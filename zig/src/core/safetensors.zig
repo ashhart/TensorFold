@@ -239,7 +239,17 @@ pub const File = struct {
     }
 
     pub fn close(self: *File, io: Io) void {
+        self.finish(io, false);
+    }
+
+    /// Only after the last borrowed tensor was copied; unmap first, then best-effort copied-file cache release.
+    pub fn closeCopied(self: *File, io: Io) void {
+        self.finish(io, true);
+    }
+
+    fn finish(self: *File, io: Io, copied: bool) void {
         self.map.destroy(io);
+        if (copied) @import("checkpoint_file_cache.zig").release(self.file.handle);
         self.file.close(io);
         self.arena.deinit();
         self.* = undefined;
@@ -373,4 +383,5 @@ test "text namespace filtering skips rank-six vision metadata without hiding inv
 
 test {
     _ = @import("safetensors_security_test.zig");
+    _ = @import("safetensors_copied_test.zig");
 }

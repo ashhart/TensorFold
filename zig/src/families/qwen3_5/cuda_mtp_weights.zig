@@ -72,7 +72,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !We
     // a ModelOpt checkpoint keeps its MTP layer in bf16 in its own shards: quantized at load unless the file is there
     if (g.kinds.modelopt and !hasFile(io, dir)) return @import("cuda_mtp_bf16.zig").load(gpa, io, e, dir);
     var ck: core.Checkpoint = .{ .gpa = gpa, .io = io };
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     try ck.add(dir, file);
     var w: Weights = .{ .arena = try DeviceBuffer.alloc(e.d, total(g)), .fc_e = undefined, .fc_h = undefined, .norm_e = 0, .norm_h = 0, .input_norm = 0, .post_norm = 0, .q_norm = 0, .k_norm = 0, .norm = 0, .q = undefined, .k = undefined, .v = undefined, .o = undefined, .mlp = undefined };
     errdefer w.arena.free();

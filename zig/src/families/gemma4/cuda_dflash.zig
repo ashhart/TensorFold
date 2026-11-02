@@ -115,7 +115,7 @@ const Weights = struct {
 
 fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, c: *const Config, w: *Weights) !void {
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var x: aw.Loader = .{ .gpa = gpa, .d = d, .s = s, .k = k, .ck = &ck, .bufs = &w.buffers };
     const h = c.hidden;
     const qw = c.heads * c.head_dim;

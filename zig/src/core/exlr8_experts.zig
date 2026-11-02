@@ -142,8 +142,19 @@ pub const Layer = struct {
     }
 
     pub fn close(l: *Layer, io: Io) void {
-        for (&l.files) |*f| if (f.*) |*file| file.close(io);
-        l.index.close(io);
+        l.finish(io, false);
+    }
+
+    /// A Metal loader copied the index and trellises into its own pack; no runtime file alias remains.
+    pub fn closeCopied(l: *Layer, io: Io) void {
+        l.finish(io, true);
+    }
+
+    fn finish(l: *Layer, io: Io, copied: bool) void {
+        for (&l.files) |*f| if (f.*) |*file| {
+            if (copied) file.closeCopied(io) else file.close(io);
+        };
+        if (copied) l.index.closeCopied(io) else l.index.close(io);
         l.* = undefined;
     }
 

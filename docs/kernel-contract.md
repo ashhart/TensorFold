@@ -241,6 +241,9 @@ output within float64's range over the spread its fp32 steps and tensor-core sum
 seven controls, each one planted fault).
 CUDA also checks Dory's nGPT rows: the L2 norm rows with and without their bf16 add, and the normalized lerp residual
 (`norms_l2.cuh`), each output within float64's range at its bf16 points (three controls, each dropping one point).
+CUDA also checks the Qwen3.5 family's pending kept rows (`contract_qwen_pending.zig`): each `tf_q35_gdn_slots_*` scan
+replaying them, written back or not, and `tf_q35k_apply_pend`, bit-equal to `tf_q35k_apply` and then the scan at the
+27B's widths (two controls: the last pending row dropped, the last two swapped).
 CUDA also checks Dory's paged caches (`window_pages.cu`): `tf_wrows_put` places rows in a shuffled arena bit for bit, and the
 head dim 256 decode and prompt kernels read them through a page table, each output within float64's range (two controls:
 swapped stream tables, a stale page id).
@@ -278,6 +281,11 @@ CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the l
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
 relu by `fmaxf`, and the down launched one neuron short).
+
+Metal also checks DeepSeek V4.1's CSA2 attention (`csa2_attn.metal`): decode rows (ring or linear windows) and prompt rows
+(16-key tiles at absolute positions), fp32 and bf16 out, against float64's softmax over the window, the selected rows and
+the sink with the inverse RoPE, and a row's bytes equal across chunk splits and between the two launches (four controls,
+each one planted fault, and one on the row bytes).
 
 CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and fp32 SwiGLU and its fp32 and bf16 down
 epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,
@@ -320,3 +328,13 @@ The sum fixtures use integers with exact FP32 partials below 2^24, including poo
 FP16 and BF16 simulations must fail in each of the three accumulator orders. Pooling declares its nine-term
 reduction separately from the physical grid width, so the small stress grid remains a valid launch.
 NaN and both infinity signs have explicit class controls. These registrations still require the device gates.
+
+## Shared M5 attention products
+
+The shared `attention_nax` defaults to the relaxed tensor P x V: float P is truncated to ten fraction bits.
+`TF_ATTENTION_PV_FP32=1` opts into full float P with FP32 FMA accumulation on M5; unset preserves the old arithmetic.
+The cut registration's independent formula includes the operand cut, while the full registration uses the full P.
+A third registration executes the real cut kernel against the full FP32 bound and must fail the shapes gate.
+The product fixture writes float output so BF16 rounding cannot conceal that control.
+Both modes still require exceptional-class, repeat, guard, shape, accumulator and separate launch checks.
+See [the mode's scope and device checks](recipes/m5-attention-precision.md); other families' rounding is unchanged.

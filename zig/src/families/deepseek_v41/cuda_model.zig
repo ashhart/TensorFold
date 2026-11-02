@@ -283,6 +283,7 @@ pub const Model = struct {
             t_build += t1 - t0;
             t_upload += std.Io.Clock.awake.now(io).toNanoseconds() - t1;
         }
+        @import("core").checkpoint.cache.files(io, m.pack.dir, m.pack.files.items);
         const ms = struct {
             fn of(ns: i96) f64 {
                 return @as(f64, @floatFromInt(ns)) / 1e6;

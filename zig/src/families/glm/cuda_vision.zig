@@ -152,7 +152,7 @@ pub const Tower = struct {
     /// The tower's tensors (either prefix) in one allocation: bf16 as stored, MXFP8 and NVFP4 packed for ``ql``.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, ql: cuda.qlinear.Linear) !Tower {
         var ck = try core.Checkpoint.openModelPrefixes(gpa, io, dir, &tower_names.prefixes);
-        defer ck.close();
+        defer core.checkpoint.cache.close(&ck);
         var tally: tower_names.Tally = .{};
         for (ck.files.items) |f| for (f.names.keys()) |name| tally.add(name);
         const pre = try tally.tower();

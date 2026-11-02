@@ -144,6 +144,7 @@ pub fn load(w: *Weights, d: *const cuda.Driver, io: std.Io, cfg: *const @import(
     defer b.deinit();
     try b.all(plan, cfg.o_groups);
     try w.upload(d, &b);
+    @import("core").checkpoint.cache.files(io, pack.dir, pack.files.items);
 }
 fn admitGroup(pack: *const @import("pack.zig").Pack, io: std.Io, group: @import("plan.zig").GroupPlan) !void {
     try admitWidth(try pack.codebook(io, group.prefix), group.part.group.k2());

@@ -3,6 +3,7 @@ const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
 const st = @import("safetensors.zig");
+const file_cache = @import("checkpoint_file_cache.zig");
 
 pub const DType = st.DType;
 
@@ -71,6 +72,7 @@ pub const Checkpoint = struct {
         }
         var held = false;
         defer if (!held) {
+            file_cache.release(fd);
             _ = platform.c.close(fd);
         };
         var head: [8]u8 = undefined;
@@ -187,6 +189,7 @@ pub const Checkpoint = struct {
     /// Close the files the deferred tensors live in, once load has read them.
     pub fn closeFiles(self: *Checkpoint) void {
         for (self.files.items) |*file| if (file.fd >= 0) {
+            file_cache.release(file.fd);
             _ = platform.c.close(file.fd);
             file.fd = -1;
         };
@@ -423,4 +426,10 @@ test "a split checkpoint keeps later tensors in the file, packs the rest, and st
     try std.testing.expect(v.ptr == (try split.view("text.weight")).ptr);
     split.closeFiles();
     try std.testing.expectError(error.ShardClosed, split.read("text.weight", 0, &part));
+    try std.testing.expectEqualSlices(u32, (try full.get("text.weight")).host(u32), w.host(u32));
+    try std.testing.expectEqualSlices(u16, (try full.get("text.scales")).host(u16), (try split.get("text.scales")).host(u16));
+}
+
+test {
+    _ = file_cache;
 }

@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const contract = @import("contract");
 const g = contract.gates;
 
+const dsv41_attn = @import("metal_dsv41_attn.zig");
 const dsv41_fp8_rows = @import("metal_dsv41_fp8_rows.zig");
 const dsv41_fp8_mma = @import("metal_dsv41_fp8_mma.zig");
 const dsv41_experts = @import("metal_dsv41_experts.zig");
@@ -13,6 +14,7 @@ const dsv41_xmma = @import("metal_dsv41_xmma.zig");
 pub const Suites = struct {
     fp8: *dsv41_fp8_rows.Suite,
     fp8_mma: *dsv41_fp8_mma.Suite,
+    attn: *dsv41_attn.Suite,
     experts: *dsv41_experts.Suite,
     xmma: *dsv41_xmma.Suite,
 
@@ -21,16 +23,19 @@ pub const Suites = struct {
         errdefer fp8.destroy();
         const fp8_mma = try dsv41_fp8_mma.Suite.create(a, device, queue, kernels, only);
         errdefer fp8_mma.destroy();
+        const attn = try dsv41_attn.Suite.create(a, device, queue, kernels, only);
+        errdefer attn.destroy();
         const experts = try dsv41_experts.Suite.create(a, device, queue, kernels, only);
         errdefer experts.destroy();
         const xmma = try dsv41_xmma.Suite.create(a, device, queue, kernels, only);
         errdefer xmma.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .experts = experts, .xmma = xmma };
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .attn = attn, .experts = experts, .xmma = xmma };
     }
 
     pub fn destroy(s: *Suites) void {
         s.xmma.destroy();
         s.experts.destroy();
+        s.attn.destroy();
         s.fp8_mma.destroy();
         s.fp8.destroy();
     }
@@ -46,5 +51,7 @@ pub const Suites = struct {
         t.failed += try s.fp8_mma.invariance(seed);
         t.failed += try s.fp8_mma.accuracy(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.fp8_mma.timing(io);
+        try s.attn.invariance(io, seed, t);
+        if (std.c.getenv("TF_DSV41_TIME") != null) try s.attn.timing(io);
     }
 };
