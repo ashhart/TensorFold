@@ -198,3 +198,32 @@ test "runtime library: native entry points defer the catalog warning to their re
         try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, body[line + 1 ..], " \t"), "defer report.deinit();"));
     }
 }
+
+test "runtime library: PDFium discovery refuses bare loader names and uses only TENSORFOLD_LIBPDFIUM or release lib/" {
+    const libs = @import("sys").optional_libraries;
+    const s = libs.spec(.pdfium);
+    const Fake = struct {
+        var override: ?[:0]const u8 = null;
+        var only: []const u8 = "";
+        pub fn getenv(_: [*:0]const u8) ?[:0]const u8 {
+            return override;
+        }
+        pub const DynLib = struct {
+            pub fn open(path: []const u8) !@This() {
+                if (std.mem.eql(u8, path, only)) return .{};
+                return error.FileNotFound;
+            }
+            pub fn close(_: *@This()) void {}
+        };
+    };
+    Fake.override = null;
+    Fake.only = s.names[0];
+    try std.testing.expect(!libs.found(s, std.testing.allocator, Fake, "/opt/tensorfold/bin"));
+    const local_path = try std.fs.path.join(std.testing.allocator, &.{ "/opt/tensorfold/bin", "..", "lib", s.names[0] });
+    defer std.testing.allocator.free(local_path);
+    Fake.only = local_path;
+    try std.testing.expect(libs.found(s, std.testing.allocator, Fake, "/opt/tensorfold/bin"));
+    Fake.override = "/custom/libpdfium";
+    Fake.only = "/custom/libpdfium";
+    try std.testing.expect(libs.found(s, std.testing.allocator, Fake, null));
+}
