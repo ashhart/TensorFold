@@ -31,7 +31,7 @@ fn scope(comptime path: []const u8, function: []const u8, variable: []const u8) 
                 var block: [2]Ast.Node.Index = undefined;
                 const cleanup = tree.blockStatements(&block, call).?;
                 try t.expectEqual(@as(usize, 2), cleanup.len);
-                try t.expectEqualStrings("file.release()", tree.getNodeSource(cleanup[0]));
+                try t.expectEqualStrings("file.release(gpa)", tree.getNodeSource(cleanup[0]));
                 try t.expectEqualStrings("file.close(io)", tree.getNodeSource(cleanup[1]));
                 continue;
             }
@@ -112,7 +112,7 @@ test "CUDA load cache: Flash Next sweep follows MTP and retains live PLE files" 
     const drop = std.mem.indexOf(u8, s, ".dropPageCache(io, dir, e.ngram.files.items)") orelse return error.NoPleExclusion;
     try t.expect(std.mem.indexOf(u8, s, "mtp.Head.init").? < drop);
     const owner = @embedFile("src/families/flashnext/cuda_prompt_wt.zig");
-    try t.expect(std.mem.indexOf(u8, owner, "if (!runtimePages(self.f.names.keys())) self.f.release()") != null);
+    try t.expect(std.mem.indexOf(u8, owner, "if (!runtimePages(self.f.names.keys())) self.f.release(std.heap.page_allocator)") != null);
 }
 
 test "CUDA load cache: LFM2 decision model releases its direct-read fallback" {
