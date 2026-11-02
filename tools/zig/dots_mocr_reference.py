@@ -15,6 +15,23 @@ import numpy as np
 REVISION = "e539fbb52280393adc081b289ec597430a0f9031"
 ORACLE_VERSIONS = {"transformers": "4.57.6"}
 PROCESSOR_VERSIONS = {"transformers": "4.51.0", "pillow": "11.2.1", "numpy": "2.2.5"}
+# The revision's non-weight sources: code, configuration, tokenizer, template, processor and the model card.
+SOURCES = {
+    "README.md": "381645b2bd63c2adff9d0c266f79e86b25657394c48c35e68551f1da73178259",
+    "chat_template.json": "c8d629ba2b3133376f1e64b980f82438945741fba5334db768afb281af93c4a9",
+    "config.json": "41d5c9aad72c730bb97062cab7a59cdb1d427eeec0b7a6e2f95e1ee72ad3b498",
+    "configuration_dots.py": "aa85add6cdaedfd947d25b850410de4506fc299dc55140d0cc5352c9737151fe",
+    "generation_config.json": "d9ca5bd51bbf3b3b2b418f2b2d296cb4286ef2f02dc76dd7361d82ffd9d4e7ca",
+    "merges.txt": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+    "model.safetensors.index.json": "0bb4faedeb3cc8b43c71fe1db6a761ea6557d4ab8ee3f54519e641078ded1c8a",
+    "modeling_dots_ocr.py": "274b5bfa35f624f15001da70414e733b89f5cb44b5453d80023bff26a68d0135",
+    "modeling_dots_vision.py": "f22d6251a05a03c7510d329ba1be9e959438cd54b32204eb51ccb1b56392a96f",
+    "preprocessor_config.json": "fec8b3187ab0ae340f6d0b1f6f892a53c63b73b328836c83dd7bff1d5bc4c79a",
+    "special_tokens_map.json": "92b060f39417514eed2f7652f454a3d5afb0e4a57b9f4b51dd4d1dfd8fdb9736",
+    "tokenizer.json": "386545eb05f08c51352cde2fcc2c867f1592bb330f305efd1c6a57a93b1244cd",
+    "tokenizer_config.json": "4f09a26dd6b20c82e9678d96b7363a58a778a948a21261d3315a949d47ed4cf4",
+    "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+}
 
 
 def require(versions):
@@ -25,6 +42,19 @@ def require(versions):
 
 def sha(data):
     return hashlib.sha256(data.read_bytes() if isinstance(data, Path) else data).hexdigest()
+
+
+def pinned(checkpoint):
+    """Return the checkpoint's source hashes, or refuse a checkpoint whose sources differ from REVISION."""
+    found = {name: sha(checkpoint / name) if (checkpoint / name).is_file() else None for name in SOURCES}
+    if wrong := sorted(name for name, digest in found.items() if digest != SOURCES[name]):
+        raise RuntimeError(f"checkpoint sources differ from {REVISION}: {', '.join(wrong)}")
+    return found
+
+
+def sources(args):
+    """Check a checkpoint's sources against the pinned revision and print their hashes; no model is loaded."""
+    print(json.dumps({"checkpoint_revision": REVISION, "source_sha256": pinned(args.checkpoint)}, indent=2))
 
 
 def example_prompt(checkpoint):
@@ -52,6 +82,7 @@ def selected_pci(torch):
 def oracle(args):
     """Run the checkpoint's Hugging Face example and retain native-comparison inputs."""
     require(ORACLE_VERSIONS)
+    source_sha256 = pinned(args.checkpoint)
     import torch
     from qwen_vl_utils import process_vision_info
     from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
@@ -173,10 +204,8 @@ def oracle(args):
     if recorder is not None and recorder.count != len(ids):
         raise RuntimeError("score row count differs from the generated token count")
     output_text = processor.batch_decode([ids], skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-    sources = ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
-               "chat_template.json", "modeling_dots_ocr.py", "modeling_dots_vision.py", "configuration_dots.py", "README.md"]
     result = {
-        "checkpoint_revision": REVISION, "source_sha256": {p: sha(args.checkpoint / p) for p in sources},
+        "checkpoint_revision": REVISION, "source_sha256": source_sha256,
         "image_sha256": sha(args.image), "images_sha256": [sha(p) for p in image_paths],
         "prepared_images": prepared_images, "prompt": prompt, "rendered_text": text,
         "prompt_ids": inputs.input_ids[0].cpu().tolist(), "output_ids": ids, "text": output_text,
@@ -196,6 +225,7 @@ def oracle(args):
 def processor(args):
     """Record small processor fixtures with the checkpoint's Transformers version; no model weights are loaded."""
     require(PROCESSOR_VERSIONS)
+    pinned(args.checkpoint)
     from PIL import Image
     from transformers import Qwen2VLImageProcessor
 
@@ -276,6 +306,9 @@ def main():
     mode.add_argument("--vision-only", action="store_true", help="capture every vision block without decoder generation")
     mode.add_argument("--extra-image", type=Path, action="append", default=[], help="append another image to test independent image spans")
     mode.set_defaults(run=oracle)
+    mode = modes.add_parser("sources", help=sources.__doc__, description=sources.__doc__)
+    mode.add_argument("checkpoint", type=Path)
+    mode.set_defaults(run=sources)
     mode = modes.add_parser("processor", help=processor.__doc__, description=processor.__doc__)
     mode.add_argument("checkpoint", type=Path)
     mode.add_argument("output", type=Path)
