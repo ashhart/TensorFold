@@ -395,7 +395,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.readiness(F);
     h.kv_plan = counted.ledger;
     const held = served.stream_bytes * (streams -| free);
-    // a ledger's plan placed the cache already, beside one full-window request instead of every stream's window
+    // a ledger's plan placed the cache already, beside --parallel full-window requests
     const kept = if (counted.ledger) |lp| lp.kept else kv_pages.kept(F, loaded, paged, o, room, held, host_budget, host_cache);
     const cache = kept.copied;
     const cache_capacity = kv_pages.capacity(F, loaded, kept, @intCast(window));

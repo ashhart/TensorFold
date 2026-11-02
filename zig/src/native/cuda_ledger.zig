@@ -57,7 +57,9 @@ pub fn plan(comptime F: type, loaded: anytype, o: api.Open, in: Inputs, short: *
         short.* = .{ .one_full = one_full, .scratch = each.scratch };
         return null;
     }
-    const kept = kv_pages.kept(F, loaded, null, o, in.room - each.scratch, one_full, in.host_budget, in.host_cache);
+    // streams first, as `held` does: the cache takes only what --parallel full-window requests leave of the room
+    const held = @as(u64, o.lanes) *| one_full;
+    const kept = kv_pages.kept(F, loaded, null, o, in.room - each.scratch, held, in.host_budget, in.host_cache);
     const device: u64 = if (kept.host) 0 else kept.snaps * kept.snap_bytes + kept.copied;
     return .{ .total = in.room - each.scratch - device, .kept = kept, .one_full = one_full, .cost = cost };
 }
@@ -91,15 +93,21 @@ test "kv ledger cost: prompt and reply rows within the context, plus the lookahe
     try std.testing.expectEqual(c.of(4096, 0), c.of(1, 4095)); // every full-window request costs the same
 }
 
-test "kv ledger plan: one full-window request is reserved before the prompt cache takes its share" {
+test "kv ledger plan: the prompt cache takes only what --parallel full-window requests leave" {
     const o: api.Open = .{ .dir = "", .model_type = "f", .prompt_cache_gib = 1, .lanes = 4 };
     var short: ?Short = null;
-    const p = plan(Cached, fixture(sample), o, .{ .room = 1 << 30, .context = 4096, .host_budget = 0, .host_cache = false }, &short).?;
-    try std.testing.expectEqual(@as(u64, 1000 + (4096 + 8) * 10), p.one_full);
-    try std.testing.expectEqual(@as(u64, (1 << 30) - 400 - p.one_full), p.kept.copied);
-    try std.testing.expectEqual(p.one_full, p.total); // exactly one full-window request fits beside a full cache
-    const l = info(&p).?;
-    try std.testing.expectEqual(p.one_full, l.cost(l.ctx, 4096, 0));
+    const full: u64 = 1000 + (4096 + 8) * 10;
+    // a room past four full windows: the cache takes the rest, the ledger keeps all four
+    const big = plan(Cached, fixture(sample), o, .{ .room = 1 << 30, .context = 4096, .host_budget = 0, .host_cache = false }, &short).?;
+    try std.testing.expectEqual(full, big.one_full);
+    try std.testing.expectEqual(@as(u64, (1 << 30) - 400 - 4 * full), big.kept.copied);
+    try std.testing.expectEqual(4 * full, big.total);
+    const l = info(&big).?;
+    try std.testing.expectEqual(full, l.cost(l.ctx, 4096, 0));
+    // a small room that holds two full windows: no cache, the ledger keeps the whole room
+    const small = plan(Cached, fixture(sample), o, .{ .room = 400 + 2 * full + 5, .context = 4096, .host_budget = 0, .host_cache = false }, &short).?;
+    try std.testing.expectEqual(@as(u64, 0), small.kept.copied);
+    try std.testing.expectEqual(2 * full + 5, small.total);
 }
 
 test "kv ledger plan: a host prompt cache leaves the device budget whole" {
