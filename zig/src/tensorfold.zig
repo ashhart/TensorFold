@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub const safetensors = @import("core/safetensors.zig");
+pub const gguf = @import("core/gguf.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
 pub const checkpoint_metal = checkpoint;
