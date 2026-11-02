@@ -21,9 +21,10 @@ pub const WeightKinds = struct {
     a_log: Storage,
     dt: Storage,
     norm: Storage,
+    stored_ssm_a: bool = false,
 
     pub fn flags(k: WeightKinds) u32 {
-        return @backingInt(k.conv) | (@backingInt(k.a_log) << 1) | (@backingInt(k.dt) << 2) | (@backingInt(k.norm) << 3);
+        return @backingInt(k.conv) | (@backingInt(k.a_log) << 1) | (@backingInt(k.dt) << 2) | (@backingInt(k.norm) << 3) | (@as(u32, @intFromBool(k.stored_ssm_a)) << 4);
     }
 };
 
@@ -58,6 +59,7 @@ pub const Shape = struct {
     }
 
     pub fn params(s: Shape, rows: usize, slots: usize, k: WeightKinds) !Params {
+        if (k.stored_ssm_a and k.a_log != .f32) return error.BadGdnDecayStorage;
         if (rows == 0 or rows > @import("gpu_frame.zig").max_rows or slots == 0 or slots > 128 or !std.math.isFinite(s.c.eps) or s.c.eps <= 0) return error.BadGdnDispatch;
         return .{ .rows = @intCast(rows), .nk = @intCast(s.c.k_heads), .nv = @intCast(s.c.v_heads), .dk = @intCast(s.c.dk), .dv = @intCast(s.c.dv), .taps = @intCast(s.c.conv_kernel), .slots = @intCast(slots), .weight_flags = k.flags(), .eps = s.c.eps };
     }

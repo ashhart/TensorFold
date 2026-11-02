@@ -23,7 +23,7 @@ pub fn check(a: Qk) !void {
 }
 
 pub fn checkDecay(a: Decay) !void {
-    if (a.rows == 0 or a.rows > 2048 or a.heads == 0 or a.heads > 128 or a.weight_flags > 15 or a.pad != 0) return error.BadPromptDecay;
+    if (a.rows == 0 or a.rows > 2048 or a.heads == 0 or a.heads > 128 or a.weight_flags > 31 or (a.weight_flags & 16 != 0 and a.weight_flags & 2 == 0) or a.pad != 0) return error.BadPromptDecay;
 }
 
 test "prompt QK epsilon and ABI differ explicitly from the decode epsilon" {

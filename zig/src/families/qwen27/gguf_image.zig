@@ -61,6 +61,8 @@ pub fn write(a: std.mem.Allocator, io: std.Io, d: *const gg.Document, dir: []con
                 try out.put(try std.fmt.allocPrint(scratch, "{s}.weight", .{entry.name}), "U32", &.{ p.n, p.k * p.bits / 32 }, try a.dupe(u32, p.words));
                 try out.put(try std.fmt.allocPrint(scratch, "{s}.scales", .{entry.name}), "F32", &.{ p.n, p.k / p.group }, try a.dupe(f32, p.scales));
                 try out.put(try std.fmt.allocPrint(scratch, "{s}.biases", .{entry.name}), "F32", &.{ p.n, p.k / p.group }, try a.dupe(f32, p.biases));
+            } else if (entry.transform == .f32 or entry.transform == .ssm_a) {
+                try out.put(entry.name, "F32", entry.shape, try rawF32(a, entry));
             } else {
                 try out.put(entry.name, "BF16", entry.shape, try small(a, entry));
             }
@@ -87,27 +89,27 @@ pub fn sampling(a: std.mem.Allocator, d: *const gg.Document, c: conf.Config) !st
         if (value == .float and !std.math.isFinite(value.float)) return error.BadGgufSampling;
         try generation.object.put(a, pair[0], value);
     };
-    try generation.object.put(a, "eos_token_id", .{ .integer = c.eos[0] });
+    var stops: std.json.Value = .{ .array = std.json.Array.init(a) };
+    for (c.eos[0..c.eos_count]) |id| try stops.array.append(.{ .integer = id });
+    try generation.object.put(a, "eos_token_id", stops);
     return generation;
 }
-/// The native loader requires BF16 scalars, so an inexact narrowing refuses before any repack or publication.
+/// Raw F32 roles stay exact; roles requiring BF16 refuse an inexact narrowing before repack or publication.
 pub fn validateSmall(entry: names.Entry, problem: ?*Problem) !void {
     if (entry.tensor.kind != .f32 or entry.tensor.bytes.len % 4 != 0) return error.BadGgufTensor;
-    for (0..entry.tensor.bytes.len / 4) |i| _ = try element(entry, i, problem);
+    if (entry.transform == .f32 or entry.transform == .ssm_a) {
+        for (0..entry.tensor.bytes.len / 4) |i| {
+            const x: f32 = @bitCast(std.mem.readInt(u32, entry.tensor.bytes[i * 4 ..][0..4], .little));
+            if (!std.math.isFinite(x)) return error.NonfiniteGgufTensor;
+            if (entry.transform == .ssm_a and x >= 0) return error.BadGgufSsmA;
+        }
+    } else for (0..entry.tensor.bytes.len / 4) |i| _ = try element(entry, i, problem);
 }
 fn element(entry: names.Entry, i: usize, problem: ?*Problem) !u16 {
     @setFloatMode(.strict);
-    var x: f32 = @bitCast(std.mem.readInt(u32, entry.tensor.bytes[i * 4 ..][0..4], .little));
-    const original = x;
+    const x: f32 = @bitCast(std.mem.readInt(u32, entry.tensor.bytes[i * 4 ..][0..4], .little));
     if (!std.math.isFinite(x)) return error.NonfiniteGgufTensor;
-    if (entry.transform == .a_log) {
-        if (x >= 0) return error.BadGgufSsmA;
-        x = @log(-x);
-    }
     const value = convert.bf16Exact(x) catch return refusal(entry, i, x, problem, "not exactly representable as BF16");
-    const widened: f32 = @bitCast(@as(u32, value) << 16);
-    if (entry.transform == .a_log and @as(u32, @bitCast(-@exp(widened))) != @as(u32, @bitCast(original)))
-        return refusal(entry, i, original, problem, "inverse A_log does not reproduce stored ssm_a");
     return value;
 }
 fn refusal(entry: names.Entry, i: usize, x: f32, problem: ?*Problem, reason: []const u8) anyerror {
@@ -128,6 +130,19 @@ pub fn small(a: std.mem.Allocator, entry: names.Entry) ![]u16 {
         return restored;
     }
     return out;
+}
+/// Original F32 words, permuted only as whole value heads. No coefficient conversion or inverse decay function.
+pub fn rawF32(a: std.mem.Allocator, entry: names.Entry) ![]f32 {
+    try validateSmall(entry, null);
+    const values = try a.alloc(f32, entry.tensor.bytes.len / 4);
+    errdefer a.free(values);
+    for (values, 0..) |*v, i| v.* = @bitCast(std.mem.readInt(u32, entry.tensor.bytes[i * 4 ..][0..4], .little));
+    if (entry.heads) |order| {
+        const restored = try heads.matrix(f32, a, values, entry.shape[0], values.len / entry.shape[0], order);
+        a.free(values);
+        return restored;
+    }
+    return values;
 }
 pub fn jsonFile(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8, value: anytype) !void {
     const text = try std.json.Stringify.valueAlloc(a, value, .{});

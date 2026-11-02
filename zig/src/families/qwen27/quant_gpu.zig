@@ -111,7 +111,8 @@ pub const Kernels = struct {
             .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(k.allocator, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
         };
         defer k.allocator.free(definitions);
-        const source = try std.mem.concat(k.allocator, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+        const gain_prefix = if ((key.kind == .norm or key.kind == .input_norm) and key.metadata == .f32) "#define TF_Q27_GAIN float\n" else "";
+        const source = try std.mem.concat(k.allocator, u8, &.{ gain_prefix, template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
         defer k.allocator.free(source);
         const library = try mtl.Library.fromSource(k.device, source, mtl.CompileOptions.mlx());
         defer library.deinit();
@@ -382,11 +383,15 @@ pub const Kernels = struct {
     }
 
     pub fn norm(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32) !void {
+        return k.normFor(input_encoder, h, residual, weight, eps, dims, combined, out, xs, width, rows, .bf16);
+    }
+
+    pub fn normFor(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32, gain_type: row.Metadata) !void {
         var span = profile.begin(k.profiler, input_encoder, .norm);
         errdefer span.cancel();
         const e = span.encoder;
 
-        e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width }));
+        e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width, .metadata = gain_type }));
         if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
         e.dispatchGroups(mtl.Size.of(1, padded(rows), 1), mtl.Size.of(width / 16, 1, 1));
         try span.end();

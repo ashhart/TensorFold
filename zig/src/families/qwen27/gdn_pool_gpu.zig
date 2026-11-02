@@ -45,7 +45,7 @@ pub const Scalars = struct {
     kinds: abi.WeightKinds,
 
     pub fn from(g: @import("gpu_weights.zig").Gdn) !Scalars {
-        return .{ .conv = tensorSpan(g.conv), .a_log = tensorSpan(g.a_log), .dt = tensorSpan(g.dt), .norm = tensorSpan(g.norm), .kinds = .{ .conv = try abi.storage(g.conv.dtype), .a_log = try abi.storage(g.a_log.dtype), .dt = try abi.storage(g.dt.dtype), .norm = try abi.storage(g.norm.dtype) } };
+        return .{ .conv = tensorSpan(g.conv), .a_log = tensorSpan(g.a_log), .dt = tensorSpan(g.dt), .norm = tensorSpan(g.norm), .kinds = .{ .conv = try abi.storage(g.conv.dtype), .a_log = try abi.storage(g.a_log.dtype), .stored_ssm_a = g.stored_ssm_a, .dt = try abi.storage(g.dt.dtype), .norm = try abi.storage(g.norm.dtype) } };
     }
 };
 

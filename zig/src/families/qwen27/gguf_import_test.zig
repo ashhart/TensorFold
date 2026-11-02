@@ -108,10 +108,11 @@ test "GGUF Qwen: complete native image uses real config, mapped triples, stored 
     var ck = try core.Checkpoint.openModel(a, io, native);
     defer ck.close();
     const norm = try ck.get("language_model.model.norm.weight");
-    try t.expectEqual(core.safetensors.DType.bf16, norm.dtype);
-    try t.expectEqual(@as(u16, 0x3fa0), std.mem.readInt(u16, norm.bytes[0..2], .little));
-    const al = try ck.get("language_model.model.layers.0.linear_attn.A_log");
-    try t.expectEqual(@as(u16, 0x4000), std.mem.readInt(u16, al.bytes[0..2], .little));
+    try t.expectEqual(core.safetensors.DType.f32, norm.dtype);
+    try t.expectEqual(@as(u32, @bitCast(@as(f32, 1.25))), std.mem.readInt(u32, norm.bytes[0..4], .little));
+    const al = try ck.get("language_model.model.layers.0.linear_attn.ssm_a");
+    try t.expectEqual(core.safetensors.DType.f32, al.dtype);
+    try t.expectEqual(@as(u32, @bitCast(-@exp(@as(f32, 2)))), std.mem.readInt(u32, al.bytes[0..4], .little));
     const gn = try ck.get("language_model.model.layers.0.linear_attn.norm.weight");
     try t.expectEqual(@as(u16, 0x3f40), std.mem.readInt(u16, gn.bytes[0..2], .little));
     const conv = try ck.get("language_model.model.layers.0.linear_attn.conv1d.weight");
@@ -224,15 +225,15 @@ test "GGUF Qwen: metadata, tensor shape and ssm_a violations fail closed" {
     const plan = try names.plan(scratch, &d, c);
     try t.expectEqual(@as(usize, 56), plan.len);
     var aentry: names.Entry = undefined;
-    for (plan) |e| if (e.transform == .a_log) {
+    for (plan) |e| if (e.transform == .ssm_a) {
         aentry = e;
         break;
     };
     var wrong: [16]u8 = @splat(0);
     aentry.tensor.bytes = &wrong;
-    try t.expectError(error.BadGgufSsmA, image.small(a, aentry));
+    try t.expectError(error.BadGgufSsmA, image.rawF32(a, aentry));
     std.mem.writeInt(u32, wrong[0..4], @bitCast(std.math.inf(f32)), .little);
-    try t.expectError(error.NonfiniteGgufTensor, image.small(a, aentry));
+    try t.expectError(error.NonfiniteGgufTensor, image.rawF32(a, aentry));
     const top_p = d.keys.get("general.sampling.top_p").?;
     d.metadata[top_p].value = .{ .float32 = std.math.nan(f32) };
     try t.expectError(error.BadGgufSampling, image.sampling(scratch, &d, c));

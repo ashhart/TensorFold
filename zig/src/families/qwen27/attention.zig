@@ -192,7 +192,7 @@ fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
 /// The prompt kernel's threads a group: eight simdgroups, both kernels (attention_prompt*.metal's SG = 8).
 const prompt_threads = 256;
 /// h_end and w_end above 0: an M-RoPE round, the h and w position planes `plane` rows past each other in `positions`.
-pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, geometry: planning.Geometry = .{} };
+pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, q_gain_type: glue.Float = .bf16, k_gain_type: glue.Float = .bf16, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, geometry: planning.Geometry = .{} };
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [16]mtl.Pipeline,
@@ -240,7 +240,8 @@ pub const Attention = struct {
         const g = p.geometry;
         const q_bytes = @as(usize, p.rows) * g.heads * g.dim * 2;
         const kv_bytes = @as(usize, p.rows) * g.kv_heads * g.dim * 2;
-        const gain_bytes = @as(usize, g.dim) * 2;
+        const q_gain_bytes = @as(usize, g.dim) * @as(usize, if (p.q_gain_type == .f32) 4 else 2);
+        const k_gain_bytes = @as(usize, g.dim) * @as(usize, if (p.k_gain_type == .f32) 4 else 2);
         var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
         errdefer timing.cancel();
         const e = timing.encoder;
@@ -248,8 +249,8 @@ pub const Attention = struct {
         if (p.rows == 0 or p.rows > @import("gpu_frame.zig").max_rows or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
         try span(p.qg, 2 * q_bytes);
         try span(p.key, kv_bytes);
-        try span(p.q_gain, gain_bytes);
-        try span(p.k_gain, gain_bytes);
+        try spanAligned(p.q_gain, q_gain_bytes, if (p.q_gain_type == .f32) 4 else 2);
+        try spanAligned(p.k_gain, k_gain_bytes, if (p.k_gain_type == .f32) 4 else 2);
         try span(p.norm_q, q_bytes);
         try span(p.norm_k, kv_bytes);
         try span(p.query, q_bytes);
@@ -258,19 +259,19 @@ pub const Attention = struct {
         const plane_rows: usize = if (p.h_end > 0 or p.w_end > 0) 2 * @as(usize, p.plane) + p.rows else p.rows;
         try spanAligned(p.positions, plane_rows * 4, 4);
         const outputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.norm_q, .bytes = q_bytes }, .{ .ref = p.norm_k, .bytes = kv_bytes }, .{ .ref = p.query, .bytes = q_bytes }, .{ .ref = p.rotated_key, .bytes = kv_bytes } };
-        const inputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.qg, .bytes = 2 * q_bytes }, .{ .ref = p.key, .bytes = kv_bytes }, .{ .ref = p.q_gain, .bytes = gain_bytes }, .{ .ref = p.k_gain, .bytes = gain_bytes }, .{ .ref = p.positions, .bytes = plane_rows * 4 } };
+        const inputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.qg, .bytes = 2 * q_bytes }, .{ .ref = p.key, .bytes = kv_bytes }, .{ .ref = p.q_gain, .bytes = q_gain_bytes }, .{ .ref = p.k_gain, .bytes = k_gain_bytes }, .{ .ref = p.positions, .bytes = plane_rows * 4 } };
         for (outputs, 0..) |dst, i| {
             for (inputs) |src| try disjoint(dst.ref, dst.bytes, src.ref, src.bytes);
             for (outputs[0..i]) |prior| try disjoint(dst.ref, dst.bytes, prior.ref, prior.bytes);
         }
         e.setPipeline(a.io[7]);
         bind(e, .{ p.qg, p.q_gain });
-        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.heads, .stride = 2 * g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
+        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.heads, .stride = 2 * g.dim, .activation = .bf16, .gain = p.q_gain_type, .eps = p.eps }, 2);
         e.setBuffer(p.norm_q.buffer, p.norm_q.offset, 3);
         e.dispatchGroups(mtl.Size.of(p.rows * g.heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.setPipeline(a.io[7]);
         bind(e, .{ p.key, p.k_gain });
-        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
+        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .activation = .bf16, .gain = p.k_gain_type, .eps = p.eps }, 2);
         e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
         e.dispatchGroups(mtl.Size.of(p.rows * g.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.barrier();

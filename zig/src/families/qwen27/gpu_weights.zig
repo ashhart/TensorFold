@@ -11,7 +11,7 @@ const Ref = projection.Ref;
 const Linear = projection.Linear;
 pub const Tensor = cp.Tensor;
 
-pub const Gdn = struct { qkv: Linear, zba: Linear, out: Linear, conv: Tensor, a_log: Tensor, dt: Tensor, norm: Tensor };
+pub const Gdn = struct { qkv: Linear, zba: Linear, out: Linear, conv: Tensor, a_log: Tensor, stored_ssm_a: bool = false, dt: Tensor, norm: Tensor };
 pub const Attention = struct { q: Linear, kv: Linear, out: Linear, q_norm: Tensor, k_norm: Tensor };
 pub const Layer = struct { norm: Tensor, post_norm: Tensor, gu: Linear, down: Linear, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
 
@@ -201,6 +201,25 @@ const Builder = struct {
         return fused;
     }
 
+    fn decay(b: Builder, prefix: []const u8, heads: usize) !Tensor {
+        const direct_name = try std.mem.concat(b.allocator, u8, &.{ prefix, "linear_attn.ssm_a" });
+        defer b.allocator.free(direct_name);
+        const log_name = try std.mem.concat(b.allocator, u8, &.{ prefix, "linear_attn.A_log" });
+        defer b.allocator.free(log_name);
+        // get() owns the checkpoint namespace; has() must include it for each tensor spelling.
+        const direct_full = try std.mem.concat(b.allocator, u8, &.{ b.prefix, direct_name });
+        defer b.allocator.free(direct_full);
+        const log_full = try std.mem.concat(b.allocator, u8, &.{ b.prefix, log_name });
+        defer b.allocator.free(log_full);
+        const direct = b.checkpoint.has(direct_full);
+        if (direct and b.checkpoint.has(log_full)) return error.AmbiguousGdnDecay;
+        const scalar_tensor = if (direct) try b.tensor(direct_name, .f32, &.{heads}) else try decayLog(try b.get(log_name), &.{heads});
+        if (direct) for (scalar_tensor.host(f32)) |value| {
+            if (!std.math.isFinite(value) or value >= 0) return error.BadGdnDecay;
+        };
+        return scalar_tensor;
+    }
+
     fn layer(b: Builder, s: *const cfg.Shard, i: usize) !Layer {
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
@@ -228,7 +247,8 @@ const Builder = struct {
                 }, g.hidden),
                 .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "linear_attn.out_proj"), .n = g.hidden, .w = w[@backingInt(M.out)], .span = s.outputRows() }}, g.gdnValueDim()),
                 .conv = try b.conv(try Name.full(a, prefix, "linear_attn.conv1d.weight"), g.conv_kernel, g.gdnQkvDim(), &convRows),
-                .a_log = try rowView(try decayLog(try b.get(try Name.full(a, prefix, "linear_attn.A_log")), &.{g.v_heads}), s.valueRows()),
+                .a_log = try rowView(try b.decay(prefix, g.v_heads), s.valueRows()),
+                .stored_ssm_a = b.checkpoint.has(try std.mem.concat(a, u8, &.{ b.prefix, prefix, "linear_attn.ssm_a" })),
                 .dt = try rowView(try b.tensor(try Name.full(a, prefix, "linear_attn.dt_bias"), .bf16, &.{g.v_heads}), s.valueRows()),
                 .norm = try b.tensor(try Name.full(a, prefix, "linear_attn.norm.weight"), .bf16, &.{c.dv}),
             } },
@@ -239,8 +259,8 @@ const Builder = struct {
                     .{ .module = try Name.full(a, prefix, "self_attn.v_proj"), .n = g.kvDim(), .w = w[@backingInt(M.v)], .span = s.kvRows() },
                 }, g.hidden),
                 .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.o_proj"), .n = g.hidden, .w = w[@backingInt(M.o)], .span = s.outputRows() }}, g.heads * g.head_dim),
-                .q_norm = try b.tensor(try Name.full(a, prefix, "self_attn.q_norm.weight"), .bf16, &.{c.head_dim}),
-                .k_norm = try b.tensor(try Name.full(a, prefix, "self_attn.k_norm.weight"), .bf16, &.{c.head_dim}),
+                .q_norm = try gain(try b.get(try Name.full(a, prefix, "self_attn.q_norm.weight")), &.{c.head_dim}),
+                .k_norm = try gain(try b.get(try Name.full(a, prefix, "self_attn.k_norm.weight")), &.{c.head_dim}),
             } },
         };
         const gu = try b.linear(&.{
@@ -248,7 +268,7 @@ const Builder = struct {
             .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = g.intermediate, .w = w[@backingInt(M.up)], .span = s.intermediateRows() },
         }, g.hidden);
         const down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = g.hidden, .w = w[@backingInt(M.down)], .span = s.outputRows() }}, g.intermediate);
-        return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .gu = gu, .down = down, .mixer = mixer };
+        return .{ .norm = try gain(try b.get(try Name.full(a, prefix, "input_layernorm.weight")), &.{c.hidden}), .post_norm = try gain(try b.get(try Name.full(a, prefix, "post_attention_layernorm.weight")), &.{c.hidden}), .gu = gu, .down = down, .mixer = mixer };
     }
 };
 
@@ -289,6 +309,10 @@ fn decayLog(t: Tensor, shape: []const usize) !Tensor {
     return checked(t, if (t.dtype == .f32) .f32 else .bf16, shape);
 }
 
+fn gain(t: Tensor, shape: []const usize) !Tensor {
+    return checked(t, if (t.dtype == .f32) .f32 else .bf16, shape);
+}
+
 /// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths) !Weights {
     const c = s.local;
@@ -312,7 +336,7 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     const b = Builder{ .allocator = allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &owned, .stage = &stage, .runs = &runs, .widths = ws };
     for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
     const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
-    const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
+    const norm = try gain(try b.get("model.norm.weight"), &.{c.hidden});
     const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };

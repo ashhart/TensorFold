@@ -8,7 +8,6 @@ const image = @import("gguf_image.zig");
 const heads = @import("gguf_heads.zig");
 const repack = @import("gguf_repack.zig");
 const fixture = @import("gguf_fixture.zig");
-const convert = @import("../../core/quant/convert.zig");
 
 test "GGUF Qwen: measured 16-key 48-value inverse map is a bijection with three consecutive native heads" {
     const o: heads.Order = .{ .axis = .rows, .key_heads = 16, .value_heads = 48, .width = 128 };
@@ -31,7 +30,7 @@ test "GGUF Qwen: every norm is a stored multiplier with no added or removed offs
     const plan = try names.plan(a, &d, try cfg.parse(a, try cfg.build(a, &d)));
     var count: usize = 0;
     for (plan) |entry| {
-        if (entry.transform != .bf16 or std.mem.indexOf(u8, entry.name, "norm.weight") == null) continue;
+        if ((entry.transform != .bf16 and entry.transform != .f32) or std.mem.indexOf(u8, entry.name, "norm.weight") == null) continue;
         count += 1;
         var input = entry;
         const raw = try a.alloc(u8, entry.tensor.bytes.len);
@@ -59,25 +58,29 @@ test "GGUF Qwen: native image inverts scalar heads and only convolution V channe
     for (plan) |entry| {
         const conv = std.mem.endsWith(u8, entry.name, "linear_attn.conv1d.weight");
         const bias = std.mem.endsWith(u8, entry.name, "linear_attn.dt_bias");
-        const log = entry.transform == .a_log;
-        if (!conv and !bias and !log) continue;
+        const direct = entry.transform == .ssm_a;
+        if (!conv and !bias and !direct) continue;
         checked += 1;
         var input = entry;
         const raw = try a.alloc(u8, entry.tensor.bytes.len);
         input.tensor.bytes = raw;
-        const logs = [_]f32{ 0, 2, 4, 8 };
+        const coefficients = [_]f32{ -0.1104574353, -1.001953125, -0.7504296303, -0.9551389813 };
         for (0..raw.len / 4) |i| {
-            const value: f32 = if (log) -@exp(logs[i]) else @bitCast(@as(u32, @as(u16, 0x3f00) + @as(u16, @intCast(i))) << 16);
+            const value: f32 = if (direct) coefficients[i] else @bitCast(@as(u32, @as(u16, 0x3f00) + @as(u16, @intCast(i))) << 16);
             std.mem.writeInt(u32, raw[i * 4 ..][0..4], @bitCast(value), .little);
         }
-        const out = try image.small(t.allocator, input);
-        defer t.allocator.free(out);
+        const out = if (direct) try image.rawF32(a, input) else blk: {
+            const narrowed = try image.small(a, input);
+            const wide = try a.alloc(f32, narrowed.len);
+            for (wide, narrowed) |*v, h| v.* = @bitCast(@as(u32, h) << 16);
+            break :blk wide;
+        };
         for (out, 0..) |value, i| {
             const row = if (conv) i / 4 else i;
             const sr = if (conv and row < 64) row else if (conv) 64 + native_to_gguf[(row - 64) / 32] * 32 + (row - 64) % 32 else native_to_gguf[row];
             const si = if (conv) sr * 4 + i % 4 else sr;
-            const expected = if (log) convert.bf16(logs[si]) else @as(u16, 0x3f00) + @as(u16, @intCast(si));
-            try t.expectEqual(expected, value);
+            const expected: f32 = if (direct) coefficients[si] else @bitCast(@as(u32, @as(u16, 0x3f00) + @as(u16, @intCast(si))) << 16);
+            try t.expectEqual(@as(u32, @bitCast(expected)), @as(u32, @bitCast(value)));
         }
     }
     try t.expectEqual(@as(usize, 9), checked);

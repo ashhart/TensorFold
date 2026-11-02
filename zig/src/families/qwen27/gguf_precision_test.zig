@@ -14,7 +14,7 @@ fn find(entries: []const names.Entry, name: []const u8) names.Entry {
     for (entries) |entry| if (std.mem.eql(u8, entry.tensor.name, name)) return entry;
     unreachable;
 }
-test "GGUF Qwen: inexact small scalars and near-zero inverse logs refuse by source tensor and element" {
+test "GGUF Qwen: remaining BF16 scalars refuse inexact values by source tensor and element" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -22,19 +22,19 @@ test "GGUF Qwen: inexact small scalars and near-zero inverse logs refuse by sour
     var d = try gg.Document.parse(t.allocator, bytes, .{});
     defer d.deinit();
     const entries = try plan(a, &d);
-    for ([_][]const u8{ "output_norm.weight", "blk.0.attn_norm.weight", "blk.0.ssm_conv1d.weight", "blk.0.ssm_dt.bias", "blk.0.ssm_norm.weight", "blk.0.ssm_a" }) |name| {
+    for ([_][]const u8{ "blk.0.ssm_conv1d.weight", "blk.0.ssm_dt.bias", "blk.0.ssm_norm.weight" }) |name| {
         var entry = find(entries, name);
         entry.heads = null; // This test isolates scalar exactness; full head layouts have their own regression.
         var raw: [4]u8 = undefined;
         entry.tensor.bytes = &raw;
-        const exact: f32 = if (entry.transform == .a_log) -@exp(@as(f32, 2)) else 1.25;
+        const exact: f32 = 1.25;
         std.mem.writeInt(u32, &raw, @bitCast(exact), .little);
         var problem: image.Problem = .{};
         try image.validateSmall(entry, &problem);
         const good = try image.small(t.allocator, entry);
         defer t.allocator.free(good);
-        try t.expectEqualSlices(u16, &.{if (entry.transform == .a_log) @as(u16, 0x4000) else @as(u16, 0x3fa0)}, good);
-        const inexact: f32 = if (entry.transform == .a_log) -@exp(@as(f32, 0x1p-15)) else 1.0009765625;
+        try t.expectEqualSlices(u16, &.{@as(u16, 0x3fa0)}, good);
+        const inexact: f32 = 1.0009765625;
         std.mem.writeInt(u32, &raw, @bitCast(inexact), .little);
         try t.expectError(error.InexactGgufSmallTensor, image.validateSmall(entry, &problem));
         try t.expect(std.mem.indexOf(u8, problem.text(), name) != null);
@@ -49,7 +49,7 @@ test "GGUF Qwen: small-tensor exactness preflight precedes repack and complete-i
     const bytes = try fixture.makeTokenized(a);
     var d = try gg.Document.parse(t.allocator, bytes, .{});
     defer d.deinit();
-    const norm = d.getTensor("output_norm.weight").?;
+    const norm = d.getTensor("blk.0.ssm_conv1d.weight").?;
     const offset = @intFromPtr(norm.bytes.ptr) - @intFromPtr(bytes.ptr);
     std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(@as(f32, 1.0009765625)), .little);
     var tmp = t.tmpDir(.{});
@@ -74,7 +74,7 @@ test "GGUF Qwen: small-tensor exactness preflight precedes repack and complete-i
         return error.TestExpectedError;
     } else |err| try t.expectEqual(error.InexactGgufSmallTensor, err);
     try t.expectEqual(@as(usize, 0), counter.calls);
-    try t.expect(std.mem.indexOf(u8, problem.text(), "output_norm.weight[0]") != null);
+    try t.expect(std.mem.indexOf(u8, problem.text(), "blk.0.ssm_conv1d.weight[0]") != null);
     std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(@as(f32, 1.25)), .little);
     try tmp.dir.writeFile(t.io, .{ .sub_path = "model.gguf", .data = bytes });
     const good = try source.prepare(t.allocator, t.io, path, cache, options);

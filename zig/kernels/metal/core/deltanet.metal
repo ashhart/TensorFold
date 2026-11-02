@@ -106,6 +106,9 @@ inline void tf_delta_gdn_pre_body(device const bfloat* projection,
     const uint at = row * p.nv + output_head, gate_at = p.zba_stride ? row * p.zba_stride + output_head : at;
     const float shifted = float(bfloat(float(a[gate_at]) + tf_delta_weight(time_bias, output_head, p.weight_flags, 2)));
     const float softplus = float(bfloat(metal::max(shifted, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(shifted)))));
+    if ((p.weight_flags & 16u) != 0)
+      decay[at] = metal::exp(tf_delta_weight(decay_weight, output_head, p.weight_flags, 1) * softplus);
+    else
     decay[at] = metal::exp(-metal::exp(tf_delta_weight(decay_weight, output_head, p.weight_flags, 1)) * softplus);
     mixing[at] = bfloat(1.0f / (1.0f + metal::exp(-float(b[gate_at]))));
   }
@@ -180,6 +183,9 @@ inline void tf_delta_gdn_pre_step4(device const bfloat* projection, device const
     const uint at = row * p.nv + output_head, gate_at = p.zba_stride ? row * p.zba_stride + output_head : at;
     const float shifted = float(bfloat(float(a[gate_at]) + tf_delta_weight(time_bias, output_head, p.weight_flags, 2)));
     const float softplus = float(bfloat(metal::max(shifted, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(shifted)))));
+    if ((p.weight_flags & 16u) != 0)
+      decay[at] = metal::exp(tf_delta_weight(decay_weight, output_head, p.weight_flags, 1) * softplus);
+    else
     decay[at] = metal::exp(-metal::exp(tf_delta_weight(decay_weight, output_head, p.weight_flags, 1)) * softplus);
     mixing[at] = bfloat(1.0f / (1.0f + metal::exp(-float(b[gate_at]))));
   }

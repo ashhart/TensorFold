@@ -68,8 +68,12 @@ kernel void q27_prompt_decay(device const bfloat* a [[buffer(0)]],
   const float shifted = wide_bias ? sum : float(bfloat(sum));
   const float raw = q27_prompt_softplus(shifted);
   const float smooth = wide_bias ? raw : float(bfloat(raw));
+  if ((p.weight_flags & 16u) != 0) {
+    decay[at] = precise::exp(logarithm * smooth);
+  } else {
   const float speed = precise::exp(logarithm);
   decay[at] = precise::exp(-speed * smooth);
+  }
   beta[at] = bfloat(q27_prompt_probability(float(b[at])));
 }
 

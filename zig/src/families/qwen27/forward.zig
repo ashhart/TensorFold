@@ -98,7 +98,7 @@ pub const Stages = struct {
         const e = lane.enc;
         const layer = m.weights.layers[index];
         const h: u32 = @intCast(m.config.hidden);
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        try m.kernels.normFor(e, s.hidden, s.pending, wts.ref(layer.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows, try @import("projection.zig").metadata(layer.norm.dtype));
         e.barrier();
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
@@ -145,7 +145,7 @@ pub const Stages = struct {
             if (s.reduce.?.broken()) return error.PairFailed;
             e.barrier();
         }
-        try m.kernels.norm(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
+        try m.kernels.normFor(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows, try @import("projection.zig").metadata(layer.post_norm.dtype));
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         var up = f.get(.mixed);
@@ -212,7 +212,7 @@ pub const Stages = struct {
         const f = &m.frame;
         // The head seam reopens the encoder, so it goes back in the lane; rank 0's half-vocab argmax is not a token.
         var e = lane.enc;
-        try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
+        try m.kernels.normFor(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows, try @import("projection.zig").metadata(m.weights.norm.dtype));
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);

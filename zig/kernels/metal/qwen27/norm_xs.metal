@@ -1,3 +1,6 @@
+#ifndef TF_Q27_GAIN
+#define TF_Q27_GAIN bfloat16_t
+#endif
 // Runtime constants preserve the Python operator's projection-shaped arithmetic.
 #include <metal_stdlib>
 using namespace metal;
@@ -6,7 +9,7 @@ typedef half float16_t;
 [[kernel]] void custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float(
   const device bfloat16_t* H [[buffer(0)]],
   const device bfloat16_t* R [[buffer(1)]],
-  const device bfloat16_t* Wt [[buffer(2)]],
+  const device TF_Q27_GAIN* Wt [[buffer(2)]],
   const constant float* eps [[buffer(3)]],
   const device int32_t* dims [[buffer(4)]],
   device bfloat16_t* HO [[buffer(5)]],
