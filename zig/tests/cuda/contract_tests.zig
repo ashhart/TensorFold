@@ -43,6 +43,7 @@ const w4a8_k = @import("contract_w4a8.zig");
 const round_k = @import("contract_tree_round.zig");
 const act_k = @import("contract_act.zig");
 const vit_g4_group = @import("contract_gemma_group.zig");
+const chain_k = @import("contract_gdn_chain.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
@@ -240,6 +241,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     };
     defer for (&halves) |*h| h.deinit();
     for (&halves) |*h| try kernels.append(a, h.kernel());
+    var chain_suite = try chain_k.Suite.init(gpu, s, mods[5]);
+    defer chain_suite.deinit();
+    try chain_suite.append(a, &kernels);
     var projections = try projection_set.Set.init(gpu, s, &lane, &lane_reduce, &prompt);
     defer projections.deinit();
     try projections.append(a, &kernels);
