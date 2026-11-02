@@ -118,7 +118,8 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
-    if (!is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
+    if (!is_rerank and !is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
@@ -142,9 +143,16 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         .rejected => |refusal| return overloaded(conn, is_anthropic, refusal),
     };
     defer if (lease) |*held| held.release();
-    if (srv.info.embeddings != null and (is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions"))) {
+    const is_text = is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
+    if (srv.info.embeddings != null and (is_text or is_rerank)) {
         discardBody(conn, a);
         conn.sendJson(400, "{\"error\":{\"message\":\"this model produces embeddings; use POST /v1/embeddings\",\"type\":\"invalid_request_error\"}}");
+        return;
+    }
+    // a reranker's template reads query and document roles only: every other route would score or write nonsense
+    if (srv.rerank != null and (is_text or is_embedding)) {
+        discardBody(conn, a);
+        conn.sendJson(400, "{\"error\":{\"message\":\"this model is a reranker: use POST /v1/rerank\",\"type\":\"invalid_request_error\"}}");
         return;
     }
     // The wake for every engine-using route: a parked server reloads under the `active` count this begin raised.
@@ -165,6 +173,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_embedding) return embeddings.post(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
+    if (is_rerank) return @import("rerank.zig").post(srv, conn, a);
     if (is_decisions) return decisions.post(srv, conn, a);
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
