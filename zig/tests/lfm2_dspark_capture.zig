@@ -95,3 +95,89 @@ pub fn targetTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids
         std.debug.print("target taps: {d} rows, released/duplicate/max-column layouts preserve all normalized and logit bytes\n", .{n});
     }
 }
+
+/// Planted W1/W2 drive native scan/pick failures through waited, event-waited target and host-held consumers.
+pub fn nonfinite(gpa: std.mem.Allocator, d: *q.dspark.Drafter) !void {
+    try d.settle();
+    const m = d.target;
+    const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+    const rank: usize = d.config.rank;
+    const bf16 = d.w.w2 == .bf16;
+    const old_w1 = d.w.w1;
+    const old_w2 = d.w.w2;
+    const grid = d.holds;
+    const grid_len = d.holds_len;
+    const step_ms = d.step_ms;
+    const hold_ms = d.hold_ms;
+    const spent_ms = d.hold_spent_ms;
+    defer {
+        d.w.w1 = old_w1;
+        d.w.w2 = old_w2;
+        d.holds = grid;
+        d.holds_len = grid_len;
+        d.step_ms = step_ms;
+        d.hold_ms = hold_ms;
+        d.hold_spent_ms = spent_ms;
+    }
+    // Depth one reads only W1[0]; all its factors are one, so an isolated infinity cannot become 0*Inf.
+    const w1 = try m.device.buffer(rank * 2, shared);
+    defer w1.deinit();
+    @memset(w1.slice(u16, rank), 0x3f80);
+    const w2 = try m.device.buffer(c.vocab * rank * @as(usize, if (bf16) 2 else 1), shared);
+    defer w2.deinit();
+    @memset(w2.contents()[0..w2.length()], 0);
+    const groups = c.vocab * rank / 64;
+    const affine: ?mtl.Buffer = if (bf16) null else try m.device.buffer(groups * 4, shared);
+    defer if (affine) |buf| buf.deinit();
+    if (affine) |buf| @memset(buf.contents()[0..buf.length()], 0);
+    d.w.w1 = w1;
+    d.w.w2 = if (bf16) .{ .bf16 = .{ .w = w2, .n = c.vocab, .k = rank } } else .{ .codes = .{
+        .w = w2,
+        .scales = affine.?,
+        .biases = affine.?,
+        .b_off = groups * 2,
+        .n = c.vocab,
+        .k = rank,
+        .bits = 8,
+    } };
+    var scratch = try st.Scratch.init(gpa, m.device, &m.config.attention, 1);
+    defer scratch.deinit();
+    const dr = d.drafter();
+    var failures: usize = 0;
+    // The final finite case also proves that neither the bad word nor the held flag survives the next pass.
+    for ([_]u16{ 0, 0x7f80, 0xff80, 0x7fc0, 0 }) |bits| {
+        if (bf16) w2.slice(u16, c.vocab * rank)[512 * rank] = bits else affine.?.slice(u16, groups * 2)[groups + 512 * rank / 64] = bits;
+        const invalid = bits != 0;
+        var stream = try tf.lanes.Stream.init(gpa, .{ .id = "nonfinite", .prompt = &.{0}, .max_new = 1 });
+        defer stream.deinit(gpa);
+        try dr.open(&stream);
+        defer dr.release(&stream);
+        const lane = d.lanes.get(&stream) orelse return error.LaneNotOpened;
+        const waited_bad = if (q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = 0, .anchor = 0, .depth = 1 }}, null)) |_| false else |err| blk: {
+            if (err != error.DraftNonfinite) return err;
+            break :blk true;
+        };
+        // The only nonfinite input is W2's planted row, not a broken target/backbone fixture.
+        for (d.s.logits.slice(u16, c.vocab)) |v| if (v & 0x7f80 == 0x7f80) return error.NonfiniteControlBaseLogit;
+        const expected = if (!waited_bad) lane.held[0] else 0;
+        try dr.hold(&.{.{ .stream = &stream, .pending = 0, .position = 1, .depth = 1 }});
+        const held = q.dspark.Drafter.device(d, &stream) orelse return error.NonfiniteControlNotDeviceHeld;
+        var cache = try st.Cache.init(gpa, m.device, &m.config.attention, 16);
+        defer cache.deinit();
+        const target_bad = if (q.forward.runHeld(m, &scratch, &.{.{ .cache = &cache, .rows = 1, .tap = .none }}, &.{0}, false, .last, &.{.{ .row = 0, .src = held.src, .off = held.off, .stride = held.stride, .count = 1 }}, .{ .event = held.wait.event, .value = held.wait.value })) |_| false else |err| blk: {
+            if (err != error.DraftNonfinite) return err;
+            break :blk true;
+        };
+        var got: [1]u32 = undefined;
+        const held_bad = if (dr.held(&.{&stream}, &.{&got})) |_| false else |err| blk: {
+            if (err != error.DraftNonfinite) return err;
+            break :blk true;
+        };
+        if (target_bad and cache.len != 0) return error.NonfiniteControlTargetCommitted;
+        if (!invalid and !waited_bad and !held_bad and (got[0] != expected or scratch.ids.slice(u32, 1)[0] != expected)) return error.NonfiniteControlFinitePickChanged;
+        const ok = waited_bad == invalid and target_bad == invalid and held_bad == invalid;
+        failures += @intFromBool(!ok);
+        std.debug.print("{s} Markov producer {s} bits 0x{x}: waited refused {}, held target refused {}, held host refused {} (expected {})\n", .{ if (ok) "PASS" else "FAIL", if (bf16) "bf16" else "8bit", bits, waited_bad, target_bad, held_bad, invalid });
+    }
+    if (failures != 0) return error.MarkovNonfiniteControlFailed;
+}

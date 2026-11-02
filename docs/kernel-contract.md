@@ -188,8 +188,16 @@ each, red at `shapes`, and a score edit (2 log2e) in each kernel is a control. T
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
-The DSpark drafter's tap copy, Markov scan and pick, draft ids, block attention and confidence logit are there too, with seven more controls.
+The DSpark drafter's tap copy, Markov scan and pick, draft ids, block attention and confidence logit are there too, with nine more controls.
 Its bf16 linears (few rows, 64x64 tiles) and the Markov scan over a bf16 W2 have four and two more.
+The Markov contracts isolate NaN, +Inf and -Inf in separate score rows for both weight formats. A direct pick
+contract distinguishes a real nonfinite partial from the empty `-Inf/UINT_MAX` sentinel; finite partial scans,
+empty groups and cross-lane ties retain the lowest token exactly. Source controls drop score flags, restore
+NaN-only pick detection or incorrectly flag empty partials. The native DSpark diagnostic also plants one W2
+row and follows real scan/pick output through waited holds, signalled held-id target forwards and host held
+reads, with finite cases before and after. Run its existing bits argument at both 0 (BF16) and 8.
+Changes to `lfm2_markov_scan`, `lfm2_markov_scan_bf16` or `lfm2_markov_pick` require fresh M1/M2 offline limits;
+these checks do not replace the existing numerical, provenance or performance gates.
 Their launches are in `lfm2_records.zig` with the M1 and M2 limits from `--offline`; `lfm2_attn_segs` and
 `lfm2_attn_block` reserve their 128 threads in their source, as Metal cannot build them for M1 or M2 at another count.
 Metal also checks Nemotron's routed experts on the engine's route tables, one row to 128: `tf_xup_w3` and `tf_xdown_w3`

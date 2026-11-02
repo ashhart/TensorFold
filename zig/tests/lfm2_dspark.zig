@@ -220,6 +220,7 @@ pub fn main(init: std.process.Init) !void {
     defer m.deinit();
     const d = try q.dspark.Drafter.init(gpa, init.io, m, args[2], .{ .capacity = length + 64, .bits = bits });
     defer d.deinit();
+    try @import("lfm2_dspark_capture.zig").nonfinite(gpa, d);
     const cfg = d.config;
     // the compared block's rows (a hold of depth d runs a d-row block)
     const block: u32 = if (args.len >= 5) try std.fmt.parseInt(u32, args[4], 10) else cfg.block;
