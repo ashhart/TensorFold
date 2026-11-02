@@ -116,6 +116,7 @@ test {
     _ = @import("decisions_test.zig");
     _ = @import("systemone.zig");
     _ = @import("systemone_test.zig");
+    _ = @import("rerank_labels.zig");
     _ = @import("slide_context_test.zig");
     // both run over Unix socket pairs
     if (comptime @import("builtin").os.tag != .windows) {

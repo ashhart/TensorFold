@@ -130,6 +130,7 @@ pub const Server = struct {
     needs_user_after_tool: bool = false,
     markers: reply_text.Markers = reply_text.think_markers,
     close_id: ?u32 = null, // the close marker's own token, when the marker is one token
+    rerank: ?@import("rerank_labels.zig").Rerank = null, // a reranker checkpoint's yes and no tokens (/v1/rerank)
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
     thinking_switch: bool = false,
@@ -188,6 +189,7 @@ pub const Server = struct {
             srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);
         }
         _ = try @import("drama_voice.zig").select(srv.voices, config.default_voice, "default");
+        srv.rerank = try @import("rerank_labels.zig").load(srv.arena.allocator(), io, config.model_dir, text.vocabSize());
         if (!srv.info.text_generation) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;
