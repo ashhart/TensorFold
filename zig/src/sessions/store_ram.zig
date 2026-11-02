@@ -32,7 +32,9 @@ pub fn save(s: *Store, slot: *Slot, bounded: Bounded, ids: []const i32, tag: u32
     x.kind = kind;
     if (slot.origin) |o| x.origin = .{ .key = o.key, .pages = @min(o.pages, @as(u32, @intCast(ids.len / s.pool.page))) };
     const nbytes = bounded.vtable.nbytes(bounded.ptr);
+    const logical = bounded.logical_bytes orelse nbytes;
     s.bounded_total += nbytes;
+    s.bounded_logical_total += logical;
     s.ram_count += 1;
     s.link(ins.id);
     s.touch(ins.id);
@@ -43,6 +45,7 @@ pub fn save(s: *Store, slot: *Slot, bounded: Bounded, ids: []const i32, tag: u32
         const extra = &s.index.get(ins.id).extra;
         extra.bounded = null;
         s.bounded_total -= nbytes;
+        s.bounded_logical_total -= logical;
         // Keep an existing non-RAM entry indexed even if it has no file flag.
         if (!ins.new) extra.file = true;
         s.leaveRam(ins.id) catch unreachable;

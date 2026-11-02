@@ -54,8 +54,17 @@ const Host = struct {
         h.pool.deinit();
     }
     fn save(h: *Host, slot: *sessions.Slot, ids: []const i32, state: State, tag: u32) !u32 {
+        return h.saveSized(slot, ids, state, tag, @sizeOf(State));
+    }
+    fn saveSized(h: *Host, slot: *sessions.Slot, ids: []const i32, state: State, tag: u32, physical: usize) !u32 {
         const snap = try t.allocator.create(sg.Sessions.Snap);
-        snap.* = .{ .owner = &h.owner, .bytes = try t.allocator.dupe(u8, std.mem.asBytes(&state)), .pos = ids.len, .tail = @splat(0), .tail_len = 0, .stash = state.stash, .ds_rows = 0, .measure = @sizeOf(State) };
+        const data = t.allocator.alloc(u8, physical) catch |err| {
+            t.allocator.destroy(snap);
+            return err;
+        };
+        @memset(data, 0);
+        @memcpy(data[0..@sizeOf(State)], std.mem.asBytes(&state));
+        snap.* = .{ .owner = &h.owner, .bytes = data, .pos = ids.len, .tail = @splat(0), .tail_len = 0, .stash = state.stash, .ds_rows = 0, .measure = @sizeOf(State) };
         var b = snap.bounded();
         b.logical_bytes = snap.measure;
         return (h.store.save(slot, b, ids, tag, 1) catch |err| {
@@ -185,7 +194,7 @@ test "prompt cache: one combined cap evicts oversized newest entries and preserv
     const id = try h.save(live, &ids, state, ced.tag_fast);
     const charge = sessions.retention.bytes(&h.store);
     const kv_bytes = 2 * (128 * 8 + 256 * 8) + 4 * (128 * 4 + 256 * 4);
-    try t.expect(charge >= kv_bytes + @sizeOf(sg.Sessions.Snap) + @sizeOf(State));
+    try t.expect(charge >= kv_bytes + @sizeOf(State));
     try sessions.retention.trim(&h.store, charge);
     try t.expect(h.store.entry(id).ram);
     try sessions.retention.trim(&h.store, charge - 1);
@@ -217,7 +226,7 @@ test "prompt cache: shared pages charged once, split-rank worst charge and LRU v
         charges[rank][0] = sessions.retention.bytes(&h.store);
         // Five distinct pages, not the sum of the two histories' seven pages; residue 0 has three pages.
         const actual_kv: u64 = 3 * (128 * 8 + 256 * 8) + 5 * (128 * 4 + 256 * 4);
-        const snapshots = 2 * (@sizeOf(State) + @sizeOf(sg.Sessions.Snap));
+        const snapshots = 2 * @sizeOf(State);
         const entries = 2 * @sizeOf(@TypeOf(h.store.index.entries.items[0]));
         const nodes = 5 * @sizeOf(@TypeOf(h.store.index.nodes.items[0]));
         // The trie has four full token blocks, a 16-token tail and seven page ids over its five unique KV pages.
@@ -261,4 +270,49 @@ test "prompt cache: the combined cap removes the oldest unrelated chat first" {
     try t.expect(h.store.entry(second).ram);
     try t.expectEqual(@as(u32, 1), h.store.ram_count);
     try t.expectEqual(one, sessions.retention.bytes(&h.store));
+}
+
+fn unequalSnapshots(world: u32, bounded_limit: bool) !void {
+    var cap: u64 = 0;
+    var decisions: [4][5]u64 = undefined;
+    var charges: [4]u64 = undefined;
+    for (0..world) |rank| {
+        var h: Host = undefined;
+        try h.init(world, @intCast(rank));
+        defer h.deinit();
+        const live = try h.pool.newSlot(1024);
+        const ids: [1025]i32 = @splat(7);
+        const physical = @sizeOf(State) + rank * 4096;
+        try live.ensure(1024);
+        _ = try h.saveSized(live, ids[0..1024], .{}, 10, physical);
+        if (rank == 0) cap = if (bounded_limit) 2 * h.store.bounded_total else sessions.retention.bytes(&h.store);
+        charges[rank] = sessions.retention.bytes(&h.store);
+        try t.expectEqual(@as(u64, @sizeOf(sg.Sessions.Snap) + physical), h.store.bounded_total);
+        if (bounded_limit) h.store.policy.ram_bytes = cap else try sessions.retention.trim(&h.store, cap);
+        decisions[rank][0] = h.store.ram_count;
+        _ = try h.saveSized(live, ids[0..1024], .{}, 11, physical);
+        if (!bounded_limit) try sessions.retention.trim(&h.store, cap);
+        decisions[rank][1] = h.store.ram_count;
+        if (bounded_limit) h.store.policy.ram_bytes = 2 * @sizeOf(State);
+        _ = try h.saveSized(live, ids[0..1024], .{}, 12, physical);
+        if (!bounded_limit) try sessions.retention.trim(&h.store, cap);
+        decisions[rank][2] = @intFromBool((try h.store.find(10, &ids)) != null);
+        decisions[rank][3] = @intFromBool((try h.store.find(11, &ids)) != null);
+        decisions[rank][4] = @intFromBool((try h.store.find(12, &ids)) != null);
+        try sessions.retention.trim(&h.store, 0);
+        try t.expectEqual(@as(u64, 0), h.store.bounded_total);
+    }
+    const expected: [5]u64 = if (bounded_limit) .{ 1, 2, 0, 1, 1 } else .{ 1, 1, 0, 0, 1 };
+    for (0..world) |rank| {
+        try t.expectEqualDeep(expected, decisions[rank]);
+        try t.expectEqual(charges[0], charges[rank]);
+    }
+}
+
+test "prompt cache: unequal physical rank snapshots make the same combined-cap evictions" {
+    for ([_]u32{ 2, 4 }) |world| try unequalSnapshots(world, false);
+}
+
+test "prompt cache: unequal physical rank snapshots make the same bounded-limit evictions" {
+    for ([_]u32{ 2, 4 }) |world| try unequalSnapshots(world, true);
 }

@@ -19,7 +19,7 @@ pub const none = prefix.none;
 pub const Bounded = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
-    /// Required for split-rank parking; physical residency may differ between ranks.
+    /// Agreed retention and split-rank parking charge; physical residency may differ between ranks.
     logical_bytes: ?u64 = null,
 
     pub const VTable = struct {
@@ -31,7 +31,7 @@ pub const Bounded = struct {
 };
 
 pub const Policy = struct {
-    /// bounded state the RAM tier keeps (least recently used entries go past it)
+    /// Bounded RAM state: physical on one rank, agreed logical charge on several ranks (oldest entries go first).
     ram_bytes: u64 = 512 << 20,
     /// Idle chats and entry-only pool bytes: null is unlimited; zero retains no idle residency.
     chats: ?u32 = null,
@@ -93,6 +93,7 @@ pub const Store = struct {
     policy: Policy,
     clock: u64 = 0,
     bounded_total: u64 = 0,
+    bounded_logical_total: u64 = 0,
     /// RAM entries, least recently used first
     oldest: u32 = none,
     newest: u32 = none,
@@ -362,7 +363,9 @@ pub const Store = struct {
         s.gpa.free(e.extra.pages);
         e.extra.pages = &.{};
         if (e.extra.bounded) |b| {
-            s.bounded_total -= b.vtable.nbytes(b.ptr);
+            const nbytes = b.vtable.nbytes(b.ptr);
+            s.bounded_total -= nbytes;
+            s.bounded_logical_total -= b.logical_bytes orelse nbytes;
             b.vtable.release(b.ptr);
         }
         e.extra.bounded = null;
@@ -412,7 +415,7 @@ pub const Store = struct {
     /// Evicts least recently used RAM entries past the bounded-state budget.
     pub fn trimRam(s: *Store, keep: u32) !void {
         var id = s.oldest;
-        while (s.bounded_total > s.policy.ram_bytes and s.ram_count > 1 and id != none) {
+        while ((if (s.pool.world > 1) s.bounded_logical_total else s.bounded_total) > s.policy.ram_bytes and s.ram_count > 1 and id != none) {
             const next = s.index.get(id).extra.newer;
             if (id != keep and s.index.get(id).extra.job == null) _ = try s.evict(id);
             id = next;

@@ -4,14 +4,14 @@ const Store = @import("store.zig").Store;
 const none = @import("store.zig").none;
 const max_world = @import("pool.zig").max_world;
 
-/// The most-loaded rank's KV plus host payload; callers must retain equal bounded shapes on every rank.
+/// The most-loaded rank's KV plus index and logical bounded payload; unequal ranks supply Bounded.logical_bytes.
 pub fn bytes(s: *const Store) u64 {
     const p = s.pool;
     var pages: [max_world]u64 = @splat(0);
     for (p.refs, p.slot_refs, 0..) |refs, slots, pg| {
         if (refs > slots) pages[pg % p.world] += 1;
     }
-    var total: u64 = s.bounded_total;
+    var total: u64 = s.bounded_logical_total;
     var all: u64 = 0;
     var worst: u64 = 0;
     for (pages[0..p.world]) |n| {

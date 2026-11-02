@@ -387,6 +387,7 @@ pub const Model = struct {
         if (world > 1) m.f.link = &m.session.plan;
         m.f.on_stop = .{ .ctx = &m.session, .run = announceStop };
         const so = @import("session_budget.zig").options(try sg.optionsFromEnv(), cache_bytes);
+        if (cache_bytes == 0) std.log.scoped(.dsv41).info("sessions: off, --prompt-cache-gib 0", .{});
         const several_ok = m.slots == 1 or so.several;
         if (so.enabled and m.f.kv != null and !several_ok)
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: off with {d} live slots (TF_DSV41_SESSION_SLOTS=1 opens them over every slot; the session-slots check has not run on hardware)", .{m.slots});

@@ -9,6 +9,7 @@ const a = std.testing.allocator;
 const fams = [_]pm.Family{.{ .name = "kv", .ratio = 1, .row_bytes = 8 }};
 const Bound = struct {
     released: usize = 0,
+    logical: ?u64 = 24,
     failing: ?*std.testing.FailingAllocator = null,
     offset: usize = 0,
     fn nbytes(ptr: *anyopaque) u64 {
@@ -27,7 +28,7 @@ const Bound = struct {
         b.released += 1;
     }
     fn bounded(b: *@This()) sm.Bounded {
-        return .{ .ptr = b, .vtable = &.{ .nbytes = nbytes, .blobs = blobs, .release = release } };
+        return .{ .ptr = b, .vtable = &.{ .nbytes = nbytes, .blobs = blobs, .release = release }, .logical_bytes = b.logical };
     }
 };
 const Bytes = struct {
@@ -56,6 +57,7 @@ const Bytes = struct {
 fn consistent(s: *sm.Store) !void {
     var count: u32 = 0;
     var bytes: u64 = 0;
+    var logical: u64 = 0;
     var prev: u32 = sm.none;
     var id: u32 = s.oldest;
     while (id != sm.none) {
@@ -63,7 +65,10 @@ fn consistent(s: *sm.Store) !void {
         const e = s.entry(id);
         try std.testing.expect(e.live and e.ram);
         try std.testing.expectEqual(prev, e.extra.older);
-        bytes += e.extra.bounded.?.vtable.nbytes(e.extra.bounded.?.ptr);
+        const b = e.extra.bounded.?;
+        const physical = b.vtable.nbytes(b.ptr);
+        bytes += physical;
+        logical += b.logical_bytes orelse physical;
         prev = id;
         id = e.extra.newer;
         count += 1;
@@ -71,6 +76,7 @@ fn consistent(s: *sm.Store) !void {
     try std.testing.expectEqual(s.newest, prev);
     try std.testing.expectEqual(s.ram_count, count);
     try std.testing.expectEqual(s.bounded_total, bytes);
+    try std.testing.expectEqual(s.bounded_logical_total, logical);
     var live: u32 = 0;
     for (s.index.entries.items) |e| if (e.live and e.ram) {
         live += 1;
@@ -212,4 +218,36 @@ test "Ownership rollback: restore copy failure returns its temporary page" {
 }
 test "Ownership rollback: restore push failure returns its temporary page" {
     try restoreFailure(false);
+}
+
+test "Ownership rollback: logical zero fallback duplicates and single-rank physical policy stay distinct" {
+    var pool = try pm.Pool.init(a, .{ .families = &fams, .page = 4 }, 64, 1, 0);
+    defer pool.deinit();
+    var data: Bytes = .{};
+    var s = try sm.Store.init(a, std.testing.io, &pool, data.store(), null, .{});
+    var zero: Bound = .{ .logical = 0 };
+    var duplicate: Bound = .{};
+    var fallback: Bound = .{ .logical = null };
+    defer s.deinit();
+    const slot = try pool.newSlot(8);
+    try slot.ensure(4);
+    const ids = [_]i32{ 1, 2, 3, 4 };
+    const first = (try s.save(slot, zero.bounded(), &ids, 1, 0)).?;
+    try std.testing.expectEqual(@as(u64, 8), s.bounded_total);
+    try std.testing.expectEqual(@as(u64, 0), s.bounded_logical_total);
+    try std.testing.expect((try s.save(slot, duplicate.bounded(), &ids, 1, 0)) == null);
+    try std.testing.expectEqual(@as(usize, 1), duplicate.released);
+    try std.testing.expectEqual(@as(u64, 0), s.bounded_logical_total);
+    const second = (try s.save(slot, fallback.bounded(), &ids, 2, 0)).?;
+    try std.testing.expectEqual(@as(u64, 16), s.bounded_total);
+    try std.testing.expectEqual(@as(u64, 8), s.bounded_logical_total);
+    s.policy.ram_bytes = 8;
+    try s.trimRam(second);
+    try std.testing.expect(!s.entry(first).ram and s.entry(second).ram);
+    try std.testing.expectEqual(@as(usize, 1), zero.released);
+    try consistent(&s);
+    try s.drop(second);
+    try std.testing.expectEqual(@as(u64, 0), s.bounded_total);
+    try std.testing.expectEqual(@as(u64, 0), s.bounded_logical_total);
+    try std.testing.expectEqual(@as(usize, 1), fallback.released);
 }
