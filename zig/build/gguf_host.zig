@@ -1,0 +1,13 @@
+//! GGUF byte-reader and repack checks, independent of GPU modules and compiled assets.
+const std = @import("std");
+
+pub fn steps(b: *std.Build, all: *std.Build.Step) void {
+    const host = b.step("test-gguf-host", "Checked GGUF containers and typed metadata without a GPU");
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const m = b.createModule(.{ .root_source_file = b.path("zig/src/core/gguf.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
+        host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    }
+    all.dependOn(host);
+    const linux = b.createModule(.{ .root_source_file = b.path("zig/src/core/gguf.zig"), .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }), .optimize = .Debug, .link_libc = true });
+    b.step("test-gguf-linux-compile", "Compile GGUF host checks for Linux aarch64").dependOn(&b.addTest(.{ .root_module = linux }).step);
+}

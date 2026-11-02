@@ -2,6 +2,7 @@
 
 pub const weight_only = @import("weight_only.zig");
 pub const safetensors = @import("safetensors.zig");
+pub const gguf = @import("gguf.zig");
 pub const npy = @import("npy.zig");
 pub const exl3_format = @import("exl3_format.zig");
 pub const exlr8 = @import("exlr8.zig");
@@ -65,6 +66,7 @@ pub const kv_prompts = @import("kv_prompts.zig");
 test {
     _ = checkpoint_weights;
     _ = safetensors;
+    _ = gguf;
     _ = affine4_host;
     _ = rope_yarn;
     _ = rope_freq;
