@@ -106,9 +106,10 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }
     const module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     module.addImport("xpu_qwen27_kernels", embedded);
-    // the runner's own `core`: the FP64 references of the weight formats (core/quant), its safetensors headers
-    const qwen_core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    module.addImport("core", qwen_core);
+    // the device runners' own `core` at `optimize` (Qwen27's FP64 references and headers, Nemotron's binaries)
+    const runner_core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    runner_core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
+    module.addImport("core", runner_core);
     module.addImport("ze", ze_mod);
     const exe = b.addExecutable(.{ .name = "xpu-qwen27", .root_module = module });
     const install = b.addInstallArtifact(exe, .{});
@@ -123,7 +124,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         const m = b.createModule(.{ .root_source_file = b.path(t[1]), .target = target, .optimize = optimize, .link_libc = true });
         m.addImport("xpu_qwen27_kernels", embedded);
         m.addImport("ze", ze_mod);
-        m.addImport("core", qwen_core);
+        m.addImport("core", runner_core);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = t[0], .root_module = m }), .{}).step);
     }
 
@@ -166,7 +167,10 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     _ = @import("server.zig").addTo(b, server.root_module, target, .ReleaseSafe);
     const install_server = b.addInstallArtifact(server, .{ .dest_dir = .{ .override = .{ .custom = "xpu/bin" } } });
     b.step("xpu-native", "tensorfold-native with the XPU engines into zig-out/xpu/bin").dependOn(&install_server.step);
-    nemotronSteps(b, target, optimize, nem);
+    // Nemotron's device binaries: the same modules over the runners' `core`, the SPIR-V images shared
+    var runners = family(b, target, optimize, runtime(b, target, optimize, &nem.images, ze_mod, runner_core, dpas), runner_core, lanes);
+    runners.images = nem.images;
+    nemotronSteps(b, target, optimize, runners);
 }
 
 /// One SPIR-V image: the .cl in zig/kernels/xpu (`src`, else `name`) and its ocloc options (dot/matrix kernels: CL3.0).
