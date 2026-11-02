@@ -121,6 +121,11 @@ test {
     _ = @import("slide_writer_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_cli.zig");
+    _ = @import("slide_audit.zig");
+    _ = @import("slide_audit_cli.zig");
+    _ = @import("slide_audit_probes.zig");
+    _ = @import("slide_audit_test.zig");
+    _ = @import("slide_audit_endpoint_test.zig");
     _ = @import("slide_key.zig");
     _ = @import("slide_graph.zig");
     _ = @import("slide_graph_delete.zig");

@@ -34,28 +34,48 @@ pub fn Adapter(comptime slide: type) type {
     return struct {
         const Self = @This();
         const Shrink = if (@hasDecl(slide, "Lesson")) @FieldType(slide.Lesson, "shrink") else @FieldType(api.LearnRequest, "shrink");
+        const Audit = if (@hasDecl(slide.Learner, "Audit")) slide.Learner.Audit else void;
 
         learner: slide.Learner,
         arena: std.heap.ArenaAllocator,
         sink: ?api.LearnSink = null,
         sent: ?api.LearnProgress = null, // the last progress sent, so each move goes out once
         neurons: [max_neurons]api.Neuron = undefined, // the open lesson's neurons for the event being sent
+        audit: if (Audit == void) void else ?Audit = if (Audit == void) {} else null,
+        audit_request: ?*const api.pocket_audit.Request = null,
+        audit_at: usize = 0,
 
         pub fn init(gpa: Allocator, io: std.Io, model: anytype) Self {
             return .{ .learner = slide.Learner.init(gpa, io, model), .arena = .init(gpa) };
         }
 
         pub fn deinit(a: *Self) void {
+            a.endAudit();
             a.learner.deinit();
             a.arena.deinit();
         }
 
         pub fn hook(a: *Self) api.Learner {
-            return .{ .ctx = a, .begin = begin, .step = step, .abort = abort };
+            return .{ .ctx = a, .begin = begin, .step = step, .abort = abort, .read_only_audit = Audit != void };
         }
 
         fn begin(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
             const a: *Self = @ptrCast(@alignCast(ctx));
+            if (request.audit) |r| {
+                if (request.shrink != .none) return error.BadAudit;
+                if (comptime Audit == void) return error.AuditUnsupported;
+                try r.validate();
+                if (r.completed) |done| done.* = false;
+                inline for (.{ "train", "against", "think", "held", "near", "keep", "asked", "unasked", "kept", "retire", "forget" }) |f|
+                    if (@field(request, f).len > 0) return error.BadAudit;
+                inline for (.{ "undo", "more", "reroute", "drop", "save", "unretire", "unforget" }) |f|
+                    if (@field(request, f)) return error.BadAudit;
+                if (!r.probe_only) a.audit = try Audit.init(&a.learner);
+                a.audit_request = r;
+                a.audit_at = 0;
+                a.sink = sink;
+                return;
+            }
             _ = a.arena.reset(.retain_capacity);
             const al = a.arena.allocator();
             try a.learner.begin(.{ .train = try examples(al, request.train), .against = try examples(al, request.against), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .shrink = @as(Shrink, @fromBackingInt(@intCast(@backingInt(request.shrink)))), .retire = try retired(al, request.retire), .unretire = request.unretire, .forget = try retired(al, request.forget), .unforget = request.unforget });
@@ -66,6 +86,28 @@ pub fn Adapter(comptime slide: type) type {
 
         fn step(ctx: *anyopaque) api.Learner.Step {
             const a: *Self = @ptrCast(@alignCast(ctx));
+            if (a.audit_request) |r| {
+                if (comptime Audit != void) {
+                    if (r.probe_only) {
+                        if (r.completed) |done| done.* = true;
+                        a.endAudit();
+                        a.emit(.{ .done = .{} });
+                        return .{ .done = true, .changed = false };
+                    }
+                    const out = r.peaks[a.audit_at * r.neurons.len ..][0..r.neurons.len];
+                    a.audit.?.read(&a.learner, r.probes[a.audit_at].ids, r.neurons, out) catch |e| {
+                        a.endAudit();
+                        a.emit(.{ .done = .{ .message = @errorName(e) } });
+                        return .{ .done = true, .changed = false };
+                    };
+                    a.audit_at += 1;
+                    if (a.audit_at < r.probes.len) return .{ .done = false, .changed = false };
+                    if (r.completed) |done| done.* = true;
+                    a.endAudit();
+                    a.emit(.{ .done = .{} });
+                    return .{ .done = true, .changed = false };
+                }
+            }
             const s = a.learner.step();
             a.progress();
             const failed = if (s.report) |r| r == .failed else false;
@@ -79,8 +121,16 @@ pub fn Adapter(comptime slide: type) type {
 
         fn abort(ctx: *anyopaque) void {
             const a: *Self = @ptrCast(@alignCast(ctx));
-            a.learner.abort();
+            if (a.audit_request != null) a.endAudit() else a.learner.abort();
             a.emit(.{ .done = .{ .message = "the engine closed" } });
+        }
+
+        fn endAudit(a: *Self) void {
+            if (comptime Audit != void) if (a.audit) |*s| {
+                s.deinit();
+                a.audit = null;
+            };
+            a.audit_request = null;
         }
 
         fn emit(a: *Self, event: api.LearnEvent) void {

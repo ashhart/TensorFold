@@ -53,6 +53,7 @@ pub fn Learner(comptime H: type) type {
         const Probes = if (has_edits) probe.Probe(H.Trainer) else void;
         const Pockets = if (has_pocket) pocket.Pocket(H.Trainer, H.family) else void;
         pub const Host = H;
+        pub const Audit = if (has_pocket) @import("pocket_audit.zig").Audit(H) else void;
 
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -204,7 +205,15 @@ pub fn Learner(comptime H: type) type {
             for ([_][]const Example{ kept.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
         }
 
-        /// The trainer, made the first time a lesson needs it.
+        /// Prepare the read-only trainer only when no lesson or unresolved write is open.
+        pub fn auditTrainer(l: *Self) !void {
+            if (comptime !has_pocket) return error.AuditUnsupported;
+            if (l.phase != .idle) return error.AuditBusy;
+            if (!l.whole or l.method != .pocket) return error.AuditUnsupported;
+            if (whole_lessons.stale(l)) return error.AuditUnresolved;
+            try l.ready();
+        }
+        /// The trainer, made the first time a lesson or audit needs it.
         fn ready(l: *Self) !void {
             if (l.trainer != null) return;
             const t0 = H.seconds(l.io);

@@ -24,6 +24,8 @@ pub const pocket_locate = @import("pocket_locate.zig");
 pub const pocket = @import("pocket.zig");
 pub const pocket_clock = @import("pocket_clock.zig");
 pub const pocket_dump = @import("pocket_dump.zig");
+pub const pocket_audit = @import("pocket_audit.zig");
+pub const audit_test = if (@import("builtin").is_test) @import("pocket_audit_test.zig") else struct {};
 pub const pocket_fit = @import("pocket_fit.zig");
 pub const pocket_forget = @import("pocket_forget.zig");
 pub const pocket_joint = @import("pocket_joint.zig");
@@ -36,6 +38,7 @@ pub const pocket_read = @import("pocket_read.zig");
 pub const pocket_values = @import("pocket_values.zig");
 
 test {
+    _ = audit_test;
     _ = family;
     _ = families;
     _ = widths;
