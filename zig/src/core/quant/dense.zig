@@ -1,5 +1,4 @@
-//! Weights kept in float [N, K]: fp32 (the unquantized projections a conversion leaves, an MTP head's fc), or BF16 /
-//! FP16 as stored when the loader asks (`readStored`: a checkpoint published in 16-bit floats).
+//! Float weights [N, K]: fp32 (an MTP head's fc a conversion leaves), or BF16 / FP16 as stored (`readStored`).
 
 const std = @import("std");
 const types = @import("types.zig");
