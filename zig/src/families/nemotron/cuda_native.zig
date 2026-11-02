@@ -116,13 +116,16 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const head_enabled = o.drafts and !e.c.bolt;
     const head: ?*Head = if (head_enabled) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
-    if (head) |h| try h.capture();
-    if (!head_enabled) try e.captureWindows(); // the one-row window: Engine.init captures windows only when drafting
-    // the sampled mode's sets: a placeholder rule now, each stream's own uploaded at its prefill
-    try e.setSampling(.{ .seed = 0, .temperature = 1.0 });
-    try e.captureWindows();
-    if (head) |h| try h.capture();
-    try e.setSampling(null);
+    // A live tap cannot join a capture; Head.launch and verifyMasked already fall back to eager glue.
+    if (!core.route_tap.live()) {
+        if (head) |h| try h.capture();
+        if (!head_enabled) try e.captureWindows(); // the one-row window: Engine.init captures windows only when drafting
+        // the sampled mode's sets: a placeholder rule now, each stream's own uploaded at its prefill
+        try e.setSampling(.{ .seed = 0, .temperature = 1.0 });
+        try e.captureWindows();
+        if (head) |h| try h.capture();
+        try e.setSampling(null);
+    }
     e.snap_host = false; // states on the device until the native host places them (snap_place)
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);

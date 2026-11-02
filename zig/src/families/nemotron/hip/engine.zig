@@ -142,7 +142,7 @@ pub const Engine = struct {
         errdefer if (e.votes) |*v| v.deinit();
         e.sized = false;
         e.graphs = .init(gpa);
-        e.replay = o.policy.graphsOn();
+        e.replay = o.policy.graphsOn() and !@import("core").route_tap.live();
         _ = forward.slots(&e.cfg, &e.place);
         e.mtp_slot = e.cfg.count(.attention);
         if (o.pool) try e.sizePool(o.capacity, o.streams, o.extra_pages);

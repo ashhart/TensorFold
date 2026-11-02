@@ -159,7 +159,7 @@ pub const Engine = struct {
         errdefer e.drawer.deinit();
         e.votes = if (o.world > 1) try hip.Votes.init(&e.driver, o.world) else null;
         errdefer if (e.votes) |*v| v.deinit();
-        e.graphed = o.policy.graphs != .off;
+        e.graphed = o.policy.graphs != .off and !@import("core").route_tap.live();
         e.graphs = Graphs.init(gpa);
         e.chosen = null;
         e.pool = .{};

@@ -106,7 +106,7 @@ pub const Engine = struct {
         e.sized = false;
         e.stopped = false;
         // rounds and the draft head's batches replay graphs unless the policy says `graphs=off`, at any world size
-        e.o.graphs = o.graphs and o.policy.graphsOn();
+        e.o.graphs = o.graphs and o.policy.graphsOn() and !@import("core").route_tap.live();
         e.graphs = round_graphs.Graphs.init(gpa);
         e.driver = try hip.Runtime.open();
         errdefer e.driver.close();

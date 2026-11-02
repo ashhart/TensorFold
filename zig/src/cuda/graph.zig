@@ -12,6 +12,8 @@ pub const Node = abi.GraphNode;
 
 /// Starts capturing `stream`; every launch on it is recorded until `endCapture`, nothing runs.
 pub fn beginCapture(stream: Stream, mode: abi.CaptureMode) Error!void {
+    // A live tap's per-layer D2H copies cannot join a capture: replay would write the same slot every step.
+    if (@import("core").route_tap.live()) return error.GraphNotPermitted;
     const source = @import("copy_source.zig");
     try source.captureBegin(stream, mode);
     errdefer source.captureEnd(stream);

@@ -41,6 +41,7 @@ pub const Model = struct {
         errdefer allocator.free(m.dir);
         m.device = try mtl.Device.init();
         m.queue = try m.device.queue();
+        @import("../../core/route_tap_metal.zig").attach(m.device);
 
         m.config = try cfg.Config.read(allocator, io, dir);
         try cfg.checkShapes(m.config);
@@ -154,6 +155,7 @@ pub const Model = struct {
         self.checkpoint.deinit();
         self.allocator.free(self.draft_ids);
         self.allocator.free(self.dir);
+        @import("../../core/route_tap_metal.zig").detach();
         self.queue.deinit();
         self.device.deinit();
         self.allocator.destroy(self);

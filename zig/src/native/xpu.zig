@@ -71,6 +71,7 @@ const LaneServed = struct {
     fn close(ptr: *anyopaque) void {
         const h: *LaneServed = @ptrCast(@alignCast(ptr));
         h.host.stop();
+        @import("core").route_tap.stop();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
@@ -162,6 +163,10 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const route_tap = @import("core").route_tap;
+    var tap_guard: route_tap.Guard = .{};
+    defer tap_guard.deinit();
+    if (!route_tap.admit(a, gpa, o.model_type, o.rank, "xpu", problem)) return null;
     if (try o.slideRefusal(a, "XPU")) |why| {
         problem.* = why;
         return null;
@@ -174,7 +179,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "--rope-yarn: the native Intel GPU engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
         return null;
     }
-    if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
+    if (nem.serves(o.model_type)) return route_tap.held(&tap_guard, try nem.open(a, gpa, io, o, problem));
     if (!std.mem.eql(u8, o.model_type, "qwen3_5")) {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) and Nemotron-H (nemotron_h, MLX 4/64), not {s}", .{o.model_type});
         return null;
@@ -195,7 +200,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             return null;
         };
     };
-    return openLanes(gpa, io, runner, dr, o, context) catch |err| {
+    const opened = openLanes(gpa, io, runner, dr, o, context) catch |err| {
         if (dr) |x| x.deinit();
         runner.deinit();
         problem.* = if (err == error.StreamDoesNotFit)
@@ -209,6 +214,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             try std.fmt.allocPrint(a, "the XPU engine could not serve {s}: {s}", .{ o.dir, @errorName(err) });
         return null;
     };
+    return route_tap.held(&tap_guard, opened);
 }
 
 test "slide admission: xpu refuses before checkpoint or device access" {

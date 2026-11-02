@@ -196,6 +196,8 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
         e.run(.{ 512, 1, 1 }, .{ 512, 1, 1 });
         groups = @min(pairs, c.experts);
     }
+    const tap_m = @import("../../core/route_tap_metal.zig");
+    if (tap_m.live()) tap_m.blit(e.e, f.k.get("tf_copy_u32"), s.idx, 0, s.wt, 0, @intCast(pairs));
     if (s.route_log) |log| {
         f.copyIds(e, s.idx, 0, log, s.route_at * pairs * 4, pairs);
         s.route_at += 1;

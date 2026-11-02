@@ -37,7 +37,7 @@ pub const fused_rows = 16;
 
 pub const Kind = timing.Kind;
 
-const Flight = struct { end: u64, cb: mtl.CommandBuffer, kind: Kind };
+const Flight = struct { end: u64, cb: mtl.CommandBuffer, kind: Kind, tap_at: u32 = 0 };
 
 /// A window's host rows in the token ring: the pending token at `stage`, then `n` tokens after its `held` drafts.
 const Fill = struct { stage: u64, held: usize, n: usize };
@@ -176,11 +176,13 @@ pub const Metal = struct {
         self.fence.wait(enc);
         var e = fwd.Enc{ .e = enc, .concurrent = self.concurrent };
         try body.encode(self, &e);
+        const tap = @import("../../core/route_tap.zig");
+        const tap_at = if (tap.live()) tap.reservedCount() else 0;
         self.fence.update(enc);
         enc.end();
         cb.commit();
         self.timing.dispatches += e.dispatches;
-        try self.flights.append(self.gpa, .{ .end = end, .cb = cb.retain(), .kind = kind });
+        try self.flights.append(self.gpa, .{ .end = end, .cb = cb.retain(), .kind = kind, .tap_at = tap_at });
     }
 
     /// Wait for the oldest command buffer in flight and record its GPU time.
@@ -188,6 +190,7 @@ pub const Metal = struct {
         const f = self.flights.orderedRemove(0);
         defer f.cb.release();
         f.cb.wait();
+        if (@import("../../core/route_tap.zig").live()) @import("../../core/route_tap_metal.zig").afterLand(f.tap_at);
         if (f.cb.failure()) |text| {
             std.log.err("command buffer failed: {s}", .{text});
             return error.GpuFailed;

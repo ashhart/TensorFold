@@ -10,6 +10,7 @@ fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     cuda.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     cuda.addOptions("kernel_options", options);
     cuda.addImport("stagger", b.createModule(.{ .root_source_file = b.path("zig/src/core/stagger.zig"), .target = target, .optimize = optimize }));
+    cuda.addImport("core", @import("cuda_runtime.zig").coreModule(b, target, optimize));
     return cuda;
 }
 

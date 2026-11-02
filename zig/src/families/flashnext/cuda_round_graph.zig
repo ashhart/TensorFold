@@ -57,6 +57,11 @@ pub const Cache = struct {
 
     pub fn run(c: *Cache, key: Key, pass: anytype, ids: []const u32) !void {
         try prepare(pass, ids);
+        if (@import("core").route_tap.live()) {
+            pass.prepared = true;
+            try pass.chunk(ids, 0, null);
+            return;
+        }
         if (c.key == null or !std.meta.eql(c.key.?, key)) {
             c.clear();
             try cuda.graph.beginCapture(pass.stream, .thread_local);

@@ -28,6 +28,10 @@ pub fn chip(_: Allocator) ?[]const u8 {
 
 /// The engine for `o.dir`, or null with `problem` set (the native_engines contract).
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const route_tap = @import("core").route_tap;
+    var tap_guard: route_tap.Guard = .{};
+    defer tap_guard.deinit();
+    if (!route_tap.admit(a, gpa, o.model_type, o.rank, "cuda", problem)) return null;
     if (try o.slideRefusal(a, "CUDA")) |why| {
         problem.* = why;
         return null;
@@ -48,7 +52,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "the DeepSeek-V4.1 CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
-    return .{ .engine = s.engine(), .close = Served.close, .ctx = s, .halt = Served.halt };
+    return route_tap.held(&tap_guard, api.Opened{ .engine = s.engine(), .close = Served.close, .ctx = s, .halt = Served.halt });
 }
 
 pub const Served = struct {

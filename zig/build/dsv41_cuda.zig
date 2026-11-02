@@ -30,6 +30,7 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8,
 /// The family's root `file` over the runtime `cuda` and kernel module `dk`, every family module at `optimize`.
 pub fn assemble(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, file: []const u8, cuda: *std.Build.Module, dk: *std.Build.Module) *std.Build.Module {
     const m = shared.moduleAt(b, target, optimize, file);
+    if (!cuda.import_table.contains("core")) cuda.addImport("core", m.import_table.get("core").?);
     m.addImport("cuda", cuda);
     m.addImport("dsv41_kernels", dk);
     const tp = @import("tp.zig").module(b, target, optimize, cuda);
