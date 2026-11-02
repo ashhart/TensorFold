@@ -57,6 +57,36 @@ pub fn controlName(w: Which) []const u8 {
         .combine => "control: metal lfm2 combine norm tap wrong column",
     };
 }
+pub const Suite = struct {
+    probes: std.ArrayList(*Probe) = .empty,
+
+    pub fn collect(self: *Suite, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
+        for (std.enums.values(Which)) |w| for ([_]bool{ false, true }) |control| {
+            const name = if (control) controlName(w) else spec(w).name;
+            if (only) |needle| if (std.mem.indexOf(u8, name, needle) == null) continue;
+            const p = try a.create(Probe);
+            p.* = Probe.init(a, device, queue, w, control) catch |err| {
+                a.destroy(p);
+                return err;
+            };
+            self.probes.append(a, p) catch |err| {
+                p.deinit();
+                a.destroy(p);
+                return err;
+            };
+            try kernels.append(a, p.kernel());
+        };
+    }
+
+    pub fn deinit(self: *Suite, a: std.mem.Allocator) void {
+        for (self.probes.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        self.probes.deinit(a);
+    }
+};
+
 pub const Probe = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,

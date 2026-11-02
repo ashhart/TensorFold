@@ -68,8 +68,7 @@ pub const Cache = struct {
     memory: Storage,
     capacity: usize,
     len: usize = 0,
-    /// Only native verify marks its completed all-row head; generic commits keep restoring from scratch.
-    /// The nonowning pointer is only compared; the native backend destroys its caches before its scratch.
+    /// Native all-row owner, compared only; backend caches are destroyed before scratch.
     last: ?struct { start: usize, base: usize, rows: usize, committed: ?*const Scratch = null } = null,
     blocks: [c.layers]Mixer,
     logits: mtl.Buffer,

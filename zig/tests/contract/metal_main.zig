@@ -32,7 +32,6 @@ const lfm2_argmax = @import("metal_lfm2_argmax.zig");
 const lfm2_streams = @import("metal_lfm2_streams.zig");
 const lfm2_tap = @import("metal_lfm2_tap.zig");
 const lfm2_owned_tap = @import("metal_lfm2_owned_tap.zig");
-const lfm2_norm_tap = @import("metal_lfm2_norm_tap.zig");
 const lfm2_kv = @import("metal_lfm2_kv.zig");
 const lfm2_dspark = @import("metal_lfm2_dspark.zig");
 const lfm2_bf16 = @import("metal_lfm2_bf16.zig");
@@ -235,22 +234,9 @@ pub fn main(init: std.process.Init) !u8 {
         try owned_tap_list.append(a, p);
         try kernels.append(a, p.kernel());
     }
-    var norm_tap_list: std.ArrayList(*lfm2_norm_tap.Probe) = .empty;
-    defer {
-        for (norm_tap_list.items) |p| {
-            p.deinit();
-            a.destroy(p);
-        }
-        norm_tap_list.deinit(a);
-    }
-    for (std.enums.values(lfm2_norm_tap.Which)) |w| for ([_]bool{ false, true }) |control| {
-        if (!wanted(o, if (control) lfm2_norm_tap.controlName(w) else lfm2_norm_tap.spec(w).name)) continue;
-        const p = try a.create(lfm2_norm_tap.Probe);
-        errdefer a.destroy(p);
-        p.* = try lfm2_norm_tap.Probe.init(a, device, queue, w, control);
-        try norm_tap_list.append(a, p);
-        try kernels.append(a, p.kernel());
-    };
+    var norm_taps: @import("metal_lfm2_norm_tap.zig").Suite = .{};
+    defer norm_taps.deinit(a);
+    try norm_taps.collect(a, device, queue, &kernels, o.only);
     var drafter_list: std.ArrayList(*lfm2_dspark.Probe) = .empty;
     var block_list: std.ArrayList(*lfm2_attn.Probe) = .empty;
     var bf16_list: std.ArrayList(*lfm2_bf16.Probe) = .empty;
