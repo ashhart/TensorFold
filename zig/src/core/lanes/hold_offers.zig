@@ -164,8 +164,7 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
             probe_depth = @max(probe_depth, probe.depth);
             probe_context = @max(probe_context, probe.hold_context_rows);
         }
-        const possible = price.canExplore(rule, whos, base, fixed,
-            probeContextMs(rule, whos, out, probes, probe_depth, probe_context));
+        const possible = price.canExplore(rule, whos, base, fixed, probeContextMs(rule, whos, out, probes, probe_depth, probe_context));
         for (rule.hold_order[rule.hold_order.len - probes ..]) |probe| {
             if (!possible) {
                 out[probe.index] = 0;

@@ -47,7 +47,6 @@ pub const Lane = struct {
     conf_len: u32 = 0, // the drafts `conf` covers: the last settled hold's depth
     slot: ?u32 = null, // its block's place in the last signalled hold, whose picks still hold its drafts
 
-
 };
 
 /// The passes' working buffers, one pass at a time on the target's queue.
