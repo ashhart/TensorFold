@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- With `TF_NEMOTRON_METAL_KV_PAGES` off, Nemotron on Metal's paged KV checks cost one null check a pass, and debug builds assert that every pass's K/V rows sit inside the lane's pages (#1914, part of #1293). Thanks to @jschmied.
+
 - Flash Next on CUDA reads its experts past the page cache with O_DIRECT, and keeps a load's shards open, so a cold start on a GB10 drops from about 100 s to 55 s with the same replies and the n-gram table still cached. `TF_LOAD_DIRECT=0` keeps the mapped reads (#1901, fixes #1873). Thanks to @jschmied.
 
 - Flash Next on CUDA reads its embedding shard's header with core's safetensors reader, so a malformed header is refused with an error instead of a panic, and a tensor's bytes must match its shape (#1917, part of #1872). Thanks to @jschmied.
