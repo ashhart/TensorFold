@@ -200,7 +200,7 @@ pub const Engine = struct {
         return try e.sizeBytes(rows, capacity, pool_pages) + streams * lane + snapshots * memory.linearBytes(m.spec) + head;
     }
 
-    /// The memory a plan may take, as the native backends count it: free (host's when integrated), reserve and cap.
+    /// The memory a plan may take, as the native backends count it: free (host's when shared), reserve and cap.
     pub fn budget(e: *const Engine, io: std.Io) !admission.Pool {
         return admission.budget(e.gpa, io, e.ctx);
     }
