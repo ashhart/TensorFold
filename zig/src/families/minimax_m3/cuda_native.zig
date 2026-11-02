@@ -149,6 +149,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place) !Loaded {
     const priority_copies = try cuda.priority_copies.read("TF_MINIMAX_COPIES", o.drafts);
+    var load_cache = core.checkpoint.cache.Load.begin(io, p.world > 1);
+    defer load_cache.deinit();
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = undefined, .lanes = undefined, .place = p };
@@ -193,6 +195,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         own.e.exchange = .{ .nccl = .{ .lib = &own.lib.?, .comm = own.comm, .group = &own.group.? } };
     }
     errdefer if (own.group) |*g| if (g.fast) |f| f.deinit();
+    if (p.world > 1) try load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready) else load_cache.finish();
     // rank 0 admits by the smallest room of the ranks
     var peer: ?Peer = null;
     if (p.world > 1) {
@@ -209,7 +212,6 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         for (all[1..], 1..) |r, q| if (peer == null or r < peer.?.bytes) {
             peer = .{ .bytes = r, .rank = q };
         };
-        try cuda.tp_watch.ready(io, own.e.checkpoint_digest);
     }
     own.benchmark_group = if (own.group) |*g| try core.benchmark_group.cuda(gpa, io, ctx, g, own.e.stream) else null;
     errdefer if (own.benchmark_group) |b| gpa.free(b);

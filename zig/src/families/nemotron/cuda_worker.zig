@@ -115,6 +115,8 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const t0 = std.Io.Clock.awake.now(io);
     var c = try Config.read(gpa, io, dir);
     try latent.place(&c);
+    var load_cache = core.checkpoint.cache.Load.begin(io, c.world > 1);
+    defer load_cache.deinit();
     if (c.rank == 0 or c.latent == 0) return error.NotAnExpertRank;
     try latent.checkHeld(c);
     c.ck = try @import("cuda_latent_ck.zig").wanted(ctx, c, precision);
@@ -167,7 +169,7 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     std.log.info("rank {d} of {d}: {d} MoE layers{s} of share {d} ({s}) in {d:.1} s, {d:.2} GiB on the device; serving rank 0's jobs", .{ c.rank, c.world, blocks, if (layers.mtp != null) " and the MTP head's" else "", c.rank, if (c.ck) "the checkpoint's math" else "full precision", @import("cuda_engine.zig").seconds(io, t0), @as(f64, @floatFromInt(cuda.usage(false).device)) / (1 << 30) });
     const loaded = content.?;
     content = null;
-    try cuda.tp_watch.ready(io, try loaded.finish()); // every rank loaded, with the same bytes, before the first job
+    try load_cache.finishAfter(.{ io, try loaded.finish() }, cuda.tp_watch.ready);
     var jobs: usize = 0;
     while (true) {
         try g.recv(stream, first, firstBytes(c), 0);
