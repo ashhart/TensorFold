@@ -9,6 +9,8 @@ const decoder = @import("hip_text.zig");
 const Input = @import("hip_input.zig").Input;
 const glue = serve.backend;
 const be = lanes.backend;
+const pc = @import("engine_api").prompt_cache;
+const Snapshot = @import("hip_snapshot.zig").Snapshot;
 
 pub const Lane = struct {
     cache: decoder.Cache,
@@ -21,6 +23,9 @@ pub const Lane = struct {
     first_row: ?[]u16 = null,
     held: [0]u32 = .{},
     held_n: usize = 0,
+    prepared: ?hip.DeviceBuffer = null,
+    normed: u64 = 0,
+    math_rows: usize = 0,
 };
 
 pub const Hip = struct {
@@ -29,17 +34,20 @@ pub const Hip = struct {
     streams: glue.Streams(Lane),
     tp: serve.protocol.Sender,
     max_shared: usize = 0,
+    store: pc.Store,
     const Shared = glue.Backend(Hip);
     pub const backend = Shared.backend;
 
     pub fn init(a: std.mem.Allocator, e: *Engine) !*Hip {
         const h = try a.create(Hip);
-        h.* = .{ .gpa = a, .e = e, .streams = .init(a), .tp = .{ .gpa = a } };
+        h.* = .{ .gpa = a, .e = e, .streams = .init(a), .tp = .{ .gpa = a }, .store = pc.Store.init(a, .{ .ptr = h, .vtable = &snapshots }, .{ .lookahead = 1, .min_prompt = 0, .chunk = 1, .chunk_starts = false, .chunk_marks = false, .repeat_min = 1, .repeat_keyed = true }, e.cache_bytes) };
+        h.store.most = e.cache_slots;
         return h;
     }
     pub fn deinit(h: *Hip) void {
         var it = h.streams.map.valueIterator();
         while (it.next()) |lane| h.release(lane.*);
+        h.store.deinit();
         h.streams.deinit();
         h.tp.deinit();
         h.gpa.destroy(h);
@@ -54,10 +62,10 @@ pub const Hip = struct {
         if (lane.input) |*input| input.deinit();
         lane.cache.deinit();
         if (lane.first_row) |row| h.gpa.free(row);
+        if (lane.prepared) |*buffer| buffer.free();
         h.gpa.destroy(lane);
     }
     pub fn begin(h: *Hip, s: *lanes.Stream) !*Lane {
-        if (s.reuse.saved != null) return error.PromptCacheUnsupported;
         const ids = s.prompt();
         if (ids.len == 0 or ids.len > h.e.window or s.max_new > h.e.window - ids.len) return error.PromptTooLong;
         if (h.streams.map.count() >= h.e.streams) return error.NoFreeLane;
@@ -74,7 +82,25 @@ pub const Hip = struct {
         errdefer h.gpa.destroy(lane);
         lane.* = .{ .cache = try .init(h.e.stream, h.e.window, try h.e.available()), .input = null, .fill = glue.Fill.init(0, &.{}) };
         errdefer lane.cache.deinit();
-        lane.input = try Input.init(h.gpa, &h.e.graph, ids, images, try h.e.available());
+        errdefer if (lane.prepared) |*b| b.free();
+        s.cached = 0;
+        if (s.reuse.saved) |saved| {
+            const snap: *const Snapshot = @ptrCast(@alignCast(saved));
+            if (snap.restore(&lane.cache, s.reuse.at, ids.len)) {
+                s.cached = snap.at;
+                if (lane.cache.len == ids.len) {
+                    lane.prepared = try hip.DeviceBuffer.alloc(h.e.stream.r, c.hidden * 2);
+                    try lane.prepared.?.copyFromAsync(0, snap.hidden.base(), c.hidden * 2, h.e.stream);
+                    try h.e.stream.synchronize();
+                }
+            } else |err| {
+                s.reuse_failed = true;
+                s.reuse_error = err;
+                lane.cache.len = 0;
+            }
+        }
+        lane.fill = glue.Fill.init(s.cached, &.{});
+        lane.input = try Input.initFrom(h.gpa, &h.e.graph, ids, images, lane.cache.len, try h.e.available());
         errdefer lane.input.?.deinit();
         lane.delta = lane.input.?.rope.delta;
         lane.id = try h.streams.idOf(s);
@@ -82,8 +108,8 @@ pub const Hip = struct {
         try h.streams.map.put(h.gpa, s, lane);
         return lane;
     }
-    pub fn reach(_: *Hip, _: *Lane, _: usize, limit: usize) !usize {
-        return limit;
+    pub fn reach(_: *Hip, lane: *Lane, _: usize, _: usize) !usize {
+        return lane.input.?.rows;
     }
     pub fn cancelOf(_: *Hip, s: *lanes.Stream) *lanes.Stream {
         return s;
@@ -101,18 +127,50 @@ pub const Hip = struct {
         }
     };
     pub fn finish(h: *Hip, lane: *Lane, prompt: []const u32, from: usize, request: serve.draw.Request, cancel: *lanes.Stream) !u32 {
-        if (from != 0 or prompt.len != lane.input.?.rows) return error.UnplannedPromptCut;
+        if (from != cancel.cached or prompt.len != lane.input.?.rows) return error.UnplannedPromptCut;
         const input = &lane.input.?;
-        const normed = try h.e.graph.forward(&lane.cache, input.embeddings(), try input.rotary(), input.rows, .{ .context = cancel, .capture = Cancel.tap });
+        const normed = if (lane.prepared) |p| p.base() else try h.e.graph.forwardMany(&.{.{ .cache = &lane.cache, .embeddings = input.embeddings(), .positions = try input.rotary(), .rows = input.rows, .prefix_rows = lane.cache.len }}, .{ .context = cancel, .capture = Cancel.tap });
         lane.len = lane.cache.len;
-        const logits = try h.e.graph.lastLogits(normed, input.rows);
+        lane.math_rows = input.rows;
+        lane.normed = if (lane.prepared == null) normed else 0;
+        defer lane.normed = 0;
+        if (cancel.reuse.hook) |hook| for (cancel.reuse.marks) |at| {
+            if (at > from and at < input.rows) hook.at(hook.ptr, cancel, at);
+        };
+        const logits = try h.e.graph.lastLogits(normed, if (lane.prepared != null) 1 else input.rows);
         var token: [1]u32 = undefined;
         h.e.arena.reset();
         try h.e.drawer.draw(h.e.drawOps(), h.e.stream, .{ .ptr = logits, .kind = .bf16 }, &.{request}, &token, false);
         input.deinit();
         lane.input = null;
+        if (lane.prepared) |*p| p.free();
+        lane.prepared = null;
         return token[0];
     }
+
+    fn snapBytes(_: *anyopaque, at: u32) u64 {
+        return Snapshot.bytes(at);
+    }
+    fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) !pc.Saved {
+        const h: *Hip = @ptrCast(@alignCast(ptr));
+        const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.UnknownStream));
+        const lane = try h.streams.get(s);
+        if (lane.normed == 0) return error.BadPromptSnapshot;
+        const snap = try h.gpa.create(Snapshot);
+        errdefer h.gpa.destroy(snap);
+        snap.* = try Snapshot.take(&lane.cache, lane.normed, at, lane.math_rows, try h.e.available());
+        return snap;
+    }
+    fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) !void {
+        return error.BackendRestores;
+    }
+    fn snapDrop(ptr: *anyopaque, saved: pc.Saved) void {
+        const h: *Hip = @ptrCast(@alignCast(ptr));
+        const snap: *Snapshot = @ptrCast(@alignCast(saved));
+        snap.deinit();
+        h.gpa.destroy(snap);
+    }
+    const snapshots: pc.Snapshots.VTable = .{ .bytes = snapBytes, .save = snapSave, .restore = snapRestore, .drop = snapDrop };
     pub fn keepRows(_: *Hip, lane: *Lane, rows: usize) !void {
         const pending = lane.pending orelse return error.NoPendingRows;
         if (rows > pending.rows) return error.Invalid;

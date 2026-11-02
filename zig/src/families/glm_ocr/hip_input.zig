@@ -16,7 +16,11 @@ pub const Input = struct {
     rope: positions.Result,
 
     pub fn init(a: std.mem.Allocator, graph: *const Graph, ids: []const u32, images: []const processor.Prepared, budget: usize) !Input {
-        if (ids.len == 0 or ids.len > c.context) return error.Invalid;
+        return initFrom(a, graph, ids, images, 0, budget);
+    }
+    /// Validate all positions and media, but omit tower work for images wholly inside the retained prefix.
+    pub fn initFrom(a: std.mem.Allocator, graph: *const Graph, ids: []const u32, images: []const processor.Prepared, skip: usize, budget: usize) !Input {
+        if (ids.len == 0 or ids.len > c.context or skip > ids.len) return error.Invalid;
         for (ids) |id| if (id >= c.vocab) return error.Invalid;
         const bytes = ids.len * (c.hidden * 2 + 12);
         if (bytes > budget) return error.GlmOcrInputDoesNotFit;
@@ -38,16 +42,24 @@ pub const Input = struct {
         errdefer buffer.free();
         errdefer stream.synchronize() catch {};
         try buffer.upload(ids.len * c.hidden * 2, std.mem.sliceAsBytes(coordinates));
+        if (skip > 0) {
+            const prefix: hip.DeviceBuffer = .{ .r = stream.r, .ptr = buffer.ptr, .len = skip * c.hidden * 2 };
+            try prefix.fill8Async(0, stream);
+        }
         var row: usize = 0;
         var image_index: usize = 0;
         while (row < ids.len) {
             if (ids[row] != c.image_token) {
-                try buffer.copyFromAsync(row * c.hidden * 2, table + ids[row] * c.hidden * 2, c.hidden * 2, stream);
+                if (row >= skip) try buffer.copyFromAsync(row * c.hidden * 2, table + ids[row] * c.hidden * 2, c.hidden * 2, stream);
                 row += 1;
                 continue;
             }
             const image = images[image_index];
             image_index += 1;
+            if (row + image.geometry.tokens() <= skip) {
+                row += image.geometry.tokens();
+                continue;
+            }
             const pixels = try a.alloc(u16, image.pixels.len);
             defer a.free(pixels);
             for (pixels, image.pixels) |*v, x| v.* = core.quant.convert.bf16(x);
@@ -77,6 +89,7 @@ pub const Input = struct {
 test "GLM-OCR HIP input: malformed tokens, geometry and budgets fail before device allocation" {
     const graph: Graph = undefined;
     const a = std.testing.allocator;
+    try std.testing.expectError(error.Invalid, Input.initFrom(a, &graph, &.{1}, &.{}, 2, 4096));
     try std.testing.expectError(error.Invalid, Input.init(a, &graph, &.{}, &.{}, 0));
     try std.testing.expectError(error.Invalid, Input.init(a, &graph, &.{c.vocab}, &.{}, 4096));
     try std.testing.expectError(error.GlmOcrInputDoesNotFit, Input.init(a, &graph, &.{1}, &.{}, 0));
