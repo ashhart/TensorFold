@@ -29,6 +29,7 @@ pub fn steps(b: *std.Build, o: Options) void {
     const source = b.path("zig/kernels/hip/contract_controls.hip");
     const own = hip.compile(b, o.hipcc, o.arch, source, "contract_controls.hsaco");
     const exe = runner(b, o.target, o.optimize, o.gpu, controls(b, o.arch, own));
+    b.step("hip-kernel-contract-build", "Compile and install the HIP kernel contract without running a GPU").dependOn(&b.addInstallArtifact(exe, .{}).step);
     const install = b.addInstallArtifact(exe, .{});
     const build_only = "Build the kernel contract's HIP gates and controls (-Dhip-arch, no run)";
     b.step("tf-hip-kernel-contract", build_only).dependOn(&install.step);

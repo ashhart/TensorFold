@@ -94,6 +94,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("hip-affine-build", "Compile affine golden GPU test without executing").dependOn(&affine_test.step);
     b.step("hip-affine-test", "Run exact affine golden GPU regression").dependOn(&b.addRunArtifact(affine_test).step);
     const device_lib = o.device_lib;
+    @import("dots_mocr.zig").columnObjects(b, .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib, .relax_branches = o.relax_branches });
     const objects = kernelObjects(b, hipcc, hipcc_resolved, device_lib, o.relax_branches, hip_arch);
     const kernel_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/kernel_tests.zig"), .target = target, .link_libc = true });
     kernel_module.addIncludePath(.{ .cwd_relative = hip_include });
@@ -203,6 +204,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         "tf-nemotron-hip-test",
         "Nemotron-H load and skeleton checks on the GPU (-Dhip-arch)",
     ).dependOn(&b.addInstallArtifact(nem_test, .{}).step);
+    @import("dots_mocr.zig").modelChecks(b, gpu.hip);
     const native = server(b, target, gpu, build_options);
     b.step("native-hip", "tensorfold-native with the HIP engines into zig-out/native-hip/bin (-Dhip-arch)").dependOn(&b.addInstallArtifact(native, .{ .dest_dir = .{ .override = .{ .custom = "native-hip/bin" } } }).step);
     @import("hip_contract.zig").steps(b, .{
@@ -382,6 +384,7 @@ const headers = [_][]const u8{
     "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp",  "tiles/plan.hpp",        "tiles/stream.hpp",
     "flashnext/streams.hpp",      "flashnext/ngram.hpp",    "flashnext/indexer.hpp", "flashnext/sparse.hpp",
     "ops/nemotron_moe.hpp",       "quant/bf16_decoder.hpp", "quant/dense_tiles.hpp", "tiles/wmma12_gemm.hpp",
+    "ops/columns.hpp",            "columns_controls.hpp",   "ops/vision.hpp",        "ops/dense_text.hpp",
 };
 
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
