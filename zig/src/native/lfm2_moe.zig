@@ -113,10 +113,12 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     };
     h.metal.options.streams = @max(served, 2);
     if (h.draft) |d| {
+        // Borrow the lane stage before prepare_features sizes capture storage.
+        h.metal.stage_source = d.stageSource();
+        errdefer h.metal.stage_source = null;
         h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
         // the verify copies the drafts on the GPU after the unwaited hold
         h.metal.held_source = d.heldSource();
-        h.metal.stage_source = d.stageSource();
         h.wrap.?.held_on_target = true;
     }
     errdefer if (h.wrap) |*w| w.deinit();

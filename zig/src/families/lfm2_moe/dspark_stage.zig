@@ -39,6 +39,7 @@ pub fn source(d: *ds.Drafter) backend.StageSource {
 fn bind(ptr: *anyopaque, s: *lanes.Stream, start: u64, rows: usize) anyerror!?backend.Stage {
     const d = cast(ptr);
     const l = d.lanes.get(s) orelse return null;
+    defer s.hold_context_rows = l.staged;
     if (start > l.end + l.staged) try d.resumeLane(s, l, start); // a prompt pass that resumed
     const p = plan(l.end, l.staged, start, rows, room(l)) orelse return null;
     if (p.rewind) {
@@ -47,10 +48,10 @@ fn bind(ptr: *anyopaque, s: *lanes.Stream, start: u64, rows: usize) anyerror!?ba
     } else if (p.flush) {
         l.staged = @intCast(start - l.end);
         try d.settle();
-        try d.flush(l);
+        try d.flush(s, l);
     } else l.staged = p.slot;
     const wait: ?fwd.Wait = if (d.pending != null) .{ .event = d.event, .value = d.signalled } else null;
-    return .{ .place = .{ .buf = l.mem, .gpu_base = l.mem.gpuAddress(), .off = l.stage_at + @as(usize, p.slot) * d.tapBytes() }, .wait = wait };
+    return .{ .place = .{ .buf = l.mem, .gpu_base = l.gpu_base, .off = l.stage_at + @as(usize, p.slot) * d.tapBytes() }, .wait = wait };
 }
 
 fn buffer(ptr: *anyopaque, s: *lanes.Stream) ?mtl.Buffer {
@@ -81,15 +82,16 @@ pub fn absorb(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         if (it.start + f.rows + d.config.block > l.cap) return error.DraftContextGap;
         _ = try owned(l, f, it.start, width);
     }
-    const pool = mtl.objc.Pool.push();
-    defer pool.pop();
-    var run: ?@TypeOf(block.begin(d)) = null;
-    errdefer if (run) |r| r.e.end(); // an encoding error closes the open encoder
+    var pool: ?mtl.objc.Pool = null;
+    defer if (pool) |p| p.pop();
+    var run: ?block.Run = null;
+    errdefer if (run) |r| block.abort(d, r);
     var pieces: [32]block.Piece = undefined;
     var count: usize = 0;
     var rows: usize = 0;
     for (items) |it| {
         const l = d.lanes.get(it.stream).?;
+        defer it.stream.hold_context_rows = l.staged;
         const f = it.features;
         l.held_len = 0;
         l.slot = null;
@@ -103,7 +105,14 @@ pub fn absorb(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
             l.staged += f.rows;
             continue;
         }
-        if (run == null) run = block.begin(d);
+        if (f.rows == 0) {
+            l.end = it.start;
+            continue;
+        }
+        if (run == null) {
+            pool = mtl.objc.Pool.push();
+            run = try block.begin(d);
+        }
         const e = run.?.e;
         if (ds.Drafter.stagedPiece(l)) |pc| {
             if (count == pieces.len or rows + pc.rows > ds.absorb_rows) {
@@ -134,7 +143,7 @@ pub fn absorb(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
     const r = run orelse return;
     if (count > 0) try block.absorbPass(d, r.e, pieces[0..count]);
     run = null; // `end` closes the encoder, even when the buffer fails
-    try block.end(d, r.cb, r.e);
+    try block.end(d, r);
 }
 
 test "a forward's rows take the stage row after the kept ones, and a lane ahead of them rewinds" {

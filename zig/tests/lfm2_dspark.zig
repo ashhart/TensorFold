@@ -7,6 +7,8 @@ const c = q.config;
 const st = q.state;
 const ck = tf.checkpoint;
 const quant = q.dspark_quant;
+const controls = @import("lfm2_dspark_controls.zig");
+const lifecycle = @import("lfm2_dspark_lifecycle.zig");
 
 const hd = c.head_dim;
 const kw = c.kv_heads * hd;
@@ -111,16 +113,6 @@ fn compare(label: []const u8, gpu: []const u16, row: []const f32, bias: []const 
     std.debug.print("{s}: cosine {d:.5}, worst difference {d:.3}\n", .{ label, dot / @sqrt(gg * rr), worst });
 }
 
-/// A hold's GPU ms: the blocks held in a signalled command buffer, waited on and read for its GPU times.
-fn gpuHold(d: *q.dspark.Drafter, blocks: []const q.dspark_block.Block) !f64 {
-    d.signalled += 1;
-    const cb = (try q.dspark_block.hold(d, blocks, .{ .event = d.event, .value = d.signalled })).?;
-    defer cb.release();
-    cb.wait();
-    if (cb.failure() != null) return error.GpuFailed;
-    return (cb.gpuEnd() - cb.gpuStart()) * 1000;
-}
-
 fn absorb(d: *q.dspark.Drafter, piece: q.dspark_block.Piece) !void {
     try q.dspark_block.absorbNow(d, &.{piece});
 }
@@ -134,78 +126,6 @@ fn ownAbsorb(key: *tf.lanes.Stream, buf: mtl.Buffer, row_bytes: usize, row: usiz
         .follow = &.{},
         .prompt = prompt,
     };
-}
-
-/// Real-lane 3x9 + 5x1 split: same-kernel reference picks and synthetic grid controls, not a speed measurement.
-fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: []const u32) !void {
-    const depths = [8]u32{ 9, 1, 1, 1, 1, 1, 1, 1 };
-    const groups = [2][2]usize{ .{ 0, 3 }, .{ 3, 8 } }; // the lanes each physical pass holds
-    const real_grid = d.holds;
-    const real_len = d.holds_len;
-    const step_ms = d.step_ms;
-    const hold_ms = d.hold_ms;
-    const spent_ms = d.hold_spent_ms;
-    defer {
-        d.holds = real_grid;
-        d.holds_len = real_len;
-        d.step_ms = step_ms;
-        d.hold_ms = hold_ms;
-        d.hold_spent_ms = spent_ms;
-    }
-    var pending: [8]u32 = undefined;
-    for (&pending, 0..) |*p, i| p.* = ids[(i * 131 + 5) % ids.len];
-    const drafter = d.drafter();
-    var streams: [8]tf.lanes.Stream = undefined;
-    var made: usize = 0;
-    defer for (streams[0..made]) |*s| s.deinit(gpa);
-    while (made < streams.len) : (made += 1) streams[made] = try tf.lanes.Stream.init(gpa, .{ .id = "split", .prompt = &.{1}, .max_new = 1 });
-    var opened: usize = 0;
-    defer for (streams[0..opened]) |*s| drafter.release(s);
-    while (opened < streams.len) : (opened += 1) {
-        try drafter.open(&streams[opened]);
-        if ((d.lanes.get(&streams[opened]) orelse return error.LaneNotOpened).cap != 64 + d.config.block) return error.LaneNotAtCapacity64;
-    }
-    // Reference groups use the same kernels on separate lanes.
-    var refs: [8]*q.dspark.Lane = undefined;
-    var ref_n: usize = 0;
-    defer for (refs[0..ref_n]) |l| d.dropLane(l);
-    while (ref_n < refs.len) : (ref_n += 1) refs[ref_n] = try d.newLane(64);
-    var blocks: [8]q.dspark_block.Block = undefined;
-    for (&blocks, refs, 0..) |*b, l, i| b.* = .{ .lane = l, .pending = pending[i], .anchor = 0, .depth = depths[i] };
-    for (groups) |g| _ = try q.dspark_block.hold(d, blocks[g[0]..g[1]], null);
-    for (d.holds[0..d.holds_len]) |*h| h.ms = 1e4 * (1 + 0.25 * @as(f64, @floatFromInt(h.streams))) * (1 + 0.5 * @as(f64, @floatFromInt(h.depth)));
-    const synthetic = d.holds;
-    _ = q.dspark_block.takeHoldMs(d);
-    var items: [8]tf.lanes.drafter.Hold = undefined;
-    for (&items, 0..) |*it, i| it.* = .{ .stream = &streams[i], .pending = pending[i], .position = 1, .depth = depths[i] };
-    const t0 = std.Io.Clock.awake.now(io);
-    try drafter.hold(&items);
-    const wall = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
-    // nothing pending (one 8-block signalled pass would be), and no lane points into a signalled pass
-    if (d.pending != null or d.pass_len != 0) return error.SplitHoldLeftAPassPending;
-    for (&streams) |*s| if (d.lanes.get(s).?.slot != null) return error.SplitHoldLaneInASignalledPass;
-    const taken = q.dspark_block.takeHoldMs(d);
-    if (!(taken > 0) or q.dspark_block.takeHoldMs(d) != 0) return error.SplitHoldTimeNotTakenOnce;
-    if (taken > wall) return error.SplitHoldTimeExceedsWall;
-    // each lane's picks: its depth of them, the same as the reference pass of its group
-    for (&streams, refs, depths, 0..) |*s, ref, depth, i| {
-        var got: [16]u32 = undefined;
-        try drafter.held(&.{s}, &.{got[0..depth]});
-        if (!std.mem.eql(u32, got[0..depth], ref.held[0..depth])) return error.SplitHoldPicksDiffer;
-        if (depth == 1 and i > 0) if (drafter.held(&.{s}, &.{got[0 .. depth + 1]})) |_| return error.SplitHoldHeldMoreThanAsked else |err| if (err != error.DraftHeldFewer) return err;
-    }
-    // the grid: participating shapes stepped down by about a tenth, the controls exactly as set
-    if (d.holds_len != real_len) return error.GridResized;
-    for (synthetic[0..real_len], d.holds[0..real_len]) |before, now| {
-        const ratio = now.ms / before.ms;
-        const ok = switch (before.streams) {
-            2, 8 => ratio > 0.9 and ratio < 0.91, // one group's step
-            4 => ratio > 0.81 and ratio < 0.83, // both groups' steps
-            else => now.ms == before.ms, // 1 and 16 blocks: in neither pass
-        };
-        if (!ok) return error.SplitHoldGridStepsWrong;
-    }
-    std.debug.print("split hold, 8 lanes at depths [9, 1 x 7]: passes of 3x9 and 5x1 rows, both synchronous; {d:.2} ms GPU taken once ({d:.2} ms wall); picks equal the reference groups'; 2-, 8- and 4-block passes repriced once, once and twice, 1- and 16-block passes untouched\n", .{ taken, wall });
 }
 
 /// Served rounds through the drafter's interface: after four warm rounds, no host allocation and one hold pass a round.
@@ -224,8 +144,7 @@ fn steady(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: [
     };
     try dr.absorb(&.{.{ .stream = &s, .features = feats.at(taps, 0, ctx, width), .start = 0, .follow = &.{} }});
     var counted = std.testing.FailingAllocator.init(gpa, .{});
-    const original_gpa = d.gpa;
-    defer d.gpa = original_gpa;
+    defer d.gpa = gpa;
     var anchor: u64 = ctx;
     const rounds = 24;
     const warm = 4;
@@ -250,6 +169,94 @@ fn steady(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: [
     if (counted.allocations != 0 or counted.resize_index != 0 or d.signalled - holds != n) return error.SteadyRoundsAllocate;
 }
 
+/// Replay owned context after long zero-grant stretches, tap overwrites and a rewind inside the pending tail.
+fn deferred(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: []const u32, ctx: usize) !void {
+    const skip = q.dspark.stage_rows + 33;
+    const anchor = ctx + skip;
+    const width = d.tapBytes();
+    const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+    const history = try d.target.device.buffer(anchor * width, shared);
+    defer history.deinit();
+    @memcpy(history.contents()[0 .. ctx * width], taps.contents()[0 .. ctx * width]);
+    const source = try d.target.device.buffer(width, shared);
+    defer source.deinit();
+    const reference = try d.newLane(anchor + 64);
+    defer d.dropLane(reference);
+    var s = try tf.lanes.Stream.init(gpa, .{ .id = "deferred", .prompt = ids[0 .. ctx + 1], .max_new = skip + 64 });
+    defer s.deinit(gpa);
+    const dr = d.drafter();
+    try dr.open(&s);
+    defer dr.release(&s);
+    const live = d.lanes.get(&s).?;
+    try dr.absorb(&.{.{ .stream = &s, .features = .{ .buffer = @intFromPtr(taps.id), .rows = @intCast(ctx), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, .start = 0, .follow = &.{}, .propose = false }});
+    var at: usize = 0;
+    while (at < live.end) {
+        const n = @min(q.dspark.absorb_rows, live.end - at);
+        try absorb(d, .{ .lane = reference, .src = .{ .buf = history, .off = at * width }, .rows = n, .p0 = at });
+        at += n;
+    }
+    var rewound: usize = 0;
+    for (0..2) |phase| {
+        const count: usize = if (phase == 0) skip else @min(29, @as(usize, live.staged));
+        const first = if (phase == 0) ctx else anchor - count;
+        if (phase == 1) rewound = count;
+        for (0..count) |i| {
+            const pos = first + i;
+            const row = ((phase * skip + i) * 71 + 17) % ctx;
+            @memcpy(source.contents()[0..width], (taps.contents() + row * width)[0..width]);
+            @memcpy((history.contents() + pos * width)[0..width], source.contents()[0..width]);
+            const before = live.end;
+            const staged = live.staged;
+            try dr.absorb(&.{.{ .stream = &s, .features = .{ .buffer = @intFromPtr(source.id), .rows = 1, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, .start = pos, .follow = &.{}, .prompt = false, .propose = false }});
+            @memset(source.slice(u16, width / 2), 0x7fc0); // the target's next forward overwrites borrowed taps
+            if (live.end != before) {
+                // Match projection batches, not source storage: the oracle reads the immutable complete history.
+                if (staged > 0) try absorb(d, .{ .lane = reference, .src = .{ .buf = history, .off = before * width }, .rows = staged, .p0 = before });
+                try absorb(d, .{ .lane = reference, .src = .{ .buf = history, .off = pos * width }, .rows = 1, .p0 = pos });
+            }
+        }
+    }
+    if (live.staged > 0) try absorb(d, .{ .lane = reference, .src = .{ .buf = history, .off = live.end * width }, .rows = live.staged, .p0 = live.end });
+    reference.end = anchor;
+    _ = try q.dspark_block.hold(d, &.{.{ .lane = reference, .pending = ids[ctx], .anchor = anchor, .depth = 3 }}, null);
+    const want = reference.held[0..3].*;
+    _ = q.dspark_block.takeHoldMs(d);
+    const context_rows = live.staged;
+    try dr.hold(&.{.{ .stream = &s, .pending = ids[ctx], .position = anchor + 1, .depth = 3 }});
+    const encode_cpu_ms = d.pass_encode_cpu_ms;
+    if (!(encode_cpu_ms > 0) or d.hold_spent_ms != 0 or d.pass_context_rows != context_rows) return error.PendingCostComponentsWrong;
+    if (q.dspark_block.takeHoldMs(d) != encode_cpu_ms or d.pass_encode_cpu_ms != encode_cpu_ms) return error.PendingCpuNotTakenOnce;
+    var got: [3]u32 = undefined;
+    try dr.held(&.{&s}, &.{&got});
+    const settled = try lifecycle.takeCost(d);
+    if (settled.encode_cpu_ms != 0 or !(settled.gpu_ms > 0) or d.pass_encode_cpu_ms != 0 or d.pass_context_rows != 0) return error.SettledHoldRechargedCpu;
+    std.debug.print("deferred hold of 1 stream, depth 3, debt {d}: CPU-encode {d:.3} ms taken at launch, GPU {d:.3} ms taken at settle, total {d:.3} ms; pending CPU retained only for EMA\n", .{ context_rows, encode_cpu_ms, settled.gpu_ms, encode_cpu_ms + settled.gpu_ms });
+    if (!std.mem.eql(u32, &want, &got)) return error.DeferredDraftMismatch;
+    const bytes = anchor * c.head_dim * 2;
+    for (0..d.config.layers) |layer| for ([_]bool{ false, true }) |values| for (0..c.kv_heads) |head| {
+        const actual = live.kv(layer, values);
+        const expected = reference.kv(layer, values);
+        const a = (live.mem.contents() + actual.off + head * live.cap * c.head_dim * 2)[0..bytes];
+        const b = (reference.mem.contents() + expected.off + head * reference.cap * c.head_dim * 2)[0..bytes];
+        if (!std.mem.eql(u8, a, b)) return error.DeferredContextMismatch;
+    };
+    std.debug.print("deferred context: {d} zero-grant rows, {d} overwritten pending rows, {d} complete context rows and 3 later drafts match the independent replay\n", .{ skip, rewound, anchor });
+
+    // A metadata-only rewind has no rows to project and must preserve the surviving prefix.
+    const rewind = anchor - 1;
+    _ = q.dspark_block.takeHoldMs(d);
+    try dr.absorb(&.{.{ .stream = &s, .features = .{ .buffer = @intFromPtr(source.id), .rows = 0, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, .start = rewind, .follow = &.{}, .prompt = false, .propose = false }});
+    if (live.end != rewind or live.staged != 0 or s.hold_context_rows != 0) return error.EmptyRewindKeptContextTail;
+    if (d.encode_cpu_ms != 0 or d.hold_spent_ms != 0) return error.EmptyRewindEncodedWork;
+    reference.end = rewind;
+    _ = try q.dspark_block.hold(d, &.{.{ .lane = reference, .pending = ids[ctx], .anchor = rewind, .depth = 3 }}, null);
+    const rewind_want = reference.held[0..3].*;
+    try dr.hold(&.{.{ .stream = &s, .pending = ids[ctx], .position = rewind + 1, .depth = 3 }});
+    try dr.held(&.{&s}, &.{&got});
+    if (!std.mem.eql(u32, &rewind_want, &got)) return error.EmptyRewindDraftMismatch;
+    std.debug.print("zero-row rewind: context end {d}, no encode or GPU work; 3 later drafts match the retained-prefix replay\n", .{rewind});
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -260,9 +267,10 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const m = try q.Model.load(gpa, init.io, args[1]);
     defer m.deinit();
-    const d = try q.dspark.Drafter.init(gpa, init.io, m, args[2], .{ .capacity = length + 64, .bits = bits });
+    const d = try q.dspark.Drafter.init(gpa, init.io, m, args[2], .{ .capacity = length + q.dspark.stage_rows + 512, .bits = bits });
     defer d.deinit();
-    try @import("lfm2_dspark_capture.zig").nonfinite(gpa, d);
+    try lifecycle.calibrated(d);
+    try controls.nonfinite(gpa, d);
     const cfg = d.config;
     // the compared block's rows (a hold of depth d runs a d-row block)
     const block: u32 = if (args.len >= 5) try std.fmt.parseInt(u32, args[4], 10) else cfg.block;
@@ -270,16 +278,28 @@ pub fn main(init: std.process.Init) !void {
     var scratch = try st.Scratch.init(gpa, m.device, &m.config.attention, length);
     defer scratch.deinit();
     const width = cfg.tap_count * c.hidden;
-    var taps: st.Taps = .{ .count = cfg.tap_count, .gpu_base = undefined, .buf = try scratch.memory.alloc(length * (width * 2 + @sizeOf(u64))), .table_at = length * width * 2 };
+    const tap_buf = try scratch.memory.alloc(length * (width * 2 + @sizeOf(u64)));
+    var taps: st.Taps = .{ .count = cfg.tap_count, .buf = tap_buf, .gpu_base = tap_buf.gpuAddress(), .table_at = length * width * 2 };
     @memcpy(taps.layers[0..cfg.tap_count], cfg.taps[0..cfg.tap_count]);
-    taps.gpu_base = taps.buf.gpuAddress();
     scratch.taps = taps;
     var cache = try st.Cache.init(gpa, m.device, &m.config.attention, length + 16);
     defer cache.deinit();
     const ids = try gpa.alloc(u32, length);
     defer gpa.free(ids);
     for (ids, 0..) |*id, i| id.* = @intCast((i * 7919 + 13) % 120000);
+    try controls.targetTaps(gpa, m, &scratch, ids);
     try q.forward.run(m, &scratch, &.{.{ .cache = &cache, .rows = length }}, ids, false, .last);
+    // Repeated target layers are legal: every requested column must receive the same hidden row.
+    const tapped = taps.buf.slice(u16, length * width);
+    for (cfg.taps[0..cfg.tap_count], 0..) |layer, i| for (cfg.taps[0..i], 0..) |other, j| {
+        if (layer != other) continue;
+        for (0..length) |row| {
+            const a = tapped[row * width + i * c.hidden ..][0..c.hidden];
+            const b = tapped[row * width + j * c.hidden ..][0..c.hidden];
+            if (!std.mem.eql(u16, a, b)) return error.RepeatedTapMismatch;
+        }
+        std.debug.print("ok repeated tap {d}, columns {d} and {d}, {d} rows\n", .{ layer, j, i, length });
+    };
     // the context: rows [0, length - 1); the pending token is the last id, at position length - 1
     const ctx = length - 1;
     const lane = try d.newLane(length + 32);
@@ -298,13 +318,16 @@ pub fn main(init: std.process.Init) !void {
     const gpu = held[0..block];
     // Compare identical taps through staged and direct paths in the same numerical regime.
     if (ctx > 3 and ctx <= @min(q.dspark.absorb_rows, @min(q.dspark.stage_rows, lane.cap))) {
-        const key: *tf.lanes.Stream = @ptrFromInt(0x1000);
+        var stream = try tf.lanes.Stream.init(gpa, .{ .id = "owned-stage", .prompt = ids, .max_new = 32 });
+        defer stream.deinit(gpa);
+        const key = &stream;
         const own = try d.newLane(length + 32);
         d.lanes.put(gpa, key, own) catch |err| {
             d.dropLane(own);
             return err;
         };
         const staged = d.drafter();
+        defer staged.release(key);
         const sizes = [_]u32{ 5, 1, 9, 33, 2 };
         const row_bytes = width * 2;
         var pos: usize = 0;
@@ -332,8 +355,7 @@ pub fn main(init: std.process.Init) !void {
         };
         std.debug.print("the owned stage: {d} rows staged in uneven absorbs, absorbed as one {d}-row piece like the direct absorbs' ({s} regime): keys, values and picks equal\n", .{ ctx, ctx, if (ctx <= 32) "<= 32-row" else "> 32-row" });
     }
-    try @import("lfm2_dspark_lifecycle.zig").run(gpa, d, taps.buf, ids, ctx);
-    try @import("lfm2_dspark_capture.zig").targetTaps(gpa, m, &scratch, ids);
+    try lifecycle.run(gpa, d, taps.buf, ids, ctx);
     // Absorb time is consumed once without repricing; a hold reprices only participating shapes.
     if (ctx > 0) {
         const grid = d.holds;
@@ -341,21 +363,23 @@ pub fn main(init: std.process.Init) !void {
         const step_ms = d.step_ms;
         const saved_hold_ms = d.hold_ms;
         const spent_ms = d.hold_spent_ms;
+        const encode_ms = d.encode_cpu_ms;
         defer {
             d.holds = grid;
             d.holds_len = grid_len;
             d.step_ms = step_ms;
             d.hold_ms = saved_hold_ms;
             d.hold_spent_ms = spent_ms;
+            d.encode_cpu_ms = encode_ms;
         }
         _ = q.dspark_block.takeHoldMs(d);
         try absorb(d, .{ .lane = lane, .src = .{ .buf = taps.buf, .off = (ctx - 1) * width * 2 }, .rows = 1, .p0 = ctx - 1 });
-        const absorb_ms = q.dspark_block.takeHoldMs(d);
-        if (!(absorb_ms > 0)) return error.AbsorbTimeNotTaken;
+        const absorb_cost = try lifecycle.takeCost(d);
+        if (!(absorb_cost.encode_cpu_ms > 0) or !(absorb_cost.gpu_ms > 0)) return error.AbsorbTimeNotTaken;
         for (grid[0..grid_len], d.holds[0..grid_len]) |before, now| if (before.ms != now.ms) return error.AbsorbRepricedAHold;
         _ = try q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = ids[ctx], .anchor = ctx, .depth = block }}, null);
-        const hold_ms = q.dspark_block.takeHoldMs(d);
-        if (!(hold_ms > 0) or q.dspark_block.takeHoldMs(d) != 0) return error.HoldTimeNotTakenOnce;
+        const hold_cost = try lifecycle.takeCost(d);
+        if (!(hold_cost.encode_cpu_ms > 0) or !(hold_cost.gpu_ms > 0)) return error.HoldTimeNotTakenOnce;
         if (d.holds_len != grid_len) return error.GridResized;
         var moved = false;
         for (grid[0..grid_len], d.holds[0..grid_len]) |before, now| {
@@ -363,11 +387,11 @@ pub fn main(init: std.process.Init) !void {
             if (before.streams == 1 and before.ms != now.ms) moved = true;
         }
         if (!moved) return error.SyncHoldNotRepriced;
-        std.debug.print("a synchronous hold of one block: {d:.2} ms GPU taken once, the one-block passes repriced toward it; a standalone absorb {d:.2} ms priced none\n", .{ hold_ms, absorb_ms });
+        std.debug.print("a synchronous hold of one block: CPU-encode {d:.3} ms + GPU {d:.3} ms = {d:.3} ms taken once, one-block passes repriced; standalone absorb CPU-encode {d:.3} ms + GPU {d:.3} ms = {d:.3} ms priced none\n", .{ hold_cost.encode_cpu_ms, hold_cost.gpu_ms, hold_cost.total(), absorb_cost.encode_cpu_ms, absorb_cost.gpu_ms, absorb_cost.total() });
     }
     if (cfg.block < 9) {
         std.debug.print("split-hold fixture skipped: this drafter's block is {d} rows and its depths [9, 1 x 7] need 9\n", .{cfg.block});
-    } else try splitHold(gpa, init.io, d, ids);
+    } else try controls.splitHold(gpa, init.io, d, ids);
     for ([_]usize{ 1, 4, 16, 128, q.dspark.absorb_rows }) |rows| {
         if (rows > ctx) continue;
         var best: f64 = std.math.floatMax(f64);
@@ -381,12 +405,16 @@ pub fn main(init: std.process.Init) !void {
     const depths = [_]u32{ 1, 3, cfg.block };
     for (depths) |depth| {
         var best: f64 = std.math.floatMax(f64);
+        var cost_best: lifecycle.Cost = .{};
         for (0..5) |_| {
+            _ = q.dspark_block.takeHoldMs(d);
             const t0 = std.Io.Clock.awake.now(init.io);
             _ = try q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = ids[ctx], .anchor = ctx, .depth = depth }}, null);
             best = @min(best, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(init.io)).toNanoseconds())) / 1e6);
+            const cost = try lifecycle.takeCost(d);
+            if (cost.total() < cost_best.total()) cost_best = cost;
         }
-        std.debug.print("hold at depth {d}: {d:.2} ms (best of 5)\n", .{ depth, best });
+        std.debug.print("clean hold of 1 stream at depth {d}: wall best {d:.3} ms; best paired cost CPU-encode {d:.3} ms + GPU {d:.3} ms = {d:.3} ms (5 attempts)\n", .{ depth, best, cost_best.encode_cpu_ms, cost_best.gpu_ms, cost_best.total() });
     }
     // a shared round's hold: S streams' blocks of d rows in one pass (S x d at most pass_rows), each on this context
     var lanes_: [16]*q.dspark.Lane = undefined;
@@ -408,16 +436,18 @@ pub fn main(init: std.process.Init) !void {
         var blocks: [16]q.dspark_block.Block = undefined;
         for (blocks[0..streams], lanes_[0..streams]) |*b, l| b.* = .{ .lane = l, .pending = ids[ctx], .anchor = ctx, .depth = depth };
         var best: f64 = std.math.floatMax(f64);
-        var gpu_best: f64 = std.math.floatMax(f64);
+        var cost_best: lifecycle.Cost = .{};
         for (0..5) |_| {
             const t0 = std.Io.Clock.awake.now(init.io);
             _ = try q.dspark_block.hold(d, blocks[0..streams], null);
             best = @min(best, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(init.io)).toNanoseconds())) / 1e6);
-            gpu_best = @min(gpu_best, try gpuHold(d, blocks[0..streams]));
+            const cost = try lifecycle.signalledCost(d, blocks[0..streams]);
+            if (cost.total() < cost_best.total()) cost_best = cost;
         }
-        std.debug.print("hold of {d} streams at depth {d}: {d:.2} ms, GPU {d:.2} ms (best of 5)\n", .{ streams, depth, best, gpu_best });
+        std.debug.print("clean hold of {d} streams at depth {d}: synchronous wall best {d:.3} ms; signalled best paired cost CPU-encode {d:.3} ms + GPU {d:.3} ms = {d:.3} ms (5 attempts each)\n", .{ streams, depth, best, cost_best.encode_cpu_ms, cost_best.gpu_ms, cost_best.total() });
     };
     try steady(gpa, d, taps.buf, ids, ctx);
+    try deferred(gpa, d, taps.buf, ids, ctx);
     _ = try q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = ids[ctx], .anchor = ctx, .depth = block }}, null);
     // the host reference, fp32 throughout
     var r: Ref = .{ .gpa = gpa, .check = ck.Checkpoint.init(gpa), .cfg = cfg };

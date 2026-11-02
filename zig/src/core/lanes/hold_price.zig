@@ -2,8 +2,34 @@
 const std = @import("std");
 const Table = @import("table.zig").Table;
 
-/// A drafter's hold pass of `streams` blocks, each `depth` drafts deep, in ms (timed at load).
+/// A drafter's hold pass of `streams` blocks, each `depth` drafts deep, in nonoverlapping encode CPU + GPU ms.
 pub const HoldCost = struct { streams: u32, depth: u32, ms: f64 };
+
+/// The same measured currency for context projection alone, excluding the clean hold's backbone and Markov work.
+pub const ContextCost = struct { streams: u32, rows: u32, ms: f64 };
+
+/// Round both dimensions up to measured coverage; mixed debts conservatively use their largest owed row count.
+pub fn contextMs(costs: []const ContextCost, streams: usize, max_rows: u32) f64 {
+    if (streams == 0 or max_rows == 0 or costs.len == 0) return 0;
+    var widest: u32 = 0;
+    var above: ?u32 = null;
+    for (costs) |c| {
+        if (c.streams == 0) continue;
+        widest = @max(widest, c.streams);
+        if (c.streams >= streams and (above == null or c.streams < above.?)) above = c.streams;
+    }
+    const width = above orelse widest;
+    if (width == 0) return std.math.inf(f64);
+    var chosen: ?ContextCost = null;
+    for (costs) |c| {
+        if (c.streams != width or c.rows < max_rows) continue;
+        if (chosen == null or c.rows < chosen.?.rows) chosen = c;
+    }
+    const quote = chosen orelse return std.math.inf(f64);
+    if (!(quote.ms > 0) or !std.math.isFinite(quote.ms)) return std.math.inf(f64);
+    return if (above != null) quote.ms else quote.ms * @as(f64, @floatFromInt(streams)) /
+        @as(f64, @floatFromInt(width));
+}
 
 /// A hold pass's ms: linear in depth at each timed stream count, then in streams (past the widest, by its slope).
 pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
@@ -34,7 +60,7 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
 }
 
 /// Greedy stream-order passes pad blocks to the deepest; `rows == 0` means no physical row limit.
-pub fn rowsMs(costs: []const HoldCost, rows: u32, view: anytype) f64 {
+pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, view: anytype) f64 {
     const n = view.len();
     var ms: f64 = 0;
     var i: usize = 0;
@@ -43,6 +69,7 @@ pub fn rowsMs(costs: []const HoldCost, rows: u32, view: anytype) f64 {
         if (i >= n) return ms;
         var blocks: usize = 0;
         var deepest: i64 = 0;
+        var context_rows: u32 = 0;
         while (i < n) : (i += 1) {
             const d = view.at(i);
             if (d <= 0) continue;
@@ -50,8 +77,9 @@ pub fn rowsMs(costs: []const HoldCost, rows: u32, view: anytype) f64 {
             if (rows != 0 and blocks > 0 and @as(i64, @intCast(blocks + 1)) * wide > rows) break;
             blocks += 1;
             deepest = wide;
+            context_rows = @max(context_rows, view.contextRows(i));
         }
-        ms += holdMs(costs, blocks, deepest);
+        ms += (if (costs.len > 0) holdMs(costs, blocks, deepest) else 0) + contextMs(contexts, blocks, context_rows);
     }
 }
 
@@ -65,16 +93,20 @@ pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
         fn at(v: @This(), i: usize) i64 {
             return v.d[i];
         }
+        fn contextRows(_: @This(), _: usize) u32 {
+            return 0;
+        }
     };
-    return rowsMs(costs, rows, View{ .d = depths });
+    return rowsMs(costs, &.{}, rows, View{ .d = depths });
 }
 
 /// Only charged counts above free-first nodes form hold blocks; an empty charged mask includes all streams.
-pub fn countsMs(costs: []const HoldCost, rows: u32, counts: []const u32, charged: []const bool, free: u32) f64 {
+pub fn countsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, counts: []const u32, charged: []const bool, free: u32, debts: []const u32) f64 {
     const View = struct {
         counts: []const u32,
         charged: []const bool,
         free: u32,
+        debts: []const u32,
         fn len(v: @This()) usize {
             return v.counts.len;
         }
@@ -82,8 +114,11 @@ pub fn countsMs(costs: []const HoldCost, rows: u32, counts: []const u32, charged
             if (v.charged.len != 0 and !v.charged[i]) return 0;
             return @as(i64, v.counts[i]) - v.free;
         }
+        fn contextRows(v: @This(), i: usize) u32 {
+            return if (v.debts.len == 0) 0 else v.debts[i];
+        }
     };
-    return rowsMs(costs, rows, View{ .counts = counts, .charged = charged, .free = free });
+    return rowsMs(costs, contexts, rows, View{ .counts = counts, .charged = charged, .free = free, .debts = debts });
 }
 
 /// The observed prefix's expected drafts, optimistic about conditionals not tried yet.
@@ -135,7 +170,7 @@ pub const ProbeCache = struct {
 };
 
 /// Retains paying full holds or the best prefix; only tried drafts cap raw gain by observed acceptance.
-pub fn prefix(costs: *const Table, holds: []const HoldCost, base: Base, fixed: f64, probabilities: []const f64, observed: []const f64, tried: usize, wanted: i64) ?Prefix {
+pub fn prefix(costs: *const Table, holds: []const HoldCost, context_ms: f64, base: Base, fixed: f64, probabilities: []const f64, observed: []const f64, tried: usize, wanted: i64) ?Prefix {
     if (holds.len == 0 or wanted <= 0 or probabilities.len == 0) return null;
     const full: usize = @min(probabilities.len, @as(usize, @intCast(wanted)));
     const plain = costs.get(base.rows) orelse return null;
@@ -159,7 +194,7 @@ pub fn prefix(costs: *const Table, holds: []const HoldCost, base: Base, fixed: f
         if (last) lowered = seen_gain < raw;
         const depth: i64 = if (last) wanted else @intCast(n);
         const verify = costs.get(@as(i64, base.rows) + @as(i64, @intCast(n))) orelse continue;
-        const score = (base.tokens + gain) / (verify + fixed + holdMs(holds, 1, depth));
+        const score = (base.tokens + gain) / (verify + fixed + holdMs(holds, 1, depth) + context_ms);
         if (last and score > plain_score) {
             best = .{ .depth = depth, .gain = gain, .rows = @floatFromInt(n), .lowered = false, .shortened = false, .pays = true };
             break;
@@ -182,9 +217,11 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
     if (holds.len == 0) return true;
     var heads: u32 = 0;
     var depth: u32 = 0;
+    var context_rows: u32 = std.math.maxInt(u32);
     for (whos) |w| {
         if (w.finished or w.forced or w.draft_room <= 1) continue;
         heads += 1;
+        context_rows = @min(context_rows, w.hold_context_rows);
         const room: i64 = @min(@as(i64, rule.most_drafts), w.draft_room - 1);
         depth = @max(depth, @as(u32, @intCast(room)));
     }
@@ -193,12 +230,16 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
     // A smaller physical cap can split a reserved cohort; the single-pass bound cannot exclude those shapes.
     if (rule.k.hold_rows != 0 and rule.batch_rows > rule.k.hold_rows) return true;
     var hasher = std.hash.Wyhash.init(0);
-    inline for (.{ base.rows, heads, depth, rule.batch_rows }) |v| {
+    inline for (.{ base.rows, heads, depth, rule.batch_rows, context_rows }) |v| {
         const x: u64 = v;
         hasher.update(std.mem.asBytes(&x));
     }
     for (holds) |c| {
         const w = [3]u64{ c.streams, c.depth, @as(u64, @bitCast(c.ms)) };
+        hasher.update(std.mem.asBytes(&w));
+    }
+    for (rule.k.hold_context_costs) |c| {
+        const w = [3]u64{ c.streams, c.rows, @as(u64, @bitCast(c.ms)) };
         hasher.update(std.mem.asBytes(&w));
     }
     var rows: u32 = base.rows;
@@ -219,13 +260,14 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
             // Deeper padding can be cheaper; descending depths retain a suffix minimum for each row-count class.
             var padded: u32 = @min(depth, rule.batch_rows / blocks);
             var hold = std.math.inf(f64);
+            const context = contextMs(rule.k.hold_context_costs, blocks, context_rows);
             while (padded >= 1) : (padded -= 1) {
                 hold = @min(hold, holdMs(holds, blocks, padded));
                 var extra: u32 = @max(blocks, (padded - 1) * blocks + 1);
                 const last = @min(room_rows, padded * blocks);
                 while (extra <= last) : (extra += 1) {
                     const verify = costs.get(@as(i64, base.rows) + extra) orelse return true;
-                    lowest = @min(lowest, (verify - plain + hold) / @as(f64, @floatFromInt(extra)));
+                    lowest = @min(lowest, (verify - plain + hold + context) / @as(f64, @floatFromInt(extra)));
                 }
             }
         }
@@ -236,13 +278,13 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
     return base.tokens * cheapest < plain + fixed;
 }
 
-/// Ignore work settled outside this round; the clock measures only what follows its start.
+/// Discard accounted startup/out-of-round work before the clock starts; pending GPU remains pending.
 pub fn startRound(engine: anytype) void {
     if (engine.backend.draft_timing) |t| _ = t.take(t.ptr);
     engine.clock.start();
 }
 
-/// A deferred hold belongs to the round that settles it, not the round that just launches another hold.
+/// Drain nonoverlapping encode CPU and settled GPU once, falling back to the head's modeled work.
 pub fn observedHeadMs(backend: anytype, rule: anytype, depths: []const i64) f64 {
     if (backend.draft_timing) |t| return t.take(t.ptr);
     return rule.headMs(depths);
@@ -325,23 +367,23 @@ test "a prefix carries whether its score strictly beats the plain round" {
     const costs: Table = .{ .slots = &slots };
     const base = Base.pending(1); // plain: 1 token in 10 ms
     const even = [_]HoldCost{.{ .streams = 1, .depth = 1, .ms = 5 }};
-    const tie = prefix(&costs, &even, base, 0, &.{0.5}, &.{}, 0, 1).?; // 1.5 tokens in 15 ms
+    const tie = prefix(&costs, &even, 0, base, 0, &.{0.5}, &.{}, 0, 1).?; // 1.5 tokens in 15 ms
     try std.testing.expectEqual(@as(f64, 0.5), tie.gain);
     try std.testing.expect(!tie.pays and !tie.shortened);
     const cheaper = [_]HoldCost{.{ .streams = 1, .depth = 1, .ms = 4 }};
-    try std.testing.expect(prefix(&costs, &cheaper, base, 0, &.{0.5}, &.{}, 0, 1).?.pays);
+    try std.testing.expect(prefix(&costs, &cheaper, 0, base, 0, &.{0.5}, &.{}, 0, 1).?.pays);
     // a second draft that costs a whole extra pass leaves the paying first one
     const chain = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 2 }, .{ .streams = 1, .depth = 2, .ms = 2 } };
-    const first = prefix(&costs, &chain, base, 0, &.{ 0.9, 0 }, &.{}, 0, 2).?;
+    const first = prefix(&costs, &chain, 0, base, 0, &.{ 0.9, 0 }, &.{}, 0, 2).?;
     try std.testing.expect(first.pays and first.shortened);
     try std.testing.expectEqual(@as(i64, 1), first.depth);
     // none pays: the best prefix is still offered, as not paying
     const dear = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 50 }, .{ .streams = 1, .depth = 2, .ms = 50 } };
-    const none = prefix(&costs, &dear, base, 0, &.{ 0.9, 0 }, &.{}, 0, 2).?;
+    const none = prefix(&costs, &dear, 0, base, 0, &.{ 0.9, 0 }, &.{}, 0, 2).?;
     try std.testing.expect(!none.pays);
     try std.testing.expectEqual(@as(i64, 1), none.depth);
     // a paying full hold ends the search
-    const full = prefix(&costs, &chain, base, 0, &.{ 0.9, 0.9 }, &.{}, 0, 2).?;
+    const full = prefix(&costs, &chain, 0, base, 0, &.{ 0.9, 0.9 }, &.{}, 0, 2).?;
     try std.testing.expect(full.pays and !full.shortened);
     try std.testing.expectEqual(@as(i64, 2), full.depth);
 }
@@ -386,9 +428,9 @@ test "the row limit's boundary: blocks x deepest equal to the rows is one pass, 
 
 test "allocated counts price the same passes: charged streams only, past the free node" {
     const near = std.testing.expectApproxEqAbs;
-    try near(@as(f64, 27), countsMs(&product, 32, &.{ 10, 2, 2 }, &.{}, 1), 1e-9); // blocks 9, 1, 1
-    try near(@as(f64, 27), countsMs(&product, 32, &.{ 9, 1, 50, 1 }, &.{ true, true, false, true }, 0), 1e-9); // a copy's 50 takes no block
-    try near(@as(f64, 0), countsMs(&product, 32, &.{ 1, 1, 1 }, &.{}, 1), 1e-12); // nothing past the free first
-    try near(@as(f64, 20), countsMs(&flat, 32, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0), 1e-9);
-    try near(@as(f64, 10), countsMs(&flat, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0), 1e-9);
+    try near(@as(f64, 27), countsMs(&product, &.{}, 32, &.{ 10, 2, 2 }, &.{}, 1, &.{}), 1e-9); // blocks 9, 1, 1
+    try near(@as(f64, 27), countsMs(&product, &.{}, 32, &.{ 9, 1, 50, 1 }, &.{ true, true, false, true }, 0, &.{}), 1e-9);
+    try near(@as(f64, 0), countsMs(&product, &.{}, 32, &.{ 1, 1, 1 }, &.{}, 1, &.{}), 1e-12); // nothing past the free first
+    try near(@as(f64, 20), countsMs(&flat, &.{}, 32, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
+    try near(@as(f64, 10), countsMs(&flat, &.{}, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
 }

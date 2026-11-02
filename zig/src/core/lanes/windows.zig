@@ -230,7 +230,7 @@ pub fn probe(e: *Engine) depth.Probe {
 }
 
 pub fn who(s: *Stream) depth.Who {
-    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null };
+    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .hold_context_rows = s.hold_context_rows, .stream = s, .sampled = s.sampling != null };
 }
 
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).

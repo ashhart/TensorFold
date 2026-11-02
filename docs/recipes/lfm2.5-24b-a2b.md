@@ -85,14 +85,23 @@ drafting stream resumes prompts. Hold lengths follow the lane core's per-round d
 Priced shared rounds use the existing lane allocator and the measured block-count/depth grid. Only neural blocks
 incur hold cost; copies and forced rows still occupy verify capacity. The native 32-row hold limit can split a
 cohort into several passes, priced in execution order rather than as one impossible padded batch.
+The target retains its original 1–16-row waited-wall calibration and wall-clock round measurement, including
+real host residual work. This stage does not add later shared-width calibration or per-row host-draw pricing.
 
-A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
-and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
-Zero-grant rounds therefore retain contiguous context for later drafts; they do not disable drafting by stream count.
-Decode and verify forwards write raw taps from the next/final RMSNorm directly into each row's owned stage,
-without a separate tap dispatch or per-round host copy. A forward waits on a pending hold before replacing rows that hold still
-reads; only accepted rows become staged context. Stage overflow projects only the retained prefix before the next
-capture's anchor, so a reused anchor can replace its old row without losing contiguous context.
+A new stream waits for its first funded hold while retaining its prompt context. Each lane owns up to 2,048
+contiguous incoming prompt and verified tap rows, clipped to its lane capacity, before the target overwrites
+them. Projection is deferred until a hold, snapshot or stage overflow. Zero-grant rounds retain context at every
+admitted stream count. Prompt, decode and verify forwards capture raw BF16 taps directly into the owned stage.
+The serving target allocates only its destination-pointer table; generic capture retains raw scratch storage.
+A forward waits on a pending hold before replacing rows that hold still reads; only accepted rows become staged
+context. Overflow projects only the retained prefix before the new anchor. A declined final snapshot leaves
+the final anchor intact across other streams' forwards. Snapshots retain bytes and state, never GPU addresses;
+each live allocation caches its own base address.
+
+Shared rounds stage newly verified rows before pricing the next hold. The prepared request then consumes
+neither its features nor its first-token handle twice. Actual staged debt reaches the existing depth and
+allocation inputs, including rounds with no grant. Metadata-only absorbs and zero-row rewinds create no
+command buffer or autorelease pool and accrue no GPU time.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
 against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),
@@ -116,6 +125,9 @@ rows, other matrices from sixteen, with 128-thread/128-column geometry. Through 
 the predecessor scalar-row numerical bound. This allocation stage's non-tensor callers retain their original
 32-row scalar limit and existing MMA fallback; 8-bit routing is unchanged. Only non-tensor devices use the
 wide gate/up row-GLU route at 4–16 physical rows, preserving projection and activation BF16 rounding.
+The context-FC gather uses the same `tensorRows` threshold as BF16 projection and stays strictly below it
+when the tensor pipeline exists. Tensor-sized pieces retain their independent calls, preserving the exact
+BF16-byte and nonfinite oracle; gathering never selects a different projection regime.
 
 A successful native all-row verify marks its completed cache frame, allowing a full identity keep to skip
 recopying conv state and logits. Partial/reordered keeps, generic and last-only forwards, snapshots and release
@@ -134,8 +146,17 @@ running on the GPU is priced by its lane's last confidences, so the host does no
 without the head verifies by the core's depth rule, from each stream's measured acceptance by depth.
 
 A stream with a copy ahead verifies the copy and asks no hold, and a drafting stream prices its copy
-windows by its own copies. The lane core also weighs the hold pass itself: the drafter times holds of 1 to 16
-blocks at load and corrects those prices toward each settled hold's GPU time. Confidence still allocates verify
+windows by its own copies. The lane core also weighs the hold pass itself: clean holds are calibrated at
+every legal depth for 1/2/4/8/16 blocks within the 32-row pass. Each shape is warmed, then takes the best of
+three valid, same-attempt CPU-encode plus GPU totals. The same concurrent encoder, barriers, piece partition
+and gather path calibrate context-only passes at powers-of-two row counts from 1 through 2,048 for all five
+stream counts: 60 context quotes. Temporary K/V-only lanes share deterministic finite nonzero raw taps.
+Both grids publish only when complete, and startup work is not charged to a serving round.
+
+Each selected physical group pays context once using its largest staged debt and the next covering measured
+regime. This is a conservative uniform-row estimate, not a hardware bound; copies and forced rows incur no
+neural fee. Clean-hold EMA adaptation subtracts the matching context estimate from measured CPU-plus-GPU work;
+invalid residuals do not invent clean observations. Confidence still allocates verify
 rows unchanged, but a hold's expected gain is capped by that stream's actual head acceptance. If the full hold
 cannot pay, the controller can retain a shorter prefix rather than discard all its useful drafts. Its separate
 hold-value estimate starts each newly tried conditional from the observed outcome; later trials use the
@@ -149,20 +170,35 @@ hold costs, including companion rows, before other holds are selected. An imposs
 probe cadence; cheaper live costs can fund the retained trial immediately. Actual profitable trials restore
 ordinary holds; copies do not train head acceptance. These rules do not establish throughput qualification:
 that still needs the complete same-head no-drafter/BF16/8-bit matrix, including sampled one-stream replies.
+This allocation stage retains probability-priority row allocation, gain-per-row hold ordering, grant/slack
+rules and probe cadence. Context prices correct the existing normal, group and physical-pass prices and the
+optimistic `canExplore` bound; they do not import later cost-aware reordering or cheap-peer cohort searches.
+Due probes still advance their clocks, and only the existing funding rule spends their trials.
 
-Observed fixed overhead excludes the completed hold's GPU time in the round that actually settles it, not
-the modeled price of a new unwaited hold. Work settled outside a round is discarded before its clock starts.
-Reading this accounting never submits GPU work or adds a wait; backends without it retain modeled pricing.
+Observed fixed overhead excludes encoding in its launch interval and GPU work in its settlement interval,
+each once. Pending encoding metadata is retained only for matching EMA repricing, never charged again.
+Accountable startup or out-of-round work is discarded before the clock starts. Actual timing does not also
+subtract modeled extra-step work; backends without the timing callback retain modeled pricing. Reading these
+receipts never allocates, submits work or waits.
 
 [Controller regression and native API receipts](../receipts/dspark-chain-restack/hold-value-controller.json)
 record the constructed timing cases and source hashes; they are not device-throughput qualification.
 
-`tf-lfm2-dspark` also prints the confidence
-head against its fp32 reference and times shared holds of 2 to 16 streams.
+`tf-lfm2-dspark` retains the actual 64-context/9-row FP32 reference, confidence reference and shared-hold
+diagnostics. Its deferred-context case crosses the 2,048-row stage and performs the zero-row rewind at 2,143.
+Waited, signalled target-held-ID and checked host consumers all reject planted NaN and both infinity signs.
+The first-normalization oracle alternates two live destination buffers and checks untouched peer bytes,
+masked columns, dark rows and nonfinite raw bits. Context-FC tests retain exact bytes, capacity bounds and
+all NaN-separated shape/input cases. The steady native loop requires zero host allocations/resizes and
+20 unwaited holds.
 
 The loader reads unpaired BF16 matrices directly into final Metal backing; paired Q/K use one reusable matrix
 stage and reorder into their destination. Quantization maps paired source rows directly into codes, clears only
 the required 4-bit packing storage, and joins stack-held worker handles on failure. Markov W1 and the existing
-confidence projection remain BF16. A stream's drafter lane is one Metal buffer (its layers' keys and values, then its staged rows), and its bytes join the streams the load limit
-admits. At load the drafter logs its weights, scratch and a stream's bytes. `tf-lfm2-dspark` also counts host
-allocations over twenty served drafter rounds, which must be none.
+confidence projection remain BF16. This allocation stage retains one combined Metal allocation for each lane's
+K/V and bounded stage; the full bytes participate in stream-memory admission. The earlier depth and confidence
+stages retain their separate stage-buffer ownership. At load the drafter logs weights, scratch and lane bytes.
+
+These are source contracts, not new qualification receipts. The last frozen full serving gate at `7eb317eda`
+remains FAIL 21/32 with the original no-tolerance per-cell comparison; no historical receipt is relabelled as
+evidence for this source head.

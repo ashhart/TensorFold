@@ -1,11 +1,86 @@
-//! The target's tap capture on the real weights: the same normalized and logit bytes, the taps where they were sent.
+//! Real-device controls for tap capture and physical hold grouping.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const q = tf.lfm2_moe;
 const c = q.config;
 const st = q.state;
-
+/// 3x9 + 5x1 physical passes: same-kernel reference and synthetic grid controls, not a speed measurement.
+pub fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: []const u32) !void {
+    const depths = [8]u32{ 9, 1, 1, 1, 1, 1, 1, 1 };
+    const groups = [2][2]usize{ .{ 0, 3 }, .{ 3, 8 } }; // the lanes each physical pass holds
+    const real_grid = d.holds;
+    const real_len = d.holds_len;
+    const step_ms = d.step_ms;
+    const hold_ms = d.hold_ms;
+    const spent_ms = d.hold_spent_ms;
+    const encode_ms = d.encode_cpu_ms;
+    defer {
+        d.holds = real_grid;
+        d.holds_len = real_len;
+        d.step_ms = step_ms;
+        d.hold_ms = hold_ms;
+        d.hold_spent_ms = spent_ms;
+        d.encode_cpu_ms = encode_ms;
+    }
+    var pending: [8]u32 = undefined;
+    for (&pending, 0..) |*p, i| p.* = ids[(i * 131 + 5) % ids.len];
+    const drafter = d.drafter();
+    var streams: [8]tf.lanes.Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*s| s.deinit(gpa);
+    while (made < streams.len) : (made += 1) streams[made] = try tf.lanes.Stream.init(gpa, .{ .id = "split", .prompt = &.{1}, .max_new = 1 });
+    var opened: usize = 0;
+    defer for (streams[0..opened]) |*s| drafter.release(s);
+    while (opened < streams.len) : (opened += 1) {
+        try drafter.open(&streams[opened]);
+        if ((d.lanes.get(&streams[opened]) orelse return error.LaneNotOpened).cap != 64 + d.config.block) return error.LaneNotAtCapacity64;
+    }
+    // Reference groups use the same kernels on separate lanes.
+    var refs: [8]*q.dspark.Lane = undefined;
+    var ref_n: usize = 0;
+    defer for (refs[0..ref_n]) |l| d.dropLane(l);
+    while (ref_n < refs.len) : (ref_n += 1) refs[ref_n] = try d.newLane(64);
+    var blocks: [8]q.dspark_block.Block = undefined;
+    for (&blocks, refs, 0..) |*b, l, i| b.* = .{ .lane = l, .pending = pending[i], .anchor = 0, .depth = depths[i] };
+    for (groups) |g| _ = try q.dspark_block.hold(d, blocks[g[0]..g[1]], null);
+    for (d.holds[0..d.holds_len]) |*h| h.ms = 1e4 * (1 + 0.25 * @as(f64, @floatFromInt(h.streams))) * (1 + 0.5 * @as(f64, @floatFromInt(h.depth)));
+    const synthetic = d.holds;
+    _ = q.dspark_block.takeHoldMs(d);
+    var items: [8]tf.lanes.drafter.Hold = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .stream = &streams[i], .pending = pending[i], .position = 1, .depth = depths[i] };
+    const t0 = std.Io.Clock.awake.now(io);
+    try drafter.hold(&items);
+    const wall = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+    // nothing pending (one 8-block signalled pass would be), and no lane points into a signalled pass
+    if (d.pending != null or d.pass_len != 0) return error.SplitHoldLeftAPassPending;
+    for (&streams) |*s| if (d.lanes.get(s).?.slot != null) return error.SplitHoldLaneInASignalledPass;
+    const gpu_ms = d.hold_spent_ms;
+    const cpu_ms = d.encode_cpu_ms;
+    const taken = q.dspark_block.takeHoldMs(d);
+    if (!(taken > 0) or q.dspark_block.takeHoldMs(d) != 0) return error.SplitHoldTimeNotTakenOnce;
+    if (taken != cpu_ms + gpu_ms or !(cpu_ms > 0) or !(gpu_ms > 0)) return error.SplitHoldComponentsNotTaken;
+    if (taken > wall) return error.SplitHoldTimeExceedsWall;
+    // each lane's picks: its depth of them, the same as the reference pass of its group
+    for (&streams, refs, depths, 0..) |*s, ref, depth, i| {
+        var got: [16]u32 = undefined;
+        try drafter.held(&.{s}, &.{got[0..depth]});
+        if (!std.mem.eql(u32, got[0..depth], ref.held[0..depth])) return error.SplitHoldPicksDiffer;
+        if (depth == 1 and i > 0) if (drafter.held(&.{s}, &.{got[0 .. depth + 1]})) |_| return error.SplitHoldHeldMoreThanAsked else |err| if (err != error.DraftHeldFewer) return err;
+    }
+    // the grid: participating shapes stepped down by about a tenth, the controls exactly as set
+    if (d.holds_len != real_len) return error.GridResized;
+    for (synthetic[0..real_len], d.holds[0..real_len]) |before, now| {
+        const ratio = now.ms / before.ms;
+        const ok = switch (before.streams) {
+            2, 8 => ratio > 0.9 and ratio < 0.91, // one group's step
+            4 => ratio > 0.81 and ratio < 0.83, // both groups' steps
+            else => now.ms == before.ms, // 1 and 16 blocks: in neither pass
+        };
+        if (!ok) return error.SplitHoldGridStepsWrong;
+    }
+    std.debug.print("split hold, 8 lanes at depths [9, 1 x 7]: passes of 3x9 and 5x1 rows, both synchronous; {d:.3} ms CPU-encode + {d:.3} ms GPU = {d:.3} ms taken once ({d:.3} ms wall); picks equal the reference groups'; 2-, 8- and 4-block passes repriced once, once and twice, 1- and 16-block passes untouched\n", .{ cpu_ms, gpu_ms, taken, wall });
+}
 fn untouched(words: []const u16) bool {
     for (words) |v| if (v != 0x7fc0) return false;
     return true;
@@ -150,6 +225,7 @@ pub fn nonfinite(gpa: std.mem.Allocator, d: *q.dspark.Drafter) !void {
     const step_ms = d.step_ms;
     const hold_ms = d.hold_ms;
     const spent_ms = d.hold_spent_ms;
+    const encode_ms = d.encode_cpu_ms;
     defer {
         d.w.w1 = old_w1;
         d.w.w2 = old_w2;
@@ -158,6 +234,7 @@ pub fn nonfinite(gpa: std.mem.Allocator, d: *q.dspark.Drafter) !void {
         d.step_ms = step_ms;
         d.hold_ms = hold_ms;
         d.hold_spent_ms = spent_ms;
+        d.encode_cpu_ms = encode_ms;
     }
     // Depth one reads only W1[0]; all its factors are one, so an isolated infinity cannot become 0*Inf.
     const w1 = try m.device.buffer(rank * 2, shared);

@@ -39,14 +39,14 @@ pub const Metal = struct {
     scratch: st.Scratch,
     width: u32 = 1,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
-    /// Forward ms by window width, timed at load: the lane core weighs drafts against them.
+    /// Forward ms by window width, timed at load for the lane core.
     costs: [st.window_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
     /// Forwards run so far: a stream's tapped rows in the scratch are current while their gen matches.
     gen: u64 = 0,
     /// A drafter whose drafts verify windows read on the device (null: windows carry host tokens only).
     held_source: ?HeldSource = null,
-    /// A drafter whose staged rows verify and decode forwards capture into (null: the scratch's taps).
+    /// A drafter whose staged rows all serving forwards capture into (install before preparing taps).
     stage_source: ?StageSource = null,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
@@ -142,7 +142,8 @@ pub const Metal = struct {
     fn tapFor(self: *Metal, stream: *lanes.Stream, start: usize, rows: usize, wait: *?fwd.Wait) !fwd.Tap {
         const src = self.stage_source orelse return .scratch;
         if (self.scratch.taps == null) return .scratch;
-        const stage = (try src.bind(src.ptr, stream, start, rows)) orelse return .none;
+        const stage = (try src.bind(src.ptr, stream, start, rows)) orelse
+            return if (stream.drafts) error.LfmTapsNotHeld else .none;
         if (stage.wait) |w| wait.* = if (wait.*) |x| (if (x.value >= w.value) x else w) else w;
         return .{ .stage = stage.place };
     }
@@ -180,10 +181,10 @@ pub const Metal = struct {
         if (layers.len == 0 or layers.len > st.max_taps) return error.BadLfmTaps;
         for (layers) |l| if (l >= c.layers) return error.BadLfmTaps;
         if (self.scratch.taps) |t| return if (std.mem.eql(u32, t.layers[0..t.count], layers)) {} else error.BadLfmTaps;
-        var t: st.Taps = .{ .count = @intCast(layers.len), .buf = undefined, .gpu_base = undefined, .table_at = self.scratch.rows * layers.len * c.hidden * 2 };
+        const table_at = if (self.stage_source == null) self.scratch.rows * layers.len * c.hidden * 2 else 0;
+        const buf = try self.scratch.memory.alloc(table_at + self.scratch.rows * @sizeOf(u64));
+        var t: st.Taps = .{ .count = @intCast(layers.len), .buf = buf, .gpu_base = buf.gpuAddress(), .table_at = table_at };
         @memcpy(t.layers[0..layers.len], layers);
-        t.buf = try self.scratch.memory.alloc(t.table_at + self.scratch.rows * @sizeOf(u64));
-        t.gpu_base = t.buf.gpuAddress();
         self.scratch.taps = t;
     }
 
@@ -197,11 +198,12 @@ pub const Metal = struct {
         if (count == 0 or start < held.start or start + count > held.start + held.rows) return error.LfmTapsNotHeld;
         const width = self.tapBytes();
         var at = (held.row + @as(usize, @intCast(start - held.start))) * width;
-        const buf = if (held.gen == 0) cache.last_tap.? else if (held.gen != self.gen) return error.StaleLfmTaps else if (held.stage) |off| blk: {
+        if (held.gen != 0 and held.gen != self.gen) return error.StaleLfmTaps;
+        const buf = if (held.stage) |off| blk: {
             const src = self.stage_source orelse return error.LfmTapsNotHeld;
             at = off + @as(usize, @intCast(start - held.start)) * width;
             break :blk src.buffer(src.ptr, stream) orelse return error.LfmTapsNotHeld;
-        } else t.buf;
+        } else if (held.gen == 0) cache.last_tap orelse return error.LfmTapsNotHeld else t.buf;
         return .{ .buffer = @intFromPtr(buf.id), .offset = at, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
     }
 
@@ -244,12 +246,20 @@ pub const Metal = struct {
             };
             while (mark < stream.reuse.marks.len and stream.reuse.marks[mark] <= at) mark += 1;
             if (mark < stream.reuse.marks.len) end = @min(end, stream.reuse.marks[mark]);
-            try self.run(&.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last, null);
+            var wait: ?fwd.Wait = null;
+            const tap = try self.tapFor(stream, at, end - at, &wait);
+            if (sink != null and tap == .none) return error.LfmTapsNotHeld;
+            try self.run(&.{.{ .cache = cache, .rows = end - at, .tap = tap }}, ids[at..end], false, .last, wait);
             if (sink) |k| {
-                const width = self.tapBytes();
-                const f: be.Features = .{ .buffer = @intFromPtr(self.scratch.taps.?.buf.id), .rows = @intCast(end - at), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+                cache.tap = self.tapped(cache, end - at, tap, 0);
+                const f = try featuresFn(self, stream, self.scratch.taps.?.layers[0..self.scratch.taps.?.count], at, @intCast(end - at));
                 try k.take(k.ptr, stream, f, at);
-                if (end == ids.len) try self.keepLastTap(cache, end - 1 - at, end - 1);
+                if (end == ids.len) {
+                    // A stage-owned final anchor survives other streams' forwards without a scratch copy.
+                    if (tap == .stage) {
+                        cache.tap = .{ .start = end - 1, .row = 0, .rows = 1, .gen = 0, .stage = tap.stage.off + (end - at - 1) * self.tapBytes() };
+                    } else try self.keepLastTap(cache, end - 1 - at, end - 1);
+                }
             }
             at = end;
             if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null)

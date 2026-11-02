@@ -239,6 +239,7 @@ pub const Stream = struct {
     grant_short: bool = false, // the last grant verified fewer drafts than the stream held
     grant_gain: ?f64 = null, // the drafts its last grant expected to keep (the chances it was priced by)
     draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
+    hold_context_rows: u32 = 0, // raw context still owed to the active drafter, maintained by that provider
     copy_width: ?u32 = null,
 
     pub fn init(gpa: Allocator, spec: Spec) !Stream {
