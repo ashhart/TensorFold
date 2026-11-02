@@ -1,6 +1,0 @@
-**/.DS_Store
-**/*_test.go
-**/testdata
-deploy/compose/secrets
-deploy/compose/.env
-dist
