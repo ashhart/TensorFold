@@ -7,6 +7,16 @@ const builtin = @import("builtin");
 /// Offset, length and buffer alignment a direct read needs (the logical block size of every NVMe we run on).
 pub const alignment = 4096;
 
+/// Maximum staging bytes per direct loader reader.
+pub const chunk = 8 << 20;
+
+/// Only TF_LOAD_DIRECT=0 disables direct loader reads.
+pub fn enabled() bool {
+    const value = platform.c.getenv("TF_LOAD_DIRECT") orelse return true;
+    const text = std.mem.span(value);
+    return text.len != 1 or text[0] != '0';
+}
+
 pub const Buffer = []align(alignment) u8;
 
 /// Bytes a read of `len` bytes at `offset` occupies once widened to aligned ends.
