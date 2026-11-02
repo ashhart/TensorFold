@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal serves Qwen3.8-27B from a GGUF file (Q8_0, Q4_K_M and the other common block formats): each block is repacked exactly into the engine's affine form with FP32 scales and biases, so the weights the kernels multiply are the file's, bit for bit; the F32 norms and SSM coefficients are kept as stored, the tokenizer is built from the file's own metadata, and the prepared image is cached once. MLX checkpoints are unchanged (#1920).
+
 - `serve --profile stable` names today's defaults explicitly, and startup reports the profile and any registered switch set away from it; seven CUDA KV switches (`TF_QWEN_KV_PAGES`, `TF_QWEN_KV_SHARE`, `TF_GLM_KV_SHARE`, `TF_KV_SHARE`, `TF_FLASHNEXT_KV_PAGES` and two `_ALL` checks) are read through one registry, with environment values winning byte for byte; `fast-exact` and `fast` are refused until qualified (#1944, part of #1660). Thanks to @garvrao80.
 
 - Compaction keeps a memory note sent as text parts instead of summarizing the conversation again, and a note or remembered file path that arrived with carriage returns no longer carries them into the next note; Cortheon's checks read a shell command wherever it sits among the call's fields, its search fallback stays within its 120-byte cap, and its text cuts never end in a partial character (#1939). Thanks to @ppardus.
