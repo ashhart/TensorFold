@@ -36,6 +36,8 @@ export interface SupervisorDeps {
   onPid?: (pid: number | null) => void
   // True when the next start should pass --cortheon.
   cortheon?: () => boolean
+  // The control vector the next start should pass, or null when none is in force.
+  controlVector?: () => { file: string; alpha: number } | null
   learning?: (repo: string) => { enabled: boolean; graphFile: string } | null
   modelSettings?: (repo: string) => EngineModelGenerationSettings | null
 }
@@ -64,6 +66,8 @@ export interface SupervisorStatus {
   contextTokens: number | null
   // The running (or starting) server was given --cortheon.
   cortheonActive: boolean
+  // The running (or starting) server was given a control vector.
+  controlVectorActive: boolean
   learningActive: boolean
 }
 
@@ -155,6 +159,7 @@ export class EngineSupervisor {
   private cancellation = 0
   private requestModel: string | null = null
   private cortheon = false
+  private controlVector: { file: string; alpha: number } | null = null
   private learning = false
   private greedyOnly = false
 
@@ -193,6 +198,7 @@ export class EngineSupervisor {
       memoryLimitBytes: this.memoryLimitBytes,
       contextTokens: this.contextTokens,
       cortheonActive: this.cortheon && (this.state === 'starting' || this.state === 'ready'),
+      controlVectorActive: this.controlVector != null && (this.state === 'starting' || this.state === 'ready'),
       learningActive: this.learning && (this.state === 'starting' || this.state === 'ready'),
     }
   }
@@ -483,9 +489,11 @@ export class EngineSupervisor {
     if (generation !== this.generation) this.fail('Engine start was cancelled.')
     const apiKey = randomBytes(32).toString('hex')
     this.cortheon = cortheonEnabledForRelease(this.deps.cortheon?.())
+    this.controlVector = this.deps.controlVector?.() ?? null
     const learning = this.deps.learning?.(model)
     this.learning = learning?.enabled === true
-    const args = ['serve', argument, '--host', '127.0.0.1', '--port', String(port), '--name', model, ...profileArgs, ...(drafterArgument ? ['--drafter', drafterArgument] : []), ...(this.cortheon ? ['--cortheon'] : []), ...(learning ? ['--slide-graph', learning.graphFile, ...(learning.enabled ? ['--slide'] : [])] : [])]
+    const controlArgs = this.controlVector ? ['--glp', this.controlVector.file, '--glp-alpha', String(this.controlVector.alpha)] : []
+    const args = ['serve', argument, '--host', '127.0.0.1', '--port', String(port), '--name', model, ...profileArgs, ...(drafterArgument ? ['--drafter', drafterArgument] : []), ...(this.cortheon ? ['--cortheon'] : []), ...controlArgs, ...(learning ? ['--slide-graph', learning.graphFile, ...(learning.enabled ? ['--slide'] : [])] : [])]
     // Independently reject a stale injected binary prefix as well as the normal serve choice.
     if (!CORTHEON_RELEASE_POLICY.enabled && [...binary.args, ...args].includes('--cortheon')) this.fail(CORTHEON_RELEASE_POLICY.reason)
     const env = { ...this.deps.env(), TENSORFOLD_API_KEY: apiKey, TENSORFOLD_NO_UPDATE_CHECK: '1' }

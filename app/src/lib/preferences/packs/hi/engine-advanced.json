@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face डाउनलोड कहाँ सहेजता है। TensorFold अपने मॉडल फ़ोल्डर सेटिंग्स → मॉडल फ़ोल्डर में रखता है।",
  "Engine knob: append per-request records to a file for diagnostics.": "इंजन विकल्प: निदान के लिए अनुरोध-वार रिकॉर्ड फ़ाइल में जोड़ें।",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "इंजन के टर्मिनल में लाइव टेक्स्ट प्रदर्शन छिपाने के लिए 1 सेट करें; सेवाया गया मॉडल वैसा ही रहता है।",
- "Engine knob: mix a salt into request seeds.": "इंजन विकल्प: अनुरोध सीड्स में नमक मिलाएँ।"
+ "Engine knob: mix a salt into request seeds.": "इंजन विकल्प: अनुरोध सीड्स में नमक मिलाएँ।",
+ "Control vector": "नियंत्रण वेक्टर",
+ "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "नियंत्रण वेक्टर स्थानीय मॉडल को दिशा देता है: यह बदल देता है कि मॉडल क्या जवाब देता है। आप इसे चालू करने तक यह बंद रहता है, और इंजन शुरू होते ही बताता है कि अभी क्या लागू है।",
+ "Apply a control vector": "नियंत्रण वेक्टर लागू करें",
+ "Choose…": "चुनें…",
+ "Strength": "तीव्रता",
+ "File: {value0}": "फ़ाइल: {value0}",
+ "In force in the loaded model.": "लोड किए गए मॉडल में लागू है।",
+ "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 वह तीव्रता है जिस पर फ़ाइल बनी थी। कई गुना तीव्रता मॉडल को उत्तरहीन कर सकती है।",
+ "The strength must be above 0 and at most {value0}.": "तीव्रता 0 से अधिक और {value0} तक या उससे कम होनी चाहिए।",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "इस बिल्ड का TensorFold इंजन अभी नियंत्रण वेक्टर नहीं देता, इसलिए मौजूदा इंजन इसे नहीं लेगा।",
+ "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "नियंत्रण वेक्टर लागू होने पर मॉडल अलग तरह जवाब देता है। यह एक दिशा है, सुरक्षा सेटिंग नहीं: यह बदल देता है कि मॉडल क्या कहने को तैयार है।"
 }

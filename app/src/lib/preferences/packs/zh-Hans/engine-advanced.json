@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face 下载缓存的位置。TensorFold 自身的模型文件夹在“设置 → 模型文件夹”中管理。",
  "Engine knob: append per-request records to a file for diagnostics.": "引擎选项：将每个请求的记录追加到文件，用于诊断。",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "设为 1 可隐藏引擎终端中的实时文本显示；所服务的模型不变。",
- "Engine knob: mix a salt into request seeds.": "引擎选项：在请求种子中混入盐值。"
+ "Engine knob: mix a salt into request seeds.": "引擎选项：在请求种子中混入盐值。",
+ "Control vector": "控制向量",
+ "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "控制向量会引导本地模型：它会改变模型回答的内容。在你开启之前它一直是关闭的，引擎启动时会说明当前生效的是哪一个。",
+ "Apply a control vector": "应用控制向量",
+ "Choose…": "选择…",
+ "Strength": "强度",
+ "File: {value0}": "文件：{value0}",
+ "In force in the loaded model.": "已在加载的模型中生效。",
+ "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 是该文件推导时的强度。强度提高到几倍后，模型可能不再给出回答。",
+ "The strength must be above 0 and at most {value0}.": "强度必须大于 0 且不超过 {value0}。",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "此版本的 TensorFold 引擎尚不支持控制向量，因此当前使用的引擎无法接收它。",
+ "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "控制向量生效时，模型的回答会有所不同。它是引导方向，不是安全设置：它会改变模型愿意说什么。"
 }
