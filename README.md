@@ -108,6 +108,13 @@ Download the Apple-silicon [beta 9 DMG](https://github.com/ashhart/TensorFold/re
 The desktop app launches the bundled `tensorfold-native` executable directly.
 Mobile clients in `app/mobile/` remain preview software.
 
+## TensorFold Starlight (enterprise)
+
+[TensorFold Starlight](starlight/README.md) gives an organisation one governed OpenAI- and Anthropic-compatible endpoint for a fleet of TensorFold engines on Macs, Linux GPU servers and Windows machines.
+It signs people in through the organisation's identity provider (OIDC or SAML, with SCIM provisioning), decides who may use which model and where it runs, places and supervises models on nodes, and accounts for every token.
+It runs fully offline, or brokers approved frontier providers under the same identity, policy and budgets; [the install guide](starlight/docs/install.md) covers Docker, Kubernetes and Linux services.
+Starlight is new: the gates that still need real GPU clusters or identity-provider tenants are listed in [its qualification notes](starlight/docs/qualification.md).
+
 ## Living Weights (experimental)
 
 Living Weights teaches a running model new facts in its own weights. Start a Nemotron 3.5 Lightning server with
