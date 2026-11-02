@@ -47,6 +47,14 @@ pub fn answer(h: *LaneHost) void {
     defer h.gpa.free(list);
     const backend = h.core.backend;
     for (list) |a| {
+        // a drain's deadline stops the queue: the started score finishes, the rest fail without running
+        h.lock();
+        const closing = h.closing;
+        h.unlock();
+        if (closing) {
+            a.failed = true;
+            continue;
+        }
         const run = backend.vtable.score orelse {
             a.failed = true;
             continue;
