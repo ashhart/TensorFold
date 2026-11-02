@@ -3,7 +3,7 @@ import { promises as fs, existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import type { EngineCapabilities, EngineConnection, EngineEvent, EngineInstalledModel, EngineLearningSnapshot, EngineLibraryScanOptions, EngineModelLibrarySnapshot, EnginePerformance, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, EngineModelGenerationSettings, EngineModelPreviewResult, EngineModelComparisonInput, EngineModelComparisonSnapshot } from '../types'
+import type { EngineCapabilities, EngineConnection, EngineControlVectorSnapshot, EngineEvent, EngineInstalledModel, EngineLearningSnapshot, EngineLibraryScanOptions, EngineModelLibrarySnapshot, EnginePerformance, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, EngineModelGenerationSettings, EngineModelPreviewResult, EngineModelComparisonInput, EngineModelComparisonSnapshot } from '../types'
 import { FAMILY_TITLES, SUGGESTED_MODELS, drafterFor } from './catalog'
 import { parseCapabilities, parseInfoOutput, parseModelsOutput, parseVersion, runEngineCli, type ModelInfo } from './cli'
 import { ModelHub } from './model-hub'
@@ -16,6 +16,7 @@ import { createTurnStats, finalizeTurnStats, readEngineTimings, recordModelCall,
 import { recordEngineContext } from './context'
 import { PullQueue, type PullHandle } from './pull'
 import { EngineSupervisor } from './supervisor'
+import { ControlVectorSetting } from './control-vector'
 import { ModelRevisions } from './model-revisions'
 import { EnginePreferenceStore } from './preferences'
 import { LearningCopies, LEARNING_MODEL } from './learning-copy'
@@ -87,6 +88,10 @@ export class EngineService {
   private readonly localRepos = new Map<string, string>()
   // Whether the bundled engine lists --cortheon among its serve flags; null until asked.
   private cortheonSupported: boolean | null = null
+  // Whether the engine in use lists --glp among its serve flags; null until asked.
+  private glpSupported: boolean | null = null
+  // The control vector the operator chose, and what the engine in use can do with it.
+  private controlVector!: ControlVectorSetting
   private learningSupported = false
   private readonly learningCopies: LearningCopies
   private readonly learning: EngineLearning
@@ -132,11 +137,18 @@ export class EngineService {
       onChange: () => this.emitStatus(),
       onPid: (pid) => { void this.recordPid(pid) },
       cortheon: () => this.cortheonSupported === true && cortheonEnabledForRelease(this.preferences.get().cortheon),
+      controlVector: () => {
+        const prefs = this.preferences.get().controlVector
+        // The engine takes the vector only when it offers --glp and the operator has a file.
+        if (this.glpSupported !== true || !prefs.enabled || !prefs.file) return null
+        return { file: prefs.file, alpha: prefs.alpha }
+      },
       learning: (repo) => {
         const prefs = this.preferences.get()
         return this.learningSupported && repo === prefs.learningModel ? { enabled: prefs.learningEnabled, graphFile: this.learningCopies.graphFile(repo) } : null
       },
     })
+    this.controlVector = new ControlVectorSetting({ preferences: this.preferences, supervisor: this.supervisor, supported: () => this.glpSupported === true })
     this.comparisons = new ModelComparisons({
       assertAllowed: () => this.assertComparisonAllowed(),
       reserve: () => this.supervisor.reserveSequence(),
@@ -234,8 +246,9 @@ export class EngineService {
       try {
         const flags = (await this.capabilitiesDoc()).flags
         this.cortheonSupported = flags.includes('--cortheon')
+        this.glpSupported = flags.includes('--glp')
         this.learningSupported = flags.includes('--slide') && flags.includes('--slide-graph') && os.platform() === 'darwin' && os.arch() === 'arm64'
-      } catch { this.cortheonSupported = false }
+      } catch { this.cortheonSupported = false; this.glpSupported = false }
     }
     return this.statusNow()
   }
@@ -314,6 +327,29 @@ export class EngineService {
     return this.learning.snapshot()
   }
 
+  // The control vector the operator chose, and what the engine in use can do with it.
+  async controlVectorSnapshot(): Promise<EngineControlVectorSnapshot> {
+    await this.status()
+    return this.controlVector.snapshot()
+  }
+
+  // The file the operator picked, from the OS picker: it is remembered, not applied.
+  async chooseControlVector(file: string): Promise<EngineControlVectorSnapshot> {
+    await this.status()
+    return this.controlVector.choose(file)
+  }
+
+  // Whether the vector is in force, and at what strength.
+  async setControlVector(input: { enabled?: unknown; alpha?: unknown }): Promise<EngineControlVectorSnapshot> {
+    await this.status()
+    return this.changeFeature(() => this.controlVector.set(input))
+  }
+
+  // Forget the file: the engine stops taking a vector at its next start.
+  async clearControlVector(): Promise<EngineControlVectorSnapshot> {
+    await this.status()
+    return this.changeFeature(() => this.controlVector.clear())
+  }
   setLearning(enabled: boolean, model?: string): Promise<EngineLearningSnapshot> {
     return this.changeFeature(() => this.setLearningNow(enabled, model))
   }
@@ -498,10 +534,10 @@ export class EngineService {
   }
 
   private statusNow(): EngineStatus {
-    const { cortheonActive, learningActive, ...s } = this.supervisor.status()
+    const { cortheonActive, controlVectorActive, learningActive, ...s } = this.supervisor.status()
     const binary = this.binary()
     return {
-      ...s, cortheon: { supported: this.cortheonSupported === true, enabled: this.preferences.get().cortheon, active: cortheonActive, disabledReason: CORTHEON_RELEASE_POLICY.enabled ? undefined : CORTHEON_RELEASE_POLICY.reason }, available: !!binary, version: this.version, binaryPath: binary ? this.options.binaryPath : null, totalMemoryBytes: this.totalMemoryBytes, memoryBudgetBytes: this.supervisor.memoryBudgetBytes,
+      ...s, cortheon: { supported: this.cortheonSupported === true, enabled: this.preferences.get().cortheon, active: cortheonActive, disabledReason: CORTHEON_RELEASE_POLICY.enabled ? undefined : CORTHEON_RELEASE_POLICY.reason }, controlVector: { supported: this.glpSupported === true, enabled: this.preferences.get().controlVector.enabled, file: this.preferences.get().controlVector.file, alpha: this.preferences.get().controlVector.alpha, active: controlVectorActive }, available: !!binary, version: this.version, binaryPath: binary ? this.options.binaryPath : null, totalMemoryBytes: this.totalMemoryBytes, memoryBudgetBytes: this.supervisor.memoryBudgetBytes,
       hardware: { platform: os.platform(), architecture: os.arch(), chip: os.cpus()[0]?.model?.trim() || null },
     }
   }

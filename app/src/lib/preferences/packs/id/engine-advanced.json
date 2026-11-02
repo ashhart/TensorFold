@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Lokasi cache unduhan Hugging Face. TensorFold menyimpan folder modelnya sendiri di Setelan → Folder model.",
  "Engine knob: append per-request records to a file for diagnostics.": "Pengaturan mesin: tambahkan catatan per permintaan ke berkas untuk diagnostik.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Setel 1 untuk menyembunyikan tampilan teks langsung mesin di terminalnya; model yang dilayani tidak berubah.",
- "Engine knob: mix a salt into request seeds.": "Pengaturan mesin: campurkan salt ke seed permintaan."
+ "Engine knob: mix a salt into request seeds.": "Pengaturan mesin: campurkan salt ke seed permintaan.",
+ "Control vector": "Vektor kendali",
+ "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "Vektor kendali mengarahkan model lokal: ia mengubah apa yang_balasan model. Vektor ini mati sampai Anda menyalakannya, dan mesin memberi tahu apa yang berlaku saat mulai.",
+ "Apply a control vector": "Terapkan vektor kendali",
+ "Choose…": "Pilih…",
+ "Strength": "Kekuatan",
+ "File: {value0}": "Berkas: {value0}",
+ "In force in the loaded model.": "Berlaku pada model yang dimuat.",
+ "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "Satu adalah kekuatan saat berkas itu diperoleh. Kekuatan beberapa kali lipat dapat membuat model tidak menjawab.",
+ "The strength must be above 0 and at most {value0}.": "Kekuatan harus lebih besar dari 0 dan tidak lebih dari {value0}.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Mesin TensorFold pada build ini belum menawarkan vektor kendali, jadi mesin yang dipakai tidak dapat menerimanya.",
+ "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "Dengan vektor kendali berlaku, model menjawab berbeda. Ini arah pengarah, bukan pengaturan keamanan: ia mengubah apa yang mau dikatakan model."
 }

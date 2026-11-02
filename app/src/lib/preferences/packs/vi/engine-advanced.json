@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Nơi Hugging Face lưu bộ nhớ đệm tải xuống. Thư mục mô hình của TensorFold đặt trong Cài đặt → Thư mục mô hình.",
  "Engine knob: append per-request records to a file for diagnostics.": "Tùy chọn engine: ghi thêm nhật ký từng yêu cầu vào tệp để chẩn đoán.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Đặt 1 để ẩn hiển thị văn bản trực tiếp của engine trong terminal; mô hình phục vụ không thay đổi.",
- "Engine knob: mix a salt into request seeds.": "Tùy chọn engine: trộn muối vào seed của yêu cầu."
+ "Engine knob: mix a salt into request seeds.": "Tùy chọn engine: trộn muối vào seed của yêu cầu.",
+ "Control vector": "Véc-tơ điều khiển",
+ "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "Véc-tơ điều khiển dẫn hướng mô hình cục bộ: nó thay đổi điều mô hình trả lời. Nó tắt cho đến khi bạn bật, và động cơ nói rõ đang có hiệu lực điều gì khi khởi động.",
+ "Apply a control vector": "Áp dụng véc-tơ điều khiển",
+ "Choose…": "Chọn…",
+ "Strength": "Cường độ",
+ "File: {value0}": "Tệp: {value0}",
+ "In force in the loaded model.": "Đang có hiệu lực trong mô hình đã tải.",
+ "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 là cường độ mà tệp đó được tạo ra. Cường độ gấp nhiều lần có thể khiến mô hình không còn trả lời.",
+ "The strength must be above 0 and at most {value0}.": "Cường độ phải lớn hơn 0 và không quá {value0}.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Bản dựng này của động cơ TensorFold chưa có véc-tơ điều khiển, nên động cơ đang dùng không nhận được.",
+ "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "Khi véc-tơ điều khiển có hiệu lực, mô hình trả lời khác đi. Đây là một hướng dẫn, không phải thiết lập an toàn: nó thay đổi điều mô hình sẵn sàng nói."
 }

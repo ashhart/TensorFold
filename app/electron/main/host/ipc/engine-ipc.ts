@@ -141,6 +141,42 @@ export function registerEngineIpc(engine: () => EngineService | null, options: {
     return operation(async () => { await auditEvent('engine.cortheon', { enabled }); if (enabled) options.assertCanEnableCortheon?.(); return svc().setCortheon(enabled) })
   })
 
+  handle('engine:controlVector', async () => {
+    requireSecurityRole('operator', 'read the control vector setting')
+    return svc().controlVectorSnapshot()
+  })
+
+  handle('engine:chooseControlVector', async (event) => {
+    requireSecurityRole('operator', 'choose a control vector file')
+    return operation(async () => {
+      const parent = BrowserWindow.fromWebContents(event.sender)
+      const options = { title: 'Choose a control vector file', properties: ['openFile'] as ('openFile')[], filters: [{ name: 'Control vector', extensions: ['gguf'] }, { name: 'All files', extensions: ['*'] }] }
+      const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
+      if (result.canceled || result.filePaths.length !== 1) return svc().controlVectorSnapshot()
+      // This path comes only from the OS picker, never from renderer arguments or audit logs.
+      return svc().chooseControlVector(result.filePaths[0])
+    })
+  })
+
+  handle('engine:setControlVector', async (_e, input: { enabled?: unknown; alpha?: unknown }) => {
+    requireSecurityRole('operator', 'change the control vector setting')
+    return operation(async () => {
+      const snapshot = await svc().setControlVector({ enabled: input?.enabled, alpha: input?.alpha })
+      // Only the state is audited; the path may name a file the operator keeps private.
+      await auditEvent('engine.controlVector', { enabled: snapshot.enabled, alpha: snapshot.alpha })
+      return snapshot
+    })
+  })
+
+  handle('engine:clearControlVector', async () => {
+    requireSecurityRole('operator', 'forget the control vector file')
+    return operation(async () => {
+      const snapshot = await svc().clearControlVector()
+      await auditEvent('engine.controlVector', { enabled: false, cleared: true })
+      return snapshot
+    })
+  })
+
   handle('engine:learning', async () => {
     requireSecurityRole('operator', 'read the Living Weights graph')
     return svc().learningSnapshot()

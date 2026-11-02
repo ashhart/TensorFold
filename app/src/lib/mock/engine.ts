@@ -1,6 +1,7 @@
 import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY } from '../../../shared/release-feature-policy'
 import { normalizeEngineEnvOverrides } from '../../../shared/engine-advanced-env'
-import type { EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, SuggestedModel } from '../types'
+import { CONTROL_VECTOR_ALPHA_DEFAULT, mergeControlVector } from '../../../shared/control-vector'
+import type { EngineControlVectorSnapshot, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, SuggestedModel } from '../types'
 import type { TensorFoldStudioApi } from '../ipc'
 import type { EngineModelLibrarySnapshot } from '../types'
 
@@ -33,7 +34,7 @@ const HUB: HubModelSummary[] = [
 ]
 
 export function createMockEngineApi(): Pick<TensorFoldStudioApi,
-  'engineCompareModels' | 'engineComparisonStatus' | 'engineCancelComparison' | 'engineTryModel' | 'engineCancelTryModel' | 'engineSaveModelProfiles' | 'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'engineEnvOverrides' | 'engineSetEnvOverrides' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
+  'engineCompareModels' | 'engineComparisonStatus' | 'engineCancelComparison' | 'engineTryModel' | 'engineCancelTryModel' | 'engineSaveModelProfiles' | 'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'engineEnvOverrides' | 'engineSetEnvOverrides' | 'engineControlVector' | 'engineChooseControlVector' | 'engineSetControlVector' | 'engineClearControlVector' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
   const listeners = new Set<(event: EngineEvent) => void>()
   const emit = (event: EngineEvent) => { for (const cb of listeners) cb(event) }
   let installed: EngineInstalledModel[] = [{
@@ -59,13 +60,17 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
     available: true, version: '1.1.0', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
     state: 'stopped', model: null, drafter: null, port: null, startedAt: null, readyAt: null, message: null, logTail: [], totalMemoryBytes: TOTAL_MEMORY, memoryLimitBytes: LIMIT, contextTokens: null,
     cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason },
+    controlVector: { supported: true, enabled: false, file: null, alpha: CONTROL_VECTOR_ALPHA_DEFAULT, active: false },
   }
   let learning: EngineLearningSnapshot = { supported: true, experimental: true, enabled: false, active: false, model: null, state: 'off', message: 'Browser demo: no weights are changed.', privateCopy: false, progress: null, job: null, graph: { next: 1, facts: [] } }
+  let controlVector: EngineControlVectorSnapshot = { supported: true, enabled: false, file: null, alpha: CONTROL_VECTOR_ALPHA_DEFAULT, active: false }
   let lessonTimer: ReturnType<typeof setTimeout> | null = null
   const learningSnapshot = () => structuredClone(learning)
   const emitLearning = () => emit({ kind: 'learning', snapshot: learningSnapshot() })
   const syncLearning = () => { learning = { ...learning, active: learning.enabled && status.state === 'ready' && status.model === learning.model }; emitLearning() }
   const setStatus = (patch: Partial<EngineStatus>) => { status = { ...status, ...patch }; emit({ kind: 'status', status }) }
+  // The demo never starts a server, so a vector is "in force" while a model is loaded.
+  const syncControlVector = () => { controlVector = { ...controlVector, active: controlVector.enabled && status.state === 'ready' }; setStatus({ controlVector: { ...controlVector } }) }
   const snapshot = (): EngineSnapshot => ({ status, performance: null, installed, pulls: [...pulls.values()], suggestions: SUGGESTIONS, hubCache: '~/.cache/huggingface/hub' })
 
   const preflight = async (repo: string, revision?: string | null): Promise<ModelPreflight> => {
@@ -151,12 +156,14 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
       await new Promise((r) => setTimeout(r, 1200))
       setStatus({ state: 'ready', readyAt: Date.now(), message: null, contextTokens: 32_768, cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason } })
       syncLearning()
+      syncControlVector()
       return status
     },
     engineUnload: async () => {
       if (learning.state === 'teaching' || learning.state === 'cancelling') throw new Error('Stop the current lesson before unloading.')
       setStatus({ state: 'stopped', model: null, port: null, startedAt: null, readyAt: null, message: null, contextTokens: null, cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason } })
       syncLearning()
+      syncControlVector()
       return status
     },
     engineSetCortheon: async (enabled) => {
@@ -166,6 +173,15 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
       return status
     },
     engineLearning: async () => learningSnapshot(),
+    engineControlVector: async () => ({ ...controlVector }),
+    engineChooseControlVector: async () => { controlVector = { ...controlVector, file: '/Volumes/Example/Controls/refusal-glp-49.gguf' }; syncControlVector(); return { ...controlVector } },
+    engineSetControlVector: async (input) => {
+      const { enabled, alpha } = mergeControlVector(controlVector, { enabled: input?.enabled, alpha: input?.alpha })
+      controlVector = { ...controlVector, enabled: enabled && controlVector.file != null, alpha }
+      syncControlVector()
+      return { ...controlVector }
+    },
+    engineClearControlVector: async () => { controlVector = { ...controlVector, enabled: false, file: null }; syncControlVector(); return { ...controlVector } },
     engineSetLearning: async (enabled, model) => {
       if (['teaching', 'cancelling', 'preparing'].includes(learning.state)) throw new Error('Wait for the current lesson to finish.')
       const repo = model ?? status.model ?? learning.model

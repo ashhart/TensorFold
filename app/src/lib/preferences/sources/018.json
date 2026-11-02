@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.",
  "Engine knob: append per-request records to a file for diagnostics.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.",
- "Engine knob: mix a salt into request seeds."
+ "Engine knob: mix a salt into request seeds.",
+ "Control vector",
+ "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.",
+ "Apply a control vector",
+ "Choose…",
+ "Strength",
+ "File: {value0}",
+ "In force in the loaded model.",
+ "One is the strength the file was derived at. A strength past a few can leave the model without an answer.",
+ "The strength must be above 0 and at most {value0}.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.",
+ "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say."
 ]

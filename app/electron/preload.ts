@@ -21,7 +21,7 @@ import type { KokoroStatus, KokoroSynthesisInput } from './agent/types'
 import type { OrchestrationEvent } from './agent/types'
 import type { ArtifactPreview } from './agent/types'
 import type { RoomManualMemoryCommand, RoomMergeResult } from './agent/types'
-import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineEnvOverrides, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './agent/types'
+import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineControlVectorSnapshot, EngineEnvOverrides, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './agent/types'
 import type { MobileBridgePairing, MobileBridgeStatus } from './agent/types/mobile-bridge'
 
 import type { EngineModelLibrarySnapshot, EngineLibraryScanOptions } from './agent/types'
@@ -616,6 +616,10 @@ const api = {
   engineLoad: (repo: string): Promise<EngineStatus> => ipcRenderer.invoke('engine:load', repo),
   engineUnload: (): Promise<EngineStatus> => ipcRenderer.invoke('engine:unload'),
   engineSetCortheon: (enabled: boolean): Promise<EngineStatus> => ipcRenderer.invoke('engine:setCortheon', enabled),
+  engineControlVector: (): Promise<EngineControlVectorSnapshot> => ipcRenderer.invoke('engine:controlVector'),
+  engineChooseControlVector: (): Promise<EngineControlVectorSnapshot> => ipcRenderer.invoke('engine:chooseControlVector'),
+  engineSetControlVector: (input: { enabled?: boolean; alpha?: number }): Promise<EngineControlVectorSnapshot> => ipcRenderer.invoke('engine:setControlVector', input),
+  engineClearControlVector: (): Promise<EngineControlVectorSnapshot> => ipcRenderer.invoke('engine:clearControlVector'),
   engineLearning: (): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:learning'),
   engineSetLearning: (enabled: boolean, model?: string): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:setLearning', { enabled, model }),
   engineEnvOverrides: (): Promise<EngineEnvOverrides> => ipcRenderer.invoke('engine:envOverrides'),
