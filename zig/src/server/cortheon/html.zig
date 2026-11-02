@@ -301,7 +301,7 @@ pub fn hrefs(a: Allocator, page: []const u8, max: usize, budget: ?*Budget) Alloc
         if (budget) |b| if (b.out()) break;
         const lt = std.ascii.findIgnoreCasePos(page, from, "<a") orelse break;
         from = lt + 2;
-        if (from >= page.len or !(page[from] == ' ' or page[from] == '\t' or page[from] == '\n')) continue;
+        if (from >= page.len or !(page[from] == ' ' or page[from] == '\t' or page[from] == '\n' or page[from] == '\r')) continue; // a carriage return is whitespace before href
         const end = tagEnd(page, lt);
         from = end; // the next link starts after this tag, so an unclosed one is read once
         const tag = page[lt..end];
@@ -440,6 +440,14 @@ test "link targets are read from anchors, decoded, without fragments or scripts"
     try std.testing.expectEqualStrings("/docs?a=1&b=2", got[0]);
     try std.testing.expectEqualStrings("https://o.org/", got[1]);
     try std.testing.expectEqualStrings("rel/page", got[2]);
+}
+
+test "a link broken onto the next line by a carriage return is kept" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("https://b.org/x", (try hrefs(a, "<a\nhref=\"https://b.org/x\">n</a>", 10, null))[0]);
+    try std.testing.expectEqualStrings("https://b.org/y", (try hrefs(a, "<a\r\nhref=\"https://b.org/y\">n</a>", 10, null))[0]);
 }
 
 test "a spent budget stops the text and the links, keeping what was read" {
