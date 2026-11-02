@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4 on Intel GPUs refuses a shard with wrong tensor sizes, overlapping tensors, unknown dtypes or too many dimensions, so a bad file can no longer overrun a device buffer (#1905, part of #1872). Thanks to @jschmied.
+
 - TensorFold Starlight, the enterprise platform, lands in `starlight/`: one governed OpenAI- and Anthropic-compatible endpoint for a fleet of TensorFold engines, with single sign-on (OIDC, SAML and SCIM), per-model access, priorities and budgets, model placement and supervision on Mac, Linux and Windows nodes, an admin console, Prometheus metrics and the TensorFold Connect desktop app (#1922, fixes #1921).
 
 - `TENSORFOLD_PREFILL_ORDER=srpt` lets short replies decode ahead of a long prompt that is still filling, while the prompt keeps at least a tenth of the GPU time and `--decode-share` still applies. Replies are the same tokens. It is off by default (#1876). Thanks to @gilby.
