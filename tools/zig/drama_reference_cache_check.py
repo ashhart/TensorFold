@@ -1,4 +1,4 @@
-"""GPU check for the Drama 3 reference cache: PCM sha256 with TF_DRAMA_REFERENCE_CACHE=0 against the default."""
+"""GPU check for the Drama 3 reference cache: PCM sha256 with TF_DRAMA_REFERENCE_CACHE=0 against 2 entries."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -17,7 +17,7 @@ TEXTS = ("The ferry leaves at seven, so we should be at the pier by half past si
          "Rain is expected tonight, but the market will still open in the morning.",
          "She folded the map, checked the compass, and started up the ridge.",
          "The bakery on the corner sells out of rye bread before noon.")
-CACHE = {"off": "0", "on": None}
+CACHE = {"off": "0", "on": "2"}
 
 
 def plan(voice):
@@ -59,10 +59,7 @@ def run_pass(args, rows, cache, log):
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    env = {**os.environ, "TF_DRAMA_PREFILL_ROWS": str(rows)}
-    env.pop("TF_DRAMA_REFERENCE_CACHE", None)
-    if CACHE[cache] is not None:
-        env["TF_DRAMA_REFERENCE_CACHE"] = CACHE[cache]
+    env = {**os.environ, "TF_DRAMA_PREFILL_ROWS": str(rows), "TF_DRAMA_REFERENCE_CACHE": CACHE[cache]}
     command = [str(args.bin), "serve", str(args.checkpoint), "--host", "127.0.0.1", "--port", str(port),
                "--name", "fishaudio/drama-3", "--context", "8192", "--parallel", "2", "--no-drafts",
                "--prompt-cache-gib", "0", "--keep-warm", "0", "--voices", str(args.voices)]
