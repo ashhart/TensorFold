@@ -64,7 +64,6 @@ pub const Cuda = struct {
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
     copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
-
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
         errdefer pinned.free();
@@ -74,7 +73,6 @@ pub const Cuda = struct {
         errdefer prompt_out.free();
         return .{ .gpa = gpa, .e = e, .head = head, .pinned = pinned, .rows_out = rows_out, .rows_dev = try rows_out.device(), .prompt_out = prompt_out, .prompt_dev = try prompt_out.device() };
     }
-
     pub fn deinit(self: *Cuda) void {
         var it = self.lanes.valueIterator();
         while (it.next()) |l| if (l.paged) {
@@ -88,7 +86,6 @@ pub const Cuda = struct {
         if (self.tapped) |*b| b.free();
         self.prompt_out.free();
     }
-
     pub fn backend(self: *Cuda) be.Backend {
         return .{ .ptr = self, .vtable = &.{
             .prefill = prefillFn,
@@ -156,6 +153,9 @@ pub const Cuda = struct {
         return .{
             .exact_width = @intCast(width),
             .copy_drafts = self.copy_drafts,
+            .root_copies = self.copy_drafts,
+            .context_copies = self.copy_drafts,
+            .copy_match = if (self.copy_drafts) 4 else 8,
             .gpu_tokens = false,
             .mtp = drafting,
             .allocate_shared_drafts = drafting,

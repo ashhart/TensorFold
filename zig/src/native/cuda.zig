@@ -496,6 +496,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 const toGib = family_memory.toGib;
 test {
     _ = @import("draft_sources_cuda_test.zig");
+    _ = @import("copy_drafts_nemotron_test.zig");
     _ = windows;
     _ = @import("cuda_startup_test.zig");
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
