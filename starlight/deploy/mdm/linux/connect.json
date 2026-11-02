@@ -1,6 +1,0 @@
-{
-  "ServerURL": "https://starlight.example.com",
-  "AllowManualServer": false,
-  "BridgePort": 7171,
-  "DisableBridge": false
-}

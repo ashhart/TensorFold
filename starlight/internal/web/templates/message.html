@@ -1,5 +1,0 @@
-{{define "body"}}{{$p := .Page}}
-<h1>{{$p.Heading}}</h1>
-<p class="{{if eq $p.Kind "error"}}error{{else if eq $p.Kind "success"}}success{{else}}lede{{end}}" {{if eq $p.Kind "error"}}role="alert"{{end}}>{{$p.Body}}</p>
-{{if $p.Links}}<div class="stack">{{range $p.Links}}<a class="button" href="{{.Href}}">{{.Label}}</a>{{end}}</div>{{end}}
-{{end}}
