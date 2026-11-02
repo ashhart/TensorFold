@@ -11,6 +11,8 @@ fn Blob(comptime import_name: []const u8) type {
 
 /// False in host-only builds (no nvcc, no prebuilt fatbins); every image is then empty.
 pub const available = options.with_kernels;
+/// The one SM (10 * major + minor) every image is built for (-Dgpu), or null for a build that holds several.
+pub const built_sm: ?u32 = options.built_sm;
 
 pub const qwen4_hc: []const u8 = if (available) &Blob("fatbin_qwen4_hc").bytes else &.{};
 pub const qwen4_ple: []const u8 = if (available) &Blob("fatbin_qwen4_ple").bytes else &.{};

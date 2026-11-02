@@ -4,8 +4,7 @@ const std = @import("std");
 
 /// The CUDA runtime without the engine's kernels (tp only needs the driver, memory, streams and NCCL).
 fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    const options = b.addOptions();
-    options.addOption(bool, "with_kernels", false);
+    const options = @import("cuda_runtime.zig").kernelOptions(b, false, null);
     const cuda = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     cuda.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     cuda.addOptions("kernel_options", options);
