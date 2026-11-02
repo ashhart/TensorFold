@@ -16,6 +16,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - The Intel GPU host tests build again: `zig build test-slide-xpu-host` no longer stops with a missing kernel image (#1840). Thanks to @jschmied.
 
+- LFM2 DSpark retains the configured bidirectional query block when the scheduler requests a shorter proposal prefix. Physical packing, clean calibration, context funding and the FP32 reference use the fixed width; larger logical cohorts still run as bounded passes. This is a model-input correction, not an acceptance or throughput claim.
+
+- LFM2 DSpark attention reserves a tail chunk for full query masks at maximum context, without changing the target's context window or attention capacity. A GPU regression checks untouched scratch rows and the extra keys' contribution.
+
 - GLM, GLM-DSA and Flash Next on Metal drop their checkpoint from the file cache once loaded, keeping the SSD expert and PLE files that serving still reads (#1868).
 
 - On Macs, the q27, Nemotron, LFM2 and Qwen3.5 loaders drop their checkpoint from the file cache once the weights are loaded, so unified memory doesn't hold them twice: on an M5 Ultra a loaded Qwen3.8-27B frees about 14 GiB and Nemotron 3.5 Lightning about 17 GiB, with the same replies (part of #1868).
