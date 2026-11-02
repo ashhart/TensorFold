@@ -36,8 +36,10 @@ const Rig = struct {
         @memset(r.tokens, 1);
         r.reqs = try gpa.alloc(draw.Request, most);
         r.out = try gpa.alloc(u32, most);
+        // a bucket's rows over the streams can outgrow a lone window when `most` passes 16 rows a stream
+        const share = most / streams + @intFromBool(most % streams != 0);
         // the rig runs before any request, on the caches of streams the memory plan holds and none uses yet
-        while (r.made < streams) : (r.made += 1) r.caches[r.made] = try e.newCaches(at + 2 * shared.window * 4);
+        while (r.made < streams) : (r.made += 1) r.caches[r.made] = try e.newCaches(at + @max(2 * shared.window * 4, share));
         return r;
     }
 
@@ -71,17 +73,17 @@ const Rig = struct {
 };
 
 /// Time `h`'s forwards and head on scratch caches of its engine (nothing of a stream is touched).
-pub fn measure(gpa: std.mem.Allocator, e: *Engine, head: ?*mtp.Head, width: usize, out: *Costs) !void {
+pub fn measure(gpa: std.mem.Allocator, e: *Engine, head: ?*mtp.Head, out: *Costs) !void {
     var r: Rig = try .init(gpa, e, @max(1, e.o.streams), e.o.batch_rows);
     defer r.deinit();
-    try forwards(&r, e.o.streams, width, e.o.batch_rows, out);
+    try forwards(&r, e.o.streams, e.o.batch_rows, out);
     if (head) |hd| out.step_ms = try step(e, hd);
 }
 
 /// The forwards the depth rule weighs: lone windows, then the row buckets shared rounds of `streams` windows pad to.
-pub fn forwards(r: anytype, streams: usize, width: usize, batch_rows: usize, out: *Costs) !void {
+pub fn forwards(r: anytype, streams: usize, batch_rows: usize, out: *Costs) !void {
     try shared.windows(r, batch_rows, out);
-    try shared.buckets(r, streams, width, batch_rows, plan.bucketOf, out);
+    try shared.buckets(r, streams, batch_rows, plan.bucketOf, out);
 }
 
 test {
