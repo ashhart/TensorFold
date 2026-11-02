@@ -19,8 +19,13 @@ pub const Ops = struct {
     text_rope: hip.Function,
 
     pub fn load(r: *hip.Runtime) !Ops {
+        return loadOn(r, 0);
+    }
+
+    pub fn loadOn(r: *hip.Runtime, device: c_int) !Ops {
+        if (device < 0) return error.Invalid;
         var buf: [64]u8 = undefined;
-        const full = try hip.Device.archName(r, 0, &buf);
+        const full = try hip.Device.archName(r, device, &buf);
         const arch = full[0 .. std.mem.indexOfScalar(u8, full, ':') orelse full.len];
         var module = try hip.Module.loadForArchitecture(r, &.{.{ .arch = kernels.arch, .bytes = kernels.bytes[0..] }}, arch);
         errdefer module.unload();
@@ -191,6 +196,8 @@ fn pointwise(out: u64, inputs: []const u64, count: usize) error{Invalid}!void {
 }
 
 test "GLM-OCR HIP ops: bias shape and aliases are refused before device calls" {
+    var r: hip.Runtime = undefined;
+    try std.testing.expectError(error.Invalid, Ops.loadOn(&r, -1));
     const o: Ops = undefined;
     const s: hip.Stream = undefined;
     try std.testing.expectError(error.Invalid, o.addBias(s, 2, 4, 0, 1));
