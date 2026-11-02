@@ -63,6 +63,7 @@ pub const dense_ref = @import("dense_ref.zig");
 pub const checkpoint_weights = @import("checkpoint_weights.zig");
 pub const kv_pool = @import("kv_pool.zig");
 pub const kv_prompts = @import("kv_prompts.zig");
+pub const kv_ledger = @import("kv_ledger.zig");
 
 test {
     _ = profile;
@@ -121,6 +122,7 @@ test {
     _ = @import("drafter_release_test.zig");
     _ = kv_pool;
     _ = kv_prompts;
+    _ = kv_ledger;
 }
 
 pub const frame_rounds = @import("frame_rounds.zig");
