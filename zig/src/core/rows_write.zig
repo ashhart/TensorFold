@@ -27,7 +27,7 @@ pub const Failures = struct {
 };
 
 pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
-    if (r.stopped) return;
+    if (r.stopped or e.image_frame != 0 or e.images.len != 0 or !@import("cache_images.zig").diskSafe(e.tokens)) return;
     sync.queued(r, e, starts);
 }
 
