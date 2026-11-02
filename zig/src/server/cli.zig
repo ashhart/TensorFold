@@ -110,6 +110,7 @@ pub const flags = [_]Flag{
     .{ .name = "--mtp-confidence", .native = served("--mtp-confidence") },
     .{ .name = "--lane-kernels", .choices = &.{ "auto", "on", "off" } },
     .{ .name = "--prompt-cache-gib", .native = true },
+    .{ .name = "--prompt-cache-disk", .native = true },
     .{ .name = "--prompt-cache-over-cap", .kind = .store_true, .native = true },
     .{ .name = "--checkpoint-slots", .native = served("--checkpoint-slots") },
     .{ .name = "--spill-gib", .native = served("--spill-gib") },
@@ -287,6 +288,8 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
             if (eq) |e| value = token[e + 1 ..] else {
                 i += 1;
                 if (i >= argv.len) return fail(u, a, "argument {s}: expected one argument", .{name});
+                if (std.mem.eql(u8, name, "--prompt-cache-disk") and std.mem.startsWith(u8, argv[i], "--"))
+                    return fail(u, a, "argument {s}: expected one argument", .{name});
                 value = argv[i];
             }
             if (flag.choices.len > 0) for (flag.choices) |c| {
@@ -420,6 +423,11 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.port = @intCast(p);
     } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
         out.learn = true;
+        out.learn_dir = v;
+    } else if (is(name, "--prompt-cache-disk")) {
+        if (v.len == 0) return fail(u, a, "argument --prompt-cache-disk: directory must not be empty", .{});
+        out.learn = true;
+        out.learn_conversations = true;
         out.learn_dir = v;
     } else if (is(name, "--learn-min-free-gib")) {
         out.learn_min_free_gib = try gib(u, a, name, v);
