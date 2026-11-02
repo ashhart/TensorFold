@@ -279,6 +279,7 @@ pub const LinuxTexts = struct {
 
 /// A Linux host's inventory. A GB10 is unified memory; any other CUDA card keeps its own VRAM.
 /// gpu_limit stays 0 when nvidia-smi did not answer, so the cluster file's gpu_limit_gb can fill it.
+/// A GB10 still at 0 after that fill is refused by name: its memory columns print [N/A].
 pub fn inventoryLinux(t: LinuxTexts) node.Inventory {
     const mem = meminfo(t.meminfo);
     const gpu = nvidiaSmi(t.nvidia);

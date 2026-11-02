@@ -121,6 +121,10 @@ pub fn inventory(a: Allocator, r: Runner, c: config.Config, n: config.Node, loca
         inv.backend = n.backend;
         if (n.memory) |m| inv.memory = m;
         if (n.gpu_limit) |g| inv.gpu_limit = g;
+        if (std.mem.indexOf(u8, inv.chip.str(), "GB10") != null and inv.gpu_limit == 0) {
+            std.log.warn("refused: {s} is a GB10 and nvidia-smi printed no memory. Set gpu_limit_gb for {s} in the cluster file.", .{ n.name, n.name });
+            return error.GpuLimitMissing;
+        }
         return inv;
     }
     var texts: [mac_probes.len][]const u8 = undefined;

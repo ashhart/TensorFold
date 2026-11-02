@@ -148,13 +148,16 @@ test "a disaggregated model on fake hosts: no tensor-parallel group across its t
         \\              { "node": "s2", "device": "rocep1s0f0", "via": "enp1s0f0np0/192.0.2.10", "port": 7491, "gid": 1 } ] } ] }
     ;
     const file = try std.fs.path.join(a, &.{ root, "cluster.json" });
+    // a GB10 prints no memory: without gpu_limit_gb it is refused, exit 1 and no stack trace
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = try std.mem.replaceOwned(u8, a, linked, ", \"gpu_limit_gb\": 100", "") });
+    try std.testing.expectEqual(@as(u8, 1), (try run(a, &.{ "serve", "--cluster", file, "--probes", root })).code);
     // no link declared: the probed topology has no Mac to GB10 cable (a GB10 reports no Thunderbolt peers)
     try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = head ++ " }\n" });
     const unlinked = try run(a, &.{ "serve", "--cluster", file, "--probes", root });
     try std.testing.expectEqual(@as(u8, 1), unlinked.code);
     try std.testing.expect(has(unlinked.err, "the fake cluster did not come up: NeverSettled"));
     try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = linked });
-    try tmp.dir.deleteFile(io, "launches.log");
+    tmp.dir.deleteFile(io, "launches.log") catch {};
     const serve = try run(a, &.{ "serve", "--cluster", file, "--probes", root });
     if (serve.code != 0) std.debug.print("{s}{s}", .{ serve.out, serve.err });
     try std.testing.expectEqual(@as(u8, 0), serve.code);
