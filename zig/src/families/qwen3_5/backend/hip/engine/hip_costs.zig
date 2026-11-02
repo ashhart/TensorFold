@@ -7,6 +7,7 @@ const Engine = @import("engine.zig").Engine;
 const state = @import("../forward/state.zig");
 const draw = serve.draw;
 const mtp = @import("mtp.zig");
+const plan = @import("../forward/plan.zig");
 
 const shared = serve.costs;
 pub const Costs = shared.Costs;
@@ -18,45 +19,73 @@ const at = 16;
 const Rig = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
-    caches: [shared.most_streams]state.Caches = undefined,
+    /// A stream's caches, rows and the tokens, requests and draws of a round's rows.
+    caches: []state.Caches = &.{},
     made: usize = 0,
-    tokens: [64]u32 = @splat(1),
-    reqs: [64]draw.Request = undefined,
-    out: [64]u32 = undefined,
+    rows: []Engine.Rows = &.{},
+    tokens: []u32 = &.{},
+    reqs: []draw.Request = &.{},
+    out: []u32 = &.{},
+
+    fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize, most: usize) !Rig {
+        var r: Rig = .{ .gpa = gpa, .e = e };
+        errdefer r.deinit();
+        r.caches = try gpa.alloc(state.Caches, streams);
+        r.rows = try gpa.alloc(Engine.Rows, streams);
+        r.tokens = try gpa.alloc(u32, most);
+        @memset(r.tokens, 1);
+        r.reqs = try gpa.alloc(draw.Request, most);
+        r.out = try gpa.alloc(u32, most);
+        // the rig runs before any request, on the caches of streams the memory plan holds and none uses yet
+        while (r.made < streams) : (r.made += 1) r.caches[r.made] = try e.newCaches(at + 2 * shared.window * 4);
+        return r;
+    }
 
     fn deinit(r: *Rig) void {
         r.e.drain();
         for (r.caches[0..r.made]) |*c| c.deinit(r.gpa);
+        r.gpa.free(r.out);
+        r.gpa.free(r.reqs);
+        r.gpa.free(r.tokens);
+        r.gpa.free(r.rows);
+        r.gpa.free(r.caches);
     }
 
     /// Mean ms of a verify of `streams` windows of the given widths.
     pub fn time(r: *Rig, widths: []const usize) !f64 {
-        var rows: [shared.most_streams]Engine.Rows = undefined;
         var total: usize = 0;
         for (widths, 0..) |w, i| {
-            rows[i] = .{ .caches = &r.caches[i], .pos = at, .tokens = r.tokens[total..][0..w] };
+            r.rows[i] = .{ .caches = &r.caches[i], .pos = at, .tokens = r.tokens[total..][0..w] };
             for (0..w) |j| r.reqs[total + j] = .{ .sampling = null, .position = at + j + 1 };
             total += w;
         }
+        const n = shared.runs(total);
         var spent: u64 = 0;
-        for (0..shared.warm + shared.reps) |i| {
+        for (0..n.warm + n.reps) |i| {
             const t0 = nowNs();
-            _ = try r.e.verify(rows[0..widths.len], r.reqs[0..total], &r.out);
-            if (i >= shared.warm) spent += nowNs() - t0;
+            _ = try r.e.verify(r.rows[0..widths.len], r.reqs[0..total], r.out);
+            if (i >= n.warm) spent += nowNs() - t0;
         }
-        return @as(f64, @floatFromInt(spent)) / shared.reps / 1e6;
+        return @as(f64, @floatFromInt(spent)) / @as(f64, @floatFromInt(n.reps)) / 1e6;
     }
 };
 
 /// Time `h`'s forwards and head on scratch caches of its engine (nothing of a stream is touched).
-pub fn measure(gpa: std.mem.Allocator, e: *Engine, head: ?*mtp.Head, out: *Costs) !void {
-    var r: Rig = .{ .gpa = gpa, .e = e };
+pub fn measure(gpa: std.mem.Allocator, e: *Engine, head: ?*mtp.Head, width: usize, out: *Costs) !void {
+    var r: Rig = try .init(gpa, e, @max(1, e.o.streams), e.o.batch_rows);
     defer r.deinit();
-    // the rig runs before any request, on the caches of streams the memory plan holds and none uses yet
-    const streams = @min(shared.most_streams, e.o.streams);
-    while (r.made < streams) : (r.made += 1) r.caches[r.made] = try e.newCaches(at + 2 * shared.window * 4);
-    try shared.forwards(&r, e.o.batch_rows, streams, e.o.batch_rows, out);
+    try forwards(&r, e.o.streams, width, e.o.batch_rows, out);
     if (head) |hd| out.step_ms = try step(e, hd);
+}
+
+/// The forwards the depth rule weighs: lone windows, then the row buckets shared rounds of `streams` windows pad to.
+pub fn forwards(r: anytype, streams: usize, width: usize, batch_rows: usize, out: *Costs) !void {
+    try shared.windows(r, batch_rows, out);
+    try shared.buckets(r, streams, width, batch_rows, plan.bucketOf, out);
+}
+
+test {
+    _ = @import("hip_costs_test.zig");
 }
 
 /// One chained head step: a lone chain of the deepest depth, over a scratch row.
