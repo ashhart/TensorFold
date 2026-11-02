@@ -158,6 +158,11 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         conn.sendJson(400, "{\"error\":{\"message\":\"this model is a reranker: use POST /v1/rerank\",\"type\":\"invalid_request_error\"}}");
         return;
     }
+    if (srv.info.readouts != null and !is_systemone) { // a readout engine answers System One decisions and nothing else
+        discardBody(conn, a);
+        conn.sendJson(400, "{\"error\":{\"message\":\"this model answers decisions only; use POST /v1/systemone\",\"type\":\"invalid_request_error\"}}");
+        return;
+    }
     // The wake for every engine-using route: a parked server reloads under the `active` count this begin raised.
     if (srv.idle_manager) |m| {
         if (idle_unload.wakeReload(m, srv, a)) |wake_problem| {
