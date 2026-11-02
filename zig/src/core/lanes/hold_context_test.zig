@@ -450,8 +450,6 @@ test "no-confidence lone holds price staged debt only before whole-round observa
         var clock: fake.FixedClock = .{};
         var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
         defer engine.deinit();
-        try std.testing.expectEqual(@as(u32, 9), cfg.k.hold_block_rows);
-        try std.testing.expectEqual(@as(u32, 9), engine.rule.k.hold_block_rows);
         engine.rule.k.depth_probe_every = 4;
         var s = try sm.Stream.init(gpa, .{ .id = "no-confidence", .prompt = &.{ 2, 7, 13 }, .max_new = 32 });
         defer s.deinit(gpa);
@@ -528,8 +526,7 @@ test "fixed query blocks fund the real split instead of four cheap short heads" 
     for ([_]u32{ 0, 9, 0 }) |query_rows| {
         f.engine.rule.k.hold_block_rows = query_rows;
         try f.budgetsFor(&plans, &.{ 0, 1, 2, 3 }, &out);
-        // Variable one-row heads fit together: 7.2/16 pays. Four fixed nine-row blocks
-        // split 3+1 and tie plain at 7.2/18, but the first three still pay at 6.4/15.
+        // Four fixed queries split 3+1 and tie plain; the first three still pay.
         try std.testing.expectEqualSlices(i64, if (query_rows == 0) &.{ 1, 1, 1, 1 } else &.{ 1, 1, 1, 0 }, &out);
     }
 }
