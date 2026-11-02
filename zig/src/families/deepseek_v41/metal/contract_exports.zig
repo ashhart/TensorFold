@@ -2,3 +2,4 @@
 pub const fp8_mma = @import("fp8_mma.zig");
 pub const fp8_rows = @import("fp8_rows.zig");
 pub const experts = @import("experts.zig");
+pub const xmma = @import("experts_mma.zig");

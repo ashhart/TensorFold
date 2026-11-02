@@ -23,8 +23,8 @@ pub fn start(b: anytype, s: *Stream, slot: ?usize) !void {
     b.filling.putAssumeCapacity(s, begun);
 }
 
-/// A family the cap cannot stand in for consumes the hint as `_: u32`: GLM CUDA's chunks fix `at + prompt_rows`.
-pub fn step(b: anytype, s: *Stream, _: u32) !bool {
+/// A nonzero `max_rows` caps the call in place of `decode_rows`; only a prefill policy sends this family one.
+pub fn step(b: anytype, s: *Stream, max_rows: u32) !bool {
     errdefer b.abortPrompt(s);
     if (s.isCancelled()) return error.Cancelled;
     if (!b.filling.contains(s)) try start(b, s, null);
@@ -37,7 +37,9 @@ pub fn step(b: anytype, s: *Stream, _: u32) !bool {
         var end: u32 = @intCast(prompt.len);
         if (p.next < s.chunks.len) end = @min(end, s.chunks[p.next]);
         if (p.reuse_next < s.reuse.marks.len) end = @min(end, s.reuse.marks[p.reuse_next]);
-        if (b.decoding()) end = @min(end, p.at + @min(decode_rows, end - p.at));
+        if (max_rows > 0) {
+            end = @min(end, p.at + @min(max_rows, end - p.at)); // promptRows still bounds it by the prompt step
+        } else if (b.decoding()) end = @min(end, p.at + @min(decode_rows, end - p.at));
         const n = b.promptRows(p.at, end);
         if (n == 0 or n > end - p.at) return error.ChunkOutOfStep;
         try b.settlePrompt(s);
@@ -74,11 +76,11 @@ pub fn Callbacks(comptime B: type) type {
             defer pool.pop();
             while (!try step(b, s, 0)) {}
         }
-        pub fn one(ptr: *anyopaque, s: *Stream, _: u32) anyerror!bool {
+        pub fn one(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
             const b = B.self(ptr);
             const pool = b.promptPool();
             defer pool.pop();
-            return step(b, s, 0);
+            return step(b, s, max_rows);
         }
     };
 }
