@@ -8,6 +8,7 @@ const steps = image.For(@import("core").picture);
 const tw = @import("cuda_tower.zig");
 
 const vit = cuda.vit;
+const toBf16 = @import("core").bf16_round.bits;
 
 /// nn.LayerNorm's default and Gemma4RMSNorm's.
 const ln_eps: f32 = 1e-5;
@@ -111,7 +112,7 @@ pub const Embedder = struct {
         const vw = wts.vision_width;
         const host = try e.gpa.alloc(u16, t * mw + 2 * t * 2);
         defer e.gpa.free(host);
-        for (pixels, host[0 .. t * mw]) |p, *h| h.* = vit.bf16(p);
+        for (pixels, host[0 .. t * mw]) |p, *h| h.* = toBf16(p);
         // each row's x and y position rows of the [1120, 2, width] table, as rows of a [2240, width] one
         const ids = std.mem.bytesAsSlice(i32, std.mem.sliceAsBytes(host[t * mw ..]));
         for (0..t) |r| {

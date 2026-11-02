@@ -99,3 +99,29 @@ test "the replaced copies equal bits() on every zero, subnormal, infinity, NaN a
     var prng = std.Random.DefaultPrng.init(32);
     for (0..1 << 20) |_| try expectReplaced(prng.random().int(u32));
 }
+
+/// The load and vision copies as they were spelled: a plain `+`, no NaN branch, so negative NaNs overflow.
+fn plain(v: f32) u16 {
+    const u: u32 = @bitCast(v);
+    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+}
+
+fn expectPlain(w: u32) !void {
+    const v: f32 = @bitCast(w);
+    if (std.math.isNan(v)) {
+        try std.testing.expectEqual(@as(u16, @intCast((w >> 16) | 0x40)), bits(v));
+        try std.testing.expect(std.math.isNan(value(bits(v))));
+    } else try std.testing.expectEqual(plain(v), bits(v));
+}
+
+test "the plain-+ copies equal bits() off NaN; every NaN, the negative ones that overflowed them too, stays NaN" {
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try expectPlain(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try expectPlain(@as(u32, @intCast(hi)) << 16 | lo);
+    try std.testing.expectEqual(@as(u16, 0xffff), bits(@bitCast(@as(u32, 0xffff_ffff))));
+    try std.testing.expectEqual(@as(u16, 0xff80), bits(@bitCast(@as(u32, 0xff7f_ffff)))); // fp32's most negative: -Inf
+    var prng = std.Random.DefaultPrng.init(33);
+    for (0..1 << 20) |_| try expectPlain(prng.random().int(u32));
+}
