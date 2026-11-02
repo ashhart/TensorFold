@@ -6,8 +6,8 @@ const win = builtin.os.tag == .windows;
 pub const video_library = @import("video_library.zig");
 const grammar_library = @import("grammar_library.zig");
 
-pub const Id = enum { cublaslt, cublas, nccl, verbs, video, jpeg, webp, grammar, rccl, mcdma_rpc, mcdma_fabric };
-pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
+pub const Id = enum { cublaslt, cublas, rocblas, nccl, verbs, video, jpeg, webp, grammar, rccl, mcdma_rpc, mcdma_fabric };
+pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, RocblasUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
 pub const Spec = struct {
     id: Id,
     name: []const u8,
@@ -29,6 +29,7 @@ const loader_path = if (win) "add its directory to PATH" else "on Linux, add its
 pub const all = [_]Spec{
     item(.cublaslt, "cuBLASLt", if (win) &.{"cublasLt64_13.dll"} else &.{ "libcublasLt.so.13", "libcublasLt.so" }, "CUDA vision towers (--vision) and CUDA cuBLASLt projections", "install the NVIDIA CUDA 13 cuBLAS runtime; " ++ loader_path ++ "; a driver-only host does not include it", error.CublasLtUnavailable, null, false),
     item(.cublas, "cuBLAS", &.{ "libcublas.so.13", "libcublas.so" }, "Drama CUDA prompt and codec GEMMs", "install the NVIDIA CUDA 13 cuBLAS runtime; " ++ loader_path ++ "", error.CublasUnavailable, null, false),
+    item(.rocblas, "rocBLAS", &.{ "librocblas.so.5", "librocblas.so", "/opt/rocm/lib/librocblas.so" }, "HIP BF16 dense projections and image towers", "install the rocBLAS runtime matching the ROCm installation; " ++ loader_path, error.RocblasUnavailable, null, false),
     item(.nccl, "NCCL", &.{"libnccl.so.2"}, "CUDA ranks (including the GLM pair)", "install the NVIDIA NCCL 2 runtime compatible with CUDA 13; " ++ loader_path ++ "", error.NcclUnavailable, null, false),
     item(.verbs, "RDMA verbs", if (mac) &.{"/usr/lib/librdma.dylib"} else &.{"libibverbs.so.1"}, "RoCE/RDMA gathers", if (mac) "use a macOS installation with its RDMA runtime" else "install rdma-core's libibverbs runtime and the provider for the network adapter", error.VerbsUnavailable, null, false),
     item(.video, "TensorFold video", if (mac) &.{"libtfvideo.dylib"} else if (win) &.{"tfvideo.dll"} else &.{video_library.soname}, "video inputs (--vision)", "build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md", error.VideoLibraryUnavailable, null, true),
