@@ -14,10 +14,57 @@ from pathlib import Path
 
 REVISION = '4035ffb1d8f8bafcdb867dfaf6f7514f101464f9'
 PROMPT = '</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>'
-COMMANDS = ('reference', 'positions', 'processor', 'compare')
+COMMANDS = ('reference', 'sources', 'positions', 'processor', 'compare')
+# The revision's non-weight sources: model, processor and example code, configuration, tokenizer and the model card.
+SOURCES = {
+    'README.md': 'a97942afdd486e6e413afd66b5f7d955a995ad78b8eaf4a73cd010ac829813ef',
+    'chat_template.jinja': '86e90f392a2779c96c96b5848248981a05750e7a11e0380b092a8c35e2c3e32f',
+    'config.json': 'bff3460ae530573ad2e276627be86cab1b6859754b76e8b196410f17e7f0b7d5',
+    'generation_config.json': '0ec0669b5d3df6c4f2fcbf41334c3d64f44fdee1d1e5f158a33b112edf1646c3',
+    'hf_logits_processor.py': '37bb9612db8840eeda67f3bc9a2d8837aeebc3b206315229671d6d56c570704c',
+    'hf_nemotron_parse_config.py': '5f4d2530457e41dc100df1fa614485aec8c94715f25cd69ba6e6ebdaf4611899',
+    'hf_nemotron_parse_modeling.py': 'ec43d337be2797e2ad137326a68578af67694763eac304fd85b604b6775b93cc',
+    'hf_nemotron_parse_processor.py': '983fa8aeb0d872da01296035b30d60c84fd857879a37c939c5c7203bad3c8b81',
+    'hf_prefix_geometry.py': '41406f33399fd39bd0601fd2acd320f87fec5f9865f13fbcb4e4577d94b97048',
+    'postprocessing.py': 'cef5a7379720d479f7fd6fe47fb0e83097ff47bc053f751e747134c882d5a3fe',
+    'preprocessor_config.json': '16d54d73fc265b31f3771caf39770dc85213cae7594823ba7a6ac3f085315ada',
+    'processor_config.json': 'b3e2ff2cc94f3d9412f179acf06d8bc5543305ec27966617977b3bd47fee9e5e',
+    'run_transformers_inference.py': 'fc3568bb3e9cf48dbcb8ce0cd4e25ee7360cec9fa9da331141497ecee5dcea41',
+    'special_tokens_map.json': '7073bb56328d2b66724495a7cf53841fccdcc9efcafb1e1b7cc916baa80e3c8c',
+    'tokenizer.json': '34f566e728995769d971fc2707596bfb92c83298d357bc6ec29a7a1d3d12a74a',
+    'tokenizer_config.json': '701dad9bcc5f964a6fa020e7d5018c71efc93aad79d471cfca541b9bb4f6d012',
+}
+VERSIONS = {'torch': '2.11.0', 'torchvision': '0.26.0', 'transformers': '5.14.1', 'timm': '1.0.22'}
+
+
+def pinned(model_dir):
+    """Return the checkpoint's source hashes, or refuse sources that differ from REVISION."""
+    found = {name: hashlib.sha256((model_dir / name).read_bytes()).hexdigest() if (model_dir / name).is_file() else None
+             for name in SOURCES}
+    if wrong := sorted(name for name, digest in found.items() if digest != SOURCES[name]):
+        raise RuntimeError(f"checkpoint sources differ from {REVISION}: {', '.join(wrong)}")
+    return found
+
+
+def versions():
+    """Refuse a reference environment whose packages differ from the pinned versions."""
+    import importlib.metadata
+
+    if wrong := [f'{name} {importlib.metadata.version(name)}' for name, want in VERSIONS.items()
+                 if importlib.metadata.version(name).split('+')[0] != want]:
+        raise RuntimeError(f"reference packages differ from {VERSIONS}: {', '.join(wrong)}")
+
+
+def sources(args):
+    """Check a checkpoint's sources against the pins and print their hashes; no model or package is loaded."""
+    print(json.dumps(dict(reference_revision=REVISION, versions=VERSIONS, source_sha256=pinned(args.model.resolve())),
+                     indent=2))
 
 
 def reference(args):
+    model_dir = args.model.resolve()
+    sources_sha256 = pinned(model_dir)
+    versions()
     import torch
     from PIL import Image
     from transformers import AutoModel, AutoProcessor, GenerationConfig
@@ -25,11 +72,11 @@ def reference(args):
     torch.set_num_threads(4)
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "input.image").write_bytes(args.image.read_bytes())
-    model_dir = args.model.resolve()
     source = model_dir / 'hf_nemotron_parse_modeling.py'
     manifest = dict(reference_revision=REVISION, device=args.device, dtype=args.dtype,
                     torch_version=torch.__version__, source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
-                    image_sha256=hashlib.sha256(args.image.read_bytes()).hexdigest(), tensors={})
+                    image_sha256=hashlib.sha256(args.image.read_bytes()).hexdigest(), sources_sha256=sources_sha256,
+                    versions=VERSIONS, tensors={})
 
     def save(name, value):
         value = value.detach().cpu().contiguous()
@@ -106,6 +153,7 @@ def reference(args):
 
 def positions(args):
     """Content-normalized RADIO positions from the checkpoint's hf_prefix_geometry.py, one-patch axes included."""
+    pinned(args.model.resolve())
     import importlib.util
 
     import torch
@@ -222,6 +270,9 @@ def main():
     p.add_argument('--max-new-tokens', type=int, default=96)
     p.add_argument('--prompt', default=PROMPT)
     p.set_defaults(run=reference)
+    p = commands.add_parser('sources', help='check the checkpoint sources against the pins')
+    p.add_argument('--model', type=Path, required=True)
+    p.set_defaults(run=sources)
     p = commands.add_parser('positions', help='build HIP position tests for TF_PARSE_POSITION_DIR')
     p.add_argument('--model', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
