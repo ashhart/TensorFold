@@ -40,6 +40,7 @@ pub const Job = struct {
     reached: u32 = 0, // the furthest mark its prompt pass has stood at, kept or not
     prefix: @import("lane_host_prefix.zig").Waiting = .{}, // its wait for another fill's cut, while queued
     fetch: @import("lane_host_fetch.zig").Ticket = .{}, // its disk state read ahead, while queued
+    lease: @import("kv_ledger.zig").Lease = .{}, // its caches' bytes in the host's ledger, from admission to its end
 
     /// Record first admission once, including a family planner and a background pass that later yields.
     pub fn noteAdmission(job: *Job) void {

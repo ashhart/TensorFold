@@ -561,6 +561,8 @@ test {
     _ = @import("lane_host_fail_test.zig");
     _ = @import("lane_host_lone_test.zig");
     _ = @import("lane_host_admit_test.zig");
+    _ = @import("lane_host_ledger_test.zig");
+    _ = @import("kv_ledger.zig");
     _ = @import("lane_host_recall_test.zig");
     _ = @import("lane_host_fill_test.zig");
     _ = @import("lane_host_status_test.zig");
