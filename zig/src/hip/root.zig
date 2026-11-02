@@ -27,6 +27,7 @@ pub const Launcher = launches.Launcher;
 pub const counting = @import("launches/util.zig").counting;
 pub const raw = @import("raw.zig");
 pub const ops = @import("ops/ops.zig");
+pub const blas = @import("blas.zig");
 pub const plan_ops = @import("ops/plan.zig");
 pub const policy = @import("policy.zig");
 pub const Policy = policy.Policy;
@@ -52,6 +53,7 @@ pub const Votes = vote.Votes;
 pub const loopback = @import("comm/loopback.zig");
 
 test {
+    _ = blas;
     _ = policy;
     _ = admission;
     _ = Device;

@@ -37,6 +37,7 @@ supply cuBLASLt or NCCL. A GLM CUDA pair needs NCCL on both ranks; adding `--vis
 | --- | --- | --- | --- |
 | CUDA vision towers (`--vision`), cuBLASLt projections | cuBLASLt | `libcublasLt.so.13` (`cublasLt64_13.dll` on Windows) | NVIDIA CUDA 13 cuBLAS runtime; not the display driver |
 | Drama3 CUDA prompt and codec matrix operations | cuBLAS | `libcublas.so.13` | NVIDIA CUDA 13 cuBLAS runtime |
+| HIP BF16 dense projections and image towers | rocBLAS | `librocblas.so.5` | ROCm's matching rocBLAS runtime |
 | CUDA tensor-parallel ranks, including the GLM pair | NCCL | `libnccl.so.2` | NVIDIA NCCL 2 runtime compatible with CUDA 13 |
 | RoCE/RDMA gathers | verbs | `libibverbs.so.1`; `/usr/lib/librdma.dylib` | rdma-core and adapter provider on Linux; the macOS RDMA runtime |
 | Video inputs | TensorFold video | `libtfvideo.so`; `libtfvideo.dylib` | Optional `zig build video -Dffmpeg=PREFIX` runtime built against FFmpeg 9.0.2, installed in the server's `lib` directory |
