@@ -19,6 +19,41 @@ test "text and VL preserve their distinct context and actual mixed embedding wid
     try std.testing.expectEqual(@as(f32, 1), t.sliding_rotary.partial);
 }
 
+test "RoPE: both settings' inverse frequencies bit for bit torch 2.14's float32 rows, zero past the rotated pairs" {
+    const full = [32]u32{
+        0x3f800000, 0x3f4e4bad, 0x3f263de0, 0x3f05f6ef, 0x3ed7e89b, 0x3eadfcff, 0x3e8c3504, 0x3e61f835,
+        0x3e361887, 0x3e12bd91, 0x3dec7fd6, 0x3dbe94c6, 0x3d99940d, 0x3d778513, 0x3d47763f, 0x3d20bc1d,
+        0x3d0186e3, 0x3cd0c1a8, 0x3ca8398b, 0x3c879008, 0x3c5a7bf2, 0x3c301052, 0x3c0de12d, 0x3be4aa46,
+        0x3bb8449c, 0x3b947dae, 0x3b6f520e, 0x3b40dac5, 0x3b1b690d, 0x3afa78f0, 0x3ac9d75c, 0x3aa2a6f7,
+    };
+    const sliding = [64]u32{
+        0x3f800000, 0x3f5dafd7, 0x3f3ff911, 0x3f263de0, 0x3f0ff59a, 0x3ef953cf, 0x3ed7e89b, 0x3ebaf81b,
+        0x3ea1e89b, 0x3e8c3504, 0x3e72d423, 0x3e5247ed, 0x3e361887, 0x3e1db040, 0x3e088d77, 0x3dec7fd6,
+        0x3dcccccd, 0x3db15978, 0x3d99940d, 0x3d84fe4d, 0x3d6655c2, 0x3d47763f, 0x3d2cba15, 0x3d159348,
+        0x3d0186e3, 0x3ce054d2, 0x3cc2434f, 0x3ca8398b, 0x3c91ad39, 0x3c7c4d33, 0x3c5a7bf2, 0x3c3d3311,
+        0x3c23d70a, 0x3c0de12d, 0x3bf5b9b0, 0x3bd4ca15, 0x3bb8449c, 0x3b9f91cc, 0x3b8a2e77, 0x3b6f520e,
+        0x3b4f3e38, 0x3b33770f, 0x3b1b690d, 0x3b06946f, 0x3ae91528, 0x3ac9d75c, 0x3aaec98e, 0x3a975c0e,
+        0x3a83126f, 0x3a6301e2, 0x3a44948c, 0x3a2a3b44, 0x3a136a16, 0x39ff4fac, 0x39dd1725, 0x39bf74d7,
+        0x39a5cb60, 0x398f9272, 0x3978a815, 0x395753e4, 0x393a7753, 0x39217916, 0x390bd472, 0x38f22ce2,
+    };
+    const f = (c.Rotary{ .theta = 1e6, .partial = 0.5 }).inverseFrequencies();
+    const s = (c.Rotary{ .theta = 1e4, .partial = 1 }).inverseFrequencies();
+    for (full, f[0..32]) |want, v| try std.testing.expectEqual(want, @as(u32, @bitCast(v)));
+    for (f[32..]) |v| try std.testing.expectEqual(@as(f32, 0), v);
+    for (sliding, s) |want, v| try std.testing.expectEqual(want, @as(u32, @bitCast(v)));
+}
+
+test "the schedule: 13 conv, 6 full and 5 sliding layers; only a sliding layer has a window, its ring the window and the rows" {
+    try std.testing.expectEqual(@as(usize, 13), c.count(.conv));
+    try std.testing.expectEqual(@as(usize, 6), c.count(.full_attention));
+    try std.testing.expectEqual(@as(usize, 5), c.count(.sliding_attention));
+    try std.testing.expectEqual(@as(usize, 256), c.LayerType.sliding_attention.window());
+    try std.testing.expectEqual(@as(usize, 0), c.LayerType.full_attention.window());
+    try std.testing.expectEqual(@as(usize, 0), c.LayerType.conv.window());
+    try std.testing.expectEqual(@as(usize, 256 + 16), c.ring(16));
+    try std.testing.expectEqual(@as(usize, 1280), c.ring(1024));
+}
+
 test "6 and 8 bit affine variants use the same config parser" {
     inline for (.{ "6", "8" }) |bits| {
         const replacement = "\"bits\": " ++ bits;
