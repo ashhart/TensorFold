@@ -21,6 +21,8 @@ struct MlxDecoder {
     static constexpr int kBits = BITS;
     // Words of a 32-code chunk of a column.
     static constexpr int kWords = BITS;
+    // A bias a group: the tiles sum x and fold the bias with it.
+    static constexpr bool kBias = true;
 
     // ---- the plan: a routed item's expert and rows ----
 
