@@ -83,8 +83,11 @@ the host does not wait for a hold that fits one pass). Each kept prompt state ke
 drafting stream resumes prompts. Hold lengths follow the lane core's per-round depth pricing; no stream-count guard disables drafting.
 
 Priced shared rounds use the existing lane allocator and the measured block-count/depth grid. Only neural blocks
-incur hold cost; copies and forced rows still occupy verify capacity. The native 32-row hold limit can split a
-cohort into several passes, priced in execution order rather than as one impossible padded batch.
+incur hold cost; copies and forced rows still occupy verify capacity. Each hold runs the checkpoint's complete
+bidirectional query block, including unused mask rows, regardless of the requested proposal prefix. The final
+pointwise projections retain that full width too. Markov steps and returned proposals still follow the grant.
+The native 32-row hold limit splits larger logical cohorts into bounded passes, priced in execution order using
+the configured query width rather than the retained depth. All logical stream counts remain supported.
 The target retains its original 1–16-row waited-wall calibration and wall-clock round measurement, including
 real host residual work. This stage does not add later shared-width calibration or per-row host-draw pricing.
 
@@ -104,9 +107,11 @@ allocation inputs, including rounds with no grant. Metadata-only absorbs and zer
 command buffer or autorelease pool and accrue no GPU time.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
-against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),
-prints each draft against the reference's pick with the margin between the reference's two best tokens, and times
-the drafter's passes; a near tie can pick the other token.
+against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head).
+The reference always evaluates the full configured query block and compares only the requested retained prefix.
+The diagnostic checks that changing the grant preserves first-row raw logits, first pick and confidence, and
+exercises independent same-regime references for 8- and 16-lane split cohorts. It prints each draft against the
+reference's pick and its margin, and times the passes; a near tie can pick the other token.
 
 The sorted expert combine preserves pick order and both BF16 rounding boundaries while feeding the next/final
 RMSNorm and raw taps; decode's twin combine follows the same ownership rules. Duplicate tap columns and null
@@ -149,10 +154,12 @@ observed whole-round prices already include that work and are not charged a seco
 
 A stream with a copy ahead verifies the copy and asks no hold, and a drafting stream prices its copy
 windows by its own copies. The lane core also weighs the hold pass itself: clean holds are calibrated at
-every legal depth for 1/2/4/8/16 blocks within the 32-row pass. Each shape is warmed, then takes the best of
-three valid, same-attempt CPU-encode plus GPU totals. The same concurrent encoder, barriers, piece partition
-and gather path calibrate context-only passes at powers-of-two row counts from 1 through 2,048 for all five
-stream counts: 60 context quotes. Temporary K/V-only lanes share deterministic finite nonzero raw taps.
+every requested depth for every legal physical block count up to 16, using the configured query width within
+the 32-row pass (1/2/3 blocks at the released nine-row width). Each shape is warmed, then takes the best of
+three valid, same-attempt CPU-encode plus GPU totals. Clean quotes remain keyed by the requested depth.
+The same concurrent encoder, barriers, piece partition and gather path calibrate context-only passes at
+powers-of-two row counts from 1 through 2,048 for all five stream counts: 60 context quotes. Temporary K/V-only
+lanes share deterministic finite nonzero raw taps.
 Both grids publish only when complete, and startup work is not charged to a serving round.
 
 Each selected physical group pays context once using its largest staged debt and the next covering measured

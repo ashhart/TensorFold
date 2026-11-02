@@ -26,7 +26,8 @@ pub const Facts = struct {
     copy_first: bool = false, // a hold costs a pass of its own: none is asked for a stream with a copy ahead
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // that pass's ms by blocks and depth (timed at load)
     hold_context_costs: []const @import("hold_price.zig").ContextCost = &.{},
-    hold_rows: u32 = 0, // rows one hold pass holds at most, a block as long as its pass's deepest: more run as passes in order (0: no bound)
+    hold_rows: u32 = 0, // rows one hold pass holds at most; more run as passes in order (0: no bound)
+    hold_block_rows: u32 = 0, // minimum query rows per block, independent of the returned proposal depth
 };
 
 /// Target rows [start, start + features.rows) and the token after each; `rows`, when given, picks which to absorb.

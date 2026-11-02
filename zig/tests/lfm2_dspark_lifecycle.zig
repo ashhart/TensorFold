@@ -43,9 +43,9 @@ pub fn signalledCost(d: *q.dspark.Drafter, blocks: []const q.dspark_block.Block)
 pub fn calibrated(d: *const q.dspark.Drafter) !void {
     var clean: usize = 0;
     var context: usize = 0;
-    for ([_]u32{ 1, 2, 4, 8, 16 }) |streams| {
+    for (1..@min(16, q.dspark.pass_rows / d.config.block) + 1) |streams| {
         var depth: u32 = 1;
-        while (depth <= @min(d.config.block, q.dspark.pass_rows / streams)) : (depth += 1) {
+        while (depth <= d.config.block) : (depth += 1) {
             var matches: usize = 0;
             for (d.holds[0..d.holds_len]) |quote| {
                 if (quote.streams != streams or quote.depth != depth) continue;
@@ -55,6 +55,8 @@ pub fn calibrated(d: *const q.dspark.Drafter) !void {
             if (matches != 1) return error.IncompleteCleanGrid;
             clean += 1;
         }
+    }
+    for ([_]u32{ 1, 2, 4, 8, 16 }) |streams| {
         var rows: u32 = 1;
         while (rows <= q.dspark.stage_rows) : (rows *= 2) {
             var matches: usize = 0;

@@ -435,3 +435,48 @@ test "a lone no-confidence head prices newly staged context and retains whole-ro
         try history.append(gpa, token);
     }
 }
+
+test "fixed query blocks fund the real split instead of four cheap short heads" {
+    const grid = [_]price.HoldCost{
+        .{ .streams = 1, .depth = 1, .ms = 3 },
+        .{ .streams = 2, .depth = 1, .ms = 4 },
+        .{ .streams = 3, .depth = 1, .ms = 5 },
+    };
+    var f: Fixture = .{};
+    try f.init(.{ .drafts = 1, .forward = flat, .holds = &grid, .prior = &.{0.8} });
+    defer f.deinit();
+    f.engine.rule.k.hold_rows = 32;
+    var streams: [4]sm.Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*s| s.deinit(gpa);
+    while (made < streams.len) : (made += 1) streams[made] = try head("fixed-query", &.{0.8});
+    var plans: [4]win.Plan = undefined;
+    for (&plans, &streams) |*p, *s| p.* = .{ .stream = s, .position = 0, .kind = .none };
+    var out: [4]i64 = undefined;
+    for ([_]u32{ 0, 9, 0 }) |query_rows| {
+        f.engine.rule.k.hold_block_rows = query_rows;
+        try f.budgetsFor(&plans, &.{ 0, 1, 2, 3 }, &out);
+        // Variable one-row heads fit together: 7.2/16 pays. Four fixed nine-row blocks
+        // split 3+1 and tie plain at 7.2/18, but the first three still pay at 6.4/15.
+        try std.testing.expectEqualSlices(i64, if (query_rows == 0) &.{ 1, 1, 1, 1 } else &.{ 1, 1, 1, 0 }, &out);
+    }
+}
+
+test "fixed query recovery keeps selected context quotes within a physical pass" {
+    const contexts = [_]price.ContextCost{
+        .{ .streams = 1, .rows = 1, .ms = 100 },
+        .{ .streams = 3, .rows = 1, .ms = 100 },
+        .{ .streams = 4, .rows = 1, .ms = 1 },
+    };
+    var f: Fixture = .{};
+    try f.init(.{ .drafts = 1, .forward = flat, .holds = &holds, .prior = &.{1}, .contexts = &contexts });
+    defer f.deinit();
+    f.engine.rule.k.hold_rows = 32;
+    const Who = struct { finished: bool = false, forced: bool = false, draft_room: i64 = 2 };
+    const whos: [4]Who = @splat(.{});
+    for ([_]u32{ 0, 9, 0 }) |query_rows| {
+        f.engine.rule.k.hold_block_rows = query_rows;
+        // Four variable rows can share the cheap quote; fixed nine-row blocks cannot.
+        try std.testing.expectEqual(query_rows == 0, price.canExplore(&f.engine.rule, &whos, .{ .rows = 4, .tokens = 4 }, 0, 1));
+    }
+}

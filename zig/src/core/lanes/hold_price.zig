@@ -59,8 +59,8 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
     return at_lo + t * (atDepth(costs, hi, depth) - at_lo);
 }
 
-/// Greedy stream-order passes pad blocks to the deepest; `rows == 0` means no physical row limit.
-pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, view: anytype) f64 {
+/// Stream-order passes pad to the deeper of the requested prefix and fixed query block; zero rows means unbounded.
+pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, block_rows: u32, view: anytype) f64 {
     const n = view.len();
     var ms: f64 = 0;
     var i: usize = 0;
@@ -74,7 +74,7 @@ pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32,
             const d = view.at(i);
             if (d <= 0) continue;
             const wide = @max(deepest, d);
-            if (rows != 0 and blocks > 0 and @as(i64, @intCast(blocks + 1)) * wide > rows) break;
+            if (rows != 0 and blocks > 0 and @as(i64, @intCast(blocks + 1)) * @max(wide, block_rows) > rows) break;
             blocks += 1;
             deepest = wide;
             context_rows = @max(context_rows, view.contextRows(i));
@@ -84,7 +84,7 @@ pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32,
 }
 
 /// The physical passes' price for these depths in stream order; zero-depth lanes take no block.
-pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
+pub fn passMs(costs: []const HoldCost, rows: u32, block_rows: u32, depths: []const i64) f64 {
     const View = struct {
         d: []const i64,
         fn len(v: @This()) usize {
@@ -97,11 +97,11 @@ pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
             return 0;
         }
     };
-    return rowsMs(costs, &.{}, rows, View{ .d = depths });
+    return rowsMs(costs, &.{}, rows, block_rows, View{ .d = depths });
 }
 
 /// Only charged counts above free-first nodes form hold blocks; an empty charged mask includes all streams.
-pub fn countsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, counts: []const u32, charged: []const bool, free: u32, debts: []const u32) f64 {
+pub fn countsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, block_rows: u32, counts: []const u32, charged: []const bool, free: u32, debts: []const u32) f64 {
     const View = struct {
         counts: []const u32,
         charged: []const bool,
@@ -118,7 +118,7 @@ pub fn countsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u3
             return if (v.debts.len == 0) 0 else v.debts[i];
         }
     };
-    return rowsMs(costs, contexts, rows, View{ .counts = counts, .charged = charged, .free = free, .debts = debts });
+    return rowsMs(costs, contexts, rows, block_rows, View{ .counts = counts, .charged = charged, .free = free, .debts = debts });
 }
 
 /// The observed prefix's expected drafts, optimistic about conditionals not tried yet.
@@ -226,10 +226,12 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64, context_
     const room_rows = if (rule.batch_rows > base.rows) rule.batch_rows - base.rows else 0;
     if (heads == 0 or depth == 0 or room_rows == 0) return false;
     // Split clean shapes remain optimistic; even free clean work must repay the selected probe's context.
-    if (rule.k.hold_rows != 0 and rule.batch_rows > rule.k.hold_rows) {
+    if (rule.k.hold_rows != 0 and (rule.batch_rows > rule.k.hold_rows or
+        @as(u64, @min(heads, room_rows)) * rule.k.hold_block_rows > rule.k.hold_rows))
+    {
         var context = std.math.inf(f64);
         var blocks: u32 = 1;
-        while (blocks <= @min(heads, rule.k.hold_rows)) : (blocks += 1)
+        while (blocks <= @min(heads, rule.k.hold_rows / @max(1, rule.k.hold_block_rows))) : (blocks += 1)
             context = @min(context, contextMs(rule.k.hold_context_costs, blocks, context_rows));
         if (context == 0) return true;
         var extra: u32 = 1;
@@ -240,7 +242,7 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64, context_
         return false;
     }
     var hasher = std.hash.Wyhash.init(0);
-    inline for (.{ base.rows, heads, depth, rule.batch_rows, context_rows }) |v| {
+    inline for (.{ base.rows, heads, depth, rule.batch_rows, rule.k.hold_block_rows, context_rows }) |v| {
         const x: u64 = v;
         hasher.update(std.mem.asBytes(&x));
     }
@@ -415,32 +417,49 @@ const product = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 1 }, .{ .streams
 test "a hold past the pass's rows is priced as the passes the drafter makes, in stream order" {
     const near = std.testing.expectApproxEqAbs;
     const deep_first = [_]i64{ 9, 1, 1, 1, 1, 1, 1, 1 }; // three blocks of nine rows fit 32, the other five go in a pass of their own
-    try near(@as(f64, 10), passMs(&flat, 0, &deep_first), 1e-9); // an unbounded pass is one
-    try near(@as(f64, 20), passMs(&flat, 32, &deep_first), 1e-9);
-    try near(@as(f64, 27 + 5), passMs(&product, 32, &deep_first), 1e-9);
+    try near(@as(f64, 10), passMs(&flat, 0, 0, &deep_first), 1e-9); // an unbounded pass is one
+    try near(@as(f64, 20), passMs(&flat, 32, 0, &deep_first), 1e-9);
+    try near(@as(f64, 27 + 5), passMs(&product, 32, 0, &deep_first), 1e-9);
     // the same depths in another order make other passes: seven blocks of one, then the nine alone
-    try near(@as(f64, 7 + 9), passMs(&product, 32, &.{ 1, 1, 1, 1, 1, 1, 1, 9 }), 1e-9);
-    try near(@as(f64, 3 + 27 + 2), passMs(&product, 32, &.{ 1, 1, 1, 9, 1, 1, 1, 1 }), 1e-9);
+    try near(@as(f64, 7 + 9), passMs(&product, 32, 0, &.{ 1, 1, 1, 1, 1, 1, 1, 9 }), 1e-9);
+    try near(@as(f64, 3 + 27 + 2), passMs(&product, 32, 0, &.{ 1, 1, 1, 9, 1, 1, 1, 1 }), 1e-9);
     // zero depths take no block and do not split a pass
-    try near(@as(f64, 27), passMs(&product, 32, &.{ 0, 9, 0, 1, 1, 0 }), 1e-9);
-    try near(@as(f64, 0), passMs(&product, 32, &.{ 0, 0 }), 1e-12);
-    try near(@as(f64, 0), passMs(&product, 32, &.{}), 1e-12);
+    try near(@as(f64, 27), passMs(&product, 32, 0, &.{ 0, 9, 0, 1, 1, 0 }), 1e-9);
+    try near(@as(f64, 0), passMs(&product, 32, 0, &.{ 0, 0 }), 1e-12);
+    try near(@as(f64, 0), passMs(&product, 32, 0, &.{}), 1e-12);
 }
 
 test "the row limit's boundary: blocks x deepest equal to the rows is one pass, one row more is two" {
     var depths: [9]i64 = @splat(4);
-    try std.testing.expectApproxEqAbs(@as(f64, 10), passMs(&flat, 32, depths[0..8]), 1e-9); // 8 x 4 = 32
-    try std.testing.expectApproxEqAbs(@as(f64, 20), passMs(&flat, 32, &depths), 1e-9); // 9 x 4 = 36: eight, then one
+    try std.testing.expectApproxEqAbs(@as(f64, 10), passMs(&flat, 32, 0, depths[0..8]), 1e-9); // 8 x 4 = 32
+    try std.testing.expectApproxEqAbs(@as(f64, 20), passMs(&flat, 32, 0, &depths), 1e-9); // 9 x 4 = 36: eight, then one
     depths[8] = 3;
-    try std.testing.expectApproxEqAbs(@as(f64, 20), passMs(&flat, 32, &depths), 1e-9); // the ninth block needs a row more than 32 either way
-    try std.testing.expectApproxEqAbs(@as(f64, 10), passMs(&flat, 36, &depths), 1e-9); // 9 x 4 fits a pass of 36
+    try std.testing.expectApproxEqAbs(@as(f64, 20), passMs(&flat, 32, 0, &depths), 1e-9); // the ninth block needs a row more than 32 either way
+    try std.testing.expectApproxEqAbs(@as(f64, 10), passMs(&flat, 36, 0, &depths), 1e-9); // 9 x 4 fits a pass of 36
 }
 
 test "allocated counts price the same passes: charged streams only, past the free node" {
     const near = std.testing.expectApproxEqAbs;
-    try near(@as(f64, 27), countsMs(&product, &.{}, 32, &.{ 10, 2, 2 }, &.{}, 1, &.{}), 1e-9); // blocks 9, 1, 1
-    try near(@as(f64, 27), countsMs(&product, &.{}, 32, &.{ 9, 1, 50, 1 }, &.{ true, true, false, true }, 0, &.{}), 1e-9);
-    try near(@as(f64, 0), countsMs(&product, &.{}, 32, &.{ 1, 1, 1 }, &.{}, 1, &.{}), 1e-12); // nothing past the free first
-    try near(@as(f64, 20), countsMs(&flat, &.{}, 32, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
-    try near(@as(f64, 10), countsMs(&flat, &.{}, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
+    try near(@as(f64, 27), countsMs(&product, &.{}, 32, 0, &.{ 10, 2, 2 }, &.{}, 1, &.{}), 1e-9); // blocks 9, 1, 1
+    try near(@as(f64, 27), countsMs(&product, &.{}, 32, 0, &.{ 9, 1, 50, 1 }, &.{ true, true, false, true }, 0, &.{}), 1e-9);
+    try near(@as(f64, 0), countsMs(&product, &.{}, 32, 0, &.{ 1, 1, 1 }, &.{}, 1, &.{}), 1e-12); // nothing past the free first
+    try near(@as(f64, 20), countsMs(&flat, &.{}, 32, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
+    try near(@as(f64, 10), countsMs(&flat, &.{}, 0, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
+}
+
+test "fixed query widths split short prefixes without changing their clean depth quotes" {
+    const near = std.testing.expectApproxEqAbs;
+    const depths: [16]i64 = @splat(1);
+    try near(@as(f64, 10), passMs(&flat, 32, 0, depths[0..4]), 1e-9);
+    try near(@as(f64, 20), passMs(&flat, 32, 9, depths[0..4]), 1e-9);
+    try near(@as(f64, 30), passMs(&flat, 32, 9, depths[0..8]), 1e-9);
+    try near(@as(f64, 60), passMs(&flat, 32, 9, &depths), 1e-9);
+    try near(@as(f64, 8), passMs(&product, 32, 9, depths[0..8]), 1e-9);
+    try near(@as(f64, 10), passMs(&flat, 0, 9, &depths), 1e-9);
+    const contexts = [_]ContextCost{
+        .{ .streams = 1, .rows = 4, .ms = 7 },
+        .{ .streams = 3, .rows = 4, .ms = 11 },
+    };
+    // Free-first and uncharged nodes take no query block; each actual group pays its own maximum debt.
+    try near(@as(f64, 20 + 11 + 7), countsMs(&flat, &contexts, 32, 9, &.{ 2, 2, 50, 2, 2, 1 }, &.{ true, true, false, true, true, true }, 1, &.{ 1, 4, 1000, 0, 4, 1000 }), 1e-9);
 }

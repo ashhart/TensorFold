@@ -199,7 +199,7 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
 fn passCost(rule: anytype, whos: anytype, depths: []const i64, blocks: usize, deepest: i64, context_rows: u32) f64 {
     if (blocks == 0) return 0;
     const rows = rule.k.hold_rows;
-    if (rows == 0 or @as(u64, @intCast(blocks)) * @as(u64, @intCast(deepest)) <= rows)
+    if (rows == 0 or @as(u64, @intCast(blocks)) * @as(u64, @intCast(@max(deepest, rule.k.hold_block_rows))) <= rows)
         return price.holdMs(rule.k.hold_costs, blocks, deepest) +
             price.contextMs(rule.k.hold_context_costs, blocks, context_rows);
     const View = struct {
@@ -215,7 +215,7 @@ fn passCost(rule: anytype, whos: anytype, depths: []const i64, blocks: usize, de
             return v.w[i].hold_context_rows;
         }
     };
-    return price.rowsMs(rule.k.hold_costs, rule.k.hold_context_costs, rows, View{ .w = whos, .d = depths });
+    return price.rowsMs(rule.k.hold_costs, rule.k.hold_context_costs, rows, rule.k.hold_block_rows, View{ .w = whos, .d = depths });
 }
 
 fn observedOf(who: anytype) []const f64 {
