@@ -175,7 +175,7 @@ test "Qwen3-Reranker: each case's yes - no logit from lastRows and lm_head rows 
     defer m.deinit();
     const yes: u32 = @intCast(ref.object.get("yes").?.integer);
     const no: u32 = @intCast(ref.object.get("no").?.integer);
-    const head = try qwen3.readRows(gpa, t.io, dir, "lm_head.weight", &.{ yes, no });
+    const head = try qwen3.readRows(gpa, t.io, dir, m.head, &.{ yes, no });
     defer gpa.free(head);
     const hidden = m.spec.hidden;
     var worst_diff: f64 = 0;
