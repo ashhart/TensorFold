@@ -110,6 +110,7 @@ pub fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize) v
     const row = c.heads * D;
     const kv = x.cache.kv[index];
     const cap = kv.capacity;
+    kvp.holds(kv, x.cache.len + L);
     const qkv = At.of(s.qkv);
     var q_row = row;
     if (L <= pre.lane_rows or lin.qkv.tiles == null) {

@@ -574,6 +574,7 @@ pub fn kvWriteAt(f: Forward, e: *Enc, kv: st.Kv, args: Buffer, at: usize, row0: 
 /// The stacked q/k/v rows from `row0` (their keys and values) into a cache after its `len` rows.
 pub fn kvWrite(f: Forward, e: *Enc, kv: st.Kv, len: usize, row0: usize, rows: usize) void {
     const c = f.c;
+    kvp.holds(kv, len + rows);
     e.pipe(if (kv.paged != null) f.k.paged.?.glue[0] else f.k.get("tf_kv_write"));
     e.buf(f.s.qkv, row0 * c.qkvDim() * 2, 0);
     kvp.bindKv(e, kv, 1, 2);
