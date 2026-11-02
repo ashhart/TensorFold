@@ -413,6 +413,10 @@ test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy d
     try std.testing.expect(flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 0 }) == null);
 }
 
+test "Nemotron Parse declares no reasoning block, so its OCR text stays answer content" {
+    try std.testing.expect(!reasoning(parse));
+}
+
 test "Nemotron refuses --slide and --mtp-confidence on HIP before it loads, and keeps a cap" {
     const o: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .slide = true };
     try std.testing.expect(std.mem.indexOf(u8, flagRefused(nemotron.native, o).?, "--slide") != null);
