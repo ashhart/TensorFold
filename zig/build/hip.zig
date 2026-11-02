@@ -141,6 +141,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     native_ocr.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native.import_table.get("glm_ocr").?, .filters = &.{"GLM-OCR native admission:"} })).step);
     b.step("test-hip-family-offers-host", "HIP optional native family metadata without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"HIP optional family offers:"} })).step);
     b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
+    @import("dots_mocr.zig").hipTests(b, host.hip, test_step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
