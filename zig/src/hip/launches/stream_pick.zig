@@ -4,6 +4,11 @@ const std = @import("std");
 const affine = @import("affine.zig");
 const Generation = @import("../caps.zig").Generation;
 
+comptime {
+    // a column's start round, (col0 >> 3) % rounds, stays the same at every width only while each width divides 8
+    for (affine.stream_cbs) |cb| std.debug.assert(@mod(8, cb) == 0);
+}
+
 fn cdiv(n: c_int, by: c_int) c_uint {
     return @intCast(@divTrunc(n + by - 1, by));
 }
