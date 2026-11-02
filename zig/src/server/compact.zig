@@ -135,14 +135,14 @@ pub fn stamp(cx: *Cx, reply: *chat.Reply, s: Stamp) chat.Failure!void {
 
 fn rebuild(srv: *Server, cx: *Cx, input: chat.Input, gone: anytype, at: CompactAt, msgs: []Value) chat.Failure!Ready {
     const a = cx.a;
-    const marker = findMarker(msgs);
+    const marker = try findMarker(a, msgs);
     const slot = stored.loadMem(srv, a, msgs);
     const hash_ok = if (slot) |m| stored.hashes(a, msgs, m) else false;
     var prev: []const u8 = "";
     if (hash_ok) {
         prev = slot.?.note;
     } else if (marker) |i| {
-        prev = markerBody(msgs[i]) orelse "";
+        prev = try markerBody(a, msgs[i]) orelse "";
     }
     const skip: usize = if (hash_ok) slot.?.covered else if (marker) |i| i + 1 else 0;
     const prefix = prefixLen(msgs);
@@ -388,20 +388,20 @@ fn prefixLen(msgs: []const Value) usize {
     return i;
 }
 
-fn findMarker(msgs: []const Value) ?usize {
+fn findMarker(a: Allocator, msgs: []const Value) Allocator.Error!?usize {
     var found: ?usize = null;
     for (msgs, 0..) |m, i| {
-        if (markerBody(m) != null) found = i;
+        if (try markerBody(a, m) != null) found = i;
     }
     return found;
 }
 
-fn markerBody(m: Value) ?[]const u8 {
+fn markerBody(a: Allocator, m: Value) Allocator.Error!?[]const u8 {
     const r = roleOf(m);
     if (!std.mem.eql(u8, r, "system") and !std.mem.eql(u8, r, "user") and !std.mem.eql(u8, r, "developer")) return null;
-    const c = m.get("content") orelse return null;
-    if (c != .string or !std.mem.startsWith(u8, c.string, marker_line)) return null;
-    var rest = c.string[marker_line.len..];
+    const words = try contentOf(a, m); // text parts count, as a string note does
+    if (!std.mem.startsWith(u8, words, marker_line)) return null;
+    var rest = words[marker_line.len..];
     if (std.mem.startsWith(u8, rest, "\n")) rest = rest[1..];
     return rest;
 }
@@ -555,4 +555,23 @@ fn pathsFromNote(a: Allocator, list: *std.ArrayList([]const u8), note: []const u
 fn addUnique(a: Allocator, list: *std.ArrayList([]const u8), p: []const u8) !void {
     for (list.items) |seen| if (std.mem.eql(u8, seen, p)) return;
     try list.append(a, p);
+}
+
+test "a memory marker made of text parts keeps its note" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const head = try json.newObject(a);
+    try head.put(a, "type", .{ .string = "text" });
+    try head.put(a, "text", .{ .string = marker_line ++ "\n" });
+    const tail = try json.newObject(a);
+    try tail.put(a, "type", .{ .string = "text" });
+    try tail.put(a, "text", .{ .string = "STORED-NOTE" });
+    const parts = try a.alloc(Value, 2);
+    parts[0] = .{ .object = head };
+    parts[1] = .{ .object = tail };
+    const m = try json.newObject(a);
+    try m.put(a, "role", .{ .string = "user" });
+    try m.put(a, "content", .{ .array = parts });
+    try std.testing.expectEqualStrings("STORED-NOTE", (try markerBody(a, .{ .object = m })).?);
 }
