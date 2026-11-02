@@ -254,8 +254,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
     for (std.enums.values(lfm2_controls.Mutation)) |m| {
         const drafter_which: ?lfm2_dspark.Which = switch (m) {
-            .markov_nan_dropped, .markov_first_prev => .markov_step,
-            .markov_bf16_nan_dropped, .markov_bf16_first_prev => .markov_step_bf16,
+            .markov_nonfinite_dropped, .markov_first_prev => .markov_step,
+            .markov_bf16_nonfinite_dropped, .markov_bf16_first_prev => .markov_step_bf16,
+            .markov_pick_inf_dropped, .markov_pick_empty_flagged => .markov_pick,
             .draft_ids_unzeroed => .draft_ids,
             else => null,
         };

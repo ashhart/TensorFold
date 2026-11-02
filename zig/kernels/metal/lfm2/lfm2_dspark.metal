@@ -43,7 +43,8 @@ inline void lfm2_markov_scan_t(const device bfloat* logits, const device bfloat*
     }
     d = simd_sum(d);
     const float sc = float(static_cast<bfloat>(float(row[v]) + float(static_cast<bfloat>(d))));
-    nan = nan || isnan(sc);
+    // Only visited token scores are checked; empty lanes keep their -Inf/UINT_MAX sentinel.
+    nan = nan || !isfinite(sc);
     if (sc > mv || (mi == 0xffffffffu && sc == mv)) {
       mv = sc;
       mi = v;
@@ -106,7 +107,8 @@ inline void lfm2_markov_scan_t(const device bfloat* logits, const device bfloat*
   for (uint g = t; g < groups; g += 256) {
     const float v = best[size_t(s) * groups + g];
     const uint i = at[size_t(s) * groups + g];
-    if (isnan(v)) nan = 1;
+    // The scan's empty partial is not an observed nonfinite score.
+    if (!isfinite(v) && !(v == -INFINITY && i == 0xffffffffu)) nan = 1;
     else if (v > bv || (v == bv && i < bi)) {
       bv = v;
       bi = i;

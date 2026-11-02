@@ -8,17 +8,17 @@ const g = contract.gates;
 const rig_ = @import("rig.zig");
 const controls = @import("metal_lfm2_controls.zig");
 
-pub const Which = enum { markov_step, draft_ids, markov_step_bf16 };
+pub const Which = enum { markov_step, draft_ids, markov_step_bf16, markov_pick };
 const rank = 256;
 const vocab = 128000;
 const span = 512; // tokens a scan threadgroup takes (the kernel's MARKOV_SPAN)
-const groups = (vocab + span - 1) / span;
+const pick_shapes = [_]c.Shape{ .{ .rows = 5, .n = 257, .k = 1 }, .{ .rows = 5, .n = 513, .k = 1 } };
 const table = 1000; // W1's rows in the check: ids are inside it or past the vocabulary (a zero row)
 const names = [_][]const u8{ "metal lfm2 markov step", "metal lfm2 draft ids", "metal lfm2 markov step bf16" };
 const stride = 64; // words between a stream's picks: a hold pass's 32 blocks, a token and a flag each
 
 const ids_shapes = [_]c.Shape{ .{ .rows = 1, .n = 1, .k = 1 }, .{ .rows = 4, .n = 1, .k = 1 }, .{ .rows = 15, .n = 1, .k = 1 } };
-const step_shapes = [_]c.Shape{ .{ .rows = 1, .n = vocab, .k = rank }, .{ .rows = 4, .n = vocab, .k = rank }, .{ .rows = 9, .n = vocab, .k = rank } };
+const step_shapes = [_]c.Shape{ .{ .rows = 1, .n = vocab, .k = rank }, .{ .rows = 4, .n = vocab, .k = rank }, .{ .rows = 9, .n = vocab, .k = rank }, .{ .rows = 4, .n = 513, .k = rank } };
 
 fn none(_: c.Shape) usize {
     return 0;
@@ -31,18 +31,13 @@ fn depth(_: c.Shape) usize {
 pub fn spec(w: Which) c.Spec {
     return switch (w) {
         .draft_ids => .{ .name = names[1], .accum = .none, .depth = none, .out = .raw, .served = &ids_shapes, .sums = .{ .f16 = 0, .bf16 = 0, .why = "a copy moves tokens: no sums" } },
-        .markov_step, .markov_step_bf16 => .{ .name = if (w == .markov_step) names[0] else names[2], .accum = .none, .depth = depth, .out = .raw, .served = &step_shapes, .nan = .{ .stated = "a row with a NaN score is flagged nonfinite" }, .sums = .{ .f16 = 0, .bf16 = 0, .why = "picks are tokens: the check bounds each pick's score by gamma(256), not sum bits" } },
+        .markov_step, .markov_step_bf16 => .{ .name = if (w == .markov_step) names[0] else names[2], .accum = .none, .depth = depth, .out = .raw, .served = &step_shapes, .nan = .{ .stated = "a row with any nonfinite score is flagged" }, .sums = .{ .f16 = 0, .bf16 = 0, .why = "picks are tokens: the check bounds each pick's score by gamma(256), not sum bits" } },
+        .markov_pick => .{ .name = "metal lfm2 markov pick", .accum = .none, .depth = none, .out = .raw, .served = &pick_shapes, .nan = .{ .stated = "nonfinite partials are flagged except an empty -Inf/UINT_MAX sentinel" }, .sums = .{ .f16 = 0, .bf16 = 0, .why = "a reduction selects tokens and ORs flags: no sums" } },
     };
 }
 
-/// A bf16 value for element `i` over signs and binades; the nonfinite fill plants NaN and infinities.
-fn value(i: usize, seed: u64, fill: g.Fill) u16 {
-    if (fill == .nonfinite) switch ((@as(u64, i) *% 2654435761 +% seed) % 9973) {
-        0 => return 0x7fc0,
-        1 => return 0x7f80,
-        2 => return 0xff80,
-        else => {},
-    };
+/// A finite bf16 value for element `i` over signs and binades; nonfinites are planted separately, one per row.
+fn value(i: usize, seed: u64, _: g.Fill) u16 {
     const h: u64 = (@as(u64, i) *% 0x9e3779b97f4a7c15 +% seed *% 0xbf58476d1ce4e5b9) >> 40;
     const mant: f32 = @as(f32, @floatFromInt(h % 1024)) / 1024 + 1;
     const exp: i32 = @as(i32, @intCast((h >> 10) % 8)) - 4;
@@ -57,6 +52,10 @@ pub const Probe = struct {
     mutation: controls.Mutation,
     pipes: [2]mtl.Pipeline,
     rows: usize = 0,
+    vocabulary: usize = 0,
+    groups: usize = 0,
+    nonfinite: bool = false,
+    best: []f32 = &.{}, // direct pick inputs, including empty partials
     src: []u16 = &.{}, // the base logits rows
     w1: []u16 = &.{},
     codes: []u8 = &.{},
@@ -75,6 +74,7 @@ pub const Probe = struct {
             .markov_step => .{ "lfm2_markov_scan", "lfm2_markov_pick" },
             .markov_step_bf16 => .{ "lfm2_markov_scan_bf16", "lfm2_markov_pick" },
             .draft_ids => .{ "lfm2_draft_ids", "lfm2_draft_ids" },
+            .markov_pick => .{ "lfm2_markov_pick", "lfm2_markov_pick" },
         };
         const first = try rig_.pipeline(device, text, kernels[0]);
         errdefer first.deinit();
@@ -83,7 +83,7 @@ pub const Probe = struct {
     }
 
     fn drop(p: *Probe) void {
-        inline for (.{ "src", "w1", "codes", "scales", "biases", "w2", "ids" }) |f| {
+        inline for (.{ "src", "w1", "codes", "scales", "biases", "w2", "ids", "best" }) |f| {
             p.a.free(@field(p, f));
             @field(p, f) = &.{};
         }
@@ -110,6 +110,37 @@ pub const Probe = struct {
     pub fn prepare(p: *Probe, s: c.Shape, f: g.Fill, seed: u64) !bool {
         p.drop();
         p.rows = s.rows;
+        p.vocabulary = s.n;
+        p.nonfinite = f == .nonfinite;
+        if (p.which == .markov_pick) {
+            if (s.rows != 5 or s.n < 257 or s.k != 1) return false;
+            p.groups = s.n;
+            p.best = try p.a.alloc(f32, s.rows * p.groups);
+            p.ids = try p.a.alloc(u32, p.best.len);
+            @memset(p.best, -std.math.inf(f32));
+            @memset(p.ids, std.math.maxInt(u32));
+            for (0..s.rows - 1) |r| {
+                const off = r * p.groups;
+                p.best[off] = 1;
+                p.ids[off] = 19;
+                p.best[off + 256] = 1;
+                p.ids[off + 256] = 7;
+                if (p.nonfinite) {
+                    p.best[off + 128] = switch (r) {
+                        0, 3 => std.math.inf(f32),
+                        1 => -std.math.inf(f32),
+                        else => std.math.nan(f32),
+                    };
+                    p.ids[off + 128] = if (r == 3) std.math.maxInt(u32) else 31;
+                }
+            }
+            p.args[0] = try p.rig.input(std.mem.sliceAsBytes(p.best));
+            p.args[1] = try p.rig.input(std.mem.sliceAsBytes(p.ids));
+            const n: u32 = @intCast(p.groups);
+            p.args[7] = try p.rig.input(std.mem.asBytes(&n));
+            p.y = try p.rig.output(p.count());
+            return true;
+        }
         if (p.which == .draft_ids) { // picks a stride apart: tokens inside the vocabulary, its last, and past it
             if (s.n != 1 or s.rows == 0 or s.rows > 16) return false;
             p.ids = try p.a.alloc(u32, s.rows * stride);
@@ -126,7 +157,9 @@ pub const Probe = struct {
             p.y = try p.rig.output(p.count());
             return true;
         }
-        if (s.n != vocab or s.k != rank or s.rows == 0) return false;
+        if ((s.n != vocab and s.n != 513) or s.k != rank or s.rows == 0) return false;
+        // One empty group also proves that its -Inf/UINT_MAX partial is not a nonfinite score.
+        p.groups = (s.n + span - 1) / span + 1;
         // each stream's step row sits a block (two rows here) apart, as a hold's rows of one step do
         p.src = try p.a.alloc(u16, 2 * s.rows * vocab);
         fill(p.src, seed, f);
@@ -151,15 +184,31 @@ pub const Probe = struct {
             1 => table - 1,
             else => vocab + @as(u32, @intCast(i)),
         };
+        if (s.n == 513) {
+            @memset(p.src, 0);
+            for (0..s.rows) |r| {
+                p.ids[2 * r] = vocab; // zero W1 row: exact ties across the full and partial groups
+                p.src[2 * r * vocab + 7] = c.toBf16(1);
+                p.src[2 * r * vocab + 512] = c.toBf16(1);
+            }
+        }
+        if (p.nonfinite) for (0..s.rows) |r| {
+            // No row contains both signs or a masking NaN: each infinity must raise its own flag.
+            p.src[2 * r * vocab + (s.n - 1)] = switch (r % 3) {
+                0 => 0x7f80,
+                1 => 0xff80,
+                else => 0x7fc0,
+            };
+        };
         p.args[0] = try p.rig.input(std.mem.sliceAsBytes(p.src));
         p.args[1] = try p.rig.input(std.mem.sliceAsBytes(p.w1));
         p.args[2] = if (p.which == .markov_step_bf16) try p.rig.input(std.mem.sliceAsBytes(p.w2)) else try p.rig.input(p.codes);
         p.args[3] = try p.rig.input(std.mem.sliceAsBytes(p.ids));
-        const args = [4]u32{ 2 * vocab, rank, vocab, 2 };
+        const args = [4]u32{ 2 * vocab, rank, @intCast(s.n), 2 };
         p.args[4] = try p.rig.input(std.mem.asBytes(&args));
         p.args[5] = try p.rig.input(std.mem.sliceAsBytes(p.scales));
         p.args[6] = try p.rig.input(std.mem.sliceAsBytes(p.biases));
-        const n: u32 = groups;
+        const n: u32 = @intCast(p.groups);
         p.args[7] = try p.rig.input(std.mem.asBytes(&n));
         p.y = try p.rig.output(p.count());
         return true;
@@ -167,7 +216,7 @@ pub const Probe = struct {
 
     pub fn count(p: *Probe) usize {
         return switch (p.which) {
-            .markov_step, .markov_step_bf16 => p.rows * 8,
+            .markov_step, .markov_step_bf16, .markov_pick => p.rows * 8,
             .draft_ids => p.rows * 4,
         };
     }
@@ -186,8 +235,17 @@ pub const Probe = struct {
             e.dispatchThreads(mtl.Size.of(p.rows, 1, 1), mtl.Size.of(32, 1, 1));
             return p.rig.finish(pass);
         }
-        const best = try p.rig.scratch(p.rows * groups * 4);
-        const at = try p.rig.scratch(p.rows * groups * 4);
+        if (p.which == .markov_pick) {
+            e.setPipeline(p.pipes[1]);
+            e.setBuffer(p.args[0].buf, p.args[0].off, 0);
+            e.setBuffer(p.args[1].buf, p.args[1].off, 1);
+            e.setBuffer(p.args[7].buf, p.args[7].off, 2);
+            e.setBuffer(p.y.buf, p.y.off, 3);
+            e.dispatchGroups(mtl.Size.of(p.rows, 1, 1), mtl.Size.of(256, 1, 1));
+            return p.rig.finish(pass);
+        }
+        const best = try p.rig.scratch(p.rows * p.groups * 4);
+        const at = try p.rig.scratch(p.rows * p.groups * 4);
         e.setPipeline(p.pipes[0]);
         for (p.args[0..5], 0..) |r, i| e.setBuffer(r.buf, r.off, i);
         e.setBuffer(best.buf, best.off, 5);
@@ -196,7 +254,7 @@ pub const Probe = struct {
             e.setBuffer(p.args[5].buf, p.args[5].off, 7);
             e.setBuffer(p.args[6].buf, p.args[6].off, 8);
         }
-        e.dispatchGroups(mtl.Size.of(groups, p.rows, 1), mtl.Size.of(256, 1, 1));
+        e.dispatchGroups(mtl.Size.of(p.groups, p.rows, 1), mtl.Size.of(256, 1, 1));
         e.setPipeline(p.pipes[1]);
         e.setBuffer(best.buf, best.off, 0);
         e.setBuffer(at.buf, at.off, 1);
@@ -229,15 +287,21 @@ pub const Probe = struct {
         for (0..p.rows) |s| {
             const token = std.mem.readInt(u32, out[8 * s ..][0..4], .little);
             const flag = std.mem.readInt(u32, out[8 * s + 4 ..][0..4], .little);
+            if (p.which == .markov_pick) {
+                const invalid = p.nonfinite and s < p.rows - 1;
+                if (flag != @intFromBool(invalid)) return "a pick partial's nonfinite flag differs (empty -Inf/UINT_MAX is valid)";
+                if (!invalid and token != (if (s == p.rows - 1) std.math.maxInt(u32) else @as(u32, 7))) return "the pick changes an empty sentinel or a finite lowest-token tie";
+                continue;
+            }
             const id = p.ids[2 * s];
             var top: f64 = -std.math.inf(f64);
             var mine: ?f64 = null;
-            var nan = false;
+            var nonfinite = false;
             var bound: f64 = 0;
-            for (0..vocab) |v| {
+            for (0..p.vocabulary) |v| {
                 var dot: f64 = 0;
                 var size: f64 = 0;
-                if (id < table) for (0..rank) |i| {
+                if (id < @min(table, p.vocabulary)) for (0..rank) |i| {
                     const k = (v * rank + i) / 64;
                     const w: f64 = if (p.which == .markov_step_bf16) c.fromBf16(p.w2[v * rank + i]) else @as(f64, c.fromBf16(p.scales[k])) * @as(f64, @floatFromInt(p.codes[v * rank + i])) + c.fromBf16(p.biases[k]);
                     dot += w * c.fromBf16(p.w1[id * rank + i]);
@@ -245,17 +309,18 @@ pub const Probe = struct {
                 };
                 const base: f32 = c.fromBf16(p.src[2 * s * vocab + v]);
                 const score: f64 = c.fromBf16(c.toBf16(base + c.fromBf16(c.toBf16(@floatCast(dot)))));
-                if (std.math.isNan(score)) nan = true;
+                if (!std.math.isFinite(score)) nonfinite = true;
                 if (score > top) top = score;
                 if (v == token) mine = score;
                 // two bf16 steps of the score and the fp32 sum's own error
                 bound = @max(bound, @abs(score) * 0x1p-7 + c.gamma(rank, 0x1p-24) * size);
             }
-            if (nan) {
-                if (flag != 1) return "a row with a NaN score is not flagged";
+            if (nonfinite) {
+                if (flag != 1) return "a row with an isolated NaN or infinity score is not flagged";
                 continue;
             }
             if (flag != 0) return "a finite row is flagged nonfinite";
+            if (p.vocabulary == 513 and token != 7) return "the finite partial scan does not preserve the lowest-token tie";
             const got = mine orelse return "the pick is past the vocabulary";
             if (got < top - bound) return "the pick's score is below the row's best by more than its bound";
         }
