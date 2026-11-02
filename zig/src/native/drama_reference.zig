@@ -4,8 +4,8 @@ const d3 = @import("drama3");
 const Frame = d3.model.Frame;
 const State = d3.kv_state.State;
 
-/// Entries kept without TF_DRAMA_REFERENCE_CACHE.
-pub const default_entries: u32 = 2;
+/// Entries kept without TF_DRAMA_REFERENCE_CACHE: none, so the cache is opt-in.
+pub const default_entries: u32 = 0;
 /// The most entries TF_DRAMA_REFERENCE_CACHE may ask for.
 pub const max_entries: u32 = 16;
 
@@ -264,7 +264,7 @@ test "drama reference cache: the identity is every saved row and the lookahead r
     try t.expect(c.find(&a, 0) == null);
 }
 
-test "drama reference cache: the least recently used entry goes first, and 0 entries keep none" {
+test "drama reference cache: the least recently used entry goes first, and the default 0 entries keep none" {
     const t = std.testing;
     const o: d3.common.Options = .{ .max_rows = 4, .attn_chunk = 4 };
     var l: FakeLane = .{ .o = o };
@@ -281,7 +281,7 @@ test "drama reference cache: the least recently used entry goes first, and 0 ent
     try t.expect(c.find(&b, 28) == null);
     c.store(&l, &a, 28); // a second lane reaching the boundary of a stored voice adds nothing
     try t.expectEqual(@as(usize, 2), c.entries.items.len);
-    var off: TestCache = .{ .gpa = t.allocator };
+    var off: TestCache = .{ .gpa = t.allocator, .capacity = default_entries };
     defer off.deinit();
     _ = try run(&off, &l, &a, 30);
     _ = try run(&off, &l, &a, 0);
