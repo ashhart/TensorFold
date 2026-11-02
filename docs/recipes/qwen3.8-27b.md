@@ -359,3 +359,33 @@ Endpoint, rewind and shared states have priority within the same byte and slot c
 is published in `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; restored tokens also count
 in `tensorfold:prompt_tokens_cached_total`. Synthetic host checks cover the two-request pattern and exact
 output. Real-model parity and TTFT for this state still need the Metal gate.
+
+### GGUF scalar and tokenizer fidelity
+
+The GGUF path preserves F32 output, input, post-attention and Q/K norm gains as stored. It does not add or remove
+one, or narrow those gains to BF16. Activations retain the native graph's BF16 rounding points. The MLX path
+keeps its BF16 gain specialization. GGUF convolution, time bias and GDN per-head norm still require exact BF16
+values; an unsupported scalar refuses before repacking or publishing an image.
+
+The GGUF's negative F32 `ssm_a` is a distinct prepared tensor. It passes through the inverse value-head map
+without an exp/log conversion. An explicit checked storage flag selects `exp(ssm_a * softplus)` in decode and
+prompt kernels. MLX `A_log` keeps its existing `exp(-exp(A_log) * softplus)` expression. Both spellings together,
+nonnegative coefficients and nonfinite coefficients refuse.
+
+For `tokenizer.ggml.pre=qwen35`, generated tokenizer assets use Qwen's letter-only regex and its ByteLevel flags.
+The six FIM/repo/file added tokens are ordinary for skip-special decoding, as in Qwen's tokenizer.json, even
+when the GGUF labels them control tokens. Request text still masks all added-token spellings. Generation stops
+include the declared EOS and `<|endoftext|>` when the latter is a control token; an ordinary end-of-text spelling
+refuses. The named primary EOS in tokenizer_config remains the declared EOS.
+
+`zig build test-qwen27-gguf-host` runs synthetic import, exact-byte, tokenizer and effective-stop-set tests.
+`zig build gguf-tokenizer-compare-host` builds a CPU-only comparison tool:
+
+```sh
+tf-gguf-tokenizer-compare model.gguf tokenizer.json cases.json generation_config.json
+```
+
+The tool maps the GGUF read-only and reads its metadata without repacking tensors.
+The cases file is an array of strings or objects with `text` and optional independently expected `ids`.
+The tool compares both full and masked encoding; the optional generation config checks the complete stop set.
+Real checkpoint serving and the `metal GGUF scalars` device contract entries remain separate GPU gates.

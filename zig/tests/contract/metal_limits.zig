@@ -31,6 +31,12 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "GGUF scalar ")) {
+        const probe = @import("metal_gguf_scalars.zig");
+        const kind: probe.Kind = if (has(d.name, " input ")) .input else if (has(d.name, " residual ")) .residual else if (has(d.name, " head ")) .head else if (has(d.name, " prompt ")) .prompt else if (has(d.name, " pre ")) .pre else .step;
+        const body = try probe.source(a, kind, 5120, false);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "GGUF row metadata ")) {
         const body = tf.row_projection.source(.f32);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };

@@ -370,6 +370,9 @@ pub fn main(init: std.process.Init) !u8 {
         ntiles += 1;
     };
     for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
+    var gguf_scalars: @import("metal_gguf_scalars.zig").Suite = .{ .a = a };
+    defer gguf_scalars.deinit();
+    try gguf_scalars.collect(device, queue, o.only, &kernels);
     var gguf_affine: @import("metal_gguf_affine.zig").Suite = .{ .a = a };
     defer gguf_affine.deinit();
     try gguf_affine.collect(device, queue, o.only, &kernels);
