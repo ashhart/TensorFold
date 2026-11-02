@@ -149,4 +149,5 @@ template __global__ void tf_gdn_prefill::chain_kernel<__nv_bfloat16, __nv_bfloat
     const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, const float* __restrict__,
     const __nv_bfloat16* __restrict__, const float*, float*, __nv_bfloat16* __restrict__, int, int, int);
 
+#define TF_GDN_CHAIN_CONTROLS
 #include "gdn_prefill_norm.cuh"

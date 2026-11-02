@@ -545,3 +545,6 @@ extern "C" __global__ void __launch_bounds__(64) tf_ctl_ple_rows(const __nv_bflo
 
 #define TF_GDN_CHAIN_CONTROLS
 #include "gdn_prefill.cu"
+
+#define TF_MOE_ROUTER_CONTROLS
+#include "moe_router_expert.cuh"

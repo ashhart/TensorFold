@@ -41,6 +41,7 @@ const w4a8_k = @import("contract_w4a8.zig");
 const round_k = @import("contract_tree_round.zig");
 const act_k = @import("contract_act.zig");
 const vit_g4_group = @import("contract_gemma_group.zig");
+const moe_router_k = @import("contract_moe_router.zig");
 const chain_k = @import("contract_gdn_chain.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
@@ -224,6 +225,9 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     };
     defer for (&halves) |*h| h.deinit();
     for (&halves) |*h| try kernels.append(a, h.kernel());
+    var router_suite = try moe_router_k.Suite.init(gpu, s, mods[5]);
+    defer router_suite.deinit();
+    try router_suite.append(a, &kernels);
     var chain_suite = try chain_k.Suite.init(gpu, s, mods[5]);
     defer chain_suite.deinit();
     try chain_suite.append(a, &kernels);
