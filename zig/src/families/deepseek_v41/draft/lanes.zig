@@ -12,6 +12,7 @@ const calib = @import("calib.zig");
 const costs_mod = @import("costs.zig");
 const Policy = @import("policy.zig").Policy;
 const spec_mod = @import("spec.zig");
+const first_mask = @import("lanes_first.zig");
 
 pub const max_block = 16;
 
@@ -32,6 +33,7 @@ pub const St = struct {
     len: u64 = 0, // rows the target holds (provisional after a window until keep)
     base: u64 = 0, // the last window's start
     first: u32 = 0, // the prompt's choice (for `first`)
+    first_bits: std.ArrayList(u32) = .empty, // the grammar bits the pass drew `first` under (lanes_first.zig)
     held: [max_block]u32 = undefined, // the last pass's drafts (the main chain)
     conf: [max_block]f64 = undefined,
     n: u32 = 0, // drafts held (0: none this round)
@@ -78,6 +80,7 @@ pub const Lanes = struct {
 
     pub fn drop(x: *Lanes, st: *St) void {
         st.shown.deinit(x.gpa);
+        st.first_bits.deinit(x.gpa);
         x.gpa.destroy(st);
     }
 
@@ -174,7 +177,7 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
-        try x.target.firstMask(slot, try x.firstBits(s));
+        try x.target.firstMask(slot, try first_mask.take(x, st, s));
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
         s.cached = @intCast(x.target.resumedRows(slot));
         st.len = ids.len;
@@ -251,7 +254,7 @@ pub const Lanes = struct {
         const st = try x.get(s);
         try x.settle();
         const ids = s.prompt();
-        try x.target.firstMask(st.slot, try x.firstBits(s));
+        try x.target.firstMask(st.slot, try first_mask.take(x, st, s));
         return x.finished(st, ids, try x.target.finish(st.slot, ids, s.sampling, ids.len));
     }
 
@@ -261,7 +264,7 @@ pub const Lanes = struct {
         const st = try x.get(s);
         try x.settle();
         const ids = s.prompt();
-        try x.target.firstMask(st.slot, try x.firstBits(s));
+        try x.target.firstMask(st.slot, try first_mask.take(x, st, s));
         if (try x.target.tail(st.slot, ids, s.sampling, ids.len)) |first_| {
             try x.finished(st, ids, first_);
             return false;
@@ -289,16 +292,9 @@ pub const Lanes = struct {
         return x.drawn.items.len - 1;
     }
 
-    /// A grammar stream's first token's bits, as the lane core's own (empty: no grammar, or not started yet).
-    fn firstBits(x: *Lanes, s: *Stream) ![]const u32 {
-        const g = s.grammar orelse return &.{};
-        return (try g.next(x.scratch.allocator())) orelse &.{};
-    }
-
-    /// Backend.first_masked: the prompt's pick ran under the same bits (firstBits); a token outside them is an error.
+    /// Backend.first_masked: `first`, the pass's pick under these same bits; no forward, KV row or draft runs.
     fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
-        const st = try self(ptr).get(s);
-        if (!lanes.grammar.allows(mask, st.first)) return error.FirstNotMasked;
+        try first_mask.check(try self(ptr).get(s), mask);
         return first(ptr, s, position);
     }
 
