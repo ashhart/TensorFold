@@ -25,6 +25,7 @@ pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");
 pub const backend = @import("backend.zig");
 pub const embedding = @import("embedding.zig");
+pub const readout = @import("readout.zig");
 pub const events = @import("events.zig");
 pub const windows = @import("windows.zig");
 pub const shared_drafts = @import("shared_drafts.zig");

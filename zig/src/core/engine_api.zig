@@ -40,6 +40,7 @@ pub const grammar = lanes.grammar;
 pub const Request = struct {
     prompt: []const u32,
     embedding: ?lanes.embedding.Batch = null,
+    readout: ?*const lanes.readout.Spec = null, // an answer from the prompt's rows (Info.readouts engines only)
     max_tokens: u32,
     sampling: ?Sampling = null,
     penalties: Penalties = .{},
@@ -94,6 +95,11 @@ pub const Request = struct {
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {
         return if (r.cache_key.len > 0) r.cache_key else r.prompt;
+    }
+
+    /// No token is drawn: the backend answers from the prompt's rows (an embedding or a readout).
+    pub fn promptOnly(r: *const Request) bool {
+        return r.embedding != null or r.readout != null;
     }
 
     /// The prompt length its kept states count as: its own, or for a warm pass the request whose reply it prefills.
@@ -156,6 +162,7 @@ pub const Info = struct {
     name: []const u8 = "lanes",
     text_generation: bool = true,
     embeddings: ?lanes.embedding.Info = null,
+    readouts: ?lanes.readout.Info = null, // non-null: the engine answers readout requests and nothing else
     speech: ?SpeechInfo = null,
     lanes: u32 = 1,
     /// Prompt plus reply tokens one request may use (0: no limit).
@@ -438,13 +445,16 @@ pub const Engine = struct {
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
         const info_ = e.info();
-        if (request.embedding) |batch| {
+        if (request.embedding != null and request.readout != null) return error.InvalidRequest;
+        if (request.readout != null) {
+            lanes.readout.admit(info_, request) catch return error.InvalidRequest;
+        } else if (request.embedding) |batch| {
             const cap = info_.embeddings orelse return error.InvalidRequest;
             if (info_.text_generation or request.max_tokens != 0 or request.drafts or request.sampling != null or
                 request.images.len != 0 or request.structure != null or request.logprobs != null or
                 request.prompt_logprobs != null or request.decode_spans.len != 0) return error.InvalidRequest;
             batch.validate(cap, request.prompt, info_.context_window) catch return error.InvalidRequest;
-        } else if (info_.embeddings != null) return error.InvalidRequest;
+        } else if (info_.embeddings != null or info_.readouts != null) return error.InvalidRequest;
         return e.vtable.submit(e.ctx, id, request, sink);
     }
     pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
