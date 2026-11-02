@@ -78,6 +78,7 @@ pub const Host = struct {
     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
     store: ?*api.prompt_cache.Store = null, // kept Nemotron states; null when the budget is 0
     kv: kv_pages.Watch = .{}, // what the load ledger hears of the KV pool (cuda_kv_pool.zig)
+    kv_plan: ?@import("cuda_ledger.zig").Plan = null, // the KV ledger's budget and cost, read by the lane host
     prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: the family's prompts as its pool's pages (no `store` then)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
@@ -379,7 +380,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
     };
     const free = loaded.free_streams;
-    const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .share = share }, problem) orelse return null;
+    const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = host_budget, .share = share }, problem) orelse return null;
     const streams = counted.streams;
     const layout = counted.layout;
     const paged = counted.paged;
@@ -392,11 +393,14 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
     h.readiness(F);
+    h.kv_plan = counted.ledger;
     const held = served.stream_bytes * (streams -| free);
-    const kept = kv_pages.kept(F, loaded, paged, o, room, held, host_budget, host_cache);
+    // a ledger's plan placed the cache already, beside one full-window request instead of every stream's window
+    const kept = if (counted.ledger) |lp| lp.kept else kv_pages.kept(F, loaded, paged, o, room, held, host_budget, host_cache);
     const cache = kept.copied;
     const cache_capacity = kv_pages.capacity(F, loaded, kept, @intCast(window));
-    const shown = try kv_pages.text(F, a, served.stream_bytes, layout, paged, kv_pages.enginePaged(loaded), kv_pages.allOnPages(loaded), @intCast(window), kept, o.kv8);
+    var shown = try kv_pages.text(F, a, served.stream_bytes, layout, paged, kv_pages.enginePaged(loaded), kv_pages.allOnPages(loaded), @intCast(window), kept, o.kv8);
+    if (counted.ledger) |lp| shown[0] = try @import("cuda_ledger.zig").text(a, lp, window);
     // TF_QWEN_KV_SHARE: the family keeps prompts itself, over its pool's pages
     const cache_text = if (kv_pages.ownCache(loaded) or share) ", the prompt cache over the pool's pages" else shown[1];
     h.startup = try std.fmt.allocPrint(gpa, @import("cuda_startup.zig").format, .{
@@ -478,6 +482,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .structures = served.backend.vtable.first_masked != null,
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
         .admit = admit,
+        .ledger = @import("cuda_ledger.zig").info(if (h.kv_plan) |*p| p else null),
         .slide_conversations = conversations,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
@@ -545,6 +550,7 @@ test "Flash Next takes --vision at family admission" {
 test {
     _ = @import("cuda_health_test.zig");
     _ = @import("cuda_vision_offer.zig");
+    _ = @import("cuda_ledger.zig");
     _ = kv_pages;
     _ = drafted;
     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
