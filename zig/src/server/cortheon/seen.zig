@@ -17,7 +17,7 @@ pub const Seen = struct {
     /// Adds every http(s) URL written in `text`.
     pub fn addFrom(s: *Seen, a: Allocator, text: []const u8) Allocator.Error!void {
         var i: usize = 0;
-        while (std.mem.indexOfPos(u8, text, i, "http")) |at| {
+        while (std.ascii.findIgnoreCasePos(text, i, "http")) |at| { // HTTPS:// is the same scheme
             i = at + 4;
             if (!(std.ascii.startsWithIgnoreCase(text[at..], "http://") or std.ascii.startsWithIgnoreCase(text[at..], "https://"))) continue;
             var end = at;
@@ -123,7 +123,9 @@ test "a request reads only what it was shown, and registry json for one package"
     const a = arena.allocator();
     var s: Seen = .{};
     try s.addFrom(a, "See (https://docs.example/guide), and https://ziglang.org/news/. Not ftp://x.org or httpx.");
+    try s.addFrom(a, "Also HTTPS://Docs.Example/API.");
     try std.testing.expect(s.allows(a, "https://docs.example/guide"));
+    try std.testing.expect(s.allows(a, "https://docs.example/API"));
     try std.testing.expect(s.allows(a, "https://ziglang.org/news"));
     try std.testing.expect(!s.allows(a, "https://docs.example/guide?leak=secret"));
     try std.testing.expect(!s.allows(a, "https://docs.example/guide/secret"));
