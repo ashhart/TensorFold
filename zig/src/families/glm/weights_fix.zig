@@ -3,6 +3,35 @@ const std = @import("std");
 const platform = @import("sys");
 const st = @import("../../core/safetensors.zig");
 const paced_read = @import("../../core/paced_read.zig");
+const file_cache = @import("../../core/checkpoint_file_cache.zig");
+
+/// Copied shards stay open through all readers; each unique descriptor is hinted and closed once afterward.
+pub const Files = struct {
+    a: std.mem.Allocator,
+    paths: std.StringHashMapUnmanaged(platform.c.fd_t) = .empty,
+    fds: std.ArrayList(platform.c.fd_t) = .empty,
+
+    pub fn open(f: *Files, path: [:0]const u8) !platform.c.fd_t {
+        if (f.paths.get(path)) |fd| return fd;
+        try f.paths.ensureUnusedCapacity(f.a, 1);
+        try f.fds.ensureUnusedCapacity(f.a, 1);
+        const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
+        if (fd < 0) return error.OpenFailed;
+        _ = platform.c.fcntl(fd, 48, @as(c_int, 1)); // F_NOCACHE
+        f.paths.putAssumeCapacity(path, fd);
+        f.fds.appendAssumeCapacity(fd);
+        return fd;
+    }
+
+    pub fn deinit(f: *Files) void {
+        for (f.fds.items) |fd| {
+            file_cache.release(fd);
+            _ = platform.c.close(fd);
+        }
+        f.fds.deinit(f.a);
+        f.paths.deinit(f.a);
+    }
+};
 
 /// One tensor's bytes on disk.
 pub const Src = struct { shard: u32, off: u64, len: u64, dtype: st.DType, shape: [st.max_rank]usize, rank: u8 };
@@ -139,16 +168,11 @@ const Pool = struct {
 
 /// Every copy on `threads` threads, uncached, paced by the memory the kernel can give (else a load fills the cache).
 pub fn runCopies(gpa: std.mem.Allocator, shards: []const [:0]const u8, copies: []const Copy, transforms: []const Transform, threads: usize) !void {
+    var files: Files = .{ .a = gpa };
+    defer files.deinit();
     const fds = try gpa.alloc(platform.c.fd_t, shards.len);
     defer gpa.free(fds);
-    for (shards, fds) |path, *fd| {
-        fd.* = platform.c.open(path, .{ .ACCMODE = .RDONLY });
-        if (fd.* < 0) return error.OpenFailed;
-        _ = platform.c.fcntl(fd.*, 48, @as(c_int, 1)); // F_NOCACHE
-    }
-    defer for (fds) |fd| {
-        _ = platform.c.close(fd);
-    };
+    for (shards, fds) |path, *fd| fd.* = try files.open(path);
     var pool: Pool = .{ .fds = fds, .jobs = copies };
     const workers = try gpa.alloc(?std.Thread, threads);
     defer gpa.free(workers);
@@ -181,4 +205,8 @@ pub fn runCopies(gpa: std.mem.Allocator, shards: []const [:0]const u8, copies: [
     tx.run();
     for (workers) |t| if (t) |th| th.join();
     if (tx.failed.load(.acquire)) return error.TransformFailed;
+}
+
+test {
+    _ = @import("weights_fix_test.zig");
 }
