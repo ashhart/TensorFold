@@ -84,6 +84,7 @@ test {
     _ = @import("health_test.zig");
     _ = @import("clef_encode_test.zig");
     _ = @import("clef_tokens_test.zig");
+    _ = @import("clef_answer_test.zig");
     _ = @import("memory_routes.zig");
     _ = @import("process_memory.zig");
     _ = @import("process_resident.zig");
