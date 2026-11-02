@@ -12,8 +12,8 @@ const Cache = caches.Cache;
 
 /// TF_QWEN_KV_SHARE=n: keep prompts as pool pages and at most n recurrent-state snapshots (0 or unset: off).
 pub fn sharing() !usize {
-    const v = std.c.getenv("TF_QWEN_KV_SHARE") orelse return 0;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch error.BadQwenKvShare;
+    const v = @import("core").profile.get(.TF_QWEN_KV_SHARE) orelse return 0;
+    return std.fmt.parseInt(usize, v, 10) catch error.BadQwenKvShare;
 }
 
 /// Below 4 snapshots a stream, live streams evict each other's before a resume (8 at 8 streams resumed none).

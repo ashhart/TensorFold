@@ -16,6 +16,54 @@ const gpuFlag = cli.Test.gpuFlag;
 const ranks = cli.Test.ranks;
 const spillWith = cli.Test.spillWith;
 
+test "stable profile: default and explicit spelling preserve every argument and engine open option" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    for ([_][]const []const u8{
+        &.{"m"},
+        &.{ "m", "--learn-conversations", "--learn-dir=cache", "--prompt-cache-gib=2", "--parallel=4" },
+        &.{ "m", "--no-thinking", "--temperature=0.7", "--no-drafts" },
+    }) |argv| {
+        const plain = try parse(a, argv, &u);
+        var extended: std.ArrayList([]const u8) = .empty;
+        try extended.appendSlice(a, argv);
+        for ([_][]const []const u8{ &.{ "--profile", "stable" }, &.{"--profile=stable"} }) |suffix| {
+            extended.shrinkRetainingCapacity(argv.len);
+            try extended.appendSlice(a, suffix);
+            const explicit = try parse(a, extended.items, &u);
+            try std.testing.expectEqualDeep(plain, explicit);
+            try std.testing.expectEqualDeep(try request(a, "d", "t", plain), try request(a, "d", "t", explicit));
+        }
+    }
+    for ([_][]const []const u8{
+        &.{ "m", "--profile" },                  &.{ "m", "--profile=" },
+        &.{ "m", "--profile=fast-exact" },       &.{ "m", "--profile=fast" },
+        &.{ "m", "--profile=Stable" },           &.{ "m", "--profile=unknown" },
+        &.{ "m", "--profile", "--no-thinking" },
+    }) |argv| {
+        try std.testing.expectError(error.Usage, parse(a, argv, &u));
+        try std.testing.expect(std.mem.indexOf(u8, u.message, "--profile") != null);
+    }
+    var output: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&output.writer, .{ .version = "test" });
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"--profile\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "fast-exact") == null);
+    const decoded = try std.json.parseFromSlice(std.json.Value, a, output.written(), .{});
+    const profiles = decoded.value.object.get("profiles").?.object;
+    try std.testing.expectEqualStrings("stable", profiles.get("default").?.string);
+    const available = profiles.get("available").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), available.len);
+    try std.testing.expectEqualStrings("stable", available[0].string);
+    const entries = profiles.get("registered_switches").?.array.items;
+    try std.testing.expectEqual(api.profile.entries.len, entries.len);
+    for (entries, api.profile.entries) |json_entry, row| {
+        try std.testing.expectEqualStrings(row.name(), json_entry.object.get("id").?.string);
+        try std.testing.expect(json_entry.object.get("stable").? == .null);
+    }
+}
+
 test "max frames CLI bounds and engine request preserve the default" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

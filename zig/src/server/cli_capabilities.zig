@@ -45,6 +45,12 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     for (cli.env, 0..) |name, i| try w.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", name });
     try w.writeAll("], \"optional_libraries\": ");
     try std.json.Stringify.value(e.optional_libraries, .{}, w);
+    try w.writeAll(", \"profiles\": ");
+    try std.json.Stringify.value(.{
+        .default = @tagName(api.profile.Profile.stable),
+        .available = [_][]const u8{"stable"},
+        .registered_switches = api.profile.entries,
+    }, .{}, w);
     if (e.p2p) |p| try w.print(", \"p2p\": {s}", .{p});
     try w.writeAll("}\n");
 }
