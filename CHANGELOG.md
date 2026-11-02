@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- An Intel XPU server built without DPAS (`-Dxpu-dpas=false`, Gen12LP) serves Nemotron-H and leaves out the Qwen3.8-27B runner and Gemma 4 E4B, refusing them by name, and Gen12LP's Nemotron prompt projection takes 8 x 4 tiles (#1692). Thanks to @jschmied.
+
 - MOSS-Image computes its sampling schedule natively from `scheduler_config.json`, bit for bit what its `MOSSImageScheduler` sets: the shifted float32 grid snapped to the training levels, repeats dropped, sigmas ending at 0 (#1670, part of #1529). Thanks to @BobClawblaw.
 
 - The Qwen3.8-27B recipe gains measurements on a 48 GB M5 Pro Mac mini with 1.2.1: 89.1 tok/s sampled code with DFlash2, against 86.5 on 1.1.0 (#1947). Thanks to @pauldodd123.
