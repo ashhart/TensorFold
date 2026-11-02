@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP loads a shared expert wider than the routed experts beside the stack instead of refusing it, and keeps the fused stack when the widths match, with the same tokens (#1612). Thanks to @gilby.
+
 - Flash Next on CUDA: prompt passes do less work with the same bits (BF16 projections of 1,024 rows or more on a 128 x 128 tile, the hyper-connection writeback and normalize in one launch, wide route logits read once, the QSA select and the fused DeltaNet gated norm reworked, the prompt scratch sized by use), so cold prompts run about 4-5% faster on a GB10 with identical tokens (#1764, part of #1762). Thanks to @Arminova.
 
 - The proposal and pull-request templates ask for proof and an opt-in for any change to default-path output tokens, planted controls for new kernels, and the `--version` output rather than a release number (#1596). Thanks to @jayleaton.
