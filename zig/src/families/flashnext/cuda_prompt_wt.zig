@@ -104,7 +104,6 @@ pub const Store = struct {
     io: std.Io,
     dir: []const u8,
     parsed: std.json.Parsed(std.json.Value),
-    path: []u8 = &.{},
     rel: []u8 = &.{},
     file: ?Shard = null,
     held: std.ArrayList(Held) = .empty, // as many shards as one layer's borrowed planes span (no fixed cap)
@@ -237,11 +236,7 @@ pub const Store = struct {
                 return self.held.items[self.held.items.len - 1].file.get(key) orelse return error.MissingTensor;
             }
         }
-        const rel = try self.gpa.dupe(u8, file);
-        errdefer self.gpa.free(rel);
-        const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
-        defer self.gpa.free(path);
-        self.held.appendAssumeCapacity(.{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) });
+        self.held.appendAssumeCapacity(try self.openShard(file));
         return self.held.items[self.held.items.len - 1].file.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
             return error.MissingTensor;
@@ -251,8 +246,6 @@ pub const Store = struct {
     pub fn closeFile(self: *Store) void {
         if (self.file) |*f| f.close();
         self.file = null;
-        if (self.path.len != 0) self.gpa.free(self.path);
-        self.path = &.{};
         if (self.rel.len != 0) self.gpa.free(self.rel);
         self.rel = &.{};
     }
@@ -283,13 +276,30 @@ pub const Store = struct {
         return v.string;
     }
 
+    /// `file` (relative to the checkpoint) opened, its header parsed, with its own copy of the name.
+    fn openShard(self: *Store, file: []const u8) !Held {
+        const rel = try self.gpa.dupe(u8, file);
+        errdefer self.gpa.free(rel);
+        const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
+        defer self.gpa.free(path);
+        return .{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) };
+    }
+
+    /// Switches shards through `released`: the next one taken from there or opened, the current one parked there.
     fn use(self: *Store, key: []const u8) !void {
         const file = try self.shard(key);
         if (self.file != null and std.mem.eql(u8, file, self.rel)) return;
-        self.closeFile();
-        self.rel = try self.gpa.dupe(u8, file);
-        self.path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
-        self.file = try Shard.load(self.gpa, self.io, self.path);
+        try self.released.ensureUnusedCapacity(self.gpa, 1);
+        const next: Held = for (self.released.items, 0..) |cached, i| {
+            if (std.mem.eql(u8, cached.rel, file)) break self.released.swapRemove(i);
+        } else try self.openShard(file);
+        if (self.file) |*f| {
+            // its pages dropped as close drops them: the n-gram table's stay
+            if (!runtimePages(f.f.names.keys())) f.f.release(self.gpa);
+            self.released.appendAssumeCapacity(.{ .rel = self.rel, .file = f.* });
+        }
+        self.rel = next.rel;
+        self.file = next.file;
     }
 
     pub fn tensor(self: *Store, requested: []const u8) !Tensor {
