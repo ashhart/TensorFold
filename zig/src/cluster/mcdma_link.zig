@@ -109,6 +109,15 @@ pub fn spec(a: Allocator, c: config.Config, m: config.Model, name: []const u8, o
     return .{ .names = names, .rank = rank, .library = library, .links = links, .layout = layout, .config = .{ .rank = rank, .ranks = n, .window_bytes = window, .staging_bytes = s.staging_bytes, .links = links, .timeout_ns = opts.timeout_ns, .connect_timeout_ns = opts.connect_timeout_ns } };
 }
 
+/// Every node of model `m` as it will check itself on its own host (a Metal node is a Mac), so a leader refuses what a
+/// node it starts would refuse: its links, library and window. Only each node can look for its library's file.
+pub fn specAll(a: Allocator, c: config.Config, m: config.Model, sizes: Sizes, why: *[]const u8) Error!void {
+    for (try ranks(a, m)) |name| {
+        const mac = if (c.find(name)) |i| c.nodes[i].backend == .metal else false;
+        _ = try spec(a, c, m, name, .{ .sizes = sizes, .mac = mac }, why);
+    }
+}
+
 /// Regions one ConnectX context registers: the window and every rank's staging in 4 MiB pieces, and one for its peer.
 pub fn regions(window: usize, staging: usize, n: u32) usize {
     return (std.math.divCeil(usize, window + @as(usize, n) * staging, mac_piece) catch unreachable) + 1;
