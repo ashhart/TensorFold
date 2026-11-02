@@ -189,6 +189,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&qwen3_host.step);
     b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.parse })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);
     // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
     test_step.dependOn(&checksExe(b, b.graph.host, .Debug, host).step);
@@ -212,6 +213,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     qwen3_run.has_side_effects = true; // the checkpoints and oracle files named by TF_QWEN3_* are not cached inputs
     b.step("qwen3-hip-gpu-build", "Compile the Qwen3 dense GPU checks without running them").dependOn(&qwen3_gpu.step);
     b.step("qwen3-hip-gpu-test", "Qwen3 lastRows on the GPU against transformers (TF_QWEN3_EMBED_*, TF_QWEN3_RERANK_*)").dependOn(&qwen3_run.step);
+    const parse_object = compile(b, .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib }, hip_arch, b.path("zig/kernels/hip/ops/vision.hip"), "parse-vision.hsaco");
+    @import("nemotron_parse_gpu.zig").gpuTests(b, target, host.hip, parse_object);
+    @import("nemotron_parse_gpu.zig").modelTests(b, target, optimize, gpu.hip);
     b.step("tf-qwen35-test", "Qwen3.5 / 3.6 model checks on the GPU (-Dhip-arch)").dependOn(&b.addInstallArtifact(checksExe(b, target, optimize, gpu), .{}).step);
     b.step("tf-clef-test", "Clef's joint schema head on the GPU: the tiny fixture and gate 3 (-Dhip-arch)").dependOn(&b.addInstallArtifact(clefExe(b, target, optimize, gpu), .{}).step);
     const fx_test = b.addExecutable(.{ .name = "tf-flashnext-hip-test", .root_module = b.createModule(.{
@@ -296,6 +300,7 @@ pub const Engine = struct {
     flashnext: *std.Build.Module,
     nemotron: *std.Build.Module,
     qwen3: *std.Build.Module,
+    parse: *std.Build.Module,
     native: *std.Build.Module,
 };
 
@@ -381,6 +386,13 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     dots.addImport("lanes", lanes);
     dots.addImport("engine_api", api);
     dots.addImport("hip_serve", serve);
+    const parse = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/nemotron_parse/hip.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "hip_serve", .module = serve } },
+    });
     const native = b.createModule(.{
         .root_source_file = b.path("zig/src/native/hip.zig"),
         .target = target,
@@ -397,6 +409,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "hip_serve", .module = serve },
             .{ .name = "qwen3", .module = qwen3 },
             .{ .name = "dots_mocr", .module = dots },
+            .{ .name = "nemotron_parse", .module = parse },
         },
     });
     return .{
@@ -408,6 +421,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         .flashnext = flashnext,
         .nemotron = nemotron,
         .qwen3 = qwen3,
+        .parse = parse,
         .native = native,
     };
 }
