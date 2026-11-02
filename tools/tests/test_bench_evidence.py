@@ -21,6 +21,12 @@ def usage(cached=0):
     return {"prompt_tokens": 8, "completion_tokens": 4, "prompt_tokens_details": {"cached_tokens": cached}}
 
 
+def observed(counts, runtime=None, complete=True):
+    evidence = Evidence()
+    evidence.add({"text": "A public fixture reply."})
+    return evidence.finish(counts, runtime or {}, complete)
+
+
 def response(counts=None, done=True, chunks=None, runtime=None):
     chunks = chunks if chunks is not None else [{"choices": [{"text": t}]} for t in ["H", "ell", "o", " world"]]
     chunks.append({"choices": [], "usage": counts,
@@ -48,27 +54,27 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(Evidence().finish(usage(), {}, False)["cache_state"], "unverified")
 
     def test_missing_and_malformed_hashes_never_pass_exactness(self):
-        row = Evidence().finish(usage(), {}, True)
+        row = observed(usage())
         self.assertIsNone(token_equal(row, row))
         for value in [None, True, "not-a-hash", "a" * 11]:
-            self.assertIsNone(Evidence().finish(usage(), {"token_sha": value}, True)["token_sha"])
-        a = Evidence().finish(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 64}, True)
-        b = Evidence().finish(usage(), {"token_sha": "b" * 12, "token_sha256": "b" * 64}, True)
+            self.assertIsNone(observed(usage(), {"token_sha": value})["token_sha"])
+        a = observed(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 64})
+        b = observed(usage(), {"token_sha": "b" * 12, "token_sha256": "b" * 64})
         self.assertTrue(token_equal(a, a))
         self.assertFalse(token_equal(a, b))
         self.assertIsNone(token_equal(a, {**a, "complete": False}))
         self.assertIsNone(token_equal(a, {**a, "error": "failure"}))
 
     def test_short_prefix_cannot_qualify_token_equality(self):
-        legacy = Evidence().finish(usage(), {"token_sha": "a" * 12}, True)
+        legacy = observed(usage(), {"token_sha": "a" * 12})
         self.assertIsNone(token_equal(legacy, legacy))
-        a = Evidence().finish(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 64}, True)
-        b = Evidence().finish(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 12 + "b" * 52}, True)
+        a = observed(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 64})
+        b = observed(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 12 + "b" * 52})
         self.assertFalse(token_equal(a, b))
-        bad = Evidence().finish(usage(), {"token_sha": "b" * 12, "token_sha256": "a" * 64}, True)
+        bad = observed(usage(), {"token_sha": "b" * 12, "token_sha256": "a" * 64})
         self.assertIsNone(token_equal(a, bad))
         for value in [None, "a" * 63, "A" * 64, "z" * 64, True]:
-            row = Evidence().finish(usage(), {"token_sha256": value}, True)
+            row = observed(usage(), {"token_sha256": value})
             self.assertIsNone(token_equal(row, row))
 
     def test_unicode_hashes_ignore_chunks_and_distinguish_reasoning(self):
@@ -187,7 +193,7 @@ class ClientTests(unittest.TestCase):
 
 class QualificationTests(unittest.TestCase):
     def row(self, phase="first", cached=0):
-        return bench_cache.receipt(Evidence().finish(usage(cached), {}, True), phase)
+        return bench_cache.receipt(observed(usage(cached)), phase)
 
     def test_claims_fail_closed_on_missing_evidence_and_wrong_token_count(self):
         row = self.row()

@@ -26,8 +26,8 @@ def receipt(run, phase, reference=None):
 
 
 def qualify(rows, expected=None, require_cold=False, require_reuse=False):
-    """An assertion needs affirmative usage evidence; unknown cache state cannot satisfy it."""
-    if not rows or any(r.get("error") or not r.get("complete") or not r.get("tokens") for r in rows):
+    """Qualification needs observed output and affirmative evidence for each requested assertion."""
+    if not rows or any(r.get("error") or not r.get("complete") or not r.get("tokens") or not r.get("output_sha256") for r in rows):
         return False
     if any(r.get("equal_first_tokens") is False or r.get("equal_first_output") is False for r in rows):
         return False

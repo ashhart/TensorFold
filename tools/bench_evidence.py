@@ -14,6 +14,7 @@ class Evidence:
     def __init__(self):
         self.content = hashlib.sha256()
         self.reasoning = hashlib.sha256()
+        self.observed_output = False
 
     def add(self, choice):
         delta = choice.get("delta") or {}
@@ -21,6 +22,7 @@ class Evidence:
         reasoning = delta.get("reasoning_content") or ""
         if not isinstance(content, str) or not isinstance(reasoning, str):
             raise ValueError("invalid_text_chunk")
+        self.observed_output |= bool(content or reasoning)
         self.content.update(content.encode("utf-8"))
         self.reasoning.update(reasoning.encode("utf-8"))
 
@@ -45,10 +47,11 @@ class Evidence:
         if token_sha and token_sha256 and not token_sha256.startswith(token_sha[:12]):
             token_sha256 = None
         digest = hashlib.sha256(self.content.digest() + self.reasoning.digest()).hexdigest()
+        verified_output = complete and self.observed_output
         return {"prompt_tokens": prompt, "cached_tokens": cached, "tokens": tokens, "cache_state": state,
-                "complete": complete, "token_sha": token_sha if complete else None,
-                "token_sha256": token_sha256 if complete else None,
-                "output_sha256": digest if complete else None}
+                "complete": complete, "token_sha": token_sha if verified_output else None,
+                "token_sha256": token_sha256 if verified_output else None,
+                "output_sha256": digest if verified_output else None}
 
 
 def token_equal(left, right):
