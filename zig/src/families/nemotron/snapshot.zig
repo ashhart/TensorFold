@@ -104,6 +104,7 @@ pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
 pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
     if (cache.len != 0 or snap.head != (cache.mtp != null)) return error.SnapshotLayout;
     if (snap.at + 1 > cache.kv[0].capacity) return error.ContextFull;
+    try @import("kv_pages.zig").grow(cache, snap.at);
     const slot = try b.pool.take();
     errdefer b.pool.give(slot);
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = slot, .snap = snap, .into = false });
