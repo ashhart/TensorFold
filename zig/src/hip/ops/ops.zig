@@ -33,6 +33,8 @@ pub const Ops = struct {
     prefill: bool = false,
     /// A lane round's forward: decode tiles at any row count, so a row's bits ignore the rows it shares a round with.
     window: bool = false,
+    /// rocBLAS on this stream, for bf16 projections (null: the model has none).
+    blas: ?*const @import("../blas.zig").Blas = null,
 
     pub const project = products.project;
     pub const projectGroup = products.projectGroup;

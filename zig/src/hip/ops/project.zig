@@ -6,6 +6,7 @@ const launches = @import("../launches.zig");
 const affine_launch = @import("../launches/affine.zig");
 const registry = @import("core").registry;
 const Ops = @import("ops.zig").Ops;
+const counting = @import("../launches/util.zig").counting;
 const Error = t.Error;
 const Tensor = t.Tensor;
 const Affine = t.Affine;
@@ -46,7 +47,16 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
             },
             else => return error.BadShape,
         },
-        .bf16 => return error.BadShape,
+        .bf16 => |h| {
+            if (f32_out or m == 0 or x.kind != .bf16) return error.BadShape;
+            const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 2), .kind = .bf16 };
+            // the counting stream sizes the arena: no product runs on its addresses
+            if (o.stream == counting) return out;
+            const b = o.blas orelse return error.BadShape;
+            if (b.stream.handle != o.stream) return error.BadShape;
+            b.project(x.ptr, h.weight, out.ptr, m, proj.n, proj.k) catch |err| return if (err == error.Invalid) error.BadShape else error.HipFailed;
+            return out;
+        },
     }
 }
 
@@ -212,7 +222,7 @@ pub fn embedRows(o: Ops, table: Projection, ids: u64, n: usize, out: Tensor) Err
     switch (table.handle) {
         .mlx => |h| return embedAffine(o, affineOf(table, h), ids, n, out),
         .dense => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(try kindOf(h.dtype)), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
-        .bf16 => return error.BadShape,
+        .bf16 => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(t.Kind.bf16), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
     }
 }
 

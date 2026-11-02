@@ -20,6 +20,8 @@ const mtp = @import("mtp.zig");
 const admission = hip.admission;
 const prefix = @import("prefix.zig");
 const plan = @import("../forward/plan.zig");
+const config = @import("../../../weights/config.zig");
+const table = @import("../../../weights/table.zig");
 
 pub const Options = struct {
     /// Most positions a stream's caches hold (its prompt, its reply and a window's rows).
@@ -60,6 +62,13 @@ fn gib(bytes: usize) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
+/// The device bytes of the checkpoint's weights, near enough to refuse before reading them: a bf16 one's text tower.
+fn checkpointBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+    var c = try config.Config.read(gpa, io, dir);
+    defer c.deinit();
+    return if (c.quant == .bf16) table.textBytes(gpa, io, dir) else admission.weightBytes(io, dir);
+}
+
 /// What `load` found before reading the weights.
 pub const Preflight = struct { pool: admission.Pool = undefined, held: u64 = 0, weights: u64 = 0 };
 
@@ -94,6 +103,9 @@ pub const Engine = struct {
     graphs: round_graphs.Graphs,
     /// The lane rounds' plan, graph choice and keep.
     round: lane_round.State = undefined,
+    /// rocBLAS on `stream` and its planned workspace, for a bf16 checkpoint's projections (opened by `size`).
+    blas: ?hip.blas.Blas = null,
+    workspace: hip.DeviceBuffer = undefined,
 
     /// The model on the device, its scratch not yet sized; a rank that fails here leaves the refusal to its caller.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
@@ -105,6 +117,7 @@ pub const Engine = struct {
         e.o = o;
         e.sized = false;
         e.stopped = false;
+        e.blas = null;
         // rounds and the draft head's batches replay graphs unless the policy says `graphs=off`, at any world size
         e.o.graphs = o.graphs and o.policy.graphsOn();
         e.graphs = round_graphs.Graphs.init(gpa);
@@ -127,12 +140,24 @@ pub const Engine = struct {
         _ = try steps.done(.{ 0, 0 }, .first);
         if (o.preflight) |pf| {
             // a rank loads its share of the checkpoint, near enough to refuse before reading it
-            pf.* = .{ .pool = try e.budget(io), .held = hip.usage(false).device, .weights = admission.weightBytes(io, dir) / o.world };
+            pf.* = .{ .pool = try e.budget(io), .held = hip.usage(false).device, .weights = try checkpointBytes(gpa, io, dir) / o.world };
             if (pf.weights > pf.pool.room(pf.held)) return error.WeightsDoNotFit;
         }
         _ = try steps.done(.{ 0, 0 }, .first);
         e.weights = try weights.Model.loadRank(gpa, io, &e.driver, dir, group);
         errdefer e.weights.deinit();
+        if (e.plain()) {
+            // rocBLAS's products are BF16 in and out, on one rank, and not qualified under graph capture
+            if (e.act != .bf16) {
+                std.log.err("a bf16 checkpoint needs bf16 activations; this GPU computes in fp16", .{});
+                return error.UnsupportedQuantization;
+            }
+            if (o.world > 1) {
+                std.log.err("a bf16 checkpoint runs on one rank", .{});
+                return error.UnsupportedQuantization;
+            }
+            e.o.graphs = false;
+        }
         e.bridge = try bridge.Bridge.init(gpa, &e.driver, &e.weights, e.act);
         errdefer e.bridge.deinit();
         if (group != null) e.bridge.model.tp = e.comm;
@@ -163,6 +188,15 @@ pub const Engine = struct {
         errdefer e.pool.deinit();
         e.round = try lane_round.State.init(e);
         errdefer e.round.deinit(e);
+        if (e.plain()) {
+            e.workspace = try hip.DeviceBuffer.alloc(&e.driver, hip.blas.workspace_bytes);
+            e.blas = hip.blas.Blas.open(e.stream) catch |err| {
+                e.workspace.free();
+                return err;
+            };
+        }
+        errdefer e.closeBlas();
+        if (e.blas) |*b| try b.useWorkspace(e.workspace.base(), e.workspace.len);
         const held = hip.usage(false).device - before;
         const planned = e.sizedBytes(arenas, rows, prompt_rows, count);
         if (held != planned) {
@@ -180,9 +214,23 @@ pub const Engine = struct {
     /// Device bytes `size` allocates beside the weights, with the arenas already counted.
     fn sizedBytes(e: *const Engine, arenas: [2]usize, rows: usize, prompt_rows: usize, pool_pages: usize) usize {
         const m = e.model();
+        const blas: usize = if (e.plain()) hip.blas.workspace_bytes else 0;
         return arenas[0] + arenas[1] + prompt_rows * 4 + draw.Drawer.deviceBytes(rows) + pages.Pool.deviceBytes(m, pool_pages) +
             plan.Buffer.deviceBytes(rows, m.spec.n_layers) + state.Caches.deviceBytes(m, rows) +
-            hip.Votes.bytes(e.o.world);
+            hip.Votes.bytes(e.o.world) + blas;
+    }
+
+    /// The checkpoint's projections are BF16 as stored (an unquantized HF checkpoint): rocBLAS runs them.
+    pub fn plain(e: *const Engine) bool {
+        return e.weights.embed == .bf16;
+    }
+
+    fn closeBlas(e: *Engine) void {
+        if (e.blas) |*b| {
+            b.close();
+            e.workspace.free();
+        }
+        e.blas = null;
     }
 
     /// Device bytes `size(capacity, pool_pages)` would allocate with `rows` rows a forward: what admission weighs.
@@ -240,6 +288,7 @@ pub const Engine = struct {
         if (e.graphs.captured > 0) std.log.info("graphs: {d} captured ({d:.0} ms each), {d} of {d} rounds replayed", .{ e.graphs.captured, @as(f64, @floatFromInt(e.graphs.capture_ns)) / @as(f64, @floatFromInt(e.graphs.captured)) / 1e6, e.graphs.replayed, e.graphs.rounds });
         e.graphs.deinit();
         if (e.sized) {
+            e.closeBlas();
             e.round.deinit(e);
             e.drawer.deinit();
             e.ids_dev.free();
@@ -263,7 +312,8 @@ pub const Engine = struct {
     }
 
     pub fn ops(e: *Engine, arena: *hip.Arena) hip.ops.Ops {
-        return .{ .l = &e.lib, .bf16 = e.act == .bf16, .stream = e.stream.handle, .arena = arena };
+        const blas: ?*const hip.blas.Blas = if (e.blas) |*b| b else null;
+        return .{ .l = &e.lib, .bf16 = e.act == .bf16, .stream = e.stream.handle, .arena = arena, .blas = blas };
     }
 
     /// Caches for `total` positions (at most the capacity) with every page taken.
