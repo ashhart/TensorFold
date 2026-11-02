@@ -207,6 +207,15 @@ finite (its id word carries bit 31, its value word a NaN) and takes the lower id
 rank's word into the id sentinel, so both Macs refuse a non-finite round where one Mac does. Six controls edit the
 source: a stage reading the peer's half, a gather writing its own half twice, and an argmax or pick tie to the higher
 id must go red at `shapes`, and an argmax or pick that does not flag at `nonfinite`.
+The Llama family's own kernels (`metal_llama*.zig`): its glue (embedding, the norms at HF's rounding points, the
+residual add, RoPE with bf16 cos and sin, the SiLU gate, the decode attention's partials and their merge, the argmax
+draw by its stated rule), its row projections (1 to 32 rows) and, on the M5's tensor units, its four GEMM forms and the
+prompt attention at both served geometries; gate 5 reads their pipelines on this GPU. Twelve controls edit the
+source, one a kernel group: an embedding reading its own row, a norm's mean over the threads, a subtracting add, an
+add-norm dropping its residual, a SiLU with gate and up swapped, a rope at the window's first position, a decode that
+never rescales, a merge dropping each block's scale, a row projection dropping its tail, a GEMM reading its weights
+untransposed and a prompt attention seeing the next key go red at `shapes`, and an argmax never picking a NaN at
+`nonfinite`.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and
