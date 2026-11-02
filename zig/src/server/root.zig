@@ -96,6 +96,7 @@ test {
     _ = @import("thinking_reserve_test.zig");
     _ = @import("loop_stop_test.zig");
     _ = @import("late_system_test.zig");
+    _ = @import("compact.zig");
     _ = @import("compact_test.zig");
     _ = @import("compact_auto_test.zig");
     _ = @import("request_log.zig");
