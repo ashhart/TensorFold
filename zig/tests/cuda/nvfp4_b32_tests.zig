@@ -5,12 +5,17 @@ const check = @import("check.zig");
 const rig = @import("flashnext_rig.zig");
 const X = cuda.experts.Nvfp4Experts;
 const Y = cuda.experts32.Nvfp4b32Experts;
+const Layer = cuda.experts.Layer;
 const d = 4096;
 const widths = [_]usize{ 1024, 704, 640 }; // TP=2's rank and TP=3's two
 const experts = 6;
 const slots = 3; // two routed picks and the skipped shared slot
 const rows_set = [_]usize{ 1, 7, 17, 22, 64, 65, 130 };
 const most = rows_set[rows_set.len - 1];
+
+/// A launch's form: the decode or the prompt kernels, and the down's sums.
+const Form = struct { prompt: bool, down: cuda.experts.Epi };
+const forms = [_]Form{ .{ .prompt = false, .down = .down_f32 }, .{ .prompt = false, .down = .down_bf16 }, .{ .prompt = true, .down = .down_bf16 } };
 
 /// A matrix in both forms: as a checkpoint holds it, and its scales [n, k/16] two by two.
 const Both = struct {
@@ -34,39 +39,42 @@ const Both = struct {
     }
 };
 
-/// One width's experts packed in both forms, on the device.
+/// One width's experts on the device: block 16's, block 32's, and block 16's with one of a scale's two bytes moved.
 const Layers = struct {
-    gate: [experts]Both,
-    up: [experts]Both,
-    x: cuda.experts.Layer,
-    y: cuda.experts.Layer,
+    x: Layer,
+    y: Layer,
+    moved: Layer,
 
     fn init(r: *rig.Rig, a: std.mem.Allocator, rng: std.Random, width: usize) !Layers {
-        var l: Layers = undefined;
         const up16 = X.bytes(1, width, d, 2) / 4;
         const down16 = X.bytes(1, d, width, 1) / 4;
         const up32 = Y.bytes(1, width, d, 2) / 4;
         const down32 = Y.bytes(1, d, width, 1) / 4;
         const w = [_][]u32{ try a.alloc(u32, experts * up16), try a.alloc(u32, experts * down16), try a.alloc(u32, experts * up32), try a.alloc(u32, experts * down32) };
-        for (&l.gate, &l.up, 0..) |*g, *u, e| {
-            g.* = try .init(a, rng, width, d);
-            u.* = try .init(a, rng, width, d);
+        const moved = [_][]u32{ try a.alloc(u32, experts * up16), try a.alloc(u32, experts * down16) };
+        for (0..experts) |e| {
+            const g: Both = try .init(a, rng, width, d);
+            const u: Both = try .init(a, rng, width, d);
             const dn: Both = try .init(a, rng, d, width);
             X.packGateUp(w[0][e * up16 ..][0..up16], .{ g.m.codes, g.scales }, .{ u.m.codes, u.scales }, width, d);
             X.packOne(w[1][e * down16 ..][0..down16], dn.m.codes, dn.scales, d, width);
             Y.packGateUp(w[2][e * up32 ..][0..up32], g.m, u.m, width, d);
             Y.packOne(w[3][e * down32 ..][0..down32], dn.m, d, width);
+            g.scales[0] +%= 1; // row 0's first 16 inputs: block 32 has no such scale, so the kernels must part
+            dn.scales[0] +%= 1;
+            X.packGateUp(moved[0][e * up16 ..][0..up16], .{ g.m.codes, g.scales }, .{ u.m.codes, u.scales }, width, d);
+            X.packOne(moved[1][e * down16 ..][0..down16], dn.m.codes, dn.scales, d, width);
         }
-        const globals = r.f32s((experts + 1) * 2, 0.01, 0.03);
-        const dg = try r.dev(std.mem.sliceAsBytes(globals));
-        const common: cuda.experts.Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .up_scale = dg, .down_scale = dg, .width = width, .dims = d, .experts = experts, .limit = 10.0 };
-        l.x = common;
+        const dg = try r.dev(std.mem.sliceAsBytes(r.f32s((experts + 1) * 2, 0.01, 0.03)));
+        const common: Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .up_scale = dg, .down_scale = dg, .width = width, .dims = d, .experts = experts, .limit = 10.0 };
+        var l: Layers = .{ .x = common, .y = common, .moved = common };
         l.x.up = try r.dev(std.mem.sliceAsBytes(w[0]));
         l.x.down = try r.dev(std.mem.sliceAsBytes(w[1]));
-        l.y = common;
         l.y.format = .nvfp4_csf0;
         l.y.up = try r.dev(std.mem.sliceAsBytes(w[2]));
         l.y.down = try r.dev(std.mem.sliceAsBytes(w[3]));
+        l.moved.up = try r.dev(std.mem.sliceAsBytes(moved[0]));
+        l.moved.down = try r.dev(std.mem.sliceAsBytes(moved[1]));
         return l;
     }
 };
@@ -79,55 +87,53 @@ fn clear(gpu: check.Gpu, r: *rig.Rig, p: u64, bytes: usize) !void {
     try gpu.d.check(gpu.d.api.cuMemsetD8Async(p, 0xff, bytes, r.s.handle), "cuMemsetD8Async");
 }
 
-/// One form's gate-up and down from both kernels on the same plan; their bytes must agree.
-fn compare(gpu: check.Gpu, r: *rig.Rig, k: Kernels, b: Bufs, l: Layers, rows: usize, prompt: bool, down: cuda.experts.Epi) !void {
+/// One form's gate-up and down of `x` under block 16's kernels and `y` under block 32's: their act and out bytes.
+fn launch(gpu: check.Gpu, r: *rig.Rig, k: Kernels, b: Bufs, x: Layer, y: Layer, rows: usize, f: Form) ![4][]u8 {
     const pairs = rows * slots;
-    const width = l.x.width;
-    const t: usize = if (prompt) 64 else 16;
+    const width = x.width;
+    const t: usize = if (f.prompt) 64 else 16;
     const items = cuda.grouped.maxItems(pairs, experts + 1, t);
     try k.router.route(r.s, b.picks, pairs, experts + 1, t, b.plan);
     for (b.act) |p| try clear(gpu, r, p, pairs * width * 2);
     for (b.out) |p| try clear(gpu, r, p, pairs * d * 4);
     const gate: cuda.experts.Rows = .{ .x = b.x, .stride = d, .slots = slots };
     const dn: cuda.experts.Rows = .{ .x = b.act[0], .stride = width };
-    if (prompt) {
-        try k.x.runPrompt(r.s, .up, gate, l.x, b.plan, b.act[0], items, experts);
-        try k.y.runPrompt(r.s, .up, gate, l.y, b.plan, b.act[1], items, experts);
-        try k.x.runPrompt(r.s, down, dn, l.x, b.plan, b.out[0], items, experts);
-        try k.y.runPrompt(r.s, down, dn, l.y, b.plan, b.out[1], items, experts);
+    if (f.prompt) {
+        try k.x.runPrompt(r.s, .up, gate, x, b.plan, b.act[0], items, experts);
+        try k.y.runPrompt(r.s, .up, gate, y, b.plan, b.act[1], items, experts);
+        try k.x.runPrompt(r.s, f.down, dn, x, b.plan, b.out[0], items, experts);
+        try k.y.runPrompt(r.s, f.down, dn, y, b.plan, b.out[1], items, experts);
     } else {
-        try k.x.run(r.s, .up, gate, l.x, b.plan, b.act[0], items, experts);
-        try k.y.run(r.s, .up, gate, l.y, b.plan, b.act[1], items, experts);
-        try k.x.run(r.s, down, dn, l.x, b.plan, b.out[0], items, experts);
-        try k.y.run(r.s, down, dn, l.y, b.plan, b.out[1], items, experts);
+        try k.x.run(r.s, .up, gate, x, b.plan, b.act[0], items, experts);
+        try k.y.run(r.s, .up, gate, y, b.plan, b.act[1], items, experts);
+        try k.x.run(r.s, f.down, dn, x, b.plan, b.out[0], items, experts);
+        try k.y.run(r.s, f.down, dn, y, b.plan, b.out[1], items, experts);
     }
-    const a0 = try r.back(u8, b.act[0], pairs * width * 2);
-    const a1 = try r.back(u8, b.act[1], pairs * width * 2);
-    try check.sameBytes("nvfp4-b32 gate-up", a1, a0);
-    const y0 = try r.back(u8, b.out[0], pairs * d * 4);
-    const y1 = try r.back(u8, b.out[1], pairs * d * 4);
-    try check.sameBytes("nvfp4-b32 down", y1, y0);
+    return .{ try r.back(u8, b.act[0], pairs * width * 2), try r.back(u8, b.act[1], pairs * width * 2), try r.back(u8, b.out[0], pairs * d * 4), try r.back(u8, b.out[1], pairs * d * 4) };
 }
 
-/// The control: one of a scale's two bytes changed in block 16's copy, the kernels' bytes must part.
-fn control(gpu: check.Gpu, r: *rig.Rig, a: std.mem.Allocator, k: Kernels, b: Bufs, l: Layers) !bool {
-    const width = l.x.width;
-    const up16 = X.bytes(1, width, d, 2) / 4;
-    const words = try r.back(u32, l.x.up, experts * up16);
-    const e = 1; // row 0's first pick
-    const moved = try a.dupe(u8, l.gate[e].scales);
-    moved[0] +%= 1;
-    X.packGateUp(words[e * up16 ..][0..up16], .{ l.gate[e].m.codes, moved }, .{ l.up[e].m.codes, l.up[e].scales }, width, d);
-    var other = l.x;
-    other.up = try r.dev(std.mem.sliceAsBytes(words));
-    const pairs = most * slots;
-    const items = cuda.grouped.maxItems(pairs, experts + 1, 16);
-    try k.router.route(r.s, b.picks, pairs, experts + 1, 16, b.plan);
-    for (b.act) |p| try clear(gpu, r, p, pairs * width * 2);
-    const gate: cuda.experts.Rows = .{ .x = b.x, .stride = d, .slots = slots };
-    try k.x.run(r.s, .up, gate, other, b.plan, b.act[0], items, experts);
-    try k.y.run(r.s, .up, gate, l.y, b.plan, b.act[1], items, experts);
-    return !std.mem.eql(u8, try r.back(u8, b.act[0], pairs * width * 2), try r.back(u8, b.act[1], pairs * width * 2));
+/// Each routed pair of `bytes` holds a written row (a launch's outputs start as all ones).
+fn written(bytes: []const u8, row: usize, rows: usize) !void {
+    for (0..rows * slots) |i| {
+        if (i % slots == slots - 1) continue; // the shared slot, skipped
+        try check.expect(std.mem.indexOfNone(u8, bytes[i * row ..][0..row], &.{0xff}) != null, "nvfp4-b32: pair {d} of {d} rows unwritten", .{ i, rows });
+    }
+}
+
+/// A form at a row count: every routed pair written, the two kernels' bytes equal.
+fn compare(gpu: check.Gpu, r: *rig.Rig, k: Kernels, b: Bufs, l: Layers, rows: usize, f: Form) !void {
+    const o = try launch(gpu, r, k, b, l.x, l.y, rows, f);
+    try written(o[1], l.x.width * 2, rows);
+    try written(o[3], if (f.down == .down_bf16) d * 2 else d * 4, rows);
+    try check.sameBytes("nvfp4-b32 gate-up", o[1], o[0]);
+    try check.sameBytes("nvfp4-b32 down", o[3], o[2]);
+}
+
+/// The control: a moved scale byte parts both of a form's outputs from block 32's, so `compare` can see a difference.
+fn control(gpu: check.Gpu, r: *rig.Rig, k: Kernels, b: Bufs, l: Layers, f: Form) !void {
+    const o = try launch(gpu, r, k, b, l.moved, l.y, most, f);
+    try check.expect(!std.mem.eql(u8, o[0], o[1]), "control: a moved gate scale parts gate-up's bytes", .{});
+    try check.expect(!std.mem.eql(u8, o[2], o[3]), "control: a moved down scale parts down's bytes", .{});
 }
 
 pub fn run(gpu: check.Gpu) !void {
@@ -169,16 +175,12 @@ pub fn run(gpu: check.Gpu) !void {
         .x = dx,
         .picks = try r.dev(std.mem.sliceAsBytes(picks)),
     };
-    var parted = true;
     for (widths) |width| {
         const l: Layers = try .init(&r, a, rng, width);
-        for (rows_set) |rows| {
-            try compare(gpu, &r, k, bufs, l, rows, false, .down_f32);
-            try compare(gpu, &r, k, bufs, l, rows, false, .down_bf16);
-            try compare(gpu, &r, k, bufs, l, rows, true, .down_bf16);
+        for (forms) |f| {
+            for (rows_set) |rows| try compare(gpu, &r, k, bufs, l, rows, f);
+            try control(gpu, &r, k, bufs, l, f);
         }
-        parted = parted and try control(gpu, &r, a, k, bufs, l);
     }
-    try check.expect(parted, "control: a changed scale parts the block 16 kernel's bytes from block 32's", .{});
-    r.report("nvfp4-b32: gate-up, fp32 and bf16 down, decode and prompt, equal to the block 16 kernels' bytes; control red");
+    r.report("nvfp4-b32: gate-up, fp32 and bf16 down, decode and prompt, at 1,024, 704 and 640: block 16's bytes, each control red");
 }
