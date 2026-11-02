@@ -224,6 +224,8 @@ fn steady(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: [
     };
     try dr.absorb(&.{.{ .stream = &s, .features = feats.at(taps, 0, ctx, width), .start = 0, .follow = &.{} }});
     var counted = std.testing.FailingAllocator.init(gpa, .{});
+    const original_gpa = d.gpa;
+    defer d.gpa = original_gpa;
     var anchor: u64 = ctx;
     const rounds = 24;
     const warm = 4;
@@ -243,7 +245,6 @@ fn steady(gpa: std.mem.Allocator, d: *q.dspark.Drafter, taps: mtl.Buffer, ids: [
         try dr.absorb(&.{.{ .stream = &s, .features = feats.at(taps, at, rows, width), .start = anchor, .follow = &.{}, .prompt = false }});
         anchor += rows;
     }
-    d.gpa = gpa;
     const n = rounds - warm;
     std.debug.print("steady rounds: {d} rounds of hold, chances, held and a verified absorb: {d} host allocations, {d} resizes, {d} unwaited holds\n", .{ n, counted.allocations, counted.resize_index, d.signalled - holds });
     if (counted.allocations != 0 or counted.resize_index != 0 or d.signalled - holds != n) return error.SteadyRoundsAllocate;
@@ -261,6 +262,7 @@ pub fn main(init: std.process.Init) !void {
     defer m.deinit();
     const d = try q.dspark.Drafter.init(gpa, init.io, m, args[2], .{ .capacity = length + 64, .bits = bits });
     defer d.deinit();
+    try @import("lfm2_dspark_capture.zig").nonfinite(gpa, d);
     const cfg = d.config;
     // the compared block's rows (a hold of depth d runs a d-row block)
     const block: u32 = if (args.len >= 5) try std.fmt.parseInt(u32, args[4], 10) else cfg.block;
