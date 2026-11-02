@@ -204,12 +204,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
-/// The admit's refusals: no stream fits, or --parallel asks for more than the budget holds.
-const no_stream = "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, " ++
-    "and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve{s}; " ++
-    "lower --context, or free device memory";
-const too_many = "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, " ++
-    "and the CUDA memory budget leaves {d:.2} GiB{s}: serve --parallel {d}, or lower --context";
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (refusals.family(F, o)) |why| {
         problem.* = why;
@@ -385,34 +379,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
     };
     const free = loaded.free_streams;
-    const grow = budget.growRoom(room, !@hasField(F.Options, "lanes"));
-    const wrapped = kv_pages.wrapped(F, loaded, free, served.stream_bytes, room);
-    const layout = wrapped.layout;
-    var paged: ?kv_pages.Plan = null;
-    const streams = if (layout) |l| blk: {
-        paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(window), problem, host_cache, kv_pages.enginePaged(loaded), if (share) 1_000_000 else 0) orelse return null;
-        break :blk paged.?.lanes;
-    } else budget.admit(grow, served.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
-        problem.* = switch (e) {
-            error.NoStream => try std.fmt.allocPrint(a, no_stream, .{
-                window,
-                toGib(served.stream_bytes),
-                toGib(room),
-                toGib(model),
-                toGib(after.reserve),
-                low,
-            }),
-            error.TooMany => try std.fmt.allocPrint(a, too_many, .{
-                o.lanes,
-                toGib(served.stream_bytes * (o.lanes -| free)),
-                window,
-                toGib(room),
-                low,
-                free + grow / served.stream_bytes,
-            }),
-        };
-        return null;
-    };
+    const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .share = share }, problem) orelse return null;
+    const streams = counted.streams;
+    const layout = counted.layout;
+    const paged = counted.paged;
     if (!try kv_pages.attach(F, a, loaded.ctx, paged, problem)) return null;
     served.reserve(streams) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot reserve {d} streams' caches at a {d}-token window ({s}): serve fewer with --parallel, or lower --context", .{ streams, window, @errorName(e) });
