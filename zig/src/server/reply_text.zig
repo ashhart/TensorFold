@@ -1,5 +1,7 @@
 //! Reply text as it streams: think blocks, tool markup held back, Harmony channels, stop strings.
 const std = @import("std");
+const json = @import("json");
+const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
 pub const Markers = struct { open: []const u8, close: []const u8 };
@@ -566,4 +568,11 @@ test "reply text: MiniMax-M3's call opener is watched for only under MiniMax-M3'
     const mm = openersOf(mm_markers);
     try std.testing.expectEqualStrings("x = a[i", try hideInto(a, &out, "x = a[i]", false, false, mm));
     try std.testing.expectEqualStrings("Checking. ", try hideInto(a, &out, "Checking. ]<]minimax[>[<tool_call>]<]minimax[>[<invoke", false, false, mm));
+}
+
+/// ``{key: text}``: a streamed delta (role, content or reasoning_content).
+pub fn deltaOf(a: Allocator, key: []const u8, text: []const u8) Allocator.Error!Value {
+    const o = try json.newObject(a);
+    try o.put(a, key, .{ .string = text });
+    return .{ .object = o };
 }

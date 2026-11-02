@@ -128,6 +128,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }), .filters = &.{"HIP BLAS device:"} });
     b.step("build-hip-blas-test", "Build BF16 projection device checks; execution requires device selection and admission").dependOn(&b.addInstallArtifact(blas_device, .{}).step);
     @import("glm_ocr.zig").hipTests(b, host.hip, device_checks.hip, test_step, o);
+    const native_ocr = b.step("test-glm-ocr-native-host", "GLM-OCR native registry and preallocation refusals without devices");
+    native_ocr.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"GLM-OCR native flags:"} })).step);
+    native_ocr.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native.import_table.get("glm_ocr").?, .filters = &.{"GLM-OCR native admission:"} })).step);
     b.step("test-hip-family-offers-host", "HIP optional native family metadata without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"HIP optional family offers:"} })).step);
     b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
@@ -275,6 +278,8 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "hip_serve", .module = serve },
         },
     });
+    const ocr_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("glm_ocr_kernels.zig", "const hip = @import(\"hip\"); pub const arch = hip.kernels.arch; pub const bytes = hip.kernels.images[@intFromEnum(hip.kernels.Group.glm_ocr)];\n"), .imports = &.{.{ .name = "hip", .module = hip }} });
+    const glm_ocr = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_ocr/hip.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "hip_serve", .module = serve }, .{ .name = "glm_ocr_kernels", .module = ocr_kernels } } });
     const native = b.createModule(.{
         .root_source_file = b.path("zig/src/native/hip.zig"),
         .target = target,
@@ -287,6 +292,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "qwen3_5", .module = family },
             .{ .name = "flashnext", .module = flashnext },
             .{ .name = "nemotron", .module = nemotron },
+            .{ .name = "glm_ocr", .module = glm_ocr },
             .{ .name = "hip_serve", .module = serve },
         },
     });

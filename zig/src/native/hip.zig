@@ -8,12 +8,13 @@ const qwen35 = @import("qwen3_5");
 const flashnext = @import("flashnext");
 const nemotron = @import("nemotron");
 const serve = @import("hip_serve");
+const glm_ocr = @import("glm_ocr");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
 
 /// The HIP families: namespaces with `model_type`, `formats`, `default_context`, `prefill_step`, `open` and `follow`.
-const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native };
+const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native };
 
 pub const backends: []const []const u8 = &.{"hip"};
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
@@ -204,6 +205,8 @@ fn reasoning(comptime F: type) bool {
 
 /// The family's refusal of --slide or --mtp-confidence, when it names one.
 fn flagRefused(comptime F: type, o: api.Open) ?[]const u8 {
+    if (o.tp != 1 and @hasDecl(F, "tp_refusal")) return F.tp_refusal;
+    if (o.mtp_drafts) |n| if (n > 0 and @hasDecl(F, "mtp_refusal")) return F.mtp_refusal;
     if (o.rope_yarn != null) return "--rope-yarn: the native HIP engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
     if (o.slide and @hasDecl(F, "slide_refusal")) return F.slide_refusal;
     if (o.mtp_confidence != null and @hasDecl(F, "confidence_refusal")) return F.confidence_refusal;
@@ -357,6 +360,14 @@ test "every registered family is listed for capabilities" {
     try std.testing.expectEqualStrings("qwen3_5_moe", families[1].model_type);
     try std.testing.expectEqualStrings("qwen4_exp", families[2].model_type);
     try std.testing.expectEqualStrings("nemotron_h", families[3].model_type);
+    try std.testing.expectEqualStrings("glm_ocr", families[4].model_type);
+}
+
+test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy drafts remain" {
+    const F = glm_ocr.native;
+    try std.testing.expectEqualStrings(F.mtp_refusal, flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 1 }).?);
+    try std.testing.expectEqualStrings(F.tp_refusal, flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .tp = 2 }).?);
+    try std.testing.expect(flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 0 }) == null);
 }
 
 test "Nemotron refuses --slide and --mtp-confidence on HIP before it loads, and keeps a cap" {
