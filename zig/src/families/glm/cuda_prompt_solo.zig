@@ -11,6 +11,11 @@ pub fn othersDecode(lanes: anytype, s: anytype) bool {
     return false;
 }
 
+/// Before the weights load: a drafter's steps take a chunk, so the buffers for two would hold memory no pass uses.
+pub fn refuse(solo: bool, drafter: ?[]const u8) !void {
+    if (solo and drafter != null) return error.GlmSoloWithDrafter;
+}
+
 /// The rows an engine sizes its prompt buffers for: at start, as they hold memory all the time.
 pub fn bufferRows(on: bool) usize {
     return if (on) fw.solo_rows else fw.prefill_rows;
@@ -34,7 +39,7 @@ fn rowsAt(start: usize, len: usize) usize {
 
 /// Rank 0's choice for the step at `start` (the others take the ids it sends); not beside what reads a chunk's rows.
 pub fn at(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, marks: ?engine.Marks) bool {
-    if (e.bp.rows < fw.solo_rows or e.drafter != null or e.prompt_logprobs != null or e.prompt_profs[3] != null) return false;
+    if (e.bp.rows < fw.solo_rows or e.prompt_logprobs != null or e.prompt_profs[3] != null) return false;
     if (e.images) |v| if (v.rowCount() > 0) return false;
     if (!takesTwo(start, len, if (marks) |m| m.at else &.{})) return false;
     // a resumed step restores its kept state, and the rings' base, after this choice
@@ -44,7 +49,7 @@ pub fn at(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, mark
 
 /// Whether a pass of `rows` past a chunk may run: `at`'s rule on every rank, its kept state restored.
 pub fn allowed(e: *const Engine, start: usize, rows: usize) bool {
-    if (e.bp.rows < rows or e.drafter != null or e.prompt_logprobs != null) return false;
+    if (e.bp.rows < rows or e.prompt_logprobs != null) return false;
     return ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rows);
 }
 

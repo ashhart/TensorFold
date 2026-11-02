@@ -223,6 +223,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const roce_bytes = a.roce_bytes;
     // TF_GLM_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
+    try @import("cuda_prompt_solo.zig").refuse(set.solo, o.drafter);
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -455,6 +456,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadGlmKvShare => "TF_GLM_KV_SHARE: give how many states the prompt cache over the KV pages keeps, or 0 or unset for off",
         error.GlmShareNeedsPages => "TF_GLM_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
+        error.GlmSoloWithDrafter => "TF_GLM_CHUNK_SOLO=4096 holds buffers no pass uses beside --drafter: unset it, or leave out --drafter",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
             .{ ranks.max_world, ranks.max_world },
@@ -501,6 +503,14 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
         for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
     }
     try std.testing.expect(explain(null, error.Fp8OnPages) != null);
+}
+
+test "TF_GLM_CHUNK_SOLO=4096 beside --drafter is refused by name" {
+    const solo = @import("cuda_prompt_solo.zig");
+    try std.testing.expectError(error.GlmSoloWithDrafter, solo.refuse(true, "dflash2"));
+    try solo.refuse(true, null);
+    try solo.refuse(false, "dflash2");
+    try std.testing.expect(explain(null, error.GlmSoloWithDrafter) != null);
 }
 
 test "capacity keeps a verify window past the context and a multiple of 64" {
