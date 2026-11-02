@@ -18,9 +18,7 @@ pub const Shape = struct {
         return .{ .experts = c.experts, .topk = c.topk, .n_group = c.n_group, .topk_group = c.topk_group, .scale = c.routed_scale };
     }
 
-    /// glue.select's bounds, which config.parse holds a config to and a hand-built Shape must pass before a dispatch:
-    /// at most 512 experts (16 a lane), top-k under 32 (a lane a pick), up to 32 equal groups (a lane a group) that hold
-    /// the top-k. Then HF's two rules: a group scores its best two, so it holds two or more; one pick stays unnormalized.
+    /// glue.select's bounds (at most 512 experts, top-k under 32, up to 32 equal groups) and HF's two group rules.
     pub fn check(s: Shape) error{ Bounds, GroupOfOne, OnePick }!void {
         const groups_ok = s.n_group >= 1 and s.n_group <= max_groups and s.experts % s.n_group == 0 and s.topk_group >= 1 and
             s.topk_group <= s.n_group and s.topk <= s.topk_group * (s.experts / s.n_group);
@@ -36,13 +34,10 @@ pub const Shape = struct {
 
 pub const Pick = struct { id: u32, wt: f32 };
 
-/// What a pick is once every expert left is NaN (picked slots are NaN too): id 0, weight 0, so a reader that
-/// indexes experts by id stays in range and adds nothing.
+/// A pick once every expert left is NaN: id 0, weight 0, so a reader indexing experts by id stays in range.
 pub const empty = Pick{ .id = 0, .wt = 0 };
 
-/// gate.expert_bias, a checkpoint constant, so the loader checks it once: a group holding both a +inf and a -inf bias
-/// can score +inf + -inf = NaN, and a NaN group never wins `keep`. With one group, keep_groups never runs.
-/// Call it after `s.check()`, with one bias per expert: it reads `s`'s groups straight off `bias`.
+/// Refuses a group holding both a +inf and a -inf bias (it can score NaN); call after `s.check()`, one bias per expert.
 pub fn checkBias(bias: []const f32, s: Shape) error{InfiniteBiasPair}!void {
     if (s.n_group <= 1) return;
     const gs = s.groupSize();
@@ -144,8 +139,7 @@ fn keepGroupsF64(choice: []f64, ne: u32, ng: u32, keep: u32) void {
     }
 }
 
-/// One row: sigmoid + bias, keep_groups when n_group > 1, then top-k (ties to the lower id), renormalized times scale.
-/// Once every expert left is NaN, the rest of the row is `empty` picks. Returns how many picks are real.
+/// One row: sigmoid + bias, keep_groups, top-k (ties to lower id), renormalized; returns how many picks are real.
 pub fn selectF32(logits: []const f32, bias: []const f32, out: []Pick, s: Shape) u32 {
     const ne = s.experts;
     var score: [max_experts]f32 = undefined;
@@ -182,8 +176,7 @@ pub const Pick64 = struct { id: u32, wt: f64 };
 
 pub const empty64 = Pick64{ .id = 0, .wt = 0 };
 
-/// Float64 reference of the same formula (ling_forward.py's moe routing, ties to the lower group then the lower id),
-/// with the same `empty` picks. Returns how many picks are real.
+/// Float64 reference of the same routing (ling_forward.py), same ties and `empty` picks. Returns how many are real.
 pub fn selectF64(logits: []const f32, bias: []const f32, out: []Pick64, s: Shape) u32 {
     const ne = s.experts;
     var score: [max_experts]f64 = undefined;
