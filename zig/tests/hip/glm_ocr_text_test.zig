@@ -154,6 +154,8 @@ test "GLM-OCR HIP text: native rows, decoder states and every generated logit ma
     try std.testing.expect(capture.compared >= 3);
     try std.testing.expectEqual(@as(usize, 0), capture.final_mismatches orelse return error.MissingTextReference);
     try std.testing.expectEqual(@as(usize, 0), capture.total_mismatches);
+    if (platform.getenv("TF_GLM_OCR_CHUNK_CHECK") != null)
+        try @import("glm_ocr_chunk_check.zig").check(&graph, if (own_input) |*native| native.embeddings() else input.base(), if (own_input) |*native| try native.rotary() else dp.base(), rows, normed, if (platform.getenv("TF_GLM_OCR_CHUNK_ROWS")) |v| try std.fmt.parseInt(usize, v, 10) else 0);
     const receipt_file = try read(reference, "receipt.json");
     defer a.free(receipt_file);
     const receipt = try std.json.parseFromSlice(struct { output_ids: []u32 }, a, receipt_file, .{ .ignore_unknown_fields = true });

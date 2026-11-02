@@ -114,5 +114,21 @@ pub fn shared(graph: *const family.decoder.Graph, source: *family.decoder.Cache,
         };
         std.debug.print("verification window {d}: {d}/{d} BF16 differences from plain\n", .{ count, differences, window_values.len });
         try std.testing.expectEqualSlices(u16, sequential, window_values);
+        const batch = try graph.logitsRows(window, count);
+        try stream.synchronize();
+        const logits = try a.alloc(u16, count * c.vocab);
+        defer a.free(logits);
+        const logits_view: hip.DeviceBuffer = .{ .r = stream.r, .ptr = @ptrFromInt(batch), .len = logits.len * 2 };
+        try logits_view.download(0, std.mem.sliceAsBytes(logits));
+        const one = try a.alloc(u16, c.vocab);
+        defer a.free(one);
+        for (0..count) |i| {
+            const single = try graph.lastLogits(window + i * c.hidden * 2, 1);
+            try stream.synchronize();
+            const single_view: hip.DeviceBuffer = .{ .r = stream.r, .ptr = @ptrFromInt(single), .len = one.len * 2 };
+            try single_view.download(0, std.mem.sliceAsBytes(one));
+            try std.testing.expectEqualSlices(u16, one, logits[i * c.vocab ..][0..c.vocab]);
+        }
+        std.debug.print("verification logits {d}: 0/{d} BF16 differences from single-row projections\n", .{ count, logits.len });
     }
 }
