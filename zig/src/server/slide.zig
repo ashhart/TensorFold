@@ -54,6 +54,9 @@ fn send(conn: *Conn, kind: []const u8, body: []const u8) void {
 }
 
 pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
+    const audit = @import("slide_audit.zig");
+    const opts = audit.options(conn.path) catch return refuse(conn, a, 400, "invalid audit options");
+    if (opts) |o| return audit.serve(srv, conn, a, o);
     const body = srv.slide.render(a, folder(srv)) catch return refuse(conn, a, 500, "out of memory");
     conn.sendJson(200, body);
 }

@@ -399,6 +399,7 @@ pub const LearnEvent = @import("learning_api.zig").LearnEvent;
 pub const LearnSink = @import("learning_api.zig").LearnSink;
 pub const LearnError = @import("learning_api.zig").LearnError;
 pub const Learner = @import("learning_api.zig").Learner;
+pub const pocket_audit = @import("pocket_audit.zig");
 
 pub const Engine = struct {
     ctx: *anyopaque,
