@@ -56,10 +56,16 @@ test "lfm2 dspark: attention past maximum target context preserves the next scra
     if (cb.failure()) |_| return error.GpuFailed;
     // Check before merging: the old stride overwrites this allocated guard row, without a buffer overrun.
     for ([_]mtl.Buffer{ pm, pl }) |b| for (b.slice(u32, 2 * block.part_row)[block.part_row..]) |word| {
-        if (word != guard) return error.DraftAttentionPartialOverwritesNextRow;
+        if (word != guard) {
+            std.debug.print("DraftAttentionPartialOverwritesNextRow: guard {x}, got {x}\n", .{ guard, word });
+            return error.DraftAttentionPartialOverwritesNextRow;
+        }
     };
     for (po.slice(u32, 2 * block.part_row * c.head_dim)[block.part_row * c.head_dim ..]) |word| {
-        if (word != guard) return error.DraftAttentionPartialOverwritesNextRow;
+        if (word != guard) {
+            std.debug.print("DraftAttentionPartialOverwritesNextRow: guard {x}, got {x}\n", .{ guard, word });
+            return error.DraftAttentionPartialOverwritesNextRow;
+        }
     }
     const merged = r.queue.commandBuffer();
     const me = merged.compute(.serial);
