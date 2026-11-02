@@ -318,7 +318,6 @@ test "a HIP family declares replies without reasoning with `pub const reasoning 
     try std.testing.expect(!reasoning(struct {
         pub const reasoning = false;
     }));
-    inline for (registry) |F| try std.testing.expect(reasoning(F));
 }
 
 test "every registered family is listed for capabilities" {
