@@ -7,6 +7,7 @@ const kern = @import("cuda_kernels.zig");
 
 const DeviceBuffer = cuda.DeviceBuffer;
 const Window = cuda.window_attention.Window;
+pub const pages = @import("cuda_pages.zig");
 
 /// Rows a prompt chunk takes (Metal's chunk_rows: cut where Metal cuts, so fresh and resumed passes keep their bits).
 pub const prompt_rows = 512;
@@ -53,6 +54,11 @@ pub const Model = struct {
     slots: usize,
     kc: []u64, // per layer: keys [slots, len, kv heads, head dim] bf16 (len: the ring, or the context if global)
     vc: []u64,
+    paged: bool = false,
+    pages: usize = 0,
+    table: u64 = 0,
+    ids: []u32 = &.{},
+    caps: []usize = &.{},
     inv_sliding: u64, // fp32 [128]
     inv_global: u64, // fp32 [256]
     s: Scratch,
@@ -68,7 +74,7 @@ pub const Model = struct {
 
     const Scratch = struct { ids: u64, pos: u64, slot: u64, hi: u64, h: [2]u64, n: u64, xs: u64, q: u64, k: u64, v: u64, qr: u64, kr: u64, vr: u64, att: u64, o: u64, gate: u64, up: u64, act: u64, y: u64, part: u64, logits: u64 };
 
-    fn alloc(m: *Model, bytes: usize) !u64 {
+    pub fn alloc(m: *Model, bytes: usize) !u64 {
         if (m.planned) |*p| {
             p.* += @max(bytes, 256);
             return 0;
@@ -82,7 +88,7 @@ pub const Model = struct {
         return b.ptr;
     }
 
-    fn zeros(m: *Model, s: cuda.Stream, bytes: usize) !u64 {
+    pub fn zeros(m: *Model, s: cuda.Stream, bytes: usize) !u64 {
         const p = try m.alloc(bytes);
         if (m.planned == null) try (DeviceBuffer{ .d = m.d, .ptr = p, .len = @max(bytes, 256), .borrowed = true }).fill8(0, s.handle);
         return p;
@@ -93,6 +99,17 @@ pub const Model = struct {
         return if (cfg.global(i)) m.context else ring;
     }
 
+    pub fn pagesFor(m: *const Model, slot: ?usize) ?cuda.window_attention.Pages {
+        return pages.view(m, slot);
+    }
+
+    pub fn dropGraphs(m: *Model) void {
+        for (&m.graphs) |*g| if (g.*) |*e| {
+            e.deinit();
+            g.* = null;
+        };
+    }
+
     /// Bytes one stream's caches take.
     pub fn streamBytes(geo: cfg.Geometry, layers: usize, context: usize) usize {
         var total: usize = 0;
@@ -101,7 +118,12 @@ pub const Model = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize) !Model {
-        var m = blank(gpa, d, w, context, slots);
+        return initPaged(gpa, d, s, w, context, slots, false);
+    }
+
+    pub fn initPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !Model {
+        var m = blank(gpa, d, w, context, if (paged) 1 else slots);
+        m.paged = paged;
         errdefer m.deinit();
         try m.build(s);
         return m;
@@ -109,7 +131,12 @@ pub const Model = struct {
 
     /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
     pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize) !usize {
-        var m = blank(gpa, d, w, context, slots);
+        return openPagedBytes(gpa, d, s, w, context, slots, false);
+    }
+
+    pub fn openPagedBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !usize {
+        var m = blank(gpa, d, w, context, if (paged) 1 else slots);
+        m.paged = paged;
         defer m.deinit();
         m.planned = 0;
         try m.build(s);
@@ -124,11 +151,7 @@ pub const Model = struct {
         const geo = m.geo;
         m.kc = try m.gpa.alloc(u64, m.layers);
         m.vc = try m.gpa.alloc(u64, m.layers);
-        for (0..m.layers) |i| {
-            const bytes = m.slots * m.cacheLen(i) * geo.kvHeads(i) * cfg.headDim(i) * 2;
-            m.kc[i] = try m.zeros(s, bytes);
-            m.vc[i] = try m.zeros(s, bytes);
-        }
+        try pages.build(m, s);
         var sl: [cfg.sliding_dim / 2]f32 = undefined;
         var gl: [cfg.global_dim / 2]f32 = undefined;
         inverseFrequencies(false, &sl);
@@ -181,9 +204,11 @@ pub const Model = struct {
         m.buffers.deinit(m.gpa);
         m.gpa.free(m.kc);
         m.gpa.free(m.vc);
+        m.gpa.free(m.ids);
+        m.gpa.free(m.caps);
     }
 
-    fn upload(m: *const Model, s: cuda.Stream, dst: u64, bytes: []const u8) !void {
+    pub fn upload(m: *const Model, s: cuda.Stream, dst: u64, bytes: []const u8) !void {
         try m.d.check(m.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, s.handle), "cuMemcpyHtoDAsync");
     }
 
@@ -246,6 +271,7 @@ pub const Model = struct {
         var rows: usize = 0;
         for (chains) |c| {
             if (c.tokens.len == 0 or c.slot >= m.slots or c.p0 + c.tokens.len > m.context) return error.BadChain;
+            if (m.paged and c.p0 + c.tokens.len > m.caps[c.slot]) return error.PastPages;
             rows += c.tokens.len;
         }
         if (rows > @as(usize, if (prompt) prompt_rows else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
@@ -329,13 +355,15 @@ pub const Model = struct {
         const src: cuda.qk_rows.Src = .{ .q = x.q, .q_ld = @intCast(qw), .q_hs = @intCast(dh), .k = x.k, .k_ld = @intCast(kw), .k_hs = @intCast(dh), .v = vsrc, .v_ld = @intCast(kw), .v_hs = @intCast(dh) };
         const shape: cuda.qk_rows.Shape = .{ .norms = l.q_norm, .norm_k = l.k_norm, .norms_bf16 = true, .inv = if (global) m.inv_global else m.inv_sliding, .rot = dh, .eps = cfg.eps, .round = true, .v_norm = true };
         const len = m.cacheLen(i);
-        try k.qk.rowsFrom(s, src, .{ .h = geo.query_heads, .hk = kvh, .dim = dh }, shape, x.pos, x.slot, .{ .q = x.qr, .k = x.kr, .v = x.vr, .kc = m.kc[i], .vc = m.vc[i], .len = len }, rows);
-        const w: Window = .{ .h = geo.query_heads, .hk = kvh, .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1, .p32 = true };
+        const pg = if (global) m.pagesFor(null) else null;
+        try k.qk.rowsFrom(s, src, .{ .h = geo.query_heads, .hk = kvh, .dim = dh }, shape, x.pos, x.slot, .{ .q = x.qr, .k = x.kr, .v = x.vr, .kc = if (pg != null) null else m.kc[i], .vc = if (pg != null) null else m.vc[i], .len = len }, rows);
+        const w: Window = .{ .h = geo.query_heads, .hk = kvh, .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1, .p32 = true, .pg = pg };
+        if (pg != null) try k.win.put(s, x.kr, x.vr, m.kc[i], m.vc[i], x.pos, x.slot, w, rows);
         if (prompt) {
             const c = chains[0];
-            const off = c.slot * len * kw * 2;
+            const off = if (pg != null) 0 else c.slot * len * kw * 2;
             const hi: ?u64 = if (!global and c.images.len > 0) x.hi else null;
-            try k.win.promptRows(s, x.qr, m.kc[i] + off, m.vc[i] + off, x.att, c.p0, rows, if (global) .{ .h = w.h, .hk = w.hk, .d = w.d, .win = 0, .ring = 0, .scale = 1, .p32 = true } else w, hi);
+            try k.win.promptRows(s, x.qr, m.kc[i] + off, m.vc[i] + off, x.att, c.p0, rows, if (global) .{ .h = w.h, .hk = w.hk, .d = w.d, .win = 0, .ring = 0, .scale = 1, .p32 = true, .pg = m.pagesFor(c.slot) } else w, hi);
         } else {
             var r: usize = 0;
             while (r < rows) : (r += attend_rows) {

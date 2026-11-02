@@ -29,6 +29,10 @@ pub const Adapter = struct {
         errdefer gpa.destroy(x);
         var rules = snaps.cacheRules(F);
         rules.page = page_tokens;
+        if (comptime @hasDecl(F, "share_grid")) {
+            rules.planned = true;
+            rules.grid = F.share_grid;
+        }
         rules.min_gap = 256;
         rules.tail = true;
         const copies: radix.Snapshots = .{ .ptr = target, .vtable = &snaps.Snaps(F, null).vtable };
