@@ -27,6 +27,21 @@ pub const Cache = struct {
         const step = cache.total * cache.c.kvWidth() * 2;
         return .{ .k = try cache.data.address(i * 2 * step), .v = try cache.data.address((i * 2 + 1) * step), .kind = .bf16, .kv_heads = cache.c.kv_heads, .total = cache.total, .d = cache.c.headDim() };
     }
+
+    /// Copy only the live prefix, head by head; source and destination may have different reserved capacities.
+    pub fn copyPrefix(source: *const Cache, dest: *Cache, rows: usize, stream: hip.Stream) !void {
+        if (rows > source.total or rows > dest.total or source.c.layers != dest.c.layers or
+            source.c.kv_heads != dest.c.kv_heads or source.c.headDim() != dest.c.headDim()) return error.BadShape;
+        if (source.data.r != dest.data.r or source.data.r != stream.r) return error.BadShape;
+        if (source.data.base() == dest.data.base() or rows == 0) return;
+        const row_bytes = @as(usize, source.c.headDim()) * 2;
+        const copied_bytes = rows * row_bytes;
+        for (0..source.c.layers * 2) |layer_kind| for (0..source.c.kv_heads) |head| {
+            const index = layer_kind * source.c.kv_heads + head;
+            const from = try source.data.address(index * source.total * row_bytes);
+            try dest.data.copyFromAsync(index * dest.total * row_bytes, from, copied_bytes, stream);
+        };
+    }
 };
 
 fn weight(g: Graph, layer: usize, suffix: []const u8) !u64 {
@@ -115,5 +130,8 @@ test "dots HIP graph: text cache and scratch reject out of context requests" {
     try std.testing.expectEqual(@as(usize, 3758096384), try Cache.bytes(c, c.context));
     try std.testing.expectError(error.DotsContext, Cache.bytes(c, 0));
     try std.testing.expectError(error.DotsContext, scratchBytes(c, c.context + 1, false));
+    const short: Cache = .{ .data = undefined, .c = c, .total = 17 };
+    var other: Cache = .{ .data = undefined, .c = c, .total = 31 };
+    try std.testing.expectError(error.BadShape, short.copyPrefix(&other, 18, undefined));
     std.testing.refAllDecls(Cache);
 }
