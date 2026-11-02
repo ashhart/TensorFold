@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3's backends share one copy of the RoPE frequencies and the layer schedule, so every backend reads the same numbers, bit for bit as torch's (#1839). Thanks to @jschmied.
+
 - The CUDA kernel contract's NVFP4 expert-waves control goes red as planted on large GPUs such as the RTX 5090, where its test shape used to fit in one wave (#1832, fixes #1778). Thanks to @rootsbymenda.
 
 - The server's linear-time tests count thread cycles on Windows, so a busy CI runner no longer fails them by chance (#1854). Thanks to @Bizuayeu.
