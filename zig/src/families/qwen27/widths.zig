@@ -151,6 +151,7 @@ fn tensorMetadata(source: anytype, module: []const u8) !row.Metadata {
 
 /// Only these FP32 forms have the native affine contract; BF16 keeps its preexisting admission policy.
 pub fn checkMetadata(w: Width) !void {
+    if (w.group == 16 and w.metadata != .f32) return error.UnsupportedAffineMetadataFormat;
     if (w.metadata == .f32 and !((w.group == 32 and (w.bits == 4 or w.bits == 5 or w.bits == 8)) or
         (w.group == 16 and w.bits == 6))) return error.UnsupportedAffineMetadataFormat;
 }
@@ -363,7 +364,7 @@ test "BF16 admission keeps the original tensor-unit group guard; FP32 admits onl
         for ([_]usize{ 48, 64 }) |n| {
             const w = Width{ .bits = bits, .group = group };
             if (bits != 4 and group != 64) {
-                try std.testing.expectError(error.UnsupportedLaneGroup, check(.{ .tensor_units = true }, n, 5120, w));
+                try std.testing.expectError(if (group == 16) error.UnsupportedAffineMetadataFormat else error.UnsupportedLaneGroup, check(.{ .tensor_units = true }, n, 5120, w));
             } else try check(.{ .tensor_units = true }, n, 5120, w);
             var f = w;
             f.metadata = .f32;
@@ -407,4 +408,23 @@ test "metadata admission reads tensor headers, checks matching bias and splits m
     try admit(&w, c, .{ .tensor_units = true }, &why);
     try std.testing.expectError(error.BadAffineMetadata, w.readMetadata(Source{ .bad_bias = true }, c));
     try std.testing.expectError(error.BadAffineMetadata, w.readMetadata(Source{ .dtype = .f16 }, c));
+}
+
+test "BF16 group16 refuses in projections, embedding and head on both chip kinds; FP32 keeps its four forms" {
+    const a = std.testing.allocator;
+    const json = try testConfig(a, "{\"bits\":4,\"group_size\":64}");
+    defer a.free(json);
+    var c = try cfg.parse(a, json, null);
+    c.layers = 1;
+    for ([_]bool{ false, true }) |tu| for (0..3) |target| {
+        var w = try Widths.uniformAll(a, 1);
+        defer w.deinit();
+        const slot = if (target == 0) &w.layers[0][@backingInt(Member.gate)] else if (target == 1) &w.embed else &w.head;
+        slot.* = .{ .bits = 6, .group = 16 };
+        var why: Why = .{};
+        try std.testing.expectError(error.UnqualifiedQwenFormat, admit(&w, c, .{ .tensor_units = tu }, &why));
+        try std.testing.expectEqual(error.UnsupportedAffineMetadataFormat, why.reason);
+        slot.metadata = .f32;
+        try admit(&w, c, .{ .tensor_units = tu }, &why);
+    };
 }
