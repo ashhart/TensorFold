@@ -18,6 +18,7 @@ const prompt_shared = 98304; // cuda_prompt.zig's smem
 const prompt_symbols = .{
     .bf16 = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi",
     .fp8 = "_ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKixi",
+    .bf16_p256 = "_ZN20tf_prefill_attention18hpattn_p256_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi", // pages of 256
 };
 const e4m3 = core.quant.fp8.e4m3;
 
@@ -413,6 +414,10 @@ pub fn run(gpu: check.Gpu) !void {
             try whole.rows.allowDynamicShared(attn_tiles);
         }
         try whole.prompt.allowDynamicShared(prompt_shared);
+        var p256 = tc; // cuda_prompt.zig's kernel for pages of 256 positions (bf16)
+        p256.prompt = try prompt.function(prompt_symbols.bf16_p256);
+        try p256.prompt.allowDynamicShared(prompt_shared);
+        var red_p256 = format != .bf16;
         var red_tc = false;
         var red_tail = false;
         var red_table = false;
@@ -490,6 +495,18 @@ pub fn run(gpu: check.Gpu) !void {
                 red_tc = red_tc or moved;
                 try check.expect(moved, "qwen35 pages {t}: a swapped page table still gave the tensor-core or prompt tiles contiguous bytes (control missed) at lens {any}", .{ format, c.lens });
             }
+            if (format == .bf16 and c.ptok == 256) {
+                for (0..2) |rep| {
+                    var repeated = std.heap.ArenaAllocator.init(gpu.gpa);
+                    defer repeated.deinit();
+                    const pg = try launch(gpu, s, fns, f, .{ f.ids[0], f.ids[1] }, null, repeated.allocator(), 20 + rep, p256);
+                    try check.sameBytes("qwen35 pages: the 256-position prompt rows, paged against contiguous", pg.prompt, flat_tc.prompt);
+                }
+                const swapped = try a.dupe(u32, f.ids[1]);
+                std.mem.swap(u32, &swapped[0], &swapped[n1 - 1]);
+                const bad = try launch(gpu, s, fns, f, .{ f.ids[0], f.ids[1] }, .{ f.ids[0], swapped }, a, 9, p256);
+                red_p256 = red_p256 or !std.mem.eql(u8, bad.prompt, flat_tc.prompt);
+            }
             const o = try a.dupe(u8, flat.out);
             std.mem.writeInt(u16, o[2 * (q_heads * hd + 5) ..][0..2], 0x4040, .little); // 3.0 where |o| <= 1
             var bad_r = flat;
@@ -499,8 +516,8 @@ pub fn run(gpu: check.Gpu) !void {
             try check.expect(caught, "qwen35 pages {t}: a planted attention row passed float64 (control missed)", .{format});
             std.debug.print("PASS qwen35 pages {t}: lens {any}, {d} rows a stream, {d}-position pages: paged == contiguous (queries, rows, stores, keep; tensor-core and prompt rows), repeats, float64 bound, guards\n", .{ format, c.lens, c.rows, c.ptok });
         }
-        const red = red_table and red_bound and red_tc and red_tail;
+        const red = red_table and red_bound and red_tc and red_tail and red_p256;
         try check.expect(red, "qwen35 pages {t}: a control never fired", .{format});
-        std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row, uncounted tail keys)\n", .{format});
+        std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row, uncounted tail keys, swapped table on 256-position pages)\n", .{format});
     }
 }
