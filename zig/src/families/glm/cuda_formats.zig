@@ -12,14 +12,18 @@ const Meta = core.nvfp4.Meta;
 const Recipe = core.modelopt.Recipe;
 
 /// A projection's stored format, as the loader reads it.
-pub const Format = enum { bf16, nvfp4, nvfp4_csf, mxfp8, fp8_pb };
+pub const Format = enum { bf16, nvfp4, nvfp4_csf, nvfp4_csf0, mxfp8, fp8_pb };
 
-/// A projection's tensors as stored: its weight, its scale when it has one, and whether csf_32x2_v1 parts replace it.
+/// A projection's tensors as stored: its weight, its scale when it has one, or the csf_32x2_v1 or csf0_v1 parts for it.
 pub const Stored = struct {
     weight: Meta,
     scale: ?Meta = null,
     csf: bool = false,
+    csf0: ?Csf0Stored = null,
 };
+
+/// csf0_v1's two tensors as stored: bases [n] and offsets [n, k/64], both u8.
+pub const Csf0Stored = struct { bases: Meta, offsets: Meta };
 
 /// How a checkpoint names its formats: one NVFP4 for every quantized linear, or MIXED_PRECISION's recipe per module.
 pub const Declared = union(enum) {
@@ -38,6 +42,7 @@ pub fn of(declared: Declared, stored: Stored) Refusal!Format {
         .mixed => |r| if (r) |recipe| switch (recipe) {
             .nvfp4, .w4a16_nvfp4 => f == .nvfp4,
             .nvfp4_csf => f == .nvfp4_csf,
+            .nvfp4_csf0 => f == .nvfp4_csf0,
             .mxfp8 => f == .mxfp8,
             .fp8_pb_wo => f == .fp8_pb,
             // per-tensor FP8 with a static input scale (#1145's Qwen recipe): GLM's lanes read no such projection
@@ -55,8 +60,14 @@ fn fromTensors(s: Stored) Refusal!Format {
     const k = if (w.dtype == .u8) try checked(std.math.mul(usize, 2, w.shape[1])) else w.shape[1]; // two FP4 codes a byte
     _ = try checked(std.math.mul(usize, n, k));
     switch (w.dtype) {
-        .bf16 => return if (s.scale == null and !s.csf) .bf16 else error.FormatMismatch,
+        .bf16 => return if (s.scale == null and !s.csf and s.csf0 == null) .bf16 else error.FormatMismatch,
         .u8 => {
+            if (s.csf0) |c| {
+                if (s.csf or s.scale != null or k % 64 != 0) return error.FormatMismatch;
+                const bases = c.bases.dtype == .u8 and c.bases.shape.len == 1 and c.bases.shape[0] == n;
+                const offsets = c.offsets.dtype == .u8 and c.offsets.shape.len == 2 and c.offsets.shape[0] == n and c.offsets.shape[1] == k / 64;
+                return if (bases and offsets) .nvfp4_csf0 else error.FormatMismatch;
+            }
             if (s.csf) return if (s.scale == null) .nvfp4_csf else error.FormatMismatch;
             const sc = s.scale orelse return error.FormatMismatch;
             if (sc.dtype != .f8_e4m3 or sc.shape.len != 2 or sc.shape[0] != n) return error.FormatMismatch;
@@ -124,6 +135,33 @@ pub fn csfParts(ck: *core.Checkpoint, module: []const u8) !Csf {
     if (g.dtype != .f32 or g.numel() != 1) return error.BadNvfp4;
     _ = try ck.get(try std.fmt.bufPrint(&buf, "{s}.input_scale", .{module})); // the W4A4 math's, unread by W4A16
     return .{ .parts = p, .n = n, .k = k, .codes = w.bytes, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
+}
+
+/// A csf0_v1 linear as read from the checkpoint: the packers take its scales as stored (experts32.Matrix).
+pub const Csf0 = struct {
+    n: usize,
+    k: usize,
+    matrix: cuda.experts32.Matrix,
+    global: f32,
+};
+
+/// `module`'s csf0_v1 linear; it marks each tensor used, so one thread reads them.
+pub fn csf0Linear(ck: *core.Checkpoint, module: []const u8) !Csf0 {
+    var buf: [256]u8 = undefined;
+    const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
+    if (w.dtype != .u8 or w.rank != 2) return error.BadNvfp4;
+    const n = w.shape[0];
+    if (n == 0 or w.shape[1] == 0) return error.EmptyShape;
+    const k = try checked(std.math.mul(usize, 2, w.shape[1]));
+    if (k % 64 != 0) return error.BadNvfp4;
+    const b = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf0_bases", .{module}));
+    if (b.dtype != .u8 or b.rank != 1 or b.shape[0] != n) return error.BadNvfp4;
+    const o = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf0_codes", .{module}));
+    if (o.dtype != .u8 or o.rank != 2 or o.shape[0] != n or o.shape[1] != k / 64) return error.BadNvfp4;
+    const g = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale_2", .{module}));
+    if (g.dtype != .f32 or g.numel() != 1) return error.BadNvfp4;
+    _ = try ck.get(try std.fmt.bufPrint(&buf, "{s}.input_scale", .{module})); // the W4A4 math's, unread by W4A16
+    return .{ .n = n, .k = k, .matrix = .{ .codes = w.bytes, .bases = b.bytes, .offsets = o.bytes }, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
 }
 
 /// `module`'s NVFP4 linear, scales stored plain; only W4A16_NVFP4 may lack the input_scale (FP4-Local's MTP experts).
@@ -266,9 +304,16 @@ pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *core.modelop
     recipes.deinit();
 }
 
-/// A routed expert's NVFP4 linear as read: scales as stored, or csf_32x2_v1's parts to decode; else refused by name.
+/// A routed expert's NVFP4 linear as read: plain scales, csf_32x2_v1's to decode, csf0_v1's; else refused by name.
 pub fn expert(L: anytype, module: []const u8) !Pending {
     var buf: [224]u8 = undefined;
+    if (L.ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf0_bases", .{module}))) {
+        try L.formatIn(L.ck, module, .nvfp4_csf0);
+        return .{ .csf0 = csf0Linear(L.ck, module) catch |e| {
+            std.log.err("{s}: its csf0_v1 parts do not read as experts32.Matrix has them ({t})", .{ module, e });
+            return e;
+        } };
+    }
     const csf = L.ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module}));
     try L.formatIn(L.ck, module, if (csf) .nvfp4_csf else .nvfp4);
     if (!csf) return .{ .plain = plainLinear(L.ck, module, L.declaredAs(module)) catch |e| switch (e) {
@@ -288,11 +333,14 @@ pub fn expert(L: anytype, module: []const u8) !Pending {
 pub const Pending = union(enum) {
     csf: Csf,
     plain: core.nvfp4.Linear,
+    csf0: Csf0,
 
+    /// A block 16 linear; csf0_v1's are packed as stored (cuda_load_pack.share32), so a mixed layer's error here.
     pub fn linear(p: Pending, scales: []u8) !core.nvfp4.Linear {
         return switch (p) {
             .csf => |c| c.linear(scales),
             .plain => |l| l,
+            .csf0 => error.BadNvfp4,
         };
     }
 };
