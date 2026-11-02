@@ -10,6 +10,7 @@ pub const Ops = struct {
     cast: hip.Function,
     add_fn: hip.Function,
     silu_mul: hip.Function,
+    silu_packed: hip.Function,
     gelu_fn: hip.Function,
     merge_layout: hip.Function,
     split: hip.Function,
@@ -30,6 +31,7 @@ pub const Ops = struct {
             .cast = try module.function("tf_glmocr_cast"),
             .add_fn = try module.function("tf_glmocr_add"),
             .silu_mul = try module.function("tf_glmocr_silu_mul"),
+            .silu_packed = try module.function("tf_glmocr_silu_mul_packed"),
             .gelu_fn = try module.function("tf_glmocr_gelu"),
             .merge_layout = try module.function("tf_glmocr_merge_layout"),
             .split = try module.function("tf_glmocr_qkv_split"),
@@ -97,6 +99,12 @@ pub const Ops = struct {
         try flat(o.gelu_fn, stream, count, .{ x, @as(u64, count) });
     }
 
+    pub fn siluMulPacked(o: *const Ops, stream: hip.Stream, input: u64, out: u64, rows: usize) !void {
+        const count = try product(rows, 4608);
+        try disjoint(try region(input, try product(count, 2), 2), try region(out, count, 2));
+        try flat(o.silu_packed, stream, count, .{ input, out, @as(u64, count), @as(u32, 4608) });
+    }
+
     pub fn merge(o: *const Ops, stream: hip.Stream, x: u64, out: u64, rows: usize, width: usize) !void {
         if (rows % 4 != 0 or width != 1024) return error.Invalid;
         const count = try product(rows, width);
@@ -124,6 +132,15 @@ pub const Ops = struct {
     }
 
     pub fn norm(o: *const Ops, stream: hip.Stream, x: u64, weight: u64, bias: ?u64, out: u64, rows: usize, width: usize) !void {
+        return o.normalize(stream, x, weight, bias, out, rows, width, @intFromBool(bias != null));
+    }
+
+    pub const Phase = enum(c_int) { prompt = 2, decode = 3 };
+    pub fn normText(o: *const Ops, stream: hip.Stream, x: u64, weight: u64, out: u64, rows: usize, phase: Phase) !void {
+        return o.normalize(stream, x, weight, null, out, rows, 1536, @backingInt(phase));
+    }
+
+    fn normalize(o: *const Ops, stream: hip.Stream, x: u64, weight: u64, bias: ?u64, out: u64, rows: usize, width: usize, kind: c_int) !void {
         if (rows == 0 or rows > std.math.maxInt(u32) / 256 or
             (width != 64 and width != 1024 and width != 1536) or (bias != null and width != 1536)) return error.Invalid;
         const count = try product(rows, width);
@@ -132,7 +149,7 @@ pub const Ops = struct {
         try disjoint(output, try region(weight, width, 2));
         if (bias) |b| try disjoint(output, try region(b, width, 2));
         var args: hip.launch.Args = .{};
-        inline for (.{ x, weight, bias orelse 0, out, @as(u32, @intCast(width)), @as(f32, 1e-5), @as(c_int, @intFromBool(bias != null)) }) |v| try args.add(v);
+        inline for (.{ x, weight, bias orelse 0, out, @as(u32, @intCast(width)), @as(f32, 1e-5), kind }) |v| try args.add(v);
         try hip.launch.launch(o.norm_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &args);
     }
 
@@ -190,4 +207,6 @@ test "GLM-OCR HIP ops: bias shape and aliases are refused before device calls" {
     try std.testing.expectError(error.Invalid, o.norm(s, 100, 10000, null, 102, 4, 1024));
     try std.testing.expectError(error.Invalid, o.visionRope(s, 100, 102, 4, 2));
     try std.testing.expectError(error.Invalid, o.textRope(s, 100, 102, 10000, 4, 16));
+    try std.testing.expectError(error.Invalid, o.siluMulPacked(s, 100, 102, 1));
+    try std.testing.expectError(error.Invalid, o.siluMulPacked(s, 100, 100000, std.math.maxInt(usize)));
 }

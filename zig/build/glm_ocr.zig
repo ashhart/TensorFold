@@ -44,7 +44,7 @@ pub fn hipTests(b: *std.Build, hip: *std.Build.Module, device_hip: *std.Build.Mo
         .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = hip.import_table.get("core").? } },
     });
     family.addImport("glm_ocr_kernels", stub);
-    const weight_tests = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "GLM-OCR HIP weights:", "GLM-OCR HIP ops:", "GLM-OCR HIP vision admission:" } }));
+    const weight_tests = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "GLM-OCR HIP weights:", "GLM-OCR HIP ops:", "GLM-OCR HIP vision admission:", "GLM-OCR HIP decoder:", "GLM-OCR HIP input:" } }));
     all.dependOn(&weight_tests.step);
     b.step("test-glm-ocr-hip-host", "GLM-OCR HIP ownership and preallocation refusal without GPU execution").dependOn(&weight_tests.step);
     const upload_family = b.createModule(.{
@@ -92,6 +92,14 @@ pub fn hipTests(b: *std.Build, hip: *std.Build.Module, device_hip: *std.Build.Mo
         .imports = &.{ .{ .name = "hip", .module = device_hip }, .{ .name = "glm_ocr", .module = device_family }, .{ .name = "core", .module = device_hip.import_table.get("core").? } },
     }), .filters = &.{"GLM-OCR HIP vision:"} });
     b.step("build-glm-ocr-vision-test", "Build native CogViT and connector reference comparison").dependOn(&b.addInstallArtifact(vision, .{}).step);
+    const text = b.addTest(.{ .name = "tf-glm-ocr-text-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/glm_ocr_text_test.zig"),
+        .target = device_hip.resolved_target,
+        .optimize = .safe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = device_hip }, .{ .name = "glm_ocr", .module = device_family }, .{ .name = "core", .module = device_hip.import_table.get("core").? } },
+    }), .filters = &.{"GLM-OCR HIP text:"} });
+    b.step("build-glm-ocr-text-test", "Build native four-norm decoder reference comparison").dependOn(&b.addInstallArtifact(text, .{}).step);
     const operations = b.createModule(.{
         .root_source_file = b.path("zig/src/families/glm_ocr/hip_ops.zig"),
         .target = device_hip.resolved_target,
