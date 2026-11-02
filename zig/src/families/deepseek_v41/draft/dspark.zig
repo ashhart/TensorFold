@@ -77,10 +77,7 @@ pub fn bf16(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
 }
 
-pub fn toBf16(x: f32) u16 {
-    const u: u32 = @bitCast(x);
-    return @intCast((u + 0x7FFF + ((u >> 16) & 1)) >> 16); // round to nearest even
-}
+pub const toBf16 = @import("core").bf16_round.bits; // round to nearest even
 
 /// The Markov head's tables (bf16 [V, rank]) and the confidence head's projection (fp32 [hidden + rank]).
 pub const Markov = struct {
