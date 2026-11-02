@@ -524,6 +524,14 @@ pub const Engine = struct {
         }
     }
 
+    /// The first token's draw: among the grammar's allowed tokens when the stream has one that constrains it.
+    pub fn drawFirst(e: *Engine, s: *Stream, position: u64) !u64 {
+        const g = s.grammar orelse return e.backend.first(s, position);
+        const mask = try g.next(e.arena.allocator()) orelse return e.backend.first(s, position);
+        const masked = e.backend.vtable.first_masked orelse return error.StructuresUnsupported;
+        return masked(e.backend.ptr, s, position, mask);
+    }
+
     /// Feed a token and queue the draw of the next at the new cache length.
     pub fn queueNext(e: *Engine, s: *Stream, feed: Feed) !void {
         s.cache_len += 1;

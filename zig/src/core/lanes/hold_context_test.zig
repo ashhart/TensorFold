@@ -197,6 +197,66 @@ test "context-aware recovery still reaches a profitable deeper clean shape" {
     try std.testing.expectEqual(@as(i64, 1), out[0]);
 }
 
+test "context-aware recovery funds unequal-depth optimism without spending refused trials" {
+    var contexts = [_]price.ContextCost{.{ .streams = 2, .rows = 1, .ms = 10 }};
+    var f: Fixture = .{};
+    try f.init(.{
+        .drafts = 3,
+        .forward = flat,
+        .holds = &.{
+            .{ .streams = 1, .depth = 1, .ms = 12 },
+            .{ .streams = 2, .depth = 1, .ms = 12 },
+            .{ .streams = 2, .depth = 3, .ms = 9 },
+        },
+        .prior = &.{ 1, 1, 1 },
+        .contexts = &contexts,
+    });
+    defer f.deinit();
+    f.engine.rule.k.depth_probe_every = 4;
+    f.engine.rule.k.draft_slack = 1;
+    var streams: [4]sm.Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*s| s.deinit(gpa);
+    var plans: [4]win.Plan = undefined;
+    for (&streams, &plans, 0..) |*s, *p, i| {
+        s.* = try head("unequal", &.{ 1, 1, 1 });
+        made += 1;
+        s.drafts = i < 2;
+        if (s.drafts) {
+            s.granted = 0;
+            s.hold_context_rows = 1;
+            _ = try f.engine.rule.rates(win.who(s));
+            s.depth.?.plain = 3;
+            s.depth.?.wait = 4;
+        }
+        p.* = .{ .stream = s, .position = 0, .kind = .none };
+    }
+    var out: [2]i64 = undefined;
+    try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out);
+    for (streams[0..2]) |s| {
+        try std.testing.expectEqual(@as(?u64, 4), s.depth.?.plain);
+        try std.testing.expectEqual(@as(?u64, 4), s.depth.?.wait);
+        try std.testing.expectEqual(@as(u32, 1), s.hold_context_rows);
+    }
+    // Eight target rows leave four drafts: [2,2] loses at 8/20.6, but [3,1] wins at 8/19.1.
+    contexts[0].ms = 0.1;
+    try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, &out);
+    for (streams[0..2]) |s| {
+        try std.testing.expectEqual(@as(?u64, 0), s.depth.?.plain);
+        try std.testing.expectEqual(@as(?u64, 8), s.depth.?.wait);
+        try std.testing.expectEqual(@as(?u32, 0), s.granted);
+    }
+    for (0..7) |_| {
+        try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
+        try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out);
+    }
+    try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, &out);
+    for (streams[0..2]) |s| try std.testing.expectEqual(@as(?u64, 16), s.depth.?.wait);
+}
+
 const dt = @import("drafted_test.zig");
 const dr = @import("drafter.zig");
 const fake = @import("fake.zig");
@@ -342,4 +402,93 @@ test "shared funding through direct and recorded targets retains every committed
             try history.append(gpa, token);
         }
     };
+}
+
+test "no-confidence lone holds price staged debt only before whole-round observations" {
+    for ([_]bool{ false, true }) |observed| {
+        var contexts = [_]price.ContextCost{.{ .streams = 1, .rows = 64, .ms = 1000 }};
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var strict: dt.Strict = .{ .inner = target.backend() };
+        defer strict.deinit();
+        var staged: Staged = .{ .head = .{ .facts_ = .{
+            .depth = 1,
+            .step_ms = 0.5,
+            .prior = &.{1},
+            .plain_guard = true,
+            .chances = false,
+            .hold_costs = &holds,
+            .hold_context_costs = &contexts,
+        } } };
+        defer staged.head.deinit();
+        var wrapped = try Drafted.init(gpa, strict.backend(), staged.drafter());
+        defer wrapped.deinit();
+        var costs: [8]@import("config.zig").Cost = undefined;
+        for (&costs, 1..) |*c, width| c.* = .{ .width = @intCast(width), .ms = 10 };
+        var cfg = try Config.init(gpa, wrapped.facts(.{
+            .exact_width = 8,
+            .window_costs = &costs,
+            .hidden_rows = true,
+            .batch_rows = 8,
+            .lone_copies = false,
+        }), 8, 7);
+        defer cfg.deinit(gpa);
+        cfg.timed = false;
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+        defer engine.deinit();
+        engine.rule.k.depth_probe_every = 4;
+        var s = try sm.Stream.init(gpa, .{ .id = "no-confidence", .prompt = &.{ 2, 7, 13 }, .max_new = 32 });
+        defer s.deinit(gpa);
+        try engine.addStream(&s);
+        defer engine.release(&s);
+        try std.testing.expect(!cfg.granted_depth and !cfg.node_probabilities);
+        try std.testing.expectEqual(@as(u32, 1), staged.head.holds);
+        if (observed) try engine.rule.observeCost(1, 11, false, win.who(&s));
+        try engine.step();
+        if (observed) {
+            // The observed 11 ms already pays the entire round; staged work must not be added again.
+            try std.testing.expectEqual(@as(u32, 1), s.next.?.count);
+            try std.testing.expectEqual(@as(u32, 2), staged.head.holds);
+            try std.testing.expectEqual(@as(u32, 0), s.hold_context_rows);
+        } else {
+            try std.testing.expectEqual(@as(u32, 0), s.next.?.count);
+            try std.testing.expectEqual(@as(u32, 1), staged.head.holds);
+            try std.testing.expectEqual(@as(u32, 2), s.hold_context_rows);
+            for ([_]u32{ 3, 4 }) |debt| {
+                try engine.step();
+                try std.testing.expectEqual(@as(u32, 0), s.next.?.count);
+                try std.testing.expectEqual(@as(u32, 1), staged.head.holds);
+                try std.testing.expectEqual(debt, s.hold_context_rows);
+                try std.testing.expectEqual(@as(?u64, debt - 1), s.depth.?.plain);
+            }
+            try engine.step(); // The original lone fallback still probes on its fourth plain round.
+            try std.testing.expectEqual(@as(u32, 1), s.next.?.count);
+            try std.testing.expectEqual(@as(u32, 2), staged.head.holds);
+            try std.testing.expectEqual(@as(?u64, 8), s.depth.?.wait);
+            try std.testing.expectEqual(@as(u32, 0), s.hold_context_rows);
+            try engine.step();
+            try std.testing.expectEqual(@as(u32, 0), s.next.?.count);
+            try std.testing.expectEqual(@as(u32, 2), s.hold_context_rows);
+            contexts[0].ms = 1;
+            try engine.step();
+            try std.testing.expectEqual(@as(u32, 1), s.next.?.count);
+            try std.testing.expectEqual(@as(u32, 3), staged.head.holds);
+            try std.testing.expectEqual(@as(u32, 0), s.hold_context_rows);
+            try std.testing.expectEqual(@as(?u64, 0), s.depth.?.plain);
+            try std.testing.expectEqual(@as(?u64, 4), s.depth.?.wait);
+        }
+        try engine.step();
+        try std.testing.expect(s.accepted > 0 and s.accepted == s.drafted);
+        const lane = staged.head.lanes.getPtr(&s).?;
+        try std.testing.expectEqualSlices(u32, s.context.items[0..@intCast(s.cache_len)], lane.history.items);
+        try std.testing.expectEqual(s.cache_len - s.prompt_len, staged.head.live_rows);
+        var history: std.ArrayList(u32) = .empty;
+        defer history.deinit(gpa);
+        try history.appendSlice(gpa, s.prompt());
+        for (s.emitted(), 0..) |token, i| {
+            try std.testing.expectEqual(fake.next(history.items, null, s.prompt_len + i), token);
+            try history.append(gpa, token);
+        }
+    }
 }
