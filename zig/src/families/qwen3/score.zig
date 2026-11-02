@@ -11,6 +11,7 @@ pub const Refusal = error{ MassUnsupported, BadPrompt, BadLabels };
 /// Head rows read so far, by token id, as fp32 host rows: the 1.24 GB head never goes to the device.
 pub const Heads = struct {
     rows: std.AutoHashMapUnmanaged(u32, []f32) = .empty,
+    io: std.Io,
     /// The checkpoint directory and the head's stored name (`Model.head`).
     dir: []const u8,
     key: []const u8,
@@ -18,14 +19,14 @@ pub const Heads = struct {
     /// Rows the head has: the vocabulary of the checkpoint's config.
     count: usize,
 
-    pub fn of(m: *const model.Model, dir: []const u8) Heads {
-        return .{ .dir = dir, .key = m.head, .hidden = m.spec.hidden, .count = m.spec.vocab };
+    pub fn of(m: *const model.Model, io: std.Io, dir: []const u8) Heads {
+        return .{ .io = io, .dir = dir, .key = m.head, .hidden = m.spec.hidden, .count = m.spec.vocab };
     }
 
     /// Row `id`, read once from the checkpoint.
-    pub fn row(h: *Heads, gpa: Allocator, io: std.Io, id: u32) ![]const f32 {
+    pub fn row(h: *Heads, gpa: Allocator, id: u32) ![]const f32 {
         if (h.rows.get(id)) |r| return r;
-        const r = try model.readRows(gpa, io, h.dir, h.key, &.{id});
+        const r = try model.readRows(gpa, h.io, h.dir, h.key, &.{id});
         errdefer gpa.free(r);
         if (r.len != h.hidden) return error.BadHeadRow;
         try h.rows.put(gpa, id, r);
@@ -49,10 +50,10 @@ pub fn check(prompt: []const u32, labels: []const u32, logits: []const f64, mass
 }
 
 /// Each label's logit from the last row (its BF16 values widened, as Engine.run gives them): sum in f64.
-pub fn labelLogits(gpa: Allocator, io: std.Io, heads: *Heads, row: []const f32, labels: []const u32, out: []f64) !void {
+pub fn labelLogits(gpa: Allocator, heads: *Heads, row: []const f32, labels: []const u32, out: []f64) !void {
     if (row.len != heads.hidden) return error.BadRow;
     for (labels, out) |id, *x| {
-        const head = try heads.row(gpa, io, id);
+        const head = try heads.row(gpa, id);
         var s: f64 = 0;
         for (row, head) |v, w| s += @as(f64, v) * @as(f64, w);
         x.* = s;
@@ -71,14 +72,14 @@ test "head rows are read once each, and a label's logit is the f64 dot of the BF
     });
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer a.free(dir);
-    var heads: Heads = .{ .dir = dir, .key = "lm_head.weight", .hidden = 2, .count = 3 };
+    var heads: Heads = .{ .io = io, .dir = dir, .key = "lm_head.weight", .hidden = 2, .count = 3 };
     defer heads.deinit(a);
     const row = [_]f32{ 1.5, 0.5 };
     var out: [2]f64 = undefined;
-    try labelLogits(a, io, &heads, &row, &.{ 2, 0 }, &out);
+    try labelLogits(a, &heads, &row, &.{ 2, 0 }, &out);
     try std.testing.expectEqualSlices(f64, &.{ 3, 1 }, &out); // 1.5 * 3 - 0.5 * 3, 1.5 * 1 - 0.5 * 1
-    try labelLogits(a, io, &heads, &row, &.{2}, out[0..1]);
-    try std.testing.expectError(error.BadRow, labelLogits(a, io, &heads, row[0..1], &.{2}, out[0..1]));
+    try labelLogits(a, &heads, &row, &.{2}, out[0..1]);
+    try std.testing.expectError(error.BadRow, labelLogits(a, &heads, row[0..1], &.{2}, out[0..1]));
     try std.testing.expectEqual(@as(u32, 2), heads.rows.count());
 }
 
