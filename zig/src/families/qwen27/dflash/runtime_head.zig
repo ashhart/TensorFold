@@ -20,6 +20,7 @@ pub const Head = struct {
         const input_words = if (source.raw) |raw| raw.w else source.words.buffer;
         const input_offset = if (source.raw) |raw| raw.w_off else source.words.offset;
         const groups = k / source.group;
+        const element = source.metadata.size();
         const words = try head.allocate(device, width * row);
         var destination: usize = 0;
         for (spans) |span| {
@@ -31,14 +32,14 @@ pub const Head = struct {
         head.linear.n = width;
         head.linear.words = .{ .buffer = words };
         if (source.raw) |raw| {
-            const scales = try head.allocate(device, width * groups * 2);
-            const biases = try head.allocate(device, width * groups * 2);
+            const scales = try head.allocate(device, width * groups * element);
+            const biases = try head.allocate(device, width * groups * element);
             destination = 0;
             for (spans) |span| {
-                const bytes = @as(usize, span[1] - span[0]) * groups * 2;
-                const first = @as(usize, span[0]) * groups * 2;
-                @memcpy(scales.contents()[destination * groups * 2 ..][0..bytes], raw.scales.contents()[raw.s_off + first ..][0..bytes]);
-                @memcpy(biases.contents()[destination * groups * 2 ..][0..bytes], raw.biases.contents()[raw.b_off + first ..][0..bytes]);
+                const bytes = @as(usize, span[1] - span[0]) * groups * element;
+                const first = @as(usize, span[0]) * groups * element;
+                @memcpy(scales.contents()[destination * groups * element ..][0..bytes], raw.scales.contents()[raw.s_off + first ..][0..bytes]);
+                @memcpy(biases.contents()[destination * groups * element ..][0..bytes], raw.biases.contents()[raw.b_off + first ..][0..bytes]);
                 destination += span[1] - span[0];
             }
             var selected = raw;
@@ -53,13 +54,13 @@ pub const Head = struct {
             head.linear.raw = selected;
             head.linear.pairs = .{ .buffer = scales };
         } else {
-            const pairs = try head.allocate(device, width * groups * 4);
+            const pairs = try head.allocate(device, width * groups * 2 * element);
             for (0..groups) |g| {
                 destination = 0;
                 for (spans) |span| {
-                    const bytes = @as(usize, span[1] - span[0]) * 4;
-                    const first = source.pairs.offset + (g * source.n + span[0]) * 4;
-                    @memcpy(pairs.contents()[(g * width + destination) * 4 ..][0..bytes], source.pairs.buffer.contents()[first..][0..bytes]);
+                    const bytes = @as(usize, span[1] - span[0]) * 2 * element;
+                    const first = source.pairs.offset + (g * source.n + span[0]) * 2 * element;
+                    @memcpy(pairs.contents()[(g * width + destination) * 2 * element ..][0..bytes], source.pairs.buffer.contents()[first..][0..bytes]);
                     destination += span[1] - span[0];
                 }
             }

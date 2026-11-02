@@ -102,6 +102,21 @@ kernel void q27_embed(device const uint* ids [[buffer(0)]], device const uint* w
   q27_write(out, at.y * a.width + at.x, value, a.metadata);
 }
 
+// Native metadata promotes to FP32 for affine decode, then the activation rounds once.
+kernel void q27_embed_f32meta(device const uint* ids [[buffer(0)]], device const uint* words [[buffer(1)]],
+                      device const uchar* scales [[buffer(2)]], device const uchar* biases [[buffer(3)]],
+                      constant Embed& a [[buffer(4)]], device uchar* out [[buffer(5)]],
+                      uint2 at [[thread_position_in_grid]]) {
+  if (at.x >= a.width || at.y >= a.rows || ids[at.y] >= a.vocab) return;
+  const uint bit = at.x * a.bits, shift = bit % 32, index = ids[at.y] * (a.width * a.bits / 32) + bit / 32;
+  uint code = words[index] >> shift;
+  if (shift + a.bits > 32) code |= words[index + 1] << (32 - shift);
+  code &= (1u << a.bits) - 1u;
+  const uint meta = ids[at.y] * (a.width / a.group) + at.x / a.group;
+  const float value = q27_read(scales, meta, a.metadata) * float(code) + q27_read(biases, meta, a.metadata);
+  q27_write(out, at.y * a.width + at.x, value, 0);
+}
+
 struct Rope { uint width, heads, rows, rotary, activation; float theta; uint h_end, w_end, plane; };
 
 // Rotate paired halves at each row's position: pair d's axis plane under M-RoPE, plane 0 (t) otherwise.

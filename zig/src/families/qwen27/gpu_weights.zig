@@ -84,16 +84,17 @@ const Builder = struct {
         for (suffixes, &tensors, 0..) |suffix, *t, i| {
             const name = try std.mem.concat(b.allocator, u8, &.{ module, suffix });
             defer b.allocator.free(name);
-            t.* = try b.tensor(name, if (i == 0) .u32 else .bf16, &.{ n, if (i == 0) k * w.bits / 32 else k / w.group });
+            t.* = if (i == 0) try b.tensor(name, .u32, &.{ n, k * w.bits / 32 }) else try affineTensor(try b.get(name), &.{ n, k / w.group });
         }
+        if (tensors[1].dtype != tensors[2].dtype) return error.BadAffineMetadata;
         return .{ .weight = tensors[0], .scales = tensors[1], .biases = tensors[2], .bits = w.bits, .group = w.group };
     }
 
     /// One part's staged tensors, shape-checked and viewed at the rank's rows; the stage must outlive these views.
     fn viewed(p: Part, k: usize, tensors: [3]Tensor) !projection.Triple {
         const weight = try checked(tensors[0], .u32, &.{ p.n, k * p.w.bits / 32 });
-        const scales = try checked(tensors[1], .bf16, &.{ p.n, k / p.w.group });
-        const biases = try checked(tensors[2], .bf16, &.{ p.n, k / p.w.group });
+        const scales = try affineTensor(tensors[1], &.{ p.n, k / p.w.group });
+        const biases = try affineTensor(tensors[2], &.{ p.n, k / p.w.group });
         return .{ .weight = try rowView(weight, p.span), .scales = try rowView(scales, p.span), .biases = try rowView(biases, p.span), .bits = p.w.bits, .group = p.w.group, .gn = p.n };
     }
 
@@ -132,8 +133,8 @@ const Builder = struct {
         try b.stage.reserve(b.checkpoint, names);
         defer b.stage.reset();
         const weight = try checked(try b.stage.read(b.checkpoint, names[0]), .u32, &.{ n, k * w.bits / 32 });
-        const scales = try checked(try b.stage.read(b.checkpoint, names[1]), .bf16, &.{ n, k / w.group });
-        const biases = try checked(try b.stage.read(b.checkpoint, names[2]), .bf16, &.{ n, k / w.group });
+        const scales = try affineTensor(try b.stage.read(b.checkpoint, names[1]), &.{ n, k / w.group });
+        const biases = try affineTensor(try b.stage.read(b.checkpoint, names[2]), &.{ n, k / w.group });
         var triples: [3]projection.Triple = undefined;
         if (spans.len > triples.len or rows.len != spans.len) return error.BadProjectionShape;
         for (spans, rows, triples[0..spans.len]) |span, gn, *t| {
@@ -177,7 +178,7 @@ const Builder = struct {
     /// Fused members of one width take one matrix as before; a mixed stack becomes one matrix a member.
     fn stack(b: Builder, parts: []const projection.Triple) !Linear {
         var ws: [3]Width = undefined;
-        for (parts, 0..) |p, i| ws[i] = .{ .bits = p.bits, .group = @intCast(p.group) };
+        for (parts, 0..) |p, i| ws[i] = .{ .bits = p.bits, .group = @intCast(p.group), .metadata = try projection.metadata(p.scales.dtype) };
         var buf: [3][2]usize = undefined;
         const list = widths.runs(ws[0..parts.len], &buf);
         if (list.len == 1) return projection.prepare(b.device, b.allocator, b.owned, parts, 32);
@@ -335,7 +336,7 @@ fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, he
 /// Only 4-bit g64 matrices take the reg kernel; other widths keep lane_projection.weight_layout.
 fn regJobs(a: std.mem.Allocator, jobs: *std.ArrayList(lane.Order), p: Linear) std.mem.Allocator.Error!void {
     for (p.runs) |r| try regJobs(a, jobs, r.linear);
-    if (p.runs.len == 0 and p.bits == 4 and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k });
+    if (p.runs.len == 0 and p.bits == 4 and p.group == 64 and p.metadata == .bf16 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k });
 }
 
 pub fn ref(t: Tensor) Ref {
@@ -367,4 +368,9 @@ test "A_log loads in bf16 or in f32, as mlx-vlm conversions store it, and refuse
     t.dtype = .f32;
     t.bytes = 32 * 4;
     try std.testing.expectError(error.BadNativeTensor, decayLog(t, &.{48}));
+}
+
+fn affineTensor(t: Tensor, shape: []const usize) !Tensor {
+    _ = try projection.metadata(t.dtype);
+    return checked(t, t.dtype, shape);
 }

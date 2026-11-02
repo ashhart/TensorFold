@@ -8,12 +8,12 @@ const row = core.row_projection;
 const lane = core.lane_projection;
 
 /// One affine width, as core.quant.mlx.Width: `bits` per weight, a scale and bias a `group` of K.
-pub const Width = struct { bits: u8, group: u16 };
+pub const Width = struct { bits: u8, group: u16, metadata: row.Metadata = .bf16 };
 /// The qualified format: today's kernels and launches, unchanged.
 pub const uniform = Width{ .bits = 4, .group = 64 };
 
 pub fn isUniform(w: Width) bool {
-    return w.bits == uniform.bits and w.group == uniform.group;
+    return w.bits == uniform.bits and w.group == uniform.group and w.metadata == .bf16;
 }
 
 /// A layer's projections; a layer stores entries for both mixers and uses those of its kind.
@@ -112,10 +112,12 @@ pub const Widths = struct {
         var mixed = false;
         for (w.layers) |l| for (l) |x| {
             mixed = mixed or !isUniform(x);
+            if (x.metadata == .f32) h.update(&.{0xff});
             h.update(&.{ x.bits, @as(u8, @truncate(x.group)), @as(u8, @truncate(x.group >> 8)) });
         };
         for ([_]Width{ w.embed, w.head }) |x| {
             mixed = mixed or !isUniform(x);
+            if (x.metadata == .f32) h.update(&.{0xff});
             h.update(&.{ x.bits, @as(u8, @truncate(x.group)), @as(u8, @truncate(x.group >> 8)) });
         }
         return if (mixed) h.final() | 1 else 0;
@@ -169,12 +171,10 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
 /// One run's kernel: 4/64 keeps today's choice; other widths take the non-reg lane kernel or the row kernel.
 fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
     _ = try @import("projection.zig").split(n, k);
-    // The lane sums and odd word counts assume group 64 off the 4-bit kernel.
-    if (chip.tensor_units and w.bits != 4 and w.group != 64) return error.UnsupportedLaneGroup;
-    if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
+    if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group, .metadata = w.metadata }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
     if (isUniform(w) and n % 8 == 0) return;
     if (std.mem.indexOfScalar(u8, chip.row_bits, w.bits) == null) return error.UnsupportedRowBits;
-    return (row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = n, .k = k, .group = w.group }).validate();
+    return (row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = n, .k = k, .group = w.group, .bits = w.bits, .metadata = w.metadata }).validate();
 }
 
 const all_rows = [_]u8{ 2, 3, 4, 5, 6, 8 };
@@ -308,4 +308,18 @@ test "resolved widths follow overrides under any checkpoint prefix" {
     try std.testing.expectEqual(Width{ .bits = 5, .group = 64 }, w.of(27, .k));
     try std.testing.expectEqual(uniform, w.of(27, .q));
     try std.testing.expectEqual(uniform, w.head);
+}
+
+test "all four FP32 metadata forms admit on tensor units and row chips, including narrow stacks and the head" {
+    for ([_]Width{ .{ .bits = 4, .group = 32, .metadata = .f32 }, .{ .bits = 5, .group = 32, .metadata = .f32 }, .{ .bits = 6, .group = 16, .metadata = .f32 }, .{ .bits = 8, .group = 32, .metadata = .f32 } }) |w| {
+        for ([_]bool{ false, true }) |tensor_units| for ([_]usize{ 48, 5120, 248320 }) |n| try check(.{ .tensor_units = tensor_units }, n, 5120, w);
+    }
+}
+
+test "metadata dtype splits a stack even when its code width and group agree" {
+    var buf: [3][2]usize = undefined;
+    var full = uniform;
+    full.metadata = .f32;
+    try std.testing.expectEqualSlices([2]usize, &.{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 1 } }, runs(&.{ uniform, full, uniform }, &buf));
+    try std.testing.expect(!isUniform(full));
 }

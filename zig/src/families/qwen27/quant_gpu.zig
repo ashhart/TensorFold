@@ -10,7 +10,7 @@ pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
+const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, metadata: row.Metadata = .bf16, long: bool = false };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one reg dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
@@ -44,6 +44,7 @@ pub const Kernels = struct {
     device: mtl.Device,
     profiler: ?*profile.Trace = null,
     row_pipelines: ?row.Pipelines = null,
+    row_f32: ?row.Pipelines = null,
     simd: ?row.simd.Pipelines = null,
     simd_bits: ?row.simd_bits.Pipelines = null,
     /// Raw matrices take simd_qmm_bits' tiles; off on tensor units, whose raw matrices are runs short of a lane tile.
@@ -77,6 +78,7 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         k.setResident(null);
         if (k.row_pipelines) |*pipelines| pipelines.deinit();
+        if (k.row_f32) |*pipelines| pipelines.deinit();
         if (k.simd) |*pipelines| pipelines.deinit();
         if (k.simd_bits) |*pipelines| pipelines.deinit();
         k.twins.deinit(k.allocator);
@@ -157,7 +159,7 @@ pub const Kernels = struct {
         cut: [2]u32,
         long: bool,
     ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
-        const reg = p.bits == 4 and p.group == 64;
+        const reg = p.metadata == .bf16 and p.bits == 4 and p.group == 64;
         const key = Key{
             .kind = .projection,
             .n = p.n,
@@ -167,6 +169,7 @@ pub const Kernels = struct {
             .cut = cut,
             .bits = p.bits,
             .group = p.group,
+            .metadata = p.metadata,
             .long = long,
         };
         const half = p.n / 64;
@@ -177,7 +180,7 @@ pub const Kernels = struct {
             entry.value_ptr.* = try lane.Projection.init(k.allocator, k.device, .{
                 .n = p.n,
                 .k = p.k,
-                .format = .{ .bits = p.bits, .group = p.group },
+                .format = .{ .bits = p.bits, .group = p.group, .metadata = p.metadata },
                 .sk = key.slices,
                 .ranges = if (skip > 0) &ranges else &.{},
                 .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null,
@@ -229,7 +232,7 @@ pub const Kernels = struct {
         _ = dims;
         if (rows == 0 or rows > @import("gpu_frame.zig").max_rows or p.tile != 32) return error.BadCoreProjectionRows;
         if (p.raw) |raw| {
-            if (raw.bits == 4 and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0) {
+            if (raw.metadata == .bf16 and raw.bits == 4 and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0) {
                 const m = row.simd.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off, .n = raw.n, .k = raw.k };
                 const scalar = try k.twin(m); // loads the tiles before they're read
                 const paired = try k.pairTwin(m);
@@ -239,8 +242,7 @@ pub const Kernels = struct {
                 try span.end();
                 return;
             }
-            if (k.row_pipelines == null) k.row_pipelines = try row.Pipelines.load(k.device);
-            const call = try row.call(&k.row_pipelines.?, raw, rows, false);
+            const call = try row.call(try k.rowPipelines(raw.metadata), raw, rows, false);
             e.setPipeline(call.pipeline);
             e.setBuffer(x.buffer, x.offset, 0);
             e.setBuffer(raw.w, raw.w_off, 1);
@@ -253,7 +255,7 @@ pub const Kernels = struct {
             try span.end();
             return;
         }
-        const reg = p.bits == 4 and p.group == 64;
+        const reg = p.metadata == .bf16 and p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
         const long = reg and longKey(k.long_prompt, k.prompt, rows);
         const sums: ?Sums = if (reg) xs else null; // the non-reg kernel sums its own groups
@@ -315,8 +317,7 @@ pub const Kernels = struct {
             try span.end();
             return;
         }
-        if (k.row_pipelines == null) k.row_pipelines = try row.Pipelines.load(k.device);
-        const call = try row.callStrided(&k.row_pipelines.?, raw, rows, stride);
+        const call = try row.callStrided(try k.rowPipelines(raw.metadata), raw, rows, stride);
         e.setPipeline(call.pipeline);
         e.setBuffer(x.buffer, x.offset, 0);
         e.setBuffer(raw.w, raw.w_off, 1);
@@ -341,7 +342,13 @@ pub const Kernels = struct {
 
     /// Groups of 64 with fp32 sums at a width the tiles unpack, where raw matrices take the tiles.
     fn tiled(k: *const Kernels, raw: row.Weights) bool {
-        return k.raw_tiles and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0 and std.mem.indexOfScalar(u8, &row.simd_bits.bit_widths, raw.bits) != null;
+        return raw.metadata == .bf16 and k.raw_tiles and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0 and std.mem.indexOfScalar(u8, &row.simd_bits.bit_widths, raw.bits) != null;
+    }
+
+    fn rowPipelines(k: *Kernels, metadata: row.Metadata) !*const row.Pipelines {
+        const slot = if (metadata == .f32) &k.row_f32 else &k.row_pipelines;
+        if (slot.* == null) slot.* = try row.Pipelines.loadFor(k.device, metadata);
+        return &slot.*.?;
     }
 
     /// Loads the tiles on first use and checks the scalar twin against them once per shape.

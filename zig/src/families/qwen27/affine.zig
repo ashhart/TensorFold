@@ -9,7 +9,7 @@ pub const Spec = struct {
 
     pub fn check(s: Spec) !void {
         if (std.mem.indexOfScalar(u8, &.{ 2, 3, 4, 5, 6, 8 }, s.bits) == null or
-            std.mem.indexOfScalar(usize, &.{ 32, 64, 128 }, s.group_size) == null) return error.BadAffine;
+            (std.mem.indexOfScalar(usize, &.{ 32, 64, 128 }, s.group_size) == null and !(s.bits == 6 and s.group_size == 16))) return error.BadAffine;
     }
 };
 
@@ -23,7 +23,7 @@ fn spec(o: std.json.ObjectMap, fallback: ?u8) !Spec {
         if (v != .integer or v.integer < 0 or v.integer > 128) return error.BadAffine;
         break :blk @as(usize, @intCast(v.integer));
     } else 64;
-    if (std.mem.indexOfScalar(usize, &.{ 32, 64, 128 }, group) == null) return error.BadAffine;
+    if (std.mem.indexOfScalar(usize, &.{ 32, 64, 128 }, group) == null and !(bits == 6 and group == 16)) return error.BadAffine;
     if (o.get("mode")) |v| {
         if (v != .null and !(v == .string and (v.string.len == 0 or std.mem.eql(u8, v.string, "affine")))) return error.BadAffine;
     }

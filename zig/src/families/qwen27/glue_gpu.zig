@@ -14,6 +14,7 @@ pub const Gather = extern struct { rows: u32, width: u32, capacity: u32, planes:
 
 pub const Kernels = struct {
     embed: mtl.Pipeline,
+    embed_f32meta: mtl.Pipeline,
     head: mtl.Pipeline,
     slice: mtl.Pipeline,
     add: mtl.Pipeline,
@@ -28,6 +29,8 @@ pub const Kernels = struct {
         defer copy.deinit();
         const embed = try mtl.Pipeline.init(device, lib, "q27_embed", false);
         errdefer embed.deinit();
+        const embed_f32meta = try mtl.Pipeline.init(device, lib, "q27_embed_f32meta", false);
+        errdefer embed_f32meta.deinit();
         const head = try mtl.Pipeline.init(device, lib, "q27_head_norm", false);
         errdefer head.deinit();
         const slice = try mtl.Pipeline.init(device, copy, "q27_slice", false);
@@ -37,11 +40,11 @@ pub const Kernels = struct {
         const gather = try mtl.Pipeline.init(device, copy, "q27_tap_gather", false);
         errdefer gather.deinit();
         const take = try mtl.Pipeline.init(device, copy, "q27_take", false);
-        return .{ .embed = embed, .head = head, .slice = slice, .add = add, .gather = gather, .take = take };
+        return .{ .embed = embed, .embed_f32meta = embed_f32meta, .head = head, .slice = slice, .add = add, .gather = gather, .take = take };
     }
 
     pub fn deinit(k: Kernels) void {
-        inline for (.{ k.embed, k.head, k.slice, k.add, k.gather, k.take }) |p| p.deinit();
+        inline for (.{ k.embed, k.embed_f32meta, k.head, k.slice, k.add, k.gather, k.take }) |p| p.deinit();
     }
 
     /// Each row whose `takes` entry names an image row gets that row's bits from `images` over its embedding.
@@ -59,9 +62,11 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
-        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(vocab), .bits = p.bits, .group = p.group, .metadata = .bf16 };
+        const metadata = try projection.metadata(p.scales.dtype);
+        if (p.biases.dtype != p.scales.dtype) return error.BadAffineMetadata;
+        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(vocab), .bits = p.bits, .group = p.group, .metadata = if (metadata == .f32) .f32 else .bf16 };
         try abi.checkEmbed(a);
-        e.setPipeline(k.embed);
+        e.setPipeline(if (metadata == .f32) k.embed_f32meta else k.embed);
         e.setBuffer(ids.buffer, ids.offset, 0);
         inline for (.{ p.weight, p.scales, p.biases }, 1..) |t, i| e.setBuffer(t.buffer, t.offset, i);
         e.setValue(a, 4);
