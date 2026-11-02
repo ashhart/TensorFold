@@ -35,6 +35,16 @@ pub const Layout = struct {
     }
 };
 
+/// A family whose unpaged streams allocate a request's rows at open, never a whole window (the KV admission ledger).
+pub const PerRequest = struct {
+    /// The ledger reads fixed_bytes (bounding the non-linear part) and token_bytes; page_tokens 0 until it pages.
+    layout: Layout,
+    /// Rows a stream keeps past its reply's last token (a draft or verify window).
+    lookahead: u32 = 0,
+    /// Buffers that grow with the stream cap but belong to no request, charged once at load.
+    scratch: u64 = 0,
+};
+
 /// Slots a plan sets aside for snapshots when the caller names no count.
 pub const most_snaps = 64;
 

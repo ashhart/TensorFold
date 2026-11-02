@@ -5,6 +5,7 @@ const kv_pool = @import("core").kv_pool;
 const budget = @import("cuda_memory.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 const toGib = @import("cuda_family_memory.zig").toGib;
+const ledger = @import("cuda_ledger.zig");
 const Allocator = std.mem.Allocator;
 
 /// The admit's refusals: no stream fits, or --parallel asks for more than the budget holds.
@@ -23,11 +24,12 @@ pub const Budget = struct {
     window: i64, // the context window (cuda_window.zig)
     stream_bytes: u64,
     host_cache: bool,
+    host_budget: u64, // a host prompt cache's bytes (0: none)
     share: bool, // TF_KV_SHARE: the prompt cache's kept states are pool pages
 };
 
-/// The streams served, and the page plan and layout when the family pages.
-pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout };
+/// The streams served, and the page plan and layout or the KV ledger plan when the family has one.
+pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null };
 
 /// The family's streams in `b.room`; null with `problem` set when none fit or --parallel asks for more than fit.
 pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Budget, problem: *[]const u8) !?Count {
@@ -37,6 +39,15 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
     if (wrapped.layout) |l| {
         const paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), if (b.share) 1_000_000 else 0) orelse return null;
         return .{ .streams = paged.lanes, .paged = paged, .layout = l };
+    }
+    // --parallel caps the streams; each request reserves its own bytes (a family that allocates per request)
+    if (ledger.wanted(F, loaded, b.stream_bytes)) {
+        var short: ?ledger.Short = null;
+        const p = ledger.plan(F, loaded, o, .{ .room = b.room, .context = b.window, .host_budget = b.host_budget, .host_cache = b.host_cache }, &short) orelse {
+            problem.* = try std.fmt.allocPrint(a, no_stream, .{ b.window, toGib(short.?.one_full +| short.?.scratch), toGib(b.room), toGib(b.model), toGib(b.reserve), b.low });
+            return null;
+        };
+        return .{ .streams = o.lanes, .paged = null, .layout = null, .ledger = p };
     }
     const streams = budget.admit(grow, b.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
