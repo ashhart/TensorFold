@@ -36,7 +36,7 @@ pub const Saved = struct {
         const s: *Saved = @ptrCast(@alignCast(ptr));
         const cmd = argv[argv.len - 1];
         const cwd = std.Io.Dir.cwd();
-        if (std.mem.indexOf(u8, cmd, "tensorfold node") != null) {
+        if (std.mem.indexOf(u8, cmd, " node --name ") != null) {
             const path = try std.fs.path.join(a, &.{ s.dir, "launches.log" });
             const log = try cwd.createFile(s.io, path, .{ .truncate = false });
             defer log.close(s.io);
@@ -119,11 +119,13 @@ pub fn discover(a: Allocator, r: Runner, c: config.Config) !struct { config: con
     return .{ .config = out, .inventories = invs };
 }
 
-/// The remote command that starts this node's agent detached, with the leader's cluster.json written beside it.
-pub fn nodeCommand(a: Allocator, json: []const u8, name: []const u8, leader: []const u8, model: []const u8) ![]const u8 {
+/// The remote command that starts this node's agent detached (`bin`: its tensorfold), with the leader's cluster.json written beside it.
+/// Only the node goes to the background, with stdin, stdout and stderr all off ssh's channel: a background `&` after the
+/// && chain would hold ssh's stdout open, and ssh (and serve's launch with it) would wait until the node exited.
+pub fn nodeCommand(a: Allocator, json: []const u8, bin: []const u8, name: []const u8, leader: []const u8, model: []const u8) ![]const u8 {
     const b64 = try a.alloc(u8, std.base64.standard.Encoder.calcSize(json.len));
     _ = std.base64.standard.Encoder.encode(b64, json);
-    return std.fmt.allocPrint(a, "mkdir -p ~/.config/tensorfold ~/.cache/tensorfold && printf %s {s} | base64 --decode > ~/.config/tensorfold/cluster.json && nohup tensorfold node --name {s} --leader {s} --model {s} --cluster ~/.config/tensorfold/cluster.json >> ~/.cache/tensorfold/node.log 2>&1 < /dev/null & echo started $!", .{ b64, name, leader, model });
+    return std.fmt.allocPrint(a, "mkdir -p ~/.config/tensorfold ~/.cache/tensorfold && printf %s {s} | base64 --decode > ~/.config/tensorfold/cluster.json && {{ nohup {s} node --name {s} --leader {s} --model {s} --cluster ~/.config/tensorfold/cluster.json >> ~/.cache/tensorfold/node.log 2>&1 < /dev/null & echo started $!; }}", .{ b64, bin, name, leader, model });
 }
 
 pub const Started = struct { name: []const u8, argv: []const []const u8, ok: bool };
@@ -134,7 +136,7 @@ pub fn launch(a: Allocator, r: Runner, c: config.Config, json: []const u8, model
     for (model.nodes) |name| {
         if (std.mem.eql(u8, name, leader)) continue;
         const n = c.nodes[c.find(name) orelse return error.UnknownNode];
-        const argv = try sshArgv(a, c, n, try nodeCommand(a, json, name, leader, model.id));
+        const argv = try sshArgv(a, c, n, try nodeCommand(a, json, n.bin orelse "tensorfold", name, leader, model.id));
         var ok = true;
         if (!dry) {
             const res = try r.run(r.ptr, a, name, argv);
@@ -162,6 +164,7 @@ pub fn writeJson(w: *std.Io.Writer, c: config.Config) !void {
         if (n.memory) |m| try w.print(", \"memory_gb\": {d:.0}", .{@as(f64, @floatFromInt(m)) / @as(f64, @floatFromInt(node.gib))});
         if (n.gpu_limit) |g| try w.print(", \"gpu_limit_gb\": {d:.1}", .{@as(f64, @floatFromInt(g)) / @as(f64, @floatFromInt(node.gib))});
         if (n.library) |l| try w.print(", \"library\": \"{s}\"", .{l});
+        if (n.bin) |b| try w.print(", \"bin\": \"{s}\"", .{b});
         if (n.ports) |ps| {
             try w.writeAll(",\n      \"ports\": [");
             for (ps, 0..) |p, k| try w.print("{s}{{ \"device\": \"{s}\", \"peer\": \"{s}\", \"gbps\": {d} }}", .{ if (k == 0) "" else ", ", p.device, p.peer, p.gbps });
