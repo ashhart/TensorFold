@@ -329,6 +329,11 @@ pub const Stream = struct {
         return s.context.items[0..s.prompt_len];
     }
 
+    /// A stream whose answer is a function of its prompt rows alone (an embedding): no token is drawn for it.
+    pub fn promptOnly(s: *const Stream) bool {
+        return s.embedding != null;
+    }
+
     pub fn emitted(s: *const Stream) []const u32 {
         return s.context.items[s.prompt_len..];
     }
