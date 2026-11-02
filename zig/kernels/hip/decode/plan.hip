@@ -379,8 +379,17 @@ __global__ void tf_sum_partials_act(const float* __restrict__ partials, void* __
     int lane = threadIdx.x;
     if (lane >= d) return;
     const float* col = partials + ((static_cast<long long>(batch) * gridDim.x + head) * tiles) * d + lane;
+    // sixteen tiles' loads go out together, then add in tile order
     float acc = 0.f;
-    for (int tile = 0; tile < tiles; ++tile) acc += col[static_cast<long long>(tile) * d];
+    int tile = 0;
+    for (; tile + 16 <= tiles; tile += 16) {
+        float ahead[16];
+#pragma unroll
+        for (int u = 0; u < 16; ++u) ahead[u] = col[static_cast<long long>(tile + u) * d];
+#pragma unroll
+        for (int u = 0; u < 16; ++u) acc += ahead[u];
+    }
+    for (; tile < tiles; ++tile) acc += col[static_cast<long long>(tile) * d];
     store(out, kind, (static_cast<long long>(batch) * gridDim.x + head) * d + lane, acc);
 }
 __global__ void __launch_bounds__(kAttendThreads)

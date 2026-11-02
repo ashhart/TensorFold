@@ -121,8 +121,18 @@ extern "C" __global__ void tf_softmax_stats(const float* __restrict__ scores, fl
     int head = blockIdx.x;
     int batch = blockIdx.y;
     const float* row = scores + (static_cast<long long>(batch) * gridDim.x + head) * span;
+    // a thread's keys i, i + blockDim.x, ...: sixteen loads go out together, then fold in that order
+    const int ahead_span = 15 * blockDim.x;
     float local = -INFINITY;
-    for (int i = threadIdx.x; i < visible; i += blockDim.x) local = fmaxf(local, row[i]);
+    int i = threadIdx.x;
+    for (; i + ahead_span < visible; i += 16 * blockDim.x) {
+        float ahead[16];
+#pragma unroll
+        for (int u = 0; u < 16; ++u) ahead[u] = row[i + u * blockDim.x];
+#pragma unroll
+        for (int u = 0; u < 16; ++u) local = fmaxf(local, ahead[u]);
+    }
+    for (; i < visible; i += blockDim.x) local = fmaxf(local, row[i]);
     __shared__ float buf[256];
     buf[threadIdx.x] = local;
     __syncthreads();
@@ -133,7 +143,15 @@ extern "C" __global__ void tf_softmax_stats(const float* __restrict__ scores, fl
     float max_score = buf[0];
     __syncthreads();
     local = 0.f;
-    for (int i = threadIdx.x; i < visible; i += blockDim.x) local += expf(row[i] - max_score);
+    i = threadIdx.x;
+    for (; i + ahead_span < visible; i += 16 * blockDim.x) {
+        float ahead[16];
+#pragma unroll
+        for (int u = 0; u < 16; ++u) ahead[u] = row[i + u * blockDim.x];
+#pragma unroll
+        for (int u = 0; u < 16; ++u) local += expf(ahead[u] - max_score);
+    }
+    for (; i < visible; i += blockDim.x) local += expf(row[i] - max_score);
     buf[threadIdx.x] = local;
     __syncthreads();
     for (int step = blockDim.x >> 1; step > 0; step >>= 1) {
@@ -186,8 +204,17 @@ extern "C" __global__ void tf_sum_partials(const float* __restrict__ partials, f
     int lane = threadIdx.x;
     if (lane >= d) return;
     const float* col = partials + ((static_cast<long long>(batch) * gridDim.x + head) * tiles) * d + lane;
+    // sixteen tiles' loads go out together, then add in tile order
     float acc = 0.f;
-    for (int tile = 0; tile < tiles; ++tile) acc += col[static_cast<long long>(tile) * d];
+    int tile = 0;
+    for (; tile + 16 <= tiles; tile += 16) {
+        float ahead[16];
+#pragma unroll
+        for (int u = 0; u < 16; ++u) ahead[u] = col[static_cast<long long>(tile + u) * d];
+#pragma unroll
+        for (int u = 0; u < 16; ++u) acc += ahead[u];
+    }
+    for (; tile < tiles; ++tile) acc += col[static_cast<long long>(tile) * d];
     out[(static_cast<long long>(batch) * gridDim.x + head) * d + lane] = acc;
 }
 
