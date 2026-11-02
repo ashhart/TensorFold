@@ -36,7 +36,7 @@ pub const Case = struct {
         t.rig.deinit();
     }
     pub fn kernel(t: *Case) g.Kernel {
-        return .{ .ctx = t, .vt = &g.hooks(Case), .control = if (t.control == .none) null else .shapes, .spec = .{
+        return .{ .ctx = t, .vt = &vt, .control = if (t.control == .none) null else .shapes, .spec = .{
             .name = switch (t.control) {
                 .gate => "control: GDN chain without SiLU gate",
                 .state => "control: GDN chain rotating final state",
@@ -45,12 +45,14 @@ pub const Case = struct {
             .accum = .none,
             .depth = depth,
             .out = .raw,
+            .in_place = true,
             .nan = .{ .stated = "every raw row, gated row, state and optional group sum equals the old chain then post bytes" },
             .replaces = "chain_kernel<bf16,bf16,64,32> then tf_q35_gdn_post",
             .tiles = .{ .{ .size = 16 }, .{}, .{} },
             .served = &served,
         } };
     }
+    const vt = g.hooks(Case);
     fn input(t: *Case, i: usize, len: usize, floats: bool, fill: g.Fill, rng: std.Random) !void {
         const a = t.rig.gpu.gpa;
         const bytes = try a.alloc(u8, len * @as(usize, if (floats) 4 else 2));
@@ -148,7 +150,7 @@ pub const Suite = struct {
     gdn: cuda.Module,
     qwen: cuda.Module,
     cases: [6]Case,
-    pub fn init(gpu: @import("check.zig").Gpu, s: cuda.Stream, controls: cuda.Module) !Suite {
+    pub fn init(gpu: @import("check.zig").Gpu, s: cuda.Stream, _: cuda.Module) !Suite {
         var gd = try cuda.Module.load(gpu.d, cuda.kernels.gdn_prefill);
         errdefer gd.unload();
         var qw = try cuda.Module.load(gpu.d, cuda.kernels.qwen35);
@@ -158,7 +160,7 @@ pub const Suite = struct {
         var cases: [6]Case = undefined;
         for (&cases, 0..) |*case, i| {
             var fns = f;
-            if (i >= 4) fns.fused = try controls.function(if (i == 4) "tf_gdn_chain_norm_bad_gate" else "tf_gdn_chain_norm_bad_state");
+            if (i >= 4) fns.fused = try gd.function(if (i == 4) "tf_gdn_chain_norm_bad_gate" else "tf_gdn_chain_norm_bad_state");
             case.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fns, .post = post, .sums = i % 2 == 1 or i >= 4, .chunks = i == 2 or i == 3, .control = if (i == 4) .gate else if (i == 5) .state else .none };
         }
         return .{ .gdn = gd, .qwen = qw, .cases = cases };
