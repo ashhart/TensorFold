@@ -126,6 +126,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{.{ .name = "hip", .module = engineModules(b, target, .safe, stub_kernels, null).hip }},
     }), .filters = &.{"HIP BLAS device:"} });
     b.step("build-hip-blas-test", "Build BF16 projection device checks; execution requires device selection and admission").dependOn(&b.addInstallArtifact(blas_device, .{}).step);
+    @import("glm_ocr.zig").hipTests(b, host.hip, test_step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
