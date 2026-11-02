@@ -39,6 +39,8 @@ pub const Port = struct {
     gid: Gid = no_gid,
     /// The far end's GID[0] (zero while the port is down or the cable's peer is unknown).
     peer_gid: Gid = no_gid,
+    /// Index of `gid` in the device table. Thunderbolt is GID[0]. ConnectX is the first RoCE v2 row.
+    gid_index: u8 = 0,
 };
 
 pub const max_ports = 8;
