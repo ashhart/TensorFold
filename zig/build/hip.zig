@@ -141,6 +141,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron })).step);
+    const qwen3_host = b.addRunArtifact(b.addTest(.{ .root_module = host.qwen3 }));
+    test_step.dependOn(&qwen3_host.step);
+    b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);
     // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
@@ -150,6 +153,17 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const check = engineModules(b, check_target, .Debug, stub_kernels, null);
     b.step("check-native-hip-host", "Compile the real native HIP server with inert kernels, without GPU execution").dependOn(&server(b, check_target, check, build_options).step);
     const gpu = engineModules(b, target, optimize, objects, hip_include);
+    const qwen3_gpu = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3/forward_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "qwen3", .module = gpu.qwen3 } },
+    }) });
+    const qwen3_run = b.addRunArtifact(qwen3_gpu);
+    qwen3_run.has_side_effects = true; // the checkpoints and oracle files named by TF_QWEN3_* are not cached inputs
+    b.step("qwen3-hip-gpu-build", "Compile the Qwen3 dense GPU checks without running them").dependOn(&qwen3_gpu.step);
+    b.step("qwen3-hip-gpu-test", "Qwen3 lastRows on the GPU against transformers (TF_QWEN3_EMBED_*, TF_QWEN3_RERANK_*)").dependOn(&qwen3_run.step);
     b.step("tf-qwen35-test", "Qwen3.5 / 3.6 model checks on the GPU (-Dhip-arch)").dependOn(&b.addInstallArtifact(checksExe(b, target, optimize, gpu), .{}).step);
     const fx_test = b.addExecutable(.{ .name = "tf-flashnext-hip-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_hip/main.zig"),
@@ -212,6 +226,7 @@ pub const Engine = struct {
     family: *std.Build.Module,
     flashnext: *std.Build.Module,
     nemotron: *std.Build.Module,
+    qwen3: *std.Build.Module,
     native: *std.Build.Module,
 };
 
@@ -280,6 +295,18 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     });
     const ocr_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("glm_ocr_kernels.zig", "const hip = @import(\"hip\"); pub const arch = hip.kernels.arch; pub const bytes = hip.kernels.images[@intFromEnum(hip.kernels.Group.glm_ocr)];\n"), .imports = &.{.{ .name = "hip", .module = hip }} });
     const glm_ocr = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_ocr/hip.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "hip_serve", .module = serve }, .{ .name = "glm_ocr_kernels", .module = ocr_kernels } } });
+    const qwen3 = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3/qwen3.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "hip", .module = hip },
+            .{ .name = "core", .module = core },
+            .{ .name = "lanes", .module = lanes },
+            .{ .name = "engine_api", .module = api },
+        },
+    });
     const native = b.createModule(.{
         .root_source_file = b.path("zig/src/native/hip.zig"),
         .target = target,
@@ -294,6 +321,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "nemotron", .module = nemotron },
             .{ .name = "glm_ocr", .module = glm_ocr },
             .{ .name = "hip_serve", .module = serve },
+            .{ .name = "qwen3", .module = qwen3 },
         },
     });
     return .{
@@ -304,6 +332,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         .family = family,
         .flashnext = flashnext,
         .nemotron = nemotron,
+        .qwen3 = qwen3,
         .native = native,
     };
 }
