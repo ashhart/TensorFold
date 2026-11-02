@@ -118,3 +118,35 @@ test "CUDA load cache: Flash Next sweep follows MTP and retains live PLE files" 
 test "CUDA load cache: LFM2 decision model releases its direct-read fallback" {
     try scope("families/lfm2/weights.zig", "load", "file");
 }
+
+test "CUDA load cache: Qwen4 preserves CPU embedding and PLE lookups after complete placement" {
+    const engine = @embedFile("src/families/qwen4/engine.zig");
+    const placed = std.mem.indexOf(u8, engine, "e.model = try Model.init") orelse return error.NoModel;
+    const hook = std.mem.indexOf(u8, engine, "if (G.kind == .cuda) @import(\"load_cache.zig\").release(&e.reader.checkpoint, &e.model)") orelse return error.NoQwen4Drop;
+    try t.expect(placed < hook);
+}
+test "CUDA load cache: every TP load scope defers file advice through all-rank readiness" {
+    inline for (.{ "flashnext/cuda_lanes_load.zig", "glm/cuda_native.zig", "minimax_m3/cuda_native.zig", "nemotron/cuda_engine.zig", "nemotron/cuda_worker.zig", "deepseek_v41/cuda_model.zig" }) |path| {
+        const source = @embedFile("src/families/" ++ path);
+        const start = std.mem.indexOf(u8, source, "checkpoint.cache.Load.begin(io,") orelse return error.NoTpGate;
+        const close = std.mem.indexOf(u8, source, "defer load_cache.deinit()") orelse return error.NoTpAbort;
+        const ready = std.mem.indexOf(u8, source, "load_cache.finishAfter(") orelse return error.NoTpReady;
+        try t.expect(start < close and close < ready);
+        try t.expect(std.mem.indexOf(u8, source[start..close], "> 1") != null);
+        const last = if (std.mem.eql(u8, path, "flashnext/cuda_lanes_load.zig")) "mtp.Head.init" else if (std.mem.eql(u8, path, "glm/cuda_native.zig")) "dflash_load.load" else if (std.mem.eql(u8, path, "minimax_m3/cuda_native.zig")) "engine.Engine.init" else if (std.mem.eql(u8, path, "nemotron/cuda_engine.zig")) "weights.load(gpa" else if (std.mem.eql(u8, path, "nemotron/cuda_worker.zig")) "loadLayers(gpa" else "m.weights.upload";
+        const read = std.mem.indexOfPos(u8, source, start, last) orelse return error.NoLastLoad;
+        try t.expect(start < read and read < ready);
+        if (std.mem.eql(u8, path, "flashnext/cuda_lanes_load.zig")) {
+            const drop = std.mem.indexOf(u8, source, "dropPageCache(io,") orelse return error.NoSweep;
+            try t.expect(drop < ready);
+        }
+    }
+    const st = @embedFile("src/core/safetensors.zig");
+    try t.expect(std.mem.indexOf(u8, st, "@import(\"checkpoint_drop.zig\").drop(self.file)") != null);
+    const identity = @embedFile("src/core/checkpoint_identity.zig");
+    try t.expect(std.mem.indexOf(u8, identity, "@import(\"checkpoint_drop.zig\").range(f, at, n)") != null);
+    const pack = @embedFile("src/families/deepseek_v41/pack.zig");
+    try t.expect(std.mem.indexOf(u8, pack, "checkpoint.cache.range(file, offset, len)") != null);
+    const cache = @embedFile("src/core/checkpoint_cache.zig");
+    try t.expect(std.mem.indexOf(u8, cache, "@import(\"checkpoint_drop.zig\").drop(file)") != null);
+}

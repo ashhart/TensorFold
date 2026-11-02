@@ -242,9 +242,7 @@ pub const Pack = struct {
 
     /// Drops the page cache of bytes just read (POSIX_FADV_DONTNEED): on unified memory it competes with the device.
     fn dropCache(file: Io.File, offset: u64, len: usize) void {
-        if (@import("builtin").os.tag != .linux) return;
-        const linux = std.os.linux;
-        _ = linux.fadvise(file.handle, @intCast(offset), @intCast(len), linux.POSIX_FADV.DONTNEED);
+        @import("core").checkpoint.cache.range(file, offset, len);
     }
 
     /// The codebook of the group at `prefix`: its marker's value, else the 3-instruction default.

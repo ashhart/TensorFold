@@ -9,6 +9,8 @@ const Glue = @import("cuda_glue.zig").Glue;
 const images = @import("cuda_images.zig");
 pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: F.Options) !F.Loaded {
     if (o.vision) |v| try @import("qwen_vision").media.checkLimits(v);
+    var load_cache = @import("core").checkpoint.cache.Load.begin(io, o.tp > 1);
+    defer load_cache.deinit();
     const Cuda = F.Cuda;
     const round_streams = 32;
 
@@ -104,6 +106,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, own.engine.chunk) else 0;
         own.kv.layout = @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
     }
+    if (own.ranks) |r| try load_cache.finishAfter(.{ r, std.math.maxInt(u64) }, ranks.Session.room) else load_cache.finish();
     return .{
         .layout = own.kv.layout,
         .vision = own.vision,

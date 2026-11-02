@@ -228,6 +228,8 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const o = a.o;
     const p = a.p;
     const roce_bytes = a.roce_bytes;
+    var load_cache = @import("core").checkpoint.cache.Load.begin(io, p.world > 1);
+    defer load_cache.deinit();
     // TF_GLM_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
     try @import("cuda_prompt_solo.zig").refuse(set.solo, o.drafter);
@@ -279,10 +281,12 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
         .p = p,
         .cap = cap,
         .roce_bytes = roce_bytes,
+        .load_cache = &load_cache,
     }, finishRank);
 }
 
 const OpenArgs = struct {
+    load_cache: *@import("core").checkpoint.cache.Load,
     own: *Owned,
     io: std.Io,
     ctx: *const cuda.Context,
@@ -315,6 +319,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     errdefer own.link.deinit();
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
     try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.kv_lora * 2);
+    if (p.world > 1) try a.load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready) else a.load_cache.finish();
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
     defer gpa.free(rooms);
@@ -327,7 +332,6 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.benchmark_group = try @import("core").benchmark_group.cuda(gpa, io, ctx, &own.group, own.e.stream);
     errdefer if (own.benchmark_group) |b| gpa.free(b);
     // every rank loaded and agreed (cuda_ranks) before the first step; the digest names what they agreed on
-    if (p.world > 1) try cuda.tp_watch.ready(io, own.e.checkpoint_digest);
     cuda.memory_receipt.emit(@intCast(p.rank), .load_end, false);
     if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, frees what it owns, then leaves the process
         follow.follow(own.e, &own.link) catch |err| {

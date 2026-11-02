@@ -63,6 +63,7 @@ pub fn Engine(comptime G: type) type {
             e.stage = .weights;
             e.model = try Model.init(a, &e.weights, p);
             e.stage = .model;
+            if (G.kind == .cuda) @import("load_cache.zig").release(&e.reader.checkpoint, &e.model);
             e.gpu = try loader.load(a, b, &e.c, p);
             e.stage = .gpu;
             e.scratch = try Scratch.open(b, e.plan.scratch, e.plan.scratch);

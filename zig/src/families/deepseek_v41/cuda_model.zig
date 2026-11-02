@@ -221,6 +221,8 @@ pub const Model = struct {
         tr.step("start", cuda.usage(false));
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
+        var load_cache = @import("core").checkpoint.cache.Load.begin(io, world > 1);
+        defer load_cache.deinit();
         try @import("session_protocol.zig").preflight(&m.session.plan);
         var so = try sg.optionsFromEnv();
         // rank 0's --prompt-cache-gib (or variable) on every rank: one resident limit, the same evictions
@@ -438,7 +440,12 @@ pub const Model = struct {
         if (m.dev_arena) |x| x.endBoot(m.tcfg.rank); // TF_DSV41_ARENA=pack: boot's buffers in, the rest as before
         // the boot check on the boot's own figures: what it took, the dip below idle, the hard floor
         if (m.boot_check) |b| try kvs.afterBoot(b);
-        try comm.barrier();
+        const Ready = struct {
+            fn wait(c: @TypeOf(comm)) !void {
+                try c.barrier();
+            }
+        };
+        try load_cache.finishAfter(.{comm}, Ready.wait);
     }
 
     /// Several live slots: the stacked roles' bases, the row runner, the followers' row ops; one-slot graphs off.

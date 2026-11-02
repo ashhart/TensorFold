@@ -265,11 +265,13 @@ pub const File = struct {
         if (@import("builtin").os.tag != .linux) return;
         // a map that fell back to a heap copy (no mmap) holds the only bytes: DONTNEED would zero them
         const mem = self.map.memory;
-        if (self.map.section == null) {
-            _ = std.os.linux.fadvise(self.file.handle, 0, 0, std.os.linux.POSIX_FADV.DONTNEED);
+        // page-cache advice goes through checkpoint_drop, which holds it until every TP rank has loaded
+        if (self.map.section == null or keep.len == 0) {
+            if (self.map.section != null) _ = std.os.linux.madvise(mem.ptr, mem.len, std.os.linux.MADV.DONTNEED);
+            @import("checkpoint_drop.zig").drop(self.file);
             return;
         }
-        dropExcept(mem.ptr, mem.len, self.file.handle, keep, scratch);
+        dropExcept(mem.ptr, mem.len, self.file, keep, scratch);
     }
 
     pub fn get(self: *const File, name: []const u8) ?Tensor {
@@ -282,7 +284,7 @@ pub const File = struct {
 fn dropExcept(
     map: [*]u8,
     map_len: usize,
-    fd: std.posix.fd_t,
+    file: std.Io.File,
     keep: []const []const u8,
     scratch: std.mem.Allocator,
 ) void {
@@ -292,7 +294,7 @@ fn dropExcept(
     var spans: [8][2]usize = undefined;
     const kept = if (keep.len <= spans.len) spans[0..keep.len] else scratch.alloc([2]usize, keep.len) catch {
         _ = linux.madvise(map, map_len, linux.MADV.DONTNEED);
-        _ = linux.fadvise(fd, 0, 0, linux.POSIX_FADV.DONTNEED);
+        @import("checkpoint_drop.zig").drop(file);
         return;
     };
     defer if (kept.len > spans.len) scratch.free(kept);
@@ -314,16 +316,16 @@ fn dropExcept(
     }.less);
     var at: usize = 0;
     for (kept[0..n]) |sp| {
-        if (sp[0] > at) gap(map, fd, at, sp[0] - at);
+        if (sp[0] > at) gap(map, file, at, sp[0] - at);
         at = @max(at, sp[1]);
     }
-    if (at < map_len) gap(map, fd, at, map_len - at);
+    if (at < map_len) gap(map, file, at, map_len - at);
 }
 
 /// One run of a mapped shard's bytes out of memory and the page cache: a later read faults them back in.
-fn gap(map: [*]u8, fd: std.posix.fd_t, at: usize, len: usize) void {
+fn gap(map: [*]u8, file: std.Io.File, at: usize, len: usize) void {
     _ = std.os.linux.madvise(map + at, len, std.os.linux.MADV.DONTNEED);
-    _ = std.os.linux.fadvise(fd, @intCast(at), @intCast(len), std.os.linux.POSIX_FADV.DONTNEED);
+    @import("checkpoint_drop.zig").range(file, at, len);
 }
 
 test "header entries" {
