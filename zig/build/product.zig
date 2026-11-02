@@ -94,7 +94,7 @@ fn cudaServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             }
         }
     }
-    const rt = @import("cuda_runtime.zig").runtime(b, target, optimize, &images);
+    const rt = @import("cuda_runtime.zig").runtimeFor(b, target, optimize, &images, std.fmt.parseInt(u32, sm, 10) catch unreachable);
     const ids_files = b.addWriteFiles();
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });

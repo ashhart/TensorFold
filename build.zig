@@ -60,7 +60,7 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 }
 
 pub fn build(b: *std.Build) void {
-    // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig, docs/design/gpu-target-builds.md)
+    // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig)
     if (@import("zig/build/product.zig").requested(b)) |gpu| return @import("zig/build/product.zig").build(b, gpu);
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
