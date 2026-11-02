@@ -10,6 +10,8 @@ pub const Node = abi.GraphNode;
 
 /// Every launch on `stream` is recorded until `endCapture`; nothing runs.
 pub fn beginCapture(stream: Stream, mode: abi.CaptureMode) runtime.Error!void {
+    // A live tap's per-layer D2H copies cannot join a capture: replay would write the same slot every step.
+    if (@import("core").route_tap.live()) return error.Invalid;
     try runtime.check(stream.r.api.hipStreamBeginCapture(stream.handle, mode));
 }
 

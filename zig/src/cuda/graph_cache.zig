@@ -177,7 +177,7 @@ pub fn Cache(comptime Key: type) type {
         /// One step: the key's graph, captured first on a miss; a new `fingerprint` (same step on all ranks) drops all.
         pub fn run(c: *Self, key: Key, stream: Stream, fingerprint: u64, body: Body) !Outcome {
             defer c.publish();
-            if (!c.settings.on or c.failed or c.settings.max == 0) return c.eager(stream, body);
+            if (!c.settings.on or c.failed or c.settings.max == 0 or @import("core").route_tap.live()) return c.eager(stream, body);
             if (c.fingerprint != null and c.fingerprint.? != fingerprint) c.dropAll();
             c.fingerprint = fingerprint;
             c.tick += 1;

@@ -221,7 +221,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, problem)) return null;
+    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, "xpu", problem)) return null;
     if (try o.slideRefusal(a, "XPU")) |why| {
         problem.* = why;
         return null;
