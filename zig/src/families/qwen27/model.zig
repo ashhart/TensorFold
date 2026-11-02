@@ -213,7 +213,8 @@ pub fn supported(c: cfg.Config) !void {
     const dense = qualifiedSize(c) and c.kv_heads == 4 and c.k_heads == 16 and !c.moe();
     // Ornith-1.5-122B: 256 experts of 1,024 and a shared expert of 1,024 over 3,072, 32 heads over 2 of 256
     const routed = c.hidden == 3072 and c.intermediate == 1024 and c.layers == 48 and c.heads == 32 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 64 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 1024;
-    if (!(dense or routed) or c.vocab != 248320 or c.head_dim != 256 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
+    const routed35 = c.hidden == 2048 and c.intermediate == 512 and c.layers == 40 and c.heads == 16 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 32 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 512;
+    if (!(dense or routed or routed35) or c.vocab != 248320 or c.head_dim != 256 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
     for (c.kinds[0..c.layers], 0..) |kind, i| if (kind != (if ((i + 1) % 4 == 0) cfg.Kind.attention else cfg.Kind.linear)) return error.UnqualifiedLayerSchedule;
 }
 

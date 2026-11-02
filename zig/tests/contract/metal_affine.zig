@@ -43,7 +43,7 @@ fn laneDepth(s: c.Shape) usize {
 const offset_inf = c.Known{ .gate = .nonfinite, .finding = "an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)" };
 
 /// Ornith-1.5-122B's 8-bit router: 256 experts and the shared gate's row padded to 320, a prompt chunk's rows.
-const router_rows = [_]c.Shape{ .{ .rows = 1024, .n = 320, .k = 3072 }, .{ .rows = 65, .n = 320, .k = 3072 } };
+const router_rows = [_]c.Shape{ .{ .rows = 1024, .n = 320, .k = 3072 }, .{ .rows = 65, .n = 320, .k = 3072 }, .{ .rows = 1024, .n = 320, .k = 2048 }, .{ .rows = 65, .n = 320, .k = 2048 } };
 
 pub fn spec(v: Variant, name: []const u8) c.Spec {
     const out: c.Elem = if (v.f32_out) .f32 else .bf16;

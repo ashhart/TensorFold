@@ -79,7 +79,7 @@ pub const Extra = struct {
             .out = .bf16,
             .tiles = .{ .{ .size = 2 }, .{ .size = 8, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } },
             // Ornith's decode windows: gate and up (1,024 over 3,072), down (3,072 over 1,024)
-            .served = &.{ .{ .rows = 16, .n = 1024, .k = 3072 }, .{ .rows = 1, .n = 3072, .k = 1024 } },
+            .served = &.{ .{ .rows = 16, .n = 1024, .k = 3072 }, .{ .rows = 1, .n = 3072, .k = 1024 }, .{ .rows = 16, .n = 512, .k = 2048 }, .{ .rows = 1, .n = 2048, .k = 512 } },
         };
     }
 
@@ -346,19 +346,25 @@ pub const Route = struct {
         }
     };
 
+    /// The same FP64 oracle for host-only fixtures, without reading a device's picks.
+    pub fn referenceRow(t: *Route, r: usize, out: []f64, ids: *[route_topk]u32) bool {
+        if (!t.select(r, ids)) {
+            @memset(out[0..route_topk], std.math.nan(f64));
+            out[route_topk] = bf(sigmoid(t.logit(r, route_experts)));
+            return false;
+        }
+        var e: [route_experts]f64 = undefined;
+        t.terms(r, &e);
+        t.weights(r, ids.*, &e, Exact.of(.{}, &e), Exact{}, out);
+        return true;
+    }
+
     pub fn reference(t: *Route, want: []f64, mag: []f64) !void {
         const picked = t.rig.bytes(t.picks, t.count() * 4);
         for (0..t.rows) |r| {
             const out = want[r * (route_topk + 1) ..][0 .. route_topk + 1];
             var ids: [route_topk]u32 = undefined;
-            if (!t.select(r, &ids)) {
-                @memset(out[0..route_topk], std.math.nan(f64));
-                out[route_topk] = bf(sigmoid(t.logit(r, route_experts)));
-                continue;
-            }
-            var e: [route_experts]f64 = undefined;
-            t.terms(r, &e);
-            t.weights(r, ids, &e, Exact.of(.{}, &e), Exact{}, out);
+            if (!t.referenceRow(r, out, &ids)) continue;
             // a pick unlike the host's poisons its row: the gate reports the row's outputs as wrong
             var host: [route_topk + 1]u32 = undefined;
             @memcpy(host[0..route_topk], &ids);
