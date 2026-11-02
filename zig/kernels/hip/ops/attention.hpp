@@ -19,6 +19,16 @@ extern "C" __global__ void tf_attn_gate(const float* att, const void* qg, void* 
     store(out, kind, i, a * sigmoid(g));
 }
 
+// out[r, h * d + j] = att[h, r, j] rounded once to kind: the causal kernel's head-major rows, row-major for o_proj.
+extern "C" __global__ void tf_heads_rows(const float* att, void* out, int kind, int len, int heads, int d) {
+    long long i = gid();
+    if (i >= static_cast<long long>(len) * heads * d) return;
+    int j = static_cast<int>(i % d);
+    int h = static_cast<int>((i / d) % heads);
+    int r = static_cast<int>(i / (static_cast<long long>(d) * heads));
+    store(out, kind, i, att[(static_cast<long long>(h) * len + r) * d + j]);
+}
+
 // keys or values (len, kv_heads, d) of kind into the cache (kv_heads, total, d) at slot pos0.
 extern "C" __global__ void tf_kv_write(const void* src, void* cache, int kind, int len, int kv_heads, int d, int total,
                                 int pos0) {
