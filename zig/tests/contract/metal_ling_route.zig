@@ -12,7 +12,7 @@ fn noSums(_: c.Shape) usize {
     return 0;
 }
 
-const rule = "NaN never wins a group or a pick; +Inf beats every finite; ties go to the lower group then the lower expert id; a picked slot is marked NaN so ids in a row are distinct; if later picks have NaN scores the row's weights are NaN";
+const rule = "NaN never wins a group or a pick; +Inf beats every finite; ties go to the lower group then the lower expert id; a picked slot is marked NaN so ids in a row are distinct; if later picks have NaN scores the row's weights are NaN; once every expert left is NaN the rest of the row is empty picks, id 0 with weight 0";
 
 const source = @import("ling_metal").route;
 
@@ -71,6 +71,7 @@ pub const Route = struct {
         t.rig.reset();
         t.shape = shape;
         t.s = shapeOf(shape);
+        try t.s.check();
         t.a.free(t.logits);
         t.logits = &.{};
         t.a.free(t.bias);
@@ -82,6 +83,7 @@ pub const Route = struct {
         const rng = prng.random();
         for (t.logits) |*v| v.* = @as(f32, @floatFromInt(rng.uintLessThan(u32, 33))) / 8 - 2;
         for (t.bias) |*v| v.* = @as(f32, @floatFromInt(rng.uintLessThan(u32, 9))) / 8 - 0.5;
+        try route.checkBias(t.bias, t.s);
         if (fill == .nonfinite) {
             t.logits[1] = std.math.nan(f32);
             if (shape.rows > 1) t.logits[shape.k + 3] = std.math.inf(f32);
@@ -134,7 +136,7 @@ pub const Route = struct {
         for (0..t.shape.rows) |r| {
             const row = t.logits[r * t.shape.k ..][0..t.shape.k];
             var want: [route.max_topk]route.Pick = undefined;
-            route.selectF32(row, t.bias, want[0..topk], t.s);
+            const real = route.selectF32(row, t.bias, want[0..topk], t.s);
             for (0..topk) |k| {
                 const got_id: u32 = @intCast(ids[r * topk + k]);
                 if (got_id != want[k].id)
@@ -143,10 +145,11 @@ pub const Route = struct {
                 const nan_ok = std.math.isNan(got_w) and std.math.isNan(want[k].wt);
                 if (!nan_ok and !(@abs(got_w - want[k].wt) <= 1e-6))
                     return try std.fmt.bufPrint(&t.msg, "row {d} pick {d}: wt {e:.6}, host {e:.6}", .{ r, k, got_w, want[k].wt });
-                for (0..k) |j| {
+                // Real picks are distinct; the empty picks after them are all id 0.
+                if (k < real) for (0..k) |j| {
                     if (ids[r * topk + j] == ids[r * topk + k])
                         return try std.fmt.bufPrint(&t.msg, "row {d}: id {d} picked twice", .{ r, got_id });
-                }
+                };
             }
             var nf: bool = false;
             for (row) |v| nf = nf or !std.math.isFinite(v);
