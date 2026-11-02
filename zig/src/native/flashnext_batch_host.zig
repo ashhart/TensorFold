@@ -242,7 +242,9 @@ const dropResident = @import("flashnext_residency.zig").dropShared;
 /// Auto with room for only one session transfers the loaded engine, preserving the chosen footprint limit.
 fn single(gpa: std.mem.Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over: bool, cap: u64, vis: ?*images.Vision, learn: ?Learn, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
     const host = @import("flashnext_host.zig");
+    const shared_gdn_pipe = eng.r.gdn_pipe;
     try eng.keepStates(); // no shared rounds here
     const h = try host.openWarmed(gpa, io, eng, window, cache_gib, over, learn, cap, vis, a, why);
+    h.shared_gdn_pipe = shared_gdn_pipe;
     return .{ .engine = h.engine(), .close = host.close, .ctx = h };
 }
