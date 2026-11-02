@@ -53,9 +53,9 @@ pub const Policy = struct {
 
     pub const Error = error{ UnknownKey, BadValue, StepNotAligned };
 
-    /// The defaults of a GPU: the iGPUs of the RDNA 3.5 generation fill prompts in larger chunks.
-    pub fn forCaps(caps: Caps) Policy {
-        return .{ .prefill_step = if (caps.generation == .rdna3_5) 4096 else 1024 };
+    /// The defaults of a GPU serving alone (`ranks` 1): the RDNA 3.5 iGPUs fill prompts in larger chunks.
+    pub fn forCaps(caps: Caps, ranks: u32) Policy {
+        return .{ .prefill_step = if (caps.generation == .rdna3_5 and ranks == 1) 4096 else 1024 };
     }
 
     /// Whether the decode stream tile is on.
@@ -236,9 +236,11 @@ test "apply sets fields and refuses what it does not know" {
 
 test "the RDNA 3.5 iGPUs default to larger prompt chunks and every flag still overrides" {
     var notes: Policy.Notes = .{};
-    const igpu = Policy.forCaps(Caps.of("gfx1151").?);
+    const igpu = Policy.forCaps(Caps.of("gfx1151").?, 1);
     try std.testing.expectEqual(@as(u32, 4096), igpu.prefill_step);
-    try std.testing.expectEqual(@as(u32, 1024), Policy.forCaps(Caps.of("gfx1100").?).prefill_step);
+    try std.testing.expectEqual(@as(u32, 1024), Policy.forCaps(Caps.of("gfx1100").?, 1).prefill_step);
+    // a group keeps 1024: the larger chunk's scratch has no fallback agreed across ranks
+    try std.testing.expectEqual(@as(u32, 1024), Policy.forCaps(Caps.of("gfx1151").?, 2).prefill_step);
     try std.testing.expectEqual(@as(u32, 4096), (try Policy.resolveFrom(igpu, "", .none, &notes)).prefill_step);
     try std.testing.expectEqual(@as(u32, 1024), (try Policy.resolveFrom(igpu, "prefill_step=1024", .none, &notes)).prefill_step);
     const env: Policy.Env = .{ .vars = &.{.{ "TF_POLICY", "prefill_step=2048" }} };
