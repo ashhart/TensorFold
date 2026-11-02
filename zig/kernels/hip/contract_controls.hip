@@ -11,6 +11,8 @@ __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
     return __uint_as_float(static_cast<uint32_t>(x[i]) << 16);
 }
 
+#include "columns_controls.hpp"
+
 // Gate 1: a row's maximum by fmaxf, which drops a NaN input, so a row holding NaN reads as its largest number.
 extern "C" __global__ void tf_ctl_fmax_max(const uint16_t* X, int K, float* Y) {
     const int row = blockIdx.x, lane = threadIdx.x;
