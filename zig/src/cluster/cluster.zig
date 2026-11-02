@@ -21,6 +21,7 @@ pub const config = @import("config.zig");
 pub const admission = @import("admission.zig");
 pub const exchange = @import("exchange.zig");
 pub const fabric_link = @import("fabric_link.zig");
+pub const mcdma_link = @import("mcdma_link.zig");
 pub const barrier = @import("barrier.zig");
 pub const round = @import("round.zig");
 pub const backend = @import("backend.zig");
