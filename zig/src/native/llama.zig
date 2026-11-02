@@ -58,6 +58,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     var drafter_model: ?*fl.Model = null;
     errdefer if (drafter_model) |dm| dm.deinit();
     if (drafterDir(o)) |dir| {
+        if (try undrafted(a, q)) |why| { // before the drafter loads
+            problem.* = why;
+            model.deinit();
+            return null;
+        }
         // a smaller Llama on the model's tokens, its commands on the model's queue (one residency set for both)
         const dm = fl.Model.loadOn(gpa, io, dir, model.queue) catch |err| {
             problem.* = if (err == error.UnsupportedLlamaPrecision)
@@ -163,6 +168,12 @@ fn qualifiedNames(comptime role: fl.config.Role) []const u8 {
     return names;
 }
 
+/// --drafter's refusal for a target its drafts were not measured to pay for (Nanbeige4.3-33B-INT4 on the M5 Ultra).
+fn undrafted(a: std.mem.Allocator, q: *const fl.config.Qualified) !?[]const u8 {
+    if (q.drafted) return null;
+    return try std.fmt.allocPrint(a, "--drafter: {s} is served without a drafter: its drafts were measured slower than decoding without them; serve it without --drafter", .{q.name});
+}
+
 /// --drafter's directory when drafts are on; one width (bf16 as published), so --drafter-bits is unread, as in Gemma 4.
 fn drafterDir(o: api.Open) ?[]const u8 {
     return if (o.drafts) o.drafter else null;
@@ -225,6 +236,19 @@ test "llama host: the default options serve the drafter, whatever --drafter-bits
     var off = plain;
     off.drafts = false; // --no-drafts
     try std.testing.expectEqual(@as(?[]const u8, null), drafterDir(off));
+}
+
+test "llama host: --drafter is refused by name for Nanbeige4.3-33B-INT4 and served for the bf16 release" {
+    const a = std.testing.allocator;
+    for (&fl.config.qualified) |*q| {
+        if (q.role != .served) continue;
+        const why = try undrafted(a, q);
+        defer if (why) |w| a.free(w);
+        if (std.mem.eql(u8, q.name, "Nanbeige4.3-33B-INT4")) {
+            try std.testing.expect(why != null);
+            try std.testing.expect(std.mem.indexOf(u8, why.?, "--drafter: Nanbeige4.3-33B-INT4 is served without a drafter") != null);
+        } else try std.testing.expectEqual(@as(?[]const u8, null), why);
+    }
 }
 
 test "llama host: cache callback updates the owned store rather than a temporary value" {

@@ -28,6 +28,7 @@ pub const Qualified = struct {
     name: []const u8,
     role: Role,
     weights: Weights,
+    drafted: bool, // served with --drafter: its drafts were measured to pay on the device; otherwise refused by name
     hidden: usize,
     intermediate: usize,
     layers: usize,
@@ -40,10 +41,10 @@ pub const Qualified = struct {
 
 /// The checkpoints the family serves; another `llama` checkpoint is refused until it has been checked the same way.
 pub const qualified = [_]Qualified{
-    .{ .name = "Nanbeige4.3-33B", .role = .served, .weights = .bf16, .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
-    .{ .name = "Nanbeige4.3-33B-INT4", .role = .served, .weights = .int4_g32, .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
+    .{ .name = "Nanbeige4.3-33B", .role = .served, .weights = .bf16, .drafted = true, .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
+    .{ .name = "Nanbeige4.3-33B-INT4", .role = .served, .weights = .int4_g32, .drafted = false, .hidden = 7168, .intermediate = 22016, .layers = 52, .heads = 56, .kv_heads = 8, .vocab = 166912, .theta = 120000000, .context = 524288 },
     // its drafts are checked by the served model's windows, its own logits not against HF
-    .{ .name = "Nanbeige4.1-3B", .role = .drafter, .weights = .bf16, .hidden = 2560, .intermediate = 10496, .layers = 32, .heads = 20, .kv_heads = 4, .vocab = 166144, .theta = 70000000, .context = 262144 },
+    .{ .name = "Nanbeige4.1-3B", .role = .drafter, .weights = .bf16, .drafted = false, .hidden = 2560, .intermediate = 10496, .layers = 32, .heads = 20, .kv_heads = 4, .vocab = 166144, .theta = 70000000, .context = 262144 },
 };
 
 /// Weights a group of the int4 projections: one bf16 scale and one 4-bit zero point each.
