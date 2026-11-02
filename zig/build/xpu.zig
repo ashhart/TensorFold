@@ -93,8 +93,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         \\
     ) });
     const ze_mod = zeModule(b, target, optimize);
-    // the Gemma 4 family config reads MLX widths and bf16 rounding from `core` by name (cuda_config.zig and its twins)
+    // one `core` for these trees: the Gemma 4 config, the safetensors readers, Nemotron, the CLI and server
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     {
         const g4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
         g4.addImport("xpu_gemma4_kernels", embedded_g4);
@@ -105,13 +106,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }
     const module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     module.addImport("xpu_qwen27_kernels", embedded);
-    // the FP64 references of the weight formats (core/quant), for XPU_FP64_REF and XPU_FIDELITY
-    module.addImport("core", b.createModule(.{
-        .root_source_file = b.path("zig/src/core/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    }));
+    // the runner's own `core`: the FP64 references of the weight formats (core/quant), its safetensors headers
+    const qwen_core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    module.addImport("core", qwen_core);
     module.addImport("ze", ze_mod);
     const exe = b.addExecutable(.{ .name = "xpu-qwen27", .root_module = module });
     const install = b.addInstallArtifact(exe, .{});
@@ -126,6 +123,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         const m = b.createModule(.{ .root_source_file = b.path(t[1]), .target = target, .optimize = optimize, .link_libc = true });
         m.addImport("xpu_qwen27_kernels", embedded);
         m.addImport("ze", ze_mod);
+        m.addImport("core", qwen_core);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = t[0], .root_module = m }), .{}).step);
     }
 
@@ -133,11 +131,12 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = target, .optimize = optimize, .link_libc = true });
     qwen27.addImport("xpu_qwen27_kernels", embedded);
     qwen27.addImport("ze", ze_mod);
+    qwen27.addImport("core", core);
     // the runner's open rules (one runner at a time, every option back to the process's own), run on this host
     const host = b.graph.host.result;
     if (target.result.cpu.arch == host.cpu.arch and target.result.os.tag == host.os.tag) tests_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen27 })).step);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const nem = nemotronModules(b, target, optimize, ocloc, device, dpas, ze_mod, lanes);
+    const nem = nemotronModules(b, target, optimize, ocloc, device, dpas, ze_mod, core, lanes);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "xpu", .module = nem.xpu }, .{ .name = "nemotron_xpu", .module = nem.nemotron } } });
     // the Qwen3.8-27B runner and Gemma 4 E4B (DPAS, nGEN) only with DPAS: a Gen12LP server serves Nemotron
@@ -195,22 +194,21 @@ const kernels = [_]Kernel{
 };
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).
-fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const std.Build.LazyPath, ze: *std.Build.Module, dpas: bool) *std.Build.Module {
+fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, images: []const std.Build.LazyPath, ze: *std.Build.Module, core: *std.Build.Module, dpas: bool) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(bool, "with_kernels", images.len == kernels.len);
     options.addOption(bool, "dpas", dpas);
     const xpu = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     xpu.addOptions("kernel_options", options);
     xpu.addImport("ze", ze);
+    xpu.addImport("core", core);
     if (images.len == kernels.len) for (kernels, images) |k, image| xpu.addAnonymousImport(b.fmt("spv_{s}", .{k.name}), .{ .root_source_file = image });
     return xpu;
 }
 
 const Modules = struct { xpu: *std.Build.Module, core: *std.Build.Module, nemotron: *std.Build.Module, images: [kernels.len]std.Build.LazyPath = undefined };
 
-fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, xpu: *std.Build.Module, lanes: *std.Build.Module) Modules {
-    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
+fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, xpu: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module) Modules {
     const nemotron = b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true });
     nemotron.addImport("xpu", xpu);
     nemotron.addImport("core", core);
@@ -219,10 +217,10 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 }
 
 /// Nemotron's SPIR-V images (built only when a step needs them), its runtime and its family module.
-fn nemotronModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, dpas: bool, ze: *std.Build.Module, lanes: *std.Build.Module) Modules {
+fn nemotronModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, dpas: bool, ze: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module) Modules {
     var images: [kernels.len]std.Build.LazyPath = undefined;
     for (kernels, &images) |k, *image| image.* = spirv(b, ocloc, device, dpas, k);
-    var m = family(b, target, optimize, runtime(b, target, optimize, &images, ze, dpas), lanes);
+    var m = family(b, target, optimize, runtime(b, target, optimize, &images, ze, core, dpas), core, lanes);
     m.images = images;
     return m;
 }
@@ -286,12 +284,14 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 /// Host unit tests of the Intel GPU runtime, the Nemotron family on it and its CLI (no GPU, no ocloc), on any host.
 pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const host = b.graph.host;
-    const xpu = runtime(b, host, .debug, &.{}, zeModule(b, host, .debug), true);
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, host));
+    const xpu = runtime(b, host, .debug, &.{}, zeModule(b, host, .debug), core, true);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = host, .optimize = .debug, .link_libc = true });
-    const mods = family(b, host, .debug, xpu, lanes);
+    const mods = family(b, host, .debug, xpu, core, lanes);
     const ze = xpu.import_table.get("ze").?;
     const empty = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "pub const drafter = [_]u8{};\npub const glue_g = [_]u8{};\npub const glue = [_]u8{};\npub const rows = [_]u8{};\npub const rows_g = [_]u8{};\npub const decode = [_]u8{};\npub const gemm = [_]u8{};\npub const gdn = [_]u8{};\npub const ngen_wide = [_]u8{};\npub const ngen_narrow = [_]u8{};\npub const gemm128 = [_]u8{};\npub const ngen_wide128 = [_]u8{};\npub const ngen_narrow128 = [_]u8{};\npub const ngen_swiglu = [_]u8{};\npub const ngen_swiglu128 = [_]u8{};\npub const ngen_a8 = [_]u8{};\npub const ngen_a8_swiglu = [_]u8{};\npub const ngen_a4 = [_]u8{};\npub const ngen_geglu = [_]u8{};\n") });
-    const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
+    const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const sources = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_xpu_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "xpu", .module = xpu }, .{ .name = "xpu_qwen27", .module = qwen }, .{ .name = "nemotron_xpu", .module = mods.nemotron } } });
     const gemma_native = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_engine.zig"), .target = host, .link_libc = true });
@@ -316,9 +316,11 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     draft_step.dependOn(&dev_tests.step);
     step.dependOn(&source_tests.step);
     step.dependOn(&dev_tests.step);
-    for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods), zeModule(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    // xpu/safetensors.zig's own tests, on the same `core`
+    const st_tests = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/safetensors.zig"), .target = host, .imports = &.{.{ .name = "core", .module = core }} });
+    for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods), zeModule(b, host, .debug), st_tests }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     // the Gemma 4 E4B runner's admission, over the family config (which takes `core` by name)
     const gemma4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_config.zig"), .target = host, .optimize = .debug });
-    gemma4.addImport("core", b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = host, .optimize = .debug, .link_libc = true }));
+    gemma4.addImport("core", core);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gemma4 })).step);
 }
