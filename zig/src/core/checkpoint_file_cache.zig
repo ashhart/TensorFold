@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const platform = @import("sys");
 
 /// Only after all readers joined and any deferred copies finished; this never touches the copied Metal buffers.
-pub fn release(fd: platform.c.fd_t) void {
+pub fn release(fd: anytype) void { // a C fd or a File handle (a pointer on Windows): only macOS reads it
     if (builtin.os.tag == .macos) {
         const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         if (end <= 0) return;
