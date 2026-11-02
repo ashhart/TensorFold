@@ -37,6 +37,13 @@ pub fn bf16(x: f32) u16 {
     return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
 }
 
+/// Stored finite BF16 multipliers must narrow exactly, including signed zero and subnormals.
+pub fn bf16Exact(x: f32) error{InexactBf16}!u16 {
+    const bits: u32 = @bitCast(x);
+    if (bits & 0xffff != 0 or bits & 0x7f800000 == 0x7f800000) return error.InexactBf16;
+    return @intCast(bits >> 16);
+}
+
 /// Writes `src` as little-endian fp32 into `dst` (4 bytes an element).
 pub fn widenInto(dst: []u8, src: Tensor) Error!void {
     const n = src.numel();
@@ -65,4 +72,15 @@ test "bf16 rounds to nearest even" {
     try std.testing.expectEqual(@as(u16, 0x3F82), bf16(@bitCast(@as(u32, 0x3F818000))));
     try std.testing.expectEqual(@as(u16, 0x3F80), bf16(@bitCast(@as(u32, 0x3F808000))));
     try std.testing.expect(std.math.isNan(@as(f32, @bitCast(@as(u32, bf16(std.math.nan(f32))) << 16))));
+}
+
+test "bf16 exact conversion preserves every finite pattern and rejects all discarded suffixes" {
+    for (0..65536) |word| {
+        const bits: u32 = @as(u32, @intCast(word)) << 16;
+        if (word & 0x7f80 == 0x7f80) {
+            try std.testing.expectError(error.InexactBf16, bf16Exact(@bitCast(bits)));
+        } else try std.testing.expectEqual(@as(u16, @intCast(word)), try bf16Exact(@bitCast(bits)));
+        for ([_]u32{ 1, 0x7fff, 0x8000, 0xffff }) |suffix|
+            try std.testing.expectError(error.InexactBf16, bf16Exact(@bitCast(bits | suffix)));
+    }
 }

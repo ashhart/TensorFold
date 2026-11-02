@@ -267,7 +267,7 @@ test "GGUF Qwen: token arrays and missing optional or required fields never sile
     try t.expectError(error.MissingGgufSpecialToken, adapter.assets(a, &d));
     try d.keys.put(t.allocator, "tokenizer.ggml.bos_token_id", bos_index);
     _ = d.keys.remove("tokenizer.ggml.token_type");
-    try t.expectError(error.MissingGgufTokenizerTypes, adapter.assets(a, &d));
+    try t.expectError(error.@"MissingGgufMetadata:tokenizer.ggml.token_type", adapter.assets(a, &d));
     try d.keys.put(t.allocator, "tokenizer.ggml.token_type", type_index);
     const chat_index = d.keys.get("tokenizer.chat_template").?;
     _ = d.keys.remove("tokenizer.chat_template");

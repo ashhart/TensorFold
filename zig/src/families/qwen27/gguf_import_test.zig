@@ -9,6 +9,22 @@ const names = @import("gguf_names.zig");
 const repack = @import("gguf_repack.zig");
 const fixture = @import("gguf_fixture.zig");
 const core = @import("core");
+// Independent fixture coordinates: two key heads, four value heads, 32 channels per value head.
+fn sourceElement(name: []const u8, row: usize, col: usize, k: usize) usize {
+    const permutation = [_]usize{ 0, 2, 1, 3 };
+    var r = row;
+    var c = col;
+    if (std.mem.endsWith(u8, name, ".ssm_alpha.weight") or std.mem.endsWith(u8, name, ".ssm_beta.weight")) {
+        r = permutation[row];
+    } else if (std.mem.endsWith(u8, name, ".attn_gate.weight")) {
+        r = permutation[row / 32] * 32 + row % 32;
+    } else if (std.mem.endsWith(u8, name, ".attn_qkv.weight") and row >= 64) {
+        r = 64 + permutation[(row - 64) / 32] * 32 + (row - 64) % 32;
+    } else if (std.mem.endsWith(u8, name, ".ssm_out.weight")) {
+        c = permutation[col / 32] * 32 + col % 32;
+    }
+    return r * k + c;
+}
 const Spy = struct {
     calls: usize = 0,
     fail: bool = false,
@@ -56,7 +72,7 @@ fn allocRepack(a: std.mem.Allocator, x: gg.Tensor) !void {
     const p = try (repack.Repacker{}).run(null, a, x);
     defer p.deinit(a);
 }
-test "GGUF Qwen: complete native image uses real config, mapped triples, one norm offset and inverse ssm_a" {
+test "GGUF Qwen: complete native image uses real config, mapped triples, stored norm multipliers and inverse ssm_a" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     const a = t.allocator;
@@ -95,7 +111,7 @@ test "GGUF Qwen: complete native image uses real config, mapped triples, one nor
     try t.expectEqual(core.safetensors.DType.bf16, norm.dtype);
     try t.expectEqual(@as(u16, 0x3fa0), std.mem.readInt(u16, norm.bytes[0..2], .little));
     const al = try ck.get("language_model.model.layers.0.linear_attn.A_log");
-    try t.expectEqual(@as(u16, 0x3f00), std.mem.readInt(u16, al.bytes[0..2], .little));
+    try t.expectEqual(@as(u16, 0x4000), std.mem.readInt(u16, al.bytes[0..2], .little));
     const gn = try ck.get("language_model.model.layers.0.linear_attn.norm.weight");
     try t.expectEqual(@as(u16, 0x3f40), std.mem.readInt(u16, gn.bytes[0..2], .little));
     const conv = try ck.get("language_model.model.layers.0.linear_attn.conv1d.weight");
@@ -120,9 +136,10 @@ test "GGUF Qwen: complete native image uses real config, mapped triples, one nor
             var expected: f64 = 0;
             for (0..entry.shape[1]) |k| {
                 const i = row * entry.shape[1] + k;
-                const block = entry.tensor.bytes[(i / 32) * 34 ..][0..34];
+                const si = sourceElement(entry.tensor.name, row, k, entry.shape[1]);
+                const block = entry.tensor.bytes[(si / 32) * 34 ..][0..34];
                 const d: f64 = @as(f16, @bitCast(std.mem.readInt(u16, block[0..2], .little)));
-                const signed: i8 = @bitCast(block[2 + i % 32]);
+                const signed: i8 = @bitCast(block[2 + si % 32]);
                 const word = std.mem.readInt(u32, q.weight.bytes[(i / 4) * 4 ..][0..4], .little);
                 const code = (word >> @as(u5, @intCast((i % 4) * 8))) & 255;
                 const scale: f32 = @bitCast(std.mem.readInt(u32, q.scales.bytes[(i / 32) * 4 ..][0..4], .little));
@@ -163,7 +180,7 @@ test "GGUF Qwen: invalid tokenizer and a failed repack never publish a usable im
     defer a.free(path);
     const cache = try std.fs.path.join(a, &.{ root, "images" });
     defer a.free(cache);
-    try t.expectError(error.MissingGgufTokenizerTypes, src.prepare(a, io, path, cache, .{}));
+    try t.expectError(error.@"MissingGgufMetadata:tokenizer.ggml.token_type", src.prepare(a, io, path, cache, .{}));
     var spy = Spy{ .fail = true };
     try t.expectError(error.PlantedRepackFailure, src.prepare(a, io, path, cache, spy.options()));
     spy.fail = false;

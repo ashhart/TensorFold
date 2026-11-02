@@ -7,12 +7,24 @@ const repack = @import("gguf_repack.zig");
 const Out = @import("../flashnext/pack_io.zig").Out;
 const convert = @import("../../core/quant/convert.zig");
 const tokenizer = @import("../../core/gguf_tokenizer.zig");
+const heads = @import("gguf_heads.zig");
 pub const Tokenizer = struct {
     identity: []const u8 = tokenizer.source,
     context: ?*anyopaque = null,
     write: *const fn (?*anyopaque, std.mem.Allocator, std.Io, *const gg.Document, []const u8) anyerror!void = tokenizer.write,
 };
-pub const Options = struct { repacker: repack.Repacker = .{}, tokenizer: Tokenizer = .{} };
+pub const Problem = struct {
+    bytes: [512]u8 = undefined,
+    len: usize = 0,
+    pub fn text(p: *const Problem) []const u8 {
+        return p.bytes[0..p.len];
+    }
+    fn inexact(p: *Problem, e: names.Entry, i: usize, x: f32, reason: []const u8) void {
+        const message = std.fmt.bufPrint(&p.bytes, "GGUF tensor {s}[{d}] ({s}): {s}; F32 value {e}", .{ e.tensor.name, i, e.name, reason, x }) catch unreachable;
+        p.len = message.len;
+    }
+};
+pub const Options = struct { repacker: repack.Repacker = .{}, tokenizer: Tokenizer = .{}, problem: ?*Problem = null };
 pub fn write(a: std.mem.Allocator, io: std.Io, d: *const gg.Document, dir: []const u8, identity: []const u8, options: Options) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -21,7 +33,8 @@ pub fn write(a: std.mem.Allocator, io: std.Io, d: *const gg.Document, dir: []con
     const c = try conf.parse(scratch, config);
     const plan = try names.plan(scratch, d, c);
     const generation = try sampling(scratch, d, c);
-    // The independent tokenizer adapter must complete before any large repack or complete marker is written.
+    for (plan) |entry| if (entry.transform != .affine) try validateSmall(entry, options.problem);
+    // The tokenizer must complete before any large repack or complete marker is written.
     try options.tokenizer.write(options.tokenizer.context, a, io, d, dir);
     var formats: std.json.Value = .{ .object = .empty };
     try conf.set(scratch, &formats, "bits", .{ .integer = 8 });
@@ -35,12 +48,13 @@ pub fn write(a: std.mem.Allocator, io: std.Io, d: *const gg.Document, dir: []con
             if (if (entry.layer) |layer| part != layer + 1 else part != 0) continue;
             const start = out.names.items.len;
             if (entry.transform == .affine) {
-                const p = try options.repacker.run(options.repacker.context, a, entry.tensor);
+                var p = try options.repacker.run(options.repacker.context, a, entry.tensor);
                 defer p.deinit(a);
                 const f = try repack.format(entry.tensor.kind);
                 if (p.n != entry.shape[0] or p.k != entry.shape[1] or p.bits != f.bits or p.group != f.group or
                     p.k % p.group != 0 or p.words.len != p.n * p.k * p.bits / 32 or
                     p.scales.len != p.n * (p.k / p.group) or p.biases.len != p.scales.len) return error.BadGgufRepackResult;
+                if (entry.heads) |order| try heads.affine(a, &p, order);
                 const format = try std.json.Stringify.valueAlloc(scratch, .{ .bits = p.bits, .group_size = p.group }, .{});
                 const value = try std.json.parseFromSliceLeaky(std.json.Value, scratch, format, .{});
                 try formats.object.put(scratch, entry.name, value);
@@ -76,20 +90,42 @@ pub fn sampling(a: std.mem.Allocator, d: *const gg.Document, c: conf.Config) !st
     try generation.object.put(a, "eos_token_id", .{ .integer = c.eos[0] });
     return generation;
 }
-/// Norms use full multipliers here; the real-file gate must check that GGUF stores the +1 offset.
+/// The native loader requires BF16 scalars, so an inexact narrowing refuses before any repack or publication.
+pub fn validateSmall(entry: names.Entry, problem: ?*Problem) !void {
+    if (entry.tensor.kind != .f32 or entry.tensor.bytes.len % 4 != 0) return error.BadGgufTensor;
+    for (0..entry.tensor.bytes.len / 4) |i| _ = try element(entry, i, problem);
+}
+fn element(entry: names.Entry, i: usize, problem: ?*Problem) !u16 {
+    @setFloatMode(.strict);
+    var x: f32 = @bitCast(std.mem.readInt(u32, entry.tensor.bytes[i * 4 ..][0..4], .little));
+    const original = x;
+    if (!std.math.isFinite(x)) return error.NonfiniteGgufTensor;
+    if (entry.transform == .a_log) {
+        if (x >= 0) return error.BadGgufSsmA;
+        x = @log(-x);
+    }
+    const value = convert.bf16Exact(x) catch return refusal(entry, i, x, problem, "not exactly representable as BF16");
+    const widened: f32 = @bitCast(@as(u32, value) << 16);
+    if (entry.transform == .a_log and @as(u32, @bitCast(-@exp(widened))) != @as(u32, @bitCast(original)))
+        return refusal(entry, i, original, problem, "inverse A_log does not reproduce stored ssm_a");
+    return value;
+}
+fn refusal(entry: names.Entry, i: usize, x: f32, problem: ?*Problem, reason: []const u8) anyerror {
+    var local_problem: Problem = .{};
+    const detail = problem orelse &local_problem;
+    detail.inexact(entry, i, x, reason);
+    if (problem == null) std.log.warn("{s}", .{detail.text()});
+    return error.InexactGgufSmallTensor;
+}
 pub fn small(a: std.mem.Allocator, entry: names.Entry) ![]u16 {
     if (entry.tensor.kind != .f32 or entry.tensor.bytes.len % 4 != 0) return error.BadGgufTensor;
     const out = try a.alloc(u16, entry.tensor.bytes.len / 4);
     errdefer a.free(out);
-    for (out, 0..) |*v, i| {
-        var x: f32 = @bitCast(std.mem.readInt(u32, entry.tensor.bytes[i * 4 ..][0..4], .little));
-        if (!std.math.isFinite(x)) return error.NonfiniteGgufTensor;
-        if (entry.transform == .a_log) {
-            if (x >= 0) return error.BadGgufSsmA;
-            x = @log(-x);
-        }
-        v.* = convert.bf16(x);
-        if (!std.math.isFinite(@as(f32, @bitCast(@as(u32, v.*) << 16)))) return error.Bf16GgufOverflow;
+    for (out, 0..) |*v, i| v.* = try element(entry, i, null);
+    if (entry.heads) |order| {
+        const restored = try heads.matrix(u16, a, out, entry.shape[0], out.len / entry.shape[0], order);
+        a.free(out);
+        return restored;
     }
     return out;
 }

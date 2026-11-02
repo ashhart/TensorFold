@@ -3,7 +3,7 @@ const std = @import("std");
 const gg = @import("gguf.zig");
 const V = std.json.Value;
 const A = std.mem.Allocator;
-pub const source = @embedFile("gguf_tokenizer.zig");
+pub const source = @embedFile("gguf_tokenizer.zig") ++ @embedFile("gguf_required.zig");
 pub const pattern = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 pub const Assets = struct { tokenizer: V, config: V };
 const Token = struct { text: []const u8, kind: i32 };
@@ -34,12 +34,13 @@ fn byteSymbol(cp: u21) bool {
 }
 /// All output storage belongs to the caller's arena; token strings can borrow the document until serialized.
 pub fn assets(a: A, d: *const gg.Document) !Assets {
+    inline for (.{ "tokenizer.ggml.model", "tokenizer.ggml.pre", "tokenizer.ggml.tokens", "tokenizer.ggml.token_type", "tokenizer.ggml.merges" }) |key| _ = try @import("gguf_required.zig").get(d, key);
     const view = try d.tokenizer();
     if (!std.mem.eql(u8, view.model orelse "", "gpt2") or
         !std.mem.eql(u8, view.pre orelse "", "qwen35")) return error.UnsupportedGgufTokenizer;
-    const words = view.tokens orelse return error.MissingGgufTokenizerTokens;
-    const types = view.types orelse return error.MissingGgufTokenizerTypes;
-    const merges = view.merges orelse return error.MissingGgufTokenizerMerges;
+    const words = view.tokens orelse return error.@"MissingGgufMetadata:tokenizer.ggml.tokens";
+    const types = view.types orelse return error.@"MissingGgufMetadata:tokenizer.ggml.token_type";
+    const merges = view.merges orelse return error.@"MissingGgufMetadata:tokenizer.ggml.merges";
     if (words.len == 0 or words.len > std.math.maxInt(u32)) return error.BadGgufVocabulary;
     const tokens = try a.alloc(Token, words.len);
     var lookup: std.StringHashMapUnmanaged(usize) = .empty;

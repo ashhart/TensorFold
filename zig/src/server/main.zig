@@ -107,17 +107,20 @@ pub fn main(init: std.process.Init) !u8 {
         if (warning) |message| log.line("warning: {s}", .{message});
     };
     var problem: []const u8 = "";
-    const prepared: ?[]u8 = if (comptime @hasDecl(@import("core"), "gguf_qwen27")) @import("core").gguf_qwen27.local(gpa, io, init.environ_map.get("HOME") orelse "", args.model) catch |err| {
-        if (err == error.OutOfMemory) return err;
-        const detail: []const u8 = switch (err) {
-            error.UnsupportedGgufTokenizer => "GGUF import requires the gpt2/qwen35 byte-level BPE tokenizer profile",
-            error.UnsupportedRepackType, error.UnqualifiedGgufAffine => "this GGUF block format has no qualified Metal affine path",
-            error.MultipleGgufFiles => "name one GGUF file explicitly",
-            error.UnqualifiedQwenShape, error.UnqualifiedLayerSchedule => "this Metal import requires the qualified 27B geometry and layer schedule",
-            error.GgufMetalOnly => "GGUF model import is available on Metal only",
-            else => @errorName(err),
+    const prepared: ?[]u8 = if (comptime @hasDecl(@import("core"), "gguf_qwen27")) blk: {
+        var gguf_problem: @import("core").gguf_qwen27.Problem = .{};
+        break :blk @import("core").gguf_qwen27.localWithProblem(gpa, io, init.environ_map.get("HOME") orelse "", args.model, &gguf_problem) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            const detail: []const u8 = if (gguf_problem.text().len != 0) gguf_problem.text() else switch (err) {
+                error.UnsupportedGgufTokenizer => "GGUF import requires the gpt2/qwen35 byte-level BPE tokenizer profile",
+                error.UnsupportedRepackType, error.UnqualifiedGgufAffine => "this GGUF block format has no qualified Metal affine path",
+                error.MultipleGgufFiles => "name one GGUF file explicitly",
+                error.UnqualifiedQwenShape, error.UnqualifiedLayerSchedule => "this Metal import requires the qualified 27B geometry and layer schedule",
+                error.GgufMetalOnly => "GGUF model import is available on Metal only",
+                else => @errorName(err),
+            };
+            return fail(try std.fmt.allocPrint(a, "GGUF model {s}: {s}", .{ args.model, detail }));
         };
-        return fail(try std.fmt.allocPrint(a, "GGUF model {s}: {s}", .{ args.model, detail }));
     } else null;
     defer if (prepared) |path| gpa.free(path);
     const dir = prepared orelse (try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem));

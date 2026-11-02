@@ -2,9 +2,10 @@
 const std = @import("std");
 const gg = @import("../../core/gguf.zig");
 const cfg = @import("config.zig");
+const needed = @import("../../core/gguf_required.zig");
 pub const Config = cfg.Config;
-pub fn required(d: *const gg.Document, key: []const u8) !usize {
-    return std.math.cast(usize, try (d.get(key) orelse return error.MissingGgufMetadata).unsigned()) orelse error.BadGgufConfig;
+pub fn required(d: *const gg.Document, comptime key: []const u8) !usize {
+    return std.math.cast(usize, try (try needed.get(d, key)).unsigned()) orelse error.BadGgufConfig;
 }
 fn string(a: std.mem.Allocator, s: []const u8) !std.json.Value {
     return .{ .string = try a.dupe(u8, s) };
@@ -19,6 +20,7 @@ pub fn set(a: std.mem.Allocator, v: *std.json.Value, k: []const u8, x: std.json.
     try v.object.put(a, k, x);
 }
 pub fn build(a: std.mem.Allocator, d: *const gg.Document) !std.json.Value {
+    _ = try needed.get(d, "general.architecture");
     const v = try d.config();
     if (!std.mem.eql(u8, v.architecture, "qwen35")) return error.NotQwenDenseGguf;
     if (v.rope_scaling) |s| if (!std.mem.eql(u8, s, "none")) return error.UnsupportedRopeScaling;
@@ -34,18 +36,19 @@ pub fn build(a: std.mem.Allocator, d: *const gg.Document) !std.json.Value {
         .{ "linear_key_head_dim", "qwen35.ssm.state_size" },          .{ "linear_conv_kernel_dim", "qwen35.ssm.conv_kernel" },
         .{ "max_position_embeddings", "qwen35.context_length" },      .{ "eos_token_id", "tokenizer.ggml.eos_token_id" },
     };
-    for (fields) |f| try set(a, &out, f[0], try integer(try required(d, f[1])));
+    inline for (fields) |f| try set(a, &out, f[0], try integer(try required(d, f[1])));
     const heads = try required(d, "qwen35.ssm.time_step_rank");
     const inner = try required(d, "qwen35.ssm.inner_size");
     if (heads == 0 or inner % heads != 0) return error.BadGgufConfig;
     try set(a, &out, "linear_value_head_dim", try integer(inner / heads));
     if (try required(d, "qwen35.attention.value_length") != try required(d, "qwen35.attention.key_length")) return error.BadGgufConfig;
-    const tokens = (try d.tokenizer()).tokens orelse return error.MissingGgufTokens;
+    _ = try needed.get(d, "tokenizer.ggml.tokens");
+    const tokens = (try d.tokenizer()).tokens.?;
     const embed = d.getTensor("token_embd.weight") orelse return error.MissingGgufTensor;
     if (embed.rank != 2 or embed.shape[1] != tokens.len or try required(d, "tokenizer.ggml.eos_token_id") >= tokens.len) return error.BadGgufVocabulary;
     try set(a, &out, "vocab_size", try integer(tokens.len));
-    const eps = v.rms_epsilon orelse return error.MissingGgufMetadata;
-    const theta = v.rope_base orelse return error.MissingGgufMetadata;
+    const eps = v.rms_epsilon orelse return error.@"MissingGgufMetadata:qwen35.attention.layer_norm_rms_epsilon";
+    const theta = v.rope_base orelse return error.@"MissingGgufMetadata:qwen35.rope.freq_base";
     if (!std.math.isFinite(eps) or !std.math.isFinite(theta)) return error.BadGgufConfig;
     try set(a, &out, "rms_norm_eps", .{ .float = eps });
     const hd = try required(d, "qwen35.attention.key_length");
@@ -55,7 +58,7 @@ pub fn build(a: std.mem.Allocator, d: *const gg.Document) !std.json.Value {
     var rope = object();
     try set(a, &rope, "rope_theta", .{ .float = theta });
     try set(a, &rope, "mrope_interleaved", .{ .bool = true });
-    const sections = d.get("qwen35.rope.dimension_sections") orelse return error.MissingGgufMetadata;
+    const sections = try needed.get(d, "qwen35.rope.dimension_sections");
     if (sections != .array or sections.array.len != 4 or sections.array.kind != .int32) return error.BadGgufConfig;
     var dims: std.json.Value = .{ .array = std.json.Array.init(a) };
     var sum: usize = 0;

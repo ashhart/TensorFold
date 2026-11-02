@@ -1,12 +1,12 @@
-//! Header-checked text tensor mapping. Fusions remain owned by gpu_weights; no unverified head permutation is applied.
+//! Header-checked text tensor mapping; GGUF value heads are restored before the native loader owns fusions.
 const std = @import("std");
 const gg = @import("../../core/gguf.zig");
 const cfg = @import("config.zig");
 pub const Transform = enum { affine, bf16, a_log };
-pub const Entry = struct { tensor: gg.Tensor, name: []const u8, shape: []const usize, transform: Transform, layer: ?usize };
+pub const Entry = struct { tensor: gg.Tensor, name: []const u8, shape: []const usize, transform: Transform, layer: ?usize, heads: ?@import("gguf_heads.zig").Order = null };
 /// The caller supplies an arena that owns the entries, their names and their shapes.
 pub fn plan(a: std.mem.Allocator, d: *const gg.Document, c: cfg.Config) ![]Entry {
-    var b = Builder{ .a = a, .d = d };
+    var b = Builder{ .a = a, .d = d, .c = c };
     try b.add("token_embd.weight", "language_model.model.embed_tokens", &.{ c.vocab, c.hidden }, .affine, null);
     try b.add("output_norm.weight", "language_model.model.norm.weight", &.{c.hidden}, .bf16, null);
     try b.add("output.weight", "language_model.lm_head", &.{ c.vocab, c.hidden }, .affine, null);
@@ -41,9 +41,24 @@ pub fn plan(a: std.mem.Allocator, d: *const gg.Document, c: cfg.Config) ![]Entry
 const Builder = struct {
     a: std.mem.Allocator,
     d: *const gg.Document,
+    c: cfg.Config,
     entries: std.ArrayList(Entry) = .empty,
     fn layer(b: *Builder, i: usize, src: []const u8, dst: []const u8, shape: []const usize, transform: Transform) !void {
         try b.add(try std.fmt.allocPrint(b.a, "blk.{d}.{s}", .{ i, src }), try std.fmt.allocPrint(b.a, "language_model.model.layers.{d}.{s}", .{ i, dst }), shape, transform, i);
+        const Kind = enum { scalar, value, qkv, out };
+        const kind = std.StaticStringMap(Kind).initComptime(.{
+            .{ "ssm_a", .scalar },            .{ "ssm_dt.bias", .scalar },
+            .{ "ssm_alpha.weight", .scalar }, .{ "ssm_beta.weight", .scalar },
+            .{ "attn_gate.weight", .value },  .{ "attn_qkv.weight", .qkv },
+            .{ "ssm_conv1d.weight", .qkv },   .{ "ssm_out.weight", .out },
+        }).get(src) orelse return;
+        b.entries.items[b.entries.items.len - 1].heads = .{
+            .axis = if (kind == .out) .columns else .rows,
+            .key_heads = b.c.k_heads,
+            .value_heads = b.c.v_heads,
+            .width = if (kind == .scalar) 1 else b.c.dv,
+            .offset = if (kind == .qkv) 2 * b.c.k_heads * b.c.dk else 0,
+        };
     }
     fn add(b: *Builder, src: []const u8, dst: []const u8, shape: []const usize, transform: Transform, layer_index: ?usize) !void {
         const t = b.d.getTensor(src) orelse return error.MissingGgufTensor;

@@ -121,10 +121,10 @@ fn build(a: std.mem.Allocator, tokenized: bool) ![]u8 {
                 const block = bytes[start + g * 34 ..][0..34];
                 const scale: f16 = @floatCast(0.125 + @as(f32, @floatFromInt(g % 4)) * 0.0001220703125);
                 std.mem.writeInt(u16, block[0..2], @bitCast(scale), .little);
-                for (block[2..], 0..) |*v, j| v.* = @bitCast(@as(i8, @intCast(@as(i32, @intCast((g * 32 + j + ti) % 256)) - 128)));
+                for (block[2..], 0..) |*v, j| v.* = @bitCast(@as(i8, @intCast(@as(i32, @intCast((g * 17 + j + ti) % 256)) - 128)));
             }
         } else for (0..count) |i| {
-            const x: f32 = if (std.mem.endsWith(u8, t.name, "ssm_a")) -@exp(@as(f32, 0.5)) else if (std.mem.endsWith(u8, t.name, "ssm_norm.weight")) 0.75 else 1.25 + @as(f32, @floatFromInt(i % 4)) * 0.0078125;
+            const x: f32 = if (std.mem.endsWith(u8, t.name, "ssm_a")) -@exp(@as(f32, 2)) else if (std.mem.endsWith(u8, t.name, "ssm_norm.weight")) 0.75 else 1.25 + @as(f32, @floatFromInt(i % 4)) * 0.0078125;
             std.mem.writeInt(u32, bytes[start + i * 4 ..][0..4], @bitCast(x), .little);
         }
     }

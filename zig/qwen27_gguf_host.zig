@@ -7,4 +7,6 @@ pub const quant = @import("src/core/quant/quant.zig");
 test {
     _ = @import("src/families/qwen27/gguf_source.zig");
     _ = @import("src/core/gguf_tokenizer_test.zig");
+    _ = @import("src/families/qwen27/gguf_precision_test.zig");
+    _ = @import("src/families/qwen27/gguf_layout_test.zig");
 }

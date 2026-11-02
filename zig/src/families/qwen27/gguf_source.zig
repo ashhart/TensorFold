@@ -6,12 +6,14 @@ const conf = @import("gguf_config.zig");
 const Sha = std.crypto.hash.sha2.Sha256;
 pub const Options = image.Options;
 pub const Tokenizer = image.Tokenizer;
+pub const Problem = image.Problem;
 const names = [_][]const u8{ "config.json", "generation_config.json", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json" };
 const sources = [_][]const u8{
-    @embedFile("gguf_source.zig"),           @embedFile("gguf_image.zig"),               @embedFile("gguf_names.zig"),
-    @embedFile("gguf_config.zig"),           @embedFile("config.zig"),                   @embedFile("../flashnext/pack_io.zig"),
-    @embedFile("../../core/gguf.zig"),       @embedFile("../../core/gguf_value.zig"),    @embedFile("../../core/gguf_tensor.zig"),
-    @embedFile("../../core/gguf_views.zig"), @embedFile("../../core/quant/convert.zig"),
+    @embedFile("gguf_source.zig"),              @embedFile("gguf_image.zig"),            @embedFile("gguf_names.zig"),
+    @embedFile("gguf_config.zig"),              @embedFile("config.zig"),                @embedFile("../flashnext/pack_io.zig"),
+    @embedFile("../../core/gguf.zig"),          @embedFile("../../core/gguf_value.zig"), @embedFile("../../core/gguf_tensor.zig"),
+    @embedFile("gguf_heads.zig"),               @embedFile("../../core/gguf_views.zig"), @embedFile("../../core/quant/convert.zig"),
+    @embedFile("../../core/gguf_required.zig"),
 };
 /// Caller owns the path; a native safetensors folder keeps its existing path even if a GGUF also sits beside it.
 pub fn find(a: std.mem.Allocator, io: std.Io, path: []const u8) !?[]u8 {
@@ -64,6 +66,7 @@ pub fn key(d: *const gg.Document, options: Options) [32]u8 {
     return h.finalResult();
 }
 pub fn prepare(a: std.mem.Allocator, io: std.Io, path: []const u8, root: []const u8, options: Options) ![]u8 {
+    if (options.problem) |problem| problem.len = 0;
     var f = try gg.File.open(a, io, path, .{});
     defer f.close(io);
     const identity = std.fmt.bytesToHex(key(&f.document, options), .lower);
@@ -98,6 +101,10 @@ pub fn prepare(a: std.mem.Allocator, io: std.Io, path: []const u8, root: []const
     return dir;
 }
 pub fn local(a: std.mem.Allocator, io: std.Io, home: []const u8, model: []const u8) !?[]u8 {
+    return localWithProblem(a, io, home, model, null);
+}
+pub fn localWithProblem(a: std.mem.Allocator, io: std.Io, home: []const u8, model: []const u8, problem: ?*Problem) !?[]u8 {
+    if (problem) |detail| detail.len = 0;
     const expanded = if (std.mem.startsWith(u8, model, "~/")) try std.fs.path.join(a, &.{ home, model[2..] }) else try a.dupe(u8, model);
     defer a.free(expanded);
     const path = (try find(a, io, expanded)) orelse return null;
@@ -112,7 +119,7 @@ pub fn local(a: std.mem.Allocator, io: std.Io, home: []const u8, model: []const 
     if (!std.fs.path.isAbsolute(home)) return error.CacheHomeMissing;
     const root = try std.fs.path.join(a, &.{ home, ".cache", "tensorfold", "gguf" });
     defer a.free(root);
-    return try prepare(a, io, path, root, .{});
+    return try prepare(a, io, path, root, .{ .problem = problem });
 }
 fn files(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![][]const u8 {
     var list: std.ArrayList([]const u8) = .empty;
