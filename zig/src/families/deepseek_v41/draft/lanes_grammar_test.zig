@@ -10,16 +10,20 @@ const gpa = std.testing.allocator;
 const grammar = lanes.grammar;
 
 /// A test grammar over the twin's 48 tokens: `length` tokens t with (t + step + r) % 3 == 0, then token 47.
-const Steps = struct {
+pub const Steps = struct {
     length: u32,
     r: u32,
+    early: u32 = 0, // > 0: the stop token is also allowed after this many tokens (grammar_budget can then bind)
     at: u32 = 0,
     done: bool = false,
-    const stop: u32 = 47;
-    const words = 2;
+    pub const stop: u32 = 47;
+    pub const words = 2;
 
-    fn rules(g: *Steps) grammar.Rules {
-        return .{ .ptr = g, .vtable = &.{ .accept = accept, .rollback = rollback, .terminated = terminated, .fill = fill, .drafts = drafts, .free = free } };
+    pub fn rules(g: *Steps) grammar.Rules {
+        const plain: *const grammar.Rules.VTable = &.{ .accept = accept, .rollback = rollback, .terminated = terminated, .fill = fill, .drafts = drafts, .free = free };
+        const budgeted: *const grammar.Rules.VTable = &.{ .accept = accept, .rollback = rollback, .terminated = terminated, .fill = fill, .drafts = drafts, .free = free, .budget = budget };
+        // matchers are independent: four streams' windows take the lane core's parallel walk (grammar_parallel.zig)
+        return .{ .ptr = g, .parallel_walk = true, .vtable = if (g.early > 0) budgeted else plain };
     }
 
     fn cast(ptr: *anyopaque) *Steps {
@@ -28,14 +32,14 @@ const Steps = struct {
 
     fn allows(g: *const Steps, t: u32) bool {
         if (g.done) return false;
-        if (g.at == g.length) return t == stop;
+        if (g.at == g.length or (g.early > 0 and g.at >= g.early and t == stop)) return t == stop;
         return t != stop and (t + g.at + g.r) % 3 == 0;
     }
 
     fn accept(ptr: *anyopaque, t: u32) anyerror!bool {
         const g = cast(ptr);
         if (!g.allows(t)) return false;
-        if (g.at == g.length) g.done = true else g.at += 1;
+        if (t == stop) g.done = true else g.at += 1;
         return true;
     }
 
@@ -46,11 +50,22 @@ const Steps = struct {
         }
     }
 
+    /// grammar_budget: clear tokens after which the stop token cannot come within `left` draws (none: leave all).
+    fn budget(ptr: *anyopaque, words_: []u32, left: u32) anyerror!bool {
+        const g = cast(ptr);
+        if (words_.len == 0 or g.done) return true;
+        const need = 2 + (g.early -| (g.at + 1)); // a non-stop token, then up to `early`, then the stop token
+        if (need <= left or !grammar.allows(words_, stop)) return true;
+        @memset(words_, 0);
+        words_[stop / 32] = @as(u32, 1) << @intCast(stop % 32);
+        return true;
+    }
+
     fn terminated(ptr: *anyopaque) bool {
         return cast(ptr).done;
     }
 
-    fn fill(ptr: *anyopaque, out: []u32) anyerror!void {
+    pub fn fill(ptr: *anyopaque, out: []u32) anyerror!void {
         const g = cast(ptr);
         @memset(out, 0);
         for (0..out.len * 32) |t| if (g.allows(@intCast(t))) {
@@ -65,16 +80,27 @@ const Steps = struct {
     fn free(_: *anyopaque) void {}
 };
 
-const Case = struct { prompt: []const u32, length: u32, r: u32 = 0, sampling: ?lanes.Sampling = null, drafts: bool = true };
+/// `early` with `max_new` below the full length: grammar_budget (armed) ends the reply within `max_new`.
+pub const Case = struct { prompt: []const u32, length: u32, r: u32 = 0, sampling: ?lanes.Sampling = null, drafts: bool = true, early: u32 = 0, max_new: ?u32 = null };
+
+fn maxNew(cs: Case) u32 {
+    return cs.max_new orelse cs.length + 8;
+}
+
+/// A case's grammar bits after the reply so far, the budget's too when the case has one.
+fn caseBits(cs: Case, g: *Steps, taken: usize, bits: []u32) !void {
+    try Steps.fill(g, bits);
+    if (cs.early > 0) _ = try Steps.budget(g, bits, maxNew(cs) - @as(u32, @intCast(taken)));
+}
 
 /// The twin alone, one row a step, each row's draw among the tokens the case's grammar allows after the reply so far.
-fn serial(cs: Case) ![]u32 {
+pub fn serial(cs: Case) ![]u32 {
     const t = try twin.Twin.init(gpa, .{}, 1);
     defer t.deinit();
     const target = t.target();
-    var g: Steps = .{ .length = cs.length, .r = cs.r };
+    var g: Steps = .{ .length = cs.length, .r = cs.r, .early = cs.early };
     var bits: [Steps.words]u32 = undefined;
-    try Steps.fill(&g, &bits);
+    try caseBits(cs, &g, 0, &bits);
     try target.firstMask(0, &bits);
     var out: std.ArrayList(u32) = .empty;
     errdefer out.deinit(gpa);
@@ -83,7 +109,7 @@ fn serial(cs: Case) ![]u32 {
         try out.append(gpa, tok);
         try std.testing.expect(try Steps.accept(&g, tok));
         if (g.done) break;
-        try Steps.fill(&g, &bits);
+        try caseBits(cs, &g, out.items.len, &bits);
         const at: u64 = cs.prompt.len + out.items.len - 1;
         var c: [1]u32 = undefined;
         var cs_out = [_][]u32{&c};
@@ -97,6 +123,8 @@ fn serial(cs: Case) ![]u32 {
 const Run = struct {
     out: [][]u32,
     drafted: u64,
+    trees: u64 = 0, // tree windows the twin ran
+    parallel: bool = false, // the lane core walked the grammars on its worker pool (four or more constrained streams)
 
     fn deinit(r: Run) void {
         for (r.out) |o| gpa.free(o);
@@ -106,13 +134,18 @@ const Run = struct {
 
 /// The cases through the lane engine over DeepSeek's backend on the twin, `slots` streams at once.
 fn run(cases: []const Case, slots: u32) !Run {
+    return runWith(cases, slots, 0);
+}
+
+/// `run` with `siblings` first-position siblings (TF_DSV41_TREE - 1): draft trees, their rows masked as the tree's.
+fn runWith(cases: []const Case, slots: u32, siblings: u32) !Run {
     const t = try twin.Twin.init(gpa, .{}, slots + 1);
     defer t.deinit();
     const d = try twin.Drafter.init(gpa, t, slots + 1);
     defer d.deinit();
     var c = try servedCosts(gpa);
     defer c.deinit(gpa);
-    const x = try ln.Lanes.init(gpa, t.target(), d.pass(), c, .{ .shape = d.shape, .slots = slots });
+    const x = try ln.Lanes.init(gpa, t.target(), d.pass(), c, .{ .shape = d.shape, .slots = slots, .siblings = siblings });
     defer x.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -129,9 +162,10 @@ fn run(cases: []const Case, slots: u32) !Run {
     const streams = try gpa.alloc(lanes.Stream, cases.len);
     defer gpa.free(streams);
     for (cases, gs, cons, streams) |cs, *g, *k, *s| {
-        g.* = .{ .length = cs.length, .r = cs.r };
+        g.* = .{ .length = cs.length, .r = cs.r, .early = cs.early };
         k.* = .init(g.rules(), Steps.words, null);
-        s.* = try lanes.Stream.init(gpa, .{ .id = "s", .prompt = cs.prompt, .max_new = cs.length + 8, .sampling = cs.sampling, .drafts = cs.drafts, .grammar = k });
+        if (cs.early > 0) try k.arm();
+        s.* = try lanes.Stream.init(gpa, .{ .id = "s", .prompt = cs.prompt, .max_new = maxNew(cs), .sampling = cs.sampling, .drafts = cs.drafts, .grammar = k });
     }
     defer for (streams) |*s| s.deinit(gpa);
     for (streams) |*s| try e.addStream(s);
@@ -142,7 +176,7 @@ fn run(cases: []const Case, slots: u32) !Run {
         try std.testing.expect(s.reason == .stop);
         o.* = try gpa.dupe(u32, s.emitted());
     }
-    return .{ .out = out, .drafted = e.drafted };
+    return .{ .out = out, .drafted = e.drafted, .trees = t.trees, .parallel = e.grammar_workers.pool != null };
 }
 
 const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
@@ -159,7 +193,7 @@ test "a structured reply equals its masked serial decode, drafted or not, alone 
         defer together.deinit();
         const undrafted = try run(&plain, 4);
         defer undrafted.deinit();
-        try std.testing.expect(together.drafted > 0 and undrafted.drafted == 0);
+        try std.testing.expect(together.drafted > 0 and undrafted.drafted == 0 and together.parallel);
         for (cases, together.out, undrafted.out) |cs, got, flat| {
             const want = try serial(cs);
             defer gpa.free(want);
@@ -320,6 +354,55 @@ test "a joined prompt's first round walks its held drafts: replies equal their m
             defer four.deinit();
             try std.testing.expect(four.drafted > 0);
             for (wants, four.out) |want, got| try std.testing.expectEqualSlices(u32, want, got);
+        }
+    }
+}
+
+test "draft trees under a grammar: each tree row is masked as its own path, so replies equal their masked serial decode" {
+    for ([_]?lanes.Sampling{ null, warm }) |smp| {
+        const cases = [_]Case{ .{ .prompt = &p1, .length = 40, .sampling = smp }, .{ .prompt = &p2, .length = 33, .r = 1, .sampling = smp }, .{ .prompt = &p3, .length = 52, .r = 2, .sampling = smp }, .{ .prompt = &p2, .length = 24, .r = 2, .sampling = smp } };
+        for ([_]u32{ 1, 2, 3 }) |siblings| {
+            const four = try runWith(&cases, 4, siblings);
+            defer four.deinit();
+            try std.testing.expect(four.trees > 0 and four.drafted > 0);
+            for (cases, four.out) |cs, got| {
+                const want = try serial(cs);
+                defer gpa.free(want);
+                try std.testing.expectEqualSlices(u32, want, got);
+                const solo = try runWith(&.{cs}, 1, siblings);
+                defer solo.deinit();
+                try std.testing.expectEqualSlices(u32, want, solo.out[0]);
+            }
+        }
+    }
+}
+
+test "grammar_budget binds inside max_new: drafted, undrafted, trees and four at once end on the stop token alike" {
+    for ([_]?lanes.Sampling{ null, warm }) |smp| {
+        const cases = [_]Case{ .{ .prompt = &p1, .length = 40, .early = 6, .max_new = 12, .sampling = smp }, .{ .prompt = &p2, .length = 33, .r = 1, .early = 4, .max_new = 9, .sampling = smp }, .{ .prompt = &p3, .length = 52, .r = 2, .early = 10, .max_new = 15, .sampling = smp }, .{ .prompt = &p2, .length = 24, .r = 2, .early = 3, .max_new = 7, .sampling = smp } };
+        var plain: [cases.len]Case = cases;
+        for (&plain) |*cs| cs.drafts = false;
+        const together = try run(&cases, 4);
+        defer together.deinit();
+        const undrafted = try run(&plain, 4);
+        defer undrafted.deinit();
+        const trees = try runWith(&cases, 4, 2);
+        defer trees.deinit();
+        try std.testing.expect(together.drafted > 0 and undrafted.drafted == 0 and trees.trees > 0);
+        for (cases, together.out, undrafted.out, trees.out) |cs, got, flat, tree_| {
+            const want = try serial(cs);
+            defer gpa.free(want);
+            // the budget bound: the reply ends on the stop token within max_new, where the grammar alone runs on
+            try std.testing.expect(want.len <= cs.max_new.? and want[want.len - 1] == Steps.stop);
+            var free_ = cs;
+            free_.max_new = cs.length + 8;
+            const unbound = try serial(free_);
+            defer gpa.free(unbound);
+            try std.testing.expect(unbound.len > cs.max_new.?);
+            for ([_][]const u32{ got, flat, tree_ }) |x| try std.testing.expectEqualSlices(u32, want, x);
+            const solo = try run(&.{cs}, 1);
+            defer solo.deinit();
+            try std.testing.expectEqualSlices(u32, want, solo.out[0]);
         }
     }
 }

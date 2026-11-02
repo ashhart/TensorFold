@@ -44,6 +44,7 @@ pub const Twin = struct {
     slots: []Slot,
     windows: u64 = 0, // rows' passes run (tests)
     widest: usize = 0, // the most rows one forward held
+    trees: u64 = 0, // windows with parents: draft trees (tests)
 
     pub fn init(gpa: Allocator, dims: Dims, slots: usize) !*Twin {
         var prng = std.Random.DefaultPrng.init(dims.seed);
@@ -225,7 +226,10 @@ pub const Twin = struct {
     fn window(ptr: *anyopaque, segments: []const iface.Segment, choices: [][]u32) anyerror!void {
         const t = self(ptr);
         var rows: usize = 0;
-        for (segments) |g| rows += g.tokens.len;
+        for (segments) |g| {
+            rows += g.tokens.len;
+            t.trees += @intFromBool(g.parents != null);
+        }
         t.widest = @max(t.widest, rows);
         for (segments, choices) |g, c| {
             const s = &t.slots[g.slot];
