@@ -16,6 +16,7 @@ test {
     _ = @import("dspark_cost_test.zig");
     _ = @import("dspark_weights.zig");
     _ = @import("dspark_glu_test.zig");
+    _ = @import("dspark_attn_test.zig");
 }
 const shared = mtl.ResourceOptions.shared;
 
