@@ -357,7 +357,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     for (e.layers, 0..) |*l, i| {
         var pbuf: [96]u8 = undefined;
         const p = try std.fmt.bufPrint(&pbuf, "{s}layers.{d}.", .{ m, i });
-        defer ck.release(); // the layer is on the device: its pages leave the cache
+        defer if (readers > 0) ck.release(); // a read-ahead layer is on the device: its pages leave the cache (none read ahead: main's one release at close)
         var reading = ck.prefetch(p, readers); // read ahead by threads of their own while the layer packs
         defer _ = reading.join();
         var ps: std.enums.EnumArray(Slot, Proj) = .initUndefined();
