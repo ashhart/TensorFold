@@ -26,9 +26,14 @@ pub fn hipTests(b: *std.Build, hip: *std.Build.Module, test_step: *std.Build.Ste
     test_step.dependOn(&host.step);
     b.step("test-dots-hip-host", "dots.mocr HIP column, vision and text operator admission without GPU execution").dependOn(&host.step);
     const family = hipModule(b, hip);
-    const weights_host = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "dots HIP weights:", "dots HIP graph:" } }));
+    const weights_host = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "dots HIP weights:", "dots HIP graph:", "dots HIP plan:" } }));
     b.step("test-dots-hip-weights-host", "HIP weight ownership, layout and budget refusal without GPU calls").dependOn(&weights_host.step);
     test_step.dependOn(&weights_host.step);
+    const fast_family = hipModule(b, hip);
+    fast_family.optimize = .fast;
+    const plan_fast = b.addRunArtifact(b.addTest(.{ .root_module = fast_family, .filters = &.{"dots HIP plan:"} }));
+    b.step("test-dots-hip-plan-fast", "Check serving memory budgets with release arithmetic and no GPU").dependOn(&plan_fast.step);
+    test_step.dependOn(&plan_fast.step);
     const upload_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/hip/dots_weights_test.zig"),
         .target = b.graph.host,

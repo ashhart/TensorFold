@@ -5,9 +5,11 @@ pub const weights = @import("hip_weights.zig");
 pub const graph = @import("hip_graph.zig");
 pub const vision = @import("hip_vision.zig");
 pub const text = @import("hip_text.zig");
+pub const plan = @import("hip_plan.zig");
 
 test {
     _ = weights;
     _ = graph;
     _ = text;
+    _ = plan;
 }
