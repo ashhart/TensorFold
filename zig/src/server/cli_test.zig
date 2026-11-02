@@ -478,6 +478,8 @@ test "prompt cache disk: new spellings ask the engine for exactly the legacy con
     for ([_][]const []const u8{
         &.{ "m", "--prompt-cache-disk", "cache with spaces" },
         &.{ "m", "--prompt-cache-disk=cache with spaces" },
+        &.{ "m", "--learn", "--prompt-cache-disk=cache with spaces" },
+        &.{ "m", "--prompt-cache-disk=cache with spaces", "--learn" },
     }) |argv| {
         const named = try parse(a, argv, &u);
         try std.testing.expectEqualDeep(legacy, named);
@@ -487,15 +489,44 @@ test "prompt cache disk: new spellings ask the engine for exactly the legacy con
     try std.testing.expect(defaults.learn == null and !defaults.learn_conversations and defaults.spill == .off);
 }
 
-test "prompt cache disk: directory flags keep last-value precedence and existing disk limits" {
+test "prompt cache disk: mixed spellings refuse both flag orders and name the conflict" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const named = [_][]const []const u8{ &.{ "--prompt-cache-disk", "cache" }, &.{"--prompt-cache-disk=cache"} };
+    const legacy = [_][]const []const u8{
+        &.{ "--learn-dir", "cache" }, &.{"--learn-dir=cache"},
+        &.{ "--learn-dir", "other" }, &.{"--learn-dir=other"},
+        &.{"--learn-conversations"},
+    };
+    for (named) |new| for (legacy) |old| {
+        for ([_]bool{ false, true }) |reverse| {
+            var argv: std.ArrayList([]const u8) = .empty;
+            try argv.append(a, "m");
+            try argv.appendSlice(a, if (reverse) old else new);
+            try argv.appendSlice(a, if (reverse) new else old);
+            try std.testing.expectError(error.Usage, parse(a, argv.items, &u));
+            try std.testing.expect(std.mem.indexOf(u8, u.message, "--prompt-cache-disk") != null);
+            const old_name = old[0][0 .. std.mem.indexOfScalar(u8, old[0], '=') orelse old[0].len];
+            try std.testing.expect(std.mem.indexOf(u8, u.message, old_name) != null);
+        }
+    };
+    for ([_][]const []const u8{
+        &.{ "m", "--learn-conversations", "--learn-dir=cache", "--prompt-cache-disk=cache" },
+        &.{ "m", "--prompt-cache-disk=cache", "--learn-conversations", "--learn-dir=cache" },
+    }) |argv| try std.testing.expectError(error.Usage, parse(a, argv, &u));
+}
+
+test "prompt cache disk: repeated same spelling keeps last-value precedence and existing disk limits" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var u: Usage = .{};
     for ([_][]const []const u8{
-        &.{ "m", "--learn-dir=old", "--prompt-cache-disk=new" },
-        &.{ "m", "--prompt-cache-disk=old", "--learn-dir=new", "--learn-conversations" },
         &.{ "m", "--prompt-cache-disk=old", "--prompt-cache-disk=new" },
+        &.{ "m", "--learn-dir=old", "--learn-dir=new", "--learn-conversations" },
+        &.{ "m", "--learn-conversations", "--learn-dir=old", "--learn-dir=new" },
     }) |argv| {
         const opened = try request(a, "d", "t", try parse(a, argv, &u));
         try std.testing.expectEqualStrings("new", opened.learn.?);
