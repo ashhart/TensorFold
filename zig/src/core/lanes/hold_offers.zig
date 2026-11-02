@@ -204,13 +204,13 @@ fn passCost(rule: anytype, whos: anytype, depths: []const i64, blocks: usize, de
     const View = struct {
         w: @TypeOf(whos),
         d: []const i64,
-        fn len(v: @This()) usize {
+        pub fn len(v: @This()) usize {
             return v.d.len;
         }
-        fn at(v: @This(), i: usize) i64 {
+        pub fn at(v: @This(), i: usize) i64 {
             return v.d[i];
         }
-        fn contextRows(v: @This(), i: usize) u32 {
+        pub fn contextRows(v: @This(), i: usize) u32 {
             return v.w[i].hold_context_rows;
         }
     };
