@@ -31,6 +31,8 @@ pub const Model = struct {
     /// The activation dtype: BF16, as the checkpoint's weights.
     act: hip.ops.Kind = .bf16,
     embed: Projection,
+    /// The stored name of the output head's rows for `readRows`: lm_head, or the embedding when the model ties them.
+    head: []const u8,
     final_norm: u64,
     layers: []Layer,
     buffers: std.ArrayList(hip.memory.DeviceBuffer) = .empty,
@@ -41,7 +43,7 @@ pub const Model = struct {
         var ck = try Checkpoint.openModel(gpa, io, dir);
         defer ck.close();
         ck.scope = scopeOf(&ck);
-        var m: Model = .{ .gpa = gpa, .spec = spec, .embed = undefined, .final_norm = 0, .layers = &.{} };
+        var m: Model = .{ .gpa = gpa, .spec = spec, .embed = undefined, .head = headKey(spec.tied, ck.scope), .final_norm = 0, .layers = &.{} };
         errdefer m.deinit();
         const up: hip.Upload = .{ .r = rt, .buffers = &m.buffers, .gpa = gpa };
         var scratch: std.heap.ArenaAllocator = .init(gpa);
@@ -70,6 +72,12 @@ pub const Model = struct {
 /// The reranker's save keeps the base model under `model.` (beside `lm_head`); the embedding's has no prefix.
 pub fn scopeOf(ck: *const Checkpoint) []const u8 {
     return if (ck.has("model.embed_tokens.weight")) "model." else "";
+}
+
+/// The head rows' stored name: `lm_head.weight`, or the embedding's (prefixed as the checkpoint stores it) when tied.
+pub fn headKey(tied: bool, scope: []const u8) []const u8 {
+    if (!tied) return "lm_head.weight";
+    return if (scope.len > 0) "model.embed_tokens.weight" else "embed_tokens.weight";
 }
 
 /// `quant.read`'s table over a checkpoint: dense tensors only, so no format asks for an affine width.
@@ -205,5 +213,10 @@ test "the reranker's model. prefix is found, the embedding's bare names are not,
         defer a.free(rows);
         try std.testing.expectEqualSlices(f32, &.{ 3, -3, 1, -1 }, rows);
         try std.testing.expectError(error.UnexpectedTensor, readRows(a, io, dir, "lm_head.weight", &.{3}));
+        // a tied model reads its head rows from the embedding, as stored
+        const tied = try readRows(a, io, dir, headKey(true, scopeOf(&ck)), &.{1});
+        defer a.free(tied);
+        try std.testing.expectEqualSlices(f32, &.{ 0, 0 }, tied);
+        try std.testing.expectEqualStrings("lm_head.weight", headKey(false, scopeOf(&ck)));
     }
 }
