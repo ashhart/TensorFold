@@ -8,6 +8,10 @@ release fixes it, and the release notes say which one.
 - GLM-5.3 (EXLR8) decodes slowly next to the other models: a one-row round on two M5 Ultras takes about 45 ms. No CUDA
   engine serves it, and only the `home` profile on M5 Ultras has run. Replies past 2,048 tokens, where the sparse indexer
   starts picking keys, have not been compared with a whole-model reference.
+- Kolibri-1 on CUDA with `TF_KV_SHARE=n`: the prompt store keeps whole 512-token pages, so a shared start shorter
+  than a page (a chat template's first 45 tokens, say) is not reused, and a prompt is cut at a page boundary. On a GB10,
+  cold 2K chat prompts take about 10% longer to the first token than without the store (0.87 against 0.79 s). Decode
+  speed and tokens are the same, and prompts with no shared start take the same time.
 - Qwen3.5-2B with a JSON schema: on an integer field it wants to write as a decimal, the 2B can keep adding digits until
   `max_tokens`, because the grammar allows no decimal point there. Nemotron writes the same schema correctly.
 - Qwen3.8-27B on an M1 to M4 Mac: the drafter's landing counts last for the server's life, so after four prose replies
