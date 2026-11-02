@@ -156,7 +156,8 @@ pub const Graph = struct {
     positions: u64,
     max_rows: usize,
 
-    pub fn init(stream: hip.Stream, weights: *const Weights, ops: *const Ops, blas: *const hip.blas.Blas, flash: *const attention.Library, max_rows: usize, budget: usize) !Graph {
+    const Layout = struct { offsets: [9]usize, lse: usize, positions: usize, inverse: usize, counter: usize, logits: usize, logit_rows: usize, bytes: usize };
+    fn layout(max_rows: usize) !Layout {
         if (max_rows == 0 or max_rows > c.context) return error.Invalid;
         const widths = [_]usize{ c.hidden, c.hidden, c.query, c.kv, c.kv, c.query, c.hidden, c.ffn * 2, c.ffn };
         var offsets: [9]usize = undefined;
@@ -175,17 +176,25 @@ pub const Graph = struct {
         const logits_offset = bytes + 512;
         const logit_rows: usize = @min(max_rows, 32);
         bytes += 512 + logit_rows * c.vocab * 2;
-        if (bytes > budget) return error.GlmOcrTextDoesNotFit;
+        return .{ .offsets = offsets, .lse = lse_offset, .positions = positions_offset, .inverse = inverse_offset, .counter = counter_offset, .logits = logits_offset, .logit_rows = logit_rows, .bytes = bytes };
+    }
+    pub fn memoryBytes(max_rows: usize) !usize {
+        return (try layout(max_rows)).bytes;
+    }
+
+    pub fn init(stream: hip.Stream, weights: *const Weights, ops: *const Ops, blas: *const hip.blas.Blas, flash: *const attention.Library, max_rows: usize, budget: usize) !Graph {
+        const p = try layout(max_rows);
+        if (p.bytes > budget) return error.GlmOcrTextDoesNotFit;
         if (weights.buffer.r != stream.r or ops.module.r != stream.r or blas.stream.r != stream.r or blas.stream.handle != stream.handle) return error.Invalid;
         var fixed = try hip.blas_fixed.Fixed.open(stream, &.{ .{ .n = c.query, .k = c.hidden }, .{ .n = c.kv, .k = c.hidden }, .{ .n = c.hidden, .k = c.query }, .{ .n = c.ffn * 2, .k = c.hidden }, .{ .n = c.hidden, .k = c.ffn }, .{ .n = c.vocab, .k = c.hidden } });
         errdefer fixed.close();
-        var buffer = try hip.DeviceBuffer.alloc(stream.r, bytes);
+        var buffer = try hip.DeviceBuffer.alloc(stream.r, p.bytes);
         errdefer buffer.free();
         const inverse = inverseFrequencies();
-        try buffer.upload(inverse_offset, std.mem.asBytes(&inverse));
+        try buffer.upload(p.inverse, std.mem.asBytes(&inverse));
         var slots: [9]u64 = undefined;
-        for (&slots, offsets) |*slot, offset| slot.* = try buffer.address(offset);
-        return .{ .stream = stream, .weights = weights, .ops = ops, .blas = blas, .flash = flash, .fixed = fixed, .buffer = buffer, .slots = slots, .inverse = try buffer.address(inverse_offset), .lse = try buffer.address(lse_offset), .counter = try buffer.address(counter_offset), .logits = try buffer.address(logits_offset), .logit_rows = logit_rows, .positions = try buffer.address(positions_offset), .max_rows = max_rows };
+        for (&slots, p.offsets) |*slot, offset| slot.* = try buffer.address(offset);
+        return .{ .stream = stream, .weights = weights, .ops = ops, .blas = blas, .flash = flash, .fixed = fixed, .buffer = buffer, .slots = slots, .inverse = try buffer.address(p.inverse), .lse = try buffer.address(p.lse), .counter = try buffer.address(p.counter), .logits = try buffer.address(p.logits), .logit_rows = p.logit_rows, .positions = try buffer.address(p.positions), .max_rows = max_rows };
     }
     pub fn deinit(graph: *Graph) void {
         graph.stream.synchronize() catch {};
