@@ -308,6 +308,51 @@ const Plain = struct {
     }
 };
 
+/// The weight store with more shards held than one gather takes: a direct load falls back to the mapping.
+const Crowded = struct {
+    store: *wt.Store,
+    pub fn has(self: *Crowded, name: []const u8) bool {
+        return self.store.has(name);
+    }
+    pub fn hold(self: *Crowded, name: []const u8) !core.safetensors.Tensor {
+        return self.store.hold(name);
+    }
+    pub fn holdAhead(self: *Crowded, name: []const u8) !core.safetensors.Tensor {
+        return self.store.holdAhead(name);
+    }
+    pub fn release(self: *Crowded) void {
+        self.store.release();
+    }
+    pub fn pinned(self: *Crowded, d: *const cuda.Driver, len: usize) ![]align(16) u8 {
+        return self.store.pinned(d, len);
+    }
+    pub fn sources(_: *Crowded, _: []core.direct_gather.Source) error{TooManySources}![]core.direct_gather.Source {
+        return error.TooManySources;
+    }
+};
+
+test "Flash Next expert loader: a direct layer whose shards don't fit one gather loads through the mapping, the same words" {
+    Fake.reset();
+    var d = Fake.driver();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var planes: [2 * 3 * layer_n]Planes = undefined;
+    try fixture(tmp.dir, &.{ .{ .index = 0 }, .{ .index = 1, .csf = true } }, null, &planes);
+    defer freePlanes(&planes);
+    const path = try tmp.dir.realPathFileAlloc(io, ".", ta);
+    defer ta.free(path);
+    var store = try wt.Store.open(ta, io, path);
+    defer store.deinit();
+    var crowded: Crowded = .{ .store = &store };
+    var buf: [96]u8 = undefined;
+    for ([_]usize{ 0, 1 }) |layer| {
+        var owned = try threads.loadMode(ta, &d, &crowded, try prefixOf(&buf, layer), layer_d, layer_w, layer_n, 4, threads.staging_bytes, true);
+        defer owned.free();
+        try expectLoopWords(owned, planes[layer * 3 * layer_n ..][0 .. 3 * layer_n]);
+    }
+    store.dropStaging();
+}
+
 test "Flash Next expert loader: plain and CSF layers over 36 shards load on threads in chunks with the loop's words" {
     Fake.reset();
     var d = Fake.driver();
