@@ -7,6 +7,8 @@ pub const Kind = enum {
     request,
     /// ContextLengthError: as request, plus ``param`` and ``code: context_length_exceeded``.
     context_length,
+    /// Missing optional runtime library for an enabled feature: 501.
+    unimplemented,
     /// CapacityError: 503, retry shortly.
     capacity,
     /// Any other exception (ValueError, KeyError...): 400 with ``{"message"}`` only.
@@ -47,6 +49,7 @@ pub const Cx = struct {
 
     pub fn status(cx: *const Cx) u16 {
         return switch (cx.kind) {
+            .unimplemented => 501,
             .capacity => 503,
             .server => 500,
             else => 400,

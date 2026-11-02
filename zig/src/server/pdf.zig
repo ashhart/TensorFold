@@ -1,5 +1,6 @@
-//! PDF document input (--vision): renders PDF pages via PDFium and libjpeg-turbo into image_url parts.
+//! PDF document input (--vision --vision-pdf): renders PDF pages via PDFium and libjpeg-turbo in a bounded worker.
 const std = @import("std");
+const builtin = @import("builtin");
 const sys = @import("sys");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -11,7 +12,14 @@ const Allocator = std.mem.Allocator;
 
 pub const env = "TENSORFOLD_LIBPDFIUM";
 pub const max_pdf_bytes: usize = 32 << 20;
+pub const max_request_pixels: u64 = 32 << 20;
 pub const default_max_pages: u32 = 16;
+pub const render_timeout_ns: i96 = 10 * std.time.ns_per_s;
+pub const max_child_heap_bytes: u64 = 1 << 30;
+pub const off_message = "PDF inputs are off on this server; start the server with --vision --vision-pdf";
+
+pub const Budget = struct { images_used: u32 = 0, pdf_pages_used: u32 = 0, encoded_bytes: usize = 0, pixels_used: u64 = 0 };
+pub const IfsdkPause = extern struct { version: c_int = 1, NeedToPauseNow: *const fn (*IfsdkPause) callconv(.c) c_int, user: ?*anyopaque = null };
 
 const PdfiumFns = struct {
     FPDF_InitLibrary: *const fn () callconv(.c) void,
@@ -27,6 +35,9 @@ const PdfiumFns = struct {
     FPDFBitmap_GetBuffer: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
     FPDFBitmap_GetStride: *const fn (?*anyopaque) callconv(.c) c_int,
     FPDF_RenderPageBitmap: *const fn (?*anyopaque, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, c_int) callconv(.c) void,
+    FPDF_RenderPageBitmap_Start: ?*const fn (?*anyopaque, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, c_int, *IfsdkPause) callconv(.c) c_int = null,
+    FPDF_RenderPage_Continue: ?*const fn (?*anyopaque, *IfsdkPause) callconv(.c) c_int = null,
+    FPDF_RenderPage_Close: ?*const fn (?*anyopaque) callconv(.c) void = null,
 };
 
 const JpegFns = struct {
@@ -36,6 +47,9 @@ const JpegFns = struct {
     tj3Compress8: *const fn (?*anyopaque, [*]const u8, c_int, c_int, c_int, c_int, *?[*]u8, *usize) callconv(.c) c_int,
     tj3Free: *const fn (?*anyopaque) callconv(.c) void,
 };
+
+const DlInfo = extern struct { fname: ?[*:0]const u8, fbase: ?*anyopaque, sname: ?[*:0]const u8, saddr: ?*anyopaque };
+extern "c" fn dladdr(addr: *const anyopaque, info: *DlInfo) c_int;
 
 const PdfiumLoaded = union(enum) { unknown, missing, ready: PdfiumFns };
 const JpegLoaded = union(enum) { unknown, missing, ready: JpegFns };
@@ -52,12 +66,17 @@ fn findPdfium(a: Allocator) PdfiumLoaded {
     var f: PdfiumFns = undefined;
     const info = @typeInfo(PdfiumFns).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
-        @field(f, name) = dl.lookup(T, name) orelse {
-            dl.close();
-            return .missing;
-        };
+        if (@typeInfo(T) == .optional) {
+            const Child = @typeInfo(T).optional.child;
+            @field(f, name) = dl.lookup(Child, name);
+        } else {
+            @field(f, name) = dl.lookup(T, name) orelse {
+                dl.close();
+                return .missing;
+            };
+        }
     }
-    f.FPDF_InitLibrary();
+    if (sys.windows) f.FPDF_InitLibrary();
     return .{ .ready = f };
 }
 
@@ -81,20 +100,37 @@ fn getJpeg(a: Allocator) ?JpegFns {
     jpeg_mutex.lockUncancelable(io);
     defer jpeg_mutex.unlock(io);
     if (jpeg_state == .unknown) jpeg_state = findJpeg(a);
-    return switch (jpeg_state) {
-        .ready => |f| f,
-        else => null,
-    };
+    return if (jpeg_state == .ready) jpeg_state.ready else null;
 }
 
-/// Configured page limit per PDF document (default 16, capped by the engine's max_images).
+/// Logs the loaded PDFium path and SHA-256 at startup when --vision-pdf is enabled, or warns if a library is missing.
+pub fn logStartup(a: Allocator, io: std.Io) void {
+    if (getJpeg(a) == null) log.line("--vision-pdf: {s}", .{sys.optional_libraries.spec(.jpeg).message});
+    pdfium_mutex.lockUncancelable(io);
+    defer pdfium_mutex.unlock(io);
+    if (pdfium_state == .unknown) pdfium_state = findPdfium(a);
+    const f = if (pdfium_state == .ready) pdfium_state.ready else {
+        log.line("--vision-pdf: {s}", .{sys.optional_libraries.spec(.pdfium).message});
+        return;
+    };
+    var path_buf: [1100]u8 = undefined;
+    const symbol: *const anyopaque = @ptrCast(f.FPDF_InitLibrary);
+    const file = if (comptime sys.windows) sys.libraryOf(symbol, &path_buf) orelse "pdfium.dll" else blk: {
+        var info: DlInfo = undefined;
+        break :blk if (dladdr(symbol, &info) != 0 and info.fname != null) std.mem.span(info.fname.?) else "libpdfium";
+    };
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, file, a, .limited(128 << 20)) catch return log.line("PDF inputs (--vision-pdf): {s}", .{file});
+    defer a.free(bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    log.line("PDF inputs (--vision-pdf): {s} (sha256 {s})", .{ file, &hex });
+}
+
+/// Configured page limit per request's PDFs (default 16, capped by the engine's max_images).
 pub fn maxPagesLimit(max_images: u32) u32 {
     const cap = if (max_images > 0) max_images else default_max_pages;
-    if (sys.getenv("TENSORFOLD_MAX_PDF_PAGES")) |raw| {
-        if (std.fmt.parseInt(u32, raw, 10) catch null) |n| {
-            if (n > 0) return @min(n, cap);
-        }
-    }
+    if (sys.getenv("TENSORFOLD_MAX_PDF_PAGES")) |raw| if (std.fmt.parseInt(u32, raw, 10) catch null) |n| if (n > 0) return @min(n, cap);
     return @min(default_max_pages, cap);
 }
 
@@ -105,11 +141,27 @@ pub fn isPdfImagePart(part: Value) bool {
     return std.ascii.startsWithIgnoreCase(url, "data:application/pdf");
 }
 
+/// Accounts for a non-PDF image_url part in the request-wide budget so mixed PDF + image requests enforce one cap.
+pub fn noteImagePart(cx: *Cx, part: Value, max_images: u32, budget: *Budget) errors.Refused!void {
+    budget.images_used += 1;
+    if (budget.pdf_pages_used > 0 and max_images > 0 and budget.images_used > max_images) {
+        return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ max_images, budget.images_used }));
+    }
+    const iu = part.get("image_url") orelse return;
+    const url = if (iu == .string) iu.string else if (iu == .object) (iu.strField("url") orelse return) else return;
+    if (!std.ascii.startsWithIgnoreCase(url, "data:")) return;
+    var scratch: Cx = .{ .a = cx.a };
+    const bytes = images.dataBytes(&scratch, url) catch return;
+    if (budget.pdf_pages_used > 0 and budget.encoded_bytes + bytes.len > images.max_request_bytes) {
+        return cx.refuse("the request's images exceed 20 MB encoded");
+    }
+    budget.encoded_bytes +|= bytes.len;
+}
+
 /// Expands a `file`, `input_file` or PDF `image_url` content part into one or more `image_url` parts.
-pub fn expandPart(cx: *Cx, part: Value, image_type: []const u8, max_images: u32, parts: *std.ArrayList(Value)) errors.Refused!void {
+pub fn expandPart(cx: *Cx, part: Value, image_type: []const u8, max_images: u32, budget: *Budget, parts: *std.ArrayList(Value)) errors.Refused!void {
     const pdf_bytes = try extractPartBytes(cx, part);
-    var encoded_bytes: usize = 0;
-    try expandBytes(cx, pdf_bytes, image_type, maxPagesLimit(max_images), &encoded_bytes, parts);
+    try expandBytes(cx, pdf_bytes, image_type, max_images, maxPagesLimit(max_images), budget, parts);
 }
 
 fn extractPartBytes(cx: *Cx, part: Value) errors.Refused![]const u8 {
@@ -144,12 +196,15 @@ pub fn decodeFileData(cx: *Cx, raw: []const u8) errors.Refused![]const u8 {
             return cx.refuse("file parts support application/pdf only");
         break :blk try images.dataBytesOf(cx, trimmed, max_pdf_bytes, "PDF");
     } else blk: {
+        const max_b64_len = 4 * ((max_pdf_bytes + 2) / 3);
+        if (trimmed.len == 0) return cx.refuse("PDF is empty or exceeds the encoded byte limit");
+        if (trimmed.len > max_b64_len + (max_b64_len / 16)) return cx.refuse("PDF exceeds the encoded byte limit");
         var clean: std.ArrayList(u8) = .empty;
-        for (trimmed) |ch| {
-            if (!std.ascii.isWhitespace(ch)) try clean.append(cx.a, ch);
-        }
+        for (trimmed) |ch| if (!std.ascii.isWhitespace(ch)) {
+            if (clean.items.len >= max_b64_len) return cx.refuse("PDF exceeds the encoded byte limit");
+            try clean.append(cx.a, ch);
+        };
         if (clean.items.len == 0) return cx.refuse("PDF is empty or exceeds the encoded byte limit");
-        if (clean.items.len > 4 * ((max_pdf_bytes + 2) / 3)) return cx.refuse("PDF exceeds the encoded byte limit");
         const d = std.base64.standard.Decoder;
         const n = d.calcSizeForSlice(clean.items) catch return cx.refuse("invalid PDF base64 encoding");
         if (n == 0 or n > max_pdf_bytes) return cx.refuse("PDF is empty or exceeds the encoded byte limit");
@@ -162,21 +217,69 @@ pub fn decodeFileData(cx: *Cx, raw: []const u8) errors.Refused![]const u8 {
     return bytes;
 }
 
-/// Renders all pages of `pdf_bytes` (up to `max_pages`, refusing if more) into `image_url` parts appended to `parts`.
-pub fn expandBytes(cx: *Cx, pdf_bytes: []const u8, image_type: []const u8, max_pages: u32, encoded_bytes: *usize, parts: *std.ArrayList(Value)) errors.Refused!void {
-    const jf = getJpeg(cx.a) orelse return cx.refuse(sys.optional_libraries.spec(.jpeg).message);
+/// Renders all pages of `pdf_bytes` within the request-wide `budget` into `image_url` parts appended to `parts`.
+pub fn expandBytes(cx: *Cx, pdf_bytes: []const u8, image_type: []const u8, max_images: u32, max_pages: u32, budget: *Budget, parts: *std.ArrayList(Value)) errors.Refused!void {
+    const jf = getJpeg(cx.a) orelse return cx.fail(.unimplemented, "{s}", .{sys.optional_libraries.spec(.jpeg).message});
     const io = log.io();
     pdfium_mutex.lockUncancelable(io);
     defer pdfium_mutex.unlock(io);
     if (pdfium_state == .unknown) pdfium_state = findPdfium(cx.a);
-    return switch (pdfium_state) {
-        .ready => |f| renderWithPdfium(cx, f, jf, pdf_bytes, image_type, max_pages, encoded_bytes, parts),
-        .missing, .unknown => cx.refuse(sys.optional_libraries.spec(.pdfium).message),
+    const f = switch (pdfium_state) {
+        .ready => |r| r,
+        .missing, .unknown => return cx.fail(.unimplemented, "{s}", .{sys.optional_libraries.spec(.pdfium).message}),
     };
+    const deadline_ns = std.Io.Clock.awake.now(io).toNanoseconds() + render_timeout_ns;
+    var jpegs: std.ArrayList([]const u8) = .empty;
+    if (comptime sys.windows) {
+        try renderInProcess(cx, f, jf, pdf_bytes, max_images, max_pages, deadline_ns, budget, &jpegs);
+    } else {
+        try renderInChild(cx, f, jf, pdf_bytes, max_images, max_pages, deadline_ns, budget, &jpegs);
+    }
+    for (jpegs.items) |jb| {
+        const data_url = try makeDataUrl(cx.a, "image/jpeg", jb);
+        try appendImageUrlPart(cx.a, parts, image_type, data_url);
+    }
 }
 
-fn renderWithPdfium(cx: *Cx, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, image_type: []const u8, max_pages: u32, encoded_bytes: *usize, parts: *std.ArrayList(Value)) errors.Refused!void {
+const PauseState = struct {
+    pause: IfsdkPause,
+    deadline_ns: i96,
+    timed_out: bool = false,
+
+    fn check(p: *IfsdkPause) callconv(.c) c_int {
+        const self: *PauseState = @alignCast(@fieldParentPtr("pause", p));
+        if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= self.deadline_ns) {
+            self.timed_out = true;
+            return 1;
+        }
+        return 0;
+    }
+};
+
+fn renderPageWithDeadline(cx: *Cx, f: PdfiumFns, bmp: ?*anyopaque, page: ?*anyopaque, w: c_int, h: c_int, idx: usize, deadline_ns: i96) errors.Refused!void {
+    const flags: c_int = 0x01 | 0x10; // FPDF_ANNOT | FPDF_PRINTING
+    if (f.FPDF_RenderPageBitmap_Start != null and f.FPDF_RenderPage_Continue != null and f.FPDF_RenderPage_Close != null) {
+        var state: PauseState = .{ .pause = .{ .version = 1, .NeedToPauseNow = PauseState.check }, .deadline_ns = deadline_ns };
+        var status = f.FPDF_RenderPageBitmap_Start.?(bmp, page, 0, 0, w, h, 0, flags, &state.pause);
+        while (status == 1) {
+            if (state.timed_out or std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) {
+                f.FPDF_RenderPage_Close.?(page);
+                return cx.refuse("PDF rendering timed out");
+            }
+            status = f.FPDF_RenderPage_Continue.?(page, &state.pause);
+        }
+        f.FPDF_RenderPage_Close.?(page);
+        if (state.timed_out or std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
+        if (status == 3) return cx.refuse(try std.fmt.allocPrint(cx.a, "PDF page {d} could not be rendered", .{idx + 1}));
+        return;
+    }
+    f.FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, flags);
+    if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
+}
+
+fn renderInProcess(cx: *Cx, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, max_images: u32, max_pages: u32, deadline_ns: i96, budget: *Budget, out_jpegs: *std.ArrayList([]const u8)) errors.Refused!void {
     if (pdf_bytes.len > std.math.maxInt(c_int)) return cx.refuse("PDF exceeds the encoded byte limit");
+    if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
     const doc = f.FPDF_LoadMemDocument(pdf_bytes.ptr, @intCast(pdf_bytes.len), null) orelse
         return cx.refuse("PDF document could not be opened (corrupt or password-protected)");
     defer f.FPDF_CloseDocument(doc);
@@ -184,51 +287,220 @@ fn renderWithPdfium(cx: *Cx, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, i
     if (total_pages <= 0) return cx.refuse("PDF document contains no pages");
     const pages: u32 = @intCast(total_pages);
     const limit: u32 = @max(@as(u32, 1), max_pages);
-    if (pages > limit) {
+    if (budget.pdf_pages_used + pages > limit) {
         return cx.refuse(try std.fmt.allocPrint(
             cx.a,
-            "a PDF may have at most {d} pages (--vision-max-images, TENSORFOLD_MAX_PDF_PAGES); this one has {d}",
-            .{ limit, pages },
+            "a PDF may have at most {d} pages (--vision-max-images, TENSORFOLD_MAX_PDF_PAGES); this request has {d}",
+            .{ limit, budget.pdf_pages_used + pages },
         ));
     }
-    var rendered_any = false;
+    if (max_images > 0 and budget.images_used + pages > max_images) {
+        return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ max_images, budget.images_used + pages }));
+    }
     for (0..pages) |idx| {
-        const page = f.FPDF_LoadPage(doc, @intCast(idx)) orelse continue;
+        if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
+        const page = f.FPDF_LoadPage(doc, @intCast(idx)) orelse
+            return cx.refuse(try std.fmt.allocPrint(cx.a, "PDF page {d} could not be rendered", .{idx + 1}));
         defer f.FPDF_ClosePage(page);
-        const pw_raw = f.FPDF_GetPageWidthF(page);
-        const ph_raw = f.FPDF_GetPageHeightF(page);
-        const pw: f32 = if (std.math.isFinite(pw_raw) and pw_raw > 1.0) pw_raw else 595.0;
-        const ph: f32 = if (std.math.isFinite(ph_raw) and ph_raw > 1.0) ph_raw else 842.0;
-        var scale: f32 = 2.0; // 144 DPI baseline
-        const max_side: f32 = 2048.0;
-        const max_area: f32 = 3_600_000.0;
-        if (pw * scale > max_side) scale = max_side / pw;
-        if (ph * scale > max_side) scale = max_side / ph;
-        if ((pw * scale) * (ph * scale) > max_area) scale = @sqrt(max_area / (pw * ph));
-        const w: c_int = @max(28, @min(4096, @as(c_int, @intFromFloat(@round(pw * scale)))));
-        const h: c_int = @max(28, @min(4096, @as(c_int, @intFromFloat(@round(ph * scale)))));
-        const bmp = f.FPDFBitmap_Create(w, h, 0) orelse return error.OutOfMemory;
+        const dims = pageDimensions(f.FPDF_GetPageWidthF(page), f.FPDF_GetPageHeightF(page));
+        const page_pixels = @as(u64, @intCast(dims[0])) * @as(u64, @intCast(dims[1]));
+        if (budget.pixels_used + page_pixels > max_request_pixels) return cx.refuse("the request's images exceed the 32-megapixel limit");
+        if (budget.encoded_bytes >= images.max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
+        const bmp = f.FPDFBitmap_Create(dims[0], dims[1], 0) orelse return error.OutOfMemory;
         defer f.FPDFBitmap_Destroy(bmp);
         const stride = f.FPDFBitmap_GetStride(bmp);
         const buf_ptr = f.FPDFBitmap_GetBuffer(bmp) orelse return error.OutOfMemory;
-        if (stride < w * 4) return cx.refuse("PDF page bitmap has invalid stride");
+        if (stride < dims[0] * 4) return cx.refuse("PDF page bitmap has invalid stride");
         const bgra: [*]u8 = @ptrCast(buf_ptr);
-        const total_bytes = @as(usize, @intCast(stride)) * @as(usize, @intCast(h));
-        @memset(bgra[0..total_bytes], 0xFF); // white background
-        // 0x01 = FPDF_ANNOT, 0x10 = FPDF_PRINTING
-        f.FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, 0x01 | 0x10);
-        const jpeg_bytes = encodeJpegBgra(cx.a, jf, bgra[0..total_bytes], @intCast(w), @intCast(h), @intCast(stride)) catch |err| switch (err) {
+        const total_bytes = @as(usize, @intCast(stride)) * @as(usize, @intCast(dims[1]));
+        @memset(bgra[0..total_bytes], 0xFF);
+        try renderPageWithDeadline(cx, f, bmp, page, dims[0], dims[1], idx, deadline_ns);
+        const jpeg_bytes = encodeJpegBgra(cx.a, jf, bgra[0..total_bytes], @intCast(dims[0]), @intCast(dims[1]), @intCast(stride)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.EncodeFailed => return cx.refuse("rendered PDF page could not be encoded as JPEG"),
         };
         if (jpeg_bytes.len > images.max_image_bytes) return cx.refuse("rendered PDF page exceeds the 10 MB image byte limit");
-        if (encoded_bytes.* + jpeg_bytes.len > images.max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
-        encoded_bytes.* += jpeg_bytes.len;
-        const data_url = try makeDataUrl(cx.a, "image/jpeg", jpeg_bytes);
-        try appendImageUrlPart(cx.a, parts, image_type, data_url);
-        rendered_any = true;
+        if (budget.encoded_bytes + jpeg_bytes.len > images.max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
+        budget.pdf_pages_used += 1;
+        budget.images_used += 1;
+        budget.pixels_used += page_pixels;
+        budget.encoded_bytes += jpeg_bytes.len;
+        try out_jpegs.append(cx.a, jpeg_bytes);
     }
-    if (!rendered_any) return cx.refuse("PDF document pages could not be rendered");
+}
+
+fn pageDimensions(pw_raw: f32, ph_raw: f32) [2]c_int {
+    const pw: f32 = if (std.math.isFinite(pw_raw) and pw_raw > 1.0) pw_raw else 595.0;
+    const ph: f32 = if (std.math.isFinite(ph_raw) and ph_raw > 1.0) ph_raw else 842.0;
+    var scale: f32 = 2.0; // 144 DPI baseline
+    const max_side: f32 = 2048.0;
+    const max_area: f32 = 3_600_000.0;
+    if (pw * scale > max_side) scale = max_side / pw;
+    if (ph * scale > max_side) scale = max_side / ph;
+    if ((pw * scale) * (ph * scale) > max_area) scale = @sqrt(max_area / (pw * ph));
+    const w: c_int = @max(28, @min(4096, @as(c_int, @intFromFloat(@round(pw * scale)))));
+    const h: c_int = @max(28, @min(4096, @as(c_int, @intFromFloat(@round(ph * scale)))));
+    return .{ w, h };
+}
+
+const PosixChild = struct {
+    extern "c" fn fork() c_int;
+    extern "c" fn kill(c_int, c_int) c_int;
+    extern "c" fn pipe(*[2]c_int) c_int;
+};
+
+fn applyChildLimits() void {
+    if (comptime sys.windows) return;
+    std.posix.setrlimit(.CPU, .{ .cur = 10, .max = 10 }) catch {};
+    std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 }) catch {};
+    std.posix.setrlimit(.FSIZE, .{ .cur = 0, .max = 0 }) catch {};
+    std.posix.setrlimit(.DATA, .{ .cur = max_child_heap_bytes, .max = max_child_heap_bytes }) catch {};
+    if (comptime builtin.os.tag == .linux) {
+        const fd = std.c.open("/proc/self/statm", .{}, @as(c_uint, 0));
+        if (fd >= 0) {
+            defer _ = std.c.close(fd);
+            var buf: [64]u8 = undefined;
+            const n = std.c.read(fd, &buf, buf.len);
+            if (n > 0) {
+                const text = buf[0..@intCast(n)];
+                const end = std.mem.indexOfAny(u8, text, " \t\n") orelse text.len;
+                if (std.fmt.parseInt(u64, text[0..end], 10) catch null) |pages| {
+                    const cap = pages * std.heap.page_size_min + max_child_heap_bytes;
+                    std.posix.setrlimit(.AS, .{ .cur = cap, .max = cap }) catch {};
+                }
+            }
+        }
+    }
+}
+
+fn writeAll(fd: c_int, bytes: []const u8) bool {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
+        if (n <= 0) return false;
+        off += @intCast(n);
+    }
+    return true;
+}
+
+fn writeInt(comptime T: type, fd: c_int, val: T) bool {
+    var b: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &b, val, .little);
+    return writeAll(fd, &b);
+}
+
+fn runChildWorker(fd: c_int, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, max_images: u32, max_pages: u32, deadline_ns: i96, budget: Budget) noreturn {
+    applyChildLimits();
+    f.FPDF_InitLibrary();
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var cx: Cx = .{ .a = arena.allocator() };
+    var b = budget;
+    var jpegs: std.ArrayList([]const u8) = .empty;
+    if (renderInProcess(&cx, f, jf, pdf_bytes, max_images, max_pages, deadline_ns, &b, &jpegs)) |_| {
+        _ = writeAll(fd, &.{0});
+        _ = writeInt(u32, fd, b.images_used);
+        _ = writeInt(u32, fd, b.pdf_pages_used);
+        _ = writeInt(u64, fd, b.encoded_bytes);
+        _ = writeInt(u64, fd, b.pixels_used);
+        _ = writeInt(u32, fd, @intCast(jpegs.items.len));
+        for (jpegs.items) |jb| {
+            _ = writeInt(u32, fd, @intCast(jb.len));
+            _ = writeAll(fd, jb);
+        }
+    } else |err| switch (err) {
+        error.OutOfMemory => _ = writeAll(fd, &.{2}),
+        error.Refused => {
+            _ = writeAll(fd, &.{ 1, @intFromEnum(cx.kind) });
+            _ = writeInt(u32, fd, @intCast(cx.message.len));
+            _ = writeAll(fd, cx.message);
+        },
+    }
+    _ = std.c.close(fd);
+    std.c._exit(0);
+}
+
+fn readChildPipe(a: Allocator, fd: c_int, deadline_ns: i96, max_bytes: usize) error{ OutOfMemory, Timeout, Overflow }![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var buf: [65536]u8 = undefined;
+    while (true) {
+        const now = std.Io.Clock.awake.now(log.io()).toNanoseconds();
+        if (now >= deadline_ns) return error.Timeout;
+        const rem_ms: i32 = @intCast(@max(@as(i96, 1), @min(@as(i96, 10_000), @divTrunc(deadline_ns - now + 999_999, 1_000_000))));
+        var pfd = [1]sys.posix.pollfd{.{ .fd = fd, .events = sys.posix.POLL.IN, .revents = 0 }};
+        const ready = sys.posix.poll(&pfd, rem_ms) catch return error.Timeout;
+        if (ready == 0) return error.Timeout;
+        const n = std.c.read(fd, &buf, buf.len);
+        if (n == 0) break;
+        if (n < 0) return error.Timeout;
+        const count: usize = @intCast(n);
+        if (out.items.len + count > max_bytes) return error.Overflow;
+        try out.appendSlice(a, buf[0..count]);
+    }
+    return out.items;
+}
+
+fn renderInChild(cx: *Cx, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, max_images: u32, max_pages: u32, deadline_ns: i96, budget: *Budget, out_jpegs: *std.ArrayList([]const u8)) errors.Refused!void {
+    var fds: [2]c_int = undefined;
+    if (PosixChild.pipe(&fds) != 0) return cx.refuse("PDF rendering worker pipe could not be opened");
+    const pid = PosixChild.fork();
+    if (pid < 0) {
+        _ = std.c.close(fds[0]);
+        _ = std.c.close(fds[1]);
+        return cx.refuse("PDF rendering worker process could not be started");
+    }
+    if (pid == 0) {
+        _ = std.c.close(fds[0]);
+        runChildWorker(fds[1], f, jf, pdf_bytes, max_images, max_pages, deadline_ns, budget.*);
+    }
+    _ = std.c.close(fds[1]);
+    var reaped = false;
+    defer {
+        _ = std.c.close(fds[0]);
+        if (!reaped) {
+            _ = PosixChild.kill(pid, 9);
+            var st: c_int = 0;
+            _ = std.c.waitpid(pid, &st, 0);
+        }
+    }
+    const max_pipe = images.max_request_bytes + (64 << 10);
+    const frame = readChildPipe(cx.a, fds[0], deadline_ns, max_pipe) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return cx.refuse("PDF rendering timed out"),
+        error.Overflow => return cx.refuse("the request's images exceed 20 MB encoded"),
+    };
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
+    reaped = true;
+    if (frame.len == 0) return cx.refuse("PDF rendering exceeded resource limits or failed");
+    switch (frame[0]) {
+        0 => {
+            if (frame.len < 29) return cx.refuse("PDF rendering exceeded resource limits or failed");
+            budget.images_used = std.mem.readInt(u32, frame[1..5], .little);
+            budget.pdf_pages_used = std.mem.readInt(u32, frame[5..9], .little);
+            budget.encoded_bytes = @intCast(std.mem.readInt(u64, frame[9..17], .little));
+            budget.pixels_used = std.mem.readInt(u64, frame[17..25], .little);
+            const count = std.mem.readInt(u32, frame[25..29], .little);
+            var pos: usize = 29;
+            for (0..count) |_| {
+                if (pos + 4 > frame.len) return cx.refuse("PDF rendering exceeded resource limits or failed");
+                const len: usize = std.mem.readInt(u32, frame[pos..][0..4], .little);
+                pos += 4;
+                if (pos + len > frame.len) return cx.refuse("PDF rendering exceeded resource limits or failed");
+                try out_jpegs.append(cx.a, frame[pos .. pos + len]);
+                pos += len;
+            }
+        },
+        1 => {
+            if (frame.len < 6) return cx.refuse("PDF rendering failed");
+            cx.kind = @enumFromInt(frame[1]);
+            const len: usize = std.mem.readInt(u32, frame[2..6], .little);
+            if (6 + len > frame.len) return cx.refuse("PDF rendering failed");
+            cx.message = frame[6 .. 6 + len];
+            return error.Refused;
+        },
+        2 => return error.OutOfMemory,
+        else => return cx.refuse("PDF rendering exceeded resource limits or failed"),
+    }
 }
 
 fn encodeJpegBgra(a: Allocator, jf: JpegFns, bgra: []const u8, width: usize, height: usize, stride: usize) error{ OutOfMemory, EncodeFailed }![]const u8 {
@@ -238,7 +510,6 @@ fn encodeJpegBgra(a: Allocator, jf: JpegFns, bgra: []const u8, width: usize, hei
     _ = jf.tj3Set(handle, 4, 2); // TJPARAM_SUBSAMP = 4, TJSAMP_420 = 2
     var out_buf: ?[*]u8 = null;
     var out_size: usize = 0;
-    // TJPF_BGRX = 8 (matches FPDFBitmap_Create with alpha=0)
     const rc = jf.tj3Compress8(handle, bgra.ptr, @intCast(width), @intCast(stride), @intCast(height), 8, &out_buf, &out_size);
     defer if (out_buf) |p| jf.tj3Free(p);
     if (rc != 0 or out_buf == null or out_size == 0) return error.EncodeFailed;
@@ -265,64 +536,59 @@ fn appendImageUrlPart(a: Allocator, parts: *std.ArrayList(Value), image_type: []
 }
 
 pub const minimal_two_page_pdf =
-    "%PDF-1.4\n" ++
-    "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" ++
+    "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n" ++
     "2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >> endobj\n" ++
     "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj\n" ++
     "4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj\n" ++
-    "xref\n0 5\n" ++
-    "0000000000 65535 f \n" ++
-    "0000000009 00000 n \n" ++
-    "0000000058 00000 n \n" ++
-    "0000000121 00000 n \n" ++
-    "0000000190 00000 n \n" ++
-    "trailer << /Size 5 /Root 1 0 R >>\n" ++
-    "startxref\n259\n%%EOF\n";
+    "xref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n" ++
+    "0000000121 00000 n \n0000000190 00000 n \ntrailer << /Size 5 /Root 1 0 R >>\nstartxref\n259\n%%EOF\n";
 
-test "decodeFileData validates PDF headers and refuses remote URLs" {
+test "decodeFileData validates PDF headers, refuses remote URLs and size-checks base64 before copying" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var cx: Cx = .{ .a = a };
-
     const data_url = try makeDataUrl(a, "application/pdf", minimal_two_page_pdf);
     const decoded = try decodeFileData(&cx, data_url);
     try std.testing.expectEqualSlices(u8, minimal_two_page_pdf, decoded);
-
     var url_cx: Cx = .{ .a = a };
     try std.testing.expectError(error.Refused, decodeFileData(&url_cx, "https://example.com/doc.pdf"));
     try std.testing.expect(std.mem.indexOf(u8, url_cx.message, "URLs are not accepted") != null);
+    var empty_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, decodeFileData(&empty_cx, "   "));
 }
 
-test "libpdfium renders a multi-page PDF document and refuses when page count exceeds limit" {
+test "libpdfium renders in a child worker and enforces request-wide page and image caps before rendering" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var cx: Cx = .{ .a = a };
 
     var parts: std.ArrayList(Value) = .empty;
-    var used: usize = 0;
-    expandBytes(&cx, minimal_two_page_pdf, "image_url", 4, &used, &parts) catch |err| {
+    var budget: Budget = .{};
+    expandBytes(&cx, minimal_two_page_pdf, "image_url", 4, 4, &budget, &parts) catch |err| {
         if (err == error.Refused and (pdfium_state == .missing or jpeg_state == .missing)) {
             const want = if (jpeg_state == .missing) sys.optional_libraries.spec(.jpeg).names[0] else sys.optional_libraries.spec(.pdfium).names[0];
             try std.testing.expect(std.mem.indexOf(u8, cx.message, want) != null);
+            try std.testing.expectEqual(errors.Kind.unimplemented, cx.kind);
             return;
         }
         return err;
     };
     try std.testing.expectEqual(@as(usize, 2), parts.items.len);
-    try std.testing.expect(used > 0 and used <= images.max_request_bytes);
+    try std.testing.expectEqual(@as(u32, 2), budget.pdf_pages_used);
+    try std.testing.expectEqual(@as(u32, 2), budget.images_used);
+    try std.testing.expect(budget.encoded_bytes > 0 and budget.encoded_bytes <= images.max_request_bytes);
     for (parts.items) |p| {
         const url = p.get("image_url").?.get("url").?.string;
         const img_bytes = try images.dataBytes(&cx, url);
         try std.testing.expectEqual(images.Format.jpeg, images.sniff(img_bytes));
     }
 
-    // Refuse when total_pages (2) > max_pages (1), naming both numbers in the refusal
-    var cap_cx: Cx = .{ .a = a };
-    var cap_parts: std.ArrayList(Value) = .empty;
-    var cap_used: usize = 0;
-    try std.testing.expectError(error.Refused, expandBytes(&cap_cx, minimal_two_page_pdf, "image_url", 1, &cap_used, &cap_parts));
-    try std.testing.expect(std.mem.indexOf(u8, cap_cx.message, "at most 1 pages") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap_cx.message, "has 2") != null);
+    // A second 2-page PDF in the same request with max_pages = 3 is refused before rendering its pages.
+    var second_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, expandBytes(&second_cx, minimal_two_page_pdf, "image_url", 4, 3, &budget, &parts));
+    try std.testing.expect(std.mem.indexOf(u8, second_cx.message, "at most 3 pages") != null);
+    try std.testing.expect(std.mem.indexOf(u8, second_cx.message, "has 4") != null);
+    try std.testing.expectEqual(@as(usize, 2), parts.items.len);
 }

@@ -38,7 +38,7 @@ pub const all = [_]Spec{
     item(.video, "TensorFold video", if (mac) &.{"libtfvideo.dylib"} else if (win) &.{"tfvideo.dll"} else &.{video_library.soname}, "video inputs (--vision)", "build the optional zig build video -Dffmpeg=PREFIX runtime against FFmpeg 9.0.2 and place it in lib beside the server; see packaging/RUNTIME.md", error.VideoLibraryUnavailable, null, true),
     item(.jpeg, "libjpeg-turbo", if (mac) &.{"libturbojpeg.0.dylib"} else if (win) &.{"turbojpeg.dll"} else &.{"libturbojpeg.so.0"}, "JPEG inputs (--vision)", "install libjpeg-turbo 3.1.4.1 and set TENSORFOLD_LIBTURBOJPEG to its file, or put it on the documented loader path", error.JpegLibraryUnavailable, "TENSORFOLD_LIBTURBOJPEG", true),
     item(.webp, "libwebp", if (mac) &.{"libwebpdecoder.3.dylib"} else &.{"libwebpdecoder.so.3"}, "WebP inputs (--vision)", "install libwebp 1.6.0 and set TENSORFOLD_LIBWEBP to its decoder file, or put it on the documented loader path", error.WebpLibraryUnavailable, "TENSORFOLD_LIBWEBP", true),
-    item(.pdfium, "PDFium", if (mac) &.{"libpdfium.dylib"} else if (win) &.{"pdfium.dll"} else &.{"libpdfium.so"}, "PDF inputs (--vision)", "install PDFium (chromium/7725) and set TENSORFOLD_LIBPDFIUM to its file, or put it on the documented loader path", error.PdfiumLibraryUnavailable, "TENSORFOLD_LIBPDFIUM", true),
+    item(.pdfium, "PDFium", if (mac) &.{"libpdfium.dylib"} else if (win) &.{"pdfium.dll"} else &.{"libpdfium.so"}, "PDF inputs (--vision --vision-pdf)", "install PDFium (chromium/7725) in lib/ beside the server or set TENSORFOLD_LIBPDFIUM to its file", error.PdfiumLibraryUnavailable, "TENSORFOLD_LIBPDFIUM", true),
     item(.grammar, "TensorFold grammar", if (mac) &.{"libtfgrammar.dylib"} else if (win) &.{"tfgrammar.dll"} else &.{"libtfgrammar.so"}, "structured output and required tool calls (HTTP 400 when missing)", "restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with " ++ grammar_library.clone, error.GrammarLibraryUnavailable, null, true),
     item(.rccl, "RCCL", &.{ "librccl.so.1", "librccl.so", "/opt/rocm/lib/librccl.so.1" }, "HIP tensor-parallel ranks", "install the RCCL runtime matching the ROCm installation; " ++ loader_path ++ "", error.RcclUnavailable, null, false),
     item(.mcdma_rpc, "MCDMA RPC", if (mac) &.{"libmcdma-rpc.dylib"} else &.{"libmcdma-rpc.so"}, "MCDMA mailbox and Metal speed-up communication", "build and install MCDMA's RPC helper and set MCDMA_RPC_LIBRARY to its file", error.McdmaRpcUnavailable, "MCDMA_RPC_LIBRARY", false),
@@ -126,6 +126,7 @@ pub fn open(s: Spec, a: std.mem.Allocator, comptime Sys: type, exe: ?[]const u8)
             if (Sys.DynLib.open(path)) |dl| return dl else |_| {}
         }
     };
+    if (s.id == .pdfium) return null;
     if (mac and (s.id == .jpeg or s.id == .webp)) {
         const package = if (s.id == .jpeg) "jpeg-turbo" else "webp";
         for ([_][]const u8{ "/opt/homebrew/opt", "/usr/local/opt" }) |root| {
