@@ -263,7 +263,7 @@ const Staged = struct {
     }
 };
 
-test "shared funding through native and recorded backends retains every committed row across zero-budget rounds" {
+test "shared funding through direct and recorded targets retains every committed row across zero-budget rounds" {
     for ([_]bool{ false, true }) |batched| for ([_]bool{ false, true }) |recording| {
         var contexts = [_]price.ContextCost{
             .{ .streams = 1, .rows = 1, .ms = 1 },
@@ -282,14 +282,16 @@ test "shared funding through native and recorded backends retains every committe
             .hold_context_costs = &contexts,
         } } };
         defer staged.head.deinit();
-        var wrapped = try Drafted.init(gpa, strict.backend(), staged.drafter());
-        defer wrapped.deinit();
+        const draft = staged.drafter();
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var path: [64]u8 = undefined;
-        var recorder = try rec.Recorder.init(gpa, std.testing.io, try std.fmt.bufPrintSentinel(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0), &.{1});
+        var recorder = try rec.Recorder.init(gpa, std.testing.io, try std.fmt.bufPrintSentinel(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0), draft.taps());
         defer recorder.deinit();
-        var recorded = try rec.Recorded.init(wrapped.backend(), &recorder);
+        recorder.floor = 0;
+        var recorded = try rec.Recorded.init(strict.backend(), &recorder);
+        var wrapped = try Drafted.init(gpa, if (recording) recorded.backend() else strict.backend(), draft);
+        defer wrapped.deinit();
         var costs: [8]@import("config.zig").Cost = undefined;
         for (&costs, 1..) |*c, width| c.* = .{ .width = @intCast(width), .ms = 10 };
         var cfg = try Config.init(gpa, wrapped.facts(.{
@@ -302,7 +304,7 @@ test "shared funding through native and recorded backends retains every committe
         defer cfg.deinit(gpa);
         cfg.timed = false;
         var clock: fake.FixedClock = .{};
-        var engine = Engine.init(gpa, &cfg, if (recording) recorded.backend() else wrapped.backend(), clock.clock());
+        var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
         defer engine.deinit();
         engine.rule.k.depth_probe_every = 1;
         var s = try sm.Stream.init(gpa, .{ .id = "staged", .prompt = &.{ 2, 7, 13 }, .max_new = 32 });
@@ -321,6 +323,7 @@ test "shared funding through native and recorded backends retains every committe
             try std.testing.expectEqual(s.cache_len - before_cache, staged.head.live_rows - before_live);
             const lane = staged.head.lanes.getPtr(&s).?;
             try std.testing.expectEqualSlices(u32, s.context.items[0..@intCast(s.cache_len)], lane.history.items);
+            if (recording) try std.testing.expect(recorder.streams.get(&s).?.gap == null);
         }
         // Debt crossed the one-row kernel regime before funding, then survived the next zero-budget round.
         try std.testing.expect(s.hold_context_rows >= 3);

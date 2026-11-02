@@ -11,6 +11,7 @@ const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const backend = @import("backend.zig");
 const stage = @import("dspark_stage.zig");
+const timing = @import("dspark_time.zig");
 
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
@@ -443,32 +444,11 @@ pub const Drafter = struct {
         const timed = ms > 0 and std.math.isFinite(ms);
         if (timed) {
             d.hold_spent_ms += ms;
-            d.priceHold(d.pass_len, std.mem.max(u32, d.depths[0..d.pass_len]), context_rows, encode_ms + ms);
+            timing.priceHold(d, d.pass_len, std.mem.max(u32, d.depths[0..d.pass_len]), context_rows, encode_ms + ms);
         }
         // Releasing a peer must not discard completed picks when only the timing receipt is unavailable.
         try block.readPicks(d, d.pass[0..d.pass_len], d.depths[0..d.pass_len]);
         if (!timed) return error.DraftTimingUnavailable;
-    }
-
-    /// Reprices the clean grid with CPU-encode + GPU ms minus the matching calibrated context estimate.
-    pub fn priceHold(d: *Drafter, streams: usize, depth: u32, context_rows: u32, ms: f64) void {
-        const timed = d.holds[0..d.holds_len];
-        if (timed.len == 0 or streams == 0 or !(ms > 0) or !std.math.isFinite(ms)) return;
-        const clean_ms = ms - lanes.hold_price.contextMs(d.contexts[0..d.contexts_len], streams, context_rows);
-        if (!(clean_ms > 0) or !std.math.isFinite(clean_ms)) return;
-        const priced = lanes.hold_price.holdMs(timed, streams, depth);
-        if (!(priced > 0) or !std.math.isFinite(priced)) return;
-        const step = 1 + 0.1 * (clean_ms / priced - 1);
-        if (!std.math.isFinite(step)) return;
-        var lo: u32 = 0;
-        var hi: u32 = std.math.maxInt(u32);
-        for (timed) |h| {
-            if (h.streams <= streams) lo = @max(lo, h.streams);
-            if (h.streams >= streams) hi = @min(hi, h.streams);
-        }
-        for (timed) |*h| if (h.streams >= lo and h.streams <= hi) {
-            h.ms *= step;
-        };
     }
 
     /// The signalled hold settled and its lanes' picks forgotten (a lane may be dropped, or a hold may overwrite).

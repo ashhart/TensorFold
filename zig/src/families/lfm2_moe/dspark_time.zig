@@ -1,6 +1,7 @@
-//! DSpark command encoding and successful GPU receipts, without overlapping time spans.
+//! DSpark native timing receipts and calibrated clean-hold repricing.
 const std = @import("std");
 const mtl = @import("metal");
+const lanes = @import("lanes");
 const Drafter = @import("dspark.zig").Drafter;
 
 fn failed(msg: [*:0]const u8) anyerror {
@@ -35,4 +36,25 @@ pub fn finish(d: *Drafter, cb: mtl.CommandBuffer, e: mtl.ComputeEncoder, start_n
     if (!(gpu_ms > 0) or !std.math.isFinite(gpu_ms)) return error.DraftTimingUnavailable;
     d.hold_spent_ms += gpu_ms;
     return encode_ms + gpu_ms;
+}
+
+/// Reprices the clean grid with CPU-encode + GPU ms minus the matching calibrated context estimate.
+pub fn priceHold(d: *Drafter, streams: usize, depth: u32, context_rows: u32, ms: f64) void {
+    const timed = d.holds[0..d.holds_len];
+    if (timed.len == 0 or streams == 0 or !(ms > 0) or !std.math.isFinite(ms)) return;
+    const clean_ms = ms - lanes.hold_price.contextMs(d.contexts[0..d.contexts_len], streams, context_rows);
+    if (!(clean_ms > 0) or !std.math.isFinite(clean_ms)) return;
+    const priced = lanes.hold_price.holdMs(timed, streams, depth);
+    if (!(priced > 0) or !std.math.isFinite(priced)) return;
+    const step = 1 + 0.1 * (clean_ms / priced - 1);
+    if (!std.math.isFinite(step)) return;
+    var lo: u32 = 0;
+    var hi: u32 = std.math.maxInt(u32);
+    for (timed) |h| {
+        if (h.streams <= streams) lo = @max(lo, h.streams);
+        if (h.streams >= streams) hi = @min(hi, h.streams);
+    }
+    for (timed) |*h| if (h.streams >= lo and h.streams <= hi) {
+        h.ms *= step;
+    };
 }

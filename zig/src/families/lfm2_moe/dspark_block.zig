@@ -462,7 +462,7 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
     open = false;
     const ms = try timing.finish(d, cb, e, start_ns);
     absorbed(blocks);
-    d.priceHold(blocks.len, depth, context_rows, ms);
+    timing.priceHold(d, blocks.len, depth, context_rows, ms);
     const picks = s.picks.slice(Pick, d.config.block * ds.pass_rows);
     for (blocks, 0..) |b, bi| {
         for (b.lane.held[0..b.depth], 0..) |*h, i| {

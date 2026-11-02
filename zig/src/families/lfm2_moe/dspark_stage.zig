@@ -61,10 +61,10 @@ fn buffer(ptr: *anyopaque, s: *lanes.Stream) ?mtl.Buffer {
 
 /// Whether `f` is rows of the lane's own stage at their place (an error when it is its stage but not there).
 fn owned(l: *const ds.Lane, f: be.Features, start: u64, width: usize) !bool {
-    if (f.buffer != @intFromPtr(l.mem.id)) return false;
+    if (f.buffer != @intFromPtr(l.stage.id)) return false;
     if (start < l.end) return error.DraftContextGap;
     const at = start - l.end;
-    if (at > l.staged or at + f.rows > room(l) or f.offset != l.stage_at + at * width) return error.DraftContextGap;
+    if (at > l.staged or at + f.rows > room(l) or f.offset != at * width) return error.DraftContextGap;
     return true;
 }
 
