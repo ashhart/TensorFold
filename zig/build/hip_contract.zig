@@ -55,7 +55,9 @@ pub fn steps(b: *std.Build, o: Options) void {
     const fits = "Every registered HIP launch against each served chip's code objects";
     b.step("hip-kernel-contract-limits", fits).dependOn(&audit.step);
     // the runner compiles on any host against stub kernels, so `test` catches what only it reaches
-    o.test_step.dependOn(&runner(b, b.graph.host, .Debug, o.host, controls(b, "", null)).step);
+    const host_runner = runner(b, b.graph.host, .Debug, o.host, controls(b, "", null));
+    o.test_step.dependOn(&host_runner.step);
+    b.step("check-hip-kernel-contract-host", "Compile the complete HIP contract registry with inert kernels").dependOn(&host_runner.step);
 }
 
 /// The controls' code object as the `hip_controls` module (empty without hipcc).
@@ -74,6 +76,16 @@ fn runner(
     hip_mod: *std.Build.Module,
     ctl: *std.Build.Module,
 ) *std.Build.Step.Compile {
+    const shaders = b.createModule(.{
+        .root_source_file = b.addWriteFiles().add("glm_ocr_shaders.zig", "const hip = @import(\"hip\");\npub const arch = hip.kernels.arch;\npub const bytes = hip.kernels.images[@backingInt(hip.kernels.Group.glm_ocr)];\n"),
+        .imports = &.{.{ .name = "hip", .module = hip_mod }},
+    });
+    const ocr_ops = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/glm_ocr/hip_ops.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "hip", .module = hip_mod }, .{ .name = "glm_ocr_kernels", .module = shaders } },
+    });
     return b.addExecutable(.{ .name = "tf-hip-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/hip/contract_main.zig"),
         .target = target,
@@ -83,6 +95,7 @@ fn runner(
             .{ .name = "hip", .module = hip_mod },
             .{ .name = "core", .module = hip_mod.import_table.get("core").? },
             .{ .name = "hip_controls", .module = ctl },
+            .{ .name = "glm_ocr_ops", .module = ocr_ops },
         },
     }) });
 }

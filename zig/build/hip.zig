@@ -116,17 +116,18 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
     b.step("test-slide-hip-host", "Unsupported HIP learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"slide admission:"} })).step);
-    const blas_host = b.addRunArtifact(b.addTest(.{ .root_module = host.hip, .filters = &.{"HIP BLAS:"} }));
-    b.step("test-hip-blas-host", "HIP BF16 matrix admission without device execution").dependOn(&blas_host.step);
+    const blas_host = b.addRunArtifact(b.addTest(.{ .root_module = host.hip, .filters = &.{ "HIP BLAS:", "HIP convolution:", "HIP AOTriton:" } }));
+    b.step("test-hip-blas-host", "HIP BLAS, convolution and attention admission without device execution").dependOn(&blas_host.step);
+    const device_checks = engineModules(b, target, .safe, stub_kernels, null);
     const blas_device = b.addTest(.{ .name = "tf-hip-blas-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/hip/blas_test.zig"),
         .target = target,
         .optimize = .safe,
         .link_libc = true,
-        .imports = &.{.{ .name = "hip", .module = engineModules(b, target, .safe, stub_kernels, null).hip }},
+        .imports = &.{.{ .name = "hip", .module = device_checks.hip }},
     }), .filters = &.{"HIP BLAS device:"} });
     b.step("build-hip-blas-test", "Build BF16 projection device checks; execution requires device selection and admission").dependOn(&b.addInstallArtifact(blas_device, .{}).step);
-    @import("glm_ocr.zig").hipTests(b, host.hip, test_step);
+    @import("glm_ocr.zig").hipTests(b, host.hip, device_checks.hip, test_step, o);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
@@ -320,7 +321,7 @@ pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_
 const groups = [_][]const u8{
     "ops/ops.hip",           "ops/act.hip",             "attention/attention.hip", "recurrence/gated_delta.hip",
     "attention/prefill.hip", "decode/decode.hip",       "decode/plan.hip",         "tiles/dot2_tiles.hip",
-    "tiles/dot2.hip",        "flashnext/flashnext.hip", "recurrence/mamba.hip",
+    "tiles/dot2.hip",        "flashnext/flashnext.hip", "recurrence/mamba.hip",    "glm_ocr/pointwise.hip",
 };
 
 /// What the group sources include, so an edit to one rebuilds them.
@@ -339,7 +340,7 @@ const headers = [_][]const u8{
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
 
-const stub = "pub const arch = \"\";\npub const images: [11][]align(8) const u8 = @splat(&.{});\n";
+const stub = "pub const arch = \"\";\npub const images: [12][]align(8) const u8 = @splat(&.{});\n";
 
 /// One code object a group for `arch`, built with the caps table's instruction switches, as the `hip_kernels` module.
 pub fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool, arch: []const u8) *std.Build.Module {

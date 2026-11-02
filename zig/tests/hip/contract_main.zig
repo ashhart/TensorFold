@@ -21,6 +21,9 @@ const pair_k = @import("contract_relu2_pair.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
 const kit = @import("contract_kit.zig");
+const ocr_ops = @import("glm_ocr_ops").Ops;
+const ocr_points = @import("contract_glm_ocr_ops.zig");
+const ocr_norms = @import("contract_glm_ocr_norm.zig");
 
 const g = core.contract.gates;
 
@@ -158,6 +161,16 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     defer for (&routers) |*x| x.deinit();
     for (&routers) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
+    var ocr = try ocr_ops.load(&r);
+    defer ocr.unload();
+    var pointwise: [std.enums.values(ocr_points.Which).len]ocr_points.Pointwise = undefined;
+    for (&pointwise, std.enums.values(ocr_points.Which)) |*op, which_op| op.* = .init(a, &r, s, &ocr, which_op);
+    defer for (&pointwise) |*op| op.deinit();
+    for (&pointwise) |*op| try kernels.append(a, op.kernel());
+    var norms: [std.enums.values(ocr_norms.Which).len]ocr_norms.Norm = undefined;
+    for (&norms, std.enums.values(ocr_norms.Which)) |*op, which_op| op.* = .init(a, &r, s, &ocr, which_op);
+    defer for (&norms) |*op| op.deinit();
+    for (&norms) |*op| try kernels.append(a, op.kernel());
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
     const t1 = ms(io);

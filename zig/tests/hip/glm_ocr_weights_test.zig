@@ -1,4 +1,4 @@
-//! Device bytes must equal every source tensor; run only on one visible GPU under its device lease.
+//! Device bytes must equal every source tensor; run on one selected GPU within its available memory budget.
 const std = @import("std");
 const hip = @import("hip");
 const family = @import("glm_ocr");
@@ -7,11 +7,11 @@ const platform = @import("sys");
 
 test "GLM-OCR HIP device weights: unchanged BF16 bytes and complete release" {
     const dir = platform.getenv("TF_GLM_OCR_DIR") orelse return error.MissingCheckpointPath;
-    const pci = platform.getenv("TF_GLM_OCR_PCI") orelse return error.MissingLeasedDevice;
+    const pci = platform.getenv("TF_GLM_OCR_PCI") orelse return error.MissingSelectedDevice;
     const a = std.testing.allocator;
     var r = try hip.Runtime.open();
     defer r.close();
-    if (try r.deviceCount() != 1) return error.SelectOneLeasedHipDevice;
+    if (try r.deviceCount() != 1) return error.SelectOneHipDevice;
     const Pci = *const fn ([*]u8, c_int, c_int) callconv(.c) c_int;
     const get_pci = r.lib.lookup(Pci, "hipDeviceGetPCIBusId") orelse return error.MissingSymbol;
     var bus: [32]u8 = @splat(0);
