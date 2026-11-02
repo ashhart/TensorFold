@@ -8,11 +8,12 @@ pub const std_options: std.Options = .{ .signal_stack_size = null };
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len >= 2 and (std.mem.eql(u8, args[1], "text") or std.mem.eql(u8, args[1], "teacher"))) {
+    const text_mode = if (args.len >= 2) std.meta.stringToEnum(TextMode, args[1]) else null;
+    if (text_mode) |mode| {
         if (args.len < 5 or args.len > 7) return error.BadArguments;
         const features = if (args.len >= 6 and !std.mem.eql(u8, args[5], "-")) args[5] else null;
         const cap = if (args.len == 7) try std.fmt.parseInt(usize, args[6], 10) else 64;
-        try textCheck(init.gpa, init.io, args[2], args[3], args[4], features, cap, std.mem.eql(u8, args[1], "teacher"));
+        try textCheck(init.gpa, init.io, args[2], args[3], args[4], features, cap, mode);
         return 0;
     }
     if (args.len != 5 and args.len != 7 and args.len != 8) {
@@ -143,11 +144,14 @@ fn write16(a: std.mem.Allocator, io: std.Io, path: []const u8, data: []const u8,
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
-fn textCheck(a: std.mem.Allocator, io: std.Io, dir: []const u8, reference: []const u8, prefix: []const u8, feature_path: ?[]const u8, cap: usize, teacher: bool) !void {
+const TextMode = enum { text, teacher, window };
+
+fn textCheck(a: std.mem.Allocator, io: std.Io, dir: []const u8, reference: []const u8, prefix: []const u8, feature_path: ?[]const u8, cap: usize, mode: TextMode) !void {
     const c = try family.config.Config.read(a, io, dir);
-    const forced = if (teacher) try referenceIds(a, io, reference, c) else try a.alloc(u32, 0);
+    const teacher = mode == .teacher;
+    const forced = if (mode != .text) try referenceIds(a, io, reference, c) else try a.alloc(u32, 0);
     defer a.free(forced);
-    const decode_cap = if (teacher) @min(cap, forced.len) else cap;
+    const decode_cap = if (mode != .text) @min(cap, forced.len) else cap;
     const ids_path = try std.fmt.allocPrint(a, "{s}/input-input_ids.npy", .{reference});
     defer a.free(ids_path);
     const ids_file = try std.Io.Dir.cwd().readFileAlloc(io, ids_path, a, .limited(4 << 20));
@@ -195,7 +199,7 @@ fn textCheck(a: std.mem.Allocator, io: std.Io, dir: []const u8, reference: []con
     var blas = try hip.blas.Blas.open(stream);
     defer blas.close();
     const free = (try ctx.memInfo()).free;
-    const reserve = scratch + kv + features.data.len + rows * 8 + (2 << 30);
+    const reserve = scratch + kv * @as(usize, if (mode == .window) 2 else 1) + features.data.len + rows * 8 + (2 << 30);
     if (free < reserve) return error.DotsWeightsDoNotFit;
     var w = try family.weights.Weights.load(a, &r, io, dir, c, free - reserve);
     defer w.deinit();
@@ -232,6 +236,10 @@ fn textCheck(a: std.mem.Allocator, io: std.Io, dir: []const u8, reference: []con
     try stream.synchronize();
     try saveTensor(a, io, &r, prefix, ".norm.npy", result.normalized, rows, c.hidden);
     try saveTensor(a, io, &r, prefix, ".logits.npy", result.logits, 1, c.vocab);
+    if (mode == .window) {
+        try @import("dots_window.zig").check(a, stream, graph, &cache, rows, forced);
+        return;
+    }
     var pick = try hip.DeviceBuffer.alloc(&r, 4);
     defer pick.free();
     const scores = try a.alloc(u8, decode_cap * c.vocab * 2);
