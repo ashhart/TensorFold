@@ -52,9 +52,9 @@ pub const Srpt = struct {
         return false;
     }
 
-    /// The prompt's share of this step: the floor when a reply goes first, else the whole step.
-    pub fn share(s: *const Srpt, decode_first: bool) f64 {
-        return if (decode_first) s.floor else 1;
+    /// The prompt's share of a step: `p`, at most the floor when a reply goes first; a whole prompt stays whole.
+    pub fn share(s: *const Srpt, decode_first: bool, p: f64, whole: bool) f64 {
+        return if (decode_first and !whole) @min(p, s.floor) else p;
     }
 };
 
@@ -105,22 +105,31 @@ test "srpt: no sample yet is no order; a short reply goes first, a long one does
     try std.testing.expect(s.decodeFirst(900_000, &.{200})); // 200 tokens: 4.8 s against 450 s of fill
     try std.testing.expect(!s.decodeFirst(1_000, &.{1_000_000})); // 24,000 s against 0.5 s of fill
     try std.testing.expect(!s.decodeFirst(900_000, &.{ 0, -1 })); // nothing runnable
-    try std.testing.expectEqual(@as(f64, 0.1), s.share(true));
-    try std.testing.expectEqual(@as(f64, 1), s.share(false));
+    try std.testing.expectEqual(@as(f64, 0.1), s.share(true, 1, false));
+    try std.testing.expectEqual(@as(f64, 1), s.share(false, 1, false));
 }
 
 test "srpt: a step at the floor owes nine times its time; a whole step owes nothing" {
     var s: Srpt = .{ .on = true };
     var share: @import("lane_host_fill.zig").Share = .{};
-    share.steppedAt(1000, true, s.share(true));
+    share.steppedAt(1000, true, s.share(true, 1, false));
     try std.testing.expectEqual(@as(i64, 9000), share.debt_ns);
-    share.steppedAt(1000, true, s.share(false));
+    share.steppedAt(1000, true, s.share(false, 1, false));
     try std.testing.expectEqual(@as(i64, 9000), share.debt_ns);
     var whole: @import("lane_host_fill.zig").Share = .{};
     whole.steppedAt(1000, true, 1);
     try std.testing.expectEqual(@as(i64, 0), whole.debt_ns);
     whole.steppedAt(1000, false, 0.1);
     try std.testing.expectEqual(@as(i64, 0), whole.debt_ns);
+}
+
+test "srpt honours --decode-share: its share when the prompt goes first, the floor at most otherwise, 0 whole" {
+    const s: Srpt = .{ .on = true };
+    try std.testing.expectEqual(@as(f64, 0.5), s.share(false, 0.5, false));
+    try std.testing.expectEqual(@as(f64, 0.1), s.share(true, 0.5, false));
+    try std.testing.expectEqual(@as(f64, 0.05), s.share(true, 0.05, false));
+    try std.testing.expectEqual(@as(f64, 1), s.share(true, 1, true));
+    try std.testing.expectEqual(@as(f64, 1), s.share(false, 1, true));
 }
 
 test "srpt off: the host's share and debt are main's" {
