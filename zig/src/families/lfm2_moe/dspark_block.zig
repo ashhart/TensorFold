@@ -18,7 +18,7 @@ const kw = c.kv_heads * c.head_dim;
 const QkArgs = extern struct { len: u32, cap: u32, eps: f32, log2_theta: f32 };
 const AttnArgs = extern struct { len: u32, cap: u32, scale: f32, subs: u32 };
 /// Partials a query row takes in the scratch (the kernels' QH x CHUNKS x SUBS).
-const part_row = c.query_heads * st.chunks * st.subs;
+pub const part_row = c.query_heads * st.chunks * st.subs;
 
 fn attnArgs(lane: *const Lane, keys: u64) AttnArgs {
     return .{ .len = @intCast(keys - 1), .cap = @intCast(lane.cap), .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = st.subs };
