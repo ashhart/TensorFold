@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on Intel GPUs refuses a config with an unknown `layers_block_type` name at load, instead of serving that layer as attention (#1865). Thanks to @jschmied.
+
 - GLM-5.3-Flash on CUDA refuses `TF_GLM_CHUNK_SOLO=4096` beside `--drafter` at load with a clear error, instead of holding 1.6 to 1.9 GiB of prompt buffers that no pass uses (#1842). Thanks to @Bizuayeu.
 
 - The Intel GPU host tests build again: `zig build test-slide-xpu-host` no longer stops with a missing kernel image (#1840). Thanks to @jschmied.
