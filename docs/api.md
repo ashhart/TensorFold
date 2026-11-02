@@ -241,7 +241,7 @@ behind device token-hash qualification; every native family is gated out today, 
 rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
 the prompt's share of a fill step's wall time, time only, never smaller chunks. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets running replies with less estimated work left than a filling long prompt take rounds first, the prompt keeping
-at least 10% of the time. The CUDA, qwen27 Metal and
+at least 10% of the time. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal and
 hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
 whole

@@ -242,7 +242,7 @@ fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
     var buf: [64]i64 = undefined;
     const left = @import("lane_host_srpt.zig").replyTokens(h.core.live.items, &buf);
     const first = h.srpt.decodeFirst(remaining(h, job), left);
-    const p = h.srpt.share(first);
+    const p = h.srpt.share(first, h.share.p, h.decode_cap and h.share.p >= 1);
     h.filling.items[at].stream.settle_step = decoding and p < 1;
     const t0 = std.Io.Clock.awake.now(h.io);
     const rows = step(h, at);
