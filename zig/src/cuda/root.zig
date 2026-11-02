@@ -215,6 +215,8 @@ test {
 }
 pub const qwen35_bf16_rows = @import("qwen35_bf16_rows.zig");
 
+pub const gdn_chain = @import("gdn_chain.zig");
 test {
     _ = @import("tfq3_lifecycle_test.zig");
+    _ = @import("gdn_chain_host_test.zig");
 }
