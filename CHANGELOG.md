@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM's CUDA `TF_KV_PAGES` is read through the profile registry, and startup reports the selection it resolved; the value and where it is read are unchanged (#1959, part of #1660). Thanks to @garvrao80.
+
 - GLM on CUDA can keep the KV pages' latent rows in pinned host memory with `TF_GLM_KV_HOST`, for a 1M-token window on two 96 GB cards; unset, the engine is as before, with identical tokens at TP=2 on two GB10s (#1795, part of #1794). Thanks to @russellmm.
 
 - On HIP, the planned decode score takes four keys a warp on long spans and two on short ones, with the same lane order and folds, so decode runs 7.5-18.9% faster on Qwen3.6-35B-A3B and Qwen3.8-27B at 32K and 64K with identical tokens on a gfx1151 (#1932). Thanks to @AbrahamCete.
