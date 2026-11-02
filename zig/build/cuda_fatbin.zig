@@ -4,19 +4,10 @@ const catalog = @import("cuda_kernels.zig");
 const Kernel = catalog.Kernel;
 const torch_flags = catalog.torch_flags;
 
-const Target = struct {
-    number: u32,
-    suffix: []const u8,
-
-    fn parse(raw: []const u8) Target {
-        var digits: usize = 0;
-        while (digits < raw.len and std.ascii.isDigit(raw[digits])) : (digits += 1) {}
-        return .{
-            .number = std.fmt.parseInt(u32, raw[0..digits], 10) catch @panic("Invalid CUDA SM target"),
-            .suffix = raw[digits..],
-        };
-    }
-};
+/// The `-Dsm` entry and SASS profile rule, kept with the catalog so its host tests cover it.
+pub const Target = catalog.Target;
+pub const Profile = catalog.Profile;
+pub const profile = catalog.profile;
 
 pub fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kernel, sms: []const u8) std.Build.LazyPath {
     var choices = std.mem.tokenizeScalar(u8, sms, ',');
@@ -36,9 +27,9 @@ pub fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: K
     var it = std.mem.tokenizeScalar(u8, sms, ',');
     while (it.next()) |sm| {
         const target = Target.parse(sm);
-        if (target.number < k.min_sm) continue;
+        const p = profile(k, target) orelse continue;
         // arch-specific features (the block-scaled FP4 mma) from sm_120 on; older targets build the trapping fallback
-        const a = if (k.arch_specific and target.number >= 120 and target.suffix.len == 0) "a" else "";
+        const a = if (p.arch_specific and target.suffix.len == 0) "a" else "";
         run.addArg(b.fmt("-gencode=arch=compute_{s}{s},code=sm_{s}{s}", .{ sm, a, sm, a }));
     }
     run.addArgs(&.{ "-MD", "-MF" });

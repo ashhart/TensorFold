@@ -1,4 +1,5 @@
 //! CUDA image names and qualification flags.
+const std = @import("std");
 
 /// Each .cu in zig/kernels/cuda (`src`, else `name`) with the flags its Python extension passes in `extra_cuda_cflags`.
 pub const Kernel = struct {
@@ -8,6 +9,31 @@ pub const Kernel = struct {
     arch_specific: bool = false,
     min_sm: u32 = 0,
 };
+
+/// One `-Dsm` entry: the SM number and any suffix given with it ("120", "121a").
+pub const Target = struct {
+    number: u32,
+    suffix: []const u8,
+
+    pub fn parse(raw: []const u8) Target {
+        var digits: usize = 0;
+        while (digits < raw.len and std.ascii.isDigit(raw[digits])) : (digits += 1) {}
+        return .{
+            .number = std.fmt.parseInt(u32, raw[0..digits], 10) catch @panic("Invalid CUDA SM target"),
+            .suffix = raw[digits..],
+        };
+    }
+};
+
+/// One SASS profile: an SM number, plain or arch-specific (`sm_<n>a`).
+pub const Profile = struct { number: u32, arch_specific: bool };
+
+/// The one profile `k`'s image holds for `sm` (`sm_<n>a` for arch-specific kernels from 120), null below `min_sm`.
+pub fn profile(k: Kernel, sm: Target) ?Profile {
+    if (sm.number < k.min_sm) return null;
+    const added = k.arch_specific and sm.number >= 120 and sm.suffix.len == 0;
+    return .{ .number = sm.number, .arch_specific = added or std.mem.eql(u8, sm.suffix, "a") };
+}
 
 /// The torch-op replacements' qualification flags (runs/006): no contraction, no flush to zero.
 const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };
@@ -133,3 +159,13 @@ pub const torch_flags = [_][]const u8{
     "--expt-relaxed-constexpr",
     "-std=c++20",
 };
+
+test "profile: arch-specific kernels take sm_<n>a from sm_120 on, others plain, none below min_sm" {
+    const ck: Kernel = .{ .name = "ck", .flags = &.{}, .arch_specific = true };
+    const plain: Kernel = .{ .name = "p", .flags = &.{}, .min_sm = 80 };
+    try std.testing.expectEqual(Profile{ .number = 120, .arch_specific = true }, profile(ck, Target.parse("120")).?);
+    try std.testing.expectEqual(Profile{ .number = 121, .arch_specific = true }, profile(ck, Target.parse("121")).?);
+    try std.testing.expectEqual(Profile{ .number = 86, .arch_specific = false }, profile(ck, Target.parse("86")).?);
+    try std.testing.expectEqual(Profile{ .number = 120, .arch_specific = false }, profile(plain, Target.parse("120")).?);
+    try std.testing.expectEqual(@as(?Profile, null), profile(plain, Target.parse("75")));
+}
