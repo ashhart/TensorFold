@@ -156,6 +156,8 @@ pub const File = struct {
     pub fn close(f: *File, io: std.Io) void {
         f.document.deinit();
         f.map.destroy(io);
+        @import("checkpoint_file_cache.zig").release(f.file.handle);
+        @import("checkpoint_cache.zig").drop(f.file);
         f.file.close(io);
         f.* = undefined;
     }

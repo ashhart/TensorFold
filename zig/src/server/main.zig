@@ -107,7 +107,21 @@ pub fn main(init: std.process.Init) !u8 {
         if (warning) |message| log.line("warning: {s}", .{message});
     };
     var problem: []const u8 = "";
-    const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
+    const prepared: ?[]u8 = if (comptime @hasDecl(@import("core"), "gguf_qwen27")) @import("core").gguf_qwen27.local(gpa, io, init.environ_map.get("HOME") orelse "", args.model) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        const detail: []const u8 = switch (err) {
+            error.GgufTokenizerPending => "the GGUF metadata tokenizer adapter is not linked",
+            error.UnsupportedRepackType, error.UnqualifiedGgufAffine => "this GGUF block format has no qualified Metal affine path",
+            error.MultipleGgufFiles => "name one GGUF file explicitly",
+            error.UnqualifiedQwenShape, error.UnqualifiedLayerSchedule => "this Metal import requires the qualified 27B geometry and layer schedule",
+            error.GgufMetalOnly => "GGUF model import is available on Metal only",
+            else => @errorName(err),
+        };
+        return fail(try std.fmt.allocPrint(a, "GGUF model {s}: {s}", .{ args.model, detail }));
+    } else null;
+    defer if (prepared) |path| gpa.free(path);
+    const dir = prepared orelse (try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem));
+    if (prepared != null and args.name.len == 0) args.name = std.fs.path.basename(std.mem.trimEnd(u8, args.model, "/"));
     // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.
     args.drafter_name = args.drafter;
     if (args.drafter) |d| args.drafter = try hub.resolve(a, io, init.environ_map, d, &problem) orelse return fail(problem);

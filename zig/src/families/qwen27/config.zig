@@ -346,3 +346,9 @@ pub fn embedBound(c: *const Config, rows: u64) !u32 {
 test {
     _ = @import("config_test.zig");
 }
+
+/// The qualified Metal 27B geometry and schedule, shared by both source adapters before weight preparation.
+pub fn qualified(c: Config) !void {
+    if (c.hidden != 5120 or c.intermediate != 17408 or c.layers != 64 or c.vocab != 248320 or c.heads != 24 or c.kv_heads != 4 or c.head_dim != 256 or c.k_heads != 16 or c.v_heads != 48 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
+    for (c.kinds[0..c.layers], 0..) |kind, i| if (kind != (if ((i + 1) % 4 == 0) Kind.attention else Kind.linear)) return error.UnqualifiedLayerSchedule;
+}

@@ -38,6 +38,7 @@ const cuda_build = builtin.os.tag == .linux;
 
 /// Python serve flags plus this binary's native-only flags; supported flags are marked native.
 pub const flags = [_]Flag{
+    .{ .name = "--model", .native = true },
     .{ .name = "--host", .native = true },
     .{ .name = "--allowed-host", .kind = .append, .native = true },
     .{ .name = "--allowed-origin", .kind = .append, .native = true },
@@ -297,7 +298,11 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
         if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
             if (std.mem.eql(u8, x, v)) break;
         } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ name, v });
-        try apply(a, &out, name, value, u, &repeated);
+        if (std.mem.eql(u8, name, "--model")) {
+            if (model != null) return fail(u, a, "model was supplied more than once: {s}", .{value.?});
+            if (value.?.len == 0) return fail(u, a, "--model requires a nonempty model path", .{});
+            model = value.?;
+        } else try apply(a, &out, name, value, u, &repeated);
     }
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     if ((out.cfg.batched or out.cfg.force_guided) and out.cfg.options() == null) return fail(u, a, "--cfg-batched and --cfg-force-guided need --cfg-gamma or --cfg-allow-request-gamma", .{});

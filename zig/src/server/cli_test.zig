@@ -468,3 +468,17 @@ test "prompt precision: parsing and request forwarding cover defaults, explicit 
     for ([_][]const []const u8{ &.{ "m", "--prompt-precision" }, &.{ "m", "--prompt-precision", "unknown" }, &.{ "m", "--prompt-precision", "fp4" } }) |argv|
         try std.testing.expectError(error.Usage, parse(a, argv, &usage));
 }
+
+test "model flag and positional model agree, while duplicate model arguments refuse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: cli.Usage = .{};
+    const p = try cli.parse(a, &.{ "--model", "weights.gguf" }, &u);
+    try std.testing.expectEqualStrings("weights.gguf", p.model);
+    const q = try cli.parse(a, &.{"--model=weights.gguf"}, &u);
+    try std.testing.expectEqualStrings(p.model, q.model);
+    try std.testing.expectError(error.Usage, cli.parse(a, &.{ "folder", "--model", "weights.gguf" }, &u));
+    try std.testing.expectError(error.Usage, cli.parse(a, &.{ "--model=weights.gguf", "folder" }, &u));
+    try std.testing.expectError(error.Usage, cli.parse(a, &.{"--model="}, &u));
+}
