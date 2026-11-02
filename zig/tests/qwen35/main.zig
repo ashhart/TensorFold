@@ -10,7 +10,7 @@ const Tensor = qwen35.table.Tensor;
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 
-const usage = "usage: tf-qwen35-test check <model dir> [--tp N --rank R --master H --port P] [--prompts FILE] [--truth T --ids IDS] [--speed] [--only invariants|accuracy|speed] | upload <model dir> [first layers] | digest <model dir> [--tp N --rank R] | layers <model dir> <fixture dir> [--tp N --rank R [--master HOST] [--port P]] | lanes ... | prefill <model dir> <length>... | logits <model dir> <ids.npy> <out.npy> [--f32] [--decode] | rows <model dir> <ids.npy> [n] | draw x\n";
+const usage = "usage: tf-qwen35-test check <model dir> [--tp N --rank R --master H --port P] [--prompts FILE] [--truth T --ids IDS] [--speed] [--only invariants|accuracy|speed] | upload <model dir> [first layers] | digest <model dir> [--tp N --rank R] | layers <model dir> <fixture dir> [--tp N --rank R [--master HOST] [--port P]] | lanes ... | prefill <model dir> <length>... | logits <model dir> <ids.npy> <out.npy> [--f32] [--decode] | rows <model dir> <ids.npy> [n] | hidden <model dir> <ids.npy> <out.npy> [--cut N|whole] [--layers] | draw x\n";
 
 /// The subcommands that take their arguments after the name.
 const commands = [_]struct { name: []const u8, run: *const fn (std.mem.Allocator, std.Io, []const [:0]const u8) anyerror!void }{
@@ -18,6 +18,7 @@ const commands = [_]struct { name: []const u8, run: *const fn (std.mem.Allocator
     .{ .name = "logits", .run = @import("logits_run.zig").run },
     .{ .name = "prefill", .run = @import("prefill_run.zig").run },
     .{ .name = "lanes", .run = @import("lanes_run.zig").run },
+    .{ .name = "hidden", .run = @import("hidden_run.zig").run },
 };
 
 pub fn main(init: std.process.Init) !u8 {
