@@ -468,3 +468,65 @@ test "prompt precision: parsing and request forwarding cover defaults, explicit 
     for ([_][]const []const u8{ &.{ "m", "--prompt-precision" }, &.{ "m", "--prompt-precision", "unknown" }, &.{ "m", "--prompt-precision", "fp4" } }) |argv|
         try std.testing.expectError(error.Usage, parse(a, argv, &usage));
 }
+
+test "prompt cache disk: new spellings ask the engine for exactly the legacy conversation store" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const legacy = try parse(a, &.{ "m", "--learn-conversations", "--learn-dir", "cache with spaces" }, &u);
+    for ([_][]const []const u8{
+        &.{ "m", "--prompt-cache-disk", "cache with spaces" },
+        &.{ "m", "--prompt-cache-disk=cache with spaces" },
+    }) |argv| {
+        const named = try parse(a, argv, &u);
+        try std.testing.expectEqualDeep(legacy, named);
+        try std.testing.expectEqualDeep(try request(a, "d", "t", legacy), try request(a, "d", "t", named));
+    }
+    const defaults = try request(a, "d", "t", try parse(a, &.{"m"}, &u));
+    try std.testing.expect(defaults.learn == null and !defaults.learn_conversations and defaults.spill == .off);
+}
+
+test "prompt cache disk: directory flags keep last-value precedence and existing disk limits" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    for ([_][]const []const u8{
+        &.{ "m", "--learn-dir=old", "--prompt-cache-disk=new" },
+        &.{ "m", "--prompt-cache-disk=old", "--learn-dir=new", "--learn-conversations" },
+        &.{ "m", "--prompt-cache-disk=old", "--prompt-cache-disk=new" },
+    }) |argv| {
+        const opened = try request(a, "d", "t", try parse(a, argv, &u));
+        try std.testing.expectEqualStrings("new", opened.learn.?);
+        try std.testing.expect(opened.learn_conversations);
+    }
+    var named = try parse(a, &.{ "m", "--prompt-cache-disk=cache", "--prompt-cache-gib=2", "--learn-gib=16", "--learn-daily-gib=3", "--learn-min-free-gib=1" }, &u);
+    named.spill_gib = 8;
+    try spillWith(&u, a, named);
+    const opened = try request(a, "d", "t", named);
+    try std.testing.expectEqualStrings("cache", opened.learn.?);
+    try std.testing.expect(opened.learn_conversations and opened.spill == .finish and opened.learn_gib == 8);
+    try std.testing.expect(opened.prompt_cache_gib == 2 and opened.learn_daily_gib == 3 and opened.learn_min_free_gib == 1);
+}
+
+test "prompt cache disk: missing and empty directories are usage errors and the flag is advertised" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    for ([_][]const []const u8{
+        &.{ "m", "--prompt-cache-disk" },
+        &.{ "m", "--prompt-cache-disk", "--no-thinking" },
+        &.{ "m", "--prompt-cache-disk=" },
+        &.{ "m", "--prompt-cache-disk", "" },
+    }) |argv| {
+        try std.testing.expectError(error.Usage, parse(a, argv, &u));
+        try std.testing.expect(std.mem.indexOf(u8, u.message, "--prompt-cache-disk") != null);
+    }
+    const dash = try parse(a, &.{ "m", "--prompt-cache-disk=--cache" }, &u);
+    try std.testing.expectEqualStrings("--cache", dash.learn_dir.?);
+    var output: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&output.writer, .{ .version = "test" });
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"--prompt-cache-disk\": {}") != null);
+}

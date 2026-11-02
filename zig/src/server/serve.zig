@@ -247,6 +247,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     if (s.on_listen) |f| f(port);
     const window = srv.info.context_window;
     if (srv.info.startup.len > 0) log.line("{s}", .{srv.info.startup});
+    if (args.learn_conversations) {
+        const root = args.learn_dir orelse api.prompt_imprint.defaultRoot(a) catch "";
+        if (root.len > 0) log.line("{f}", .{@import("prompt_cache_line.zig").shown(root, srv.info)});
+    }
     const now = std.Io.Clock.awake.now(io).toNanoseconds();
     const loaded = if (s.started > 0) @as(f64, @floatFromInt(now - s.started)) / 1e9 else 0;
     var window_text: [24]u8 = undefined;

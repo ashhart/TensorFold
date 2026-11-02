@@ -641,7 +641,20 @@ spent rate; with more than 128 keys starting requests within one refill, a furth
 
 ## Conversations on disk
 
-`--learn-conversations` (it implies `--learn`) writes every prompt state the server keeps in RAM to disk as well: a
+Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
+
+```sh
+tensorfold serve MODEL --prompt-cache-disk ./prompt-cache
+```
+
+This is equivalent to `--learn-conversations --learn-dir DIR`; both legacy flags remain supported.
+`--learn-conversations` alone keeps its existing default directory, `~/.cache/tensorfold/learned`.
+Both spellings imply `--learn`. If directory flags are repeated or combined, the last directory wins.
+The startup line names the disk tier's directory and the device budget reported by the engine; when the engine
+does not report a device budget, the line says so. `--prompt-cache-gib` still controls the in-memory budget,
+and the existing disk limits described below apply to either spelling.
+
+`--prompt-cache-disk DIR` writes every prompt state the server keeps in RAM to disk as well: a
 conversation's history, the end of each reply, the next turn's background prefill and the shared prefixes, all in one
 store for each model and build. That store takes the place of `--learn`'s store of shared prefixes: a server started
 with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
@@ -712,7 +725,7 @@ it read ahead on an I/O thread, as described above.
 
 Three routes let a client such as the Mac app ask about a conversation. Each takes the body of a chat completion
 (`messages`, `tools`, `chat_template_kwargs`), renders it as that request would be rendered, and answers on the engine's
-thread between rounds. A server started without `--learn-conversations` answers each with 404 and the error message
+thread between rounds. A server started without `--prompt-cache-disk DIR` or `--learn-conversations` answers each with 404 and the error message
 "saved conversations are off: start the server with --learn-conversations"; an engine that keeps no prompt states
 answers 501.
 
