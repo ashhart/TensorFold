@@ -7,8 +7,136 @@
 import argparse
 import hashlib
 import json
+import sys
+from pathlib import Path
+
+# Adapted from run_transformers_inference.py in nvidia/Nemotron-3.5-Parse at the revision below.
 
 REVISION = '4035ffb1d8f8bafcdb867dfaf6f7514f101464f9'
+PROMPT = '</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>'
+COMMANDS = ('reference', 'positions', 'processor', 'compare')
+
+
+def reference(args):
+    import torch
+    from PIL import Image
+    from transformers import AutoModel, AutoProcessor, GenerationConfig
+
+    torch.set_num_threads(4)
+    args.output.mkdir(parents=True, exist_ok=False)
+    (args.output / "input.image").write_bytes(args.image.read_bytes())
+    model_dir = args.model.resolve()
+    source = model_dir / 'hf_nemotron_parse_modeling.py'
+    manifest = dict(reference_revision=REVISION, device=args.device, dtype=args.dtype,
+                    torch_version=torch.__version__, source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                    image_sha256=hashlib.sha256(args.image.read_bytes()).hexdigest(), tensors={})
+
+    def save(name, value):
+        value = value.detach().cpu().contiguous()
+        payload = value.view(torch.uint8).numpy().tobytes()
+        filename = name + '.bin'
+        (args.output / filename).write_bytes(payload)
+        manifest['tensors'][name] = dict(file=filename, shape=list(value.shape), dtype=str(value.dtype),
+                                         sha256=hashlib.sha256(payload).hexdigest())
+
+    model = AutoModel.from_pretrained(model_dir, trust_remote_code=True, local_files_only=True,
+                                      dtype=getattr(torch, args.dtype)).to(args.device).eval()
+    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True, local_files_only=True)
+    image = Image.open(args.image).convert('RGB')
+    inputs = processor(images=[image], text=args.prompt, return_tensors='pt',
+                       add_special_tokens=False).to(args.device)
+    for name, value in inputs.items():
+        if isinstance(value, torch.Tensor):
+            save('input.' + name, value)
+
+    handles = []
+    capture = True
+
+    def tap(name):
+        def record(_module, _inputs, output):
+            if not capture:
+                return
+            if isinstance(output, torch.Tensor):
+                save(name, output)
+            elif isinstance(output, tuple):
+                for i, value in enumerate(output):
+                    if isinstance(value, torch.Tensor):
+                        save(f'{name}.{i}', value)
+        return record
+
+    handles.append(model.encoder.register_forward_hook(tap('encoder.neck')))
+    blocks = model.encoder.model_encoder.radio_model.model.blocks
+    for i, block in enumerate(blocks):
+        handles.append(block.register_forward_hook(tap(f'encoder.block.{i}')))
+    handles.append(blocks[0].register_forward_pre_hook(lambda _module, values: save('encoder.positioned', values[0]) if capture else None))
+    for i, layer in enumerate(model.decoder.layers):
+        handles.append(layer.register_forward_hook(tap(f'decoder.layer.{i}')))
+    handles.append(model.decoder.layernorm_embedding.register_forward_hook(tap('decoder.embedding_norm')))
+    handles.append(model.decoder.layer_norm.register_forward_hook(tap('decoder.final_norm')))
+    config = GenerationConfig.from_pretrained(model_dir, local_files_only=True)
+    config.max_new_tokens = args.max_new_tokens
+    config.do_sample = False
+    config.num_beams = 1
+    config.repetition_penalty = 1.1
+    generation_step = 0
+
+    def save_logits(_module, _inputs, output):
+        nonlocal generation_step, capture
+        if generation_step == 0:
+            save('prefill.logits', output)
+            capture = False
+        save(f'generation.logits.{generation_step}', output[:, -1:, :])
+        generation_step += 1
+
+    generation_hook = model.lm_head.register_forward_hook(save_logits)
+    with torch.inference_mode():
+        output_ids = model.generate(**inputs, generation_config=config)
+    generation_hook.remove()
+    for handle in handles:
+        handle.remove()
+    manifest['prompt_ids'] = inputs['input_ids'].tolist()[0]
+    manifest['output_ids'] = output_ids.tolist()[0]
+    manifest['new_ids'] = manifest['output_ids'][len(manifest['prompt_ids']):]
+    manifest['text'] = processor.batch_decode(output_ids, skip_special_tokens=False)[0]
+    manifest['settings'] = dict(max_new_tokens=args.max_new_tokens, do_sample=False, num_beams=1,
+                                repetition_penalty=1.1)
+    (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    print(manifest['text'])
+
+
+def positions(args):
+    """Content-normalized RADIO positions from the checkpoint's hf_prefix_geometry.py, one-patch axes included."""
+    import importlib.util
+
+    import torch
+
+    torch.set_num_threads(4)
+    spec = importlib.util.spec_from_file_location('parse_geometry', args.model / 'hf_prefix_geometry.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    args.output.mkdir(parents=True, exist_ok=False)
+    hidden, prefix = 8, 10
+    table = (((torch.arange(128 * 128 * hidden) * 17) % 193).float() - 96).div(97).to(torch.bfloat16)
+    cls = torch.arange(prefix * hidden).float().div(83).to(torch.bfloat16)
+
+    def save(name, value):
+        (args.output / name).write_bytes(value.contiguous().view(torch.uint8).numpy().tobytes())
+
+    save('table.bin', table)
+    save('cls.bin', cls)
+    cells = []
+    for i, (height, width) in enumerate([(1, 1), (8, 73), (17, 65), (113, 97), (512, 256), (2047, 1663)]):
+        gh, gw = (height + 15) // 16, ((width + 63) // 64) * 4
+        patch = (((torch.arange(gh * gw * hidden) * 13) % 101).float() - 50).div(257).to(torch.bfloat16)
+        with torch.inference_mode():
+            positioned = module._normalized_2d_position_pages(
+                torch, patches=patch.reshape(1, gh * gw, hidden), pos_embed=table.reshape(1, 128 * 128, hidden),
+                source_rows=128, source_cols=128, image_sizes=[(gh * 16, gw * 16)], patch_size=16,
+                content_sizes=[(height, width)], content_normalized=True)
+        save(f'patches-{i}.bin', patch)
+        save(f'expected-{i}.bin', torch.cat([cls.reshape(prefix, hidden), positioned[0]], dim=0))
+        cells.append(dict(height=height, width=width, gh=gh, gw=gw))
+    (args.output / 'manifest.json').write_text(json.dumps(dict(hidden=hidden, prefix=prefix, cells=cells), indent=2))
 
 
 # Formulas of nvidia/Nemotron-3.5-Parse@4035ffb1d8f8bafcdb867dfaf6f7514f101464f9 processor; no native code.
@@ -50,12 +178,64 @@ def processor(_args):
                           cases=[processor_case(np, Image, h, w) for h, w in PROCESSOR_CASES]), indent=2))
 
 
+def compare(args):
+    import torch
+    from transformers import RepetitionPenaltyLogitsProcessor
+
+    manifest = json.loads((args.reference / 'manifest.json').read_text())
+    ids = list(manifest['prompt_ids'])
+    penalty = RepetitionPenaltyLogitsProcessor(manifest['settings']['repetition_penalty'])
+    mismatches, choices = [], []
+    for step, want in enumerate(manifest['new_ids']):
+        raw = args.native / f'generation.logits.{step}.bin'
+        values = torch.frombuffer(bytearray(raw.read_bytes()), dtype=torch.bfloat16).float().reshape(1, -1)
+        if values.shape[1] != 72512 or not values.isfinite().all():
+            raise ValueError(f'invalid native logits at step {step}')
+        scores = penalty(torch.tensor([ids], dtype=torch.long), values)
+        # GenerationConfig forces EOS only at its maximum length; this matches the shipped example.
+        if step + 1 == manifest['settings']['max_new_tokens']:
+            got = 2
+        else:
+            got = int(scores.argmax(dim=-1).item())
+        choices.append(got)
+        if got != want:
+            mismatches.append(dict(step=step, native=got, reference=want,
+                                   native_score=float(scores[0, got]), reference_score=float(scores[0, want])))
+        ids.append(want)
+    result = dict(compared=len(choices), matched=len(choices) - len(mismatches),
+                  native_choices=choices, reference_ids=manifest['new_ids'], mismatches=mismatches,
+                  method='teacher-forced native model; original HF RepetitionPenaltyLogitsProcessor on FP32 scores')
+    (args.native / 'draw-comparison.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(result, indent=2))
+    raise SystemExit(1 if mismatches else 0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
+    p = commands.add_parser('reference', help='save the HF example workflow (default command)')
+    p.add_argument('--model', type=Path, required=True)
+    p.add_argument('--image', type=Path, required=True)
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--device', default='cpu')
+    p.add_argument('--dtype', choices=('float32', 'bfloat16'), default='bfloat16')
+    p.add_argument('--max-new-tokens', type=int, default=96)
+    p.add_argument('--prompt', default=PROMPT)
+    p.set_defaults(run=reference)
+    p = commands.add_parser('positions', help='build HIP position tests for TF_PARSE_POSITION_DIR')
+    p.add_argument('--model', type=Path, required=True)
+    p.add_argument('--output', type=Path, required=True)
+    p.set_defaults(run=positions)
     p = commands.add_parser('processor', help='print zig/src/families/nemotron_parse/fixtures/processor.json')
     p.set_defaults(run=processor)
-    args = parser.parse_args()
+    p = commands.add_parser('compare', help='check native teacher-forced logits from the probe')
+    p.add_argument('--reference', type=Path, required=True)
+    p.add_argument('--native', type=Path, required=True)
+    p.set_defaults(run=compare)
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in COMMANDS + ('-h', '--help'):
+        argv = ['reference'] + argv
+    args = parser.parse_args(argv)
     args.run(args)
 
 

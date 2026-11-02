@@ -205,3 +205,51 @@ fn readReference(dir: []const u8, name: []const u8, limit: usize) ![]u8 {
     defer a.free(path);
     return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(limit));
 }
+
+test "Parse media admission preserves unpadded content and refuses malformed visual prefixes" {
+    const Image = struct { pixels: []const f32, gh: u32, gw: u32, at: u32, tokens: u32, content_size: ?[2]u32 };
+    const pixels = try a.alloc(f32, 2 * 8 * 768);
+    defer a.free(pixels);
+    var image: Image = .{ .pixels = pixels, .gh = 2, .gw = 8, .at = 0, .tokens = 5, .content_size = .{ 17, 65 } };
+    const media = @import("media.zig");
+    const valid_geometry = try media.geometry(image);
+    try std.testing.expectEqualDeep(processor.Size{ .h = 17, .w = 65 }, valid_geometry.content);
+    image.at = 1;
+    try std.testing.expectError(error.ParseImageMustBePrefix, media.geometry(image));
+    image.at = 0;
+    image.content_size = null;
+    try std.testing.expectError(error.ParseContentSizeRequired, media.geometry(image));
+    for ([_][2]u32{ .{ 0, 65 }, .{ 33, 65 }, .{ 17, 129 }, .{ 17, 64 } }) |bad| {
+        image.content_size = bad;
+        try std.testing.expectError(error.BadParseImage, media.geometry(image));
+    }
+    image.content_size = .{ 17, 65 };
+    image.tokens = 4;
+    try std.testing.expectError(error.BadParseImage, media.geometry(image));
+    image.tokens = 5;
+    image.pixels = pixels[0..3];
+    try std.testing.expectError(error.BadParseImage, media.geometry(image));
+    image.pixels = pixels;
+    image.gw = 7;
+    try std.testing.expectError(error.BadParseImage, media.geometry(image));
+}
+
+test "Parse native tokenizer matches HF task IDs and full serialized OCR output" {
+    const model = @import("parse_options").model_dir orelse return error.SkipZigTest;
+    const reference = @import("parse_options").reference_dir orelse return error.SkipZigTest;
+    const text = try readReference(reference, "manifest.json", 4 << 20);
+    defer a.free(text);
+    const Manifest = struct { prompt_ids: []u32, output_ids: []u32, text: []const u8 };
+    const doc = try std.json.parseFromSlice(Manifest, a, text, .{ .ignore_unknown_fields = true });
+    defer doc.deinit();
+    var tokenizer = try core.tokenizer.loadTokenizer(io, a, model);
+    defer tokenizer.deinit();
+    const prompt = "</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>";
+    const ids = try tokenizer.encode(a, prompt);
+    defer a.free(ids);
+    try std.testing.expectEqualSlices(u32, doc.value.prompt_ids, ids);
+    const decoded = try tokenizer.decode(a, doc.value.output_ids, false);
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings(doc.value.text, decoded);
+    try std.testing.expect(tokenizer.isAdded(1)); // the visual prefix uses the checkpoint's added <pad> marker
+}
