@@ -96,10 +96,7 @@ pub fn route(K: *const ly.Kernels, L: *const L_, s: *const gpu.Scratch, q: *cons
         e.barrier();
     }
     const tap_m = @import("../../core/route_tap_metal.zig");
-    if (tap_m.live()) {
-        e.barrier();
-        tap_m.blitPicks(e, q.pick, 0, q.wts8, 0, rows * c.topk);
-    }
+    if (tap_m.live()) tap_m.blitPicks(e, q.pick, 0, q.wts8, 0, rows * c.topk);
 }
 
 /// The window's experts of normed rows `x` into `out` from q's picks: tiles decoded once for 32 rows (bf16 rows).

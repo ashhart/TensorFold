@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Tap-on replies equal tap-off for Metal families that blit after a concurrent-encoder barrier.
+"""Tap-on replies equal tap-off for Metal families that blit while the tap is live.
 
-Covers GLM, GLM-DSA, Step5, MiniMax and LFM2. Nemotron already had the barrier; this script
-does not cover it. Flash Next (`qwen4_exp`) and Qwen3.5 MoE on Metal never copy
+Covers GLM, GLM-DSA, Step5, MiniMax and LFM2. The blit barrier runs only when
+the tap is live. Nemotron already had a live-gated blit; this script does not
+cover it. Flash Next (`qwen4_exp`) and Qwen3.5 MoE on Metal never copy
 and are refused by name.
 
 Run this on a Metal host with the checkpoints. Host tests do not start a GPU server.
@@ -97,7 +98,7 @@ def checkpoint_of(row: dict) -> str | None:
 
 
 def print_plan() -> None:
-    print("Metal tap-on vs tap-off proofs (barrier before blit)")
+    print("Metal tap-on vs tap-off proofs (blit barrier only while live)")
     print(f"binary: {native_bin()}")
     print()
     for row in FAMILIES:
@@ -208,7 +209,7 @@ def run_family(row: dict, tokens: int, port: int, extra: list[str], out_dir: Pat
         )
         if decode.returncode != 0:
             raise SystemExit(f"{row['family']}: TFR1 decode failed\n{decode.stderr}")
-        result["records"] = json.loads(decode.stdout).get("n_records")
+        result["records"] = len(json.loads(decode.stdout).get("records") or [])
         receipt.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({k: result[k] for k in ("family", "equal", "trace", "records") if k in result}))
     return result

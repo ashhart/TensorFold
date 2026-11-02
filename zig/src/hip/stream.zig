@@ -16,7 +16,7 @@ pub const Stream = struct {
 
     pub fn synchronize(self: Stream) runtime.Error!void {
         try runtime.check(self.r.api.hipStreamSynchronize(self.handle));
-        @import("route_tap_copy.zig").land();
+        if (@import("core").route_tap.live()) @import("route_tap_copy.zig").land();
     }
 
     /// True once every queued item has finished.

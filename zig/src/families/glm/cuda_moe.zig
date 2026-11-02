@@ -78,7 +78,7 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     const shared_id: i32 = @intCast(l.count);
     const flat = direct(k, l, rows, prompt);
     try prepare(k, stream, l, s, x, x_stride, rows, s.pick, if (flat) s.x3.picks else null);
-    cuda.route_tap_copy.afterPick(stream, s.pick, s.wts, rows, l.top_k + 1);
+    if (@import("core").route_tap.live()) cuda.route_tap_copy.afterPick(stream, s.pick, s.wts, rows, l.top_k + 1);
     const stamp = prof_mod.span(k.prof, stream, .experts);
     defer stamp.end();
     if (k.prof) |p| p.mark(stream, .router);
