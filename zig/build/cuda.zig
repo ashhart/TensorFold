@@ -202,6 +202,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     @import("runtime_libraries.zig").tests(b, step);
     const host = b.graph.host;
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = host }) })).step);
+    // the SASS profile rule (cuda_kernels.zig) and the -Dgpu check of prebuilt images
+    for ([_][]const u8{ "zig/build/cuda_kernels.zig", "zig/build/check_product_fatbins.zig" }) |root|
+        step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(root), .target = host }) })).step);
     const cuda = runtime(b, host, .debug, &.{});
     b.step("test-nccl-version-host", "Shared NCCL minimum without a communicator or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"NCCL minimum:"} })).step);
     // H3's library opens its checkpoint with mmap: not Windows
