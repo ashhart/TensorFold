@@ -8,12 +8,12 @@ const c = core.contract.spec;
 const g = core.contract.gates;
 const rows = core.contract.rows;
 
-pub const Which = enum { head, vision, text, layer };
+pub const Which = enum { head, vision, text, prompt, decode, layer };
 fn width(which: Which) usize {
     return switch (which) {
         .head => 64,
         .vision => 1024,
-        .text, .layer => 1536,
+        .text, .prompt, .decode, .layer => 1536,
     };
 }
 fn depth(s: c.Shape) usize {
@@ -94,7 +94,7 @@ pub const Norm = struct {
     pub fn run(n: *Norm) !void {
         const target: hip.DeviceBuffer = .{ .r = n.rig.r, .ptr = @ptrFromInt(n.out), .len = n.count() * 2 };
         try target.copyFromAsync(0, n.x, n.count() * 2, n.rig.s);
-        try n.ops.norm(n.rig.s, n.out, n.weight, if (n.which == .layer) n.bias else null, n.out, n.shape.rows, n.shape.k);
+        try n.apply(n.out, n.out);
         try n.rig.s.synchronize();
         const actual = try n.rig.a.dupe(u8, try n.rig.bytes(n.out, n.count() * 2));
         defer n.rig.a.free(actual);
@@ -102,8 +102,13 @@ pub const Norm = struct {
         if (!std.mem.eql(u8, actual, separate_bytes)) return error.NormAliasChangesOutput;
     }
     fn separate(n: *Norm) ![]const u8 {
-        try n.ops.norm(n.rig.s, n.x, n.weight, if (n.which == .layer) n.bias else null, n.baseline, n.shape.rows, n.shape.k);
+        try n.apply(n.x, n.baseline);
         return n.rig.bytes(n.baseline, n.count() * 2);
+    }
+    fn apply(n: *Norm, input: u64, output: u64) !void {
+        if (n.which == .prompt or n.which == .decode) {
+            try n.ops.normText(n.rig.s, input, n.weight, output, n.shape.rows, if (n.which == .prompt) .prompt else .decode);
+        } else try n.ops.norm(n.rig.s, input, n.weight, if (n.which == .layer) n.bias else null, output, n.shape.rows, n.shape.k);
     }
     pub fn reference(n: *Norm, want: []f64, mag: []f64) !void {
         if (n.which != .layer) return n.rows.?.reference(want, mag);

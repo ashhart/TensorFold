@@ -70,6 +70,16 @@ extern "C" __global__ void __launch_bounds__(256) tf_glmocr_gelu(B* x, unsigned 
     }
 }
 
+extern "C" __global__ void __launch_bounds__(256) tf_glmocr_silu_mul_packed(
+    const B* gate_up, B* out, unsigned long long count, unsigned int width) {
+    const auto i = index();
+    if (i < count) {
+        const auto at = (i / width) * 2 * width + i % width;
+        const float g = float(gate_up[at]);
+        out[i] = B(rounded(g / (1.f + expf(-g))) * float(gate_up[at + width]));
+    }
+}
+
 // Four source patches per merge cell, with channels moved before the patch's two spatial axes.
 extern "C" __global__ void __launch_bounds__(256) tf_glmocr_merge_layout(
     const B* x, B* out, unsigned long long count, unsigned int width, int reverse) {
@@ -102,12 +112,15 @@ extern "C" __global__ void __launch_bounds__(256) tf_glmocr_norm(
     __shared__ float part[256];
     const auto base = static_cast<unsigned long long>(blockIdx.x) * width;
     const int tid = threadIdx.x;
-    if (!layer) {
+    if (layer != 1) {
         unsigned height = 1;
         while (height * 2 <= gridDim.x && height < 16) height *= 2;
         unsigned lanes = 1;
         const unsigned items = width >= 128 ? width / 4 : width;
         while (lanes * 2 <= items && lanes * 2 <= 512 / height && lanes < 256) lanes *= 2;
+        // Decoder reduction geometry follows the token phase, independent of chunk or shared row count.
+        if (layer == 2) lanes = 32;
+        if (layer == 3) lanes = 256;
         float accum[4] = {0.f, 0.f, 0.f, 0.f};
         if (tid < lanes) {
             if (width >= 128) {

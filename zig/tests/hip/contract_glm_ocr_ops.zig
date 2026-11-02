@@ -8,7 +8,7 @@ const c = core.contract.spec;
 const g = core.contract.gates;
 extern "c" fn erf(f64) f64;
 
-pub const Which = enum { bias, fill, cast, add, silu, gelu, merge, filter, split, vision_rope, text_rope };
+pub const Which = enum { bias, fill, cast, add, silu, silu_packed, gelu, merge, filter, split, vision_rope, text_rope };
 fn depth(_: c.Shape) usize {
     return 0;
 }
@@ -18,15 +18,16 @@ fn served(comptime which: Which) []const c.Shape {
         .merge, .split => &.{ .{ .rows = 8, .n = 1024, .k = 1 }, .{ .rows = 20, .n = 1024, .k = 1 } },
         .vision_rope => &.{ .{ .rows = 8, .n = 1024, .k = 2 }, .{ .rows = 24, .n = 1024, .k = 6 } },
         .text_rope => &.{ .{ .rows = 1, .n = 2048, .k = 128 }, .{ .rows = 17, .n = 1024, .k = 128 } },
+        .silu_packed => &.{ .{ .rows = 1, .n = 4608, .k = 1 }, .{ .rows = 4, .n = 4608, .k = 1 }, .{ .rows = 17, .n = 4608, .k = 1 } },
         else => &.{ .{ .rows = 1, .n = 1536, .k = 1 }, .{ .rows = 17, .n = 1024, .k = 1 }, .{ .rows = 4, .n = 9216, .k = 1 }, .{ .rows = 1, .n = 59392, .k = 1 } },
     };
 }
 fn spec(comptime which: Which) c.Spec {
     return .{ .name = "hip GLM-OCR " ++ @tagName(which), .accum = .none, .depth = depth, .ops = switch (which) {
-        .silu, .gelu => 8,
+        .silu, .silu_packed, .gelu => 8,
         .vision_rope, .text_rope => 12,
         else => 1,
-    }, .mids = if (which == .silu) 1 else 0, .out = .bf16, .served = served(which), .tiles = if (which == .filter or which == .vision_rope or which == .text_rope or which == .merge or which == .split)
+    }, .mids = if (which == .silu or which == .silu_packed) 1 else 0, .out = .bf16, .served = served(which), .tiles = if (which == .filter or which == .vision_rope or which == .text_rope or which == .merge or which == .split)
         .{ .{}, .{}, .{} }
     else
         .{ .{ .size = 16 }, .{ .size = 256 }, .{} } };
@@ -75,6 +76,7 @@ pub const Pointwise = struct {
             .merge, .split => if (shape.rows % 4 != 0 or shape.n != 1024) return false,
             .vision_rope => if (shape.k == 0 or shape.k % 2 != 0 or shape.rows % (2 * shape.k) != 0 or shape.n != 1024) return false,
             .text_rope => if ((shape.n != 1024 and shape.n != 2048) or shape.k != 128) return false,
+            .silu_packed => if (shape.n != 4608) return false,
             else => {},
         }
         p.rig.reset();
@@ -82,7 +84,7 @@ pub const Pointwise = struct {
         p.shape = shape;
         const a = p.arena.allocator();
         const size = p.count();
-        p.x = try a.alloc(f64, size);
+        p.x = try a.alloc(f64, size * @as(usize, if (p.which == .silu_packed) 2 else 1));
         p.y = try a.alloc(f64, @max(size, shape.n));
         var prng = std.Random.DefaultPrng.init(seed);
         for (p.x) |*v| {
@@ -133,6 +135,7 @@ pub const Pointwise = struct {
             .cast => try p.ops.castBf16(s, p.dx, p.out, n),
             .add => try p.ops.add(s, p.dx, p.dy, p.out, n),
             .silu => try p.ops.siluMul(s, p.dx, p.dy, p.out, n),
+            .silu_packed => try p.ops.siluMulPacked(s, p.dx, p.out, p.shape.rows),
             .gelu => try p.ops.gelu(s, p.out, n),
             .merge => try p.ops.merge(s, p.dx, p.out, p.shape.rows, p.shape.n),
             .filter => try p.ops.channelsLastFilter(s, p.dx, p.out, p.shape.rows),
@@ -152,6 +155,11 @@ pub const Pointwise = struct {
                 .cast => x,
                 .add => x + p.y[i],
                 .silu => bf(x / (1 + @exp(-x))) * p.y[i],
+                .silu_packed => blk: {
+                    const at = i / width * width * 2 + i % width;
+                    const gate = p.x[at];
+                    break :blk bf(gate / (1 + @exp(-gate))) * p.x[at + width];
+                },
                 .gelu => 0.5 * x * (1 + erf(x / @sqrt(@as(f64, 2)))),
                 .merge => p.x[(i / (4 * width) * 4 + i % 4) * width + (i / 4) % width],
                 .filter => p.x[i / (4 * width) * 4 * width + (i % width) * 4 + (i / width) % 4],

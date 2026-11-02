@@ -6,8 +6,8 @@ const win = builtin.os.tag == .windows;
 pub const video_library = @import("video_library.zig");
 const grammar_library = @import("grammar_library.zig");
 
-pub const Id = enum { cublaslt, cublas, rocblas, miopen, aotriton, nccl, verbs, video, jpeg, webp, grammar, rccl, mcdma_rpc, mcdma_fabric };
-pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, RocblasUnavailable, MiopenUnavailable, AotritonUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
+pub const Id = enum { cublaslt, cublas, rocblas, hipblaslt, miopen, aotriton, nccl, verbs, video, jpeg, webp, grammar, rccl, mcdma_rpc, mcdma_fabric };
+pub const Failure = error{ CublasLtUnavailable, CublasUnavailable, RocblasUnavailable, HipblasltUnavailable, MiopenUnavailable, AotritonUnavailable, NcclUnavailable, VerbsUnavailable, VideoLibraryUnavailable, JpegLibraryUnavailable, WebpLibraryUnavailable, GrammarLibraryUnavailable, RcclUnavailable, McdmaRpcUnavailable, McdmaFabricUnavailable };
 pub const Spec = struct {
     id: Id,
     name: []const u8,
@@ -30,6 +30,7 @@ pub const all = [_]Spec{
     item(.cublaslt, "cuBLASLt", if (win) &.{"cublasLt64_13.dll"} else &.{ "libcublasLt.so.13", "libcublasLt.so" }, "CUDA vision towers (--vision) and CUDA cuBLASLt projections", "install the NVIDIA CUDA 13 cuBLAS runtime; " ++ loader_path ++ "; a driver-only host does not include it", error.CublasLtUnavailable, null, false),
     item(.cublas, "cuBLAS", &.{ "libcublas.so.13", "libcublas.so" }, "Drama CUDA prompt and codec GEMMs", "install the NVIDIA CUDA 13 cuBLAS runtime; " ++ loader_path ++ "", error.CublasUnavailable, null, false),
     item(.rocblas, "rocBLAS", &.{ "librocblas.so.5", "librocblas.so", "/opt/rocm/lib/librocblas.so" }, "HIP BF16 dense projections and image towers", "install the rocBLAS runtime matching the ROCm installation; " ++ loader_path, error.RocblasUnavailable, null, false),
+    item(.hipblaslt, "hipBLASLt", &.{ "libhipblaslt.so.1", "libhipblaslt.so" }, "HIP BF16 projections with a fixed decode algorithm", "install the hipBLASLt runtime matching the ROCm installation; " ++ loader_path, error.HipblasltUnavailable, null, false),
     item(.miopen, "MIOpen", &.{ "libMIOpen.so.1", "libMIOpen.so", "/opt/rocm/lib/libMIOpen.so.1" }, "HIP BF16 image convolutions", "install the MIOpen runtime matching the ROCm installation; " ++ loader_path, error.MiopenUnavailable, null, false),
     item(.aotriton, "AOTriton", &.{"libaotriton_v2.so.0.11.1"}, "HIP BF16 flash attention", "install AOTriton 0.11.1 with its matching aotriton.images directory and set TENSORFOLD_AOTRITON to its library", error.AotritonUnavailable, "TENSORFOLD_AOTRITON", false),
     item(.nccl, "NCCL", &.{"libnccl.so.2"}, "CUDA ranks (including the GLM pair)", "install the NVIDIA NCCL 2 runtime compatible with CUDA 13; " ++ loader_path ++ "", error.NcclUnavailable, null, false),
