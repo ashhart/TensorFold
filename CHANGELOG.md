@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- EAQ containers refuse a shard whose header length runs past its file or past 100 MB before anything is allocated (#1902, part of #1872). Thanks to @jschmied.
+
 - With `TF_NEMOTRON_METAL_KV_PAGES=1`, Nemotron on Metal takes KV pages as a reply grows instead of for its whole context at the start, so a short chat holds 1 page instead of 17. It is off by default (#1837, part of #1293). Thanks to @jschmied.
 
 - Qwen3.5-9B runs on Metal on the 27B's engine, instead of being refused as an unqualified shape (#1826, part of #503). Thanks to @grantoverton.
