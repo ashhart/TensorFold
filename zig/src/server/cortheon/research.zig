@@ -122,7 +122,8 @@ pub fn fallback(a: Allocator, goal: []const u8) Allocator.Error![]const []const 
         var it = std.mem.tokenizeAny(u8, line, " \t");
         var n: usize = 0;
         while (it.next()) |w| : (n += 1) {
-            if (n == 12 or words.items.len + w.len > 120) break;
+            const gap: usize = if (words.items.len > 0) 1 else 0; // the space between words counts toward the cap
+            if (n == 12 or words.items.len + gap + w.len > 120) break;
             if (words.items.len > 0) try words.append(a, ' ');
             try words.appendSlice(a, w);
         }
@@ -264,6 +265,18 @@ test "text beside an image counts in the page budget" {
     const one = try a.alloc(Value, 1);
     one[0] = .{ .object = bare };
     try std.testing.expect(pageBudget(5000, 2048, .{ .array = one }) > 600);
+}
+
+test "a fallback query counts the space before the next word" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var line: std.ArrayList(u8) = .empty;
+    while (line.items.len < 118) try line.append(a, 'x');
+    try line.appendSlice(a, " ab");
+    const q = try fallback(a, line.items);
+    try std.testing.expectEqual(@as(usize, 1), q.len);
+    try std.testing.expect(q[0].len <= 120);
 }
 
 test "a fallback query is omitted when its first word does not fit" {
