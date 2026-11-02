@@ -177,6 +177,14 @@ test "every broken link or library names what to change, before anything opens" 
     try check(top ++ "\"nodes\":[{\"name\":\"m1\",\"address\":\"h\",\"backend\":\"metal\",\"library\":\"lib/libmcdma-fabric.dylib\"},{\"name\":\"m2\",\"address\":\"h\",\"backend\":\"metal\",\"library\":7}]}", &.{ "nodes[0] (m1).library: libmcdma-fabric's absolute path", "nodes[1] (m2).library" });
 }
 
+test "a disaggregated model's per-node paths need cover only its prefill and decode nodes, which run it" {
+    const paths = "\"models\":{\"q\":{\"path\":{\"c1\":\"/m/q\",\"m1\":\"/data/q\"},\"mode\":\"disaggregated\",\"prefill\":[\"c1\"],\"decode\":[\"m1\"]}}}";
+    try check(top ++ macs ++ paths, &.{});
+    try check(top ++ macs ++ "\"models\":{\"q\":{\"path\":{\"c1\":\"/m/q\"},\"mode\":\"disaggregated\",\"prefill\":[\"c1\"],\"decode\":[\"m1\"]}}}", &.{"models.q.path: no path for node m1"});
+    // a converged model's still need every node of the model
+    try check(top ++ macs ++ "\"models\":{\"k\":{\"path\":{\"m1\":\"/m/k\"},\"nodes\":[\"m1\",\"m2\"]}}}", &.{"models.k.path: no path for node m2"});
+}
+
 test "a declared link changes no refusal: Metal and CUDA in one tensor-parallel group stay refused" {
     const linked = top ++ macs ++ "\"links\":[{\"name\":\"l1\",\"kind\":\"cx5\",\"ends\":[{\"node\":\"m1\",\"device\":\"rdma_mcrdma0\",\"via\":\"en7/192.0.2.2\",\"port\":7490,\"gid\":0},{\"node\":\"c1\",\"device\":\"rocep1s0f1\",\"via\":\"enp1/192.0.2.1\",\"port\":7490,\"gid\":1}]}],";
     try check(linked ++ "\"models\":{\"k\":{\"path\":\"/m\",\"nodes\":[\"m1\",\"c1\"]}}}", &.{"different bits"});

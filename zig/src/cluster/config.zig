@@ -426,7 +426,9 @@ fn checkModel(c: Config, m: Model, probs: *Problems) void {
     const members = m.nodes;
     for (members) |n| if (c.find(n) == null) probs.add("models.{s}.nodes: \"{s}\" is not a node", .{ m.id, n });
     for (m.paths) |p| if (c.find(p[0]) == null) probs.add("models.{s}.path: \"{s}\" is not a node", .{ m.id, p[0] });
-    if (m.path == null and m.paths.len > 0) for (members) |n| {
+    // the nodes that load the model: a disaggregated model's prefill and decode lists ("nodes" may default to every node)
+    const loading: []const []const []const u8 = if (m.mode == .disaggregated) &.{ m.prefill, m.decode } else &.{members};
+    if (m.path == null and m.paths.len > 0) for (loading) |list| for (list) |n| {
         if (m.pathFor(n) == null) probs.add("models.{s}.path: no path for node {s}", .{ m.id, n });
     };
     const n: u32 = @intCast(members.len);
