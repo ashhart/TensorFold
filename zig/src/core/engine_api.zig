@@ -577,17 +577,5 @@ pub const originals = @import("originals.zig");
 pub const save_guard = @import("save_guard");
 
 test {
-    _ = @import("lane_embedding_test.zig");
-    _ = speech_guard;
-    _ = @import("lane_host.zig");
-    _ = load_ledger;
-    _ = @import("lane_host_test.zig");
-    _ = @import("lane_root_copy_test.zig");
-    _ = @import("lane_rounds_test.zig");
-    _ = @import("lane_halt_test.zig");
-    _ = @import("prompt_cache.zig");
-    _ = @import("prompt_radix.zig");
-    _ = @import("prompt_imprint.zig");
-    _ = @import("keepalive.zig");
-    _ = @import("originals_test.zig");
+    _ = @import("engine_api_test.zig");
 }
