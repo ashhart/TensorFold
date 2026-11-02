@@ -584,7 +584,7 @@ constant constexpr uint SORT_CHUNKS = 16;  // thread (e, c) counts expert e's pi
 // A row's tap destination (null: none), the address of its first column.
 struct lfm2_tap_row_dst { device bfloat* row; };
 
-// A drafter's tap into each row's own destination: H's rows [rows, D] copied there, column i of `mask` at i * D values, 8 a thread.
+// Copy eight values per thread into each row's masked tap columns; null destinations are skipped.
 [[kernel]] void lfm2_tap_rows(const device bfloat* h [[buffer(0)]], const device lfm2_tap_row_dst* dst [[buffer(1)]], constant uint& mask [[buffer(2)]],
                               uint2 i [[thread_position_in_grid]]) {
   if (i.x >= D / 8) return;

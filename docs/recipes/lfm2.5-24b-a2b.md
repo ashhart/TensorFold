@@ -96,3 +96,8 @@ capture's anchor, so a reused anchor can replace its old row without losing cont
 against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),
 prints each draft against the reference's pick with the margin between the reference's two best tokens, and times
 the drafter's passes; a near tie can pick the other token.
+
+Row-owned capture uses `lfm2_tap_rows`; the original `lfm2_tap` interface is unchanged. Its launch uses
+256 threads and no threadgroup storage. Native offline compiles for all three M1 and M2 architecture
+variants permit 1,024 threads without changing the kernel's machine code. This is compiler evidence,
+not a physical M1/M2 device run or throughput qualification; `--only` checks remain scoped diagnostics.
