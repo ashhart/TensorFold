@@ -106,6 +106,8 @@ pub const Normalizer = union(enum) {
     sequence: []const Normalizer,
     nfc,
     nfd,
+    nfkc,
+    nfkd,
     replace: struct { pattern: Pattern, content: []const u8 },
     prepend: []const u8,
     strip: struct { left: bool, right: bool },
@@ -127,6 +129,8 @@ pub const Normalizer = union(enum) {
         if (std.mem.eql(u8, kind, "Sequence")) return .{ .sequence = try sequence(Normalizer, a, v, "normalizers") };
         if (std.mem.eql(u8, kind, "NFC")) return .nfc;
         if (std.mem.eql(u8, kind, "NFD")) return .nfd;
+        if (std.mem.eql(u8, kind, "NFKC")) return .nfkc;
+        if (std.mem.eql(u8, kind, "NFKD")) return .nfkd;
         if (std.mem.eql(u8, kind, "Replace")) return .{ .replace = .{ .pattern = try Pattern.parse(a, field(v, "pattern")), .content = string(v, "content") orelse return error.InvalidTokenizer } };
         if (std.mem.eql(u8, kind, "Prepend")) return .{ .prepend = string(v, "prepend") orelse return error.InvalidTokenizer };
         if (std.mem.eql(u8, kind, "Strip")) return .{ .strip = .{ .left = flag(v, "strip_left", true), .right = flag(v, "strip_right", true) } };
@@ -138,7 +142,7 @@ pub const Normalizer = union(enum) {
             .sequence => |steps| for (steps) |*step| {
                 if (step.hasForms()) break true;
             } else false,
-            .nfc, .nfd => true,
+            .nfc, .nfd, .nfkc, .nfkd => true,
             else => false,
         };
     }
@@ -153,6 +157,8 @@ pub const Normalizer = union(enum) {
             },
             .nfc => return unicode.normalize(ctx.a, s, .nfc),
             .nfd => return unicode.normalize(ctx.a, s, .nfd),
+            .nfkc => return unicode.normalize(ctx.a, s, .nfkc),
+            .nfkd => return unicode.normalize(ctx.a, s, .nfkd),
             .replace => |r| {
                 // Replacement text takes the alignment of the text it replaces.
                 var out: std.ArrayList(u8) = .empty;
