@@ -4,7 +4,7 @@ const node = @import("node.zig");
 const checkpoint = @import("checkpoint.zig");
 const model = @import("model.zig");
 const roles = @import("roles.zig");
-const canon = @import("canon.zig");
+const canon = @import("canon");
 
 const Allocator = std.mem.Allocator;
 const Range = canon.Range;

@@ -1,6 +1,6 @@
 //! Two-sided link over verbs: per peer a UC queue pair and a ring of one-packet receives that a message fills in order.
 const std = @import("std");
-const abi = @import("verbs_abi.zig");
+const abi = @import("verbs").abi;
 const vqp = @import("verbs_qp.zig");
 const sr = @import("sendrecv.zig");
 

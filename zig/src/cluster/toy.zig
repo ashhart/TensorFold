@@ -1,6 +1,6 @@
 //! Small model split by heads (tensor parallel) and expert groups (expert parallel) for the cluster's exactness tests.
 const std = @import("std");
-const canon = @import("canon.zig");
+const canon = @import("canon");
 const exchange = @import("exchange.zig");
 const round = @import("round.zig");
 
