@@ -102,7 +102,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     const index: c_int = if (o.device) |d| @intCast(d) else hip.Device.ordinal(o.rank);
     const caps = hip.Device.capsOf(index) orelse return refuse(a, problem, "HIP device {d} is not a GPU this engine supports", .{index});
     var notes: hip.Policy.Notes = .{};
-    var policy = hip.Policy.resolveFrom(hip.Policy.forCaps(caps), o.policy, .current, &notes) catch |err| return refuse(a, problem, "the policy \"{s}\" is refused ({s})", .{ o.policy, @errorName(err) });
+    var policy = hip.Policy.resolveFrom(hip.Policy.forCaps(caps, o.tp), o.policy, .current, &notes) catch |err| return refuse(a, problem, "the policy \"{s}\" is refused ({s})", .{ o.policy, @errorName(err) });
     // the step came from the GPU's defaults when the plain defaults under the same flags differ: one rank may fall back
     var plain_notes: hip.Policy.Notes = .{};
     const plain = hip.Policy.resolve(o.policy, .current, &plain_notes) catch policy;
