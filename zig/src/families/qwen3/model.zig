@@ -51,12 +51,11 @@ pub const Model = struct {
         var t: Table = .{ .ck = &ck };
         m.embed = try projection(scratch.allocator(), &t, &up, "embed_tokens", spec.vocab, spec.hidden);
         m.final_norm = try norm(scratch.allocator(), &t, &up, "norm.weight", spec.hidden);
-        ck.release();
         m.layers = try gpa.alloc(Layer, spec.layers);
         for (m.layers, 0..) |*layer, i| {
             _ = scratch.reset(.retain_capacity);
+            // no ck.release() between layers: its fadvise would drop the shards from the page cache mid-load
             layer.* = try readLayer(scratch.allocator(), &t, &up, spec, i);
-            ck.release();
         }
         return m;
     }
