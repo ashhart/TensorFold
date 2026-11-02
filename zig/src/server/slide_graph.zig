@@ -376,6 +376,14 @@ pub const Graph = struct {
         return g.document(a, true);
     }
 
+    /// One immutable view for an audit: graph JSON and copied facts under the same lock, even beside a clear.
+    pub fn auditView(g: *Graph, a: Allocator, dir: ?[]const u8) !struct { document: []const u8, facts: []Fact } {
+        if (dir) |d| g.scanned(d);
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        return .{ .document = try g.document(a, true), .facts = try deleting.copyLocked(g, a) };
+    }
+
     pub fn find(g: *Graph, id: u32) ?*Fact {
         for (g.facts.items) |*f| if (f.id == id) return f;
         return null;
