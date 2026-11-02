@@ -17,8 +17,9 @@ const Encoder = struct {
     steps: [256]u32 = undefined,
     step_count: usize = 0,
     first_release_step: usize = 0,
+    batched: bool = false, // the fake's `prefill_many` with `many_rows`, as a backend that batches short prompts
     fn backend(e: *Encoder) lanes.backend.Backend {
-        e.table = e.base.stepped().vtable.*;
+        e.table = (if (e.batched) e.base.batchedSteps() else e.base.stepped()).vtable.*;
         e.table.first = first;
         e.table.prefill_step = step;
         e.table.embedding = embedding;
@@ -278,4 +279,29 @@ test "embedding lane: fake encoder rows are bit-identical alone and batched acro
         try encodeFixture(chunks, &tokens, &.{ 2, 6 }, &batch);
         try std.testing.expectEqualSlices(u8, std.mem.asBytes(&solo), std.mem.asBytes(&batch));
     }
+}
+
+test "embedding lane: short prompts on a backend that batches prompts each complete alone" {
+    var cfg = try lanes.Config.init(a, .{}, 1, 0);
+    defer cfg.deinit(a);
+    var encoder: Encoder = .{ .batched = true };
+    defer encoder.base.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, encoder.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(a, io, &core, .{ .text_generation = false, .lanes = 2, .context_window = 16, .embeddings = .{ .dimensions = 2, .vocabulary = 256, .max_batch_tokens = 16 } });
+    var output: [2][2]f32 = undefined;
+    var boxes: [2]Box = .{ .{}, .{} };
+    const requests = [_]api.Request{
+        .{ .prompt = &.{ 2, 7 }, .max_tokens = 0, .drafts = false, .embedding = .{ .ends = &.{2}, .dimensions = 2, .output = &output[0] } },
+        .{ .prompt = &.{ 1, 8, 3 }, .max_tokens = 0, .drafts = false, .embedding = .{ .ends = &.{3}, .dimensions = 2, .output = &output[1] } },
+    };
+    for (&requests, &boxes, 1..) |*ask, *box, id| try host.engine().submit(id, ask, .{ .ctx = box, .event = Box.event });
+    try host.start(); // both queued first: a batching backend would take them in one pass
+    defer host.stop();
+    for (&boxes) |*box| try std.testing.expectEqual(api.Reason.length, try box.wait());
+    try std.testing.expectEqualSlices(f32, &.{ 9, 2, 12, 3 }, @as(*const [4]f32, @ptrCast(&output)));
+    try std.testing.expectEqual(@as(usize, 0), encoder.firsts);
+    try std.testing.expectEqual(@as(usize, 2), encoder.releases);
+    try std.testing.expectEqual(@as(usize, 0), encoder.base.many_passes);
 }
