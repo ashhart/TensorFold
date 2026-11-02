@@ -10,8 +10,8 @@ const Engine = engine.Engine;
 
 /// TF_GLM_KV_SHARE=n: keep prompts as pool pages and at most n states past them (0 or unset: off).
 pub fn sharing() !usize {
-    const v = std.c.getenv("TF_GLM_KV_SHARE") orelse return 0;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch error.BadGlmKvShare;
+    const v = @import("core").profile.get(.TF_GLM_KV_SHARE) orelse return 0;
+    return std.fmt.parseInt(usize, v, 10) catch error.BadGlmKvShare;
 }
 
 /// Below 4 states a stream, live streams evict each other's before a resume reaches them.

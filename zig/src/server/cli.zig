@@ -62,6 +62,7 @@ pub const flags = [_]Flag{
     .{ .name = "--vision-image-tokens", .native = true },
     .{ .name = "--vision-video-tokens", .native = true },
     .{ .name = "--context", .native = true },
+    .{ .name = "--profile", .choices = &.{"stable"}, .native = true },
     .{ .name = "--max-frames", .native = true },
     .{ .name = "--speed-up", .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
@@ -177,6 +178,7 @@ pub const Args = struct {
     metrics_open: bool = false,
     dashboard: bool = false,
     context: ?i64 = null,
+    profile: api.profile.Profile = .stable,
     max_frames: ?u32 = null,
     silence: api.speech_guard.Config = .{},
     cfg: @import("drama_cfg.zig").Flags = .{},
@@ -398,6 +400,11 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     }
     if (is(name, "--chat-template")) {
         out.chat_template = v;
+        return;
+    }
+    if (is(name, "--profile")) {
+        out.profile = std.meta.stringToEnum(api.profile.Profile, v) orelse
+            return fail(u, a, "argument --profile: only stable is served; fast-exact and fast need qualification", .{});
         return;
     }
     if (is(name, "--max-frames")) {

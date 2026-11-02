@@ -278,6 +278,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | Flag | Meaning |
 | --- | --- |
 | `--host HOST`, `--port PORT` | Listen address and port, default `127.0.0.1:8080`. |
+| `--profile stable` | Explicitly preserve current defaults; [profiles](docs/profiles.md) describes the initial switch registry and startup report. |
 | `--name NAME` | Model ID advertised to clients. |
 | `--alias NAME` | Another accepted model ID; repeat for multiple aliases. |
 | `--api-key KEY` | Require a bearer key; repeat for multiple keys. |

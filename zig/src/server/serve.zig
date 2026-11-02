@@ -116,6 +116,12 @@ fn env(s: Setup, name: []const u8) ?[]const u8 {
     return m.get(name);
 }
 
+const ProfileEnvironment = struct {
+    pub fn get(_: @This(), name: [:0]const u8) ?[]const u8 {
+        return platform.getenv(name);
+    }
+};
+
 /// Serves until a stop signal; the process exit status.
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     stop_requested.store(false, .release);
@@ -244,6 +250,9 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const now = std.Io.Clock.awake.now(io).toNanoseconds();
     const loaded = if (s.started > 0) @as(f64, @floatFromInt(now - s.started)) / 1e9 else 0;
     var window_text: [24]u8 = undefined;
+    const profile_line = @import("profile_line.zig").format(a, args.profile, s.model_type, s.identity.backend, ProfileEnvironment{}) catch
+        "profile: stable; registered overrides: unavailable (out of memory)";
+    log.line("{s}", .{profile_line});
     log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{
         s.served,                                                  args.host,                                                                                   port,   shownSampling(a, s.sampling),
         @import("draft_line.zig").shown(args.no_drafts, srv.info), if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
