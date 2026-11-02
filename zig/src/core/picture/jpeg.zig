@@ -146,10 +146,14 @@ const Markers = struct {
 };
 
 pub fn decode(io: std.Io, a: Allocator, data: []const u8) picture.Error!picture.Samples {
+    return decodeWithLimits(io, a, data, .{});
+}
+
+pub fn decodeWithLimits(io: std.Io, a: Allocator, data: []const u8, limits: picture.Limits) picture.Error!picture.Samples {
     var m: Markers = .{};
     defer m.exif.deinit(a);
     try walk(a, data, &m);
-    try picture.fits(m.width, m.height);
+    try limits.fits(m.width, m.height);
     if (m.components == 4) return error.CmykJpeg;
     if (!m.ended) return error.Invalid; // libjpeg would read past the end: Pillow's load refused the truncated bytes
     const f = try load(io, a);

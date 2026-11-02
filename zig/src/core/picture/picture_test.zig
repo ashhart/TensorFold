@@ -209,6 +209,36 @@ test "sizes are judged as 0.6.6 judged them" {
     try std.testing.expectError(error.Invalid, picture.fits(0, 100_000_000));
 }
 
+test "explicit decode limits admit a large source while retaining defaults and the absolute bomb bound" {
+    const larger: picture.Limits = .{ .pixels = 32 << 20 };
+    try std.testing.expectError(error.Oversized, picture.fits(5184, 3456));
+    try larger.fits(5184, 3456);
+    try std.testing.expectError(error.Oversized, larger.fits(8193, 1));
+    try std.testing.expectError(error.Oversized, larger.fits(8192, 4097));
+    try std.testing.expectError(error.Invalid, larger.fits(std.math.maxInt(u64), 2));
+    try std.testing.expectError(error.Invalid, (picture.Limits{ .side = 100000, .pixels = 100000000 }).fits(9000, 10000));
+    try std.testing.expectError(error.Invalid, (picture.Limits{ .pixels = 0 }).fits(1, 1));
+}
+
+test "caller decode limits reach every admitted image header before pixel allocation" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const golden = try goldens(arena);
+    var checked: usize = 0;
+    for (golden.cases) |case| {
+        if (case.problem != null or case.width * case.height <= 1) continue;
+        const bytes = (try payload(arena, case.url)) orelse continue;
+        const format = picture.sniff(bytes);
+        if (format == .jpeg and !picture.jpeg.available(std.testing.io, arena)) continue;
+        if (format == .webp and !picture.webp.available(std.testing.io, arena)) continue;
+        if (format == .unknown) continue;
+        try std.testing.expectError(error.Oversized, picture.decodeWithLimits(std.testing.io, std.testing.allocator, bytes, .{ .pixels = 1 }));
+        checked += 1;
+    }
+    try std.testing.expect(checked > 0);
+}
+
 test "alpha over white keeps opaque values and whitens clear ones" {
     for (0..256) |c| try std.testing.expectEqual(@as(u8, @intCast(c)), picture.overWhite(@intCast(c), 255));
     try std.testing.expectEqual(@as(u8, 255), picture.overWhite(0, 0));
