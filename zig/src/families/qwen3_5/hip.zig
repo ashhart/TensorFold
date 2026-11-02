@@ -39,6 +39,7 @@ test {
     _ = @import("weights/shard.zig");
     _ = @import("weights/projection.zig");
     _ = @import("weights/checkpoint_test.zig");
+    _ = @import("weights/checkpoint_hf_test.zig");
     _ = @import("weights/real_test.zig");
     _ = view;
     _ = moe;
