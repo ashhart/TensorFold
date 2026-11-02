@@ -370,6 +370,7 @@ test "every registered family is listed for capabilities" {
 
 test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy drafts remain" {
     const F = glm_ocr.native;
+    try std.testing.expect(!reasoning(F)); // GLM-OCR replies carry no reasoning block
     try std.testing.expectEqualStrings(F.mtp_refusal, flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 1 }).?);
     try std.testing.expectEqualStrings(F.tp_refusal, flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .tp = 2 }).?);
     try std.testing.expect(flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 0 }) == null);
