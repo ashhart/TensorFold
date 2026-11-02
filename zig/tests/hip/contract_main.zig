@@ -27,6 +27,7 @@ const ocr_ops = @import("glm_ocr_ops").Ops;
 const ocr_points = @import("contract_glm_ocr_ops.zig");
 const ocr_norms = @import("contract_glm_ocr_norm.zig");
 const item_k = @import("contract_wmma_item.zig");
+const embed_k = @import("contract_embed.zig");
 
 const g = core.contract.gates;
 
@@ -179,6 +180,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&items, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&items) |*x| x.deinit();
     if (matrix) for (&items) |*x| try kernels.append(a, x.kernel());
+    var embeds: [4]embed_k.Embed = undefined;
+    var nembeds: usize = 0;
+    defer for (embeds[0..nembeds]) |*x| x.deinit();
+    for (std.enums.values(embed_k.Which)) |w| {
+        embeds[nembeds] = try .init(a, &r, s, &l, ctl, w);
+        nembeds += 1;
+    }
+    for (embeds[0..nembeds]) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     var ocr = try ocr_ops.load(&r);
     defer ocr.unload();
