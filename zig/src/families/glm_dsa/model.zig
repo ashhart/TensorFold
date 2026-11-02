@@ -67,7 +67,7 @@ pub const Model = struct {
         var p = pack.Pack.init(m.gpa);
         defer p.deinit();
         var xl: ?ex.experts.Layer = if (m.c.isMoe(n)) try ex.experts.Layer.open(m.gpa, io, dir, @intCast(n)) else null;
-        defer if (xl) |*x| x.close(io);
+        defer if (xl) |*x| x.closeCopied(io);
         const w = try wt.load(m.gpa, io, dir, &m.c, manifest, n, &p, if (xl) |*x| x else null);
         const caches = @as(u64, slots) * context * (576 + if (w.full) @as(u64, 128) else 0) * 2;
         if (m.device.allocated() + p.bytes.items.len + caches > m.limit) {
@@ -81,7 +81,7 @@ pub const Model = struct {
 
     fn loadVocab(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: *const cfg.Config) !Vocab {
         var f = try st.File.open(gpa, io, try std.fmt.allocPrint(gpa, "{s}/dense/exlr8-vocab.safetensors", .{dir}));
-        defer f.close(io);
+        defer f.closeCopied(io);
         var p = pack.Pack.init(gpa);
         defer p.deinit();
         const emb = try ex.dense.Matrix.get(&f, "embed_tokens");
