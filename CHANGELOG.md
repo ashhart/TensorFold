@@ -51,6 +51,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The benchmark clients refuse a nonpositive `--tokens`, `--reps` or `--levels` entry, or a malformed `--levels` list, with a clear error and exit status 2 before any request, instead of failing mid-run or writing zero-stream cells (#1869, fixes #1867). Thanks to @garvrao80.
 
 - Qwen3.8-Flash-Next on Macs, opt-in: `TENSORFOLD_PREFILL_POLICY=fcfs` serves long prompts that arrive together oldest first, in chunks of `TENSORFOLD_PREFILL_TOKENS` rows (default 2,048) between decode rounds, with the same tokens. With eight 14K-token prompts at once on an M3 Ultra, the last user's first token comes after 93.6 s instead of 326.9 s; unset, nothing changes (#1843). Thanks to @ivanfioravanti.
+- Qwen3.8-27B EXL3 checkpoints on CUDA prefill prompts much faster, with the same tokens: on a GB10, 2K-token prompts run 42% faster at 3 bpw and 2.6x faster at 4 bpw, and decode gains 5 to 12% (#1467). Thanks to @BHCC2025.
 
 - On CUDA, every family's loader drops its checkpoint from the page cache once the weights are on the GPU, as Flash Next does since 1.2.1, so a GB10's shared memory doesn't hold them twice: a served Qwen3.8-27B frees about 15 GiB. Files read at runtime (PLE rows, DeepSeek's Engram tables) are kept (part of #1868).
 
