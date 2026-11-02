@@ -19,7 +19,7 @@ pub fn group(x: []const u16, bits: u8, codes: []u8, scale: *u16, bias: *u16) voi
     bias.* = toBf16(if (q0 == 0) lo else edge);
     const s = toF32(scale.*);
     const b = toF32(bias.*);
-    @memset(codes, 0);
+    if (bits != 8) @memset(codes, 0);
     for (x, 0..) |v, i| {
         const q: u8 = @intFromFloat(std.math.clamp(@round((toF32(v) - b) / s), 0, bins));
         if (bits == 8) codes[i] = q else codes[i / 2] |= q << @intCast((i % 2) * 4);
@@ -42,24 +42,28 @@ pub const Job = struct {
     src: []const u16,
     k: usize,
     bits: u8,
+    /// Zero keeps file order; otherwise each head's interleaved rows become half-split pairs.
+    pair_dim: usize = 0,
     codes: []u8,
     scales: []u16,
     biases: []u16,
     fn run(j: Job, from: usize, to: usize) void {
         const groups = j.k / 64;
         const per = 64 * @as(usize, j.bits) / 8;
-        for (from..to) |r| for (0..groups) |g| {
-            const at = r * groups + g;
-            group(j.src[r * j.k + g * 64 ..][0..64], j.bits, j.codes[at * per ..][0..per], &j.scales[at], &j.biases[at]);
-        };
+        for (from..to) |r| {
+            const src_row = if (j.pair_dim == 0) r else halfSplit(r, j.pair_dim);
+            for (0..groups) |g| {
+                const at = r * groups + g;
+                group(j.src[src_row * j.k + g * 64 ..][0..64], j.bits, j.codes[at * per ..][0..per], &j.scales[at], &j.biases[at]);
+            }
+        }
     }
 
     /// The job over its rows on every CPU (at most 16 threads).
-    pub fn all(j: Job, gpa: std.mem.Allocator, rows: usize) !void {
+    pub fn all(j: Job, rows: usize) !void {
         const threads = @min(std.Thread.getCpuCount() catch 1, 16);
         const per = (rows + threads - 1) / threads;
-        const handles = try gpa.alloc(std.Thread, threads);
-        defer gpa.free(handles);
+        var handles: [16]std.Thread = undefined;
         var spawned: usize = 0;
         defer for (handles[0..spawned]) |h| h.join();
         var at: usize = 0;
@@ -114,5 +118,40 @@ test "lfm2 dspark: half-split rows rotated by the half-split rule equal interlea
         const r = moved[h * dim + i + dim / 2];
         try std.testing.expectEqual(a * cs - b * sn, l * cs - r * sn);
         try std.testing.expectEqual(a * sn + b * cs, l * sn + r * cs);
+    };
+}
+
+test "lfm2 dspark: quantized row pairing matches materialized rows across heads and thread partitions" {
+    const n = 24;
+    const k = 128;
+    const dim = 8;
+    var src: [n * k]u16 = undefined;
+    for (&src, 0..) |*v, i| v.* = toBf16(@as(f32, @floatFromInt((i * 79 + i / k * 13) % 257)) * 0.0625 - 7);
+    for ([_]usize{ 0, dim }) |pair_dim| for ([_]u8{ 4, 8 }) |bits| {
+        var moved: [n * k]u16 = undefined;
+        for (0..n) |r| {
+            const from = if (pair_dim == 0) r else halfSplit(r, pair_dim);
+            @memcpy(moved[r * k ..][0..k], src[from * k ..][0..k]);
+        }
+        var want_codes: [n * k]u8 = @splat(0xff);
+        var want_scales: [n * k / 64]u16 = undefined;
+        var want_biases: [n * k / 64]u16 = undefined;
+        const per = 64 * @as(usize, bits) / 8;
+        for (0..n * k / 64) |g| group(moved[g * 64 ..][0..64], bits, want_codes[g * per ..][0..per], &want_scales[g], &want_biases[g]);
+        var codes: [n * k]u8 = @splat(0xa5);
+        var scales: [n * k / 64]u16 = undefined;
+        var biases: [n * k / 64]u16 = undefined;
+        const job: Job = .{ .src = &src, .k = k, .bits = bits, .pair_dim = pair_dim, .codes = codes[0 .. n * k * @as(usize, bits) / 8], .scales = &scales, .biases = &biases };
+        job.run(0, 3);
+        job.run(3, 11);
+        job.run(11, n);
+        try std.testing.expectEqualSlices(u8, want_codes[0..job.codes.len], job.codes);
+        try std.testing.expectEqualSlices(u16, &want_scales, &scales);
+        try std.testing.expectEqualSlices(u16, &want_biases, &biases);
+        @memset(&codes, 0xff);
+        try job.all(n);
+        try std.testing.expectEqualSlices(u8, want_codes[0..job.codes.len], job.codes);
+        try std.testing.expectEqualSlices(u16, &want_scales, &scales);
+        try std.testing.expectEqualSlices(u16, &want_biases, &biases);
     };
 }

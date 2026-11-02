@@ -23,7 +23,10 @@ pub const Rig = struct {
         errdefer device.deinit();
         const queue = try device.queue();
         errdefer queue.deinit();
-        return .{ .device = device, .queue = queue, .k = try kernels.load(device) };
+        var k = try kernels.load(device);
+        errdefer k.deinit();
+        try k.loadBf16(device);
+        return .{ .device = device, .queue = queue, .k = k };
     }
 
     pub fn deinit(r: *Rig) void {

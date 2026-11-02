@@ -1,4 +1,4 @@
-//! Row-owned LFM2 taps: exact copies into masked columns; null destinations and other columns stay unchanged.
+//! First normalization's raw owned taps: masked columns are exact copies; null destinations remain unchanged.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -12,7 +12,7 @@ const hidden = 2048;
 const taps = 5;
 /// The destination columns written: one layer captured twice, the columns beside and between them kept.
 const mask: u32 = 0b01010;
-pub const name = "metal lfm2 tap rows lfm2_tap_rows";
+pub const name = "metal lfm2 owned norm tap";
 
 /// A row with no destination keeps its columns' prior values.
 fn dark(row: usize) bool {
@@ -56,11 +56,13 @@ pub const Probe = struct {
     args: [2]rig_.Ref = undefined,
     y: rig_.Ref = undefined,
     tab: rig_.Ref = undefined, // each row's destination address, 0 for none
+    gain: rig_.Ref = undefined,
+    normalized: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, mutation: controls.Mutation) !Probe {
         const text = try controls.source(a, mutation);
         defer if (mutation != .none) a.free(text);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, text, "lfm2_tap_rows"), .mutation = mutation };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, text, "lfm2_norm_tap"), .mutation = mutation };
     }
 
     fn drop(p: *Probe) void {
@@ -100,6 +102,9 @@ pub const Probe = struct {
         p.args[1] = try p.rig.input(std.mem.asBytes(&mask));
         p.tab = try p.rig.scratch(s.rows * 8);
         p.y = try p.rig.output(p.count() * 2);
+        const gain: [hidden]u16 = @splat(0x3f80);
+        p.gain = try p.rig.input(std.mem.sliceAsBytes(&gain));
+        p.normalized = try p.rig.scratch(s.rows * hidden * 2);
         return true;
     }
 
@@ -115,10 +120,15 @@ pub const Probe = struct {
         const e = pass.e;
         e.setPipeline(p.pipe);
         e.setBuffer(p.args[0].buf, p.args[0].off, 0);
+        e.setBuffer(p.args[0].buf, p.args[0].off, 1);
+        e.setBuffer(p.gain.buf, p.gain.off, 2);
+        e.setValue(@as(f32, 1e-5), 3);
+        e.setValue(@as(u32, 0), 4);
+        e.setBuffer(p.normalized.buf, p.normalized.off, 5);
         e.useResource(p.y.buf, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-        e.setBuffer(p.tab.buf, p.tab.off, 1);
-        e.setBuffer(p.args[1].buf, p.args[1].off, 2);
-        e.dispatchThreads(mtl.Size.of(hidden / 8, p.rows, 1), mtl.Size.of(256, 1, 1));
+        e.setBuffer(p.tab.buf, p.tab.off, 6);
+        e.setBuffer(p.args[1].buf, p.args[1].off, 7);
+        e.dispatchGroups(mtl.Size.of(p.rows, 1, 1), mtl.Size.of(hidden / 4, 1, 1));
         return p.rig.finish(pass);
     }
 

@@ -323,7 +323,8 @@ pub const Metal = struct {
         self.gen += 1;
         try fwd.runHeld(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all, held[0..count], wait);
         for (segments[0..windows.len]) |seg| {
-            const last = seg.cache.last.?;
+            const last = &seg.cache.last.?;
+            last.committed = &self.scratch;
             seg.cache.tap = self.tapped(seg.cache, last.rows, seg.tap, last.base);
         }
         const logits = self.scratch.logits.slice(u16, total * c.vocab);
@@ -345,7 +346,6 @@ pub const Metal = struct {
             base += w.rows();
         }
     }
-
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
         for (windows, paths) |w, path| try (try self.cacheOf(w.stream)).keep(&self.scratch, path);

@@ -52,10 +52,20 @@ fn stageTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []c
 
 /// Untapped target outputs versus the capture, including duplicate final taps and every admitted column.
 pub fn targetTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []const u32) !void {
+    const twin = m.kernels.twin;
+    defer m.kernels.twin = twin;
+    try targetTapMode(gpa, m, scratch, ids);
+    if (twin) {
+        m.kernels.twin = false;
+        try targetTapMode(gpa, m, scratch, ids);
+    }
+}
+
+fn targetTapMode(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []const u32) !void {
     const original = scratch.taps.?;
     defer scratch.taps = original;
-    for ([_]usize{ 1, 4, 16, ids.len }, 0..) |n, shape| {
-        if (n > ids.len or (shape == 3 and (n == 1 or n == 4 or n == 16))) continue;
+    for ([_]usize{ 1, 4, 8, 16, ids.len }, 0..) |n, shape| {
+        if (n > ids.len or (shape == 4 and (n == 1 or n == 4 or n == 8 or n == 16))) continue;
         scratch.taps = null;
         var plain = try st.Cache.init(gpa, m.device, &m.config.attention, n + 16);
         defer plain.deinit();
@@ -92,7 +102,7 @@ pub fn targetTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids
             };
             try stageTaps(gpa, m, scratch, ids[0..n], record, taps, x, logits);
         }
-        std.debug.print("target taps: {d} rows, released/duplicate/max-column layouts preserve all normalized and logit bytes\n", .{n});
+        std.debug.print("target taps: {d} rows, twin {}, released/duplicate/max-column layouts preserve all normalized and logit bytes\n", .{ n, m.kernels.twin });
     }
 }
 

@@ -62,7 +62,7 @@ off; the lane core verifies every draft, so a drafted reply equals its `"draft":
 
 The drafter has no embedding and no head of its own:
 
-- Context: the target's rows after layers 2, 10, 18, 26 and 34 (the backend's taps, `lfm2_tap_rows`), through `fc` and
+- Context: the target's rows after layers 2, 10, 18, 26 and 34 (captured by the fused normalization kernels), through `fc` and
   `hidden_norm`, give each of its five layers' context keys and values (k_norm, then RoPE at the row's position).
 - Block: the pending token and mask tokens run five Qwen3 layers with non-causal attention over the context and the
   block, then the target's head. A block is as long as the deepest chain its pass holds, at most the nine rows the
@@ -73,8 +73,9 @@ The drafter runs the released bf16 matrices as they are (`--drafter-bits 0`, the
 quantizes them at load to 8-bit MLX affine codes in groups of 64: about 361 MiB of weights
 against 625 MiB. Weight storage does not guarantee serving throughput; the server logs the mode, and 4 bits is refused.
 Both run on the family's kernels
-(bf16 on `lfm2_bf16_rows`, `lfm2_bf16_mma` and `lfm2_markov_scan_bf16`, 8-bit on `core/tile_qmm`); the q and k rows are reordered so that the target's half-split RoPE kernel gives the
-checkpoint's interleaved RoPE. Its own kernels are `lfm2_tap_rows`, `lfm2_attn_block` and `lfm2_attn_block_merge`
+(bf16 on `lfm2_bf16_rows`, `lfm2_bf16_mma`, the M5 GPU tensor path and `lfm2_markov_scan_bf16`,
+8-bit on `core/tile_qmm`); the q and k rows are reordered so that the target's half-split RoPE kernel gives the
+checkpoint's interleaved RoPE. Its own kernels include `lfm2_attn_block` and `lfm2_attn_block_merge`
 (non-causal block attention, the target's attention kernels with a template flag), `lfm2_markov_scan` and
 `lfm2_markov_pick` (a Markov step) and `lfm2_draft_ids` (a hold's drafts into the next verify's rows on the GPU, so
 the host does not wait for a hold that fits one pass). Each kept prompt state keeps the drafter's context too, so a
@@ -87,8 +88,8 @@ cohort into several passes, priced in execution order rather than as one impossi
 A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
 and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
 Zero-grant rounds therefore retain contiguous context for later drafts; they do not disable drafting by stream count.
-Decode and verify forwards copy their taps (`lfm2_tap_rows`) through each row's destination straight into the lane's
-stage, without a per-round host copy. A forward waits on a pending hold before replacing rows that hold still
+Decode and verify forwards capture their raw taps during normalization through each row's destination straight
+into the lane's stage, without a per-round host copy. A forward waits on a pending hold before replacing rows that hold still
 reads; only accepted rows become staged context. Stage overflow projects only the retained prefix before the next
 capture's anchor, so a reused anchor can replace its old row without losing contiguous context.
 
@@ -97,10 +98,10 @@ against an fp32 host reference of the released checkpoint (the same taps and the
 prints each draft against the reference's pick with the margin between the reference's two best tokens, and times
 the drafter's passes; a near tie can pick the other token.
 
-Row-owned capture uses `lfm2_tap_rows`; the original `lfm2_tap` interface is unchanged. Its launch uses
-256 threads and no threadgroup storage. Native offline compiles for all three M1 and M2 architecture
-variants permit 1,024 threads without changing the kernel's machine code. This is compiler evidence,
-not a physical M1/M2 device run or throughput qualification; `--only` checks remain scoped diagnostics.
+Row-owned capture uses `lfm2_norm_tap`, `lfm2_combine_norm_tap` and the sorted-combine variant;
+the original diagnostic `lfm2_tap` interface is unchanged. The fused norms launch 512 threads with
+144 bytes of threadgroup storage. Sorted combine retains a 512-thread source reservation. Resource
+declarations are not physical-device or throughput qualification; `--only` checks remain scoped diagnostics.
 
 ### Verify schedule
 
@@ -138,3 +139,43 @@ record the constructed timing cases and source hashes; they are not device-throu
 
 `tf-lfm2-dspark` also prints the confidence
 head against its fp32 reference and times shared holds of 2 to 16 streams.
+
+### Shared native paths in the confidence stage
+
+The shared native cutover leaves this stage's confidence/depth decisions, hold grants, acceptance-cap
+pricing, probe cadence and owned context unchanged. It does not import the later allocation-stage
+controller or the top candidate's subsequent pricing policies.
+
+The loader leaves matrices in the checkpoint until needed. Ordinary BF16 matrices, `W1` and the
+optional confidence projection read directly into their final Metal buffers. Paired Q/K matrices use
+one reusable staging matrix and reorder rows directly into their destination. Coded matrices apply
+the same row mapping during quantization. The overwritten 8-bit clear is removed; 4-bit packing's
+required clear remains in the quantization helper, although 4-bit serving is still refused. Spawned
+quantization threads are joined on failure.
+
+Context absorption rotates keys and stores values without computing discarded query heads. Target
+and drafter Q projections write `queries`, then normalize and rotate into the existing padded `x`
+after its projection consumers finish. Attention reads `x`, keeping Metal input/output arguments
+disjoint. Target scratch no longer retains unused Q or sort-order backing. BF16 drafter sums retain
+only the quantized target-head requirement; 8-bit drafters keep their original sums capacity.
+
+Target Q/K/V and gate/up projections share row sums only when input width, group, sums regime and
+ordinary-versus-tensor route agree. Each matrix retains its own code width, and down projections
+recompute their sums. Sorted expert combine can feed the next or final RMSNorm and raw taps in one
+dispatch, preserving expert-pick order, both BF16 boundaries, duplicate columns and null destinations.
+The native twin path keeps its original arithmetic.
+
+BF16 projections use M5 GPU tensor instructions from 8 physical rows for wide matrices and 16 for
+other matrices. Capability comes from the GPU architecture, not Apple Neural Engine availability.
+The tensor numerical contract retains the predecessor's scalar-row bound through 32 rows and the
+128-thread, 128-column geometry. Without that pipeline, this confidence branch retains its original
+scalar projections through 32 rows, then 64x64 tiles. On non-tensor devices only, wide BF16 gate/up
+projections fuse with SwiGLU at 4 through 16 physical rows. Projection and activation BF16 rounding
+remain canonical; smaller or narrow shapes and tensor-capable devices use separate projections.
+The 8-bit routing is unchanged.
+
+Only a successfully completed native all-row verification marks its exact scratch owner. Keeping
+that full identity frame skips redundant convolution-state and logit copies. Partial, reordered,
+generic and last-row frames keep their copy path; snapshots and release order remain unchanged.
+Chain windows build positions directly without unused parent/depth arrays; tree handling is unchanged.
+These are source behavior and storage/work changes, not performance qualification of this head.
