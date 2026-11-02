@@ -3,6 +3,7 @@ import argparse
 import ctypes
 import hashlib
 import importlib.metadata
+import importlib.util
 import inspect
 import json
 import time
@@ -11,6 +12,25 @@ from pathlib import Path
 MODEL_REVISION = "2e85a62840ccac27daa451df36c736c4636b8628"
 IMAGE_REVISION = "9dd8e4710f6b2ddf5184d308639e0359bc7b55be"
 VERSION = "5.5.4"
+# The revision's non-weight sources: configuration, tokenizer, template, processor and the model card.
+SOURCES = {
+    "README.md": "172334449c3df98650bc9a42781c254c64c9d466b440e2ca8ce31f99829212b2",
+    "chat_template.jinja": "062e7ee4cc8defa88a5938b5d456dc60366ffd80647f918946ee747bf09ddc7c",
+    "config.json": "ad537817b2becde827cbb23569a1dd83a352ee64cc34ce751a4ef000ecce4b5f",
+    "generation_config.json": "4e2a3412f65b2a21d315d928986c55723d3e60dfb92c3982a5b9fd56835b0aa5",
+    "preprocessor_config.json": "02cc50c36240882ae35e8cd4077a25a379664108185d728d261cb785aefeccff",
+    "processor_config.json": "a56fbd559186fefd6c22a3acc6a393a18a9fe52c264692a122a143d24042112b",
+    "tokenizer.json": "aa0fd058c73a5718bb191f6672dc16d122ee0147b20c123d1726514298f9968a",
+    "tokenizer_config.json": "95abd49942be9cdc6e2653528aed7b4c1cb9e180828421d3488ab38da3057016",
+}
+# The model and processor code ships in Transformers 5.5.4, not in the checkpoint; paths are package-relative.
+LIBRARY = {
+    "models/glm_ocr/configuration_glm_ocr.py": "7015c0aa18811ab058e228a9c343bc07bf266abb2753a66a2c371720b6612c53",
+    "models/glm_ocr/modeling_glm_ocr.py": "f667126388eacde9ca93983c1fc34488f4c169717a6ff5900c1479d2c6bb7db4",
+    "models/glm46v/image_processing_glm46v.py": "41fa88e258a4b291f167d77085eee989dbebff1776c336121e2f4185b6e0eef1",
+    "models/glm46v/image_processing_pil_glm46v.py": "3506c3f76284c90d3ed9d4e44e5091cb09ceb4fcd8f382cb2a90aa18923c7598",
+    "models/glm46v/processing_glm46v.py": "91ba14d315a2059e4f0f811618394f201401a9858648c1f66c4637f25fe628db",
+}
 SCHEMA = {
     "id_number": "", "last_name": "", "first_name": "", "date_of_birth": "",
     "address": {"street": "", "city": "", "state": "", "zip_code": ""},
@@ -25,6 +45,28 @@ def sha(path):
 def pinned_transformers(what):
     if importlib.metadata.version("transformers") != VERSION:
         raise RuntimeError(f"{what} requires official Transformers {VERSION}")
+
+
+def hashed(root, pins, what):
+    """Return the hashes of the pinned files under root, or refuse when any differs from its pin."""
+    found = {name: sha(root / name) if (root / name).is_file() else None for name in pins}
+    if wrong := sorted(name for name, digest in found.items() if digest != pins[name]):
+        raise RuntimeError(f"{what} differs from its pin: {', '.join(wrong)}")
+    return found
+
+
+def pinned(checkpoint):
+    """Return the checkpoint and Transformers source hashes, or refuse sources that differ from the pins."""
+    pinned_transformers("the source pins")
+    package = Path(importlib.util.find_spec("transformers").origin).parent
+    return dict(checkpoint=hashed(Path(checkpoint), SOURCES, f"checkpoint {MODEL_REVISION}"),
+                transformers=hashed(package, LIBRARY, f"Transformers {VERSION}"))
+
+
+def sources(args):
+    """Check the checkpoint and Transformers sources against the pins and print their hashes; no model loads."""
+    print(json.dumps(dict(model_revision=MODEL_REVISION, transformers=VERSION, source_sha256=pinned(args.checkpoint)),
+                     indent=2))
 
 
 def device_pci(torch):
@@ -56,7 +98,7 @@ def capture(args):
     import torch
     from transformers import AutoProcessor, GlmOcrForConditionalGeneration
 
-    pinned_transformers("reference")
+    source_sha256 = pinned(args.checkpoint)
     pci = device_pci(torch)
     if pci != args.pci.lower():
         raise RuntimeError(f"selected GPU {pci} differs from requested GPU {args.pci}")
@@ -180,9 +222,7 @@ def capture(args):
                    gpu=torch.cuda.get_device_name(), free_before=free, total_memory=total,
                    peak_allocated=torch.cuda.max_memory_allocated(), seconds=elapsed, output_ids=ids,
                    text=processor.decode(ids, skip_special_tokens=True), top_tokens=top,
-                   config_sha256=sha(args.checkpoint / "config.json"),
-                   runtime=runtime_versions(),
-                   model_source_sha256=sha(inspect.getfile(GlmOcrForConditionalGeneration)))
+                   source_sha256=source_sha256, runtime=runtime_versions())
     (args.output / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps({k: receipt[k] for k in ("pci", "seconds", "text", "peak_allocated")}, ensure_ascii=False), flush=True)
 
@@ -194,7 +234,7 @@ def processor_fixtures(args):
     from transformers import AutoConfig, AutoProcessor, GlmOcrModel
     from transformers.models.glm46v.image_processing_glm46v import smart_resize
 
-    pinned_transformers("fixtures")
+    pinned(args.checkpoint)
     cfg = AutoConfig.from_pretrained(args.checkpoint, local_files_only=True)
     processor = AutoProcessor.from_pretrained(args.checkpoint, local_files_only=True)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -312,6 +352,9 @@ def examples(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
+    pins = commands.add_parser("sources", help="check the checkpoint and Transformers sources against the pins")
+    pins.add_argument("checkpoint", type=Path)
+    pins.set_defaults(func=sources)
     run = commands.add_parser("capture", help="run the HIP reference for one examples.json case")
     run.add_argument("checkpoint", type=Path)
     run.add_argument("examples", type=Path)
