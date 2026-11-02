@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
+const scoring = @import("lane_host_score.zig");
 
 /// The fake backend's entries with a score of its own: label i scores prompt.len + i, the mass 7.5.
 const Scorer = struct {
@@ -61,4 +62,49 @@ test "a backend's score runs on the engine thread, a failure comes back as Faile
     host.stop();
     try std.testing.expectError(error.Failed, engine.score(&.{1}, &.{2}, logits[0..1], false));
     try std.testing.expectEqual(@as(usize, 2), Scorer.calls);
+}
+
+/// Closes its host during the first score, as a drain's halt does while the engine thread answers a queue.
+const Closer = struct {
+    var host: ?*LaneHost = null;
+    var calls: usize = 0;
+
+    fn score(_: *anyopaque, _: []const u32, _: []const u32, logits: []f64, _: bool) anyerror!f64 {
+        calls += 1;
+        const h = host.?;
+        h.lock();
+        h.closing = true;
+        h.unlock();
+        @memset(logits, 1);
+        return 0;
+    }
+};
+
+test "a queue answered while the host closes runs the started score and fails the rest" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    const plain = target.backend();
+    var vt = plain.vtable.*;
+    vt.score = Closer.score;
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, .{ .ptr = plain.ptr, .vtable = &vt }, clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    defer host.scores.asks.deinit(gpa);
+    Closer.host = &host;
+    Closer.calls = 0;
+    var logits: [3][1]f64 = .{ .{0}, .{0}, .{0} };
+    var asks: [3]scoring.Ask = undefined;
+    for (&asks, &logits) |*ask, *row| {
+        ask.* = .{ .prompt = &.{1}, .labels = &.{2}, .logits = row, .mass = false };
+        try host.scores.asks.append(gpa, ask);
+    }
+    scoring.answer(&host);
+    try std.testing.expectEqual(@as(usize, 1), Closer.calls);
+    try std.testing.expect(!asks[0].failed and asks[0].done);
+    try std.testing.expectEqual(@as(f64, 1), logits[0][0]);
+    for (asks[1..]) |ask| try std.testing.expect(ask.failed and ask.done);
 }
