@@ -345,6 +345,13 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
     b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
+    const copies = b.step("test-nemotron-copies-host", "Nemotron CUDA copy gates and plain equality without devices");
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const rt = runtime(b, host, mode, &.{});
+        const fs = family(b, host, mode, rt, draft_ids);
+        const m = engines(b, host, mode, rt, fs.core, fs.lanes, fs.nemotron, fs.heat, fs.qwen35, fs.qwen_vision).engines;
+        copies.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Nemotron copies:"} })).step);
+    }
     @import("cuda_fault_host.zig").steps(b, cuda, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), native);
     @import("release_cuda_refusal.zig").tests(b, step, native_modules.api, mods.nemotron);
     @import("qwen_cost_open.zig").tests(b, mods, native_modules, step);
