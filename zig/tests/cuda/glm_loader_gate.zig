@@ -282,12 +282,54 @@ fn denseMade(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []con
     return .{ .made = try p.gpa.dupe(u8, std.mem.sliceAsBytes(words)) };
 }
 
+/// csf0_v1 matrix `module`'s rows [lo, hi) and inputs [klo, khi), each part its own copy, for experts32's packers.
+fn cut32(p: *Plan, module: []const u8, lo: usize, hi: usize, klo: usize, khi: usize) !cuda.experts32.Matrix {
+    const w = try p.ck.get(try std.fmt.allocPrint(p.a, "{s}.weight", .{module}));
+    const b = try p.ck.get(try std.fmt.allocPrint(p.a, "{s}.weight_scale.csf0_bases", .{module}));
+    const o = try p.ck.get(try std.fmt.allocPrint(p.a, "{s}.weight_scale.csf0_codes", .{module}));
+    const kk = 2 * w.dim(1);
+    if (w.dtype != .u8 or lo > hi or hi > w.dim(0) or klo > khi or khi > kk or klo % 64 != 0 or (khi - klo) % 64 != 0) return error.CutOutside;
+    const n = hi - lo;
+    const k = khi - klo;
+    const codes = try p.a.alloc(u8, n * k / 2);
+    const offsets = try p.a.alloc(u8, n * (k / 64));
+    for (0..n) |r| {
+        @memcpy(codes[r * k / 2 ..][0 .. k / 2], w.bytes[(lo + r) * kk / 2 + klo / 2 ..][0 .. k / 2]);
+        @memcpy(offsets[r * (k / 64) ..][0 .. k / 64], o.bytes[(lo + r) * (kk / 64) + klo / 64 ..][0 .. k / 64]);
+    }
+    return .{ .codes = codes, .bases = b.bytes[lo..hi], .offsets = offsets };
+}
+
+/// A csf0_v1 layer's experts as experts32 packs them.
+fn experts32Made(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, up: bool) !Want {
+    const at = P ++ "layers.{d}.mlp.experts.{d}.";
+    const Y = cuda.experts32.Nvfp4b32Experts;
+    const d: usize = c.hidden;
+    const cut = s.moe;
+    const ni = cut.len();
+    const per = if (up) Y.bytes(1, ni, d, 2) / 4 else Y.bytes(1, d, ni, 1) / 4;
+    const out = try p.gpa.alloc(u32, c.experts * per);
+    defer p.gpa.free(out);
+    for (0..c.experts) |e| {
+        const block = out[e * per ..][0..per];
+        if (up) {
+            const g = try cut32(p, try std.fmt.allocPrint(p.a, at ++ "gate_proj", .{ i, e }), cut.lo, cut.hi, 0, d);
+            const u = try cut32(p, try std.fmt.allocPrint(p.a, at ++ "up_proj", .{ i, e }), cut.lo, cut.hi, 0, d);
+            Y.packGateUp(block, g, u, ni, d);
+        } else {
+            Y.packOne(block, try cut32(p, try std.fmt.allocPrint(p.a, at ++ "down_proj", .{ i, e }), 0, d, cut.lo, cut.hi), d, ni);
+        }
+    }
+    return .{ .made = try p.gpa.dupe(u8, std.mem.sliceAsBytes(out)) };
+}
+
 /// The routed experts' tiles: gate and up by the rank's rows (packGateUp), down by its inputs (packOne).
 fn expertsMade(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, up: bool) !Want {
     const at = P ++ "layers.{d}.mlp.experts.{d}.";
     if (i == c.layers and (try p.ck.get(try std.fmt.allocPrint(p.a, at ++ "gate_proj.weight", .{ i, 0 }))).dtype == .bf16) {
         return .{ .skip = "the GPU quantizer's, from the MTP layer's bf16 experts" };
     }
+    if (p.ck.has(try std.fmt.allocPrint(p.a, at ++ "gate_proj.weight_scale.csf0_bases", .{ i, 0 }))) return experts32Made(p, c, s, i, up);
     const X = cuda.experts.Nvfp4Experts;
     const d: usize = c.hidden;
     const cut = s.moe;

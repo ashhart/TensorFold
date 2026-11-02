@@ -4,6 +4,8 @@ const std = @import("std");
 
 /// The NVFP4 group size ModelOpt writes for this format.
 pub const nvfp4_group = 16;
+/// The group size of csf0_v1, this engine's own: no other reader takes it.
+pub const csf0_group = 32;
 
 /// A MIXED_PRECISION module's recipe, as this engine reads it (the activations stay bf16 whatever the recipe names).
 pub const Recipe = enum {
@@ -11,6 +13,8 @@ pub const Recipe = enum {
     nvfp4,
     /// NVFP4 whose block scales are stored as csf_32x2_v1 (quant/csf.zig decodes them).
     nvfp4_csf,
+    /// NVFP4 with an e4m3 scale every 32 inputs: csf0_v1's row base plus 4-bit offset (experts32.Matrix).
+    nvfp4_csf0,
     /// W4A16_NVFP4: NVFP4 weights without an input scale.
     w4a16_nvfp4,
     /// MXFP8: e4m3 weights, a UE8M0 scale every 32 inputs.
@@ -110,6 +114,9 @@ fn recipeOf(entry: ?std.json.ObjectMap) ?Recipe {
     const group = o.get("group_size");
     const blocks = o.get("weight_block_size");
     const encoding = o.get("weight_scale_encoding");
+    if (std.ascii.eqlIgnoreCase(algo, "NVFP4") and std.mem.eql(u8, text(encoding) orelse "", "csf0_v1")) {
+        return if (int(group) == csf0_group and blocks == null) .nvfp4_csf0 else null;
+    }
     if (std.ascii.eqlIgnoreCase(algo, "NVFP4") or std.ascii.eqlIgnoreCase(algo, "W4A16_NVFP4")) {
         if (int(group) != nvfp4_group or blocks != null) return null;
         if (std.ascii.eqlIgnoreCase(algo, "W4A16_NVFP4")) return if (encoding == null) .w4a16_nvfp4 else null;
@@ -233,7 +240,7 @@ test "nvidia/GLM-5.3-Flash-FP4-Local's recipes: a module's, and its tensors' und
     var count = std.EnumArray(Recipe, usize).initFill(0);
     var it = r.modules.valueIterator();
     while (it.next()) |v| count.getPtr(v.*).* += 1;
-    try std.testing.expectEqualSlices(usize, &.{ 0, 42, 77, 205, 170, 0 }, &count.values); // the vision tower's MLPs too
+    try std.testing.expectEqualSlices(usize, &.{ 0, 42, 0, 77, 205, 170, 0 }, &count.values); // the vision tower's MLPs too
     const at = "model.language_model.layers.";
     const cases = [_]struct { []const u8, ?Recipe }{
         .{ at ++ "3.mlp.experts.17.gate_proj.weight", .nvfp4_csf }, // routed experts: one entry a layer
@@ -322,6 +329,36 @@ test "recipes this engine does not read are refused by module" {
     defer mixed.deinit();
     try std.testing.expectEqual(@as(?Recipe, .fp8), mixed.of("m.out_proj.weight_scale"));
     try std.testing.expectEqual(@as(?Recipe, .nvfp4), mixed.of("m.mlp.up_proj"));
+}
+
+test "csf0_v1 is NVFP4 at group 32 alone; a group of 32 without it, or any other pairing, is refused by module" {
+    var why: Why = .{};
+    var r = try admitRecipes(std.testing.allocator,
+        \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers":
+        \\ {"m.3.experts": {"quant_algo": "NVFP4", "group_size": 32, "weight_scale_encoding": "csf0_v1"},
+        \\  "m.45.experts": {"quant_algo": "W4A16_NVFP4", "group_size": 16}}}}
+    , &why);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(?Recipe, .nvfp4_csf0), r.of("m.3.experts.0.gate_proj.weight"));
+    try std.testing.expectEqual(@as(?Recipe, .w4a16_nvfp4), r.of("m.45.experts.0.gate_proj.weight"));
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4", "group_size": 32}}
+    , "m.e: NVFP4");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4", "group_size": 16, "weight_scale_encoding": "csf0_v1"}}
+    , "m.e: NVFP4");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4", "group_size": 64, "weight_scale_encoding": "csf0_v1"}}
+    , "m.e: NVFP4");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4", "weight_scale_encoding": "csf0_v1"}}
+    , "m.e: NVFP4");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "W4A16_NVFP4", "group_size": 32, "weight_scale_encoding": "csf0_v1"}}
+    , "m.e: W4A16_NVFP4");
+    try expectRecipesRefused(
+        \\, "quantized_layers": {"m.e": {"quant_algo": "NVFP4", "group_size": 32, "weight_block_size": [1, 32], "weight_scale_encoding": "csf0_v1"}}
+    , "m.e: NVFP4");
 }
 
 test "empty MIXED_PRECISION recipes retain their identity beside single-format NVFP4" {

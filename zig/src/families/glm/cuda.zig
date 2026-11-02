@@ -42,6 +42,7 @@ pub const snapshots = @import("cuda_snapshots.zig");
 pub const kv_host = @import("cuda_kv_host.zig");
 
 test {
+    _ = @import("cuda_formats_csf0_test.zig");
     _ = @import("cuda_tile.zig");
     _ = @import("cuda_kv8_test.zig");
     _ = kv8_ref;
