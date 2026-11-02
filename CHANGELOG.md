@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- `core/gguf.zig` reads GGUF files with every length and offset checked before use, and repacks GGUF's Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K, Q3_K and Q2_K blocks exactly into per-group affine weights. It is the first step toward native GGUF on Apple Silicon (part of #1920).
+
 - With `TF_NEMOTRON_METAL_KV_PAGES` off, Nemotron on Metal's paged KV checks cost one null check a pass, and debug builds assert that every pass's K/V rows sit inside the lane's pages (#1914, part of #1293). Thanks to @jschmied.
 
 - Flash Next on CUDA reads its experts past the page cache with O_DIRECT, and keeps a load's shards open, so a cold start on a GB10 drops from about 100 s to 55 s with the same replies and the n-gram table still cached. `TF_LOAD_DIRECT=0` keeps the mapped reads (#1901, fixes #1873). Thanks to @jschmied.
