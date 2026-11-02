@@ -3,6 +3,8 @@ const std = @import("std");
 const picture = @import("core").picture;
 const c = @import("config.zig");
 const Allocator = std.mem.Allocator;
+pub const input_limits: picture.Limits = .{ .pixels = 32 << 20 };
+const output_limits: picture.Limits = .{ .side = 16384, .pixels = c.max_pixels / c.temporal };
 pub const Error = picture.Error || error{ BadPixels, AspectRatio, ImageBudget, ContextExceeded };
 
 pub const Geometry = struct {
@@ -25,7 +27,7 @@ pub const Geometry = struct {
 pub fn geometry(height: usize, width: usize) Error!Geometry {
     if (height == 0 or width == 0) return error.Invalid;
     if (height > picture.max_side or width > picture.max_side) return error.Oversized;
-    try picture.fits(width, height);
+    try input_limits.fits(width, height);
     var h: f64 = @floatFromInt(height);
     var w: f64 = @floatFromInt(width);
     const factor = c.patch * c.merge;
@@ -47,7 +49,7 @@ pub fn geometry(height: usize, width: usize) Error!Geometry {
         wb = @ceil(w * beta / factor) * factor;
     }
     const g: Geometry = .{ .h = @intFromFloat(hb), .w = @intFromFloat(wb) };
-    try picture.fits(g.w, g.h);
+    try output_limits.fits(g.w, g.h);
     return g;
 }
 
@@ -70,7 +72,7 @@ pub const Prepared = struct {
 };
 
 pub fn prepare(io: std.Io, a: Allocator, bytes: []const u8, max_tokens: usize) Error!Prepared {
-    var rgb = try picture.decode(io, a, bytes);
+    var rgb = try picture.decodeWithLimits(io, a, bytes, input_limits);
     defer rgb.deinit(a);
     return prepareRgb(a, rgb, max_tokens);
 }

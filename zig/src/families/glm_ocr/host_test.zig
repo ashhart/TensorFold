@@ -155,6 +155,15 @@ test "GLM-OCR image positions match Transformers across multiple non-square imag
     try std.testing.expectError(error.BadImageSpan, positions.fill(corrupt, images, rows));
 }
 
+test "GLM-OCR admits the unchanged linked bee image and output-side rounding" {
+    const g = try processor.geometry(3456, 5184);
+    try std.testing.expectEqualDeep(processor.Geometry{ .h = 1792, .w = 2688 }, g);
+    try std.testing.expectEqual(@as(usize, 6144), g.tokens());
+    const wide = try processor.geometry(41, 8192);
+    try std.testing.expectEqualDeep(processor.Geometry{ .h = 28, .w = 8204 }, wide);
+    try std.testing.expectError(error.Oversized, processor.geometry(8192, 8192));
+}
+
 test "GLM-OCR refuses invalid geometry, pixel buffers and budgets before allocation" {
     try std.testing.expectError(error.Invalid, processor.geometry(0, 10));
     try std.testing.expectError(error.Oversized, processor.geometry(std.math.maxInt(usize), 10));
