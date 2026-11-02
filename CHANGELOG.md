@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5-9B runs on Metal on the 27B's engine, instead of being refused as an unqualified shape (#1826, part of #503). Thanks to @grantoverton.
+
 - The kernel contract computes its affine and GLM float64 references on worker threads, so it finishes sooner, with the same reference bytes (#1776). Thanks to @BlivionIaG.
 
 - Host code: sixteen hand-written fp32-to-bf16 copies now use core's one rounding, identical on every input; a negative NaN no longer panics a Debug build (#1864, fixes #1863). Thanks to @jschmied.
