@@ -337,6 +337,24 @@ serial, resumed against fresh, by `token_sha`) matched on 8 of 8 short-prompt ce
 tokens with a real resume, and replays after a restart matched too. A conversation grown by 6,144 tokens a turn
 to the 140,288 window kept swap at 653 to 656 MB, with a 43.57 GiB peak footprint.
 
+### A 48 GB M5 Pro Mac mini on 1.2.1
+
+Halfpenny Mac measured these on a rack-mounted Mac mini with the release binary; the 1.1.0 runs of the same cells
+are [public receipts](https://tensorfold.dev/benchmarks?contributor=7cc22071-45c2-4df0-8466-2cc25904b4fe) on the
+board.
+
+| | |
+| --- | --- |
+| Machine | Mac mini Mac17,16, Apple M5 Pro, 15-core CPU, 16-core GPU, 48 GB, macOS 27.0.1 (26A434), headless |
+| Runtime | TensorFold 1.2.1, the native Metal binary from Homebrew (`ashhart/tensorfold/tensorfold`), no Python |
+| Checkpoints | `TensorFold/Qwen3.8-27B-MLX-4bit@22d8d538`, `z-lab/Qwen3.8-27B-DFlash2@50307d4c` |
+| Launch | `tensorfold benchmark TensorFold/Qwen3.8-27B-MLX-4bit`, managed server, defaults; `--serial` for the plain rows |
+
+Decode medians from the [public benchmark command](README.md#measurements), 256-token replies, five repeats a cell,
+in tok/s for code sampled, chat sampled, code greedy and chat greedy: 89.1, 47.2, 79.3 and 56.4 with DFlash2;
+17.3, 17.3, 17.3 and 17.3 with `--serial`. First text arrived in 71 to 73 ms on every cell. The 1.1.0 binary served
+86.5, 46.1, 80.2 and 53.3 on the same cells. The machine was otherwise idle and no wired-limit sysctl was set.
+
 ## Calibration and checks
 
 The draft calibration metadata names public prompts. When regenerating it, start its server with
