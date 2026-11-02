@@ -41,7 +41,15 @@ const g = core.contract.gates;
 pub fn main(init: std.process.Init) !u8 {
     const a = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len == 1) return if (try run(a, init.io) > 0) 1 else 0;
+    if (args.len == 1) {
+        var bad: []const u8 = "";
+        select.validateAll(a, &families.entries, &core.contract.hip_records.records, &bad) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            std.debug.print("FAIL kernel-contract: {s} ({s})\n", .{ select.explain(err), bad });
+            return 2;
+        };
+        return if (try run(a, init.io) > 0) 1 else 0;
+    }
     const image_args = args.len == 3 or args.len == 4;
     if (image_args and std.mem.eql(u8, args[1], "image")) return image(a, init.io, args[2], if (args.len == 4) args[3] else "full");
     if (args.len != 3 or !std.mem.eql(u8, args[1], "limits")) {
@@ -66,15 +74,8 @@ fn image(a: std.mem.Allocator, io: std.Io, group_name: []const u8, profile_name:
     };
     var bad: []const u8 = "";
     const sel = select.resolve(a, &families.entries, &core.contract.hip_records.records, group_name, &bad) catch |err| {
-        const why = switch (err) {
-            error.OutOfMemory => return err,
-            error.UnknownGroup => "no kernel group has that name",
-            error.NoEntry => "the group has no entry in contract_families.zig",
-            error.MissingRecord => "the entry names a record that is not registered",
-            error.AmbiguousRecord => "the entry names a record that is registered more than once",
-            error.EmptySelection => "the entry selects no gate-5 record",
-        };
-        std.debug.print("FAIL image {s}: {s} ({s})\n", .{ group_name, why, bad });
+        if (err == error.OutOfMemory) return err;
+        std.debug.print("FAIL image {s}: {s} ({s})\n", .{ group_name, select.explain(err), bad });
         if (err == error.UnknownGroup) {
             std.debug.print("groups:", .{});
             for (@typeInfo(hip.kernels.Group).@"enum".field_names) |name| std.debug.print(" {s}", .{name});
