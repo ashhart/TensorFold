@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The Flash Next recipe covers native HIP on a Strix Halo iGPU, with speed and quality for three checkpoints (#1747, fixes #1617). Thanks to @gilby.
+
 - HIP gains a shared rocBLAS BF16 projection with FP32 sums, loaded as an optional runtime library. Nothing calls it yet (#1930, part of #1927). Thanks to @laudney.
 
 - The prompt cache can let a family count repeated image or keyed prompts as repeats, under the cache's own key. No family uses it yet (#1929, part of #1927). Thanks to @laudney.
