@@ -65,25 +65,12 @@ fn reply(h: *Host, id: api.Id, request: *const api.Request, hooks: run.Hooks) !r
     h.eng.r.gdn_pipe = h.shared_gdn_pipe;
     var back = try tf.flashnext_backend.Backend.init(h.gpa, h.eng, &.{h.eng.r.window.capacity});
     defer back.deinit();
-    back.unwrap_snapshot = unwrap;
     if (h.vis != null) back.images = .{ .ctx = h, .build = buildImages, .release = releaseImages };
     h.prompt = request.prompt;
-    // Text states retain their owned wrapper; image frames use the shared host's independent arithmetic.
-    const cache: ?*api.prompt_cache.Store = if (request.images.len == 0) (if (h.cache) |*s| s else null) else null;
-    const rules = if (cache) |s| s.rules else api.prompt_cache.Rules{};
-    if (cache) |s| s.rules = .{ .lookahead = 1, .planned = true, .warm = .on };
-    defer {
-        if (cache) |s| s.rules = rules;
-    }
     var info = h.info_;
     info.lanes = 1;
     info.prefill_step = @intCast(h.eng.pr.step);
-    return run.run(h.gpa, h.io, back.backend(), back.facts(), info, cache, id, request, hooks);
-}
-
-fn unwrap(saved: *anyopaque) *tf.flashnext_snapshot.State {
-    const kept: *@import("flashnext_disk.zig").Kept = @ptrCast(@alignCast(saved));
-    return kept.st;
+    return run.run(h.gpa, h.io, back.backend(), back.facts(), info, run.isolatedCache(h), id, request, hooks);
 }
 
 fn buildImages(ptr: *anyopaque, a: std.mem.Allocator, imgs: []const api.Image, prompt_len: usize, from: usize) anyerror!*VisPrompt {

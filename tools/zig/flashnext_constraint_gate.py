@@ -186,10 +186,13 @@ def main():
                     raise AssertionError(f"{label}/{key}: drafted/plain token ids differ")
                 manifest["checks"].append({"server": label, "case": key, "draft_plain_equal": True})
     if args.cache_gib > 0 and args.prefix_repeats:
-        hits = [c for c in manifest["cases"] if c["server"] == "candidate1" and
+        for c in manifest["cases"]:
+            if c["server"] == "candidate1" and not c["case"].startswith("plain-") and c["cached_tokens"] != 0:
+                raise AssertionError("single-slot constrained request reused the driver's cache")
+        hits = [c for c in manifest["cases"] if c["server"] == "candidate2" and
                 not c["case"].startswith("plain-") and c["cached_tokens"] > 0]
         if not hits:
-            raise AssertionError("cache cell exercised no constrained restore")
+            raise AssertionError("shared-host cache cell exercised no constrained restore")
     medians = {}
     for label in answers:
         rows = [c["wall_seconds"] for c in manifest["cases"] if c["server"] == label and c["case"].startswith("plain-")]
