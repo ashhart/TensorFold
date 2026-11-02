@@ -141,6 +141,7 @@ pub fn Learner(comptime H: type) type {
             if (has_pocket and l.trainer != null) {
                 if (lesson.save) try whole_lessons.healLive(l) else try whole_lessons.heal(l);
             }
+            if (lesson.against.len > 0 and (!@hasDecl(H.Trainer, "causalLogit") or !l.whole or l.method != .pocket)) return error.CorrectionsUnsupported;
             l.lesson = lesson;
             if (lesson.shrink != .none) {
                 l.phase = .shrink;

@@ -1,6 +1,7 @@
 const Example = @import("engine_api.zig").Example;
 pub const LearnRequest = struct {
     train: []const Example = &.{},
+    against: []const Example = &.{}, // a correction's old answers, cancelled by new subject neurons only
     think: []const Example = &.{}, // the facts' answers with thinking on, learned beside `train` (one of each a step)
     held: []const Example = &.{},
     near: []const Example = &.{},
@@ -37,7 +38,7 @@ pub const LearnProgress = struct { phase: LearnPhase, at: u32 = 0, of: u32 = 0, 
 pub const LearnEvent = union(enum) {
     learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{}, candidate: bool = false }, // neurons: a pocket's
     progress: LearnProgress,
-    done: struct { message: []const u8 = "" },
+    done: struct { message: []const u8 = "", before_begin: bool = false },
 };
 
 /// Where a learn request's events go; called on the engine's thread, so it must return at once.

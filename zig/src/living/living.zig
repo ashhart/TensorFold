@@ -78,3 +78,7 @@ test {
     _ = @import("pocket_locate_test.zig");
     _ = @import("pocket_shrink_test.zig");
 }
+
+test {
+    _ = @import("correction_test.zig");
+}

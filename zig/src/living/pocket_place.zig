@@ -68,9 +68,9 @@ pub fn all(p: anytype, t: anytype, host: anytype) !bool {
     };
     p.logSources(d, m, kinds);
     try p.findKeeps(d);
-    try quieting.quiet(p, t, host);
+    if (p.against.len == 0) try quieting.quiet(p, t, host);
     std.log.info("slide pocket: {d} candidate neurons fitted on {d} read rows in {d:.1} s; earlier neurons checked in {d:.1} s", .{ fitted, m, t1 - t0, clock.now(host.io) - t1 });
-    try joint.find(p, d);
+    if (p.against.len == 0) try joint.find(p, d);
     try p.v.begin(p.gpa, p.taken.items.len + p.joint.items.len, d, p.answered.len + p.joint_answers.items.len + p.keeps.items.len);
     joint.seed(p, d);
     p.next(.values);

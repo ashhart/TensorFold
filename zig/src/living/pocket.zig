@@ -115,6 +115,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         scratch: std.ArrayList(f32) = .empty, // SwiGLU: [neurons, D], a slot's up rows (u / sharp) as handed over
         used: std.ArrayList(usize) = .empty, // [slots]: neurons in use, the first ones
         taken: std.ArrayList(Taken) = .empty, // the open fact's neurons
+        against: []const Example = &.{}, // old answers of a correction, owned by the enclosing lesson
         answered: []const Example = &.{}, // the fact's answers, which its neurons' outputs are fitted on
         prompts: []const Example = &.{}, // more wordings of its questions, prompts only
         held: []const Example = &.{}, // its held-out answers, judged and never fitted on
@@ -287,7 +288,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             p.steady = steady;
             p.locate = .{ .enabled = @hasDecl(T, "causalLogit") and !set("TF_SLIDE_PLACEMENT", "legacy") };
             p.shrink.reset();
-            p.split = p.pickSplit(&.{ answered, prompts }, answered);
+            p.split = if (p.against.len > 0) .{ 0, per_fact, 0 } else p.pickSplit(&.{ answered, prompts }, answered);
             @import("pocket_selection.zig").log(p, &.{ answered, prompts }, answered);
             std.log.info("slide pocket: the fact's neurons: {d} at the reply's first row, {d} at its questions' subject, {d} before its answer's value", .{ p.split[0], p.split[1], p.split[2] });
             p.taken.clearRetainingCapacity();
@@ -514,7 +515,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         pub fn progress(p: *const Self) Progress {
             return switch (p.phase) {
                 .read => .{ .phase = .read, .at = p.at, .of = p.reads() },
-                .fit => .{ .phase = .fit, .at = p.locate.example * (p.slots() + 1) + p.locate.slot + @intFromBool(p.locate.baseline != null), .of = if (p.locate.enabled and !p.locate.done) @min(locating.questions, p.answered.len) * (p.slots() + 1) else 0 },
+                .fit => .{ .phase = .fit, .at = p.locate.example * (p.slots() + 1) + p.locate.slot + @intFromBool(p.locate.baseline != null), .of = if (p.locate.enabled and !p.locate.done) @min(locating.questions, locating.answers(p).len) * (p.slots() + 1) else 0 },
                 .values => .{ .phase = .values, .at = p.v.round, .loss = p.v.running },
                 .check => .{ .phase = .check, .at = p.at, .of = p.held.len },
                 else => .{ .phase = p.phase },

@@ -39,7 +39,7 @@ pub fn step(h: *LaneHost) void {
         const lesson = h.lessons.orderedRemove(0);
         h.unlock();
         learner.begin(learner.ctx, lesson.request, lesson.sink) catch |e| {
-            const failed: api.LearnEvent = .{ .done = .{ .message = h.words(e) } };
+            const failed: api.LearnEvent = .{ .done = .{ .message = h.words(e), .before_begin = true } };
             return lesson.sink.event(lesson.sink.ctx, &failed);
         };
         h.lesson_open = true;

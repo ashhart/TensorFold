@@ -59,6 +59,11 @@ pub fn select(scores: []const f32, free: []const bool, chosen: []bool) !usize {
     return n;
 }
 
+/// A correction locates its existing belief; a new fact locates its requested answer.
+pub fn answers(p: anytype) []const Example {
+    return if (p.against.len > 0) p.against else p.answered;
+}
+
 /// One forward per unit, on up to eight lesson answers; no held-out answer enters the causal ranking.
 pub fn once(p: anytype, t: anytype) !bool {
     if (comptime !@hasDecl(@TypeOf(t.*), "causalLogit")) return true;
@@ -66,8 +71,9 @@ pub fn once(p: anytype, t: anytype) !bool {
     if (!s.enabled or s.done) return true;
     const n = p.moe.items.len;
     if (n > max_slots) return error.TooManyCausalLayers;
-    if (s.example < @min(questions, p.answered.len)) {
-        const ex = p.answered[s.example];
+    const source = answers(p);
+    if (s.example < @min(questions, source.len)) {
+        const ex = source[s.example];
         const row = pocket.subjectRow(ex) orelse ex.decide;
         if (s.baseline == null) {
             s.baseline = try t.causalLogit(ex, null, row);
