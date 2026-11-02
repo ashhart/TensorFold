@@ -128,6 +128,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }), .filters = &.{"HIP BLAS device:"} });
     b.step("build-hip-blas-test", "Build BF16 projection device checks; execution requires device selection and admission").dependOn(&b.addInstallArtifact(blas_device, .{}).step);
     @import("glm_ocr.zig").hipTests(b, host.hip, device_checks.hip, test_step, o);
+    b.step("test-hip-family-offers-host", "HIP optional native family metadata without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"HIP optional family offers:"} })).step);
+    b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
@@ -285,6 +287,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "qwen3_5", .module = family },
             .{ .name = "flashnext", .module = flashnext },
             .{ .name = "nemotron", .module = nemotron },
+            .{ .name = "hip_serve", .module = serve },
         },
     });
     return .{

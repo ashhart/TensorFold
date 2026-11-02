@@ -31,20 +31,7 @@ pub fn Native(comptime type_name: []const u8) type {
 }
 
 /// What the serve flags ask of the engine, as the host read them.
-pub const Options = struct {
-    /// Prompt plus reply tokens a request may use: --context, or the family default within the model's window.
-    window: usize,
-    /// Streams asked for at once; `fixed` when --parallel named the number, which then fits or is refused.
-    streams: usize,
-    fixed: bool = false,
-    /// This process is `rank` of `world`.
-    rank: u32 = 0,
-    world: u32 = 1,
-    /// Bytes kept prompt states may hold (null: the policy's, else what the streams leave) and their snapshot slots.
-    cache_gib: ?f64 = null,
-    /// A --prompt-cache-gib past what the streams leave is kept, not refused.
-    cache_over_cap: bool = false,
-};
+pub const Options = @import("hip_serve").Options;
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {

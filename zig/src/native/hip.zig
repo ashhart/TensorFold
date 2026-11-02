@@ -7,6 +7,7 @@ const lanes = @import("lanes");
 const qwen35 = @import("qwen3_5");
 const flashnext = @import("flashnext");
 const nemotron = @import("nemotron");
+const serve = @import("hip_serve");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
@@ -72,7 +73,7 @@ const Ready = struct {
     /// The policy's line, for the server's info.
     policy_line: []const u8,
 
-    const Options = qwen35.native_engine.Options;
+    const Options = serve.Options;
 
     fn deinit(r: Ready, gpa: Allocator) void {
         gpa.free(r.policy_line);
@@ -130,6 +131,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
             .world = o.tp,
             .cache_gib = o.prompt_cache_gib,
             .cache_over_cap = o.prompt_cache_over_cap,
+            .vision = o.vision,
         },
         .policy_line = policy_line,
     };
@@ -238,6 +240,26 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return .{ .active = u.device, .cache = 0, .peak = u.peak };
 }
 
+fn visionOffer(loaded: anytype) ?api.Vision {
+    return if (@hasField(@TypeOf(loaded), "vision")) loaded.vision else null;
+}
+
+test "HIP optional family offers: image metadata comes from the loaded owner" {
+    try std.testing.expect(visionOffer(.{}) == null);
+    try std.testing.expect(visionOffer(.{ .vision = @as(?api.Vision, null) }) == null);
+    const Stub = struct {
+        fn prepare(_: *anyopaque, _: Allocator, _: []const u8, _: u32) !api.PreparedImage {
+            return error.Unused;
+        }
+    };
+    var owner: u8 = 0;
+    const v: api.Vision = .{ .ctx = &owner, .prepare = Stub.prepare, .image_token = 9, .image_tokens = 6144, .max_images = 2 };
+    const offered = visionOffer(.{ .vision = @as(?api.Vision, v) }).?;
+    try std.testing.expectEqual(v.ctx, offered.ctx);
+    try std.testing.expectEqual(v.image_token, offered.image_token);
+    try std.testing.expectEqual(v.image_tokens, offered.image_tokens);
+}
+
 /// The engine for `o.dir`, or null with `problem` when no HIP family reads it; under tensor parallelism, rank 0.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
@@ -285,7 +307,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = @intCast(loaded.streams), .context_window = @intCast(r.options.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = true, .reasoning = reasoning(F) });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = @intCast(loaded.streams), .context_window = @intCast(r.options.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = true, .vision = visionOffer(loaded), .reasoning = reasoning(F) });
     h.host.memory = .{ .read = readMemory };
     try h.host.start();
     served = true;
