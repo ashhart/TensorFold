@@ -15,13 +15,13 @@ pub const tap_rows = 2048 + engine.max_rows;
 pub const pend_cap = 48;
 pub const pend_commit = 24;
 
-/// TF_QWEN_KEEP_LATE=0: every keep replays its path into the state at once.
+/// TF_QWEN_KEEP_LATE=1 defers a keep's rows to the next slot scan (#1824): opt-in, its copy failed served chats.
 pub fn keepLate() bool {
     const S = struct {
         var on: ?bool = null;
     };
     if (S.on) |v| return v;
-    const v = if (std.c.getenv("TF_QWEN_KEEP_LATE")) |x| !std.mem.eql(u8, std.mem.span(x), "0") else true;
+    const v = if (std.c.getenv("TF_QWEN_KEEP_LATE")) |x| std.mem.eql(u8, std.mem.span(x), "1") else false;
     S.on = v;
     return v;
 }
