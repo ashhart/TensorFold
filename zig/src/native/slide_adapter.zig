@@ -8,6 +8,7 @@ const max_neurons = 64;
 
 /// Why --slide cannot learn into `dir` (`Checks`: linked and plainShared files; `copy`: the copy to make), or null.
 pub fn refusal(comptime Checks: type, a: Allocator, io: std.Io, dir: []const u8, copy: []const u8) !?[]const u8 {
+    if (@hasDecl(Checks, "slideRefusal")) if (try Checks.slideRefusal(a, io, dir)) |why| return why;
     if (@hasDecl(Checks, "plainShared")) if (try Checks.plainShared(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.6 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, dir });
     if (try Checks.linked(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with {s}", .{ name, dir, copy });
     if (try folderShard(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide rewrites the model's own shards, and {s} in {s} sits in a folder, where the checks for links do not look: serve this folder without --slide", .{ name, dir });

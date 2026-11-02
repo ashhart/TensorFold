@@ -37,6 +37,7 @@ pub const omni = @import("cuda_native_omni.zig");
 pub const identity = @import("core").checkpoint_identity;
 
 test {
+    _ = omni;
     _ = @import("cuda_bolt_lanes_test.zig");
     _ = @import("cuda_lanes.zig");
     _ = @import("cuda_shared_grants_test.zig");

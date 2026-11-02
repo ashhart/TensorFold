@@ -8,6 +8,18 @@ It is not a prompt cache, a retrieval index or an adapter: each fact it keeps be
 model, written into the checkpoint's own safetensors files. Nothing the model already had is changed. It shipped in 1.0.3
 as Sliding Weights (experimental), and its flag and API use the name `slide`.
 
+## Repeating a lesson
+
+The same text and supplied questions can take different steps and choose different neurons on separate runs.
+The lesson writer generates extra question wordings at temperature 0.9, including when you supply questions.
+Sampled requests use a fresh random seed by default. The fitter also shuffles examples, with deterministic seeds
+from its round and pass counters; the lesson history affects those counters.
+
+For a repeatability check, start each run from fresh copies of the same checkpoint and graph. Use
+`--prompt-seed` to key sampled generations by their rendered prompt. Keep the build, backend, seed salt and settings fixed.
+This controls the writer's random seeds; it does not promise identical lessons across devices or builds.
+The acceptance checks still decide what is kept on every run.
+
 ## What you need
 
 - An Apple-silicon Mac (tested on an M5 Ultra and an M3 Ultra), or an NVIDIA GB10 (DGX Spark) with the CUDA build,
