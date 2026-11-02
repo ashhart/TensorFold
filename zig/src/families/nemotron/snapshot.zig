@@ -67,6 +67,7 @@ const Copies = struct {
         const n = rowBytes(c, self.snap.at);
         for (0..self.c.attentions + @intFromBool(self.c.mtp != null)) |i| {
             const kv = if (i < self.c.attentions) self.c.kv[i] else self.c.mtp.?;
+            if (!self.into) @import("kv_pages.zig").holds(kv, self.snap.at);
             if (kv.paged) |p| {
                 // the same bytes as a contiguous cache's: a head's rows in order, a page's run of them a part
                 for ([2]usize{ p.k_off, p.v_off }) |half| for (0..c.kv_heads) |h| {
