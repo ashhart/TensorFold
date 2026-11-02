@@ -1,8 +1,0 @@
-Windows Registry Editor Version 5.00
-
-; TensorFold Connect machine policy. REPLACE the address; 0x1c03 is port 7171.
-[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\TensorFold\Connect]
-"ServerURL"="https://starlight.example.com"
-"AllowManualServer"=dword:00000000
-"BridgePort"=dword:00001c03
-"DisableBridge"=dword:00000000
