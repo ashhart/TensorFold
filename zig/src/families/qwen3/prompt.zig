@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api");
 const Engine = @import("engine.zig").Engine;
+const score = @import("score.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -18,6 +19,8 @@ pub const Prompt = struct {
     normalize: bool,
     /// Each stream's pooled fp32 rows, from its prompt pass to its release.
     slots: std.AutoHashMapUnmanaged(*Stream, []f32) = .empty,
+    /// The reranker's head rows, when the checkpoint scores labels (`scoreLabels` is then in `table`).
+    heads: ?score.Heads = null,
     table: be.Backend.VTable = .{
         .embedding = embedding,
         .prefill = prefill,
@@ -39,6 +42,20 @@ pub const Prompt = struct {
         var it = p.slots.valueIterator();
         while (it.next()) |rows| p.gpa.free(rows.*);
         p.slots.deinit(p.gpa);
+        if (p.heads) |*h| h.deinit(p.gpa);
+    }
+
+    /// The score hook: one prompt's last row through the engine, its label logits in f64; no mass.
+    pub fn scoreLabels(ptr: *anyopaque, ids: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 {
+        const p = of(ptr);
+        const heads = if (p.heads) |*h| h else return error.NoScoreHead;
+        const e = p.engine;
+        try score.check(ids, labels, logits, mass, e.window, e.m.spec.vocab, heads.count);
+        const row = try p.gpa.alloc(f32, e.m.spec.hidden);
+        defer p.gpa.free(row);
+        try e.run(ids, &.{@intCast(ids.len)}, row);
+        try score.labelLogits(p.gpa, heads, row, labels, logits);
+        return 0;
     }
 
     /// The backend over this engine; heads add their hooks to `table` before it serves.
