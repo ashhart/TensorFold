@@ -18,6 +18,11 @@ pub const Finished = struct {
     }
 };
 
+// Driver snapshots use different GDN and chunk arithmetic until a device gate qualifies sharing.
+pub fn isolatedCache(_: anytype) ?*api.prompt_cache.Store {
+    return null;
+}
+
 pub fn run(gpa: std.mem.Allocator, io: std.Io, target: lanes.backend.Backend, facts: lanes.Model, info: api.Info, cache: ?*api.prompt_cache.Store, id: api.Id, request: *const api.Request, hooks: Hooks) !Finished {
     if (request.structure == null) return error.UnconstrainedRequest;
     if (hooks.cancelled(hooks.sink.ctx)) return .{ .reason = .cancelled };
