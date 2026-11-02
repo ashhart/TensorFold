@@ -28,6 +28,8 @@ pub const Engine = struct {
     input: hip.DeviceBuffer,
     window: usize,
     streams: usize,
+    cache_bytes: usize,
+    cache_slots: usize,
 
     pub fn load(a: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: serve.Options) !*Engine {
         if (o.window == 0 or o.window > c.context or o.streams == 0 or o.world != 1 or o.rank != 0) return error.Invalid;
@@ -51,6 +53,9 @@ pub const Engine = struct {
         if (fixed >= room or room - fixed < lane_bytes) return error.GlmOcrModelDoesNotFit;
         e.streams = @min(o.streams, @min(4, (room - fixed) / lane_bytes));
         if (o.fixed and e.streams != o.streams) return error.GlmOcrParallelDoesNotFit;
+        const cache_room = (if (o.cache_over_cap) pool.free -| pool.reserve else room) -| fixed -| (e.streams * lane_bytes);
+        e.cache_bytes = try cacheBudget(o.cache_gib, @intCast(cache_room), dev.policy.slots);
+        e.cache_slots = dev.policy.slots;
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
         e.blas = try hip.blas.Blas.open(e.stream);
@@ -96,3 +101,23 @@ pub const Engine = struct {
         e.gpa.destroy(e);
     }
 };
+
+pub fn cacheBudget(gib: ?f64, room: usize, slots: usize) !usize {
+    const wanted = if (gib) |g| b: {
+        if (!std.math.isFinite(g) or g < 0 or g >= 1 << 32) return error.BadCacheBudget;
+        break :b @as(usize, @intFromFloat(g * (1 << 30)));
+    } else @min(room, 1 << 30);
+    if (slots == 0) return 0;
+    if (wanted > room) return error.GlmOcrPromptCacheDoesNotFit;
+    return wanted;
+}
+
+test "GLM-OCR native admission: cache budgets are finite and fit after planned lanes" {
+    try std.testing.expectEqual(@as(usize, 1 << 30), try cacheBudget(null, 4 << 30, 8));
+    try std.testing.expectEqual(@as(usize, 123), try cacheBudget(null, 123, 8));
+    try std.testing.expectEqual(@as(usize, 0), try cacheBudget(1, 0, 0));
+    try std.testing.expectEqual(@as(usize, 0), try cacheBudget(0, 0, 8));
+    try std.testing.expectError(error.GlmOcrPromptCacheDoesNotFit, cacheBudget(1, 123, 8));
+    for ([_]f64{ -1, std.math.nan(f64), std.math.inf(f64), 1 << 32 }) |g|
+        try std.testing.expectError(error.BadCacheBudget, cacheBudget(g, 4 << 30, 8));
+}

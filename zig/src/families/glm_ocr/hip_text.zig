@@ -104,6 +104,17 @@ test "GLM-OCR HIP decoder: all row segments are validated before a shared forwar
     var bad = two;
     bad.rows = 7;
     try std.testing.expectError(error.Invalid, graph.validate(&.{ one, bad }));
+    var resumed = one;
+    resumed.rows = 6;
+    resumed.prefix_rows = 3;
+    try std.testing.expectEqual(@as(usize, 6), try graph.validate(&.{resumed}));
+    resumed.phase = .decode;
+    try std.testing.expectError(error.Invalid, graph.validate(&.{resumed}));
+    resumed.phase = .prompt;
+    resumed.prefix_rows = 2;
+    try std.testing.expectError(error.Invalid, graph.validate(&.{resumed}));
+    resumed.prefix_rows = resumed.rows;
+    try std.testing.expectError(error.Invalid, graph.validate(&.{resumed}));
     var alias = first;
     bad = two;
     bad.cache = &alias;
@@ -137,7 +148,15 @@ pub fn inverseFrequencies() [64]f32 {
     return inverse;
 }
 
-pub const Segment = struct { cache: *Cache, embeddings: u64, positions: u64, rows: usize, phase: Ops.Phase = .prompt };
+pub const Segment = struct {
+    cache: *Cache,
+    embeddings: u64,
+    positions: u64,
+    rows: usize,
+    phase: Ops.Phase = .prompt,
+    /// Keep this prefix's K/V while running the original full prompt row shape.
+    prefix_rows: usize = 0,
+};
 
 pub const Graph = struct {
     stream: hip.Stream,
@@ -285,8 +304,10 @@ pub const Graph = struct {
                 const value = try cache.value(layer);
                 const key_view: hip.DeviceBuffer = .{ .r = graph.stream.r, .ptr = @ptrFromInt(key), .len = cache.capacity * c.kv * 2 };
                 const value_view: hip.DeviceBuffer = .{ .r = graph.stream.r, .ptr = @ptrFromInt(value), .len = cache.capacity * c.kv * 2 };
-                try key_view.copyFromAsync(cache.len * c.kv * 2, k + offset * c.kv * 2, segment.rows * c.kv * 2, graph.stream);
-                try value_view.copyFromAsync(cache.len * c.kv * 2, val + offset * c.kv * 2, segment.rows * c.kv * 2, graph.stream);
+                const skip = segment.prefix_rows;
+                const added = segment.rows - skip;
+                try key_view.copyFromAsync(cache.len * c.kv * 2, k + (offset + skip) * c.kv * 2, added * c.kv * 2, graph.stream);
+                try value_view.copyFromAsync(cache.len * c.kv * 2, val + (offset + skip) * c.kv * 2, added * c.kv * 2, graph.stream);
                 if (segment.phase == .decode) {
                     // Shared products retain one-token attention arithmetic at every verification row.
                     for (0..segment.rows) |i| {
@@ -295,7 +316,7 @@ pub const Graph = struct {
                         try graph.flash.forward(graph.stream, attention.rows(q + at * c.query * 2, c.heads, 1, c.head_dim), attention.rows(key, c.kv_heads, keys, c.head_dim), attention.rows(value, c.kv_heads, keys, c.head_dim), attention.rows(attended + at * c.query * 2, c.heads, 1, c.head_dim), graph.lse + at * c.heads * 4, graph.counter, false);
                     }
                 } else {
-                    const keys = cache.len + segment.rows;
+                    const keys = cache.len + added;
                     try graph.flash.forward(graph.stream, attention.rows(q + offset * c.query * 2, c.heads, segment.rows, c.head_dim), attention.rows(key, c.kv_heads, keys, c.head_dim), attention.rows(value, c.kv_heads, keys, c.head_dim), attention.rows(attended + offset * c.query * 2, c.heads, segment.rows, c.head_dim), graph.lse + offset * c.heads * 4, graph.counter, segment.rows > 1);
                 }
                 offset += segment.rows;
@@ -322,7 +343,7 @@ pub const Graph = struct {
         try graph.norm(segments, schema.text, "norm", x, normed, rows);
         try Observer.emit(observer, "text-norm", normed, rows * c.hidden);
         try graph.stream.synchronize();
-        for (segments) |segment| segment.cache.len += segment.rows;
+        for (segments) |segment| segment.cache.len += segment.rows - segment.prefix_rows;
         return normed;
     }
 
@@ -332,7 +353,9 @@ pub const Graph = struct {
         for (segments, 0..) |segment, i| {
             const cache = segment.cache;
             if (rows > graph.max_rows or segment.rows == 0 or segment.rows > graph.max_rows - rows or
-                !cache.admitted(graph.stream) or segment.rows > cache.capacity - cache.len or
+                !cache.admitted(graph.stream) or segment.prefix_rows >= segment.rows or
+                (segment.prefix_rows != 0 and (segment.phase != .prompt or segment.prefix_rows != cache.len)) or
+                segment.rows - segment.prefix_rows > cache.capacity - cache.len or
                 segment.embeddings == 0 or segment.embeddings % 2 != 0 or segment.positions == 0 or segment.positions % 4 != 0) return error.Invalid;
             _ = std.math.add(u64, segment.embeddings, segment.rows * c.hidden * 2) catch return error.Invalid;
             _ = std.math.add(u64, segment.positions, segment.rows * 3 * 4) catch return error.Invalid;

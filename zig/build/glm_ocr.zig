@@ -44,7 +44,7 @@ pub fn hipTests(b: *std.Build, hip: *std.Build.Module, device_hip: *std.Build.Mo
         .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = hip.import_table.get("core").? } },
     });
     family.addImport("glm_ocr_kernels", stub);
-    const weight_tests = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "GLM-OCR HIP weights:", "GLM-OCR HIP ops:", "GLM-OCR HIP vision admission:", "GLM-OCR HIP decoder:", "GLM-OCR HIP input:" } }));
+    const weight_tests = b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{ "GLM-OCR HIP weights:", "GLM-OCR HIP ops:", "GLM-OCR HIP vision admission:", "GLM-OCR HIP decoder:", "GLM-OCR HIP input:", "GLM-OCR HIP snapshot:" } }));
     all.dependOn(&weight_tests.step);
     b.step("test-glm-ocr-hip-host", "GLM-OCR HIP ownership and preallocation refusal without GPU execution").dependOn(&weight_tests.step);
     const upload_family = b.createModule(.{

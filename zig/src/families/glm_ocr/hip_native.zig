@@ -34,6 +34,8 @@ pub const Loaded = struct {
     streams: usize,
     startup: []const u8,
     vision: ?api.Vision,
+    cache: ?*api.prompt_cache.Store,
+    cache_capacity: ?api.PromptCacheCapacity,
 };
 fn refuse(a: std.mem.Allocator, problem: *[]const u8, comptime fmt: []const u8, args: anytype) error{Refused} {
     problem.* = std.fmt.allocPrint(a, fmt, args) catch fmt;
@@ -55,7 +57,7 @@ fn prepare(ptr: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens:
 const markers = [_]u32{ c.image_start, c.image_token, c.image_end };
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: serve.Options, problem: *[]const u8) !Loaded {
     if (o.world != 1 or o.rank != 0 or dev.group != null) return refuse(a, problem, "GLM-OCR currently runs on one HIP rank", .{});
-    if (o.cache_gib) |g| if (g != 0) return refuse(a, problem, "GLM-OCR prompt-cache reuse is not yet qualified; use --prompt-cache-gib 0", .{});
+    _ = @import("hip_engine.zig").cacheBudget(o.cache_gib, std.math.maxInt(usize), 1) catch return refuse(a, problem, "GLM-OCR prompt-cache budget must be finite and nonnegative", .{});
     if (o.fixed and o.streams > 4) return refuse(a, problem, "GLM-OCR currently admits at most four shared lanes; use --parallel 1 to 4", .{});
     if (o.vision) |v| if (v.max_images == 0 or v.max_images > 16 or v.image_tokens == 0) return refuse(a, problem, "GLM-OCR image limits need 1 to 16 images and a positive token budget", .{});
     var ck = @import("checkpoint.zig").Checkpoint.open(a, io, dir) catch |err| return refuse(a, problem, "cannot read this GLM-OCR checkpoint ({t})", .{err});
@@ -66,10 +68,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.D
     errdefer h.deinit();
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
-    const startup = try std.fmt.allocPrint(gpa, "GLM-OCR BF16 on HIP {s}, device {d}; {d} shared lanes at context {d}; exact verification through 32 rows; prompt cache off", .{ hip.kernels.arch, dev.index, e.streams, e.window });
+    const startup = try std.fmt.allocPrint(gpa, "GLM-OCR BF16 on HIP {s}, device {d}; {d} shared lanes at context {d}; exact verification through 32 rows; full-shape prompt cache {d} bytes in at most {d} slots", .{ hip.kernels.arch, dev.index, e.streams, e.window, e.cache_bytes, e.cache_slots });
     own.* = .{ .gpa = gpa, .e = e, .h = h, .startup = startup };
     const vision: ?api.Vision = if (o.vision) |v| .{ .ctx = own, .prepare = prepare, .image_token = c.image_token, .markers = &markers, .part_type = "image", .image_tokens = if (v.image_tokens_set) v.image_tokens else 6144, .max_images = v.max_images, .explain = @import("sys").optional_libraries.explain } else null;
-    return .{ .backend = h.backend(), .facts = h.facts(), .ctx = own, .deinit = release, .streams = e.streams, .startup = startup, .vision = vision };
+    return .{ .backend = h.backend(), .facts = h.facts(), .ctx = own, .deinit = release, .streams = e.streams, .startup = startup, .vision = vision, .cache = if (e.cache_bytes > 0) &h.store else null, .cache_capacity = .{ .budget_bytes = e.cache_bytes, .minimum_state_bytes = @import("hip_snapshot.zig").Snapshot.bytes(1) } };
 }
 pub fn follow(a: std.mem.Allocator, _: std.mem.Allocator, _: std.Io, _: hip.Device, _: []const u8, _: serve.Options, problem: *[]const u8) !void {
     return refuse(a, problem, "GLM-OCR currently runs on one HIP rank", .{});
@@ -84,7 +86,7 @@ test "GLM-OCR native admission: unsupported requests fail before checkpoint or d
     var why: []const u8 = "";
     const cases = [_]serve.Options{
         .{ .window = 8192, .streams = 2, .world = 2 },
-        .{ .window = 8192, .streams = 2, .cache_gib = 1 },
+        .{ .window = 8192, .streams = 2, .cache_gib = std.math.inf(f64) },
         .{ .window = 8192, .streams = 5, .fixed = true },
         .{ .window = 8192, .streams = 2, .vision = .{ .max_images = 0 } },
     };

@@ -9,6 +9,7 @@ pub const vision = @import("hip_vision.zig");
 pub const decoder = @import("hip_text.zig");
 pub const positions = @import("positions.zig");
 pub const input = @import("hip_input.zig");
+pub const snapshot = @import("hip_snapshot.zig");
 pub const native = @import("hip_native.zig");
 
 test {
@@ -18,4 +19,5 @@ test {
     _ = decoder;
     _ = input;
     _ = native;
+    _ = snapshot;
 }
