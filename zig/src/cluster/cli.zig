@@ -7,6 +7,8 @@ const status = @import("status.zig");
 const topology = @import("topology.zig");
 const bringup = @import("bringup.zig");
 const cli_model = @import("cli_model.zig");
+const mcdma_link = @import("mcdma_link.zig");
+const node = @import("node.zig");
 
 const Allocator = std.mem.Allocator;
 const W = std.Io.Writer;
@@ -23,9 +25,11 @@ pub const usage =
     \\usage: tensorfold cluster init --node NAME=ADDRESS[@VIA]... [--cuda NAME]... [--ssh-user U] [--ssh-key FILE] [--name CLUSTER] [--probes DIR]
     \\       tensorfold cluster check --cluster FILE [--model ID] [--model-config FILE [--model-files FILE]] [--probe | --probes DIR]
     \\       tensorfold cluster status --cluster FILE [--model ID] [--probe | --probes DIR]
-    \\       tensorfold serve [MODEL] --cluster FILE [--leader NAME] [--dry-run] [--model-config FILE [--model-files FILE]] [--probes DIR]
+    \\       tensorfold serve [MODEL] --cluster FILE [--leader NAME] [--dry-run] [--hold SECONDS] [--model-config FILE [--model-files FILE]] [--probes DIR]
     \\       tensorfold node --name NAME --cluster FILE [--leader NAME] [--model ID] [--probes DIR]
     \\--probes DIR reads each node's probe output from DIR/NAME/ and records launches in DIR/launches.log (fake hosts).
+    \\On real hosts a disaggregated model's nodes open their MCDMA links and agree on its plan; serve holds the cluster
+    \\--hold SECONDS (default 0) and says goodbye, node holds until a node says goodbye. A converged model is refused.
     \\
 ;
 
@@ -38,7 +42,8 @@ pub fn wants(args: []const []const u8) bool {
     return false;
 }
 
-/// Exit: 0 ok; 1 refused, not planned or invalid; 2 usage; 3 MCDMA endpoints not linked.
+/// The exit code: 0 ok, 1 refused, not planned, invalid or a failed bring-up, 2 usage, 3 MCDMA's library not found (no "library" for
+/// this node, none at its path, or not libmcdma-fabric ABI 1).
 pub fn run(env_in: Env, args: []const []const u8) !u8 {
     var env = env_in;
     var saved: launch.Saved = undefined;
@@ -183,6 +188,11 @@ fn reportErr(env: Env, err: anyerror) !u8 {
     return 1;
 }
 
+/// Converged rounds on real hosts need a real Shard on every rank; only the toy shard exists.
+fn refuseConverged(env: Env, m: config.Model) !void {
+    try env.err.print("model {s} is converged: its rounds on real hosts need a real backend.Shard (cluster/backend.zig) on every node, and only the toy shard exists, so it is refused and no node was started; a disaggregated model brings its nodes up over MCDMA\n", .{m.id});
+}
+
 fn serveCmd(env: Env, args: []const []const u8) !u8 {
     const l = (try load(env, args)) orelse return bad(env);
     const c = l.config;
@@ -191,20 +201,55 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
         try env.err.print("no model \"{s}\" in the cluster file\n", .{id});
         return 1;
     };
-    const leader = flag(args, "--leader") orelse m.nodes[0];
+    const hold = seconds(args, "--hold") orelse return bad(env);
+    // a disaggregated model's nodes are its prefill and decode lists, and no tensor-parallel group spans the two
+    const disaggregated = m.mode == .disaggregated;
+    const members = try mcdma_link.ranks(env.a, m);
+    const leader = flag(args, "--leader") orelse if (mcdma_link.rankOf(members, m.nodes[0]) != null) m.nodes[0] else members[0];
+    if (disaggregated and mcdma_link.rankOf(members, leader) == null) {
+        try env.err.print("--leader {s} is not one of model {s}'s prefill or decode nodes\n", .{ leader, m.id });
+        return 1;
+    }
     const code = try checkCmd(env, args, false);
     if (code != 0) return code;
     const fake = flag(args, "--probes") != null;
-    const started = try launch.launch(env.a, env.runner, c, l.json, m, leader, has(args, "--dry-run") or !fake);
+    const dry = has(args, "--dry-run");
+    if (!fake and !disaggregated) {
+        try refuseConverged(env, m);
+        return if (dry) 0 else 1;
+    }
+    // on real hosts everything that can refuse does so before any node is started
+    const here: ?Prepared = if (fake) null else switch (try prepare(env, c, m, leader)) {
+        .ok => |p| p,
+        .code => |x| return x,
+    };
+    var started_model = m;
+    started_model.nodes = members;
+    const started = try launch.launch(env.a, env.runner, c, l.json, started_model, leader, dry);
     try env.out.print("\nleader {s}; the control step starts tensorfold node over key-only ssh on:", .{leader});
     for (started) |s| try env.out.print(" {s}{s}", .{ s.name, if (s.ok) "" else " (FAILED)" });
     try env.out.writeAll("\n");
     for (started) |s| if (!s.ok) return 1;
-    if (!fake) {
-        try env.err.writeAll("this build does not link the MCDMA endpoints: no node was started, and nothing runs over TCP\n");
-        return if (has(args, "--dry-run")) 0 else 3;
+    if (here) |p| {
+        try describe(env, c, p);
+        if (dry) {
+            try env.out.writeAll("dry run: no node was started and no link opened\n");
+            return 0;
+        }
+        const inv = try launch.inventory(env.a, env.runner, c, c.nodes[c.find(leader).?], true);
+        return hostRun(env, p, inv, hold);
     }
     const src = source(env, args);
+    if (disaggregated) {
+        const invs = try cli_model.inventories(src, c, members);
+        const plan = mcdma_link.planDigest(c, m, members, .{});
+        const r = bringup.simulate(env.a, invs, try topology.edges(env.a, invs), plan) catch |err| {
+            try env.err.print("the fake cluster did not come up: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        try env.out.print("fake cluster up: {d} nodes agree on disaggregated plan {x:0>16} (prefill on {d}, decode on {d}; leader {x}, epoch {d}) after {d} ms simulated; the KV hand-off needs the real endpoints and engines\n", .{ r.nodes, r.plan, m.prefill.len, m.decode.len, r.leader, r.epoch, r.agreed_ms });
+        return 0;
+    }
     const invs = try cli_model.inventories(src, c, m.nodes);
     const pl = try cli_model.planModel(src, m, invs);
     const r = bringup.simulate(env.a, invs, try topology.edges(env.a, invs), pl.p.digest) catch |err| {
@@ -217,15 +262,97 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
 
 fn nodeCmd(env: Env, args: []const []const u8) !u8 {
     const l = (try load(env, args)) orelse return bad(env);
+    const c = l.config;
     const name = flag(args, "--name") orelse return bad(env);
-    const i = l.config.find(name) orelse {
+    const i = c.find(name) orelse {
         try env.err.print("no node \"{s}\" in the cluster file\n", .{name});
         return 1;
     };
-    const inv = try launch.inventory(env.a, env.runner, l.config, l.config.nodes[i], true);
+    if (flag(args, "--probes") != null) {
+        const inv = try launch.inventory(env.a, env.runner, c, c.nodes[i], true);
+        try status.nodes(env.out, &.{inv});
+        try env.err.writeAll("node: fake hosts (--probes) have no MCDMA links to join; serve --cluster --probes brings every node up in its own process\n");
+        return 1;
+    }
+    const id = flag(args, "--model") orelse if (c.models.len == 1) c.models[0].id else return bad(env);
+    const m = c.model(id) orelse {
+        try env.err.print("no model \"{s}\" in the cluster file\n", .{id});
+        return 1;
+    };
+    if (m.mode != .disaggregated) {
+        try refuseConverged(env, m);
+        return 1;
+    }
+    const p = switch (try prepare(env, c, m, name)) {
+        .ok => |x| x,
+        .code => |x| return x,
+    };
+    try describe(env, c, p);
+    const inv = try launch.inventory(env.a, env.runner, c, c.nodes[i], true);
     try status.nodes(env.out, &.{inv});
-    try env.err.writeAll("node: joining needs the MCDMA endpoints, which this build does not link\n");
-    return 3;
+    return hostRun(env, p, inv, null);
+}
+
+const Prepared = struct { spec: mcdma_link.Spec, plan: u64 };
+
+/// This node's rank, links, window and plan from the file, and its library found; else the exit code (3: the library).
+fn prepare(env: Env, c: config.Config, m: config.Model, name: []const u8) !union(enum) { ok: Prepared, code: u8 } {
+    var why: []const u8 = "";
+    const s = mcdma_link.spec(env.a, c, m, name, .{}, &why) catch |err| {
+        try env.err.print("{s}\n", .{why});
+        return .{ .code = if (mcdma_link.libraryError(err)) 3 else 1 };
+    };
+    mcdma_link.findLibrary(env.io, s.library) catch |err| {
+        try env.err.print("{s}: no MCDMA library at {s} ({s}): build libmcdma-fabric (tools/zig/mcdma_pair/build_mcdma.sh) and give its absolute path as the node's \"library\"\n", .{ name, s.library, @errorName(err) });
+        return .{ .code = 3 };
+    };
+    return .{ .ok = .{ .spec = s, .plan = mcdma_link.planDigest(c, m, s.names, .{}) } };
+}
+
+/// What this node will open: its rank among the model's, each link with its ports, GID, path MTU and kind, the window, the plan.
+fn describe(env: Env, c: config.Config, p: Prepared) !void {
+    const s = p.spec;
+    try env.out.print("{s}: rank {d} of {d} (", .{ s.names[s.rank], s.rank, s.names.len });
+    for (s.names, 0..) |n, r| try env.out.print("{s}{d} {s} {s}", .{ if (r == 0) "" else ", ", r, n, @tagName(c.nodes[c.find(n).?].backend) });
+    try env.out.print("); plan {x:0>16}; window {d} bytes, staging {d} a rank; library {s}\n", .{ p.plan, s.config.window_bytes, s.config.staging_bytes, s.library });
+    for (s.links) |x| try env.out.print("  link \"{s}\" to {s}: {s} via {s}, port {d} to {d}, gid {d}, path MTU {d}, kind {s}\n", .{ x.name, s.names[x.peer], x.device, x.via, x.port, x.peer_port, x.gid, x.mtu, if (x.kind) |k| @tagName(k) else "any" });
+}
+
+/// Bring this node up over MCDMA and hold: `hold_ns`, then goodbye (serve), or null until a node says goodbye (node).
+fn hostRun(env: Env, p: Prepared, probed: node.Inventory, hold_ns: ?u64) !u8 {
+    // membership knows a node by its name in the file (unique there, and known to every node), not by its probed
+    // hardware id, which two nodes on one host would share
+    var inv = probed;
+    inv.id = node.idFrom(p.spec.names[p.spec.rank]);
+    inv.name = .of(p.spec.names[p.spec.rank]);
+    try env.out.flush();
+    var diag: bringup.Diag = .{};
+    const got = bringup.onHost(std.heap.c_allocator, p.spec, inv, p.plan, .{ .hold_ns = hold_ns }, env.out, &diag) catch |err| {
+        const who = diag.culprit.name.str();
+        switch (err) {
+            error.PlanMismatch => try env.err.print("{s} computed plan {x:0>16} and this node {x:0>16}: every node must read the same cluster file (its links, path MTUs and node lists)\n", .{ who, diag.culprit.plan, p.plan }),
+            error.WrongPeer => try env.err.print("{s} answered on the link the cluster file gives {s}: check each link's via\n", .{ who, diag.culprit.expected }),
+            error.MemberLost => try env.err.print("{s} is {s}{s}{s}\n", .{ who, if (diag.culprit.state) |st| @tagName(st) else "gone", if (diag.reason.len > 0) "; MCDMA: " else "", diag.reason }),
+            error.NeverSettled, error.NeverAgreed => try env.err.print("{s}: not every node of the plan joined and agreed within the settle time\n", .{@errorName(err)}),
+            else => try env.err.print("mcdma: {s}\n", .{@errorName(err)}),
+        }
+        return if (mcdma_link.libraryError(err)) 3 else 1;
+    };
+    if (got.ended_by) |x| {
+        try env.out.print("{s} said goodbye; this node said goodbye and closed its links\n", .{x.name.str()});
+        if (hold_ns != null) {
+            try env.err.print("{s} left before the hold ended\n", .{x.name.str()});
+            return 1;
+        }
+    } else try env.out.print("held the cluster {d} s, said goodbye and closed the links; rounds need the KV hand-off (#1594 step 2b)\n", .{(hold_ns orelse 0) / std.time.ns_per_s});
+    return 0;
+}
+
+/// Whole seconds given as `name`, in nanoseconds: 0 when absent, null when not a number.
+fn seconds(args: []const []const u8, name: []const u8) ?u64 {
+    const text = flag(args, name) orelse return 0;
+    const s = std.fmt.parseInt(u32, text, 10) catch return null;
+    return @as(u64, s) * std.time.ns_per_s;
 }
 
 /// Runs commands with std.process (ssh for remote hosts, /bin/sh for this one).
