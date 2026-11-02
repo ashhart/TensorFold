@@ -70,6 +70,7 @@ test {
     _ = @import("drafted_grammar_test.zig");
     _ = @import("windows_grammar_test.zig");
     _ = @import("grammar_time_test.zig");
+    _ = @import("grammar_parallel_test.zig");
     _ = @import("pricing_test.zig");
     _ = @import("hold_prefix_test.zig");
     _ = @import("pass_pricing_test.zig");

@@ -113,7 +113,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     if (c.quant != .nvfp4) return error.UnsupportedDoryCudaQuantization;
     if (loops) |l| c = try c.withLoops(l);
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var m = try names.map(gpa, &ck, c);
     defer m.deinit();
     var w: Weights = .{ .gpa = gpa, .config = c };

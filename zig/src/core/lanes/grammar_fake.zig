@@ -68,7 +68,7 @@ fn drafts(_: *anyopaque, _: [*]i32, _: c_int) callconv(.c) c_int {
 }
 
 fn budget(_: *anyopaque, _: [*]i32, n: c_int, _: c_int) callconv(.c) c_int {
-    if (n == 0) arms += 1 else narrows += 1;
+    _ = @atomicRmw(usize, if (n == 0) &arms else &narrows, .Add, 1, .monotonic);
     return 0;
 }
 
