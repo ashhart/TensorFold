@@ -42,6 +42,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_router(const __nv_bfloa
     if (row0 + rr < R && e0 + ee < E) OUT[static_cast<int64_t>(row0 + rr) * E + e0 + ee] = acc;
 }
 
+#include "moe_router_expert.cuh"
+
 namespace {
 
 constexpr int MAXC = 8;  // experts a lane holds: up to 256 routed experts
