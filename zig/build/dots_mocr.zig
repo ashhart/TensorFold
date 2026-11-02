@@ -41,6 +41,15 @@ pub fn hipTests(b: *std.Build, hip: *std.Build.Module, test_step: *std.Build.Ste
     const upload_run = b.addRunArtifact(upload);
     upload_run.has_side_effects = true;
     b.step("test-dots-hip-weights", "Upload TF_DOTS_DIR on the selected HIP GPU after memory admission").dependOn(&upload_run.step);
+    const cache_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/dots_cache_test.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "dots_mocr", .module = family } },
+    });
+    const cache = b.addTest(.{ .name = "tf-dots-hip-cache-test", .root_module = cache_module, .filters = &.{"dots HIP device cache:"} });
+    b.step("build-dots-hip-cache-test", "Build dense KV prefix-copy checks without running a GPU").dependOn(&b.addInstallArtifact(cache, .{}).step);
 }
 
 pub fn hipModule(b: *std.Build, hip: *std.Build.Module) *std.Build.Module {
