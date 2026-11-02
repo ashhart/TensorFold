@@ -47,7 +47,7 @@ test "every total row count prices at one forward of the row bucket it pads to, 
     var r: Rig = .{};
     defer r.deinit();
     var c: costs.Costs = .{};
-    try costs.forwards(&r, 4, 16, 64, &c);
+    try costs.forwards(&r, 4, 64, &c);
     var cfg = try coreTable(&c, 64);
     defer cfg.deinit(T.allocator);
     for (1..65) |total| {
@@ -59,11 +59,27 @@ test "every total row count prices at one forward of the row bucket it pads to, 
     }
 }
 
+test "a total past the rows the served windows hold prices at the forward of the bucket it pads to" {
+    var r: Rig = .{};
+    defer r.deinit();
+    var c: costs.Costs = .{};
+    // four streams of 16-row windows hold 64 rows: a 65-row total pads to the 128-row bucket
+    try costs.forwards(&r, 4, 128, &c);
+    var cfg = try coreTable(&c, 128);
+    defer cfg.deinit(T.allocator);
+    try T.expectEqualSlices(usize, &.{ 32, 32, 32, 32 }, try r.of(cfg.shared_costs.get(65).?));
+    for (1..129) |total| {
+        const timed = try r.of(cfg.shared_costs.get(@intCast(total)).?);
+        try T.expectEqual(plan.bucketOf(total, 128), rowsOf(timed));
+        try T.expectEqual(@as(usize, @min(4, rowsOf(timed))), timed.len);
+    }
+}
+
 test "shared timings split a bucket's rows evenly over the served streams, past eight of them" {
     var r: Rig = .{};
     defer r.deinit();
     var c: costs.Costs = .{};
-    try costs.forwards(&r, 3, 16, 48, &c);
+    try costs.forwards(&r, 3, 48, &c);
     const three = [_][]const usize{ &.{1}, &.{ 1, 1 }, &.{ 2, 1, 1 }, &.{ 3, 3, 2 }, &.{ 6, 5, 5 }, &.{ 11, 11, 10 }, &.{ 16, 16, 16 } };
     try T.expectEqual(16 + three.len, r.calls.items.len);
     for (three, r.calls.items[16..]) |want, got| try T.expectEqualSlices(usize, want, got);
@@ -73,7 +89,7 @@ test "shared timings split a bucket's rows evenly over the served streams, past 
 
     var wide: Rig = .{};
     defer wide.deinit();
-    try costs.forwards(&wide, 12, 16, 192, &c);
+    try costs.forwards(&wide, 12, 192, &c);
     const twelve: [12]usize = @splat(16);
     try T.expectEqualSlices(usize, &twelve, wide.calls.items[wide.calls.items.len - 1]);
     try T.expectEqual(@as(usize, 192), c.shareds);
@@ -83,7 +99,7 @@ test "a table past its entries still prices every total of the last bucket at th
     var r: Rig = .{};
     defer r.deinit();
     var c: costs.Costs = .{};
-    try costs.forwards(&r, 20, 16, 320, &c);
+    try costs.forwards(&r, 20, 320, &c);
     try T.expectEqual(c.shared.len, c.shareds);
     var cfg = try coreTable(&c, 320);
     defer cfg.deinit(T.allocator);
@@ -96,7 +112,7 @@ test "the lone window table stays one window of each width to the widest" {
         var r: Rig = .{};
         defer r.deinit();
         var c: costs.Costs = .{};
-        try costs.forwards(&r, streams, 16, 16 * streams, &c);
+        try costs.forwards(&r, streams, 16 * streams, &c);
         try T.expectEqual(@as(usize, 16), c.windows);
         for (c.window[0..c.windows], 1..) |w, width| {
             try T.expectEqual(@as(u32, @intCast(width)), w.width);

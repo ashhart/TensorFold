@@ -72,18 +72,16 @@ pub fn windows(r: anytype, widest: usize, out: *Costs) !void {
     }
 }
 
-/// Each row bucket shared rounds pad to, timed once at the most rows `streams` windows put in it, prices its totals.
-pub fn buckets(r: anytype, streams: usize, width: usize, batch_rows: usize, bucketOf: *const fn (usize, usize) usize, out: *Costs) !void {
+/// Each row bucket shared rounds pad to, to `batch_rows`, timed at its rows over `streams` windows, prices its totals.
+pub fn buckets(r: anytype, streams: usize, batch_rows: usize, bucketOf: *const fn (usize, usize) usize, out: *Costs) !void {
     out.shareds = 0;
-    const most = @min(streams * width, batch_rows);
     var total: usize = 1;
-    while (total <= most and out.shareds < most_rows) {
+    while (total <= batch_rows and out.shareds < most_rows) {
         const bucket = @max(total, bucketOf(total, batch_rows));
-        const rows = @min(bucket, most);
-        const n = @min(streams, rows, most_rows);
+        const n = @min(streams, bucket, most_rows);
         var widths: [most_rows]usize = undefined;
-        // the bucket's rows split evenly over as many streams as rows, each window at most `width`
-        for (widths[0..n], 0..) |*w, i| w.* = rows / n + @intFromBool(i < rows % n);
+        // the bucket's rows split evenly over as many streams as rows: the graph a round padded to it runs
+        for (widths[0..n], 0..) |*w, i| w.* = bucket / n + @intFromBool(i < bucket % n);
         const ms = try r.time(widths[0..n]);
         while (total <= bucket and out.shareds < most_rows) : (total += 1) {
             // the lane core prices totals between two entries of equal ms at that ms
