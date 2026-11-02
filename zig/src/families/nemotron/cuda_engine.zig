@@ -238,7 +238,7 @@ pub const Engine = struct {
             content = null;
             try load_cache.finishAfter(.{ io, try x.finish() }, cuda.tp_watch.ready);
         } else load_cache.finish();
-        if (opts.graphs) try e.capture(mtp);
+        if (opts.graphs and !@import("core").route_tap.live()) try e.capture(mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
             return err;

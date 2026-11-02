@@ -109,7 +109,7 @@ test "every captured verify shape keys its own graph: a shape after another neve
 /// One shape's launches (the engine's `launchShape`): uncaptured for a prompt chunk or the exact path, else replayed.
 pub fn launch(e: anytype, shape: Shape) !void {
     // a prompt chunk's GEMMs (a window's rows keep one-row steps' bits) dwarf its launches: never captured
-    if (e.learning != null or e.pockets.any() or shape.prompt) return e.body(shape);
+    if (e.learning != null or e.pockets.any() or shape.prompt or @import("core").route_tap.live()) return e.body(shape);
     const gop = try e.graphs.getOrPut(e.gpa, shape.key());
     if (!gop.found_existing) {
         errdefer _ = e.graphs.remove(shape.key());

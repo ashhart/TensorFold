@@ -161,7 +161,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     const report = platform.optional_libraries.atBoundary();
     defer report.deinit();
     if (try refusals.startup(a, o, problem)) return null;
-    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, problem)) return null;
+    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, "cuda", problem)) return null;
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     // a checkpoint that serves pictures rather than tokens: its model_index.json decides, before any family's flags
     if (@import("moss_image_spec.zig").recognize(a, io, o.dir)) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
