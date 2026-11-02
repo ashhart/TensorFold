@@ -208,7 +208,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
         const kv_out = kvh * dh;
         const p = try std.fmt.allocPrint(gpa, lm ++ "layers.{d}.", .{i});
         defer gpa.free(p);
-        defer x.ck.release(); // the layer is on the device: its pages leave the cache
+        defer if (readers > 0) x.ck.release(); // a read-ahead layer is on the device: its pages leave the cache (none read ahead: main's one release at close)
         var reading = x.ck.prefetch(p, readers); // read ahead by threads of their own while the layer packs
         defer _ = reading.join();
         const name = struct {
