@@ -88,6 +88,7 @@ pub fn prepare(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.Arr
         if (p.scales.rank != 2 or p.biases.rank != 2 or p.scales.shape[0] != rows or p.biases.shape[0] != rows or p.scales.shape[1] != k / group or p.biases.shape[1] != k / group) return error.BadAffineMetadata;
         n = try std.math.add(usize, n, rows);
     }
+    try @import("widths.zig").check(.{ .tensor_units = device.tensorUnits() }, n, k, .{ .bits = bits, .group = @intCast(group), .metadata = meta });
     if (!device.tensorUnits() or n % tile != 0) return prepareRows(device, allocator, owned, parts, n, k, tile, slices, gn);
     if (bits != 4 or group != 64 or meta != .bf16) return prepareLanes(device, allocator, owned, parts, n, k, tile, slices, gn);
     slices = key.m5 orelse slices;

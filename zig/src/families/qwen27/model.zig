@@ -88,6 +88,11 @@ pub const Model = struct {
         defer formats.deinit();
         var ws = try widths.Widths.resolve(a, &formats, shard.local);
         defer ws.deinit();
+        {
+            var headers = try core.checkpoint_host.Checkpoint.openModel(a, io, dir);
+            defer headers.close();
+            try ws.readMetadata(&headers, shard.local);
+        }
         const m = try a.create(Model);
         errdefer a.destroy(m);
         m.allocator = a;

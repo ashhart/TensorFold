@@ -91,6 +91,18 @@ pub const Widths = struct {
         return .{ .allocator = a, .layers = layers, .embed = try one(f, "model.embed_tokens"), .head = try one(f, "lm_head") };
     }
 
+    /// Read the actual metadata dtype, which the quantization JSON does not encode, before device admission.
+    pub fn readMetadata(w: *Widths, source: anytype, c: cfg.Config) !void {
+        const prefix: []const u8 = if (source.has("language_model.model.embed_tokens.scales")) "language_model." else "";
+        var name: [192]u8 = undefined;
+        for (w.layers, 0..) |*layer, i| for (stacks(c.kind(i))) |stack| for (stack) |m| {
+            const module = try std.fmt.bufPrint(&name, "{s}model.layers.{d}.{s}", .{ prefix, i, leaf(m) });
+            layer[@backingInt(m)].metadata = try tensorMetadata(source, module);
+        };
+        w.embed.metadata = try tensorMetadata(source, try std.fmt.bufPrint(&name, "{s}model.embed_tokens", .{prefix}));
+        w.head.metadata = try tensorMetadata(source, try std.fmt.bufPrint(&name, "{s}lm_head", .{prefix}));
+    }
+
     /// Every module 4-bit g64, for synthetic graphs.
     pub fn uniformAll(a: std.mem.Allocator, layers: usize) !Widths {
         const all = try a.alloc([members]Width, layers);
@@ -129,6 +141,20 @@ fn one(f: *const affine.Formats, path: []const u8) !Width {
     return .{ .bits = s.bits, .group = @intCast(s.group_size) };
 }
 
+fn tensorMetadata(source: anytype, module: []const u8) !row.Metadata {
+    var name: [224]u8 = undefined;
+    const scale = try source.get(try std.fmt.bufPrint(&name, "{s}.scales", .{module}));
+    const bias = try source.get(try std.fmt.bufPrint(&name, "{s}.biases", .{module}));
+    if (scale.dtype != bias.dtype) return error.BadAffineMetadata;
+    return @import("projection.zig").metadata(scale.dtype);
+}
+
+/// Only these FP32 forms have the native affine contract; BF16 keeps its preexisting admission policy.
+pub fn checkMetadata(w: Width) !void {
+    if (w.metadata == .f32 and !((w.group == 32 and (w.bits == 4 or w.bits == 5 or w.bits == 8)) or
+        (w.group == 16 and w.bits == 6))) return error.UnsupportedAffineMetadataFormat;
+}
+
 /// The timed window costs' model shape; mixed widths add their tag, so checkpoints of one shape keep their own costs.
 pub fn costShape(c: cfg.Config, tag: u64, buf: []u8, rows: usize, drafted: bool) ![]const u8 {
     const s = try std.fmt.bufPrint(buf, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.intermediate, c.vocab, rows, @intFromBool(drafted) });
@@ -158,7 +184,7 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
             };
         }
     };
-    glue.checkEmbed(.{ .width = @intCast(c.hidden), .rows = 1, .vocab = @intCast(c.vocab), .bits = w.embed.bits, .group = w.embed.group, .metadata = .bf16 }) catch |err| {
+    embedCheck(w.embed, c) catch |err| {
         why.* = .{ .module = "embed_tokens", .width = w.embed, .reason = err };
         return error.UnqualifiedQwenFormat;
     };
@@ -168,8 +194,15 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
     };
 }
 
+fn embedCheck(w: Width, c: cfg.Config) !void {
+    try checkMetadata(w);
+    try glue.checkEmbed(.{ .width = @intCast(c.hidden), .rows = 1, .vocab = @intCast(c.vocab), .bits = w.bits, .group = w.group, .metadata = if (w.metadata == .f32) .f32 else .bf16 });
+}
+
 /// One run's kernel: 4/64 keeps today's choice; other widths take the non-reg lane kernel or the row kernel.
-fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
+pub fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
+    try checkMetadata(w);
+    if (w.metadata == .bf16 and chip.tensor_units and w.bits != 4 and w.group != 64) return error.UnsupportedLaneGroup;
     _ = try @import("projection.zig").split(n, k);
     if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group, .metadata = w.metadata }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
     if (isUniform(w) and n % 8 == 0) return;
@@ -322,4 +355,56 @@ test "metadata dtype splits a stack even when its code width and group agree" {
     full.metadata = .f32;
     try std.testing.expectEqualSlices([2]usize, &.{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 1 } }, runs(&.{ uniform, full, uniform }, &buf));
     try std.testing.expect(!isUniform(full));
+}
+
+test "BF16 admission keeps the original tensor-unit group guard; FP32 admits only four gated forms" {
+    for (all_rows) |bits| for ([_]u16{ 16, 32, 64, 128 }) |group| {
+        if (group == 16 and bits != 6) continue;
+        for ([_]usize{ 48, 64 }) |n| {
+            const w = Width{ .bits = bits, .group = group };
+            if (bits != 4 and group != 64) {
+                try std.testing.expectError(error.UnsupportedLaneGroup, check(.{ .tensor_units = true }, n, 5120, w));
+            } else try check(.{ .tensor_units = true }, n, 5120, w);
+            var f = w;
+            f.metadata = .f32;
+            const allowed = (group == 32 and (bits == 4 or bits == 5 or bits == 8)) or (group == 16 and bits == 6);
+            for ([_]bool{ false, true }) |tu| {
+                if (allowed) try check(.{ .tensor_units = tu }, n, 5120, f) else try std.testing.expectError(error.UnsupportedAffineMetadataFormat, check(.{ .tensor_units = tu }, n, 5120, f));
+            }
+        }
+    };
+}
+
+test "metadata admission reads tensor headers, checks matching bias and splits mixed dtype stacks" {
+    const Source = struct {
+        dtype: core.checkpoint_metal.DType = .f32,
+        bad_bias: bool = false,
+        fn has(_: @This(), _: []const u8) bool {
+            return true;
+        }
+        fn get(s: @This(), name: []const u8) !struct { dtype: core.checkpoint_metal.DType } {
+            return .{ .dtype = if (s.bad_bias and std.mem.endsWith(u8, name, ".biases")) .bf16 else s.dtype };
+        }
+    };
+    var w = try Widths.uniformAll(std.testing.allocator, 1);
+    defer w.deinit();
+    const json = try testConfig(std.testing.allocator, "{\"bits\":4,\"group_size\":64}");
+    defer std.testing.allocator.free(json);
+    var c = try cfg.parse(std.testing.allocator, json, null);
+    c.layers = 1;
+    try w.readMetadata(Source{}, c);
+    try std.testing.expectEqual(row.Metadata.f32, w.embed.metadata);
+    try std.testing.expectEqual(row.Metadata.f32, w.head.metadata);
+    for (stacks(c.kind(0))) |stack| for (stack) |m| try std.testing.expectEqual(row.Metadata.f32, w.of(0, m).metadata);
+    var why: Why = .{};
+    try std.testing.expectError(error.UnqualifiedQwenFormat, admit(&w, c, .{ .tensor_units = true }, &why));
+    try std.testing.expectEqual(error.UnsupportedAffineMetadataFormat, why.reason);
+    for (stacks(c.kind(0))) |stack| for (stack) |m| {
+        w.layers[0][@backingInt(m)].group = 32;
+    };
+    w.embed.group = 32;
+    w.head.group = 32;
+    try admit(&w, c, .{ .tensor_units = true }, &why);
+    try std.testing.expectError(error.BadAffineMetadata, w.readMetadata(Source{ .bad_bias = true }, c));
+    try std.testing.expectError(error.BadAffineMetadata, w.readMetadata(Source{ .dtype = .f16 }, c));
 }
