@@ -132,6 +132,7 @@ pub const Launcher = struct {
         silu_mul: Function,
         add: Function,
         attn_gate: Function,
+        heads_rows: Function,
         gnorm_silu: Function,
         copy_cols: Function,
         rope_prefill: Function,
@@ -206,6 +207,7 @@ pub const Launcher = struct {
             .silu_mul = try ops.function("tf_silu_mul"),
             .add = try ops.function("tf_add"),
             .attn_gate = try ops.function("tf_attn_gate"),
+            .heads_rows = try ops.function("tf_heads_rows"),
             .gnorm_silu = try ops.function("tf_gnorm_silu"),
             .copy_cols = try ops.function("tf_copy_cols"),
             .rope_prefill = try ops.function("tf_rope_prefill"),
@@ -330,6 +332,7 @@ pub const Launcher = struct {
     pub const tf_moe_route = moe.tf_moe_route;
     pub const tf_causal = attention.tf_causal;
     pub const tf_attn_gate = attention.tf_attn_gate;
+    pub const tf_heads_rows = attention.tf_heads_rows;
     pub const tf_kv_write = attention.tf_kv_write;
     pub const tf_kv_write_at = attention.tf_kv_write_at;
     pub const tf_argmax_rows = draw.tf_argmax_rows;

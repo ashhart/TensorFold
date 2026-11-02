@@ -26,6 +26,15 @@ fn relu2Tile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
 /// HIP kernels as launched; tf-hip-kernel-contract limits DIR re-derives the usage records from the code objects.
 const own_records = [_]Record{
     .{
+        .launch = .{ .name = "attention tf_heads_rows", .symbol = "tf_heads_rows", .image = "ops", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 30, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
+    .{
         .launch = .{ .name = "RMS norm tf_rms_rows", .symbol = "tf_rms_rows", .image = "ops", .threads = 256 },
         .usage = .{
             .{ .vgprs = 58, .sgprs = 45, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
