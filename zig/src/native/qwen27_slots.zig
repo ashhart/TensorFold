@@ -38,7 +38,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     if (resumed == 0) {
         if (d) |x| try x.reset() else try b.runner.reset(slot);
         try clearContext(b, slot);
-        try b.runner.release(slot); // a fresh pass: the slot's grown rows are no one's now
+        try b.runner.admit(slot, @intCast(ids.len)); // a fresh pass: the slot takes its prompt's rows at once
     }
     s.cached = resumed;
     var at: usize = resumed;

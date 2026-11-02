@@ -109,6 +109,16 @@ test "qwen27 memory: a slot starts at one step and grows to the need, a quarter 
     try std.testing.expectEqual(@as(u32, 32784), kv_grow.rows(28672, 28673, 4096, 32784));
 }
 
+test "qwen27 memory: an emptied slot takes its prompt's rows at once, at least one step, at most the context" {
+    try std.testing.expectEqual(@as(u32, 4096), kv_grow.admitted(1, 4096, 131088));
+    try std.testing.expectEqual(@as(u32, 4096), kv_grow.admitted(4096, 4096, 131088));
+    try std.testing.expectEqual(@as(u32, 8192), kv_grow.admitted(4097, 4096, 131088));
+    // one growth for a 65,536-token prompt, where growing from the first rows takes ten
+    try std.testing.expectEqual(@as(u32, 65536), kv_grow.admitted(65536, 4096, 131088));
+    try std.testing.expectEqual(@as(u32, 131088), kv_grow.admitted(131080, 4096, 131088));
+    try std.testing.expectEqual(@as(u32, 2000), kv_grow.admitted(64, 4096, 2000));
+}
+
 test "qwen27 memory: growing moves every K/V head to its place in the wider buffer" {
     // 4 heads of dim 256 in bf16: head h starts at h * rows * 256 * 2 bytes
     var moves: [4]kv_grow.Move = undefined;

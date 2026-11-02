@@ -52,18 +52,29 @@ pub fn reserve(r: *Runner, slot: u32, need: u32) !void {
 /// Slot `slot` back to its first rows once no stream holds it and no blit reads it: its rows are gone (offset 0).
 pub fn release(r: *Runner, slot: u32) !void {
     const s = r.kv_step orelse return;
+    return refit(r, slot, kv_grow.first(s, r.capacity));
+}
+
+/// An emptied slot takes the rows a prompt of `need` tokens fills, at once and without a copy (a fresh pass).
+pub fn admit(r: *Runner, slot: u32, need: u32) !void {
+    const s = r.kv_step orelse return;
+    if (need > r.capacity) return error.AttentionCapacity;
+    return refit(r, slot, kv_grow.admitted(need, s, r.capacity));
+}
+
+/// Every layer of empty slot `slot` holds exactly `first` rows: new buffers where it holds any other count.
+fn refit(r: *Runner, slot: u32, first: u32) !void {
     if (slot >= r.ready) return;
-    const first = kv_grow.first(s, r.capacity);
     var held: u32 = 0;
     for (0..r.caches.len / r.slots) |layer| held = @max(held, r.caches[layer * r.slots + slot].capacity);
-    if (held <= first) return;
+    if (held == first and r.heldRows(slot) == first) return;
     r.settleSlot(slot);
     if (r.failed) return error.RoundNotReady;
     const bytes = @as(usize, first) * r.model.config.kvDim() * 2;
     for (0..r.caches.len / r.slots) |layer| {
         const at = layer * r.slots + slot;
         const c = r.caches[at];
-        if (c.capacity <= first) continue;
+        if (c.capacity == first) continue;
         var fresh: [2]mtl.Buffer = undefined;
         fresh[0] = try r.model.device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer fresh[0].deinit();
@@ -71,7 +82,7 @@ pub fn release(r: *Runner, slot: u32) !void {
         swapPair(r, at, fresh, first);
     }
     r.offsets[slot] = 0;
-    std.log.info("qwen27: slot {d} gave back its K/V ({d} to {d} rows)", .{ slot, held, first });
+    std.log.info("qwen27: slot {d} K/V refit from {d} to {d} rows", .{ slot, held, first });
 }
 
 /// Cache `at` takes `fresh` (`rows` each); its old pair leaves the residency set and is freed.

@@ -194,6 +194,11 @@ pub const Runner = struct {
         return kv_slots.release(r, slot);
     }
 
+    /// Emptied slot `slot` holds the rows a prompt of `need` tokens fills, without a copy (kv_slots.zig).
+    pub fn admit(r: *Runner, slot: u32, need: u32) !void {
+        return kv_slots.admit(r, slot, need);
+    }
+
     /// Whether a blit still reads slot `slot` (without waiting for it).
     pub fn busy(r: *const Runner, slot: u32) bool {
         const cb = r.reading[slot] orelse return false;
