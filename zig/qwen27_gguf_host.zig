@@ -5,6 +5,7 @@ pub const checkpoint_host = checkpoint;
 pub const safetensors = @import("src/core/safetensors.zig");
 pub const quant = @import("src/core/quant/quant.zig");
 test {
+    _ = @import("src/families/qwen27/weight_admission.zig");
     _ = @import("src/core/gguf_qwen_profile_test.zig");
     _ = @import("src/families/qwen27/gguf_f32_test.zig");
     _ = @import("src/families/qwen27/gguf_source.zig");

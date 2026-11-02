@@ -30,6 +30,8 @@ pub const Config = struct {
     rank: u32 = 0,
     ranks: u32 = 1,
     split_attention: bool = false,
+    /// The source adapter wrote a native GGUF image; only it admits the GGUF scalar roles.
+    gguf_image: bool = false,
 
     pub fn kind(c: Config, layer: usize) Kind {
         return c.kinds[layer];
@@ -261,6 +263,12 @@ fn shapeProducts(c: Config) !void {
     _ = try std.math.mul(usize, c.hidden, c.vocab);
 }
 
+fn ggufImage(root: std.json.ObjectMap) !bool {
+    const marker = root.get("tensorfold_gguf") orelse return false;
+    if (marker != .string or marker.string.len == 0) return error.BadConfig;
+    return true;
+}
+
 pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) !Config {
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
@@ -289,6 +297,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     const factor = if (rope) |r| try optional(r, "partial_rotary_factor", try optional(t, "partial_rotary_factor", 0.25)) else try optional(t, "partial_rotary_factor", 0.25);
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
+        .gguf_image = try ggufImage(root),
         .hidden = hidden,
         .intermediate = try required(t, "intermediate_size"),
         .layers = try required(t, "num_hidden_layers"),

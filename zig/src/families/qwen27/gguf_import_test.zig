@@ -96,6 +96,7 @@ test "GGUF Qwen: complete native image uses real config, mapped triples, stored 
     const config = try std.Io.Dir.cwd().readFileAlloc(io, config_path, a, .limited(1 << 20));
     defer a.free(config);
     const c = try @import("config.zig").parse(a, config, null);
+    try t.expect(c.gguf_image);
     try t.expectEqual(@as(usize, 64), c.hidden);
     try t.expectEqual(@as(usize, 4), c.layers);
     try t.expectEqual(@as(u32, 1), c.eos[0]);
@@ -112,6 +113,17 @@ test "GGUF Qwen: complete native image uses real config, mapped triples, stored 
     try t.expectEqual(@as(u32, @bitCast(@as(f32, 1.25))), std.mem.readInt(u32, norm.bytes[0..4], .little));
     const al = try ck.get("language_model.model.layers.0.linear_attn.ssm_a");
     try t.expectEqual(core.safetensors.DType.f32, al.dtype);
+    const admission = @import("weight_admission.zig");
+    try t.expectEqual(core.safetensors.DType.f32, try admission.gain(norm.dtype, c.gguf_image));
+    try t.expect(try admission.storedDecay(c.gguf_image, true, false));
+    var plain_json = try std.json.parseFromSlice(std.json.Value, a, config, .{});
+    defer plain_json.deinit();
+    try t.expect(plain_json.value.object.swapRemove("tensorfold_gguf"));
+    const plain_text = try std.json.Stringify.valueAlloc(a, plain_json.value, .{});
+    defer a.free(plain_text);
+    const plain = try @import("config.zig").parse(a, plain_text, null);
+    try t.expectError(error.BadNativeTensor, admission.gain(norm.dtype, plain.gguf_image));
+    try t.expectError(error.BadNativeTensor, admission.storedDecay(plain.gguf_image, true, false));
     try t.expectEqual(@as(u32, @bitCast(-@exp(@as(f32, 2)))), std.mem.readInt(u32, al.bytes[0..4], .little));
     const gn = try ck.get("language_model.model.layers.0.linear_attn.norm.weight");
     try t.expectEqual(@as(u16, 0x3f40), std.mem.readInt(u16, gn.bytes[0..2], .little));

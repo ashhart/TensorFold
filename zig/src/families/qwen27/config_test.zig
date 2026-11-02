@@ -299,3 +299,27 @@ test "the fused zba row keeps the tiled projection and each rank's a and b" {
     try std.testing.expectEqual(@as(usize, 6192), u.zbaA());
     try std.testing.expectEqual(@as(usize, 6240), u.zbaDim());
 }
+
+test "GGUF Qwen: only the root config image marker enables GGUF scalar admission" {
+    const a = std.testing.allocator;
+    try std.testing.expect(!(try parse(a, fixture, null)).gguf_image);
+    const marked = try edit(a, "tensorfold_gguf", .{ .string = "synthetic-image-identity" });
+    defer a.free(marked);
+    try std.testing.expect((try parse(a, marked, null)).gguf_image);
+    for ([_]Mode{ .full, .mlp }) |mode| {
+        var whole = model27();
+        whole.gguf_image = true;
+        const shard = try split(&whole, 1, 2, mode);
+        try std.testing.expect(shard.global.gguf_image and shard.local.gguf_image);
+    }
+    // A model's nested text config and generation config cannot supply the image's root marker.
+    const nested = try std.fmt.allocPrint(a, "{{\"model_type\":\"qwen3_5\",\"text_config\":{s}}}", .{marked});
+    defer a.free(nested);
+    try std.testing.expect(!(try parse(a, nested, null)).gguf_image);
+    try std.testing.expect(!(try parse(a, fixture, "{\"tensorfold_gguf\":\"not-model-config\"}")).gguf_image);
+    for ([_]std.json.Value{ .{ .bool = false }, .{ .bool = true }, .{ .integer = 1 }, .{ .string = "" }, .null }) |value| {
+        const bad = try edit(a, "tensorfold_gguf", value);
+        defer a.free(bad);
+        try std.testing.expectError(error.BadConfig, parse(a, bad, null));
+    }
+}
