@@ -45,6 +45,7 @@ pub const Model = struct {
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass, timed at load
     hold_context_costs: []const @import("hold_price.zig").ContextCost = &.{},
     hold_rows: u32 = 0, // rows one of that drafter's hold passes holds at most (0: no bound)
+    hold_block_rows: u32 = 0,
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
     join_tail: bool = false, // a prompt in pieces leaves its last token for the next shared round's window (Backend.join)
     piece_runs: bool = false, // a round's pieces go to the backend in one call (Backend.pieces: one forward over them)
@@ -183,6 +184,7 @@ pub const Config = struct {
                 .hold_costs = m.hold_costs,
                 .hold_context_costs = m.hold_context_costs,
                 .hold_rows = m.hold_rows,
+                .hold_block_rows = m.hold_block_rows,
             },
             .draft_step_ms = m.draft_step_ms,
         };

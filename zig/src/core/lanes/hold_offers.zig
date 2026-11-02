@@ -213,10 +213,10 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
 fn passCost(rule: anytype, whos: anytype, depths: []const i64, blocks: usize, deepest: i64, context_rows: u32) f64 {
     if (blocks == 0) return 0;
     const rows = rule.k.hold_rows;
-    if (rows == 0 or @as(u64, @intCast(blocks)) * @as(u64, @intCast(deepest)) <= rows)
+    if (rows == 0 or @as(u64, @intCast(blocks)) * @as(u64, @intCast(@max(deepest, rule.k.hold_block_rows))) <= rows)
         return price.holdMs(rule.k.hold_costs, blocks, deepest) +
             price.contextMs(rule.k.hold_context_costs, blocks, context_rows);
-    return price.rowsMs(rule.k.hold_costs, rule.k.hold_context_costs, rows, View{ .whos = whos, .depths = depths });
+    return price.rowsMs(rule.k.hold_costs, rule.k.hold_context_costs, rows, rule.k.hold_block_rows, View{ .whos = whos, .depths = depths });
 }
 
 const View = struct {
@@ -238,8 +238,8 @@ const View = struct {
 fn probeContextMs(rule: anytype, whos: anytype, depths: []const i64, blocks: usize, deepest: i64, context_rows: u32) f64 {
     if (context_rows == 0 or rule.k.hold_context_costs.len == 0) return 0;
     const one_pass = rule.k.hold_rows == 0 or
-        @as(u64, @intCast(blocks)) * @as(u64, @intCast(deepest)) <= rule.k.hold_rows;
-    return if (one_pass) price.contextMs(rule.k.hold_context_costs, blocks, context_rows) else price.rowsMs(&.{}, rule.k.hold_context_costs, rule.k.hold_rows, View{ .whos = whos, .depths = depths });
+        @as(u64, @intCast(blocks)) * @as(u64, @intCast(@max(deepest, rule.k.hold_block_rows))) <= rule.k.hold_rows;
+    return if (one_pass) price.contextMs(rule.k.hold_context_costs, blocks, context_rows) else price.rowsMs(&.{}, rule.k.hold_context_costs, rule.k.hold_rows, rule.k.hold_block_rows, View{ .whos = whos, .depths = depths });
 }
 
 fn observedOf(who: anytype) []const f64 {

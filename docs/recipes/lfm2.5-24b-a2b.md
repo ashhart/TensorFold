@@ -65,8 +65,9 @@ The drafter has no embedding and no head of its own:
 - Context: the target's rows after layers 2, 10, 18, 26 and 34 (captured by the fused normalization kernels), through `fc` and
   `hidden_norm`, give each of its five layers' context keys and values (k_norm, then RoPE at the row's position).
 - Block: the pending token and mask tokens run five Qwen3 layers with non-causal attention over the context and the
-  block, then the target's head. A block is as long as the deepest chain its pass holds, at most the nine rows the
-  drafter was trained on.
+  block, then the target's head. Every hold runs the checkpoint's full configured query block (nine rows in
+  the released model), including unused mask rows and the full pointwise tail, regardless of the retained
+  proposal depth. Only the Markov steps and returned picks follow that depth.
 - Markov head: row i's logits plus `W2 W1[previous token]` (rank 256); draft i is their argmax.
 
 The drafter runs the released bf16 matrices as they are (`--drafter-bits 0`, the default). `--drafter-bits 8` instead
@@ -83,7 +84,10 @@ drafting stream resumes prompts. Hold lengths follow the lane core's per-round d
 
 Priced shared rounds use the existing lane allocator and the measured block-count/depth grid. Only neural blocks
 incur hold cost; copies and forced rows still occupy verify capacity. The native 32-row hold limit can split a
-cohort into several passes, priced in execution order rather than as one impossible padded batch.
+cohort into several passes, priced in execution order using the greater of logical depth and configured query
+width rather than as one impossible padded batch. The released nine-row blocks fit three per physical pass;
+larger logical cohorts continue in bounded passes. Providers whose query-width metadata is zero retain the
+original variable-width grouping.
 
 A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
 and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
@@ -97,9 +101,11 @@ rows become staged context. Overflow projects only the retained prefix before th
 Declined snapshots leave the retained final anchor intact, including across other streams' forwards.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
-against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),
+against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head).
+The reference runs the full configured query block and compares only the retained `ROWS` prefix. The diagnostic
 prints each draft against the reference's pick with the margin between the reference's two best tokens, and times
-the drafter's passes; a near tie can pick the other token.
+the drafter's passes; a near tie can pick the other token. A separate exact oracle requires retained prefixes
+1/3/full to preserve every first-row base-logit byte, first proposal and confidence.
 The native diagnostic covers 64 context rows and a nine-row block, deferred context, the 2,143-row
 zero-row-rewind case, complete clean/context calibration grids, and NaN/+Inf/-Inf rejection on all three
 held-token consumer paths. Exact FC bytes and alternating-two-live-buffer raw-tap oracles remain separate
@@ -116,14 +122,16 @@ The drafter also carries a confidence head: a linear map of a draft's final bloc
 (2,304 inputs) to one logit, through a sigmoid (`lfm2_dspark_confidence`). It does not change the drafts.
 The verify rows follow it: a chain's chance at draft j is the product of its first j confidences. Each round the
 lane core's window allocator takes the likeliest drafts over all streams while the expected tokens a ms rise, so
-each stream gets its own verify length, and the next hold drafts as deep as the stream's grant. A hold still
-running on the GPU is priced by its lane's last confidences, so the host does not wait for it. A checkpoint
+each stream gets its own verify length, and the next hold retains as many proposals as the stream's grant while
+keeping the full configured query block. A hold still running on the GPU is priced by its lane's last confidences,
+so the host does not wait for it. A checkpoint
 without the head verifies by the core's depth rule, from each stream's measured acceptance by depth.
 
 A stream with a copy ahead verifies the copy and asks no hold, and a drafting stream prices its copy
-windows by its own copies. Clean holds are calibrated at every legal depth for 1, 2, 4, 8 and 16 blocks,
-within the 32-row pass limit. Context-only held passes use the same encoder, barriers, partitioning and
-gathering at powers-of-two row counts 1 through 2,048 for those five counts: 60 context quotes. Every shape
+windows by its own copies. Clean holds are calibrated at every logical depth for every legal physical block
+count up to 16 within the 32-row pass limit: one, two and three nine-row blocks for the released checkpoint.
+Context-only held passes use the same encoder, barriers, partitioning and gathering at powers-of-two row
+counts 1 through 2,048 for 1, 2, 4, 8 and 16 streams, retaining all 60 context quotes. Every shape
 warms once, then records the best of three valid CPU-encode + GPU measurements on finite nonzero raw taps;
 both grids publish only when complete. The newly retained context debt is staged before funding, and the
 matching calibrated context estimate is subtracted before updating the clean-hold EMA. Confidence still
@@ -154,8 +162,10 @@ without actual timing retain modeled pricing.
 [Controller regression and native API receipts](../receipts/dspark-chain-restack/hold-value-controller.json)
 record the constructed timing cases and source hashes; they are not device-throughput qualification.
 
-`tf-lfm2-dspark` also prints the confidence
-head against its fp32 reference and times shared holds of 2 to 16 streams.
+`tf-lfm2-dspark` also prints the confidence head against its fp32 reference and times legal physical shared holds.
+Separate real 8- and 16-logical-stream controls compare their bounded passes with independent same-regime
+references, retain exactly the requested ragged prefixes, and require settled ownership and one-time timing
+receipts. These query-geometry semantics do not establish acceptance or throughput improvement.
 
 ### Shared native paths in the confidence stage
 

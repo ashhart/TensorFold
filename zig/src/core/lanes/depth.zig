@@ -18,6 +18,7 @@ pub const Constants = struct {
     hold_costs: []const HoldCost = &.{}, // a drafter's own hold pass by blocks and depth: it prices every hold (lone, shared, granted)
     hold_context_costs: []const @import("hold_price.zig").ContextCost = &.{},
     hold_rows: u32 = 0, // rows one of those hold passes holds at most; a larger hold runs as passes in order (0: no bound)
+    hold_block_rows: u32 = 0, // minimum query rows per block, independent of the returned proposal depth
 };
 
 pub const HoldCost = @import("hold_price.zig").HoldCost;
@@ -327,9 +328,9 @@ pub const Rule = struct {
         @memset(ones, 1);
         const own_steps = r.draft_step_ms != 0; // the backend's own draft step prices a stream's drafts past its first
         const head: alloc.HeadCost = if (own_steps)
-            .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .hold_costs = r.k.hold_costs, .hold_context_costs = r.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = r.k.hold_rows }
+            .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .hold_costs = r.k.hold_costs, .hold_context_costs = r.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = r.k.hold_rows, .hold_block_rows = r.k.hold_block_rows }
         else
-            .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads, .hold_costs = r.k.hold_costs, .hold_context_costs = r.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = r.k.hold_rows };
+            .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads, .hold_costs = r.k.hold_costs, .hold_context_costs = r.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = r.k.hold_rows, .hold_block_rows = r.k.hold_block_rows };
         // a timed hold grid prices the pass itself: the overhead beyond it is the fixed one either way
         const overhead = if (own_steps and r.k.hold_costs.len == 0) r.overheadMs(whos.len, sampled) else r.fixedMs(whos.len, sampled);
         const counts = try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, overhead, @max(whos.len, r.batch_rows), head);
@@ -397,7 +398,7 @@ pub const Rule = struct {
 
     /// Physical hold passes, or modeled head steps, excluded from measured fixed overhead.
     pub fn headMs(r: *const Rule, depths: []const i64) f64 {
-        if (r.k.hold_costs.len > 0) return @import("hold_price.zig").passMs(r.k.hold_costs, r.k.hold_rows, depths);
+        if (r.k.hold_costs.len > 0) return @import("hold_price.zig").passMs(r.k.hold_costs, r.k.hold_rows, r.k.hold_block_rows, depths);
         var steps: i64 = 0;
         for (depths) |d| steps = if (r.batched_heads) @max(steps, d) else steps + d;
         return r.mtp_step_ms * @as(f64, @floatFromInt(steps));

@@ -372,8 +372,8 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
         depth = @max(depth, b.depth);
         context_rows = @max(context_rows, b.lane.staged);
     }
-    // a block of the deepest chain's rows, at most the 9 the drafter was trained on
-    const n: u32 = depth;
+    // The checkpoint's query block is bidirectional: unused mask rows still affect retained proposals.
+    const n: u32 = d.config.block;
     const rows = blocks.len * n;
     if (rows == 0 or rows > ds.pass_rows) return error.DraftTooManyStreams;
     const start_ns = try timing.encodeNow();
@@ -383,8 +383,8 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
         @memset(ids[i * n + 1 ..][0 .. n - 1], d.config.mask);
     }
     const steps = depth;
-    // past the last layer's attention a lone block carries only the rows its chain reads; several keep them all
-    const tail = if (blocks.len == 1) steps else rows;
+    // Keep pointwise dispatch regimes independent of how many proposals the scheduler retains.
+    const tail = rows;
     const cb = d.target.queue.commandBuffer();
     // one concurrent encoder: independent dispatches overlap, each dependent step waits at a barrier
     const x = Enc{ .d = d, .e = cb.compute(.concurrent), .conc = true };

@@ -6,10 +6,10 @@ const q = tf.lfm2_moe;
 const c = q.config;
 const st = q.state;
 
-/// 3x9 + 5x1 physical passes: same-kernel reference and synthetic grid controls, not a speed measurement.
-pub fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: []const u32) !void {
-    const depths = [8]u32{ 9, 1, 1, 1, 1, 1, 1, 1 };
-    const groups = [2][2]usize{ .{ 0, 3 }, .{ 3, 8 } }; // the lanes each physical pass holds
+/// Ragged logical cohorts keep their requested prefixes across bounded, configured-width query passes.
+pub fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: []const u32, count: usize) !void {
+    var depths: [16]u32 = @splat(1);
+    depths[0] = 9;
     const real_grid = d.holds;
     const real_len = d.holds_len;
     const step_ms = d.step_ms;
@@ -24,38 +24,41 @@ pub fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: 
         d.hold_spent_ms = spent_ms;
         d.encode_cpu_ms = encode_ms;
     }
-    var pending: [8]u32 = undefined;
-    for (&pending, 0..) |*p, i| p.* = ids[(i * 131 + 5) % ids.len];
+    var pending: [16]u32 = undefined;
+    for (pending[0..count], 0..) |*p, i| p.* = ids[(i * 131 + 5) % ids.len];
     const drafter = d.drafter();
-    var streams: [8]tf.lanes.Stream = undefined;
+    var streams: [16]tf.lanes.Stream = undefined;
     var made: usize = 0;
     defer for (streams[0..made]) |*s| s.deinit(gpa);
-    while (made < streams.len) : (made += 1) streams[made] = try tf.lanes.Stream.init(gpa, .{ .id = "split", .prompt = &.{1}, .max_new = 1 });
+    while (made < count) : (made += 1) streams[made] = try tf.lanes.Stream.init(gpa, .{ .id = "split", .prompt = &.{1}, .max_new = 1 });
     var opened: usize = 0;
     defer for (streams[0..opened]) |*s| drafter.release(s);
-    while (opened < streams.len) : (opened += 1) {
+    while (opened < count) : (opened += 1) {
         try drafter.open(&streams[opened]);
         if ((d.lanes.get(&streams[opened]) orelse return error.LaneNotOpened).cap != 64 + d.config.block) return error.LaneNotAtCapacity64;
     }
     // Reference groups use the same kernels on separate lanes.
-    var refs: [8]*q.dspark.Lane = undefined;
+    var refs: [16]*q.dspark.Lane = undefined;
     var ref_n: usize = 0;
     defer for (refs[0..ref_n]) |l| d.dropLane(l);
-    while (ref_n < refs.len) : (ref_n += 1) refs[ref_n] = try d.newLane(64);
-    var blocks: [8]q.dspark_block.Block = undefined;
-    for (&blocks, refs, 0..) |*b, l, i| b.* = .{ .lane = l, .pending = pending[i], .anchor = 0, .depth = depths[i] };
-    for (groups) |g| _ = try q.dspark_block.hold(d, blocks[g[0]..g[1]], null);
-    for (d.holds[0..d.holds_len]) |*h| h.ms = 1e4 * (1 + 0.25 * @as(f64, @floatFromInt(h.streams))) * (1 + 0.5 * @as(f64, @floatFromInt(h.depth)));
-    const synthetic = d.holds;
+    while (ref_n < count) : (ref_n += 1) refs[ref_n] = try d.newLane(64);
+    var blocks: [16]q.dspark_block.Block = undefined;
+    for (blocks[0..count], refs[0..count], 0..) |*b, l, i| b.* = .{ .lane = l, .pending = pending[i], .anchor = 0, .depth = depths[i] };
+    var at: usize = 0;
+    while (at < count) {
+        const end = @min(count, at + q.dspark.pass_rows / d.config.block);
+        _ = try q.dspark_block.hold(d, blocks[at..end], null);
+        at = end;
+    }
     _ = q.dspark_block.takeHoldMs(d);
-    var items: [8]tf.lanes.drafter.Hold = undefined;
-    for (&items, 0..) |*it, i| it.* = .{ .stream = &streams[i], .pending = pending[i], .position = 1, .depth = depths[i] };
+    var items: [16]tf.lanes.drafter.Hold = undefined;
+    for (items[0..count], 0..) |*it, i| it.* = .{ .stream = &streams[i], .pending = pending[i], .position = 1, .depth = depths[i] };
     const t0 = std.Io.Clock.awake.now(io);
-    try drafter.hold(&items);
+    try drafter.hold(items[0..count]);
     const wall = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
-    // nothing pending (one 8-block signalled pass would be), and no lane points into a signalled pass
+    // A logical cohort larger than one physical pass must leave no pending pass or borrowed lane slots.
     if (d.pending != null or d.pass_len != 0) return error.SplitHoldLeftAPassPending;
-    for (&streams) |*s| if (d.lanes.get(s).?.slot != null) return error.SplitHoldLaneInASignalledPass;
+    for (streams[0..count]) |*s| if (d.lanes.get(s).?.slot != null) return error.SplitHoldLaneInASignalledPass;
     const gpu_ms = d.hold_spent_ms;
     const cpu_ms = d.encode_cpu_ms;
     const taken = q.dspark_block.takeHoldMs(d);
@@ -63,41 +66,30 @@ pub fn splitHold(gpa: std.mem.Allocator, io: std.Io, d: *q.dspark.Drafter, ids: 
     if (taken != cpu_ms + gpu_ms or !(cpu_ms > 0) or !(gpu_ms > 0)) return error.SplitHoldComponentsNotTaken;
     if (taken > wall) return error.SplitHoldTimeExceedsWall;
     // each lane's picks: its depth of them, the same as the reference pass of its group
-    for (&streams, refs, depths, 0..) |*s, ref, depth, i| {
+    for (streams[0..count], refs[0..count], depths[0..count], 0..) |*s, ref, depth, i| {
         var got: [16]u32 = undefined;
         try drafter.held(&.{s}, &.{got[0..depth]});
         if (!std.mem.eql(u32, got[0..depth], ref.held[0..depth])) return error.SplitHoldPicksDiffer;
         if (depth == 1 and i > 0) if (drafter.held(&.{s}, &.{got[0 .. depth + 1]})) |_| return error.SplitHoldHeldMoreThanAsked else |err| if (err != error.DraftHeldFewer) return err;
     }
-    // the grid: participating shapes stepped down by about a tenth, the controls exactly as set
-    if (d.holds_len != real_len) return error.GridResized;
-    for (synthetic[0..real_len], d.holds[0..real_len]) |before, now| {
-        const ratio = now.ms / before.ms;
-        const ok = switch (before.streams) {
-            2, 8 => ratio > 0.9 and ratio < 0.91, // one group's step
-            4 => ratio > 0.81 and ratio < 0.83, // both groups' steps
-            else => now.ms == before.ms, // 1 and 16 blocks: in neither pass
-        };
-        if (!ok) return error.SplitHoldGridStepsWrong;
-    }
-    std.debug.print("split hold, 8 lanes at depths [9, 1 x 7]: passes of 3x9 and 5x1 rows, both synchronous; {d:.3} ms CPU-encode + {d:.3} ms GPU = {d:.3} ms taken once ({d:.3} ms wall); picks equal the reference groups'; 2-, 8- and 4-block passes repriced once, once and twice, 1- and 16-block passes untouched\n", .{ cpu_ms, gpu_ms, taken, wall });
+    std.debug.print("split hold, {d} logical lanes: configured {d}-row query blocks in bounded synchronous passes; {d:.3} ms CPU-encode + {d:.3} ms GPU = {d:.3} ms taken once ({d:.3} ms wall); requested picks equal independent same-regime references\n", .{ count, d.config.block, cpu_ms, gpu_ms, taken, wall });
 }
 
 /// Every legal clean depth and every power-of-two context shape has one measured quote.
 pub fn quotes(d: *q.dspark.Drafter) !void {
     var clean: usize = 0;
     var contexts: usize = 0;
-    for ([_]u32{ 1, 2, 4, 8, 16 }) |streams| {
-        for (1..@min(d.config.block, q.dspark.pass_rows / streams) + 1) |depth| {
-            var found: usize = 0;
-            for (d.holds[0..d.holds_len]) |quote| {
-                if (quote.streams != streams or quote.depth != depth) continue;
-                if (!(quote.ms > 0) or !std.math.isFinite(quote.ms)) return error.InvalidCleanQuote;
-                found += 1;
-            }
-            if (found != 1) return error.IncompleteCleanQuotes;
-            clean += 1;
+    for (1..@min(16, q.dspark.pass_rows / d.config.block) + 1) |streams| for (1..d.config.block + 1) |depth| {
+        var found: usize = 0;
+        for (d.holds[0..d.holds_len]) |quote| {
+            if (quote.streams != streams or quote.depth != depth) continue;
+            if (!(quote.ms > 0) or !std.math.isFinite(quote.ms)) return error.InvalidCleanQuote;
+            found += 1;
         }
+        if (found != 1) return error.IncompleteCleanQuotes;
+        clean += 1;
+    };
+    for ([_]u32{ 1, 2, 4, 8, 16 }) |streams| {
         var rows: u32 = 1;
         while (rows <= q.dspark.stage_rows) : (rows *= 2) {
             var found: usize = 0;
@@ -331,4 +323,22 @@ pub fn nonfinite(gpa: std.mem.Allocator, d: *q.dspark.Drafter) !void {
         std.debug.print("{s} Markov producer {s} bits 0x{x}: waited refused {}, held target refused {}, held host refused {} (expected {})\n", .{ if (ok) "PASS" else "FAIL", if (bf16) "bf16" else "8bit", bits, waited_bad, target_bad, held_bad, invalid });
     }
     if (failures != 0) return error.MarkovNonfiniteControlFailed;
+}
+
+/// A shorter retained prefix cannot remove the future mask rows of a bidirectional query block.
+pub fn fixedBlockPrefix(gpa: std.mem.Allocator, d: *q.dspark.Drafter, lane: *q.dspark.Lane, pending: u32, anchor: u64) !void {
+    try d.settle();
+    _ = try q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = pending, .anchor = anchor, .depth = d.config.block }}, null);
+    const expected = try gpa.dupe(u8, d.s.logits.contents()[0 .. c.vocab * 2]);
+    defer gpa.free(expected);
+    const first = lane.held[0];
+    const has_confidence = lane.conf_len > 0;
+    const confidence: u32 = @bitCast(lane.conf[0]);
+    for ([_]u32{ 1, @min(3, d.config.block), d.config.block }) |depth| {
+        _ = try q.dspark_block.hold(d, &.{.{ .lane = lane, .pending = pending, .anchor = anchor, .depth = depth }}, null);
+        if (!std.mem.eql(u8, expected, d.s.logits.contents()[0..expected.len])) return error.DraftPrefixDependsOnGrant;
+        if (lane.held[0] != first) return error.DraftFirstProposalDependsOnGrant;
+        if (has_confidence and (lane.conf_len == 0 or @as(u32, @bitCast(lane.conf[0])) != confidence)) return error.DraftConfidenceDependsOnGrant;
+    }
+    std.debug.print("fixed query block: {d} rows; retained prefixes 1/3/{d} preserve all first-row base-logit bytes, first proposal and confidence\n", .{ d.config.block, d.config.block });
 }

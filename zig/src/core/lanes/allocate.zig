@@ -27,6 +27,7 @@ pub const HeadCost = struct {
     hold_context_rows: []const u32 = &.{},
     charged: []const bool = &.{},
     hold_rows: u32 = 0,
+    hold_block_rows: u32 = 0,
 };
 
 /// Prices growing blocks in stream order; batched blocks pad to each physical pass's deepest, excluding free nodes.
@@ -38,6 +39,7 @@ const GridPass = struct {
     batched: bool,
     free: u32,
     rows: u32,
+    block_rows: u32,
     counts: []const u32, // the allocation so far, which prices a split batch exactly
     charged: []const bool,
     blocks: usize = 0, // batched: streams with a node past the free one
@@ -53,10 +55,10 @@ const GridPass = struct {
             p.context_rows = @max(p.context_rows, debt);
             p.blocks += @intFromBool(depth == 1);
             p.deepest = @max(p.deepest, depth);
-            p.ms = if (p.rows == 0 or @as(i64, @intCast(p.blocks)) * p.deepest <= p.rows)
+            p.ms = if (p.rows == 0 or @as(i64, @intCast(p.blocks)) * @max(p.deepest, p.block_rows) <= p.rows)
                 hold_price.holdMs(p.costs, p.blocks, p.deepest) + hold_price.contextMs(p.contexts, p.blocks, p.context_rows)
             else
-                hold_price.countsMs(p.costs, p.contexts, p.rows, p.counts, p.charged, p.free, p.debts);
+                hold_price.countsMs(p.costs, p.contexts, p.rows, p.block_rows, p.counts, p.charged, p.free, p.debts);
         } else {
             if (depth == 1) p.ms += hold_price.contextMs(p.contexts, 1, debt);
             p.ms += hold_price.holdMs(p.costs, 1, depth) - (if (depth > 1) hold_price.holdMs(p.costs, 1, depth - 1) else 0.0);
@@ -84,7 +86,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
     var deepest: u32 = 0;
     var firsts: u64 = 0;
     const grid = head.hold_costs.len > 0;
-    var pass: GridPass = .{ .costs = head.hold_costs, .contexts = head.hold_context_costs, .debts = head.hold_context_rows, .batched = head.batched, .free = @intFromBool(head.free_first), .rows = head.hold_rows, .counts = counts, .charged = head.charged };
+    var pass: GridPass = .{ .costs = head.hold_costs, .contexts = head.hold_context_costs, .debts = head.hold_context_rows, .batched = head.batched, .free = @intFromBool(head.free_first), .rows = head.hold_rows, .block_rows = head.hold_block_rows, .counts = counts, .charged = head.charged };
     const timed = !costs.empty();
     var head_ms: f64 = 0.0; // the nodes counted so far: the head's price
     var best = rate(costs, timed, rows, expected, overhead_ms);
@@ -354,6 +356,28 @@ test "a hold past the pass's rows is priced as the passes it takes: an asymmetri
         const got = try allocateDrafts(gpa, &fixed, &probs, &flat, 0.0, 32, .{ .hold_costs = &grid, .batched = true, .hold_rows = c.rows });
         defer gpa.free(got);
         try std.testing.expectEqualSlices(u32, &c.want, got);
+    }
+}
+
+test "fixed query geometry charges short allocator heads as bounded passes" {
+    const gpa = std.testing.allocator;
+    var costs = try extendCosts(gpa, &.{ .{ .width = 1, .ms = 10 }, .{ .width = 8, .ms = 10 } }, 8);
+    defer costs.deinit(gpa);
+    const grid = [_]hold_price.HoldCost{
+        .{ .streams = 1, .depth = 1, .ms = 3 },
+        .{ .streams = 2, .depth = 1, .ms = 4 },
+        .{ .streams = 3, .depth = 1, .ms = 5 },
+    };
+    const probs = [_][]const f64{ &.{0.8}, &.{0.8}, &.{0.8}, &.{0.8} };
+    for ([_]u32{ 0, 9, 0 }) |block_rows| {
+        const got = try allocateDrafts(gpa, &.{ 1, 1, 1, 1 }, &probs, &costs, 0, 8, .{
+            .hold_costs = &grid,
+            .batched = true,
+            .hold_rows = 32,
+            .hold_block_rows = block_rows,
+        });
+        defer gpa.free(got);
+        try std.testing.expectEqualSlices(u32, if (block_rows == 0) &.{ 1, 1, 1, 1 } else &.{ 1, 1, 1, 0 }, got);
     }
 }
 

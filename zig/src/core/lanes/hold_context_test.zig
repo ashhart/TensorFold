@@ -430,6 +430,8 @@ test "no-confidence lone holds price staged debt only before whole-round observa
             .chances = false,
             .hold_costs = &holds,
             .hold_context_costs = &contexts,
+            .hold_rows = 32,
+            .hold_block_rows = 9,
         } } };
         defer staged.head.deinit();
         var wrapped = try Drafted.init(gpa, strict.backend(), staged.drafter());
@@ -448,6 +450,8 @@ test "no-confidence lone holds price staged debt only before whole-round observa
         var clock: fake.FixedClock = .{};
         var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
         defer engine.deinit();
+        try std.testing.expectEqual(@as(u32, 9), cfg.k.hold_block_rows);
+        try std.testing.expectEqual(@as(u32, 9), engine.rule.k.hold_block_rows);
         engine.rule.k.depth_probe_every = 4;
         var s = try sm.Stream.init(gpa, .{ .id = "no-confidence", .prompt = &.{ 2, 7, 13 }, .max_new = 32 });
         defer s.deinit(gpa);
@@ -501,5 +505,69 @@ test "no-confidence lone holds price staged debt only before whole-round observa
             try std.testing.expectEqual(fake.next(history.items, null, s.prompt_len + i), token);
             try history.append(gpa, token);
         }
+    }
+}
+
+test "fixed query blocks fund the real split instead of four cheap short heads" {
+    const grid = [_]price.HoldCost{
+        .{ .streams = 1, .depth = 1, .ms = 3 },
+        .{ .streams = 2, .depth = 1, .ms = 4 },
+        .{ .streams = 3, .depth = 1, .ms = 5 },
+    };
+    var f: Fixture = .{};
+    try f.init(.{ .drafts = 1, .forward = flat, .holds = &grid, .prior = &.{0.8} });
+    defer f.deinit();
+    f.engine.rule.k.hold_rows = 32;
+    var streams: [4]sm.Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*s| s.deinit(gpa);
+    while (made < streams.len) : (made += 1) streams[made] = try head("fixed-query", &.{0.8});
+    var plans: [4]win.Plan = undefined;
+    for (&plans, &streams) |*p, *s| p.* = .{ .stream = s, .position = 0, .kind = .none };
+    var out: [4]i64 = undefined;
+    for ([_]u32{ 0, 9, 0 }) |query_rows| {
+        f.engine.rule.k.hold_block_rows = query_rows;
+        try f.budgetsFor(&plans, &.{ 0, 1, 2, 3 }, &out);
+        // Variable one-row heads fit together: 7.2/16 pays. Four fixed nine-row blocks
+        // split 3+1 and tie plain at 7.2/18, but the first three still pay at 6.4/15.
+        try std.testing.expectEqualSlices(i64, if (query_rows == 0) &.{ 1, 1, 1, 1 } else &.{ 1, 1, 1, 0 }, &out);
+    }
+}
+
+test "fixed query recovery funds the selected physical context groups before spending cadence" {
+    var contexts = [_]price.ContextCost{
+        .{ .streams = 1, .rows = 1, .ms = 5 },
+        .{ .streams = 3, .rows = 1, .ms = 5 },
+        .{ .streams = 4, .rows = 1, .ms = 5 },
+    };
+    var f: Fixture = .{};
+    try f.init(.{ .drafts = 1, .forward = flat, .holds = &holds, .prior = &.{0.8}, .contexts = &contexts });
+    defer f.deinit();
+    f.engine.rule.k.hold_rows = 32;
+    f.engine.rule.k.depth_probe_every = 4;
+    f.engine.rule.k.draft_slack = 1;
+    var streams: [4]sm.Stream = undefined;
+    var made: usize = 0;
+    defer for (streams[0..made]) |*s| s.deinit(gpa);
+    var plans: [4]win.Plan = undefined;
+    for (&streams, &plans) |*s, *p| {
+        s.* = try head("fixed-query-trial", &.{0.8});
+        made += 1;
+        s.granted = 0;
+        s.hold_context_rows = 1;
+        _ = try f.engine.rule.rates(win.who(s));
+        p.* = .{ .stream = s, .position = 0, .kind = .none };
+    }
+    var out: [4]i64 = undefined;
+    for ([_]u32{ 0, 9, 0 }) |block_rows| {
+        f.engine.rule.k.hold_block_rows = block_rows;
+        for (&streams) |*s| {
+            s.depth.?.plain = 3;
+            s.depth.?.wait = 4;
+        }
+        try f.budgetsFor(&plans, &.{ 0, 1, 2, 3 }, &out);
+        // Two context fees alone tie plain for fixed blocks; one shared fee can fund recovery.
+        try std.testing.expectEqualSlices(i64, if (block_rows == 0) &.{ 1, 1, 1, 1 } else &.{ 0, 0, 0, 0 }, &out);
+        for (streams) |s| try std.testing.expectEqual(@as(?u64, if (block_rows == 0) 8 else 4), s.depth.?.wait);
     }
 }

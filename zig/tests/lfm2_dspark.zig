@@ -272,7 +272,7 @@ pub fn main(init: std.process.Init) !void {
     try controls.quotes(d);
     try controls.nonfinite(gpa, d);
     const cfg = d.config;
-    // the compared block's rows (a hold of depth d runs a d-row block)
+    // The retained proposal prefix; the reference still runs the checkpoint's entire bidirectional query block.
     const block: u32 = if (args.len >= 5) try std.fmt.parseInt(u32, args[4], 10) else cfg.block;
     if (block == 0 or block > cfg.block) return error.BadBlockRows;
     var scratch = try st.Scratch.init(gpa, m.device, &m.config.attention, length);
@@ -351,6 +351,7 @@ pub fn main(init: std.process.Init) !void {
         };
         std.debug.print("the owned stage: {d} rows staged in uneven absorbs, absorbed as one {d}-row piece like the direct absorbs' ({s} regime): keys, values and picks equal\n", .{ ctx, ctx, if (ctx <= 32) "<= 32-row" else "> 32-row" });
     }
+    try controls.fixedBlockPrefix(gpa, d, lane, ids[ctx], ctx);
     try lifecycle.run(gpa, d, taps.buf, ids, ctx);
     // Absorb time is consumed once without repricing; a hold reprices only participating shapes.
     if (ctx > 0) {
@@ -387,7 +388,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (cfg.block < 9) {
         std.debug.print("split-hold fixture skipped: this drafter's block is {d} rows and its depths [9, 1 x 7] need 9\n", .{cfg.block});
-    } else try controls.splitHold(gpa, init.io, d, ids);
+    } else for ([_]usize{ 8, 16 }) |count| try controls.splitHold(gpa, init.io, d, ids, count);
     for ([_]usize{ 1, 4, 16, 128, q.dspark.absorb_rows }) |rows| {
         if (rows > ctx) continue;
         var best: f64 = std.math.floatMax(f64);
@@ -400,6 +401,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const depths = [_]u32{ 1, 3, cfg.block };
     for (depths) |depth| {
+        if (depth > cfg.block) continue;
         var best: f64 = std.math.floatMax(f64);
         var cost_best: lifecycle.Cost = .{};
         for (0..5) |_| {
@@ -412,12 +414,13 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("clean hold of 1 stream at depth {d}: wall best {d:.3} ms; best paired cost CPU-encode {d:.3} ms + GPU {d:.3} ms = {d:.3} ms (5 attempts)\n", .{ depth, best, cost_best.encode_cpu_ms, cost_best.gpu_ms, cost_best.total() });
     }
-    // a shared round's hold: S streams' blocks of d rows in one pass (S x d at most pass_rows), each on this context
+    // One physical pass uses configured query blocks; larger logical cohorts are covered by splitHold.
     var lanes_: [16]*q.dspark.Lane = undefined;
+    const physical_lanes = @min(lanes_.len, q.dspark.pass_rows / cfg.block);
     lanes_[0] = lane;
     var made: usize = 1;
     defer for (lanes_[1..made]) |l| d.dropLane(l);
-    while (made < lanes_.len) : (made += 1) {
+    while (made < physical_lanes) : (made += 1) {
         const l = try d.newLane(length + 32);
         lanes_[made] = l;
         var from: usize = 0;
@@ -427,8 +430,8 @@ pub fn main(init: std.process.Init) !void {
         }
         l.end = ctx;
     }
-    for ([_]usize{ 2, 4, 8, 16 }) |streams| for ([_]u32{ 1, 2, 3, 4, 8 }) |depth| {
-        if (streams * depth > q.dspark.pass_rows) continue;
+    for (2..physical_lanes + 1) |streams| for ([_]u32{ 1, 2, 3, 4, 8 }) |depth| {
+        if (depth > cfg.block) continue;
         var blocks: [16]q.dspark_block.Block = undefined;
         for (blocks[0..streams], lanes_[0..streams]) |*b, l| b.* = .{ .lane = l, .pending = ids[ctx], .anchor = ctx, .depth = depth };
         var best: f64 = std.math.floatMax(f64);
@@ -455,7 +458,7 @@ pub fn main(init: std.process.Init) !void {
     defer arena.deinit();
     r.gpa = arena.allocator();
     const a = r.gpa;
-    const n = block;
+    const n = cfg.block;
     const tap_rows = taps.buf.slice(u16, length * width);
     const feats = try a.alloc(f32, ctx * width);
     for (feats, tap_rows[0 .. ctx * width]) |*f, v| f.* = quant.toF32(v);
@@ -543,7 +546,7 @@ pub fn main(init: std.process.Init) !void {
     var prev = ids[ctx];
     var same: usize = 0;
     var worst: f32 = 0;
-    for (0..n) |i| {
+    for (0..block) |i| {
         try matmul(gpa, w2, w1[@as(usize, prev) * cfg.rank ..][0..cfg.rank], bias, c.vocab, cfg.rank, 1);
         const row = base[i * c.vocab ..][0..c.vocab];
         var best: usize = 0;
@@ -576,5 +579,5 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("the reference's largest margin over a different GPU pick: {d:.3}\n", .{worst});
     std.debug.print("the confidences' worst difference from the fp32 reference: {d:.5}\n", .{conf_worst});
-    std.debug.print("{d} of {d} drafts equal the fp32 reference's picks on the same chain ({d}-token context)\n", .{ same, n, ctx });
+    std.debug.print("{d} of {d} drafts equal the fp32 reference's picks on the same chain ({d}-token context)\n", .{ same, block, ctx });
 }
