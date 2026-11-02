@@ -29,6 +29,10 @@ const ocr_points = @import("contract_glm_ocr_ops.zig");
 const ocr_norms = @import("contract_glm_ocr_norm.zig");
 const item_k = @import("contract_wmma_item.zig");
 const embed_k = @import("contract_embed.zig");
+const columns_k = @import("contract_columns.zig");
+const vision_k = @import("contract_vision.zig");
+const full_k = @import("contract_vision_attention.zig");
+const text_k = @import("contract_dense_text.zig");
 
 const g = core.contract.gates;
 
@@ -197,6 +201,25 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
         nembeds += 1;
     }
     for (embeds[0..nembeds]) |*x| try kernels.append(a, x.kernel());
+    var columns: [std.enums.values(columns_k.Which).len]columns_k.Columns = undefined;
+    var columns_count: usize = 0;
+    defer for (columns[0..columns_count]) |*x| x.deinit();
+    for (std.enums.values(columns_k.Which)) |which_columns| {
+        columns[columns_count] = try columns_k.Columns.init(a, &r, s, &l, ctl, which_columns);
+        columns_count += 1;
+    }
+    for (&columns) |*x| try kernels.append(a, x.kernel());
+    var vision: [std.enums.values(vision_k.Which).len]vision_k.Vision = undefined;
+    for (&vision, std.enums.values(vision_k.Which)) |*v, w| v.* = .init(a, &r, s, &l, w);
+    defer for (&vision) |*v| v.deinit();
+    for (&vision) |*v| try kernels.append(a, v.kernel());
+    var full = full_k.Attention.init(a, &r, s, &l);
+    defer full.deinit();
+    try kernels.append(a, full.kernel());
+    var text: [std.enums.values(text_k.Which).len]text_k.Text = undefined;
+    for (&text, std.enums.values(text_k.Which)) |*v, w| v.* = .init(a, &r, s, &l, w);
+    defer for (&text) |*v| v.deinit();
+    for (&text) |*v| try kernels.append(a, v.kernel());
     var t: g.Tally = .{};
     var ocr = try ocr_ops.load(&r);
     defer ocr.unload();
