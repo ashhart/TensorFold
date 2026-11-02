@@ -22,6 +22,21 @@ fn holds(text: []const u8, words: []const []const u8) bool {
     return false;
 }
 
+fn commandText(args: Value) []const u8 {
+    switch (args) {
+        .string => |s| return s,
+        .object => |o| {
+            if (o.get("command")) |c| if (c == .string) return c.string; // the command, wherever it sits among the fields
+            for (o.values()) |v| if (v == .string) {
+                if (holds(v.string, &verify_commands) or holds(v.string, &edit_commands)) return v.string;
+            };
+            if (o.count() > 0 and o.values()[0] == .string) return o.values()[0].string;
+            return "";
+        },
+        else => return "",
+    }
+}
+
 /// What a harness tool call did, read from its name and, for shell tools, its command.
 fn act(call: Value) Act {
     const name = tools.callName(call);
@@ -30,11 +45,7 @@ fn act(call: Value) Act {
     if (!holds(name, &run_names)) return .other;
     const f = call.get("function") orelse return .other;
     const args = f.get("arguments") orelse return .other;
-    const text = switch (args) {
-        .string => |s| s,
-        .object => |o| if (o.count() > 0) (if (o.values()[0] == .string) o.values()[0].string else "") else "",
-        else => "",
-    };
+    const text = commandText(args);
     if (holds(text, &edit_commands)) return .edit;
     if (holds(text, &verify_commands)) return .verify;
     return .other;
@@ -95,5 +106,7 @@ test "an edit after the last test is untested; a test after it settles it" {
     try std.testing.expect(!untested(read_only.array));
     const shell_edit = (try json.parseText(a, "[{\"role\": \"user\", \"content\": \"x\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"function\": {\"name\": \"bash\", \"arguments\": {\"command\": \"sed -i s/a/b/ f.c\"}}}]}]")).ok;
     try std.testing.expect(untested(shell_edit.array));
+    const later = (try json.parseText(a, "[{\"role\": \"user\", \"content\": \"x\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"function\": {\"name\": \"bash\", \"arguments\": {\"cwd\": \"/tmp\", \"command\": \"sed -i s/a/b/ f.c\"}}}]}]")).ok;
+    try std.testing.expect(untested(later.array));
     try std.testing.expect(cites("see https://ziglang.org") and !cites("no links"));
 }
