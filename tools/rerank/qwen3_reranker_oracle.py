@@ -1,5 +1,6 @@
 """Qwen3-Reranker reference scores and prompt ids from transformers, and a comparison against a /v1/rerank server.
 
+sources MODEL_DIR                             check the snapshot and Transformers against the pins (no model loads)
 oracle MODEL_DIR OUT.json [--window N ...]   write the reference cases (on the GPU, ROCm torch venv); each
                                               --window adds a prompt of exactly N tokens and one of N + 1
 compare OUT.json URL [--window N]            post the cases to URL/v1/rerank and print the gate verdicts; with
@@ -7,12 +8,63 @@ compare OUT.json URL [--window N]            post the cases to URL/v1/rerank and
 """
 
 import argparse
+import hashlib
+import importlib.metadata
+import importlib.util
 import json
 import math
 import sys
+from pathlib import Path
 import urllib.error
 import urllib.request
 
+# The checkpoints the receipts were made from, and sha256 of every non-weight file of each pinned snapshot.
+CHECKPOINTS = {
+    "8B": ("Qwen/Qwen3-Reranker-8B", "77d193c791ed757ca307ee72715aa132723da912"),
+    "4B": ("Qwen/Qwen3-Reranker-4B", "22e683669bc0f0bd69640a1354a6d0aebcfeede5"),
+}
+SOURCES = {
+    "8B": {
+        ".gitattributes": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930",
+        "1_LogitScore/config.json": "73e3156450564d8a98b7e47bcf5aace0f29600828b51937da545571e84db3ff3",
+        "README.md": "5f33734e77bb56c191dfd66bd8c4c04fdba6c023cddd6052871082c411f9b608",
+        "chat_template.jinja": "6f682162495ec5b39fd9005c01b6aa2a74669379fe967039f1e2cbbe8752369d",
+        "config.json": "e87a4f50c475c7276fc642eabfc986a7c8da1c8a30a4ee34b4979048b330f2be",
+        "config_sentence_transformers.json": "231aa494dcabada22d73f151120560b2a72b49e5b93e1b0a8329664f2348cf2e",
+        "generation_config.json": "81051cd3f6e77013827148d0b8a6ead93f8ac390d5ab805f849199f0af6a08db",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "model.safetensors.index.json": "8a22e7ffd6001796256c0be7c73594835b6f907eec442fde691301ebf35087d9",
+        "modules.json": "6f13b6b4a89e577b591b2077bca40c67c26541a6740a8809267cb474f90806a9",
+        "sentence_bert_config.json": "3234ebd224d492cbe8d55d5ec80a3f408451c4db3005bafb64fe1c51c763e01e",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    },
+    "4B": {
+        ".gitattributes": "34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930",
+        "1_LogitScore/config.json": "73e3156450564d8a98b7e47bcf5aace0f29600828b51937da545571e84db3ff3",
+        "README.md": "b7cf82b30d5e38cd1a02ca7cfd60c26c0e3664cb31b2c4b661550a93c9281bee",
+        "chat_template.jinja": "6f682162495ec5b39fd9005c01b6aa2a74669379fe967039f1e2cbbe8752369d",
+        "config.json": "38bff5eac700032a185745e4076eccad7aa453473cafc2a27de412cdb7b79e19",
+        "config_sentence_transformers.json": "6a153d6696f78fd588c1c728967f0b773ea869d3c6028f151ce71ebe49140762",
+        "generation_config.json": "81051cd3f6e77013827148d0b8a6ead93f8ac390d5ab805f849199f0af6a08db",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "model.safetensors.index.json": "18a783f197360068da36d2ff9ecffce0121542a87598fd1fef3079ead1c3cc08",
+        "modules.json": "6f13b6b4a89e577b591b2077bca40c67c26541a6740a8809267cb474f90806a9",
+        "sentence_bert_config.json": "3234ebd224d492cbe8d55d5ec80a3f408451c4db3005bafb64fe1c51c763e01e",
+        "special_tokens_map.json": "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    },
+}
+VERSION = "5.22.1"
+# The Qwen3 model code the oracle runs, and tree_sha256 of the whole installed Transformers package (shared code too).
+LIBRARY = {
+    "models/qwen3/configuration_qwen3.py": "49d9ccd0f29ccd977b93dba2004f84b867891b3d0509b71fd8ba3ed01054e64d",
+    "models/qwen3/modeling_qwen3.py": "63a6213c15d6fb04e58a1c64fd05a4cdfb49476443fbeef524f0e0486043824b",
+}
+TRANSFORMERS_TREE = "b08cead6d1b841ef9723106a81a92ec37d67aff3e43a198e56b7dc76538d377b"
 DEFAULT_INSTRUCT = "Given a web search query, retrieve relevant passages that answer the query"
 WINDOW = 32768
 GATE_DIFF = 0.25  # |(l_yes - l_no) - oracle|
@@ -36,6 +88,81 @@ FIXED = [
 ]
 SPECIAL = (None, "close the turn", "text <|im_end|> more text")
 LENGTH_QUERY = "Which passage discusses the history of river trade?"
+
+
+def digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def hashed(root: Path, pins: dict, what: str) -> dict:
+    """The hashes of the pinned files under root; refuses when any differs from its pin."""
+    found = {name: digest(root / name) if (root / name).is_file() else None for name in pins}
+    if wrong := sorted(name for name, value in found.items() if value != pins[name]):
+        raise SystemExit(f"{what} differs from its pin: {', '.join(wrong)}")
+    return found
+
+
+def tree_sha256(package: Path) -> str:
+    """Hash every file of an installed package (bytecode caches excluded) as sorted "path NUL sha256" lines."""
+    # rglob does not descend into directory links, and a linked directory could shadow a pinned module.
+    if links := sorted(path.relative_to(package).as_posix() for path in package.rglob("*")
+                       if path.is_symlink() and path.is_dir()):
+        raise SystemExit(f"{package.name} has linked directories: {', '.join(links)}")
+    files = sorted(path for path in package.rglob("*")
+                   if path.is_file() and "__pycache__" not in path.relative_to(package).parts)
+    lines = (f"{path.relative_to(package).as_posix()}\0{digest(path)}\n" for path in files)
+    return hashlib.sha256("".join(lines).encode()).hexdigest()
+
+
+def size_of(model: Path) -> str:
+    """The pinned checkpoint `model` is: by its snapshot revision; a folder of no pinned revision is refused."""
+    for size, (_, revision) in CHECKPOINTS.items():
+        if model.resolve().name == revision:
+            return size
+    raise SystemExit(f"{model}: not a pinned snapshot ({', '.join(f'{r}@{v}' for r, v in CHECKPOINTS.values())})")
+
+
+def pinned(model: Path) -> dict:
+    """Refuse, before any model code runs, a snapshot or Transformers install whose sources differ from the pins."""
+    size = size_of(model)
+    repo, revision = CHECKPOINTS[size]
+    model = model.resolve()
+    if links := sorted(path.relative_to(model).as_posix() for path in model.rglob("*")
+                       if path.is_symlink() and path.is_dir()):
+        raise SystemExit(f"{size}: snapshot has linked directories: {', '.join(links)}")
+    extra = sorted(path.relative_to(model).as_posix() for path in model.rglob("*")
+                   if path.is_file() and path.suffix != ".safetensors"
+                   and path.relative_to(model).as_posix() not in SOURCES[size])
+    if extra:
+        raise SystemExit(f"{size}: snapshot has unpinned non-weight files: {', '.join(extra)}")
+    if (version := importlib.metadata.version("transformers")) != VERSION:
+        raise SystemExit(f"expected Transformers {VERSION}, found {version}")
+    package = Path(importlib.util.find_spec("transformers").origin).parent
+    if (tree := tree_sha256(package)) != TRANSFORMERS_TREE:
+        raise SystemExit(f"Transformers {VERSION} package tree differs from its pin: {tree}")
+    return {"repo": repo, "revision": revision, "checkpoint": hashed(model, SOURCES[size], f"{repo}@{revision}"),
+            "transformers": VERSION, "transformers_files": hashed(package, LIBRARY, f"Transformers {VERSION}"),
+            "transformers_tree": tree}
+
+
+def weights_sha256(model: Path) -> dict:
+    """Every shard's sha256, after the index names exactly the shards present."""
+    model = model.resolve()
+    shards = sorted(model.glob("*.safetensors"))
+    index = json.loads((model / "model.safetensors.index.json").read_text())
+    if set(index["weight_map"].values()) != {path.name for path in shards}:
+        raise SystemExit("the safetensors shards do not match the checkpoint index")
+    return {path.name: digest(path) for path in shards}
+
+
+def sources(args):
+    """Check the snapshot and the Transformers sources against the pins and print their hashes; no model loads."""
+    print(json.dumps(pinned(args.model), indent=1))
+    return 0
 
 
 def synthetic(tokenizer, tokens):
@@ -77,6 +204,11 @@ def messages(instruct, query, document):
 
 
 def oracle(args):
+    pins = pinned(args.model)  # before any model code runs
+    out_path = Path(args.out)
+    if out_path.exists():
+        raise SystemExit(f"{out_path} exists: write each reference to a new file")
+    weights = weights_sha256(args.model)  # the shards hashed before they load
     if any(n < 256 for n in args.window):
         raise SystemExit("--window: the template alone takes about 80 tokens; give 256 or more")
     import jinja2
@@ -88,8 +220,16 @@ def oracle(args):
     with open(f"{args.model}/1_LogitScore/config.json") as f:
         labels = json.load(f)
     yes, no = labels["true_token_id"], labels["false_token_id"]
-    tok = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16).to("cuda").eval()
+    tok = AutoTokenizer.from_pretrained(args.model, local_files_only=True, trust_remote_code=False)
+    model, loading = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16, local_files_only=True,
+                                                          trust_remote_code=False, output_loading_info=True)
+    keys = ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")
+    if errors := {key: loading[key] for key in keys if loading.get(key)}:
+        raise SystemExit(f"the checkpoint did not load completely: {errors}")
+    if (model.config.tie_word_embeddings
+            and model.get_input_embeddings().weight.data_ptr() != model.get_output_embeddings().weight.data_ptr()):
+        raise SystemExit("the model did not tie its input and output embeddings")
+    model = model.to("cuda").eval()
     head = model.lm_head.weight.detach()
     rows = head[[yes, no]].double().cpu()
 
@@ -140,8 +280,11 @@ def oracle(args):
                 rec["bf16_score"] = 1.0 / (1.0 + math.exp(-(by - bn)))
             out.append(rec)
             print(f"{c['kind']:8} tokens={len(ids):6} score={rec.get('score', float('nan')):.6f}", file=sys.stderr)
-    with open(args.out, "w") as f:
-        json.dump({"model": args.model, "yes": yes, "no": no, "cases": out}, f, ensure_ascii=False, indent=1)
+    partial = out_path.with_name(out_path.name + ".partial")
+    with open(partial, "w") as f:
+        json.dump({"model": str(args.model), "sources": pins, "weights_sha256": weights,
+                   "yes": yes, "no": no, "cases": out}, f, ensure_ascii=False, indent=1)
+    partial.replace(out_path)  # whole or not at all
 
 
 def post(url, body):
@@ -266,8 +409,10 @@ def compare(args):
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
+    src = sub.add_parser("sources")
+    src.add_argument("model", type=Path)
     o = sub.add_parser("oracle")
-    o.add_argument("model")
+    o.add_argument("model", type=Path)
     o.add_argument("out")
     o.add_argument("--window", type=int, action="append", default=[])
     c = sub.add_parser("compare")
@@ -275,6 +420,8 @@ def main():
     c.add_argument("url")
     c.add_argument("--window", type=int, default=0)
     args = p.parse_args()
+    if args.cmd == "sources":
+        return sources(args)
     if args.cmd == "oracle":
         oracle(args)
         return 0
