@@ -2,6 +2,7 @@ package admission
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,6 +18,7 @@ type Admitter struct {
 	Waker     *Waker
 	Poll      time.Duration
 	Timeout   time.Duration
+	once      sync.Once
 }
 
 type entry struct {
@@ -87,10 +89,13 @@ func (a *Admitter) Admit(ctx context.Context, req Request) (*Lease, error) {
 	}
 }
 
+// waker makes the Waker once when none was given, so concurrent admissions share it.
 func (a *Admitter) waker() *Waker {
-	if a.Waker == nil {
-		a.Waker = NewWaker()
-	}
+	a.once.Do(func() {
+		if a.Waker == nil {
+			a.Waker = NewWaker()
+		}
+	})
 	return a.Waker
 }
 
