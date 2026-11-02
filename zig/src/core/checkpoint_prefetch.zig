@@ -9,6 +9,20 @@ const Checkpoint = @import("checkpoint.zig").Checkpoint;
 pub const chunk = 8 << 20;
 pub const max_readers = 16;
 
+/// Readers a layer loader reads each layer ahead with when TF_LOAD_PREFETCH is unset.
+pub const default_readers = 16;
+
+/// TF_LOAD_PREFETCH as a reader count: unset for `default_readers`, 0 for none (the loader faults every page in).
+pub fn readerCount(value: ?[]const u8) !usize {
+    const n = std.fmt.parseInt(usize, value orelse return default_readers, 10) catch return error.BadLoadPrefetch;
+    return if (n <= max_readers) n else error.BadLoadPrefetch;
+}
+
+/// This process's TF_LOAD_PREFETCH reader count.
+pub fn configured() !usize {
+    return readerCount(if (std.c.getenv("TF_LOAD_PREFETCH")) |v| std.mem.span(v) else null);
+}
+
 /// A piece of one file: its path lives in the checkpoint's arena, which outlives the readers.
 const Span = struct { path: [*:0]const u8, lo: u64, hi: u64 };
 
@@ -116,6 +130,15 @@ fn close(fd: platform.c.fd_t) void {
 }
 
 const fixture = @import("checkpoint_fixture.zig");
+
+test "TF_LOAD_PREFETCH: 16 when unset, none at 0, a count up to the limit, a refusal past it or for a word" {
+    try std.testing.expectEqual(@as(usize, 16), try readerCount(null));
+    try std.testing.expectEqual(@as(usize, 0), try readerCount("0"));
+    try std.testing.expectEqual(@as(usize, 8), try readerCount("8"));
+    try std.testing.expectEqual(@as(usize, 16), try readerCount("16"));
+    try std.testing.expectError(error.BadLoadPrefetch, readerCount("17"));
+    try std.testing.expectError(error.BadLoadPrefetch, readerCount("eight"));
+}
 
 test "readers read every byte named under a prefix, a piece at a time, and none past it" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;

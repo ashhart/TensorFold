@@ -353,9 +353,13 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     e.final_norm = try normVec(e, ck, mo, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
     const conv = g.convWidth();
     const taps_shape: []const usize = if (mo) &.{ conv, 1, geometry.taps } else &.{ conv, geometry.taps, 1 }; // the same bytes
+    const readers = try core.checkpoint.loadReaders();
     for (e.layers, 0..) |*l, i| {
         var pbuf: [96]u8 = undefined;
         const p = try std.fmt.bufPrint(&pbuf, "{s}layers.{d}.", .{ m, i });
+        defer ck.release(); // the layer is on the device: its pages leave the cache
+        var reading = ck.prefetch(p, readers); // read ahead by threads of their own while the layer packs
+        defer _ = reading.join();
         var ps: std.enums.EnumArray(Slot, Proj) = .initUndefined();
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
