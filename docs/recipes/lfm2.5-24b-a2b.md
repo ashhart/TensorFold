@@ -70,6 +70,10 @@ The drafter has no embedding and no head of its own:
 - Markov head: row i's logits plus `W2 W1[previous token]` (rank 256); draft i is their argmax. Only the requested
   prefix takes Markov steps and is returned; the pointwise backbone tail always keeps the full query block.
 
+Full-block attention reserves one tail chunk beyond the target's 131,072-key span for query masks.
+The target context window is unchanged. A GPU boundary oracle checks both the next scratch row and the
+extra keys' contribution to the result.
+
 The drafter runs the released bf16 matrices as they are (`--drafter-bits 0`, the default). `--drafter-bits 8` instead
 quantizes them at load to 8-bit MLX affine codes in groups of 64: about 361 MiB of weights
 against 625 MiB. Weight storage does not guarantee serving throughput; the server logs the mode, and 4 bits is refused.
