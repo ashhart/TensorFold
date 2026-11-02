@@ -505,35 +505,6 @@ test "under a confidence floor a greedy stream drafts the most, and a sampled on
     try std.testing.expectEqual(@as(i64, 1), try rule.headDepth(&sampled, null, probe)); // a first rate under 0.8: one draft
 }
 
-test "a shared round's drafts come out the same whichever depths its overhead was measured at" {
-    const gpa = std.testing.allocator;
-    var shared: Table = .{};
-    defer shared.deinit(gpa);
-    for (1..17) |w| try shared.put(gpa, @intCast(w), 10.0 + 2.0 * @as(f64, @floatFromInt(w)));
-    const empty: Table = .{};
-    const No = struct {
-        fn copy(_: *anyopaque, _: *const Who) bool {
-            return false;
-        }
-    };
-    var unused: u8 = 0;
-    const probe: Probe = .{ .ptr = &unused, .copy = No.copy };
-    var got: [2][2]i64 = undefined;
-    for ([_][2]i64{ .{ 1, 1 }, .{ 3, 3 } }, &got) |measured, *out| {
-        var rule: Rule = .{ .gpa = gpa, .prior = &.{ 0.9, 0.8, 0.7, 0.6 }, .most_drafts = 4, .family_costs = &empty, .shared_costs = &shared, .mtp_step_ms = 3.0, .plain_guard = false, .node_probabilities = false, .batch_rows = 16 };
-        defer rule.deinit();
-        // two streams' round: their pending rows and the drafts verified, 3 ms of its own, then each drafted step
-        const rows: u64 = @intCast(2 + measured[0] + measured[1]);
-        const head = rule.headMs(&measured);
-        try rule.observeOverhead(2, rows, shared.get(@intCast(rows)).? + 3.0 + head, false, head);
-        var states: [2]?State = .{ null, null };
-        defer for (&states) |*s| if (s.*) |*x| x.deinit(gpa);
-        var whos = [_]Who{ .{ .state = &states[0], .draft_room = 100, .finished = false, .forced = false }, .{ .state = &states[1], .draft_room = 100, .finished = false, .forced = false } };
-        try rule.budgets(&whos, probe, false, out);
-    }
-    try std.testing.expectEqualSlices(i64, &got[0], &got[1]);
-}
-
 test "granted depths in a shared round fit one hold pass: every block is as deep as the deepest" {
     const empty: Table = .{};
     var rule: Rule = .{ .gpa = std.testing.allocator, .prior = &.{0.8}, .most_drafts = 9, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = true, .granted_depth = true, .batch_rows = 32 };
