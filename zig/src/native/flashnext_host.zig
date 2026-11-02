@@ -270,7 +270,7 @@ pub const Host = struct {
         h: *Host,
         job: *Job,
 
-        pub fn prefilled(ctx: *anyopaque) void {
+        fn prefilled(ctx: *anyopaque) void {
             const c: *Ctx = @ptrCast(@alignCast(ctx));
             const h = c.h;
             const done = h.now();

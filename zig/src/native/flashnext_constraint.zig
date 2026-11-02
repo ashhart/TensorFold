@@ -18,8 +18,15 @@ pub fn serve(h: *Host, job: anytype) void {
             switch (e.*) {
                 .prefilled => |cached| {
                     c.job.cached = cached;
-                    var context: Host.Ctx = .{ .h = c.h, .job = c.job };
-                    Host.Ctx.prefilled(&context);
+                    const done = c.h.now();
+                    c.h.lock();
+                    if (done > c.job.began) c.h.prefill_rate = @as(f64, @floatFromInt(c.job.request.prompt.len - cached)) / (@as(f64, @floatFromInt(done - c.job.began)) / 1e9);
+                    c.h.prefill_at = done;
+                    c.h.prefilling = false;
+                    c.job.prefilled = done;
+                    c.h.unlock();
+                    c.job.prefill_sent = true;
+                    Host.emit(c.job, e.*);
                 },
                 .tokens => |tokens| {
                     Host.emit(c.job, e.*);
