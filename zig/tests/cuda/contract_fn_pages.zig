@@ -519,4 +519,5 @@ test "paged media contract: the sparse row control chooses a positive cached sco
 
 test {
     _ = @import("contract_fn_pages_sums.zig");
+    _ = @import("contract_fn_attn_lanes.zig");
 }
