@@ -25,7 +25,7 @@ pub const usage =
     \\usage: tensorfold cluster init --node NAME=ADDRESS[@VIA]... [--cuda NAME]... [--ssh-user U] [--ssh-key FILE] [--name CLUSTER] [--probes DIR]
     \\       tensorfold cluster check --cluster FILE [--model ID] [--model-config FILE [--model-files FILE]] [--probe | --probes DIR]
     \\       tensorfold cluster status --cluster FILE [--model ID] [--probe | --probes DIR]
-    \\       tensorfold serve [MODEL] --cluster FILE [--leader NAME] [--dry-run] [--hold SECONDS] [--model-config FILE [--model-files FILE]] [--probes DIR]
+    \\       tensorfold serve [MODEL] --cluster FILE [--leader NAME] [--dry-run] [--hold SECONDS] [--model-config FILE [--model-files FILE]] [--probe | --probes DIR]
     \\       tensorfold node --name NAME --cluster FILE [--leader NAME] [--model ID] [--probes DIR]
     \\--probes DIR reads each node's probe output from DIR/NAME/ and records launches in DIR/launches.log (fake hosts).
     \\On real hosts a disaggregated model's nodes open their MCDMA links and agree on its plan; serve holds the cluster
@@ -90,6 +90,49 @@ fn flag(args: []const []const u8, name: []const u8) ?[]const u8 {
         if (std.mem.startsWith(u8, args[i], name) and args[i].len > name.len and args[i][name.len] == '=') return args[i][name.len + 1 ..];
     }
     return null;
+}
+
+/// The flags a command takes: with a value (`--x V` or `--x=V`), and switches.
+const Flags = struct { values: []const []const u8, switches: []const []const u8 = &.{}, positionals: usize = 0 };
+
+const serve_flags: Flags = .{ .values = &.{ "--cluster", "--leader", "--hold", "--model-config", "--model-files", "--probes" }, .switches = &.{ "--dry-run", "--probe" }, .positionals = 1 };
+const node_flags: Flags = .{ .values = &.{ "--name", "--cluster", "--leader", "--model", "--probes" } };
+
+/// Refuse, by name, a flag `cmd` does not take, a missing value and a stray argument, before anything is read or opened
+/// (an unknown flag used to be ignored: `node --dry-run` opened the real endpoint and waited for its peer).
+fn known(env: Env, cmd: []const u8, args: []const []const u8, f: Flags) !bool {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const x = args[i];
+        if (!std.mem.startsWith(u8, x, "--")) {
+            if (i < f.positionals) continue;
+            try env.err.print("{s}: unexpected argument {s}\n", .{ cmd, x });
+            return false;
+        }
+        const eq = std.mem.indexOfScalar(u8, x, '=');
+        const name = x[0 .. eq orelse x.len];
+        if (contains(f.values, name)) {
+            if (eq != null) continue;
+            if (i + 1 >= args.len) {
+                try env.err.print("{s}: {s} needs a value\n", .{ cmd, name });
+                return false;
+            }
+            i += 1;
+        } else if (contains(f.switches, name)) {
+            if (eq == null) continue;
+            try env.err.print("{s}: {s} takes no value\n", .{ cmd, name });
+            return false;
+        } else {
+            try env.err.print("{s}: unknown flag {s}\n", .{ cmd, name });
+            return false;
+        }
+    }
+    return true;
+}
+
+fn contains(list: []const []const u8, name: []const u8) bool {
+    for (list) |x| if (std.mem.eql(u8, x, name)) return true;
+    return false;
 }
 
 fn has(args: []const []const u8, name: []const u8) bool {
@@ -195,6 +238,7 @@ fn refuseConverged(env: Env, m: config.Model) !void {
 }
 
 fn serveCmd(env: Env, args: []const []const u8) !u8 {
+    if (!try known(env, "serve", args, serve_flags)) return bad(env);
     const l = (try load(env, args)) orelse return bad(env);
     const c = l.config;
     const id = if (args.len > 0 and !std.mem.startsWith(u8, args[0], "--")) args[0] else if (c.models.len == 1) c.models[0].id else return bad(env);
@@ -270,6 +314,7 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
 }
 
 fn nodeCmd(env: Env, args: []const []const u8) !u8 {
+    if (!try known(env, "node", args, node_flags)) return bad(env);
     const l = (try load(env, args)) orelse return bad(env);
     const c = l.config;
     const name = flag(args, "--name") orelse return bad(env);
