@@ -140,7 +140,7 @@ pub const Router = struct {
         const k = self.shape.k;
         const e = self.shape.n;
         self.w[k / 3] = std.math.nan(f64);
-        self.w[1 * k + k / 2] = std.math.inf(f64);
+        if (e > 1) self.w[1 * k + k / 2] = std.math.inf(f64);
         if (e > 2 and k / 2 + 1 < k) self.w[2 * k + k / 2 + 1] = -std.math.inf(f64);
         if (self.shape.rows > 1) self.x[k] = std.math.nan(f64);
     }
