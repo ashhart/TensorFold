@@ -1,3 +1,6 @@
+import { connectorSourceBinding } from '../../../agent/connector-source-binding'
+import { registerMicrosoftMailIpc } from './microsoft-mail'
+import { microsoftMailService } from '../microsoft-mail-runtime'
 import { emailSourceRef, emailThreadResolvedEvent, readEmailMessage, readEmailThread, scanEmailMessages, summarizeEmail, syncEmailConnector, validateAndMakeEmailSource } from '../../../agent/email-connector'
 import { attachMediaBytesPaths, emailContactObservations, enrichContacts } from '../connector-enrich'
 import { mergeConnectorSyncSources } from '../../../agent/connector-sync-state'
@@ -14,6 +17,7 @@ import type { ConnectorEvent } from '../../../agent/types'
 import type { ConnectorIpcDeps } from '../connector-ipc'
 
 export function registerEmailIpc(deps: ConnectorIpcDeps): void {
+  registerMicrosoftMailIpc(deps)
   const handle = deps.handle ?? defaultHandle
   const { spine, emailTransport, syncQueue } = deps
   const { rememberConnectorEvents } = spine
@@ -40,7 +44,10 @@ export function registerEmailIpc(deps: ConnectorIpcDeps): void {
         ...store.settings.email,
         sources: store.settings.email.sources.map((source) => {
           if (source.id !== id) return source
-          const safePatch = { ...patch }
+          const safePatch = source.kind === 'microsoft_graph' ? {
+            ...(typeof patch.label === 'string' && patch.label.trim() ? { label: patch.label.trim().slice(0, 200) } : {}),
+            ...(typeof patch.enabled === 'boolean' ? { enabled: patch.enabled } : {}),
+          } : { ...patch }
           if (safePatch.password && isSecretMask(safePatch.password)) safePatch.password = source.password
           const next = { ...source, ...safePatch, id: source.id, updatedAt: Date.now() }
           return stampSecretRotations(next, source, { password: [next.password, source.password] })
@@ -53,6 +60,10 @@ export function registerEmailIpc(deps: ConnectorIpcDeps): void {
 
   handle('email:removeSource', async (_e, id: string) => {
     requireSecurityRole('operator', 'remove email sources')
+    if (store.settings.email.sources.some(source => source.id === id && source.kind === 'microsoft_graph')) {
+      requireSecurityRole('owner', 'disconnect Microsoft mail')
+      await microsoftMailService().remove(id)
+    }
     store.settings = { ...store.settings, email: { ...store.settings.email, sources: store.settings.email.sources.filter((source) => source.id !== id) } }
     await saveSettings(store.settings)
     return publicConnectorSettings().email
@@ -62,18 +73,17 @@ export function registerEmailIpc(deps: ConnectorIpcDeps): void {
     requireSecurityRole('operator', 'sync email')
     return syncQueue.run('email', async () => {
       const result = await syncEmailConnector(store.settings.email, store.connectorEvents)
+      result.events = result.events.filter(event => event.sources?.every(ref => {
+        const current = store.settings.email.sources.find(source => source.id === ref.sourceId && source.enabled)
+        return current && (!ref.sourceRevision || ref.sourceRevision === connectorSourceBinding(current))
+      }))
       store.settings = { ...store.settings, email: { ...store.settings.email, sources: mergeConnectorSyncSources(store.settings.email.sources, result.sources), lastSyncAt: result.syncedAt } }
       await saveSettings(store.settings)
-      // CONTACT NAMES: learn an email address -> From display-name from this batch so a later
-      // "reply to <name>" resolves the address. The actor already shows the From header, so
-      // enrichContacts leaves events untouched; we only persist the grown directory.
+
       const enriched = enrichContacts(store.contacts, result.events, emailContactObservations(result.events))
       store.contacts = enriched.directory
       persistContacts()
-      // MEDIA CACHE: email attachments are inline MIME parts (not URLs), so the sync already
-      // decoded their bytes (result.attachmentsByEvent, keyed by event id). Write those bytes to
-      // ~/.vontra/cache/{images,documents,audio} and stamp the local paths onto each event's
-      // mediaPaths so the vision tool can read an attached image/PDF by path. Best-effort.
+
       const attachmentsByEvent = result.attachmentsByEvent
       if (attachmentsByEvent) {
         await attachMediaBytesPaths(enriched.events, (event) => attachmentsByEvent[event.id] ?? [])

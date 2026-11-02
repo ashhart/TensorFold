@@ -78,22 +78,23 @@ export function ThreadPanel({ thread, git, onChanged }: { thread: Thread; git: G
       <div onPointerDown={startResize} className="group absolute left-0 top-0 z-20 h-full w-1.5 -translate-x-1/2 cursor-col-resize" aria-label={tx("Resize work pane")}>
         <div className="absolute left-1/2 top-0 h-full w-px bg-transparent transition-colors group-hover:bg-line-strong" />
       </div>
-      <div role="tablist" className="flex h-10 shrink-0 items-stretch gap-4 border-b border-line px-4">
+      <div className="flex h-10 shrink-0 items-stretch gap-2 border-b border-line px-2">
+        <div role="tablist" className="scroll-thin flex min-w-0 flex-1 items-stretch gap-3 overflow-x-auto">
         {WORK_PANE_TABS.filter((t) => tabs.includes(t.id)).map((t) => (
           <button
             key={t.id}
             role="tab"
             aria-selected={tab === t.id}
             onClick={() => pick(t.id)}
-            className={clsx('relative flex items-center gap-1.5 text-[13px] transition-colors', tab === t.id ? 'text-ink' : 'text-ink-3 hover:text-ink-2')}
+            className={clsx('relative flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] transition-colors focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2', tab === t.id ? 'text-ink' : 'text-ink-3 hover:text-ink-2')}
           >
             {t.label}
             {t.id === 'changes' && changeCount > 0 && <span className="text-[13px] tabular-nums text-ink-3">{changeCount}</span>}
             {tab === t.id && <span className="absolute inset-x-0 -bottom-px h-[1.5px] rounded-full bg-ink" />}
           </button>
         ))}
-        <div className="flex-1" />
-        <button onClick={closeWorkPane} title={tx("Close pane (⌥⌘B)")} aria-label={tx("Close pane")} className="my-auto flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink">
+        </div>
+        <button onClick={closeWorkPane} title={tx("Close pane (⌥⌘B)")} aria-label={tx("Close pane")} className="my-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink focus-visible:outline-2 focus-visible:outline-accent">
           <Icon name="x" size={16} />
         </button>
       </div>

@@ -1,4 +1,14 @@
-# Linux desktop port — current status
+# Original Linux client port evidence
+
+This document records the earlier client port and its review. For this development branch's bundled
+1.2.0 engine, packages and current limits, see [desktop platform qualification](../desktop-platforms.md).
+The provider-only scope and engine exclusions below describe the original port.
+
+The current integration supports staged writable commands and direct MCP isolation. Native Ubuntu
+tests cover checked source publication, Git and worktree protection, private-file denial, network
+controls, cancellation and MCP shutdown. See [command and MCP isolation](../process-isolation.md).
+The sections below preserve the original port's scope and evidence, not the current feature list.
+Ubuntu's AppArmor policy must permit bubblewrap user namespaces; unavailable isolation fails closed.
 
 Work lives on branch `linux-port` in the fork and is pushed there. All checks below were re-run after
 rebasing onto current `upstream/main`.
@@ -55,7 +65,7 @@ clean-machine install.
   read the workspace on any platform. Attachments are the supported way to give a bot file content;
   workspace work belongs to a task or project chat.
 
-## Linux command sandbox — separate work, not in this change
+## Historical command sandbox exclusions
 
 Per the maintainer's review, the bubblewrap backend is not part of this client portability change:
 commands stay refused on Linux until the git and worktree gaps are closed. The implementation and its

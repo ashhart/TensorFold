@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
+import { spawnCliProcess as spawn } from './cli-process'
 import type { CliAuthCheck, CliAuthTransport, CliLoginResult, Provider } from './types'
 import { cliAuthCommands, parseAuthStatus } from './cli-auth'
 import { resolveCliBinary } from './cli-path'
@@ -8,14 +9,6 @@ function isCliTransport(t?: string): t is CliAuthTransport {
   return t === 'codex-cli' || t === 'claude-cli'
 }
 
-// Resolve the CLI binary the SAME way the agent runner does (codex-cli.ts / claude-cli.ts): an
-// explicit configured path wins; otherwise probe the known install dirs for an ABSOLUTE path;
-// otherwise fall back to the bare name on the (startup-augmented) PATH. Keeping DETECTION consistent
-// with EXECUTION is the fix for "it isn't detecting my installed CLI" — a Finder-launched app's
-// stripped PATH made the bare-name probe ENOENT even when codex/claude was installed, so detection
-// reported "not installed" for a CLI the app could actually run.
-// The binary names each CLI transport is allowed to resolve/spawn — also used to validate
-// renderer-supplied custom paths before they reach spawn().
 export function cliBinaryNames(transport: CliAuthTransport): string[] {
   return transport === 'codex-cli' ? ['codex'] : ['claude']
 }
@@ -25,9 +18,6 @@ export function cliAuthBinary(provider: Provider, opts?: { dirs?: string[]; exis
   return resolveCliBinary(provider.cliPath, names, opts ?? {})
 }
 
-// Run `<cli> <status-subcommand>` and parse. binaryPresent=false only when the
-// binary itself is missing (ENOENT), so the UI can distinguish "install it" from
-// "sign in".
 export async function checkCliAuth(provider: Provider): Promise<CliAuthCheck> {
   const transport = provider.transport
   if (!isCliTransport(transport)) return { loggedIn: false, binaryPresent: false, message: 'Not a CLI provider.' }
@@ -67,10 +57,6 @@ export interface StartLoginOptions {
   timeoutMs?: number
 }
 
-// Spawn the OAuth login (`codex login` / `claude auth login`). The CLI opens the
-// system browser itself and blocks until the flow completes, so this resolves
-// once the process exits; we then re-check status to confirm. The only step
-// outside the app is the provider's own browser consent page.
 export async function startCliLogin(provider: Provider, opts: StartLoginOptions = {}): Promise<CliLoginResult> {
   const transport = provider.transport
   if (!isCliTransport(transport)) return { ok: false, loggedIn: false, message: 'Not a CLI provider.' }

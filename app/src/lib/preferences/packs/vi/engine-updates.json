@@ -1,0 +1,15 @@
+{
+  "Engine updates": "Cập nhật động cơ",
+  "bundled": "đi kèm",
+  "Checking installed runtime…": "Đang kiểm tra môi trường thực thi đã cài…",
+  "Check for engine updates": "Kiểm tra cập nhật động cơ",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "Cập nhật động cơ cục bộ mà không cần cài lại ứng dụng. Hãy hoàn tất công việc cục bộ trước khi chuyển đổi. Mô hình và cuộc trò chuyện được giữ nguyên.",
+  "No compatible engine updates are available for this device.": "Không có bản cập nhật động cơ tương thích với thiết bị này.",
+  "Use this runtime": "Dùng môi trường thực thi này",
+  "Use bundled engine": "Dùng động cơ đi kèm",
+  "Checking signed releases…": "Đang kiểm tra các bản phát hành đã ký…",
+  "Switching runtime…": "Đang chuyển môi trường thực thi…",
+  "Ready locally": "Sẵn sàng cục bộ",
+  "memory on this computer.": "bộ nhớ trên máy tính này.",
+  "Prevent sleep while this option is enabled.": "Ngăn chế độ ngủ khi tùy chọn này được bật."
+}

@@ -20,7 +20,7 @@ export function FirstAnswerStep({ starter, onStarter, model, readiness, disabled
     </div>
     <fieldset disabled={disabled} className="min-w-0 space-y-2">
       <legend className="mb-2 text-[14px] font-medium text-ink">{t("first.task")}</legend>
-      {FIRST_ANSWER_STARTERS.map((item) => <label key={item.id} className="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-card px-3 py-2.5 text-[13px] text-ink-2">
+      {FIRST_ANSWER_STARTERS.map((item) => <label key={item.id} className={`flex cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 text-[13px] text-ink-2 transition-colors ${starter === item.id ? 'border-accent/40 bg-accent/5' : 'border-line bg-card hover:bg-card-2'}`}>
         <input type="radio" name="first-answer-starter" value={item.id} checked={starter === item.id} onChange={() => onStarter(item.id)} className="mt-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent" />
         <span className="min-w-0"><span className="block font-medium text-ink">{authored(item.label)}</span><span className="mt-0.5 block leading-relaxed">{authored(item.description)}</span></span>
       </label>)}

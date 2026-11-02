@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "助手工作区",
+  "Open inbox": "打开收件箱",
+  "Open Google Workspace": "打开 Google Workspace",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "开始任务、阅读已连接的对话，或管理 Google 邮件和日历。",
+  "Google account tools require a model running locally on this computer.": "Google 账户工具需要在此电脑上本地运行的模型。",
+  "Manage Google accounts locally in TensorFold on the host computer.": "在主机 电脑 的 TensorFold 中本地管理 Google 账户。",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Google 桌面 OAuth 客户端导入、凭据和所有者审核仅可在主机 电脑 上使用。",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "这台 电脑 尚未连接任何 Google 账号。请在下方登录，然后在 Google 登录窗口中选择账号或使用其他邮箱地址。",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "这台 电脑 尚未连接任何 Google 账号。请在下方设置 Google 登录以添加账号。",
+  "Disconnected on this computer": "已在此 电脑 上断开",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "已在此 电脑 本地断开连接；读取或准备新操作前请通过 Google 重新连接。",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "替换客户端绝不会自动登录或断开账户；其 JSON 和凭据保留在主机 电脑 上。",
+  "No inbox conversation is attached": "未附加收件箱对话"
+}

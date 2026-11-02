@@ -1,4 +1,5 @@
 import { DocumentEvidenceButtons } from '../documents/DocumentEvidenceButtons'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import ReactMarkdown from 'react-markdown'
@@ -8,7 +9,7 @@ import { Icon } from '../../lib/icons'
 import { useStore } from '../../lib/store'
 import { mdComponents } from '../../lib/highlight'
 import { groupToolRuns } from '../../lib/activity-grouping'
-import { workRowLabel, type TurnSummary } from '../../lib/turn-blocks'
+import { turnActivityState, workRowLabel, type TurnSummary } from '../../lib/turn-blocks'
 import type { TimelineItem } from '../../lib/types'
 import { ActivityLineGroup } from '../ActivityLine'
 import { Reasoning, Spinner, ToolCard } from '../timeline'
@@ -34,27 +35,42 @@ export function TurnWorkRow({ turn, status, phaseLabel, defaultOpen = false, rev
   reveal?: number
   searchItemId?: string | null
 }) {
+  const tx = useAuthoredText()
   const [open, setOpen] = useState(defaultOpen)
   useEffect(() => { if (reveal > 0) setOpen(true) }, [reveal])
   const locale = useStore(state => state.settings?.uiPreferences?.locale)
   const now = useNow(turn.running)
   const label = workRowLabel(turn, { now, status, phaseLabel, locale })
   const hasDetails = turn.work.length > 0
+  const state = turnActivityState(turn, status)
+  const stateLabel = { running: 'Running', waiting: 'Needs you', completed: 'Finished', failed: 'Failed', stopped: 'Stopped', review: 'Review needed', interrupted: 'Interrupted' }[state]
+  const needsAttention = state === 'failed' || state === 'review' || state === 'interrupted'
+  const detailsId = `turn-details-${turn.key}`
   return (
-    <div className="fade-in">
-      <span role="status" aria-live="polite" className="sr-only">{turn.running ? phaseLabel : undefined}</span>
+    <div className={clsx('fade-in min-w-0 rounded-xl border bg-card', turn.running ? 'border-accent/25' : 'border-line')}>
+      <span role="status" aria-live="polite" className="sr-only">{turn.running ? phaseLabel || tx(stateLabel) : undefined}</span>
       <button
         type="button"
         onClick={() => hasDetails && setOpen((value) => !value)}
+        disabled={!hasDetails}
         aria-expanded={hasDetails ? open : undefined}
-        className={clsx('group -ml-2 flex max-w-full items-center gap-2 rounded-[10px] px-2 py-1 text-left text-[13px] leading-[18px] transition-colors', hasDetails ? 'text-ink-3 hover:bg-ink-5 hover:text-ink-2' : 'cursor-default text-ink-3')}
+        aria-controls={hasDetails ? detailsId : undefined}
+        className="group flex w-full items-start gap-2.5 rounded-xl px-3 py-2.5 text-left text-[13px] leading-5 transition-colors hover:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default"
       >
-        {turn.running && <Spinner size={13} />}
-        <span className={clsx('min-w-0 truncate', turn.running && 'shimmer')}>{label}</span>
-        {hasDetails && <Icon name={open ? 'chevronDown' : 'chevronRight'} size={14} className="shrink-0 opacity-60 transition-opacity group-hover:opacity-100" />}
+        <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+          {state === 'running' ? <Spinner size={14} /> : <Icon name={state === 'waiting' ? 'shield' : needsAttention ? 'warning' : state === 'stopped' ? 'stop' : 'check'} size={15} className={needsAttention ? 'text-danger' : state === 'waiting' ? 'text-accent' : 'text-ink-3'} />}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="min-w-0 break-words font-medium text-ink-2">{label}</span>
+            <span className={clsx('rounded px-1.5 text-[11px] font-medium', needsAttention ? 'bg-danger/8 text-danger' : state === 'running' || state === 'waiting' ? 'bg-accent-soft text-accent' : 'bg-surface text-ink-3')}>{tx(stateLabel)}</span>
+          </span>
+          {needsAttention && <span className="mt-0.5 block text-[12px] text-ink-3">{tx('Review the activity before continuing.')}</span>}
+        </span>
+        {hasDetails && <Icon name={open ? 'chevronDown' : 'chevronRight'} size={15} className="mt-0.5 shrink-0 text-ink-3" />}
       </button>
       {open && hasDetails && (
-        <div className="ml-[3px] mt-1.5 space-y-1.5 border-l border-line pb-1 pl-4">
+        <div id={detailsId} className="space-y-2 border-t border-line px-3 py-2.5">
           <WorkItems items={turn.work} running={turn.running} status={status} searchItemId={searchItemId} />
         </div>
       )}
@@ -87,10 +103,12 @@ function WorkItems({ items, running, status, searchItemId }: { items: TimelineIt
 
 // Run bookkeeping (contract, receipt, guard and verify notes) as one quiet line each.
 function WorkNote({ item }: { item: TimelineItem }) {
-  const icon = item.runReceipt || item.runContract ? 'check' : item.title === 'Guard' || item.title === 'Verify-on-stop' ? 'shield' : 'layers'
+  const verdict = item.runReceipt?.verdict
+  const concern = verdict === 'failed' || verdict === 'blocked' || verdict === 'unverified'
+  const icon = concern ? 'warning' : verdict === 'cancelled' ? 'stop' : item.runReceipt ? 'check' : item.runContract || item.title === 'Guard' || item.title === 'Verify-on-stop' ? 'shield' : 'layers'
   return (
     <div className="flex items-start gap-2 py-0.5 text-[13px] leading-4 text-ink-3">
-      <Icon name={icon} size={14} className="mt-px shrink-0 text-ink-4" />
+      <Icon name={icon} size={14} className={clsx('mt-px shrink-0', concern ? 'text-danger' : 'text-ink-4')} />
       <span className="min-w-0 break-words">{item.text || item.title}</span>
     </div>
   )

@@ -201,7 +201,7 @@
   "Copy user message": "사용자 메시지 복사",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "Cortheon이 켜져 있습니다. 응답 전에 이 채팅에서 만든 검색어를 웹 검색 서비스에 보내고 공개 페이지를 읽을 수 있습니다. AI 설정 또는 모델에서 끌 수 있습니다.",
-  "Cortheon is temporarily disabled in this beta.": "이 베타에서는 Cortheon이 일시적으로 꺼져 있습니다.",
+  "Cortheon is temporarily disabled.": "Cortheon이 일시적으로 비활성화되어 있습니다.",
   "Cost cap $": "비용 상한 $",
   "Could not check CLI auth.": "CLI 인증을 확인할 수 없습니다.",
   "Could not open a chat. Your current work is still here; try New chat again.": "채팅을 열 수 없습니다. 현재 작업은 그대로 있습니다. 새 채팅을 다시 시도하세요.",

@@ -5,17 +5,9 @@ import { quarantinedProtectedFiles } from './recovery-registry'
 import { normalizeLegacyCliModelList } from '../agent/cli-models'
 import type { Settings, McpServerConfig, WebhookEndpoint, Provider, EmailSourceConfig, SlackSourceConfig, DiscordSource, MattermostSource, MatrixSource, GoogleChatSource } from '../agent/types'
 
-// Application crypto layer — everything between the raw AES primitives (in
-// electron/local-crypto.ts) and the write infrastructure (still in store.ts until Step 4).
-// Key management, secret protect/reveal, envelope classification, legacy-secret management,
-// and the operator-visible local-secret-storage status all live here.
-
 const SECRET_PREFIX = 'safe:v1:'
 const PROTECTED_JSON_PREFIX = 'safe-json:v1:'
 
-// Secrets use either an independently-held deployment key (VONTRA_SECRET_KEY_BASE64)
-// or the default profile-adjacent ~/.vontra/.secretkey. The latter protects against
-// casual reads/settings-only sharing, but a copied COMPLETE profile contains its key.
 let cachedAppKeys: {
   discriminator: string
   key: Buffer
@@ -35,34 +27,23 @@ function appKeys() {
 
 function appKey(): Buffer { return appKeys().key }
 
-// Full-text search stores only keyed token digests. The domain prefix prevents a
-// digest copied from this index from being useful against any other app-key use.
 export function blindSearchToken(token: string): string {
   return createHmac('sha256', appKey()).update(`vontra-search-v1\0${token}`).digest('hex')
 }
 
 function decryptWithAppKeys(payload: string): { plaintext: string; source: 'primary' | 'profile-fallback' } | null {
   const keys = appKeys()
-  try { return { plaintext: decryptWithKey(payload, keys.key), source: 'primary' } } catch { /* try migration key */ }
+  try { return { plaintext: decryptWithKey(payload, keys.key), source: 'primary' } } catch {  }
   if (keys.profileFallbackKey) {
-    try { return { plaintext: decryptWithKey(payload, keys.profileFallbackKey), source: 'profile-fallback' } } catch { /* unknown/legacy */ }
+    try { return { plaintext: decryptWithKey(payload, keys.profileFallbackKey), source: 'profile-fallback' } } catch {  }
   }
   return null
 }
 
-// Pre-refactor secrets were encrypted with Electron safeStorage (macOS Keychain).
-// By explicit user policy TensorFold NEVER touches the macOS Keychain — not even to
-// read/migrate old secrets, because that access re-triggers the Keychain prompt on
-// an unsigned/re-signed build. Unknown blobs are backed up and preserved verbatim
-// through unrelated saves until the user replaces them; this stub makes the
-// deliberate "no Keychain recovery" policy explicit.
 function revealLegacySafeStorage(_payload: string): string | undefined {
   return undefined
 }
 
-// True when a value carries our prefix but neither the active key nor the optional
-// profile-key migration fallback can decode it. In practice this includes old
-// safeStorage blobs and blobs whose key was lost; both must be preserved verbatim.
 function isLegacySecretBlob(value: unknown): boolean {
   if (typeof value !== 'string' || !value.startsWith(SECRET_PREFIX)) return false
   return !decryptWithAppKeys(value.slice(SECRET_PREFIX.length))
@@ -73,8 +54,6 @@ function isProfileFallbackSecretBlob(value: unknown): boolean {
   return decryptWithAppKeys(value.slice(SECRET_PREFIX.length))?.source === 'profile-fallback'
 }
 
-// Keep this explicit list aligned with protectSettings/revealSettings. It is used
-// for migration classification and for the operator-visible recovery count.
 function settingsSecretValues(loaded: Partial<Settings>): unknown[] {
   const values: unknown[] = []
   for (const p of loaded.providers ?? []) {
@@ -83,6 +62,7 @@ function settingsSecretValues(loaded: Partial<Settings>): unknown[] {
       values.push(a.apiKey, ...Object.values(a.env ?? {}))
     }
   }
+  values.push(loaded.imessage?.blueBubblesPassword)
   values.push(...(loaded.email?.sources ?? []).map((s) => s.password))
   values.push(...(loaded.slack?.sources ?? []).map((s) => s.token))
   values.push(...(loaded.discord?.sources ?? []).map((s) => s.token))
@@ -101,12 +81,6 @@ function hasLegacySecret(loaded: Partial<Settings>): boolean { return settingsSe
 function countLegacySecrets(loaded: Partial<Settings>): number { return settingsSecretValues(loaded).filter(isLegacySecretBlob).length }
 function hasProfileFallbackSecret(loaded: Partial<Settings>): boolean { return settingsSecretValues(loaded).some(isProfileFallbackSecretBlob) }
 
-// Legacy-secret template state. These six module-level mutables are read by
-// localSecretStorageStatus() below and mutated by the load/save functions still living in
-// store.ts (loadSettings/saveSettings/loadMcpServers/...). ES module bindings are read-only
-// for importers, so the live state is owned here and exposed via getters/setters that store.ts
-// calls. Process-wide: one template per collection, retained until the operator replaces every
-// unresolved legacy ciphertext value, so an unrelated save can never blank a secret we can't read.
 let legacySecretTemplate: Partial<Settings> | null = null
 let legacySettingsBackupPath: string | null = null
 let legacyMcpTemplate: McpServerConfig[] | null = null
@@ -152,9 +126,7 @@ export function localSecretStorageStatus(): LocalSecretStorageStatus {
   return {
     keyMode,
     externalKeyRequired: externalSecretKeyRequired(),
-    // A transitioned profile can still contain its prior .secretkey. Until the
-    // operator removes/archives that key after validating migration, historical
-    // ciphertext in the copied profile may remain decryptable.
+
     copiedProfileDecryptable: keyMode === 'profile-key' || keys.profileFallbackKey !== null,
     legacySafeStorageSecrets:
       (legacySecretTemplate ? countLegacySecrets(legacySecretTemplate) : 0) +
@@ -173,11 +145,6 @@ function containsLegacySecret(value: unknown): boolean {
   return isRecord(value) && Object.values(value).some(containsLegacySecret)
 }
 
-/**
- * Restore only unresolved legacy ciphertext into an otherwise newly-protected
- * settings snapshot. Arrays are matched by stable id so deleting a provider or
- * source really deletes it; unrelated saves cannot blank a secret we cannot read.
- */
 function mergeUnresolvedLegacySecrets(template: unknown, next: unknown): unknown {
   if (isLegacySecretBlob(template)) {
     return typeof next === 'string' && next.length > 0 ? next : template
@@ -214,9 +181,7 @@ function revealSecret(value: string): string {
   const decrypted = decryptWithAppKeys(payload)
   if (decrypted) return decrypted.plaintext
   {
-    // Wrong/rotated key, tamper, or a legacy safeStorage blob. The runtime sees an
-    // unset value, while the store-level legacy template retains the raw ciphertext
-    // until the user re-enters it; no Keychain access is attempted here.
+
     return revealLegacySafeStorage(payload) ?? ''
   }
 }
@@ -235,12 +200,10 @@ function revealJsonPayload<T>(data: unknown, fallback: T): T {
     try { return JSON.parse(decrypted.plaintext) as T } catch { return fallback }
   }
   {
-    // No active key can decode this envelope. The legacy hook is intentionally a
-    // no-op under the no-Keychain policy; callers back up the original before using
-    // their fallback value.
+
     const legacy = revealLegacySafeStorage(payload)
     if (legacy != null) {
-      try { return JSON.parse(legacy) as T } catch { /* fall through */ }
+      try { return JSON.parse(legacy) as T } catch {  }
     }
     return fallback
   }
@@ -254,8 +217,6 @@ function isProtectedJsonEnvelope(data: unknown): boolean {
     (data as { encrypted: string }).encrypted.startsWith(PROTECTED_JSON_PREFIX)
 }
 
-// Unknown legacy/lost-key envelopes share our prefix but none of the available
-// keys can decode them. Callers preserve a recovery copy rather than overwriting.
 function isLegacyProtectedEnvelope(data: unknown): boolean {
   const enc = (data as { encrypted?: unknown } | null | undefined)?.encrypted
   if (typeof enc !== 'string' || !enc.startsWith(PROTECTED_JSON_PREFIX)) return false
@@ -281,11 +242,6 @@ function hasMalformedDecryptedProtectedPayload(data: unknown): boolean {
   }
 }
 
-// A protected envelope that NEITHER the app key NOR legacy safeStorage can decode —
-// i.e. the app-managed key was lost (deleted .secretkey, restored settings.json from
-// a backup/sync without its key, moved between machines, etc.). The data is gone and
-// we must not silently overwrite it with freshly-encrypted defaults (which would make
-// the loss permanent and repeat every launch). The caller backs it up instead.
 function isUndecryptableEnvelope(data: unknown): boolean {
   if (!isLegacyProtectedEnvelope(data)) return false // either ours, or not an envelope
   const enc = (data as { encrypted: string }).encrypted.slice(PROTECTED_JSON_PREFIX.length)
@@ -298,8 +254,7 @@ function matchesProtectedFallbackShape(value: unknown, fallback: unknown): boole
     return value !== null && typeof value === 'object' && !Array.isArray(value)
   }
   if (fallback !== null && fallback !== undefined) return typeof value === typeof fallback
-  // null/undefined are also used for union/shape-agnostic probes (for example
-  // string|null managed outputs), so they cannot safely impose a generic shape.
+
   return true
 }
 
@@ -318,6 +273,7 @@ function protectSettings(s: Settings): Settings {
   return {
     ...s,
     providers: s.providers.map(protectProvider),
+    imessage: { ...s.imessage, blueBubblesPassword: s.imessage.blueBubblesPassword ? protectSecret(s.imessage.blueBubblesPassword) : s.imessage.blueBubblesPassword },
     email: { ...s.email, sources: s.email.sources.map(protectEmailSource) },
     slack: { ...s.slack, sources: s.slack.sources.map(protectSlackSource) },
     discord: { ...s.discord, sources: s.discord.sources.map(protectDiscordSource) },
@@ -389,8 +345,7 @@ function protectMatrixSource(src: MatrixSource): MatrixSource {
 function revealMatrixSource(src: MatrixSource): MatrixSource {
   return { ...src, token: src.token ? revealSecret(src.token) : src.token }
 }
-// Google Chat carries TWO secrets per source: the incoming-webhook URL (its query string
-// holds an auth token) and an optional service-account / OAuth2 access token.
+
 function protectGoogleChatSource(src: GoogleChatSource): GoogleChatSource {
   return {
     ...src,
@@ -421,6 +376,7 @@ function revealSettings(s: Settings): Settings {
   return {
     ...s,
     providers: s.providers.map(revealProvider),
+    imessage: { ...s.imessage, blueBubblesPassword: s.imessage.blueBubblesPassword ? revealSecret(s.imessage.blueBubblesPassword) : s.imessage.blueBubblesPassword },
     email: { ...s.email, sources: s.email.sources.map(revealEmailSource) },
     slack: { ...s.slack, sources: s.slack.sources.map(revealSlackSource) },
     discord: { ...s.discord, sources: s.discord.sources.map(revealDiscordSource) },
@@ -488,8 +444,6 @@ function revealMcpServers(servers: McpServerConfig[]): McpServerConfig[] {
   }))
 }
 
-// Internal helpers re-exported so store.ts (and other store submodules) can call the same
-// crypto routines the protected-JSON read/write path and the settings load/save path rely on.
 export {
   SECRET_PREFIX,
   PROTECTED_JSON_PREFIX,

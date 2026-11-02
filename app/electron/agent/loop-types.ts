@@ -1,6 +1,4 @@
-// Loop Mode — shared types for the autonomous, self-verifying build pipeline.
-// Pure type declarations + small constants; no logic, no I/O. See
-// docs/superpowers/specs/2026-06-23-loop-mode-design.md.
+// Loop Mode contracts and observed execution results.
 
 export type LoopMode = 'off' | 'build' | 'ship'
 export type LoopPhaseId = 'product' | 'architect' | 'dev' | 'qa' | 'security' | 'browser' | 'docs' | 'review'
@@ -27,6 +25,29 @@ export interface Verdict {
   issues: string[]
 }
 
+export type VerificationOutcome = 'passed' | 'failed' | 'cancelled' | 'timed_out' | 'error'
+
+export interface VerificationCheck {
+  command: string
+  outcome: VerificationOutcome
+  exitCode: number | null
+  output: string
+}
+
+export interface VerificationReport {
+  checks: VerificationCheck[]
+  cancelled: boolean
+}
+
+export interface LoopShellResult {
+  code: number | null
+  stdout: string
+  stderr: string
+  cancelled?: boolean
+  timedOut?: boolean
+  signal?: string | null
+}
+
 export type BlockerKind =
   | 'FIXABLE_BY_AGENT'
   | 'NEEDS_USER_SECRET'
@@ -45,28 +66,25 @@ export interface PhaseResult {
   ok: boolean
   // Tools that ran AND succeeded (state === 'ok'). Drives `ok`.
   toolEvents: number
-  // Tools the agent ATTEMPTED, regardless of outcome (ok OR error). The evidence guard
-  // keys off this so a phase whose tools all legitimately failed (a red build/test) is
-  // not misread as "the agent did nothing" — judging that failure is the critic's job.
+  // Attempts distinguish a failed operation from a phase that never used a tool.
   toolAttempts: number
   summary: string
   evidenceRefs: string[]
 }
 
-/** Default ordered phase stacks for surfaces without seats. */
+// Default ordered phase stacks for surfaces without seats.
 export const BUILD_PHASES: LoopPhaseId[] = ['architect', 'dev', 'qa', 'review']
 export const SHIP_PHASES: LoopPhaseId[] = ['product', 'architect', 'dev', 'qa', 'security', 'browser', 'docs', 'review']
 export const DEFAULT_MAX_CYCLES = { build: 5, ship: 7 } as const
 export const HARD_MAX_CYCLES = 12
 export const CRITIC_PASS_CONFIDENCE = 0.6
 
-/** Phases that may legitimately produce a text-only result (planning/analysis),
- * so the tool-evidence guard does not fail them closed. */
+// Planning phases may complete without invoking tools.
 export const EVIDENCE_OPTIONAL_PHASES: LoopPhaseId[] = ['product', 'architect']
 
 export type LoopStatus = 'running' | 'shipped' | 'blocked' | 'capped' | 'failed' | 'stopped'
 
-/** A persisted, observable Loop run record (one per active/finished loop). */
+// One persisted record per Loop run.
 export interface LoopRecord {
   id: string
   source: LoopContractSource
@@ -88,7 +106,7 @@ export interface LoopRecord {
   updatedAt: number
 }
 
-/** IPC payload to start a loop from a surface (solo/room/kanban). */
+// IPC payload to start a Loop run.
 export interface LoopStartInput {
   source: LoopContractSource
   surfaceId: string

@@ -1,0 +1,15 @@
+{
+  "Engine updates": "引擎更新",
+  "bundled": "內建",
+  "Checking installed runtime…": "正在檢查已安裝的執行環境…",
+  "Check for engine updates": "檢查引擎更新",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "無需重新安裝應用程式即可更新本機引擎。切換前請先完成本機工作。模型和對話將保留。",
+  "No compatible engine updates are available for this device.": "此裝置暫無相容的引擎更新。",
+  "Use this runtime": "使用此執行環境",
+  "Use bundled engine": "使用內建引擎",
+  "Checking signed releases…": "正在檢查已簽署的版本…",
+  "Switching runtime…": "正在切換執行環境…",
+  "Ready locally": "本機已就緒",
+  "memory on this computer.": "此電腦的記憶體。",
+  "Prevent sleep while this option is enabled.": "啟用此選項時防止睡眠。"
+}

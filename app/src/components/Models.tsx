@@ -9,6 +9,7 @@ import clsx from 'clsx'
 import { api } from '../lib/ipc'
 import { useStore } from '../lib/store'
 import { ENGINE_PROVIDER_ID, loadEngineModel, refreshEngine, useEngine } from '../lib/engine'
+import { openModelChat } from '../lib/model-chat'
 import { useFavoriteModels, orderFavoritesFirst } from '../lib/favorite-models'
 import type { EngineInstalledModel, HubModelSummary } from '../lib/types'
 import { Button, Input } from './ui'
@@ -22,14 +23,14 @@ import { WorkersPanel } from './models/WorkersPanel'
 import { isLocalWorker } from './models/workers'
 import { recommendEngineModel } from '../lib/model-recommendation'
 import { ModelRecommendationPanel } from './models/ModelRecommendationPanel'
-import { shouldShowOnboarding } from './onboarding-model'
+import { readOnboardingDraft, saveOnboardingDraft, shouldShowOnboarding } from './onboarding-model'
 import { ModelDetailsDrawer } from './models/ModelDetailsDrawer'
 import { ModelComparisonPanel } from './models/ModelComparisonPanel'
 import { ModelsDrawer } from './models/ModelsDrawer'
 import { DownloadCentre } from './models/DownloadCentre'
-import { isDownloadPending, downloadStateLabel } from './models/download-display'
+import { DownloadActivity } from './models/DownloadActivity'
+import { isDownloadPending } from './models/download-display'
 import { ModelFoldersSettings } from './settings/ModelFoldersSettings'
-import { repoDisplayName } from '../lib/turn-stats-line'
 import { ModelBenchmarkDrawer } from './models/benchmark/ModelBenchmarkDrawer'
 
 const AUTO_CHECK = 10
@@ -40,14 +41,15 @@ const TAB_LABEL: Record<WorkspaceTab, string> = { get Models() { return authored
 const route = (model: EngineInstalledModel) => ({ providerId: ENGINE_PROVIDER_ID, accountId: null, model: model.repo })
 function errorText(error: unknown): string { return decodeHubFailure(error).message }
 
-// A build without a local engine has no Models workspace to manage: show the one useful action
-// instead of an unavailable engine, downloads and Apple-silicon recommendations.
+// Builds without an engine keep provider setup available.
 function NoLocalEngineModels() {
   const tx = useAuthoredText()
   return <div data-testid="models-page" className="scroll-thin h-full overflow-y-auto">
     <div className="mx-auto w-full max-w-[1040px] px-4 py-6 sm:px-6">
       <header><h1 className="text-[21px] font-semibold tracking-[-0.02em] text-ink">{tx("Models")}</h1></header>
       <section className="mt-5 rounded-xl border border-line bg-card p-5">
+        <h2 className="text-[16px] font-medium text-ink">{tx('Connect a model provider')}</h2>
+        <p className="mb-4 mt-2 max-w-xl text-[14px] leading-relaxed text-ink-2">{tx('This build does not include the local engine. Connect a provider or another local runtime to start a conversation.')}</p>
         <Button size="sm" variant="primary" icon="plus" onClick={() => useStore.getState().setView({ name: 'settings', section: 'models' })}>{tx("Connect provider")}</Button>
       </section>
     </div>
@@ -63,10 +65,11 @@ export function Models({ minimal = false, noLocalEngine = false }: { minimal?: b
 function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
   const tx = useAuthoredText()
 
-  const { snapshot } = useEngine()
+  const { snapshot, error: engineError } = useEngine()
   const { snapshot: learning } = useLearning()
   const learningLocked = learningBusy(learning)
-  const newChat = useStore((state) => state.newChat)
+  const settings = useStore((state) => state.settings)
+  const setupPending = shouldShowOnboarding(undefined, settings?.desktopOnboardingComplete)
   const setNotice = useStore((state) => state.setNotice)
   const threads = useStore((state) => state.threads)
   const runStatus = useStore((state) => state.status)
@@ -89,7 +92,10 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
   const [searchError, setSearchError] = useState<string | null>(null)
   const checked = useRef(new Set<string>())
   const [startingModel, setStartingModel] = useState<string | null>(null)
+  const [stopping, setStopping] = useState(false)
   const startLock = useRef(false)
+  const stopLock = useRef(false)
+  const cancelLoad = useRef(false)
   const searchLock = useRef(false)
   const mounted = useRef(true)
   const favorites = useFavoriteModels()
@@ -131,27 +137,35 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
     try { await api.enginePull(repo, revision) } catch (error) { if (mounted.current) setNotice({ kind: 'error', message: errorText(error) }) }
   }
   const useModel = async (repo: string) => {
-    if (startLock.current) return
+    if (startLock.current || stopLock.current) return
+    if (engineError || !snapshot?.status.available) { setNotice({ kind: 'error', message: tx('The local engine is unavailable. Open Engine details for help.') }); return }
     if (learningLocked) { setNotice({ kind: 'error', message: tx("Wait for the learning checkpoint before using a model.") }); return }
     if (activeRuns > 0 && (snapshot?.status.state !== 'ready' || snapshot.status.model !== repo)) { setNotice({ kind: 'error', message: tx("Stop active local runs before switching their model.") }); return }
-    startLock.current = true; setStartingModel(repo)
+    startLock.current = true; cancelLoad.current = false; setStartingModel(repo)
     try {
       await loadEngineModel(repo)
-      if (!mounted.current) return
-      if (!minimal && !shouldShowOnboarding(undefined, useStore.getState().settings?.desktopOnboardingComplete)) await newChat()
-    } catch (error) { if (mounted.current) setNotice({ kind: 'error', message: errorText(error) }) }
+      if (!mounted.current || cancelLoad.current) return
+      if (shouldShowOnboarding(undefined, useStore.getState().settings?.desktopOnboardingComplete)) {
+        saveOnboardingDraft({ ...readOnboardingDraft(minimal ? 'minimal' : 'full'), step: 'guide' })
+        useStore.getState().setView({ name: 'home' })
+      } else if (!minimal) await openModelChat({ providerId: ENGINE_PROVIDER_ID, model: repo }, () => mounted.current && !cancelLoad.current)
+    } catch (error) { if (mounted.current && !cancelLoad.current) setNotice({ kind: 'error', message: errorText(error) }) }
     finally { startLock.current = false; if (mounted.current) setStartingModel(null) }
   }
   const unload = async () => {
+    if (stopLock.current) return
     if (activeRuns > 0 || learningLocked) { setNotice({ kind: 'error', message: tx("Finish active local work before unloading its model.") }); return }
-    try { await api.engineUnload() } catch (error) { if (mounted.current) setNotice({ kind: 'error', message: errorText(error) }) }
+    stopLock.current = true; setStopping(true)
+    cancelLoad.current = startLock.current || snapshot?.status.state === 'starting'
+    try { await api.engineUnload() }
+    catch (error) { if (mounted.current) setNotice({ kind: 'error', message: errorText(error) }) }
+    finally { stopLock.current = false; if (mounted.current) setStopping(false) }
   }
-  const status = snapshot?.status ?? null
+  const status = snapshot ? engineError ? { ...snapshot.status, available: false } : snapshot.status : null
   const installed = snapshot?.installed ?? []
   const pulls = snapshot?.pulls ?? []
   const pendingPulls = pulls.filter(isDownloadPending)
   const failedPulls = pulls.filter((pull) => pull.state === 'failed')
-  const currentPull = pendingPulls.find((pull) => pull.state !== 'queued') ?? pendingPulls[0]
   const pullFor = (repo: string) => pulls.find((pull) => pull.repo === repo)
   const recommendation = recommendEngineModel({ status, installed, suggestions, preflights: Object.fromEntries(Object.entries(checks).map(([repo, state]) => [repo, state.result])) })
   const checkFailed = suggestions.length > 0 && suggestions.every((suggestion) => checks[suggestion.repo] && !checks[suggestion.repo].loading) && suggestions.some((suggestion) => !!checks[suggestion.repo]?.error)
@@ -159,7 +173,7 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
   const lowered = libraryQuery.trim().toLocaleLowerCase()
   const shown = orderFavoritesFirst(installed.filter((model) => (!favoritesOnly || favorites.isFavorite(route(model))) && (!lowered || [model.title, model.repo, model.family, model.format].some((value) => value?.toLocaleLowerCase().includes(lowered)))), favorites.favorites, route)
   const favoriteCount = installed.filter((model) => favorites.isFavorite(route(model))).length
-  const locked = activeRuns > 0 || learningLocked || status?.state === 'starting' || startingModel != null
+  const locked = activeRuns > 0 || learningLocked || !status?.available || status.state === 'starting' || startingModel != null || stopping
   const canCompare = installed.filter((model) => model.fitsMemory === true).length >= 2
   const benchmarkBlockedReason = activeRuns > 0 ? 'Finish active local chats and workers before benchmarking.' : learningLocked ? 'Wait for the Living Weights checkpoint and turn learning off before benchmarking.' : status?.state === 'starting' || startingModel != null ? 'Wait for the current model to finish loading before benchmarking.' : !status?.available ? 'The built-in TensorFold engine is unavailable; check Engine details before benchmarking.' : null
   const showApi = () => { setUtility(null); setTab('API') }
@@ -174,10 +188,10 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
   return <div data-testid="models-page" className="scroll-thin h-full overflow-y-auto">
     <div className="mx-auto w-full max-w-[1040px] px-4 py-6 sm:px-6">
       <header className="flex flex-wrap items-start justify-between gap-3">
-        <div><h1 className="text-[21px] font-semibold tracking-[-0.02em] text-ink">{tx("Models")}</h1><p className="mt-1 text-[13px] text-ink-2">{minimal ? tx("Choose a model for your local API.") : tx("Choose a model and get started.")}</p></div>
+        <div><h1 className="text-[21px] font-semibold tracking-[-0.02em] text-ink">{tx("Models")}</h1><p className="mt-1 max-w-xl text-[13px] leading-relaxed text-ink-2">{setupPending ? tx('Download or choose a model. Once it loads, setup continues with your next step.') : minimal ? tx("Choose a model for your local API.") : tx("Choose a model and get started.")}</p></div>
         <div className="flex flex-wrap gap-1"><Button size="sm" variant="ghost" onClick={() => setUtility('clusters')}>{tx("Compute and clusters")}</Button><Button size="sm" variant="ghost" icon="folder" onClick={() => setUtility('folders')}>{tx("Model folders")}</Button><Button size="sm" variant="ghost" icon="arrowDown" onClick={() => setUtility('downloads')}>{tx("Downloads")}{pendingPulls.length ? ` (${pendingPulls.length})` : failedPulls.length ? tx(" ({value0} need attention)", { value0: failedPulls.length }) : ''}</Button><Button size="sm" variant="ghost" icon="refresh" aria-label={tx("Refresh models")} onClick={() => void refreshEngine(true)} /></div>
       </header>
-      <EngineRuntimePanel compact minimal={minimal} activeRuns={activeRuns} onDetails={() => setUtility('runtime')} onApi={showApi} onWorkers={showWorkers} onUnload={() => void unload()} />
+      <EngineRuntimePanel compact minimal={minimal} activeRuns={activeRuns} stopping={stopping} onDetails={() => setUtility('runtime')} onChat={status?.model ? () => void useModel(status.model!) : undefined} onRetry={status?.model && !startingModel ? () => void useModel(status.model!) : undefined} onApi={showApi} onWorkers={showWorkers} onUnload={() => void unload()} />
       <div role="tablist" aria-label={tx("Local AI workspace")} className="mt-5 flex flex-wrap gap-x-5 gap-y-1 border-b border-line">
         {tabs.map((name, index) => <button key={name} id={`local-tab-${name}`} role="tab" aria-label={name === 'Models' && installed.length ? tx("My models ({value0})", { value0: installed.length }) : TAB_LABEL[name]} aria-selected={tab === name} aria-controls={`local-panel-${name}`} tabIndex={tab === name ? 0 : -1} onClick={() => setTab(name)} onKeyDown={(event) => {
           const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : null
@@ -185,7 +199,7 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
           event.preventDefault(); setTab(tabs[next]); event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
         }} className={clsx('relative pb-3 pt-1 text-[13px] font-medium focus-visible:outline-2 focus-visible:outline-accent', tab === name ? 'text-ink after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:rounded-full after:bg-accent' : 'text-ink-2 hover:text-ink')}>{TAB_LABEL[name]}{name === 'Models' && installed.length > 0 && <span className="ml-1.5 text-ink-3">{installed.length}</span>}</button>)}
       </div>
-      {currentPull && <button type="button" onClick={() => setUtility('downloads')} className="mt-3 flex w-full flex-wrap items-center gap-2 rounded-lg bg-card px-3 py-2 text-left text-[12px] text-ink-2 hover:bg-card-2 focus-visible:outline-2 focus-visible:outline-accent"><Icon name="arrowDown" size={13} /><span className="min-w-0 flex-1 break-words">{downloadStateLabel(currentPull)}: {repoDisplayName(currentPull.repo)}</span>{pendingPulls.length > 1 && <span>{pendingPulls.length - 1} {tx("more in queue")}</span>}<Icon name="chevronRight" size={13} /></button>}
+      <DownloadActivity pulls={pulls} installed={installed} showCompleted={tab === 'Discover'} minimal={minimal} locked={locked} onAll={() => setUtility('downloads')} onCancel={(repo) => api.engineCancelPull(repo)} onRetry={(repo, revision) => api.enginePull(repo, revision)} onLoad={(repo) => void useModel(repo)} />
       <div id="local-panel-Models" role="tabpanel" aria-labelledby="local-tab-Models" hidden={tab !== 'Models'}>
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 flex-1 basis-56 items-center gap-2"><Input aria-label={tx("Search your models")} value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder={tx("Search your models")} maxLength={200} /><button type="button" disabled={!favorites.ready} aria-pressed={favoritesOnly} aria-label={tx("Show favourite models only")} onClick={() => setFavoritesOnly((value) => !value)} className={clsx('flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-2 text-[13px] focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40', favoritesOnly ? 'border-accent/40 bg-accent/10 text-accent' : 'border-line text-ink-2 hover:text-ink')}><Icon name={favoritesOnly ? 'starFilled' : 'star'} size={14} />{tx("Favourites")}{favoriteCount > 0 ? ` (${favoriteCount})` : ''}</button></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="default" onClick={() => { setBenchmarkModel(null); setUtility('benchmark') }}>{tx("Benchmarks")}</Button><Button size="sm" variant="default" icon="layers" disabled={locked || !canCompare} title={!canCompare ? tx("Install two compatible models to compare their replies") : locked ? tx("Finish active local work before comparing models") : undefined} onClick={() => setUtility('compare')}>{tx("Compare models")}</Button></div></div>
         {favorites.error && <p role="alert" className="mt-3 text-[13px] text-warn">{<OriginalDiagnostic>{favorites.error}</OriginalDiagnostic>}</p>}
@@ -198,7 +212,7 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
         </>}
       </div>
       <div id="local-panel-Discover" role="tabpanel" aria-labelledby="local-tab-Discover" hidden={tab !== 'Discover'}>
-        <form className="mt-5 flex gap-2" onSubmit={(event) => { event.preventDefault(); void search() }}><Input data-testid="models-search" aria-label={tx("Search Hugging Face")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Search Hugging Face or enter owner/model")} spellCheck={false} maxLength={200} /><Button type="submit" icon="search" disabled={searching || !query.trim()}>{searching ? tx("Searching…") : tx("Search")}</Button></form>
+        <form className="mt-5 flex gap-2" onSubmit={(event) => { event.preventDefault(); void search() }}><Input data-testid="models-search" className="min-w-0" aria-label={tx("Search Hugging Face")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tx("Search Hugging Face or enter owner/model")} spellCheck={false} maxLength={200} /><Button className="shrink-0 whitespace-nowrap" type="submit" icon="search" disabled={searching || !query.trim()}>{searching ? tx("Searching…") : tx("Search")}</Button></form>
         <p className="mt-2 text-[12px] text-ink-2">{tx("Models are checked for engine support, memory and download space before use.")}</p>
         {searchError && <p role="alert" className="mt-4 rounded-lg border border-danger/25 bg-danger/10 px-3 py-2 text-[13px] text-danger">{searchError}</p>}
         {results ? <Section title={tx("Results for “{value0}”", { value0: searchTerm })} action={<Button size="xs" variant="ghost" onClick={() => { setResults(null); setQuery(''); setSearchError(null) }}>{tx("Clear search")}</Button>}>
@@ -220,7 +234,7 @@ function ModelsWorkspace({ minimal = false }: { minimal?: boolean }) {
     {utility === 'compare' && <ModelComparisonPanel models={installed} activeModel={status?.model ?? null} locked={locked} onClose={() => setUtility(null)} />}
     {utility === 'downloads' && <ModelsDrawer title={tx("Downloads")} labelId="models-downloads-title" onClose={() => setUtility(null)} description={tx("Follow queued downloads, resume failures and check completed files.")}>{pulls.length ? <DownloadCentre pulls={pulls} onCancel={(repo) => api.engineCancelPull(repo)} onRetry={(repo, revision) => api.enginePull(repo, revision)} /> : <p className="py-4 text-[14px] text-ink-2">{tx("No downloads yet; find a model in Discover to get started.")}</p>}</ModelsDrawer>}
     {utility === 'folders' && <ModelsDrawer title={tx("Model folders")} labelId="models-folders-title" onClose={() => setUtility(null)} description={tx("Use models already on this Mac or an external drive.")}><ModelFoldersSettings compact /></ModelsDrawer>}
-    {utility === 'runtime' && <ModelsDrawer title={tx("Engine details")} labelId="models-runtime-title" onClose={() => setUtility(null)}><EngineRuntimePanel minimal={minimal} activeRuns={activeRuns} onApi={showApi} onWorkers={showWorkers} onUnload={() => void unload()} /></ModelsDrawer>}
+    {utility === 'runtime' && <ModelsDrawer title={tx("Engine details")} labelId="models-runtime-title" onClose={() => setUtility(null)}><EngineRuntimePanel minimal={minimal} activeRuns={activeRuns} stopping={stopping} onRetry={status?.model && !startingModel ? () => void useModel(status.model!) : undefined} onApi={showApi} onWorkers={showWorkers} onUnload={() => void unload()} /></ModelsDrawer>}
   </div>
 }
 

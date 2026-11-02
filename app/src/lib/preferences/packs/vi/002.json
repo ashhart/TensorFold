@@ -201,7 +201,7 @@
   "Copy user message": "Sao chép tin nhắn người dùng",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "Cortheon đang bật: trước khi trả lời, engine có thể gửi truy vấn dựa trên trò chuyện tới dịch vụ tìm kiếm và đọc trang công khai. Tắt trong Cài đặt AI hoặc Mô hình.",
-  "Cortheon is temporarily disabled in this beta.": "Cortheon tạm tắt trong bản beta này.",
+  "Cortheon is temporarily disabled.": "Cortheon tạm thời bị tắt.",
   "Cost cap $": "Giới hạn chi phí $",
   "Could not check CLI auth.": "Không kiểm tra được xác thực CLI.",
   "Could not open a chat. Your current work is still here; try New chat again.": "Không mở được trò chuyện. Công việc vẫn còn; thử Trò chuyện mới lần nữa.",

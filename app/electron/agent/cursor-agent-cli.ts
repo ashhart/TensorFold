@@ -1,20 +1,6 @@
-// Cursor Agent engine (VST-033): drive `cursor-agent` headless as a thread engine. Wire
-// facts from Cursor's CLI reference (docs/cli/reference/{parameters,output-format}) — the
-// binary is not installed on this machine, so shapes come from the published docs:
-// - `cursor-agent -p --output-format stream-json` emits NDJSON events:
-//     {type:"system",subtype:"init",session_id,model,...}      (once, session id → cursor)
-//     {type:"assistant",message:{role,content:[{type:"text",text}]},session_id}
-//     {type:"tool_call",subtype:"started"|"completed",call_id,tool_call:{<name>ToolCall:…}}
-//     {type:"result",subtype,is_error,result,session_id}       (terminal)
-// - `--resume <chatId>` resumes a session; `--model <model>`; CURSOR_API_KEY authenticates
-//   without exposing the credential in the child process argument list.
-// - `--stream-partial-output` makes assistant events stream partial text. The docs don't
-//   pin down whether partials are cumulative or incremental, so `cursorTextFromAssistant`
-//   handles BOTH: text extending what we've emitted yields the suffix; otherwise the new
-//   text is emitted whole. Without the flag the single complete assistant event and the
-//   terminal result both carry full text — the same dedup makes the result a no-op then.
 
-import { spawn } from 'node:child_process'
+
+import { spawnCliProcess as spawn } from './cli-process'
 import readline from 'node:readline'
 import { detachedProcessGroup, terminateChildProcess } from './child-process-lifecycle'
 import { resolveCliBinary, isSafeArgvId } from './cli-path'
@@ -51,9 +37,7 @@ function binary(provider: Provider): string {
 
 export function buildCursorArgs(params: CursorCliParams, resume: CursorResumeCursor | null): string[] {
   const args = ['-p', '--output-format', 'stream-json', '--stream-partial-output']
-  // Cursor print mode can edit files and run shell commands without a TensorFold approval
-  // bridge. Only explicit Full Auto may use that writable posture; every other mode
-  // uses Cursor's documented read-only ask mode.
+
   if (params.approvalMode !== 'auto') args.push('--mode=ask')
   if (params.model && params.model !== 'cursor-default' && isSafeArgvId(params.model)) args.push('--model', params.model)
   if (resume?.sessionId && isSafeArgvId(resume.sessionId)) args.push('--resume', resume.sessionId)
@@ -79,10 +63,6 @@ function assistantText(event: any): string {
   return blocks.map((block: any) => (block && block.type === 'text' && typeof block.text === 'string') ? block.text : '').join('')
 }
 
-// Cumulative-or-incremental dedup: given everything emitted so far, return only the NEW
-// text this assistant event contributes. Cumulative partials extend the accumulator (emit
-// the suffix); incremental partials don't (emit whole); an exact repeat (the final assistant
-// event / terminal result re-carrying full text) emits nothing.
 export function cursorTextFromAssistant(event: any, emittedSoFar: string): string {
   const text = assistantText(event)
   if (!text) return ''
@@ -158,10 +138,8 @@ export async function* streamCursorAgent(params: CursorCliParams): AsyncGenerato
     env: run.env,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
-  // Cursor documents piped stdin as a non-interactive prompt source. Keep the
-  // full conversation out of argv, where same-user process inspection and crash
-  // reporters could otherwise capture it.
-  proc.stdin.on('error', () => { /* spawn/early-exit is reported through stderr/close */ })
+
+  proc.stdin.on('error', () => { })
   proc.stdin.end(body)
 
   let spawnErrorMessage = ''
@@ -211,8 +189,7 @@ export async function* streamCursorAgent(params: CursorCliParams): AsyncGenerato
           yield { type: 'content', text }
         }
       } else if (event?.type === 'result' && !event.is_error && typeof event.result === 'string' && !emitted) {
-        // No assistant events streamed (plain json-esque run): the terminal result carries
-        // the full text.
+
         emitted = event.result
         yield { type: 'content', text: event.result }
       }

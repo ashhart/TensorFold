@@ -1,0 +1,15 @@
+[
+  "Assistant workspace",
+  "Open inbox",
+  "Open Google Workspace",
+  "Start a task, read connected conversations, or manage Google mail and calendar.",
+  "Google account tools require a model running locally on this computer.",
+  "Manage Google accounts locally in TensorFold on the host computer.",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.",
+  "Disconnected on this computer",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.",
+  "No inbox conversation is attached"
+]

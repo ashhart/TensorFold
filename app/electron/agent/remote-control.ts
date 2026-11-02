@@ -7,6 +7,7 @@ import { PairingAttemptLimiter, authToken, tokenMatches, securityRoleAllows, req
 import { readJson, writeJson, writeRemoteStatic } from './remote-control-http'
 import { remoteControlCommandCatalog } from './remote-control-catalog'
 import { handleRemoteMutation } from './remote-control-mutations'
+import { handleQuickAskRemote } from './quick-ask/remote-http'
 import type { RemoteWorkspaceScope } from './local-workspace-policy'
 import type { RemoteControlServer, RemoteControlServerDeps } from './remote-control-types'
 import type { RemoteControlEvent, RemoteControlSettings, RemoteControlStatus, SpineAggregate } from './types'
@@ -325,6 +326,8 @@ export function createRemoteControlServer(deps: RemoteControlServerDeps): Remote
         return
       }
     }
+
+    if (await handleQuickAskRemote(req, res, url.pathname, ownerAuthed, stillAuthorized, deps.quickAsk)) return
 
     // Listing/revoking device sessions is an OWNER action — a paired device can't enumerate
     // or evict its siblings.

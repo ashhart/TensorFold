@@ -1,0 +1,35 @@
+const { build: shared } = require('../package.json')
+
+module.exports = {
+  extends: null,
+  appId: shared.appId,
+  productName: shared.productName,
+  npmRebuild: shared.npmRebuild,
+  directories: { ...shared.directories, output: 'release/windows' },
+  files: [...shared.files, '!node_modules/**/*.pdb',
+    '!node_modules/onnxruntime-node/bin/napi-v3/{darwin,linux}/**/*',
+    '!node_modules/onnxruntime-node/bin/napi-v3/win32/arm64/**/*',
+    { from: 'build/sandbox/windows-x64/asar', to: '.', filter: ['sandbox-native.json'] }],
+  extraResources: [...shared.extraResources.filter(({ to }) => ['engine', 'voice-notices', 'third-party-notices'].includes(to)),
+    { from: 'build/sandbox/windows-x64/TensorFoldSandbox.exe', to: 'sandbox/TensorFoldSandbox.exe' }],
+  asar: shared.asar,
+  afterPack: require('./verify-packaged-windows-sandbox.cjs'),
+  forceCodeSigning: false,
+  electronFuses: { ...shared.electronFuses },
+  asarUnpack: ['node_modules/onnxruntime-node/bin/napi-v3/win32/x64/**/*'],
+  publish: null,
+  toolsets: { nsis: '1.2.1' },
+  win: {
+    target: [{ target: 'nsis', arch: ['x64'] }],
+    artifactName: '${productName}-${version}-windows-${arch}-setup.${ext}',
+    icon: 'build/icon.png',
+  },
+  nsis: {
+    oneClick: false,
+    perMachine: false,
+    allowToChangeInstallationDirectory: true,
+    deleteAppDataOnUninstall: false,
+    createDesktopShortcut: false,
+    createStartMenuShortcut: true,
+  },
+}

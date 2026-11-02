@@ -1,0 +1,15 @@
+{
+  "Engine updates": "Machinae renovationes",
+  "bundled": "inclusa",
+  "Checking installed runtime…": "Machina instituta examinatur…",
+  "Check for engine updates": "Machinae renovationes quaere",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "Machinam localem renova sine applicatione iterum instituenda. Opera localia perfice antequam machinam mutes. Exemplaria et colloquia suo loco manent.",
+  "No compatible engine updates are available for this device.": "Nullae machinae renovationes huic instrumento aptae praesto sunt.",
+  "Use this runtime": "Hac machina utere",
+  "Use bundled engine": "Machina inclusa utere",
+  "Checking signed releases…": "Editiones subscriptae examinantur…",
+  "Switching runtime…": "Machina mutatur…",
+  "Ready locally": "Localiter parata",
+  "memory on this computer.": "memoria in hoc computatro.",
+  "Prevent sleep while this option is enabled.": "Somnum prohibe dum haec optio valet."
+}

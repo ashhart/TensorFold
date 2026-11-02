@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "सहायक कार्यक्षेत्र",
+  "Open inbox": "इनबॉक्स खोलें",
+  "Open Google Workspace": "Google Workspace खोलें",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "कोई काम शुरू करें, जुड़े स्रोतों की बातचीत पढ़ें या Google मेल और कैलेंडर प्रबंधित करें।",
+  "Google account tools require a model running locally on this computer.": "Google खाते के टूल के लिए इस कंप्यूटर पर स्थानीय रूप से चलने वाला मॉडल आवश्यक है।",
+  "Manage Google accounts locally in TensorFold on the host computer.": "होस्ट कंप्यूटर पर Google खाते स्थानीय प्रबंधित करें।",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Google OAuth क्लाइंट आयात, क्रेडेंशियल और मालिक की समीक्षा केवल होस्ट कंप्यूटर पर उपलब्ध हैं।",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "इस कंप्यूटर पर कोई Google खाता कनेक्ट नहीं है। नीचे साइन इन करें और Google की साइन-इन विंडो में खाता चुनें या कोई दूसरा ईमेल पता इस्तेमाल करें।",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "इस कंप्यूटर पर कोई Google खाता कनेक्ट नहीं है। खाता जोड़ने के लिए नीचे Google साइन-इन सेट अप करें।",
+  "Disconnected on this computer": "इस कंप्यूटर पर डिस्कनेक्ट",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "इस कंप्यूटर पर डिस्कनेक्ट है। पढ़ने या नई कार्रवाई तैयार करने से पहले Google से फिर जुड़ें।",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "क्लाइंट बदलने से खाते अपने आप लॉगिन या डिस्कनेक्ट नहीं होते; JSON और क्रेडेंशियल होस्ट कंप्यूटर पर रहते हैं।",
+  "No inbox conversation is attached": "इनबॉक्स की कोई बातचीत संलग्न नहीं है"
+}

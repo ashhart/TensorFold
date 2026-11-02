@@ -1,4 +1,8 @@
+import { validInboxCache } from './inbox-validation'
 import type { GoogleWorkspaceAccount, GoogleWorkspaceActionResult, GoogleWorkspaceActionReview, GoogleWorkspaceLocalDraft } from '../../../shared/google-workspace'
+import type { GmailInboxCache } from '../../../shared/gmail-inbox'
+import type { ComposerDraftSnapshot } from '../../../shared/composer-drafts'
+import { validateComposerDraftSnapshot } from '../../../shared/composer-drafts'
 import { validEmail } from './validation'
 import { validateCapabilities } from './scopes'
 
@@ -12,11 +16,13 @@ export interface GoogleWorkspacePrivateState {
   accounts: PrivateGoogleAccount[]
   drafts: GoogleWorkspaceLocalDraft[]
   actions: PrivateGoogleAction[]
+  inbox?: GmailInboxCache[]
+  inboxDrafts?: { accountId: string; threadId: string; draft: ComposerDraftSnapshot }[]
 }
-/** The host must implement this with encrypted, account-bound, atomic storage. */
+// The host must implement this with encrypted, account-bound, atomic storage.
 export interface GoogleWorkspaceStore {
   read(): Promise<GoogleWorkspacePrivateState | null>
-  /** Production host must honor validateCommit immediately before its atomic rename. */
+  // Production host must honor validateCommit immediately before its atomic rename.
   write(state: GoogleWorkspacePrivateState, validateCommit?: () => void): Promise<void>
 }
 function checkedState(value: GoogleWorkspacePrivateState | null): GoogleWorkspacePrivateState {
@@ -32,14 +38,29 @@ function checkedState(value: GoogleWorkspacePrivateState | null): GoogleWorkspac
     if (tokens && (typeof tokens.accessToken !== 'string' || !tokens.accessToken || /[\s\0]/.test(tokens.accessToken) || tokens.accessToken.length > 16_384 || tokens.refreshToken !== undefined && (typeof tokens.refreshToken !== 'string' || !tokens.refreshToken || tokens.refreshToken.length > 16_384 || /[\s\0]/.test(tokens.refreshToken)) || !Number.isFinite(tokens.expiresAt) || !Array.isArray(tokens.scopes) || !tokens.scopes.length || tokens.scopes.length > 64 || tokens.scopes.some(scope => typeof scope !== 'string' || scope.length > 2048 || /\s/.test(scope)))) invalid()
     ids.add(account.id)
   }
+  if (!validInboxCache(state.inbox, ids)) invalid()
   for (const draft of state.drafts) if (!draft || typeof draft.id !== 'string' || typeof draft.accountId !== 'string' || !ids.has(draft.accountId) || draft.localOnly !== true || !Array.isArray(draft.to) || typeof draft.subject !== 'string' || typeof draft.text !== 'string') invalid()
   for (const action of state.actions) if (!action || !action.review || typeof action.review.id !== 'string' || !ids.has(action.review.accountId) || !Number.isSafeInteger(action.review.revision) || typeof action.review.digest !== 'string' || !/^[a-f0-9]{64}$/.test(action.review.digest) || !Number.isFinite(action.review.expiresAt) || !action.review.action || !['gmail.send', 'calendar.create', 'calendar.update', 'calendar.delete'].includes(action.review.action.kind) || action.result && !['succeeded', 'uncertain', 'failed'].includes(action.result.status)) invalid()
   if (state.client && (typeof state.client.clientId !== 'string' || typeof state.client.clientSecret !== 'string' || !state.client.clientSecret)) invalid()
+  if (state.inboxDrafts) {
+    if (!Array.isArray(state.inboxDrafts) || state.inboxDrafts.length > 100) invalid()
+    const draftKeys = new Set<string>()
+    for (const row of state.inboxDrafts) {
+      if (!row || !ids.has(row.accountId) || !/^[A-Za-z0-9_-]{1,128}$/.test(row.threadId)) invalid()
+      const key = JSON.stringify([row.accountId, row.threadId])
+      if (draftKeys.has(key)) invalid()
+      draftKeys.add(key)
+      try {
+        const draft = validateComposerDraftSnapshot(row.draft)
+        if (draft.attachments.length || draft.quotes?.length || draft.text.length > 128_000 || draft.text.includes('\0')) invalid()
+      } catch { invalid() }
+    }
+  }
   return state
 }
 export class GoogleState {
   private queue: Promise<unknown> = Promise.resolve()
-  constructor(private readonly store: GoogleWorkspaceStore) {}
+  constructor(private readonly store: GoogleWorkspaceStore) { }
   transaction<T>(run: (state: GoogleWorkspacePrivateState) => Promise<T> | T, validateCommit?: () => void): Promise<T> {
     const job = this.queue.then(async () => {
       const state = checkedState(await this.store.read())
@@ -48,7 +69,7 @@ export class GoogleState {
       await this.store.write(state, validateCommit)
       return result
     })
-    this.queue = job.catch(() => {})
+    this.queue = job.catch(() => { })
     return job
   }
   read<T>(run: (state: GoogleWorkspacePrivateState) => T): Promise<T> {

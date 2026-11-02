@@ -69,17 +69,17 @@ export class GoogleAccounts {
         live.capabilities = capabilities
       })
     } catch (error) {
-      if (error instanceof GoogleApiError && (error.status === 400 || error.status === 401)) await this.needsAuthorization(id, revision)
+      if (error instanceof GoogleApiError && (error.status === 400 || error.status === 401)) await this.needsAuthorization(id, revision, error.tokenFailure ? error.message : undefined)
       throw error
     }
   }
-  async needsAuthorization(id: string, revision: number): Promise<void> {
+  async needsAuthorization(id: string, revision: number, detail = 'Google sign-in expired or was revoked. Reconnect this account.'): Promise<void> {
     await this.state.transaction(state => {
       const live = state.accounts.find(item => item.id === id)
       if (!live || live.revision !== revision) return
       // A late failure from an older session must not cancel a newer sign-in's controller.
       const controller = this.controllers.get(id) ?? new AbortController(); controller.abort(); this.controllers.set(id, controller)
-      live.status = 'needs-reauthorization'; live.lastError = 'Google sign-in expired or was revoked. Reconnect this account.'; live.revision++
+      live.status = 'needs-reauthorization'; live.lastError = detail; live.revision++
       live.tokens = undefined
     })
   }
@@ -92,6 +92,8 @@ export class GoogleAccounts {
       const account: PrivateGoogleAccount = { id: previous?.id ?? randomUUID(), subject, email, tokens, capabilities, status: 'connected', connectedAt: this.now(), revision: (previous?.revision ?? 0) + 1 }
       if (previous) { this.controllers.get(previous.id)?.abort(); this.controllers.set(previous.id, new AbortController()); Object.assign(previous, account); delete previous.lastError }
       else state.accounts.push(account)
+      const inbox = state.inbox?.find(item => item.accountId === account.id)
+      if (inbox) { inbox.revision = account.revision; inbox.messages = []; inbox.syncedAt = null; delete inbox.error }
     })
   }
   async disconnect(id: string): Promise<{ revoked: boolean; detail: string }> {
@@ -103,6 +105,8 @@ export class GoogleAccounts {
       account.tokens = undefined; account.capabilities = []; account.status = 'disconnected'; account.revision++; delete account.lastError
       state.drafts = state.drafts.filter(draft => draft.accountId !== id)
       state.actions = state.actions.filter(action => action.review.accountId !== id)
+      state.inbox = state.inbox?.filter(item => item.accountId !== id)
+      state.inboxDrafts = state.inboxDrafts?.filter(item => item.accountId !== id)
       return { tokens: previous, revision: account.revision }
     })
     const warn = async () => {

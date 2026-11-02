@@ -1,0 +1,89 @@
+#!/bin/bash
+set -euo pipefail
+fail() {
+  printf 'TensorFold: %s\n' "$1" >&2
+  if [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] && command -v zenity >/dev/null; then zenity --error --title='TensorFold sandbox setup' --text="$1" || true; fi
+  exit 1
+}
+[[ $(id -u) != 0 ]] || fail 'Run the app as a normal user. Sandbox setup requests administrator approval separately.'
+for argument in "$@"; do
+  case $argument in --no-sandbox|--no-sandbox=*|--disable-sandbox|--disable-setuid-sandbox|--disable-seccomp-filter-sandbox|--disable-namespace-sandbox) fail 'Remove the sandbox-disable argument before starting this AppImage.' ;; esac
+done
+[[ ${ELECTRON_DISABLE_SANDBOX:-0} != 1 ]] || fail 'Remove ELECTRON_DISABLE_SANDBOX before starting this AppImage.'
+appdir=${APPDIR:-$(cd -- "$(dirname -- "$0")" && pwd -P)}
+image=$(realpath -- "${APPIMAGE:-}") || fail 'The AppImage file could not be located.'
+[[ -f $image ]] || fail 'The AppImage file could not be located.'
+digest=$(sha256sum -- "$image" | cut -d' ' -f1)
+[[ $digest =~ ^[a-f0-9]{64}$ ]] || fail 'The AppImage digest could not be read.'
+version=/opt/tensorfold-appimage/$digest
+installed=$version/app/tensorfold-studio
+policy=/etc/apparmor.d/tensorfold-appimage-$digest
+trusted_installed() {
+  local file directory mode
+  for directory in /opt /opt/tensorfold-appimage /opt/tensorfold-appimage/"$digest" "$version/app"; do
+    [[ -d $directory && ! -L $directory && $(stat -c %u -- "$directory") == 0 ]] || return 1
+    mode=$(stat -c %a -- "$directory"); (( (8#$mode & 022) == 0 )) || return 1
+  done
+  [[ -z $(find "$version/app" \( ! -user root -o \( ! -type l -a -perm /022 \) \) -print -quit) ]] || return 1
+  [[ -f $policy && ! -L $policy && $(stat -c %u -- "$policy") == 0 ]] || return 1
+  mode=$(stat -c %a -- "$policy"); (( (8#$mode & 022) == 0 )) || return 1
+  [[ -f $installed && ! -L $installed && $(stat -c %u -- "$installed") == 0 ]] || return 1
+  mode=$(stat -c %a -- "$installed"); (( (8#$mode & 022) == 0 )) || return 1
+  [[ -f $version/TensorFold.AppImage && ! -L $version/TensorFold.AppImage && $(stat -c %u -- "$version/TensorFold.AppImage") == 0 ]] || return 1
+  mode=$(stat -c %a -- "$version/TensorFold.AppImage"); (( (8#$mode & 022) == 0 )) || return 1
+  [[ $(sha256sum -- "$version/TensorFold.AppImage" | cut -d' ' -f1) == "$digest" ]]
+}
+mode=run
+case ${1:-} in --install-sandbox-support) mode=install; shift ;; --remove-sandbox-support) mode=remove; shift ;; --sandbox-status) mode=status; shift ;; esac
+run_installed() {
+  unset APPDIR APPIMAGE
+  export LD_LIBRARY_PATH="$version/app/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  exec "$installed" "$@"
+}
+if [[ $mode == run && $image != "$installed" ]] && trusted_installed; then run_installed "$@"; fi
+namespace_available() { command -v unshare >/dev/null && unshare --user --map-root-user true >/dev/null 2>&1; }
+if [[ $mode == status ]]; then
+  if trusted_installed; then printf 'Approved sandbox integration files are present. Launch the app to check current kernel permissions.\n'; exit 0; fi
+  if namespace_available; then printf 'Chromium user namespaces are available.\n'; exit 0; fi
+  printf 'Sandbox setup is required. Run this AppImage with --install-sandbox-support.\n' >&2; exit 78
+fi
+if [[ $mode == run ]] && namespace_available; then
+  if [[ -d $appdir/usr/lib ]]; then export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
+  exec "$appdir/tensorfold-studio" "$@"
+fi
+if [[ $mode == run ]]; then
+  text='Ubuntu is blocking the user namespaces needed by Chromium. Setup installs this exact TensorFold copy under /opt and adds an AppArmor rule for it. It requires administrator approval and the Linux squashfs-tools package. Your user data and global security settings are not changed.'
+  if [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] && command -v zenity >/dev/null; then
+    zenity --question --title='TensorFold sandbox setup' --text="$text" --ok-label='Set up sandbox' --cancel-label='Cancel' || exit 78
+  elif [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] && command -v kdialog >/dev/null; then
+    kdialog --title 'TensorFold sandbox setup' --yesno "$text" || exit 78
+  else
+    printf 'TensorFold needs sandbox integration on this host. Run:\n  %q --install-sandbox-support\n' "$image" >&2
+    exit 78
+  fi
+fi
+if [[ $mode != remove ]] && ! command -v unsquashfs >/dev/null; then fail 'Sandbox setup needs the Linux squashfs-tools package. Install it with your system package manager, then run this AppImage again.'; fi
+helper=$appdir/resources/appimage-support/install-sandbox-support.sh
+[[ -f $helper && ! -L $helper ]] || fail 'Sandbox setup support is missing from this build.'
+temporary=$(mktemp -d /tmp/tensorfold-appimage-setup-XXXXXXXX)
+trap 'rm -rf -- "$temporary"' EXIT
+cp -- "$helper" "$temporary/install.sh"
+operation=--install
+parameters=("$image" "$digest")
+if [[ $mode == remove ]]; then operation=--remove; parameters=("$digest"); fi
+if [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]] && command -v pkexec >/dev/null; then
+  pkexec /bin/bash "$temporary/install.sh" "$operation" "${parameters[@]}" || fail 'Setup was cancelled or failed. The app was not started.'
+elif [[ -t 0 ]] && command -v sudo >/dev/null; then
+  sudo -- /bin/bash "$temporary/install.sh" "$operation" "${parameters[@]}" || fail 'Setup was cancelled or failed. The app was not started.'
+else
+  action=--install-sandbox-support
+  if [[ $mode == remove ]]; then action=--remove-sandbox-support; fi
+  printf 'Open an interactive terminal and run:\n  %q %s\n' "$image" "$action" >&2
+  printf 'A desktop with PolicyKit can also request administrator approval.\n' >&2
+  exit 78
+fi
+if [[ $mode == remove ]]; then exit 0; fi
+trusted_installed || fail 'The approved AppImage installation could not be verified.'
+rm -rf -- "$temporary"
+trap - EXIT
+run_installed "$@"

@@ -1,4 +1,5 @@
 import { currentIntlLocale } from '../../lib/preferences/current-locale'
+import { openAskTensorFold } from '../../lib/quick-ask-launch'
 import { OriginalDiagnostic } from '../OriginalDiagnostic'
 import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
@@ -28,6 +29,7 @@ export function RuntimeSettings({ ctx }: { ctx: SettingsSectionContext }) {
 
   return (
 <SettingsPane>
+        {window.tensorfoldQuickAskLauncher && <Section title={tx('Ask TensorFold')} desc={tx('A floating question window with your models, context attachments and editable presets.')}><Button onClick={openAskTensorFold}>{tx('Open Ask TensorFold')}</Button></Section>}
         <Section title={tx("Runtime defaults")} desc={tx("Approvals, workspace defaults, and context behavior. Room agents are configured inside each room.")}>
           <div className="space-y-4">
             <Field label={tx("Default approval mode")}>
@@ -66,9 +68,7 @@ export function RuntimeSettings({ ctx }: { ctx: SettingsSectionContext }) {
               </div>
             </Field>
 
-            {/* Advanced: low-level sampling + context knobs most users never touch.
-                Temperature defaults to ~0 (#49); kept here, collapsed, so the
-                Runtime page stays approachable. */}
+            {}
             <AdvancedSection>
               <Field label={tx("Temperature")} hint={draft.temperature.toFixed(2)}>
                 <input
@@ -168,7 +168,7 @@ export function RuntimeSettings({ ctx }: { ctx: SettingsSectionContext }) {
                 <div className="min-w-0">
                   <div className="text-[13px] font-medium text-ink">{tx("Keep computer alive")}</div>
                   <div className="mt-0.5 text-[13px] leading-snug text-ink-3">
-                    {tx("On macOS, TensorFold runs ")}<span className="font-mono text-ink-2">{tx("caffeinate -dimsu")}</span> {tx("while this is enabled so sleep does not interrupt active work.")}</div>
+                    {tx("Prevent sleep while this option is enabled.")}</div>
                 </div>
               </div>
               <Toggle label={tx("Keep computer awake")} checked={draft.power.keepComputerAlive} onChange={(keepComputerAlive) => commit({ ...draft, power: { ...draft.power, keepComputerAlive, lastError: null } })} />

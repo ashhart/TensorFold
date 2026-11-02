@@ -2,7 +2,7 @@
 // The bundled engine/standalone CLI still has its own capabilities.
 export const CORTHEON_RELEASE_POLICY = Object.freeze({
   enabled: false,
-  reason: 'Cortheon is temporarily disabled in this beta.',
+  reason: 'Cortheon is temporarily disabled.',
 })
 
 export function cortheonEnabledForRelease(requested: unknown): boolean {

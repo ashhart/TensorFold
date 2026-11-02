@@ -30,6 +30,7 @@ import type {
 
 
 export interface RemoteControlServerDeps {
+  quickAsk?: import('./quick-ask/remote-http').QuickAskRemoteBackend
   getSettings: () => RemoteControlSettings
   getSnapshot: () => RemoteControlSnapshot | Promise<RemoteControlSnapshot>
   getArchives: () => ArchiveSnapshot | Promise<ArchiveSnapshot>

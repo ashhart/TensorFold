@@ -4,7 +4,7 @@ import { GoogleWorkspaceConnector } from './connectors/GoogleWorkspaceConnector'
 import { TelegramConnector } from './connectors/TelegramConnector'
 import { useEffect, useState } from 'react'
 import { CONNECTOR_CATALOG, CONNECTOR_SETUP_IDS, type ConnectorSetupId } from '../../../shared/connector-catalog'
-import { consumeConnectorSetup, SETTINGS_SECTION_REQUEST_EVENT } from '../../lib/store'
+import { peekConnectorSetup, consumeConnectorSetup, SETTINGS_SECTION_REQUEST_EVENT } from '../../lib/store'
 import { api } from '../../lib/ipc'
 import { BrandIcon, connectorBrand } from '../../lib/brand'
 import type { AssistantControlSnapshot } from '../../lib/types'
@@ -24,7 +24,7 @@ import { WhatsAppBridgeConnector } from './connectors/WhatsAppBridgeConnector'
 
 export function ConnectorsSettings({ ctx }: { ctx: SettingsSectionContext }) {
   const tx = useAuthoredText()
-  const [selected, setSelected] = useState<ConnectorSetupId | null>(() => consumeConnectorSetup())
+  const [selected, setSelected] = useState<ConnectorSetupId | null>(() => peekConnectorSetup())
   const [snapshot, setSnapshot] = useState<AssistantControlSnapshot | null>(null)
   const [googleStatus, setGoogleStatus] = useState('Set up')
   const [error, setError] = useState('')
@@ -48,6 +48,7 @@ export function ConnectorsSettings({ ctx }: { ctx: SettingsSectionContext }) {
   }, [selected])
   useEffect(() => {
     const requested = () => { const id = consumeConnectorSetup(); if (id) setSelected(id) }
+    requested()
     window.addEventListener(SETTINGS_SECTION_REQUEST_EVENT, requested)
     return () => window.removeEventListener(SETTINGS_SECTION_REQUEST_EVENT, requested)
   }, [])
@@ -64,15 +65,15 @@ export function ConnectorsSettings({ ctx }: { ctx: SettingsSectionContext }) {
     {!selected && <div className="grid gap-3 sm:grid-cols-2">{CONNECTOR_SETUP_IDS.map((id) => {
       const metadata = CONNECTOR_CATALOG[id]
       const state = snapshot?.connectors.find((connector) => connector.id === id)
-      const status = id === 'google' ? googleStatus : state?.status === 'connected' ? tx("Connected") : state?.status === 'error' ? tx("Needs attention") : tx("Set up")
+      const status = id === 'outlook' ? (ctx.draft.email.sources.some(source => source.kind === 'microsoft_graph' && source.enabled) ? tx('Configured') : tx('Set up')) : id === 'google' ? googleStatus : state?.status === 'connected' ? tx("Connected") : state?.status === 'error' ? tx("Needs attention") : tx("Set up")
       return <button key={id} onClick={() => setSelected(id)} className="flex min-w-0 items-start gap-3 rounded-xl border border-line bg-card p-4 text-left transition-colors hover:border-line-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
-        {id === 'google' ? <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-card-2 text-accent"><Icon name="mail" size={20} /></span> : <BrandIcon brand={connectorBrand(id)} size={32} />}
+        {id === 'google' ? <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-card-2 text-accent"><Icon name="mail" size={20} /></span> : <BrandIcon brand={connectorBrand(id === 'outlook' ? 'email' : id)} size={32} />}
         <span className="min-w-0 flex-1"><span className="flex flex-wrap items-center justify-between gap-2"><span className="text-[14px] font-medium text-ink">{metadata.name}</span><span className="text-[12px] text-ink-2">{status}</span></span><span className="mt-1 block text-[13px] leading-relaxed text-ink-2">{metadata.description}</span>{state?.error && <span className="mt-2 block break-words text-[12px] text-danger">{<OriginalDiagnostic>{state.error}</OriginalDiagnostic>}</span>}</span>
       </button>
     })}</div>}
     {selected === 'google' && <GoogleWorkspaceConnector />}
     {selected === 'telegram' && <TelegramConnector ctx={ctx} />}
-    {selected === 'email' && <EmailConnector ctx={ctx} />}
+    {(selected === 'email' || selected === 'outlook') && <EmailConnector ctx={ctx} />}
     {selected === 'slack' && <SlackConnector ctx={ctx} />}
     {selected === 'discord' && <DiscordConnector ctx={ctx} />}
     {selected === 'mattermost' && <MattermostConnector ctx={ctx} />}

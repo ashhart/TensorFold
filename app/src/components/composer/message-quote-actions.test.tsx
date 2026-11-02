@@ -8,7 +8,7 @@ const { AssistantMessage, UserBubble } = load('src/components/timeline.tsx', {
   './composer/MessageQuotes': { MessageQuoteAction: 'quote-action' },
   'react-markdown': 'markdown', 'remark-gfm': {}, '../lib/markdown-citations': {}, '../lib/icons': { Icon: 'icon' }, '../lib/fileicon': {}, '../lib/highlight': {},
   './reading/math-markdown': {}, '../lib/store': { useStore: (select: any) => select({ settings: {} }) }, '../lib/activity-grouping': {}, '../lib/ipc': { api: {} },
-  '../lib/voice': { speechSupported: () => false }, '../lib/diff-words': {}, './visualization': { splitVisualizationMarkdown: (text: string) => [{ type: 'markdown', text }], VisualizationCard: 'visualization' },
+  '../lib/voice': { speechSupported: () => false }, './thread-panel/DiffView': { DiffView: 'diff-view' }, './visualization': { splitVisualizationMarkdown: (text: string) => [{ type: 'markdown', text }], VisualizationCard: 'visualization' },
   '../lib/turn-blocks': { isEstimatedThroughputMeta: () => false }, './AttachmentChips': { AttachmentChips: 'attachments' }, '../lib/run-recovery': {},
 })
 const calls: Array<string | undefined> = []

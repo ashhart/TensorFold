@@ -2,6 +2,13 @@ import { createHash, verify } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { canUseMacSandbox, macSandboxProfile } from './sandbox'
+import { existsSync, realpathSync } from 'node:fs'
+import { canUseLinuxSandbox, linuxSandboxCommand } from './linux-sandbox'
+import { canUseWindowsSandbox, type WindowsSandboxLaunch } from './windows-sandbox'
+import { sandboxCommandEnv } from './sandbox-process'
+import { resolveCliBinary } from './cli-path'
+import { windowsLocalInput } from './windows-local-input'
+import type { IsolatedWorkspace } from './isolated-workspace'
 export { mcpSpawnFingerprint } from './mcp-launch-identity'
 import type { McpDockerGatewayConfig, McpDockerMount, McpDockerNetworkMode, McpServerConfig, McpServerProvenance } from './types'
 
@@ -16,10 +23,16 @@ export interface McpSpawnSpec {
   env: NodeJS.ProcessEnv
   gateway: McpServerProvenance['gateway']
   sandboxed: boolean
+  cancelFile?: string
+  readyFile?: string
 }
 
 export interface McpSpawnSpecOptions {
   macSandboxAvailable?: boolean
+  linuxSandboxAvailable?: boolean
+  isolatedWorkspace?: IsolatedWorkspace
+  windowsLaunch?: WindowsSandboxLaunch
+  readViews?: Array<{ source: string; target: string }>
 }
 
 function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -120,6 +133,9 @@ export async function verifyConfiguredManifest(config: McpServerConfig): Promise
   }
   try {
     const manifestPath = path.resolve(config.manifestPath)
+    if (process.platform === 'win32' && !await windowsLocalInput(manifestPath)) throw new Error('MCP manifests need a local regular file.')
+    const stat = await fs.stat(manifestPath)
+    if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error('MCP manifest must be a bounded regular file.')
     const raw = await fs.readFile(manifestPath, 'utf8')
     const manifest = JSON.parse(raw)
     const canonical = canonicalMcpManifest(manifest)
@@ -171,6 +187,21 @@ export function mcpSpawnSpec(config: McpServerConfig, options: McpSpawnSpecOptio
   }
   if (config.launchMode === 'docker_gateway') return dockerGatewaySpawnSpec(config, cwd)
   const sandboxAvailable = options.macSandboxAvailable ?? canUseMacSandbox()
+  if (!sandboxAvailable && (options.linuxSandboxAvailable ?? canUseLinuxSandbox())) {
+    const command = config.command.includes('/') ? path.resolve(cwd, config.command) : resolveCliBinary(null, [config.command], { env: { ...process.env, ...config.env } })
+    const roots = options.readViews ? [] : mcpSandboxReadRoots({ ...config, command }, cwd).filter(root => {
+      const relative = path.relative(cwd, root)
+      return relative.startsWith('..') || path.isAbsolute(relative)
+    }).filter(existsSync).map(root => realpathSync(root))
+    const launch = linuxSandboxCommand({ command, args: config.args, cwd, allowNetwork: false, readRoots: roots, readViews: options.readViews,
+      environment: { ...config.env, HOME: cwd, TMPDIR: '/tmp' },
+      workspaceSource: options.isolatedWorkspace?.workspace, writableStage: !!options.isolatedWorkspace,
+      protectedPaths: options.isolatedWorkspace ? [...options.isolatedWorkspace.original.keys()].filter(relative => /(^|\/)\.git$/i.test(relative)) : [] })
+    return { command: launch[0], args: launch.slice(1), cwd, env: sandboxCommandEnv(cwd), gateway: null, sandboxed: true }
+  }
+  if (!sandboxAvailable && options.windowsLaunch && canUseWindowsSandbox()) {
+    return { ...options.windowsLaunch, gateway: null, sandboxed: true }
+  }
   if (!sandboxAvailable) {
     if (!allowUnsandboxedMcp()) {
       throw new Error(`No supported MCP process sandbox is available on this platform. Use Docker Gateway or set ${UNSANDBOXED_MCP_ENV}=1 only for deliberate unsandboxed local development.`)
@@ -188,6 +219,8 @@ export function mcpSpawnSpec(config: McpServerConfig, options: McpSpawnSpecOptio
 }
 
 function allowUnsandboxedMcp(): boolean {
+  const resources = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+  if (resources && existsSync(path.join(resources, 'app.asar'))) return false
   const value = process.env[UNSANDBOXED_MCP_ENV]?.toLowerCase()
   return value === '1' || value === 'true' || value === 'yes'
 }
@@ -206,6 +239,7 @@ function dockerGatewaySpawnSpec(config: McpServerConfig, cwd: string): McpSpawnS
     '-i',
     '--network',
     network,
+    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '64', '--init',
   ]
   if (gateway.readOnlyRootfs !== false) args.push('--read-only')
   for (const mount of gateway.mounts ?? []) args.push('--mount', dockerMountArg(mount))
@@ -241,6 +275,7 @@ async function verifyManifestLaunchFiles(config: McpServerConfig, manifest: any,
       return { ok: false, digest, error: 'MCP manifest launchFiles entries require path and a 64-character sha256.' }
     }
     const resolved = path.resolve(cwd, file)
+    if (process.platform === 'win32' && !await windowsLocalInput(resolved)) return { ok: false, digest, error: 'MCP launch files need local regular paths.' }
     let actual: string
     try { actual = createHash('sha256').update(await fs.readFile(resolved)).digest('hex') } catch (e: any) {
       return { ok: false, digest, error: `MCP manifest launch file could not be read: ${file} (${String(e?.message || e)})` }
@@ -259,7 +294,7 @@ async function verifyManifestLaunchFiles(config: McpServerConfig, manifest: any,
     if (!arg || arg.startsWith('-')) continue
     const candidate = path.resolve(cwd, arg)
     let isFile = false
-    try { isFile = (await fs.stat(candidate)).isFile() } catch { /* ordinary value, not a launch file */ }
+    try { isFile = (await fs.stat(candidate)).isFile() } catch {}
     if (isFile && !entries.has(candidate)) {
       return { ok: false, digest, error: `Trusted or auto-connect MCP manifest must pin mutable launch file ${arg} in launchFiles.` }
     }
@@ -282,7 +317,7 @@ function pickEnv(source: Record<string, string>, allowlist: string[]): Record<st
   return picked
 }
 
-function mcpSandboxReadRoots(config: McpServerConfig, cwd: string): string[] {
+export function mcpSandboxReadRoots(config: McpServerConfig, cwd: string): string[] {
   const roots: string[] = []
   const add = (value: string | null | undefined) => {
     const raw = String(value || '').trim()
@@ -310,8 +345,8 @@ function trustedMcpAllowed(): boolean {
 }
 
 export async function commandProvenance(config: McpServerConfig): Promise<McpServerProvenance | null> {
-  const spec = mcpSpawnSpec(config)
-  const commandPath = await resolveCommandPath(spec.command, config.cwd || undefined, config.env?.PATH ?? process.env.PATH)
+  const gateway = config.launchMode === 'docker_gateway' ? dockerGatewaySpawnSpec(config, path.resolve(config.cwd || process.cwd())) : null
+  const commandPath = await resolveCommandPath(gateway?.command ?? config.command, config.cwd || undefined, config.env?.PATH ?? process.env.PATH)
   if (!commandPath) return null
   const stat = await fs.stat(commandPath)
   if (!stat.isFile()) return null
@@ -321,8 +356,8 @@ export async function commandProvenance(config: McpServerConfig): Promise<McpSer
     commandSha256: createHash('sha256').update(bytes).digest('hex'),
     checkedAt: Date.now(),
     manifestDigest: config.manifestDigest ?? null,
-    sandboxed: spec.sandboxed,
-    gateway: spec.gateway,
+    sandboxed: !!gateway || canUseMacSandbox() || canUseLinuxSandbox() || canUseWindowsSandbox(),
+    gateway: gateway?.gateway ?? null,
   }
 }
 
@@ -334,14 +369,17 @@ async function resolveCommandPath(command: string, cwd?: string, pathEnv?: strin
     return await isExecutableFile(candidate) ? candidate : null
   }
   for (const dir of ((pathEnv ?? process.env.PATH) || '').split(path.delimiter).filter(Boolean)) {
-    const candidate = path.join(dir, raw)
-    if (await isExecutableFile(candidate)) return candidate
+    for (const extension of process.platform === 'win32' && !path.extname(raw) ? ['.exe', '.com', '.cmd', '.bat'] : ['']) {
+      const candidate = path.join(dir, raw + extension)
+      if (await isExecutableFile(candidate)) return candidate
+    }
   }
   return null
 }
 
 async function isExecutableFile(file: string): Promise<boolean> {
   try {
+    if (process.platform === 'win32' && !await windowsLocalInput(file)) return false
     const stat = await fs.stat(file)
     return stat.isFile()
   } catch {

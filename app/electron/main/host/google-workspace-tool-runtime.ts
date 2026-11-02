@@ -24,7 +24,7 @@ export interface GoogleWorkspaceToolRuntimeDeps {
   hasExternalResearchEnabled(): boolean
   markContext(thread: Thread): Promise<void>
 }
-/** Concurrent first reads share the same durable marker write; a failed write stays fail-closed. */
+// Concurrent first reads share the same durable marker write; a failed write stays fail-closed.
 export function createGoogleContextMarker(deps: { persist(): Promise<void>; publish(thread: Thread): void }) {
   const pending = new WeakMap<Thread, Promise<void>>()
   const needsPersistence = new WeakSet<Thread>()
@@ -58,7 +58,7 @@ export function createGoogleWorkspaceToolRunner(run: GoogleWorkspaceToolRun | un
       if (run.memoryOwner && (run.memoryOwner.id !== live.id || run.memoryOwner.revision !== revision)) throw new Error('Google tools cannot use a different conversation owner.')
       if (run.subAgentId || live.bot?.executionTarget === 'vm' || live.orchestratorHostId || live.workspace?.kind === 'ssh' || live.engine && live.engine !== 'native' || live.phoneLocalOnly) throw new Error('Google account tools are unavailable to remote, child, phone-confined or VM runs.')
       const provider = deps.resolveProvider(live)
-      if (!provider || isExternalProvider(run.provider) || isExternalProvider(provider) || route(provider) !== providerRoute || deps.hasExternalResearchEnabled()) throw new Error('Google account data stays on a model running on this Mac. External, LAN and research routes are unavailable.')
+      if (!provider || isExternalProvider(run.provider) || isExternalProvider(provider) || route(provider) !== providerRoute || deps.hasExternalResearchEnabled()) throw new Error('Google account data stays on a model running on this computer. External, LAN and research routes are unavailable.')
       assertGoogleContextTransport(live, provider)
       if (deps.disabledCapabilities().includes('connector:google-workspace') || deps.disabledTools().includes(name)) throw new Error('Google Workspace capability or tool is disabled for this run.')
       botToolScopeKey(live.bot?.toolScope)

@@ -23,4 +23,14 @@ assert.equal(parseVerdict('Here: {"passed":true,"confidence":0.8,"summary":"ok",
 // a low-conf "pass" surfaces an issue (not empty)
 assert.ok(parseVerdict('{"passed":true,"confidence":0.3,"summary":"x","issues":[]}').issues.length >= 1)
 
+const contradictory = parseVerdict('{"passed":true,"confidence":0.99,"summary":"ok","issues":["tests failed"]}')
+assert.equal(contradictory.passed, false)
+assert.deepEqual(contradictory.issues, ['tests failed'], 'unresolved critic issues cannot disappear behind passed=true')
+for (const confidence of [1.01, -1]) {
+  assert.equal(parseVerdict(JSON.stringify({ passed: true, confidence, summary: 'ok', issues: [] })).passed, false)
+}
+assert.equal(parseVerdict('{"passed":true,"confidence":1e999,"summary":"ok","issues":[]}').passed, false)
+assert.equal(parseVerdict('{"passed":true,"confidence":1,"summary":"ok"}').passed, false)
+assert.equal(parseVerdict('{"passed":true,"confidence":1,"summary":"ok","issues":[123]}').passed, false)
+
 console.log('loop-critic tests passed')

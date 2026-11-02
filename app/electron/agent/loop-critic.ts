@@ -1,6 +1,4 @@
-// Loop Mode — the independent verification critic. Builds the skeptical
-// auditor prompt and parses the verdict FAIL-CLOSED. The model call itself is
-// performed by the engine (so this module stays pure + unit-testable).
+// The critic can reject completion; it cannot override observed verification failures.
 
 import type { RunContract, Verdict } from './loop-types'
 import { CRITIC_PASS_CONFIDENCE } from './loop-types'
@@ -13,24 +11,45 @@ Respond with ONLY a single JSON object: {"passed":boolean,"confidence":number,"s
   return { system, user }
 }
 
-/** Parse the critic's JSON; fail-closed on anything ambiguous. */
+function invalidVerdict(): Verdict {
+  return {
+    passed: false, confidence: 0, summary: 'Could not parse verdict',
+    issues: ['Critic returned an invalid or unparseable response'],
+  }
+}
+
+function checkedVerdict(value: unknown): Verdict {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalidVerdict()
+  const data = value as Partial<Verdict>
+  if (typeof data.passed !== 'boolean' || typeof data.confidence !== 'number' ||
+      !Number.isFinite(data.confidence) || data.confidence < 0 || data.confidence > 1 ||
+      typeof data.summary !== 'string' || !data.summary.trim() ||
+      !Array.isArray(data.issues) || data.issues.some(issue => typeof issue !== 'string' || !issue.trim())) {
+    return invalidVerdict()
+  }
+  const issues = data.issues.map(issue => issue.trim())
+  const passed = data.passed && data.confidence >= CRITIC_PASS_CONFIDENCE && !issues.length
+  return {
+    passed, confidence: data.confidence, summary: data.summary,
+    issues: passed ? [] : issues.length ? issues : ['Verdict did not meet the confidence threshold to pass'],
+  }
+}
+
+export function gateVerdict(critic: Verdict, requiredIssues: readonly string[]): Verdict {
+  const verdict = checkedVerdict(critic)
+  if (!requiredIssues.length) return verdict
+  return {
+    ...verdict, passed: false,
+    summary: `Required evidence incomplete: ${requiredIssues.join(' ')}`,
+    issues: [...new Set([...verdict.issues, ...requiredIssues])],
+  }
+}
+
+// Preserve compatible JSON-in-prose responses while validating the complete verdict shape.
 export function parseVerdict(raw: string): Verdict {
   try {
     const match = raw.match(/\{[\s\S]*\}/)
-    if (match) {
-      const data = JSON.parse(match[0]) as Partial<Verdict>
-      const confidence = typeof data.confidence === 'number' ? data.confidence : 0
-      const issues = Array.isArray(data.issues) ? data.issues.map(String) : []
-      const passed = data.passed === true && confidence >= CRITIC_PASS_CONFIDENCE
-      return {
-        passed,
-        confidence,
-        summary: typeof data.summary === 'string' ? data.summary : passed ? 'Verified' : 'Not yet complete',
-        issues: passed ? [] : issues.length ? issues : ['Verdict did not meet the confidence threshold to pass'],
-      }
-    }
-  } catch {
-    // fall through to fail-closed
-  }
-  return { passed: false, confidence: 0, summary: 'Could not parse verdict', issues: ['Critic returned an unparseable response'] }
+    if (match) return checkedVerdict(JSON.parse(match[0]))
+  } catch {}
+  return invalidVerdict()
 }

@@ -1,3 +1,5 @@
+import { registerGmailInboxIpc } from './ipc/gmail-inbox-ipc'
+import { registerMailConnectionsIpc } from './ipc/mail-connections-ipc'
 import { normalizeContextLimitChoices } from '../../../shared/context-limit-choices'
 import { invalidateHostedContexts } from '../../agent/hosted-context'
 import { preserveManagedComputeProviders } from './clusters/provider'
@@ -18,7 +20,7 @@ import { buildContextPressureSnapshot } from '../../agent/context-pressure'
 import { auditPreview, isSecretMask, mergeSettingsSecrets, redactSettings } from '../../agent/security'
 import { createSerialTaskQueue } from '../../agent/serial-task-queue'
 import { stampSettingsSecretRotations } from '../../agent/secret-rotation'
-import { assertDedicatedWhatsAppSourceRemoval, normalizeWhatsAppSettingsForSave } from '../../agent/settings-save'
+import { assertDedicatedWhatsAppSourceRemoval, normalizeWhatsAppSettingsForSave, normalizeMicrosoftMailSettingsForSave, normalizeIMessageSettingsForSave } from '../../agent/settings-save'
 import type { EventSpineHost } from '../../agent/event-spine-host'
 import type { ArchiveKind, CreatePrLoopInput, CreatePrLoopResult, Mission, SaveEngineModelProfilesInput, Settings } from '../../agent/types'
 import type { McpHost } from '../../agent/mcp-client'
@@ -144,8 +146,7 @@ export function registerCoreIpc(deps: CoreIpcDeps) {
         await saveSettings(next, { validateCommit: () => { validateRole(); if (!stillCurrent()) throw new Error('The settings profile changed before commit.') } })
         validateRole()
         if (!stillCurrent()) {
-          // A background trust/rule/connector update owns the newer live snapshot.
-          // Restore it durably before rejecting this stale full-settings transaction.
+
           await saveSettings(store.settings)
           throw new Error('Settings changed while saving. The current configuration was preserved; retry your edit.')
         }
@@ -184,6 +185,8 @@ export function registerCoreIpc(deps: CoreIpcDeps) {
   registerMcpIpc({ mcpHost, confirmSensitiveAction })
   registerProviderIpc()
   registerGoogleWorkspaceIpc({ confirmSensitiveAction })
+  registerMailConnectionsIpc()
+  registerGmailInboxIpc()
   registerControllerIpc({ appName, rememberConnectorEvents })
   registerMissionsIpc({ getMission, createLocalPrLoop })
   registerBotIpc({ pollTelegramUpdates, startBotControlPolling, recipes: {
@@ -205,9 +208,6 @@ handle('security:purgeLocalMemory', async () => {
   return purgeLocalMemory()
 })
 
-// Open the macOS Full Disk Access pane so the user can grant TensorFold access to
-// protected databases (iMessage chat.db). The URL scheme is Apple's official deep
-// link into System Settings; it only opens the pane, it can't auto-grant.
 handle('system:openFullDiskAccess', async () => {
   // macOS-only; no-op elsewhere so the renderer can call it unconditionally.
   if (process.platform !== 'darwin') return
@@ -283,16 +283,16 @@ handle('settings:save', async (_e, s: Settings) => {
     merged.modelHelperDefaults = normalizeStoredHelperDefaults(merged.modelHelperDefaults)
     merged.uiPreferences = normalizeStoredUiPreferences(merged.uiPreferences)
     merged.whatsapp = normalizeWhatsAppSettingsForSave(s, current)
+    merged.email = normalizeMicrosoftMailSettingsForSave(merged, current)
+    merged.imessage = normalizeIMessageSettingsForSave(merged, current)
     // Remote assistant scope and durable owner selections use their dedicated revisioned IPC.
     merged.botControl = { ...merged.botControl, telegram: { ...merged.botControl.telegram, remote: current.botControl.telegram.remote } }
-    // These scoped rows have their own revisioned Save & apply transaction; a stale theme/
-    // connector snapshot must not overwrite them or bypass the engine's idle restart guard.
+
     merged.engineModelProfiles = current.engineModelProfiles
     merged.engineModelProfilesRecovery = current.engineModelProfilesRecovery
     merged.engineModelProfilesProblem = current.engineModelProfilesProblem
     merged.agentPresets = normalizeAgentPresets(merged.agentPresets ?? [], true)
-    // Renderer snapshots never own approval rules. Merge masks against the live
-    // configuration only once this transaction reaches the head of the queue.
+
     let next = await normalizeRemoteOrchestratorDestinations({ ...merged, desktopMode: normalizeDesktopMode(merged.desktopMode), desktopOnboardingComplete: merged.desktopOnboardingComplete === true, approvalRules: current.approvalRules }, current)
     for (const preset of current.agentPresets) {
       const nextPreset = next.agentPresets.find((candidate) => candidate.id === preset.id)

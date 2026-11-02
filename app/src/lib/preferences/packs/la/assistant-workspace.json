@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "Spatium adiutoris",
+  "Open inbox": "Recepta aperi",
+  "Open Google Workspace": "Google Workspace aperi",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "Opus incipe, colloquia fontium conexorum lege, aut epistulas et calendarium Google administra.",
+  "Google account tools require a model running locally on this computer.": "Instrumenta rationis Google exemplar in hoc computatro localiter currens requirunt.",
+  "Manage Google accounts locally in TensorFold on the host computer.": "Rationes Google localiter in TensorFold in computatro principali administra.",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Importatio clientis Google Desktop OAuth, claves et recognitiones domini tantum in computatro principali praesto sunt.",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "Nullae rationes Google huic computatro conexae sunt. Infra ini et in fenestra Google rationem elige aut alia inscriptione utere.",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "Nullae rationes Google huic computatro conexae sunt. Ut rationem addas, infra aditum per Google configura.",
+  "Disconnected on this computer": "In hoc computatro seiunctum",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "Localiter in hoc computatro seiunctum; per Google reconiunge ante lectionem aut actiones novas.",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "Clientem substituere rationem sponte non ingreditur nec seiungit; JSON et claves in computatro principali manent.",
+  "No inbox conversation is attached": "Nullum colloquium receptum adiunctum est"
+}

@@ -1,3 +1,4 @@
+import { microsoftMailRuntime } from '../../agent/email-provider-runtime'
 import { emailDraftEvent, writeEmailOutboxMessage } from '../../agent/email-connector'
 import { sendEmailOverSmtp } from '../../agent/smtp-send'
 import { auditPreview } from '../../agent/security'
@@ -38,9 +39,9 @@ export function createEmailTransport(deps: {
     const snapshot = event.outbound
     const account = snapshot.accountId ? store.settings.email.sources.find(source => source.id === snapshot.accountId) : null
     if (snapshot.accountId && !account) return { transport: 'smtp', status: 'failed', deliveredAt: null, error: 'The reviewed email account is no longer available. Nothing was sent.' }
-    // SMTP and local-outbox writers receive a detached approved payload, never the live
-    // mutable event object. Preserve selected account identity instead of picking a default.
+
     const transportEvent: ConnectorEvent = { ...event, payload: { to: snapshot.recipient, subject: snapshot.subject, body: snapshot.body, inReplyTo: snapshot.inReplyTo, threadKey: snapshot.threadKey } }
+    if (account?.kind === 'microsoft_graph') return microsoftMailRuntime().send({ ...account }, event)
     if (account?.kind === 'imap') {
       const selected = { ...account }
       if (!selected.host || !selected.user || !selected.password) return { transport: 'smtp', status: 'failed', deliveredAt: null, error: 'The reviewed email account is missing SMTP configuration. Nothing was sent.' }

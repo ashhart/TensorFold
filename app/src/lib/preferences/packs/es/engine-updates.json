@@ -1,0 +1,15 @@
+{
+  "Engine updates": "Actualizaciones del motor",
+  "bundled": "incluido",
+  "Checking installed runtime…": "Comprobando el motor instalado…",
+  "Check for engine updates": "Buscar actualizaciones del motor",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "Actualiza el motor local sin reinstalar la aplicación. Termina el trabajo local antes de cambiar de motor. Los modelos y las conversaciones se conservan.",
+  "No compatible engine updates are available for this device.": "No hay actualizaciones del motor compatibles con este dispositivo.",
+  "Use this runtime": "Usar este motor",
+  "Use bundled engine": "Usar el motor incluido",
+  "Checking signed releases…": "Comprobando versiones firmadas…",
+  "Switching runtime…": "Cambiando de motor…",
+  "Ready locally": "Listo en este equipo",
+  "memory on this computer.": "de memoria en este equipo.",
+  "Prevent sleep while this option is enabled.": "Evita la suspensión mientras esta opción esté activada."
+}

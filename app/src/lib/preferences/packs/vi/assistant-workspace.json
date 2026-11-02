@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "Không gian trợ lý",
+  "Open inbox": "Mở hộp thư đến",
+  "Open Google Workspace": "Mở Google Workspace",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "Bắt đầu tác vụ, đọc hội thoại từ nguồn đã kết nối hoặc quản lý thư và lịch Google.",
+  "Google account tools require a model running locally on this computer.": "Công cụ tài khoản Google cần mô hình chạy cục bộ trên máy tính này.",
+  "Manage Google accounts locally in TensorFold on the host computer.": "Quản lý Google cục bộ trên máy tính chủ.",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Nhập client OAuth, thông tin xác thực và duyệt của chủ sở hữu chỉ có trên máy tính chủ.",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "Chưa có tài khoản Google nào được kết nối trên máy máy tính này. Đăng nhập bên dưới rồi chọn tài khoản hoặc dùng địa chỉ khác trong cửa sổ đăng nhập của Google.",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "Chưa có tài khoản Google nào được kết nối trên máy máy tính này. Thiết lập đăng nhập Google bên dưới để thêm tài khoản.",
+  "Disconnected on this computer": "Đã ngắt trên máy tính này",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "Đã ngắt cục bộ trên máy tính; kết nối Google lại trước khi đọc hoặc tạo hành động.",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "Thay client không tự đăng nhập hay ngắt tài khoản; JSON và thông tin xác thực ở trên máy tính chủ.",
+  "No inbox conversation is attached": "Không đính kèm hội thoại nào từ hộp thư đến"
+}

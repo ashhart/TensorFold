@@ -1,4 +1,5 @@
 import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { openAskTensorFold } from '../lib/quick-ask-launch'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import { useAccessibleDialog } from './navigation/useAccessibleDialog'
@@ -71,6 +72,7 @@ export function CommandPalette() {
   const commands = useMemo<Cmd[]>(() => {
     const s = useStore.getState()
     const list: Cmd[] = []
+    if (window.tensorfoldQuickAskLauncher) list.push({ id: 'quick-ask', label: tx('Ask TensorFold'), hint: tx('Floating question window'), icon: 'spark', group: tx('Create'), run: openAskTensorFold })
     // The palette is global search/create: every creation verb, always.
     list.push(
       { id: 'search-content', label: tx("Search message contents"), hint: tx("all saved conversations"), icon: 'search', group: tx("Find"), run: () => requestConversationSearch({ scope: 'all' }) },

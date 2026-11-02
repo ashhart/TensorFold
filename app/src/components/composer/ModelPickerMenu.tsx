@@ -41,6 +41,7 @@ export interface ModelPickerMenuProps {
   settings?: React.ReactNode
   detail?: string
   disabled?: boolean
+  showPlanningBadge?: boolean
   ownerId?: string | null
   requirements?: ModelTaskRequirements
   qualifications?: ModelQualificationReport[]
@@ -165,7 +166,7 @@ export function ModelPickerMenu(props: ModelPickerMenuProps) {
   const label = !model?.trim() ? tx('Choose a model') : provider.source === 'tensorfold' && model ? snapshot?.installed.find((entry) => entry.repo === model)?.title ?? statsModelLabel(model, provider, snapshot?.suggestions) : modelDisplayName(provider, model)
   const account = accountLabel(provider, providerAccountId)
   return <Menu width={400} align="end" placement="top" trigger={(open) => <button ref={trigger} type="button" disabled={disabled} aria-label={tx("Choose model, current {value0}", { value0: label })} aria-haspopup="dialog" aria-expanded={open} title={disabled ? tx("Stop the current run before changing its model") : tx("Choose a model · {value0}{value1}", { value0: label, value1: account ? ` · ${account}` : '' })} className={clsx('flex h-8 w-full min-w-0 items-center gap-1.5 rounded-full px-2.5 text-[13px] transition-colors focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-55', open ? 'bg-ink-5 text-ink' : 'text-ink-2 hover:bg-ink-5 hover:text-ink')}>
-    {provider.source === 'tensorfold' ? <EngineDot /> : <Icon name={providerIconName(provider, model)} size={16} className="shrink-0 text-ink-3" />}<span className="min-w-0 flex-1 truncate text-left">{label}{account ? ` · ${account}` : ''}</span>{detail && <span className="shrink-0 text-ink-3 @max-md:hidden">{detail}</span>}{isExternalProvider(provider) && <PlanningOnlyBadge />}<Icon name="chevronDown" size={14} className="shrink-0 text-ink-3" />
+    {provider.source === 'tensorfold' ? <EngineDot /> : <Icon name={providerIconName(provider, model)} size={16} className="shrink-0 text-ink-3" />}<span className="min-w-0 flex-1 truncate text-left">{label}{account ? ` · ${account}` : ''}</span>{detail && <span className="hidden shrink-0 text-ink-3 @2xl:inline">{detail}</span>}{props.showPlanningBadge !== false && isExternalProvider(provider) && <PlanningOnlyBadge />}<Icon name="chevronDown" size={14} className="shrink-0 text-ink-3" />
   </button>}>
     {(close) => <ModelPickerBody {...props} close={() => { close(); requestAnimationFrame(() => trigger.current?.focus()) }} />}
   </Menu>

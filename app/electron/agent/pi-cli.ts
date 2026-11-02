@@ -1,24 +1,8 @@
-// Pi engine (VST-033): drive the installed `pi` coding agent (@earendil-works/pi-coding-agent)
-// as a first-class thread engine, mirroring claude-cli.ts. Wire facts taken from the INSTALLED
-// pi 0.80.3 — its `--help`, the docs it ships (docs/rpc.md, docs/json.md), and a live rpc-mode
-// probe on this machine — not from memory:
-// - `pi --mode rpc` speaks JSONL over stdin/stdout: commands in ({"type":"prompt","message"},
-//   {"type":"steer","message"}, ...), events + id-correlated `response` lines out.
-// - Streaming arrives as `message_update` events whose `assistantMessageEvent` is
-//   `{type:"text_delta",delta}` or `{type:"thinking_delta",delta}` (same shapes as json mode).
-// - `steer` queues a mid-turn user message, delivered after the current assistant turn's tool
-//   calls and before the next LLM call (docs/rpc.md) — the live-steering seam.
-// - `agent_end` marks the whole agentic run complete; stdin EOF then exits the process
-//   cleanly (probe: exit 0 within ms), so no kill is needed on the happy path.
-// - `--session-id <id>` uses an exact project session id, CREATING IT IF MISSING — so we mint
-//   our own uuid up front (probe-verified accepted) and resume can never fail "not found".
-// - rpc framing is STRICT LF-delimited JSONL: node readline is explicitly called out as
-//   non-compliant (it also splits on U+2028/U+2029, which are valid inside JSON strings), so
-//   stdout is split manually on \n only.
-// - `--thinking <level>`: off | minimal | low | medium | high | xhigh.
+
 
 import { randomUUID } from 'node:crypto'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawnCliProcess as spawn } from './cli-process'
 import { chmod, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -78,7 +62,7 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-/** Remove private prompt directories abandoned by a crashed TensorFold process. */
+// Remove private prompt directories abandoned by a crashed TensorFold process.
 export async function cleanupStalePiSystemPrompts(
   root = os.tmpdir(),
   options: { currentPid?: number; now?: number; isProcessAlive?: (pid: number) => boolean } = {},
@@ -97,8 +81,7 @@ export async function cleanupStalePiSystemPrompts(
       await rm(dir, { recursive: true, force: true }).catch(() => undefined)
       return
     }
-    // Pre-PID directories cannot be attributed safely while fresh; remove only
-    // clearly stale leftovers from the previous implementation.
+
     const info = await stat(dir).catch(() => null)
     if (info && now - info.mtimeMs > LEGACY_PROMPT_MAX_AGE_MS) {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined)
@@ -137,8 +120,6 @@ function binary(provider: Provider): string {
   return resolveCliBinary(provider.cliPath, ['pi'])
 }
 
-// TensorFold reasoning efforts → pi's --thinking levels (verified set: off/minimal/low/medium/
-// high/xhigh). 'max'/'ultrathink'-style efforts clamp to xhigh, pi's ceiling.
 export function piThinkingLevel(value?: string): string {
   const v = (value || '').toLowerCase()
   if (v === 'off' || v === 'none') return 'off'
@@ -149,32 +130,24 @@ export function piThinkingLevel(value?: string): string {
   return 'medium'
 }
 
-// Read-only approval mode restricts pi to its read tool; other modes keep pi's defaults
-// (pi has no sandbox flags — the tool allowlist is its only execution-narrowing control,
-// so this is a UX guardrail, not a sandbox boundary).
 export function piToolsForApproval(approvalMode?: ApprovalMode): string[] | null {
   if (approvalMode === 'readonly') return ['read']
   return null
 }
 
-// rpc-mode args. The session id is ALWAYS ours to pass: a resumed cursor reuses its id, a
-// fresh turn mints one (create-if-missing semantics make both the same flag).
 export function buildPiArgs(params: PiCliParams, systemPromptFile: string, sessionId: string, resuming: boolean): string[] {
   assertPiCredentialHandoff(params.provider)
   const args = ['--mode', 'rpc', '--thinking', piThinkingLevel(params.reasoningEffort)]
   if (params.model && params.model !== 'pi-default' && isSafeArgvId(params.model)) args.push('--model', params.model)
   const tools = piToolsForApproval(params.approvalMode)
   if (tools) args.push('--tools', tools.join(','))
-  // The session id originates from pi's own output (a UUID) but is persisted and passed back
-  // on resume — validate it can't masquerade as a CLI flag.
+
   if (isSafeArgvId(sessionId)) args.push('--session-id', sessionId)
   // A resumed session already carries the system prompt from the run that created it.
   if (!resuming && systemPromptFile) args.push('--append-system-prompt', systemPromptFile)
   return args
 }
 
-// Strict LF framing per docs/rpc.md: split ONLY on \n (tolerating a trailing \r), never on
-// U+2028/U+2029 — those are valid inside JSON strings and node readline would corrupt them.
 export function splitJsonlChunk(buffer: string, chunk: string): { lines: string[]; rest: string } {
   const combined = buffer + chunk
   const parts = combined.split('\n')
@@ -188,8 +161,6 @@ function compactStatusValue(value: string, max = 120): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
-// Translate one pi JSONL event into a chunk, or null. Only delta text/thinking stream as
-// content/reasoning; tool lifecycle becomes short status lines (tool NAME only, never args).
 export function chunkFromPiEvent(event: any): PiCliChunk | null {
   const type = String(event?.type || '')
   if (type === 'message_update') {
@@ -210,8 +181,6 @@ export function chunkFromPiEvent(event: any): PiCliChunk | null {
   return null
 }
 
-// Failure classification once the process exits: a rejected prompt command or a retry loop
-// that gave up carries its own message; otherwise a nonzero exit surfaces stderr.
 export function piFailureMessage(opts: { exitCode: number; stderr: string; retryFinalError?: string | null; promptRejected?: string | null }): string | null {
   if (opts.promptRejected?.trim()) return `Pi rejected the prompt: ${opts.promptRejected.trim().slice(0, 400)}`
   if (opts.retryFinalError?.trim()) return `Pi gave up after retries: ${opts.retryFinalError.trim().slice(0, 400)}`
@@ -220,8 +189,6 @@ export function piFailureMessage(opts: { exitCode: number; stderr: string; retry
   return `Pi CLI exited with code ${opts.exitCode}${detail ? `: ${detail.slice(0, 400)}` : ''}`
 }
 
-// The newest user message — a resumed pi session holds the prior context server-side
-// (well, session-file-side), so only the new input goes over (mirrors claude/codex).
 export function latestPiUserBody(messages: ApiMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === 'user') return contentText(messages[i].content).trim()
@@ -252,8 +219,6 @@ export async function* streamPiCli(params: PiCliParams): AsyncGenerator<PiCliChu
   const sessionId = resume?.sessionId ?? (params.newSessionId ?? randomUUID)()
   assertPiCredentialHandoff(params.provider)
 
-  // Pi accepts a file path for --append-system-prompt. Use a private temporary
-  // file so the full system prompt never appears in process listings.
   const systemPrompt = !resume && system ? await createPiSystemPromptFile(system, cliConfinement(params.provider)?.tmpDir) : null
   const systemPromptFile = systemPrompt?.path ?? ''
 
@@ -312,11 +277,9 @@ export async function* streamPiCli(params: PiCliParams): AsyncGenerator<PiCliChu
   const endStdin = () => {
     if (stdinClosed) return
     stdinClosed = true
-    try { proc.stdin.end() } catch { /* spawn failure path reports below */ }
+    try { proc.stdin.end() } catch {  }
   }
 
-  // Steer acks: `steer` responses are id-correlated, so acceptance is the server's word,
-  // not an optimistic write. A missing ack within the timeout counts as refused.
   let steerSeq = 0
   let agentEnded = false
   const pendingSteers = new Map<string, (accepted: boolean) => void>()
@@ -349,9 +312,7 @@ export async function* streamPiCli(params: PiCliParams): AsyncGenerator<PiCliChu
   const eventQueue: any[] = []
   let wakeQueue: (() => void) | null = null
   let stdoutDone = false
-  // Steer acks settle HERE, in the data handler, not in the generator's consume loop — an
-  // ack must never wait on downstream chunk consumption (the offering pump would deadlock
-  // against a paused consumer otherwise).
+
   const admitEvent = (event: any) => {
     if (event?.type === 'response') {
       const id = typeof event.id === 'string' ? event.id : ''
@@ -368,13 +329,13 @@ export async function* streamPiCli(params: PiCliParams): AsyncGenerator<PiCliChu
     lineBuffer = rest
     lastOutputAt = Date.now()
     for (const raw of lines) {
-      try { admitEvent(JSON.parse(raw)) } catch { /* skip malformed line */ }
+      try { admitEvent(JSON.parse(raw)) } catch {  }
     }
     wakeQueue?.()
   })
   proc.stdout.on('end', () => {
     if (lineBuffer.trim()) {
-      try { admitEvent(JSON.parse(lineBuffer)) } catch { /* torn tail */ }
+      try { admitEvent(JSON.parse(lineBuffer)) } catch {  }
       lineBuffer = ''
     }
     stdoutDone = true

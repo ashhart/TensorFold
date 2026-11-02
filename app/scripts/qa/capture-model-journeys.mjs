@@ -1,0 +1,166 @@
+import assert from 'node:assert/strict'
+import { mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { launchFixtureBrowser, openFixturePage, waitForPaint } from './browser-session.mjs'
+import { installModelEngineFixture } from './model-engine-fixture.mjs'
+
+const options = Object.fromEntries(process.argv.slice(2).map(value => value.replace(/^--/, '').split(/=(.*)/s).slice(0, 2)))
+const baseUrl = options.url || 'http://127.0.0.1:5173/'
+const output = path.resolve(options.output || 'qa-model-journeys')
+await mkdir(output, { recursive: true })
+const browser = await launchFixtureBrowser()
+const captures = []
+const checks = []
+const pageErrors = []
+let failure = null
+let engineActions = []
+
+async function capture(page, name, scenario) {
+  await waitForPaint(page)
+  const filename = `${name}.png`
+  await page.screenshot({ path: path.join(output, filename) })
+  captures.push({ filename, scenario, viewport: page.viewportSize() })
+}
+
+try {
+  const selection = await openFixturePage(browser, baseUrl, { onboarding: true })
+  await selection.page.getByTestId('onboarding-step-connect').click()
+  await selection.page.getByRole('button', { name: /Choose this model:/ }).waitFor()
+  await capture(selection.page, 'models-01-setup-choice', 'Actual setup with the repository cached-model demo fixture.')
+  await selection.page.setViewportSize({ width: 720, height: 520 })
+  const choose = selection.page.getByRole('button', { name: /Choose this model:/ }).first()
+  await choose.scrollIntoViewIfNeeded()
+  await capture(selection.page, 'models-01b-setup-minimum-window', 'Setup at the native 720×520 minimum; the model action remains reachable by scrolling.')
+  await choose.focus()
+  await selection.page.keyboard.press('Enter')
+  await selection.page.getByTestId('first-answer-step').waitFor()
+  await selection.page.getByTestId('onboarding-finish').scrollIntoViewIfNeeded()
+  assert.equal(await selection.page.getByTestId('onboarding-finish').isEnabled(), true)
+  await capture(selection.page, 'models-02b-guide-minimum-window', 'Keyboard model selection reaches the guide; its primary action remains accessible at 720×520.')
+  await selection.page.setViewportSize({ width: 1440, height: 1000 })
+  await selection.page.getByTestId('onboarding').evaluate(element => { element.scrollTop = 0 })
+  assert.match(await selection.page.getByTestId('first-answer-step').innerText(), /Validation and the first local load happen/)
+  const idle = await selection.page.evaluate(async () => (await (await import('/src/lib/ipc.ts')).api.engineSnapshot()).status)
+  assert.equal(idle.state, 'stopped', 'choosing a cached model must not allocate it or start a request')
+  checks.push('Cached selection opens the guide while the demo engine stays stopped.')
+  await capture(selection.page, 'models-02-cached-first-draft-guide', 'A cached model is selected; the checklist explains loading on Send.')
+  pageErrors.push(...selection.errors)
+  await selection.page.close()
+
+  const journey = await openFixturePage(browser, baseUrl, { onboarding: true })
+  const { page } = journey
+  await page.getByTestId('onboarding-step-connect').click()
+  await page.getByTestId('onboarding-provider-engine').waitFor()
+  await installModelEngineFixture(page)
+  await page.getByTestId('onboarding-choose-model').click()
+  await page.getByTestId('models-page').waitFor()
+  await page.getByRole('tab', { name: 'Discover', exact: true }).click()
+  await page.getByTestId('model-recommendation').getByRole('button', { name: 'Download model', exact: true }).click()
+  await page.getByTestId('models-download-activity').getByRole('progressbar').waitFor()
+  assert.equal(await page.getByTestId('models-download-activity').getByRole('progressbar').getAttribute('aria-valuenow'), '25')
+  await capture(page, 'models-03-download-progress', 'Controlled engine reply: 25% measured progress, visible Cancel, original renderer/API call.')
+  await page.getByRole('button', { name: /^Cancel download / }).click()
+  await page.getByText('Download paused', { exact: true }).waitFor()
+  await page.getByRole('button', { name: /^Resume download / }).click()
+  await page.getByText('Download in progress', { exact: true }).waitFor()
+  await page.evaluate(() => globalThis.__modelQa.failDownload())
+  await page.getByText('Download needs attention', { exact: true }).waitFor()
+  await capture(page, 'models-04-download-recovery', 'Controlled download failure: original diagnostic and inline Resume retain the requested revision.')
+  await page.getByRole('button', { name: /^Resume download / }).click()
+  await page.evaluate(() => globalThis.__modelQa.completeDownload())
+  await page.getByTestId('models-download-activity').getByRole('button', { name: 'Use model', exact: true }).waitFor()
+  assert.equal(await page.evaluate(() => globalThis.__modelQa.snapshot().status.state), 'stopped')
+  checks.push('Download cancel/resume/retry reach the API; completed files do not auto-load.')
+  await capture(page, 'models-05-download-complete', 'Completed fixture files expose an explicit load action without starting a model.')
+  await page.getByTestId('models-download-activity').getByRole('button', { name: 'Use model', exact: true }).click()
+  await page.getByRole('button', { name: 'Cancel loading', exact: true }).waitFor()
+  await capture(page, 'models-06-loading', 'Controllable pending model load: Cancel is visible; no decode speed or ready context is invented.')
+  await page.getByRole('button', { name: 'Cancel loading', exact: true }).click()
+  await page.getByText('Engine idle', { exact: true }).waitFor()
+  await page.getByTestId('models-download-activity').getByRole('button', { name: 'Use model', exact: true }).click()
+  await page.getByRole('button', { name: 'Cancel loading', exact: true }).waitFor()
+  await page.evaluate(() => globalThis.__modelQa.failLoad())
+  await page.getByRole('button', { name: 'Retry loading', exact: true }).waitFor()
+  await capture(page, 'models-07-load-recovery', 'Controllable failed load shows Retry loading; setup stays open.')
+  await page.getByRole('button', { name: 'Retry loading', exact: true }).click()
+  await page.getByRole('button', { name: 'Cancel loading', exact: true }).waitFor()
+  await page.evaluate(() => globalThis.__modelQa.completeLoad())
+  await page.getByTestId('first-answer-step').waitFor()
+  assert.match(await page.getByTestId('first-answer-step').innerText(), /The selected local model is loaded/)
+  checks.push('Load cancel leaves setup unfinished; load retry returns to the guide only after ready.')
+  await capture(page, 'models-08-ready-guide', 'A ready engine fixture returns to the setup guide; no prompt has been sent.')
+  await page.getByTestId('onboarding-finish').click()
+  await page.getByRole('textbox', { name: 'Message composer', exact: true }).waitFor()
+  const composer = page.getByRole('textbox', { name: 'Message composer', exact: true })
+  assert.match(await composer.inputValue(), /Help me plan a small project/)
+  const beforeSend = await page.evaluate(() => {
+    const state = globalThis.__store.getState()
+    const thread = state.threads.find(item => item.id === state.view.id)
+    return { id: thread.id, providerId: thread.providerId, model: thread.model, messages: thread.apiMessages.length, timeline: thread.timeline.length }
+  })
+  assert.equal(beforeSend.messages, 0)
+  assert.equal(beforeSend.timeline, 0)
+  assert.equal(beforeSend.providerId, 'tensorfold', 'a saved Assistant default must not replace the selected local model')
+  assert.equal(beforeSend.model, await page.evaluate(() => globalThis.__modelQa.repo))
+  checks.push('Finishing setup opens an editable first draft with zero sent messages.')
+  await capture(page, 'models-09-first-draft', 'Actual composer seeded by onboarding; empty conversation, explicit Send remains required.')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await page.waitForFunction(id => {
+    const state = globalThis.__store.getState()
+    const thread = state.threads.find(item => item.id === id)
+    return thread?.timeline.some(item => item.kind === 'assistant')
+      && !['thinking', 'streaming', 'tool', 'awaiting'].includes(state.status[id])
+  }, beforeSend.id, { timeout: 45_000 })
+  checks.push('Explicit Send completes a synthetic browser-demo reply in the production conversation renderer.')
+  await capture(page, 'models-10-first-reply', 'Synthetic browser-demo reply after explicit Send; no native model inference is claimed.')
+  await page.evaluate(() => {
+    const state = globalThis.__store.getState()
+    state.setFullWorkspaceLayout('workspace')
+    state.setView({ name: 'models' })
+  })
+  await page.getByText('Ready on this Mac', { exact: true }).waitFor()
+  assert.match(await page.getByTestId('local-runtime').innerText(), /Measured after a request/)
+  await capture(page, 'models-11-ready-no-measurement', 'Ready controlled engine snapshot; no native performance measurement, so no speed is shown.')
+  await page.evaluate(() => globalThis.__modelQa.setReadError(true))
+  await page.getByTestId('local-runtime').getByText('Engine status unavailable', { exact: true }).waitFor()
+  await page.getByTestId('sidebar-engine-status').getByText('Engine status unavailable', { exact: true }).waitFor()
+  assert.equal(await page.getByTestId('sidebar-engine-status').getByRole('button', { name: 'Eject', exact: true }).count(), 0)
+  assert.equal(await page.getByRole('button', { name: 'Chat with this model', exact: true }).count(), 0)
+  assert.equal(await page.getByText('Ready on this Mac', { exact: true }).count(), 0)
+  await capture(page, 'models-12-unavailable-status', 'Status refresh failure withdraws ready/chat controls and metrics while preserving the diagnostic.')
+  checks.push('A refresh failure suppresses ready state, Chat action and stale performance values.')
+  await page.evaluate(() => globalThis.__modelQa.setReadError(false))
+  await page.getByText('Ready on this Mac', { exact: true }).waitFor()
+  await page.setViewportSize({ width: 1024, height: 768 })
+  await capture(page, 'models-13-small-window', 'Actual Models page at 1024×768; same controlled fixture and responsive controls.')
+  await page.setViewportSize({ width: 720, height: 520 })
+  assert.equal(await page.getByTestId('models-page').evaluate(element => element.scrollWidth <= element.clientWidth + 1), true)
+  const libraryTab = page.getByRole('tab', { name: /^My models/ })
+  await libraryTab.focus()
+  await page.keyboard.press('ArrowRight')
+  assert.equal(await page.getByRole('tab', { name: 'Discover', exact: true }).getAttribute('aria-selected'), 'true')
+  await page.keyboard.press('ArrowLeft')
+  assert.equal(await libraryTab.getAttribute('aria-selected'), 'true')
+  await capture(page, 'models-14-minimum-window', 'Actual Models page at the native minimum 720×520; scroll keeps secondary controls reachable.')
+  checks.push('At 720×520, setup actions remain reachable, Models has no horizontal overflow and tabs support arrow keys.')
+  engineActions = await page.evaluate(() => globalThis.__modelQa.log)
+  assert.equal(engineActions.filter(item => item.action === 'download').length, 3)
+  assert.equal(engineActions.filter(item => item.action === 'cancel-download').length, 1)
+  assert.equal(engineActions.filter(item => item.action === 'unload').length, 1)
+  assert.equal(engineActions.filter(item => item.action === 'load').length, 3)
+  const revisions = engineActions.filter(item => item.action === 'download').map(item => item.revision)
+  assert.ok(revisions.every(value => value === revisions[0] && typeof value === 'string'))
+  pageErrors.push(...journey.errors)
+  assert.deepEqual(pageErrors, [])
+} catch (error) {
+  failure = String(error?.stack || error)
+  throw error
+} finally {
+  await browser.close()
+  await writeFile(path.join(output, 'models-capture-manifest.json'), JSON.stringify({
+    passed: !failure, failure, capturedAt: new Date().toISOString(),
+    evidence: 'Actual application renderer; browser-demo provider data plus explicitly controlled engine API replies.',
+    nativeVerified: false, fixtureData: true, captures, checks, engineActions, pageErrors,
+  }, null, 2) + '\n')
+}
+console.log(`Passed ${checks.length} model journey checks and captured ${captures.length} application views.`)

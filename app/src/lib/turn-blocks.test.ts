@@ -9,6 +9,7 @@ import {
   needsUser,
   shortToolMeta,
   turnFileEdits,
+  turnActivityState,
   workRowLabel,
   type TurnRow,
 } from './turn-blocks'
@@ -134,6 +135,22 @@ const shape = (rows: TurnRow[]) => rows.map((row) => row.type === 'item' ? `${ro
 }
 
 console.log('turn-blocks: ok')
+
+{
+  const rows = buildTurnRows([user('Check the changes'), tool('run_command'), assistant('Finished.')])
+  const turn = rows.find((row) => row.type === 'work')!.turn
+  const withReceipt = (verdict: string) => ({ ...turn, work: [...turn.work, notice({ runReceipt: { verdict } as any })] })
+  assert.equal(turnActivityState({ ...turn, running: true }, 'awaiting'), 'waiting')
+  assert.equal(turnActivityState({ ...turn, running: true }, 'tool'), 'running')
+  assert.equal(turnActivityState(turn), 'completed')
+  assert.equal(turnActivityState(withReceipt('cancelled')), 'stopped')
+  assert.equal(turnActivityState(withReceipt('failed')), 'failed')
+  assert.equal(turnActivityState(withReceipt('blocked')), 'review')
+  assert.equal(turnActivityState(withReceipt('unverified')), 'review')
+  assert.equal(turnActivityState(withReceipt('verified')), 'completed')
+  assert.equal(turnActivityState({ ...turn, work: [tool('run_command', { state: 'running' })] }), 'interrupted')
+  assert.equal(turnActivityState({ ...turn, work: [tool('run_command', { state: 'error' })] }), 'review')
+}
 
 {
   const question = tool('ask_user', { state: 'awaiting', question: { id: 'q-visible', state: 'pending' } as any })

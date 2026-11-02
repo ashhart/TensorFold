@@ -1,20 +1,17 @@
 import { Composer } from './Composer'
-import { BrandMark } from './BrandMark'
+import { RecentWorkspaceTasks, WorkspaceWelcome } from './workspace/WorkspaceWelcome'
 
-// Home is an empty thread with no hero heading. The quiet logo floats in the empty
-// transcript space and the composer docks at the bottom, where it stays once
-// messages start flowing.
+// Keep the draft composer mounted while the welcome surface provides workspace navigation.
 export function Home() {
   return (
-    <main className="flex h-full flex-col">
-      <div className="flex min-h-0 flex-1 select-none items-center justify-center">
-        <BrandMark size={150} className="fade-in opacity-90" />
-      </div>
-      <div className="relative shrink-0 px-6 pb-5">
-        <div className="mx-auto w-full max-w-3xl">
+    <div className="scroll-thin h-full overflow-y-auto">
+      <div className="mx-auto w-full max-w-3xl px-5 py-8 sm:px-6 sm:py-12 [@media(max-height:650px)]:py-5">
+        <WorkspaceWelcome />
+        <div className="mt-6 [@media(max-height:650px)]:mt-4">
           <Composer mode="home" />
         </div>
+        <RecentWorkspaceTasks />
       </div>
-    </main>
+    </div>
   )
 }

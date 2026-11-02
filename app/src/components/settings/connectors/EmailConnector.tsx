@@ -1,3 +1,4 @@
+import { MicrosoftMailConnector } from './MicrosoftMailConnector'
 import { currentIntlLocale } from '../../../lib/preferences/current-locale'
 import { OriginalDiagnostic } from '../../OriginalDiagnostic'
 import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
@@ -27,6 +28,7 @@ export function EmailConnector({ ctx }: { ctx: SettingsSectionContext }) {
 
   return (
     <Section title={tx("Email connector")} desc={tx("Local-first inbox access. Add folders with .eml/.emlx files, a Maildir, or a live IMAP account. Outbound replies are approval-gated.")}>
+      <MicrosoftMailConnector ctx={ctx} />
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-card px-3.5 py-3 shadow-card">
           <div>
@@ -44,9 +46,15 @@ export function EmailConnector({ ctx }: { ctx: SettingsSectionContext }) {
         {draft.email.sources.length === 0 ? (
           <div className="rounded-xl border border-dashed border-line px-3.5 py-5 text-center text-[13px] text-ink-3">
             {tx("Add a local email export folder or an IMAP account to turn the Email connector from a contract into a live source.")}</div>
-        ) : draft.email.sources.map((source) => source.kind === 'imap' ? (
-          // IMAP account: host/port/tls/user/password. Password is masked to the
-          // renderer (••••) and secret-protected at rest; typing a new value replaces it.
+        ) : draft.email.sources.map((source) => source.kind === 'microsoft_graph' ? (
+          <div key={source.id} className="rounded-xl border border-line bg-card p-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2"><span className="break-all text-[13px] font-medium text-ink">{source.label}</span><Toggle label={tx('Enable {value0}', { value0: source.label })} checked={source.enabled} onChange={enabled => updateEmailSource(source.id, { enabled })} /></div>
+            <p className="mt-1 text-[12px] text-ink-3">{tx('Microsoft sign-in · tokens stay in protected host storage')}</p>
+            {source.lastError && <p role="alert" className="mt-2 text-[13px] text-danger"><OriginalDiagnostic>{source.lastError}</OriginalDiagnostic></p>}
+            <Button className="mt-2" size="sm" variant="ghost" disabled={!!emailBusy} onClick={() => removeEmailSource(source.id)}>{tx('Disconnect Microsoft account')}</Button>
+          </div>
+        ) : source.kind === 'imap' ? (
+
           <div key={source.id} className="rounded-xl border border-line bg-card p-3.5 shadow-card">
             <div className="flex items-start gap-3">
               <BrandIcon brand="outlook" size={32} />

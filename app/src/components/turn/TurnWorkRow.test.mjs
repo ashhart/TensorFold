@@ -7,7 +7,8 @@ const require = createRequire(path.join(app, 'package.json'))
 const React = require('react'), { renderToStaticMarkup } = require('react-dom/server'), ts = require('typescript'), clsx = require('clsx')
 const { createJiti } = require('jiti');const jiti = createJiti(path.join(app, 'package.json'), { moduleCache: true, fsCache: false })
 const { builtinChatLoadingPhase } = await jiti.import(path.join(app, 'src/lib/chat-loading-phase.ts'))
-const { buildTurnRows, workRowLabel } = await jiti.import(path.join(app, 'src/lib/turn-blocks.ts'))
+const { buildTurnRows, workRowLabel, turnActivityState } = await jiti.import(path.join(app, 'src/lib/turn-blocks.ts'))
+const { authoredText } = await jiti.import(path.join(app, 'src/lib/preferences/language-packs.ts'))
 const source = await readFile(new URL('./TurnWorkRow.tsx', import.meta.url), 'utf8')
 const ast = ts.createSourceFile('TurnWorkRow.tsx', source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
 const printer = ts.createPrinter()
@@ -17,7 +18,7 @@ const body = functions.map(node => printer.printNode(ts.EmitHint.Unspecified, no
 const compiled = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None, jsx: ts.JsxEmit.React } }).outputText
 let locale = 'en'
 const useStore = select => select({ settings: { uiPreferences: { locale } } })
-const Row = new Function('React', 'useState', 'useEffect', 'useStore', 'workRowLabel', 'clsx', 'Icon', 'Spinner', 'WorkItems', `${compiled};return TurnWorkRow;`)(React, React.useState, React.useEffect, useStore, workRowLabel, clsx, () => null, () => null, () => null)
+const Row = new Function('React', 'useState', 'useEffect', 'useStore', 'useAuthoredText', 'workRowLabel', 'turnActivityState', 'clsx', 'Icon', 'Spinner', 'WorkItems', `${compiled};return TurnWorkRow;`)(React, React.useState, React.useEffect, useStore, () => (source, params) => authoredText(locale, source, params), workRowLabel, turnActivityState, clsx, () => null, () => null, () => null)
 const provider = { id: 'tensorfold', source: 'tensorfold', kind: 'local', transport: 'chat-completions', baseUrl: 'http://127.0.0.1/v1', models: ['fixture-model'], apiKey: '', name: 'TensorFold' }
 const engine = { available: true, state: 'starting', model: 'fixture-model' }
 const timeline = [{ id: 'user', kind: 'user', text: 'Synthetic first message', at: Date.now() - 1000 }]

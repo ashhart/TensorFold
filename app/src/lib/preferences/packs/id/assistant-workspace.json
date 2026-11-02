@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "Ruang kerja asisten",
+  "Open inbox": "Buka kotak masuk",
+  "Open Google Workspace": "Buka Google Workspace",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "Mulai tugas, baca percakapan dari sumber terhubung, atau kelola email dan kalender Google.",
+  "Google account tools require a model running locally on this computer.": "Alat akun Google memerlukan model yang berjalan secara lokal di komputer ini.",
+  "Manage Google accounts locally in TensorFold on the host computer.": "Kelola akun Google lokal dalam TensorFold pada komputer host.",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Impor klien Google Desktop OAuth, kredensial, dan tinjauan pemilik hanya tersedia di komputer host.",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "Belum ada akun Google yang terhubung di komputer ini. Masuk di bawah lalu pilih akun atau gunakan alamat lain di jendela masuk Google.",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "Belum ada akun Google yang terhubung di komputer ini. Siapkan proses masuk Google di bawah untuk menambahkan akun.",
+  "Disconnected on this computer": "Terputus di komputer ini",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "Terputus lokal di komputer; hubungkan ulang melalui Google sebelum membaca atau menyiapkan tindakan baru.",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "Mengganti klien tidak otomatis masuk atau memutus akun; JSON dan kredensial tetap di komputer host.",
+  "No inbox conversation is attached": "Tidak ada percakapan kotak masuk yang dilampirkan"
+}

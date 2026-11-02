@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 const root = resolve(import.meta.dirname, '..', 'src/lib/preferences/packs')
-const allowed = new Set(['es', 'es-419', 'zh-Hans', 'zh-Hant', 'ja', 'ko', 'ru', 'pl', 'la', 'hi', 'th', 'vi', 'id'])
+const allowed = new Set(['es', 'es-419', 'pt', 'zh-Hans', 'zh-Hant', 'ja', 'ko', 'ru', 'pl', 'la', 'hi', 'th', 'vi', 'id'])
 const imports = [], entries = [], counts = {}, nativePacks = {}, coverage = {}
 const sourceDir = resolve(root, '../sources'), required = new Set(readdirSync(sourceDir).filter(file => file.endsWith('.json')).flatMap(file => JSON.parse(readFileSync(join(sourceDir, file), 'utf8'))))
 const nativePhrases = JSON.parse(readFileSync(resolve(root, '../../../../shared/native-ui-phrases.json'), 'utf8'))

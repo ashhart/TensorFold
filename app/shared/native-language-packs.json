@@ -153,6 +153,28 @@
     "Stop local server": "Zatrzymaj serwer lokalny",
     "Start selected model": "Uruchom wybrany model"
   },
+  "pt": {
+    "API setup…": "Configuração da API…",
+    "Copy": "Copiar",
+    "Cut": "Recortar",
+    "Edit": "Editar",
+    "Local server needs attention": "O servidor local precisa de atenção",
+    "Local server stopped": "Servidor local parado",
+    "Models and downloads…": "Modelos e downloads…",
+    "Open Full workspace": "Abrir espaço de trabalho completo",
+    "Open Minimal": "Abrir modo Mínimo",
+    "Paste": "Colar",
+    "Paste as Plain Text": "Colar como texto simples",
+    "Quit TensorFold": "Sair do TensorFold",
+    "Redo": "Refazer",
+    "Select All": "Selecionar tudo",
+    "Server running on this Mac": "Servidor em execução neste Mac",
+    "Start selected model": "Iniciar modelo selecionado",
+    "Starting local model…": "Iniciando modelo local…",
+    "Stop local server": "Parar servidor local",
+    "Undo": "Desfazer",
+    "Updating local server…": "Atualizando servidor local…"
+  },
   "ru": {
     "Copy": "Копировать",
     "Edit": "Изменить",

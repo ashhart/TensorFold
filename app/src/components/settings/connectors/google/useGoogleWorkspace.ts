@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../../../../lib/ipc'
 import type { GoogleWorkspaceAuthRequest, GoogleWorkspaceSnapshot } from '../../../../../shared/google-workspace'
 import { googleClientImportError } from './google-setup-error'
+import { googleRequestError } from '../../../../../shared/google-workspace-errors'
 
-export function useGoogleWorkspace() {
+export function useGoogleWorkspace({ enabled = true } = {}) {
   const [snapshot, setSnapshot] = useState<GoogleWorkspaceSnapshot | null>(null)
   const [error, setError] = useState('')
   const [accountErrors, setAccountErrors] = useState<Record<string, string>>({})
@@ -13,18 +14,18 @@ export function useGoogleWorkspace() {
   const acting = useRef(false)
   const hostOnly = api.platform === 'web-remote'
   const refresh = useCallback(async () => {
-    if (hostOnly) return
+    if (hostOnly || !enabled) return
     const ownVersion = ++version.current
     const next = await api.googleWorkspaceStatus()
     if (mounted.current && ownVersion === version.current) { setSnapshot(next); setError('') }
-  }, [hostOnly])
+  }, [hostOnly, enabled])
   useEffect(() => {
     mounted.current = true
     void refresh().catch(() => { if (mounted.current) setError('Google connections could not be read; check the local credential store, then retry.') })
     return () => { mounted.current = false; version.current++ }
   }, [refresh])
   const action = async (name: string, fn: () => Promise<unknown>, accountId?: string) => {
-    if (hostOnly) { setError('Manage Google accounts on the host Mac.'); return false }
+    if (hostOnly || !enabled) { setError('Manage Google accounts on the host computer.'); return false }
     if (acting.current) return false
     acting.current = true; setBusy(name); setError('')
     if (accountId) setAccountErrors((current) => ({ ...current, [accountId]: '' }))
@@ -33,7 +34,7 @@ export function useGoogleWorkspace() {
     try { await fn(); await refresh(); return true }
     catch (reason) {
       if (mounted.current) {
-        const message = name === 'import' ? googleClientImportError(reason) : 'This Google connection action failed; check account access, client configuration and the network, then retry.'
+        const message = name === 'import' ? googleClientImportError(reason) : googleRequestError(reason)
         if (accountId) setAccountErrors((current) => ({ ...current, [accountId]: message }))
         else setError(message)
       }
@@ -41,6 +42,21 @@ export function useGoogleWorkspace() {
     } finally { acting.current = false; if (mounted.current) setBusy('') }
   }
   const waiting = snapshot?.authorization?.status === 'waiting'
+  useEffect(() => {
+    if (!enabled || hostOnly || typeof document === 'undefined') return
+    const reconcile = () => {
+      if (!document.hidden && !acting.current) void refresh().catch(() => {
+        if (mounted.current) setError('Google account status could not be refreshed. Use Refresh to retry.')
+      })
+    }
+    const timer = setInterval(reconcile, 15_000)
+    document.addEventListener('visibilitychange', reconcile)
+    window.addEventListener('focus', reconcile)
+    return () => {
+      clearInterval(timer); document.removeEventListener('visibilitychange', reconcile)
+      window.removeEventListener('focus', reconcile)
+    }
+  }, [enabled, hostOnly, refresh])
   useEffect(() => {
     if (!waiting) return
     const timer = setInterval(() => { void refresh().catch(() => { if (mounted.current) setError('Sign-in status could not be refreshed.') }) }, 1500)

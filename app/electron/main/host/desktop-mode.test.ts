@@ -241,4 +241,21 @@ for (const input of [null, undefined, 'MINIMAL', 'background', {}, 1]) assert.eq
   assert.equal(h.counts.engineStarts, 0)
   h.runtime.dispose()
 }
+{
+  const h = harness({ mode: 'full' })
+  h.deps.quickAskEnabled = () => true
+  h.runtime.applySettings()
+  const hidden = h.counts.dockHidden
+  h.window.handlers.delete('close')
+  h.runtime.attachWindow(h.window as any, { closeManaged: true })
+  assert.equal(h.window.close(), false, 'draft-close manager owns the native close event')
+  assert.equal(h.window.hidden, 0, 'attaching the desktop mode cannot hide before the draft fence')
+  assert.equal(h.runtime.closeWindow(h.window as any), true)
+  assert.equal(h.window.hidden, 1)
+  assert.equal(h.counts.dockHidden, hidden, 'Full mode with Ask keeps its Dock presence stable')
+  h.runtime.show()
+  assert.equal(h.window.shown, 1, 'an explicit reopen still restores the window')
+  h.runtime.dispose()
+  assert.equal(h.runtime.closeWindow(h.window as any), false, 'Quit must destroy rather than hide')
+}
 console.log('Desktop Minimal/Full tray, restart, model-action and graceful-quit tests passed')

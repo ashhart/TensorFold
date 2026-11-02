@@ -201,7 +201,7 @@
   "Copy user message": "คัดลอกข้อความผู้ใช้",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "เปิด Cortheon อยู่ ก่อนตอบ เอนจินอาจส่งคำค้นที่สร้างจากแชตนี้ไปบริการค้นหาเว็บและอ่านหน้าสาธารณะ ปิดได้ในการตั้งค่า AI หรือโมเดล",
-  "Cortheon is temporarily disabled in this beta.": "ปิด Cortheon ชั่วคราวในเบตานี้",
+  "Cortheon is temporarily disabled.": "ปิด Cortheon ชั่วคราว",
   "Cost cap $": "วงเงินค่าใช้จ่าย $",
   "Could not check CLI auth.": "ตรวจการยืนยันตัวตน CLI ไม่ได้",
   "Could not open a chat. Your current work is still here; try New chat again.": "เปิดแชตไม่ได้ งานปัจจุบันยังอยู่ ลองเลือกแชตใหม่อีกครั้ง",

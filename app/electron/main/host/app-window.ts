@@ -15,6 +15,7 @@ interface AppWindowRuntimeDeps {
   shouldShowWindow?(): boolean
   installTextEditing?(win: BrowserWindowType): void
   beforeWindowClose?(win: BrowserWindowType): Promise<void>
+  onWindowCloseSaved?(win: BrowserWindowType): boolean
   shouldGuardWindowClose?(): boolean
   onWindowCloseFailure?(error: unknown): void
   /** Report a renderer that never loaded or died, so a blank window is not mistaken for a hang. */
@@ -86,8 +87,8 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
       minHeight: 520,
       show: false,
       // Linux uses the window manager's native title bar and controls; no renderer IPC needed.
-      titleBarStyle: process.platform === 'linux' ? 'default' : 'hiddenInset',
-      trafficLightPosition: process.platform === 'linux' ? undefined : { x: 18, y: 22 },
+      titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+      trafficLightPosition: process.platform === 'darwin' ? { x: 18, y: 22 } : undefined,
       // macOS glass: native vibrancy blurs the desktop wallpaper through the window
       // (the dark tint comes from the translucent renderer surfaces on top). A clear
       // backgroundColor lets the material show; other platforms keep a solid dark.
@@ -125,6 +126,10 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
         appWindow.setEnabled(false)
         void Promise.resolve().then(() => deps.beforeWindowClose!(appWindow)).then(() => {
           closing = false
+          if (!appWindow.isDestroyed() && deps.onWindowCloseSaved) {
+            appWindow.setEnabled(true)
+            if (deps.onWindowCloseSaved(appWindow)) return
+          }
           if (!appWindow.isDestroyed()) { saved = true; appWindow.close() }
           if (!appWindow.isDestroyed()) appWindow.setEnabled(true)
         }, (error) => { closing = false; if (!appWindow.isDestroyed()) appWindow.setEnabled(true); deps.onWindowCloseFailure?.(error) })

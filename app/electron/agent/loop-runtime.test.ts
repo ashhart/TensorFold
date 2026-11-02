@@ -38,7 +38,10 @@ async function main() {
   assert.equal((await rt.critique(contract, 'evidence')).passed, true)
 
   // runVerification runs the commands
-  assert.match(await rt.runVerification(contract), /PASS 3/)
+  const verification = await rt.runVerification(contract)
+  assert.equal(verification.checks[0].exitCode, 0)
+  assert.equal(verification.checks[0].outcome, 'passed')
+  assert.match(verification.checks[0].output, /PASS 3/)
 
   // cleanupThread is always called (even though run succeeded)
   let cleaned = 0
@@ -49,6 +52,27 @@ async function main() {
   // end-to-end: the engine drives this runtime to a ship
   const result = await runLoop(contract, ['dev'], createLoopRuntime(contract, deps()))
   assert.equal(result.status, 'shipped')
+
+  const red = await runLoop({ ...contract, maxCycles: 1 }, ['dev'], createLoopRuntime(contract, deps({
+    runShell: async () => ({ code: 1, stdout: 'FAIL: invariant broken', stderr: '' }),
+  })))
+  assert.equal(red.status, 'capped', 'a confident critic cannot waive a failing required command')
+  assert.equal(red.lastVerdict?.passed, false)
+  assert.match(red.lastVerdict?.issues.join('\n') ?? '', /npm test.*failed.*exit 1/)
+
+  const recovered = await runLoop({ ...contract, maxCycles: 2 }, ['dev'], createLoopRuntime(contract, deps({
+    runShell: (() => { let calls = 0; return async () => ({ code: calls++ ? 0 : 1, stdout: '', stderr: '' }) })(),
+  })))
+  assert.equal(recovered.status, 'shipped')
+  assert.equal(recovered.cycles, 2)
+
+  let cancelled = false
+  const stopped = await runLoop(contract, ['dev'], createLoopRuntime(contract, deps({
+    isCancelled: () => cancelled,
+    runCritic: async () => { cancelled = true; return '{"passed":true,"confidence":1,"summary":"ok","issues":[]}' },
+  })))
+  assert.equal(stopped.status, 'stopped', 'Stop requested during critique prevents completion')
+  assert.equal(stopped.lastVerdict?.passed, false)
 
   console.log('loop-runtime tests passed')
 }

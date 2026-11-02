@@ -1,5 +1,5 @@
 import { passiveNodeLinks } from './passive-links'
-import { promises as fs, constants } from 'node:fs'
+import { promises as fs, constants, type StatsFs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -20,6 +20,7 @@ export interface NativeAdapterOptions {
   config: ClusterNodeConfig
   runCli?: (args: string[], signal: AbortSignal, timeoutMs?: number) => Promise<CliOutput>
   memory?: () => { total: number; free: number }
+  statfs?: (directory: string) => Promise<Pick<StatsFs, 'bavail' | 'bsize'>>
   platform?: 'darwin' | 'linux'
   arch?: 'arm64' | 'x64'
   passiveSysfsRoot?: string | false
@@ -108,7 +109,7 @@ export class NodeEngineAdapter implements EngineAdapter {
     await fs.mkdir(this.cacheDir, { recursive: true, mode: 0o700 })
     const root = await fs.lstat(this.cacheDir)
     if (!root.isDirectory() || root.isSymbolicLink()) throw new Error('The approved model cache root must be a real directory.')
-    const space = await fs.statfs(this.cacheDir)
+    const space = await (this.options.statfs ? this.options.statfs(this.cacheDir) : fs.statfs(this.cacheDir))
     if (Number(space.bavail) * Number(space.bsize) < 2 * GIB) throw new Error('The approved model cache needs at least two GiB free before staging.')
     await progress('Staging the requested immutable revision; native download checks and resume rules apply.')
     const result = await this.cli(['pull', `${model.repo}@${model.revision}`], signal, 60 * 60_000)

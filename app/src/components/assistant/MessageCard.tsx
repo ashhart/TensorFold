@@ -63,7 +63,7 @@ function MessageCard({ item, onApprove, onEdit, onDiscard, onRedraft }: { item: 
   const { brand, initials } = avatarFor(item)
   const isTensorFoldStudio = item.isBot || ['TensorFold', 'Vontra'].includes(item.author)
   return (
-    <div className="group flex items-start gap-3 px-2 py-2 hover:bg-surface">
+    <article className={clsx('group flex items-start gap-3 rounded-xl px-3 py-3', item.status === 'draft' ? 'border border-accent/20 bg-accent-soft/40' : 'hover:bg-surface/60')}>
       {/* Avatar: brand tile for source messages, initials for people, folded-lane glyph for TensorFold. */}
       <span className="mt-0.5 shrink-0">
         {isTensorFoldStudio ? (
@@ -76,9 +76,9 @@ function MessageCard({ item, onApprove, onEdit, onDiscard, onRedraft }: { item: 
       </span>
       <div className="min-w-0 flex-1">
         {/* Header: name + APP badge + timestamp. */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           <span className={clsx('text-[14px] font-semibold', isTensorFoldStudio ? 'text-accent' : 'text-ink')}>{isTensorFoldStudio ? "TensorFold" : item.author}</span>
-          {isTensorFoldStudio && <span className="rounded bg-accent-soft px-1 py-0.5 text-[11px] font-bold uppercase tracking-wide text-accent">APP</span>}
+          {isTensorFoldStudio && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[11px] font-medium text-accent">{item.status === 'draft' ? tx('Draft for review') : tx('Assistant')}</span>}
           {item.isFromMe && !isTensorFoldStudio && <span className="rounded bg-surface px-1 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">{tx("You")}</span>}
           <span className="text-[12px] text-ink-4">{timeLabel(item.time)}</span>
         </div>
@@ -87,26 +87,26 @@ function MessageCard({ item, onApprove, onEdit, onDiscard, onRedraft }: { item: 
         {item.status && item.status !== 'draft' && <div role="status" className="mt-1 text-[12px] text-ink-2">{item.status === 'sent' ? tx("Delivered") : item.status === 'approved' ? tx("Approved, no delivery receipt") : item.status === 'sending' ? tx("Sending…") : item.status === 'uncertain' ? tx("Delivery uncertain; check the destination before sending again") : tx("Delivery failed")}</div>}
         {/* Draft approval affordance (TensorFold drafts awaiting the user). */}
         {isTensorFoldStudio && item.status === 'draft' && (
-          <div className="mt-1.5 flex flex-col gap-1.5">
-            <div className="flex items-center gap-1.5">
+          <div className="mt-3 flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               <button onClick={() => onApprove?.(item.id)} className="rounded-lg bg-accent px-2.5 py-1 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong">{tx("Review message")}</button>
               <button onClick={() => onEdit?.(item.id)} className="rounded-lg border border-line px-2.5 py-1 text-[13px] font-medium text-ink-2 transition-colors hover:bg-surface-hover">{tx("Edit")}</button>
               <button onClick={() => onDiscard?.(item.id)} className="rounded-lg px-2 py-1 text-[13px] text-ink-3 transition-colors hover:text-danger">{tx("Discard")}</button>
             </div>
-            {/* One-click redraft variants: ask the assistant to re-write this draft. */}
             {onRedraft && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[12px] text-ink-4">{tx("Redraft:")}</span>
+              <details className="text-[12px] text-ink-3">
+                <summary className="w-fit cursor-pointer rounded py-1 focus-visible:outline-2 focus-visible:outline-accent">{tx('Change tone or length')}</summary>
+                <div className="flex flex-wrap items-center gap-1.5">
                 {REDRAFTS.map((r) => (
                   <button key={r.label} onClick={() => onRedraft(item.id, r.how)} className="rounded-md border border-line px-1.5 py-0.5 text-[12px] text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink">{r.label}</button>
                 ))}
-              </div>
+                </div>
+              </details>
             )}
           </div>
         )}
-        {item.status === 'sent' && <div className="mt-1 flex items-center gap-1 text-[12px] text-ink-4"><Icon name="check" size={11} /> {tx("Sent")}</div>}
       </div>
-    </div>
+    </article>
   )
 }
 
@@ -163,8 +163,8 @@ export function MessageCardView({ items, emptyTitle, emptyDetail, onApprove, onE
 
   const threads = groupThreads(items)
   return (
-    <div ref={scrollRef} onScroll={onScroll} className="scroll-thin min-h-0 flex-1 overflow-y-auto py-3 select-text">
-      <div className="mx-auto flex w-full max-w-[760px] flex-col">
+    <div ref={scrollRef} onScroll={onScroll} role="region" aria-label={tx('Conversation messages')} className="scroll-thin min-h-[160px] flex-1 overflow-y-auto px-3 py-3 select-text sm:px-5 md:min-h-0 md:py-5">
+      <div className="mx-auto flex w-full max-w-[760px] flex-col gap-3">
         {threads.map(({ root, replies }) => (
           <div key={root.id}>
             <MessageCard item={root} onApprove={onApprove} onEdit={onEdit} onDiscard={onDiscard} onRedraft={onRedraft} />

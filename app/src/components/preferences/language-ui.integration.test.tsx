@@ -45,6 +45,9 @@ const draft = '未完成の編集: Settings Cancel'
 input.props.onChange({ target: { value: draft } })
 changeLanguage('ru'); tree = render(); input = find(tree, node => node.type === 'textarea')
 assert.equal(input.props.value, draft, 'Locale changes preserve in-progress message edits and the same hook state')
+changeLanguage('pt'); tree = render(); input = find(tree, node => node.type === 'textarea')
+assert.equal(input.props.value, draft, 'Switching to Portuguese preserves the unfinished original draft')
+assert.match(renderToStaticMarkup(tree), /Cancelar/)
 assert.equal(copied.length, 0, 'Changing a language never invokes an action')
 hooks.cleanup()
 

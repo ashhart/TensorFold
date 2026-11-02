@@ -58,7 +58,7 @@ Search/read does not change Gmail read status, load tracking images or download
 attachments automatically.
 Email drafts are local TensorFold drafts bound to one account, not Gmail drafts.
 Every email send and Calendar mutation needs a complete saved review followed by
-native owner confirmation on the Mac.
+native owner confirmation on the host computer.
 Updates and cancellations check the current event version before execution.
 All-day ends are exclusive, and ambiguous daylight-saving times need an explicit
 offset choice.
@@ -76,6 +76,37 @@ edits and supported branches, and are excluded from other-chat recall, automatic
 memory harvesting, remote/watch projections and automatic speech.
 They cannot move to cloud/LAN/CLI/remote providers or launch linked child agents.
 Google content is not exposed through Telegram Chief of Staff in this version.
+
+## Mail connection health and the unified Inbox
+
+Assistant, Connections shows each connected Google or Microsoft account, its read and send
+permissions, and its last explicit mailbox test. Signing in does not prove mailbox access.
+Test connection reads at most one message's metadata and never sends a message. Its timestamp
+records that past test; it is not a live delivery guarantee. Reconnect, permission, network and
+rate-limit failures have separate recovery guidance. Changed accounts invalidate old results.
+
+Choose Add Gmail to Inbox for each Google account you want included, then open Assistant,
+Inbox and choose Sync Gmail. Sync caches up to 20 recent Inbox messages per selected account.
+It does not mark messages read, fetch full bodies, download attachments or send anything.
+Read Gmail conversation explicitly loads the native Gmail thread, including its sent messages.
+Accounts and native thread IDs keep unrelated messages separate, even with identical subjects.
+
+Gmail Inbox metadata and text drafts use the protected Google store. Status reconciliation
+reads this local cache only. Removing a source hides its messages and cancels pending Inbox
+reviews. Reconnecting clears old message content while preserving drafts for that same account;
+disconnecting the Google account removes those drafts. Gmail replies are text only in this pass.
+
+Review reply prepares the exact account, original sender, subject and body for owner review.
+Approval uses the existing native Google confirmation and one-shot durable action receipt.
+Replies include Gmail's native thread ID and RFC reply headers. Gmail accepting a send does not
+prove recipient delivery. Uncertain sends are retained and are never retried automatically.
+
+Starting a task from Gmail reads the selected conversation explicitly. The host requires a
+model API running on this computer, external research off and local execution before inference.
+The resulting conversation keeps its Google privacy marker. Gmail data does not enter the
+generic connector feed, remote projections, unrelated briefings or general assistant tasks.
+These host and renderer paths are shared by macOS, Windows and Linux. Live-account sign-in and
+sending still need qualification on the intended configuration; fixture tests do not prove them.
 
 ## Slack and Discord
 

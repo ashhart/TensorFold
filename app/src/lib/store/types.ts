@@ -49,6 +49,7 @@ export interface AppState {
   // Text injected into the composer from elsewhere (VST-040 ask-why → chat reference). The
   // composer watches `n` and inserts `text` at the caret. Nonce-keyed like pendingMention.
   composerSeed: { text: string; n: number } | null
+  homeComposerWorkspace: { workspace: WorkspaceLocation | null; projectId: string | null; cwd: string } | null
   threadDockRequest: { threadId: string; dock: 'terminal' | 'preview'; nonce: number } | null
   sidebarCollapsed: boolean
   fullWorkspaceLayout: FullWorkspaceLayout

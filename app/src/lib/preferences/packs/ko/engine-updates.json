@@ -1,0 +1,15 @@
+{
+  "Engine updates": "엔진 업데이트",
+  "bundled": "기본 제공",
+  "Checking installed runtime…": "설치된 런타임 확인 중…",
+  "Check for engine updates": "엔진 업데이트 확인",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "앱을 다시 설치하지 않고 로컬 엔진을 업데이트합니다. 전환하기 전에 로컬 작업을 마치세요. 모델과 대화는 그대로 유지됩니다.",
+  "No compatible engine updates are available for this device.": "이 기기와 호환되는 엔진 업데이트가 없습니다.",
+  "Use this runtime": "이 런타임 사용",
+  "Use bundled engine": "기본 제공 엔진 사용",
+  "Checking signed releases…": "서명된 릴리스 확인 중…",
+  "Switching runtime…": "런타임 전환 중…",
+  "Ready locally": "로컬 준비 완료",
+  "memory on this computer.": "이 컴퓨터의 메모리.",
+  "Prevent sleep while this option is enabled.": "이 옵션이 켜져 있는 동안 절전 모드로 전환하지 않습니다."
+}

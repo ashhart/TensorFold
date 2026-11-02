@@ -40,6 +40,7 @@ interface Entry {
 }
 
 const RESELECT = 'Select this file again after restarting TensorFold; its contents were not stored with the draft.'
+export const SESSION_ONLY_DRAFT_NOTICE = 'Drafts are kept in this tab; persistent drafts require the local desktop app.'
 
 /** Strictly omit payloads, paths and source objects from durable references. */
 export function draftAttachmentReferences(attachments: Attachment[]): DraftAttachmentReference[] {
@@ -89,7 +90,7 @@ export class ConversationDrafts {
     const entry: Entry = {
       scope: valid, listeners: new Set(), serverRevision: 0, savedVersion: 0, hydrate: null,
       chain: Promise.resolve(), timer: null, readFailed: false, textTouched: false, attachmentsTouched: false, quotesTouched: false, generation: 0,
-      view: { text: '', attachments: [], quotes: [], ready: valid.incognito || !this.port, saving: false, dirty: false, error: !this.port && !valid.incognito ? 'Drafts are kept in this tab; persistent drafts require the local desktop app.' : null, version: 0 },
+      view: { text: '', attachments: [], quotes: [], ready: valid.incognito || !this.port, saving: false, dirty: false, error: !this.port && !valid.incognito ? SESSION_ONLY_DRAFT_NOTICE : null, version: 0 },
     }
     this.entries.set(key, entry)
     if (!entry.view.ready) entry.hydrate = this.hydrate(entry)

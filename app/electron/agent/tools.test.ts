@@ -31,6 +31,13 @@ async function main() {
 console.log('tool tests:')
 
 {
+  for (const name of ['toString', 'constructor', '__proto__', 'hasOwnProperty', 'unknown_tool']) {
+    assert.deepStrictEqual(await executeTool(name, {}, { cwd: '' }), { ok: false, output: `Unknown tool: ${name}` })
+  }
+  ok('unknown and inherited object names never bypass the public tool dispatch boundary')
+}
+
+{
   assert.throws(
     () => workspaceBackend({ cwd: '/srv/project', workspace: { kind: 'ssh', hostId: 'host-1', path: '/srv/project' } }),
     /SSH workspace is disconnected.*refusing to fall back/i,

@@ -4,8 +4,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 const app = process.cwd(), req = createRequire(import.meta.url)
 const React = req('react'), { renderToStaticMarkup } = req('react-dom/server'), ts = req('typescript')
-// One real React instance exercises the installed-model callback after render.
-// The engine and native APIs are synthetic; this test never loads a model.
+// Real React exercises the installed-model callback; synthetic native APIs never load a model.
 function load(file, imports) {
  const module = { exports: {} };
  const output = ts.transpileModule(fs.readFileSync(path.join(app, file), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
@@ -25,6 +24,8 @@ const { Models } = load('src/components/Models.tsx', {
  react: React, 'react/jsx-runtime': req('react/jsx-runtime'), clsx: req('clsx'),
  './OriginalDiagnostic': { OriginalDiagnostic: empty }, '../lib/preferences/language-packs': { authoredText }, '../lib/preferences/useAuthoredText': { useAuthoredText }, '../lib/store': { useStore }, '../lib/ipc': { api: {} }, '../lib/engine': engine,
  './clusters/ClusterWorkspace': { ClusterWorkspace: empty },
+ './models/DownloadActivity': { DownloadActivity: empty },
+ '../lib/model-chat': { openModelChat: async () => {} },
  '../lib/favorite-models': { useFavoriteModels: () => ({ ready: true, favorites: [], isFavorite: () => false }), orderFavoritesFirst: items => items }, './ui': { Button: empty, Input: empty }, '../lib/icons': { Icon: empty }, './models/ModelRows': { HubRow: empty, InstalledRow: row }, './models/EngineRuntimePanel': { EngineRuntimePanel: empty }, './models/EngineApiPanel': { EngineApiPanel: empty }, '../lib/learning': { useLearning: () => ({ snapshot: null }), learningBusy: () => false }, './models/LearningPanel': { LearningPanel: empty }, './models/WorkersPanel': { WorkersPanel: empty }, './models/workers': { isLocalWorker: () => false }, '../lib/model-recommendation': { recommendEngineModel: () => ({ selected: null }) }, './models/ModelRecommendationPanel': { ModelRecommendationPanel: empty }, './onboarding-model': { shouldShowOnboarding: () => false }, './models/ModelDetailsDrawer': { ModelDetailsDrawer: empty }, './models/ModelComparisonPanel': { ModelComparisonPanel: empty }, './models/ModelsDrawer': { ModelsDrawer: empty }, './models/DownloadCentre': { DownloadCentre: empty }, './models/download-display': { isDownloadPending: () => false, downloadStateLabel: () => '' }, './settings/ModelFoldersSettings': { ModelFoldersSettings: empty }, '../lib/turn-stats-line': { repoDisplayName: x => x }, './models/benchmark/ModelBenchmarkDrawer': { ModelBenchmarkDrawer: empty },
 });
 (async () => {

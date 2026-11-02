@@ -2,7 +2,7 @@ import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { WorkspaceBackupPanel } from './workspace-backup/WorkspaceBackupPanel'
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { SETTINGS_SECTION_REQUEST_EVENT, useStore, consumeSettingsSection } from '../lib/store'
+import { SETTINGS_SECTION_REQUEST_EVENT, useStore, consumeSettingsSection, peekSettingsSection } from '../lib/store'
 import { registerUpdatePreparationBlocker } from '../lib/update-safety'
 import { createSettingsDraftPersistence, type SettingsDraftState } from '../lib/settings-draft'
 import { Icon } from '../lib/icons'
@@ -28,8 +28,8 @@ import { ModelFoldersSettings } from './settings/ModelFoldersSettings'
 import { EngineAdvancedSettings } from './settings/EngineAdvancedSettings'
 import { PhoneSettings } from './settings/PhoneSettings'
 
-function consumeRequestedSettingsSection(): SettingsSection | null {
-  const requested = consumeSettingsSection()
+function consumeRequestedSettingsSection(consume = true): SettingsSection | null {
+  const requested = consume ? consumeSettingsSection() : peekSettingsSection()
   return requested && ALL_SETTINGS_SECTIONS.some((section) => section.id === requested) ? requested as SettingsSection : null
 }
 
@@ -43,43 +43,40 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
   const checkForUpdates = useStore((s) => s.checkForUpdates)
   const openUpdateDownload = useStore((s) => s.openUpdateDownload)
   const [draft, setDraft] = useState<TSettings>(settings)
-  // Land on the requested section if a surface (e.g. Assistant Sources) asked for
-  // one, else the prop, else Models. Consumed once so it doesn't stick.
+
   const [activeSection, setActiveSection] = useState<SettingsSection>(() => {
-    return consumeRequestedSettingsSection() ?? initialSection ?? 'models'
+    return consumeRequestedSettingsSection(false) ?? initialSection ?? 'models'
   })
   useEffect(() => {
     const onRequestedSection = () => {
       const requested = consumeRequestedSettingsSection()
       if (requested) setActiveSection(requested)
     }
+    onRequestedSection()
     window.addEventListener(SETTINGS_SECTION_REQUEST_EVENT, onRequestedSection)
     return () => window.removeEventListener(SETTINGS_SECTION_REQUEST_EVENT, onRequestedSection)
   }, [])
   useEffect(() => {
     if (initialSection) setActiveSection(initialSection)
   }, [initialSection])
-  // Which sidebar groups are expanded. The active section's group is always
-  // open; the rest persist across launches via localStorage so the nav
-  // remembers the user's browsing shape.
+
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => {
     const saved = (() => { try { return localStorage.getItem('vontra.settingsGroups') } catch { return null } })()
     const initial = new Set<string>(['ai']) // AI & Models open by default
     const activeGroup = groupOfSection(activeSection)
     if (activeGroup) initial.add(activeGroup.id)
-    if (saved) { try { for (const id of JSON.parse(saved) as string[]) initial.add(id) } catch { /* ignore */ } }
+    if (saved) { try { for (const id of JSON.parse(saved) as string[]) initial.add(id) } catch {  } }
     return initial
   })
   const toggleGroup = (id: string) => {
     setExpandedGroups((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id); else next.add(id)
-      try { localStorage.setItem('vontra.settingsGroups', JSON.stringify([...next])) } catch { /* ignore */ }
+      try { localStorage.setItem('vontra.settingsGroups', JSON.stringify([...next])) } catch {  }
       return next
     })
   }
-  // Expanding a section's group when it becomes active (e.g. deep-link, or the
-  // agent opens Settings) keeps the active item visible.
+
   useEffect(() => {
     const g = groupOfSection(activeSection)
     if (g && !expandedGroups.has(g.id)) setExpandedGroups((prev) => new Set(prev).add(g.id))
@@ -92,11 +89,6 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
     if (onClose) onClose(); else setView({ name: 'home' })
   }
 
-  // True while the local draft holds edits the user has not committed yet. A save can land from
-  // a background path (agent change_setting, connector status push, a Connect that calls
-  // commitProviders) while the modal is open; saveSettings replaces the store settings with a
-  // fresh redacted object, so an unconditional resync would wipe in-progress typing — including
-  // re-typed secret fields that come back masked. Skip the resync while edits are pending.
   const dirtyRef = useRef(false)
   const [draftState, setDraftState] = useState<SettingsDraftState>({ dirty: false, pending: false, failed: false })
   const draftPersistence = useRef<ReturnType<typeof createSettingsDraftPersistence<TSettings>> | null>(null)
@@ -112,15 +104,12 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
     setDraft(settings)
   }, [settings])
 
-  // Latest-draft ref so long-lived effect handlers (e.g. the WhatsApp status push) can
-  // persist against the user's current edits instead of a stale closure captured at subscribe time.
   const draftRef = useRef(draft)
   draftRef.current = draft
 
   // Uncommitted edit: mark the draft dirty so an external save can't clobber it.
   const editDraft: typeof setDraft = (update) => { draftPersistence.current!.edited(); setDraft(update) }
-  // The store already reports persistence failures; consumed rejections keep automatic
-  // control changes from becoming unhandled errors while the draft remains retryable.
+
   const commit = (next: TSettings) => { void draftPersistence.current!.persist(next).catch(() => {}) }
   const persistDraft = (next: TSettings) => draftPersistence.current!.persist(next)
   const patch = (p: Partial<TSettings>) => commit({ ...draft, ...p })
@@ -160,8 +149,6 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
     commitVoice,
   }
 
-  // Full-page takeover: the settings nav swaps into the sidebar
-  // position on the frosted shell, and the sections render on the content card.
   return (
     <div className="flex h-full w-full overflow-hidden">
       <aside className="hidden w-[240px] shrink-0 flex-col sm:flex">

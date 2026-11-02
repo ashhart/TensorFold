@@ -1,9 +1,5 @@
 import { isConnectorSetupId, type ConnectorSetupId } from '../../../shared/connector-catalog'
 
-// One-shot signal: a Settings section to open on. Set by surfaces (e.g. the
-// Assistant Sources rail "configure" button) and consumed once by Settings on
-// mount, so the user lands directly on the relevant section (Bug 1: configuring a
-// source from where it's listed, not the generic Models default).
 export const SETTINGS_SECTION_REQUEST_EVENT = 'vontra:settings-section-request'
 let pendingSettingsSection: string | null = null
 let pendingConnectorSetup: ConnectorSetupId | null = null
@@ -12,6 +8,8 @@ export function requestConnectorSetup(id: ConnectorSetupId): void {
   pendingConnectorSetup = id
   requestSettingsSection('connectors')
 }
+export function peekConnectorSetup(): ConnectorSetupId | null { return pendingConnectorSetup }
+export function peekSettingsSection(): string | null { return pendingSettingsSection }
 export function consumeConnectorSetup(): ConnectorSetupId | null {
   const id = pendingConnectorSetup
   pendingConnectorSetup = null

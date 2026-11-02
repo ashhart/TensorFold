@@ -41,7 +41,7 @@ export function linuxSmokeEnvironment(baseEnv, profileRoot, port) {
 
 export async function resolvePackagedLinuxAppImage(root = fileURLToPath(new URL('..', import.meta.url)), platform = process.platform, arch = process.arch) {
   if (platform !== 'linux') throw new Error('The packaged Linux smoke command can run only on Linux.')
-  if (arch !== 'x64') throw new Error('Initial packaged Linux smoke covers x64 only.')
+  if (!['x64', 'arm64'].includes(arch)) throw new Error('Packaged Linux smoke covers x64 and arm64.')
   const dir = path.join(root, 'release', 'linux')
   const images = (await readdir(dir).catch(() => [])).filter((name) => name.endsWith('.AppImage')).sort()
   if (images.length !== 1) throw new Error(`Expected exactly one built AppImage in ${dir}; found ${images.length}. Run npm run dist:linux first.`)
@@ -50,15 +50,15 @@ export async function resolvePackagedLinuxAppImage(root = fileURLToPath(new URL(
 
 export async function resolvePackagedLinuxExecutable(root = fileURLToPath(new URL('..', import.meta.url)), platform = process.platform, arch = process.arch) {
   if (platform !== 'linux') throw new Error('The packaged Linux smoke command can run only on Linux.')
-  if (arch !== 'x64') throw new Error('Initial packaged Linux smoke covers x64 only.')
+  if (!['x64', 'arm64'].includes(arch)) throw new Error('Packaged Linux smoke covers x64 and arm64.')
   const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
   // electron-builder names the Linux executable from linux.executableName, else package.json name.
   const executable = String(pkg?.build?.linux?.executableName || pkg?.name || '').trim()
   if (!executable || executable.includes('/') || executable.includes('\\')) throw new Error('package.json does not define a packaged Linux executable name.')
-  return path.join(root, 'release', 'linux', 'linux-unpacked', executable)
+  return path.join(root, 'release', 'linux', arch === 'arm64' ? 'linux-arm64-unpacked' : 'linux-unpacked', executable)
 }
 
-async function probe(port) {
+export async function probePackagedService(port) {
   const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_500) })
   const body = await health.json().catch(() => null)
   if (!health.ok || body?.ok !== true || body?.listening !== true) throw new Error('health did not confirm ok=true and listening=true')
@@ -78,7 +78,7 @@ async function waitForHealthy(port, timeoutMs, child) {
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Packaged Linux app exited early (code ${child.exitCode}).`)
     try {
-      return await probe(port)
+      return await probePackagedService(port)
     } catch (error) {
       lastFailure = error?.message || String(error)
     }

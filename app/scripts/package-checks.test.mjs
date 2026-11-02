@@ -40,9 +40,21 @@ for (const script of ['pack:mac:dev', 'pack:mac', 'dist:mac']) {
   assert.match(pkg.scripts[script], /node scripts\/fetch-engine\.mjs && node scripts\/build-computer-helper\.mjs && node scripts\/package-mac\.mjs/, `${script} stages the pinned engine and builds the computer-use helper before packaging`)
 }
 const engineManifest = JSON.parse(await readFile(path.join(root, 'build', 'engine.json'), 'utf8'))
-assert.equal(engineManifest.version, '1.1.0')
-assert.equal(engineManifest.sha256, '99c66f56fcde07a7dd8df6ea555bcbd406d0537b7d92a453112a54bef5a72707')
-assert.equal(engineManifest.url, 'https://github.com/ashhart/TensorFold/releases/download/v1.1.0/tensorfold-1.1.0-macos-arm64.tar.gz')
+assert.equal(engineManifest.version, '1.2.0')
+assert.equal(engineManifest.sha256, '81fffaabf1c21f17f49b6107cf00c7d21f1d55fa1262e8bf82e6948def708ff2')
+assert.equal(engineManifest.url, 'https://github.com/ashhart/TensorFold/releases/download/v1.2.0/tensorfold-1.2.0-macos-arm64.tar.gz')
+assert.equal(engineManifest.sourceCommit, 'a388876f41e19f863ccd82e99e028bd8e9486802')
+for (const [file, platform, digest] of [
+  ['engine-linux-arm64.json', 'linux-aarch64', 'afb52c8c023bd31e22f28f66b4c294a9683fc7c909ec814e1b6b2d5afb114288'],
+  ['engine-linux-x64.json', 'linux-x86_64', '37f82e1803310db17b960120c9bb3ff06a9e2c306612ee754bdb297c2f6b508e'],
+]) {
+  const pin = JSON.parse(await readFile(path.join(root, 'build', file), 'utf8'))
+  assert.equal(pin.version, engineManifest.version, 'Every bundled platform must use the same engine release')
+  assert.equal(pin.sourceCommit, engineManifest.sourceCommit)
+  assert.equal(pin.sha256, digest)
+  assert.equal(pin.platform, platform)
+  assert.equal(pin.url, `https://github.com/ashhart/TensorFold/releases/download/v${pin.version}/tensorfold-${pin.version}-${platform}.tar.gz`)
+}
 const ignore = await readFile(path.join(root, '.gitignore'), 'utf8')
 assert.match(ignore, /^build\/engine\/$/m, 'the staged engine is never committed')
 

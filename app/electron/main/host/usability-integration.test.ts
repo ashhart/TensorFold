@@ -141,12 +141,12 @@ assert.equal(lists, before); assert.equal(leases, 0); assert.equal(libraryCreati
 console.log('Actual document runtime rejects profile/role drift after an asynchronous result, bounds queries, restricts purge to owner and releases each operation lease.')
 
 function mainBackupAdapter(environment: Record<string, unknown>) {
-  const source = readFileSync('electron/main-app.ts', 'utf8'), ast = ts.createSourceFile('main.ts', source, ts.ScriptTarget.ES2022, true)
+  const source = readFileSync('electron/main/composition/workspace-services.ts', 'utf8'), ast = ts.createSourceFile('main.ts', source, ts.ScriptTarget.ES2022, true)
   let expression = '', helper = ''
   const visit = (node: ts.Node) => { if (ts.isCallExpression(node) && node.expression.getText(ast) === 'registerWorkspaceBackupRuntime') expression = node.arguments[0].getText(ast); if (ts.isFunctionDeclaration(node) && node.name?.text === 'persistWorkspaceSnapshot') helper = node.getText(ast); ts.forEachChild(node, visit) }
   visit(ast); assert.ok(expression)
   const compiled = ts.transpileModule(`${helper}\nreturn (${expression});`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
-  return new Function(...Object.keys(environment), compiled)(...Object.values(environment))
+  return new Function('exports', ...Object.keys(environment), compiled)({}, ...Object.values(environment))
 }
 const backupCalls: string[] = [], backupStore: any = { settings: { agentPresets: [] }, threads: [], projects: [], unrelated: 'keep', win: { webContents: { reload: () => backupCalls.push('reload') } } }
 let persistFailure = false
@@ -195,7 +195,7 @@ console.log('Actual paired transport rejects all new local search, document, rea
 
 const { reviewedRunOutcome, assertRecoveryAllowsNewRun } = await import('../../agent/run-outcome-review')
 function reviewCallback(environment: Record<string, unknown>) {
-  const source = readFileSync('electron/main-app.ts', 'utf8'), ast = ts.createSourceFile('main.ts', source, ts.ScriptTarget.ES2022, true)
+  const source = readFileSync('electron/main/composition/workspace-content.ts', 'utf8'), ast = ts.createSourceFile('main.ts', source, ts.ScriptTarget.ES2022, true)
   let callback = ''
   const visit = (node: ts.Node) => { if (ts.isCallExpression(node) && node.expression.getText(ast) === 'handle' && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text === 'runRecovery:review') callback = node.arguments[1].getText(ast); ts.forEachChild(node, visit) }
   visit(ast); assert.ok(callback)

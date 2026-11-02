@@ -1,0 +1,22 @@
+{
+  "version": "1.2.0",
+  "platform": "linux-aarch64",
+  "archive": "tensorfold-1.2.0-linux-aarch64.tar.gz",
+  "root": "tensorfold-1.2.0-linux-aarch64",
+  "url": "https://github.com/ashhart/TensorFold/releases/download/v1.2.0/tensorfold-1.2.0-linux-aarch64.tar.gz",
+  "sha256": "afb52c8c023bd31e22f28f66b4c294a9683fc7c909ec814e1b6b2d5afb114288",
+  "required": [
+    "bin/tensorfold-native",
+    "lib/libtfgrammar.so",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+    "VERSION",
+    "SHA256SUMS"
+  ],
+  "executables": [
+    "bin/tensorfold-native",
+    "lib/libtfgrammar.so"
+  ],
+  "sourceCommit": "a388876f41e19f863ccd82e99e028bd8e9486802"
+}

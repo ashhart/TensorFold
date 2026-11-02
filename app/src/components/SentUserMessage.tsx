@@ -10,7 +10,7 @@ import type { Thread, TimelineItem } from '../lib/types'
 import type { ThreadMessageEditPreparation } from '../../shared/thread-message-edit'
 import { UserBubble } from './timeline'
 
-export function SentUserMessage({ thread, item, busy, onQuote }: { thread: Thread; item: TimelineItem; busy: boolean; onQuote?(selection?: string): void }) {
+export function SentUserMessage({ thread, item, busy, onQuote }: { thread: Pick<Thread, 'id' | 'orchestratorHostId'>; item: TimelineItem; busy: boolean; onQuote?(selection?: string): void }) {
   const tx = useAuthoredText()
   const contentRef = useRef<HTMLDivElement>(null)
   const action = useRef<'prepare' | 'save' | null>(null)

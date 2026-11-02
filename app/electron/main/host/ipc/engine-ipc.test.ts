@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { engineRepo, engineRevision, engineSearchText, engineLibraryFolderId, engineLibraryScanOptions } from './engine-ipc'
 import { createMockEngineApi } from '../../../../src/lib/mock/engine'
+import { enginePreload } from '../../../preload/engine'
 
 // Renderer input is only ever a repo id, a revision or search text.
 assert.equal(engineRepo('TensorFold/Qwen3.8-27B-MLX-4bit'), 'TensorFold/Qwen3.8-27B-MLX-4bit')
@@ -48,15 +49,47 @@ assert.match(folderHandler, /svc\(\)\.addLibraryFolder\(result\.filePaths\[0\]\)
 assert.doesNotMatch(folderHandler, /auditEvent|console\./, 'private folder paths do not enter audit or process logs')
 
 const preload = readFileSync(path.join(__dirname, '..', '..', '..', 'preload.ts'), 'utf8')
-for (const channel of channels) assert.ok(preload.includes(`'${channel}'`), `preload exposes ${channel}`)
-assert.match(preload, /engineConnection: \(\): Promise<EngineConnection \| null> => ipcRenderer\.invoke\('engine:connection'\)/)
+assert.match(preload, /\.\.\.enginePreload\(ipcRenderer\)/, 'the exposed API includes the engine namespace')
+const calls: unknown[][] = [], listeners = new Map<string, (...args: any[]) => void>()
+const bridge = enginePreload({
+  invoke: async (...args: unknown[]) => { calls.push(args); return 'fixture-result' },
+  on: (channel: string, listener: (...args: any[]) => void) => { listeners.set(channel, listener) },
+  removeListener: (channel: string, listener: (...args: any[]) => void) => {
+    assert.equal(listeners.get(channel), listener)
+    listeners.delete(channel)
+  },
+} as Parameters<typeof enginePreload>[0])
+const methods = ['engineSnapshot', 'engineConnection', 'engineRefresh', 'engineSearch', 'enginePreflight',
+  'enginePull', 'engineCancelPull', 'engineLoad', 'engineCompareModels', 'engineComparisonStatus',
+  'engineCancelComparison', 'engineTryModel', 'engineCancelTryModel', 'engineSetCortheon', 'engineLearning',
+  'engineSetLearning', 'engineEnvOverrides', 'engineSetEnvOverrides', 'engineTeach', 'engineCancelTeach',
+  'engineUnload', 'engineDelete', 'engineLibrary', 'engineScanLibrary', 'engineAddLibraryFolder',
+  'engineRemoveLibraryFolder', 'engineCancelLibraryScan']
+assert.equal(methods.length, channels.length)
+for (const [index, method] of methods.entries()) {
+  const invoke = (bridge as unknown as Record<string, () => Promise<unknown>>)[method]
+  assert.equal(await invoke(), 'fixture-result')
+  assert.equal(calls.at(-1)?.[0], channels[index], `${method} forwards to its exact host channel`)
+}
+await bridge.enginePreflight('owner/model', 'revision')
+assert.deepEqual(calls.at(-1), ['engine:preflight', { repo: 'owner/model', revision: 'revision' }])
+await bridge.enginePull('owner/model', null)
+assert.deepEqual(calls.at(-1), ['engine:pull', { repo: 'owner/model', revision: null }])
+await bridge.engineSetLearning(false, 'owner/model')
+assert.deepEqual(calls.at(-1), ['engine:setLearning', { enabled: false, model: 'owner/model' }])
+let engineEvent: unknown
+const unsubscribe = bridge.onEngineEvent(event => { engineEvent = event })
+listeners.get('engine:event')!({}, { kind: 'performance', performance: null })
+assert.deepEqual(engineEvent, { kind: 'performance', performance: null })
+unsubscribe()
+assert.equal(listeners.size, 0)
 
 // Browser demos have no server or measured requests, even after their simulated model is ready.
 const mock = createMockEngineApi()
 const beforeEnable = await mock.engineSnapshot()
-await assert.rejects(mock.engineSetCortheon(true), /temporarily disabled in this beta/)
+await assert.rejects(mock.engineSetCortheon(true), /temporarily disabled/)
 assert.deepEqual(await mock.engineSnapshot(), beforeEnable, 'the browser mock also refuses stale enable calls without mutation')
-assert.match(beforeEnable.status.cortheon?.disabledReason ?? '', /temporarily disabled in this beta/)
+assert.match(beforeEnable.status.cortheon?.disabledReason ?? '', /temporarily disabled/)
 assert.equal(await mock.engineConnection(), null)
 assert.equal((await mock.engineSnapshot()).performance, null)
 await mock.engineLoad('mlx-community/Qwen3.5-2B-MLX-4bit')

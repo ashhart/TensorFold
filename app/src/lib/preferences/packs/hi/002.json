@@ -201,7 +201,7 @@
   "Copy user message": "उपयोगकर्ता संदेश कॉपी करें",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "Cortheon चालू है। उत्तर से पहले इंजन इस चैट से बनी खोज वेब सेवा को भेज सकता है और सार्वजनिक पेज पढ़ सकता है। AI सेटिंग या मॉडल में बंद करें।",
-  "Cortheon is temporarily disabled in this beta.": "इस बीटा में Cortheon अस्थायी रूप से बंद है।",
+  "Cortheon is temporarily disabled.": "Cortheon अस्थायी रूप से बंद है।",
   "Cost cap $": "खर्च सीमा $",
   "Could not check CLI auth.": "CLI प्रमाणीकरण जाँच नहीं हुई।",
   "Could not open a chat. Your current work is still here; try New chat again.": "चैट नहीं खुला। आपका काम सुरक्षित है; नया चैट फिर आज़माएँ।",

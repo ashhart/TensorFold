@@ -5,6 +5,8 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { canonicalMcpManifest, createMcpServer, mcpSpawnSpec, normalizeMcpPrompt, normalizeMcpResource, verifyConfiguredManifest } from './mcp-client'
+import { prepareIsolatedWorkspace, removeIsolatedWorkspace } from './isolated-workspace'
+import { verifyPrivateMcpLaunch } from './mcp-isolation-manifest'
 
 async function main() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vontra-mcp-manifest-'))
@@ -39,9 +41,7 @@ async function main() {
   assert.equal(badSignature.ok, false)
   assert.match(badSignature.error ?? '', /signature verification failed/)
 
-  // commandSha256 pin: a signed manifest can pin the on-disk binary's hash. A correct hash
-  // verifies; a wrong hash (binary swapped, same name) is rejected. (gap-audit: manifest
-  // previously pinned only the command string, never the executable.)
+  // Signed executable pins reject a swapped binary.
   {
     const echoSha = createHash('sha256').update(await fs.readFile('/bin/echo')).digest('hex')
     const pinned = { ...manifest, commandSha256: echoSha }
@@ -70,9 +70,7 @@ async function main() {
     assert.match(badHash.error ?? '', /hash does not match/)
   }
 
-  // A trusted interpreter launch binds both the interpreter and the mutable script bytes.
-  // Re-signing a manifest without a launch-file pin is insufficient; swapping the script
-  // after signing is detected before the child process starts.
+  // Interpreter launches pin both the interpreter and script bytes.
   {
     const scriptPath = path.join(dir, 'server.js')
     await fs.writeFile(scriptPath, 'console.log("safe")\n', 'utf8')
@@ -94,7 +92,15 @@ async function main() {
       manifestPath: scriptManifestPath, manifestSignature: scriptSig,
       manifestPublicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
     })
-    assert.equal((await verifyConfiguredManifest(scriptConfig)).ok, true)
+    const scriptChecked = await verifyConfiguredManifest(scriptConfig)
+    assert.equal(scriptChecked.ok, true)
+    const privateWorkspace = await prepareIsolatedWorkspace(dir)
+    try {
+      const privateConfig = { ...scriptConfig, manifestDigest: scriptChecked.digest }
+      await verifyPrivateMcpLaunch(privateConfig, privateWorkspace, [])
+      await fs.writeFile(path.join(privateWorkspace.workspace, 'server.js'), 'console.log("private copy swapped")\n')
+      await assert.rejects(verifyPrivateMcpLaunch(privateConfig, privateWorkspace, []), /Private MCP launch code/)
+    } finally { await removeIsolatedWorkspace(privateWorkspace) }
 
     const missingFilePin = { ...scriptManifest, launchFiles: [] }
     const missingPath = path.join(dir, 'missing-script-pin.json')
@@ -158,6 +164,13 @@ async function main() {
     args: ['hello'],
     cwd: dir,
   })
+  const linuxLaunch = mcpSpawnSpec({ ...directConfig, env: { LD_PRELOAD: '/private/fixture.so', TF_EXPLICIT: 'fixture' } },
+    { macSandboxAvailable: false, linuxSandboxAvailable: true })
+  assert.equal(linuxLaunch.env.LD_PRELOAD, undefined, 'Explicit server loader variables must not reach the host launcher')
+  assert.equal(linuxLaunch.env.TF_EXPLICIT, undefined)
+  const preload = linuxLaunch.args.indexOf('LD_PRELOAD')
+  assert.equal(linuxLaunch.args[preload - 1], '--setenv')
+  assert.equal(linuxLaunch.args[preload + 1], '/private/fixture.so')
   delete process.env.VONTRA_ALLOW_UNSANDBOXED_MCP
   assert.throws(
     () => mcpSpawnSpec(directConfig, { macSandboxAvailable: false }),

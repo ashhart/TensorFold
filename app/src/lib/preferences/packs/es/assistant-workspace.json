@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "Espacio del asistente",
+  "Open inbox": "Abrir bandeja de entrada",
+  "Open Google Workspace": "Abrir Google Workspace",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "Inicia una tarea, lee conversaciones conectadas o gestiona el correo y el calendario de Google.",
+  "Google account tools require a model running locally on this computer.": "Las herramientas de las cuentas de Google requieren un modelo que se ejecute localmente en este equipo.",
+  "Manage Google accounts locally in TensorFold on the host computer.": "Gestiona las cuentas de Google localmente en el equipo anfitrión.",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "La importación del cliente OAuth, las credenciales y las revisiones del propietario solo están disponibles en el equipo anfitrión.",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "No hay cuentas de Google conectadas en este equipo. Inicia sesión abajo y elige una cuenta o usa otra dirección en la ventana de inicio de sesión de Google.",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "No hay cuentas de Google conectadas en este equipo. Configura el inicio de sesión de Google abajo para añadir una.",
+  "Disconnected on this computer": "Desconectado en este equipo",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "Desconectado localmente; vuelve a conectar mediante Google antes de leer o preparar acciones.",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "Sustituir el cliente no inicia ni cierra sesiones automáticamente; su JSON y credenciales permanecen en el equipo anfitrión.",
+  "No inbox conversation is attached": "No se ha adjuntado ninguna conversación de la bandeja de entrada"
+}

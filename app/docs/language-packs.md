@@ -5,12 +5,21 @@ The first-run welcome screen also has a language selector before model setup.
 Packs are bundled and work offline; selecting one does not download a model or
 contact a translation service.
 
-The interface choices are English, Spanish, Latin American Spanish, Simplified
+The interface choices are English, Spanish, Latin American Spanish, Portuguese, Simplified
 Chinese, Traditional Chinese, Japanese, Korean, Russian, Polish, Latin, Hindi,
 Thai, Vietnamese and Indonesian. Latin American Spanish uses the Spanish pack
 with regional number and date formatting. Traditional Chinese starts from the
 same authored Chinese wording with traditional glyphs; regional terminology and
 all translations still benefit from native-speaker review.
+
+Portuguese uses Brazilian wording in one shared pack for `pt`, Brazilian `pt-BR` and European `pt-PT`
+profile tags. It includes onboarding, preferences, Assistant, mail connection health,
+Gmail Inbox, engine updates and native menu labels. The pack is bundled on all desktop
+platforms and does not add a translation service or model dependency to the app.
+Draft wording was prepared locally with the
+[OPUS-MT English to Portuguese model](https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-en-pt)
+from Helsinki-NLP, licensed under CC BY 4.0, then edited for interface terms and safety messages.
+The model and translation tools are development-only and are not included in the app.
 
 **Use this language for new assistant replies** is on by default. It adds an
 ephemeral response preference to TensorFold's own model requests, including local

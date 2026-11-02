@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "어시스턴트 작업 공간",
+  "Open inbox": "받은 편지함 열기",
+  "Open Google Workspace": "Google Workspace 열기",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "작업을 시작하거나 연결된 대화를 읽고 Google 메일과 캘린더를 관리하세요.",
+  "Google account tools require a model running locally on this computer.": "Google 계정 도구를 사용하려면 이 컴퓨터에서 로컬로 실행되는 모델이 필요합니다.",
+  "Manage Google accounts locally in TensorFold on the host computer.": "호스트 컴퓨터의 TensorFold에서 Google 계정을 로컬로 관리하세요.",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Google 데스크톱 OAuth 클라이언트 가져오기, 자격 증명 및 소유자 검토는 호스트 컴퓨터에서만 가능합니다.",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "이 컴퓨터에 연결된 Google 계정이 없습니다. 아래에서 로그인한 다음 Google 로그인 창에서 계정을 선택하거나 다른 이메일 주소를 사용하세요.",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "이 컴퓨터에 연결된 Google 계정이 없습니다. 계정을 추가하려면 아래에서 Google 로그인을 설정하세요.",
+  "Disconnected on this computer": "이 컴퓨터에서 연결 해제됨",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "이 컴퓨터에서 연결을 해제했습니다. 읽거나 새 작업을 준비하기 전에 Google로 다시 연결하세요.",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "클라이언트 교체로 자동 로그인하거나 계정을 해제하지 않습니다. JSON과 자격 증명은 호스트 컴퓨터에 남습니다.",
+  "No inbox conversation is attached": "받은 편지함 대화가 첨부되지 않았습니다"
+}

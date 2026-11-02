@@ -40,6 +40,14 @@ jobs:
             app/mobile/package-lock.json
       - name: Use the package-manager pin
         run: npm install --global --ignore-scripts npm@10.9.8
+      - name: Put the CI toolchain in the sandbox runtime directory
+        run: |
+          runtime=/usr/local/lib/tensorfold-ci-node
+          sudo mkdir -p "$runtime/bin" "$runtime/lib/node_modules"
+          sudo cp "$(command -v node)" "$runtime/bin/node"
+          sudo cp -R "$(npm root --global)/npm" "$runtime/lib/node_modules/npm"
+          sudo ln -s ../lib/node_modules/npm/bin/npm-cli.js "$runtime/bin/npm"
+          echo "$runtime/bin" >> "$GITHUB_PATH"
       - name: Install locked desktop dependencies without lifecycle scripts
         run: npm ci --ignore-scripts
       - name: Install mobile fixtures required by the shared test runner

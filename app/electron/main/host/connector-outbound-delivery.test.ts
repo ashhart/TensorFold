@@ -103,6 +103,17 @@ try {
   ;(fixtureState.store.settings as any).imessage={enabled:true,allowedChatIds:'allowed@example.test'}
   const outside=sealConnectorOutboundEvent(personalMessageDraftEvent({connectorId:'imessage',target:'blocked@example.test',body:'Synthetic review'}))
   assert.match(outside.outboundError,/current connection scope/,'model-composed iMessage cannot leave the current configured contact scope')
+  ;(fixtureState.store.settings as any).imessage={enabled:true,allowedChatIds:'chat123456789'}
+  const group=sealConnectorOutboundEvent(personalMessageDraftEvent({connectorId:'imessage',target:'chat123456789',body:'Reviewed group reply',threadKey:'imessage:chat123456789'}))
+  assert.ok(group.outbound, 'an allowed existing iMessage group must support the same reviewed reply as a direct chat')
+  const bridge = {enabled:true,transport:'bluebubbles',blueBubblesUrl:'https://messages.example.com',blueBubblesPassword:'fixture-secret',allowedChatIds:'iMessage;+;chat123456789'}
+  ;(fixtureState.store.settings as any).imessage=bridge
+  const { blueBubblesIdentity } = await jiti.import<any>(path.join(__dirname, '../../agent/bluebubbles-connector.ts'))
+  const bridgeAccount=`bb-${blueBubblesIdentity(bridge)}`
+  const bridged=sealConnectorOutboundEvent(personalMessageDraftEvent({connectorId:'imessage',target:'iMessage;+;chat123456789',body:'Exact bridge reply',threadKey:`imessage:${bridgeAccount}:iMessage;+;chat123456789`}))
+  assert.equal(bridged.outbound.accountId,bridgeAccount)
+  ;(fixtureState.store.settings as any).imessage={...bridge,blueBubblesUrl:'https://other.example.com'}
+  assert.match(sealConnectorOutboundEvent(bridged).outboundError,/current connection scope/,'a cached conversation cannot send using a different BlueBubbles server')
   const exactBody='  '+('words 🌿 '.repeat(300))+'  '
   const long = reset(exactBody)
   await approve(long)

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { googleRequestError } from '../../../../../shared/google-workspace-errors'
 import type { GoogleWorkspaceAccount } from '../../../../../shared/google-workspace'
 
 // Fence every request by account+revision, including draft panes retained during reconnect.
@@ -16,12 +17,10 @@ export function useGoogleAccountRequest(account: GoogleWorkspaceAccount, refresh
     const ownEpoch = ++epoch.current
     setBusy(name); setError('')
     try { const result = await work(); if (mounted.current && ownEpoch === epoch.current) { apply(result); return true } }
-    catch {
+    catch (reason) {
       if (mounted.current && ownEpoch === epoch.current) {
-        setError('Google could not complete this request; check the account permissions and connection, then retry.')
-        // A failed token refresh or 401 can have removed the host's credentials.
-        // Re-read that state so the parent replaces this pane with Reconnect;
-        // neither exception text nor credentials need to cross this boundary.
+        setError(googleRequestError(reason))
+
         try { await refreshAccountStatus?.() }
         catch {
           if (mounted.current && ownEpoch === epoch.current) setError('Google could not complete this request or refresh the account status; use Refresh in Google Workspace, then retry.')

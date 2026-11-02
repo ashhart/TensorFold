@@ -11,6 +11,7 @@ const hooks = harness()
 const common = { react: hooks.hooks, 'react/jsx-runtime': jsx, clsx }
 const { TitleBar } = load('src/components/TitleBar.tsx', {
   ...common, '../lib/store': { useStore }, '../lib/ipc': { api }, '../lib/icons': { Icon: fixture },
+  '../lib/quick-ask-launch': { openAskTensorFold: fixture },
   '../lib/bot-labels': { localExecutionSource: (platform: string) => platform === 'darwin' ? 'This Mac' : 'Local' },
   './ThreadTrustBadge': { ThreadTrustBadge: fixture }, './CortheonBadge': { CortheonBadge: fixture },
   './full-workspace/ChatWorkspaceHeader': { ChatWorkspaceHeader: fixture }, './full-workspace/FullLayoutSwitch': { FullLayoutSwitch: fixture },
@@ -18,7 +19,7 @@ const { TitleBar } = load('src/components/TitleBar.tsx', {
 const { ChatWorkspaceHeader } = load('src/components/full-workspace/ChatWorkspaceHeader.tsx', {
   ...common, '../../lib/store': { useStore }, '../../lib/ipc': { api }, '../../lib/icons': { Icon: fixture },
   '../../lib/preferences/hooks': { useUiText: () => (key: string) => key },
-  '../../lib/full-workspace-activity': { fullWorkspaceActivity: () => [] }, '../search/search-events': { requestConversationSearch: fixture },
+  '../work-activity/WorkActivityMenu': { WorkActivityMenu: fixture }, '../search/search-events': { requestConversationSearch: fixture },
   '../ui': { Button: fixture, Menu: fixture, MenuItem: fixture }, '../ThreadTrustBadge': { ThreadTrustBadge: fixture },
   '../CortheonBadge': { CortheonBadge: fixture }, './FullLayoutSwitch': { FullLayoutSwitch: fixture },
 })

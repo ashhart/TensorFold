@@ -5,6 +5,7 @@ import { ConversationDrafts } from '../lib/conversation-drafts'
 import { composerDraftKey } from '../../shared/composer-drafts'
 import { capturedDraftMatches, editQueuedFollowUp } from '../lib/queued-followups'
 import { fixtureText } from './preferences/language-test-fixture'
+import { harness } from './reading/reading-test-harness'
 const source = ts.createSourceFile('Composer.tsx', readFileSync('src/components/Composer.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
 const component = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'Composer')!
 const printer = ts.createPrinter()
@@ -102,5 +103,47 @@ try {
   f = fixture({ switched: true }); f.queueEditingRef.current = null
   drain({ ...f.environment, draft: { ...f.environment.draft, scopeKey: composerDraftKey(b), capture: () => drafts.capture(b) }, prevBusy: { current: true }, busy: false, st: 'idle', mode: 'thread' }); await settle()
   assert.equal(f.sends.length, 0, 'Changing from running chat A to idle chat B cannot dispatch A\'s queued input into B before the queue-reset effect executes')
+
+  // Render both production effects in source order so navigation reset cannot hide a real busy-to-idle transition.
+  const queueEffects = component.body!.statements.filter(row => ts.isExpressionStatement(row) && ts.isCallExpression(row.expression) && row.expression.expression.getText(source) === 'useEffect' && row.expression.arguments[0]?.getText(source).includes('prevBusy.current'))
+  assert.equal(queueEffects.length, 2)
+  const lifecycleCode = ts.transpileModule(queueEffects.map(row => printer.printNode(ts.EmitHint.Unspecified, row, source)).join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+  for (const scenario of ['mount-running', 'return-running', 'return-error', 'return-review', 'return-editing']) {
+    f = fixture()
+    const hooks = harness(), previous = { current: false }, quoteEditingRef = { current: false }
+    const render = (target: typeof a, busy: boolean, terminal = false) => {
+      f.activeDraftKey.current = composerDraftKey(target)
+      const environment = {
+        ...f.environment, quoteEditingRef, setQuoteEditing() {}, prevBusy: previous, busy,
+        st: busy ? 'streaming' : terminal && scenario === 'return-error' ? 'error' : 'idle', mode: 'thread',
+        thread: { id: target.conversationId, ...(terminal && scenario === 'return-review' ? { runRecovery: { state: 'needs_review', retry: 'requires_review' } } : {}) },
+        draft: { scopeKey: composerDraftKey(target), capture: () => drafts.capture(target), clearAccepted: (token: any) => drafts.clearAccepted(token) },
+      }
+      hooks.render(() => new Function('useEffect', ...Object.keys(environment), lifecycleCode)(hooks.hooks.useEffect, ...Object.values(environment)))
+      hooks.flush()
+      return environment
+    }
+    let environment = render(a, true)
+    if (scenario !== 'mount-running') { render(b, false); environment = render(a, true) }
+    const followUp = `Follow up only for ${scenario}`
+    drafts.update(a, { text: followUp })
+    production(['queueMessage'], { ...environment, text: followUp, quotes: [], attachments: [], readiness: { ready: true }, expandSkills: (text: string) => text, crypto: { randomUUID: () => 'after-return' } }).queueMessage()
+    assert.equal(f.sends.length, 0, 'Queueing while busy does not start a second run')
+    render(a, true)
+    if (scenario === 'return-editing') f.queueEditingRef.current = 'after-return'
+    render(a, false, true)
+    await settle()
+    if (scenario === 'mount-running' || scenario === 'return-running') {
+      assert.deepEqual(f.sends, [[followUp, undefined, a.conversationId]], `${scenario}: the first completed run drains exactly one queued message to its owner`)
+      assert.equal(drafts.get(a).text, '')
+      render(a, false, true); await settle()
+      assert.equal(f.sends.length, 1, 'Rerendering the settled scope cannot send it again')
+    } else {
+      assert.equal(f.sends.length, 0, `${scenario}: restoring the busy transition must preserve error, review and edit guards`)
+      assert.equal(drafts.get(a).text, followUp)
+    }
+    assert.equal(drafts.get(b).text, 'other draft', 'Navigation and completion preserve the other conversation draft')
+    hooks.cleanup()
+  }
   console.log('Production queued-edit/save/guide/completion wiring preserves owner and newer drafts, pauses completion edits, requires explicit idle sends and prevents stale/duplicate/Stop/conversation-switch dispatch')
 } finally { drafts.dispose() }

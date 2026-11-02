@@ -17,8 +17,17 @@ export function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
-export async function readEngineManifest(root) {
-  const manifest = JSON.parse(await readFile(path.join(root, 'build', 'engine.json'), 'utf8'))
+export function engineTarget(platform = process.platform, arch = process.arch) {
+  if (platform === 'darwin' && arch === 'arm64') return 'macos-arm64'
+  if (platform === 'linux' && arch === 'x64') return 'linux-x64'
+  if (platform === 'linux' && arch === 'arm64') return 'linux-arm64'
+  throw new Error(`No pinned engine archive is available for ${platform}/${arch}.`)
+}
+
+export async function readEngineManifest(root, target = 'macos-arm64') {
+  if (!['macos-arm64', 'linux-x64', 'linux-arm64'].includes(target)) throw new Error('Unknown engine target.')
+  const filename = target === 'macos-arm64' ? 'engine.json' : `engine-${target}.json`
+  const manifest = JSON.parse(await readFile(path.join(root, 'build', filename), 'utf8'))
   for (const key of ['version', 'archive', 'root', 'url', 'sha256']) {
     if (typeof manifest[key] !== 'string' || !manifest[key]) throw new Error(`build/engine.json is missing ${key}.`)
   }
@@ -246,8 +255,8 @@ async function download(manifest, buildDir, fetchImpl) {
   return bytes
 }
 
-export async function fetchEngine({ root, env = process.env, force = false, fetchImpl = fetch, log = console.log } = {}) {
-  const manifest = await readEngineManifest(root)
+export async function fetchEngine({ root, target, env = process.env, force = false, fetchImpl = fetch, log = console.log } = {}) {
+  const manifest = await readEngineManifest(root, target)
   const buildDir = path.join(root, 'build')
   if (!force && await stagedEngineIsCurrent(buildDir, manifest)) {
     log(`[fetch-engine] TensorFold engine ${manifest.version} already staged in build/engine.`)
@@ -279,7 +288,7 @@ export async function fetchEngine({ root, env = process.env, force = false, fetc
 const invoked = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : ''
 if (invoked === import.meta.url) {
   const root = fileURLToPath(new URL('..', import.meta.url))
-  fetchEngine({ root, force: process.argv.includes('--force') }).catch((error) => {
+  fetchEngine({ root, target: engineTarget(), force: process.argv.includes('--force') }).catch((error) => {
     console.error(`[fetch-engine] ${error?.message || error}`)
     process.exitCode = 1
   })

@@ -16,12 +16,13 @@ export function readFirstAnswerStarter(replaying = false): FirstAnswerStarterId 
 }
 export function saveFirstAnswerStarter(id: FirstAnswerStarterId): void {
   if (!FIRST_ANSWER_STARTERS.some((starter) => starter.id === id)) return
-  try { localStorage.setItem(STARTER_KEY, id) } catch { /* Selection remains in the current setup. */ }
+  try { localStorage.setItem(STARTER_KEY, id) } catch {}
 }
 
 export interface FirstAnswerReadiness {
   providerKind: 'local' | 'cloud' | null
   builtIn: boolean
+  available?: boolean
   selected: boolean
   cached: boolean
   fitsMemory: boolean | null
@@ -30,6 +31,7 @@ export interface FirstAnswerReadiness {
   loaded: boolean
 }
 export function firstAnswerNextAction(state: FirstAnswerReadiness): { action: 'models' | 'provider' | 'draft'; label: string; message: string } {
+  if (state.builtIn && state.available === false) return { action: 'models', label: 'Check local engine', message: 'The local engine is unavailable. Open Models to review its status before sending a message.' }
   if (!state.selected) return { action: state.builtIn || state.providerKind === null ? 'models' : 'provider', label: 'Choose a model', message: 'Choose a model before sending your first question.' }
   if (state.builtIn && state.fitsMemory === false) return { action: 'models', label: 'Choose a model that fits', message: 'The selected model exceeds the current memory budget.' }
   if (state.builtIn && !state.cached) return { action: 'models', label: 'Finish model download', message: 'Return to Models to finish or resume the selected download.' }

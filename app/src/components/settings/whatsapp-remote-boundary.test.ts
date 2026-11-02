@@ -36,8 +36,8 @@ export const useEffect=(work)=>{const cleanup=work();if(typeof cleanup==='functi
   assert.deepEqual(state.calls, [], 'unrelated Settings mount over paired transport must not request forbidden QR/local runtime IPC')
   await remote.addWhatsAppAccount()
   assert.deepEqual(state.calls, [], 'paired caller cannot invoke local account mutation')
-  assert.match(state.messages[0], /host Mac/)
-  for (const platform of ['darwin', 'web']) {
+  assert.match(state.messages[0], /host computer/)
+  for (const platform of ['darwin', 'win32', 'linux', 'web']) {
     const local = await load(platform)
     assert.equal(local.whatsappLocalOnly, false)
     assert.deepEqual(state.calls, ['runtime-subscription', 'status-subscription', 'runtime-read'], 'desktop and synthetic demo retain local runtime snapshot wiring')

@@ -60,10 +60,12 @@ export function InstalledRow({ model, status, onLoad, onUnload, onDelete, onTask
   const menuRef = useRef<HTMLDivElement>(null)
   const moreRef = useRef<HTMLButtonElement>(null)
   const active = status?.model === model.repo
-  const running = active && status?.state === 'ready'
-  const loading = active && status?.state === 'starting'
+  const running = active && !!status?.available && status.state === 'ready'
+  const loading = active && !!status?.available && status.state === 'starting'
   const failed = active && status?.state === 'failed'
   const name = model.title ?? repoDisplayName(model.repo)
+  const diskBytes = Number.isFinite(model.weightsBytes) && (model.weightsBytes ?? 0) > 0 ? model.weightsBytes : null
+  const memoryBytes = Number.isFinite(model.memoryFloorBytes) && (model.memoryFloorBytes ?? 0) > 0 ? model.memoryFloorBytes : null
   const badge: VerdictBadge = running ? { label: tx("Running"), tone: 'ok' } : loading ? { label: tx("Loading"), tone: 'warn' } : failed ? { label: tx("Needs attention"), tone: 'bad' } : model.fitsMemory === false ? { label: tx("Needs more memory"), tone: 'warn' } : model.fitsMemory === true ? { label: tx("Fits this Mac"), tone: 'ok' } : { label: tx("Compatibility checked on use"), tone: 'muted' }
   useEffect(() => {
     if (!menu) return
@@ -87,8 +89,8 @@ export function InstalledRow({ model, status, onLoad, onUnload, onDelete, onTask
           <button type="button" onClick={onSettings} disabled={!onSettings} aria-label={tx("Details for {value0}", { value0: name })} className="block max-w-full break-words rounded text-left text-[15px] font-medium text-ink hover:text-accent focus-visible:outline-2 focus-visible:outline-accent disabled:text-ink">{name}</button>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-ink-2">
             <Badge badge={badge} />
-            {model.weightsBytes != null && <span>{formatBytes(model.weightsBytes)} {tx("on disk")}</span>}
-            {model.memoryFloorBytes != null && <span>{formatBytes(model.memoryFloorBytes)} {tx("memory")}</span>}
+            {diskBytes != null && <span>{formatBytes(diskBytes)} {tx("on disk")}</span>}
+            {memoryBytes != null && <span>{formatBytes(memoryBytes)} {tx("memory")}</span>}
           </div>
           {failed && status?.message && <p className="mt-2 break-words text-[13px] text-danger">{status.message}</p>}
         </div>

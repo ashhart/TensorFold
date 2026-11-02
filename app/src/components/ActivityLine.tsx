@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { Icon } from '../lib/icons'
 import { activityGroupLabel, activityGroupStateSummary } from '../lib/activity-grouping'
@@ -16,6 +17,7 @@ export function ActivityLineGroup({
   items: TimelineItem[]
   defaultOpen?: boolean
 }) {
+  const tx = useAuthoredText()
   const summary = activityGroupStateSummary(items)
   // Auto-expand when any tool in the run is awaiting approval so the approval
   // UI can never be hidden behind a collapsed line.
@@ -26,27 +28,28 @@ export function ActivityLineGroup({
 
   const label = activityGroupLabel(items)
   const icon = toolIcon(items[0]?.tool)
+  const detailsId = `activity-${items[0]?.id}`
 
   return (
     <div className="fade-in">
       <button
+        type="button"
         onClick={() => !forceOpen && setOpen((o) => !o)}
         aria-expanded={expanded}
-        className="group flex w-full items-center gap-2 py-[3px] text-left text-[13px]"
+        aria-controls={detailsId}
+        className="group flex w-full items-center gap-2 rounded-lg px-1.5 py-2 text-left text-[13px] transition-colors hover:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
       >
         <Icon name={icon} size={14} className="shrink-0 text-ink-3" />
         <span className="min-w-0 flex-1 truncate text-[13px] text-ink-2">{label}</span>
-        {summary.text && (
-          <span className={clsx('shrink-0 text-[12px]', summary.error ? 'text-danger' : 'text-ink-4')}>{summary.text}</span>
-        )}
+        <span className={clsx('max-w-36 shrink-0 text-right text-[11px]', summary.error ? 'text-danger' : 'text-ink-3')}>{summary.text || tx('Completed')}</span>
         <span className="flex w-4 shrink-0 items-center justify-center">
-          <StateGlyph state={summary.error ? 'error' : summary.pending ? 'running' : 'ok'} />
+          <StateGlyph state={summary.awaiting ? 'awaiting' : summary.pending ? 'running' : summary.error ? 'error' : summary.denied ? 'denied' : 'ok'} />
         </span>
-        <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />
+        <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={14} className="shrink-0 text-ink-3" />
       </button>
 
       {expanded && (
-        <div className="ml-[6px] mt-1 space-y-0.5 border-l border-line pl-3.5">
+        <div id={detailsId} className="ml-[6px] mt-1 space-y-1 border-l border-line pl-3.5">
           {items.map((item) => (
             <ToolCard key={item.id} item={item} />
           ))}

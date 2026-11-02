@@ -1,6 +1,9 @@
 import { activeEngineModelSettings } from '../../../shared/model-profiles'
 import { app } from 'electron'
 import os from 'node:os'
+import path from 'node:path'
+import engineManifest from '../../../build/engine.json'
+import { EngineRuntimeManager } from '../../agent/engine/runtime/manager'
 import { EngineService } from '../../agent/engine/service'
 import { resolveEngineBinaryPath } from '../../agent/engine/paths'
 import { ENGINE_PROVIDER_ID } from '../../agent/engine/provider'
@@ -11,10 +14,12 @@ import { persistSettings } from './persistence'
 import { sendToRenderer } from './renderer-events'
 import { loweredEngineMemoryBudget } from '../../agent/engine/memory-budget'
 
-// The one EngineService for this app process: binary from the bundle (or build/engine in dev), engine
-// events to the renderer, and the built-in provider's model list kept equal to what `models` reports.
-
 let service: EngineService | null = null
+let runtimes: EngineRuntimeManager | null = null
+export function engineRuntimes(): EngineRuntimeManager {
+  if (!runtimes) throw new Error('The local runtime manager is not initialized.')
+  return runtimes
+}
 
 export function engineService(): EngineService | null {
   return service
@@ -36,13 +41,18 @@ function syncProviderModels(repos: string[]): void {
 export function createEngineRuntime(): EngineService {
   if (service) return service
   const binaryPath = resolveEngineBinaryPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appRoot: app.getAppPath(), env: process.env })
+  runtimes = new EngineRuntimeManager({
+    root: path.join(vontraHomeDir(), 'engine-runtimes'), bundledVersion: engineManifest.version, appVersion: app.getVersion(),
+    transition: (apply, rollback) => service!.reconfigureRuntime(apply, rollback),
+  })
   service = new EngineService({
+    runtimeReady: () => runtimes!.ready, runtimeBinary: () => runtimes!.binaryPath(),
     binaryPath,
     modelSettings: (model) => activeEngineModelSettings(store.settings, model),
     appHome: vontraHomeDir(),
     memoryBudgetBytes: loweredEngineMemoryBudget(os.totalmem(), process.env.TENSORFOLD_STUDIO_MEMORY_BUDGET_BYTES),
     emit: (event: EngineEvent) => { sendToRenderer('engine:event', event) },
-    onInstalled: (repos) => { try { syncProviderModels(repos) } catch { /* settings not loaded yet */ } },
+    onInstalled: (repos) => { try { syncProviderModels(repos) } catch {  } },
   })
   service.install()
   // Last resort if the app exits without before-quit: no engine may outlive it.

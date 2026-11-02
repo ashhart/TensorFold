@@ -1,4 +1,3 @@
-import { requestMessageQuote } from '../lib/message-quotes'
 import { CollectionPicker } from './documents/CollectionPicker'
 import { ConversationOutline } from './search/ConversationOutline'
 import { useAuthoredText } from '../lib/preferences/useAuthoredText'
@@ -6,18 +5,22 @@ import { ModelHelperDialog } from './models/ModelHelperDialog'
 import { RunOutcomeReviewDialog } from './run-recovery/RunOutcomeReviewDialog'
 import { RunRecoveryCard } from './run-recovery/RunRecoveryCard'
 import { useTranscriptWindow } from './search/useTranscriptWindow'
+import { useConversationScroll } from './search/useConversationScroll'
+import { scrollTranscriptTarget } from './search/scroll-transcript-target'
 import { ReadableExportDialog } from './reading/ReadableExportDialog'
 import { requestConversationSearch } from './search/search-events'
 import { useConversationSearchTarget } from './search/useConversationSearchTarget'
-import { SentUserMessage, EarlierMessageRevisions } from './SentUserMessage'
+import { EarlierMessageRevisions } from './SentUserMessage'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { threadPendingApproval } from '../lib/thread-approval'
 import { useStore } from '../lib/store'
 import { api } from '../lib/ipc'
 import clsx from 'clsx'
 import { Composer } from './Composer'
-import { AssistantMessage, CueBubble, ErrorBlock, ToolCard, VisualizationCard } from './timeline'
+import { CueBubble, ErrorBlock, ToolCard, VisualizationCard } from './timeline'
 import { ThreadPanel } from './ThreadPanel'
+import { TaskContextBar } from './thread-panel/TaskContextBar'
+import { ConversationTools } from './thread-panel/ConversationTools'
 import { RunPlanCard } from './thread-panel/RunPlanCard'
 import { ApprovalCard } from './ApprovalCard'
 import { Icon } from '../lib/icons'
@@ -25,9 +28,10 @@ import { buildTurnRows, type TurnSummary } from '../lib/turn-blocks'
 import type { GitStatus, TimelineItem } from '../lib/types'
 import { isPinned, parseAnnotations, pinMessage, serializeAnnotations, unpinMessage } from '../lib/thread-annotations'
 import { effectiveThreadCwd, effectiveThreadWorkspace } from '../lib/thread-workspace'
+import { changeTotals, threadChangeTurns } from '../lib/thread-changes'
 import { TurnWorkRow } from './turn/TurnWorkRow'
 import { EditedFilesCard } from './turn/EditedFilesCard'
-import { TurnStatsLine } from './turn/TurnStatsLine'
+import { TranscriptMessage } from './turn/TranscriptMessage'
 import { TurnOutcome } from './turn/TurnOutcome'
 import { QuestionCard } from './user-question/QuestionCard'
 import { BotChatContext } from './bots/BotChatContext'
@@ -57,12 +61,18 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
   const [reviewOpen, setReviewOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const endRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
   const [revealedTurns, setRevealedTurns] = useState<Record<string, number>>({})
   const showRecordedActivity = (key: string) => {
+    followRef.current = false
     setRevealedTurns((previous) => ({ ...previous, [key]: (previous[key] ?? 0) + 1 }))
-    requestAnimationFrame(() => document.getElementById(`turn-work-${key}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }))
+    requestAnimationFrame(() => {
+      const container = scrollRef.current
+      const target = document.getElementById(`turn-work-${key}`)
+      if (container?.dataset.conversationId === threadId && target && container.contains(target)) {
+        scrollTranscriptTarget(container, target, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth')
+      }
+    })
   }
 
   const workspace = thread ? effectiveThreadWorkspace(thread, project) : null
@@ -70,6 +80,9 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
   const isTask = thread?.kind === 'task' && !!workspaceCwd
   const [git, setGit] = useState<GitStatus | null>(null)
   const [gitTick, setGitTick] = useState(0)
+  const changes = useMemo(() => thread && isTask
+    ? changeTotals(threadChangeTurns(thread, git, workspaceCwd))
+    : { files: 0, additions: 0, deletions: 0 }, [thread?.timeline, isTask, git, workspaceCwd])
   const refreshGit = () => setGitTick((n) => n + 1)
   // ⌘J and dock requests (command palette, run links) open the work pane's tabs.
   useEffect(() => {
@@ -110,14 +123,8 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
     return threadPendingApproval(threadId, timeline, approvals ?? [], durableJobs)
   }, [threadId, approvals, timeline, durableJobs])
 
-  // Stick to bottom while streaming unless the user scrolled up.
   const signature = timeline.map((i) => i.id + (i.text?.length ?? 0) + (i.output?.length ?? 0) + (i.state ?? '')).join('|')
-  useEffect(() => {
-    if (followRef.current) endRef.current?.scrollIntoView({ block: 'end' })
-  }, [signature])
-  useEffect(() => {
-    if (pendingApproval) endRef.current?.scrollIntoView({ block: 'end' })
-  }, [pendingApproval?.callId])
+  const conversationScroll = useConversationScroll({ threadId, revision: `${signature}|${pendingApproval?.callId ?? ''}`, scrollRef, followRef })
 
   // Pull working-tree git state for the panel + the files-changed card.
   useEffect(() => {
@@ -135,25 +142,12 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
     prevBusyRef.current = busy
   }, [busy, isTask])
 
-  const onScroll = () => {
-    const el = scrollRef.current
-    if (!el) return
-    followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120
-  }
-
   if (!thread) return null
   const renderTimelineItem = (item: TimelineItem, turn: TurnSummary) => {
-    if (item.kind === 'user') return <SentUserMessage thread={thread} item={item} busy={busy} onQuote={!thread.orchestratorHostId ? selection => { void requestMessageQuote({ threadId: thread.id, itemId: item.id, ...(selection ? { selection } : {}) }) } : undefined} />
+    if (item.kind === 'user' || item.kind === 'assistant') return <TranscriptMessage threadId={thread.id}
+      orchestratorHostId={thread.orchestratorHostId} item={item} busy={busy}
+      active={st === 'streaming' && item.id === lastAssistantId} showStats={item.id === turn.answerId && !turn.running} />
     if (item.kind === 'cue') return <CueBubble text={item.text || ''} state={item.state} />
-    if (item.kind === 'assistant') return (
-      <AssistantMessage
-        text={item.text || ''}
-        onQuote={!thread.orchestratorHostId ? selection => { void requestMessageQuote({ threadId: thread.id, itemId: item.id, ...(selection ? { selection } : {}) }) } : undefined}
-        meta={item.meta}
-        active={st === 'streaming' && item.id === lastAssistantId}
-        footer={item.stats && item.id === turn.answerId && !turn.running ? <TurnStatsLine stats={item.stats} /> : undefined}
-      />
-    )
     if (item.kind === 'tool' && item.tool === 'ask_user' && item.question) return <QuestionCard item={item} />
     if (item.kind === 'tool') return <ToolCard item={item} />
     if (item.kind === 'visualization') return <VisualizationCard item={item} />
@@ -181,8 +175,9 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
         {rendered}
         <button
           onClick={toggle}
+          aria-label={pinned ? tx("Unpin this message") : tx("Pin this message")}
           title={pinned ? tx("Unpin this message") : tx("Pin this message")}
-          className={clsx('absolute -left-6 top-1 flex h-5 w-5 items-center justify-center rounded-md transition-opacity', pinned ? 'text-accent opacity-100' : 'text-ink-4 opacity-0 hover:text-ink group-hover/pin:opacity-100')}
+          className={clsx('absolute -left-6 top-1 flex h-5 w-5 items-center justify-center rounded-md transition-opacity focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-accent', pinned ? 'text-accent opacity-100' : 'text-ink-4 opacity-0 hover:text-ink group-hover/pin:opacity-100')}
         >
           <Icon name={pinned ? 'starFilled' : 'star'} size={13} />
         </button>
@@ -193,18 +188,25 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
   return (
     <div className="relative flex h-full">
       <div className="flex h-full min-w-0 flex-1 flex-col">
+        {isTask && <TaskContextBar cwd={workspaceCwd} projectName={project?.name}
+          remote={workspace?.kind === 'ssh' || !!thread.orchestratorHostId || api.platform === 'web-remote'}
+          branch={git?.branch ?? null} gitAvailable={!!git} changes={changes}
+          onWorkspace={() => useStore.getState().openWorkPane('details')}
+          onReview={() => useStore.getState().openWorkPane('changes')}
+          onTerminal={() => useStore.getState().openWorkPane('terminal')} />}
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-line/50 px-4 py-1.5">
           <CollectionPicker key={`collections-${threadId}`} threadId={threadId} sourceIds={thread.documentSourceIds} disabled={busy || thread.status === 'running' || !!thread.bot || !!thread.phoneLocalOnly || !!thread.googleLocalOnly || !!thread.orchestratorHostId || workspace?.kind === 'ssh' || api.platform === 'web-remote' || !!selectedProvider && isExternalProvider(selectedProvider)} onChange={ids => patchThread(threadId, { documentSourceIds: ids })} />
           <ConversationOutline key={threadId} threadId={threadId} timeline={timeline} annotations={annotations} activeAssistantId={st === 'streaming' ? lastAssistantId : undefined} />
           <button type="button" className="rounded-lg px-2 py-1 text-[12px] text-ink-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-accent" onClick={() => requestConversationSearch({ scope: 'thread', threadId })}>{tx("Find in chat")}</button>
-          <button type="button" disabled={busy || !!thread.bot || !!thread.phoneLocalOnly || !!thread.googleLocalOnly || !!thread.orchestratorHostId || api.platform === 'web-remote'} className="rounded-lg px-2 py-1 text-[12px] text-ink-2 hover:bg-surface disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-accent" onClick={() => setHelpersOpen(true)}>{tx("Local helpers")}</button>
-          <button type="button" disabled={!!thread.orchestratorHostId || api.platform === 'web-remote'} className="rounded-lg px-2 py-1 text-[12px] text-ink-2 hover:bg-surface disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-accent" onClick={() => setExportOpen(true)}>{tx("Export readable text")}</button>
+          <ConversationTools helpersDisabled={!!busy || !!thread.bot || !!thread.phoneLocalOnly || !!thread.googleLocalOnly || !!thread.orchestratorHostId || api.platform === 'web-remote'}
+            exportDisabled={!!thread.orchestratorHostId || api.platform === 'web-remote'}
+            onHelpers={() => setHelpersOpen(true)} onExport={() => setExportOpen(true)} />
         </div>
         {helpersOpen && <ModelHelperDialog key={threadId} thread={thread} onClose={() => setHelpersOpen(false)} />}
         {reviewOpen && <RunOutcomeReviewDialog key={threadId} thread={thread} onClose={() => setReviewOpen(false)} />}
         {exportOpen && <ReadableExportDialog key={threadId} threadId={threadId} messages={timeline.filter(item => item.kind === 'user' || item.kind === 'assistant').map((item, index) => ({ id: item.id, label: `${index + 1}. ${item.kind === 'user' ? 'You' : 'Assistant'}: ${(item.text || '').slice(0, 90)}` }))} api={api} onClose={() => setExportOpen(false)} />}
         {searchTarget.notice && <div role="status" className="flex items-center gap-3 border-b border-line bg-card px-6 py-2 text-[12px] text-ink-2"><span className="flex-1">{searchTarget.notice}</span><button type="button" className="rounded px-2 py-1 text-accent focus-visible:outline-2 focus-visible:outline-accent" onClick={searchTarget.clear}>{tx("Clear match")}</button></div>}
-        <div ref={scrollRef} onScroll={onScroll} className="scroll-thin min-h-0 flex-1 overflow-y-auto select-text">
+        <div ref={scrollRef} data-conversation-id={threadId} onScroll={conversationScroll.onScroll} className="scroll-thin min-h-0 flex-1 overflow-y-auto select-text">
           <div className="mx-auto w-full max-w-3xl space-y-4 px-6 pb-8 pt-12">
             {thread.bot && <BotChatContext thread={thread} />}
             <EarlierMessageRevisions thread={thread} />
@@ -216,25 +218,31 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
               ? [<div key={`gap-${segment.start}`} className="flex flex-wrap items-center justify-center gap-3 rounded-lg border border-dashed border-line p-3 text-[12px] text-ink-2"><span>{segment.end - segment.start} {tx("earlier transcript rows hidden")}</span><button type="button" className="rounded-lg px-3 py-1 text-accent focus-visible:outline-2 focus-visible:outline-accent" onClick={() => transcriptWindow.load(Math.max(segment.start, segment.end - transcriptWindow.pageSize), segment.end)}>{tx("Load ")}{Math.min(transcriptWindow.pageSize, segment.end - segment.start)} {tx("earlier rows")}</button><button type="button" className="rounded-lg px-3 py-1 text-ink-2 focus-visible:outline-2 focus-visible:outline-accent" onClick={() => transcriptWindow.load(segment.start, segment.end)}>{tx("Show this entire gap")}</button></div>]
               : turnRows.slice(segment.start, segment.end).map((row) => {
               if (row.type === 'work') return (
-                <div key={`work-${row.turn.key}`} id={`turn-work-${row.turn.key}`}>
+                <div key={`work-${row.turn.key}`} id={`turn-work-${row.turn.key}`} data-transcript-row={`work-${row.turn.key}`}>
                   <TurnWorkRow turn={row.turn} status={row.turn.running ? st : undefined} phaseLabel={row.turn.running ? loadingPhase : undefined} defaultOpen={!collapseToolRunsDefault} reveal={revealedTurns[row.turn.key] ?? 0} searchItemId={searchTarget.itemId} />
                   {!row.turn.answerId && <TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} />}
                 </div>
               )
               if (row.type === 'edits') return (
-                <div key={`edits-${row.turn.key}`}>
+                <div key={`edits-${row.turn.key}`} data-transcript-row={`edits-${row.turn.key}`}>
                   <EditedFilesCard thread={thread} turn={row.turn} canUndo={isTask && !busy && checkpointTurns.has(row.turn.index)} onChanged={refreshGit} />
                 </div>
               )
-              return <div key={row.item.id} id={`ti-${row.item.id}`} className={searchTarget.itemId === row.item.id ? 'rounded-lg outline outline-2 outline-accent outline-offset-4' : undefined}>{renderPinnable(row.item, row.turn)}{row.item.id === row.turn.answerId && <div className="mt-3"><TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} /></div>}</div>
+              return <div key={row.item.id} id={`ti-${row.item.id}`} data-transcript-row={`item-${row.item.id}`} className={searchTarget.itemId === row.item.id ? 'rounded-lg outline outline-2 outline-accent outline-offset-4' : undefined}>{renderPinnable(row.item, row.turn)}{row.item.id === row.turn.answerId && <div className="mt-3"><TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} /></div>}</div>
             }))}
 
             <RunRecoveryCard recovery={thread.runRecovery} onEditRequest={() => scrollRef.current?.parentElement?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message composer"]')?.focus()} onChooseModel={() => useStore.getState().setView({ name: 'models' })} onReviewEffects={() => { const last = [...turnRows].reverse().find(row => row.type === 'work'); if (last) showRecordedActivity(last.turn.key); setReviewOpen(true) }} />
             <RunPlanCard thread={thread} busy={!!busy} />
 
-            <div ref={endRef} className="h-px" />
+            <div className="h-px" />
           </div>
         </div>
+
+        {!conversationScroll.following && <div className="pointer-events-none relative z-10 h-0">
+          <button type="button" onClick={conversationScroll.jumpToLatest} className="pointer-events-auto absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border border-line-strong bg-card px-3 py-1.5 text-[12px] font-medium text-ink-2 shadow-card hover:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+            <Icon name="arrowDown" size={13} />{tx('Jump to latest')}
+          </button>
+        </div>}
 
         {/* Docked composer — no scroll scrim: a gradient fading to the opaque
             --canvas paints a visible band over the glass theme's translucent

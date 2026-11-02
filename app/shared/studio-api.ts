@@ -1,3 +1,7 @@
+import type { GmailInboxApi } from './gmail-inbox'
+import type { MailConnectionsApi } from './mail-connections'
+import type { MicrosoftMailSignIn, MicrosoftMailPoll } from './microsoft-mail'
+import type { EngineRuntimeSnapshot } from '../electron/agent/types/engine-runtime'
 import type { ClusterWorkspaceApi } from './cluster-workspace'
 import type { InputHistoryApi } from './input-history'
 import type { MessageQuoteApi } from './message-quotes'
@@ -16,7 +20,7 @@ import type { ProviderGenerationProbe } from '../electron/agent/provider-generat
 import type { ThreadMemoryPolicy } from '../electron/agent/types'
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, Attachment, CueRunPayload, CueRunResult, Settings, StartRunPayload, Thread, RendererThreadPatch, Project, Room, RoomStreamEvent, Ticket, TicketRemoteLifecycleCommand, TicketWorkOptions, Automation, Job, GitCommitResult, GitDiffFile, GitHygieneFinding, GitHygieneReport, GitHygieneSanitizeResult, GitRepositoryState, GitStatus, TokenUsageSnapshot, ContextPressureSnapshot, ModelRouterSnapshot, AssistantControlSnapshot, ConnectorEvent, ConnectorInteractionInput, ChannelApprovalRequest, ChannelApprovalResult, AppUpdateStatus, Provider, OmlxDiscovery, ProviderDiscovery, ProviderDiscoveryKind, ResolvedInstructionGraph, ProjectMemoryCandidate, ProjectMemoryCandidateDiff, ProjectMemoryEntry, WebhookEndpoint, WebhookSnapshot, CreateMissionInput, CreatePrLoopInput, CreatePrLoopResult, Mission, MissionCheckpoint, MissionInspectionSnapshot, MissionJournalEvent, MissionPendingApproval, MissionRuntimeSnapshot, MissionStatus, EmailConnectorSettings, EmailDraftInput, EmailListOptions, EmailMessage, EmailReadResult, EmailResolveInput, EmailSourceConfig, EmailSummaryResult, EmailSyncResult, EmailThreadResult, Skill, ProjectSkillView, SkillSuggestionDiff, Artifact, ArtifactPreview, Command, SkillSuggestion, McpServerConfig, McpSnapshot, McpToolCallResult, BotControlPollResult, ControllerSnapshot, ControllerStatus, RemoteControlPairingInfo, RemoteControlStatus, RemoteConnectionTestResult, RemoteDirectoryListResult, RemoteOrchestratorSnapshotResult, PersistenceFailure, SecurityControlSnapshot, SecurityPurgeResult, SshHost, SshConnectionState, SshSecretPrompt, SshTrustPrompt, WorkspaceLocation, CliDefinition, CliSession, CliToolStatus, ImportableSession, ImportSessionSource, SpineAggregate, ReadSinceResult, CommandReceipt, TurnCheckpoint, PersistedProviderStatus } from '../electron/agent/types'
 import type { BrowserConnectorSettings, BrowserItem, BrowserListOptions, BrowserReadResult, BrowserSnapshotInput, BrowserSourceConfig, BrowserSummaryResult, BrowserSyncResult, CalendarConnectorSettings, CalendarEvent, CalendarListOptions, CalendarMutationInput, CalendarReadResult, CalendarSourceConfig, CalendarSummaryResult, CalendarSyncResult, DocumentConnectorSettings, DocumentItem, DocumentListOptions, DocumentReadResult, DocumentSourceConfig, DocumentSummaryResult, DocumentSyncResult, IMessageItem, IMessageReadResult, IMessageSyncResult, WhatsAppBridgeConnectorSettings, WhatsAppBridgeSource, DiscordConnectorSettings, DiscordChannel, DiscordSource, MattermostConnectorSettings, MattermostChannel, MattermostSource, MatrixConnectorSettings, MatrixRoom, MatrixSource, GoogleChatConnectorSettings, GoogleChatSpace, GoogleChatSource, SlackConnectorSettings, SlackListOptions, SlackMessage, SlackReadResult, SlackSourceConfig, SlackSummaryResult, SlackSyncResult } from '../electron/agent/types'
-// Phase 6/7 (incident mode + run export) — additive import line alongside the Codex lane.
+
 import type { Incident, CreateIncidentInput, IncidentEventKind, IncidentMitigation, ExportOptions, ExportResult, ExportSaveResult, ExportImportResult } from '../electron/agent/types'
 import type { Readiness, CliLoginResult } from '../electron/agent/types'
 import type { LoopRecord, LoopStartInput } from '../electron/agent/types'
@@ -36,7 +40,10 @@ import type { ComposerDraftScope, ComposerDraftSnapshot, ComposerDraftWrite, Com
 import type { ThreadMessageEditInput, ThreadMessageEditPreparation } from './thread-message-edit'
 import type { AttachmentTextCapability, AttachmentTextRequest, AttachmentTextResult } from '../electron/agent/types'
 
-export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryApi, MessageQuoteApi, GoogleWorkspaceApi, ModelBenchmarkApi, ConversationSearchApi, DocumentLibraryApi, ReadableExportApi, WorkspaceBackupApi, RunRecoveryApi, ModelQualificationApi, ModelHelperApi {
+export interface TensorFoldStudioApi extends GmailInboxApi, MailConnectionsApi, ClusterWorkspaceApi, InputHistoryApi, MessageQuoteApi, GoogleWorkspaceApi, ModelBenchmarkApi, ConversationSearchApi, DocumentLibraryApi, ReadableExportApi, WorkspaceBackupApi, RunRecoveryApi, ModelQualificationApi, ModelHelperApi {
+  microsoftMailBegin(clientId: string, allowSend: boolean): Promise<MicrosoftMailSignIn>
+  microsoftMailPoll(id: string): Promise<MicrosoftMailPoll>
+  microsoftMailCancel(id: string): Promise<void>
   verifyTelegram(): Promise<TelegramVerificationResult>
   configureTelegramRemote(input: TelegramRemoteConfigInput): Promise<TelegramRemotePublicStatus>
   listTelegramRemoteTargets(): Promise<TelegramRemotePublicStatus>
@@ -163,8 +170,7 @@ export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryAp
   getArchives(): Promise<ArchiveSnapshot>
   archiveItem(kind: ArchiveKind, id: string): Promise<ArchiveSnapshot>
   restoreItem(kind: ArchiveKind, id: string): Promise<ArchiveSnapshot>
-  // commandId (optional) makes the create exactly-once through the event spine: a retried
-  // call with the same id returns the SAME thread instead of creating a duplicate.
+
   createThread(cwd: string, kind?: 'task' | 'chat', projectId?: string | null, commandId?: string, incognito?: boolean): Promise<Thread>
   setThreadProject(id: string, projectId: string | null): Promise<void>
   deleteThread(id: string): Promise<void>
@@ -444,11 +450,11 @@ export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryAp
   approveWebhook(id: string): Promise<WebhookSnapshot>
   deleteWebhook(id: string): Promise<WebhookSnapshot>
   testWebhook(id: string): Promise<WebhookSnapshot>
-  // Phase 7 — run export & sharing
+
   buildExport(threadId: string, opts?: ExportOptions): Promise<ExportResult>
   saveExport(threadId: string, opts?: ExportOptions): Promise<ExportSaveResult>
   importBundle(): Promise<ExportImportResult>
-  // Phase 6 — production incident mode
+
   getIncidents(): Promise<Incident[]>
   createIncident(input: CreateIncidentInput): Promise<Incident>
   updateIncident(id: string, patch: Partial<Incident>): Promise<Incident>
@@ -477,9 +483,12 @@ export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryAp
   onTerminalStatus(cb: (p: { sessionId: string; status: CliSession['status']; orchestratorHostId?: string | null }) => void): () => void
   onTerminalSessions(cb: (p: { projectId: string; sessions: CliSession[]; orchestratorHostId?: string | null }) => void): () => void
 
-  // Built-in TensorFold engine: status, installed models, Hugging Face search and downloads.
-  // A native run notification was clicked (desktop only).
   onOpenThread?(cb: (threadId: string) => void): () => void
+  engineRuntimeStatus(): Promise<EngineRuntimeSnapshot>
+  engineRuntimeCheck(): Promise<EngineRuntimeSnapshot>
+  engineRuntimeInstall(id: string): Promise<EngineRuntimeSnapshot>
+  engineRuntimeUse(id: string | null): Promise<EngineRuntimeSnapshot>
+  engineRuntimeCancel(): Promise<boolean>
   engineSnapshot(): Promise<EngineSnapshot>
   // Contains a launch credential: request only in the user's explicit copy-connection action.
   engineConnection(): Promise<EngineConnection | null>

@@ -23,6 +23,7 @@ import { MoreSection } from './sidebar/MoreSection'
 import { EngineChip } from './sidebar/EngineChip'
 import { UpdatePrompt } from './sidebar/UpdatePrompt'
 import { useBranches } from './sidebar/useBranches'
+import { WorkActivityMenu } from './work-activity/WorkActivityMenu'
 import type { ThreadRowProps, RoomRowProps, TerminalRowProps } from './sidebar/types'
 
 const COLLAPSED_KEY = 'vontra.collapsedProjects'
@@ -239,6 +240,7 @@ export function Sidebar() {
         <NavRow icon="pencil" label={text('common.newTask')} hint={"⌘N"} active={view.name === 'home'} onClick={s.newTask} />
         <NavRow icon="message" label={text('common.newChat')} hint={tx("⇧⌘N")} onClick={() => void s.newChat(null)} />
         <NavRow icon="search" label={text('common.search')} hint={tx("⇧⌘F")} onClick={() => requestConversationSearch()} />
+        <WorkActivityMenu variant="sidebar" />
         <NavRow icon="spark" label={tx("Bots")} active={view.name === 'bots'} onClick={() => s.setView({ name: 'bots' })} />
         <label className="no-drag flex h-8 items-center gap-2 rounded-[10px] px-2.5 text-ink-3 transition-colors focus-within:bg-surface hover:bg-surface">
           <Icon name="search" size={16} className="shrink-0" />

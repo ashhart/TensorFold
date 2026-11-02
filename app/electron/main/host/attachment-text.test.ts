@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { ChildProcess, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { PassThrough } from 'node:stream'
 import {
   ATTACHMENT_TEXT_MAX_BYTES,
   createAttachmentTextService,
@@ -60,12 +61,70 @@ let bytes = 0; process.stdin.on('data', chunk => bytes += chunk.length); process
   service.shutdown()
   assert.equal((await service.extract({ name: 'x', mime: 'image/png', bytes: [1, 2] })).ok, false)
 
+  type ControlledChild = Omit<ChildProcessWithoutNullStreams, 'exitCode' | 'signalCode'> & {
+    exitCode: number | null
+    signalCode: NodeJS.Signals | null
+  }
+  const controlled: Array<{ child: ChildProcessWithoutNullStreams; signals: Array<NodeJS.Signals | number> }> = []
+  const controlledOutput = (chunks: Buffer[]): ChildProcessWithoutNullStreams => {
+    const child = new ChildProcess() as ControlledChild
+    const stdout = new PassThrough()
+    child.stdin = new PassThrough()
+    child.stdout = stdout
+    child.stderr = new PassThrough()
+    const signals: Array<NodeJS.Signals | number> = []
+    let closed = false
+    const close = (signal: NodeJS.Signals | null = null) => {
+      if (closed) return
+      closed = true
+      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy()
+      child.exitCode = signal ? null : 0
+      child.signalCode = signal
+      child.emit('close', child.exitCode, signal)
+    }
+    child.kill = (signal = 'SIGTERM') => {
+      signals.push(signal)
+      close(typeof signal === 'number' ? null : signal)
+      return true
+    }
+    controlled.push({ child, signals })
+    queueMicrotask(() => {
+      for (const chunk of chunks) {
+        if (closed) return
+        stdout.write(chunk)
+      }
+      close()
+    })
+    return child
+  }
+  const capability = Buffer.from(JSON.stringify({ available: true, method: 'apple-vision', maxBytes: ATTACHMENT_TEXT_MAX_BYTES, maxPages: 8 }))
+  const hung: Array<{ child: ChildProcessWithoutNullStreams; closed: Promise<NodeJS.Signals | null> }> = []
   for (const mode of ['hang', 'overflow', 'bad-json']) {
-    const service = createAttachmentTextService({ helperPath: () => process.execPath, platform: 'darwin', darwinRelease: '25.0.0', timeoutMs: 200, spawn: (_file, args, options) => spawn(process.execPath, [fixture, ...args, mode], options) })
+    const service = createAttachmentTextService({ helperPath: () => process.execPath, platform: 'darwin', darwinRelease: '25.0.0', timeoutMs: 200, spawn: (_file, args, options) => {
+      if (args.includes('--attachment-text-capability')) return controlledOutput([capability])
+      if (mode === 'hang') {
+        const child = spawn(process.execPath, [fixture, ...args, mode], options)
+        const closed = new Promise<NodeJS.Signals | null>(resolve => child.once('close', (_code, signal) => resolve(signal)))
+        hung.push({ child, closed })
+        return child
+      }
+      return controlledOutput(mode === 'overflow'
+        ? [Buffer.alloc(512 * 1024, 120), Buffer.alloc(512 * 1024 + 1, 120)]
+        : [Buffer.from('not JSON\n')])
+    } })
     const outcome = await service.extract({ name: 'x.png', mime: 'image/png', bytes: [1, 2] })
     assert.equal(outcome.ok, false)
     assert.match(outcome.error ?? '', mode === 'hang' ? /timed out/ : mode === 'overflow' ? /output safety/ : /no usable result/)
     service.shutdown()
+  }
+  assert.equal(hung.length, 1)
+  assert.equal(await hung[0].closed, 'SIGKILL')
+  assert.equal(hung[0].child.killed, true)
+  for (const stream of [hung[0].child.stdin, hung[0].child.stdout, hung[0].child.stderr]) assert.equal(stream.destroyed, true)
+  assert.equal(controlled.length, 5)
+  assert.deepEqual(controlled.flatMap(item => item.signals), ['SIGKILL', 'SIGKILL'])
+  for (const item of controlled) {
+    for (const stream of [item.child.stdin, item.child.stdout, item.child.stderr]) assert.equal(stream.destroyed, true)
   }
 } finally { await rm(root, { recursive: true, force: true }) }
 console.log('attachment text service validates selected bytes, review output, individual failures, bounded workers, timeout and shutdown')

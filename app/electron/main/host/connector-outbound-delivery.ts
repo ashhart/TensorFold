@@ -1,3 +1,5 @@
+import { isIMessageGroupConversation } from '../../agent/imessage-connector'
+import { blueBubblesChats, blueBubblesIdentity } from '../../agent/bluebubbles-connector'
 import { createHash, randomUUID } from 'node:crypto'
 import { createSerialTaskQueue } from '../../agent/serial-task-queue'
 import { sendViaChannel, resolveAdapter, type ChannelAdapter } from '../../agent/channel-adapter'
@@ -6,8 +8,6 @@ import { saveConnectorEvents } from '../../store'
 import { store } from '../state'
 import type { ConnectorEvent, ConnectorOutboundSnapshot } from '../../agent/types'
 
-// All app/channel decisions for the same event share this queue. A transport result is
-// not permission to retry: sending/uncertain records permanently consume this attempt.
 export const connectorDecisionQueue = createSerialTaskQueue()
 const PERSONAL_ACTIONS = new Set(['message_send_requested', 'message_reply_requested'])
 export function isOutboundSendRequest(event: ConnectorEvent): boolean {
@@ -21,8 +21,7 @@ function accountRevision(connectorId: string, accountId: string | null): string 
   if (connectorId === 'whatsapp') {
     const source = settings.whatsapp?.sources.find(item => item.id === accountId)
     if (!source || !source.enabled || !source.paired) throw new Error('Choose an enabled linked WhatsApp account before sending.')
-    // Transient sync/error status is deliberately excluded; identity and consent scope
-    // remain bound while a healthy socket reconnects.
+
     identity = { id: source.id, enabled: source.enabled, paired: source.paired, phoneNumber: source.phoneNumber, allowedChatJids: source.allowedChatJids, allowSelfChat: source.allowSelfChat, credentialRotatedAt: source.credentialRotatedAt }
   } else if (connectorId === 'telegram') {
     const source = settings.botControl?.telegram
@@ -32,10 +31,10 @@ function accountRevision(connectorId: string, accountId: string | null): string 
   } else if (connectorId === 'email') {
     const source = accountId ? settings.email?.sources.find(item => item.id === accountId) : null
     if (accountId && (!source || !source.enabled)) throw new Error('Choose an enabled email account before sending.')
-    identity = source ? { id: source.id, kind: source.kind, host: source.host, port: source.port, user: source.user, password: source.password, fromAddress: source.fromAddress, enabled: source.enabled } : { kind: 'local_outbox' }
+    identity = source ? { id: source.id, kind: source.kind, microsoftRevision: source.microsoftRevision, host: source.host, port: source.port, user: source.user, password: source.password, fromAddress: source.fromAddress, enabled: source.enabled } : { kind: 'local_outbox' }
   } else {
     if (!settings.imessage?.enabled) throw new Error('Enable iMessage before reviewing this message.')
-    identity = { enabled: settings.imessage.enabled, allowedChatIds: settings.imessage.allowedChatIds }
+    identity = { enabled: settings.imessage.enabled, connection: blueBubblesIdentity(settings.imessage) }
   }
   return createHash('sha256').update(JSON.stringify(identity)).digest('hex')
 }
@@ -75,11 +74,15 @@ export function outboundSnapshot(event: ConnectorEvent): ConnectorOutboundSnapsh
     const chats = String(store.settings.botControl?.telegram?.allowedChatIds ?? '').split(/[\s,;]+/).filter(Boolean)
     if (!chats.includes(recipient)) throw new Error('Choose a Telegram chat in the current connection scope before sending.')
   } else {
-    if (accountId || !/^(?:\+?\d{5,20}|[^\s@<>;,]+@[^\s@<>;,]+\.[^\s@<>;,]+)$/.test(recipient)) throw new Error('Choose an exact iMessage phone number or email address before sending.')
-    const grant = store.settings.imessage?.allowedChatIds
-    if (typeof grant !== 'string') throw new Error('Repair the saved iMessage conversation scope before sending.')
-    const chats = grant.split(/[\s,;]+/).filter(Boolean)
-    if (chats.length && !chats.includes(recipient)) throw new Error('Choose an iMessage contact in the current connection scope before sending.')
+    if (store.settings.imessage.transport === 'bluebubbles') {
+      if (accountId !== `bb-${blueBubblesIdentity(store.settings.imessage)}` || !blueBubblesChats(store.settings.imessage).includes(recipient)) throw new Error('Choose a BlueBubbles conversation in the current connection scope before sending.')
+    } else {
+      if (accountId || (!isIMessageGroupConversation(recipient) && !/^(?:\+?\d{5,20}|[^\s@<>;,]+@[^\s@<>;,]+\.[^\s@<>;,]+)$/.test(recipient))) throw new Error('Choose an exact iMessage contact or existing group before sending.')
+      const grant = store.settings.imessage?.allowedChatIds
+      if (typeof grant !== 'string') throw new Error('Repair the saved iMessage conversation scope before sending.')
+      const chats = grant.split(/[\s,;]+/).filter(Boolean)
+      if (chats.length && !chats.includes(recipient)) throw new Error('Choose an iMessage contact in the current connection scope before sending.')
+    }
   }
   const threadKey = accountId ? `${connectorId}:${accountId}:${recipient}` : `${connectorId}:${recipient}`
   return { version: 1, connectorId, accountId, accountRevision: accountRevision(connectorId, accountId), recipient, body, threadKey }
@@ -89,7 +92,7 @@ export function outboundReviewDigest(event: ConnectorEvent, outbound = outboundS
   return createHash('sha256').update(JSON.stringify({ eventId: event.id, action: event.action, outbound })).digest('hex')
 }
 
-/** Called on host ingest, never accepts renderer-supplied approval snapshots. */
+// Called on host ingest, never accepts renderer-supplied approval snapshots.
 export function sealConnectorOutboundEvent(event: ConnectorEvent): ConnectorEvent {
   if (!isOutboundSendRequest(event)) return event
   try {
@@ -103,12 +106,12 @@ export function sealConnectorOutboundEvent(event: ConnectorEvent): ConnectorEven
 export interface ReviewedDeliveryDeps {
   adapters: ChannelAdapter[]
   sendEmail(event: ConnectorEvent): Promise<NonNullable<ConnectorEvent['delivery']>>
-  /** Durable protected write; injectable only for isolated regression tests. */
+  // Durable protected write; injectable only for isolated regression tests.
   persist?: (events: ConnectorEvent[]) => Promise<void>
   now?: () => number
 }
 
-/** One durable one-shot attempt for precisely the snapshot the owner reviewed. */
+// One durable one-shot attempt for precisely the snapshot the owner reviewed.
 export function createReviewedConnectorDelivery(deps: ReviewedDeliveryDeps) {
   const persist = deps.persist ?? saveConnectorEvents
   const now = deps.now ?? Date.now
@@ -116,8 +119,7 @@ export function createReviewedConnectorDelivery(deps: ReviewedDeliveryDeps) {
     const current = store.connectorEvents.findIndex(item => item.id === event.id)
     if (current < 0) store.connectorEvents = [event, ...store.connectorEvents].slice(0, 500)
     else store.connectorEvents = store.connectorEvents.map(item => item.id === event.id ? event : item)
-    // writeProtectedJson joins its per-file queue immediately but encrypts later; detach
-    // now so a later UI edit cannot change the bytes that precede an external send.
+
     await persist(structuredClone(store.connectorEvents))
   }
   async function approve(event: ConnectorEvent, reviewDigest: unknown, actor: string): Promise<ConnectorEvent> {
@@ -131,15 +133,14 @@ export function createReviewedConnectorDelivery(deps: ReviewedDeliveryDeps) {
     const approved: ConnectorEvent = { ...structuredClone(event), outbound: snapshot, requiresApproval: false, approvalStatus: 'approved', resolvedAt: now(), resolvedBy: actor,
       delivery: { transport, status: 'sending', attemptId: randomUUID(), reviewDigest: digest, attemptedAt: now(), deliveredAt: null, error: null } }
     try { await durable(approved) } catch (error) {
-      // No adapter was called. Restore the pending object; saving the exact review may
-      // be retried only after storage recovers.
+
       const idx = store.connectorEvents.findIndex(item => item.id === event.id)
       if (idx >= 0) store.connectorEvents[idx] = event
       throw error
     }
     const live = store.connectorEvents.find(item => item.id === event.id)
     let unchanged = false
-    try { unchanged = live === approved && outboundReviewDigest(live) === digest } catch { /* revoked account/scope: nothing sent */ }
+    try { unchanged = live === approved && outboundReviewDigest(live) === digest } catch {  }
     if (!unchanged) {
       approved.delivery = { ...approved.delivery!, status: 'failed', error: 'The draft changed before dispatch. Nothing was sent.' }
       await durable(approved)
@@ -150,8 +151,7 @@ export function createReviewedConnectorDelivery(deps: ReviewedDeliveryDeps) {
       if (snapshot.connectorId === 'email') {
         result = await deps.sendEmail(approved)
       } else {
-        // No draft animation/fallback or automatic retry for approved actions. Partial
-        // multi-message sends and timeouts are uncertain, never safe to replay.
+
         const sent = await sendViaChannel(deps.adapters, snapshot.threadKey, { text: snapshot.body, inReplyTo: snapshot.inReplyTo }, { preserveText: true })
         result = { transport, status: sent.ok ? 'delivered' : 'uncertain', sentId: sent.sentId ?? null, path: snapshot.threadKey, deliveredAt: sent.ok ? now() : null, error: sent.ok ? null : (sent.error ?? 'Delivery could not be confirmed; check the conversation before creating another message.') }
       }
@@ -159,15 +159,14 @@ export function createReviewedConnectorDelivery(deps: ReviewedDeliveryDeps) {
       result = { transport, status: 'uncertain', deliveredAt: null, error: 'Delivery could not be confirmed; check the destination before creating another message.' }
     }
     const settled = { ...approved, delivery: { ...approved.delivery!, ...result } }
-    // If this final save fails the durable sending marker remains. On restart it is
-    // shown as uncertain and cannot be replayed by an approval click.
+
     await durable(settled)
     return settled
   }
   return { approve, durable }
 }
 
-/** Run once after loading persisted events, before admitting new connector work. */
+// Run once after loading persisted events, before admitting new connector work.
 export async function recoverInterruptedConnectorDeliveries(): Promise<void> {
   if (!store.connectorEvents.some(event => event.delivery?.status === 'sending')) return
   store.connectorEvents = store.connectorEvents.map(event => event.delivery?.status === 'sending'

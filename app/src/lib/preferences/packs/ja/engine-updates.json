@@ -1,0 +1,15 @@
+{
+  "Engine updates": "エンジンの更新",
+  "bundled": "同梱",
+  "Checking installed runtime…": "インストール済みのランタイムを確認中…",
+  "Check for engine updates": "エンジンの更新を確認",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "アプリを再インストールせずにローカルエンジンを更新できます。切り替える前にローカルでの作業を完了してください。モデルと会話は保持されます。",
+  "No compatible engine updates are available for this device.": "このデバイスに対応するエンジンの更新はありません。",
+  "Use this runtime": "このランタイムを使用",
+  "Use bundled engine": "同梱のエンジンを使用",
+  "Checking signed releases…": "署名済みのリリースを確認中…",
+  "Switching runtime…": "ランタイムを切り替え中…",
+  "Ready locally": "ローカルで準備完了",
+  "memory on this computer.": "このコンピューターのメモリ。",
+  "Prevent sleep while this option is enabled.": "この設定が有効な間はスリープを防ぎます。"
+}

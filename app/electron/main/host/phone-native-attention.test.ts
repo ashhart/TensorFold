@@ -6,7 +6,7 @@ import { createRunAttention, type AttentionNotice } from './run-attention'
 
 // Execute the actual main-process canonical predicate, rather than duplicating it
 // in a test while the direct approval callback can bypass the event emitter.
-const filename = path.join(process.cwd(), 'electron/main-app.ts')
+const filename = path.join(process.cwd(), 'electron/main/composition/attention.ts')
 const source = ts.createSourceFile(filename, await readFile(filename, 'utf8'), ts.ScriptTarget.Latest, true)
 let predicate: ts.Expression | undefined
 function visit(node: ts.Node) {

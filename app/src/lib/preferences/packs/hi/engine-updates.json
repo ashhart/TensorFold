@@ -1,0 +1,15 @@
+{
+  "Engine updates": "इंजन अपडेट",
+  "bundled": "साथ में उपलब्ध",
+  "Checking installed runtime…": "इंस्टॉल किए गए रनटाइम की जाँच हो रही है…",
+  "Check for engine updates": "इंजन अपडेट जाँचें",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "ऐप दोबारा इंस्टॉल किए बिना लोकल इंजन अपडेट करें। बदलने से पहले लोकल काम पूरा करें। मॉडल और बातचीत सुरक्षित रहेंगे।",
+  "No compatible engine updates are available for this device.": "इस डिवाइस के लिए कोई संगत इंजन अपडेट उपलब्ध नहीं है।",
+  "Use this runtime": "इस रनटाइम का उपयोग करें",
+  "Use bundled engine": "साथ में उपलब्ध इंजन का उपयोग करें",
+  "Checking signed releases…": "हस्ताक्षरित रिलीज़ की जाँच हो रही है…",
+  "Switching runtime…": "रनटाइम बदला जा रहा है…",
+  "Ready locally": "लोकल रूप से तैयार",
+  "memory on this computer.": "इस कंप्यूटर की मेमोरी।",
+  "Prevent sleep while this option is enabled.": "यह विकल्प चालू रहने पर स्लीप मोड रोकें।"
+}

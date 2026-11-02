@@ -29,6 +29,7 @@ export const uiSlice: Slice = (set, get) => ({
   newProjectIntent: 0,
   pendingMention: null as { path: string; n: number } | null,
   composerSeed: null as { text: string; n: number } | null,
+  homeComposerWorkspace: null,
   threadDockRequest: null as { threadId: string; dock: 'terminal' | 'preview'; nonce: number } | null,
   sidebarCollapsed: false,
   fullWorkspaceLayout: readFullWorkspaceLayout(),

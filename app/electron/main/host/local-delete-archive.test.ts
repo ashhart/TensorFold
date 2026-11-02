@@ -14,7 +14,7 @@ function handler(body: string, channel: string, next: string): string {
 }
 
 const core = source('./core-ipc.ts')
-const remoteControl = source('./ipc/remote-control-ipc.ts')
+const remoteControl = source('./ipc/remote-project-ipc.ts')
 const workspaceIpc = source('./ipc/workspace-ipc.ts')
 const remoteProjectCreate = handler(remoteControl, 'remote:createProject', 'remote:updateProject')
 assert.match(remoteProjectCreate, /createdAt: _createdAt/, 'controller timestamps are stripped before remote project creation')

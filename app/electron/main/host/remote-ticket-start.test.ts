@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const remoteHostApi = readFileSync(new URL('./remote-host-api.ts', import.meta.url), 'utf8')
-const remoteControl = readFileSync(new URL('./ipc/remote-control-ipc.ts', import.meta.url), 'utf8')
+const remoteControl = readFileSync(new URL('./ipc/remote-room-ticket-ipc.ts', import.meta.url), 'utf8')
 const store = readFileSync(new URL('../../../src/lib/store/slices/ticketsSlice.ts', import.meta.url), 'utf8')
 const workspace = readFileSync(new URL('./workspace-runtime-ipc.ts', import.meta.url), 'utf8')
 

@@ -18,6 +18,7 @@ import * as execution from '../../lib/execution-target'
 import * as attachmentsModule from '../../lib/attachments'
 import * as format from '../../lib/format'
 import { modelPickerChoices } from '../../lib/model-picker'
+import { SESSION_ONLY_DRAFT_NOTICE } from '../../lib/conversation-drafts'
 import { find, harness, jsx, settle } from '../reading/reading-test-harness'
 
 function load(file: string, overrides: Record<string, any>) {
@@ -33,13 +34,15 @@ function load(file: string, overrides: Record<string, any>) {
   new Function('require', 'module', 'exports', output)((id: string) => { const reviewed = reviewedLanguageImport(id, imports); if (reviewed.matched) return reviewed.value;  assert.ok(id in imports); return imports[id] }, module, module.exports)
   return module.exports
 }
+const { isSessionOnlyDraftNotice } = load('src/components/composer/DraftPersistenceNotice.tsx', {
+  'react/jsx-runtime': jsx, '../../lib/conversation-drafts': { SESSION_ONLY_DRAFT_NOTICE },
+})
 const local: any = { id: 'fit-local', name: 'Synthetic local model', kind: 'local', source: 'custom', transport: 'chat-completions', baseUrl: 'http://127.0.0.1:12345/v1', apiKey: '', models: ['selected'] }
 const image: any = { id: 'synthetic-image', kind: 'image', name: 'Synthetic.png', mime: 'image/png', status: 'ready', dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' }
 async function scenario(provider: any, attached: any[], visionState = 'failed', task = false) {
-  const hooks = harness(), stateHook = hooks.hooks.useState
-  let stateCalls = 0, sends = 0, cleared = 0
+  const hooks = harness()
+  let sends = 0, cleared = 0
   hooks.hooks.useLayoutEffect = hooks.hooks.useEffect
-  hooks.hooks.useState = (initial: any) => stateHook(stateCalls++ === 0 ? { ready: true, reason: null, message: 'Synthetic model ready.' } : initial)
   const thread: any = { id: 'selected-thread', kind: task ? 'task' : 'chat', title: 'Synthetic selected model', cwd: task ? '/synthetic/workspace' : '', providerId: provider.id, providerAccountId: null, model: 'selected', timeline: [], apiMessages: [], status: 'idle' }
   const settings: any = { providers: [provider], activeProviderId: provider.id, activeProviderAccountId: null, activeModel: 'selected', approvalMode: 'suggest', reasoningEffort: 'low', contextLimit: 8192, localContextLimit: 8192, defaultCwd: '', voice: { enabled: false }, agentPresets: [], remoteOrchestrators: [], defaultExecutionTarget: 'local', capabilities: {} }
   const notices: any[] = []
@@ -49,7 +52,7 @@ async function scenario(provider: any, attached: any[], visionState = 'failed', 
   const useStore = Object.assign((select: any) => select(state), { getState: () => state, setState: (patch: any) => { if (patch.notice) notices.push(patch.notice); Object.assign(state, patch) } })
   const reports: any[] = [{ providerId: provider.id, accountId: null, model: 'selected', key: fit.modelQualificationKey({ providerId: provider.id, accountId: null, model: 'selected' }), probeRevision: fit.MODEL_PROBE_REVISION, revision: 1, checkedAt: 1, checks: { ...fit.emptyModelChecks(), text: { state: 'observed', message: 'Synthetic text qualified.' }, vision: { state: visionState, message: 'Synthetic image evidence.' } } }]
   const captured = { text: 'Answer the supplied question.', attachments: attached }
-  const { Composer } = load('src/components/Composer.tsx', {
+  const adapters = {
     react: hooks.hooks, 'react/jsx-runtime': jsx, clsx, '../lib/store': { useStore }, '../lib/ipc': { api: { platform: 'browser' } },
     './models/qualification/useModelQualifications': { useModelQualifications: () => ({ reports }) }, '../../shared/model-fit': fit, '../../shared/provider-trust': trust, '../../shared/thread-memory-policy': memoryPolicy,
     '../lib/policy': policy, '../lib/assistant-model': modelSelection, '../lib/provider-accounts': providerAccounts, '../lib/provider-model-metadata': providerMetadata, '../lib/thread-workspace': workspace, '../lib/execution-target': execution, '../lib/attachments': attachmentsModule, '../lib/format': format,
@@ -57,9 +60,25 @@ async function scenario(provider: any, attached: any[], visionState = 'failed', 
     '../lib/desktop-drafts': { desktopDraftPort: null }, '../lib/composer-estimate': { boundedComposerEstimate: () => ({ tokens: 10, partial: false }) }, '../lib/engine': { useEngineContextTokens: () => null }, '../lib/provider-usage': { providerUsageSummary: () => null }, '../lib/provider-status': { providerStatusViewFor: () => null },
     '../lib/composer-budget': composerBudgetModule, '../lib/composer-keyboard': composerKeyboard,
     '../lib/recent-models': { loadRecentModels: () => [] }, '../lib/capabilities': { BUILTIN_CAPABILITIES: [] }, './composer/ModelPickerMenu': { ModelPickerMenu: 'model-picker-fixture' }, './composer/TaskStarters': { TASK_STARTERS: [], TaskStarters: 'task-starters-fixture' },
+  }
+  const childAdapters = Object.fromEntries(Object.entries(adapters).map(([key, value]) => [
+    key.startsWith('../lib/') ? `../${key}` : key.startsWith('../../shared/') ? `../${key}` : key.startsWith('./models/') ? `.${key}` : key,
+    value,
+  ]))
+  const workspaceModule = load('src/components/composer/useComposerWorkspace.tsx', childAdapters)
+  const modelModule = load('src/components/composer/useComposerModel.ts', childAdapters)
+  const inputModule = load('src/components/composer/useComposerInput.ts', childAdapters)
+  const toolbarModule = load('src/components/composer/ComposerToolbar.tsx', {
+    ...childAdapters, './ModelPickerMenu': { ModelPickerMenu: 'model-picker-fixture' },
+  })
+  const { Composer } = load('src/components/Composer.tsx', {
+    ...adapters, './composer/useComposerWorkspace': workspaceModule, './composer/useComposerModel': modelModule,
+    './composer/useComposerInput': inputModule, './composer/ComposerToolbar': toolbarModule,
+    './composer/DraftPersistenceNotice': { DraftPersistenceNotice: 'draft-notice', isSessionOnlyDraftNotice },
   })
   const tree = hooks.render(() => Composer({ mode: 'thread', thread }))
-  const picker = find(tree, (node) => node.type === 'model-picker-fixture')
+  const toolbar = find(tree, (node) => node.type === toolbarModule.ComposerToolbar)
+  const picker = find(toolbarModule.ComposerToolbar(toolbar.props), (node) => node.type === 'model-picker-fixture')
   assert.equal(picker.props.model, 'selected'); assert.equal(picker.props.provider.id, provider.id)
   const choices = modelPickerChoices([provider], null, { requirements: picker.props.requirements, qualifications: reports })
   find(tree, (node) => node.type === 'button' && node.props['aria-label'] === 'Send').props.onClick()

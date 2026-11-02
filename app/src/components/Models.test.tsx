@@ -10,13 +10,13 @@ import * as hubFailure from '../../shared/hub-failure'
 
 let slots: any[] = [], refs: any[] = [], effects: any[] = [], queued: any[] = []
 let cursor = 0, refCursor = 0, effectCursor = 0
-let busyLearning = false, requested: any = undefined, minimal = false
+let busyLearning = false, requested: any = undefined, minimal = false, pendingSetup = false
 let calls: any[] = [], hold: (() => void) | null = null, delayLoad = false, failLoad = false
 const model = (repo: string, title: string, fitsMemory = true) => ({ repo, title, fitsMemory, family: 'Synthetic family', format: '4-bit', weightsBytes: 1024, memoryFloorBytes: 2048, source: 'download', contextTokens: 32768 })
 const snapshot: any = { status: { state: 'idle', available: true, model: null, totalMemoryBytes: 1e11, memoryLimitBytes: 7e10 }, installed: [model('fixture/Qwen', 'Qwen'), model('fixture/Nemotron', 'Nemotron'), model('fixture/Large', 'Large', false)], pulls: [], hubCache: '/synthetic/cache', suggestions: [{ repo: 'fixture/New', title: 'New model', revision: 'pinned-revision', note: '' }] }
-const state: any = { view: { name: 'models' }, settings: { desktopOnboardingComplete: true }, threads: [], status: {}, setNotice: (notice: any) => calls.push(['notice', notice]), newChat: async () => calls.push(['chat']), openThread: (id: string) => calls.push(['thread', id]) }
+const state: any = { view: { name: 'models' }, settings: { desktopOnboardingComplete: true }, threads: [], status: {}, setView: (view: any) => calls.push(['view', view]), setNotice: (notice: any) => calls.push(['notice', notice]), newChat: async () => calls.push(['chat']), openThread: (id: string) => calls.push(['thread', id]) }
 const favorites: any = { favorites: [{ providerId: 'tensorfold', accountId: null, model: 'fixture/Nemotron' }], ready: true, error: null, isFavorite: (route: any) => favorites.favorites.some((item: any) => item.model === route.model), toggle: (route: any) => { calls.push(['star', route]); return true } }
-const placeholders = Object.fromEntries(['HubRow', 'InstalledRow', 'EngineRuntimePanel', 'EngineApiPanel', 'LearningPanel', 'WorkersPanel', 'ModelRecommendationPanel', 'ModelDetailsDrawer', 'ModelComparisonPanel', 'ModelsDrawer', 'DownloadCentre', 'ModelFoldersSettings', 'ModelBenchmarkDrawer', 'ClusterWorkspace'].map((name) => [name, () => null])) as Record<string, any>
+const placeholders = Object.fromEntries(['HubRow', 'InstalledRow', 'EngineRuntimePanel', 'EngineApiPanel', 'LearningPanel', 'WorkersPanel', 'ModelRecommendationPanel', 'ModelDetailsDrawer', 'ModelComparisonPanel', 'ModelsDrawer', 'DownloadCentre', 'DownloadActivity', 'ModelFoldersSettings', 'ModelBenchmarkDrawer', 'ClusterWorkspace'].map((name) => [name, () => null])) as Record<string, any>
 const Button = (props: any) => React.createElement('button', props, props.children)
 const Input = (props: any) => React.createElement('input', props)
 const jsx = { jsx: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), jsxs: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), Fragment: React.Fragment }
@@ -30,11 +30,12 @@ const imports: any = {
   },
   'react/jsx-runtime': jsx, clsx: (...values: any[]) => values.filter(Boolean).join(' '), '../lib/ipc': { api }, '../lib/store': { useStore },
   '../lib/engine': { ENGINE_PROVIDER_ID: 'tensorfold', useEngine: () => ({ snapshot }), refreshEngine: async () => {}, loadEngineModel: async (repo: string) => { calls.push(['use', repo]); if (delayLoad) { delayLoad = false; await new Promise<void>((resolve) => { hold = resolve }) } if (failLoad) throw Error('Synthetic load failure'); return { state: 'ready', model: repo } } },
+  '../lib/model-chat': { openModelChat: async (selection: any, canOpen: () => boolean) => { assert.equal(selection.providerId, 'tensorfold'); assert.ok(canOpen()); calls.push(['chat', selection]) } },
   '../lib/favorite-models': { useFavoriteModels: () => favorites, orderFavoritesFirst }, './ui': { Button, Input }, '../lib/icons': { Icon: () => null },
   './models/ModelRows': { HubRow: placeholders.HubRow, InstalledRow: placeholders.InstalledRow },
   '../lib/learning': { useLearning: () => ({ snapshot: {} }), learningBusy: () => busyLearning },
   './models/workers': { isLocalWorker: () => false }, '../lib/model-recommendation': { recommendEngineModel: () => ({ status: 'ready', hardwareLabel: 'Synthetic Mac', selected: { repo: 'fixture/New', title: 'New', action: 'download' } }) },
-  './onboarding-model': { shouldShowOnboarding: () => false }, './models/download-display': { isDownloadPending: (pull: any) => ['queued', 'running', 'verifying'].includes(pull.state), downloadStateLabel: (pull: any) => pull.state }, '../lib/turn-stats-line': { repoDisplayName: (name: string) => name },
+  './onboarding-model': { shouldShowOnboarding: () => pendingSetup, readOnboardingDraft: () => ({ mode: 'full', step: 'connect' }), saveOnboardingDraft: (draft: any) => calls.push(['setup', draft]) }, './models/download-display': { isDownloadPending: (pull: any) => ['queued', 'running', 'verifying'].includes(pull.state) },
 }
 for (const name of Object.keys(placeholders)) if (!['HubRow', 'InstalledRow', 'ModelBenchmarkDrawer', 'ClusterWorkspace'].includes(name)) imports[`./${name === 'ModelFoldersSettings' ? 'settings' : 'models'}/${name}`] = { [name]: placeholders[name] }
 imports['./clusters/ClusterWorkspace'] = { ClusterWorkspace: placeholders.ClusterWorkspace }
@@ -72,5 +73,19 @@ state.threads = [{ id: 'running', providerId: 'tensorfold', status: 'running' }]
 button(node, 'Benchmarks').props.onClick(); node = render(); assert.match(component(node, 'ModelBenchmarkDrawer').props.blockedReason, /active local/); component(node, 'ModelBenchmarkDrawer').props.onClose();
 state.threads = []; state.status = {}; busyLearning = true; node = render(); rows(node)[0].props.onLoad(); await settle(); assert.equal(calls.filter((call) => call[0] === 'use').length, 1)
 busyLearning = false; failLoad = true; node = render(); rows(node)[0].props.onLoad(); await settle(); assert.equal(calls.filter((call) => call[0] === 'chat').length, 1); assert.match(calls.at(-1)[1].message, /Synthetic load failure/)
+failLoad = false; delayLoad = true; node = render(); rows(node)[0].props.onLoad(); node = render()
+const beforeCancel = calls.filter((call) => call[0] === 'notice').length
+component(node, 'EngineRuntimePanel').props.onUnload(); component(node, 'EngineRuntimePanel').props.onUnload()
+assert.equal(calls.filter((call) => call[0] === 'unload').length, 1, 'repeated Stop admits one engine unload')
+await settle(); failLoad = true; (hold as (() => void) | null)?.(); await settle(); failLoad = false
+assert.equal(calls.filter((call) => call[0] === 'notice').length, beforeCancel, 'intentional cancellation does not become a load failure alert')
+assert.equal(calls.filter((call) => call[0] === 'chat').length, 1, 'a cancelled model load cannot open a chat later')
+snapshot.status.available = false; node = render(); const beforeUnavailable = calls.filter((call) => call[0] === 'use').length
+rows(node)[0].props.onLoad(); await settle(); assert.equal(calls.filter((call) => call[0] === 'use').length, beforeUnavailable)
+assert.match(calls.at(-1)[1].message, /engine is unavailable/); snapshot.status.available = true
+pendingSetup = true; node = render(); rows(node)[0].props.onLoad(); await settle()
+assert.deepEqual(calls.slice(-2), [['setup', { mode: 'full', step: 'guide' }], ['view', { name: 'home' }]])
+assert.equal(calls.filter((call) => call[0] === 'chat').length, 1, 'loading during setup returns to its guide without creating or sending a message')
+pendingSetup = false
 failLoad = false; delayLoad = true; node = render(); rows(node)[0].props.onLoad(); effects.forEach((effect) => effect?.cleanup?.()); (hold as (() => void) | null)?.(); await settle(); assert.equal(calls.filter((call) => call[0] === 'chat').length, 1, 'late load never navigates after unmount')
 console.log('Models: library-first layout, scoped favourites/search/details, lazy API, pinned discovery downloads, comparison gates, single use/chat action and late/error guards')

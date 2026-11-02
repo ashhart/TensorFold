@@ -6,6 +6,8 @@ import { GoogleCalendar } from './calendar'
 import { parseGoogleDesktopClient } from './client-config'
 import { GoogleDrafts } from './drafts'
 import { GoogleGmail } from './gmail'
+import { GoogleInbox } from './inbox'
+import { GoogleInboxDrafts } from './inbox-drafts'
 import { createGoogleOAuthLoopback, type GoogleOAuthLoopback } from './oauth-loopback'
 import { exchangeGoogleCode, googleIdentity } from './oauth-tokens'
 import { GoogleState, type GoogleDesktopClient, type GoogleWorkspaceStore } from './private-state'
@@ -15,7 +17,7 @@ import { GoogleTransport, type GoogleTransportDeps } from './transport'
 export type { GoogleWorkspaceStore, GoogleWorkspacePrivateState } from './private-state'
 export interface GoogleWorkspaceServiceDeps extends GoogleTransportDeps {
   store: GoogleWorkspaceStore
-  /** Host must use the system browser, never a WebView or an embedded login. */
+  // Host must use the system browser, never a WebView or an embedded login.
   openExternal(url: string): Promise<void>
   now?: () => number
   onChange?: () => void
@@ -34,6 +36,8 @@ export class GoogleWorkspaceService {
   private readonly transport: GoogleTransport
   private readonly accounts: GoogleAccounts
   private readonly gmail: GoogleGmail
+  private readonly inbox: GoogleInbox
+  private readonly inboxDrafts: GoogleInboxDrafts
   private readonly calendar: GoogleCalendar
   private readonly drafts: GoogleDrafts
   private readonly actions: GoogleActions
@@ -51,6 +55,8 @@ export class GoogleWorkspaceService {
     this.calendar = new GoogleCalendar(this.accounts)
     this.drafts = new GoogleDrafts(this.accounts, this.now)
     this.actions = new GoogleActions(this.accounts, this.now)
+    this.inbox = new GoogleInbox(this.accounts, this.gmail, this.actions, this.now)
+    this.inboxDrafts = new GoogleInboxDrafts(this.state, this.now)
   }
   async snapshot(): Promise<GoogleWorkspaceSnapshot> {
     const reviews = await this.actions.listReviews()
@@ -148,6 +154,14 @@ export class GoogleWorkspaceService {
   getReview(receipt: GoogleWorkspaceReviewedAction) { return this.actions.getReview(receipt) }
   async cancelAction(receipt: GoogleWorkspaceReviewedAction) { const result = await this.actions.cancel(receipt); this.changed(); return result }
   async executeReviewed(receipt: GoogleWorkspaceReviewedAction) { const result = await this.actions.execute(receipt); this.changed(); return result }
-  dispose(): void { this.cancelAuthorization(); this.accounts.dispose() }
-  private changed(): void { try { this.deps.onChange?.() } catch { /* Host notifications cannot invalidate a completed account operation. */ } }
+  inboxSnapshot() { return this.inbox.snapshot() }
+  enableInbox(input: { accountId: string; revision: number; enabled: boolean }) { return this.inbox.enable(input) }
+  syncInbox() { return this.inbox.sync() }
+  inboxThread(key: string) { return this.inbox.thread(key) }
+  inboxReply(key: string, text: string) { return this.inbox.reply(key, text) }
+  inboxDraft(key: string) { return this.inboxDrafts.read(key) }
+  saveInboxDraft(input: { key: string; expectedRevision: number; text: string }) { return this.inboxDrafts.write(input) }
+  assertInboxSelected(accountId: string, revision: number) { return this.inbox.assertSelected(accountId, revision) }
+  dispose(): void { this.inbox.dispose(); this.cancelAuthorization(); this.accounts.dispose() }
+  private changed(): void { try { this.deps.onChange?.() } catch { } }
 }

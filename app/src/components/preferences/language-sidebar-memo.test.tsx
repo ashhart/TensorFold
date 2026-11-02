@@ -48,6 +48,7 @@ function mount(file: string) {
     './sidebar/rows': { ThreadRow: 'thread-row' }, './sidebar/ProjectsSection': { ProjectsSection: 'projects' },
     './sidebar/MoreSection': { MoreSection: 'more' }, './sidebar/EngineChip': { EngineChip: 'engine' },
     './sidebar/UpdatePrompt': { UpdatePrompt: 'update' }, './sidebar/useBranches': { useBranches: () => ({}) },
+    './work-activity/WorkActivityMenu': { WorkActivityMenu: 'work-activity' },
   })
   return () => { cursor = 0; return Sidebar() }
 }

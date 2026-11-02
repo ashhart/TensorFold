@@ -1,9 +1,30 @@
 import type { RemoteOrchestratorProfile, Settings } from './types'
 import { validateWhatsAppSourcePatch } from './whatsapp-bridge'
+import { blueBubblesIdentity } from './bluebubbles-connector'
 
 type RemoteUrlNormalizer = (raw: string) => Promise<string>
 
-/** Credential-bearing WhatsApp rows may only be removed by the dedicated shred workflow. */
+// Account membership and identity are owned by sign-in and disconnect IPC, not stale settings drafts.
+export function normalizeMicrosoftMailSettingsForSave(next: Settings, current: Settings): Settings['email'] {
+  const accounts = current.email.sources.filter(source => source.kind === 'microsoft_graph')
+  const ids = new Set(accounts.map(source => source.id))
+  if (next.email.sources.some(source => source.kind === 'microsoft_graph' && !ids.has(source.id))) throw new Error('Microsoft accounts must be connected with Microsoft sign-in.')
+  return { ...next.email, sources: [...next.email.sources.filter(source => source.kind !== 'microsoft_graph' && !ids.has(source.id)), ...accounts] }
+}
+
+export function normalizeIMessageSettingsForSave(next: Settings, current: Settings): Settings['imessage'] {
+  const settings = next.imessage
+  if (settings.transport !== undefined && !['local', 'bluebubbles'].includes(settings.transport)) throw new Error('Choose local iMessage or BlueBubbles.')
+  for (const value of [settings.allowedChatIds, settings.blueBubblesUrl, settings.blueBubblesPassword]) {
+    if (value !== undefined && (typeof value !== 'string' || value.length > 20_000 || value.includes('\0'))) throw new Error('Invalid iMessage connection settings.')
+  }
+  const changed = blueBubblesIdentity(settings) !== blueBubblesIdentity(current.imessage)
+  return { ...settings, cursor: changed ? undefined : current.imessage.cursor,
+    bridgeCursorIdentity: changed ? undefined : current.imessage.bridgeCursorIdentity,
+    lastSyncAt: changed ? null : current.imessage.lastSyncAt, lastError: changed ? null : current.imessage.lastError }
+}
+
+// Credential-bearing WhatsApp rows may only be removed by the dedicated shred workflow.
 export function assertDedicatedWhatsAppSourceRemoval(next: Settings, current: Settings): void {
   const incoming = new Set((next.whatsapp?.sources ?? []).map((source) => source.id))
   const removed = (current.whatsapp?.sources ?? []).filter((source) => !incoming.has(source.id))
@@ -12,7 +33,7 @@ export function assertDedicatedWhatsAppSourceRemoval(next: Settings, current: Se
   }
 }
 
-/** Whole-settings drafts never own linked-device identity, lifecycle, or contact grants. */
+// Whole-settings drafts never own linked-device identity, lifecycle, or contact grants.
 export function normalizeWhatsAppSettingsForSave(next: Settings, current: Settings): Settings['whatsapp'] {
   assertDedicatedWhatsAppSourceRemoval(next, current)
   const existing = new Set(current.whatsapp.sources.map((source) => source.id))
@@ -20,8 +41,7 @@ export function normalizeWhatsAppSettingsForSave(next: Settings, current: Settin
     if (!existing.has(source.id)) throw new Error('WhatsApp accounts must be added with the dedicated Add account control.')
     validateWhatsAppSourcePatch({ label: source.label, enabled: source.enabled, ...(source.allowedChatJids !== undefined ? { allowedChatJids: source.allowedChatJids } : {}), ...(source.allowSelfChat !== undefined ? { allowSelfChat: source.allowSelfChat } : {}) })
   }
-  // Preserve the latest complete rows, including saved contact scopes and disconnect intent.
-  // All editable account fields now have a dedicated owner-gated patch transaction.
+
   return current.whatsapp
 }
 
@@ -38,14 +58,6 @@ function remoteHostNeedsValidation(next: RemoteOrchestratorProfile, current: Rem
     (next.enabled && !current.enabled)
 }
 
-/**
- * Validate only remote destinations changed by this settings transaction.
- *
- * Whole-settings saves are used for theme, provider, and connector edits. Revalidating
- * an unchanged legacy/offline remote URL on every one of those saves makes that stale
- * row a global write lock. A changed/newly-enabled credential-bearing destination still
- * goes through the full DNS/SSRF normalizer before it reaches the live store.
- */
 export async function normalizeChangedRemoteDestinations(
   next: Settings,
   current: Settings,

@@ -201,7 +201,7 @@
   "Copy user message": "Salin pesan pengguna",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "Cortheon aktif: sebelum menjawab, mesin dapat mengirim kueri dari chat ini ke layanan pencarian web dan membaca halaman publik. Nonaktifkan di Pengaturan AI atau Model.",
-  "Cortheon is temporarily disabled in this beta.": "Cortheon sementara dinonaktifkan dalam beta ini.",
+  "Cortheon is temporarily disabled.": "Cortheon dinonaktifkan sementara.",
   "Cost cap $": "Batas biaya $",
   "Could not check CLI auth.": "Autentikasi CLI tidak dapat diperiksa.",
   "Could not open a chat. Your current work is still here; try New chat again.": "Chat tidak dapat dibuka. Pekerjaan tetap di sini; coba Chat baru lagi.",

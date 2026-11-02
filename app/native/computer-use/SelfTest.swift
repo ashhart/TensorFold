@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreVideo
 import Foundation
 
 // Pure checks only: nothing here reads the accessibility tree, the window list or posts an event.
@@ -259,6 +260,34 @@ func attachmentTextChecks(_ c: Checks) {
     catch { c.expect(false, "invalid PDF returns a supported error") }
 }
 
+func askWindowFrameChecks(_ c: Checks) {
+    var buffer: CVPixelBuffer?
+    let status = CVPixelBufferCreate(kCFAllocatorDefault, 8, 8, kCVPixelFormatType_32BGRA, nil, &buffer)
+    c.expect(status == kCVReturnSuccess, "synthetic selected-window frame allocates without screen access")
+    guard let buffer else { return }
+    CVPixelBufferLockBaseAddress(buffer, [])
+    if let base = CVPixelBufferGetBaseAddress(buffer) {
+        memset(base, 255, CVPixelBufferGetBytesPerRow(buffer) * 8)
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    let image = askWindowFrameImage(buffer)
+    c.expect(image?.width == 8 && image?.height == 8, "selected-window BGRA frame becomes a bounded image")
+    CVPixelBufferLockBaseAddress(buffer, [])
+    if let base = CVPixelBufferGetBaseAddress(buffer) {
+        memset(base, 0, CVPixelBufferGetBytesPerRow(buffer) * 8)
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, [])
+    if let data = image?.dataProvider?.data, let bytes = CFDataGetBytePtr(data) {
+        c.expect(bytes[0] == 255, "selected frame owns its bytes after the stream reuses its pixel buffer")
+    } else { c.expect(false, "selected frame retains readable pixels") }
+    var oversized: CVPixelBuffer?
+    CVPixelBufferCreate(kCFAllocatorDefault, 1801, 1, kCVPixelFormatType_32BGRA, nil, &oversized)
+    c.expect(oversized != nil && askWindowFrameImage(oversized!) == nil, "oversized capture frames are refused before copying")
+    var unsupported: CVPixelBuffer?
+    CVPixelBufferCreate(kCFAllocatorDefault, 8, 8, kCVPixelFormatType_32ARGB, nil, &unsupported)
+    c.expect(unsupported != nil && askWindowFrameImage(unsupported!) == nil, "unexpected capture pixel formats are refused")
+}
+
 func runSelfTest() -> Int32 {
     let checks = Checks()
     keyChecks(checks)
@@ -269,6 +298,13 @@ func runSelfTest() -> Int32 {
     miscChecks(checks)
     phoneChecks(checks)
     attachmentTextChecks(checks)
+    askWindowFrameChecks(checks)
+    checks.expect(askWindowKind(app: "Safari", title: "sample", text: "") == "web", "selected browser is web context")
+    checks.expect(askWindowKind(app: "TextEdit", title: "sample.txt", text: "") == "document", "selected text document is recognised")
+    checks.expect(askWindowKind(app: "Preview", title: "sample.png", text: "") == "image", "image extension wins over generic document viewer")
+    checks.expect(askWindowKind(app: "Example", title: "sample", text: String(repeating: "a", count: 100)) == "document", "visible text is classified locally")
+    checks.expect(askWindowKind(app: "Example", title: "sample", text: "") == "window", "unknown context is not guessed")
+    checks.expect(askWindowDeniedBundles.contains("com.apple.SecurityAgent") && askWindowDeniedBundles.contains("com.apple.Passwords"), "authentication and password windows are excluded")
     if checks.failures.isEmpty {
         writeLine(["ok": true, "checks": checks.count])
         return 0

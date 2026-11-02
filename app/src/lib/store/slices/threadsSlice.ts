@@ -1,3 +1,4 @@
+import { assertGmailInboxRoute } from '../../../../shared/gmail-inbox'
 import { parseThreadMemoryPolicy, assertThreadMemoryTransport } from '../../../../shared/thread-memory-policy'
 import { api } from '../../ipc'
 import { modelDisplayName, resolveProviderModel } from '../../provider-accounts'
@@ -27,7 +28,7 @@ export const threadsSlice: Slice = (set, get) => ({
     if (project && !t.workspace && defaults.workspace) patch.workspace = defaults.workspace
     if (!remoteHostId && Object.keys(patch).length) {
       Object.assign(t, patch)
-      await api.setThreadWorkspace(t.id, patch.workspace ?? null, patch.cwd ?? null).catch(() => {})
+      await api.setThreadWorkspace(t.id, patch.workspace ?? null, patch.cwd ?? null).catch(() => { })
     }
     if (!remoteHostId) applyProjectModel(get, s, projectId, t)
     set((st) => ({ threads: [t, ...st.threads.filter((x) => x.id !== t.id)], view: { name: 'thread', id: t.id } }))
@@ -57,8 +58,6 @@ export const threadsSlice: Slice = (set, get) => ({
     }
   },
 
-  // Cross-engine handoff (VST-036): continue this conversation on a different engine.
-  // The host flattens the transcript, creates the new thread, and auto-runs the seed.
   async handoffThread(threadId, toProviderId, toModel, intent) {
     try {
       const t = await api.handoffThread({ threadId, toProviderId, toModel: toModel ?? null, ...(intent ? { intent } : {}) })
@@ -101,6 +100,7 @@ export const threadsSlice: Slice = (set, get) => ({
     const safeModel = provider ? (resolveProviderModel(provider, accountId, model) ?? model) : model
     const project = projectId ? get().projects.find((candidate) => candidate.id === projectId) ?? null : null
     const remoteHostId = remoteHostIdForProject(get(), project)
+    assertGmailInboxRoute(sourceThreadKey, !!remoteHostId)
     const requestedMemory = parseThreadMemoryPolicy(memoryPolicy)
     assertThreadMemoryTransport({ memoryPolicy: requestedMemory, incognito, orchestratorHostId: remoteHostId }, provider)
     if (s && persistActiveModel) await get().saveSettings({ ...s, activeProviderId: providerId, activeProviderAccountId: accountId, activeModel: safeModel, defaultCwd: cwd, approvalMode }, { silent: true })
@@ -118,8 +118,7 @@ export const threadsSlice: Slice = (set, get) => ({
     }
     if (!remoteHostId && memoryPolicy !== undefined) Object.assign(t, await api.setThreadMemoryPolicy(t.id, requestedMemory, t.memoryPolicyRevision ?? 0))
     set((st) => ({ threads: [t, ...st.threads.filter((x) => x.id !== t.id)], status: { ...st.status, [t.id]: 'thinking' } }))
-    // When this run was launched from a connector conversation, carry its threadKey so the
-    // host can inject that source's per-channel ephemeral prompt for this run only.
+
     try {
       await startThreadRunApi(remoteHostId, { threadId: t.id, userText: text, attachments, sourceThreadKey })
       set({ view: { name: 'thread', id: t.id } })
@@ -194,9 +193,7 @@ export const threadsSlice: Slice = (set, get) => ({
     } else {
       await cancelThreadRunApi(hostId, threadId)
     }
-    // The reply acknowledges a Stop request; already-started work may still be active.
-    // Keep the current busy state and approval ownership until an authoritative
-    // terminal event or host snapshot confirms settlement, including remote runs.
+
   },
 
   async approve(threadId, callId, decision) {
@@ -236,8 +233,7 @@ export const threadsSlice: Slice = (set, get) => ({
     const provider = get().settings?.providers.find((p) => p.id === providerId)
     const accountId = selectedAccountId(provider, providerAccountId)
     const safeModel = provider ? (resolveProviderModel(provider, accountId, model) ?? model) : model
-    // Append the notice in MAIN (the timeline owner) which echoes it back via item_add — instead of
-    // round-tripping our whole timeline, which could clobber main's copy if a stream is in flight.
+
     await api.appendThreadNotice(threadId, `Model changed to ${modelDisplayName(provider, safeModel)}`)
   },
   async renameThread(id, title) {
@@ -288,15 +284,14 @@ export const threadsSlice: Slice = (set, get) => ({
     }))
     const events = drainPendingAgentEvents(t.id, projectedHostId(t))
     for (const event of events) get().applyEvent(event)
-    // Ask the owning host to project its own thread state onto bound remote tickets.
-    // The renderer never supplies runState/execution patches.
+
     const mirrored = get().threads.find((thread) => thread.id === t.id) ?? t
     if (mirrored.orchestratorHostId) {
       for (const ticket of get().tickets) {
         if (ticket.execution?.target !== 'remote' || ticket.execution.threadId !== mirrored.id) continue
         const ownerHostId = owningRemoteHostIdForTicket(get(), ticket)
         if (!ownerHostId) continue
-        void api.transitionRemoteOrchestratorTicket(ownerHostId, ticket.id, { action: 'sync' }).then((next) => get().applyTicketUpdate(next)).catch(() => {})
+        void api.transitionRemoteOrchestratorTicket(ownerHostId, ticket.id, { action: 'sync' }).then((next) => get().applyTicketUpdate(next)).catch(() => { })
       }
     }
   },
@@ -373,9 +368,6 @@ export const threadsSlice: Slice = (set, get) => ({
       return { threads, status, approvals }
     })
 
-    // #42 — auto-apply app-control actions the agent requested (creates +
-    // navigation). change_setting waits for the user's confirm chip. Guarded so a
-    // persisted timeline replaying on reload never re-runs an action.
     const action = e.type === 'item_add' ? e.item.appAction : e.type === 'item_update' ? (e.patch as any)?.appAction : null
     const actionItemId = e.type === 'item_add' ? e.item.id : e.type === 'item_update' ? e.id : null
     if (action && actionItemId && !isAppActionApplied(actionItemId) && !isInflightAppAction(actionItemId) && action.kind !== 'change_setting' && action.state !== 'applied' && action.state !== 'dismissed') {
@@ -384,13 +376,11 @@ export const threadsSlice: Slice = (set, get) => ({
       const v = s.view
       const currentProjectId = v.name === 'project' ? v.id
         : v.name === 'room' ? (s.rooms.find((r) => r.id === v.id)?.projectId ?? null)
-        : v.name === 'thread' ? (s.threads.find((t) => t.id === v.id)?.projectId ?? null)
-        : null
+          : v.name === 'thread' ? (s.threads.find((t) => t.id === v.id)?.projectId ?? null)
+            : null
       const p = action.payload || {}
       const threadId = e.threadId
-      // Mark applied (and reflect it in the in-session timeline) ONLY once the create lands —
-      // otherwise a failed IPC create would stay marked-applied in localStorage forever, and the
-      // !appliedAppActions guard above would block every retry, silently dropping the request.
+
       const markApplied = () => {
         deleteInflightAppAction(actionItemId)
         markAppActionApplied(actionItemId)
@@ -422,8 +412,8 @@ export const threadsSlice: Slice = (set, get) => ({
       if (key === 'theme' && ['system', 'light', 'dark'].includes(value)) next.theme = value
       else if (key === 'approvalMode' && ['suggest', 'auto', 'readonly'].includes(value)) next.approvalMode = value
       else if (key === 'reasoningEffort' && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultrathinks', 'ultracode', 'dynamic', '512'].includes(value)) next.reasoningEffort = value
-      else return // unknown key/value — leave the chip pending rather than mark it applied
-      // Only mark applied once the save actually lands (saveSettings surfaces its own error).
+      else return
+
       try { await s.saveSettings(next) } catch { return }
     }
     set((st) => ({ threads: st.threads.map((t) => (t.id !== threadId ? t : { ...t, timeline: t.timeline.map((i) => (i.id !== itemId ? i : { ...i, appAction: { ...action, state: decision === 'apply' ? 'applied' : 'dismissed' } })) })) }))

@@ -1,4 +1,4 @@
-/** Renderer-safe contracts only. OAuth credentials never cross the host boundary. */
+// Renderer-safe contracts only. OAuth credentials never cross the host boundary.
 export type GoogleWorkspaceCapability = 'gmail.read' | 'gmail.send' | 'calendar.read' | 'calendar.write'
 export type GoogleWorkspaceAccountStatus = 'connected' | 'needs-reauthorization' | 'disconnected'
 export interface GoogleWorkspaceAccount {
@@ -41,6 +41,11 @@ export interface GoogleWorkspaceMessage {
   htmlOmitted?: boolean
   attachments: { filename: string; mimeType: string; size: number }[]
   untrustedContent: true
+  unread?: boolean
+  messageId?: string
+  references?: string
+  inReplyTo?: string
+  internalDate?: number
 }
 export interface GoogleWorkspaceThread { id: string; messages: GoogleWorkspaceMessage[] }
 export interface GoogleWorkspaceCalendar { id: string; summary: string; timeZone?: string; accessRole?: string }
@@ -62,7 +67,10 @@ export interface GoogleWorkspaceAvailability {
   timeMax: string
   calendars: { id: string; busy: { start: string; end: string }[]; errors: string[] }[]
 }
-export interface GoogleWorkspaceEmailContent { to: string[]; cc?: string[]; bcc?: string[]; subject: string; text: string }
+export interface GoogleWorkspaceEmailContent {
+  to: string[]; cc?: string[]; bcc?: string[]; subject: string; text: string
+  reply?: { threadId: string; messageId: string; rfcMessageId?: string; references?: string; scopeId?: string }
+}
 export interface GoogleWorkspaceLocalDraft extends GoogleWorkspaceEmailContent {
   id: string
   accountId: string
@@ -76,7 +84,7 @@ export interface GoogleWorkspaceEventContent {
   end: string
   timeZone: string
   attendees?: string[]
-  /** Explicit choice shown in the owner review; never inferred from model output. */
+  // Explicit choice shown in the owner review; never inferred from model output.
   sendUpdates: 'none' | 'all'
 }
 export type GoogleWorkspaceAction =
@@ -86,6 +94,7 @@ export type GoogleWorkspaceAction =
   | { kind: 'calendar.delete'; calendarId: string; eventId: string; etag: string; title: string; sendUpdates: 'none' | 'all' }
 export interface GoogleWorkspaceActionReview {
   id: string
+  createdAt?: number
   accountId: string
   accountEmail: string
   revision: number
@@ -94,7 +103,7 @@ export interface GoogleWorkspaceActionReview {
   action: GoogleWorkspaceAction
   previousEvent?: GoogleWorkspaceEvent
 }
-/** Only a host-verified owner review may supply this receipt. Never expose execution as an agent tool. */
+// Only a host-verified owner review may supply this receipt. Never expose execution as an agent tool.
 export interface GoogleWorkspaceReviewedAction { id: string; accountId: string; revision: number; digest: string }
 export interface GoogleWorkspaceActionResult {
   id: string

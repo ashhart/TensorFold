@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "Obszar asystenta",
+  "Open inbox": "Otwórz skrzynkę odbiorczą",
+  "Open Google Workspace": "Otwórz Google Workspace",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "Rozpocznij zadanie, czytaj rozmowy z połączonych źródeł lub zarządzaj pocztą i kalendarzem Google.",
+  "Google account tools require a model running locally on this computer.": "Narzędzia konta Google wymagają modelu działającego lokalnie na tym komputerze.",
+  "Manage Google accounts locally in TensorFold on the host computer.": "Zarządzaj kontami Google lokalnie w TensorFold na głównym komputerze.",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Import klienta Google Desktop OAuth, dane logowania i przeglądy właściciela są dostępne tylko na głównym komputerze.",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "Na tym komputerze nie ma połączonych kont Google. Zaloguj się poniżej i wybierz konto lub użyj innego adresu w oknie logowania Google.",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "Na tym komputerze nie ma połączonych kont Google. Aby dodać konto, skonfiguruj poniżej logowanie przez Google.",
+  "Disconnected on this computer": "Rozłączono na tym komputerze",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "Rozłączono lokalnie na komputerze; połącz ponownie z Google przed odczytem lub nowymi działaniami.",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "Zastąpienie klienta nie loguje ani nie rozłącza kont automatycznie; JSON i dane logowania pozostają na głównym komputerze.",
+  "No inbox conversation is attached": "Nie dołączono żadnej rozmowy ze skrzynki odbiorczej"
+}

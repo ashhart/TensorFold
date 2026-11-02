@@ -201,7 +201,7 @@
   "Copy user message": "Kopiuj wiadomość użytkownika",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "Cortheon jest włączony: przed odpowiedzią silnik może wysłać zapytania utworzone z czatu do wyszukiwarki i czytać publiczne strony. Wyłącz w ustawieniach AI lub Modelach.",
-  "Cortheon is temporarily disabled in this beta.": "Cortheon jest tymczasowo wyłączony w tej becie.",
+  "Cortheon is temporarily disabled.": "Cortheon jest tymczasowo wyłączony.",
   "Cost cap $": "Limit kosztów $",
   "Could not check CLI auth.": "Nie udało się sprawdzić logowania CLI.",
   "Could not open a chat. Your current work is still here; try New chat again.": "Nie udało się otworzyć czatu. Bieżąca praca pozostała tutaj; ponów Nowy czat.",

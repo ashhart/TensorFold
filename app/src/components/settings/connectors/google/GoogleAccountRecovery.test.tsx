@@ -6,6 +6,7 @@ import ts from 'typescript'
 import { reviewedLanguageImport } from '../../../preferences/language-test-fixture'
 import { GoogleWorkspaceService } from '../../../../../electron/agent/google-workspace'
 import { requestedScopes } from '../../../../../electron/agent/google-workspace/scopes'
+import * as googleErrors from '../../../../../shared/google-workspace-errors'
 import type { GoogleWorkspaceAccount, GoogleWorkspaceSnapshot } from '../../../../../shared/google-workspace'
 
 const Button = (_props: any) => null, Toggle = (_props: any) => null, Field = (_props: any) => null, Input = (_props: any) => null
@@ -14,8 +15,6 @@ const MailReader = (_props: any) => null, CalendarReader = (_props: any) => null
 const MailDrafts = (_props: any) => null, AccountSetup = (_props: any) => null
 const jsx = { jsx: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), jsxs: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), Fragment: React.Fragment }
 
-// Exercise the production hooks and components at the same isolated seam as
-// GoogleRendererFlows; no browser account, OAuth token or network is consulted.
 function harness(file: string, api: any, extra: Record<string, unknown> = {}) {
   const slots: any[] = [], cleanups = new Map<number, () => void>()
   let cursor = 0, effects: Array<() => void> = []
@@ -26,6 +25,7 @@ function harness(file: string, api: any, extra: Record<string, unknown> = {}) {
     useEffect(work: () => any, deps: any[]) { const i = cursor++; if (!slots[i] || deps.some((v, j) => v !== slots[i][j])) { slots[i] = deps; effects.push(() => { cleanups.get(i)?.(); const cleanup = work(); if (typeof cleanup === 'function') cleanups.set(i, cleanup) }) } },
   }
   const imports: Record<string, any> = {
+    '../../../../../shared/google-workspace-errors': googleErrors,
     react, 'react/jsx-runtime': jsx, '../../../../lib/ipc': { api }, '../../../lib/ipc': { api },
     '../../../ui': { Button, Toggle, Field, Input }, '../../ui': { Button }, '../shared': { Section: Empty },
     './google/GoogleAccountSetup': { GoogleAccountSetup: AccountSetup }, './google/GoogleActionReviews': { GoogleActionReviews: Empty },
@@ -85,8 +85,6 @@ assert.deepEqual(state.snapshot.accounts, [])
 assert.equal(state.error, '')
 discovery.close()
 
-// Reproduce the stale Connected badge through a real revoked-refresh failure,
-// rather than inventing a renderer-only account status transition.
 const now = 1_800_000_000_000
 let transportCalls = 0
 let privateState: any = { version: 1, client: { clientId: '123456789012-synthetic.apps.googleusercontent.com', clientSecret: 'synthetic-secret' }, accounts: [{ ...account('first'), subject: 'synthetic-subject', tokens: { accessToken: 'synthetic-expired', refreshToken: 'synthetic-refresh', expiresAt: now, scopes: requestedScopes(['gmail.read', 'calendar.read']) } }], drafts: [], actions: [] }

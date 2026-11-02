@@ -1,0 +1,139 @@
+name: Desktop platform packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/app-improvements-engine-116]
+    paths: ['app/**', '.github/workflows/desktop-packages.yml']
+  pull_request:
+    paths: ['app/**', '.github/workflows/desktop-packages.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm install --global --ignore-scripts npm@10.9.8
+      - run: npm ci --ignore-scripts
+      - run: npm run deps:trusted-scripts
+      - run: npm run typecheck
+      - run: sudo apt-get update && sudo apt-get install -y squashfs-tools
+      - run: npm run dist:linux
+      - name: Verify the packaged native engine
+        run: |
+          if [ '${{ matrix.arch }}' = arm64 ]; then unpacked=linux-arm64-unpacked; else unpacked=linux-unpacked; fi
+          expected=$(node -p "require('./build/engine.json').version")
+          test "$(release/linux/$unpacked/resources/engine/bin/tensorfold-native --version)" = "tensorfold-native $expected"
+      - name: Prepare per-app sandbox integration on restricted hosts
+        run: |
+          if ! unshare --user --map-root-user true; then
+            image=$(find "$PWD/release/linux" -maxdepth 1 -name '*.AppImage' -type f -print -quit)
+            test -n "$image"
+            digest=$(sha256sum "$image" | cut -d' ' -f1)
+            sudo /bin/bash build/linux/install-sandbox-support.sh --install "$image" "$digest"
+          fi
+      - run: npm run smoke:linux:packaged -- --appimage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tensorfold-linux-${{ matrix.arch }}-development
+          path: app/release/linux/*.AppImage
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: app
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm install --global --ignore-scripts npm@10.9.8
+      - run: npm ci --ignore-scripts
+      - run: npm run deps:trusted-scripts
+      - run: npm run typecheck
+      - name: Verify Windows package policy and engine paths
+        run: |
+          node scripts/package-windows.test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node node_modules/jiti/lib/jiti-cli.mjs electron/agent/engine/windows-runtime.test.ts
+      - name: Read the reviewed engine pin
+        id: engine-pin
+        run: |
+          $pin = Get-Content build/engine.json -Raw | ConvertFrom-Json
+          "commit=$($pin.sourceCommit)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$($pin.version)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ashhart/TensorFold
+          ref: ${{ steps.engine-pin.outputs.commit }}
+          path: engine-source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: mlc-ai/xgrammar
+          ref: 97787376faee5ed8466cfad57c99855e4ce2f6aa
+          path: xgrammar
+          submodules: recursive
+          persist-credentials: false
+      - name: Install the pinned native compiler
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP zig-windows.zip
+          Invoke-WebRequest https://ziglang.org/download/0.17.0/zig-x86_64-windows-0.17.0.zip -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne 'b5663f69581dcf391293fbf16c06cb80d81d806545ce618b4d0bab7f0eb8c428') { throw 'Zig archive hash mismatch' }
+          Expand-Archive $archive (Join-Path $env:RUNNER_TEMP zig)
+          (Join-Path $env:RUNNER_TEMP 'zig/zig-x86_64-windows-0.17.0') | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+      - uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d
+        with:
+          cuda: '13.2.0'
+          method: network
+          sub-packages: '["nvcc", "cudart"]'
+      - name: Build the pinned native engine and grammar library
+        working-directory: engine-source
+        run: |
+          zig build native "-Dversion=${{ steps.engine-pin.outputs.version }}" '-Doptimize=ReleaseFast' '-Dstrip=true' "-Dnvcc=$env:CUDA_PATH/bin/nvcc.exe" '-Dsm=80,86,120,121' -j2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          zig build grammar '-Dxgrammar=../xgrammar' -j2
+      - run: node scripts/stage-windows-engine.mjs ../engine-source ../xgrammar
+      - run: npm run dist:windows
+      - run: npm run smoke:windows:packaged
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tensorfold-windows-x64-development
+          path: |
+            app/release/windows/*-setup.exe
+            app/build/engine/BUILD-PROVENANCE.json
+          if-no-files-found: error

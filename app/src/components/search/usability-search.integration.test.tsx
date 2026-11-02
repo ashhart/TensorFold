@@ -7,6 +7,8 @@ import * as events from './search-events'
 import * as filters from '../../../shared/conversation-search-filters'
 import { searchFiltersFromDraft, emptySearchFilterDraft } from './search-filter-draft'
 import * as windowing from '../../lib/transcript-window'
+import { createTranscriptViewMemory } from '../../lib/transcript-view-memory'
+import * as scrolling from '../../lib/transcript-scroll'
 import { find, jsx, load, nodes, settle, text } from '../reading/reading-test-harness'
 
 function harness() {
@@ -17,6 +19,7 @@ function harness() {
     useState(initial: any) { const index = cursor++; if (!(index in values)) values[index] = typeof initial === 'function' ? initial() : initial; return [values[index], (next: any) => { values[index] = typeof next === 'function' ? next(values[index]) : next }] },
     useRef(initial: any) { const index = cursor++; return values[index] ??= { current: initial } },
     useMemo(build: any, deps: any[]) { const index = cursor++; if (changed(index, deps)) { values[index] = build(); dependencies[index] = deps }; return values[index] },
+    useCallback(callback: any, deps: any[]) { return hooks.useMemo(() => callback, deps) },
     useEffect(effect: any, deps?: any[]) { const index = cursor++; if (changed(index, deps)) { effects.push(() => { cleanups[index]?.(); cleanups[index] = effect() }); if (deps) dependencies[index] = deps } },
     useLayoutEffect(effect: any, deps?: any[]) { hooks.useEffect(effect, deps) },
   }
@@ -73,7 +76,8 @@ hooks.cleanup()
 
 const anchorHooks = harness(), windowHooks = harness(), revealed: string[] = [], focused: string[] = []
 const { useConversationSearchTarget } = load('src/components/search/useConversationSearchTarget.ts', { react: anchorHooks.hooks, './search-events': events, './scroll-transcript-target': { scrollTranscriptTarget } })
-const { useTranscriptWindow } = load('src/components/search/useTranscriptWindow.ts', { react: windowHooks.hooks, '../../lib/transcript-window': windowing })
+const viewMemory = { transcriptViewMemory: createTranscriptViewMemory() }
+const { useTranscriptWindow } = load('src/components/search/useTranscriptWindow.ts', { react: windowHooks.hooks, '../../lib/transcript-window': windowing, '../../lib/transcript-view-memory': viewMemory })
 const turn: any = { key: 'work-turn', work: [{ id: 'exact-tool', kind: 'tool', output: 'Synthetic recorded work.' }] }
 let rows: any[] = Array.from({ length: 900 }, (_, index) => index === 23 ? { type: 'work', turn } : { type: 'item', item: { id: `message-${index}` } })
 const outerViewport = { scrollTop: 133 }
@@ -94,6 +98,7 @@ const total = rows.length; rows = [...rows, { type: 'item', item: { id: 'streame
 window = renderWindow(); windowHooks.flush()
 assert.ok(window.segments.some((segment: any) => segment.kind === 'visible' && segment.start <= 23 && segment.end > 23)); assert.ok(window.segments.some((segment: any) => segment.kind === 'visible' && segment.end === total + 1), 'Streaming appends retain earlier searched rows')
 const beforeLoad = viewport.scrollTop; window.load(0, 150); viewport.scrollHeight += 400; renderWindow(); windowHooks.flush(); assert.equal(viewport.scrollTop, beforeLoad + 400, 'Loading earlier rows preserves the reading position')
+const rememberedRows = rows
 currentThread = 'different-thread'; anchor = renderAnchor(); anchorHooks.flush(); anchor = renderAnchor(); assert.equal(anchor.itemId, null)
 rows = Array.from({ length: 900 }, (_, index) => ({ type: 'item', item: { id: `revision-${index}` } }))
 renderWindow(); windowHooks.flush(); window = renderWindow()
@@ -101,7 +106,36 @@ assert.equal(window.segments.filter((segment: any) => segment.kind === 'visible'
 rows = rows.slice(0, 20)
 window = renderWindow(); windowHooks.flush(); window = renderWindow()
 assert.equal(window.segments.filter((segment: any) => segment.kind === 'visible').reduce((sum: number, segment: any) => sum + segment.end - segment.start, 0), 20, 'Editing or reverting to a shorter revision keeps its surviving conversation visible rather than hiding every row behind an old window')
+currentThread = 'anchor-thread'; rows = rememberedRows
+window = renderWindow(); windowHooks.flush(); window = renderWindow()
+assert.ok(window.segments.some((segment: any) => segment.kind === 'visible' && segment.start === 0 && segment.end >= 150), 'Returning to the earlier thread retains its explicitly loaded history')
 anchorHooks.cleanup(); windowHooks.cleanup()
+
+const scrollHooks = harness()
+const scrollMemory = { transcriptViewMemory: createTranscriptViewMemory() }
+const { useConversationScroll } = load('src/components/search/useConversationScroll.ts', {
+  react: scrollHooks.hooks, '../../lib/transcript-scroll': scrolling, '../../lib/transcript-view-memory': scrollMemory,
+})
+const readViewport: any = { dataset: { conversationId: 'first' }, scrollTop: 0, scrollHeight: 3000, clientHeight: 600, querySelectorAll: () => [], getBoundingClientRect: () => ({ top: 0 }) }
+const readRef = { current: readViewport }, readFollow = { current: true }
+let revision = 'initial'
+const renderScroll = () => scrollHooks.render(() => useConversationScroll({ threadId: readViewport.dataset.conversationId, revision, scrollRef: readRef, followRef: readFollow }))
+let scroll = renderScroll(); scrollHooks.flush()
+assert.equal(readViewport.scrollTop, 2400, 'A new conversation starts at its latest content')
+readViewport.scrollTop = 300; scroll.onScroll()
+readViewport.dataset.conversationId = 'second'; renderScroll(); scrollHooks.flush()
+assert.equal(readViewport.scrollTop, 2400, 'A new thread does not inherit the prior thread\'s non-following state')
+readViewport.dataset.conversationId = 'first'; scroll = renderScroll(); scrollHooks.flush()
+assert.equal(readViewport.scrollTop, 300, 'A thread switch restores the earlier reading position')
+assert.equal(readFollow.current, false)
+readViewport.scrollHeight = 4000; revision = 'stream-appended'; renderScroll(); scrollHooks.flush()
+assert.equal(readViewport.scrollTop, 300, 'Streaming does not move a reader away from older content')
+readViewport.clientHeight = 450; revision = 'approval-arrived'; scroll = renderScroll(); scrollHooks.flush()
+assert.equal(readViewport.scrollTop, 300, 'A docked approval shrinking the viewport does not force a jump')
+scroll.jumpToLatest(); assert.equal(readViewport.scrollTop, 3550); assert.equal(readFollow.current, true)
+readViewport.scrollHeight = 4200; revision = 'more-streaming'; renderScroll(); scrollHooks.flush()
+assert.equal(readViewport.scrollTop, 3750, 'Explicitly returning to latest restores automatic following')
+scrollHooks.cleanup()
 
 const ordinary: any = { id: 'ordinary', title: 'Synthetic chat', kind: 'chat', updatedAt: 1, timeline: [{ id: 'unicode', kind: 'assistant', text: 'Café Привет 東京 ＡＢＣ' }] }
 const privateKinds = ['incognito', 'phoneLocalOnly', 'googleLocalOnly', 'bot']

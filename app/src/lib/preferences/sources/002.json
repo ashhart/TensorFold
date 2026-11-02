@@ -101,7 +101,7 @@
   "Copy user message",
   "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.",
-  "Cortheon is temporarily disabled in this beta.",
+  "Cortheon is temporarily disabled.",
   "Cost cap $",
   "Could not check CLI auth.",
   "Could not open a chat. Your current work is still here; try New chat again.",

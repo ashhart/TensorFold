@@ -11,6 +11,8 @@ import * as firstModel from '../../components/onboarding/first-answer/model'
 import * as onboarding from '../../components/onboarding-model'
 import * as modelFit from '../../../shared/model-fit'
 import type { RunRecoverySnapshot } from '../../../shared/run-recovery'
+import { engineReadiness } from '../engine-readiness'
+import { repoDisplayName } from '../turn-stats-line'
 
 assert.deepEqual(Object.keys(flowEnglish).sort(), Object.keys(flowSpanish).sort())
 for (const [key, en] of Object.entries(flowEnglish)) {
@@ -37,7 +39,7 @@ function load(file: string, extra: Record<string, any> = {}, tail = '') {
 const first = load('src/components/onboarding/first-answer/FirstAnswerStep.tsx', { './model': firstModel, '../../../lib/preferences/useFlowText': hook }).FirstAnswerStep
 const approval = load('src/components/ApprovalCard.tsx', { '../lib/preferences/useFlowText': hook, '../lib/icons': { Icon: () => null } }).ApprovalCard
 const recovery = load('src/components/run-recovery/RunRecoveryCard.tsx', { '../../lib/preferences/useFlowText': hook, '../ui': { Button } }).RunRecoveryCard
-const engine = load('src/components/models/EngineChoice.tsx', { '../../lib/preferences/useFlowText': hook, '../../lib/icons': { Icon: () => null }, '../../lib/engine': { useEngine: () => ({ snapshot: { status: { available: true, state: 'stopped', memoryLimitBytes: 100 }, installed: [] }, error: 'HTTP 503 original provider diagnostic' }), formatBytes: () => '100 B' }, '../ui': { Button }, './EngineStatus': { engineDotTone: () => '' }, '../BrandMark': { BrandMark: () => null } }).EngineChoice
+const engine = load('src/components/models/EngineChoice.tsx', { '../../lib/preferences/useFlowText': hook, '../../lib/icons': { Icon: () => null }, '../../lib/engine': { useEngine: () => ({ snapshot: { status: { available: true, state: 'stopped', memoryLimitBytes: 100 }, installed: [] }, error: 'HTTP 503 original provider diagnostic' }), formatBytes: () => '100 B' }, '../../lib/engine-readiness': { engineReadiness }, '../../lib/turn-stats-line': { repoDisplayName }, '../ui': { Button }, './EngineStatus': { engineDotTone: () => '' }, '../BrandMark': { BrandMark: () => null } }).EngineChoice
 const settings = { desktopMode: 'full', providers: [], uiPreferences: { locale: 'en' } }
 const useStore = Object.assign((selector: any) => selector({ settings, saveSettings() {}, setView() {} }), { getState: () => ({ threads: [], settings }), setState() {} })
 const onboardingComponents = load('src/components/Onboarding.tsx', {
@@ -47,6 +49,7 @@ const onboardingComponents = load('src/components/Onboarding.tsx', {
   '../lib/full-workspace-layout': { savedFullWorkspaceLayout: () => 'chat', fullLayoutPreferenceReadable: () => true }, '../lib/onboarding-landing': { finishOnboardingLanding() {} },
   './onboarding/first-answer/FirstAnswerStep': { FirstAnswerStep: first }, './onboarding/first-answer/MinimalSetupGuide': { MinimalSetupGuide: () => null }, './onboarding/first-answer/model': firstModel,
   './onboarding/first-answer/transition': { openFirstAnswerDraft() {} }, '../lib/conversation-drafts': { conversationDraftsFor() {} }, '../lib/desktop-drafts': { desktopDraftPort: null },
+  '../lib/model-chat': { openModelChat() {} },
 }, '\nexports.WorkspaceChoice = WorkspaceChoice; exports.ConnectStep = ConnectStep;')
 const ownership = {}
 const qualificationReport = { providerId: 'original-provider', accountId: 'original-account', model: 'Original / 模型', key: modelFit.modelQualificationKey({ providerId: 'original-provider', accountId: 'original-account', model: 'Original / 模型' }), checks: { ...modelFit.emptyModelChecks(), tools: { state: 'failed', message: 'The synthetic tool call contained malformed or schema-invalid arguments; no tools were executed.' } }, checkedAt: 1, probeRevision: 1, revision: 1 }

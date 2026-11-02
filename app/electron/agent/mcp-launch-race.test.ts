@@ -8,6 +8,7 @@ import * as envelope from './mcp-envelope'
 import * as lifecycle from './child-process-lifecycle'
 import * as detection from './secret-detection'
 import * as security from './security'
+import * as isolation from './mcp-isolation'
 
 const source = await fs.readFile(new URL('./mcp-client.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
@@ -20,10 +21,11 @@ function deferred() {
   return { promise, resolve }
 }
 
-function fixture(stage: 'manifest' | 'provenance') {
+function fixture(stage: 'manifest' | 'provenance' | 'isolation') {
   const entered = deferred()
   const release = deferred()
   let launches = 0
+  let disposed = 0
   const pause = async () => { entered.resolve(); await release.promise }
   const dependencies: Record<string, unknown> = {
     './mcp-process': {
@@ -37,6 +39,11 @@ function fixture(stage: 'manifest' | 'provenance') {
     './child-process-lifecycle': lifecycle,
     './secret-detection': detection,
     './security': security,
+    './mcp-isolation': { ...isolation, prepareMcpIsolation: async () => {
+      if (stage !== 'isolation') return undefined
+      await pause()
+      return { workspace: {}, dispose: async () => { disposed++ } }
+    } },
   }
   const exports: Record<string, any> = {}
   new Function('require', 'exports', compiled)((name: string) => {
@@ -46,7 +53,7 @@ function fixture(stage: 'manifest' | 'provenance') {
   }, exports)
   const host = new exports.McpHost()
   host.setConfigs([base])
-  return { host, entered: entered.promise, release: release.resolve, launches: () => launches }
+  return { host, entered: entered.promise, release: release.resolve, launches: () => launches, disposed: () => disposed }
 }
 
 let failed = 0
@@ -55,7 +62,7 @@ async function test(name: string, run: () => Promise<void>) {
   catch (error) { failed++; console.error(`FAIL ${name}`, error) }
 }
 
-for (const stage of ['manifest', 'provenance'] as const) await test(`changed configuration cannot cross process launch boundary after ${stage} await`, async () => {
+for (const stage of ['manifest', 'provenance', 'isolation'] as const) await test(`changed configuration cannot cross process launch boundary after ${stage} await`, async () => {
   const f = fixture(stage)
   const result = f.host.connect(base.id).catch((error: unknown) => error)
   await f.entered
@@ -64,11 +71,12 @@ for (const stage of ['manifest', 'provenance'] as const) await test(`changed con
   const error = await result
   assert.equal(f.launches(), 0, 'stale configuration must be rejected before process creation')
   assert.match(error.message, /changed|no longer matches|cancelled/i)
+  if (stage === 'isolation') assert.equal(f.disposed(), 1, 'Cancelled isolation preparation must release its private copy')
   await f.host.shutdown()
 })
 
-await test('disconnect cancels a launch still collecting process provenance', async () => {
-  const f = fixture('provenance')
+for (const stage of ['provenance', 'isolation'] as const) await test(`disconnect cancels a launch still preparing ${stage}`, async () => {
+  const f = fixture(stage)
   const result = f.host.connect(base.id).catch((error: unknown) => error)
   await f.entered
   await f.host.disconnect(base.id)
@@ -76,6 +84,7 @@ await test('disconnect cancels a launch still collecting process provenance', as
   const error = await result
   assert.equal(f.launches(), 0, 'a stopped connection must not spawn later')
   assert.match(error.message, /changed|no longer matches|cancelled/i)
+  if (stage === 'isolation') assert.equal(f.disposed(), 1)
   await f.host.shutdown()
 })
 

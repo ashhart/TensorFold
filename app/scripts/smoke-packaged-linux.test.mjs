@@ -29,7 +29,7 @@ assert.throws(() => linuxSmokeEnvironment({}, 'relative/profile', 1234), /VONTRA
 assert.throws(() => linuxSmokeEnvironment({}, '/tmp/profile', 0), /port is invalid/)
 
 await assert.rejects(() => resolvePackagedLinuxExecutable(undefined, 'darwin', 'arm64'), /only on Linux/)
-await assert.rejects(() => resolvePackagedLinuxExecutable(undefined, 'linux', 'arm64'), /x64 only/)
+await assert.rejects(() => resolvePackagedLinuxExecutable(undefined, 'linux', 'ia32'), /x64 and arm64/)
 
 const root = await mkdtemp(path.join(os.tmpdir(), 'tf-linux-smoke-resolve-'))
 try {
@@ -37,6 +37,7 @@ try {
   await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'tensorfold-studio', build: { productName: 'TensorFold' } }))
   const resolved = await resolvePackagedLinuxExecutable(root, 'linux', 'x64')
   assert.equal(resolved, path.join(root, 'release', 'linux', 'linux-unpacked', 'tensorfold-studio'))
+  assert.equal(await resolvePackagedLinuxExecutable(root, 'linux', 'arm64'), path.join(root, 'release', 'linux', 'linux-arm64-unpacked', 'tensorfold-studio'))
   await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'tensorfold-studio', build: { linux: { executableName: 'tensorfold' } } }))
   assert.equal(await resolvePackagedLinuxExecutable(root, 'linux', 'x64'), path.join(root, 'release', 'linux', 'linux-unpacked', 'tensorfold'))
   // AppImage resolution: exactly one built image, and errors are actionable.

@@ -49,6 +49,7 @@ export function redactSettings(input: Settings): Settings {
         env: account.env ? Object.fromEntries(Object.entries(account.env).map(([key, value]) => [key, value ? SECRET_MASK : ''])) : account.env,
       })),
     })),
+    imessage: { ...input.imessage, blueBubblesPassword: input.imessage?.blueBubblesPassword ? SECRET_MASK : input.imessage?.blueBubblesPassword },
     email: {
       ...input.email,
       sources: input.email.sources.map((src) => ({ ...src, password: src.password ? SECRET_MASK : src.password })),
@@ -149,6 +150,7 @@ export function mergeSettingsSecrets(next: Settings, current: Settings): Setting
         }),
       }
     }),
+    imessage: { ...next.imessage, blueBubblesPassword: boundSecret(next.imessage?.blueBubblesPassword, current.imessage?.blueBubblesPassword, sameEndpoint(next.imessage?.blueBubblesUrl, current.imessage?.blueBubblesUrl)) },
     email: {
       ...next.email,
       sources: next.email.sources.map((src) => {

@@ -116,6 +116,7 @@ assert.equal(drafts.get(a).text, TASK_STARTERS[1].prompt, 'private and retained 
 activeDraftKey.current = composerDraftKey(home)
 starter(home)('plan'); assert.equal(drafts.get(home).text, TASK_STARTERS[2].prompt)
 assert.equal(automaticSends, 0)
-assert.ok(source.text.includes('{showTaskStarters && <TaskStarters onSelect={startTask} />}'), 'the tested actions are wired into the actual Composer used by Home and empty threads')
+assert.ok(source.text.includes("{showTaskStarters && mode !== 'home' && <TaskStarters onSelect={startTask} />}"), 'empty threads retain the tested actions above their composer')
+assert.ok(source.text.includes("{showTaskStarters && mode === 'home' && <div className=\"mt-3\"><TaskStarters onSelect={startTask} /></div>}"), 'Home exposes the same guarded actions below its primary composer')
 drafts.dispose()
 console.log('Actual starter buttons fill only an empty ready owner draft, preserve typing/files/privacy/navigation, use the existing scoped file picker and never send automatically.')

@@ -2,7 +2,7 @@ import os from 'node:os'
 import { resolveHubEndpoint } from './hub-network'
 import { PINNED_ENGINE_ENV_KEYS } from '../../../shared/engine-advanced-env'
 
-const CHILD_ENV_KEYS = ['HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'USER', 'LOGNAME', 'SHELL', 'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE', 'HF_ENDPOINT']
+const CHILD_ENV_KEYS = ['HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'USER', 'LOGNAME', 'SHELL', 'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE', 'HF_ENDPOINT', 'SystemRoot', 'WINDIR', 'USERPROFILE', 'TEMP', 'TMP']
 
 // The engine gets ordinary OS values and the Hugging Face cache settings, never the app's provider keys.
 export function engineChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

@@ -32,15 +32,8 @@ import type { ContactDirectory } from '../agent/contact-directory'
 import { emptyContactDirectory } from '../agent/contact-directory'
 import { normalizeAgentPresets } from '../../shared/bot-policy'
 
-// Settings load/save + every per-collection load/save pair + the two purge routines.
-// Depends on all five other store/ modules: paths / recovery-registry / app-crypto / write-infra /
-// defaults. writeModelsJson is a hoisted function declaration so loadSettings/saveSettings above
-// its definition can reference it (readSettingsJson takes it as a callback to avoid a cycle).
-
 export async function loadSettings(): Promise<Settings> {
-  // Validate/capture the configured key policy even on a fresh profile with no
-  // ciphertext yet. A managed require-external launch must fail now, not silently
-  // boot and discover the missing key only after the first secret is saved.
+
   appKeys()
   const def = defaultSettings()
   const primary = await readSettingsJson(settingsPath(), true, writeModelsJson)
@@ -48,9 +41,7 @@ export async function loadSettings(): Promise<Settings> {
   const loaded = primary ?? legacy ?? {}
   const unresolvedLegacyCount = countLegacySecrets(loaded)
   if (unresolvedLegacyCount > 0) {
-    // Preserve the exact ciphertext before revealing unknown legacy blobs as empty.
-    // The template is also merged into subsequent unrelated saves until the user
-    // replaces each value, preventing the old destructive empty-overwrite migration.
+
     setLegacySecretTemplate(JSON.parse(JSON.stringify(loaded)) as Partial<Settings>)
     const sourcePath = primary ? settingsPath() : legacy ? legacySettingsPath() : settingsPath()
     setLegacySettingsBackupPath(await backupLegacySecretFile(sourcePath))
@@ -200,22 +191,18 @@ export async function loadSettings(): Promise<Settings> {
     !!(loaded.remoteControl?.authToken && !loaded.remoteControl.authToken.startsWith(SECRET_PREFIX)) ||
     !!(loaded.remoteClient?.authToken && !loaded.remoteClient.authToken.startsWith(SECRET_PREFIX)) ||
     (loaded.remoteOrchestrators ?? []).some((host) => !!host.authToken && !host.authToken.startsWith(SECRET_PREFIX)) ||
-    // Connector source secrets were missing from this migration check entirely — a plaintext
-    // email/Slack/Discord/Mattermost/Matrix/Google Chat secret never triggered the re-encrypt-on-load.
+
+    (!!loaded.imessage?.blueBubblesPassword && !loaded.imessage.blueBubblesPassword.startsWith(SECRET_PREFIX)) ||
     (loaded.email?.sources ?? []).some((s) => !!s.password && !s.password.startsWith(SECRET_PREFIX)) ||
     (loaded.slack?.sources ?? []).some((s) => !!s.token && !s.token.startsWith(SECRET_PREFIX)) ||
     (loaded.discord?.sources ?? []).some((s) => !!s.token && !s.token.startsWith(SECRET_PREFIX)) ||
     (loaded.mattermost?.sources ?? []).some((s) => !!s.token && !s.token.startsWith(SECRET_PREFIX)) ||
     (loaded.matrix?.sources ?? []).some((s) => !!s.token && !s.token.startsWith(SECRET_PREFIX)) ||
     (loaded.googlechat?.sources ?? []).some((s) => (!!s.webhookUrl && !s.webhookUrl.startsWith(SECRET_PREFIX)) || (!!s.accessToken && !s.accessToken.startsWith(SECRET_PREFIX)))
-  // Unknown legacy macOS-Keychain/lost-key blobs share our prefix but cannot be
-  // decoded under the active keys. They remain backed up and preserved verbatim;
-  // never auto-save the empty revealed values over them. A profile-key fallback,
-  // however, is readable and can be safely rewrapped under an external key.
+
   const hasLegacySafeStorageSecret = hasLegacySecret(loaded)
   const hasProfileKeyMigrationSecret = hasProfileFallbackSecret(loaded)
-  // Migration is a security write, not optional housekeeping. If it fails, reject startup
-  // rather than continue with known plaintext/legacy credentials while only logging nothing.
+
   await persistSettingsMigration(
     !hasLegacySafeStorageSecret && Boolean(legacy || normalizedCliModels || seeded.removedIds.length || rebranded || hasPlaintextSecret || hasProfileKeyMigrationSecret),
     () => saveSettings(result),
@@ -227,15 +214,12 @@ export async function saveSettings(s: Settings, options: { validateCommit?: () =
   const authoritativePath = settingsPath(), cataloguePath = modelsPath()
   options.validateCommit?.()
   validateEngineModelProfileSets(s.engineModelProfiles)
-  // Readable JSON: protectSettings already encrypts secret fields in-place (safe:v1:), so we skip the
-  // whole-file envelope — settings.json is now human-readable/editable, with only API keys/tokens
-  // opaque. The discovered model catalogue per provider goes in a sibling readable models.json.
+
   const protectedSettings = protectSettings({ ...s, uiPreferences: normalizeStoredUiPreferences(s.uiPreferences), modelHelperDefaults: normalizeStoredHelperDefaults(s.modelHelperDefaults) })
   const merged = getLegacySecretTemplate()
     ? mergeUnresolvedLegacySecrets(getLegacySecretTemplate(), protectedSettings) as Settings
     : protectedSettings
-  // The catalogue is derived; prepare it before the authoritative configuration
-  // commit so a rejected cache write cannot leave settings.json secretly changed.
+
   await writeModelsJson(s, cataloguePath, options.validateCommit)
   options.validateCommit?.()
   await writeJson(authoritativePath, merged, options.validateCommit)
@@ -244,8 +228,6 @@ export async function saveSettings(s: Settings, options: { validateCommit?: () =
   if (remainingLegacy === 0) setLegacySettingsBackupPath(null)
 }
 
-// Function declaration (hoisted) so loadSettings/saveSettings above can reference it. readSettingsJson
-// takes it as a callback to avoid a circular dependency between this module and write-infra.
 function writeModelsJson(s: Settings, target = modelsPath(), validateCommit?: () => void): Promise<void> {
   const catalogue: Record<string, string[]> = {}
   for (const p of s.providers) {
@@ -273,11 +255,9 @@ export async function saveThreads(threads: Thread[]): Promise<void> {
   // Incognito threads are memory-only: never let them touch threads.json.
   for (const thread of threads) validateDocumentSourceIds(thread.documentSourceIds)
   const persisted = stripIncognitoThreads(threads)
-  // An empty new thread can become Incognito while an earlier save is queued.
-  // Re-evaluate privacy in the serialized slot, immediately before encryption.
+
   await writeProtectedJson(threadsPath(), persisted, { prepareData: () => { for (const thread of threads) validateDocumentSourceIds(thread.documentSourceIds); return stripIncognitoThreads(threads) } })
-  // The search DB is disposable and stores keyed token digests, not transcript text.
-  // Failure never invalidates the canonical protected JSON save.
+
   try {
     syncSessionSearchIndex(vontraPath('state', 'session-search.sqlite'), stripIncognitoThreads(threads), blindSearchToken)
   } catch (error) {
@@ -285,7 +265,7 @@ export async function saveThreads(threads: Thread[]): Promise<void> {
   }
 }
 
-/** Keep question acceptance out of live IPC snapshots until the encrypted write commits. */
+// Keep question acceptance out of live IPC snapshots until the encrypted write commits.
 export async function saveThreadQuestion(
   getThreads: () => Thread[],
   run: Pick<UserQuestionRun, 'threadId' | 'runId' | 'itemId'>,
@@ -300,8 +280,7 @@ export async function saveThreadQuestion(
   }
   const initial = resolveTarget(getThreads())
   if (initial.thread.incognito) {
-    // Incognito questions are memory-only even if the normal thread store is
-    // quarantined; never require, skip or rewrite its unrelated protected file.
+
     Object.assign(initial.item, patch)
     return
   }
@@ -315,16 +294,13 @@ export async function saveThreadQuestion(
       const stagedThread = { ...thread, timeline: thread.timeline.map((item) => item === target ? stagedItem : item) }
       return stripIncognitoThreads(threads.map((candidate) => candidate === thread ? stagedThread : candidate))
     },
-    // Generic thread saves retain shallow references. Publish within the same
-    // serialized slot so an already queued save sees the newly durable answer.
+
     onCommitted: () => { if (target) Object.assign(target, patch) },
   })
   try { syncSessionSearchIndex(vontraPath('state', 'session-search.sqlite'), stripIncognitoThreads(getThreads()), blindSearchToken) }
   catch (error) { console.warn('[vontra] session search index sync failed:', (error as Error)?.message ?? error) }
 }
 
-// Provider rate-limit status snapshots (VST-037): non-secret usage percentages/resets, so
-// the plain state envelope (not protected) is fine — the same tier as connector events.
 export async function loadProviderStatus(): Promise<PersistedProviderStatus | null> {
   return readJsonState<PersistedProviderStatus | null>('provider-status.json', null)
 }
@@ -332,9 +308,6 @@ export async function saveProviderStatus(data: PersistedProviderStatus): Promise
   await writeJsonState('provider-status.json', data)
 }
 
-// Automation scheduler lease (VST-038): the single-runner lease persisted so a restart /
-// shared host sees who currently owns scheduling and stands down. Non-secret coordination
-// state → plain envelope.
 export async function loadSchedulerLease(): Promise<SchedulerLease | null> {
   return readJsonState<SchedulerLease | null>('scheduler-lease.json', null)
 }
@@ -351,8 +324,6 @@ export async function savePairingSessions(data: PairingRegistryState): Promise<v
   await writeProtectedJson(pairingSessionsPath(), data)
 }
 
-// Turn-checkpoint ledgers (VST-036) hold full conversation snapshots, so they get the same
-// protected envelope as threads.json. The service filters incognito threads before save.
 const turnCheckpointsPath = () => statePath('turn-checkpoints.json')
 export async function loadTurnCheckpoints(): Promise<PersistedTurnCheckpoints | null> {
   return readProtectedState<PersistedTurnCheckpoints | null>('turn-checkpoints.json', null)
@@ -392,16 +363,10 @@ const connectorEventsPath = () => statePath('assistant-events.json')
 export async function loadConnectorEvents(): Promise<ConnectorEvent[]> { return readProtectedState<ConnectorEvent[]>('assistant-events.json', []) }
 export async function saveConnectorEvents(e: ConnectorEvent[]): Promise<void> { await writeProtectedJson(connectorEventsPath(), e) }
 
-// Learned contact directory (platform handle -> display name). Holds names + phone
-// numbers, so it is stored ENCRYPTED at rest like the other PII-bearing state files.
 const contactsPath = () => statePath('contacts.json')
 export async function loadContactDirectory(): Promise<ContactDirectory> { return readProtectedState<ContactDirectory>('contacts.json', emptyContactDirectory()) }
 export async function saveContactDirectory(d: ContactDirectory): Promise<void> { await writeProtectedJson(contactsPath(), d, { isEmpty: Object.keys(d.records).length === 0 }) }
 
-// The set of project terminals (codex/claude/shell/…) that were LIVE — persisted so they survive an
-// app restart and can be resumed to their prior CLI session. Holds spawn cwds (filesystem paths), so
-// it is stored ENCRYPTED at rest like the other path/PII-bearing state files. The file represents
-// "sessions that were running": a finished/closed terminal is removed; the clean-quit set is kept.
 const cliSessionsPath = () => statePath('cli-sessions.json')
 export async function loadCliSessions(): Promise<CliSession[]> { return readProtectedState<CliSession[]>('cli-sessions.json', []) }
 export async function saveCliSessions(list: CliSession[]): Promise<void> { await writeProtectedJson(cliSessionsPath(), list) }
@@ -448,11 +413,6 @@ export async function saveSuggestions(s: SkillSuggestion[]): Promise<void> { awa
 
 export { loadProjectMemory, saveProjectMemory, loadProjectMemoryCandidates, saveProjectMemoryCandidates } from './project-memory'
 
-
-// Keep the existing per-field secret wrapping for compatibility, but protect the whole file too:
-// MCP commands, arguments, server names, and env-var names are sensitive operational metadata.
-// readProtectedState transparently reads the former plaintext-JSON shape and rewrites it into a
-// safe-json envelope on first load.
 export async function loadMcpServers(): Promise<McpServerConfig[]> {
   const stored = await readProtectedState<McpServerConfig[]>('mcp-servers.json', [])
   if (countMcpLegacySecrets(stored) > 0) {
@@ -474,9 +434,6 @@ export async function saveMcpServers(s: McpServerConfig[]): Promise<void> {
   if (!getLegacyMcpTemplate()) setLegacyMcpBackupPath(null)
 }
 
-// As above, preserve the inner secretRef format while hiding endpoint names, paths/URLs, and the
-// surrounding integration structure in a whole-file envelope. Legacy per-field files migrate on
-// read without losing compatibility with their safe:v1 secret values.
 export async function loadWebhooks(): Promise<WebhookEndpoint[]> {
   const stored = await readProtectedState<WebhookEndpoint[]>('webhooks.json', [])
   if (countWebhookLegacySecrets(stored) > 0) {
@@ -498,8 +455,6 @@ export async function saveWebhooks(w: WebhookEndpoint[]): Promise<void> {
   if (!getLegacyWebhookTemplate()) setLegacyWebhookBackupPath(null)
 }
 
-// Incidents can carry log/config excerpts from the read-only scan, so persist the
-// whole record encrypted at rest (protected JSON), like missions/project-memory.
 const incidentsPath = () => statePath('incidents.json')
 export async function loadIncidents(): Promise<Incident[]> { return readProtectedState<Incident[]>('incidents.json', []) }
 export async function saveIncidents(i: Incident[]): Promise<void> { await writeProtectedJson(incidentsPath(), i) }
@@ -519,11 +474,6 @@ export async function purgeLegacyUserDataState(): Promise<void> {
   await overwriteAndUnlink(legacyAudit).catch(() => {})
 }
 
-// The memory collections the security purge clears (filenames under ~/.vontra/state/). Kept here so
-// the purge can FORCE-shred them: saveX([]) routes through writeProtectedJson, whose empty-over-
-// unreadable guard SKIPS the write for an UNDECRYPTABLE file (key rotated/missing) and backs the
-// bytes up to a .bak — leaving AND duplicating the very data the purge must destroy. MCP servers /
-// webhooks are deliberately NOT here: the purge does not clear that config.
 const PURGED_STATE_FILES = [
   'threads.json', 'projects.json', 'rooms.json', 'tickets.json', 'automations.json',
   'assistant-events.json', 'missions.json', 'jobs.json', 'subagents.json',
@@ -532,9 +482,6 @@ const PURGED_STATE_FILES = [
   'turn-checkpoints.json', 'pairing-sessions.json', 'skill-suggestions.json',
 ]
 
-// Overwrite-and-unlink every purged collection file AND any recovery .bak (bypassing the
-// empty-over-unreadable write guard so a purge truly leaves no sensitive bytes), then leave a CLEAN
-// empty placeholder so the cleared state is actually persisted on disk (not merely absent).
 export async function shredPurgedStateFiles(): Promise<void> {
   const dir = vontraPath('state')
   const present = await fs.readdir(dir).catch(() => [] as string[])
@@ -544,9 +491,7 @@ export async function shredPurgedStateFiles(): Promise<void> {
     for (const name of present) {
       if (name !== base && name.startsWith(`${base}.`)) await overwriteAndUnlink(path.join(dir, name))
     }
-    // The file is now absent, so this empty write goes through the guard cleanly. Preserve each
-    // store's real wire shape; boot code should never have to interpret an array as a checkpoint
-    // ledger or pairing registry merely because the operator used the forget control.
+
     if (base === 'contacts.json') continue
     const empty: unknown = base === 'turn-checkpoints.json'
       ? { version: 1, ledgers: {}, planLinks: [] }
@@ -559,7 +504,7 @@ export async function shredPurgedStateFiles(): Promise<void> {
   }
 }
 
-/** Stage choices without exposing them through threads:get before durable acceptance. */
+// Stage choices without exposing them through threads:get before durable acceptance.
 export async function saveThreadMemoryPolicy(getThreads: () => Thread[], threadId: string, value: unknown, expectedRevision: number, validate: (thread: Thread) => void = () => {}): Promise<Thread> {
   const policy = parseThreadMemoryPolicy(value)
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || expectedRevision >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid memory-choice revision.')

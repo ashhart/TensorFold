@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "Рабочая область помощника",
+  "Open inbox": "Открыть входящие",
+  "Open Google Workspace": "Открыть Google Workspace",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "Начните задачу, прочитайте переписки из подключённых источников или управляйте почтой и календарём Google.",
+  "Google account tools require a model running locally on this computer.": "Для инструментов аккаунта Google нужна модель, работающая локально на этом компьютере.",
+  "Manage Google accounts locally in TensorFold on the host computer.": "Управляйте учётными записями Google локально в TensorFold на основном компьютере.",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Импорт клиента Google Desktop OAuth, учётные данные и проверки владельца доступны только на основном компьютере.",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "На этом компьютере нет подключённых аккаунтов Google. Войдите ниже и выберите аккаунт или укажите другой адрес в окне входа Google.",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "На этом компьютере нет подключённых аккаунтов Google. Чтобы добавить аккаунт, настройте вход через Google ниже.",
+  "Disconnected on this computer": "Отключено на этом компьютере",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "Локально отключено на этом компьютере; снова войдите в Google перед чтением или подготовкой действий.",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "Замена клиента не выполняет вход или отключение автоматически; JSON и учётные данные остаются на основном компьютере.",
+  "No inbox conversation is attached": "Переписка из входящих не прикреплена"
+}

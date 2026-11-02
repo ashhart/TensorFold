@@ -23,16 +23,21 @@ assert.equal(child.backend, backend, 'child research tools retain the parent SSH
 assert.equal(child.cwd, '/srv/repo')
 assert.equal(child.signal, signal)
 
-const source = readFileSync(new URL('./loop.ts', import.meta.url), 'utf8')
-for (const [start, end, label] of [
-  ['async function verifyGoal', 'const EXPLORE_TOOL_NAMES', 'goal verifier'],
-  ['async function runDelegateChild', 'async function runExplore', 'delegate child'],
-  ['async function runOracle', 'const DELEGATE_TASK_MAX_CONCURRENT', 'oracle'],
-  ['async function summarizeTranscript', 'export async function compactThread', 'compaction summarizer'],
+const auxiliary = readFileSync(new URL('./run-loop-auxiliary.ts', import.meta.url), 'utf8')
+const compaction = readFileSync(new URL('./run-loop-compaction.ts', import.meta.url), 'utf8')
+for (const [source, start, end, label] of [
+  [auxiliary, 'async function verifyGoal', 'const EXPLORE_TOOL_NAMES', 'goal verifier'],
+  [auxiliary, 'async function runDelegateChild', 'async function runExplore', 'delegate child'],
+  [auxiliary, 'async function runOracle', 'const DELEGATE_TASK_MAX_CONCURRENT', 'oracle'],
+  [compaction, 'async function summarizeTranscript', 'export async function compactThread', 'compaction summarizer'],
 ] as const) {
-  const region = source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)))
+  const from = source.indexOf(start)
+  const to = source.indexOf(end, from)
+  assert.ok(from >= 0 && to > from, `${label} implementation is present`)
+  const region = source.slice(from, to)
   assert.match(region, /approvalMode:\s*'readonly'/, `${label} model call is explicitly read-only`)
 }
+const source = readFileSync(new URL('./run-loop-tool-turn.ts', import.meta.url), 'utf8')
 assert.match(source, /runExplore\([^\n]+deps\.toolContext,\s*assertRequestAllowed\)/, 'explore receives parent tool context and its live request guard')
 assert.match(source, /runDelegateChild\([^\n]+deps\.toolContext,\s*assertRequestAllowed\)/, 'delegate children receive parent tool context and its live request guard')
 assert.match(source, /runOracle\([^\n]+deps\.toolContext,\s*assertRequestAllowed\)/, 'oracle receives parent tool context and its live request guard')

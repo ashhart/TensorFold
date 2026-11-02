@@ -3,8 +3,7 @@ import clsx from 'clsx'
 import { pairWordDiffs, type WordSpan } from '../../lib/diff-words'
 import type { DiffLine } from '../../lib/types'
 
-// Line diff with old/new numbers and word-level marks, the same look as the transcript's tool
-// diffs. The transcript keeps its own copy in timeline.tsx, which this pane may not edit.
+// The transcript and Changes pane share readable line numbers and word-level change marks.
 
 function Words({ spans, kind }: { spans: WordSpan[]; kind: 'add' | 'del' }) {
   return (
@@ -16,22 +15,22 @@ function Words({ spans, kind }: { spans: WordSpan[]; kind: 'add' | 'del' }) {
   )
 }
 
-export function DiffView({ diff }: { diff: DiffLine[] }) {
+export function DiffView({ diff, wrap = true, label = 'File diff' }: { diff: DiffLine[]; wrap?: boolean; label?: string }) {
   const words = useMemo(() => pairWordDiffs(diff), [diff])
   return (
-    <div className="scroll-thin overflow-x-auto font-mono text-[13px] leading-[18px]">
-      <div className="min-w-max">
+    <div tabIndex={0} role="region" aria-label={label} className="scroll-thin min-w-0 overflow-x-auto font-mono text-[12px] leading-5 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent">
+      <div className={wrap ? 'min-w-0' : 'min-w-max'}>
         {diff.map((line, i) => {
-          if (line.type === 'hunk') return <div key={i} className="select-none px-3 py-1 text-[12px] text-ink-3">{line.text}</div>
+          if (line.type === 'hunk') return <div key={i} className="select-none whitespace-pre-wrap break-words border-y border-line/60 bg-surface px-3 py-1.5 text-[11px] text-ink-3">{line.text}</div>
           const pair = words.get(i)
           return (
             <div key={i} className={clsx('flex', line.type === 'add' && 'bg-[var(--add-bg)]', line.type === 'del' && 'bg-[var(--del-bg)]')}>
-              <span className="w-9 shrink-0 select-none pr-1 text-right text-ink-4">{line.oldNo ?? ''}</span>
-              <span className="w-9 shrink-0 select-none pr-1 text-right text-ink-4">{line.newNo ?? ''}</span>
+              <span aria-hidden="true" className="w-8 shrink-0 select-none pr-1 text-right text-ink-4">{line.oldNo ?? ''}</span>
+              <span aria-hidden="true" className="w-8 shrink-0 select-none pr-1 text-right text-ink-4">{line.newNo ?? ''}</span>
               <span className={clsx('w-4 shrink-0 select-none text-center', line.type === 'add' ? 'text-[var(--add-ink)]' : line.type === 'del' ? 'text-[var(--del-ink)]' : 'text-ink-4')}>
                 {line.type === 'add' ? '+' : line.type === 'del' ? '−' : ''}
               </span>
-              <span className={clsx('whitespace-pre pr-3', line.type === 'add' ? 'text-[var(--add-ink)]' : line.type === 'del' ? 'text-[var(--del-ink)]' : 'text-ink-2')}>
+              <span className={clsx('min-w-0 flex-1 pr-3', wrap ? 'whitespace-pre-wrap [overflow-wrap:anywhere]' : 'whitespace-pre', line.type === 'add' ? 'text-[var(--add-ink)]' : line.type === 'del' ? 'text-[var(--del-ink)]' : 'text-ink-2')}>
                 {pair && line.type === 'del' ? <Words spans={pair.removed} kind="del" />
                   : pair && line.type === 'add' ? <Words spans={pair.added} kind="add" />
                     : (line.text || ' ')}

@@ -1,0 +1,15 @@
+{
+  "Engine updates": "Обновления движка",
+  "bundled": "в комплекте",
+  "Checking installed runtime…": "Проверка установленной среды…",
+  "Check for engine updates": "Проверить обновления движка",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "Обновляйте локальный движок без переустановки приложения. Перед переключением завершите локальную работу. Модели и переписка сохранятся.",
+  "No compatible engine updates are available for this device.": "Для этого устройства нет совместимых обновлений движка.",
+  "Use this runtime": "Использовать эту среду",
+  "Use bundled engine": "Использовать встроенный движок",
+  "Checking signed releases…": "Проверка подписанных выпусков…",
+  "Switching runtime…": "Переключение среды…",
+  "Ready locally": "Готово локально",
+  "memory on this computer.": "памяти на этом компьютере.",
+  "Prevent sleep while this option is enabled.": "Запрещать переход в спящий режим, пока эта настройка включена."
+}

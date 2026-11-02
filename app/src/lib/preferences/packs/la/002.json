@@ -201,7 +201,7 @@
   "Copy user message": "Nuntium utentis exscribe",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "Cortheon activum est: ante responsum machina quaestiones ex colloquio ad quaesitorem interretialem mittere et paginas publicas legere potest. In Optionibus IA vel Exemplaribus exclude.",
-  "Cortheon is temporarily disabled in this beta.": "Cortheon in hac beta ad tempus exclusum est.",
+  "Cortheon is temporarily disabled.": "Cortheon ad tempus exclusum est.",
   "Cost cap $": "Limes impensarum $",
   "Could not check CLI auth.": "Ingressus CLI probari non potuit.",
   "Could not open a chat. Your current work is still here; try New chat again.": "Colloquium aperiri non potuit. Opera tua hic manent; Colloquium novum iterum elige.",

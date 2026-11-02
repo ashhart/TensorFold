@@ -349,7 +349,7 @@ label,
 .fade-in { animation: fade-in 0.25s ease both; }
 
 @media (prefers-reduced-motion: reduce) {
-  .shimmer, .caret::after, .rise, .fade-in { animation: none !important; }
+  .shimmer, .caret::after, .rise, .fade-in, .animate-spin, .animate-pulse { animation: none !important; }
 }
 
 /* Markdown prose inside assistant messages */

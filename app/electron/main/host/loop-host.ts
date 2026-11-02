@@ -1,10 +1,6 @@
-// Loop Mode — main-process host. Turns the pure engine + bridge into real runs:
-// spawns role threads through the existing thread runtime, runs verification
-// shell, calls an independent critic model, and persists/streams an observable
-// LoopRecord. Owns its own loops.json so it doesn't touch the central store shape.
+// Own Loop records and adapt thread, model, verification, and workspace operations to the pure engine.
 
 import { randomUUID } from 'node:crypto'
-import { exec as cpExec } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { ApprovalMode, ArchiveKind, Project, Room, StartRunPayload, Thread, Ticket, WorkspaceLocation } from '../../agent/types'
@@ -12,10 +8,12 @@ import type { LoopContractSource, LoopRecord, RunContract, LoopPhaseId } from '.
 import { BUILD_PHASES, SHIP_PHASES } from '../../agent/loop-types'
 import { READ_ONLY_ROLES } from '../../agent/loop-guards'
 import { buildRunContract } from '../../agent/loop-contract'
-import { runLoop } from '../../agent/loop-engine'
+import { runLoop, loopConfigurationBlocker } from '../../agent/loop-engine'
 import { createLoopRuntime, type RoleTimelineItem, type LoopModelRef } from '../../agent/loop-runtime'
 import { resolveProviderModel } from '../../agent/provider-accounts'
 import { journalPath } from '../../agent/thread-journal'
+import { execCmd, prepareLoopBaseline, rollbackLoopWorkspace, type LoopCommandRunner } from './loop-workspace'
+export { prepareLoopBaseline, rollbackLoopWorkspace, type LoopCommandRunner, type LoopBaseline } from './loop-workspace'
 import { store } from '../state'
 import { persistThreads, persistTickets } from './persistence'
 import { requireSecurityRole } from './audit'
@@ -26,7 +24,7 @@ import { canonicalLocalWorkspaceKey, lexicalLocalWorkspaceKey, type WorkspaceMut
 export interface LoopHostDeps {
   startThreadRun: (payload: StartRunPayload) => Promise<{ runId: string }>
   workspaceMutationGuard: Pick<WorkspaceMutationGuard, 'reserveStart'>
-  /** Test seam; production uses the local command runner. */
+  // Test seam; production uses the local command runner.
   baselineRunner?: LoopCommandRunner
 }
 
@@ -51,7 +49,7 @@ type LoopSurfaceState = {
   tickets: Array<Pick<Ticket, 'id' | 'projectId' | 'roomId' | 'threadId' | 'archivedAt'>>
 }
 
-/** Resolve ownership from the actual surface, never from renderer-supplied project metadata. */
+// Resolve ownership from the actual surface, never from renderer-supplied project metadata.
 export function assertLoopSurfaceSupported(
   input: Pick<StartLoopInput, 'source' | 'surfaceId' | 'projectId' | 'baseCwd'>,
   state: LoopSurfaceState = store,
@@ -125,15 +123,7 @@ export function reserveLoopWorkspace(
 
 const LOOPS_FILE = ['loops.json']
 
-// startThreadRun is fire-and-forget: it sets thread.status = 'running' synchronously and resolves
-// with { runId } BEFORE the agent run completes (the run drives runWithRoute(...).finally(...) in
-// the background, flipping status to 'idle'/'error' only when it settles). Loop Mode must wait for
-// the run to actually finish before slicing the role's timeline, otherwise it captures an empty
-// (or user-only) slice and the engine sees no role/critic output every cycle. Poll the observable
-// thread status until it leaves 'running'. Returns the final observed status: 'idle'/'error' when
-// the run settles, undefined if the thread vanished underneath us, or 'running' if the wall-clock
-// cap elapsed (so a stuck run can't hang the loop forever). Pure + injectable (status getter +
-// clock + sleep) so it can be unit-tested deterministically without the store or real timers.
+// Wait for the background role run to settle before reading its timeline; the injected clock bounds stalled runs.
 export async function waitForThreadSettled(
   getStatus: () => 'idle' | 'running' | 'error' | undefined,
   opts: { pollMs?: number; timeoutMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
@@ -144,8 +134,7 @@ export async function waitForThreadSettled(
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const deadline = now() + timeoutMs
   let status = getStatus()
-  // Loop only while the run is still in flight; undefined (thread gone) and any settled status
-  // ('idle'/'error') fall straight through. Bail at the deadline so a stuck run can't hang here.
+  // Missing or settled threads return immediately; a deadline bounds a stuck role.
   while (status === 'running' && now() < deadline) {
     await sleep(pollMs)
     status = getStatus()
@@ -153,123 +142,9 @@ export async function waitForThreadSettled(
   return status
 }
 
-// The approvalMode a Loop role thread runs with. Read-only planning roles and the independent
-// critic (which has no phase) always run readonly. Implementation/review roles inherit the
-// user's actual saved posture rather than silently escalating to auto.
+// Planning and critic threads are read-only; implementation roles retain the user's saved approval posture.
 export function loopRoleApprovalMode(phase: LoopPhaseId | undefined, globalApprovalMode: ApprovalMode): ApprovalMode {
   return !phase || READ_ONLY_ROLES.includes(phase) ? 'readonly' : globalApprovalMode
-}
-
-function execCmd(command: string, cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    cpExec(command, { cwd, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-      const code = err ? (typeof (err as NodeJS.ErrnoException).code === 'number' ? (err as { code: number }).code : 1) : 0
-      resolve({ code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') })
-    })
-  })
-}
-
-export type LoopCommandRunner = (command: string, cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>
-
-export interface LoopBaseline {
-  baseSha: string
-  snapshottedDirtyTree: boolean
-}
-
-function commandFailure(label: string, result: { stdout: string; stderr: string }): Error {
-  const detail = (result.stderr || result.stdout).trim().slice(-1000)
-  return new Error(`Could not create a safe Loop baseline (${label})${detail ? `: ${detail}` : '.'} No loop was started.`)
-}
-
-/**
- * Turn pre-existing staged, unstaged, and untracked work into a verified baseline commit before
- * Loop Mode can ever reset/clean the tree. On any add/commit/verification failure, restore the
- * original HEAD ref and exact index bytes; git add/commit do not change worktree file contents.
- */
-export async function prepareLoopBaseline(cwd: string, run: LoopCommandRunner = execCmd, kind: 'baseline' | 'checkpoint' = 'baseline'): Promise<LoopBaseline> {
-  const inside = await run('git rev-parse --is-inside-work-tree', cwd)
-  if (inside.code !== 0 || inside.stdout.trim() !== 'true') throw commandFailure('this folder is not a Git worktree', inside)
-  const conflicts = await run('git diff --name-only --diff-filter=U', cwd)
-  if (conflicts.code !== 0) throw commandFailure('could not inspect unresolved conflicts', conflicts)
-  if (conflicts.stdout.trim()) throw new Error('Resolve Git conflicts before starting Loop Mode. No loop was started.')
-
-  const oldHeadResult = await run('git rev-parse --verify --quiet HEAD', cwd)
-  const oldHead = oldHeadResult.code === 0 ? oldHeadResult.stdout.trim() : ''
-  const status = await run('git status --porcelain', cwd)
-  if (status.code !== 0) throw commandFailure('could not inspect the working tree', status)
-  if (!status.stdout.trim()) return { baseSha: oldHead, snapshottedDirtyTree: false }
-
-  const indexResult = await run('git rev-parse --git-path index', cwd)
-  if (indexResult.code !== 0 || !indexResult.stdout.trim()) throw commandFailure('could not locate the Git index', indexResult)
-  const rawIndexPath = indexResult.stdout.trim()
-  const indexPath = path.isAbsolute(rawIndexPath) ? rawIndexPath : path.resolve(cwd, rawIndexPath)
-  const originalIndex = await fs.readFile(indexPath).catch((error: NodeJS.ErrnoException) => {
-    if (error?.code === 'ENOENT') return null
-    throw error
-  })
-  const originalIndexMode = await fs.stat(indexPath).then((stat) => stat.mode).catch(() => 0o600)
-
-  const restoreOriginalState = async (): Promise<void> => {
-    const currentHeadResult = await run('git rev-parse --verify --quiet HEAD', cwd)
-    const currentHead = currentHeadResult.code === 0 ? currentHeadResult.stdout.trim() : ''
-    let refError: Error | null = null
-    if (currentHead && currentHead !== oldHead) {
-      const restoreRef = oldHead
-        ? await run(`git update-ref HEAD ${oldHead} ${currentHead}`, cwd)
-        : await run(`git update-ref -d HEAD ${currentHead}`, cwd)
-      if (restoreRef.code !== 0) refError = commandFailure('could not restore the original HEAD after snapshot failure', restoreRef)
-    }
-    try {
-      if (originalIndex == null) {
-        await fs.rm(indexPath, { force: true })
-      } else {
-        await fs.mkdir(path.dirname(indexPath), { recursive: true })
-        const tmp = `${indexPath}.vontra-restore-${randomUUID()}`
-        await fs.writeFile(tmp, originalIndex, { mode: originalIndexMode })
-        await fs.rename(tmp, indexPath)
-      }
-    } catch (error) {
-      throw new Error(`Loop baseline failed and the original Git index could not be restored: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    if (refError) throw refError
-  }
-
-  const add = await run('git add -A', cwd)
-  if (add.code !== 0) {
-    await restoreOriginalState()
-    throw commandFailure('git add failed', add)
-  }
-  const message = kind === 'checkpoint' ? 'loop checkpoint' : 'loop baseline (pre-existing uncommitted work)'
-  const commit = await run(`git -c user.name="TensorFold" -c user.email=tensorfold-studio@example.test commit -q -m "${message}" --no-verify --no-gpg-sign`, cwd)
-  if (commit.code !== 0) {
-    await restoreOriginalState()
-    throw commandFailure('git commit failed', commit)
-  }
-
-  const [newHeadResult, cleanResult] = await Promise.all([
-    run('git rev-parse --verify --quiet HEAD', cwd),
-    run('git status --porcelain', cwd),
-  ])
-  const newHead = newHeadResult.code === 0 ? newHeadResult.stdout.trim() : ''
-  if (!newHead || newHead === oldHead || cleanResult.code !== 0 || cleanResult.stdout.trim()) {
-    await restoreOriginalState()
-    throw new Error('Could not verify a clean, new Loop baseline commit. The original Git state was restored and no loop was started.')
-  }
-  return { baseSha: newHead, snapshottedDirtyTree: true }
-}
-
-export async function rollbackLoopWorkspace(cwd: string, target: string, run: LoopCommandRunner = execCmd): Promise<void> {
-  const reset = await run(target ? `git reset --hard ${target}` : 'git reset --hard', cwd)
-  if (reset.code !== 0) throw commandFailure('rollback reset failed', reset)
-  if (target) {
-    const head = await run('git rev-parse --verify --quiet HEAD', cwd)
-    if (head.code !== 0 || head.stdout.trim() !== target) throw commandFailure('rollback target could not be verified', head)
-  }
-  // Never clean untracked files if reset failed or landed on the wrong commit.
-  const clean = await run('git clean -fd', cwd)
-  if (clean.code !== 0) throw commandFailure('rollback clean failed', clean)
-  const status = await run('git status --porcelain', cwd)
-  if (status.code !== 0 || status.stdout.trim()) throw commandFailure('rollback did not leave a clean worktree', status)
 }
 
 // Skip utility/non-chat models (MarkItDown, embeddings, etc.) when auto-selecting loop models.
@@ -287,7 +162,7 @@ function modelForThread(threadId: string): LoopModelRef {
   return { providerId: providerId ?? '', model: model ?? '' }
 }
 
-/** Pick a critic model distinct from the workers' (cloud for rigor or a local one); fall back to same. */
+// Prefer a distinct critic model, falling back to the worker when no alternative is available.
 function differentCriticModel(worker: LoopModelRef): LoopModelRef {
   for (const p of store.settings.providers) {
     if (p.id === worker.providerId) continue
@@ -300,16 +175,11 @@ function differentCriticModel(worker: LoopModelRef): LoopModelRef {
   return worker
 }
 
-// #31 — when a loop runs from a room, use the room's seats as its roles instead
-// of one default model: the builder/development seat does the work, a
-// reviewer/planner seat critiques. Falls back to the thread default + a distinct
-// critic when seats don't cover a role.
+// Room seats staff worker and critic roles; missing seats fall back to the thread model and a distinct critic.
 function seatModelRef(seat: { providerId?: string; model?: string } | undefined): LoopModelRef | null {
   if (!seat?.providerId || !seat.model) return null
   const provider = store.settings.providers.find((p) => p.id === seat.providerId)
-  // If the seat is pinned to a non-chat model (MarkItDown etc.) and the provider
-  // has no chat alternative, return null so the caller falls back rather than
-  // staffing a loop role with a model that can't converse.
+  // A non-chat seat without a chat alternative falls back to the normal role selection.
   const model = !NON_CHAT_MODEL.test(seat.model) ? seat.model : firstChatModel(provider?.models)
   if (!model) return null
   return { providerId: seat.providerId, model }
@@ -323,6 +193,16 @@ function modelsForRoom(roomId: string, fallback: LoopModelRef): { worker: LoopMo
     ?? seats.find((s) => s !== builder)
   const critic = seatModelRef(reviewer) ?? differentCriticModel(worker)
   return { worker, critic }
+}
+
+function newLoopRecord(input: StartLoopInput, contract: RunContract, cwd: string, branch: string): LoopRecord {
+  return {
+    id: randomUUID(), source: input.source, surfaceId: input.surfaceId,
+    goal: contract.goal, mode: input.mode, status: 'running', cwd, branch,
+    phase: null, cycle: 0, maxCycles: contract.maxCycles, checkpoints: 0,
+    lastVerdict: null, blockers: [], log: [], roleThreadIds: [],
+    createdAt: Date.now(), updatedAt: Date.now(),
+  }
 }
 
 export function createLoopHost(deps: LoopHostDeps) {
@@ -353,9 +233,7 @@ export function createLoopHost(deps: LoopHostDeps) {
     emit(rec)
   }
 
-  // #32 — a loop launched from a kanban ticket stays bound to it: the ticket
-  // reflects the loop's run state (and lands in Review / Needs clarification when
-  // the loop finishes), so the board mirrors what the loop is doing.
+  // Mirror a ticket's loop state, placing finished work in Review or Needs clarification.
   function reflectOnTicket(rec: LoopRecord, runState: 'running' | 'done', status?: import('../../agent/types').TicketStatus) {
     if (rec.source !== 'ticket') return
     const ticket = store.tickets.find((t) => t.id === rec.surfaceId)
@@ -391,11 +269,7 @@ export function createLoopHost(deps: LoopHostDeps) {
     return { id: t.id }
   }
 
-  // Remove a throwaway "loop role" thread once its timeline has been captured. Without
-  // this, every phase/critique of every cycle permanently accumulated a "loop role"
-  // thread in memory, on disk (threads.json), and in the sidebar (cleanupThread used to
-  // be a no-op and critic threads were never removed). Mirrors threads:delete: drop it
-  // from the store + prompt map, persist, and remove its NDJSON journal.
+  // Remove captured role threads from memory, persistence, prompts, and journals to avoid accumulating sidebar entries.
   function removeRoleThread(id: string): void {
     const idx = store.threads.findIndex((t) => t.id === id)
     if (idx === -1) { promptByThread.delete(id); return }
@@ -409,17 +283,10 @@ export function createLoopHost(deps: LoopHostDeps) {
     const sys = promptByThread.get(threadId) ?? ''
     const before = store.threads.find((t) => t.id === threadId)?.timeline.length ?? 0
     const userText = sys ? `${sys}\n\n---\nTASK:\n${instruction}` : instruction
-    // Loop role threads run autonomously (#33) — never stall waiting for a human to approve a tool
-    // call mid-loop in a way the engine can't drive forward. Read-only planning roles
-    // (product/architect) run in readonly mode so they cannot mutate source; they produce
-    // planning text and are evidence-exempt, so this is safe regardless of the global posture.
-    // Every other role inherits the user's saved global approvalMode (#16) rather than a
-    // hardcoded 'auto', so Loop Mode respects the same approval/sandbox posture as any other run.
+    // Implementation roles keep the user's approval posture; planning and critic roles cannot write source.
     const approvalMode = loopRoleApprovalMode(phase, store.settings.approvalMode)
     await deps.startThreadRun({ threadId, userText, approvalMode })
-    // startThreadRun is fire-and-forget (returns { runId } before the run settles); wait for the
-    // run to actually finish so the timeline slice below captures the role's real output rather
-    // than an empty/user-only slice. See waitForThreadSettled for details.
+    // startThreadRun returns before completion; capture evidence only after the role actually settles.
     await waitForThreadSettled(() => store.threads.find((t) => t.id === threadId)?.status)
     const after = store.threads.find((t) => t.id === threadId)
     return (after?.timeline.slice(before) ?? []).map((i) => ({ kind: i.kind, text: i.text, tool: i.tool, state: i.state }))
@@ -429,20 +296,17 @@ export function createLoopHost(deps: LoopHostDeps) {
     requireSecurityRole('operator', 'start a loop')
     if (quiesced) throw new Error('Loop Mode is temporarily unavailable while local memory is being purged.')
     const ownership = assertLoopSurfaceSupported(input)
-    // Reserve synchronously from the host-owned surface path before the first filesystem/Git
-    // await. Checkpoint/full-file restore now cannot interleave between Loop phases.
+    // Reserve the host-owned workspace before any await so checkpoint restores cannot interleave with a Loop phase.
     const runLease = reserveLoopWorkspace(deps.workspaceMutationGuard, ownership.cwd)
     let leaseTransferred = false
     try {
     const cwd = await resolveWorkspaceCwd(ownership.cwd)
     runLease.addWorkspaceKeys?.([await canonicalLocalWorkspaceKey(cwd)])
-    // Room loops staff their roles from the room's seats (#31); solo/ticket use
-    // the surface thread's model with a distinct critic.
+    // Room seats staff roles; solo and ticket runs use the surface model with a distinct critic.
     const roomModels = input.source === 'room' ? modelsForRoom(input.surfaceId, modelForThread(input.surfaceId)) : null
     const worker = input.workerModel ?? roomModels?.worker ?? modelForThread(input.surfaceId)
     const critic = input.criticModel ?? roomModels?.critic ?? differentCriticModel(worker)
-    // Fail fast with a clear message rather than spawning role threads on an empty
-    // model (#7) — modelForThread can resolve to '' when nothing is configured.
+    // Reject an unconfigured model before spawning role threads.
     if (!worker.providerId || !worker.model) throw new Error('No chat model is configured for this loop. Connect a model in Settings first.')
     if (!store.settings.providers.some((provider) => provider.id === worker.providerId)) throw new Error('The Loop worker provider is not configured.')
     if (!critic.providerId || !critic.model || !store.settings.providers.some((provider) => provider.id === critic.providerId)) {
@@ -458,31 +322,21 @@ export function createLoopHost(deps: LoopHostDeps) {
     })
     const phases = input.mode === 'ship' ? SHIP_PHASES : BUILD_PHASES
     const branch = `vontra/loop-${Date.now().toString(36)}`
+    const configuration = loopConfigurationBlocker(contract)
+    if (configuration) {
+      const blocked = newLoopRecord(input, contract, cwd, branch)
+      blocked.status = 'blocked'
+      blocked.lastVerdict = configuration.lastVerdict ?? null
+      blocked.blockers = configuration.blockers
+      loops.set(blocked.id, blocked)
+      log(blocked, configuration.lastVerdict?.summary ?? 'Verification commands must be configured.')
+      return blocked
+    }
 
-    // Prove the rollback baseline before publishing a running record or changing a ticket.
-    // prepareLoopBaseline restores the exact pre-call index/HEAD if snapshot creation fails.
+    // Verify the rollback baseline before publishing a running record or changing a ticket.
     const baseline = await prepareLoopBaseline(cwd, deps.baselineRunner ?? execCmd)
 
-    const rec: LoopRecord = {
-      id: randomUUID(),
-      source: input.source,
-      surfaceId: input.surfaceId,
-      goal: contract.goal,
-      mode: input.mode,
-      status: 'running',
-      cwd,
-      branch,
-      phase: null,
-      cycle: 0,
-      maxCycles: contract.maxCycles,
-      checkpoints: 0,
-      lastVerdict: null,
-      blockers: [],
-      log: [],
-      roleThreadIds: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    }
+    const rec = newLoopRecord(input, contract, cwd, branch)
     loops.set(rec.id, rec)
     log(rec, `Loop started (${input.mode}) — worker ${worker.providerId}/${worker.model}, critic ${critic.providerId}/${critic.model}`)
     if (baseline.snapshottedDirtyTree) log(rec, 'Snapshotted pre-existing uncommitted work into a verified Loop baseline commit')
@@ -506,6 +360,7 @@ export function createLoopHost(deps: LoopHostDeps) {
       },
       cleanupThread: async (threadId) => { removeRoleThread(threadId) },
       runShell: (shellCwd, command) => execCmd(command, shellCwd),
+      isCancelled: () => aborted.has(rec.id),
       runCritic: async (system, user) => {
         const t = makeRoleThread(cwd, ownership.projectId, critic, system, 'chat')
         rec.roleThreadIds.push(t.id)
@@ -514,8 +369,7 @@ export function createLoopHost(deps: LoopHostDeps) {
           const last = [...items].reverse().find((i) => i.kind === 'assistant' && (i.text ?? '').trim())
           return last?.text ?? ''
         } finally {
-          // Critic threads are throwaway too and bypass the engine's cleanupThread hook,
-          // so remove the captured critic thread here to avoid unbounded accumulation.
+          // Critic threads bypass the phase cleanup hook and need their own removal.
           removeRoleThread(t.id)
         }
       },
@@ -533,10 +387,7 @@ export function createLoopHost(deps: LoopHostDeps) {
         return head
       },
       rollback: async () => {
-        // Return the worktree to the most recent loop checkpoint, or the pre-loop
-        // baseline if none — discarding only THIS cycle's uncommitted changes. Never
-        // `reset --hard HEAD~1`: that would delete a real commit (the user's own commit
-        // on cycle 0, or a still-good earlier checkpoint later).
+        // Restore the latest checkpoint or baseline, preserving earlier user commits and successful cycles.
         const target = checkpointShas[checkpointShas.length - 1] || baseSha
         await rollbackLoopWorkspace(cwd, target, deps.baselineRunner ?? execCmd)
         log(rec, `rolled back to ${target ? `checkpoint ${target.slice(0, 8)}` : 'empty baseline'} (regression)`)
@@ -561,12 +412,12 @@ export function createLoopHost(deps: LoopHostDeps) {
             rec.phase = 'verify'
             emit(rec)
             const v = await runtime.critique(c, evidence)
-            rec.lastVerdict = v
-            log(rec, v.passed ? `✅ critic passed (${Math.round(v.confidence * 100)}%)` : `❌ critic failed: ${v.summary}`)
+            log(rec, v.passed ? 'Critic accepted the evidence; required checks still govern completion.' : `Critic failed: ${v.summary}`)
             return v
           },
         })
         rec.status = result.status
+        rec.lastVerdict = result.lastVerdict ?? null
         rec.blockers = result.blockers
         rec.phase = null
         log(rec, `Loop ${result.status} after ${result.cycles} cycle(s)`)
@@ -577,9 +428,7 @@ export function createLoopHost(deps: LoopHostDeps) {
         log(rec, `Loop ${rec.status}: ${e instanceof Error ? e.message : String(e)}`)
         reflectOnTicket(rec, 'done', 'needs_clarification')
       } finally {
-        // Safety net: drop any role/critic threads still left over (e.g. a phase that
-        // threw before its cleanupThread finally ran), so a settled loop never leaves
-        // throwaway "loop role" threads behind in the store/sidebar.
+        // Clean up any role or critic threads left behind by a failed phase.
         for (const id of rec.roleThreadIds.splice(0)) removeRoleThread(id)
         runLease.release()
       }
@@ -625,7 +474,7 @@ export function createLoopHost(deps: LoopHostDeps) {
     return projectId === id
   }
 
-  /** Stop and await direct Git/role activity before an owning archive operation returns. */
+  // Stop and await direct Git/role activity before an owning archive operation returns.
   async function stopLoopsForArchive(kind: ArchiveKind, id: string): Promise<string[]> {
     const ids = [...loops.values()]
       .filter((rec) => rec.status === 'running' && loopMatchesArchive(rec, kind, id))
@@ -653,9 +502,7 @@ export function createLoopHost(deps: LoopHostDeps) {
   }
 
   async function quiesceAndClear(): Promise<void> {
-    // Stop persistence first so neither a status/log update nor a late finalizer can recreate
-    // loops.json after the security purge shreds it. The host aborts underlying thread runs too;
-    // awaiting activeRuns makes their cleanup/persistence finalizers a real barrier.
+    // Disable persistence before purge, then await active-run finalizers so no late writer can recreate loop records.
     quiesced = true
     for (const rec of loops.values()) if (rec.status === 'running') aborted.add(rec.id)
     await Promise.allSettled([...activeRuns.values()])

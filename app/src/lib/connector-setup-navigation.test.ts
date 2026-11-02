@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
-import { requestConnectorSetup, consumeConnectorSetup, requestSettingsSection, consumeSettingsSection } from './store/settings-section'
+import { requestConnectorSetup, consumeConnectorSetup, requestSettingsSection, consumeSettingsSection, peekConnectorSetup, peekSettingsSection } from './store/settings-section'
 import { CONNECTOR_SETUP_IDS, CONNECTOR_CATALOG, isConnectorSetupId } from '../../shared/connector-catalog'
 
 for (const id of CONNECTOR_SETUP_IDS) {
   requestConnectorSetup(id)
+  assert.equal(peekSettingsSection(), 'connectors')
+  assert.equal(peekSettingsSection(), 'connectors', 'rendering a suspended settings screen must not consume its requested section')
+  assert.equal(peekConnectorSetup(), id)
+  assert.equal(peekConnectorSetup(), id, 'service selection must survive discarded React renders before commit')
   assert.equal(consumeSettingsSection(), 'connectors')
   assert.equal(consumeConnectorSetup(), id, 'The chosen service must survive the Settings mount')
   assert.equal(consumeConnectorSetup(), null, 'A consumed service cannot reopen on a later visit')

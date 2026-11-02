@@ -1,12 +1,13 @@
-/** Display and setup metadata only; availability and permissions come from the host. */
+// Display and setup metadata only; availability and permissions come from the host.
 export const CONNECTOR_CATALOG = {
   google: { name: 'Google', tag: 'Gmail & Calendar', description: 'Connect your account to search mail, draft replies and manage your schedule.' },
+  outlook: { name: 'Outlook / Microsoft 365', tag: 'Microsoft sign-in', description: 'Connect Microsoft mail on any desktop platform and review outgoing replies.' },
   email: { name: 'Email', tag: 'Mailbox', description: 'Read selected mailboxes and review outgoing replies.' },
   slack: { name: 'Slack', tag: 'Workspace', description: 'Choose the channels TensorFold may read.' },
   discord: { name: 'Discord', tag: 'Bot', description: 'Connect selected server channels and threads.' },
   telegram: { name: 'Telegram', tag: 'Bot', description: 'Use a bot with explicitly allowed chats and senders.' },
   whatsapp: { name: 'WhatsApp', tag: 'Link your phone', description: 'Scan a Linked Devices QR code; no Business API key needed.' },
-  imessage: { name: 'iMessage', tag: 'This Mac', description: 'Allow local access and choose the contacts to sync.' },
+  imessage: { name: 'iMessage', tag: 'Mac or BlueBubbles', description: 'Read selected iMessage conversations locally on Mac or through your BlueBubbles server.' },
   mattermost: { name: 'Mattermost', tag: 'Workspace', description: 'Connect a server and choose channels to sync.' },
   matrix: { name: 'Matrix', tag: 'Homeserver', description: 'Connect selected rooms through your account.' },
   googlechat: { name: 'Google Chat', tag: 'Workspace', description: 'Connect selected Google Chat spaces.' },
@@ -18,7 +19,7 @@ export const CONNECTOR_CATALOG = {
 } as const
 
 export type ConnectorCatalogId = keyof typeof CONNECTOR_CATALOG
-export const CONNECTOR_SETUP_IDS = ['google', 'whatsapp', 'email', 'imessage', 'slack', 'discord', 'telegram', 'mattermost', 'matrix', 'googlechat', 'docs', 'browser'] as const satisfies readonly ConnectorCatalogId[]
+export const CONNECTOR_SETUP_IDS = ['google', 'outlook', 'whatsapp', 'email', 'imessage', 'slack', 'discord', 'telegram', 'mattermost', 'matrix', 'googlechat', 'docs', 'browser'] as const satisfies readonly ConnectorCatalogId[]
 export type ConnectorSetupId = typeof CONNECTOR_SETUP_IDS[number]
 export function isConnectorSetupId(value: unknown): value is ConnectorSetupId {
   return typeof value === 'string' && (CONNECTOR_SETUP_IDS as readonly string[]).includes(value)

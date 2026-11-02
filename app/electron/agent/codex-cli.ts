@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawnCliProcess as spawn } from './cli-process'
 import readline from 'node:readline'
 import { detachedProcessGroup, terminateChildProcess } from './child-process-lifecycle'
 import { resolveCliBinary } from './cli-path'
@@ -39,10 +39,6 @@ function effort(value?: string): string {
   return 'medium'
 }
 
-// TensorFold lists a couple of codex "models" that are really effort presets. codex only knows the real
-// models gpt-5.5 / gpt-5.4 — "high"/"extra high" are reasoning-effort levels, NOT model ids — so
-// `codex exec -m gpt-5.5-extra-high` 400s with "model is not supported". Map the aliases to a real
-// model + effort. A plain model uses the separate reasoning-effort selector.
 const CODEX_MODEL_ALIASES: Record<string, { model: string; effort: string }> = {
   'gpt-5.5-codex-high': { model: 'gpt-5.5', effort: 'high' },
   'gpt-5.5-extra-high': { model: 'gpt-5.5', effort: 'xhigh' },
@@ -54,9 +50,6 @@ export function codexModelAndEffort(model: string, reasoningEffort?: string): { 
   return { model, effort: effort(reasoningEffort) }
 }
 
-// codex reports turn failures as JSON events on STDOUT (type:"error" / "turn.failed"), not stderr —
-// and nests the upstream API error as a JSON string. Pull out the human-readable message so the UI
-// shows the real cause instead of a blank "exited with code 1".
 function codexErrorMessage(event: any): string {
   const raw = event?.error?.message ?? event?.message
   if (typeof raw !== 'string' || !raw) return ''
@@ -65,17 +58,14 @@ function codexErrorMessage(event: any): string {
 
 export function sandbox(provider: Provider, approvalMode?: ApprovalMode): string {
   if (approvalMode === 'readonly') return 'read-only'
-  // Full Auto suppresses TensorFold's safe-class prompts; it never disables the delegated CLI's
-  // workspace boundary. Provider settings also cannot reintroduce danger-full-access in Auto.
+
   if (approvalMode === 'auto') return 'workspace-write'
   if (provider.cliSandbox) return provider.cliSandbox
   return 'workspace-write'
 }
 
 export function codexExecApprovalPolicy(provider: Provider, approvalMode?: ApprovalMode): string {
-  // `codex exec` is non-interactive and cannot bridge command/file approval prompts back into
-  // TensorFold. In exec mode, on-request approvals fail invisibly/awkwardly; use the sandbox as the
-  // safety boundary and reserve approval bridging for a future app-server-backed session.
+
   if (approvalMode === 'auto' || approvalMode === 'readonly') return 'never'
   const policy = provider.cliApprovalPolicy || 'never'
   return policy === 'on-request' ? 'never' : policy
@@ -108,15 +98,11 @@ export function buildCodexArgs(params: CodexCliParams): string[] {
   if (resolved.model && resolved.model !== 'codex-cli-default') args.push('-m', resolved.model)
   if (params.provider.cliProfile?.trim()) args.push('-p', params.provider.cliProfile.trim())
   args.push('-c', `model_reasoning_effort="${resolved.effort}"`)
-  // `serviceTier` can come from persisted/user-edited settings. JSON string quoting is
-  // compatible with TOML basic strings and prevents quotes, slashes, or control chars
-  // from breaking the single `-c` override into malformed/injected TOML.
+
   if (params.serviceTier?.trim()) args.push('-c', `service_tier=${JSON.stringify(params.serviceTier.trim())}`)
   if (params.cwd) args.push('-C', params.cwd)
   args.push('-s', sandbox(params.provider, params.approvalMode))
-  // `codex exec` (>= 0.125) dropped the top-level `--ask-for-approval` flag — it now exits 2 with
-  // "unexpected argument '--ask-for-approval' found". Route the policy through the supported
-  // config override; the sandbox stays active even when non-interactive Auto uses `never`.
+
   args.push('-c', `approval_policy="${codexExecApprovalPolicy(params.provider, params.approvalMode)}"`)
   args.push('--skip-git-repo-check', '--json', '-')
   return args
@@ -290,9 +276,7 @@ export async function* streamCodexCli(params: CodexCliParams): AsyncGenerator<Co
   } finally {
     clearInterval(watchdog)
     params.signal?.removeEventListener('abort', abort)
-    // If the consumer stopped iterating early (generator .return(), e.g. an upstream
-    // cancel that didn't go through params.signal), the child is still running and the
-    // exit-code await below never executes — kill it so `codex exec` isn't orphaned.
+
     if (!completed) lines.close()
     if (!completed && proc.exitCode == null) terminateChildProcess(proc, { processGroup: true })
   }
@@ -307,8 +291,7 @@ export async function* streamCodexCli(params: CodexCliParams): AsyncGenerator<Co
   if (exitCode !== 0) {
     const detail = codexError || stderr
     if (detail && AUTH_FAILURE.test(detail)) throw new Error('Codex CLI is not authenticated. Run `codex login`, then retry this provider.')
-    // Prefer codex's own JSON error (the real cause, e.g. "The 'X' model is not supported") over the
-    // generic exit code — stderr is usually empty because codex writes errors to stdout.
+
     if (codexError) throw new Error(codexError)
     throw new Error(`Codex CLI exited with code ${exitCode}${stderr ? `: ${stderr.slice(0, 400)}` : ''}`)
   }

@@ -1,4 +1,5 @@
 import { OriginalDiagnostic } from './components/OriginalDiagnostic'
+import { useQuickAskHandoff } from './components/quick-ask/useQuickAskHandoff'
 import { useAuthoredText } from './lib/preferences/useAuthoredText'
 import { useUiPreferences } from './lib/preferences/hooks'
 import { ConversationSearchHost } from './components/search/ConversationSearchHost'
@@ -62,6 +63,7 @@ export default function App() {
     else forgetComposerFileSources(scope ? composerDraftKey(scope) : undefined)
   }) : undefined, [])
   const ready = useStore((s) => s.ready)
+  useQuickAskHandoff(ready)
   const view = useStore((s) => s.view)
   useEffect(() => {
     if (api.platform === 'web-remote') return

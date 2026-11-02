@@ -1,5 +1,6 @@
 import { requestApprovalViaChannel, type ChannelAdapter, type ChannelApprovalRequest } from '../../agent/channel-adapter'
 import { createChannelApprovalRegistry, discordApprovalComponents, slackApprovalBlocks, telegramApprovalKeyboard } from '../../agent/channel-approvals'
+import { blueBubblesIdentity } from '../../agent/bluebubbles-connector'
 import { sendIMessage } from '../../agent/imessage-connector'
 import { sendWhatsAppMessage, whatsappEventFromMessage } from '../../agent/whatsapp-bridge'
 import { editSlackMessage, postSlackMessage } from '../../agent/slack-live'
@@ -31,13 +32,6 @@ export function createConnectorChannels(deps: {
 }): ConnectorChannels {
   const { rememberConnectorEvents } = deps.spine
 
-  // WhatsApp inbound events arrive one-at-a-time via the bridge push (not a sync handler), so
-  // enrichment is funnelled here: learn the sender's phone -> pushName contact (inbound only;
-  // the observation builder skips our own outbound "You" sends and groups) and persist the
-  // grown directory before remembering the event. Inbound MEDIA is decrypted + cached at the
-  // bridge (whatsapp-media-ingest): the encrypted blob is fetched+decrypted (Baileys'
-  // downloadMediaMessage / the whatsapp-media HKDF+AES primitive) and the local path arrives on
-  // event.mediaPaths already — nothing to fetch here. Outbound sends pass through untouched.
   function rememberWhatsAppEvents(events: ConnectorEvent[]): void {
     const observations = whatsappContactObservations(events)
     if (observations.length) {
@@ -47,22 +41,14 @@ export function createConnectorChannels(deps: {
     void rememberConnectorEvents(events)
   }
 
-  // Short notification/fallback text shown alongside inline approve/deny controls (the
-  // buttons carry the actual decision; this is what surfaces in a notification preview).
   function approvalNotice(request: ChannelApprovalRequest): string {
     const detail = request.command?.trim() ? ` (${request.command.trim()})` : ''
     return `Approval needed: ${request.title}${detail}`.slice(0, 280)
   }
 
-  // Registry of in-channel approvals awaiting the user's decision. requestApproval posts an
-  // inline prompt and parks a promise here; an inbound button callback (resolveChannelApproval)
-  // or a "/approve" reply (resolveChannelApprovalByThread) resolves it — block-until-answered.
   const approvalRegistry = createChannelApprovalRegistry()
   const telegramApiFetch = createTelegramApiFetch()
 
-  // Post a Telegram message with an optional inline keyboard. Mirrors the bot-polling sender
-  // but lives here so the approval adapter can attach approve/deny buttons. Returns false when
-  // Telegram isn't configured so the router falls back to the in-app gate.
   async function sendTelegramApprovalPrompt(chatId: string, text: string, replyMarkup?: unknown): Promise<boolean> {
     const token = store.settings.botControl?.telegram?.botToken?.trim()
     if (!token) return false
@@ -78,8 +64,6 @@ export function createConnectorChannels(deps: {
     try { return res.ok } finally { await discardResponseBody(res) }
   }
 
-  // Send a Telegram message and return its message_id (for draft-streaming edit-in-place).
-  // null on failure / unconfigured bot, so callers can fall back to a single send.
   async function sendTelegramText(chatId: string, text: string): Promise<string | null> {
     const token = store.settings.botControl?.telegram?.botToken?.trim()
     if (!token) return null
@@ -96,8 +80,6 @@ export function createConnectorChannels(deps: {
     return id == null ? null : String(id)
   }
 
-  // Edit a Telegram message in place (a draft-streaming animation frame). Best-effort: a
-  // failed/identical edit is swallowed (Telegram rejects a no-op edit) so streaming never throws.
   async function editTelegramText(chatId: string, messageId: string, text: string): Promise<boolean> {
     const token = store.settings.botControl?.telegram?.botToken?.trim()
     if (!token) return false
@@ -124,13 +106,14 @@ export function createConnectorChannels(deps: {
     try { return res.ok } finally { await discardResponseBody(res) }
   }
 
-  // One contract per channel for outbound replies, so connector:reply has a single
-  // routing path (parse threadKey -> platform adapter). New channels = one thin adapter.
-  // supportsInlineApproval marks the channels that can render approve/deny controls; the
-  // rest get a plain-text "/approve" prompt + the in-app gate (requestApprovalViaChannel).
   const channelAdapters: ChannelAdapter[] = [
     { platform: 'imessage', send: async (addr, reply) => {
-      const r = await sendIMessage(addr.conversation, reply.text)
+      const settings = store.settings.imessage
+      const account = settings.transport === 'bluebubbles' ? `bb-${blueBubblesIdentity(settings)}` : null
+      if (addr.account !== account) return { ok: false, error: 'This iMessage connection changed; sync and review the conversation again.' }
+      const r = await sendIMessage(addr.conversation, reply.text, settings, () => {
+        if (!store.settings.imessage.enabled || blueBubblesIdentity(store.settings.imessage) !== blueBubblesIdentity(settings)) throw new Error('The iMessage connection changed before dispatch.')
+      })
       await auditEvent('imessage.send', { to: auditPreview(addr.conversation), chars: reply.text.length })
       return { ok: r.ok }
     } },
@@ -141,11 +124,7 @@ export function createConnectorChannels(deps: {
       return { ok: r.ok, sentId: r.sentId }
     } },
     { platform: 'slack', supportsInlineApproval: true,
-      // Slack can edit a sent message (chat.update), so it streams a draft: sendDraft posts the
-      // initial message and returns its ts as the handle, updateDraft edits it in place (throttled
-      // by the per-platform draft-edit interval so chat.update's rate limit isn't tripped), and
-      // finalizeDraft commits the final text — splitting a long reply into a first edit + sent
-      // continuations.
+
       supportsDraftStreaming: true, send: async (addr, reply) => {
       const source = store.settings.slack.sources.find((s) => s.id === addr.account && s.kind === 'api_token')
       if (!source) return { ok: false, error: 'Live Slack source not found.' }
@@ -169,8 +148,7 @@ export function createConnectorChannels(deps: {
       if (!source) return { ok: false, error: 'Live Slack source not found.' }
       const chunks = splitForPlatform('slack', reply.text)
       const first = chunks[0] ?? reply.text
-      // Commit the first chunk by editing the draft in place; if that edit fails (or there was no
-      // draft id), fall back to a fresh send so the reply still lands.
+
       const edited = handle.messageId ? await editSlackMessage(source, addr.conversation, handle.messageId, first).then(() => true).catch(() => false) : false
       const firstId = edited ? handle.messageId : (await postSlackMessage(source, addr.conversation, first, reply.inReplyTo ?? addr.message ?? undefined).catch(() => null))?.ts
       if (!firstId) return { ok: false, error: 'Slack reply could not be sent.' }
@@ -185,8 +163,7 @@ export function createConnectorChannels(deps: {
       const source = store.settings.slack.sources.find((s) => s.id === addr.account && s.kind === 'api_token')
       if (!source) throw new Error('Live Slack source not found.')
       const { token, promise } = approvalRegistry.create('slack', addr.raw)
-      // If posting the prompt fails, settle the parked approval (deny) so it can't leak, then
-      // rethrow so the router falls back to the in-app gate.
+
       try {
         await postSlackMessage(source, addr.conversation, approvalNotice(request), addr.message ?? undefined, slackApprovalBlocks(request, token))
       } catch (e) { approvalRegistry.resolve(token, 'deny'); throw e }
@@ -194,11 +171,7 @@ export function createConnectorChannels(deps: {
       return promise
     } },
     { platform: 'discord', supportsInlineApproval: true,
-      // Discord can edit a sent message (PATCH /messages/{id}), so it streams a draft: sendDraft
-      // sends the initial message and returns its id as the handle, updateDraft edits it in place
-      // (throttled by the per-platform draft-edit interval so the channel edit bucket isn't tripped),
-      // and finalizeDraft commits the final text — split-aware so a long final reply still chunks
-      // into a first edit + sent continuations.
+
       supportsDraftStreaming: true, send: async (addr, reply) => {
       const source = store.settings.discord.sources.find((s) => s.id === addr.account)
       if (!source) return { ok: false, error: 'Discord source not found.' }
@@ -222,8 +195,7 @@ export function createConnectorChannels(deps: {
       if (!source) return { ok: false, error: 'Discord source not found.' }
       const chunks = splitForPlatform('discord', reply.text)
       const first = chunks[0] ?? reply.text
-      // Commit the first chunk by editing the draft in place; if that edit fails (or there was no
-      // draft id), fall back to a fresh send so the reply still lands.
+
       const edited = handle.messageId ? await editDiscordMessage(source, addr.conversation, handle.messageId, first).then(() => true).catch(() => false) : false
       const firstId = edited ? handle.messageId : (await postDiscordMessage(source, addr.conversation, first, reply.inReplyTo ?? undefined).catch(() => null))?.id
       if (!firstId) return { ok: false, error: 'Discord reply could not be sent.' }
@@ -245,9 +217,7 @@ export function createConnectorChannels(deps: {
       return promise
     } },
     { platform: 'telegram', supportsInlineApproval: true,
-      // Telegram can edit a sent message, so it streams a draft preview edit-in-place: the
-      // first partial creates the message, each later partial editMessageText's it, and
-      // finalizeDraft commits the finished text (splitting a long reply into continuations).
+
       supportsDraftStreaming: true, send: async (addr, reply) => {
       const id = await sendTelegramText(addr.conversation, reply.text)
       return id ? { ok: true, sentId: id } : { ok: false, error: 'Telegram bot is not configured.' }
@@ -288,14 +258,10 @@ export function createConnectorChannels(deps: {
     return requestApprovalViaChannel(channelAdapters, threadKey, request)
   }
 
-  // Resolve a parked in-channel approval from an inbound button callback (token carried in
-  // the button payload). Called by the Telegram poll loop / interactivity handlers.
   function resolveChannelApproval(token: string, decision: ConnectorApprovalDecision): boolean {
     return approvalRegistry.resolve(token, decision)
   }
 
-  // Resolve a parked in-channel approval from a plain "/approve" / "/deny" reply that carries
-  // no token — matches the newest unsettled approval for that conversation.
   function resolveChannelApprovalByThread(threadKey: string, decision: ConnectorApprovalDecision): boolean {
     return approvalRegistry.resolveByThreadKey(threadKey, decision)
   }

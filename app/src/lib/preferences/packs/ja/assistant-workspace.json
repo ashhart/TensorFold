@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "アシスタントのワークスペース",
+  "Open inbox": "受信トレイを開く",
+  "Open Google Workspace": "Google Workspace を開く",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "タスクを開始したり、接続した会話を読んだり、Google のメールとカレンダーを管理したりできます。",
+  "Google account tools require a model running locally on this computer.": "Google アカウントのツールには、このコンピューター上でローカル実行するモデルが必要です。",
+  "Manage Google accounts locally in TensorFold on the host computer.": "ホスト コンピューター の TensorFold で Google アカウントを管理してください。",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "Google デスクトップ OAuth クライアントのインポート、認証情報、所有者レビューはホスト コンピューター のみで利用できます。",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "この コンピューター に接続された Google アカウントはありません。下からログインし、Google のログイン画面でアカウントを選択するか、別のメールアドレスを使用してください。",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "この コンピューター に接続された Google アカウントはありません。追加するには、下で Google ログインを設定してください。",
+  "Disconnected on this computer": "この コンピューター で切断済み",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "この コンピューター で切断しました。読み取りや操作の準備には Google で再接続してください。",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "クライアントの置き換えで、自動サインインや切断はしません。JSON と認証情報はホスト コンピューター に残ります。",
+  "No inbox conversation is attached": "受信トレイの会話は添付されていません"
+}

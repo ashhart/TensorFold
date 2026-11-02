@@ -5,7 +5,7 @@ import clsx from 'clsx'
 import { api } from '../../../lib/ipc'
 import { BrandIcon } from '../../../lib/brand'
 import { Icon } from '../../../lib/icons'
-import { Button, Field, Input, Toggle } from '../../ui'
+import { Button, Field, Input, Toggle, Segmented } from '../../ui'
 import { AdvancedSection, Section, type SettingsSectionContext } from '../shared'
 
 export function BotControlConnector({ ctx, focus }: { ctx: SettingsSectionContext; focus?: 'telegram' | 'whatsapp-cloud' | 'imessage' }) {
@@ -171,14 +171,20 @@ export function BotControlConnector({ ctx, focus }: { ctx: SettingsSectionContex
               <div className="min-w-0">
                 <div className="text-[13px] font-medium text-ink">{"iMessage"}</div>
                 <div className="mt-0.5 text-[13px] leading-snug text-ink-3">
-                  {tx("Read your own iMessage database (~/Library/Messages/chat.db) read-only. Requires Full Disk Access.")}</div>
+                  {draft.imessage.transport === 'bluebubbles' ? tx('Connect selected iMessage conversations through your BlueBubbles server.') : tx("Read your own iMessage database (~/Library/Messages/chat.db) read-only. Requires Full Disk Access.")}</div>
               </div>
             </div>
             <Toggle label={tx("iMessage connector")} checked={draft.imessage.enabled} onChange={toggleImessage} />
           </div>
           {draft.imessage.enabled && (
             <div className="mt-3 space-y-2.5">
-              {/* Full Disk Access gate: probe chat.db and report the precise state. */}
+              <Segmented value={draft.imessage.transport ?? 'local'} onChange={transport => commit({ ...draft, imessage: { ...draft.imessage, transport: transport as 'local' | 'bluebubbles', cursor: undefined, lastSyncAt: null } })} options={[{ value: 'local', label: tx('This Mac') }, { value: 'bluebubbles', label: 'BlueBubbles' }]} />
+              {draft.imessage.transport === 'bluebubbles' && <div className="space-y-2">
+                <p className="text-[13px] text-ink-2">{tx('BlueBubbles works from Windows, Linux or Mac through a signed-in Mac running BlueBubbles Server. Keep that Mac awake and signed in. Only text reading and approved text sending are supported here.')}</p>
+                <Field label={tx('Server URL')}><Input value={draft.imessage.blueBubblesUrl ?? ''} onChange={event => setDraft(current => ({ ...current, imessage: { ...current.imessage, blueBubblesUrl: event.target.value } }))} onBlur={() => commit(draft)} placeholder="https://messages.example.com" /></Field>
+                <Field label={tx('Server password')}><Input type="password" value={draft.imessage.blueBubblesPassword ?? ''} onChange={event => setDraft(current => ({ ...current, imessage: { ...current.imessage, blueBubblesPassword: event.target.value } }))} onBlur={() => commit(draft)} /></Field>
+              </div>}
+              {}
               <div className={clsx('rounded-lg border px-3 py-2 text-[13px]', imessageAccess?.state === 'ok' ? 'border-positive/30 bg-positive/10 text-positive' : imessageAccess?.state === 'needs_full_disk_access' ? 'border-warn/30 bg-warn/10 text-warn' : 'border-line bg-card-2 text-ink-3')}>
                 {imessageAccess ? imessageAccess.detail : tx("Click \"Check access\" to verify TensorFold can read your iMessage database.")}
               </div>
@@ -189,9 +195,10 @@ export function BotControlConnector({ ctx, focus }: { ctx: SettingsSectionContex
                     <Icon name="shield" size={12} /> {tx("Open System Settings")}</button>
                 </div>
               )}
-              <Field label={tx("Allowed contacts")} hint={tx("optional")}>
-                <Input value={draft.imessage.allowedChatIds} onChange={(e) => setDraft((d) => ({ ...d, imessage: { ...d.imessage, allowedChatIds: e.target.value } }))} onBlur={() => commit(draft)} placeholder={tx("phone or email handle (blank = all)")} className="h-8" spellCheck={false} />
+              <Field label={tx("Allowed contacts")} hint={draft.imessage.transport === 'bluebubbles' ? tx("required") : tx("optional")}>
+                <Input value={draft.imessage.allowedChatIds} onChange={(e) => setDraft((d) => ({ ...d, imessage: { ...d.imessage, allowedChatIds: e.target.value } }))} onBlur={() => commit(draft)} placeholder={draft.imessage.transport === 'bluebubbles' ? 'iMessage;-;contact@example.com' : tx("phone or email handle (blank = all)")} className="h-8" spellCheck={false} />
               </Field>
+              {draft.imessage.transport === 'bluebubbles' && <p className="text-[12px] text-ink-3">{tx('Enter exact BlueBubbles chat GUIDs separated by commas or newlines. Empty receives none. Save changes before checking access.')}</p>}
               <div className="flex flex-wrap gap-2">
                 <Button variant="default" size="sm" icon="shield" onClick={checkImessageAccess} disabled={imessageBusy}>{imessageBusy ? tx("Checking") : tx("Check access")}</Button>
                 <Button variant="primary" size="sm" icon="message" onClick={syncImessage} disabled={imessageBusy || imessageAccess?.state !== 'ok'}>{imessageBusy ? tx("Syncing") : tx("Sync iMessage")}</Button>

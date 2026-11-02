@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { createPrivateKey } from 'node:crypto'
 import { assertProductionMacSigner, assertProductionUpdateTrustRoot, assertSigningKeyMatchesTrustRoot, readReleaseTrustConfig } from './update-signing-trust.mjs'
 import { packageWithXcodeAccount } from './package-mac-xcode.mjs'
+import { desktopReleaseMetadata } from './desktop-release-metadata.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Prepare this release on an Apple silicon Mac.')
@@ -22,10 +23,11 @@ const args = ['notarytool', 'history', '--keychain-profile', profile, '--output-
 const credentials = spawnSync('xcrun', args, { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 })
 const useXcode = credentials.status !== 0 || !!credentials.error
 if (useXcode && process.env.APPLE_KEYCHAIN_PROFILE) throw new Error('The explicitly selected notarization profile is not usable; repair that profile or omit APPLE_KEYCHAIN_PROFILE to use the existing Xcode account.')
-const key = path.join(os.homedir(), '.config', 'tensorfold-studio', 'release', 'update-signing-ed25519.pem')
+const key = path.join(os.homedir(), '.config', 'TensorFold', 'Release', 'update-signing-ed25519.pem')
 if (!(await stat(key)).isFile()) throw new Error('The protected update-signing key is unavailable.')
 assertSigningKeyMatchesTrustRoot(createPrivateKey(await readFile(key)), trust.update.ed25519PublicKey)
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
+const releaseUrls = desktopReleaseMetadata(pkg.version)
 const artifact = path.join(root, 'release', `${pkg.build.productName}-${pkg.version}-arm64.dmg`)
 const updateZip = path.join(root, 'release', `${pkg.build.productName}-${pkg.version}-arm64.zip`)
 const notes = path.join(root, 'docs', 'beta', `${pkg.version}.md`)
@@ -45,5 +47,5 @@ if (useXcode) {
   await packageWithXcodeAccount()
 } else run(process.execPath, [npm, 'run', 'dist:mac'])
 run(process.execPath, [npm, 'run', 'smoke:mac:packaged'])
-run(process.execPath, [path.join(root, 'scripts', 'make-update-manifest.mjs'), '--version', pkg.version, '--artifact', artifact, '--download-url', `https://tensorfold.dev/studio/TensorFold-${pkg.version}-arm64.dmg`, '--update-zip', updateZip, '--update-zip-url', `https://tensorfold.dev/studio/TensorFold-${pkg.version}-arm64.zip`, '--notes', notes, '--out', path.join(root, 'release', 'update.json'), '--private-key', key])
+run(process.execPath, [path.join(root, 'scripts', 'make-update-manifest.mjs'), '--version', pkg.version, '--artifact', artifact, '--download-url', releaseUrls.downloadUrl, '--update-zip', updateZip, '--update-zip-url', releaseUrls.zipUrl, '--notes', notes, '--out', path.join(root, 'release', 'update.json'), '--private-key', key])
 console.log('Signed release and update manifest prepared locally; public hosting is the next release step.')

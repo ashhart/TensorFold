@@ -38,9 +38,10 @@ function pending() { let resolve!: () => void, reject!: (error: Error) => void; 
 async function settle() { for (let i = 0; i < 15; i++) await Promise.resolve() }
 const originalWindow = store.win
 try {
-  let gate = pending(), calls = 0, failures = 0, guard = true
+  let gate = pending(), calls = 0, failures = 0, guard = true, background = false, hides = 0
   const runtime = createAppWindowRuntime({ BrowserWindow: FakeWindow as any, baseDir: '/private/qa/Contents/Resources/app.asar/dist-electron', openExternalSafely: async () => {}, session: {} as any,
     shouldGuardWindowClose: () => guard,
+    onWindowCloseSaved: () => { if (!background) return false; hides++; return true },
     beforeWindowClose: async () => { calls++; await gate.promise },
     onWindowCloseFailure() { failures++ },
   })
@@ -52,6 +53,15 @@ try {
   gate.resolve(); await settle()
   assert.equal(win.destroyed, true, 'renderer is destroyed only after successful flush')
   assert.equal(failures, 0)
+
+  background = true; gate = pending(); runtime.createWindow(); win = FakeWindow.latest
+  win.close(); win.close(); await settle()
+  assert.equal(hides, 0, 'background hiding waits for the draft save')
+  gate.resolve(); await settle()
+  assert.equal(hides, 1, 'one close request hides once, without dispatching another native close')
+  assert.equal(win.closes, 2)
+  assert.equal(win.destroyed, false); assert.equal(win.enabled, true)
+  background = false
 
   gate = pending(); runtime.createWindow(); win = FakeWindow.latest
   win.close(); await settle(); gate.reject(new Error('Synthetic draft write refused')); await settle()

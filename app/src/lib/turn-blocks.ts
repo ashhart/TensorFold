@@ -1,7 +1,5 @@
-// One turn, one block: folds a thread timeline into per-turn rows for the conversation view.
-// A turn runs from a user message to the next one. Its work (tool calls, reasoning, interim
-// text, run bookkeeping) collapses into one row; anything that needs the user, the final
-// answer and the files it edited stay visible. Pure so it is tested without a DOM.
+
+
 import { basename } from './format'
 import { authoredText } from './preferences/language-packs'
 import { currentUiLanguage } from './preferences/current-locale'
@@ -12,13 +10,13 @@ export interface FileEdit {
   path: string
   additions: number
   deletions: number
-  /** False when a command changed the file and no line diff was recorded. */
+  // False when a command changed the file and no line diff was recorded.
   counted: boolean
 }
 
 export interface TurnSummary {
   key: string
-  /** 1-based user turn, the number turn checkpoints use; 0 for items before the first message. */
+  // 1-based user turn, the number turn checkpoints use; 0 for items before the first message.
   index: number
   work: TimelineItem[]
   steps: number
@@ -28,6 +26,22 @@ export interface TurnSummary {
   edits: FileEdit[]
   running: boolean
   questionPending?: boolean
+}
+
+export type TurnActivityState = 'running' | 'waiting' | 'completed' | 'failed' | 'stopped' | 'review' | 'interrupted'
+
+// A finished turn is not necessarily verified; only its saved receipt can establish that outcome.
+export function turnActivityState(turn: TurnSummary, status?: string): TurnActivityState {
+  if (turn.running) return status === 'awaiting' ? 'waiting' : 'running'
+  const receipt = [...turn.work].reverse().find((item) => item.runReceipt)?.runReceipt
+  if (receipt?.verdict === 'cancelled') return 'stopped'
+  if (receipt?.verdict === 'failed') return 'failed'
+  if (receipt?.verdict === 'blocked' || receipt?.verdict === 'unverified') return 'review'
+  if (turn.work.some((item) => item.kind === 'tool' && ['pending', 'running', 'awaiting'].includes(item.state ?? ''))) {
+    return 'interrupted'
+  }
+  if (!receipt && turn.work.some((item) => item.kind === 'tool' && item.state === 'error')) return 'review'
+  return 'completed'
 }
 
 export type TurnRow =
@@ -47,7 +61,7 @@ const MACHINERY_TEXT = [
   /^Run (step|time) budget reached/i,
 ]
 
-/** Run bookkeeping that belongs in the collapsed details, not in the transcript. */
+// Run bookkeeping that belongs in the collapsed details, not in the transcript.
 export function isMachineryNotice(item: TimelineItem): boolean {
   if (item.kind !== 'notice') return false
   if (item.runContract || item.runReceipt) return true
@@ -56,7 +70,7 @@ export function isMachineryNotice(item: TimelineItem): boolean {
   return MACHINERY_TEXT.some((re) => re.test(text))
 }
 
-/** A tool item the user has to act on: an approval, a question, or a confirm-first setting. */
+// A tool item the user has to act on: an approval, a question, or a confirm-first setting.
 export function needsUser(item: TimelineItem): boolean {
   if (item.kind !== 'tool') return false
   if (item.state === 'awaiting') return true
@@ -72,7 +86,7 @@ function normalizePath(path: string): string {
   return path.trim().replace(/^\.\//, '')
 }
 
-/** Files a turn's tools changed, with line counts from their recorded diffs. */
+// Files a turn's tools changed, with line counts from their recorded diffs.
 export function turnFileEdits(items: TimelineItem[]): FileEdit[] {
   const byPath = new Map<string, FileEdit>()
   const touch = (raw: string): FileEdit | null => {
@@ -99,7 +113,7 @@ export function turnFileEdits(items: TimelineItem[]): FileEdit[] {
   return [...byPath.values()]
 }
 
-/** The turn's answer: its last assistant text with no tool call or reasoning after it. */
+// The turn's answer: its last assistant text with no tool call or reasoning after it.
 function answerIndex(items: TimelineItem[]): number {
   for (let i = items.length - 1; i >= 0; i--) {
     const kind = items[i].kind
@@ -171,7 +185,7 @@ export function buildTurnRows(timeline: TimelineItem[], opts: { running?: boolea
   return rows
 }
 
-/** Present-tense label for one in-flight work item. */
+// Present-tense label for one in-flight work item.
 export function stepLabel(item: TimelineItem | undefined, locale: unknown = currentUiLanguage()): string {
   if (normalizeLanguage(locale) !== 'en') {
     const tx = (source: string, params = {}) => authoredText(locale, source, params)
@@ -210,7 +224,7 @@ export function stepLabel(item: TimelineItem | undefined, locale: unknown = curr
   }
 }
 
-/** What the live row says it is doing right now. */
+// What the live row says it is doing right now.
 export function currentStepLabel(turn: TurnSummary, status?: string, locale: unknown = currentUiLanguage()): string {
   const tx = (source: string) => authoredText(locale, source)
   if (normalizeLanguage(locale) !== 'en') {
@@ -241,7 +255,7 @@ export function compactDuration(ms: number): string {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
-/** "Worked for 12s · 4 steps" when done; "Working · 12s · Editing App.tsx" while live. */
+// "Worked for 12s · 4 steps" when done; "Working · 12s · Editing App.tsx" while live.
 export function workRowLabel(turn: TurnSummary, opts: { now: number; status?: string; phaseLabel?: string; locale?: string }): string {
   const locale = normalizeLanguage(opts.locale ?? currentUiLanguage())
   if (locale !== 'en') {
@@ -272,14 +286,14 @@ export function editTotals(edits: FileEdit[]): { files: number; additions: numbe
   return edits.reduce((acc, edit) => ({ files: acc.files + 1, additions: acc.additions + edit.additions, deletions: acc.deletions + edit.deletions }), { files: 0, additions: 0, deletions: 0 })
 }
 
-/** Old saved threads carry a "~N tok/s" chars/4 estimate in meta; it is not shown any more. */
+// Old saved threads carry a "~N tok/s" chars/4 estimate in meta; it is not shown any more.
 export function isEstimatedThroughputMeta(meta: string | undefined): boolean {
   return /^~\d+ tok\/s$/.test((meta ?? '').trim())
 }
 
-const SANDBOX_META = /^(sandbox=|artifacts=|redacted=|macos-sandbox-exec$|unsandboxed$)/
+const SANDBOX_META = /^(sandbox=|artifacts=|redacted=|macos-sandbox-exec$|linux-bubblewrap$|unsandboxed$)/
 
-/** The tool line's short meta ("exit 0 · 240ms"); sandbox bookkeeping shows only when expanded. */
+// The tool line's short meta ("exit 0 · 240ms"); sandbox bookkeeping shows only when expanded.
 export function shortToolMeta(meta: string | undefined): string {
   return (meta ?? '').split(' · ').filter((part) => part && !SANDBOX_META.test(part.trim())).join(' · ')
 }

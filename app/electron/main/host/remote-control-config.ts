@@ -1,3 +1,6 @@
+import { assertGmailInboxRoute } from '../../../shared/gmail-inbox'
+import { localAskRoutes, localAskGeneration, loadLocalAskModel } from './quick-ask/backend'
+import { handoffAsk } from './quick-ask/handoff'
 import type { RemoteWorkspaceScope } from '../../agent/local-workspace-policy'
 import path from 'node:path'
 import { app } from 'electron'
@@ -19,9 +22,7 @@ export interface RemoteControlConfigDeps {
   // Pairing (constructed at module scope, before this factory): direct references are fine.
   pairingRegistry: PairingRegistry
   persistPairingSessions(): Promise<void>
-  // Late-bound collaborators — forward-declared `let` bindings assigned later in the bootstrap.
-  // Accessors keep the lookups lazy so the factory can be built early while the resolved values
-  // are read at runtime, exactly mirroring the original inline closure semantics.
+
   spineHost(): EventSpineHost | null
   remoteHostApi(): {
     createThreadOnThisHost(input: { cwd?: string; kind?: 'task' | 'chat'; projectId?: string | null }, scope?: RemoteWorkspaceScope): Promise<import('../../agent/types').Thread>
@@ -53,8 +54,7 @@ export interface RemoteControlConfigDeps {
   }
   jobControlRuntime(): Pick<JobControlRuntime, 'resolveToolApproval'>
   terminalRemoteApi(): TerminalRemoteApi | null
-  // Mutable abort/run maps — declared later than this factory in the bootstrap, but created ONCE
-  // and passed by reference so identity is preserved across every reader.
+
   aborters(): Map<string, AbortController>
   roomAborters(): Map<string, AbortController>
   runningMissions(): Set<string>
@@ -63,15 +63,6 @@ export interface RemoteControlConfigDeps {
   recordMissionHeartbeatLocal(id: string, message?: string): Promise<import('../../agent/types').Mission>
 }
 
-/**
- * Builds the `RemoteControlServerDeps` config object consumed by `createRemoteControlServer`.
- *
- * This is pure relocation of the ~110-line inline blob from main-app.ts. Every forward-declared
- * symbol (`remoteHostApi`, `jobControlRuntime`, `terminalRemoteApi`, `spineHost`, and the later
- * `aborters`/`roomAborters`/`runningMissions` collections) is reached through an accessor so the
- * config can be assembled at module scope while the resolved values are read at request time —
- * mirroring the original closures verbatim.
- */
 export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteControlServerDeps {
   const {
     pairingRegistry,
@@ -88,6 +79,7 @@ export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteC
   } = deps
 
   return {
+    quickAsk: { routes: localAskRoutes, generate: localAskGeneration, load: loadLocalAskModel, handoff: handoffAsk },
     getSettings: () => store.settings.remoteControl,
     getDeviceEngine: async () => {
       const snapshot = await engineService()?.snapshot()
@@ -108,9 +100,7 @@ export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteC
       },
       listSessions: () => pairingRegistry.listSessions(),
       revokeSession: async (id) => {
-        // Revocation is a security boundary: never acknowledge success until the protected
-        // snapshot is durable. On write failure the token remains revoked in-memory and the
-        // caller receives an error instead of a false-success response.
+
         return durablePairingMutation(
           pairingRegistry,
           () => pairingRegistry.revokeSession(id),
@@ -119,12 +109,9 @@ export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteC
         )
       },
     },
-    // The built renderer bundle, so a paired browser loads the SAME app this window runs
-    // (VST-035). Dev (vite server) has no dist next to dist-electron → serving degrades to
-    // an explanatory 404 rather than guessing at the vite URL.
+
     staticRoot: () => path.join(__dirname, '../dist'),
-    // Durable spine replay for remote clients (VST-034); degrades to an empty page in the
-    // pre-ready window before the spine restore completes.
+
     spineReadSince: (since, options) => spineHost()?.readSince(since, options) ?? { events: [], hasMore: false, snapshotRequired: false },
     spineReceipt: (commandId) => spineHost()?.receipt(commandId) ?? null,
     getSnapshot: () => remoteControlSnapshot({
@@ -153,7 +140,7 @@ export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteC
       activeMissionIds: Array.from(runningMissions()),
     }),
     createThread: (input, scope) => remoteHostApi().createThreadOnThisHost(input, scope),
-    startThread: (payload, scope) => { assertPublicThread(payload.threadId); return remoteHostApi().startRemoteThreadOnThisHost(payload, scope) },
+    startThread: (payload, scope) => { assertGmailInboxRoute(payload.sourceThreadKey, true); assertPublicThread(payload.threadId); return remoteHostApi().startRemoteThreadOnThisHost(payload, scope) },
     guideThread: (payload, scope) => { assertPublicThread(payload.threadId); return remoteHostApi().guideRemoteThreadOnThisHost(payload, scope) },
     cancelThread: (threadId) => { assertPublicThread(threadId); return remoteHostApi().cancelRemoteThreadOnThisHost(threadId) },
     approve: (callId, decision) => {

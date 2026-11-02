@@ -1,11 +1,10 @@
 import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY } from '../../../shared/release-feature-policy'
 import { normalizeEngineEnvOverrides } from '../../../shared/engine-advanced-env'
+import engineManifest from '../../../build/engine.json'
+import type { EngineRuntimeSnapshot } from '../../../electron/agent/types/engine-runtime'
 import type { EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, SuggestedModel } from '../types'
 import type { TensorFoldStudioApi } from '../ipc'
 import type { EngineModelLibrarySnapshot } from '../types'
-
-// Browser demo of the built-in engine: a fake installed model, Hub results and a simulated download.
-// Nothing here reaches Hugging Face or runs a model.
 
 const GIB = 1024 ** 3
 const TOTAL_MEMORY = 36 * GIB
@@ -33,7 +32,8 @@ const HUB: HubModelSummary[] = [
 ]
 
 export function createMockEngineApi(): Pick<TensorFoldStudioApi,
-  'engineCompareModels' | 'engineComparisonStatus' | 'engineCancelComparison' | 'engineTryModel' | 'engineCancelTryModel' | 'engineSaveModelProfiles' | 'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'engineEnvOverrides' | 'engineSetEnvOverrides' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
+  'engineRuntimeStatus' | 'engineRuntimeCheck' | 'engineRuntimeInstall' | 'engineRuntimeUse' | 'engineRuntimeCancel' | 'engineCompareModels' | 'engineComparisonStatus' | 'engineCancelComparison' | 'engineTryModel' | 'engineCancelTryModel' | 'engineSaveModelProfiles' | 'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'engineEnvOverrides' | 'engineSetEnvOverrides' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
+  const runtimes: EngineRuntimeSnapshot = { bundledVersion: engineManifest.version, active: null, installed: [], available: [], state: 'idle', progress: null, checkedAt: null, error: null }
   const listeners = new Set<(event: EngineEvent) => void>()
   const emit = (event: EngineEvent) => { for (const cb of listeners) cb(event) }
   let installed: EngineInstalledModel[] = [{
@@ -56,7 +56,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
   const timers = new Map<string, ReturnType<typeof setInterval>>()
   let status: EngineStatus = {
     hardware: { platform: 'darwin', architecture: 'arm64', chip: 'Apple M3 Max' },
-    available: true, version: '1.1.0', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
+    available: true, version: engineManifest.version, binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
     state: 'stopped', model: null, drafter: null, port: null, startedAt: null, readyAt: null, message: null, logTail: [], totalMemoryBytes: TOTAL_MEMORY, memoryLimitBytes: LIMIT, contextTokens: null,
     cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason },
   }
@@ -98,6 +98,11 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
     engineAddLibraryFolder: async () => { library = { ...library, folders: [{ id: 'demo-folder', path: '/Volumes/Example/Models', label: 'Example models' }] }; return scanLibrary() },
     engineRemoveLibraryFolder: async (id) => { library = { ...library, folders: library.folders.filter((folder) => folder.id !== id) }; return scanLibrary() },
     engineCancelLibraryScan: async () => { library = { ...library, cancelled: true, scanning: false }; return librarySnapshot() },
+    engineRuntimeStatus: async () => structuredClone(runtimes),
+    engineRuntimeCheck: async () => { runtimes.checkedAt = Date.now(); return structuredClone(runtimes) },
+    engineRuntimeInstall: async () => { throw new Error('Runtime downloads require the desktop app.') },
+    engineRuntimeUse: async () => { throw new Error('Runtime switching requires the desktop app.') },
+    engineRuntimeCancel: async () => false,
     engineSnapshot: async () => snapshot(),
     // Demo mode never starts a server, so it cannot supply a working client connection.
     engineConnection: async () => null,

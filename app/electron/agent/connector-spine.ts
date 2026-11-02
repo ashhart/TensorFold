@@ -116,9 +116,7 @@ export function recordConnectorInteraction(input: ConnectorInteractionInput): Co
   const trustLevel = trust(input.action, direction)
   const priority = priorityFor(input.action, trustLevel)
   const requiresApproval = trustLevel === 'approve'
-  // Inbound webhook payloads are fully attacker-controlled — never copy raw payload values
-  // into human/agent-visible fields (title/summary/actor/threadKey). Derive them from the
-  // redacted key names only, so untrusted text can't reach the UI or the model's context.
+
   const keys = safeKeys(payload)
   const untrusted = input.connectorId === 'webhook'
   return event({
@@ -149,8 +147,7 @@ export interface AssistantControlSnapshotOptions {
 }
 
 export function buildAssistantControlSnapshot(events: ConnectorEvent[], email?: EmailConnectorSettings, botControl?: BotControlSettings, controllerSettings?: ControllerSettings, calendar?: CalendarConnectorSettings, documents?: DocumentConnectorSettings, slack?: SlackConnectorSettings, browser?: BrowserConnectorSettings, imessage?: IMessageConnectorSettings, whatsapp?: WhatsAppBridgeConnectorSettings, discord?: DiscordConnectorSettings, mattermost?: MattermostConnectorSettings, matrix?: MatrixConnectorSettings, googlechat?: GoogleChatConnectorSettings, options: AssistantControlSnapshotOptions = {}): AssistantControlSnapshot {
-  // Reapply current QR source grants to cached incoming content. Pending exact
-  // outbound review cards remain visible so their author can approve or discard.
+
   const latest = events.filter((event) => event.connectorId !== 'whatsapp' || !event.threadKey.startsWith('whatsapp:') || event.direction !== 'inbound' || isWhatsAppEventInCurrentScope(event, whatsapp?.sources ?? [])).sort((a, b) => b.createdAt - a.createdAt)
   const snapshotEvents = latest.slice(0, 40)
   const connectors = connectorDefinitions(email, botControl, controllerSettings, calendar, documents, slack, browser, imessage, whatsapp, discord, mattermost, matrix, googlechat, options.whatsappRuntime).map((connector) => {
@@ -244,7 +241,9 @@ function connectorDefinitions(email?: EmailConnectorSettings, botControl?: BotCo
     enabled: imessage?.enabled ?? false,
     allowedTargets: imessage?.allowedChatIds ?? '',
     allowedTargetLabel: 'allowed contacts',
-    requiredFields: [{ label: 'full disk access', value: imessage?.enabled ? 'granted' : '' }],
+    requiredFields: imessage?.transport === 'bluebubbles'
+      ? [{ label: 'server URL', value: imessage.blueBubblesUrl ?? '' }, { label: 'server password', value: imessage.blueBubblesPassword ?? '' }]
+      : [{ label: 'full disk access', value: imessage?.enabled ? 'granted' : '' }],
   })
   return BASE_CONNECTORS.map((connector) => {
     if (connector.id === 'telegram') return personalBridgeConnector(connector, telegramPolicy, botControl?.telegram.polling ? 'Local polling is enabled.' : 'Local polling is off.')
@@ -275,7 +274,7 @@ function connectorDefinitions(email?: EmailConnectorSettings, botControl?: BotCo
     }
     if (connector.id === 'imessage') {
       const detail = imessage?.enabled
-        ? (imessage.lastError ? `iMessage bridge error: ${imessage.lastError}` : 'Local bridge active — reading your iMessage database.')
+        ? (imessage.lastError ? `iMessage bridge error: ${imessage.lastError}` : imessage.transport === 'bluebubbles' ? 'BlueBubbles configured. Check access and sync selected conversations.' : 'Local bridge configured. Check Full Disk Access and sync.')
         : 'Enable the iMessage bridge and grant Full Disk Access to read your messages.'
       return personalBridgeConnector(connector, imessagePolicy, detail)
     }

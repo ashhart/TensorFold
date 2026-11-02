@@ -6,6 +6,7 @@ import clsx from 'clsx'
 import { api } from '../lib/ipc'
 import { Icon } from '../lib/icons'
 import type { LoopRecord, LoopStatus } from '../lib/types'
+import { parseVerificationDraft } from '../lib/loop-launch'
 
 const STATUS_TINT: Record<LoopStatus, string> = {
   running: 'text-accent',
@@ -22,18 +23,16 @@ function upsert(list: LoopRecord[], rec: LoopRecord): LoopRecord[] {
   return [rec, ...list]
 }
 
-/**
- * Loop Mode launcher + live monitor for one surface (solo thread, room, or
- * kanban). Starts an autonomous self-verifying loop and renders its record as
- * it advances (phase, cycle, the independent critic's verdict, blockers, log).
- */
+// Launch a verified work loop and follow its phases, required checks and final decision.
 export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; source: 'solo' | 'room' | 'ticket'; surfaceId: string; projectId?: string | null }) {
   const tx = useAuthoredText()
   const [goal, setGoal] = useState('')
+  const [verification, setVerification] = useState('')
   const [mode, setMode] = useState<'build' | 'ship'>('build')
   const [loops, setLoops] = useState<LoopRecord[]>([])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const verificationDraft = parseVerificationDraft(verification)
 
   useEffect(() => {
     let alive = true
@@ -47,9 +46,10 @@ export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; 
 
   const start = async () => {
     if (!goal.trim() || !cwd || busy) return
+    if (verificationDraft.error) { setErr(tx(verificationDraft.error)); return }
     setBusy(true); setErr(null)
     try {
-      const rec = await api.startLoop({ source, surfaceId, goal: goal.trim(), mode, baseCwd: cwd, projectId })
+      const rec = await api.startLoop({ source, surfaceId, goal: goal.trim(), mode, baseCwd: cwd, projectId, verify: verificationDraft.commands })
       setGoal('')
       setLoops((prev) => upsert(prev, rec))
     } catch (e: any) {
@@ -63,12 +63,31 @@ export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; 
     <div className="space-y-2">
       {!cwd && <div className="px-1 text-[12px] text-ink-4">{tx("Pick a folder to run a loop.")}</div>}
       <textarea
+        aria-label={tx("Loop goal")}
         value={goal}
         onChange={(e) => setGoal(e.target.value)}
         placeholder={tx("Goal — what should the loop build & verify?")}
         rows={2}
         className="w-full resize-none rounded-md border border-line bg-card px-2 py-1.5 text-[13px] text-ink placeholder:text-ink-4 focus:border-ink-3 focus:outline-none"
       />
+      <label className="block space-y-1.5 rounded-lg border border-line bg-card p-2.5">
+        <span className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+          <Icon name="check" size={13} className="text-accent" />{tx("Required checks")}
+        </span>
+        <textarea
+          aria-label={tx("Verification commands")}
+          value={verification}
+          onChange={event => setVerification(event.target.value)}
+          rows={2}
+          maxLength={64032}
+          spellCheck={false}
+          placeholder={'npm test\nnpm run typecheck'}
+          className="w-full resize-y rounded-md border border-line bg-canvas px-2 py-1.5 font-mono text-[12px] text-ink placeholder:text-ink-4 focus-visible:outline-2 focus-visible:outline-accent"
+        />
+        <span className="block text-[11px] leading-relaxed text-ink-2">
+          {tx("One command per line, run in this workspace. Every check must pass before the loop can finish successfully.")}
+        </span>
+      </label>
       {err && <div className="rounded-md bg-danger/10 px-2 py-1 text-[12px] leading-snug text-danger">{<OriginalDiagnostic>{err}</OriginalDiagnostic>}</div>}
       <div className="flex items-center gap-1.5">
         <div className="flex overflow-hidden rounded-md border border-line">
@@ -82,7 +101,7 @@ export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; 
         </div>
         <button
           onClick={start}
-          disabled={!goal.trim() || !cwd || busy}
+          disabled={!goal.trim() || !cwd || busy || !!verificationDraft.error}
           title={tx("Start an autonomous self-verifying loop (roles → gates → independent critic → retry).")}
           className="flex flex-1 items-center justify-center gap-1 rounded-md bg-ink px-2 py-1.5 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
         >
@@ -124,8 +143,8 @@ function LoopCard({ loop }: { loop: LoopRecord }) {
         <span className="capitalize">{loop.mode}</span>
       </div>
       {v && (
-        <div className={clsx('mt-1 rounded-md px-2 py-1 text-[12px] leading-snug', v.passed ? 'bg-positive/10 text-positive' : 'bg-danger/10 text-danger')}>
-          {v.passed ? tx("✓ verified") : tx("✗ not verified")} ({Math.round(v.confidence * 100)}%) — {v.summary}
+        <div className={clsx('mt-1 rounded-md px-2 py-1 text-[12px] leading-snug', v.passed && loop.status === 'shipped' ? 'bg-positive/10 text-positive' : 'bg-warn/10 text-ink-2')}>
+          {v.passed && loop.status === 'shipped' ? tx("Checks and review passed") : tx("Not yet verified")} — {v.summary}
         </div>
       )}
       {loop.blockers.length > 0 && (

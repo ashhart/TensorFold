@@ -15,6 +15,11 @@ import { prepareBrowserDemo } from './lib/browser-demo-bootstrap'
 // imports below.
 async function boot() {
   const root = createRoot(document.getElementById('root')!)
+  if (window.tensorfoldQuickAsk) {
+    const { default: QuickAskApp } = await import('./components/quick-ask/QuickAskApp')
+    root.render(<React.StrictMode><QuickAskApp /></React.StrictMode>)
+    return
+  }
   const mode = await preparePairedSession()
   if (mode === 'needs-pairing') {
     const { PairingGate } = await import('./components/PairingGate')

@@ -2,6 +2,18 @@
 import assert from 'node:assert/strict'
 import { safePublicWebUrl, assertFetchableUrl, fetchText, resolveFetchableUrl } from './tool-web.ts'
 
+{
+  const controller = new AbortController()
+  let started!: () => void
+  const ready = new Promise<void>(resolve => { started = resolve })
+  const request = fetchText(new URL('https://example.com/'), 10_000, { signal: controller.signal, lookup: async () => [{ address: '93.184.215.14', family: 4 }], fetchImpl: (async (_url, init) => {
+    started()
+    return new Promise((_resolve, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true }))
+  }) as typeof fetch })
+  await ready; controller.abort()
+  await assert.rejects(request, /abort/i)
+}
+
 let passed = 0
 const ok = (name: string) => { passed++; console.log(`  ✓ ${name}`) }
 

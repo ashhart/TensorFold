@@ -1,0 +1,15 @@
+{
+  "Assistant workspace": "พื้นที่ทำงานผู้ช่วย",
+  "Open inbox": "เปิดกล่องข้อความ",
+  "Open Google Workspace": "เปิด Google Workspace",
+  "Start a task, read connected conversations, or manage Google mail and calendar.": "เริ่มงาน อ่านการสนทนาจากแหล่งที่เชื่อมต่อ หรือจัดการอีเมลและปฏิทิน Google",
+  "Google account tools require a model running locally on this computer.": "เครื่องมือบัญชี Google ต้องใช้โมเดลที่ทำงานภายในคอมพิวเตอร์เครื่องนี้",
+  "Manage Google accounts locally in TensorFold on the host computer.": "จัดการบัญชี Google ใน TensorFold บนโฮสต์ คอมพิวเตอร์",
+  "Google Desktop OAuth client import, credentials and owner reviews are available only on the host computer.": "นำเข้า Google Desktop OAuth client จัดการข้อมูลรับรอง และตรวจทานโดยเจ้าของได้เฉพาะบนโฮสต์ คอมพิวเตอร์",
+  "No Google accounts are connected on this computer. Sign in below and choose an account or use another address in Google's sign-in window.": "ยังไม่มีบัญชี Google ที่เชื่อมต่อบน คอมพิวเตอร์ เครื่องนี้ ลงชื่อเข้าใช้ด้านล่าง แล้วเลือกบัญชีหรือใช้อีเมลอื่นในหน้าต่างลงชื่อเข้าใช้ของ Google",
+  "No Google accounts are connected on this computer. Set up Google sign-in below to add one.": "ยังไม่มีบัญชี Google ที่เชื่อมต่อบน คอมพิวเตอร์ เครื่องนี้ ตั้งค่าการลงชื่อเข้าใช้ Google ด้านล่างเพื่อเพิ่มบัญชี",
+  "Disconnected on this computer": "ตัดบน คอมพิวเตอร์ นี้แล้ว",
+  "Disconnected locally on this computer; reconnect with Google before reading or preparing new actions.": "ตัดใน คอมพิวเตอร์ นี้แล้ว เชื่อมผ่าน Google ใหม่ก่อนอ่านหรือเตรียมงานใหม่",
+  "Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.": "เปลี่ยนไคลเอนต์ไม่ลงชื่อเข้าใช้หรือตัดบัญชีอัตโนมัติ JSON และข้อมูลรับรองยังอยู่บนโฮสต์ คอมพิวเตอร์",
+  "No inbox conversation is attached": "ไม่ได้แนบการสนทนาจากกล่องข้อความ"
+}

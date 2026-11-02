@@ -1,6 +1,6 @@
 import { MessageQuoteAction } from './composer/MessageQuotes'
 import { useAuthoredText } from '../lib/preferences/useAuthoredText'
-import { memo, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -13,7 +13,7 @@ import { useStore } from '../lib/store'
 import { reasoningDisplayState } from '../lib/activity-grouping'
 import { api } from '../lib/ipc'
 import { speakText, speechSupported, stopSpeaking } from '../lib/voice'
-import { pairWordDiffs, type WordSpan } from '../lib/diff-words'
+import { DiffView } from './thread-panel/DiffView'
 import { VisualizationCard, splitVisualizationMarkdown } from './visualization'
 import { isEstimatedThroughputMeta, shortToolMeta } from '../lib/turn-blocks'
 import type { Attachment, DiffLine, TimelineItem, ToolArtifactSummary, ToolState } from '../lib/types'
@@ -34,7 +34,7 @@ export function toolIcon(tool?: string): IconName {
 
 export function Spinner({ size = 14 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="animate-spin text-accent">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true" className="animate-spin text-accent motion-reduce:animate-none">
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" strokeOpacity="0.2" />
       <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
     </svg>
@@ -42,7 +42,8 @@ export function Spinner({ size = 14 }: { size?: number }) {
 }
 
 export function StateGlyph({ state }: { state?: ToolState }) {
-  if (state === 'running' || state === 'pending') return <Spinner />
+  if (state === 'running') return <Spinner />
+  if (state === 'pending') return <Icon name="clock" size={14} className="text-ink-3" />
   if (state === 'awaiting') return <span className="flex h-3.5 w-3.5 items-center justify-center"><Icon name="shield" size={14} className="text-ink-2" /></span>
   if (state === 'ok') return <Icon name="check" size={15} className="text-ink-2" />
   if (state === 'error') return <Icon name="warning" size={14} className="text-danger" />
@@ -64,7 +65,7 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
     window.setTimeout(() => setCopied(false), 1200)
   }
   return (
-    <button onClick={copy} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-line bg-card px-2 text-[13px] font-medium text-ink-2 shadow-card transition-colors hover:bg-ink-5 hover:text-ink">
+    <button type="button" onClick={copy} className="focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent inline-flex h-7 items-center gap-1.5 rounded-lg border border-line bg-card px-2 text-[13px] font-medium text-ink-2 shadow-card transition-colors hover:bg-ink-5 hover:text-ink">
       <Icon name={copied ? 'check' : 'copy'} size={12} />{copied ? tx("Copied") : label ?? tx("Copy")}
     </button>
   )
@@ -211,72 +212,15 @@ export function ErrorBlock({ text }: { text: string }) {
   )
 }
 
-function WordSpanText({ spans, kind }: { spans: WordSpan[]; kind: 'add' | 'del' }) {
-  return (
-    <>
-      {spans.map((s, idx) =>
-        s.changed ? (
-          <mark
-            key={idx}
-            className={clsx(
-              'rounded-[2px] px-0.5',
-              kind === 'add' ? 'bg-[var(--add-ink)]/20 text-[var(--add-ink)]' : 'bg-[var(--del-ink)]/20 text-[var(--del-ink)]',
-            )}
-          >
-            {s.text || ' '}
-          </mark>
-        ) : (
-          <span key={idx}>{s.text}</span>
-        ),
-      )}
-    </>
-  )
-}
-
-function DiffView({ diff }: { diff: DiffLine[] }) {
-  // Pair adjacent del+add lines so we can highlight the changed words within
-  // each line, not just which lines changed. Computed once per diff render.
-  const wordPairs = useMemo(() => pairWordDiffs(diff), [diff])
-  return (
-    <div className="scroll-thin overflow-x-auto bg-card-2 font-mono text-[13px] leading-[1.55]">
-      {diff.map((l, i) => {
-        if (l.type === 'hunk') return (
-          <div key={i} className="select-none px-3 py-1 text-[12px] text-ink-3">{l.text}</div>
-        )
-        const wd = wordPairs.get(i)
-        return (
-          <div key={i} className={clsx('flex',
-            l.type === 'add' && 'bg-[var(--add-bg)]',
-            l.type === 'del' && 'bg-[var(--del-bg)]')}>
-            <span className="w-10 shrink-0 select-none px-1 text-right text-ink-4">{l.oldNo ?? ''}</span>
-            <span className="w-10 shrink-0 select-none px-1 text-right text-ink-4">{l.newNo ?? ''}</span>
-            <span className={clsx('w-4 shrink-0 select-none text-center',
-              l.type === 'add' && 'text-[var(--add-ink)]', l.type === 'del' && 'text-[var(--del-ink)]', l.type === 'ctx' && 'text-ink-4')}>
-              {l.type === 'add' ? '+' : l.type === 'del' ? '−' : ''}
-            </span>
-            <span className={clsx('whitespace-pre pr-3',
-              l.type === 'add' && 'text-[var(--add-ink)]', l.type === 'del' && 'text-[var(--del-ink)]', l.type === 'ctx' && 'text-ink-2')}>
-              {wd && l.type === 'del' ? <WordSpanText spans={wd.removed} kind="del" /> :
-               wd && l.type === 'add' ? <WordSpanText spans={wd.added} kind="add" /> :
-               (l.text || ' ')}
-            </span>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-// A tool call reads as a single dim line — icon · title · target ·
-// state — that expands to its diff/output inline. No card chrome; the transcript
-// stays prose-first and the tool runs recede until you want them.
+// Tool headers retain a readable target and state while long output opens on demand.
 export function ToolCard({ item, foldDiff, forceExpanded = false }: { item: TimelineItem; foldDiff?: boolean; forceExpanded?: boolean }) {
   const tx = useAuthoredText()
   const isDiff = !!item.diff?.length
   const isCmd = item.tool === 'run_command'
   // Diffs (the edits you care about) open by default unless a turn's edits card already
   // lists them; noisy command output stays folded until clicked.
-  const [open, setOpen] = useState(isDiff && !foldDiff)
+  const [open, setOpen] = useState(item.state === 'error' || (isDiff && !foldDiff))
+  useEffect(() => { if (item.state === 'error') setOpen(true) }, [item.state])
   const effectiveOpen = open || forceExpanded
   const resolveAppAction = useStore((s) => s.resolveAppAction)
   const view = useStore((s) => s.view)
@@ -284,23 +228,35 @@ export function ToolCard({ item, foldDiff, forceExpanded = false }: { item: Time
   const settingProposal = item.appAction?.kind === 'change_setting' && item.appAction.payload?.key && item.appAction.payload?.value ? item.appAction : null
 
   const icon = toolIcon(item.tool)
-  const hasBody = isDiff || (item.output && item.output.trim().length > 0)
+  const hasBody = isDiff || !!item.output?.trim() || !!(isCmd && item.command)
+  const stateLabel = item.state ? { pending: 'Queued', awaiting: 'Needs approval', running: 'Running', ok: 'Completed', error: 'Failed', denied: 'Denied' }[item.state] : ''
+  const bodyId = `tool-output-${item.id}`
 
   return (
     <div className="fade-in">
       <button
+        type="button"
         onClick={() => hasBody && setOpen((o) => !o)}
+        disabled={!hasBody}
         aria-expanded={hasBody ? effectiveOpen : undefined}
-        className={clsx('group flex w-full items-center gap-2 py-[3px] text-left', !hasBody && 'cursor-default')}
+        aria-controls={hasBody ? bodyId : undefined}
+        title={[item.title, item.command || item.path].filter(Boolean).join(': ')}
+        className="group flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left transition-colors hover:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default"
       >
         {FILE_TOOLS.has(item.tool || '') && item.path
           ? <FileGlyph path={item.path} size={14} />
           : <Icon name={icon} size={14} className="shrink-0 text-ink-3" />}
-        <span className={clsx('shrink-0 text-[13px]', item.state === 'error' ? 'text-danger' : 'text-ink-2')}>{item.title}</span>
-        <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink-3">{item.command || item.path}</code>
-        {shortToolMeta(item.meta) && <span className="shrink-0 font-mono text-[12px] text-ink-4">{shortToolMeta(item.meta)}</span>}
-        <span className="flex w-4 shrink-0 items-center justify-center"><StateGlyph state={item.state} /></span>
-        {hasBody && <Icon name={effectiveOpen ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
+        <span className="min-w-0 flex-1">
+          <span className={clsx('block text-[13px] font-medium', item.state === 'error' ? 'text-danger' : 'text-ink-2')}>{item.title}</span>
+          {(item.command || item.path) && <code className="block truncate font-mono text-[12px] text-ink-3">{item.command || item.path}</code>}
+        </span>
+        <span className="shrink-0 text-right">
+          <span className={clsx('flex items-center justify-end gap-1 text-[11px]', item.state === 'error' ? 'text-danger' : item.state === 'running' || item.state === 'awaiting' ? 'text-accent' : 'text-ink-3')}>
+            <StateGlyph state={item.state} />{tx(stateLabel)}
+          </span>
+          {shortToolMeta(item.meta) && <span title={shortToolMeta(item.meta)} className="block max-w-40 truncate font-mono text-[11px] text-ink-4">{shortToolMeta(item.meta)}</span>}
+        </span>
+        {hasBody && <Icon name={effectiveOpen ? 'chevronDown' : 'chevronRight'} size={14} className="shrink-0 text-ink-3" />}
       </button>
 
       {item.approval && item.state !== 'awaiting' && (
@@ -310,40 +266,11 @@ export function ToolCard({ item, foldDiff, forceExpanded = false }: { item: Time
         </div>
       )}
 
-      {effectiveOpen && hasBody && (
-        // Opaque recessed surface (not a translucent tint): on the frosted glass
-        // panels a see-through body lets the wallpaper bleed under the mono diff/
-        // output text and muddies it, so the tool body stays a solid card-2.
-        <div className="ml-[22px] mt-1.5 overflow-hidden rounded-lg border border-line bg-card-2">
-          {isDiff ? (
-            <>
-              <DiffView diff={item.diff!} />
-              <div className="flex justify-end border-t border-line bg-card px-2.5 py-1.5">
-                <CopyButton text={diffText(item.diff!)} label={tx("Copy diff")} />
-              </div>
-            </>
-          ) : (
-            <>
-              <pre className="scroll-thin max-h-[280px] overflow-auto px-3.5 py-2.5 font-mono text-[13px] leading-[1.5] text-ink-2">
-                {isCmd && <span className="select-none text-ink-4">$ </span>}
-                {isCmd && <span className="text-ink">{item.command}</span>}
-                {isCmd && '\n'}
-                {item.output}
-              </pre>
-              <div className="flex items-center gap-2 border-t border-line bg-card px-2.5 py-1.5">
-                <div className="min-w-0 flex-1">
-                  {item.artifacts ? <ArtifactLine artifacts={item.artifacts} /> : item.meta && item.meta !== shortToolMeta(item.meta) ? <div className="truncate font-mono text-[12px] text-ink-4">{item.meta}</div> : null}
-                </div>
-                <CopyButton text={`${isCmd && item.command ? `$ ${item.command}\n` : ''}${item.output ?? ''}`} />
-              </div>
-            </>
-          )}
-        </div>
-      )}
+      {effectiveOpen && hasBody && <div id={bodyId} className="mt-1.5"><ToolContent item={item} /></div>}
 
       {/* #42 — confirm-first chip for a chat-requested setting change. */}
       {settingProposal && (!settingProposal.state || settingProposal.state === 'pending') && threadId && (
-        <div className="ml-[22px] mt-1.5 flex items-center gap-2 rounded-xl border border-line-strong bg-card px-3 py-2.5 shadow-card">
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-xl border border-line-strong bg-card px-3 py-2.5 shadow-card">
           <Icon name="settings" size={14} className="text-ink-2" />
           <span className="flex-1 text-[13px] text-ink-2">{tx("Set ")}<span className="font-medium text-ink">{String(settingProposal.payload?.key)}</span> {tx("to ")}<span className="font-mono text-ink">{String(settingProposal.payload?.value)}</span>?</span>
           <button onClick={() => resolveAppAction(threadId, item.id, 'dismiss')} className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">{tx("Dismiss")}</button>
@@ -352,6 +279,39 @@ export function ToolCard({ item, foldDiff, forceExpanded = false }: { item: Time
       )}
       {settingProposal && (settingProposal.state === 'applied' || settingProposal.state === 'dismissed') && (
         <div className="ml-[22px] mt-1 text-[12px] text-ink-4">{settingProposal.state === 'applied' ? tx("Applied.") : tx("Dismissed.")}</div>
+      )}
+    </div>
+  )
+}
+
+function ToolContent({ item }: { item: TimelineItem }) {
+  const tx = useAuthoredText()
+  const [wrap, setWrap] = useState(true)
+  const [expanded, setExpanded] = useState(false)
+  const isDiff = !!item.diff?.length
+  const isCmd = item.tool === 'run_command'
+  const output = `${isCmd && item.command ? `$ ${item.command}\n` : ''}${item.output ?? ''}`
+  const lines = isDiff ? item.diff!.length : output.split('\n').length
+  const controlClass = 'rounded-md px-2 py-1 text-[12px] transition-colors hover:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent'
+  return (
+    <div className="min-w-0 overflow-hidden rounded-lg border border-line bg-card-2">
+      <div className="flex flex-wrap items-center gap-1 border-b border-line bg-card px-2 py-1.5">
+        <span className="mr-auto px-1 text-[12px] text-ink-3">{tx(isDiff ? 'Diff' : 'Output')} · {tx('Lines: {count}', { count: lines })}</span>
+        <button type="button" aria-pressed={wrap} onClick={() => setWrap(!wrap)} className={clsx(controlClass, wrap ? 'bg-accent-soft text-accent' : 'text-ink-3')}>{tx('Wrap lines')}</button>
+        {lines > 12 && <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)} className={clsx(controlClass, 'text-ink-3')}>{tx(expanded ? 'Collapse output' : 'Expand output')}</button>}
+        <CopyButton text={isDiff ? diffText(item.diff!) : output} label={tx(isDiff ? 'Copy diff' : 'Copy output')} />
+      </div>
+      <div className={clsx('scroll-thin overflow-auto', expanded ? 'max-h-[min(60vh,640px)]' : 'max-h-[280px]')}>
+        {isDiff ? <DiffView diff={item.diff!} wrap={wrap} label={tx('Tool diff')} /> : (
+          <pre tabIndex={0} aria-label={tx('Tool output')} className={clsx('min-w-0 px-3.5 py-2.5 font-mono text-[12px] leading-5 text-ink-2 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent', wrap ? 'whitespace-pre-wrap [overflow-wrap:anywhere]' : 'whitespace-pre')}>
+            {output}{!item.output && <span className="text-ink-3">{tx(item.state === 'running' || item.state === 'pending' ? 'Waiting for output…' : 'No text output.')}</span>}
+          </pre>
+        )}
+      </div>
+      {(item.artifacts || (item.meta && item.meta !== shortToolMeta(item.meta))) && (
+        <div className="border-t border-line px-3 py-1.5">
+          {item.artifacts ? <ArtifactLine artifacts={item.artifacts} /> : <div className="break-words font-mono text-[11px] text-ink-3">{item.meta}</div>}
+        </div>
       )}
     </div>
   )

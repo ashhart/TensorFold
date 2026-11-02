@@ -53,6 +53,7 @@ const { useAccessibleDialog } = load('src/components/navigation/useAccessibleDia
 const paletteImports: Record<string, any> = {
   react: paletteHooks.hooks, 'react/jsx-runtime': jsx, 'react-dom': { createPortal: (node: any) => node, flushSync: (action: () => void) => action() }, clsx,
   '../lib/store': { useStore }, '../lib/icons': { Icon: () => null }, '../lib/thread-row': { threadPlace: () => 'Synthetic project' },
+  '../lib/quick-ask-launch': { openAskTensorFold: () => commandCalls.push('ask') },
   '../lib/ipc': { api: { listImportableSessions: async () => [{ source: 'codex', sessionId: 'synthetic-session', title: 'Synthetic import', messageCount: 3 }], importExternalSession: async () => { importCalls++; return { id: 'imported-fixture' } } } },
   './navigation/useAccessibleDialog': { useAccessibleDialog },
   './search/search-events': { requestConversationSearch: (request: any) => { assert.deepEqual(request, { scope: 'all' }); assert.equal(paletteHooks.render(CommandPalette), null, 'The palette closes before message search is requested'); commandCalls.push('search-content') } },

@@ -1,20 +1,6 @@
-// Gemini CLI engine (VST-033): drive `gemini` headless as a thread engine. Wire facts from
-// google-gemini/gemini-cli's shipped docs (docs/cli/{headless,cli-reference}.md) — the
-// binary is not installed on this machine, so only DOCUMENTED behavior is used:
-// - Piped stdin triggers headless mode; `--output-format json` emits ONE JSON object:
-//     { "response": "<text>", "stats": {…}, "error": {…}? }
-//   (stream-json exists but its event FIELD shapes aren't documented with examples, so v1
-//   deliberately uses the fully-specified json mode; the delegated-CLI heartbeat keeps the
-//   UI alive during the silent wait.)
-// - `-m/--model` picks the model; `--approval-mode default|auto_edit|yolo|plan` gates tools.
-// - Gemini's CLI reference says `--prompt` is appended to stdin input, so the complete
-//   conversation is sent only through stdin and never copied into process argv.
-// - `--resume/-r` exists but its ARGUMENT semantics are undocumented — no resume cursor in
-//   v1; every turn sends the flattened conversation (like claude-cli before its resume
-//   upgrade). The documented API-key handoff is GEMINI_API_KEY.
-// - Exit codes: 0 ok, 1 general, 42 input error, 53 turn limit.
 
-import { spawn } from 'node:child_process'
+
+import { spawnCliProcess as spawn } from './cli-process'
 import { detachedProcessGroup, terminateChildProcess } from './child-process-lifecycle'
 import { resolveCliBinary } from './cli-path'
 import { cliSpawnEnv } from './cli-spawn-env'
@@ -41,8 +27,6 @@ function binary(provider: Provider): string {
   return resolveCliBinary(provider.cliPath, ['gemini'])
 }
 
-// TensorFold approval modes → gemini's documented guarded modes. Full Auto permits automatic
-// workspace edits but never selects yolo, which bypasses Gemini's safety prompts entirely.
 export function geminiApprovalMode(approvalMode?: ApprovalMode): 'default' | 'auto_edit' | 'yolo' | 'plan' {
   if (approvalMode === 'readonly') return 'plan'
   if (approvalMode === 'auto') return 'auto_edit'
@@ -55,15 +39,13 @@ export function buildGeminiArgs(params: GeminiCliParams): string[] {
   return args
 }
 
-/** Map TensorFold's raw Gemini key to the CLI's documented environment variable, never argv. */
+// Map TensorFold's raw Gemini key to the CLI's documented environment variable, never argv.
 export function geminiSpawnEnv(provider: Provider, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const apiKey = provider.apiKey?.trim()
   // Allowlisted basics + provider env only; the raw key rides the documented GEMINI_API_KEY.
   return cliSpawnEnv({ ...(provider.cliEnv ?? {}), ...(apiKey ? { GEMINI_API_KEY: apiKey } : {}) }, inherited)
 }
 
-// Parse the single documented output object. Defensive on the error shape (its inner field
-// names aren't documented): prefer .message, fall back to a bounded JSON slice.
 export function parseGeminiOutput(stdout: string): { response: string; errorMessage: string | null } {
   const text = stdout.trim()
   if (!text) return { response: '', errorMessage: null }
@@ -132,8 +114,8 @@ export async function* streamGeminiCli(params: GeminiCliParams): AsyncGenerator<
     }
   }, 5_000)
   proc.once('error', (e) => { spawnErrorMessage = e.message })
-  proc.stdin.on('error', () => { /* child exit/spawn failure is reported below */ })
-  try { proc.stdin.end(prompt) } catch { /* spawn failure is reported below */ }
+  proc.stdin.on('error', () => {  })
+  try { proc.stdin.end(prompt) } catch {  }
 
   const abort = () => {
     if (proc.exitCode == null) terminateChildProcess(proc, { processGroup: true })
@@ -157,8 +139,7 @@ export async function* streamGeminiCli(params: GeminiCliParams): AsyncGenerator<
   } finally {
     clearInterval(watchdog)
     params.signal?.removeEventListener('abort', abort)
-    // The initial activity chunk is yielded while Gemini is still alive. If
-    // the consumer stops there, reap the group instead of orphaning the run.
+
     if (!completed && proc.exitCode == null) terminateChildProcess(proc, { processGroup: true })
   }
   if (params.signal?.aborted) return

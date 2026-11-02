@@ -201,7 +201,7 @@
   "Copy user message": "ユーザーメッセージをコピー",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "Cortheon は有効です。回答前に、このチャットに基づく検索語を Web 検索サービスへ送り、公開ページを読む場合があります。「AI 設定」または「モデル」で無効にできます。",
-  "Cortheon is temporarily disabled in this beta.": "このベータでは Cortheon を一時的に無効にしています。",
+  "Cortheon is temporarily disabled.": "Cortheon は一時的に無効になっています。",
   "Cost cap $": "費用上限 $",
   "Could not check CLI auth.": "CLI 認証を確認できませんでした。",
   "Could not open a chat. Your current work is still here; try New chat again.": "チャットを開けませんでした。現在の作業は残っています。「新しいチャット」を再試行してください。",

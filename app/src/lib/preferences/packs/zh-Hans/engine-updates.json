@@ -1,0 +1,15 @@
+{
+  "Engine updates": "引擎更新",
+  "bundled": "内置",
+  "Checking installed runtime…": "正在检查已安装的运行时…",
+  "Check for engine updates": "检查引擎更新",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "无需重新安装应用即可更新本地引擎。切换前请先完成本地任务。模型和对话将保留。",
+  "No compatible engine updates are available for this device.": "此设备暂无兼容的引擎更新。",
+  "Use this runtime": "使用此运行时",
+  "Use bundled engine": "使用内置引擎",
+  "Checking signed releases…": "正在检查已签名的版本…",
+  "Switching runtime…": "正在切换运行时…",
+  "Ready locally": "本地已就绪",
+  "memory on this computer.": "此计算机的内存。",
+  "Prevent sleep while this option is enabled.": "启用此选项时阻止休眠。"
+}

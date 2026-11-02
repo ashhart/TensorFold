@@ -25,6 +25,8 @@ export interface DesktopModeDeps {
   navigate(target: DesktopTarget): void
   quit(): void
   reportError(message: string): void
+  quickAskEnabled?(): boolean
+  openQuickAsk?(): void
 }
 
 export function normalizeDesktopMode(value: unknown): DesktopMode {
@@ -52,7 +54,7 @@ export function createDesktopModeRuntime(deps: DesktopModeDeps) {
     const settings = deps.getSettings()
     return normalizeDesktopMode(settings?.desktopMode) === 'minimal' && settings?.desktopOnboardingComplete === true
   }
-  const canBackground = () => !deps.headless && completedMinimal() && trayAvailable() && !quitting
+  const canBackground = () => !deps.headless && (completedMinimal() || deps.quickAskEnabled?.() === true) && trayAvailable() && !quitting
 
   function report(error: unknown) {
     deps.reportError(error instanceof Error ? error.message : 'TensorFold could not complete this action.')
@@ -84,7 +86,7 @@ export function createDesktopModeRuntime(deps: DesktopModeDeps) {
     const win = deps.getWindow()
     if (!canBackground() || !win || win.isDestroyed()) return { hidden: false }
     win.hide()
-    deps.hideDock()
+    if (completedMinimal()) deps.hideDock()
     return { hidden: true }
   }
 
@@ -131,6 +133,7 @@ export function createDesktopModeRuntime(deps: DesktopModeDeps) {
     const signature = JSON.stringify([locale, stateLabel, status?.model, selected, modelOperation, runs > 0, learningBusy])
     if (signature === lastMenuSignature) return
     const items: MenuItemConstructorOptions[] = [
+      ...(deps.openQuickAsk ? [{ label: text('Ask TensorFold'), click: () => deps.openQuickAsk!() }, { type: 'separator' as const }] : []),
       { label: text(stateLabel), enabled: false },
       ...(status?.model ? [{ label: status.model, enabled: false }] : []),
       { type: 'separator' },
@@ -164,7 +167,7 @@ export function createDesktopModeRuntime(deps: DesktopModeDeps) {
 
   function applySettings(options: { startup?: boolean } = {}) {
     if (deps.headless || quitting) return
-    if (normalizeDesktopMode(deps.getSettings()?.desktopMode) === 'full') {
+    if (normalizeDesktopMode(deps.getSettings()?.desktopMode) === 'full' && !deps.quickAskEnabled?.()) {
       backgroundOnLaunch = false
       dropTray()
       deps.showDock()
@@ -188,7 +191,7 @@ export function createDesktopModeRuntime(deps: DesktopModeDeps) {
         return
       }
     }
-    backgroundOnLaunch = options.startup === true && canBackground()
+    backgroundOnLaunch = options.startup === true && completedMinimal() && canBackground()
     if (backgroundOnLaunch) deps.hideDock()
     else deps.showDock()
     updateMenu()
@@ -199,8 +202,12 @@ export function createDesktopModeRuntime(deps: DesktopModeDeps) {
     void refreshStatus()
   }
 
-  function attachWindow(win: DesktopWindow) {
-    win.on('close', (event) => {
+  function closeWindow(win: DesktopWindow): boolean {
+    return deps.getWindow() === win && hide().hidden
+  }
+
+  function attachWindow(win: DesktopWindow, options: { closeManaged?: boolean } = {}) {
+    if (!options.closeManaged) win.on('close', (event) => {
       if (deps.getWindow() !== win || !canBackground()) return
       event.preventDefault()
       hide()
@@ -218,5 +225,5 @@ export function createDesktopModeRuntime(deps: DesktopModeDeps) {
     dropTray()
   }
 
-  return { applySettings, attachWindow, hide, show, dispose, refreshStatus, canBackground, shouldShowWindow: () => !backgroundOnLaunch }
+  return { applySettings, attachWindow, hide, show, dispose, refreshStatus, canBackground, closeWindow, shouldShowWindow: () => !backgroundOnLaunch }
 }

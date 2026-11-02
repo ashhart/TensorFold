@@ -92,6 +92,10 @@ if CommandLine.arguments.contains("--attachment-text-capability") {
 if CommandLine.arguments.contains("--extract-attachment-text") {
     exit(runAttachmentTextMode())
 }
+if CommandLine.arguments.contains("--ask-window-picker") {
+    guard let ownBundle = argumentValue("--own-bundle-id"), isBundleIdentifier(ownBundle) else { exit(2) }
+    runAskWindowPicker(ownBundle)
+}
 
 if CommandLine.arguments.contains("--self-test") {
     exit(runSelfTest())

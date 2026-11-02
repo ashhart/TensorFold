@@ -5,7 +5,9 @@ import { normalizeServerConfig, verifyConfiguredManifest, mcpSignatureRequired, 
 export { normalizeMcpResource, normalizeMcpPrompt } from './mcp-catalog'
 export { normalizeServerConfig, createMcpServer, verifyConfiguredManifest, mcpSpawnSpec, canonicalMcpManifest, splitShellArgs, mcpSpawnFingerprint } from './mcp-process'
 export type { McpSpawnSpec, McpSpawnSpecOptions } from './mcp-process'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import { prepareMcpIsolation, disposeMcpIsolation, waitForMcpSandbox } from './mcp-isolation'
+import type { McpClientState as ClientState, JsonRpcId } from './mcp-client-state'
 import { detachedProcessGroup, terminateChildProcess } from './child-process-lifecycle'
 import { redactSecretValues } from './secret-detection'
 import { SECRET_MASK } from './security'
@@ -22,35 +24,15 @@ import type {
 const MCP_PROTOCOL_VERSION = '2025-06-18'
 const REQUEST_TIMEOUT_MS = 20_000
 const MAX_LOG_LINES = 80
-// Cap *_list pagination so a server that returns a non-advancing or never-terminating
-// nextCursor can't wedge connect() in an unbounded request loop.
+// Bound pagination so a server cannot keep connection setup running forever.
 const MAX_LIST_PAGES = 1000
 // Bound each complete frame and any unfinished stdout frame before JSON parsing.
 const MAX_STDOUT_BUFFER_BYTES = 8 * 1024 * 1024
 
-type JsonRpcId = string | number
-
-interface PendingRequest {
-  resolve: (value: any) => void
-  reject: (error: Error) => void
-  timer: ReturnType<typeof setTimeout>
-}
-
-interface ClientState {
-  config: McpServerConfig
-  runtime: McpServerRuntime
-  proc: ChildProcessWithoutNullStreams | null
-  buffer: string
-  decoder: StringDecoder
-  pending: Map<JsonRpcId, PendingRequest>
-  nextId: number
-  generation: number
-  connectPromise: Promise<McpServerRuntime> | null
-}
-
 export class McpHost {
   private configs: McpServerConfig[] = []
   private clients = new Map<string, ClientState>()
+  private cleanups = new Set<Promise<void>>()
 
   setConfigs(configs: McpServerConfig[]) {
     this.configs = configs.map(normalizeServerConfig)
@@ -96,7 +78,9 @@ export class McpHost {
     if (!config.command.trim()) throw new Error(`${config.name} needs a command.`)
     const verified = await verifyConfiguredManifest(config)
     const current = this.assertConfigCurrent(id, fingerprint)
-    if (mcpSignatureRequired(current) && !verified.ok) throw new Error(verified.error || `${current.name} requires a signed MCP manifest.`)
+    if ((mcpSignatureRequired(current) || current.manifestPath || current.manifestSignature || current.manifestPublicKey) && !verified.ok) {
+      throw new Error(verified.error || `${current.name} requires a valid signed MCP manifest.`)
+    }
     if (verified.ok) {
       current.manifestVerifiedAt = Date.now()
       current.manifestDigest = verified.digest
@@ -108,6 +92,7 @@ export class McpHost {
       if (state.connectPromise === pending) state.connectPromise = null
     })
     state.connectPromise = pending
+    this.cleanup(pending.then(() => {}))
     return pending
   }
 
@@ -139,14 +124,36 @@ export class McpHost {
   async callTool(callName: string, args: Record<string, any>): Promise<McpToolCallResult> {
     const tool = this.toolDefinitions().find((candidate) => candidate.callName === callName)
     if (!tool) throw new Error(`MCP tool not found: ${callName}`)
-    const state = await this.ensureConnected(tool.serverId)
-    const result = await this.request(state, 'tools/call', { name: tool.name, arguments: args ?? {} }, 120_000)
-    return formatToolResult(tool, result)
+    let state = await this.ensureConnected(tool.serverId)
+    if (state.isolation && await state.isolation.hostChanged()) {
+      await this.disconnect(tool.serverId)
+      state = await this.ensureConnected(tool.serverId)
+      if (!state.runtime.tools.some(candidate => candidate.name === tool.name)) throw new Error('MCP tool changed after workspace refresh.')
+    }
+    const generation = state.generation, fingerprint = mcpSpawnFingerprint(state.config)
+    const assertCurrent = () => {
+      if (state.generation !== generation || this.clients.get(state.config.id) !== state) throw new Error('MCP configuration changed before publication.')
+      this.assertConfigCurrent(state.config.id, fingerprint)
+    }
+    const call = () => this.request(state, 'tools/call', { name: tool.name, arguments: args ?? {} }, 120_000)
+    try {
+      const result = state.isolation ? await state.isolation.call(call, assertCurrent) : await call()
+      return formatToolResult(tool, result)
+    } catch (error: any) {
+      if (state.isolation) { this.stopState(state); state.runtime = { ...state.runtime, status: 'error', lastError: error.message, pid: null } }
+      throw error
+    }
   }
 
   async shutdown() {
     for (const state of this.clients.values()) this.stopState(state)
     this.clients.clear()
+    await Promise.all([...this.cleanups])
+  }
+
+  private cleanup(pending: Promise<void>): void {
+    const tracked = pending.catch(() => {}).finally(() => this.cleanups.delete(tracked))
+    this.cleanups.add(tracked)
   }
 
   private async ensureConnected(id: string): Promise<ClientState> {
@@ -238,7 +245,10 @@ export class McpHost {
       const provenance = await commandProvenance(config).catch(() => null)
       this.assertLaunchCurrent(state, fingerprint, generation)
       state.runtime = { ...state.runtime, provenance }
-      const spawnSpec = mcpSpawnSpec(config)
+      const isolation = await prepareMcpIsolation(config)
+      try { this.assertLaunchCurrent(state, fingerprint, generation) } catch (error) { await isolation?.dispose(); throw error }
+      state.isolation = isolation
+      const spawnSpec = mcpSpawnSpec(config, { isolatedWorkspace: isolation?.workspace, windowsLaunch: isolation?.windowsLaunch, readViews: isolation?.readViews })
       const proc = spawn(spawnSpec.command, spawnSpec.args, {
         cwd: spawnSpec.cwd,
         detached: detachedProcessGroup(),
@@ -255,6 +265,7 @@ export class McpHost {
         state.runtime = { ...state.runtime, status: 'error', pid: null, lastError: error.message }
       })
       proc.on('close', (code, signal) => {
+        if (state.isolation === isolation) { state.isolation = undefined; this.cleanup(disposeMcpIsolation(isolation)) }
         this.rejectAll(state, new Error(`${config.name} exited${code == null ? '' : ` with code ${code}`}${signal ? ` (${signal})` : ''}.`))
         if (state.runtime.status !== 'error') {
           state.runtime = {
@@ -270,6 +281,8 @@ export class McpHost {
         state.proc = null
       })
 
+      await waitForMcpSandbox(proc, spawnSpec.readyFile)
+      this.assertLaunchCurrent(state, fingerprint, generation)
       const initialized = await this.request(state, 'initialize', {
         protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
@@ -472,8 +485,7 @@ export class McpHost {
   }
 
   private appendLog(state: ClientState, text: string) {
-    // MCP subprocess stderr can contain connection strings, tokens, and request payloads.
-    // Redact before storing so the snapshot (exposed via mcp:snapshot) never leaks secrets.
+    // Redact subprocess logs before they reach snapshots.
     const redacted = redactSecretValues(text, SECRET_MASK).text
     const lines = redacted.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
     if (!lines.length) return
@@ -495,11 +507,21 @@ export class McpHost {
     state.generation++
     this.rejectAll(state, new Error(`${state.config.name} stopped.`))
     state.connectPromise = null
-    if (state.proc) {
-      state.proc.removeAllListeners()
-      state.proc.stdout.removeAllListeners()
-      state.proc.stderr.removeAllListeners()
-      terminateChildProcess(state.proc, { processGroup: true })
+    const proc = state.proc, isolation = state.isolation
+    state.isolation = undefined
+    isolation?.cancel()
+    if (proc) {
+      proc.removeAllListeners()
+      proc.on('error', () => {})
+      proc.stdout.removeAllListeners('data')
+      proc.stderr.removeAllListeners('data')
+      this.cleanup(disposeMcpIsolation(isolation, proc))
+      if (isolation?.windowsLaunch) {
+        const timer = setTimeout(() => terminateChildProcess(proc, { processGroup: true }), 5000)
+        timer.unref?.(); proc.once('close', () => clearTimeout(timer))
+      } else terminateChildProcess(proc, { processGroup: true })
+    } else if (isolation) {
+      this.cleanup(isolation.dispose())
     }
     state.proc = null
     state.buffer = ''
@@ -513,9 +535,7 @@ function serverSupports(state: ClientState, key: 'tools' | 'resources' | 'prompt
   return isRecord(capabilities[key])
 }
 
-// Guards a paginated *_list loop: throws if a server exceeds the page cap or repeats a cursor it
-// already returned (a non-advancing cursor would otherwise loop forever). Call before each request
-// with the cursor that is ABOUT to be sent (undefined on the first page). `page` is 1-based.
+// Reject repeated cursors and page-budget exhaustion before issuing the next request.
 export function assertListPageBudget(
   serverName: string,
   method: string,

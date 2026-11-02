@@ -39,6 +39,7 @@ import { FirstAnswerStep } from './onboarding/first-answer/FirstAnswerStep'
 import { MinimalSetupGuide } from './onboarding/first-answer/MinimalSetupGuide'
 import { firstAnswerNextAction, readFirstAnswerStarter, saveFirstAnswerStarter, type FirstAnswerStarterId, type FirstAnswerReadiness } from './onboarding/first-answer/model'
 import { openFirstAnswerDraft } from './onboarding/first-answer/transition'
+import { openModelChat } from '../lib/model-chat'
 import { conversationDraftsFor } from '../lib/conversation-drafts'
 import { desktopDraftPort } from '../lib/desktop-drafts'
 
@@ -101,21 +102,21 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const currentStepIndex = onboardingStepIndex(tourStep)
   const selectedModel = desktopMode === 'minimal' && activeProvider?.id !== ENGINE_PROVIDER_ID ? engine?.status.model ?? null : activeModel
   const selectedModelLabel = selectedModel && (desktopMode === 'minimal' || activeProvider?.id === ENGINE_PROVIDER_ID)
-    ? engine?.installed.find((model) => model.repo === selectedModel)?.title || selectedModel
+    ? engine?.installed.find((model) => model.repo === selectedModel)?.title || engine?.suggestions.find((model) => model.repo === selectedModel)?.title || selectedModel
     : selectedModel
   const cachedModel = engine?.installed.find((model) => model.repo === selectedModel)
   const firstAnswerReadiness: FirstAnswerReadiness = {
-    providerKind: activeProvider?.kind ?? null, builtIn: activeProvider?.id === ENGINE_PROVIDER_ID || !activeProvider,
+    providerKind: activeProvider?.kind ?? null, builtIn: activeProvider?.id === ENGINE_PROVIDER_ID || !activeProvider, available: engine?.status.available,
     selected: !!selectedModel, cached: !!cachedModel || activeProvider?.id === ENGINE_PROVIDER_ID && engine?.status.model === selectedModel && ['ready', 'starting'].includes(engine.status.state), fitsMemory: cachedModel?.fitsMemory ?? null, configured: !!readiness?.ready,
-    loading: activeProvider?.id === ENGINE_PROVIDER_ID && engine?.status.model === selectedModel && engine.status.state === 'starting',
-    loaded: activeProvider?.id === ENGINE_PROVIDER_ID && engine?.status.model === selectedModel && engine.status.state === 'ready',
+    loading: activeProvider?.id === ENGINE_PROVIDER_ID && !!engine?.status.available && engine.status.model === selectedModel && engine.status.state === 'starting',
+    loaded: activeProvider?.id === ENGINE_PROVIDER_ID && !!engine?.status.available && engine.status.model === selectedModel && engine.status.state === 'ready',
   }
   const firstAnswerAction = firstAnswerNextAction(firstAnswerReadiness)
   const openStarterDraft = async () => {
     const result = await openFirstAnswerDraft({ starter, locale: settings?.uiPreferences?.locale, drafts: conversationDraftsFor(desktopDraftPort), persistent: !!desktopDraftPort,
       threadIds: () => useStore.getState().threads.map((thread) => thread.id),
       currentThread: () => { const state = useStore.getState(); return state.view.name === 'thread' ? state.threads.find((thread) => thread.id === (state.view as { id: string }).id) ?? null : null },
-      newChat: () => useStore.getState().newChat(),
+      newChat: () => activeProvider && activeModel ? openModelChat({ providerId: activeProvider.id, model: activeModel, providerAccountId: settings?.activeProviderAccountId }) : useStore.getState().newChat(),
     })
     if (result.preservedExistingDraft) useStore.getState().setNotice({ kind: 'info', message: t("setup.draftKept") })
   }
@@ -331,7 +332,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
           {tourStep === 'connect' && <>
             {engine?.status.hardware && <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-surface px-3 py-2 text-[12px] text-ink-2"><Icon name="monitor" size={14} /><span>{engine.status.hardware.chip || t("setup.thisMac")}</span><span>{t("setup.memory", { size: formatBytes(engine.status.totalMemoryBytes) })}</span><span>{t("setup.modelChecks")}</span></div>}
-            {desktopMode === 'full' && <p role="status" data-testid="onboarding-model-status" className="mb-3 break-words text-[12px] text-ink-2">{statusText}</p>}
+            {desktopMode === 'full' && !connectedLabel && <p role="status" data-testid="onboarding-model-status" className="mb-3 break-words text-[12px] text-ink-2">{statusText}</p>}
             <fieldset disabled={busy} className="min-w-0"><ConnectStep providerStep={providerStep} setProviderStep={setProviderStep} mode={mode} preset={preset} apiKey={apiKey} localPath={localPath} busy={busy} error={error} foundModels={foundModels} cliAuth={cliAuth} connectedLabel={connectedLabel} desktopMode={desktopMode} onPickCloud={pickCloud} onPickLocal={pickLocal} onDetect={detect} onConnect={() => void connect()} onApiKeyChange={setApiKey} onLocalPathChange={setLocalPath} onOpenModels={() => openSettings('models')} onOpenEngineModels={openModels} onUseEngineModel={(repo) => void chooseEngineModel(repo)} onContinue={goNext} /></fieldset>
             <div className="mt-4 rounded-xl border border-line px-4 py-3 text-[13px] leading-relaxed text-ink-2"><span className="font-medium text-ink">{t("setup.downloaded")}</span>{' '}{t("setup.scanFolders")}{' '}<button type="button" disabled={busy} className="text-accent underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40" onClick={() => openSettings('library')}>{t("setup.modelFolders")}</button>. {t("setup.originalFiles")}</div>
           </>}
@@ -503,13 +504,13 @@ function ConnectStep({
 
   return (
     <div className="grid gap-4">
+      <EngineChoice minimal={desktopMode === 'minimal'} onOpenModels={onOpenEngineModels} onUse={onUseEngineModel} />
       {connectedLabel && (
         <div className="rounded-xl border border-positive/25 bg-positive/10 px-4 py-3 text-[13px] text-positive">
           <div className="flex items-center gap-2 font-medium"><Icon name="check" size={15} />{t("setup.connected")}</div>
           <div className="mt-1 text-ink-3">{connectedLabel}</div>
         </div>
       )}
-      <EngineChoice minimal={desktopMode === 'minimal'} onOpenModels={onOpenEngineModels} onUse={onUseEngineModel} />
       {desktopMode === 'full' && <details className="rounded-xl border border-line p-4"><summary className="cursor-pointer text-[13px] font-medium text-ink focus-visible:outline-2 focus-visible:outline-accent">{t("setup.otherProvider")}</summary><div className="mt-3 grid gap-3 sm:grid-cols-2">
         <ChoiceCard
           testId="onboarding-provider-cloud"
@@ -528,9 +529,6 @@ function ConnectStep({
       </div></details>}
       <div className="flex flex-wrap items-center gap-3">
         {desktopMode === 'full' && <Button variant="default" icon="settings" onClick={onOpenModels}>{t("setup.providerSettings")}</Button>}
-        <button type="button" onClick={onContinue} className="text-[13px] text-ink-3 transition-colors hover:text-ink">
-          {connectedLabel ? t("common.continue") : t("setup.withoutModel")}
-        </button>
       </div>
     </div>
   )

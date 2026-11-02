@@ -92,17 +92,20 @@ const MAX_REDIRECTS = 5
 export async function fetchText(
   url: URL,
   timeoutMs: number,
-  deps: { lookup?: PinnedHostResolver; fetchImpl?: typeof fetch } = {},
+  deps: { lookup?: PinnedHostResolver; fetchImpl?: typeof fetch; signal?: AbortSignal } = {},
 ): Promise<{ status: number; statusText: string; contentType: string; text: string }> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const signal = deps.signal ? AbortSignal.any([deps.signal, controller.signal]) : controller.signal
   let current = url
   try {
     for (let hop = 0; ; hop++) {
+      signal.throwIfAborted()
       // Resolve immediately before this hop and constrain the socket to that exact answer.
       // DNS failures are fatal; an ordinary fetch fallback would reopen the rebinding race.
       const target = await resolveFetchableUrl(current.toString(), deps.lookup)
-      const res = await pinnedFetch(target, { headers: BROWSER_HEADERS, redirect: 'manual', signal: controller.signal }, deps.fetchImpl ?? fetch)
+      signal.throwIfAborted()
+      const res = await pinnedFetch(target, { headers: BROWSER_HEADERS, redirect: 'manual', signal }, deps.fetchImpl ?? fetch)
       // Undici returns an opaque-redirect (type: 'opaqueredirect', status 0) when
       // redirect:'manual' meets a 3xx. Read the Location header directly instead.
       const location = res.headers.get('location')

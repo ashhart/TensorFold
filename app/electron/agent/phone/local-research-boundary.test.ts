@@ -32,9 +32,9 @@ const thread: any = { id: 'local-phone-fixture', kind: 'chat', providerId: provi
 const store = { threads: [thread], settings: { providers: [provider], activeProviderId: provider.id } }
 let research = true
 const collaborators = { store, HEADLESS_MODE: false, runtimeProvider: (value: unknown) => value, isExternalProvider, engineService: () => ({ hasExternalResearchEnabled: () => research }) }
-const authorizeThread = vm.runInNewContext(callback('electron/main-app.ts', 'authorizeThread', 'initializePhoneHost'), collaborators)
+const authorizeThread = vm.runInNewContext(callback('electron/main/composition/device-services.ts', 'authorizeThread', 'initializePhoneHost'), collaborators)
 const privacyGuard = vm.runInNewContext(callback('electron/main/host/tool-context-runtime.ts', 'phonePrivacyGuard'), { ...collaborators, run: { thread, provider } })
-const enableGuard = vm.runInNewContext(callback('electron/main-app.ts', 'assertCanEnableCortheon', 'registerEngineIpc'), { store, aborters: new Map([[thread.id, new AbortController()]]), isRestrictedBot })
+const enableGuard = vm.runInNewContext(callback('electron/main/composition/device-services.ts', 'assertCanEnableCortheon', 'registerEngineIpc'), { store, aborters: new Map([[thread.id, new AbortController()]]), isRestrictedBot })
 assert.equal(isExternalProvider(provider), false)
 assert.throws(() => authorizeThread(thread.id), /Cortheon off/, 'a local API alias cannot bypass the known engine research setting')
 assert.match(privacyGuard() ?? '', /Cortheon off/)

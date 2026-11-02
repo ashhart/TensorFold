@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import ts from 'typescript'
 const globals = globalThis as any
-globals.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
-globals.matchMedia = () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} })
-globals.addEventListener = () => {}; globals.removeEventListener = () => {}; globals.window = globals
+globals.localStorage = { getItem: () => null, setItem: () => { }, removeItem: () => { } }
+globals.matchMedia = () => ({ matches: false, addEventListener: () => { }, removeEventListener: () => { } })
+globals.addEventListener = () => { }; globals.removeEventListener = () => { }; globals.window = globals
 await (await import('../../browser-demo-bootstrap')).prepareBrowserDemo()
 const { api } = await import('../../ipc')
 const { useStore } = await import('../index')
@@ -47,6 +47,7 @@ try {
   const state = useStore.getState()
   useStore.setState({ settings: { ...state.settings!, defaultExecutionTarget: 'orchestrator', defaultOrchestratorId: 'synthetic-remote', remoteOrchestrators: [{ id: 'synthetic-remote', enabled: true, name: 'Synthetic remote' } as any] } })
   await assert.rejects(() => useStore.getState().launch({ text: 'Private draft retained by caller', cwd: '/synthetic', providerId: provider.id, model: 'synthetic', approvalMode: 'suggest', persistActiveModel: false, incognito: true }), /desktop app|This Mac/)
+  await assert.rejects(() => useStore.getState().launch({ text: 'Synthetic private Gmail body', sourceThreadKey: 'gmail:account-a:1:dd11', cwd: '/synthetic', providerId: provider.id, model: 'synthetic', approvalMode: 'suggest', persistActiveModel: false }), /Gmail Inbox tasks run on this computer/)
   assert.equal(remoteCreates, 0, 'remote selection is refused before transmitting the private creation')
   assert.equal(creates.length, 2)
 
@@ -63,7 +64,7 @@ try {
   assert.deepEqual(nativeCalls[0], { channel: 'threads:create', payload: { cwd: '/synthetic', kind: 'task', projectId: null, commandId: 'synthetic-command', incognito: true } })
 
   const browserRequests: any[] = []
-  const remote = createRemoteBrowserApi({ token: 'synthetic-device', fetchImpl: (async (url, init) => { browserRequests.push({ url, body: JSON.parse(String(init?.body ?? '{}')) }); return Response.json({ id: 'ordinary-remote' }) }) as typeof fetch, openEventStream: () => ({ close() {}, onEvent() {} }) })
+  const remote = createRemoteBrowserApi({ token: 'synthetic-device', fetchImpl: (async (url, init) => { browserRequests.push({ url, body: JSON.parse(String(init?.body ?? '{}')) }); return Response.json({ id: 'ordinary-remote' }) }) as typeof fetch, openEventStream: () => ({ close() { }, onEvent() { } }) })
   await assert.rejects(() => remote.createThread('/synthetic', 'task', null, 'synthetic-private-remote', true), /local desktop app/)
   assert.equal(browserRequests.length, 0, 'paired browser cannot serialize a private creation into the ordinary host API')
   await remote.createThread('/synthetic', 'task', null, 'synthetic-normal-remote')

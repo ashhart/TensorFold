@@ -72,8 +72,21 @@ export function Menu({
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties | null>(null)
   const ref = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const focusLast = useRef(false)
+  const focusable = () => Array.from(menuRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]') ?? []).filter(element => element.getClientRects().length > 0)
+  const close = () => {
+    if (menuRef.current?.contains(document.activeElement)) ref.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    setOpen(false)
+  }
   useEffect(() => {
     if (!open) return
+    const focusFrame = window.requestAnimationFrame(() => {
+      if (ref.current?.contains(document.activeElement)) {
+        const choices = focusable()
+        ;(focusLast.current ? choices.at(-1) : choices[0])?.focus()
+      }
+      focusLast.current = false
+    })
     const onDown = (e: MouseEvent) => {
       const target = e.target as Node
       // The menu is portaled out of `ref`, so check both the trigger and the menu itself.
@@ -88,7 +101,7 @@ export function Menu({
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onEsc)
-    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onEsc) }
+    return () => { window.cancelAnimationFrame(focusFrame); document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onEsc) }
   }, [open])
   // Position the menu in a portal with fixed (viewport) coordinates derived from the
   // trigger rect, so it is never clipped or scroll-trapped by an ancestor's overflow
@@ -132,14 +145,33 @@ export function Menu({
   }, [open, placement, width, align])
   return (
     <div ref={ref} className="relative no-drag">
-      <div onClick={() => setOpen((o) => !o)}>{trigger(open)}</div>
+      <div onClick={() => setOpen((o) => !o)} onKeyDown={event => {
+        if (!open && !event.defaultPrevented && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+          event.preventDefault()
+          focusLast.current = event.key === 'ArrowUp'
+          setOpen(true)
+        }
+      }}>{trigger(open)}</div>
       {open && createPortal(
         <div
           ref={menuRef}
+          onKeyDown={event => {
+            if (event.defaultPrevented) return
+            const choices = focusable(), index = choices.indexOf(document.activeElement as HTMLElement)
+            if (event.key === 'Tab' && (event.shiftKey ? index === 0 : index === choices.length - 1)) {
+              if (event.shiftKey) event.preventDefault()
+              close()
+              return
+            }
+            if (!(event.target instanceof HTMLButtonElement) || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length
+            choices[next]?.focus()
+          }}
           className="overflow-y-auto overflow-x-hidden rounded-xl border border-line bg-card p-1 shadow-pop fade-in scroll-thin"
           style={{ ...(menuStyle ?? { position: 'fixed', width, left: -9999, top: 0 }), zIndex: 90, boxShadow: 'var(--shadow-pop)' }}
         >
-          {children(() => setOpen(false))}
+          {children(close)}
         </div>,
         document.body,
       )}

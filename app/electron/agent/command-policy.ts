@@ -37,7 +37,7 @@ const BLOCKED_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
 const APPROVAL_COMMAND_PATTERNS: Array<{ re: RegExp; reason: string }> = [
   { re: /(?:^|[\s;&|])(?:curl|wget|http|https)\b/i, reason: 'network fetch commands require explicit approval' },
   { re: /(?:^|[\s;&|])(?:ssh|scp|sftp|rsync|nc|ncat|netcat|socat)\b/i, reason: 'network shell/file-transfer commands require explicit approval' },
-  { re: /(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:install|add|dlx|exec|create)\b/i, reason: 'package install/execution commands require explicit approval' },
+  { re: /(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|ci|dlx|exec|create)\b/i, reason: 'package install/execution commands require explicit approval' },
   { re: /(?:^|[\s;&|])(?:pip|pip3|python3?\s+-m\s+pip)\s+install\b/i, reason: 'package install commands require explicit approval' },
   // Mirror approval-policy's isSecretReadCommand: a credential/secret read must require approval, so
   // Full Auto can't silently read & leak in-repo secrets. The binary list mirrors the BLOCKED
@@ -278,7 +278,7 @@ export function commandNetworkReason(command: string): string | null {
   const patterns: Array<{ re: RegExp; reason: string }> = [
     { re: /(?:^|[\s;&|])(?:curl|wget|http|https)\b/i, reason: 'network fetch command' },
     { re: /(?:^|[\s;&|])(?:ssh|scp|sftp|rsync|nc|ncat|netcat|socat)\b/i, reason: 'network shell or file-transfer command' },
-    { re: /(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:install|add|dlx|exec|create)\b/i, reason: 'network package command' },
+    { re: /(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:i|install|add|ci|dlx|exec|create)\b/i, reason: 'network package command' },
     { re: /(?:^|[\s;&|])(?:pip|pip3|python3?\s+-m\s+pip)\s+install\b/i, reason: 'network package command' },
     { re: /\/dev\/(?:tcp|udp)\//i, reason: 'shell network redirection' },
     { re: /(?:^|[\s;&|])(?:python3?|node|ruby|perl|deno|bun|php)\b(?=[\s\S]*\s-{1,2}(?:c|e|m|M|r|eval|require|exec))[\s\S]*(?:socket|urllib|requests|http\.client|net\/http|io::socket|net::|\bnet\b|\bdgram\b|\bdns\b|https?:\/\/|fetch\s*\(|http\.server|\bcurl\b|\bwget\b|os\.system|subprocess|popen|\bsystem\s*\(|require\s*\(\s*['"](?:net|http|https|dgram|dns))/i, reason: 'inline interpreter network access' },

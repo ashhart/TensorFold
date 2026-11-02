@@ -10,6 +10,8 @@ async function main() {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'tensorfold-native-node-adapter-'))), cacheDir = path.join(root, 'cache')
   const calls: string[][] = [], launches: string[][] = []
   let type = 'qwen3_5', memory = { total: 16 * 1024 ** 3, free: 12 * 1024 ** 3 }, stopped = 0, declaredDistributed: any = undefined
+  const blockSize = 4096, stagingMinimumBlocks = 2 * 1024 ** 3 / blockSize
+  let availableBlocks = stagingMinimumBlocks, statfsError: Error | null = null
   const config = { schema: 1 as const, dataDir: root, host: '127.0.0.1', port: 0, enginePath: '/synthetic/approved/tensorfold-native', cacheDir }
   const put = async (revision: string, modelType: string) => {
     const directory = path.join(cacheDir, 'models--Example--Small', 'snapshots', revision); await fs.mkdir(directory, { recursive: true })
@@ -17,6 +19,11 @@ async function main() {
     await fs.writeFile(path.join(directory, 'tokenizer.json'), '{}'); await fs.writeFile(path.join(directory, 'model.safetensors'), Buffer.alloc(128))
   }
   const adapter = new NodeEngineAdapter({ config, passiveSysfsRoot: false, platform: process.platform as 'darwin' | 'linux', arch: process.arch as 'arm64' | 'x64', memory: () => memory,
+    statfs: async directory => {
+      assert.equal(directory, cacheDir)
+      if (statfsError) throw statfsError
+      return { bsize: blockSize, bavail: availableBlocks }
+    },
     runCli: async (args, signal) => {
       if (signal.aborted) throw new Error('Synthetic cancellation'); calls.push(args)
       if (args[0] === 'capabilities') return { code: 0, stdout: JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.12', backends: [process.platform === 'darwin' ? 'metal' : 'cuda'], families: { qwen3_5: ['mlx-q4g64'], unsupported_type: ['mlx-q4g64'], glm_moe_dsa: ['exlr8'] }, serve: { flags: Object.fromEntries(['--speed-up', '--host', '--port', '--name', '--api-key-file', '--context', '--max-tokens', '--temperature', '--parallel', '--prompt-cache-gib', '--no-thinking', '--no-update-check', '--dashboard'].map(flag => [flag, {}])) }, ...(declaredDistributed ? { distributed: declaredDistributed } : {}) }), stderr: '' }
@@ -37,6 +44,15 @@ async function main() {
     assert.equal(inspection.available, true); assert.deepEqual(inspection.profiles[0].modelTypes, ['qwen3_5']); assert.deepEqual(inspection.profiles.map(profile => profile.mode), ['single'])
     assert.equal(inspection.links[0].verified, false)
     assert.equal((await adapter.admission(input, new AbortController().signal)).cached, false)
+    const unexpectedStagingProgress = async () => { assert.fail('Refused staging cannot announce a download') }
+    availableBlocks = stagingMinimumBlocks - 1
+    await assert.rejects(adapter.ensureModel(model, new AbortController().signal, unexpectedStagingProgress), /at least two GiB free/)
+    assert.equal(calls.filter(args => args[0] === 'pull').length, 0)
+    availableBlocks = stagingMinimumBlocks
+    statfsError = new Error('Synthetic filesystem capacity failure')
+    await assert.rejects(adapter.ensureModel(model, new AbortController().signal, unexpectedStagingProgress), error => error === statfsError)
+    assert.equal(calls.filter(args => args[0] === 'pull').length, 0)
+    statfsError = null
     await adapter.ensureModel(model, new AbortController().signal, async () => {})
     assert.deepEqual(calls.find(args => args[0] === 'pull'), ['pull', `${model.repo}@${model.revision}`])
     assert.equal((await adapter.admission(input, new AbortController().signal)).allowed, true)

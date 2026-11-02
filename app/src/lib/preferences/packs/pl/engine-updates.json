@@ -1,0 +1,15 @@
+{
+  "Engine updates": "Aktualizacje silnika",
+  "bundled": "wbudowany",
+  "Checking installed runtime…": "Sprawdzanie zainstalowanego środowiska…",
+  "Check for engine updates": "Sprawdź aktualizacje silnika",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "Aktualizuj lokalny silnik bez ponownej instalacji aplikacji. Zakończ lokalną pracę przed przełączeniem. Modele i rozmowy zostaną zachowane.",
+  "No compatible engine updates are available for this device.": "Brak aktualizacji silnika zgodnych z tym urządzeniem.",
+  "Use this runtime": "Użyj tego środowiska",
+  "Use bundled engine": "Użyj wbudowanego silnika",
+  "Checking signed releases…": "Sprawdzanie podpisanych wydań…",
+  "Switching runtime…": "Przełączanie środowiska…",
+  "Ready locally": "Gotowe lokalnie",
+  "memory on this computer.": "pamięci na tym komputerze.",
+  "Prevent sleep while this option is enabled.": "Zapobiegaj uśpieniu, gdy ta opcja jest włączona."
+}

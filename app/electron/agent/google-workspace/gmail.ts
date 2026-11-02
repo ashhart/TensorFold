@@ -25,14 +25,15 @@ export function parseGoogleMessage(data: any): GoogleWorkspaceMessage {
     responseArray(part.parts, 100).forEach(child => walk(child, depth + 1))
   }
   walk(data?.payload, 0)
-  return { id: responseText(data?.id, 128), threadId: responseText(data?.threadId, 128), subject: header(data?.payload, 'subject'), from: header(data?.payload, 'from'), to: header(data?.payload, 'to'), date: header(data?.payload, 'date'), snippet: responseText(data?.snippet, 2048), ...(texts.length ? { text: texts.join('\n\n').slice(0, 256_000) } : {}), ...(htmlOmitted ? { htmlOmitted: true } : {}), attachments, untrustedContent: true }
+  return { id: responseText(data?.id, 128), threadId: responseText(data?.threadId, 128), subject: header(data?.payload, 'subject'), from: header(data?.payload, 'from'), to: header(data?.payload, 'to'), date: header(data?.payload, 'date'), snippet: responseText(data?.snippet, 2048), ...(texts.length ? { text: texts.join('\n\n').slice(0, 256_000) } : {}), ...(htmlOmitted ? { htmlOmitted: true } : {}), attachments, untrustedContent: true, unread: responseArray(data?.labelIds, 100).includes('UNREAD'), messageId: header(data?.payload, 'message-id'), references: header(data?.payload, 'references'), inReplyTo: header(data?.payload, 'in-reply-to'), internalDate: Number.isFinite(Number(data?.internalDate)) ? Number(data.internalDate) : undefined }
 }
 export class GoogleGmail {
-  constructor(private readonly accounts: GoogleAccounts) {}
-  async listMessages(accountId: string, options: GoogleWorkspaceMessageQuery = {}): Promise<GoogleWorkspacePage<GoogleWorkspaceMessage>> {
+  constructor(private readonly accounts: GoogleAccounts) { }
+  async listMessages(accountId: string, options: GoogleWorkspaceMessageQuery = {}, revision?: number, callerSignal?: AbortSignal): Promise<GoogleWorkspacePage<GoogleWorkspaceMessage>> {
     const page = googlePage(options.limit, options.pageToken)
     const query = options.query === undefined ? undefined : boundedString(options.query, 'Gmail search query', 1024, true)
     return this.accounts.withAccess(accountId, 'gmail.read', async (token, _revision, signal) => {
+      signal = callerSignal ? AbortSignal.any([signal, callerSignal]) : signal
       const params = new URLSearchParams({ ...page, ...(query ? { q: query } : {}) })
       const data = await this.accounts.transport.json(`${BASE}/messages?${params}`, token, undefined, 'GET', signal)
       // Search returns summaries; metadata is fetched explicitly with a strict result bound.
@@ -40,22 +41,22 @@ export class GoogleGmail {
       const items: GoogleWorkspaceMessage[] = []
       for (const message of messages) {
         const id = googleResourceId(message?.id, 'message ID')
-        const details = await this.accounts.transport.json(`${BASE}/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Date`, token, undefined, 'GET', signal)
+        const details = await this.accounts.transport.json(`${BASE}/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Date&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=In-Reply-To`, token, undefined, 'GET', signal)
         items.push(parseGoogleMessage(details))
       }
       return { items, ...(returnedPageToken(data.nextPageToken) ? { nextPageToken: data.nextPageToken } : {}) }
-    })
+    }, revision)
   }
-  async readMessage(accountId: string, id: string): Promise<GoogleWorkspaceMessage> {
+  async readMessage(accountId: string, id: string, revision?: number): Promise<GoogleWorkspaceMessage> {
     const key = googleResourceId(id, 'message ID')
-    return this.accounts.withAccess(accountId, 'gmail.read', async (token, _revision, signal) => parseGoogleMessage(await this.accounts.transport.json(`${BASE}/messages/${key}?format=full`, token, undefined, 'GET', signal)))
+    return this.accounts.withAccess(accountId, 'gmail.read', async (token, _revision, signal) => parseGoogleMessage(await this.accounts.transport.json(`${BASE}/messages/${key}?format=full`, token, undefined, 'GET', signal)), revision)
   }
-  async readThread(accountId: string, id: string): Promise<GoogleWorkspaceThread> {
+  async readThread(accountId: string, id: string, revision?: number): Promise<GoogleWorkspaceThread> {
     const key = googleResourceId(id, 'thread ID')
     return this.accounts.withAccess(accountId, 'gmail.read', async (token, _revision, signal) => {
       const data = await this.accounts.transport.json(`${BASE}/threads/${key}?format=full`, token, undefined, 'GET', signal)
       if (!Array.isArray(data.messages) || data.messages.length > 100) throw new Error('This thread is too large. Read individual messages instead.')
       return { id: responseText(data.id, 128), messages: data.messages.map(parseGoogleMessage) }
-    })
+    }, revision)
   }
 }

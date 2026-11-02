@@ -36,7 +36,7 @@ function find(node: any, type: any): any {
 for (const status of [undefined, { available: false }, { available: true, state: 'ready', cortheon: { supported: true, enabled: true, active: false } }, { available: true, state: 'starting', cortheon: { supported: false, enabled: false, active: false } }]) {
   const node = CortheonToggle({ status, activeRuns: 0 })
   const markup = renderToStaticMarkup(node)
-  assert.match(markup, /temporarily disabled in this beta/)
+  assert.match(markup, /temporarily disabled/)
   assert.match(markup, /role="switch"/)
   const toggle = find(node, Toggle)
   assert.equal(toggle.props.disabled, true)

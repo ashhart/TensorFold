@@ -201,7 +201,7 @@
   "Copy user message" : "複製用戶消息",
   "Cortheon" : "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models." : "Cortheon 已開啓：引擎回答前可能將基於此聊天生成的查詢發送到網絡搜索服務，並讀取公開網頁。可在“AI 設置”或“模型”中關閉。",
-  "Cortheon is temporarily disabled in this beta." : "本測試版暫時禁用 Cortheon。",
+  "Cortheon is temporarily disabled." : "Cortheon 暫時停用。",
   "Cost cap $" : "費用上限 $",
   "Could not check CLI auth." : "無法檢查 CLI 身份驗證。",
   "Could not open a chat. Your current work is still here; try New chat again." : "無法打開聊天。當前工作仍然保留；請再次嘗試“新聊天”。",

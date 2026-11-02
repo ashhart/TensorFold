@@ -201,7 +201,7 @@
   "Copy user message": "Скопировать сообщение пользователя",
   "Cortheon": "Cortheon",
   "Cortheon is on: before answering, the engine may send search queries built from this chat to a web search service and read public pages. Turn it off in AI settings or Models.": "Cortheon включён: перед ответом движок может отправлять поисковому сервису запросы на основе этого чата и читать публичные страницы. Отключите его в настройках ИИ или разделе «Модели».",
-  "Cortheon is temporarily disabled in this beta.": "Cortheon временно отключён в этой бета-версии.",
+  "Cortheon is temporarily disabled.": "Cortheon временно отключён.",
   "Cost cap $": "Лимит расходов $",
   "Could not check CLI auth.": "Не удалось проверить вход CLI.",
   "Could not open a chat. Your current work is still here; try New chat again.": "Не удалось открыть чат. Текущая работа сохранена; снова нажмите «Новый чат».",

@@ -1,3 +1,4 @@
+import { blueBubblesAccess, blueBubblesIdentity, scanBlueBubbles, sendBlueBubbles } from './bluebubbles-connector'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import os from 'node:os'
@@ -11,12 +12,6 @@ const execFileP = promisify(execFile)
 const exec = (cmd: string, args: string[]) =>
   execFileP(cmd, args, { maxBuffer: 8_000_000, timeout: 15_000 }).then(({ stdout }) => stdout)
 
-// Resolve iMessage handles (phone numbers / emails) to contact names via the macOS
-// Contacts framework (AppleScript). This is what makes a bubble read "Maya Chen"
-// instead of "+15551234567" (Bug 2). Runs once per scan over the unique handles;
-// failures (no Contacts access, unknown handle) fall back to the raw handle.
-// The lookup uses `name of first person whose value contains <handle>` — one
-// osascript call handles a batch of handles via tab-delimited output.
 async function resolveContactNames(handles: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>()
   const unique = [...new Set(handles.filter(Boolean))]
@@ -59,8 +54,6 @@ function escapeAppleScript(s: string): string {
   return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
 }
 
-// A fully-escaped AppleScript string literal. Escapes backslash, quote, and control chars so a
-// recipient handle or message body can NEVER break out of the string (osascript injection defense).
 function appleScriptString(s: string): string {
   return '"' + s
     .replace(/\\/g, '\\\\')
@@ -71,19 +64,11 @@ function appleScriptString(s: string): string {
     + '"'
 }
 
-/**
- * Messages chat.db uses `chat…` identifiers for group conversations. Those are
- * existing text chats, not participant handles: asking Messages.app for a
- * participant named `chat…` makes every group reply fail. Keep this classifier
- * narrow so ordinary phone/email handles continue through the buddy path, while
- * also accepting the fully-qualified Messages.app chat id shape.
- */
 export function isIMessageGroupConversation(target: string): boolean {
   const value = target.trim()
   return /^chat[\w.-]+$/i.test(value) || /^(?:iMessage|SMS);[^;]*;chat[\w.-]+$/i.test(value)
 }
 
-/** Build the AppleScript that sends `text` to a participant or existing group chat. Pure — unit-tested for escaping. */
 export function buildIMessageSendScript(target: string, text: string): string {
   if (isIMessageGroupConversation(target)) {
     return [
@@ -102,8 +87,11 @@ export function buildIMessageSendScript(target: string, text: string): string {
   ].join('\n')
 }
 
-/** Send an iMessage reply via Messages.app (macOS only). Outbound — callers approval-gate it. */
-export async function sendIMessage(target: string, text: string): Promise<{ ok: boolean }> {
+// Send an iMessage reply via Messages.app (macOS only). Outbound — callers approval-gate it.
+export async function sendIMessage(target: string, text: string, settings?: IMessageConnectorSettings, assertCurrent?: () => void): Promise<{ ok: boolean }> {
+  assertCurrent?.()
+  if (settings?.transport === 'bluebubbles') return sendBlueBubbles(settings, target, text, { assertCurrent })
+  if (settings && (!settings.enabled || !isAllowedMessage({ chatId: target, handle: target } as IMessageItem, parseAllowedChats(settings.allowedChatIds)))) throw new Error('Choose an iMessage contact in the current connection scope before sending.')
   if (process.platform !== 'darwin') throw new Error('iMessage sending is only available on macOS.')
   const to = target.trim()
   if (!to) throw new Error('iMessage recipient or conversation is required.')
@@ -120,24 +108,18 @@ export async function sendIMessage(target: string, text: string): Promise<{ ok: 
   }
 }
 
-// chat.db lives under the protected ~/Library/Messages directory. Reading it
-// requires Full Disk Access granted to the app at runtime (System Settings ->
-// Privacy & Security). No entitlement pre-grants it; we detect the resulting
-// permission error and surface it so the UI can redirect the user.
 export function imessageDbPath(): string {
   return path.join(os.homedir(), 'Library', 'Messages', 'chat.db')
 }
 
-// The system `sqlite3` CLI is always present on macOS and needs no native module
-// (npmRebuild is off, so better-sqlite3 would break in the packaged app). We open
-// the database read-only so we can never mutate the user's iMessage store.
 const SQLITE3 = 'sqlite3'
 
-// Detect whether TensorFold can read chat.db. Returns the kind of permission state so
-// the UI can show a precise "grant Full Disk Access" redirect vs a real error.
 export type IMessageAccessState = 'ok' | 'needs_full_disk_access' | 'no_macos' | 'missing_db' | 'error'
-export async function imessageAccessState(): Promise<{ state: IMessageAccessState; detail: string }> {
-  if (process.platform !== 'darwin') return { state: 'no_macos', detail: 'iMessage is only available on macOS.' }
+export async function imessageAccessState(settings?: IMessageConnectorSettings): Promise<{ state: IMessageAccessState; detail: string }> {
+  if (settings?.transport === 'bluebubbles') {
+    try { return await blueBubblesAccess(settings) } catch (error) { return { state: 'error', detail: error instanceof Error ? error.message : 'BlueBubbles connection failed.' } }
+  }
+  if (process.platform !== 'darwin') return { state: 'no_macos', detail: 'Use BlueBubbles to connect iMessage through a Mac.' }
   try {
     // A trivial read-only query proves both that the DB exists and that we have FDA.
     await exec(SQLITE3, ['-readonly', imessageDbPath(), 'SELECT count(*) FROM message LIMIT 1;'])
@@ -154,15 +136,13 @@ export async function imessageAccessState(): Promise<{ state: IMessageAccessStat
   }
 }
 
-// Fetch recent messages from chat.db, joined to handles for sender identity. Each
-// row becomes an IMessageItem where isFromMe drives the bubble direction (blue out
-// vs gray in). Limited to the most recent N across all chats by default.
 export async function scanIMessageMessages(settings: IMessageConnectorSettings): Promise<IMessageItem[]> {
+  if (!settings.enabled) throw new Error('Enable iMessage before reading selected conversations.')
+  if (settings.transport === 'bluebubbles') return scanBlueBubbles(settings)
   if (process.platform !== 'darwin') throw new Error('iMessage is only available on macOS.')
   const limit = Math.max(25, Math.min(settings.maxMessages || 200, 1_000))
   const allowed = parseAllowedChats(settings.allowedChatIds)
-  // Query recent messages with sender handle; is_from_me=1 means you sent it.
-  // chat_identifier + message.date (CFAbsoluteTime epoch 2001-01-01) per Apple.
+
   const sql = [
     'SELECT m.ROWID, m.handle_id, m.is_from_me, m.text, m.date, m.cache_has_attachments,',
     'm.guid, m.associated_message_guid,',
@@ -178,8 +158,7 @@ export async function scanIMessageMessages(settings: IMessageConnectorSettings):
   const raw = await exec(SQLITE3, ['-readonly', '-json', imessageDbPath(), sql])
   const rows: any[] = raw.trim() ? JSON.parse(raw) : []
   let items = rows.map(rowToIMessage).filter((m): m is IMessageItem => !!m)
-  // Resolve raw handles (phone/email) to contact names so bubbles read "Maya Chen"
-  // instead of "+15551234567" (Bug 2). Falls back to the handle if Contacts is unavailable.
+
   const handles = items.map((it) => it.handle).filter((h, i) => h && !items[i].isFromMe)
   const names = await resolveContactNames(handles)
   if (names.size) {
@@ -192,7 +171,8 @@ export async function scanIMessageMessages(settings: IMessageConnectorSettings):
   return items.slice(0, limit).sort((a, b) => (b.date ?? 0) - (a.date ?? 0))
 }
 
-export async function readIMessageMessage(id: string): Promise<IMessageReadResult | null> {
+export async function readIMessageMessage(id: string, settings?: IMessageConnectorSettings): Promise<IMessageReadResult | null> {
+  if (settings) return (await scanIMessageMessages(settings)).find(item => item.id === id) ?? null
   if (process.platform !== 'darwin') throw new Error('iMessage is only available on macOS.')
   const rowid = Number(id)
   if (!Number.isFinite(rowid)) return null
@@ -212,43 +192,32 @@ export async function readIMessageMessage(id: string): Promise<IMessageReadResul
   return rowToIMessage(rows[0]) ?? null
 }
 
-// Emit connector events for newly-seen messages so the Assistant surfaces them.
-// `cursor` is the incremental high-water mark (newest message date+ROWID already
-// ingested): a sync skips anything at/below it before the per-message dedup, so an
-// ever-growing chat.db isn't fully re-walked into events each poll. A null cursor (or
-// the runtime omitting it) falls back to the dedup-only full scan. The advanced cursor
-// is returned for the host to persist.
 export async function syncIMessageConnector(settings: IMessageConnectorSettings, known: Set<string>, cursor?: SyncCursor | null): Promise<IMessageSyncResult> {
+  const bridge = settings.transport === 'bluebubbles'
+  if (bridge && settings.bridgeCursorIdentity !== blueBubblesIdentity(settings)) cursor = null
   const messages = await scanIMessageMessages(settings)
   const events: ConnectorEvent[] = []
-  // Dedup by MESSAGE identity, not conversation. `known` is the set of per-message
-  // dedup keys the runtime rebuilds via imessageEventDedupKey (payload.messageId), so
-  // a conversation that has already surfaced one event still ingests its later
-  // messages — one event per new message — while the event's threadKey stays
-  // conversation-scoped for grouping/replies.
+
   const seen = new Set(known)
-  // Resolve quoted-reply context within the batch: chat.db threads a reply via the
-  // associated-message GUID (IMessageItem.replyToId), matched against a sibling's guid.
+
   const byGuid = new Map<string, IMessageItem>()
   for (const m of messages) {
     if (m.guid) byGuid.set(m.guid, m)
   }
   for (const message of messages) {
-    // INCREMENTAL: drop anything not strictly newer than the cursor (position = date,
-    // id = ROWID) before the dedup work.
+
     if (!isNewerThanCursor({ position: message.date, id: message.id }, cursor)) continue
     const messageKey = imessageMessageKey(message)
     if (seen.has(messageKey)) continue
     seen.add(messageKey)
-    events.push(imessageEventFromMessage(message, Date.now(), resolveIMessageReply(message, byGuid)))
+    const event = imessageEventFromMessage(message, Date.now(), resolveIMessageReply(message, byGuid))
+    if (bridge) event.threadKey = `imessage:bb-${blueBubblesIdentity(settings)}:${message.chatId}`
+    events.push(event)
   }
   const advanced = advanceSyncCursor(cursor, messages.map((m) => ({ position: m.date, id: m.id })), Date.now()) ?? undefined
   return { events, messages: messages.length, syncedAt: Date.now(), cursor: advanced }
 }
 
-// Resolve a reply's quoted message from the batch via the associated-message GUID
-// chat.db stores on a reply. Returns undefined when the message isn't a reply or its
-// parent isn't in the batch. Pure over the in-memory index.
 function resolveIMessageReply(message: IMessageItem, byGuid: Map<string, IMessageItem>): ConnectorReplyContext | undefined {
   if (!message.replyToId) return undefined
   const parent = byGuid.get(message.replyToId)
@@ -259,34 +228,19 @@ function resolveIMessageReply(message: IMessageItem, byGuid: Map<string, IMessag
   return { id: message.replyToId, author: author || null, text: text ? text.slice(0, 2_000) : null }
 }
 
-// Stable per-message dedup/identity key. Must be unique per message (not per
-// conversation) or an ongoing chat collapses to a single ever-emitted event.
 export function imessageMessageKey(message: Pick<IMessageItem, 'id'>): string {
   return `imessage:msg:${message.id}`
 }
 
-// Conversation-scoped key. This is the event's threadKey: the Assistant groups a
-// conversation's events by threadKey (Assistant.tsx) and replies target it, so it
-// MUST stay per-conversation — dedup uses imessageMessageKey, never this.
 export function imessageConversationKey(message: Pick<IMessageItem, 'chatId' | 'handle'>): string {
   return `imessage:${message.chatId || message.handle}`
 }
 
-// Per-message dedup key for a STORED event, used by the runtime to rebuild `known`.
-// Prefers the persisted source message id (payload.messageId); falls back to the
-// (now conversation-scoped) threadKey only for pre-upgrade events that lack it.
 export function imessageEventDedupKey(event: { payload?: Record<string, unknown> | null; threadKey?: string }): string {
   const id = event.payload && typeof event.payload === 'object' ? (event.payload as { messageId?: unknown }).messageId : undefined
   return (typeof id === 'string' || typeof id === 'number') ? `imessage:msg:${id}` : (event.threadKey ?? '')
 }
 
-// The event's createdAt MUST be the real message time, not the ingest time, so the
-// Assistant's thread list (sorted by createdAt) shows the newest CONVERSATION at the top.
-// A whole sync batch is remembered with one Date.now(), so using ingest time would make a
-// fresh resync of historical chats order arbitrarily; the message's own timestamp keeps
-// "newest message at the top" stable regardless of when it was scanned. Falls back to `now`
-// when chat.db gave no/garbage date, and clamps a future timestamp to now so a bad clock on
-// one row can't pin it to the top forever. Pure + unit-tested.
 export function imessageEventTimestamp(message: Pick<IMessageItem, 'date'>, now = Date.now()): number {
   const date = message.date
   if (typeof date !== 'number' || !Number.isFinite(date) || date <= 0) return now
@@ -314,9 +268,7 @@ export function imessageEventFromMessage(message: IMessageItem, now = Date.now()
     // Prepend the quoted parent so the agent's context shows what is being replied to.
     summary: reply ? injectReplyContext(baseSummary, reply) : baseSummary,
     actor: message.chatName || message.handle || (isFromMe ? 'You' : 'Unknown'),
-    // Conversation-scoped so the Assistant groups a chat's messages together and
-    // replies target the conversation. Per-message dedup is keyed off payload.messageId
-    // (see imessageEventDedupKey), not this.
+
     threadKey: imessageConversationKey(message),
     payloadKeys: ['text', 'handle', 'chat', ...(reply ? ['reply'] : [])],
     payload: { text: message.text, handle: message.handle, chat: message.chatId, messageId: message.id },
@@ -331,19 +283,11 @@ function parseAllowedChats(raw: string | undefined): Set<string> {
   return new Set(raw.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean))
 }
 
-// Allowlist gate. A message is allowed only if its chat_identifier OR its sender
-// handle is explicitly listed. An empty chatId must NOT auto-pass: chat_message_join
-// is a LEFT JOIN, so messages with no chat row resolve chatId to '' and would
-// otherwise slip past the allowlist entirely. Matching the handle too lets users
-// gate by the contact (phone/email) they actually configured, not just chat ids.
 export function isAllowedMessage(message: Pick<IMessageItem, 'chatId' | 'handle'>, allowed: Set<string>): boolean {
   if (!allowed.size) return true
   return (!!message.chatId && allowed.has(message.chatId)) || (!!message.handle && allowed.has(message.handle))
 }
 
-// Apple's `date` column is CFAbsoluteTime since 2001-01-01 UTC. Older databases
-// store seconds; modern Messages databases commonly store nanoseconds. Detect the
-// magnitude before converting or a modern row lands millions of years in the future.
 const APPLE_EPOCH_OFFSET_MS = 978_307_200_000
 export function appleDateToMs(date: number | null | undefined): number | null {
   if (date == null || !Number.isFinite(date)) return null
@@ -372,9 +316,6 @@ function rowToIMessage(row: any): IMessageItem | null {
   }
 }
 
-// chat.db stores a reply's parent in associated_message_guid as `bp:<guid>`, `p:0/<guid>`,
-// or a bare guid. Tapbacks (likes/emphasis) use the same column, so only treat it as a
-// THREADED reply target when it parses to a guid; the bare guid is what message.guid holds.
 export function parseAssociatedGuid(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null
   const match = value.match(/([0-9A-Fa-f-]{36})/)

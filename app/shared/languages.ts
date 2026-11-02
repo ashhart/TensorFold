@@ -1,8 +1,9 @@
-/** Bundled interface languages; remote/user text never chooses a locale or prompt. */
+// Bundled interface languages; remote/user text never chooses a locale or prompt.
 export const LANGUAGES = [
   { id: 'en', nativeName: 'English', englishName: 'English', direction: 'ltr' },
   { id: 'es', nativeName: 'Español', englishName: 'Spanish', direction: 'ltr' },
   { id: 'es-419', nativeName: 'Español (Latinoamérica)', englishName: 'Latin American Spanish', direction: 'ltr' },
+  { id: 'pt', nativeName: 'Português', englishName: 'Portuguese', direction: 'ltr' },
   { id: 'zh-Hans', nativeName: '简体中文', englishName: 'Simplified Chinese', direction: 'ltr' },
   { id: 'zh-Hant', nativeName: '繁體中文', englishName: 'Traditional Chinese', direction: 'ltr' },
   { id: 'ja', nativeName: '日本語', englishName: 'Japanese', direction: 'ltr' },

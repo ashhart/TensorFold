@@ -168,10 +168,10 @@ try {
     })
     runtime.createWindow()
     const win = FakeBrowserWindow.latest!
-    assert.equal(win.options.titleBarStyle, platform === 'linux' ? 'default' : 'hiddenInset')
+    assert.equal(win.options.titleBarStyle, platform === 'darwin' ? 'hiddenInset' : 'default')
     assert.notEqual(win.options.frame, false, 'native frame must not be disabled')
     assert.equal(win.options.titleBarOverlay, undefined, 'no custom window-control overlay')
-    assert.deepEqual(win.options.trafficLightPosition, platform === 'linux' ? undefined : { x: 18, y: 22 })
+    assert.deepEqual(win.options.trafficLightPosition, platform === 'darwin' ? { x: 18, y: 22 } : undefined)
     assert.equal(win.options.backgroundColor, platform === 'darwin' ? '#00000000' : '#111216')
     assert.equal(win.options.vibrancy, platform === 'darwin' ? 'under-window' : undefined)
     assert.deepEqual(win.options.webPreferences, {

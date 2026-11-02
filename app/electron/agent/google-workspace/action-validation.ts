@@ -9,7 +9,15 @@ export function validatedEmail(input: GoogleWorkspaceEmailContent): GoogleWorksp
   if (/[\r\n]/.test(subject)) throw new Error('Email subjects cannot contain line breaks.')
   const text = boundedString(input.text, 'email body', 128_000, true)
   if (!subject.trim() && !text.trim()) throw new Error('Write an email subject or message before reviewing it.')
-  return { to, ...(cc.length ? { cc } : {}), ...(bcc.length ? { bcc } : {}), subject, text }
+  let reply: GoogleWorkspaceEmailContent['reply']
+  if (input.reply) {
+    googleResourceId(input.reply.threadId, 'reply thread ID'); googleResourceId(input.reply.messageId, 'reply message ID')
+    const rfcMessageId = boundedString(input.reply.rfcMessageId, 'reply header', 502)
+    const references = boundedString(input.reply.references, 'reply references', 10_100)
+    if (!/^<[^\s<>]{1,500}>$/.test(rfcMessageId) || !/^(?:<[^\s<>]{1,500}>)(?: <[^\s<>]{1,500}>)*$/.test(references)) throw new Error('Read the original Gmail message before reviewing a reply.')
+    reply = { threadId: input.reply.threadId, messageId: input.reply.messageId, rfcMessageId, references, ...(input.reply.scopeId ? { scopeId: boundedString(input.reply.scopeId, 'Inbox scope', 128) } : {}) }
+  }
+  return { to, ...(cc.length ? { cc } : {}), ...(bcc.length ? { bcc } : {}), subject, text, ...(reply ? { reply } : {}) }
 }
 function sendUpdates(value: unknown): 'none' | 'all' {
   if (value !== 'none' && value !== 'all') throw new Error('Choose whether Google should notify attendees.')
@@ -48,6 +56,7 @@ export function validatedGoogleAction(input: GoogleWorkspaceAction): GoogleWorks
 }
 export function emailMime(email: GoogleWorkspaceEmailContent, from: string): string {
   const headers = [`From: ${from}`, `To: ${email.to.join(', ')}`, ...(email.cc?.length ? [`Cc: ${email.cc.join(', ')}`] : []), ...(email.bcc?.length ? [`Bcc: ${email.bcc.join(', ')}`] : [])]
+  if (email.reply) headers.push(`In-Reply-To: ${email.reply.rfcMessageId}`, `References: ${email.reply.references}`)
   // Short encoded words fold long Unicode subjects without introducing untrusted headers.
   const words: string[] = []
   let chunk = ''

@@ -6,6 +6,8 @@ import { gzipSync } from 'node:zlib'
 import {
   archiveRelativePath,
   fetchEngine,
+  engineTarget,
+  readEngineManifest,
   localArchiveCandidates,
   parseSha256Sums,
   readTar,
@@ -13,6 +15,12 @@ import {
   stagedEngineIsCurrent,
   unpackEngineArchive,
 } from './fetch-engine.mjs'
+
+assert.equal(engineTarget('darwin', 'arm64'), 'macos-arm64')
+assert.equal(engineTarget('linux', 'x64'), 'linux-x64')
+assert.equal(engineTarget('linux', 'arm64'), 'linux-arm64')
+assert.throws(() => engineTarget('win32', 'x64'), /No pinned engine archive/)
+await assert.rejects(() => readEngineManifest('.', '../escape'), /Unknown engine target/)
 
 function header(name, { type = '0', size = 0, mode = 0o644, link = '' } = {}) {
   const h = Buffer.alloc(512)

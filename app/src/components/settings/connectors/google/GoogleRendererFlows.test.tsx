@@ -5,6 +5,7 @@ import path from 'node:path'
 import React from 'react'
 import ts from 'typescript'
 import * as time from './google-calendar-time'
+import * as googleErrors from '../../../../../shared/google-workspace-errors'
 
 const Button = (_props: any) => null, Field = (_props: any) => null, Input = (_props: any) => null, Toggle = (_props: any) => null
 const jsx = { jsx: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), jsxs: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), Fragment: React.Fragment }
@@ -22,6 +23,7 @@ function harness(file: string, api: any, extra: Record<string, unknown> = {}) {
   const load = (filename: string): any => {
     const compiled = ts.transpileModule(readFileSync(path.join(__dirname, filename), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
     const imports: Record<string, unknown> = { react, 'react/jsx-runtime': jsx, '../../../../lib/ipc': { api }, '../../../ui': { Button, Field, Input, Toggle }, './google-calendar-time': time, ...extra }
+    imports['../../../../../shared/google-workspace-errors'] = googleErrors
     if (filename !== 'useGoogleAccountRequest.ts') imports['./useGoogleAccountRequest'] = load('useGoogleAccountRequest.ts')
     const loaded = { exports: {} as any }
     new Function('require', 'module', 'exports', compiled)((name: string) => { const reviewed = reviewedLanguageImport(name, imports); if (reviewed.matched) return reviewed.value;  assert.ok(name in imports, `Reviewed renderer import ${name}`); return imports[name] }, loaded, loaded.exports)
@@ -42,8 +44,7 @@ const visibleText = (node: any): string => React.Children.toArray(node).map((chi
 const button = (node: any, text: string) => find(node, (item) => item.type === Button && item.props.children === text)
 const input = (node: any, label: string) => find(node, (item) => item.type === Input && item.props['aria-label'] === label)
 const account = (id: string) => ({ id, email: `${id}@example.com`, revision: 1, capabilities: ['gmail.read', 'calendar.read'], status: 'connected', connectedAt: 0 })
-// Polling and permission refresh must reconcile one setup/tools/reviews pane each.
-// Duplicate sibling keys previously caused setup cards to accumulate on every poll.
+
 function assertUniqueSiblingKeys(node: any): void {
   if (!node || typeof node !== 'object') return
   const flatten = (value: any): any[] => Array.isArray(value) ? value.flatMap(flatten) : value && typeof value === 'object' ? [value] : []

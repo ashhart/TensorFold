@@ -7,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { SANDBOX_PROFILES, buildSandboxArtifactBundle, canUseMacSandbox, captureSandboxArtifactBaseline, summarizeSandboxArtifactBundle, macSandboxProfile, runSandboxedCommand, sandboxCommandEnv, sandboxProfileForCommand, taskSandboxNetworkOverride } from './sandbox'
 import { commandShell } from './cli-path'
+import { preparePackageInstallLayout } from './package-install-layout'
 
 async function main() {
   // Keep the fixture outside both the repo (mutation snapshots must not see the
@@ -119,21 +120,45 @@ async function main() {
   const packageHost = await fs.mkdtemp(path.join(os.tmpdir(), 'vontra-package-host-'))
   const packageJson = '{"name":"package-host","version":"1.0.0"}\n'
   await fs.writeFile(path.join(packageHost, 'package.json'), packageJson, 'utf8')
-  const packageInstall = await runSandboxedCommand('npm install --package-lock-only --ignore-scripts --offline left-pad', {
+  const packageInstall = await runSandboxedCommand('npm install --offline', {
     cwd: packageHost,
     profile: 'package-install',
     allowNetwork: false,
     timeoutMs: 20_000,
   })
-  assert.equal(packageInstall.profile, 'package-install')
-  assert.ok(packageInstall.artifacts, 'package-install run returns artifact bundle')
-  assert.notEqual(packageInstall.artifacts!.cwd, realpathSync(packageHost), 'package install runs away from the host project')
-  assert.ok(packageInstall.artifacts!.inputSnapshot.some((file) => file.path === 'package.json'), 'sandbox copy includes package manifest input')
+  assert.ok(packageInstall.artifacts)
+  assert.equal(packageInstall.artifacts.cwd, realpathSync(packageHost))
+  assert.ok(packageInstall.artifacts.inputSnapshot.some((file) => file.path === 'package.json'))
+  if (canUseMacSandbox()) {
+    assert.equal(packageInstall.code, 0, packageInstall.stderr)
+    assert.match(packageInstall.stdout, /Dependencies were installed/)
+    await fs.access(path.join(packageHost, 'package-lock.json'))
+  } else {
+    assert.equal(packageInstall.code, 126)
+    await assert.rejects(fs.access(path.join(packageHost, 'package-lock.json')))
+  }
   assert.equal(await fs.readFile(path.join(packageHost, 'package.json'), 'utf8'), packageJson)
-  await assert.rejects(() => fs.access(path.join(packageHost, 'node_modules')))
-  await assert.rejects(() => fs.access(path.join(packageHost, 'package-lock.json')))
-  // the throwaway sandbox cwd must be cleaned up by runSandboxedCommand, not orphaned in TMPDIR
-  await assert.rejects(() => fs.access(packageInstall.artifacts!.cwd), 'package-install sandbox temp dir is removed after the run')
+  assert.deepEqual((await fs.readdir(packageHost)).filter((name) => name.startsWith('.tensorfold-')), [])
+  const layout = await preparePackageInstallLayout(packageHost)
+  const stage = layout.stage
+  const isolated = macSandboxProfile(stage, 'package-install', [], true, packageHost)
+  assert.match(isolated, /deny file-read-data file-write\*/)
+  assert.ok(isolated.indexOf('(deny file-read-data file-write*') > isolated.indexOf('(allow file-read*'))
+  assert.ok(isolated.endsWith(`(allow file-read* file-write* (subpath ${JSON.stringify(stage)}))`))
+  if (canUseMacSandbox()) {
+    const probe = spawnSync('/usr/bin/sandbox-exec', ['-p', isolated, process.execPath, '-e', `
+      const fs = require('node:fs'), assert = require('node:assert/strict');
+      assert.equal(process.cwd(), process.argv[1]);
+      assert.throws(() => fs.readFileSync(process.argv[2]), { code: 'EPERM' });
+      assert.throws(() => fs.writeFileSync(process.argv[2], 'changed'), { code: 'EPERM' });
+      fs.writeFileSync('stage-write.txt', 'owned stage');
+    `, stage, path.join(realpathSync(packageHost), 'package.json')], { cwd: stage, encoding: 'utf8' })
+    assert.equal(probe.status, 0, probe.stderr)
+    assert.equal(await fs.readFile(path.join(stage, 'stage-write.txt'), 'utf8'), 'owned stage')
+  }
+  await fs.rm(stage, { recursive: true, force: true })
+  assert.equal(sandboxProfileForCommand('npm ci'), 'package-install')
+  assert.equal(sandboxProfileForCommand('npm rebuild'), 'build-test')
   await fs.rm(packageHost, { recursive: true, force: true })
 
   if (canUseMacSandbox()) {

@@ -17,15 +17,19 @@ export interface ResolveBinaryInput {
   resourcesPath: string
   appRoot: string
   env: NodeJS.ProcessEnv
+  platform?: NodeJS.Platform
 }
 
 // Packaged: Contents/Resources/engine/bin. Dev: build/engine/bin from fetch-engine. The override env
 // is honoured only in dev, so a packaged app always runs the binary it shipped with.
 export function resolveEngineBinaryPath(input: ResolveBinaryInput): string {
-  if (input.packaged) return path.join(input.resourcesPath, 'engine', 'bin', 'tensorfold-native')
+  const platform = input.platform ?? process.platform
+  const paths = platform === 'win32' ? path.win32 : path
+  const executable = platform === 'win32' ? 'tensorfold-native.exe' : 'tensorfold-native'
+  if (input.packaged) return paths.join(input.resourcesPath, 'engine', 'bin', executable)
   const override = input.env[ENGINE_BINARY_OVERRIDE_ENV]?.trim()
   if (override) return path.resolve(override)
-  return path.join(input.appRoot, 'build', 'engine', 'bin', 'tensorfold-native')
+  return paths.join(input.appRoot, 'build', 'engine', 'bin', executable)
 }
 
 // The engine's own rule (cli/hub.zig cacheDir): HF_HUB_CACHE, else HF_HOME/hub, else ~/.cache/huggingface/hub.

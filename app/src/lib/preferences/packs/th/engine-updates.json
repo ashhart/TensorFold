@@ -1,0 +1,15 @@
+{
+  "Engine updates": "อัปเดตเอนจิน",
+  "bundled": "ที่มาพร้อมแอป",
+  "Checking installed runtime…": "กำลังตรวจสอบรันไทม์ที่ติดตั้ง…",
+  "Check for engine updates": "ตรวจสอบอัปเดตเอนจิน",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "อัปเดตเอนจินในเครื่องโดยไม่ต้องติดตั้งแอปใหม่ ทำงานในเครื่องให้เสร็จก่อนสลับ โมเดลและบทสนทนาจะยังคงอยู่",
+  "No compatible engine updates are available for this device.": "ไม่มีอัปเดตเอนจินที่เข้ากันได้กับอุปกรณ์นี้",
+  "Use this runtime": "ใช้รันไทม์นี้",
+  "Use bundled engine": "ใช้เอนจินที่มาพร้อมแอป",
+  "Checking signed releases…": "กำลังตรวจสอบรุ่นที่ลงนามแล้ว…",
+  "Switching runtime…": "กำลังสลับรันไทม์…",
+  "Ready locally": "พร้อมใช้งานในเครื่อง",
+  "memory on this computer.": "หน่วยความจำบนคอมพิวเตอร์นี้",
+  "Prevent sleep while this option is enabled.": "ป้องกันโหมดพักเครื่องขณะเปิดใช้ตัวเลือกนี้"
+}

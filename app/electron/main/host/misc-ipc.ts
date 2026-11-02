@@ -1,4 +1,5 @@
 import type { ProjectSkillView } from '../../agent/types'
+import { prepareGmailInboxRun } from './gmail-inbox-run-runtime'
 import type { CueRunPayload, CueRunResult, StartRunPayload } from '../../agent/types'
 import { auditPreview } from '../../agent/security'
 import { auditEvent, requireSecurityRole } from './audit'
@@ -32,17 +33,9 @@ interface MiscIpcDeps {
   persistArtifacts(): void
 }
 
-/**
- * A grab-bag of renderer-invocable handlers that don't belong to a dedicated runtime:
- * repo-authored project skills (VST-010), first-class artifacts (VST-011), observer
- * health (VST-012), the provider-rate-limit read, the bare agent start/cue/cancel
- * controls, loop controls, and the window minimize/maximize/close actions.
- */
 export function registerMiscIpc(deps: MiscIpcDeps) {
   const { projectSkills, observerHub, providerStatus, loopHost } = deps
 
-  // Trust UI + review flow (VST-010): live scan with trust states, and the trust toggle —
-  // operator-gated + audited (trusting repo content is a durable-behavior decision).
   handle('skills:project', async (_e, projectId: string): Promise<ProjectSkillView[]> => {
     const project = store.projects.find((p) => p.id === projectId)
     if (!project) return []
@@ -83,9 +76,7 @@ export function registerMiscIpc(deps: MiscIpcDeps) {
     const preview = artifactPreview(artifact, content)
     return unavailable ? { ...preview, meta: `${preview.meta} · ${unavailable}` } : preview
   })
-  // Redaction produces a SAFE COPY inside the record (the original file is never edited):
-  // content is masked via the shared export rules, the record becomes inline-backed with
-  // the file kept as sourceRef, and the report lands on the record for the receipt.
+
   handle('artifacts:redact', async (_e, id: string) => {
     requireSecurityRole('operator', 'redact artifacts')
     const at = store.artifacts.findIndex((a) => a.id === id)
@@ -135,12 +126,10 @@ export function registerMiscIpc(deps: MiscIpcDeps) {
   // Observer hooks (VST-012): per-hook health + the recent-event ring for the doctor.
   handle('observers:status', async () => ({ hooks: observerHub.status(), recent: observerHub.recent(50) }))
 
-  // Provider rate-limit status (VST-037): the picker + doctor read the persisted per-provider
-  // windows; live updates push over 'providerStatus:update'.
   handle('providerStatus:get', async () => providerStatus.status())
   handle('agent:cancel', async (_e, threadId: string) => deps.cancelThreadRun(threadId))
   handle('agent:cue', async (_e, payload: CueRunPayload): Promise<CueRunResult> => deps.guideThreadRun(payload))
-  handle('agent:start', async (_e, payload: StartRunPayload) => deps.startThreadRun(payload))
+  handle('agent:start', async (_e, payload: StartRunPayload) => { await prepareGmailInboxRun(payload); return deps.startThreadRun(payload) })
 
   handle('loop:start', async (_e, input: StartLoopInput) => loopHost.startLoop(input))
   handle('loop:list', async () => loopHost.getLoops())

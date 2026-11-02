@@ -1,7 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import http from 'node:http'
-import net from 'node:net'
 import type { EngineState, EngineModelGenerationSettings } from '../types'
 import type { ModelInfo } from './cli'
 import { assertRepoId, type EngineBinary } from './paths'
@@ -11,12 +9,12 @@ import { engineLoadLimitOverride } from '../../../shared/engine-advanced-env'
 import { CORTHEON_RELEASE_POLICY, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
 import { modelLaunchOptions } from './launch-options'
 import { assertEngineModelSamplingSupported, isGreedyOnlyEngineModel } from '../../../shared/model-profiles'
+import { freeLoopbackPort, engineReadinessProbe, type EngineModels, type EngineReadinessProbe } from './readiness'
+export { freeLoopbackPort, probeModels, readContextWindow } from './readiness'
 
 // Native admission accounts for loaded buffers and streams; the weights-only floor cannot reserve retained states.
 
-// One engine process at a time: `serve MODEL` on a free loopback port with a fresh API key per launch,
-// ready once /v1/models answers. Switching models stops the old process first; a model whose memory
-// floor is above the limit (70% of RAM by default) is refused before anything starts.
+// Supervise one leased engine endpoint with serialized admission, launch, readiness, and teardown.
 
 export interface SupervisorDeps {
   binary: () => EngineBinary | null
@@ -32,6 +30,7 @@ export interface SupervisorDeps {
   readyTimeoutMs?: number
   pollMs?: number
   stopGraceMs?: number
+  readiness?: EngineReadinessProbe
   onChange?: () => void
   onPid?: (pid: number | null) => void
   // True when the next start should pass --cortheon.
@@ -74,58 +73,6 @@ export function formatGiB(bytes: number): string {
   return `${(bytes / GIB).toFixed(1)} GB`
 }
 
-export async function freeLoopbackPort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer()
-    server.once('error', reject)
-    server.listen({ host: '127.0.0.1', port: 0, exclusive: true }, () => {
-      const address = server.address()
-      const port = typeof address === 'object' && address ? address.port : 0
-      server.close(() => (port ? resolve(port) : reject(new Error('No free loopback port.'))))
-    })
-  })
-}
-
-// One JSON request to the engine with the launch key; null on any transport, status or parse failure.
-function engineJson(port: number, apiKey: string, method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = 2000): Promise<any | null> {
-  return new Promise((resolve) => {
-    const payload = body === undefined ? undefined : JSON.stringify(body)
-    const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}`, ...(payload ? { 'Content-Type': 'application/json' } : {}) }
-    const req = http.request({ host: '127.0.0.1', port, path, method, headers, timeout: timeoutMs }, (res) => {
-      let text = ''
-      res.setEncoding('utf8')
-      res.on('data', (chunk) => { if (text.length < 65_536) text += chunk })
-      res.on('end', () => {
-        if (res.statusCode !== 200) return resolve(null)
-        try { resolve(JSON.parse(text)) } catch { resolve(null) }
-      })
-    })
-    req.on('timeout', () => req.destroy())
-    req.on('error', () => resolve(null))
-    req.end(payload)
-  })
-}
-
-// GET /v1/models; the model list once the server answers, else null.
-export async function probeModels(port: number, apiKey: string, timeoutMs = 2000): Promise<{ data: any[] } | null> {
-  const doc = await engineJson(port, apiKey, 'GET', '/v1/models', undefined, timeoutMs)
-  return Array.isArray(doc?.data) ? doc : null
-}
-
-function positiveInt(value: unknown): number | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null
-}
-
-// The served prompt-plus-reply limit: /v1/models reports max_model_len when the engine has one;
-// otherwise /tokenize's max_model_len (null there means no limit is set).
-export async function readContextWindow(port: number, apiKey: string, model: string, models: { data: any[] } | null): Promise<number | null> {
-  const entry = models?.data.find((m) => m?.id === model) ?? models?.data[0]
-  const listed = positiveInt(entry?.max_model_len) ?? positiveInt(entry?.context_length)
-  if (listed) return listed
-  const tokenized = await engineJson(port, apiKey, 'POST', '/tokenize', { prompt: 'hi' })
-  return positiveInt(tokenized?.max_model_len)
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -164,9 +111,7 @@ export class EngineSupervisor {
 
   get memoryLimitBytes(): number { return this.memoryPolicyFor(null).bytes }
 
-  // The app-side admission limit for one checkpoint family, with the human-readable basis for it.
-  // A user load-limit variable raises only its own family's limit and never lowers the 70% default;
-  // the engine may still cap the requested ceiling by its own RAM/GPU working-set math.
+  // Family overrides may raise the 70% RAM admission default; the engine enforces its own memory ceiling.
   memoryPolicyFor(modelType: string | null | undefined): { bytes: number; basis: string } {
     const base = Math.floor(this.memoryBudgetBytes * (this.deps.memoryFraction ?? 0.7))
     const override = engineLoadLimitOverride(this.deps.env(), modelType ?? null, this.deps.totalMemoryBytes)
@@ -221,8 +166,7 @@ export class EngineSupervisor {
     return next
   }
 
-  // Start the serving model again so a changed serve setting (such as --cortheon) takes effect.
-  // Refused while a reply is running; a stopped or failed engine has nothing to restart.
+  // Restart only an idle serving model so new settings apply without interrupting an active reply.
   restart(): Promise<LiveEngine | null> {
     const model = this.model
     if (!model || this.state === 'stopped' || this.state === 'failed') return Promise.resolve(null)
@@ -232,8 +176,7 @@ export class EngineSupervisor {
     return next
   }
 
-  // Both the persistent choice and the running process change under the same request guard.
-  // No preference is changed when a reply or lesson holds a lease.
+  // Guard the saved preference and runtime change together; active reply or lesson leases forbid both.
   reconfigure(apply: () => Promise<void>, rollback: () => Promise<void>): Promise<void> {
     const next = this.queue.then(async () => {
       this.assertRequestIdle()
@@ -252,8 +195,7 @@ export class EngineSupervisor {
     return next
   }
 
-  // Reserve the serving model before another queued load can replace its process. Same-model
-  // requests share it; another model gets a defined refusal rather than killing an active turn.
+  // Share same-model leases and reject switches before a queued load could replace an active process.
   acquire(model: string, options: { start: boolean; signal?: AbortSignal; exclusive?: boolean; owner?: symbol }): Promise<EngineRequestLease> {
     const next = this.queue.then(async () => {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error('Aborted.')
@@ -283,8 +225,7 @@ export class EngineSupervisor {
     if (this.sequenceOwner && owner !== this.sequenceOwner) throw new Error(`Finish or cancel the ${this.sequenceLabel} before changing or using the local engine.`)
   }
 
-  // Keep admission closed between two measured requests and through restoring the old runtime.
-  // The owner is a main-process symbol, never a renderer or model-supplied identifier.
+  // A host-owned lease keeps admission closed across measurement and restoration.
   reserveSequence(label = 'model comparison'): Promise<{ owner: symbol; previousModel: string | null; pause(): Promise<void>; restore(signal?: AbortSignal): Promise<void>; release(): void }> {
     const next = this.queue.then(() => {
       this.assertRequestIdle()
@@ -351,7 +292,8 @@ export class EngineSupervisor {
   }
 
   private changed(): void {
-    try { this.deps.onChange?.() } catch { /* listeners never break the supervisor */ }
+    // Optional observers cannot break process supervision.
+    try { this.deps.onChange?.() } catch {}
   }
 
   private append(text: string): void {
@@ -516,23 +458,39 @@ export class EngineSupervisor {
       }
     })
 
-    const deadline = Date.now() + (this.deps.readyTimeoutMs ?? 15 * 60_000)
-    let models: { data: any[] } | null = null
-    while (!(models = await probeModels(port, apiKey))) {
+    // Every awaited probe must revalidate the same live child before publishing readiness.
+    const assertStarting = () => {
       if (generation !== this.generation) {
         killGroup(child, 'SIGTERM')
         this.fail('Engine start was cancelled.')
       }
-      if (exited) this.fail(exited)
-      if (Date.now() > deadline) {
-        killGroup(child, 'SIGKILL')
-        this.fail(`${model} did not finish loading in time.`)
+      if (exited || this.child !== child || child.exitCode !== null || child.signalCode !== null) {
+        this.port = null
+        this.apiKey = null
+        this.fail(exited ?? 'The engine stopped before readiness completed.')
       }
-      await delay(this.deps.pollMs ?? 500)
     }
-    if (exited || generation !== this.generation) this.fail(exited ?? 'Engine start was cancelled.')
-    this.contextTokens = await readContextWindow(port, apiKey, model, models)
-    if (generation !== this.generation) this.fail('Engine start was cancelled.')
+    const probe = this.deps.readiness ?? engineReadinessProbe
+    const deadline = Date.now() + (this.deps.readyTimeoutMs ?? 15 * 60_000)
+    let models: EngineModels | null = null
+    try {
+      for (;;) {
+        assertStarting()
+        models = await probe.models(port, apiKey)
+        assertStarting()
+        if (models) break
+        if (Date.now() > deadline) {
+          killGroup(child, 'SIGKILL')
+          this.fail(`${model} did not finish loading in time.`)
+        }
+        await delay(this.deps.pollMs ?? 500)
+      }
+      this.contextTokens = await probe.context(port, apiKey, model, models)
+      assertStarting()
+    } catch (error) {
+      if (this.child === child) await this.stopNow('failed', error instanceof Error ? error.message : String(error))
+      throw error
+    }
     this.state = 'ready'
     this.readyAt = Date.now()
     this.message = null
@@ -546,7 +504,8 @@ export class EngineSupervisor {
     if (child) {
       this.stopping = true
       const exited = new Promise<void>((resolve) => {
-        if (child.exitCode !== null || child.signalCode !== null) return resolve()
+        // A failed spawn has no pid and emits error/close without an exit event.
+        if (child.pid == null || child.exitCode !== null || child.signalCode !== null) return resolve()
         child.once('exit', () => resolve())
       })
       killGroup(child, 'SIGTERM')

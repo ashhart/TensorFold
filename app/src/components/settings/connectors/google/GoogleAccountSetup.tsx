@@ -46,7 +46,7 @@ export function GoogleAccountSetup({ snapshot, account, busy, permissionsLocked,
       <details className="mt-4 rounded-lg border border-line bg-card-2 p-3 text-[13px] text-ink-2">
         <summary className="cursor-pointer font-medium text-ink">{tx("Google Cloud project and Desktop client")}</summary>
         <p className="mt-2 text-[12px] leading-relaxed text-ink-2">{tx("Imported the wrong client or project? Disconnect every Google account first, then import a replacement Desktop app client JSON; reconnect each account through Google afterward.")}</p>
-        <p className="mt-2 text-[12px] leading-relaxed text-ink-2">{tx("Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host Mac.")}</p>
+        <p className="mt-2 text-[12px] leading-relaxed text-ink-2">{tx("Replacing the client never signs in or disconnects an account automatically; its JSON and credentials remain on the host computer.")}</p>
         {activeAccounts && <p className="mt-2 text-[12px] text-warn">{tx("Disconnect connected accounts and accounts needing reauthorization before replacing this client.")}</p>}
         <Button className="mt-3" size="sm" disabled={!canImport} onClick={chooseClient}>{busy === 'import' ? tx("Importing…") : tx("Replace Desktop client JSON")}</Button>
       </details>

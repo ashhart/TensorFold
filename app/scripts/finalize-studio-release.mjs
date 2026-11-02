@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { assertProductionMacSigner, assertProductionUpdateTrustRoot, assertSigningKeyMatchesTrustRoot, readReleaseTrustConfig } from './update-signing-trust.mjs'
 import { assertFuses } from './package-checks.mjs'
 import { expectedMacArtifacts, verifyMacReleaseArtifacts } from './package-mac.mjs'
+import { desktopReleaseMetadata } from './desktop-release-metadata.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 
@@ -24,11 +25,12 @@ export async function finalizeStudioRelease(sourceRoot) {
   await assertProductionUpdateTrustRoot(root, trust)
   const signer = await assertProductionMacSigner(root, trust)
   const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
+  const releaseUrls = desktopReleaseMetadata(pkg.version)
   const metadata = { productName: pkg.build.productName, version: pkg.version, arch: 'arm64', appId: pkg.build.appId, engine: JSON.parse(await readFile(path.join(root, 'build', 'engine.json'), 'utf8')) }
   const source = expectedMacArtifacts(await realpath(sourceRoot), metadata)
   await assertFuses(source.apps[0], pkg.build.electronFuses)
   await verifyMacReleaseArtifacts(sourceRoot, ['dir', 'dmg', 'zip'], metadata, signer)
-  const keyFile = path.join(os.homedir(), '.config', 'tensorfold-studio', 'release', 'update-signing-ed25519.pem')
+  const keyFile = path.join(os.homedir(), '.config', 'TensorFold', 'Release', 'update-signing-ed25519.pem')
   const keyInfo = await lstat(keyFile)
   if (!keyInfo.isFile() || keyInfo.isSymbolicLink() || keyInfo.mode & 0o077 || process.getuid && keyInfo.uid !== process.getuid()) throw new Error('Update-signing key must remain in its owner-only protected file.')
   assertSigningKeyMatchesTrustRoot(createPrivateKey(await readFile(keyFile)), trust.update.ed25519PublicKey)
@@ -55,7 +57,7 @@ export async function finalizeStudioRelease(sourceRoot) {
   if (await digest(destination.dmgs[0]) !== hashes[0] || await digest(destination.zips[0]) !== hashes[1]) throw new Error('Release artifacts changed during finalization.')
   await verifyMacReleaseArtifacts(destinationRoot, ['dir', 'dmg', 'zip'], metadata, signer)
   await run(process.execPath, [path.join(root, 'scripts', 'smoke-packaged-mac.mjs')])
-  await run(process.execPath, [path.join(root, 'scripts', 'make-update-manifest.mjs'), '--version', pkg.version, '--artifact', destination.dmgs[0], '--download-url', `https://tensorfold.dev/studio/TensorFold-${pkg.version}-arm64.dmg`, '--update-zip', destination.zips[0], '--update-zip-url', `https://tensorfold.dev/studio/TensorFold-${pkg.version}-arm64.zip`, '--notes', notes, '--out', path.join(destinationRoot, 'update.json'), '--private-key', keyFile])
+  await run(process.execPath, [path.join(root, 'scripts', 'make-update-manifest.mjs'), '--version', pkg.version, '--artifact', destination.dmgs[0], '--download-url', releaseUrls.downloadUrl, '--update-zip', destination.zips[0], '--update-zip-url', releaseUrls.zipUrl, '--notes', notes, '--out', path.join(destinationRoot, 'update.json'), '--private-key', keyFile])
   console.log('Notarized release finalized and manifest signed locally; artifact/privacy clearance and hosting remain separate.')
 }
 

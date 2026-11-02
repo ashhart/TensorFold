@@ -416,7 +416,7 @@ export function commandClass(command: string): string {
   if (isSecretReadCommand(compact)) return 'secret-read'
   if (isDestructiveFilesystemCommand(compact)) return 'destructive-filesystem'
   if (isNetworkShellCommand(compact)) return 'network-shell'
-  if (/(?:^|[\s;&|])(npm|pnpm|yarn|bun)\s+(i|install|add|dlx|exec|create)\b/.test(compact)
+  if (/(?:^|[\s;&|])(npm|pnpm|yarn|bun)\s+(i|install|add|ci|dlx|exec|create)\b/.test(compact)
     || /(?:^|[\s;&|])(?:pip|pip3|python3?\s+-m\s+pip)\s+install\b/.test(compact)) return 'package-install'
   // Shell composition/redirection can hide a second command or turn an otherwise read-only
   // utility into a mutation. Classify it before the safe build/read allowlist so Full Auto asks.

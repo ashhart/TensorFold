@@ -25,7 +25,7 @@ if (!process.argv[2]) {
     }
     console.log('actual settings IPC disk faults, ordered snapshots, update admission, metadata conflicts and apply failures passed');
   } finally {
-    if (previous === undefined) delete process.env.VONTRA_HOME;else process.env.VONTRA_HOME = previous;
+    if (previous === undefined) delete process.env.VONTRA_HOME; else process.env.VONTRA_HOME = previous;
     await fs.rm(tmp, {
       recursive: true,
       force: true
@@ -60,7 +60,7 @@ if (!process.argv[2]) {
   const guard = new WorkspaceMutationGuard();
   const state = {
     normalize: async n => n,
-    apply: async () => {},
+    apply: async () => { },
     effects: 0,
     aborters: new Map(),
     vmHost: null,
@@ -76,7 +76,7 @@ if (!process.argv[2]) {
   const fixture = path.join(tmp, 'fixture.mjs');
   await fs.writeFile(fixture, `import path from 'node:path';export const store=globalThis.__coreSettingsFixture.store;export const saveSettings=(s,options)=>globalThis.__coreSettingsFixture.saveSettings(s,options);export const vontraHomeDir=()=>globalThis.__coreSettingsFixture.root;export const vontraPath=(...p)=>path.join(vontraHomeDir(),...p);export const makeRemoteControlToken=()=>'synthetic-token';export const handle=(c,cb)=>globalThis.__coreSettingsFixture.handlers.set(c,cb);export const requireSecurityRole=()=>{};export const auditEvent=async()=>{};export const shell={};export const getBotVmHost=()=>globalThis.__coreSettingsFixture.vmHost;`);
   const noops = path.join(tmp, 'noops.mjs');
-  const names = ['RemoteControl', 'Ssh', 'Workspace', 'Session', 'Spine', 'Mcp', 'Provider', 'GoogleWorkspace', 'Controller', 'Missions', 'Bot'];
+  const names = ['RemoteControl', 'Ssh', 'Workspace', 'Session', 'Spine', 'Mcp', 'Provider', 'GoogleWorkspace', 'MailConnections', 'GmailInbox', 'Controller', 'Missions', 'Bot'];
   await fs.writeFile(noops, names.map(n => `export const register${n}Ipc=()=>{};`).join('\n') + `export const syncRemoteEventStreams=()=>{};export const sanitizeRendererThreadPatch=(x)=>x;export const openExternalSafely=async()=>{};export const modelRouterCooldownSnapshot=()=>({});export const securityControlSnapshot=()=>({});`);
   const alias = {
     '../../store/ui-preferences': path.join(studio, 'electron/store/ui-preferences.ts'),
@@ -91,7 +91,7 @@ if (!process.argv[2]) {
     './provider-runtime': noops,
     './security-controls': noops
   };
-  for (const n of ['remote-control', 'ssh', 'workspace', 'session', 'spine', 'mcp', 'provider', 'google-workspace', 'controller', 'missions', 'bot']) alias['./ipc/' + n + '-ipc'] = noops;
+  for (const n of ['remote-control', 'ssh', 'workspace', 'session', 'spine', 'mcp', 'provider', 'google-workspace', 'mail-connections', 'gmail-inbox', 'controller', 'missions', 'bot']) alias['./ipc/' + n + '-ipc'] = noops;
   const jiti = createJiti(path.join(studio, 'package.json'), {
     alias,
     moduleCache: false,
@@ -100,7 +100,7 @@ if (!process.argv[2]) {
   const {
     registerCoreIpc
   } = await jiti.import(path.join(studio, 'electron/main/host/core-ipc.ts'));
-  const noop = () => {};
+  const noop = () => { };
   registerCoreIpc({
     aborters: state.aborters,
     workspaceMutationGuard: guard,
@@ -113,11 +113,11 @@ if (!process.argv[2]) {
     },
     applyPowerSettings: noop,
     remoteServer: {
-      syncFromSettings: async () => {}
+      syncFromSettings: async () => { }
     },
     startUpdateChecks: noop,
     startBotControlPolling: noop,
-    syncWebhookServer: async () => {}
+    syncWebhookServer: async () => { }
   });
   const mode = process.argv[2];
   const commit = next => state.handlers.get('settings:save')({}, next);
@@ -276,7 +276,7 @@ if (!process.argv[2]) {
   console.log('PASS ' + mode + ' settings transaction');
 } finally {
   delete globalThis.__coreSettingsFixture;
-  if (previous === undefined) delete process.env.VONTRA_HOME;else process.env.VONTRA_HOME = previous;
+  if (previous === undefined) delete process.env.VONTRA_HOME; else process.env.VONTRA_HOME = previous;
   await fs.rm(tmp, {
     recursive: true,
     force: true

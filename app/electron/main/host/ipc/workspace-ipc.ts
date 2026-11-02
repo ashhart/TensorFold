@@ -7,7 +7,7 @@ import { assertThreadMemoryTransport } from '../../../../shared/thread-memory-po
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawnCliProcess as spawn } from '../../../agent/cli-process'
 import path from 'node:path'
 import { estimateTokens, kfmt } from '../../../agent/compaction'
 import { compactThread } from '../../../agent/loop'
@@ -38,11 +38,6 @@ const RENDERER_THREAD_PATCH_KEYS = new Set([
   'goal', 'goalStatus', 'plan', 'notepad', 'annotations', 'diffReviewedAt', 'incognito', 'documentSourceIds',
 ])
 
-/**
- * The renderer owns only user-authored presentation/planning fields. Runtime state,
- * workspace identity, transcripts, timeline mutation evidence, resume cursors, and
- * provider state are main-process owned and cannot cross the generic patch seam.
- */
 export function sanitizeRendererThreadPatch(input: unknown): RendererThreadPatch {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Thread patch must be an object.')
   const raw = input as Record<string, unknown>
@@ -140,9 +135,7 @@ handle('archives:restore', async (_e, { kind, id }: { kind: 'project' | 'thread'
 handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, commandId, incognito = false }: { cwd: string; kind?: 'task' | 'chat'; projectId?: string | null; commandId?: string; incognito?: boolean }) => {
   requireSecurityRole('operator', 'create threads')
   if (typeof incognito !== 'boolean') throw new Error('Incognito must be selected as a boolean option.')
-  // Exactly-once via the spine (VST-034): a retried create with the same commandId (lost
-  // IPC reply, reconnect replay) returns the thread the accepted receipt points at instead
-  // of minting a duplicate.
+
   const spineHost = incognito ? null : spine()
   const cmdId = typeof commandId === 'string' && commandId.trim() ? commandId.trim() : null
   if (cmdId && cmdId.length > 160) throw new Error('Thread creation command is too long.')
@@ -164,8 +157,7 @@ handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, comm
   if (projectId && (!project || project.archivedAt)) throw new Error('Choose an active project before creating a thread.')
   const projectWorkspace = project?.workspace ?? null
   const candidateCwd = cwd || project?.cwd || (projectWorkspace?.kind === 'ssh' ? projectWorkspace.path : '') || store.settings.defaultCwd || ''
-  // Don't carry a stale/missing folder (e.g. a deleted default workspace) into a new
-  // thread — fall back to "no folder" so the composer prompts to choose one.
+
   const selectedCwd = project?.executionTarget === 'orchestrator'
     ? candidateCwd
     : projectWorkspace?.kind === 'ssh' && candidateCwd === projectWorkspace.path
@@ -320,8 +312,7 @@ handle('threads:configure', async (_e, { id, providerId, model, providerAccountI
     }
   } finally { lease.release() }
 })
-// Generic thread patch is deliberately narrow: only renderer-owned planning/notes
-// fields cross this seam. Workspace/runtime/timeline state has dedicated host APIs.
+
 const updateDocumentPolicy = createThreadDocumentPolicyHost({ threads: () => store.threads, settings: () => store.settings, projects: () => store.projects, aborters, guard: workspaceMutationGuard, authorize: () => requireSecurityRole('operator', 'change document collections') })
 const updateMemoryPolicy = createThreadMemoryPolicyHost({
   threads: () => store.threads,
@@ -433,9 +424,6 @@ handle('threads:setWorkspace', async (_e, input: { id: string; workspace?: Works
   }
 })
 
-// Append a single notice to a thread's timeline IN MAIN (the timeline owner) and echo it via
-// item_add. Used for things like the "Model changed to X" note, so the renderer never has to
-// round-trip its whole timeline back (which would clobber main's copy with a mid-stream snapshot).
 handle('threads:appendNotice', async (_e, { id, text }: { id: string; text: string }) => {
   requireSecurityRole('operator', 'annotate threads')
   const t = store.threads.find((t) => t.id === id)
@@ -455,8 +443,7 @@ handle('thread:compact', async (_e, id: string) => {
     const thread = store.threads.find((t) => t.id === id)
     if (!thread) throw new Error('Thread not found')
     if (thread.archivedAt) throw new Error('Restore the archived thread before compacting it.')
-    // compactThread writes back a snapshot taken before its model call, which would drop
-    // whatever a live run appended meanwhile (and can orphan tool calls).
+
     if (aborters.has(thread.id)) throw new Error('Stop the running thread before compacting it.')
     const baseProvider = store.settings.providers.find((p) => p.id === (thread.providerId ?? store.settings.activeProviderId))
     if (!baseProvider) throw new Error('Configure a provider and model first.')

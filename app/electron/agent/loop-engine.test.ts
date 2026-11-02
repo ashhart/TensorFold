@@ -6,7 +6,10 @@ import type { Verdict } from './loop-types'
 function runtime(overrides: Partial<LoopRuntime>): LoopRuntime {
   return {
     runPhase: async (phase) => ({ phase, ok: true, toolEvents: 3, toolAttempts: 3, summary: `${phase} ok`, evidenceRefs: [] }),
-    runVerification: async () => 'TEST: 3 passed',
+    runVerification: async contract => ({
+      checks: contract.verificationCommands.map(command => ({ command, outcome: 'passed', exitCode: 0, output: '3 passed' })),
+      cancelled: false,
+    }),
     critique: async () => ({ passed: true, confidence: 0.9, summary: 'ok', issues: [] }),
     checkpoint: async () => 'cp1',
     rollback: async () => {},
@@ -46,19 +49,17 @@ async function main() {
   assert.equal(r4.status, 'capped')
   assert.equal(r4.cycles, 3)
 
-  // A repeatedly text-only IMPLEMENTATION phase is reclassified as fixable evidence debt.
-  // It may not ship, but it also must not hard-fail the whole loop before verification/critique.
+  // Missing implementation evidence remains fixable but prevents completion.
   let textOnlyVerifications = 0
   const r5 = await runLoop(contract, ['dev'], runtime({
     runPhase: async (phase) => ({ phase, ok: true, toolEvents: 0, toolAttempts: 0, summary: 'claimed done', evidenceRefs: [] }),
-    runVerification: async () => { textOnlyVerifications++; return 'tests unchanged' },
+    runVerification: async c => { textOnlyVerifications++; return runtime({}).runVerification(c) },
   }))
   assert.equal(r5.status, 'capped')
   assert.equal(textOnlyVerifications, contract.maxCycles, 'every text-only cycle still reaches verification instead of hard-failing')
   assert.match(r5.lastVerdict?.issues.join('\n') ?? '', /text-only output twice/)
 
-  // The next cycle can recover by actually using tools; the first cycle's optimistic critic
-  // pass is overridden until executable evidence exists.
+  // A later cycle can recover; critic optimism cannot override missing execution evidence.
   let recoveryCalls = 0
   const r5Recovered = await runLoop({ ...contract, maxCycles: 3 }, ['dev'], runtime({
     runPhase: async (phase) => {
@@ -86,14 +87,12 @@ async function main() {
   }))
   assert.equal(r6.status, 'shipped')
 
-  // C1 regression: a dev phase that ATTEMPTED tools which all errored (toolEvents 0 but
-  // toolAttempts > 0 — e.g. a failing build) is NOT "no evidence". The guard must not fail
-  // it; the work goes to the critic (which here passes), so the loop ships rather than
-  // hard-failing on a legitimately-red build.
+  // Failed attempts retain evidence but cannot satisfy an implementation phase.
   const r7 = await runLoop(contract, ['dev'], runtime({
     runPhase: async (phase) => ({ phase, ok: false, toolEvents: 0, toolAttempts: 2, summary: 'build failed', evidenceRefs: [] }),
   }))
-  assert.equal(r7.status, 'shipped')
+  assert.equal(r7.status, 'capped')
+  assert.match(r7.lastVerdict?.issues.join('\n') ?? '', /no successful implementation evidence/)
 
   // regression verdict -> rollback invoked
   let rolledBack = false

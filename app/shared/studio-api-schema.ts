@@ -1,12 +1,14 @@
+import { GMAIL_INBOX_API_SCHEMA } from './gmail-inbox'
+import { MAIL_CONNECTIONS_API_SCHEMA } from './mail-connections'
 import { GOOGLE_WORKSPACE_API_SCHEMA } from './google-workspace-api'
 import { MODEL_BENCHMARK_API_SCHEMA } from './model-benchmark-api'
 import type { TensorFoldStudioApi } from './studio-api'
 
-// Exhaustive remote fallback policy. This is not an IPC channel allowlist.
-// Keep main-process validation and preload channel forwarding explicit.
 export const STUDIO_API_SCHEMA = {
   clusterWorkspace: 'method', clusterSaveHost: 'method', clusterRemoveHost: 'method', clusterDiscover: 'method', clusterInspectHost: 'method', clusterPlan: 'method', clusterEnsureModel: 'method', clusterActivate: 'method', clusterStop: 'method', clusterCancelJob: 'method', clusterReconcile: 'method', clusterEndpointCredentials: 'method', clusterUseEndpoint: 'method', clusterSshKey: 'method', clusterBootstrapPreview: 'method', clusterBootstrapApply: 'method',
   ...GOOGLE_WORKSPACE_API_SCHEMA,
+  ...MAIL_CONNECTIONS_API_SCHEMA,
+  ...GMAIL_INBOX_API_SCHEMA,
   ...MODEL_BENCHMARK_API_SCHEMA,
   getInputHistory: 'method', recallInputHistory: 'method', clearInputHistory: 'method', prepareMessageQuote: 'method',
   documentLibraryProcessing: 'method', documentLibraryProcess: 'method', documentLibraryReadSource: 'method',
@@ -269,6 +271,9 @@ export const STUDIO_API_SCHEMA = {
   listBrowser: 'method',
   readBrowser: 'method',
   summarizeBrowser: 'method',
+  microsoftMailBegin: 'method',
+  microsoftMailPoll: 'method',
+  microsoftMailCancel: 'method',
   imessageAccess: 'method',
   syncImessage: 'method',
   listImessage: 'method',
@@ -435,6 +440,11 @@ export const STUDIO_API_SCHEMA = {
   onTerminalStatus: 'subscription',
   onTerminalSessions: 'subscription',
   onOpenThread: 'subscription',
+  engineRuntimeStatus: 'method',
+  engineRuntimeCheck: 'method',
+  engineRuntimeInstall: 'method',
+  engineRuntimeUse: 'method',
+  engineRuntimeCancel: 'method',
   engineSnapshot: 'method',
   engineConnection: 'method',
   engineRefresh: 'method',

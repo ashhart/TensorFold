@@ -11,6 +11,7 @@ export const HEADLESS_MODE = process.argv.includes('--headless-server') || proce
 const updateProfile = privateUpdateRelaunchProfile(process.execPath, !process.env.VONTRA_HOME)
 export const isolatedElectronPathPlan = planIsolatedElectronPaths(process.env.VONTRA_HOME || updateProfile?.root)
 configureAppIdentity(app, Boolean(isolatedElectronPathPlan))
+if (process.platform === 'linux') app.setDesktopName('dev.tensorfold.studio.desktop')
 // Wayland cannot present Vulkan surfaces; disable only that feature before Electron starts GPU init.
 applyLinuxGraphics(app)
 if (isolatedElectronPathPlan) {

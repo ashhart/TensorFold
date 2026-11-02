@@ -6,12 +6,13 @@ import { assertCapability } from './scopes'
 import { GoogleApiError } from './transport'
 import { googleResourceId, responseText } from './validation'
 import { parseGoogleEvent } from './calendar'
+import { assertInboxReplyAllowed, canonicalGoogleReply } from './reply'
 
 const REVIEW_TTL = 10 * 60_000
 function digestReview(review: Omit<GoogleWorkspaceActionReview, 'digest'>): string { return createHash('sha256').update(JSON.stringify(review)).digest('hex') }
 function sameDigest(actual: string, expected: string): boolean { return /^[a-f0-9]{64}$/.test(actual) && timingSafeEqual(Buffer.from(actual), Buffer.from(expected)) }
 export class GoogleActions {
-  constructor(private readonly accounts: GoogleAccounts, private readonly now: () => number) {}
+  constructor(private readonly accounts: GoogleAccounts, private readonly now: () => number) { }
   listReviews() {
     return this.accounts.state.read(state => state.actions.filter(item => !item.result && item.review.expiresAt >= this.now() && state.accounts.some(account => account.id === item.review.accountId && account.revision === item.review.revision && account.status === 'connected')).map(item => structuredClone(item.review)))
   }
@@ -33,9 +34,10 @@ export class GoogleActions {
       return structuredClone(action.result)
     })
   }
-  async prepare(accountId: string, input: GoogleWorkspaceAction, assertAllowed?: () => void): Promise<GoogleWorkspaceActionReview> {
-    const action = validatedGoogleAction(input)
-    const account = await this.accounts.current(accountId)
+  async prepare(accountId: string, input: GoogleWorkspaceAction, assertAllowed?: () => void, revision?: number): Promise<GoogleWorkspaceActionReview> {
+    const account = await this.accounts.current(accountId, revision)
+    const bound = input?.kind === 'gmail.send' && input.email?.reply ? { ...input, email: await canonicalGoogleReply(this.accounts, accountId, account.revision, input.email) } : input
+    const action = validatedGoogleAction(bound)
     assertCapability(account.capabilities, action.kind === 'gmail.send' ? 'gmail.send' : 'calendar.write')
     let previousEvent: GoogleWorkspaceActionReview['previousEvent']
     if (action.kind === 'calendar.update' || action.kind === 'calendar.delete') {
@@ -45,12 +47,13 @@ export class GoogleActions {
       previousEvent = parseGoogleEvent(existing, action.calendarId)
       if (action.kind === 'calendar.delete') action.title = previousEvent.title || 'Untitled event'
     }
-    const content = { id: randomUUID(), accountId, accountEmail: account.email, revision: account.revision, expiresAt: this.now() + REVIEW_TTL, action, ...(previousEvent ? { previousEvent } : {}) }
+    const content = { id: randomUUID(), createdAt: this.now(), accountId, accountEmail: account.email, revision: account.revision, expiresAt: this.now() + REVIEW_TTL, action, ...(previousEvent ? { previousEvent } : {}) }
     const review = { ...content, digest: digestReview(content) }
     await this.accounts.state.transaction(state => {
       assertAllowed?.()
       const live = state.accounts.find(item => item.id === accountId)
       if (!live || live.revision !== account.revision || live.status !== 'connected') throw new Error('Google account changed. Review this operation again.')
+      if (action.kind === 'gmail.send') assertInboxReplyAllowed(state, accountId, account.revision, action.email)
       state.actions = state.actions.filter(item => item.result || item.review.expiresAt >= this.now())
       // Missing old IDs still fail closed, so definitive receipts can be pruned without allowing replay.
       while (state.actions.length >= 200) {
@@ -62,7 +65,7 @@ export class GoogleActions {
     }, assertAllowed)
     return structuredClone(review)
   }
-  /** Host-owned UI review only. Models cannot approve an action, alter its payload, or retry it. */
+  // Host-owned UI review only. Models cannot approve an action, alter its payload, or retry it.
   async execute(receipt: GoogleWorkspaceReviewedAction): Promise<GoogleWorkspaceActionResult> {
     if (!receipt || typeof receipt.digest !== 'string') throw new Error('An owner review is required.')
     const stored = await this.accounts.state.read(state => state.actions.find(item => item.review.id === receipt.id))
@@ -78,6 +81,7 @@ export class GoogleActions {
           const live = state.accounts.find(item => item.id === receipt.accountId)
           const action = state.actions.find(item => item.review.id === receipt.id)
           if (!live || live.status !== 'connected' || live.revision !== revision || revision !== receipt.revision || !action || action.review.expiresAt < this.now()) throw new Error('Google account or review changed. Review this operation again.')
+          if (review.action.kind === 'gmail.send') assertInboxReplyAllowed(state, receipt.accountId, revision, review.action.email)
           if (action.result) return action.result
           // Persist an uncertain receipt BEFORE a network call. Crashes and timeouts cannot resend it.
           action.result = { id: receipt.id, status: 'uncertain', error: 'The operation started but its outcome has not been confirmed. Check Google before preparing another action.' }
@@ -116,7 +120,15 @@ export class GoogleActions {
   }
   private send(review: GoogleWorkspaceActionReview, token: string, signal: AbortSignal): Promise<any> {
     const action = review.action
-    if (action.kind === 'gmail.send') return this.accounts.transport.json('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', token, { raw: emailMime(action.email, review.accountEmail) }, 'POST', signal)
+    if (action.kind === 'gmail.send') {
+      const authorize = () => this.accounts.state.read(state => {
+        const account = state.accounts.find(item => item.id === review.accountId && item.revision === review.revision && item.status === 'connected')
+        if (!account) throw new Error('Google account changed before dispatch.')
+        assertInboxReplyAllowed(state, review.accountId, review.revision, action.email)
+      })
+      return this.accounts.transport.json('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', token,
+        { raw: emailMime(action.email, review.accountEmail), ...(action.email.reply ? { threadId: action.email.reply.threadId } : {}) }, 'POST', signal, {}, authorize)
+    }
     const calendar = googleResourceId(action.calendarId, 'calendar ID')
     const endpoint = `https://www.googleapis.com/calendar/v3/calendars/${calendar}/events`
     if (action.kind === 'calendar.create') return this.accounts.transport.json(`${endpoint}?sendUpdates=${action.event.sendUpdates}`, token, googleEventBody(action.event), 'POST', signal)

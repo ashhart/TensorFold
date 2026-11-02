@@ -1,4 +1,5 @@
 import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { openAskTensorFold } from '../lib/quick-ask-launch'
 import { localExecutionSource } from '../lib/bot-labels'
 import { useStore } from '../lib/store'
 import { Icon } from '../lib/icons'
@@ -59,6 +60,7 @@ export function TitleBar({ simple = false }: { simple?: boolean }) {
       </div>
 
       <div className="no-drag flex items-center gap-1">
+        {typeof window !== 'undefined' && window.tensorfoldQuickAskLauncher && <button className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-ink-3 hover:bg-surface-hover hover:text-ink" onClick={openAskTensorFold}><Icon name="spark" size={13} />{tx('Ask TF')}</button>}
         <FullLayoutSwitch />
         {/* Paired session (VST-035): this renderer is a browser driving a TensorFold host over
             /v1 — always visible so limited surfaces are never mistaken for broken ones. */}

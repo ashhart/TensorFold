@@ -1,3 +1,4 @@
+import { blueBubblesChats, blueBubblesIdentity } from '../../agent/bluebubbles-connector'
 import path from 'node:path'
 import { connectorSourceBinding } from '../../agent/connector-source-binding'
 import { createHash } from 'node:crypto'
@@ -6,7 +7,7 @@ import type { Automation, AutomationSourceScope, ConnectorEvent, Settings } from
 import { isWhatsAppEventInCurrentScope } from '../../../shared/whatsapp-event-scope'
 import { parseThreadAddress } from '../../agent/thread-address'
 
-/** Validate an exact account scope against current host state, never a display label. */
+// Validate an exact account scope against current host state, never a display label.
 export function assertRoutineSources(automation: Automation, settings: Settings): void {
   if (!automation.routineKind && !automation.botId && !automation.sourceScope) return
   if (!automation.routineKind || automation.mode !== 'chat' || !automation.botId || !automation.providerId || !automation.model || !Array.isArray(automation.sourceScope)) throw new Error('Repair this routine’s saved bot, model and explicit source scope before running it.')
@@ -49,14 +50,16 @@ function canonicalBrowserUrl(raw: unknown): string | null {
   try { const url = new URL(raw); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null } catch { return null }
 }
 
-/** Cached messages must still belong to the current conversation grant. Cached labels
- * cannot resolve a name/alias grant to a different protocol ID; absent bindings fail closed. */
 export function isRoutineEventInCurrentSourceScope(event: ConnectorEvent, scope: AutomationSourceScope, settings: Settings): boolean {
   if (event.connectorId !== scope.connectorId || typeof event.threadKey !== 'string') return false
   const payload = event.payload ?? {}
   if (scope.connectorId === 'whatsapp') return isWhatsAppEventInCurrentScope(event, settings.whatsapp.sources) && event.threadKey.startsWith(`whatsapp:${scope.sourceId}:`)
   if (scope.connectorId === 'imessage') {
     if (scope.sourceId !== 'imessage' || !settings.imessage.enabled || !event.threadKey.startsWith('imessage:')) return false
+    if (settings.imessage.transport === 'bluebubbles') {
+      const address = parseThreadAddress(event.threadKey)
+      try { return address?.account === `bb-${blueBubblesIdentity(settings.imessage)}` && blueBubblesChats(settings.imessage).includes(address.conversation) && payload.chat === address.conversation } catch { return false }
+    }
     const conversation = event.threadKey.slice('imessage:'.length)
     const handle = typeof payload.handle === 'string' ? payload.handle : ''
     const chat = typeof payload.chat === 'string' ? payload.chat : ''
@@ -102,7 +105,7 @@ export function isRoutineEventInCurrentSourceScope(event: ConnectorEvent, scope:
     if (scope.connectorId === 'docs') return ['file','dir'].includes(source.kind) && isSelectedLocalPath(source.path, ref.path, source.kind === 'dir')
     if (scope.connectorId === 'calendar') return ['ics_file','ics_dir'].includes(source.kind) && isSelectedLocalPath(source.path, ref.path, source.kind === 'ics_dir')
     if (scope.connectorId === 'email') {
-      if (source.kind === 'imap' || source.kind === 'outlook_local') return ref.sourceRevision === connectorSourceBinding(source) && typeof ref.path === 'string'
+      if (source.kind === 'imap' || source.kind === 'outlook_local' || source.kind === 'microsoft_graph') return ref.sourceRevision === connectorSourceBinding(source) && typeof ref.path === 'string'
       return ['eml_dir','maildir'].includes(source.kind) && isSelectedLocalPath(source.path, ref.path, true)
     }
     if (scope.connectorId === 'browser') {
@@ -139,13 +142,12 @@ export function personalRoutinePrompt(automation: Automation, settings: Settings
     if (used + size > max) break
     items.push(item); used += size
   }
-  // Source material is quoted data. No tools, files, global chat recall, host digest
-  // or automatic delivery are offered; proposed outward messages need owner review.
+
   return `${prefix}Context coverage: ${items.length} of ${selected.length} current selected-source items included; ${selected.length - items.length} older items omitted.\n${JSON.stringify(items)}`
 
 }
 
-/** Capture consent/identity without retaining credentials in prompts or evidence. */
+// Capture consent/identity without retaining credentials in prompts or evidence.
 export function routineSourceRevision(automation: Automation, settings: Settings): string {
   const scoped = (automation.sourceScope ?? []).map(scope => {
     if (scope.connectorId === 'telegram') return { ...scope, enabled: settings.botControl.telegram.enabled, chats: settings.botControl.telegram.allowedChatIds, token: settings.botControl.telegram.botToken }

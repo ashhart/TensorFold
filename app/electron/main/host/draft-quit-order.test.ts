@@ -5,7 +5,7 @@ import ts from 'typescript'
 
 // Execute the production callbacks with inert lifecycle collaborators. Importing
 // main-app would launch Electron; AST extraction keeps this seam isolated.
-const file = path.join(process.cwd(), 'electron/main-app.ts')
+const file = path.join(process.cwd(), 'electron/main/composition/shutdown.ts')
 const tree = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true)
 function find(predicate: (node: ts.Node) => boolean): ts.Node {
   let result: ts.Node | undefined
@@ -52,7 +52,7 @@ assert.deepEqual(log.filter((entry) => gates.includes(entry)), gates)
 assert.ok(log.indexOf('drafts') < log.indexOf('dispose-desktop'))
 assert.ok(log.includes('stop-ocr') && log.includes('stop-engine'))
 let released = 0
-const resumeFixture = new Function('store', 'userQuestions', 'phones', 'botVms', 'resumeDocumentLibrary', 'resumeModelQualifications', 'resumeModelHelpers', 'release', `
+const resumeFixture = new Function('store', 'userQuestions', 'phones', 'botVms', 'resumeDocumentLibrary', 'resumeModelQualifications', 'resumeModelHelpers', 'release', 'resumeQuickAsk', `
 let documentQuitSettled = true, draftQuitSettled = true, questionQuitSettled = true, phoneQuitSettled = true, botVmQuitSettled = true;
 let quitAdmissionPause = { release };
 ${resume}
@@ -60,7 +60,8 @@ resumeAfterFailedQuit();
 return { documentQuitSettled, draftQuitSettled, questionQuitSettled, phoneQuitSettled, botVmQuitSettled, quitAdmissionPause };
 `)
 log = []; enabled = false
-const flags = resumeFixture(store, { resume: teardown('resume-questions') }, { service: { resume: teardown('resume-phone') } }, { resume: teardown('resume-vm') }, teardown('resume-documents'), teardown('resume-qualifications'), teardown('resume-helpers'), () => { released++ })
+const flags = resumeFixture(store, { resume: teardown('resume-questions') }, { service: { resume: teardown('resume-phone') } }, { resume: teardown('resume-vm') }, teardown('resume-documents'), teardown('resume-qualifications'), teardown('resume-helpers'), () => { released++ }, teardown('resume-quick-ask'))
+assert.ok(log.includes('resume-quick-ask'), 'A failed Quit restores Quick Ask admission and input')
 assert.equal(enabled, true, 'a failed Quit restores native input')
 assert.deepEqual(flags, { documentQuitSettled: false, draftQuitSettled: false, questionQuitSettled: false, phoneQuitSettled: false, botVmQuitSettled: false, quitAdmissionPause: null })
 assert.equal(released, 1)

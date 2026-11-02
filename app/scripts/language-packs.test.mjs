@@ -7,7 +7,7 @@ const root = process.cwd(), packRoot = path.join(root, 'src/lib/preferences/pack
 const sourceKeys = readdirSync(sourceRoot).filter(file => file.endsWith('.json')).flatMap(file => JSON.parse(readFileSync(path.join(sourceRoot, file), 'utf8')))
 assert.equal(new Set(sourceKeys).size, sourceKeys.length, 'English source fragments cannot hide duplicates')
 const sourceSet = new Set(sourceKeys), token = text => [...text.matchAll(/\{([a-zA-Z][a-zA-Z0-9_]*)\}/g)].map(value => value[1]).sort()
-const requiredLocales = ['zh-Hans', 'zh-Hant', 'ja', 'ko', 'ru', 'pl', 'la', 'es', 'hi', 'th', 'vi', 'id']
+const requiredLocales = ['zh-Hans', 'zh-Hant', 'ja', 'ko', 'ru', 'pl', 'la', 'es', 'pt', 'hi', 'th', 'vi', 'id']
 for (const locale of requiredLocales) {
   const entries = new Map(), dir = path.join(packRoot, locale), files = readdirSync(dir).filter(file => file.endsWith('.json'))
   for (const file of files) {
@@ -20,6 +20,10 @@ for (const locale of requiredLocales) {
       assert.equal(typeof value, 'string'); assert.ok(value.trim())
       assert.doesNotMatch(value, /[\u0000\u202a-\u202e\u2066-\u2069]/u, 'Pack text cannot smuggle bidi controls; isolate dynamic values at formatting time')
       assert.deepEqual(token(value), token(key), `Placeholder parity in ${locale}: ${key}`)
+      if (locale === 'pt') {
+        const literals = key.match(/`[^`]+`|https?:\/\/[^\s<>]+|(?<!\w)--[a-zA-Z][\w-]*|x-vontra-[a-z-]+|\b[\w-]+\.(?:cpp|json|yml|yaml|toml|md|db|exe|dll|py|js|tsx?)\b/g) ?? []
+        for (const literal of literals) assert.ok(value.includes(literal), `Portuguese preserves code and protocol literals: ${literal}`)
+      }
       entries.set(key, value)
     }
   }

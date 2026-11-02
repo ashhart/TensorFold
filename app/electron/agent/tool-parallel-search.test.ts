@@ -7,10 +7,12 @@ import ts from 'typescript'
 import { executeTool, TOOL_SCHEMAS } from './tools'
 import { runAgent } from './loop'
 import type { Thread } from './types'
+import { installDnsFixture } from './test-fixtures/dns'
 
 const endpoint = 'https://search.parallel.ai/mcp'
 const publicPage = 'https://93.184.216.34/article'
 const originalFetch = globalThis.fetch
+const restoreDns = installDnsFixture({ 'news.google.com': '8.8.8.8' })
 const requests: Array<{ body: any; headers: Headers }> = []
 let fault = ''
 let httpSessions = 0
@@ -185,6 +187,7 @@ try {
   console.log('Parallel caller checks passed: dispatch, scripted loop consumption, discovery, JSON/SSE, identity, permissions, errors, timeout and cancellation.')
 } finally {
   globalThis.fetch = originalFetch
+  restoreDns()
   delete process.env.PARALLEL_API_KEY
   mock.timers.reset()
 }

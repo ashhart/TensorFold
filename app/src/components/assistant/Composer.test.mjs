@@ -8,7 +8,9 @@ const taskContext = await jiti.import('./task-context.ts')
 // Locale subscription is isolated; separate actual-hook tests cover language changes and state.
 const { Composer } = load('src/components/assistant/Composer.tsx', {
   'react/jsx-runtime': jsx, '../composer/DraftSaveIndicator': { DraftSaveIndicator: 'draft-indicator' },
+  '../composer/DraftPersistenceNotice': { DraftPersistenceNotice: 'draft-notice', isSessionOnlyDraftNotice: () => false },
   '../ui': { Button: 'button' }, './task-context': taskContext, '../../lib/composer-keyboard': keyboard,
+  './mappings': { sourceName: () => 'Email' },
 })
 
 // Exercise the actual textarea handler, rather than a copied keyboard predicate.
@@ -54,6 +56,12 @@ assert.deepEqual(reply.result(), { sent: 1, started: 0, prevented: 1 })
 const task = input({ canDirectReply: false })
 task.key()
 assert.equal(task.result().started, 1)
+const explicitTask = input({ canDirectReply: true, intent: 'task' })
+explicitTask.key()
+assert.deepEqual(explicitTask.result(), { sent: 0, started: 1, prevented: 1 }, 'A task suggestion in a reply-capable conversation must never send to the contact')
+const explicitReply = input({ canDirectReply: true, intent: 'reply' })
+explicitReply.key()
+assert.deepEqual(explicitReply.result(), { sent: 1, started: 0, prevented: 1 })
 const hydrating = input({ draftReady: false })
 hydrating.key()
 assert.equal(hydrating.result().sent, 0, 'A different conversation cannot submit before its own draft hydrates')

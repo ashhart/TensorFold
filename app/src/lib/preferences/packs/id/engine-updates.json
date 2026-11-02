@@ -1,0 +1,15 @@
+{
+  "Engine updates": "Pembaruan mesin",
+  "bundled": "bawaan",
+  "Checking installed runtime…": "Memeriksa runtime yang terpasang…",
+  "Check for engine updates": "Periksa pembaruan mesin",
+  "Update the local engine without reinstalling the app. Finish local work before switching. Models and conversations stay in place.": "Perbarui mesin lokal tanpa menginstal ulang aplikasi. Selesaikan pekerjaan lokal sebelum beralih. Model dan percakapan tetap tersimpan.",
+  "No compatible engine updates are available for this device.": "Tidak ada pembaruan mesin yang kompatibel untuk perangkat ini.",
+  "Use this runtime": "Gunakan runtime ini",
+  "Use bundled engine": "Gunakan mesin bawaan",
+  "Checking signed releases…": "Memeriksa rilis bertanda tangan…",
+  "Switching runtime…": "Beralih runtime…",
+  "Ready locally": "Siap secara lokal",
+  "memory on this computer.": "memori di komputer ini.",
+  "Prevent sleep while this option is enabled.": "Cegah mode tidur selama opsi ini diaktifkan."
+}

@@ -24,7 +24,7 @@ try {
   })
   state.audit = async () => { audits++ }
   const set = (enabled) => state.handlers.get('engine:setCortheon')({}, enabled)
-  await assert.rejects(() => set(true), /temporarily disabled in this beta/)
+  await assert.rejects(() => set(true), /temporarily disabled/)
   assert.deepEqual(calls, [], 'an old renderer cannot reach the service enable API')
   assert.equal(audits, 0, 'release refusal happens before asynchronous audit or operation admission')
   assert.equal(reserved, 0)
@@ -36,7 +36,7 @@ try {
   assert.equal(reserved, released)
   // Execute the actual main-app callback rather than a second copy of its policy.
   const ts = require('typescript')
-  const main = await fs.readFile(path.join(root, 'electron/main-app.ts'), 'utf8')
+  const main = await fs.readFile(path.join(root, 'electron/main/composition/device-services.ts'), 'utf8')
   const tree = ts.createSourceFile('main-app.ts', main, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
   let callback
   const visit = (node) => {

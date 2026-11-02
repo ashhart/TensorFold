@@ -1,12 +1,10 @@
-// Loop Mode — the runtime bridge. Turns injected app primitives (spawn a role
-// thread, run shell, call the critic model, git checkpoint) into the LoopRuntime
-// interface the pure engine consumes. Decoupled via deps so it stays testable;
-// the real deps are provided by the main-process loop host.
+// Adapt host operations into observed phase, verification, and critic results.
 
-import type { LoopPhaseId, RunContract } from './loop-types'
+import type { LoopPhaseId, LoopShellResult, RunContract, VerificationCheck } from './loop-types'
 import type { LoopRuntime } from './loop-engine'
 import { roleSystemPrompt, phaseResultFromTimeline } from './loop-runtime-support'
 import { buildCriticPrompt, parseVerdict } from './loop-critic'
+import { verificationCheck, verificationError } from './loop-verification'
 
 export interface RoleTimelineItem {
   kind: string
@@ -26,12 +24,12 @@ export interface LoopRuntimeDeps {
   workerModel: LoopModelRef
   criticModel: LoopModelRef
   createRoleThread(opts: { cwd: string; projectId?: string | null; providerId: string; model: string; systemPrompt: string; kind: 'task' | 'chat' }): Promise<{ id: string }>
-  /** Run a role's thread to completion with `instruction`; resolve with the new timeline items.
-   *  `phase` lets the host enforce role boundaries (read-only planning roles run without write access). */
+  // Phase identity lets the host enforce role-specific write permissions.
   runRoleThread(threadId: string, instruction: string, phase?: LoopPhaseId): Promise<RoleTimelineItem[]>
   cleanupThread(threadId: string): Promise<void>
-  runShell(cwd: string, command: string): Promise<{ code: number; stdout: string; stderr: string }>
-  /** Call the (independent) critic model and return its raw text. */
+  runShell(cwd: string, command: string): Promise<LoopShellResult>
+  isCancelled?(): boolean
+  // The independent critic returns text; execution results retain separate authority.
   runCritic(system: string, user: string, model: LoopModelRef): Promise<string>
   checkpoint(cycle: number): Promise<string>
   rollback(): Promise<void>
@@ -61,13 +59,17 @@ export function createLoopRuntime(contract: RunContract, deps: LoopRuntimeDeps):
       }
     },
     async runVerification(c) {
-      if (!c.verificationCommands.length) return '(no verification commands configured)'
-      const out: string[] = []
+      const checks: VerificationCheck[] = []
       for (const cmd of c.verificationCommands) {
-        const r = await deps.runShell(deps.cwd, cmd)
-        out.push(`$ ${cmd}\n[exit ${r.code}]\n${(r.stdout + r.stderr).slice(-3000)}`)
+        if (deps.isCancelled?.()) return { checks, cancelled: true }
+        try {
+          checks.push(verificationCheck(cmd, await deps.runShell(deps.cwd, cmd)))
+        } catch (error) {
+          checks.push(verificationError(cmd, error))
+        }
+        if (checks.at(-1)?.outcome === 'cancelled') return { checks, cancelled: true }
       }
-      return out.join('\n\n')
+      return { checks, cancelled: deps.isCancelled?.() === true }
     },
     async critique(c, evidence) {
       const { system, user } = buildCriticPrompt(c, evidence, '')
@@ -76,6 +78,7 @@ export function createLoopRuntime(contract: RunContract, deps: LoopRuntimeDeps):
     },
     checkpoint: (cycle) => deps.checkpoint(cycle),
     rollback: () => deps.rollback(),
+    isCancelled: () => deps.isCancelled?.() === true,
     log: (line) => deps.emit(line),
   }
 }

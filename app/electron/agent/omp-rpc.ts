@@ -1,21 +1,7 @@
-// OMP RPC transport (VST-050): speak the headless embedding protocol of the installed
-// `omp` coding agent (@oh-my-pi/pi-coding-agent). Wire facts taken from the INSTALLED
-// package source (src/modes/rpc/*) plus a live rpc-mode probe on this machine — not from
-// memory:
-// - `omp --mode=rpc` reads newline-delimited JSON commands on stdin and writes
-//   newline-delimited JSON frames on stdout: `ready`, id-correlated `response` frames,
-//   streamed AgentSessionEvent objects, and `rpc_chunk` frames that split one large
-//   payload across several lines ({chunkId,index,count,data} — concat data in index
-//   order, then JSON.parse).
-// - Framing is STRICT LF-delimited JSONL (same family as the pi engine, VST-033):
-//   stdout is split manually on \n only — readline also splits on U+2028/U+2029, which
-//   are valid inside JSON strings.
-// - stdin EOF lets the process exit cleanly; abort falls back to the managed
-//   terminateChildProcess lifecycle.
-// - Commands larger than maxFrameBytes must be length-prefixed; we never send frames
-//   that big (prompts carry file URIs, not file bodies) and refuse instead.
 
-import { spawn, type ChildProcess } from 'node:child_process'
+
+import type { ChildProcess } from 'node:child_process'
+import { spawnCliProcess as spawn } from './cli-process'
 import { resolveCliBinary } from './cli-path'
 import { cliSpawnEnv } from './cli-spawn-env'
 import { detachedProcessGroup, terminateChildProcess } from './child-process-lifecycle'
@@ -45,7 +31,7 @@ interface PendingChunk {
   parts: Map<number, string>
 }
 
-/** Reassembles rpc_chunk payloads into parsed frames. Pure; returns null while incomplete. */
+// Reassembles rpc_chunk payloads into parsed frames. Pure; returns null while incomplete.
 export function reassembleRpcChunks(chunks: Array<{ chunkId: string; index: number; count: number; data: string }>): { complete: Array<{ chunkId: string; frame: unknown }>; pending: number } {
   const byId = new Map<string, PendingChunk>()
   for (const chunk of chunks) {
@@ -74,14 +60,14 @@ export interface OmpRpcClientOptions {
   env?: Record<string, string>
   signal?: AbortSignal
   silenceTimeoutMs?: number
-  /** Test seam: inject a pre-spawned child. */
+  // Test seam: inject a pre-spawned child.
   child?: ChildProcess
 }
 
 export class OmpRpcClient {
   readonly child: ChildProcess
   readonly ready: Promise<OmpReadyFrame>
-  /** Resolves when the process exits — lets callers stop waiting for events that will never come. */
+  // Resolves when the process exits — lets callers stop waiting for events that will never come.
   readonly exited: Promise<void>
   private readonly pending = new Map<string, { resolve: (value: OmpResponseFrame) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   private readonly eventListeners = new Set<(event: OmpSessionEvent) => void>()
@@ -122,8 +108,7 @@ export class OmpRpcClient {
         maxReassembledFrameBytes: Number(event.maxReassembledFrameBytes ?? 8_388_608),
       })
     }
-    // These stay attached for the child's whole life (an unhandled 'error' event on a
-    // ChildProcess throws); they only act before ready settles.
+
     const onSpawnError = (error: Error) => { failReady?.(error); settleReady = undefined; failReady = undefined }
     const onEarlyExit = (code: number | null) => { onSpawnError(new Error(`omp rpc process exited before ready (code ${code ?? 'unknown'}).`)) }
     this.eventListeners.add(readyListener)
@@ -183,7 +168,7 @@ export class OmpRpcClient {
     }
     this.pending.clear()
     // stdin EOF is the clean shutdown path; force-kill only if the child lingers.
-    try { this.stdin.end() } catch { /* already closed */ }
+    try { this.stdin.end() } catch {  }
     const child = this.child
     setTimeout(() => { terminateChildProcess(child) }, 1_500).unref?.()
   }
@@ -244,11 +229,10 @@ export class OmpRpcClient {
       return
     }
     if (record.type === 'prompt_result' || record.type === 'ready') {
-      // prompt_result is a streaming-side frame (agent_invoked echo); `ready` is consumed
-      // by the ready promise's listener through the normal event path.
+
     }
     for (const listener of [...this.eventListeners]) {
-      try { listener(record as OmpSessionEvent) } catch { /* listener isolation */ }
+      try { listener(record as OmpSessionEvent) } catch {  }
     }
   }
 
@@ -263,7 +247,7 @@ export class OmpRpcClient {
   }
 }
 
-/** Locates the omp binary: explicit path, then known bin dirs, then bare name. */
+// Locates the omp binary: explicit path, then known bin dirs, then bare name.
 export function discoverOmpBinary(explicit?: string | null): string {
   return resolveCliBinary(explicit ?? undefined, ['omp'])
 }

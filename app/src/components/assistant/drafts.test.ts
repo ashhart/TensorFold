@@ -33,7 +33,7 @@ assert.equal(restarted.get(a).text, 'Assistant draft A'); assert.equal(restarted
 
 const source = readFileSync(path.join(process.cwd(), 'src/components/Assistant.tsx'), 'utf8')
 const tree = ts.createSourceFile('Assistant.tsx', source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
-function action(name: string, dependencies: Record<string, unknown>): () => Promise<void> {
+function action(name: string, dependencies: Record<string, unknown>): (...args: any[]) => any {
   let expression: ts.Expression | null = null
   const visit = (node: ts.Node) => { if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name && node.initializer) expression = node.initializer; ts.forEachChild(node, visit) }
   visit(tree); assert.ok(expression, `Actual ${name} action exists`)
@@ -45,11 +45,12 @@ const facade = { ready: true, capture: () => drafts.capture(a), clearAccepted: (
 let sends = 0, launches = 0, notices: string[] = [], accepted = false, confirmation = true
 let finish!: (value: any) => void
 const dependencies = () => ({
+  gmailBinding: null,
   taskText: drafts.get(a).text, draft: facade, selectedItem: { from: 'Example contact', source: 'email', threadKey: 'email:example' },
   selectedSource: 'email', selectedEvent: eventA, filteredItems: [], snapshot: { briefing: '' }, settings,
-  actionPending: { current: false }, setSendingReply: () => {}, setTaskBusy: () => {}, setNotice: (value: string) => notices.push(value), sourceName: () => 'Email', confirm: () => confirmation,
+  actionPending: { current: false }, setSendingReply: () => { }, setTaskBusy: () => { }, setNotice: (value: string) => notices.push(value), sourceName: () => 'Email', confirm: () => confirmation,
   api: { replyToThread: async () => { sends++; return new Promise((resolve) => { finish = resolve }) }, readEmailThread: async () => ({}) },
-  refresh: async () => {}, resolveAssistantModel: () => ({ providerId: 'synthetic-provider', providerAccountId: null, model: 'synthetic-model' }), assistantTaskContext: () => 'Synthetic context', emailThreadContext: () => 'Synthetic thread context',
+  refresh: async () => { }, resolveAssistantModel: () => ({ providerId: 'synthetic-provider', providerAccountId: null, model: 'synthetic-model' }), assistantTaskContext: () => 'Synthetic context', emailThreadContext: () => 'Synthetic thread context',
   launch: async () => { launches++; return { ok: accepted, error: 'Synthetic launch refused' } },
 })
 confirmation = false
@@ -70,5 +71,16 @@ await drafts.flushAll()
 assert.equal((await persistence.readComposerDraft(a)).text, '', 'Actual accepted launch clears only its captured durable revision')
 assert.equal((await persistence.readComposerDraft(b)).text, 'New B while A sends')
 assert.equal(launches, 2)
+let suggestion = 'An unfinished reply', intent = 'reply'
+const suggest = (accept: boolean) => action('draftTask', {
+  draft: { ready: true }, taskText: suggestion, confirm: () => accept, composerRef: { current: null },
+  setTaskText: (value: string) => { suggestion = value }, setComposerIntent: (value: string) => { intent = value }, setNotice() { },
+})
+assert.equal(suggest(false)('Summarize this conversation'), false)
+assert.equal(suggestion, 'An unfinished reply', 'Cancelling a suggestion replacement preserves the original draft')
+assert.equal(intent, 'reply')
+assert.equal(suggest(true)('Summarize this conversation'), true)
+assert.equal(intent, 'task', 'Suggested work selects assistant intent instead of an external reply')
+assert.equal(suggestion, 'Summarize this conversation')
 drafts.dispose(); restarted.dispose()
 console.log('Actual Assistant reply/launch actions preserve account-scoped protected drafts across navigation, restart, confirmation, failure and newer typing')

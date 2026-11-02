@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -19,10 +19,12 @@ const fetchFixture: typeof fetch = async (url, options) => {
   return new Response(new Uint8Array(payload), { headers: { 'content-length': String(payload.length) } })
 }
 
+const workerEvents = new EventEmitter()
+const nextWorkerInput = () => once(workerEvents, 'posted', { signal: AbortSignal.timeout(5_000) })
 class FakeWorker extends EventEmitter {
   terminated = false
   input: unknown
-  postMessage(input: unknown) { this.input = input }
+  postMessage(input: unknown) { this.input = input; workerEvents.emit('posted', this) }
   terminate() { this.terminated = true; return Promise.resolve(0) }
 }
 
@@ -46,20 +48,21 @@ try {
   const offline = new KokoroService({ root, workerFile: 'test-worker.js', assets, fetchImpl: async () => { throw new Error('Network is offline') }, makeWorker: () => { fake = new FakeWorker(); return fake as unknown as Worker } })
   assert.equal((await offline.status()).state, 'ready', 'a fresh process must recognize verified files offline')
   assert.equal((await offline.install()).state, 'ready', 'a ready offline installation must not fetch anything')
+  const initialInput = nextWorkerInput()
   const synthesis = offline.synthesize({ text: 'Private local speech', requestId: 'read-one', voice: 'af_bella', rate: 100 })
-  await new Promise((resolve) => setTimeout(resolve, 15))
+  await initialInput
   assert.equal((fake!.input as { rate: number }).rate, 2.5)
   assert.equal(offline.cancelSpeech('another-read'), false)
   assert.equal(offline.cancelSpeech('read-one'), true)
   assert.equal((await synthesis).ok, false)
   assert.ok(fake!.terminated, 'Stop must terminate the inference worker')
 
+  const firstInput = nextWorkerInput()
   const firstRead = offline.synthesize({ text: 'First request', requestId: 'reused-id' })
-  await new Promise((resolve) => setTimeout(resolve, 5))
-  const oldWorker = fake!
+  const [oldWorker] = await firstInput
+  const secondInput = nextWorkerInput()
   const secondRead = offline.synthesize({ text: 'Second request', requestId: 'reused-id' })
-  await new Promise((resolve) => setTimeout(resolve, 5))
-  const newWorker = fake!
+  const [newWorker] = await secondInput
   assert.equal((await firstRead).ok, false)
   oldWorker.emit('exit', 1)
   newWorker.emit('message', { requestId: 'reused-id', ok: true, audioBase64: 'UklGRg==', mimeType: 'audio/wav' })
