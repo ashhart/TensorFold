@@ -15,14 +15,14 @@ const Stream = stream_.Stream;
 const Plan = grouped.Plan;
 const Affine3Experts = @import("experts3.zig").Affine3Experts;
 
-pub const Format = enum { affine4, affine3, fp8g, nvfp4, exl3, iq2xxs };
+pub const Format = enum { affine4, affine3, fp8g, nvfp4, nvfp4_csf0, exl3, iq2xxs };
 
 /// One layer's experts on the device as each format's make() lays them out; a family stacks its shared ones last.
 pub const Layer = struct {
     format: Format,
     exl3: ?@import("exl3_experts.zig").Layer = null,
-    up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]; iq2xxs [E][NI/16][D/256][1056] bytes (ggml.zig)
-    down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]; iq2xxs [E][D/16][NI/256][1056]
+    up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]; nvfp4_csf0 [E][NI/32] blocks (experts32.zig); iq2xxs [E][NI/16][D/256][1056] bytes (ggml.zig)
+    down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]; nvfp4_csf0 [E][D/32] blocks; iq2xxs [E][D/16][NI/256][1056]
     up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2] global scales; affine4's are in the blocks
     down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]
     width: usize, // NI
@@ -49,6 +49,7 @@ pub const Grouped = struct {
     affine3: ?*const Affine3Experts = null,
     fp8g: ?*const Fp8Experts = null,
     nvfp4: ?*const Nvfp4Experts = null,
+    nvfp4_csf0: ?*const @import("experts32.zig").Nvfp4b32Experts = null,
     iq2xxs: ?*const Iq2xxsExperts = null,
 
     /// Decode rows: `items` bounds the plan's items (grouped.maxItems at tile 16); `skip` an expert left out, or -1.
@@ -72,6 +73,7 @@ pub const Grouped = struct {
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, false, out, items, skip),
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
+            .nvfp4_csf0 => return (g.nvfp4_csf0 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
             .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, false, epi, in, l, p, out, items, skip),
         }
     }
@@ -97,6 +99,7 @@ pub const Grouped = struct {
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, true, out, items, skip),
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
+            .nvfp4_csf0 => return (g.nvfp4_csf0 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
             .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, true, epi, in, l, p, out, items, skip),
         }
     }
@@ -105,7 +108,7 @@ pub const Grouped = struct {
 /// Pairs a prompt item holds, per format (the Python engines' prompt tiles).
 pub fn promptTile(f: Format) usize {
     return switch (f) {
-        .affine4, .affine3, .fp8g, .nvfp4, .exl3, .iq2xxs => 64,
+        .affine4, .affine3, .fp8g, .nvfp4, .nvfp4_csf0, .exl3, .iq2xxs => 64,
     };
 }
 
@@ -467,7 +470,7 @@ pub const Nvfp4Experts = struct {
     }
 
     /// Where input 16h + 4t + q of a lane's word sits: nibble 2h + q/2 + 4(q%2) (fp4pair's field order).
-    fn slot(h: usize, q: usize) u5 {
+    pub fn slot(h: usize, q: usize) u5 {
         return @intCast(4 * (2 * h + q / 2 + 4 * (q % 2)));
     }
 
@@ -590,11 +593,4 @@ test "a format that is not loaded, or an option it was not built with, is refuse
     try std.testing.expectError(error.EpilogueNotBuilt, h.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
     try std.testing.expectError(error.EpilogueNotBuilt, h.prompt(s, .down_f32, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
     try std.testing.expectError(error.OptionNotBuilt, h.decode(s, .up, .{ .x = 0, .stride = 64 }, la, p, 0, 1, 3));
-}
-
-test "NVFP4 decode CTA geometry is explicit, bounded and defaults to four warps" {
-    try std.testing.expectEqual(@as(usize, 4), try Nvfp4Experts.decodeWarps(null));
-    try std.testing.expectEqual(@as(usize, 1), try Nvfp4Experts.decodeWarps("1"));
-    try std.testing.expectEqual(@as(usize, 4), try Nvfp4Experts.decodeWarps("4"));
-    for ([_][]const u8{ "0", "2", "8", "", "garbage" }) |v| try std.testing.expectError(error.BadExpertWarps, Nvfp4Experts.decodeWarps(v));
 }
