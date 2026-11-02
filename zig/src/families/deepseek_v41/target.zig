@@ -41,6 +41,7 @@ pub const GpuTarget = struct {
     /// a tree window's masks (its rows') while the resolver runs its chains
     tree_masks: []const u32 = &.{},
     tree_rows: usize = 0,
+    masked_trees: u64 = 0, // tree windows with a row the grammar narrows (the tree log line)
     /// draft trees (`parents`): resolved as chain windows on the slot (draft/branches.zig), the last one kept by path
     tree: branches.Resolver = .{},
     /// the DSpark pass the lanes drive: with `.verify`, the prefilled tail's taps go to it before the first window
@@ -324,6 +325,7 @@ pub const GpuTarget = struct {
             t.tree_masks = s.masks;
             t.tree_rows = s.tokens.len;
             defer t.tree_masks = &.{};
+            defer t.noteTree(!gg.allowsAll(s.masks)); // a row the grammar narrows (empty masks allow all)
             return t.tree.window(.{ .ptr = t, .vtable = &chains }, s, choices[0]);
         }
         t.tree.clear();
@@ -452,6 +454,14 @@ pub const GpuTarget = struct {
         const masks = try t.chainMasks(tokens.len);
         defer t.f.gpa.free(masks);
         return window(p, &.{.{ .slot = slot, .start = start, .tokens = tokens, .parents = null, .draws = draws, .sampling = sampling, .masks = masks }}, &one);
+    }
+
+    /// TF_DSV41_TREE: the tree windows so far, logged at the first, the first under a grammar and every 256th.
+    fn noteTree(t: *GpuTarget, masked: bool) void {
+        t.masked_trees += @intFromBool(masked);
+        const st = t.tree.stats;
+        if (st.trees != 1 and st.trees % 256 != 0 and !(masked and t.masked_trees == 1)) return;
+        std.log.scoped(.dsv41).info("tree windows: {d} ({d} under a grammar), {d} chains, {d} rows run again", .{ st.trees, t.masked_trees, st.chains, st.rerun_rows });
     }
 
     /// A tree chain's bits: chain row i takes the tree row the resolver put there (empty without a grammar).
