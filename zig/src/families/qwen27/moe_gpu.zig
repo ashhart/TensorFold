@@ -179,7 +179,7 @@ pub const Kernels = struct {
             enc2.setBuffer(f.get(.order).buffer, 0, 3);
             enc2.setBuffer(f.get(.sorted_weights).buffer, 0, 4);
             enc2.setValue(SortArgs{ .slots = @intCast(slots), .experts = @intCast(experts) }, 5); // the shared slots skipped
-            enc2.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+            enc2.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of((experts + 31) / 32 * 32, 1, 1)); // a thread an expert
             enc2.barrier();
             enc2.setPipeline(k.gather);
             enc2.setBuffer(f.get(.input).buffer, 0, 0);

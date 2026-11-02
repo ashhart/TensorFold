@@ -111,7 +111,7 @@ pub const Sort = struct {
         p.e.setBuffer(t.ins[1].buf, t.ins[1].off, 1);
         for (t.outs, 2..) |r, i| p.e.setBuffer(r.buf, r.off, i);
         p.e.setValue(SortArgs{ .slots = @intCast(t.picks.len), .experts = route_experts }, 5);
-        p.e.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+        p.e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(route_experts, 1, 1)); // a thread an expert, as served
         try t.rig.finish(p);
     }
 
