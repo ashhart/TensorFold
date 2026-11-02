@@ -229,3 +229,23 @@ test "check, status and serve fail when a model cannot be planned" {
         try std.testing.expectEqual(@as(u8, 1), unsupported.code);
     }
 }
+
+test "serve MODEL checks only the model it serves: another model in the file that cannot be planned does not stop it" {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/cluster.json", .{tmp.sub_path});
+    // model k (converged, mac and spare) cannot be planned: spare declares no memory
+    const text = try std.mem.replaceOwned(u8, a, try pairFile(a, cx_link, ", \"library\": \"/bin/sh\""), "\"192.0.2.3\", \"backend\": \"metal\", \"memory_gb\": 128", "\"192.0.2.3\", \"backend\": \"metal\"");
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = text });
+    try std.testing.expectEqual(@as(u8, 1), (try run(a, &.{ "cluster", "check", "--cluster", file })).code);
+    for ([_][]const []const u8{ &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--dry-run" }, &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--dry-run", "--model", "q" } }) |args| {
+        const got = try run(a, args);
+        if (got.code != 0) std.debug.print("exit {d}\n{s}{s}", .{ got.code, got.out, got.err });
+        try std.testing.expectEqual(@as(u8, 0), got.code);
+        try std.testing.expect(has(got.out, "model q: disaggregated"));
+        try std.testing.expect(std.mem.indexOf(u8, got.out, "model k:") == null);
+    }
+}

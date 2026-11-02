@@ -54,8 +54,8 @@ pub fn run(env_in: Env, args: []const []const u8) !u8 {
     if (args.len < 1) return bad(env);
     if (std.mem.eql(u8, args[0], "cluster") and args.len >= 2) {
         if (std.mem.eql(u8, args[1], "init")) return initCmd(env, args[2..]);
-        if (std.mem.eql(u8, args[1], "check")) return checkCmd(env, args[2..], false);
-        if (std.mem.eql(u8, args[1], "status")) return checkCmd(env, args[2..], true);
+        if (std.mem.eql(u8, args[1], "check")) return checkCmd(env, args[2..], false, flag(args, "--model"));
+        if (std.mem.eql(u8, args[1], "status")) return checkCmd(env, args[2..], true, flag(args, "--model"));
     }
     if (std.mem.eql(u8, args[0], "serve")) return serveCmd(env, args[1..]);
     if (std.mem.eql(u8, args[0], "node")) return nodeCmd(env, args[1..]);
@@ -149,7 +149,8 @@ fn load(env: Env, args: []const []const u8) !?Loaded {
     return .{ .config = c, .json = json };
 }
 
-fn checkCmd(env: Env, args: []const []const u8, show_nodes: bool) !u8 {
+/// Every model in the file, or only `only`.
+fn checkCmd(env: Env, args: []const []const u8, show_nodes: bool, only: ?[]const u8) !u8 {
     const l = (try load(env, args)) orelse return 1;
     const c = l.config;
     const src = source(env, args);
@@ -162,7 +163,7 @@ fn checkCmd(env: Env, args: []const []const u8, show_nodes: bool) !u8 {
     }
     var code: u8 = 0;
     for (c.models) |m| {
-        if (flag(args, "--model")) |want| if (!std.mem.eql(u8, want, m.id)) continue;
+        if (only) |want| if (!std.mem.eql(u8, want, m.id)) continue;
         try env.out.print("\nmodel {s}: {s}, {d} nodes\n", .{ m.id, @tagName(m.mode), m.nodes.len });
         if (m.mode == .disaggregated) {
             try env.out.print("prefill on {d} nodes, decode on {d}: KV handoff over MCDMA; outside the exactness contract (a prefill computed elsewhere is not this node's own)\n", .{ m.prefill.len, m.decode.len });
@@ -210,7 +211,7 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
         try env.err.print("--leader {s} is not one of model {s}'s prefill or decode nodes\n", .{ leader, m.id });
         return 1;
     }
-    const code = try checkCmd(env, args, false);
+    const code = try checkCmd(env, args, false, m.id);
     if (code != 0) return code;
     const fake = flag(args, "--probes") != null;
     const dry = has(args, "--dry-run");
