@@ -191,3 +191,7 @@ pub const gdn_chain = @import("gdn_chain.zig");
 test {
     _ = @import("gdn_chain_host_test.zig");
 }
+
+test {
+    _ = @import("moe_router_host_test.zig");
+}
