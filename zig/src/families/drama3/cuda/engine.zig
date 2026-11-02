@@ -6,6 +6,7 @@ const cfg = @import("../config.zig");
 const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const fwd = @import("forward.zig");
+const ref_rows = @import("reference_rows.zig");
 const common = @import("../common.zig");
 
 pub const Options = common.Options;
@@ -442,13 +443,11 @@ pub const Engine = struct {
 
     /// A reference cache entry's device copy of the state after its prompt rows.
     pub const Saved = Buf;
-    const kv_row = cfg.kv_heads * cfg.head_dim * 2;
 
     /// Device bytes of the state after `rows` prompt rows: both recurrent blocks, then each K and V cache's rows.
     pub fn referenceBytes(e: *const Engine, rows: usize) usize {
-        var caches: usize = 2 * cfg.tower_layers;
-        for (e.c.full_attention) |full| caches += 2 * @as(usize, @intFromBool(full));
-        return e.state_bytes[0] + e.state_bytes[1] + caches * rows * kv_row;
+        var caches: [ref_caches]u64 = undefined;
+        return ref_rows.bytes(e.referenceLive(&caches), rows);
     }
 
     pub fn allocReference(e: *Engine, bytes: usize) !Saved {
@@ -469,24 +468,36 @@ pub const Engine = struct {
         try e.moveReference(saved, rows, true);
     }
 
+    const ref_caches = 2 * (cfg.layers + cfg.tower_layers);
+
+    fn referenceLive(e: *const Engine, caches: *[ref_caches]u64) ref_rows.Live {
+        var n: usize = 0;
+        for (0..cfg.layers) |li| if (e.c.full_attention[li]) for (e.kv_bb[li]) |kv| {
+            caches[n] = kv;
+            n += 1;
+        };
+        for (e.kv_tw) |pair| for (pair) |kv| {
+            caches[n] = kv;
+            n += 1;
+        };
+        return .{ .state = e.state_bufs, .state_bytes = e.state_bytes, .caches = caches[0..n] };
+    }
+
     fn moveReference(e: *Engine, saved: Saved, rows: usize, load: bool) !void {
-        if (rows == 0 or rows > e.o.max_ctx or saved.len < e.referenceBytes(rows)) return error.BadReferenceRows;
+        var caches: [ref_caches]u64 = undefined;
+        const live = e.referenceLive(&caches);
+        if (rows == 0 or rows > e.o.max_ctx or saved.len < ref_rows.bytes(live, rows)) return error.BadReferenceRows;
         errdefer e.stream.synchronize() catch {};
-        var at = saved.ptr;
-        for (e.state_bufs, e.state_bytes) |live, bytes| at = try e.moveRows(live, at, bytes, load);
-        for (0..cfg.layers) |li| if (e.c.full_attention[li]) {
-            for (e.kv_bb[li]) |live| at = try e.moveRows(live, at, rows * kv_row, load);
-        };
-        for (e.kv_tw) |pair| for (pair) |live| {
-            at = try e.moveRows(live, at, rows * kv_row, load);
-        };
+        _ = try ref_rows.move(DeviceCopy{ .e = e }, live, saved.ptr, rows, load);
         try e.stream.synchronize();
     }
 
-    fn moveRows(e: *Engine, live: u64, saved: u64, bytes: usize, load: bool) !u64 {
-        if (load) try e.copyRow(saved, live, bytes) else try e.copyRow(live, saved, bytes);
-        return saved + bytes;
-    }
+    const DeviceCopy = struct {
+        e: *Engine,
+        pub fn copy(d: DeviceCopy, src: u64, dst: u64, n: usize) !void {
+            try d.e.copyRow(src, dst, n);
+        }
+    };
 
     /// Teacher forcing for parity: each pick goes to `picks`, then `frame`'s value (device int32 [11]) replaces it.
     pub const Force = struct { frame: u64, picks: u64 };
