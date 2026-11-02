@@ -6,6 +6,11 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
         const m = b.createModule(.{ .root_source_file = b.path("zig/src/core/gguf.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
         host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+        if (mode == .debug) {
+            const points = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"GGUF repack: deterministic"} }));
+            points.has_side_effects = true;
+            b.step("test-gguf-repack-points", "Original GGUF values against compact affine blocks without a GPU").dependOn(&points.step);
+        }
     }
     all.dependOn(host);
     const linux = b.createModule(.{ .root_source_file = b.path("zig/src/core/gguf.zig"), .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }), .optimize = .Debug, .link_libc = true });
