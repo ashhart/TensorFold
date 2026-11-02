@@ -7,6 +7,8 @@ const source = @import("ling_metal").route;
 const Args = extern struct { rows: i32, ne: i32, topk: i32, ng: i32, keep: i32, scale: f32 };
 
 fn check(s: route.Shape, rows: u32, logits: []const f32, bias: []const f32) !void {
+    try s.check();
+    try route.checkBias(bias, s);
     const n = rows * s.experts;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -58,7 +60,7 @@ fn check(s: route.Shape, rows: u32, logits: []const f32, bias: []const f32) !voi
     const got = std.mem.bytesAsSlice(f32, wts.contents()[0 .. rows * s.topk * 4]);
     var want: [route.max_topk]route.Pick = undefined;
     for (0..rows) |r| {
-        route.selectF32(logits[r * s.experts ..][0..s.experts], bias, want[0..s.topk], s);
+        const real = route.selectF32(logits[r * s.experts ..][0..s.experts], bias, want[0..s.topk], s);
         for (0..s.topk) |k| {
             const got_id = ids[r * s.topk + k];
             try std.testing.expect(got_id >= 0 and @as(u32, @intCast(got_id)) < s.experts);
@@ -66,7 +68,8 @@ fn check(s: route.Shape, rows: u32, logits: []const f32, bias: []const f32) !voi
             const gw = got[r * s.topk + k];
             const nan_ok = std.math.isNan(gw) and std.math.isNan(want[k].wt);
             try std.testing.expect(nan_ok or @abs(gw - want[k].wt) <= 1e-6);
-            for (0..k) |j| try std.testing.expect(ids[r * s.topk + j] != got_id);
+            // Real picks are distinct; the empty picks after them are all id 0.
+            if (k < real) for (0..k) |j| try std.testing.expect(ids[r * s.topk + j] != got_id);
         }
     }
 }
@@ -177,4 +180,20 @@ test "tiny: one finite logit per group" {
 test "tiny: all -10 weights are 0.3125; all -100 weights are 0" {
     try oneRow(tiny, -10, &.{});
     try oneRow(tiny, -100, &.{});
+}
+
+test "every group kept, or one group: an all-NaN row is all empty picks (flash has no padded slots)" {
+    for ([_]route.Shape{
+        .{ .experts = 128, .topk = 8, .n_group = 1, .topk_group = 1, .scale = 2.5 },
+        .{ .experts = 128, .topk = 8, .n_group = 8, .topk_group = 8, .scale = 2.5 },
+        .{ .experts = 512, .topk = 8, .n_group = 1, .topk_group = 1, .scale = 2.5 },
+        .{ .experts = 512, .topk = 8, .n_group = 8, .topk_group = 8, .scale = 2.5 },
+    }) |s| try oneRow(s, std.math.nan(f32), &.{});
+}
+
+test "three usable experts under top-k 8: three real picks, then five empty" {
+    for ([_]route.Shape{
+        .{ .experts = 128, .topk = 8, .n_group = 1, .topk_group = 1, .scale = 2.5 },
+        .{ .experts = 512, .topk = 8, .n_group = 1, .topk_group = 1, .scale = 2.5 },
+    }) |s| try oneRow(s, std.math.nan(f32), &.{ .{ .at = 90, .v = 1 }, .{ .at = 7, .v = 2 }, .{ .at = 64, .v = 0 } });
 }

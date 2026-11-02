@@ -1,5 +1,6 @@
 //! Ling-3.1-flash's shape from config.json (bailing_hybrid), refusing what the engine does not run.
 const std = @import("std");
+const route = @import("route.zig");
 
 /// Backbone plus MTP layers the per-layer tables hold (Ling-3.1-flash: 72 + 1).
 pub const max_layers = 80;
@@ -446,22 +447,15 @@ fn parseConfig(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
         return error.Routing;
     }
     c.expert_bias = try flag(o, "moe_router_enable_expert_bias", true, why);
-    // glue.select's bounds: at most 512 experts, top-k under 32, up to 32 equal groups that hold the top-k
-    const g_ok = c.n_group >= 1 and c.n_group <= 32 and c.experts % c.n_group == 0 and c.topk_group >= 1 and
-        c.topk_group <= c.n_group and c.topk <= c.topk_group * (c.experts / c.n_group);
-    if (c.experts > 512 or c.topk == 0 or c.topk >= 32 or c.topk > c.experts or !g_ok) {
-        why.set("routing {d} of {d} experts in {d} groups keeping {d}: past glue.select's bounds", .{ c.topk, c.experts, c.n_group, c.topk_group });
+    // glue.select's bounds and HF's two routing rules, kept in one place: route.Shape.check
+    route.Shape.of(&c).check() catch |e| {
+        switch (e) {
+            error.Bounds => why.set("routing {d} of {d} experts in {d} groups keeping {d}: past glue.select's bounds", .{ c.topk, c.experts, c.n_group, c.topk_group }),
+            error.GroupOfOne => why.set("{d} groups of {d} experts: HF scores a group by its best two, so groups hold two or more", .{ c.n_group, c.experts / c.n_group }),
+            error.OnePick => why.set("num_experts_per_tok 1: HF leaves one pick's weight unnormalized, the kernel normalizes it", .{}),
+        }
         return error.Routing;
-    }
-    // HF's rule: a group scores its top two (topk(2) fails on a group of one); one pick keeps its weight unnormalized
-    if (c.experts / c.n_group < 2) {
-        why.set("{d} groups of {d} experts: HF scores a group by its best two, so groups hold two or more", .{ c.n_group, c.experts / c.n_group });
-        return error.Routing;
-    }
-    if (c.topk == 1) {
-        why.set("num_experts_per_tok 1: HF leaves one pick's weight unnormalized, the kernel normalizes it", .{});
-        return error.Routing;
-    }
+    };
     c.moe_inter = try int(o, "moe_intermediate_size", why);
     const shared_n = if (o.get("num_shared_experts")) |v| (if (v == .null) 0 else try int(o, "num_shared_experts", why)) else 0;
     const shared_w = if (o.get("moe_shared_expert_intermediate_size")) |_| try int(o, "moe_shared_expert_intermediate_size", why) else c.moe_inter;
