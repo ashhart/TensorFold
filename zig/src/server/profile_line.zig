@@ -2,7 +2,7 @@
 const std = @import("std");
 const p = @import("engine_api").profile;
 
-/// Bounded numeric switch text cannot inject terminal controls or another startup line.
+/// Bounded switch text cannot inject terminal controls or another startup line.
 fn shown(writer: *std.Io.Writer, raw: []const u8) !void {
     const limit = @min(raw.len, 64);
     for (raw[0..limit]) |byte| {
@@ -34,10 +34,13 @@ const TestEnv = struct {
     qwen: ?[]const u8 = null,
     all: ?[]const u8 = null,
     share: ?[]const u8 = null,
+    glm_pages: ?[]const u8 = null,
     pub fn get(e: @This(), name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "TF_QWEN_KV_PAGES")) return e.qwen;
         if (std.mem.eql(u8, name, "TF_QWEN_KV_PAGES_ALL")) return e.all;
         if (std.mem.eql(u8, name, "TF_QWEN_KV_SHARE")) return e.share;
+        if (std.mem.eql(u8, name, "TF_KV_PAGES")) return e.glm_pages;
+        if (std.mem.eql(u8, name, "TF_GLM_KV_SHARE")) return null;
         return "fixture-secret-must-not-be-read";
     }
 };
@@ -53,6 +56,20 @@ test "profile line: only applicable allowlisted changes are shown, without claim
         try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], env));
     }
     try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "qwen3_5", "cuda", TestEnv{ .qwen = "00", .all = "true", .share = "+0" }));
+}
+
+test "profile line: GLM reports explicit page policies including off without treating auto as an override" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]?[]const u8{ null, "auto" }) |raw|
+        try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "glm5_next", "cuda", TestEnv{ .glm_pages = raw }));
+    for ([_][]const u8{ "off", "0", "on", "1", "all", "", "false" }) |raw| {
+        const expected = try std.fmt.allocPrint(a, "profile: stable; registered overrides: TF_KV_PAGES={s} (identical, env)", .{raw});
+        try std.testing.expectEqualStrings(expected, try format(a, .stable, "glm5_next", "cuda", TestEnv{ .glm_pages = raw }));
+    }
+    for ([_][2][]const u8{ .{ "qwen3_5", "cuda" }, .{ "glm5_next", "mlx" }, .{ "unknown", "cuda" } }) |scope|
+        try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], TestEnv{ .glm_pages = "off" }));
 }
 
 test "profile line: control bytes and overlong values stay bounded on a single line" {
