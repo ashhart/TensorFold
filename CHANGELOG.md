@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on CUDA drafts copies of earlier text in its lanes: a verified copy is tried first inside the existing verify windows with the same acceptance rule, so replies are unchanged and drafts off is main exactly (#1910).
+
 - The XPU build makes one core module per device tree and passes it through the runtime, family and module builders, while the Nemotron XPU device binaries keep their own optimize level (#1918). Thanks to @jschmied.
 
 - On HIP, decode's softmax stats and partial sums load sixteen values ahead and fold them in the same order, with the same bits (#1961). Thanks to @AbrahamCete.
