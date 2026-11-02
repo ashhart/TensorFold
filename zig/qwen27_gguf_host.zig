@@ -6,4 +6,5 @@ pub const safetensors = @import("src/core/safetensors.zig");
 pub const quant = @import("src/core/quant/quant.zig");
 test {
     _ = @import("src/families/qwen27/gguf_source.zig");
+    _ = @import("src/core/gguf_tokenizer_test.zig");
 }

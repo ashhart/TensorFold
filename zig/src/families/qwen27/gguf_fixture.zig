@@ -3,14 +3,23 @@ const std = @import("std");
 const gg = @import("../../core/gguf.zig");
 const Writer = @import("../../core/gguf_test_fixture.zig").Fixture;
 pub fn make(a: std.mem.Allocator) ![]u8 {
+    return build(a, false);
+}
+pub fn makeTokenized(a: std.mem.Allocator) ![]u8 {
+    return build(a, true);
+}
+fn build(a: std.mem.Allocator, tokenized: bool) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
     const Item = struct { name: []const u8, shape: []const u64, kind: gg.TensorKind, at: usize = 0 };
     var list: std.ArrayList(Item) = .empty;
+    const text = @import("../../core/gguf_tokenizer_fixture.zig");
+    const vocabulary: u64 = if (tokenized) text.count else 32;
+    const embed_shape = [_]u64{ 64, vocabulary };
     for ([_]Item{
-        .{ .name = "token_embd.weight", .shape = &.{ 64, 32 }, .kind = .q8_0 },
-        .{ .name = "output.weight", .shape = &.{ 64, 32 }, .kind = .q8_0 },
+        .{ .name = "token_embd.weight", .shape = &embed_shape, .kind = .q8_0 },
+        .{ .name = "output.weight", .shape = &embed_shape, .kind = .q8_0 },
         .{ .name = "output_norm.weight", .shape = &.{64}, .kind = .f32 },
     }) |t| try list.append(scratch, t);
     const common = [_]Item{
@@ -57,6 +66,7 @@ pub fn make(a: std.mem.Allocator) ![]u8 {
         .{ "general.sampling.top_k", 20 },
     };
     for (ints) |kv| {
+        if (tokenized and std.mem.eql(u8, kv[0], "tokenizer.ggml.eos_token_id")) continue;
         h.kv(kv[0], .{ .uint32 = kv[1] });
         nk += 1;
     }
@@ -68,15 +78,20 @@ pub fn make(a: std.mem.Allocator) ![]u8 {
     nk += 1;
     h.kv("general.sampling.temp", .{ .float32 = 1 });
     nk += 1;
-    h.kv("tokenizer.ggml.model", .{ .string = "gpt2" });
-    nk += 1;
-    h.kv("tokenizer.ggml.pre", .{ .string = "qwen35" });
-    nk += 1;
-    h.kv("tokenizer.chat_template", .{ .string = "{{ messages[0].content }}" });
-    nk += 1;
-    h.array("tokenizer.ggml.tokens", .string, 32);
-    nk += 1;
-    for (0..32) |i| h.string(try std.fmt.allocPrint(scratch, "t{d}", .{i}));
+    if (tokenized) {
+        try text.metadata(&h, scratch, false, false);
+        nk += text.metadata_count;
+    } else {
+        h.kv("tokenizer.ggml.model", .{ .string = "gpt2" });
+        nk += 1;
+        h.kv("tokenizer.ggml.pre", .{ .string = "qwen35" });
+        nk += 1;
+        h.kv("tokenizer.chat_template", .{ .string = "{{ messages[0].content }}" });
+        nk += 1;
+        h.array("tokenizer.ggml.tokens", .string, 32);
+        nk += 1;
+        for (0..32) |i| h.string(try std.fmt.allocPrint(scratch, "t{d}", .{i}));
+    }
     h.array("qwen35.rope.dimension_sections", .int32, 4);
     nk += 1;
     for ([_]i32{ 4, 2, 2, 0 }) |v| h.int(i32, v);

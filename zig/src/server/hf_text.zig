@@ -275,6 +275,7 @@ pub const HfText = struct {
         const t = self(ctx);
         const ids = t.tok.encode(a, s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
+        defer a.free(ids);
         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
     }
 

@@ -6,13 +6,11 @@ const names = @import("gguf_names.zig");
 const repack = @import("gguf_repack.zig");
 const Out = @import("../flashnext/pack_io.zig").Out;
 const convert = @import("../../core/quant/convert.zig");
+const tokenizer = @import("../../core/gguf_tokenizer.zig");
 pub const Tokenizer = struct {
-    identity: []const u8 = "pending-gguf-tokenizer-v1",
+    identity: []const u8 = tokenizer.source,
     context: ?*anyopaque = null,
-    write: *const fn (?*anyopaque, std.mem.Allocator, std.Io, *const gg.Document, []const u8) anyerror!void = pending,
-    fn pending(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: *const gg.Document, _: []const u8) !void {
-        return error.GgufTokenizerPending;
-    }
+    write: *const fn (?*anyopaque, std.mem.Allocator, std.Io, *const gg.Document, []const u8) anyerror!void = tokenizer.write,
 };
 pub const Options = struct { repacker: repack.Repacker = .{}, tokenizer: Tokenizer = .{} };
 pub fn write(a: std.mem.Allocator, io: std.Io, d: *const gg.Document, dir: []const u8, identity: []const u8, options: Options) !void {

@@ -149,7 +149,7 @@ test "GGUF Qwen: complete native image uses real config, mapped triples, one nor
     try t.expect(!std.mem.eql(u8, native, changed));
     try t.expectEqual(@as(usize, 66), spy.calls);
 }
-test "GGUF Qwen: missing tokenizer and a failed repack never publish a usable image" {
+test "GGUF Qwen: invalid tokenizer and a failed repack never publish a usable image" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     const a = t.allocator;
@@ -163,7 +163,7 @@ test "GGUF Qwen: missing tokenizer and a failed repack never publish a usable im
     defer a.free(path);
     const cache = try std.fs.path.join(a, &.{ root, "images" });
     defer a.free(cache);
-    try t.expectError(error.GgufTokenizerPending, src.prepare(a, io, path, cache, .{}));
+    try t.expectError(error.MissingGgufTokenizerTypes, src.prepare(a, io, path, cache, .{}));
     var spy = Spy{ .fail = true };
     try t.expectError(error.PlantedRepackFailure, src.prepare(a, io, path, cache, spy.options()));
     spy.fail = false;

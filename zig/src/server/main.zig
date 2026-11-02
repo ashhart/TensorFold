@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !u8 {
     const prepared: ?[]u8 = if (comptime @hasDecl(@import("core"), "gguf_qwen27")) @import("core").gguf_qwen27.local(gpa, io, init.environ_map.get("HOME") orelse "", args.model) catch |err| {
         if (err == error.OutOfMemory) return err;
         const detail: []const u8 = switch (err) {
-            error.GgufTokenizerPending => "the GGUF metadata tokenizer adapter is not linked",
+            error.UnsupportedGgufTokenizer => "GGUF import requires the gpt2/qwen35 byte-level BPE tokenizer profile",
             error.UnsupportedRepackType, error.UnqualifiedGgufAffine => "this GGUF block format has no qualified Metal affine path",
             error.MultipleGgufFiles => "name one GGUF file explicitly",
             error.UnqualifiedQwenShape, error.UnqualifiedLayerSchedule => "this Metal import requires the qualified 27B geometry and layer schedule",
