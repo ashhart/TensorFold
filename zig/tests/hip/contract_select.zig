@@ -57,11 +57,24 @@ pub fn merge(x: Tally, y: Tally) Tally {
     return t;
 }
 
-/// Every entry through its own gates 1-4 at `profile`, one tally for all of them (the no-argument run).
-pub fn runEntries(a: std.mem.Allocator, io: std.Io, entries: []const Entry, profile: families.Profile) !Tally {
-    var t: Tally = .{};
-    for (entries) |e| t = merge(t, try e.run(a, io, profile));
-    return t;
+/// One entry's problems on its own tally: failed kernels, missed controls, and one when it ran no kernel.
+pub fn entryProblems(t: Tally) usize {
+    return t.problems() + @intFromBool(t.kernels == 0);
+}
+
+/// The entries' tallies summed, and their problems each judged on its own entry's tally.
+pub const Entries = struct { tally: Tally = .{}, problems: usize = 0 };
+
+/// Every entry through its own gates 1-4 at `profile`, one ENTRY line each (the no-argument run).
+pub fn runEntries(a: std.mem.Allocator, io: std.Io, entries: []const Entry, profile: families.Profile) !Entries {
+    var out: Entries = .{};
+    for (entries) |e| {
+        const t = try e.run(a, io, profile);
+        std.debug.print("ENTRY {t}: {d} kernels, {d} fail, {d} missed\n", .{ e.group, t.kernels, t.failed, t.missed });
+        out.tally = merge(out.tally, t);
+        out.problems += entryProblems(t);
+    }
+    return out;
 }
 
 fn noRun(_: std.mem.Allocator, _: std.Io, _: families.Profile) anyerror!Tally {
@@ -70,6 +83,10 @@ fn noRun(_: std.mem.Allocator, _: std.Io, _: families.Profile) anyerror!Tally {
 
 fn cleanRun(_: std.mem.Allocator, _: std.Io, p: families.Profile) anyerror!Tally {
     return if (p == .full) .{ .kernels = 2, .passed = 2, .controls = 1, .caught = 1 } else .{};
+}
+
+fn failRun(_: std.mem.Allocator, _: std.Io, p: families.Profile) anyerror!Tally {
+    return if (p == .full) .{ .kernels = 3, .passed = 1, .failed = 2, .known = 1 } else .{};
 }
 
 fn missRun(_: std.mem.Allocator, _: std.Io, p: families.Profile) anyerror!Tally {
@@ -138,7 +155,9 @@ test "contract select: the verdict fails a failed kernel, a missed control, a ga
 
 test "contract select: the no-argument run counts every entry's kernels and controls" {
     const two = [_]Entry{ .{ .group = .ops, .run = cleanRun }, .{ .group = .act, .run = missRun } };
-    const t = try runEntries(std.testing.allocator, std.testing.io, &two, .full);
+    const run = try runEntries(std.testing.allocator, std.testing.io, &two, .full);
+    const t = run.tally;
+    try std.testing.expectEqual(@as(usize, 1), run.problems);
     try std.testing.expectEqual(@as(usize, 3), t.kernels);
     try std.testing.expectEqual(@as(usize, 3), t.passed);
     try std.testing.expectEqual(@as(usize, 2), t.controls);
@@ -146,5 +165,17 @@ test "contract select: the no-argument run counts every entry's kernels and cont
     try std.testing.expectEqual(@as(usize, 1), t.missed);
     try std.testing.expectEqual(@as(u8, 1), verdict(t, 0));
     const none = try runEntries(std.testing.allocator, std.testing.io, &.{}, .full);
-    try std.testing.expectEqual(Tally{}, none);
+    try std.testing.expectEqual(Tally{}, none.tally);
+    try std.testing.expectEqual(@as(usize, 0), none.problems);
+}
+
+test "contract select: each entry is judged on its own tally, so an empty run is a problem beside a clean one" {
+    try std.testing.expectEqual(@as(usize, 0), entryProblems(try cleanRun(std.testing.allocator, std.testing.io, .full)));
+    try std.testing.expectEqual(@as(usize, 2), entryProblems(try failRun(std.testing.allocator, std.testing.io, .full)));
+    try std.testing.expectEqual(@as(usize, 1), entryProblems(try noRun(std.testing.allocator, std.testing.io, .full)));
+    const three = [_]Entry{ .{ .group = .ops, .run = cleanRun }, .{ .group = .act, .run = failRun }, .{ .group = .mamba, .run = noRun } };
+    const run = try runEntries(std.testing.allocator, std.testing.io, &three, .full);
+    try std.testing.expectEqual(@as(usize, 3), run.problems); // 0 + 2 failed + 1 for the empty run
+    try std.testing.expectEqual(@as(usize, 5), run.tally.kernels); // the merged tally alone would miss the empty run
+    try std.testing.expectEqual(@as(usize, 2), run.tally.problems());
 }

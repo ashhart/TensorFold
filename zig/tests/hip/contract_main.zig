@@ -290,12 +290,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&norms) |*op| try kernels.append(a, op.kernel());
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
-    t = select.merge(t, try select.runEntries(a, io, &families.entries, .full)); // each family's own gates 1-4
+    const own = t.problems();
+    const fam = try select.runEntries(a, io, &families.entries, .full); // each family's own gates 1-4
+    t = select.merge(t, fam.tally);
     const t1 = ms(io);
     const lim = try gate5.table(a) + try gate5.live(a, &r, ctx, arch);
     const t2 = ms(io);
     const tally = .{ t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed, lim, t1 - t0, t2 - t1 };
     std.debug.print("SUMMARY {s} {d} kernels: {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: " ++
         "{d} red as planted, {d} missed; {d} limit problems; gates {d} ms, limits {d} ms\n", .{arch} ++ tally);
-    return t.problems() + lim;
+    return own + fam.problems + lim;
 }
