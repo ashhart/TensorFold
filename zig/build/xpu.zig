@@ -291,8 +291,16 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     sources.addImport("gemma4_xpu", gemma_native);
     const source_tests = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"draft sources:"} }));
     b.step("test-slide-xpu-host", "Unsupported XPU learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"slide admission:"} })).step);
-    b.step("test-draft-xpu-host", "XPU draft source metadata without devices or kernel compilation").dependOn(&source_tests.step);
+    // the Gemma 4 runner's shard header reader on core (gemma4/xpu_dev.zig), so its malformed inputs run
+    const dev = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_dev.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    dev.addImport("core", mods.core);
+    dev.addImport("ze", ze);
+    const dev_tests = b.addRunArtifact(b.addTest(.{ .root_module = dev }));
+    const draft_step = b.step("test-draft-xpu-host", "XPU draft source metadata and the Gemma 4 shard reader without devices or kernel compilation");
+    draft_step.dependOn(&source_tests.step);
+    draft_step.dependOn(&dev_tests.step);
     step.dependOn(&source_tests.step);
+    step.dependOn(&dev_tests.step);
     for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods), zeModule(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     // the Gemma 4 E4B runner's admission, over the family config (which takes `core` by name)
     const gemma4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_config.zig"), .target = host, .optimize = .debug });
