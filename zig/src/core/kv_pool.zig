@@ -37,9 +37,9 @@ pub const Layout = struct {
 
 /// A family whose unpaged streams allocate a request's rows at open, never a whole window (the KV admission ledger).
 pub const PerRequest = struct {
-    /// The ledger reads fixed_bytes (bounding the non-linear part) and token_bytes; page_tokens 0 until it pages.
+    /// fixed_bytes holds every per-request byte open allocates past token_bytes x rows; page_tokens 0 until it pages.
     layout: Layout,
-    /// Rows a stream keeps past its reply's last token (a draft or verify window).
+    /// Rows past the reply: the widest drafted or verify pass the family runs (MTP and DFlash rows), not just decode.
     lookahead: u32 = 0,
     /// Buffers that grow with the stream cap but belong to no request, charged once at load.
     scratch: u64 = 0,
