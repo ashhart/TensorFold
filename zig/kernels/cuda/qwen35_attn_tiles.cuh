@@ -40,13 +40,26 @@ struct Fp8Tiles {
     template <class Row>
     __device__ void fetch(int t0, Row row) {
         const int tid = threadIdx.x, part = tid & 15;
+        // a thread's rows mostly share a page: its head's first row there is looked up once, not per load
+        const unsigned char* near = nullptr;
+        int lo = 0;
 #pragma unroll
         for (int i = 0; i < PER; i++) {
             const int r = row(t0 + (tid >> 4) + THREADS / 16 * i);
             kr[i] = vr[i] = make_uint4(0u, 0u, 0u, 0u);
             if (r >= 0) {
-                kr[i] = *reinterpret_cast<const uint4*>(kp(r) + part * 16);
-                vr[i] = *reinterpret_cast<const uint4*>(vp(r) + part * 16);
+                const unsigned char* k = K + (size_t)r * HD;
+                const unsigned char* v = V + (size_t)r * HD;
+                if (paged) {
+                    if (near == nullptr || r < lo || r - lo >= ptok) {
+                        lo = r / ptok * ptok;
+                        near = arena + (size_t)page.ids[lo / ptok] * page.stride + lblk + hoff * HD;
+                    }
+                    k = near + (size_t)(r - lo) * HD;
+                    v = k + vgap;
+                }
+                kr[i] = *reinterpret_cast<const uint4*>(k + part * 16);
+                vr[i] = *reinterpret_cast<const uint4*>(v + part * 16);
             }
         }
         const int r = row(t0 + (tid & 31));
@@ -102,12 +115,25 @@ struct Bf16Tiles {
     template <class Row>
     __device__ void fetch(int t0, Row row) {
         uint4* dst = s.kt + (cur ^ 1) * 2 * TILE;
+        // a thread's rows mostly share a page: its head's first row there is looked up once, not per 16-byte chunk
+        const __nv_bfloat16* near = nullptr;
+        int lo = 0;
 #pragma unroll
         for (int i = 0; i < TILE / THREADS; i++) {
             const int at = threadIdx.x + THREADS * i, u = at / CH, chunk = at % CH;
             const int r = row(t0 + u), pos = r < 0 ? 0 : r;  // a key past the chunk reads row 0 and lands zeros
-            qmm_frag::cp16z(dst + swz(u, chunk), kp(pos) + chunk * 8, r >= 0);
-            qmm_frag::cp16z(dst + TILE + swz(u, chunk), vp(pos) + chunk * 8, r >= 0);
+            const __nv_bfloat16* k = K + (size_t)pos * HD;
+            const __nv_bfloat16* v = V + (size_t)pos * HD;
+            if (paged) {
+                if (near == nullptr || pos < lo || pos - lo >= ptok) {
+                    lo = pos / ptok * ptok;
+                    near = arena + (size_t)page.ids[lo / ptok] * page.stride + lblk + hoff * HD;
+                }
+                k = near + (size_t)(pos - lo) * HD;
+                v = k + vgap;
+            }
+            qmm_frag::cp16z(dst + swz(u, chunk), k + chunk * 8, r >= 0);
+            qmm_frag::cp16z(dst + TILE + swz(u, chunk), v + chunk * 8, r >= 0);
         }
         qmm_frag::commit();
     }
