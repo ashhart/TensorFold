@@ -2,6 +2,11 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
+pub const Metadata = @import("affine_metadata.zig").Type;
+
+pub fn source(metadata: Metadata) []const u8 {
+    return if (metadata == .bf16) sources.core_row_projection else "#define TF_RP_META float\n" ++ sources.core_row_projection;
+}
 
 /// 4-bit groups of 64 with fp32 sums take simdgroup-matrix tiles instead (8 rows a weight read).
 pub const simd = @import("simd_qmm.zig");
@@ -34,6 +39,7 @@ pub const Weights = struct {
     group: usize = 64,
     bits: u8 = 4,
     sum: Sum = .f32,
+    metadata: Metadata = .bf16,
 
     pub fn validate(x: Weights) !void {
         if (x.n == 0 or x.n % (columns * groups) != 0 or x.k == 0 or x.k % 16 != 0 or x.group < 16 or x.group % 16 != 0 or x.k % x.group != 0 or 512 % x.group != 0 or x.k * x.bits % 32 != 0) return error.UnsupportedRowShape;
@@ -61,6 +67,7 @@ pub const Experts = struct {
 const variants = bit_widths.len * 2;
 
 pub const Pipelines = struct {
+    metadata: Metadata = .bf16,
     plain: [variants]mtl.Pipeline,
     relu2: [variants]mtl.Pipeline,
     indexed: [variants]mtl.Pipeline,
@@ -68,11 +75,16 @@ pub const Pipelines = struct {
     strided: [variants]mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
+        return loadFor(device, .bf16);
+    }
+
+    pub fn loadFor(device: mtl.Device, metadata: Metadata) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const lib = try mtl.Library.fromSource(device, sources.core_row_projection, mtl.CompileOptions.mlx());
+        const lib = try mtl.Library.fromSource(device, source(metadata), mtl.CompileOptions.mlx());
         defer lib.deinit();
         var p: Pipelines = undefined;
+        p.metadata = metadata;
         inline for (bit_widths, 0..) |bits, b| inline for (.{ "f32", "bf16" }, 0..) |sum, m| {
             const i = b * 2 + m;
             p.plain[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_q{d}_{s}", .{ bits, sum }), false);
@@ -99,6 +111,7 @@ pub const Call = struct { pipeline: mtl.Pipeline, dims: [6]i32, groups: usize, s
 /// y[rows, n] = x[rows, k] W^T (relu squared with `relu2`), x and y bf16 rows.
 pub fn call(p: *const Pipelines, w: Weights, rows: usize, relu2: bool) !Call {
     try w.validate();
+    if (p.metadata != w.metadata) return error.RowMetadataMismatch;
     if (rows == 0) return error.NoRows;
     const i = w.variant();
     return .{ .pipeline = if (relu2) p.relu2[i] else p.plain[i], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), 1, 1 }, .groups = w.n / (columns * groups) };
@@ -107,6 +120,7 @@ pub fn call(p: *const Pipelines, w: Weights, rows: usize, relu2: bool) !Call {
 /// `call` with output row m at y + m * `stride` values: a fused stack member writes its columns of the rows.
 pub fn callStrided(p: *const Pipelines, w: Weights, rows: usize, stride: usize) !Call {
     try w.validate();
+    if (p.metadata != w.metadata) return error.RowMetadataMismatch;
     if (rows == 0) return error.NoRows;
     if (stride < w.n or stride > std.math.maxInt(i32)) return error.UnsupportedRowStride;
     return .{ .pipeline = p.strided[w.variant()], .dims = .{ @intCast(w.k), @intCast(w.n), @intCast(w.group), @intCast(rows), @intCast(stride), 1 }, .groups = w.n / (columns * groups) };
@@ -115,6 +129,7 @@ pub fn callStrided(p: *const Pipelines, w: Weights, rows: usize, stride: usize) 
 /// y[slots, n] = x[slot / repeat] W[ids[slot]]^T; the grid's y is the slot.
 pub fn callIndexed(p: *const Pipelines, x: Experts, slots: usize, relu2: bool) !Call {
     try x.validate();
+    if (p.metadata != x.one.metadata) return error.RowMetadataMismatch;
     if (slots == 0 or slots % x.repeat != 0 or slots > std.math.maxInt(u16)) return error.NoRows;
     const i = x.one.variant();
     return .{ .pipeline = if (relu2) p.indexed_relu2[i] else p.indexed[i], .dims = .{ @intCast(x.one.k), @intCast(x.one.n), @intCast(x.one.group), @intCast(slots), @intCast(x.experts), @intCast(x.repeat) }, .groups = x.one.n / (columns * groups), .slots = slots };
@@ -167,7 +182,8 @@ test "every width has its own pipeline slot" {
 }
 
 test "a strided call writes rows at least a matrix wide" {
-    const p: Pipelines = undefined;
+    var p: Pipelines = undefined;
+    p.metadata = .bf16;
     const w = Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = 64, .k = 128, .bits = 5 };
     try std.testing.expectError(error.UnsupportedRowStride, callStrided(&p, w, 2, 63));
     try std.testing.expectError(error.NoRows, callStrided(&p, w, 0, 64));

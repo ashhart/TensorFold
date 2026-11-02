@@ -1,6 +1,9 @@
 // Affine 2- to 8-bit row projections without tensor units: RPS columns a simdgroup, MB rows a pass over the weights.
 #include <metal_stdlib>
 using namespace metal;
+#ifndef TF_RP_META
+#define TF_RP_META bfloat
+#endif
 
 // 2^-e, exact: a code read in place at bit e times its input scaled by 2^-e is the same product.
 inline float tf_rp_p2(int e) { return as_type<float>(uint(127 - e) << 23); }
@@ -106,7 +109,7 @@ inline void tf_rp_qdot16(const device uint8_t* w, const thread X (*xt)[16], floa
 template <int MB> struct TfRpRows { const device bfloat* x[MB]; };
 
 template <int RPS, int MB, int BITS, bool BF16SUM>
-inline void tf_rp_rows_at(const device uint8_t* w, const device bfloat* sc, const device bfloat* bi, thread const TfRpRows<MB>& x,
+inline void tf_rp_rows_at(const device uint8_t* w, const device TF_RP_META* sc, const device TF_RP_META* bi, thread const TfRpRows<MB>& x,
                           int K, int GS, uint lane, thread float (*acc)[RPS]) {
   typedef typename metal::conditional<(MB >= 3), bfloat, float>::type X;
   static_assert(MB <= 3 || MB % 2 == 0, "4+ rows run in pairs");
@@ -153,7 +156,7 @@ inline void tf_rp_rows_at(const device uint8_t* w, const device bfloat* sc, cons
 
 // Contiguous callers use the same reduction with their original row starts.
 template <int RPS, int MB, int BITS, bool BF16SUM>
-inline void tf_rp_rows(const device uint8_t* w, const device bfloat* sc, const device bfloat* bi, const device bfloat* x0,
+inline void tf_rp_rows(const device uint8_t* w, const device TF_RP_META* sc, const device TF_RP_META* bi, const device bfloat* x0,
                        int K, int GS, uint lane, thread float (*acc)[RPS]) {
   TfRpRows<MB> x;
   for (int b = 0; b < MB; b++) x.x[b] = x0 + b * K;
@@ -174,8 +177,8 @@ inline bfloat tf_rp_out(float v) {
 template <int RPS, int SG, int MB, bool RELU2, int BITS, bool BF16SUM, bool STRIDED = false>
 [[kernel]] void tf_row_projection(const device bfloat* X [[buffer(0)]],
                                   const device uint32_t* W [[buffer(1)]],
-                                  const device bfloat* S [[buffer(2)]],
-                                  const device bfloat* B [[buffer(3)]],
+                                  const device TF_RP_META* S [[buffer(2)]],
+                                  const device TF_RP_META* B [[buffer(3)]],
                                   constant int* dims [[buffer(4)]],
                                   device bfloat* OUT [[buffer(5)]],
                                   uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],
@@ -187,8 +190,8 @@ template <int RPS, int SG, int MB, bool RELU2, int BITS, bool BF16SUM, bool STRI
   if (row0 >= N) return;
   const size_t at = size_t(row0);
   const device uint8_t* wr = (const device uint8_t*)W + at * (K * BITS / 8);
-  const device bfloat* sr = S + at * (K / GS);
-  const device bfloat* br = B + at * (K / GS);
+  const device TF_RP_META* sr = S + at * (K / GS);
+  const device TF_RP_META* br = B + at * (K / GS);
   int m = 0;
   #pragma clang loop unroll(disable)
   for (; m + MB <= rows; m += MB) {
@@ -211,8 +214,8 @@ template <int RPS, int SG, int MB, bool RELU2, int BITS, bool BF16SUM, bool STRI
 template <int RPS, int SG, bool RELU2, int BITS, bool BF16SUM>
 [[kernel]] void tf_row_projection_indexed(const device bfloat* X [[buffer(0)]],
                                           const device uint32_t* W [[buffer(1)]],
-                                          const device bfloat* S [[buffer(2)]],
-                                          const device bfloat* B [[buffer(3)]],
+                                          const device TF_RP_META* S [[buffer(2)]],
+                                          const device TF_RP_META* B [[buffer(3)]],
                                           constant int* dims [[buffer(4)]],
                                           device bfloat* OUT [[buffer(5)]],
                                           const device uint* ids [[buffer(6)]],
@@ -232,8 +235,8 @@ template <int RPS, int SG, bool RELU2, int BITS, bool BF16SUM>
   }
   const size_t at = size_t(expert) * N + size_t(row0);
   const device uint8_t* wr = (const device uint8_t*)W + at * (K * BITS / 8);
-  const device bfloat* sr = S + at * (K / GS);
-  const device bfloat* br = B + at * (K / GS);
+  const device TF_RP_META* sr = S + at * (K / GS);
+  const device TF_RP_META* br = B + at * (K / GS);
   float acc[1][RPS];
   tf_rp_rows<RPS, 1, BITS, BF16SUM>(wr, sr, br, X + size_t(slot / repeat) * K, K, GS, lane, acc);
   if (lane == 0)

@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
+pub const Metadata = @import("affine_metadata.zig").Type;
 
 pub const weight_layout = "u32[ceil(N/32)][K/group][32][group*bits/32], low-bit-first codes, columns past N zero";
 pub const reg_layout = "u32[N/32][K/64][2][32 lanes][4] 4-bit codes, regBlock order";
@@ -12,10 +13,11 @@ pub const Output = enum { bf16, f32 };
 pub const Format = struct {
     bits: u8,
     group: usize,
+    metadata: Metadata = .bf16,
 
     pub fn validate(f: Format) !void {
         if (f.bits < 2 or f.bits > 8 or f.bits == 7) return error.UnsupportedBits;
-        if (f.group != 32 and f.group != 64 and f.group != 128) return error.UnsupportedGroup;
+        if (f.group != 32 and f.group != 64 and f.group != 128 and !(f.group == 16 and f.bits == 6)) return error.UnsupportedGroup;
     }
 };
 
@@ -41,8 +43,8 @@ pub const Layout = struct {
 
     pub fn validate(l: Layout) !void {
         try l.format.validate();
-        if (l.cooperative and l.format.bits != 4) return error.UnsupportedCooperativeFormat;
-        if (l.reg and (l.cooperative or l.format.bits != 4 or l.format.group != 64 or !l.precompute_sums)) return error.UnsupportedRegFormat;
+        if (l.cooperative and (l.format.bits != 4 or l.format.metadata != .bf16)) return error.UnsupportedCooperativeFormat;
+        if (l.reg and (l.cooperative or l.format.bits != 4 or l.format.group != 64 or l.format.metadata != .bf16 or !l.precompute_sums)) return error.UnsupportedRegFormat;
         if ((l.cooperative or l.reg) and l.n % 32 != 0) return error.InvalidShape;
         if (l.y_stride) |s| if (s < l.n or s > std.math.maxInt(i32) / 16) return error.InvalidOutputStride;
         if (l.n == 0 or l.n % 16 != 0 or l.k == 0 or l.k % l.format.group != 0 or
@@ -83,12 +85,12 @@ pub const Layout = struct {
     }
 
     pub fn weightWords(l: Layout) usize {
-        return l.tileCount() * 32 * (l.k / 32) * l.format.bits;
+        return l.tileCount() * 32 * (l.k * l.format.bits / 32);
     }
 
     /// MLX's packed W for this layout: N rows of K*bits/32 words.
     pub fn sourceWords(l: Layout) usize {
-        return l.n * (l.k / 32) * l.format.bits;
+        return l.n * (l.k * l.format.bits / 32);
     }
 
     pub fn metadataElements(l: Layout) usize {
@@ -96,7 +98,7 @@ pub const Layout = struct {
     }
 
     pub fn packedBytes(l: Layout) usize {
-        return l.weightWords() * 4 + l.metadataElements() * 2;
+        return l.weightWords() * 4 + l.metadataElements() * l.format.metadata.size();
     }
 };
 
@@ -118,16 +120,27 @@ pub fn source(a: std.mem.Allocator, l: Layout) ![]u8 {
     try text.print(a, "#define TF_PRECOMPUTE_SUMS {d}\n", .{@intFromBool(l.precompute_sums)});
     if (l.reg) try text.appendSlice(a, "#define TF_REG 1\n");
     if (l.y_stride) |s| try text.print(a, "#define TF_YS {d}\n", .{s});
+    if (l.format.metadata == .f32) try text.appendSlice(a, "#define TF_META_F32 1\n");
     try text.appendSlice(a, ks.core_lane_projection);
     return text.toOwnedSlice(a);
 }
 
 /// Exact byte copies of MLX affine W, S and B into the kernel's layouts (no dequantization); storage disjoint.
 pub fn pack(l: Layout, w: []const u32, scales: []const u16, biases: []const u16, out_w: []u32, out_sb: []u16) !void {
+    if (l.format.metadata != .bf16) return error.MetadataMismatch;
+    return packNative(u16, l, w, scales, biases, out_w, out_sb);
+}
+
+pub fn packF32(l: Layout, w: []const u32, scales: []const f32, biases: []const f32, out_w: []u32, out_sb: []f32) !void {
+    if (l.format.metadata != .f32) return error.MetadataMismatch;
+    return packNative(f32, l, w, scales, biases, out_w, out_sb);
+}
+
+fn packNative(comptime T: type, l: Layout, w: []const u32, scales: []const T, biases: []const T, out_w: []u32, out_sb: []T) !void {
     try l.validate();
     const ng = l.k / l.format.group;
     const wp = l.format.group * l.format.bits / 32;
-    const row_words = l.k / 32 * l.format.bits;
+    const row_words = l.k * l.format.bits / 32;
     if (w.len != l.sourceWords() or scales.len != l.n * ng or biases.len != l.n * ng or
         out_w.len != l.weightWords() or out_sb.len != l.metadataElements()) return error.InvalidStorage;
     if (overlap(std.mem.sliceAsBytes(w), std.mem.sliceAsBytes(out_w)) or
@@ -240,7 +253,7 @@ pub const Projection = struct {
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, l: Layout) !Projection {
         try l.validate();
-        if (!device.tensorUnits() and (l.format.bits != 6 or l.format.group != 32 or l.cooperative or l.reg or l.precompute_sums)) return error.TensorUnitsRequired;
+        if (!device.tensorUnits() and (l.format.bits != 6 or l.format.group != 32 or l.format.metadata != .bf16 or l.cooperative or l.reg or l.precompute_sums)) return error.TensorUnitsRequired;
         const text = try source(a, l);
         defer a.free(text);
         const adapted = try frags.source(device, a, text);
@@ -257,7 +270,7 @@ pub const Projection = struct {
             errdefer sums_pipe.?.deinit();
             sums_buffer = try device.buffer(@as(usize, if (l.reg) l.rows else 16) * (l.k / l.format.group) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         }
-        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg, .max_rows = @intCast(if (l.reg) l.rows else 16) };
+        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * l.format.metadata.size(), .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg, .max_rows = @intCast(if (l.reg) l.rows else 16) };
     }
 
     pub fn deinit(p: Projection) void {
@@ -468,4 +481,29 @@ test "reg order puts every code in the tensor op's right-input register for its 
     try bad.validate();
     bad.format.group = 128;
     try std.testing.expectError(error.UnsupportedRegFormat, bad.validate());
+}
+
+test "group16 FP32 metadata uses whole encoded words even at K16, with exact bytes and padded columns" {
+    const l = Layout{ .n = 16, .k = 16, .format = .{ .bits = 6, .group = 16, .metadata = .f32 } };
+    try l.validate();
+    try std.testing.expectEqual(@as(usize, 48), l.sourceWords());
+    try std.testing.expectEqual(@as(usize, 96), l.weightWords());
+    var words: [48]u32 = undefined;
+    for (&words, 0..) |*v, i| v.* = @intCast(i);
+    var scales: [16]f32 = undefined;
+    var biases: [16]f32 = undefined;
+    for (&scales, &biases, 0..) |*s, *b, i| {
+        s.* = @bitCast(@as(u32, 0x3f800001) + @as(u32, @intCast(i)));
+        b.* = @bitCast(@as(u32, 0xbf800003) + @as(u32, @intCast(i)));
+    }
+    var encoded: [96]u32 = undefined;
+    var sb: [32]f32 = undefined;
+    try packF32(l, &words, &scales, &biases, &encoded, &sb);
+    try std.testing.expectEqualSlices(u32, &words, encoded[0..48]);
+    for (encoded[48..]) |v| try std.testing.expectEqual(@as(u32, 0), v);
+    for (scales, biases, 0..) |s, b, i| {
+        try std.testing.expectEqual(@as(u32, @bitCast(s)), @as(u32, @bitCast(sb[i * 2])));
+        try std.testing.expectEqual(@as(u32, @bitCast(b)), @as(u32, @bitCast(sb[i * 2 + 1])));
+    }
+    try std.testing.expectEqual(@as(usize, 512), l.encodedBytes());
 }

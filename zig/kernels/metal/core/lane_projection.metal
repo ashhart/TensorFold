@@ -2,6 +2,14 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
+#ifndef TF_META_F32
+#define TF_META_F32 0
+#endif
+#if TF_META_F32
+#define TF_LANE_META float
+#else
+#define TF_LANE_META bfloat
+#endif
 
 // 1-16 bf16 rows share each group's weight read; every row's sums and split-K order hold at every width.
 
@@ -138,14 +146,26 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
 #define TF_SUM_VALUE(row, g) tf_lane_xsum(X, row, g, M)
 #endif
 
+#if TF_META_F32
+#define TF_LANE_METADATA(raw, f, g) \
+  for (int j = 0; j < 4; j++) { \
+    const int col = n0 + (f) * 16 + fn + (TF_SIMD_FRAGS ? (j & 1) + 8 * (j >> 1) : j); \
+    s[f][j] = col < TF_N ? SBt[(size_t(g) * TF_N + col) * 2] : 0.0f; \
+    bb[f][j] = col < TF_N ? SBt[(size_t(g) * TF_N + col) * 2 + 1] : 0.0f; \
+  }
+#else
+#define TF_LANE_METADATA(raw, f, g) \
+  const vec<bfloat, 8> v = as_type<vec<bfloat, 8>>((raw).s[f]); \
+  for (int j = 0; j < 4; j++) { s[f][j] = float(v[2 * j]); bb[f][j] = float(v[2 * j + 1]); }
+#endif
+
 // Each group loads packed codes or stages widened codes, performs the tensor product, then applies the scale/bias FMAs.
 #define TF_LANE_GROUP(g, raw)                                                                                  \
   {                                                                                                            \
     TF_STAGE_CODES(raw) \
     float s[NF][4], bb[NF][4];                                                                                 \
     for (int f = 0; f < NF; f++) {                                                                             \
-      const vec<bfloat, 8> v = as_type<vec<bfloat, 8>>(raw.s[f]);                                              \
-      for (int j = 0; j < 4; j++) { s[f][j] = float(v[2 * j]); bb[f][j] = float(v[2 * j + 1]); }               \
+      TF_LANE_METADATA(raw, f, g)                                                                             \
     }                                                                                                          \
     raw = tf_lane_fetch(W, sbv, tile, (g) + TF_PF, g_end, n0, lane, fn);                                       \
     TF_GROUP_PRODUCT(g) \
@@ -161,7 +181,7 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
   }
 
 [[kernel]] void tf_lane(const device bfloat* X [[buffer(0)]], const device uint* W [[buffer(1)]],
-    const device bfloat* SBt [[buffer(2)]], const device int* mdims [[buffer(3)]], device TF_OUT* Y [[buffer(4)]],
+    const device TF_LANE_META* SBt [[buffer(2)]], const device int* mdims [[buffer(3)]], device TF_OUT* Y [[buffer(4)]],
 #if TF_PRECOMPUTE_SUMS
     const device float* XS [[buffer(5)]],
 #endif
