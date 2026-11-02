@@ -43,3 +43,5 @@ fi
 # libmcdma-fabric on MCDMA's stub verbs (roce0, roce1, tb0..), as its tests/test_link.py builds it; no device is opened
 cc -std=c11 -O1 -g -Wall -Wextra -Werror -DMCDMA_LINK_TEST_INTERFACES "${shared[@]}" -o "$stub" "$src/rpc/libmcdma_fabric.c" "$src/rpc/link_verbs.c" "$src/rpc/link_tb.c" "$src/rpc/link_xchg.c" "$src/tests/stub_link_verbs.c" -lpthread
 TF_MCDMA_FABRIC_STUB="$stub" "$zig" test -lc -O ReleaseSafe --dep fabric --dep sys "-Mroot=$root/zig/tests/fabric_mcdma_stub.zig" --dep sys "-Mfabric=$fabric" "-Msys=$sys"
+# the cluster's bring-up on the same stub: two nodes from one cluster file to their endpoints and an agreed plan
+TF_MCDMA_FABRIC_STUB="$stub" "$zig" test -lc -O ReleaseSafe --dep cluster --dep fabric --dep sys "-Mroot=$root/zig/tests/cluster_mcdma_stub.zig" --dep fabric --dep sys "-Mcluster=$root/zig/src/cluster/cluster.zig" --dep sys "-Mfabric=$fabric" "-Msys=$sys"
