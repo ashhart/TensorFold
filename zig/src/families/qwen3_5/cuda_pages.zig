@@ -11,10 +11,16 @@ const Cache = caches.Cache;
 /// Rows past a request's prompt and reply its pages hold: one more forward's (a verify window or a prompt chunk).
 pub const window_rows: u32 = engine.max_rows;
 
-/// TF_QWEN_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset or 0: a window each).
-pub fn paging() !usize {
-    const v = @import("core").profile.get(.TF_QWEN_KV_PAGES) orelse return 0;
-    return parsePaging(v);
+/// Positions a page holds with TF_QWEN_KV_PAGES unset: divides the 4096-row prompt chunk, as TF_QWEN_KV_SHARE needs.
+pub const default_page_tokens: usize = 256;
+
+/// TF_QWEN_KV_PAGES=n: streams take n-position pages from one pool (0: a window each; unset: 256, windows by --slide).
+pub fn paging(slide: bool) !usize {
+    return pagingOf(@import("core").profile.get(.TF_QWEN_KV_PAGES), slide);
+}
+
+pub fn pagingOf(v: ?[]const u8, slide: bool) !usize {
+    return parsePaging(v orelse return if (slide) 0 else default_page_tokens);
 }
 
 pub fn parsePaging(v: []const u8) !usize {
@@ -23,10 +29,13 @@ pub fn parsePaging(v: []const u8) !usize {
     return n;
 }
 
-/// TF_QWEN_KV_PAGES_ALL=1: every stream on pages, the engine's own too: no window is reserved for it.
+/// TF_QWEN_KV_PAGES_ALL: every stream on pages, the engine's own too; 0 keeps a window for the engine's stream.
 pub fn pagedOnly() bool {
-    const v = @import("core").profile.get(.TF_QWEN_KV_PAGES_ALL) orelse return false;
-    return std.mem.eql(u8, v, "1");
+    return pagedOnlyOf(@import("core").profile.get(.TF_QWEN_KV_PAGES_ALL));
+}
+
+pub fn pagedOnlyOf(v: ?[]const u8) bool {
+    return !std.mem.eql(u8, v orelse return true, "0");
 }
 
 /// Pages a stream maps at most: a full window and one more forward.
@@ -224,4 +233,12 @@ test "KV page dimensions: pool rows fit the signed kernel argument and zero disa
     try std.testing.expectEqual(@as(usize, 48), try parsePaging("48"));
     try std.testing.expectError(error.BadQwenKvPages, parsePaging("2147483648"));
     try std.testing.expectError(error.BadQwenKvPages, parsePaging("18446744073709551615"));
+}
+
+test "Qwen pages by default: 256 positions and the engine's stream too, windows beside --slide or at 0" {
+    try std.testing.expectEqual(default_page_tokens, try pagingOf(null, false));
+    try std.testing.expectEqual(@as(usize, 0), try pagingOf(null, true));
+    try std.testing.expectEqual(@as(usize, 0), try pagingOf("0", false));
+    try std.testing.expectEqual(@as(usize, 128), try pagingOf("128", true));
+    try std.testing.expect(pagedOnlyOf(null) and pagedOnlyOf("1") and !pagedOnlyOf("0"));
 }
