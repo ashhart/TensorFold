@@ -189,10 +189,7 @@ pub fn route(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl.C
     const weights = wts orelse ref(r[1]);
     kn.route_select(e, K.k.select, ref(s.logits), L.k.at(m.bias), c.routed_scale, rows, .{ 0, c.experts }, kn.RouteOutputs(Ref){ .pick = picks, .wts = weights, .ids = ref(r[2]), .members = ref(r[3]), .count = ref(r[4]), .mine = ref(r[5]), .theirs = ref(r[6]), .counts = ref(r[7]), .word = ref(r[8]) });
     const tap_m = @import("../../core/route_tap_metal.zig");
-    if (tap_m.live()) {
-        e.barrier();
-        tap_m.blitPicks(e, picks.buf, picks.off, weights.buf, weights.off, rows * c.topk);
-    }
+    if (tap_m.live()) tap_m.blitPicks(e, picks.buf, picks.off, weights.buf, weights.off, rows * c.topk);
 }
 
 /// The experts of x into s.y from jobs already in s.moe_jobs (gate/up first, then down) and their tables.

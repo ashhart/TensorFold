@@ -182,7 +182,10 @@ const record = @import("cuda_record.zig");
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = platform.optional_libraries.atBoundary();
     defer report.deinit();
-    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, "cuda", problem)) return null;
+    const route_tap = @import("core").route_tap;
+    var tap_guard: route_tap.Guard = .{};
+    defer tap_guard.deinit();
+    if (!route_tap.admit(a, gpa, o.model_type, o.rank, "cuda", problem)) return null;
     if (o.fsrRefusal("cuda")) |why| {
         problem.* = why;
         return null;
@@ -192,15 +195,15 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
-    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "fish_omni")) return route_tap.held(&tap_guard, try openDrama(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return route_tap.held(&tap_guard, try @import("qwen4_cuda.zig").open(a, gpa, io, o, problem));
+    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return route_tap.held(&tap_guard, try openWith(F, a, gpa, io, o, problem));
     if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
         if (refusals.lfm2(o)) |why| {
             problem.* = why;
             return null;
         }
-        return lfm2.open(a, gpa, io, o, problem);
+        return route_tap.held(&tap_guard, try lfm2.open(a, gpa, io, o, problem));
     }
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;

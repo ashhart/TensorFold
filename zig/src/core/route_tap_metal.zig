@@ -54,15 +54,19 @@ pub fn live() bool {
 
 /// Copy `n` u32 picks (and the same count of fp32 weights) into the ring inside this command buffer.
 pub fn blit(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, n: u32) void {
-    if (!tap.live()) return;
-    copyInto(enc, pipe, pick, pick_off, wts, wts_off, n);
+    if (tap.live()) {
+        @branchHint(.unlikely);
+        copyInto(enc, pipe, pick, pick_off, wts, wts_off, n);
+    }
 }
 
 /// Same as `blit` using the tap's own copy kernel (families that have no u32 copy pipeline).
 pub fn blitPicks(enc: mtl.ComputeEncoder, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, n: u32) void {
-    if (!tap.live()) return;
-    const pipe = copy orelse return;
-    copyInto(enc, pipe, pick, pick_off, wts, wts_off, n);
+    if (tap.live()) {
+        @branchHint(.unlikely);
+        const pipe = copy orelse return;
+        copyInto(enc, pipe, pick, pick_off, wts, wts_off, n);
+    }
 }
 
 fn copyInto(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_off: usize, wts: mtl.Buffer, wts_off: usize, n: u32) void {
@@ -70,7 +74,7 @@ fn copyInto(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_
     if (n == 0) return;
     const sl = tap.reserve(@intCast(n)) orelse return;
     const off = tap.sharedOff(sl.index);
-    // Concurrent encoders otherwise copy the previous layer's picks; Nemotron barriers the same way.
+    // Only on a live tap: concurrent encoders otherwise copy the previous layer's picks.
     enc.barrier();
     enc.setPipeline(pipe);
     enc.setBuffer(pick, pick_off, 0);
@@ -86,11 +90,13 @@ fn copyInto(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_
 
 /// After the command buffer wait the step already does: read the shared ring, then publish.
 pub fn afterWait() void {
+    if (!tap.live()) return;
     afterLand(tap.reservedCount());
 }
 
 /// Same as `afterWait`, but only slots reserved by this command buffer (pipelined submits).
 pub fn afterLand(to: u32) void {
+    if (!tap.live()) return;
     const dest_buf = dest() orelse {
         tap.publishTo(to);
         return;

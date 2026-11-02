@@ -158,19 +158,21 @@ const Host = struct {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    var tap_guard: tf.route_tap.Guard = .{};
+    defer tap_guard.deinit();
     if (!tf.route_tap.admit(a, gpa, o.model_type, o.rank, "metal", problem)) return null;
     if (fsr_options.refuse(o, problem)) return null;
     if (o.prompt_int8 or o.rope_yarn != null) {
         problem.* = if (o.prompt_int8) prompt_int8_refusal else "--rope-yarn: the Metal engine has no YaRN rope; serve without --rope-yarn";
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "fish_omni")) return tf.route_tap.held(&tap_guard, try @import("drama_open.zig").openMetal(a, gpa, io, o, problem));
     if (o.cfg_enabled or o.cfg_batched) {
         problem.* = "--cfg-* guidance requires a Drama 3 speech model";
         return null;
     }
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
-    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_metal.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return tf.route_tap.held(&tap_guard, try @import("qwen4_metal.zig").open(a, gpa, io, o, problem));
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and @import("qwen27_engine.zig").owns(a, io, o.dir);
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;
@@ -180,20 +182,20 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head) and Gemma 4 dense";
         return null;
     }
-    if (dense) return openQwen27(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
-    if (isGemma4(o.model_type)) return @import("gemma4.zig").open(a, gpa, io, o, problem);
+    if (dense) return tf.route_tap.held(&tap_guard, try openQwen27(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return tf.route_tap.held(&tap_guard, try openFlashNext(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "glm5_next")) return tf.route_tap.held(&tap_guard, try openGlm(a, gpa, io, o, problem));
+    if (isGemma4(o.model_type)) return tf.route_tap.held(&tap_guard, try @import("gemma4.zig").open(a, gpa, io, o, problem));
     if (o.vision != null and !std.mem.eql(u8, o.model_type, "step5_vl") and !std.mem.eql(u8, o.model_type, "minimax_m3_vl")) {
         problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4, Step-5 and MiniMax-M3.1-Flash only, not {s} checkpoints", .{o.model_type});
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "step5_vl")) return @import("step5.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "spark2_5")) return @import("spark25.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return @import("minimax_m3.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return tf.route_tap.held(&tap_guard, try openGlmDsa(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "qwen3_5")) return tf.route_tap.held(&tap_guard, try @import("qwen35.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "step5_vl")) return tf.route_tap.held(&tap_guard, try @import("step5.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "spark2_5")) return tf.route_tap.held(&tap_guard, try @import("spark25.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return tf.route_tap.held(&tap_guard, try @import("minimax_m3.zig").open(a, gpa, io, o, problem));
+    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return tf.route_tap.held(&tap_guard, try @import("lfm2_moe.zig").open(a, gpa, io, o, problem));
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
@@ -305,7 +307,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     errdefer if (h.slide) |s| s.deinit(gpa);
     try h.host.start();
-    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
+    return tf.route_tap.held(&tap_guard, api.Opened{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt });
 }
 
 const prompt_int8_refusal = "--prompt-precision int8 is the CUDA Qwen3.5 engine's; the Metal engines prompt in bf16: serve without it";

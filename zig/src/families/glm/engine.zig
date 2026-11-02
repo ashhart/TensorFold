@@ -337,7 +337,7 @@ pub const Engine = struct {
         if (spin) {
             while (@backingInt(cb.status()) < @backingInt(mtl.types.CommandBufferStatus.completed)) std.atomic.spinLoopHint();
         } else cb.wait();
-        @import("../../core/route_tap_metal.zig").afterWait();
+        if (@import("../../core/route_tap_metal.zig").live()) @import("../../core/route_tap_metal.zig").afterWait();
         e.gpu = .{ cb.gpuStart(), cb.gpuEnd() };
         if (cb.failure()) |msg| {
             e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it

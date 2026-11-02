@@ -136,7 +136,7 @@ pub const Engine = struct {
     fn finish(e: *Engine, cb: mtl.CommandBuffer) !void {
         cb.commit();
         cb.wait();
-        @import("../../core/route_tap_metal.zig").afterWait();
+        if (@import("../../core/route_tap_metal.zig").live()) @import("../../core/route_tap_metal.zig").afterWait();
         if (cb.failure()) |msg| {
             std.log.err("glm_dsa: GPU command failed: {s}", .{msg});
             return error.GpuFailure;

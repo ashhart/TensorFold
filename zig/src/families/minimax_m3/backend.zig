@@ -218,7 +218,7 @@ pub const Metal = struct {
         const f = self.flights.orderedRemove(0);
         defer f.cb.release();
         f.cb.wait();
-        @import("../../core/route_tap_metal.zig").afterLand(f.tap_at);
+        if (@import("../../core/route_tap.zig").live()) @import("../../core/route_tap_metal.zig").afterLand(f.tap_at);
         if (f.cb.failure()) |msg| {
             std.log.err("minimax_m3 step: {s}", .{msg});
             return error.GpuFailed;
@@ -382,7 +382,8 @@ pub const Metal = struct {
         const how: @FieldType(fwd.Draw, "how") = if (sampled(stream.sampling)) |t| .{ .sampled = .{ .sampling = t, .position = position } } else .greedy;
         var cb: mtl.CommandBuffer = undefined;
         try fwd.run(self.model, &self.scratch, cache, &.{0}, .{ .ids = self.slotOf(in), .draw = .{ .how = how, .out = self.slotOf(out) }, .flight = &cb });
-        self.flights.append(self.gpa, .{ .end = out + 1, .cb = cb, .tap_at = @import("../../core/route_tap.zig").reservedCount() }) catch |err| {
+        const tap = @import("../../core/route_tap.zig");
+        self.flights.append(self.gpa, .{ .end = out + 1, .cb = cb, .tap_at = if (tap.live()) tap.reservedCount() else 0 }) catch |err| {
             cb.wait();
             cb.release();
             return err;

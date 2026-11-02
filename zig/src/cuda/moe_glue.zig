@@ -70,7 +70,7 @@ pub const MoeGlue = struct {
             try launch_.launch(g.topk_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
         }
         const slots = r.topk + (if (r.shared) r.shared_slots else 0);
-        @import("route_tap_copy.zig").afterPick(s, pick, wts, rows, slots);
+        if (@import("core").route_tap.live()) @import("route_tap_copy.zig").afterPick(s, pick, wts, rows, slots);
     }
 
     /// out [rows, dims] = the sum, in slot order, of w [rows, slots] (fp32) times y [rows, slots, dims].
