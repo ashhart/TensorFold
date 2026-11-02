@@ -106,7 +106,10 @@ pub fn recall(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32,
     const r = s.disk orelse return have;
     write.reap(r);
     const chosen = select.choose(s, prompt, starts, spans, have).restore orelse return have;
-    const name = r.states.items[chosen].name;
+    const candidate = r.states.items[chosen];
+    if (s.image_frame != 0 or !@import("cache_images.zig").diskSafe(candidate.tokens) or
+        !@import("cache_images.zig").equal(&.{}, s.image_query orelse &.{}, @intCast(candidate.tokens.len))) return have;
+    const name = candidate.name;
     const bytes = s.family.vtable.bytes(s.family.ptr, r.states.items[chosen].at);
     if (bytes > s.budget or s.most == 0) return have;
     if (!ready(s, bytes)) present(r, chosen) catch return have; // nothing goes to make room for a state whose file is gone
