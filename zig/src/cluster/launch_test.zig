@@ -1,5 +1,6 @@
 //! The control step against fake hosts: key-only ssh argv, `cluster init` discovering a mesh, and node launches.
 const std = @import("std");
+const fabric = @import("fabric");
 const node = @import("node.zig");
 const config = @import("config.zig");
 const launch = @import("launch.zig");
@@ -97,4 +98,55 @@ test "serve starts tensorfold node on every other model node, reports a node tha
     const calls = fake.calls.items.len;
     _ = try launch.launch(a, fake.runner(), c, four, c.model("m").?, "n0", true);
     try std.testing.expectEqual(calls, fake.calls.items.len);
+}
+
+test "a node's \"bin\" is the tensorfold its launch runs over ssh; without one, tensorfold from the login PATH" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try std.mem.replaceOwned(u8, a, four, "\"name\": \"n1\", \"address\": \"host1\", \"backend\": \"metal\",", "\"name\": \"n1\", \"address\": \"host1\", \"backend\": \"metal\", \"bin\": \"/opt/tf/bin/tensorfold\",");
+    var probs: config.Problems = .{ .a = a };
+    const c = try config.parse(a, text, &probs);
+    var fake: Fake = .{ .cables = &mesh };
+    const started = try launch.launch(a, fake.runner(), c, text, c.model("m").?, "n0", true);
+    try std.testing.expectEqualStrings("tf@host1", started[0].argv[started[0].argv.len - 2]);
+    try std.testing.expect(std.mem.indexOf(u8, started[0].argv[started[0].argv.len - 1], "nohup /opt/tf/bin/tensorfold node --name n1 --leader n0 --model m --cluster") != null);
+    try std.testing.expect(std.mem.indexOf(u8, started[1].argv[started[1].argv.len - 1], "nohup tensorfold node --name n2 --leader n0 --model m --cluster") != null);
+}
+
+test "the node launch backgrounds only the node: the exact remote command, braces around nohup and echo" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const cmd = try launch.nodeCommand(arena.allocator(), "{}", "/opt/tf/bin/tensorfold", "n1", "n0", "m");
+    try std.testing.expectEqualStrings("mkdir -p ~/.config/tensorfold ~/.cache/tensorfold && printf %s e30= | base64 --decode > ~/.config/tensorfold/cluster.json && { nohup /opt/tf/bin/tensorfold node --name n1 --leader n0 --model m --cluster ~/.config/tensorfold/cluster.json >> ~/.cache/tensorfold/node.log 2>&1 < /dev/null & echo started $!; }", cmd);
+    // the braces hold the background job to the node alone, and the node holds none of ssh's stdin, stdout or stderr
+    const open = std.mem.indexOf(u8, cmd, "&& { nohup ").?;
+    const amp = std.mem.lastIndexOf(u8, cmd, " & echo started $!; }").?;
+    try std.testing.expect(std.mem.endsWith(u8, cmd, " & echo started $!; }") and open < amp);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, cmd, " & "));
+    const job = cmd[open..amp];
+    for ([_][]const u8{ ">> ~/.cache/tensorfold/node.log", "2>&1", "< /dev/null" }) |redirect| try std.testing.expect(std.mem.indexOf(u8, job, redirect) != null);
+}
+
+test "the launch's remote command returns at once, before the node it started exits, so ssh does not wait on it" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmp.dir.realPathFileAlloc(io, ".", a);
+    // a stand-in node that runs 4 s; ssh, like std.process.run, reads the command's stdout until it closes
+    try tmp.dir.writeFile(io, .{ .sub_path = "node.sh", .data = "sleep 4\n" });
+    const bin = try std.fmt.allocPrint(a, "/bin/sh {s}/node.sh", .{home});
+    const cmd = try launch.nodeCommand(a, "{\"cluster\": \"x\"}", bin, "n1", "n0", "m");
+    const t0 = fabric.words.nowNs();
+    const res = try std.process.run(a, io, .{ .argv = &.{ "/bin/sh", "-c", try std.fmt.allocPrint(a, "HOME={s}; export HOME; {s}", .{ home, cmd }) } });
+    const took = fabric.words.nowNs() - t0;
+    try std.testing.expect(res.term == .exited and res.term.exited == 0);
+    try std.testing.expect(std.mem.startsWith(u8, res.stdout, "started "));
+    try std.testing.expect(took < 2 * std.time.ns_per_s);
+    const written = try tmp.dir.readFileAlloc(io, ".config/tensorfold/cluster.json", a, .limited(1 << 10));
+    try std.testing.expectEqualStrings("{\"cluster\": \"x\"}", written);
 }
