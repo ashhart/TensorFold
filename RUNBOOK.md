@@ -182,6 +182,27 @@ On flashnext Metal with eight 14336-row prompts arriving together, `fcfs` at 204
 
 For source builds with `zig build native` (including `--prefix` installs): Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
 
+### Build a server for one GPU
+
+`zig build -Dgpu=<gpu>` builds only `tensorfold-native`, with kernel code for that one GPU architecture and every model family, stripped by default:
+
+```sh
+zig build -Dgpu=spark -Dnvcc=/usr/local/cuda/bin/nvcc            # zig-out/native/bin/tensorfold-native
+zig build -Dgpu=gfx1201 -Dhipcc=/opt/rocm/core/bin/hipcc          # zig-out/native-hip/bin/tensorfold-native
+```
+
+- `-Dgpu`: `sm_80`, `sm_86`, `sm_89`, `sm_120`, `sm_121`, `spark` (GB10, sm_121), or an exact HIP architecture from `zig/src/hip/caps.zig`. It replaces `-Dsm`, `-Dhip` and `-Dhip-arch`.
+- CUDA needs `-Dnvcc`, or `-Dfatbins` with prebuilt images; each prebuilt image must hold exactly the one SASS profile its kernel needs on that GPU. `-Dstrip=false` keeps debug info.
+- The build offers no other step: tests, tools and `grammar` need the development build (no `-Dgpu`). Structured output needs `libtfgrammar` in the server's `../lib` (release archive `lib/`, or `zig build grammar -Dxgrammar=DIR`, which installs `native/lib`; copy it to `native-hip/lib` for HIP).
+
+Measured on 2026-11-02 (aarch64 for CUDA, x86_64 for HIP), every model family in every server:
+
+| Hardware GPU | Generic server | `-Dgpu` server | Saved |
+| --- | --- | --- | --- |
+| RTX PRO 6000 (`sm_120`, nvcc 13.3) | 145.5 MB (sm_80, 86, 120, 121) | 44.9 MB | 100.6 MB (69.2%) |
+| GB10 DGX Spark (`spark`, nvcc 13.4) | 146.1 MB (sm_80, 86, 120, 121) | 44.8 MB | 101.3 MB (69.3%) |
+| Radeon AI PRO R9700 (`gfx1201`, ROCm 7.16) | 48.9 MB (`native-hip`, unstripped) | 20.6 MB | 28.3 MB (58.0%) |
+
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
 The archives require glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`.
 Their kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
