@@ -46,3 +46,15 @@ test "stable profile: reporting follows the original count and exact-one flag se
     try t.expect(flag.differs("1"));
     for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |v| try t.expect(!flag.differs(v));
 }
+
+test "stable profile: GLM paging registers automatic policy without supplying or coercing its value" {
+    const e = p.entry(.TF_KV_PAGES);
+    try t.expectEqual(p.Syntax.auto, e.syntax);
+    try t.expectEqual(p.Class.identical, e.class);
+    try t.expect(e.applies("glm5_next", "cuda"));
+    try t.expect(!e.applies("qwen3_5", "cuda"));
+    try t.expect(!e.applies("glm5_next", "mlx"));
+    try t.expect(!e.differs("auto"));
+    for ([_][]const u8{ "off", "0", "on", "1", "all", "", "AUTO", "false", " 0 " }) |raw|
+        try t.expect(e.differs(raw));
+}
