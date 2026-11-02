@@ -26,6 +26,12 @@ pub fn rows(held: u32, need: u32, s: u32, context: u32) u32 {
     return @intCast(@min(@max(rounded, quarter), context));
 }
 
+/// An empty slot's rows for a prompt of `need`: rounded up to the step, at least one step, at most the context.
+pub fn admitted(need: u32, s: u32, context: u32) u32 {
+    const rounded = (@as(u64, need) + s - 1) / s * s;
+    return @intCast(@min(@max(rounded, s), context));
+}
+
 /// Head h of a [heads][old][dim] bf16 buffer to its place in a [heads][new][dim] one.
 pub fn moves(out: []Move, heads: usize, dim: usize, old: u32, new: u32) []Move {
     std.debug.assert(out.len >= heads and new >= old);
