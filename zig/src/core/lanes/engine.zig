@@ -16,6 +16,7 @@ const lone_costs = @import("lone_costs.zig");
 const open = @import("open.zig");
 const handover = @import("handover.zig");
 const trim = @import("trim.zig");
+const pipelined = @import("pipelined.zig");
 const Stream = sm.Stream;
 const Feed = be.Feed;
 const LogRow = @import("logprob.zig").Row;
@@ -24,7 +25,7 @@ const f = ev.f;
 const str = trail.str;
 const int = trail.int;
 const Outcome = struct { got: []const u32, path: []const u32, cut: ?usize, follow: []const u32 };
-const Result = struct { rows: u32, keep: u32, got: []const u32 };
+pub const Result = struct { rows: u32, keep: u32, got: []const u32 };
 const Unread = struct { event: usize, handle: u64 };
 pub const Engine = struct {
     const pieces_ = @import("pieces.zig");
@@ -127,7 +128,7 @@ pub const Engine = struct {
         if (live.items.len > 1 and e.cfg.family_streams) {
             // a shared round is synchronous: a stream that ran a step ahead lands its queued token first
             for (live.items) |s| {
-                if (s.inflight != null) try e.landInflight(s);
+                if (s.inflight != null) try pipelined.land(e, s);
             }
             var kept: usize = 0;
             for (live.items) |s| {
@@ -150,7 +151,7 @@ pub const Engine = struct {
             for (live.items) |s| {
                 // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
                 const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
-                const r = if (windowed) try e.familyRound(s, null) else try e.pipelinedRound(s);
+                const r = if (windowed) try e.familyRound(s, null) else try pipelined.round(e, s);
                 s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
             }
         }
@@ -198,7 +199,7 @@ pub const Engine = struct {
     }
 
     /// One stream's round: verify pending and drafted tokens together, keep drafts to the first mismatch.
-    fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
+    pub fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
         @import("hold_price.zig").startRound(e);
         try e.late.flush(e, Engine.askDrafts);
         const priced = s.priced;
@@ -285,25 +286,42 @@ pub const Engine = struct {
         for (plans, 0..) |p, i| {
             if (e.cfg.family_mtp and p.stream.drafts) try heads.append(a, i);
         }
-        const whos = try a.alloc(depth.Who, heads.items.len);
-        for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream);
+        const requests: []be.DraftRequest = if (heads.items.len > 0 and
+            (e.cfg.draft_streams or e.backend.vtable.prepare_draft != null))
+            try a.alloc(be.DraftRequest, heads.items.len)
+        else
+            &.{};
+        for (requests, 0..) |*r, at| {
+            const i = heads.items[at];
+            const s = plans[i].stream;
+            r.* = .{ .stream = s, .follow = outcomes[i].follow, .rows = outcomes[i].path, .start = plans[i].position, .position = s.cache_len + 1, .depth = 0 };
+        }
+        if (requests.len > 0) if (e.backend.vtable.prepare_draft) |prepare| {
+            try prepare(e.backend.ptr, requests);
+            for (requests) |*r| r.prepared = true;
+        };
         const budgets = try a.alloc(i64, heads.items.len);
         const sampled = win.anySampled(plans);
-        if (e.cfg.allocate_shared_drafts)
-            try @import("shared_drafts.zig").budgets(e, plans, heads.items, budgets)
-        else
+        if (e.cfg.allocate_shared_drafts) {
+            try @import("shared_drafts.zig").budgets(e, plans, heads.items, budgets);
+        } else {
+            const whos = try a.alloc(depth.Who, heads.items.len);
+            for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream);
             try e.rule.budgets(whos, win.probe(e), sampled, budgets);
+        }
         const ids = try a.alloc(ev.Value, heads.items.len);
         for (ids, heads.items) |*id, i| id.* = str(plans[i].stream.id);
         try trail.event(e, &.{ f("ev", str("budgets")), f("streams", .{ .list = ids }), f("depths", .{ .i64s = budgets }) });
         if (heads.items.len > 0 and e.cfg.draft_streams) {
-            // every stream's head in one batch (the backend drafts a depth for all of them at once)
-            const requests = try a.alloc(be.DraftRequest, heads.items.len);
-            for (requests, heads.items, budgets) |*r, i, d| {
-                const s = plans[i].stream;
-                r.* = .{ .stream = s, .follow = outcomes[i].follow, .rows = outcomes[i].path, .start = plans[i].position, .position = s.cache_len + 1, .depth = @intCast(d) };
-            }
+            // Every head shares one hold, after all kept context has been staged and priced.
+            for (requests, budgets) |*r, d| r.depth = @intCast(d);
             try e.askDrafts(requests);
+        } else if (requests.len > 0) {
+            for (requests, budgets, 0..) |*r, d, i| {
+                var who = win.who(r.stream);
+                r.depth = @intCast(try e.rule.headDepth(&who, d, win.probe(e)));
+                try e.askDrafts(requests[i..][0..1]);
+            }
         } else {
             for (heads.items, budgets) |i, d| try e.draftLate(plans[i].stream, plans[i].position, outcomes[i].follow, outcomes[i].path, d);
         }
@@ -314,9 +332,11 @@ pub const Engine = struct {
         };
         try e.backend.keep(windows, paths);
         if (e.cfg.timed) {
-            // the drafts budgets priced past each stream's first are no part of the round's overhead
+            // Actual native timing already includes every head step; subtract extras only for the modeled path.
             var steps: i64 = 0;
-            for (budgets) |d| steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
+            if (e.backend.draft_timing == null) for (budgets) |d| {
+                steps = if (e.cfg.draft_streams and depth.pricedBatched()) @max(steps, d - 1) else steps + @max(0, d - 1);
+            };
             const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
             try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, @import("hold_price.zig").observedHeadMs(e.backend, &e.rule, budgets));
@@ -439,11 +459,15 @@ pub const Engine = struct {
         return .{ .got = got, .path = path, .cut = cut, .follow = committed.items[0..keep] };
     }
 
-    /// Read the kept rows with their following tokens and ask the head for the next round's drafts.
+    /// Stage kept context before choosing a lone depth, then hold without ingesting the same rows twice.
     fn draftLate(e: *Engine, s: *Stream, start: u64, follow: []const u32, path: []const u32, budget: ?i64) !void {
+        var request: be.DraftRequest = .{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = 0 };
+        if (e.backend.vtable.prepare_draft) |prepare| {
+            try prepare(e.backend.ptr, &.{request});
+            request.prepared = true;
+        }
         var w = win.who(s);
-        const d: u32 = @intCast(try e.rule.headDepth(&w, budget, win.probe(e)));
-        const request: be.DraftRequest = .{ .stream = s, .follow = follow, .rows = path, .start = start, .position = s.cache_len + 1, .depth = d };
+        request.depth = @intCast(try e.rule.headDepth(&w, budget, win.probe(e)));
         if (!e.late.put(e.backend.defer_lone_draft and e.alone, request)) try e.askDrafts(&.{request});
     }
 
@@ -497,64 +521,6 @@ pub const Engine = struct {
                 if (try tree(e.backend.ptr, r.stream, e.gpa)) |held| r.stream.next = held;
             };
         }
-    }
-
-    /// One token, the next forward queued first; a copied continuation ahead switches to verify windows.
-    fn pipelinedRound(e: *Engine, s: *Stream) !Result {
-        const before = s.mode;
-        // an adopted stream holds neither a mode nor a queued step: it starts where a drain step leaves one
-        const mode: sm.Mode = s.mode orelse if (s.inflight == null) .verify else .pipe;
-        var result: Result = .{ .rows = 1, .keep = 1, .got = &.{} };
-        if (mode == .verify or mode == .exit) {
-            const verifying = mode == .verify and e.cfg.family_width >= 2;
-            const proposal: win.Copy = if (verifying) try win.copyProposal(e, s) else .{};
-            if (proposal.tokens.len > 0) {
-                const copied = try e.arena.allocator().dupe(u32, proposal.tokens);
-                result = try e.familyRound(s, .{ .tokens = copied, .recalled = proposal.recalled });
-                if (result.keep == 1 or s.force.items.len > 0) s.mode = .exit;
-            } else {
-                // nothing to copy: back to steps queued ahead (this one lands next round)
-                s.mode = .pipe;
-                try e.queueNext(s, .{ .value = s.pending.? });
-            }
-            try trail.pipe(e, s, before, result.got);
-            return result;
-        }
-        var current: Feed = .{ .handle = s.inflight.? };
-        s.inflight = null;
-        if (try e.forcedNext(s)) |t| current = .{ .value = t };
-        var token: u32 = undefined;
-        if (mode == .drain) {
-            token = try e.readFeed(current); // the last queued step: no new one
-            s.mode = .verify;
-        } else {
-            try e.queueNext(s, current); // the GPU starts the next step first
-            token = try e.readFeed(current);
-        }
-        s.rounds += 1;
-        const landed = try s.commit(e.gpa, &.{token}, &.{});
-        s.pending = token;
-        if (s.recall) |r| r.noteHead(1); // a step lands one token: the bar a copy must beat
-        if (e.cfg.root_copies) s.root_copy_miss = false;
-        const piping = e.cfg.family_width >= 2 and (s.mode orelse .pipe) == .pipe and !s.finished and s.drafts;
-        if (piping and (try win.copyProposal(e, s)).tokens.len > 0)
-            s.mode = .drain; // a copy window is ahead: land the queued step
-        result.got = try e.arena.allocator().dupe(u32, s.emitted()[s.emitted().len - landed ..]);
-        try trail.pipe(e, s, before, result.got);
-        return result;
-    }
-
-    /// Land the queued token without queuing another (a shared round is synchronous).
-    fn landInflight(e: *Engine, s: *Stream) !void {
-        var current: Feed = .{ .handle = s.inflight.? };
-        s.inflight = null;
-        if (try e.forcedNext(s)) |t| current = .{ .value = t };
-        const token = try e.readFeed(current);
-        s.rounds += 1;
-        const landed = try s.commit(e.gpa, &.{token}, &.{});
-        s.pending = token;
-        s.mode = .verify;
-        try trail.event(e, &.{ f("ev", str("land")), f("stream", str(s.id)), f("got", .{ .u32s = s.emitted()[s.emitted().len - landed ..] }) });
     }
 
     /// The first token's draw: among the grammar's allowed tokens when the stream has one that constrains it.

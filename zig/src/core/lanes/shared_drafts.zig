@@ -58,7 +58,9 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
     }
     // Copies add verify rows, not head work; granted depths already pay in payReserved.
     const rich = e.cfg.k.hold_costs.len > 0 and !e.cfg.granted_depth;
-    const head_cost: alloc.HeadCost = if (rich) .{ .hold_costs = e.cfg.k.hold_costs, .hold_rows = e.cfg.k.hold_rows, .batched = e.cfg.draft_streams and depth.pricedBatched(), .charged = neural } else .{};
+    const context_rows: []u32 = if (rich and e.cfg.k.hold_context_costs.len > 0) try a.alloc(u32, plans.len) else &.{};
+    for (context_rows, 0..) |*rows, i| rows.* = plans[i].stream.hold_context_rows;
+    const head_cost: alloc.HeadCost = if (rich) .{ .hold_costs = e.cfg.k.hold_costs, .hold_context_costs = e.cfg.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = e.cfg.k.hold_rows, .batched = e.cfg.draft_streams and depth.pricedBatched(), .charged = neural } else .{};
     const overhead = if (rich) e.rule.fixedMs(@intCast(live), sampled) else e.rule.overheadMs(@intCast(live), sampled);
     const counts = try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, overhead, @max(live, e.cfg.batch_rows), head_cost);
     for (heads, out) |i, *budget| {

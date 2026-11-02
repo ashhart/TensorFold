@@ -5,13 +5,15 @@ const c = @import("config.zig");
 const kernels = @import("kernels.zig");
 const quant = @import("dspark_quant.zig");
 const block = @import("dspark_block.zig");
-const ds = @import("dspark.zig");
 const Pick = @import("tree_round_gpu").contract.Pick;
+const ds = @import("dspark.zig");
 const dc = @import("dspark_config.zig");
 const lanes = @import("lanes");
+
 const Model = @import("model.zig").Model;
 
 test {
+    _ = @import("dspark_cost_test.zig");
     _ = @import("dspark_glu_test.zig");
 }
 const shared = mtl.ResourceOptions.shared;
@@ -183,6 +185,7 @@ test "lfm2 dspark: lfm2_qk on half-split rows and gains gives interleaved RoPE's
     for (k.slice(u16, c.kv_heads * hd), 0..) |*x, i| x.* = k_il[quant.halfSplit(i, hd)];
     for (kn.slice(u16, hd), 0..) |*x, i| x.* = gain_il[quant.halfSplit(i, hd)];
     @memset(qn.slice(u16, hd), quant.toBf16(1));
+    noise(23, q.slice(u16, c.query_heads * hd), 3);
     const cap = 1024;
     const queries = try r.buffer(u16, c.query_heads * hd);
     defer queries.deinit();
@@ -199,9 +202,14 @@ test "lfm2 dspark: lfm2_qk on half-split rows and gains gives interleaved RoPE's
     e.setBytes(std.mem.asBytes(&args), 5);
     for ([_]mtl.Buffer{ queries, keys, values }, 6..) |b, i| e.setBuffer(b, 0, i);
     e.dispatchGroups(mtl.Size.of(c.query_heads + c.kv_heads, 1, 1), mtl.Size.of(32, 1, 1));
+    // Each SIMD lane has read its pair before either output is stored: Q may be the query destination.
+    e.setBuffer(q, 0, 6);
+    e.dispatchGroups(mtl.Size.of(c.query_heads + c.kv_heads, 1, 1), mtl.Size.of(32, 1, 1));
     e.end();
     cb.commit();
     cb.wait();
+    if (cb.failure()) |_| return error.GpuFailed;
+    try std.testing.expectEqualSlices(u16, queries.slice(u16, c.query_heads * hd), q.slice(u16, c.query_heads * hd));
     const got = keys.slice(u16, c.kv_heads * cap * hd);
     for (0..c.kv_heads) |h| {
         var ss: f32 = 0;
@@ -260,26 +268,115 @@ test "lfm2 dspark: a settled hold refuses a NaN, infinity or invalid pick as the
     try block.copyPicks(&picks, &chains, &.{ 2, 2 });
 }
 
-test "lfm2 dspark: a completed hold moves the timed passes at its block counts a tenth of the way to its GPU ms" {
+/// Project pieces separated by NaN sentinels; a stray gather copy must change the output.
+fn fcOnce(rig: *Rig, d: *ds.Drafter, src: mtl.Buffer, sizes: []const usize, gather: ?*usize, out: []u16) !void {
+    var pieces: [40]block.Piece = undefined;
+    var row: usize = 0;
+    for (sizes, pieces[0..sizes.len]) |n, *pc| {
+        pc.* = .{ .lane = undefined, .src = .{ .buf = src, .off = row * d.tapBytes() }, .rows = n, .p0 = 0 };
+        row += n + 1;
+    }
+    @memset(d.s.fcx.slice(u16, out.len), 0x5a5a);
+    const cb = rig.queue.commandBuffer();
+    defer cb.release();
+    const e = cb.compute(if (gather == null) .serial else .concurrent);
+    const rows = try block.fcRows(d, e, gather != null, pieces[0..sizes.len], gather);
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |_| return error.GpuFailed;
+    try std.testing.expectEqual(out.len / c.hidden, rows);
+    @memcpy(out, d.s.fcx.slice(u16, out.len));
+}
+
+test "lfm2 dspark: small staged pieces sharing one fc call give the bytes each gives alone, at the boundaries of a call's rows" {
+    var rig = try Rig.init();
+    defer rig.deinit();
+    var target: Model = undefined;
+    target.device = rig.device;
+    target.kernels = rig.k;
     var d: ds.Drafter = undefined;
-    const grid = [_]lanes.hold_price.HoldCost{ .{ .streams = 1, .depth = 1, .ms = 1 }, .{ .streams = 4, .depth = 1, .ms = 2 }, .{ .streams = 4, .depth = 4, .ms = 4 }, .{ .streams = 8, .depth = 1, .ms = 3 } };
-    @memcpy(d.holds[0..grid.len], &grid);
-    d.holds_len = grid.len;
-    d.priceHold(4, 1, 4); // priced 2 ms: the 4-block passes rise by a tenth of the doubling
-    try std.testing.expectApproxEqAbs(@as(f64, 2.2), d.holds[1].ms, 1e-12);
-    try std.testing.expectApproxEqAbs(@as(f64, 4.4), d.holds[2].ms, 1e-12);
-    try std.testing.expectEqual(@as(f64, 1), d.holds[0].ms);
-    try std.testing.expectEqual(@as(f64, 3), d.holds[3].ms);
-    d.priceHold(6, 1, 0); // between 4 and 8 blocks, no GPU time: nothing learned
-    try std.testing.expectEqual(@as(f64, 2.2), d.holds[1].ms);
-    d.priceHold(6, 1, 2.6 * 2); // both neighbors move
-    try std.testing.expect(d.holds[1].ms > 2.2 and d.holds[3].ms > 3 and d.holds[0].ms == 1);
-    const before = d.holds[1].ms;
-    d.priceHold(0, 1, 5); // a pass of no blocks prices nothing
-    try std.testing.expectEqual(before, d.holds[1].ms);
-    d.holds_len = 0; // no grid (the load's timing holds): nothing to move
-    d.priceHold(4, 1, 100);
-    try std.testing.expectEqual(before, d.holds[1].ms);
+    d.target = &target;
+    d.config = try dc.Config.parse(std.testing.allocator, dc.stock);
+    const k = d.config.tap_count * c.hidden;
+    const most = 200; // source rows: 40 pieces of four rows, each followed by a NaN row
+    d.s.sums = try rig.buffer(f32, most * (k / 64));
+    defer d.s.sums.deinit();
+    d.s.fcx = try rig.buffer(u16, most * c.hidden);
+    defer d.s.fcx.deinit();
+    d.s.gather = try rig.buffer(u16, ds.gather_rows * k);
+    defer d.s.gather.deinit();
+    const src = try rig.buffer(u16, most * k);
+    defer src.deinit();
+    const w16 = try rig.buffer(u16, c.hidden * k);
+    defer w16.deinit();
+    noise(41, w16.slice(u16, c.hidden * k), 0.5);
+    const wq = try rig.buffer(u8, c.hidden * k);
+    defer wq.deinit();
+    var prng = std.Random.DefaultPrng.init(42);
+    prng.random().bytes(wq.slice(u8, c.hidden * k));
+    const scales = try rig.buffer(u16, c.hidden * (k / 64));
+    defer scales.deinit();
+    noise(43, scales.slice(u16, c.hidden * (k / 64)), 0.02);
+    const biases = try rig.buffer(u16, c.hidden * (k / 64));
+    defer biases.deinit();
+    noise(44, biases.slice(u16, c.hidden * (k / 64)), 0.1);
+    // Piece sizes span projection-regime boundaries and exhaust the shared gather's capacity.
+    const cases = [_]struct { sizes: []const usize }{
+        .{ .sizes = &.{ 1, 1, 1, 1, 1, 1, 1, 1 } },
+        .{ .sizes = &.{ 1, 2, 8, 9, 16, 32 } },
+        .{ .sizes = &.{ 16, 16, 1 } },
+        .{ .sizes = &.{ 33, 1, 1, 40 } },
+        .{ .sizes = &.{ 32, 1 } },
+        .{ .sizes = &.{ 31, 1, 1 } },
+        .{ .sizes = &.{ 5, 5, 5, 5, 5, 5, 5, 5 } },
+        .{ .sizes = &@as([24]usize, @splat(6)) },
+        .{ .sizes = &@as([40]usize, @splat(4)) },
+    };
+    for ([_]u8{ 0, 1, 2, 3 }) |mode| { // BF16 tensor if present; 8-bit tiles; 8-bit twin; original BF16 fallback
+        target.kernels.bf16_nax = if (mode == 3) null else rig.k.bf16_nax;
+        target.kernels.twin = mode == 2;
+        d.w.fc = if (mode == 0 or mode == 3)
+            .{ .bf16 = .{ .w = w16, .n = c.hidden, .k = k } }
+        else
+            .{ .codes = .{ .w = wq, .scales = scales, .biases = biases, .n = c.hidden, .k = k, .bits = 8 } };
+        for (cases) |cs| for ([_]bool{ false, true }) |bad| {
+            const all = src.slice(u16, most * k);
+            noise(45, all, 2);
+            var first: [40]usize = undefined;
+            var row: usize = 0;
+            var total: usize = 0;
+            for (cs.sizes, first[0..cs.sizes.len]) |n, *f| {
+                f.* = row;
+                @memset(all[(row + n) * k ..][0..k], 0x7fc0); // the NaN row after the piece
+                row += n + 1;
+                total += n;
+            }
+            const last = cs.sizes.len - 1;
+            if (bad) { // a NaN, a -inf and a +inf among the rows
+                all[first[0] * k + 3] = 0x7fc0;
+                all[first[cs.sizes.len / 2] * k + 17] = 0xff80;
+                all[(first[last] + cs.sizes[last] - 1) * k + k - 1] = 0x7f80;
+            }
+            const want = try std.testing.allocator.alloc(u16, total * c.hidden);
+            defer std.testing.allocator.free(want);
+            const got = try std.testing.allocator.alloc(u16, total * c.hidden);
+            defer std.testing.allocator.free(got);
+            try fcOnce(&rig, &d, src, cs.sizes, null, want);
+            var used: usize = 0;
+            try fcOnce(&rig, &d, src, cs.sizes, &used, got);
+            try std.testing.expect(used <= ds.gather_rows);
+            try std.testing.expectEqualSlices(u16, want, got);
+            var nonfinite = false;
+            var nonzero = false;
+            for (want) |v| {
+                nonfinite = nonfinite or !std.math.isFinite(quant.toF32(v));
+                nonzero = nonzero or v != 0;
+            }
+            try std.testing.expect(nonzero);
+            try std.testing.expectEqual(bad, nonfinite);
+        };
+    }
 }
 
 /// A drafter with a device and a config but no weights: absorbs that only stage never reach the GPU.
@@ -320,8 +417,11 @@ test "lfm2 dspark: an absorb owns the rows it stages, prompt rows too, and a ref
     defer d.lanes.deinit(d.gpa);
     const width = d.tapBytes();
     const l = try d.newLane(64); // 73 positions: at most 73 staged rows
+    const stage = l.stage.contents();
     defer d.dropLane(l);
-    const key: *lanes.Stream = @ptrFromInt(0x1000);
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "staged", .prompt = &.{1}, .max_new = 64 });
+    defer stream.deinit(std.testing.allocator);
+    const key = &stream;
     try d.lanes.put(d.gpa, key, l);
     const src = try device.buffer(80 * width, shared);
     defer src.deinit();
@@ -332,26 +432,30 @@ test "lfm2 dspark: an absorb owns the rows it stages, prompt rows too, and a ref
     try drafter.absorb(&.{tapped(key, src, width, 0, 10, 0, true)}); // the prompt's rows
     try drafter.absorb(&.{tapped(key, src, width, 10, 20, 10, false)}); // a round's verified rows
     try std.testing.expectEqual(@as(u32, 30), l.staged);
+    try std.testing.expectEqual(l.staged, stream.hold_context_rows);
     try std.testing.expectEqual(@as(u64, 0), l.end);
     @memset(src.contents()[0 .. 80 * width], 0xee); // the target's next forward overwrites its taps
-    try std.testing.expectEqualSlices(u8, first[0 .. 30 * width], l.stage.contents()[0 .. 30 * width]);
+    try std.testing.expectEqualSlices(u8, first[0 .. 30 * width], stage[0 .. 30 * width]);
     pattern(src, 80, width, 1);
     const second = try std.testing.allocator.dupe(u8, src.contents()[0 .. 80 * width]);
     defer std.testing.allocator.free(second);
     try drafter.absorb(&.{tapped(key, src, width, 40, 4, 25, false)}); // a rewrite: rows from 25 are replaced
     try std.testing.expectEqual(@as(u32, 29), l.staged);
-    try std.testing.expectEqualSlices(u8, first[0 .. 25 * width], l.stage.contents()[0 .. 25 * width]);
-    try std.testing.expectEqualSlices(u8, second[40 * width .. 44 * width], l.stage.contents()[25 * width .. 29 * width]);
+    try std.testing.expectEqual(l.staged, stream.hold_context_rows);
+    try std.testing.expectEqualSlices(u8, first[0 .. 25 * width], stage[0 .. 25 * width]);
+    try std.testing.expectEqualSlices(u8, second[40 * width .. 44 * width], stage[25 * width .. 29 * width]);
     const stranger: *lanes.Stream = @ptrFromInt(0x2000);
     try std.testing.expectError(error.DraftStreamUnknown, drafter.absorb(&.{ tapped(key, src, width, 0, 2, 29, false), tapped(stranger, src, width, 0, 2, 0, false) }));
     try std.testing.expectError(error.DraftContextGap, drafter.absorb(&.{ tapped(key, src, width, 0, 2, 29, false), tapped(key, src, width, 0, 60, 29, false) }));
     try std.testing.expectEqual(@as(u32, 29), l.staged);
-    try std.testing.expectEqualSlices(u8, second[40 * width .. 44 * width], l.stage.contents()[25 * width .. 29 * width]);
+    try std.testing.expectEqual(l.staged, stream.hold_context_rows);
+    try std.testing.expectEqualSlices(u8, second[40 * width .. 44 * width], stage[25 * width .. 29 * width]);
     try std.testing.expectEqual(@as(u64, 0), l.end);
     try std.testing.expectEqual(@as(f64, 0), d.hold_spent_ms); // staging runs no GPU work
+    try std.testing.expectEqual(@as(f64, 0), d.encode_cpu_ms); // no command encoder was opened
 }
 
-test "lfm2 dspark: a lane's accounted bytes are the buffers it allocates, and its stage holds a whole 2048-row prompt chunk" {
+test "lfm2 dspark: separate lane accounting, live stage address and a whole prompt chunk" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     var target: Model = undefined;
@@ -359,22 +463,90 @@ test "lfm2 dspark: a lane's accounted bytes are the buffers it allocates, and it
     var d = try bare(&target);
     defer d.lanes.deinit(d.gpa);
     const width = d.tapBytes();
-    for ([_]usize{ 64, 4096 }) |capacity| { // a warm-up lane's stage is clipped to its positions, a long lane's to one absorb pass
+    for ([_]usize{ 1, 64, 2039, 4096 }) |capacity| {
         const l = try d.newLane(capacity);
         defer d.dropLane(l);
         var bytes = l.stage.length();
         for (0..d.config.layers) |i| bytes += l.keys[i].length() + l.values[i].length();
         try std.testing.expectEqual(d.laneBytes(capacity), bytes);
-        try std.testing.expectEqual(@min(ds.stage_rows, capacity + d.config.block) * width, l.stage.length());
+        try std.testing.expectEqual(@min(ds.stage_rows, l.cap) * width, l.stage.length());
+        try std.testing.expectEqual(l.stage.gpuAddress(), l.gpu_base);
+        for (0..d.config.layers) |i| {
+            try std.testing.expect(l.keys[i].id != l.stage.id and l.values[i].id != l.stage.id);
+            try std.testing.expectEqual(l.cap * c.kv_heads * c.head_dim * 2, l.keys[i].length());
+            try std.testing.expectEqual(l.keys[i].length(), l.values[i].length());
+        }
     }
     const l = try d.newLane(4096);
     defer d.dropLane(l);
-    const key: *lanes.Stream = @ptrFromInt(0x1000);
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "chunk", .prompt = &.{1}, .max_new = 4096 });
+    defer stream.deinit(std.testing.allocator);
+    const key = &stream;
     try d.lanes.put(d.gpa, key, l);
     const chunk = try device.buffer(ds.absorb_rows * width, shared);
     defer chunk.deinit();
     pattern(chunk, ds.absorb_rows, width, 7);
     try d.drafter().absorb(&.{tapped(key, chunk, width, 0, ds.absorb_rows, 0, true)});
     try std.testing.expectEqual(@as(u32, ds.absorb_rows), l.staged);
-    try std.testing.expectEqualSlices(u8, chunk.contents()[0 .. ds.absorb_rows * width], l.stage.contents()[0 .. ds.absorb_rows * width]);
+    try std.testing.expectEqual(l.staged, stream.hold_context_rows);
+    try std.testing.expectEqualSlices(u8, chunk.contents()[0 .. ds.absorb_rows * width], (l.stage.contents())[0 .. ds.absorb_rows * width]);
+}
+
+test "lfm2 dspark: capture replacement and stream release keep the live context debt" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var target: Model = undefined;
+    target.device = device;
+    var d = try bare(&target);
+    defer d.lanes.deinit(d.gpa);
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "capture-debt", .prompt = &.{1}, .max_new = 64 });
+    defer stream.deinit(std.testing.allocator);
+    const drafter = d.drafter();
+    {
+        try drafter.open(&stream);
+        defer drafter.release(&stream);
+        try std.testing.expectEqual(@as(u32, 0), stream.hold_context_rows);
+        const l = d.lanes.get(&stream).?;
+        const width = d.tapBytes();
+        const src = try device.buffer(8 * width, shared);
+        defer src.deinit();
+        pattern(src, 8, width, 3);
+        try drafter.absorb(&.{tapped(&stream, src, width, 0, 8, 0, true)});
+        try std.testing.expectEqual(@as(u32, 8), stream.hold_context_rows);
+        const capture = d.stageSource();
+        const bound = (try capture.bind(capture.ptr, &stream, 5, 2)).?;
+        try std.testing.expectEqual(@as(u32, 5), stream.hold_context_rows);
+        try std.testing.expectEqual(5 * width, bound.place.off);
+        try std.testing.expect(bound.wait == null);
+        @memcpy((bound.place.buf.contents() + bound.place.off)[0 .. 2 * width], src.contents()[0 .. 2 * width]);
+        var owned = tapped(&stream, l.stage, width, 0, 2, 5, false);
+        owned.features.offset = bound.place.off;
+        try drafter.absorb(&.{owned});
+        try std.testing.expectEqual(@as(u32, 7), stream.hold_context_rows);
+        try std.testing.expect((try capture.bind(capture.ptr, &stream, 7, l.cap + 1)) == null);
+        try std.testing.expectEqual(@as(u32, 7), stream.hold_context_rows);
+    }
+    try std.testing.expectEqual(@as(u32, 0), stream.hold_context_rows);
+    try std.testing.expectEqual(@as(usize, 0), d.lanes.count());
+    try std.testing.expectEqual(@as(f64, 0), d.hold_spent_ms);
+    try std.testing.expectEqual(@as(f64, 0), d.encode_cpu_ms);
+}
+
+test "lfm2 dspark: failed lane creation and map insertion clean up" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var target: Model = undefined;
+    target.device = device;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var d = try bare(&target);
+    d.gpa = failing.allocator();
+    defer d.lanes.deinit(d.gpa);
+    try std.testing.expectError(error.OutOfMemory, d.newLane(64));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "failed-open", .prompt = &.{1}, .max_new = 1 });
+    defer stream.deinit(std.testing.allocator);
+    try std.testing.expectError(error.OutOfMemory, d.drafter().open(&stream));
+    try std.testing.expectEqual(@as(usize, 0), d.lanes.count());
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

@@ -1,8 +1,34 @@
 //! A drafter's hold pass priced from its timed passes: by the blocks it holds and their depth.
 const std = @import("std");
 
-/// A drafter's hold pass of `streams` blocks, each `depth` drafts deep, in ms (timed at load).
+/// A drafter's hold pass of `streams` blocks, each `depth` drafts deep, in nonoverlapping encode CPU + GPU ms.
 pub const HoldCost = struct { streams: u32, depth: u32, ms: f64 };
+
+/// The same measured currency for context projection alone, excluding the clean hold's backbone and Markov work.
+pub const ContextCost = struct { streams: u32, rows: u32, ms: f64 };
+
+/// Round both dimensions up to measured coverage; mixed debts conservatively use their largest owed row count.
+pub fn contextMs(costs: []const ContextCost, streams: usize, max_rows: u32) f64 {
+    if (streams == 0 or max_rows == 0 or costs.len == 0) return 0;
+    var widest: u32 = 0;
+    var above: ?u32 = null;
+    for (costs) |c| {
+        if (c.streams == 0) continue;
+        widest = @max(widest, c.streams);
+        if (c.streams >= streams and (above == null or c.streams < above.?)) above = c.streams;
+    }
+    const width = above orelse widest;
+    if (width == 0) return std.math.inf(f64);
+    var chosen: ?ContextCost = null;
+    for (costs) |c| {
+        if (c.streams != width or c.rows < max_rows) continue;
+        if (chosen == null or c.rows < chosen.?.rows) chosen = c;
+    }
+    const quote = chosen orelse return std.math.inf(f64);
+    if (!(quote.ms > 0) or !std.math.isFinite(quote.ms)) return std.math.inf(f64);
+    return if (above != null) quote.ms else quote.ms * @as(f64, @floatFromInt(streams)) /
+        @as(f64, @floatFromInt(width));
+}
 
 /// A hold pass's ms: linear in depth at each timed stream count, then in streams (past the widest, by its slope).
 pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
@@ -33,7 +59,7 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
 }
 
 /// Greedy stream-order passes pad blocks to the deepest; `rows == 0` means no physical row limit.
-pub fn rowsMs(costs: []const HoldCost, rows: u32, view: anytype) f64 {
+pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, view: anytype) f64 {
     const n = view.len();
     var ms: f64 = 0;
     var i: usize = 0;
@@ -42,6 +68,7 @@ pub fn rowsMs(costs: []const HoldCost, rows: u32, view: anytype) f64 {
         if (i >= n) return ms;
         var blocks: usize = 0;
         var deepest: i64 = 0;
+        var context_rows: u32 = 0;
         while (i < n) : (i += 1) {
             const d = view.at(i);
             if (d <= 0) continue;
@@ -49,12 +76,13 @@ pub fn rowsMs(costs: []const HoldCost, rows: u32, view: anytype) f64 {
             if (rows != 0 and blocks > 0 and @as(i64, @intCast(blocks + 1)) * wide > rows) break;
             blocks += 1;
             deepest = wide;
+            context_rows = @max(context_rows, view.contextRows(i));
         }
-        ms += holdMs(costs, blocks, deepest);
+        ms += (if (costs.len > 0) holdMs(costs, blocks, deepest) else 0) + contextMs(contexts, blocks, context_rows);
     }
 }
 
-/// The padded pass's price for these depths in stream order; zero-depth lanes take no block.
+/// The physical passes' price for these depths in stream order; zero-depth lanes take no block.
 pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
     const View = struct {
         d: []const i64,
@@ -64,16 +92,20 @@ pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
         fn at(v: @This(), i: usize) i64 {
             return v.d[i];
         }
+        fn contextRows(_: @This(), _: usize) u32 {
+            return 0;
+        }
     };
-    return rowsMs(costs, rows, View{ .d = depths });
+    return rowsMs(costs, &.{}, rows, View{ .d = depths });
 }
 
 /// Only charged counts above free-first nodes form hold blocks; an empty charged mask includes all streams.
-pub fn countsMs(costs: []const HoldCost, rows: u32, counts: []const u32, charged: []const bool, free: u32) f64 {
+pub fn countsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, counts: []const u32, charged: []const bool, free: u32, debts: []const u32) f64 {
     const View = struct {
         counts: []const u32,
         charged: []const bool,
         free: u32,
+        debts: []const u32,
         fn len(v: @This()) usize {
             return v.counts.len;
         }
@@ -81,8 +113,11 @@ pub fn countsMs(costs: []const HoldCost, rows: u32, counts: []const u32, charged
             if (v.charged.len != 0 and !v.charged[i]) return 0;
             return @as(i64, v.counts[i]) - v.free;
         }
+        fn contextRows(v: @This(), i: usize) u32 {
+            return if (v.debts.len == 0) 0 else v.debts[i];
+        }
     };
-    return rowsMs(costs, rows, View{ .counts = counts, .charged = charged, .free = free });
+    return rowsMs(costs, contexts, rows, View{ .counts = counts, .charged = charged, .free = free, .debts = debts });
 }
 
 /// Ignore work settled outside this round; the clock measures only what follows its start.
@@ -91,7 +126,7 @@ pub fn startRound(engine: anytype) void {
     engine.clock.start();
 }
 
-/// A deferred hold belongs to the round that settles it, not the round that just launches another hold.
+/// Native CPU encoding is charged at commit, and deferred GPU work in the round that settles it.
 pub fn observedHeadMs(backend: anytype, rule: anytype, depths: []const i64) f64 {
     if (backend.draft_timing) |t| return t.take(t.ptr);
     return rule.headMs(depths);
@@ -201,9 +236,9 @@ test "the row limit's boundary: blocks x deepest equal to the rows is one pass, 
 
 test "allocated counts price the same passes: charged streams only, past the free node" {
     const near = std.testing.expectApproxEqAbs;
-    try near(@as(f64, 27), countsMs(&product, 32, &.{ 10, 2, 2 }, &.{}, 1), 1e-9); // blocks 9, 1, 1
-    try near(@as(f64, 27), countsMs(&product, 32, &.{ 9, 1, 50, 1 }, &.{ true, true, false, true }, 0), 1e-9); // a copy's 50 takes no block
-    try near(@as(f64, 0), countsMs(&product, 32, &.{ 1, 1, 1 }, &.{}, 1), 1e-12); // nothing past the free first
-    try near(@as(f64, 20), countsMs(&flat, 32, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0), 1e-9);
-    try near(@as(f64, 10), countsMs(&flat, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0), 1e-9);
+    try near(@as(f64, 27), countsMs(&product, &.{}, 32, &.{ 10, 2, 2 }, &.{}, 1, &.{}), 1e-9); // blocks 9, 1, 1
+    try near(@as(f64, 27), countsMs(&product, &.{}, 32, &.{ 9, 1, 50, 1 }, &.{ true, true, false, true }, 0, &.{}), 1e-9); // a copy's 50 takes no block
+    try near(@as(f64, 0), countsMs(&product, &.{}, 32, &.{ 1, 1, 1 }, &.{}, 1, &.{}), 1e-12); // nothing past the free first
+    try near(@as(f64, 20), countsMs(&flat, &.{}, 32, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
+    try near(@as(f64, 10), countsMs(&flat, &.{}, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
 }

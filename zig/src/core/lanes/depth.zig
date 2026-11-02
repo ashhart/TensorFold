@@ -16,6 +16,7 @@ pub const Constants = struct {
     short_slack: i64 = 0, // granted depths: drafts past a grant that left some of them unverified
     copy_first: bool = false, // a copy ahead takes the next round whole: the head drafts none for it (else one)
     hold_costs: []const HoldCost = &.{}, // a drafter's own hold pass by blocks and depth: it prices every hold (lone, shared, granted)
+    hold_context_costs: []const @import("hold_price.zig").ContextCost = &.{},
     hold_rows: u32 = 0, // rows one of those hold passes holds at most; a larger hold runs as passes in order (0: no bound)
 };
 
@@ -47,6 +48,7 @@ pub const Who = struct {
     gain: ?f64 = null, // the drafts its last grant expected to keep (null: none priced)
     stream: ?*anyopaque = null,
     sampled: bool = false, // keyed draws: host work a row that a greedy round does not have
+    hold_context_rows: u32 = 0, // raw context still owed to the active drafter
 };
 
 /// Whether a copied continuation is ahead of a stream (the round loop proposes; Python `_copy_proposal`).
@@ -145,6 +147,9 @@ pub const Rule = struct {
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
         var modeled = forward + r.loneHeadMs(drafts);
+        if (drafts > 0) if (who) |w| {
+            modeled += @import("hold_price.zig").contextMs(r.k.hold_context_costs, 1, w.hold_context_rows);
+        };
         if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
             var least: ?f64 = null;
@@ -259,11 +264,13 @@ pub const Rule = struct {
         var m: usize = 0;
         var probes: usize = 0; // a probe after a grant of none keeps its hold: it measures the stream again
         var deepest: i64 = 0;
+        var context_rows: u32 = 0;
         for (whos, out, 0..) |w, d, i| {
             if (d <= 0) continue;
             if (w.granted == @as(?u32, 0)) {
                 probes += 1;
                 deepest = @max(deepest, d);
+                context_rows = @max(context_rows, w.hold_context_rows);
             } else {
                 order[m] = i;
                 m += 1;
@@ -284,15 +291,16 @@ pub const Rule = struct {
         var rows: f64 = @floatFromInt(whos.len);
         var tokens = rows;
         const plain = r.shared_costs.get(@intCast(whos.len)) orelse return;
-        const probe_ms = if (probes > 0) holdMs(r.k.hold_costs, probes, deepest) else 0;
+        const probe_ms = if (probes > 0) holdMs(r.k.hold_costs, probes, deepest) + @import("hold_price.zig").contextMs(r.k.hold_context_costs, probes, context_rows) else 0;
         var best = tokens / (plain + fixed + probe_ms);
         var keep: usize = 0;
         for (order[0..m], 1..) |i, k| {
             rows += rowsOf(whos[i]);
             tokens += try r.gainOf(whos[i]);
             deepest = @max(deepest, out[i]);
+            context_rows = @max(context_rows, whos[i].hold_context_rows);
             const verify = r.shared_costs.get(@intFromFloat(@ceil(rows))) orelse break;
-            const now = tokens / (verify + fixed + holdMs(r.k.hold_costs, k + probes, deepest));
+            const now = tokens / (verify + fixed + holdMs(r.k.hold_costs, k + probes, deepest) + @import("hold_price.zig").contextMs(r.k.hold_context_costs, k + probes, context_rows));
             if (now > best) {
                 best = now;
                 keep = k;
@@ -338,14 +346,17 @@ pub const Rule = struct {
             p.* = try alloc.chainProbabilities(r.gpa, try r.rates(w), @intCast(m.*));
             made += 1;
         }
-        const ones = try r.gpa.alloc(u32, whos.len);
-        defer r.gpa.free(ones);
+        const work = try r.gpa.alloc(u32, whos.len * @as(usize, if (r.k.hold_context_costs.len > 0) 2 else 1));
+        defer r.gpa.free(work);
+        const ones = work[0..whos.len];
         @memset(ones, 1);
+        const context_rows = work[whos.len..];
+        for (context_rows, 0..) |*rows, i| rows.* = whos[i].hold_context_rows;
         const own_steps = r.draft_step_ms != 0; // the backend's own draft step prices a stream's drafts past its first
         const head: alloc.HeadCost = if (own_steps)
-            .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .hold_costs = r.k.hold_costs, .hold_rows = r.k.hold_rows }
+            .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .hold_costs = r.k.hold_costs, .hold_context_costs = r.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = r.k.hold_rows }
         else
-            .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads, .hold_costs = r.k.hold_costs, .hold_rows = r.k.hold_rows };
+            .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads, .hold_costs = r.k.hold_costs, .hold_context_costs = r.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = r.k.hold_rows };
         // a timed hold grid prices the pass itself: the overhead beyond it is the fixed one either way
         const overhead = if (own_steps and r.k.hold_costs.len == 0) r.overheadMs(whos.len, sampled) else r.fixedMs(whos.len, sampled);
         const counts = try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, overhead, @max(whos.len, r.batch_rows), head);
@@ -396,7 +407,7 @@ pub const Rule = struct {
         return o.ms;
     }
 
-    /// Grid entries are wall times; do not invent fixed overhead before observation.
+    /// A timed hold grid supplies the head price; do not invent fixed overhead before observation.
     fn unmeasuredMs(r: *const Rule) f64 {
         return if (r.k.hold_costs.len > 0) 0.0 else 8.0;
     }

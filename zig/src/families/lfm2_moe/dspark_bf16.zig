@@ -7,11 +7,14 @@ const c = @import("config.zig");
 
 const Args = extern struct { rows: u32, n: u32, k: u32 };
 
+pub fn tensorRows(n: usize) usize {
+    return if (n > c.hidden) 8 else 16;
+}
+
 /// Physical projection rows select the measured tensor regime; the caller retains its scalar-row limit.
 pub fn project(e: mtl.ComputeEncoder, pipes: *const kernels.Kernels, m: dw.Bf16, in: anytype, out: anytype, rows: usize, row_limit: usize) void {
     const args = Args{ .rows = @intCast(rows), .n = @intCast(m.n), .k = @intCast(m.k) };
-    const tensor_rows: usize = if (m.n > c.hidden) 8 else 16;
-    const tensor = if (rows >= tensor_rows) pipes.bf16_nax else null;
+    const tensor = if (rows >= tensorRows(m.n)) pipes.bf16_nax else null;
     if (tensor) |p| {
         e.setPipeline(p);
         e.setBuffer(in.buf, in.off, 0);

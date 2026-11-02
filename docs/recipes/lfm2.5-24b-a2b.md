@@ -90,6 +90,15 @@ Priced shared rounds use the existing lane allocator and the measured block-coun
 incur hold cost; copies and forced rows still occupy verify capacity. The native 32-row hold limit can split a
 cohort into several passes, priced in execution order rather than as one impossible padded batch.
 
+Clean hold prices cover every legal depth at 1, 2, 4, 8 and 16 streams. Context projection has a separate
+60-point grid: those five stream counts at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 and 2048 retained rows.
+Each point uses the serving encoder and deterministic nonzero BF16 inputs, one warmup and the best of three
+valid nonoverlapping CPU-encode plus GPU measurements. Both grids publish together; startup receipts are drained.
+Before either the lone depth decision or shared allocation, committed target rows are staged exactly once so
+the existing controller sees the actual deferred-context debt. Context quotes round up to covered row/count
+regimes and charge only neural holds, once per physical pass. The live clean-hold EMA subtracts the matched
+context quote; an already observed whole-round price is not charged context a second time.
+
 A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
 and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
 Zero-grant rounds therefore retain contiguous context for later drafts; they do not disable drafting by stream count.
@@ -98,16 +107,27 @@ straight into the lane's stage, without a separate tap pass or per-round host co
 hold before replacing rows that hold still reads; only accepted rows become staged context. Stage overflow projects
 only the retained prefix before the next capture's anchor, so a reused anchor can replace its old row without
 losing contiguous context.
+The raw stage is bounded by 2048 rows and the lane capacity, separate from the per-layer K/V buffers in this
+depth stage. Its allocation caches the GPU base used for row pointer tables. Owned-stage serving retains only
+that table in target scratch; missing drafting-lane destinations are errors, and plain-stream rows are null.
+Snapshots count persistent K/V bytes only, and a declined snapshot must not consume the final owned prompt anchor.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
-against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),
-prints each draft against the reference's pick with the margin between the reference's two best tokens, and times
-the drafter's passes; a near tie can pick the other token.
+against an fp32 host reference of the released checkpoint (including a real 64-context/nine-draft case), prints
+each draft against the reference's pick and margin, and reports CPU-encode, GPU and summed pass costs separately.
+A near tie can pick the other token. Native diagnostics and kernel contracts also exercise table-only and
+alternating two-buffer raw capture, null/dark destinations and uneven FC gather regimes with unchanged exact bytes,
+deferred zero-grant context through a rewind to 2143, snapshot lifecycle and allocation-free unwaited holds. Checked host consumers
+reject planted NaN and positive/negative infinity independently; neither completion waits nor timing receipts
+replace those numerical oracles. The depth stage has no confidence-head oracle.
 
 Row-owned capture uses `lfm2_norm_tap`, `lfm2_combine_norm_tap` and `lfm2_combine_sorted_norm_tap`; the original
 `lfm2_tap` interface remains the reference copy. Sorted expert outputs stay live until the next operator norm or
 final norm, preserving pick order, residual BF16 boundaries, duplicate columns and null destinations. The sorted
 norm launches retain the 512-thread cap and 144-byte threadgroup reservation.
+FC batching never crosses the per-matrix tensor threshold: wide BF16 projections switch at eight rows and other
+BF16 projections at sixteen, while non-tensor BF16 and 8-bit routes retain the original 32-row boundary. Each
+span still projects all rows; gathering changes neither separators nor BF16 results.
 
 The loader reads unpaired BF16 matrices directly into their final Metal buffers. Paired Q/K matrices use one
 reusable matrix stage and reorder into the destination; coded matrices map paired source rows during quantization.

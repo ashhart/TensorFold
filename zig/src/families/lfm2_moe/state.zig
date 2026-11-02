@@ -53,14 +53,15 @@ pub const Storage = struct {
 pub const Attention = struct { keys: mtl.Buffer, values: mtl.Buffer };
 /// Layers a drafter reads at most (each layer's output, hidden wide).
 pub const max_taps = 8;
-/// Captured bf16 rows followed by the forward's row destination addresses, all in the same buffer.
+/// The forward's row destination addresses, preceded by raw bf16 rows only for generic scratch capture.
 pub const Taps = struct {
     layers: [max_taps]u32 = @splat(0),
     count: u32 = 0,
     buf: mtl.Buffer,
+    gpu_base: u64, // `buf`'s base address, cached for this allocation (not `table_at`)
     table_at: usize,
 };
-/// A stream's latest tapped rows: scratch rows from `row`, or its drafter's stage from byte `stage`.
+/// Latest scratch rows from `row`, or owned stage bytes from `stage`; gen 0 keeps a prompt anchor across forwards.
 pub const TapRows = struct { start: usize, row: usize, rows: usize, gen: u64, stage: ?usize = null };
 pub const Mixer = union(enum) { conv: mtl.Buffer, attention: Attention };
 
@@ -72,7 +73,7 @@ pub const Cache = struct {
     last: ?struct { start: usize, base: usize, rows: usize, committed: ?*const Scratch = null } = null,
     blocks: [c.layers]Mixer,
     logits: mtl.Buffer,
-    /// The stream's latest tapped rows in the scratch, and its prompt's last row's taps (kept for the first draft).
+    /// Latest captured rows; generic capture alone copies the prompt anchor into `last_tap`.
     tap: ?TapRows = null,
     last_tap: ?mtl.Buffer = null,
 

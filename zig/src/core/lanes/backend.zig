@@ -60,6 +60,7 @@ pub const DraftRequest = struct {
     start: u64, // the cache length the last verify started from
     position: u64, // where the first draft lands (the new cache length + 1)
     depth: u32, // drafts to hold (0: absorb only)
+    prepared: bool = false, // prepare_draft already absorbed these rows; do not consume their taps or first handle twice
     early: bool = false, // settle the drafts the verify began (speculate_early) instead of drafting late
     lanes: ?*const Shape = null, // a tree of drafts to hold, each lane its parent's rank-r head token (depth unused)
     plan: ?*const @import("proposal_head.zig").Plan = null,
@@ -71,7 +72,7 @@ pub const DraftRequest = struct {
 
 pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
 pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
-/// Already-settled draft GPU ms since the last take; reading this never submits or waits for GPU work.
+/// Takes nonoverlapping encoding CPU + settled GPU ms once, without allocating, submitting or waiting.
 pub const DraftTiming = struct { ptr: *anyopaque, take: *const fn (*anyopaque) f64 };
 
 pub const Backend = struct {
@@ -113,6 +114,8 @@ pub const Backend = struct {
         keep: *const fn (ptr: *anyopaque, windows: []const Window, paths: []const []const u32) anyerror!void,
         /// Absorb kept rows and hold drafts for the next round (one batch for a shared round).
         draft: *const fn (ptr: *anyopaque, requests: []const DraftRequest) anyerror!void,
+        /// Stage kept context before budgeting; the same requests return to draft with prepared=true.
+        prepare_draft: ?*const fn (*anyopaque, []const DraftRequest) anyerror!void = null,
         draft_capacity: ?*const fn (*anyopaque, *Stream) u32 = null, // current per-stream proposal capacity
         proposal_draft: ?*const fn (*anyopaque, []const DraftRequest) anyerror!void = null,
         clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
