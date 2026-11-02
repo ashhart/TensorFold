@@ -143,7 +143,7 @@ pub const Drafter = struct {
         const r = pass_rows;
         const wide = @max(pass_rows, absorb_rows);
         const i = d.config.intermediate;
-        const partials = d.partRows() * st.subs * c.query_heads * st.chunks;
+        const partials = d.partRows() * block.part_row;
         const sums = if (d.options.bits == 0) r * (c.hidden / 64) else @max(absorb_rows * (d.config.tap_count * c.hidden / 64), r * (i / 64));
         d.s = .{
             .ids = try d.buffer(r * 4),

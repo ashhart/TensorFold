@@ -272,7 +272,7 @@ constant constexpr uint BF16_ROWS = 16;
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup uint ks[2][HD * (KT / 2)];
   threadgroup bfloat vs[2][KB * KP];
-  lfm2_attn_rows<1, true>(queries, keys, values, p, pm, pl, po, rows, tg, tid, sg, lane, ks, vs);
+  lfm2_attn_rows<1, true, CHUNKS + 1>(queries, keys, values, p, pm, pl, po, rows, tg, tid, sg, lane, ks, vs);
 }
 
 // A tapped norm's raw state also goes to each row's destination (null: none), column i of `mask` at i * D values.

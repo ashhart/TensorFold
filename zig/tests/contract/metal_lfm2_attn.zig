@@ -12,7 +12,7 @@ const qh = 32;
 const kvh = 8;
 const hd = 64;
 const subs = 8; // the drafter's sub-spans a 4,096-key chunk (state.subs)
-const chunks = 32;
+const chunks = 33; // target context plus the full drafter query block's tail chunk
 const chunk_keys = 4096;
 pub const name = "metal lfm2 block attention";
 

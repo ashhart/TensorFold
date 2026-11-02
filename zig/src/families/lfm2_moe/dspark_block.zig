@@ -17,8 +17,9 @@ const Lane = ds.Lane;
 const kw = c.kv_heads * c.head_dim;
 const QkArgs = extern struct { len: u32, cap: u32, eps: f32, log2_theta: f32 };
 const AttnArgs = extern struct { len: u32, cap: u32, scale: f32, subs: u32 };
-/// Partials a query row takes in the scratch (the kernels' QH x CHUNKS x SUBS).
-pub const part_row = c.query_heads * st.chunks * st.subs;
+/// Full query masks may extend beyond the target's final context chunk; target attention stays unchanged.
+pub const attn_chunks = st.chunks + 1;
+pub const part_row = c.query_heads * attn_chunks * st.subs;
 
 fn attnArgs(lane: *const Lane, keys: u64) AttnArgs {
     return .{ .len = @intCast(keys - 1), .cap = @intCast(lane.cap), .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = st.subs };
@@ -306,8 +307,8 @@ pub fn end(d: *Drafter, run: Run) !void {
     _ = try timing.finish(d, run.cb, run.e, run.start_ns);
 }
 
-/// Layer `layer`'s q, k, v and every block's attention (a lone block's last layer: `out` rows), on a concurrent `x`.
-fn attendBlocks(x: Enc, layer: usize, blocks: []const Block, n: u32, rows: usize, out: usize) !void {
+/// Layer `layer`'s q, k, v and every full block's attention, on a concurrent `x`.
+fn attendBlocks(x: Enc, layer: usize, blocks: []const Block, n: u32, rows: usize) !void {
     const s = &x.d.s;
     const ly = &x.d.w.layers[layer];
     // the three projections, every block's keys, then waves of as many blocks as the partials hold at once
@@ -318,14 +319,13 @@ fn attendBlocks(x: Enc, layer: usize, blocks: []const Block, n: u32, rows: usize
         x.qk(.{ .buf = s.queries, .off = at * c.hidden * 2 }, .{ .buf = s.k, .off = at * kw * 2 }, .{ .buf = s.v, .off = at * kw * 2 }, layer, b.lane, b.anchor, .{ .buf = s.x, .off = at * c.hidden * 2 }, n);
     }
     x.sync();
-    const each = if (blocks.len == 1) out else n;
     const wave = @max(1, x.d.partRows() / n);
     var first: usize = 0;
     while (first < blocks.len) : (first += wave) {
         const last = @min(blocks.len, first + wave);
-        for (blocks[first..last], first..) |b, bi| x.partials(layer, b.lane, bi * n, each, b.anchor + n, (bi - first) * n);
+        for (blocks[first..last], first..) |b, bi| x.partials(layer, b.lane, bi * n, n, b.anchor + n, (bi - first) * n);
         x.sync();
-        for (blocks[first..last], first..) |b, bi| x.merge(b.lane, bi * n, each, b.anchor + n, (bi - first) * n);
+        for (blocks[first..last], first..) |b, bi| x.merge(b.lane, bi * n, n, b.anchor + n, (bi - first) * n);
         x.sync();
     }
 }
@@ -383,7 +383,6 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
     }
     const steps = depth;
     // Keep pointwise dispatch regimes independent of how many proposals the scheduler retains.
-    const tail = rows;
     const cb = d.target.queue.commandBuffer();
     // one concurrent encoder: independent dispatches overlap, each dependent step waits at a barrier
     const x = Enc{ .d = d, .e = cb.compute(.concurrent), .conc = true };
@@ -413,34 +412,33 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
     x.sync();
     for (0..d.config.layers) |i| {
         const ly = &d.w.layers[i];
-        const out = if (i + 1 == d.config.layers) tail else rows;
         x.norm(s.h, s.r, ly.input_norm, i > 0, s.x, rows);
         x.sync();
-        try attendBlocks(x, i, blocks, n, rows, out);
-        try x.project(ly.o, .{ .buf = s.y }, .{ .buf = s.r }, out);
+        try attendBlocks(x, i, blocks, n, rows);
+        try x.project(ly.o, .{ .buf = s.y }, .{ .buf = s.r }, rows);
         x.sync();
-        x.norm(s.h, s.r, ly.post_norm, true, s.x, out);
+        x.norm(s.h, s.r, ly.post_norm, true, s.x, rows);
         x.sync();
-        const row_glu = out >= 4 and out <= 16 and d.target.kernels.bf16_nax == null;
+        const row_glu = rows >= 4 and rows <= 16 and d.target.kernels.bf16_nax == null;
         if (row_glu and ly.gate == .bf16 and ly.up == .bf16 and ly.gate.bf16.n > c.hidden) {
-            bf16.glu(x.e, &d.target.kernels, ly.gate.bf16, ly.up.bf16, Ref{ .buf = s.x }, Ref{ .buf = s.act }, out);
+            bf16.glu(x.e, &d.target.kernels, ly.gate.bf16, ly.up.bf16, Ref{ .buf = s.x }, Ref{ .buf = s.act }, rows);
         } else {
-            try x.projectAll(&.{ ly.gate, ly.up }, .{ .buf = s.x }, &.{ .{ .buf = s.gate }, .{ .buf = s.up } }, out);
+            try x.projectAll(&.{ ly.gate, ly.up }, .{ .buf = s.x }, &.{ .{ .buf = s.gate }, .{ .buf = s.up } }, rows);
             x.sync();
             x.pipe("lfm2_swiglu");
             x.e.setBuffer(s.gate, 0, 0);
             x.e.setBuffer(s.up, 0, 1);
             x.e.setBuffer(s.act, 0, 2);
-            x.e.setValue(@as(u32, @intCast(out * d.config.intermediate)), 3);
-            x.e.dispatchThreads(mtl.Size.of(out * d.config.intermediate / 8, 1, 1), mtl.Size.of(256, 1, 1));
+            x.e.setValue(@as(u32, @intCast(rows * d.config.intermediate)), 3);
+            x.e.dispatchThreads(mtl.Size.of(rows * d.config.intermediate / 8, 1, 1), mtl.Size.of(256, 1, 1));
         }
         x.sync();
-        try x.project(ly.down, .{ .buf = s.act }, .{ .buf = s.r }, out);
+        try x.project(ly.down, .{ .buf = s.act }, .{ .buf = s.r }, rows);
         x.sync();
     }
-    x.norm(s.h, s.r, d.w.norm, true, s.x, tail);
+    x.norm(s.h, s.r, d.w.norm, true, s.x, rows);
     x.sync();
-    try x.project(.{ .codes = fwd.matrix(emb) }, .{ .buf = s.x }, .{ .buf = s.logits }, tail);
+    try x.project(.{ .codes = fwd.matrix(emb) }, .{ .buf = s.x }, .{ .buf = s.logits }, rows);
     x.sync();
     try markov(x, blocks.len, n, steps);
     const e = x.e;
