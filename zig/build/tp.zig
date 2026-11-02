@@ -12,11 +12,21 @@ fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     return cuda;
 }
 
+/// verbs.zig as its own module. A compilation that also builds fabric.zig must pass this same module in, because a file can belong to only one module.
+pub fn verbsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/fabric/verbs.zig"), .target = target, .optimize = optimize, .link_libc = true });
+}
+
 /// The `tp` module over `cuda` (an engine passes its own runtime module); verbs (zig/src/fabric/verbs.zig) for RoCE.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module) *std.Build.Module {
+    return moduleWith(b, target, optimize, cuda, verbsModule(b, target, optimize));
+}
+
+/// Same as `module`, using a verbs module the caller already owns.
+pub fn moduleWith(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, verbs: *std.Build.Module) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/tp.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
-    m.addImport("verbs", b.createModule(.{ .root_source_file = b.path("zig/src/fabric/verbs.zig"), .target = target, .optimize = optimize, .link_libc = true }));
+    m.addImport("verbs", verbs);
     return m;
 }
 
