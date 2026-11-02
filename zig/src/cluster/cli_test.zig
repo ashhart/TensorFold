@@ -123,24 +123,48 @@ test "a disaggregated model on fake hosts: no tensor-parallel group across its t
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    const names = [_][]const u8{ "s1", "s2", "s3", "s4" };
-    try fixtures.writeHosts(io, a, tmp.dir, &names, &fixtures.mesh4);
-    const init = try run(a, &.{ "cluster", "init", "--node", "s1=192.0.2.10", "--node", "s2=192.0.2.11", "--node", "s3=192.0.2.12", "--node", "s4=192.0.2.13", "--cuda", "s2", "--probes", root });
-    try std.testing.expectEqual(@as(u8, 0), init.code);
+    // s1 is a Mac (macOS probes); s2 a GB10, probed with Linux tools: meminfo, nvidia-smi, a ConnectX-7's ibv_devinfo -v
+    try fixtures.writeHosts(io, a, tmp.dir, &.{"s1"}, &fixtures.mesh4);
+    try tmp.dir.createDirPath(io, "s2");
+    const gb10 = [_][2][]const u8{
+        .{ "s2/meminfo.txt", "MemTotal:       131072000 kB\nMemAvailable:    80000000 kB\n" },
+        .{ "s2/nvidia.txt", "NVIDIA GB10, [N/A], [N/A]\n" },
+        .{ "s2/ibv_devinfo.txt", @embedFile("testdata/gb10-ibv.txt") },
+        .{ "s2/df-root.txt", "Filesystem     1K-blocks      Used Available Use% Mounted on\n/dev/nvme0n1p2 900000000 100000000 750000000  12% /\n" },
+        .{ "s2/machine-id.txt", "0123456789abcdef0123456789abcdef\n" },
+    };
+    for (gb10) |f| try tmp.dir.writeFile(io, .{ .sub_path = f[0], .data = f[1] });
     // the model's path is nowhere: a disaggregated bring-up plans no tensor placement, so it reads no model files
-    const models = ", \"models\": { \"q\": { \"path\": \"/nonexistent/q\", \"mode\": \"disaggregated\", \"prefill\": [\"s2\"], \"decode\": [\"s1\"] } } }\n";
-    const json = try std.mem.concat(a, u8, &.{ init.out[0..std.mem.lastIndexOf(u8, init.out, ",\n  \"models\"").?], models });
-    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = json });
+    const head =
+        \\{ "schema": "tensorfold-cluster/1", "cluster": "pair",
+        \\  "nodes": [ { "name": "s1", "address": "192.0.2.10", "backend": "metal" },
+        \\             { "name": "s2", "address": "192.0.2.11", "backend": "cuda", "gpu_limit_gb": 100 } ],
+        \\  "models": { "q": { "path": "/nonexistent/q", "mode": "disaggregated", "prefill": ["s2"], "decode": ["s1"] } }
+    ;
+    const linked = head ++
+        \\,
+        \\  "links": [ { "name": "s1-s2", "kind": "cx5", "mtu": 1024,
+        \\    "ends": [ { "node": "s1", "device": "rdma_mcrdma0", "via": "en7/192.0.2.11", "port": 7490, "gid": 0 },
+        \\              { "node": "s2", "device": "rocep1s0f0", "via": "enp1s0f0np0/192.0.2.10", "port": 7491, "gid": 1 } ] } ] }
+    ;
     const file = try std.fs.path.join(a, &.{ root, "cluster.json" });
+    // no link declared: the probed topology has no Mac to GB10 cable (a GB10 reports no Thunderbolt peers)
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = head ++ " }\n" });
+    const unlinked = try run(a, &.{ "serve", "--cluster", file, "--probes", root });
+    try std.testing.expectEqual(@as(u8, 1), unlinked.code);
+    try std.testing.expect(has(unlinked.err, "the fake cluster did not come up: NeverSettled"));
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = linked });
+    try tmp.dir.deleteFile(io, "launches.log");
     const serve = try run(a, &.{ "serve", "--cluster", file, "--probes", root });
+    if (serve.code != 0) std.debug.print("{s}{s}", .{ serve.out, serve.err });
     try std.testing.expectEqual(@as(u8, 0), serve.code);
     var probs: config.Problems = .{ .a = a };
-    const c = try config.parse(a, json, &probs);
+    const c = try config.parse(a, linked, &probs);
     const m = c.model("q").?;
     const want = try std.fmt.allocPrint(a, "fake cluster up: 2 nodes agree on disaggregated plan {x:0>16} (prefill on 1, decode on 1;", .{mcdma_link.planDigest(c, m, try mcdma_link.ranks(a, m), .{})});
     try std.testing.expect(has(serve.out, want));
     try std.testing.expect(std.mem.indexOf(u8, serve.out, "layout: tensor") == null);
-    // the leader (s1, the model's first node) starts the one other rank, not every node in the file
+    // the leader (s1, the model's first node) starts the one other rank
     const launches = try tmp.dir.readFileAlloc(io, "launches.log", a, .limited(1 << 20));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, launches, "tensorfold node --name"));
     try std.testing.expect(has(launches, "--name s2 --leader s1 --model q"));

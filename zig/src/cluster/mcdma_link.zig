@@ -5,6 +5,8 @@ const fabric = @import("fabric");
 const config = @import("config.zig");
 const fabric_link = @import("fabric_link.zig");
 const transport = @import("transport.zig");
+const topology = @import("topology.zig");
+const max_ports = @import("node.zig").max_ports;
 
 const Allocator = std.mem.Allocator;
 const mcdma = fabric.mcdma;
@@ -116,6 +118,26 @@ pub fn specAll(a: Allocator, c: config.Config, m: config.Model, sizes: Sizes, wh
         const mac = if (c.find(name)) |i| c.nodes[i].backend == .metal else false;
         _ = try spec(a, c, m, name, .{ .sizes = sizes, .mac = mac }, why);
     }
+}
+
+/// The declared links among `names` as cables between their indices: the fake bring-up's wiring, from the same
+/// declarations the real nodes open. A CUDA host's probes report no Thunderbolt peers, so the probed topology never
+/// joins a Mac to a GB10. Each node's links take its ports in file order.
+pub fn cables(a: Allocator, c: config.Config, names: []const []const u8) ![]topology.Edge {
+    const ports = try a.alloc(u8, names.len);
+    defer a.free(ports);
+    @memset(ports, 0);
+    var out: std.ArrayList(topology.Edge) = .empty;
+    errdefer out.deinit(a);
+    for (c.links) |l| {
+        const i = rankOf(names, l.ends[0].node) orelse continue;
+        const j = rankOf(names, l.ends[1].node) orelse continue;
+        if (ports[i] == max_ports or ports[j] == max_ports) return error.TooManyLinks;
+        try out.append(a, .{ .a = @intCast(i), .a_port = ports[i], .b = @intCast(j), .b_port = ports[j], .gbps = 0, .kind = if (l.kind == .tb5) .tb5 else .cx5, .up = true });
+        ports[i] += 1;
+        ports[j] += 1;
+    }
+    return out.toOwnedSlice(a);
 }
 
 /// Regions one ConnectX context registers: the window and every rank's staging in 4 MiB pieces, and one for its peer.
