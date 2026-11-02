@@ -120,14 +120,13 @@ pub const Loader = struct {
         return ptr;
     }
 
-    /// `.float()` of a bf16 tensor into the host staging buffer: exact.
+    /// `.float()` of a vector into the host staging buffer, exact (see `widening`).
     pub fn widened(L: *Loader, t: Tensor) ![]u8 {
-        if (t.dtype == .f32) {
+        if (try widening(t.dtype, L.w.config.salm) == .copy) {
             const out = try L.staging(t.bytes.len);
             @memcpy(out, try L.src.view(t.bytes));
             return L.host.items;
         }
-        if (t.dtype != .bf16) return error.UnexpectedTensor;
         const n = t.bytes.len / 2;
         const out = std.mem.bytesAsSlice(u32, try L.staging(n * 4));
         const in = try L.src.view(t.bytes);
@@ -516,4 +515,20 @@ pub fn draftIds(L: *Loader, ids: []const u32) !void {
     L.w.draft_ids = try L.alloc("draft_ids", ids.len * 8);
     try L.ops.upload(L.w.draft_ids, L.host.items);
     L.w.draft_count = ids.len;
+}
+
+/// How `widened` reads a vector: bf16 widened; fp32 copied, from Transcribe (salm) only; anything else refused.
+fn widening(dtype: core.checkpoint.DType, salm: bool) !enum { widen, copy } {
+    if (dtype == .bf16) return .widen;
+    if (dtype == .f32 and salm) return .copy;
+    return error.UnexpectedTensor;
+}
+
+test "the CUDA loader takes fp32 vectors only from a Transcribe (salm) checkpoint" {
+    const t = std.testing;
+    try t.expectEqual(.widen, try widening(.bf16, false));
+    try t.expectEqual(.widen, try widening(.bf16, true));
+    try t.expectEqual(.copy, try widening(.f32, true));
+    try t.expectError(error.UnexpectedTensor, widening(.f32, false));
+    try t.expectError(error.UnexpectedTensor, widening(.f16, true));
 }
