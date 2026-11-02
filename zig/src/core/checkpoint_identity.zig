@@ -255,8 +255,7 @@ pub const Content = struct {
 
     /// The pages just read leave the page cache: on unified memory they would take the device's.
     fn drop(f: Io.File, at: u64, n: usize) void {
-        if (builtin.os.tag != .linux) return;
-        _ = std.os.linux.fadvise(f.handle, @intCast(at), @intCast(n), std.os.linux.POSIX_FADV.DONTNEED);
+        @import("checkpoint_drop.zig").range(f, at, n);
     }
 
     pub fn wait(c: *Content) void {
