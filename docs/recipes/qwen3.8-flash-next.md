@@ -490,11 +490,13 @@ each decoded token's reads, so the checkpoint choice sets both speed and quality
 | `unigilby/Qwen3.8-Flash-Next-oQ4e-mix5-HIP` (`1b5c83a6`) | 5-bit g64 | 4.45 GiB | 51.3 / 41.4 | 3.05 | 0.096 / 0.022 | 94.3 / 93.3 / 67.6 |
 
 The two oQ checkpoints are oMLX oQe quantizations (imatrix) with routed and shared experts at 4-bit group 32 and the MTP
-head under `language_model.mtp.*`; they differ only in the dense mixers. oQ4e is the quality choice. oQ4e-mix5 is a
-checkpoint you choose for speed, not an engine default: it decodes about 22% faster on code than oQ4e and keeps MTP
-acceptance, at about 1.5x its KL. A 6-bit-mixer variant reads fewer bytes than oQ4e but its MTP acceptance falls (2.44
-tokens per round on code), so it decodes no faster and is not listed. The uniform 4-bit checkpoint is the fastest on chat
-but the furthest from bf16.
+head under `language_model.mtp.*`; they differ only in the dense mixers. oQ4e is the quality pick and the one to start
+with. oQ4e-mix5's 5-bit dense mixers are a speed-for-quality trade you choose, not an engine default: it decodes about
+22% faster on code than oQ4e and keeps MTP acceptance (3.05 tokens per round), at about 1.5x its KL (0.059 against 0.039
+over both slices). A 6-bit-mixer variant reads fewer bytes than oQ4e but its MTP acceptance falls (2.44 tokens per round
+on code), so it decodes no faster and is not listed. The uniform 4-bit checkpoint is the fastest on chat but the
+furthest from bf16, and it costs on tasks: MMLU-Pro falls to 55.9% against oQ4e's 69.1%, and 159 of its 700 replies
+there are format misses (no answer letter within 16 tokens), so weigh that before choosing it for speed.
 
 How these were measured: TensorFold `7c068895` built with `zig build native-hip -Dhip-arch=gfx1151` (Ubuntu archive HIP
 7.1, clang 21), MTP 3 drafts, `--parallel 1 --context 131072 --prompt-cache-gib 0`, `tools/bench_openai.py` decode
