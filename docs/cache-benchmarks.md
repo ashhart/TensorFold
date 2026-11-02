@@ -15,6 +15,8 @@ unverified, including when both hashes are absent. Failed or incomplete replies 
 `output_sha256` fingerprints streamed content and reasoning separately, then hashes their two SHA-256
 digests in that order. It is independent of network chunk boundaries and includes reasoning-only output.
 Text equivalence does not prove token-ID equivalence. Incomplete streams have no published output hash.
+Completed streams with no nonempty text or reasoning also have no output or token fingerprint, even when usage
+claims positive completion tokens or the server supplies a token hash. Usage and completion remain recorded.
 Missing counts/timings remain null, and failed or insufficiently streamed replies do not enter decode rates.
 
 ## First, repeated and concurrent requests
@@ -52,10 +54,12 @@ it omits the endpoint, model alias, file path, raw prompt/output and exception t
 for public receipts: a hash is a fingerprint, not a promise of anonymity for sensitive input.
 The existing single-stream client retains its legacy generated sample; review those reports before sharing.
 
-`qualified` and exit status zero mean requests completed with nonzero reported output, requested cache
-and token-count assertions passed, and no observed fingerprint comparison differed. A missing token-ID
+`qualified` and exit status zero mean requests completed with nonzero reported tokens and observed text or reasoning,
+requested cache and token-count assertions passed, and no observed fingerprint comparison differed. A missing token-ID
 hash stays an unverified comparison; it is not an exact-token pass. A nonzero exit preserves the evidence.
 This is benchmark qualification, not a model certification or proof of a RAM sizing recommendation.
+A single buffered text chunk or a reasoning-only reply can qualify without a measurable decode interval. A usage-only
+reply cannot qualify in any phase; its receipt is preserved with null fingerprints and exit status 1.
 
 ## Latency figures
 
