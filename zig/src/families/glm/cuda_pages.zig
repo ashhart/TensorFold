@@ -236,11 +236,11 @@ pub const Pages = struct {
         p.report();
     }
 
-    /// The idle server's line: nothing promised, every page free (the copy store holds none).
+    /// The idle server's line: nothing promised, every page free or, under TF_GLM_KV_SHARE, the store's.
     fn report(p: *const Pages) void {
         if (@import("builtin").is_test) return;
         const c = p.pool.census();
-        const ok = p.pool.idle() and c.free == c.total;
+        const ok = p.pool.idle() and (p.e.share_pages or c.free == c.total);
         std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
     }
 
