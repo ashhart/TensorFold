@@ -30,6 +30,9 @@ pub const Node = struct {
     root: ?[]const u8 = null,
     /// libmcdma-fabric on this node: an absolute path (MCDMA's library is loaded from no other place).
     library: ?[]const u8 = null,
+    /// This node's tensorfold, an absolute path, for the launch over ssh (whose non-interactive PATH holds only the
+    /// system directories); null runs `tensorfold` from that PATH.
+    bin: ?[]const u8 = null,
 };
 
 /// One end of an MCDMA link: its node, RDMA device, meeting interface and the other end's address, exchange port, GID index.
@@ -206,6 +209,7 @@ fn nodes(a: Allocator, v: ?Value, probs: *Problems) ![]Node {
         if (backend == null) probs.add("nodes[{d}] ({s}): backend must be \"metal\" or \"cuda\"", .{ i, name });
         var n: Node = .{ .name = name, .address = str(x.get("address")) orelse "", .via = str(x.get("via")), .backend = backend orelse .metal, .chip = str(x.get("chip")) orelse str(x.get("gpu")), .root = str(x.get("model_root")) };
         if (x.get("library")) |l| n.library = str(l) orelse "";
+        if (x.get("bin")) |b| n.bin = str(b) orelse "";
         if (num(x.get("memory_gb"))) |g| n.memory = @intFromFloat(g * @as(f64, @floatFromInt(node.gib)));
         if (num(x.get("gpu_limit_gb"))) |g| n.gpu_limit = @intFromFloat(g * @as(f64, @floatFromInt(node.gib)));
         if (x.get("ports")) |p| switch (p) {
@@ -368,6 +372,9 @@ pub fn validate(c: Config, probs: *Problems) void {
         if (n.library) |lib| if (!std.fs.path.isAbsolute(lib) or std.mem.indexOfScalar(u8, lib, 0) != null) {
             probs.add("nodes[{d}] ({s}).library: libmcdma-fabric's absolute path (MCDMA's library is loaded from no other place)", .{ i, n.name });
         };
+        if (n.bin) |bin| if (!binOk(bin)) {
+            probs.add("nodes[{d}] ({s}).bin: the absolute path of that node's tensorfold, in [A-Za-z0-9_./+-] (it goes into the launch's remote command)", .{ i, n.name });
+        };
     }
     for (c.links, 0..) |l, i| checkLink(c, l, i, probs);
     for (c.models) |m| checkModel(c, m, probs);
@@ -407,6 +414,13 @@ fn checkLink(c: Config, l: Link, i: usize, probs: *Problems) void {
             probs.add("links[{d}] ({s}).ends[{d}].device: {s}'s {s} already carries link \"{s}\"; one link per device", .{ i, name, k, e.node, e.device, old.name });
         };
     }
+}
+
+/// An absolute path the launch can put in its remote shell command as it is: no spaces, quotes or other shell syntax.
+fn binOk(path: []const u8) bool {
+    if (path.len < 2 or path[0] != '/') return false;
+    for (path) |ch| if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "_./+-", ch) == null) return false;
+    return true;
 }
 
 /// MCDMA's via: one interface/address for every member, or one per member, none empty or with spaces.

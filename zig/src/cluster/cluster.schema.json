@@ -58,6 +58,7 @@
         "gpu_limit_gb": { "type": "number", "exclusiveMinimum": 0, "description": "What the GPU may hold; inventory fills it in." },
         "model_root": { "type": "string" },
         "library": { "type": "string", "pattern": "^/", "description": "libmcdma-fabric on this node, an absolute path; MCDMA's library is loaded from no other place." },
+        "bin": { "type": "string", "pattern": "^/[A-Za-z0-9_./+-]+$", "description": "This node's tensorfold, an absolute path, for the launch over ssh (whose non-interactive PATH has only the system directories). Absent: tensorfold from that PATH." },
         "ports": {
           "oneOf": [
             { "const": "auto" },

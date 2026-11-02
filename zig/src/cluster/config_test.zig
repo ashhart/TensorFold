@@ -185,6 +185,28 @@ test "a disaggregated model's per-node paths need cover only its prefill and dec
     try check(top ++ macs ++ "\"models\":{\"k\":{\"path\":{\"m1\":\"/m/k\"},\"nodes\":[\"m1\",\"m2\"]}}}", &.{"models.k.path: no path for node m2"});
 }
 
+test "a node's \"bin\" is an absolute path the launch can run as written; a relative path or shell syntax is refused by name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ok = top ++ "\"nodes\":[{\"name\":\"g1\",\"address\":\"h\",\"backend\":\"cuda\",\"bin\":\"/home/tf/.local/bin/tensorfold\"},{\"name\":\"m1\",\"address\":\"h\",\"backend\":\"metal\"}]}";
+    try check(ok, &.{});
+    var probs: config.Problems = .{ .a = a };
+    const c = try config.parse(a, ok, &probs);
+    try std.testing.expectEqualStrings("/home/tf/.local/bin/tensorfold", c.nodes[0].bin.?);
+    try std.testing.expectEqual(@as(?[]const u8, null), c.nodes[1].bin);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try launch.writeJson(&out.writer, c);
+    var again: config.Problems = .{ .a = a };
+    try std.testing.expectEqualStrings(c.nodes[0].bin.?, (try config.parse(a, out.written(), &again)).nodes[0].bin.?);
+    for ([_][]const u8{ "tensorfold", "bin/tensorfold", "/opt/tf bin/tensorfold", "/opt/tf/tensorfold;reboot", "/", "" }) |bad| {
+        const text = try std.mem.concat(a, u8, &.{ top, "\"nodes\":[{\"name\":\"g1\",\"address\":\"h\",\"backend\":\"cuda\",\"bin\":\"", bad, "\"}]}" });
+        var p: config.Problems = .{ .a = a };
+        try std.testing.expectError(error.Invalid, config.parse(a, text, &p));
+        try std.testing.expect(std.mem.indexOf(u8, p.list.items[0], "nodes[0] (g1).bin: the absolute path of that node's tensorfold") != null);
+    }
+}
+
 test "a declared link changes no refusal: Metal and CUDA in one tensor-parallel group stay refused" {
     const linked = top ++ macs ++ "\"links\":[{\"name\":\"l1\",\"kind\":\"cx5\",\"ends\":[{\"node\":\"m1\",\"device\":\"rdma_mcrdma0\",\"via\":\"en7/192.0.2.2\",\"port\":7490,\"gid\":0},{\"node\":\"c1\",\"device\":\"rocep1s0f1\",\"via\":\"enp1/192.0.2.1\",\"port\":7490,\"gid\":1}]}],";
     try check(linked ++ "\"models\":{\"k\":{\"path\":\"/m\",\"nodes\":[\"m1\",\"c1\"]}}}", &.{"different bits"});
