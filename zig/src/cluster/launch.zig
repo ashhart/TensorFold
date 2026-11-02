@@ -161,6 +161,7 @@ pub fn writeJson(w: *std.Io.Writer, c: config.Config) !void {
         if (n.chip) |ch| try w.print(", \"chip\": \"{s}\"", .{ch});
         if (n.memory) |m| try w.print(", \"memory_gb\": {d:.0}", .{@as(f64, @floatFromInt(m)) / @as(f64, @floatFromInt(node.gib))});
         if (n.gpu_limit) |g| try w.print(", \"gpu_limit_gb\": {d:.1}", .{@as(f64, @floatFromInt(g)) / @as(f64, @floatFromInt(node.gib))});
+        if (n.library) |l| try w.print(", \"library\": \"{s}\"", .{l});
         if (n.ports) |ps| {
             try w.writeAll(",\n      \"ports\": [");
             for (ps, 0..) |p, k| try w.print("{s}{{ \"device\": \"{s}\", \"peer\": \"{s}\", \"gbps\": {d} }}", .{ if (k == 0) "" else ", ", p.device, p.peer, p.gbps });
@@ -168,7 +169,23 @@ pub fn writeJson(w: *std.Io.Writer, c: config.Config) !void {
         } else try w.writeAll(", \"ports\": \"auto\"");
         try w.print(" }}{s}\n", .{if (i + 1 < c.nodes.len) "," else ""});
     }
-    try w.writeAll("  ],\n  \"models\": {}\n}\n");
+    try w.writeAll("  ],\n");
+    if (c.links.len > 0) {
+        try w.writeAll("  \"links\": [\n");
+        for (c.links, 0..) |l, i| {
+            try w.print("    {{ \"name\": \"{s}\"", .{l.name});
+            if (l.kind) |k| try w.print(", \"kind\": \"{s}\"", .{@tagName(k)});
+            try w.print(", \"mtu\": {d},\n      \"ends\": [", .{l.mtu});
+            for (l.ends, 0..) |e, k| {
+                try w.print("{s}{{ \"node\": \"{s}\", \"device\": \"{s}\", \"via\": \"{s}\", \"port\": {d}", .{ if (k == 0) "" else ",\n                ", e.node, e.device, e.via, e.port });
+                if (e.gid) |g| try w.print(", \"gid\": {d}", .{g});
+                try w.writeAll(" }");
+            }
+            try w.print("] }}{s}\n", .{if (i + 1 < c.links.len) "," else ""});
+        }
+        try w.writeAll("  ],\n");
+    }
+    try w.writeAll("  \"models\": {}\n}\n");
 }
 
 test {
