@@ -30,13 +30,14 @@ const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const lfm2_argmax = @import("metal_lfm2_argmax.zig");
 const lfm2_streams = @import("metal_lfm2_streams.zig");
+const lfm2_controls = @import("metal_lfm2_controls.zig");
 const lfm2_tap = @import("metal_lfm2_tap.zig");
-const lfm2_tap_rows = @import("metal_lfm2_tap_rows.zig");
+const lfm2_norm_tap = @import("metal_lfm2_norm_tap.zig");
 const lfm2_dspark = @import("metal_lfm2_dspark.zig");
 const lfm2_bf16 = @import("metal_lfm2_bf16.zig");
 const lfm2_attn = @import("metal_lfm2_attn.zig");
 const lfm2_conf = @import("metal_lfm2_confidence.zig");
-const lfm2_controls = @import("metal_lfm2_controls.zig");
+const lfm2_kv = @import("metal_lfm2_kv.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
 
@@ -201,6 +202,22 @@ pub fn main(init: std.process.Init) !u8 {
             try kernels.append(a, p.kernel());
         }
     }
+    var norm_tap_list: std.ArrayList(*lfm2_norm_tap.Probe) = .empty;
+    defer {
+        for (norm_tap_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        norm_tap_list.deinit(a);
+    }
+    for (std.enums.values(lfm2_norm_tap.Which)) |w| for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, if (control) lfm2_norm_tap.controlName(w) else lfm2_norm_tap.spec(w).name)) continue;
+        const p = try a.create(lfm2_norm_tap.Probe);
+        errdefer a.destroy(p);
+        p.* = try lfm2_norm_tap.Probe.init(a, device, queue, w, control);
+        try norm_tap_list.append(a, p);
+        try kernels.append(a, p.kernel());
+    };
     var tap_list: std.ArrayList(*lfm2_tap.Probe) = .empty;
     defer {
         for (tap_list.items) |p| {
@@ -217,25 +234,10 @@ pub fn main(init: std.process.Init) !u8 {
         try tap_list.append(a, p);
         try kernels.append(a, p.kernel());
     }
-    var tap_rows_list: std.ArrayList(*lfm2_tap_rows.Probe) = .empty;
-    defer {
-        for (tap_rows_list.items) |p| {
-            p.deinit();
-            a.destroy(p);
-        }
-        tap_rows_list.deinit(a);
-    }
-    for ([_]lfm2_controls.Mutation{ .none, .tap_rows_first_destination, .tap_rows_clobbers_column }) |m| {
-        if (!wanted(o, if (m == .none) lfm2_tap_rows.name else m.name())) continue;
-        const p = try a.create(lfm2_tap_rows.Probe);
-        errdefer a.destroy(p);
-        p.* = try lfm2_tap_rows.Probe.init(a, device, queue, m);
-        try tap_rows_list.append(a, p);
-        try kernels.append(a, p.kernel());
-    }
     var drafter_list: std.ArrayList(*lfm2_dspark.Probe) = .empty;
     var block_list: std.ArrayList(*lfm2_attn.Probe) = .empty;
     var bf16_list: std.ArrayList(*lfm2_bf16.Probe) = .empty;
+    var kv_list: std.ArrayList(*lfm2_kv.Probe) = .empty;
     defer {
         for (drafter_list.items) |p| {
             p.deinit();
@@ -249,9 +251,14 @@ pub fn main(init: std.process.Init) !u8 {
             p.deinit();
             a.destroy(p);
         }
+        for (kv_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
         drafter_list.deinit(a);
         block_list.deinit(a);
         bf16_list.deinit(a);
+        kv_list.deinit(a);
     }
     for (std.enums.values(lfm2_controls.Mutation)) |m| {
         const drafter_which: ?lfm2_dspark.Which = switch (m) {
@@ -279,6 +286,7 @@ pub fn main(init: std.process.Init) !u8 {
         };
         if (m == .none or bf16_which != null) {
             for (std.enums.values(lfm2_bf16.Which)) |w| {
+                if (w == .tensor and !tensor) continue;
                 if (m != .none and w != bf16_which.?) continue;
                 if (!wanted(o, if (m == .none) lfm2_bf16.spec(w).name else m.name())) continue;
                 const p = try a.create(lfm2_bf16.Probe);
@@ -296,6 +304,14 @@ pub fn main(init: std.process.Init) !u8 {
             try block_list.append(a, p);
             try kernels.append(a, p.kernel());
         }
+    }
+    for ([_]lfm2_controls.Mutation{ .none, .context_kv_first_row, .context_kv_theta }) |m| {
+        if (!wanted(o, if (m == .none) lfm2_kv.name else m.name())) continue;
+        const p = try a.create(lfm2_kv.Probe);
+        errdefer a.destroy(p);
+        p.* = try lfm2_kv.Probe.init(a, device, queue, m);
+        try kv_list.append(a, p);
+        try kernels.append(a, p.kernel());
     }
     var conf_list: std.ArrayList(*lfm2_conf.Probe) = .empty;
     defer {
@@ -568,6 +584,7 @@ pub fn main(init: std.process.Init) !u8 {
         lim += try gemma.limits(a, device, o.only);
         lim += try gemma_embed.limits(a, device, o.only);
         lim += try gemma_mixed.limits(a, device, o.only);
+        lim += try lfm2_bf16.tensorLimits(a, device, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

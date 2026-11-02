@@ -11,6 +11,34 @@ fn untouched(words: []const u16) bool {
     return true;
 }
 
+/// Table-only capture must reject raw/table destinations before encoding, and match generic capture.
+fn tableOnlyTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []const u32, record: bool, want: []const u16, x: []const u8, logits: []const u8) !void {
+    const original = scratch.taps.?;
+    defer scratch.taps = original;
+    var taps = original;
+    taps.table_at = 0;
+    taps.buf = try m.device.buffer(scratch.rows * @sizeOf(u64), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    taps.gpu_base = taps.buf.gpuAddress();
+    defer taps.buf.deinit();
+    scratch.taps = taps;
+    const width = taps.count * c.hidden * 2;
+    const stage = try m.device.buffer((ids.len + 2) * width, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    defer stage.deinit();
+    const stage_base = stage.gpuAddress();
+    @memset(stage.slice(u16, stage.length() / 2), 0x7fc0);
+    var cache = try st.Cache.init(gpa, m.device, &m.config.attention, ids.len + 16);
+    defer cache.deinit();
+    const spent = q.forward.gpu_seconds;
+    for ([_]q.forward.Tap{ .scratch, .{ .stage = .{ .buf = taps.buf, .gpu_base = taps.gpu_base, .off = 0 } } }) |tap| {
+        if (q.forward.run(m, scratch, &.{.{ .cache = &cache, .rows = ids.len, .tap = tap }}, ids, record, .last)) |_| return error.InvalidTapDestinationAccepted else |err| if (err != error.BadLfmTapDestination) return err;
+        if (cache.len != 0 or q.forward.gpu_seconds != spent or !untouched(stage.slice(u16, stage.length() / 2))) return error.InvalidTapDestinationEncoded;
+    }
+    try q.forward.run(m, scratch, &.{.{ .cache = &cache, .rows = ids.len, .tap = .{ .stage = .{ .buf = stage, .gpu_base = stage_base, .off = width } } }}, ids, record, .last);
+    if (!std.mem.eql(u16, want, stage.slice(u16, stage.length() / 2)[width / 2 ..][0..want.len])) return error.TableOnlyTapsDiffer;
+    if (!untouched(stage.slice(u16, width / 2)) or !untouched(stage.slice(u16, stage.length() / 2)[(ids.len + 1) * (width / 2) ..])) return error.TableOnlyTapGuardChanged;
+    if (!std.mem.eql(u8, x, scratch.x.contents()[0..x.len]) or !std.mem.eql(u8, logits, scratch.logits.contents()[0..logits.len])) return error.TableOnlyTargetOutputMismatch;
+}
+
 /// The forward capturing into a stage, into none, and beside a stream with none.
 fn stageTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []const u32, record: bool, taps: st.Taps, x: []const u8, logits: []const u8) !void {
     const n = ids.len;
@@ -21,7 +49,7 @@ fn stageTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []c
     defer stage.deinit();
     const got = stage.slice(u16, (n + 2) * row_words);
     const scratch_taps = taps.buf.slice(u16, n * row_words);
-    const place: q.forward.Place = .{ .buf = stage, .off = row_words * 2 };
+    const place: q.forward.Place = .{ .buf = stage, .gpu_base = stage.gpuAddress(), .off = row_words * 2 };
     for ([_]q.forward.Tap{ .{ .stage = place }, .none }, 0..) |tap, mode| {
         @memset(got, 0x7fc0);
         @memset(scratch_taps, 0x7fc0);
@@ -36,6 +64,7 @@ fn stageTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []c
         }
         if (!std.mem.eql(u16, want, got[row_words..][0 .. n * row_words]) or !untouched(got[0..row_words]) or !untouched(got[(n + 1) * row_words ..])) return error.StagedTapsDiffer;
     }
+    try tableOnlyTaps(gpa, m, scratch, ids, record, want, x, logits);
     if (2 * n > st.batch_rows or 2 * n > scratch.rows) return;
     // two streams in one recorded call: the first captured into the stage, the second nowhere
     @memset(got, 0x7fc0);
@@ -43,19 +72,29 @@ fn stageTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []c
     defer a.deinit();
     var b = try st.Cache.init(gpa, m.device, &m.config.attention, n + 16);
     defer b.deinit();
-    var both: [st.batch_rows]u32 = undefined;
+    var both: [32]u32 = undefined;
     @memcpy(both[0..n], ids);
     @memcpy(both[n..][0..n], ids);
     try q.forward.run(m, scratch, &.{ .{ .cache = &a, .rows = n, .tap = .{ .stage = place } }, .{ .cache = &b, .rows = n, .tap = .none } }, both[0 .. 2 * n], true, .all);
     if (!std.mem.eql(u16, want, got[row_words..][0 .. n * row_words]) or !untouched(got[0..row_words]) or !untouched(got[(n + 1) * row_words ..])) return error.SharedStagedTapsDiffer;
 }
 
-/// Untapped target outputs versus the capture, including duplicate final taps and every admitted column.
+/// Untapped target outputs versus capture/restore, including duplicate final taps and every admitted column.
 pub fn targetTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []const u32) !void {
+    const twin = m.kernels.twin;
+    defer m.kernels.twin = twin;
+    try targetTapMode(gpa, m, scratch, ids);
+    if (twin) {
+        m.kernels.twin = false;
+        try targetTapMode(gpa, m, scratch, ids);
+    }
+}
+
+fn targetTapMode(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids: []const u32) !void {
     const original = scratch.taps.?;
     defer scratch.taps = original;
-    for ([_]usize{ 1, 4, 16, ids.len }, 0..) |n, shape| {
-        if (n > ids.len or (shape == 3 and (n == 1 or n == 4 or n == 16))) continue;
+    for ([_]usize{ 1, 4, 8, 16, ids.len }, 0..) |n, shape| {
+        if (n > ids.len or (shape == 4 and (n == 1 or n == 4 or n == 8 or n == 16))) continue;
         scratch.taps = null;
         var plain = try st.Cache.init(gpa, m.device, &m.config.attention, n + 16);
         defer plain.deinit();
@@ -76,6 +115,7 @@ pub fn targetTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids
             }
             taps.table_at = n * taps.count * c.hidden * 2;
             taps.buf = try m.device.buffer(taps.table_at + scratch.rows * @sizeOf(u64), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            taps.gpu_base = taps.buf.gpuAddress();
             defer {
                 scratch.taps = null;
                 taps.buf.deinit();
@@ -92,7 +132,7 @@ pub fn targetTaps(gpa: std.mem.Allocator, m: *q.Model, scratch: *st.Scratch, ids
             };
             try stageTaps(gpa, m, scratch, ids[0..n], record, taps, x, logits);
         }
-        std.debug.print("target taps: {d} rows, released/duplicate/max-column layouts preserve all normalized and logit bytes\n", .{n});
+        std.debug.print("target taps: {d} rows, twin {}, released/duplicate/max-column layouts preserve all normalized and logit bytes\n", .{ n, m.kernels.twin });
     }
 }
 

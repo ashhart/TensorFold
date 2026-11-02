@@ -180,9 +180,10 @@ pub const Metal = struct {
         if (layers.len == 0 or layers.len > st.max_taps) return error.BadLfmTaps;
         for (layers) |l| if (l >= c.layers) return error.BadLfmTaps;
         if (self.scratch.taps) |t| return if (std.mem.eql(u32, t.layers[0..t.count], layers)) {} else error.BadLfmTaps;
-        var t: st.Taps = .{ .count = @intCast(layers.len), .buf = undefined, .table_at = self.scratch.rows * layers.len * c.hidden * 2 };
+        var t: st.Taps = .{ .count = @intCast(layers.len), .buf = undefined, .gpu_base = undefined, .table_at = self.scratch.rows * layers.len * c.hidden * 2 };
         @memcpy(t.layers[0..layers.len], layers);
         t.buf = try self.scratch.memory.alloc(t.table_at + self.scratch.rows * @sizeOf(u64));
+        t.gpu_base = t.buf.gpuAddress();
         self.scratch.taps = t;
     }
 
@@ -323,7 +324,8 @@ pub const Metal = struct {
         self.gen += 1;
         try fwd.runHeld(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all, held[0..count], wait);
         for (segments[0..windows.len]) |seg| {
-            const last = seg.cache.last.?;
+            const last = &seg.cache.last.?;
+            last.committed = &self.scratch;
             seg.cache.tap = self.tapped(seg.cache, last.rows, seg.tap, last.base);
         }
         const logits = self.scratch.logits.slice(u16, total * c.vocab);

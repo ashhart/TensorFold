@@ -50,7 +50,7 @@ fn bind(ptr: *anyopaque, s: *lanes.Stream, start: u64, rows: usize) anyerror!?ba
         try d.flush(l);
     } else l.staged = p.slot;
     const wait: ?fwd.Wait = if (d.pending != null) .{ .event = d.event, .value = d.signalled } else null;
-    return .{ .place = .{ .buf = l.mem, .off = l.stage_at + @as(usize, p.slot) * d.tapBytes() }, .wait = wait };
+    return .{ .place = .{ .buf = l.mem, .gpu_base = l.mem.gpuAddress(), .off = l.stage_at + @as(usize, p.slot) * d.tapBytes() }, .wait = wait };
 }
 
 fn buffer(ptr: *anyopaque, s: *lanes.Stream) ?mtl.Buffer {

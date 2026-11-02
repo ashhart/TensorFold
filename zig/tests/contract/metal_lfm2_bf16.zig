@@ -4,23 +4,31 @@ const mtl = @import("metal");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const controls = @import("metal_lfm2_controls.zig");
+const tf = @import("tensorfold");
+const sources = @import("kernel_sources");
 
 const c = contract.spec;
 const g = contract.gates;
 const Dense = contract.dense.Dense;
 
-pub const Which = enum { rows, tile };
-const names = [_][]const u8{ "metal lfm2 bf16 rows", "metal lfm2 bf16 tile" };
+pub const Which = enum { rows, tile, tensor };
+const names = [_][]const u8{ "metal lfm2 bf16 rows", "metal lfm2 bf16 tile", "metal lfm2 bf16 tensor" };
 
 /// The drafter's matrices: q and o (2,048 from 2,048), k and v (512), gate and up (6,144), down (2,048 from 6,144).
 const rows_served = [_]c.Shape{
     .{ .rows = 1, .n = 2048, .k = 2048 },  .{ .rows = 9, .n = 512, .k = 2048 },   .{ .rows = 16, .n = 6144, .k = 2048 },
     .{ .rows = 32, .n = 2048, .k = 6144 }, .{ .rows = 4, .n = 2048, .k = 10240 },
 };
-/// A cold prompt's absorb: the taps' projection (2,048 from 10,240) and k and v, up to 2,048 rows a pass.
+/// Shared holds past 16 rows, and a cold prompt's absorb up to 2,048 rows a pass.
 const tile_served = [_]c.Shape{
+    .{ .rows = 17, .n = 2048, .k = 2048 },    .{ .rows = 18, .n = 512, .k = 2048 },
+    .{ .rows = 24, .n = 6144, .k = 2048 },    .{ .rows = 32, .n = 2048, .k = 6144 },
     .{ .rows = 33, .n = 2048, .k = 2048 },    .{ .rows = 128, .n = 512, .k = 2048 },
     .{ .rows = 2048, .n = 2048, .k = 10240 }, .{ .rows = 70, .n = 6144, .k = 2048 },
+};
+const tensor_served = rows_served ++ tile_served ++ [_]c.Shape{
+    .{ .rows = 4, .n = 2048, .k = 2048 }, .{ .rows = 8, .n = 512, .k = 2048 },
+    .{ .rows = 8, .n = 6144, .k = 2048 }, .{ .rows = 16, .n = 2048, .k = 10240 },
 };
 
 /// A lane's k / 32 fp32 fmas in turn, then the simdgroup's five-level sum.
@@ -33,11 +41,16 @@ fn tileDepth(s: c.Shape) usize {
     return s.k / 8 + 8;
 }
 
+fn tensorDepth(s: c.Shape) usize {
+    return if (s.rows <= 32) rowsDepth(s) else tileDepth(s);
+}
+
 pub fn spec(w: Which) c.Spec {
     return switch (w) {
         // rows in groups of 16, a column a simdgroup (any n), k in 256-wide lane steps of 8
         .rows => .{ .name = names[0], .accum = .f32, .depth = rowsDepth, .out = .bf16, .tiles = .{ .{ .size = 16 }, .{ .size = 8 }, .{ .size = 256, .step = 8, .min = 8 } }, .served = &rows_served },
         .tile => .{ .name = names[1], .accum = .f32, .depth = tileDepth, .out = .bf16, .tiles = .{ .{ .size = 64 }, .{ .size = 64 }, .{ .size = 32, .step = 32, .min = 32 } }, .served = &tile_served },
+        .tensor => .{ .name = names[2], .accum = .f32, .depth = tensorDepth, .out = .bf16, .tiles = .{ .{ .size = 16 }, .{ .size = 128 }, .{ .size = 16 } }, .served = &tensor_served },
     };
 }
 
@@ -55,6 +68,12 @@ pub const Probe = struct {
     out: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, w: Which, mutation: controls.Mutation) !Probe {
+        if (w == .tensor) {
+            if (!device.tensorUnits() or mutation != .none) return error.UnsupportedBf16TensorProbe;
+            const text = try tf.frags.source(device, a, sources.lfm2_bf16_nax);
+            defer a.free(text);
+            return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = w, .mutation = mutation, .pipe = try rig_.pipeline(device, text, "lfm2_bf16_nax") };
+        }
         const text = try controls.source(a, mutation);
         defer if (mutation != .none) a.free(text);
         const key: []const u8 = if (w == .rows) "lfm2_bf16_rows" else "lfm2_bf16_mma";
@@ -115,6 +134,8 @@ pub const Probe = struct {
         e.setBuffer(p.out.buf, p.out.off, 3);
         if (p.which == .rows) {
             e.dispatchGroups(mtl.Size.of((d.shape.n + 7) / 8, (d.shape.rows + 15) / 16, 1), mtl.Size.of(256, 1, 1));
+        } else if (p.which == .tensor) {
+            e.dispatchGroups(mtl.Size.of((d.shape.n + 127) / 128, (d.shape.rows + 15) / 16, 1), mtl.Size.of(128, 1, 1));
         } else e.dispatchGroups(mtl.Size.of((d.shape.n + 63) / 64, (d.shape.rows + 63) / 64, 1), mtl.Size.of(128, 1, 1));
         try p.rig.finish(pass);
     }
@@ -131,3 +152,17 @@ pub const Probe = struct {
         return p.d.?.simulate(acc, order, out);
     }
 };
+
+/// Only the tensor-capable device compiles this source; no fictitious pre-M5 pipeline limits.
+pub fn tensorLimits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usize {
+    if (!device.tensorUnits()) return 0;
+    if (only) |needle| if (std.mem.indexOf(u8, names[2], needle) == null) return 0;
+    const text = try tf.frags.source(device, a, sources.lfm2_bf16_nax);
+    defer a.free(text);
+    return @import("metal_limits.zig").onThisGpu(a, device, .{
+        .decl = .{ .name = "metal lfm2 bf16 tensor lfm2_bf16_nax", .threads = 128, .tg_memory = 0, .reserved = 128 },
+        .function = "lfm2_bf16_nax",
+        .here = text,
+        .pre_m5 = "",
+    }, false);
+}

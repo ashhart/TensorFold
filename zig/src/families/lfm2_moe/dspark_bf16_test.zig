@@ -10,6 +10,10 @@ const Args = extern struct { rows: u32, n: u32, k: u32 };
 fn linear(comptime key: []const u8, rows: usize, n: usize, k: usize, groups: [2]usize, threads: usize) !void {
     var r = try base.Rig.init();
     defer r.deinit();
+    const pipe = if (comptime std.mem.eql(u8, key, "lfm2_bf16_nax"))
+        r.k.bf16_nax orelse return error.SkipZigTest
+    else
+        r.k.get(key);
     const x = try r.buffer(u16, rows * k);
     defer x.deinit();
     const w = try r.buffer(u16, n * k);
@@ -20,7 +24,7 @@ fn linear(comptime key: []const u8, rows: usize, n: usize, k: usize, groups: [2]
     base.noise(32, w.slice(u16, n * k), 0.5);
     const cb = r.queue.commandBuffer();
     const e = cb.compute(.serial);
-    e.setPipeline(r.k.get(key));
+    e.setPipeline(pipe);
     e.setBuffer(x, 0, 0);
     e.setBuffer(w, 0, 1);
     e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(k) }, 2);
@@ -51,6 +55,63 @@ test "lfm2 dspark: the bf16 tile kernel is x W^T for a ragged 70 rows and 100 co
 
 test "lfm2 dspark: the bf16 tile kernel at the drafter's widths" {
     try linear("lfm2_bf16_mma", 33, 512, 2048, .{ 8, 1 }, 128);
+}
+
+test "lfm2 dspark: tensor bf16 projections keep partial rows and columns within the original fp64 bound" {
+    for ([_]usize{ 1, 4, 8, 16, 17, 32, 33, 65 }) |rows| {
+        try linear("lfm2_bf16_nax", rows, 137, 288, .{ 2, (rows + 15) / 16 }, 128);
+    }
+    try linear("lfm2_bf16_nax", 16, 512, 2048, .{ 4, 1 }, 128);
+}
+
+test "lfm2 dspark: tensor bf16 projections honor borrowed offsets and isolate nonfinite rows" {
+    var r = try base.Rig.init();
+    defer r.deinit();
+    const pipe = r.k.bf16_nax orelse return error.SkipZigTest;
+    const rows = 17;
+    const n = 137;
+    const k = 280;
+    const pad = 8;
+    const x = try r.buffer(u16, rows * k + 2 * pad);
+    defer x.deinit();
+    const w = try r.buffer(u16, n * k + 2 * pad);
+    defer w.deinit();
+    const y = try r.buffer(u16, rows * n + 2 * pad);
+    defer y.deinit();
+    @memset(x.slice(u16, rows * k + 2 * pad), 0x7fc0);
+    @memset(w.slice(u16, n * k + 2 * pad), 0x7fc0);
+    @memset(y.slice(u16, rows * n + 2 * pad), 0xdead);
+    const xs = x.slice(u16, rows * k + 2 * pad)[pad..][0 .. rows * k];
+    const ws = w.slice(u16, n * k + 2 * pad)[pad..][0 .. n * k];
+    @memset(xs, quant.toBf16(1));
+    @memset(ws, quant.toBf16(0.5));
+    xs[3] = 0x7fc0;
+    xs[8 * k + 17] = 0x7f80;
+    xs[16 * k + k - 1] = 0xff80;
+    const cb = r.queue.commandBuffer();
+    const e = cb.compute(.serial);
+    e.setPipeline(pipe);
+    e.setBuffer(x, pad * 2, 0);
+    e.setBuffer(w, pad * 2, 1);
+    e.setValue(Args{ .rows = rows, .n = n, .k = k }, 2);
+    e.setBuffer(y, pad * 2, 3);
+    e.dispatchGroups(mtl.Size.of(2, 2, 1), mtl.Size.of(128, 1, 1));
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |_| return error.GpuFailed;
+    const all = y.slice(u16, rows * n + 2 * pad);
+    for (all[0..pad]) |v| try std.testing.expectEqual(@as(u16, 0xdead), v);
+    for (all[pad + rows * n ..]) |v| try std.testing.expectEqual(@as(u16, 0xdead), v);
+    for (0..rows) |row| for (all[pad + row * n ..][0..n]) |v| {
+        const got = quant.toF32(v);
+        switch (row) {
+            0 => try std.testing.expect(std.math.isNan(got)),
+            8 => try std.testing.expectEqual(std.math.inf(f32), got),
+            16 => try std.testing.expectEqual(-std.math.inf(f32), got),
+            else => try std.testing.expectEqual(@as(f32, k / 2), got),
+        }
+    };
 }
 
 test "lfm2 dspark: a Markov step over bf16 W2 picks the argmax of bf16(base + bf16(W2 . W1[prev])), a NaN row flagged" {

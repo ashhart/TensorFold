@@ -1,5 +1,13 @@
 // DSpark's Markov step, compiled after lfm2.metal's text (its includes and constants).
 
+// Absorbed context has no queries: preserve the target's key arithmetic without computing a discarded query row.
+[[kernel]] void lfm2_dspark_kv(const device bfloat* k [[buffer(0)]], const device bfloat* v [[buffer(1)]],
+                              const device bfloat* kn [[buffer(2)]], constant lfm2_qk_args& p [[buffer(3)]],
+                              device bfloat* keys [[buffer(4)]], device bfloat* values [[buffer(5)]],
+                              uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  lfm2_qk_row(nullptr, k, v, nullptr, kn, p, nullptr, keys, values, QH + tg.x, tg.y, lane);
+}
+
 // DSpark's Markov scan, W2 as 8-bit codes (BF16 false) or bf16 as released (true): a threadgroup's best of 512 tokens.
 struct lfm2_markov_args { uint stride, rank, vocab, prev_stride; };
 constant constexpr uint MARKOV_SPAN = 512;
@@ -247,6 +255,41 @@ constant constexpr uint BF16_ROWS = 16;
   }
 }
 
+// Gate/up share x and feed only SwiGLU. Each dot keeps lfm2_bf16_rows' FMA and simd_sum order.
+[[max_total_threads_per_threadgroup(256)]]
+[[kernel]] void lfm2_bf16_glu_rows(const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]],
+                                 constant lfm2_bf16_args& p [[buffer(2)]], device bfloat* y [[buffer(3)]],
+                                 const device bfloat* u [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
+                                 uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint col = tg.x * 8 + sg, r0 = tg.y * BF16_ROWS;
+  if (col >= p.n) return;
+  const uint rows = min(BF16_ROWS, p.rows - r0);
+  float gate[BF16_ROWS], up[BF16_ROWS];
+  for (uint r = 0; r < BF16_ROWS; ++r) gate[r] = up[r] = 0.0f;
+  const device bfloat* wr = w + size_t(col) * p.k;
+  const device bfloat* ur = u + size_t(col) * p.k;
+  const device bfloat* xr = x + size_t(r0) * p.k;
+  for (uint i = 8 * lane; i < p.k; i += 256) {
+    float wv[8], uv[8];
+    lfm2_unpack8(*(const device uint4*)(wr + i), wv);
+    lfm2_unpack8(*(const device uint4*)(ur + i), uv);
+    for (uint r = 0; r < BF16_ROWS; ++r) {
+      if (r >= rows) break;
+      float xv[8];
+      lfm2_unpack8(*(const device uint4*)(xr + size_t(r) * p.k + i), xv);
+      for (int j = 0; j < 8; ++j) {
+        gate[r] = fma(wv[j], xv[j], gate[r]);
+        up[r] = fma(uv[j], xv[j], up[r]);
+      }
+    }
+  }
+  for (uint r = 0; r < BF16_ROWS; ++r) {
+    const float g = simd_sum(gate[r]), v = simd_sum(up[r]);
+    if (lane == 0 && r < rows)
+      y[size_t(r0 + r) * p.n + col] = lfm2_swiglu_value(static_cast<bfloat>(g), static_cast<bfloat>(v));
+  }
+}
+
 // A drafter block's attention: lfm2_attn_mma where every row sees all keys, its 128 threads reserved for M1 and M2.
 [[max_total_threads_per_threadgroup(128)]] [[kernel]] void lfm2_attn_block(
     const device bfloat* queries [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
@@ -257,4 +300,77 @@ constant constexpr uint BF16_ROWS = 16;
   threadgroup uint ks[2][HD * (KT / 2)];
   threadgroup bfloat vs[2][KB * KP];
   lfm2_attn_rows<1, true>(queries, keys, values, p, pm, pl, po, rows, tg, tid, sg, lane, ks, vs);
+}
+
+// A tapped norm's raw state also goes to each row's destination (null: none), column i of `mask` at i * D values.
+struct lfm2_tap_dst { device bfloat* row; };
+inline void lfm2_store_columns(const device lfm2_tap_dst* dst, uint row, uint mask, uint t, bfloat4 saved) {
+  device bfloat* out = dst[row].row;
+  if (out == nullptr) return;
+  for (uint m = mask; m != 0; m &= m - 1) *(device bfloat4*)(out + size_t(ctz(m)) * D + 4 * t) = saved;
+}
+
+// lfm2_norm that also stores the new state to the destination columns.
+[[kernel]] void lfm2_norm_tap(device bfloat* h [[buffer(0)]], const device bfloat* r [[buffer(1)]], const device bfloat* w [[buffer(2)]],
+                          constant float& eps [[buffer(3)]], constant uint& add [[buffer(4)]], device bfloat* x [[buffer(5)]],
+                          const device lfm2_tap_dst* dst [[buffer(6)]], constant uint& mask [[buffer(7)]],
+                          uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
+                          uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const size_t base = size_t(row) * D + 4 * t;
+  float v[4];
+  bfloat4 saved;
+  for (int j = 0; j < 4; ++j) {
+    bfloat hv = h[base + j];
+    if (add != 0) {
+      hv = hv + r[base + j];
+      h[base + j] = hv;
+    }
+    v[j] = hv;
+    saved[j] = hv;
+  }
+  lfm2_store_columns(dst, row, mask, t, saved);
+  threadgroup float sums[32], inv[1];
+  lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
+}
+
+// lfm2_combine_norm that also stores the new state to the destination columns.
+[[kernel]] void lfm2_combine_norm_tap(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]], device bfloat* h [[buffer(2)]],
+                                  const device bfloat* w [[buffer(3)]], constant float& eps [[buffer(4)]], device bfloat* x [[buffer(5)]],
+                                  const device lfm2_tap_dst* dst [[buffer(6)]], constant uint& mask [[buffer(7)]],
+                                  uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
+                                  uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const size_t base = size_t(row) * D + 4 * t;
+  float v[4];
+  bfloat4 saved;
+  for (int j = 0; j < 4; ++j) {
+    float acc = 0.0f;
+    for (uint k = 0; k < TOPK; ++k) {
+      const size_t slot = size_t(row) * TOPK + k;
+      acc += float(static_cast<bfloat>(float(y[slot * D + 4 * t + j]) * float(wts[slot])));
+    }
+    const bfloat hv = h[base + j] + static_cast<bfloat>(acc);
+    h[base + j] = hv;
+    v[j] = hv;
+    saved[j] = hv;
+  }
+  lfm2_store_columns(dst, row, mask, t, saved);
+  threadgroup float sums[32], inv[1];
+  lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
+}
+
+// Sorted experts' residual update, canonical norm and the same row-owned raw-state columns.
+[[max_total_threads_per_threadgroup(512)]]
+[[kernel]] void lfm2_combine_sorted_norm_tap(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]],
+                                             device bfloat* h [[buffer(2)]], const device bfloat* w [[buffer(3)]],
+                                             constant float& eps [[buffer(4)]], device bfloat* x [[buffer(5)]],
+                                             const device lfm2_tap_dst* dst [[buffer(6)]], constant uint& mask [[buffer(7)]],
+                                             const device uint* pos [[buffer(8)]], uint row [[threadgroup_position_in_grid]],
+                                             uint t [[thread_position_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                                             uint lane [[thread_index_in_simdgroup]]) {
+  const bfloat4 saved = lfm2_sorted_state(y, wts, h, pos, row, t);
+  float v[4];
+  for (int j = 0; j < 4; ++j) v[j] = saved[j];
+  lfm2_store_columns(dst, row, mask, t, saved);
+  threadgroup float sums[32], inv[1];
+  lfm2_rms(v, w, eps, x, size_t(row) * D + 4 * t, t, sg, lane, sums, inv);
 }

@@ -62,8 +62,9 @@ off; the lane core verifies every draft, so a drafted reply equals its `"draft":
 
 The drafter has no embedding and no head of its own:
 
-- Context: the target's rows after layers 2, 10, 18, 26 and 34 (the backend's taps, `lfm2_tap_rows`), through `fc` and
-  `hidden_norm`, give each of its five layers' context keys and values (k_norm, then RoPE at the row's position).
+- Context: the target's raw rows after layers 2, 10, 18, 26 and 34, captured by the next/final normalization,
+  pass through `fc` and `hidden_norm` into each drafter layer's context keys and values. `lfm2_dspark_kv` applies
+  k_norm and RoPE without computing discarded queries.
 - Block: the pending token and mask tokens run five Qwen3 layers with non-causal attention over the context and the
   block, then the target's head. A block is as long as the deepest chain its pass holds, at most the nine rows the
   drafter was trained on.
@@ -72,9 +73,10 @@ The drafter has no embedding and no head of its own:
 The drafter runs the released bf16 matrices as they are (`--drafter-bits 0`, the default). `--drafter-bits 8` instead
 quantizes them at load to 8-bit MLX affine codes in groups of 64: about 361 MiB of weights
 against 625 MiB. Weight storage does not guarantee serving throughput; the server logs the mode, and 4 bits is refused.
-Both run on the family's kernels
-(bf16 on `lfm2_bf16_rows`, `lfm2_bf16_mma` and `lfm2_markov_scan_bf16`, 8-bit on `core/tile_qmm`); the q and k rows are reordered so that the target's half-split RoPE kernel gives the
-checkpoint's interleaved RoPE. Its own kernels are `lfm2_tap_rows`, `lfm2_attn_block` and `lfm2_attn_block_merge`
+Both run on the family's kernels: BF16 uses `lfm2_bf16_rows`, `lfm2_bf16_mma`, the GPU tensor-unit route
+`lfm2_bf16_nax` when supported, and `lfm2_markov_scan_bf16`; 8-bit uses `core/tile_qmm`. The q and k rows are
+reordered so that the target's half-split RoPE kernel gives the checkpoint's interleaved RoPE. Block kernels
+include `lfm2_attn_block` and `lfm2_attn_block_merge`
 (non-causal block attention, the target's attention kernels with a template flag), `lfm2_markov_scan` and
 `lfm2_markov_pick` (a Markov step) and `lfm2_draft_ids` (a hold's drafts into the next verify's rows on the GPU, so
 the host does not wait for a hold that fits one pass). Each kept prompt state keeps the drafter's context too, so a
@@ -87,8 +89,8 @@ cohort into several passes, priced in execution order rather than as one impossi
 A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
 and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
 Zero-grant rounds therefore retain contiguous context for later drafts; they do not disable drafting by stream count.
-Decode and verify forwards copy their taps (`lfm2_tap_rows`) through each row's destination straight into the lane's
-stage, without a per-round host copy. A forward waits on a pending hold before replacing rows that hold still
+Decode and verify forwards write raw taps from the next/final RMSNorm directly into each row's owned stage,
+without a separate tap dispatch or per-round host copy. A forward waits on a pending hold before replacing rows that hold still
 reads; only accepted rows become staged context. Stage overflow projects only the retained prefix before the next
 capture's anchor, so a reused anchor can replace its old row without losing contiguous context.
 
@@ -97,10 +99,29 @@ against an fp32 host reference of the released checkpoint (the same taps and the
 prints each draft against the reference's pick with the margin between the reference's two best tokens, and times
 the drafter's passes; a near tie can pick the other token.
 
-Row-owned capture uses `lfm2_tap_rows`; the original `lfm2_tap` interface is unchanged. Its launch uses
-256 threads and no threadgroup storage. Native offline compiles for all three M1 and M2 architecture
-variants permit 1,024 threads without changing the kernel's machine code. This is compiler evidence,
-not a physical M1/M2 device run or throughput qualification; `--only` checks remain scoped diagnostics.
+The sorted expert combine preserves pick order and both BF16 rounding boundaries while feeding the next/final
+RMSNorm and raw taps; decode's twin combine follows the same ownership rules. Duplicate tap columns and null
+row destinations remain supported. The sorted fused kernels retain a 512-thread cap and a 144-byte source
+threadgroup reservation; these are resource contracts, not physical-device or throughput qualification.
+
+Target Q/K/V and gate/up projections reuse row sums only when K, group, sums mode and ordinary/tensor regime
+agree, while each matrix retains its own code width. Down projections recompute sums. Target Q and routing-order
+backing are removed: Q projects into `queries`, then normalization and RoPE write into the existing padded `x`.
+Attention reads `x`; the Metal input and output arguments remain disjoint. The drafter uses the same Q lifetime,
+omits discarded context queries, and sizes BF16 sums for the target head while retaining 8-bit sums capacity.
+
+`dspark_bf16.zig` owns the BF16 projection and row-GLU routes. Actual GPU architecture capability, not a model
+name, enables M5 GPU tensor acceleration (not Apple Neural Engine): wide matrices use it from eight physical
+rows, other matrices from sixteen, with 128-thread/128-column geometry. Through 32 rows the tensor kernel keeps
+the predecessor scalar-row numerical bound. This allocation stage's non-tensor callers retain their original
+32-row scalar limit and existing MMA fallback; 8-bit routing is unchanged. Only non-tensor devices use the
+wide gate/up row-GLU route at 4–16 physical rows, preserving projection and activation BF16 rounding.
+
+A successful native all-row verify marks its completed cache frame, allowing a full identity keep to skip
+recopying conv state and logits. Partial/reordered keeps, generic and last-only forwards, snapshots and release
+retain their existing semantics. Chain windows construct positions directly; trees still validate their parents.
+These shared native changes do not import later controller policies into this allocation-stage recipe, and no
+performance or merge-readiness claim is made for this source head.
 
 ### Verify schedule
 
@@ -139,7 +160,9 @@ record the constructed timing cases and source hashes; they are not device-throu
 `tf-lfm2-dspark` also prints the confidence
 head against its fp32 reference and times shared holds of 2 to 16 streams.
 
-The loader reads the checkpoint one matrix at a time and keeps the released bf16 matrices, or 8-bit codes only when explicitly requested; a stream's drafter lane is one
-Metal buffer (its layers' keys and values, then its staged rows), and its bytes join the streams the load limit
+The loader reads unpaired BF16 matrices directly into final Metal backing; paired Q/K use one reusable matrix
+stage and reorder into their destination. Quantization maps paired source rows directly into codes, clears only
+the required 4-bit packing storage, and joins stack-held worker handles on failure. Markov W1 and the existing
+confidence projection remain BF16. A stream's drafter lane is one Metal buffer (its layers' keys and values, then its staged rows), and its bytes join the streams the load limit
 admits. At load the drafter logs its weights, scratch and a stream's bytes. `tf-lfm2-dspark` also counts host
 allocations over twenty served drafter rounds, which must be none.

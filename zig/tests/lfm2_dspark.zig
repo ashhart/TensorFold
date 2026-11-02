@@ -270,8 +270,9 @@ pub fn main(init: std.process.Init) !void {
     var scratch = try st.Scratch.init(gpa, m.device, &m.config.attention, length);
     defer scratch.deinit();
     const width = cfg.tap_count * c.hidden;
-    var taps: st.Taps = .{ .count = cfg.tap_count, .buf = try scratch.memory.alloc(length * (width * 2 + @sizeOf(u64))), .table_at = length * width * 2 };
+    var taps: st.Taps = .{ .count = cfg.tap_count, .gpu_base = undefined, .buf = try scratch.memory.alloc(length * (width * 2 + @sizeOf(u64))), .table_at = length * width * 2 };
     @memcpy(taps.layers[0..cfg.tap_count], cfg.taps[0..cfg.tap_count]);
+    taps.gpu_base = taps.buf.gpuAddress();
     scratch.taps = taps;
     var cache = try st.Cache.init(gpa, m.device, &m.config.attention, length + 16);
     defer cache.deinit();
