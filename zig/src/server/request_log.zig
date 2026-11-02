@@ -136,7 +136,8 @@ test "a log others can read, or a symbolic link, gets no requests; the owner's o
     const body = try json.newObject(a);
     try body.put(a, "model", .{ .string = "m" });
     // a name another user created first, readable by others: nothing is appended to it
-    try tmp.dir.writeFile(io, .{ .sub_path = "taken.jsonl", .data = "", .flags = .{ .permissions = .fromMode(0o644) } });
+    try tmp.dir.writeFile(io, .{ .sub_path = "taken.jsonl", .data = "" });
+    try tmp.dir.setFilePermissions(io, "taken.jsonl", .fromMode(0o644), .{}); // set after creating: a umask clears bits
     append(a, try std.fmt.allocPrint(a, "{s}/taken.jsonl", .{dir}), .{ .object = body });
     try std.testing.expectEqual(@as(usize, 0), (try tmp.dir.readFileAlloc(io, "taken.jsonl", a, .limited(1 << 10))).len);
     // a symbolic link to another file: the target is never written
