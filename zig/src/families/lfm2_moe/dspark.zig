@@ -23,7 +23,7 @@ pub const absorb_rows = 2048;
 pub const stage_rows = absorb_rows;
 /// Staged rows a hold can gather to share fc reads, in calls of at most 32 rows.
 pub const gather_rows = 128;
-/// The block counts timed at load, at every depth that fits one pass and the checkpoint's block.
+/// Context calibration block counts; clean holds cover every legal count up to this maximum.
 const hold_grid = [_]u32{ 1, 2, 4, 8, 16 };
 const context_row_levels = std.math.log2_int(usize, stage_rows) + 1;
 const kw = c.kv_heads * c.head_dim;
@@ -83,7 +83,7 @@ pub const Drafter = struct {
     /// One stream's clean CPU-encode + GPU ms at full depth, and that over the block (the depth rule's cost a draft).
     hold_ms: f64 = 0,
     step_ms: f64 = 0,
-    holds: [2 * pass_rows]lanes.hold_price.HoldCost = undefined, // the power-of-two block counts sum to fewer than 2 * pass_rows depths
+    holds: [pass_rows]lanes.hold_price.HoldCost = undefined, // block * floor(pass_rows / block) bounds the clean grid
     holds_len: usize = 0,
     contexts: [hold_grid.len * context_row_levels]lanes.hold_price.ContextCost = undefined,
     contexts_len: usize = 0,
@@ -202,6 +202,7 @@ pub const Drafter = struct {
         f.hold_costs = d.holds[0..d.holds_len];
         f.hold_context_costs = d.contexts[0..d.contexts_len];
         f.hold_rows = pass_rows;
+        f.hold_block_rows = d.config.block;
         return f;
     }
 
@@ -351,15 +352,8 @@ pub const Drafter = struct {
         try d.unpass();
         var at: usize = 0;
         while (at < items.len) {
-            // as many streams as their blocks' rows fit a pass: each block is as long as the pass's deepest chain
-            var deepest: usize = 0;
-            var end = at;
-            while (end < items.len) : (end += 1) {
-                const rows = @max(deepest, items[end].depth);
-                if ((end - at + 1) * rows > pass_rows) break;
-                deepest = rows;
-            }
-            if (end == at) return error.DraftDepth;
+            // Every retained prefix still runs the configured bidirectional query block.
+            const end = @min(items.len, at + pass_rows / d.config.block);
             var blocks: [pass_rows]block.Block = undefined;
             const group = items[at..end];
             at = end;
@@ -494,7 +488,7 @@ pub const Drafter = struct {
         for (made, &blocks) |lane, *b| b.* = .{ .lane = lane, .pending = 1, .anchor = 0, .depth = 1 };
         // Publish only after both grids are complete, so calibration holds cannot reprice the clean grid.
         var timed: usize = 0;
-        for (hold_grid) |streams| for (1..@min(d.config.block, pass_rows / streams) + 1) |depth| {
+        for (1..@min(made.len, pass_rows / d.config.block) + 1) |streams| for (1..d.config.block + 1) |depth| {
             for (blocks[0..streams]) |*b| b.depth = @intCast(depth);
             var ms_best = std.math.inf(f64);
             for (0..4) |i| {
@@ -506,7 +500,7 @@ pub const Drafter = struct {
                     ms_best = @min(ms_best, ms);
                 }
             }
-            d.holds[timed] = .{ .streams = streams, .depth = @intCast(depth), .ms = ms_best };
+            d.holds[timed] = .{ .streams = @intCast(streams), .depth = @intCast(depth), .ms = ms_best };
             timed += 1;
         };
         var pieces: [hold_grid[hold_grid.len - 1]]block.Piece = undefined;

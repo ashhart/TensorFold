@@ -65,9 +65,10 @@ The drafter has no embedding and no head of its own:
 - Context: the target's rows after layers 2, 10, 18, 26 and 34 (the backend's raw-state norm taps), through `fc` and
   `hidden_norm`, give each of its five layers' context keys and values (k_norm, then RoPE at the row's position).
 - Block: the pending token and mask tokens run five Qwen3 layers with non-causal attention over the context and the
-  block, then the target's head. A block is as long as the deepest chain its pass holds, at most the nine rows the
-  drafter was trained on.
-- Markov head: row i's logits plus `W2 W1[previous token]` (rank 256); draft i is their argmax.
+  block, then the target's head. Every hold runs the checkpoint's complete nine-row query block, even when the
+  scheduler retains a shorter proposal prefix: the unused mask rows still affect bidirectional attention.
+- Markov head: row i's logits plus `W2 W1[previous token]` (rank 256); draft i is their argmax. Only the requested
+  prefix takes Markov steps and is returned; the pointwise backbone tail always keeps the full query block.
 
 The drafter runs the released bf16 matrices as they are (`--drafter-bits 0`, the default). `--drafter-bits 8` instead
 quantizes them at load to 8-bit MLX affine codes in groups of 64: about 361 MiB of weights
@@ -84,14 +85,16 @@ The drafter also uses `lfm2_attn_block` and `lfm2_attn_block_merge`
 (non-causal block attention, the target's attention kernels with a template flag), `lfm2_markov_scan` and
 `lfm2_markov_pick` (a Markov step) and `lfm2_draft_ids` (a hold's drafts into the next verify's rows on the GPU, so
 the host does not wait for a hold that fits one pass). Each kept prompt state keeps the drafter's context too, so a
-drafting stream resumes prompts. Hold lengths follow the lane core's per-round depth pricing; no stream-count guard disables drafting.
+drafting stream resumes prompts. Retained proposal depths follow the lane core's per-round pricing; no stream-count guard disables drafting.
 
 Priced shared rounds use the existing lane allocator and the measured block-count/depth grid. Only neural blocks
-incur hold cost; copies and forced rows still occupy verify capacity. The native 32-row hold limit can split a
-cohort into several passes, priced in execution order rather than as one impossible padded batch.
+incur hold cost; copies and forced rows still occupy verify capacity. Physical grouping uses the larger of retained
+depth and configured query width. The native 32-row hold limit fits three nine-row blocks per pass; larger logical
+cohorts run in bounded passes, priced in execution order rather than as one impossible padded batch.
 
-Clean hold prices cover every legal depth at 1, 2, 4, 8 and 16 streams. Context projection has a separate
-60-point grid: those five stream counts at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 and 2048 retained rows.
+Clean hold prices cover every retained depth at every legal block count up to the existing maximum of 16:
+the released nine-row checkpoint measures 1, 2 and 3 blocks, each at retained depths 1 through 9. Context projection
+keeps its separate 60-point grid: 1, 2, 4, 8 and 16 streams at 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 and 2048 retained rows.
 Each point uses the serving encoder and deterministic nonzero BF16 inputs, one warmup and the best of three
 valid nonoverlapping CPU-encode plus GPU measurements. Both grids publish together; startup receipts are drained.
 Before either the lone depth decision or shared allocation, committed target rows are staged exactly once so
@@ -113,9 +116,13 @@ that table in target scratch; missing drafting-lane destinations are errors, and
 Snapshots count persistent K/V bytes only, and a declined snapshot must not consume the final owned prompt anchor.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
-against an fp32 host reference of the released checkpoint (including a real 64-context/nine-draft case), prints
-each draft against the reference's pick and margin, and reports CPU-encode, GPU and summed pass costs separately.
-A near tie can pick the other token. Native diagnostics and kernel contracts also exercise table-only and
+against an fp32 host reference of the released checkpoint's full query block; `ROWS` selects only the retained
+proposal prefix compared with that reference (including a real 64-context/nine-draft case). It prints each draft
+against the reference's pick and margin, and reports CPU-encode, GPU and summed pass costs separately.
+The prefix oracle compares all first-row raw-logit bytes and the first pick at retained depths 1, 3 and the
+configured block. Independent same-regime references also cover split cohorts of 8 and 16 logical streams.
+A near tie can pick the other token. These query-width corrections make no measured acceptance or speed claim.
+Native diagnostics and kernel contracts also exercise table-only and
 alternating two-buffer raw capture, null/dark destinations and uneven FC gather regimes with unchanged exact bytes,
 deferred zero-grant context through a rewind to 2143, snapshot lifecycle and allocation-free unwaited holds. Checked host consumers
 reject planted NaN and positive/negative infinity independently; neither completion waits nor timing receipts

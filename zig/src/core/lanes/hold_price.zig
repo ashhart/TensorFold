@@ -58,8 +58,8 @@ pub fn holdMs(costs: []const HoldCost, streams: usize, depth: i64) f64 {
     return at_lo + t * (atDepth(costs, hi, depth) - at_lo);
 }
 
-/// Greedy stream-order passes pad blocks to the deepest; `rows == 0` means no physical row limit.
-pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, view: anytype) f64 {
+/// Stream-order passes pad to the deeper of the requested prefix and fixed query block; zero rows means unbounded.
+pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, block_rows: u32, view: anytype) f64 {
     const n = view.len();
     var ms: f64 = 0;
     var i: usize = 0;
@@ -73,7 +73,7 @@ pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32,
             const d = view.at(i);
             if (d <= 0) continue;
             const wide = @max(deepest, d);
-            if (rows != 0 and blocks > 0 and @as(i64, @intCast(blocks + 1)) * wide > rows) break;
+            if (rows != 0 and blocks > 0 and @as(i64, @intCast(blocks + 1)) * @max(wide, block_rows) > rows) break;
             blocks += 1;
             deepest = wide;
             context_rows = @max(context_rows, view.contextRows(i));
@@ -83,7 +83,7 @@ pub fn rowsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32,
 }
 
 /// The physical passes' price for these depths in stream order; zero-depth lanes take no block.
-pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
+pub fn passMs(costs: []const HoldCost, rows: u32, block_rows: u32, depths: []const i64) f64 {
     const View = struct {
         d: []const i64,
         fn len(v: @This()) usize {
@@ -96,11 +96,11 @@ pub fn passMs(costs: []const HoldCost, rows: u32, depths: []const i64) f64 {
             return 0;
         }
     };
-    return rowsMs(costs, &.{}, rows, View{ .d = depths });
+    return rowsMs(costs, &.{}, rows, block_rows, View{ .d = depths });
 }
 
 /// Only charged counts above free-first nodes form hold blocks; an empty charged mask includes all streams.
-pub fn countsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, counts: []const u32, charged: []const bool, free: u32, debts: []const u32) f64 {
+pub fn countsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u32, block_rows: u32, counts: []const u32, charged: []const bool, free: u32, debts: []const u32) f64 {
     const View = struct {
         counts: []const u32,
         charged: []const bool,
@@ -117,7 +117,7 @@ pub fn countsMs(costs: []const HoldCost, contexts: []const ContextCost, rows: u3
             return if (v.debts.len == 0) 0 else v.debts[i];
         }
     };
-    return rowsMs(costs, contexts, rows, View{ .counts = counts, .charged = charged, .free = free, .debts = debts });
+    return rowsMs(costs, contexts, rows, block_rows, View{ .counts = counts, .charged = charged, .free = free, .debts = debts });
 }
 
 /// Ignore work settled outside this round; the clock measures only what follows its start.
@@ -213,32 +213,43 @@ const product = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 1 }, .{ .streams
 test "a hold past the pass's rows is priced as the passes the drafter makes, in stream order" {
     const near = std.testing.expectApproxEqAbs;
     const deep_first = [_]i64{ 9, 1, 1, 1, 1, 1, 1, 1 }; // three blocks of nine rows fit 32, the other five go in a pass of their own
-    try near(@as(f64, 10), passMs(&flat, 0, &deep_first), 1e-9); // an unbounded pass is one
-    try near(@as(f64, 20), passMs(&flat, 32, &deep_first), 1e-9);
-    try near(@as(f64, 27 + 5), passMs(&product, 32, &deep_first), 1e-9);
+    try near(@as(f64, 10), passMs(&flat, 0, 0, &deep_first), 1e-9); // an unbounded pass is one
+    try near(@as(f64, 20), passMs(&flat, 32, 0, &deep_first), 1e-9);
+    try near(@as(f64, 27 + 5), passMs(&product, 32, 0, &deep_first), 1e-9);
     // the same depths in another order make other passes: seven blocks of one, then the nine alone
-    try near(@as(f64, 7 + 9), passMs(&product, 32, &.{ 1, 1, 1, 1, 1, 1, 1, 9 }), 1e-9);
-    try near(@as(f64, 3 + 27 + 2), passMs(&product, 32, &.{ 1, 1, 1, 9, 1, 1, 1, 1 }), 1e-9);
+    try near(@as(f64, 7 + 9), passMs(&product, 32, 0, &.{ 1, 1, 1, 1, 1, 1, 1, 9 }), 1e-9);
+    try near(@as(f64, 3 + 27 + 2), passMs(&product, 32, 0, &.{ 1, 1, 1, 9, 1, 1, 1, 1 }), 1e-9);
     // zero depths take no block and do not split a pass
-    try near(@as(f64, 27), passMs(&product, 32, &.{ 0, 9, 0, 1, 1, 0 }), 1e-9);
-    try near(@as(f64, 0), passMs(&product, 32, &.{ 0, 0 }), 1e-12);
-    try near(@as(f64, 0), passMs(&product, 32, &.{}), 1e-12);
+    try near(@as(f64, 27), passMs(&product, 32, 0, &.{ 0, 9, 0, 1, 1, 0 }), 1e-9);
+    try near(@as(f64, 0), passMs(&product, 32, 0, &.{ 0, 0 }), 1e-12);
+    try near(@as(f64, 0), passMs(&product, 32, 0, &.{}), 1e-12);
 }
 
 test "the row limit's boundary: blocks x deepest equal to the rows is one pass, one row more is two" {
     var depths: [9]i64 = @splat(4);
-    try std.testing.expectApproxEqAbs(@as(f64, 10), passMs(&flat, 32, depths[0..8]), 1e-9); // 8 x 4 = 32
-    try std.testing.expectApproxEqAbs(@as(f64, 20), passMs(&flat, 32, &depths), 1e-9); // 9 x 4 = 36: eight, then one
+    try std.testing.expectApproxEqAbs(@as(f64, 10), passMs(&flat, 32, 0, depths[0..8]), 1e-9); // 8 x 4 = 32
+    try std.testing.expectApproxEqAbs(@as(f64, 20), passMs(&flat, 32, 0, &depths), 1e-9); // 9 x 4 = 36: eight, then one
     depths[8] = 3;
-    try std.testing.expectApproxEqAbs(@as(f64, 20), passMs(&flat, 32, &depths), 1e-9); // the ninth block needs a row more than 32 either way
-    try std.testing.expectApproxEqAbs(@as(f64, 10), passMs(&flat, 36, &depths), 1e-9); // 9 x 4 fits a pass of 36
+    try std.testing.expectApproxEqAbs(@as(f64, 20), passMs(&flat, 32, 0, &depths), 1e-9); // the ninth block needs a row more than 32 either way
+    try std.testing.expectApproxEqAbs(@as(f64, 10), passMs(&flat, 36, 0, &depths), 1e-9); // 9 x 4 fits a pass of 36
 }
 
 test "allocated counts price the same passes: charged streams only, past the free node" {
     const near = std.testing.expectApproxEqAbs;
-    try near(@as(f64, 27), countsMs(&product, &.{}, 32, &.{ 10, 2, 2 }, &.{}, 1, &.{}), 1e-9); // blocks 9, 1, 1
-    try near(@as(f64, 27), countsMs(&product, &.{}, 32, &.{ 9, 1, 50, 1 }, &.{ true, true, false, true }, 0, &.{}), 1e-9); // a copy's 50 takes no block
-    try near(@as(f64, 0), countsMs(&product, &.{}, 32, &.{ 1, 1, 1 }, &.{}, 1, &.{}), 1e-12); // nothing past the free first
-    try near(@as(f64, 20), countsMs(&flat, &.{}, 32, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
-    try near(@as(f64, 10), countsMs(&flat, &.{}, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
+    try near(@as(f64, 27), countsMs(&product, &.{}, 32, 0, &.{ 10, 2, 2 }, &.{}, 1, &.{}), 1e-9); // blocks 9, 1, 1
+    try near(@as(f64, 27), countsMs(&product, &.{}, 32, 0, &.{ 9, 1, 50, 1 }, &.{ true, true, false, true }, 0, &.{}), 1e-9); // a copy's 50 takes no block
+    try near(@as(f64, 0), countsMs(&product, &.{}, 32, 0, &.{ 1, 1, 1 }, &.{}, 1, &.{}), 1e-12); // nothing past the free first
+    try near(@as(f64, 20), countsMs(&flat, &.{}, 32, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
+    try near(@as(f64, 10), countsMs(&flat, &.{}, 0, 0, &.{ 9, 1, 1, 1, 1, 1, 1, 1 }, &.{}, 0, &.{}), 1e-9);
+}
+
+test "fixed query blocks split short logical prefixes but retain logical-depth quotes" {
+    const shallow = [_]i64{ 1, 1, 1, 1, 1, 1, 1, 1 };
+    try std.testing.expectEqual(@as(f64, 10), passMs(&flat, 32, 0, &shallow));
+    try std.testing.expectEqual(@as(f64, 30), passMs(&flat, 32, 9, &shallow));
+    try std.testing.expectEqual(@as(f64, 8), passMs(&product, 32, 9, &shallow));
+    try std.testing.expectEqual(@as(f64, 10), passMs(&flat, 0, 9, &shallow));
+    // A deeper logical request still sets the width; the fixed block is a minimum.
+    try std.testing.expectEqual(@as(f64, 30), passMs(&flat, 32, 9, &.{ 12, 1, 1, 1, 1, 1, 1 }));
+    try std.testing.expectEqual(@as(f64, 20), countsMs(&flat, &.{}, 32, 9, &.{ 2, 1, 2, 50, 2, 2 }, &.{ true, true, true, false, true, true }, 1, &.{}));
 }

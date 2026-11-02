@@ -40,10 +40,10 @@ test "physical context passes ignore zero, free and uncharged blocks" {
         .{ .streams = 1, .rows = 4, .ms = 3 },
         .{ .streams = 2, .rows = 4, .ms = 5 },
     };
-    try std.testing.expectEqual(@as(f64, 6), price.countsMs(&holds, &contexts, 32, &.{ 10, 2 }, &.{}, 1, &.{ 1, 4 }));
-    try std.testing.expectEqual(@as(f64, 8), price.countsMs(&holds, &contexts, 9, &.{ 10, 2 }, &.{}, 1, &.{ 1, 4 }));
-    try std.testing.expectEqual(@as(f64, 4), price.countsMs(&holds, &contexts, 32, &.{ 9, 2, 1 }, &.{ false, true, true }, 1, &.{ 1000, 4, 1000 }));
-    try std.testing.expectEqual(@as(f64, 0), price.countsMs(&holds, &contexts, 32, &.{ 1, 1 }, &.{}, 1, &.{ 1000, 1000 }));
+    try std.testing.expectEqual(@as(f64, 6), price.countsMs(&holds, &contexts, 32, 0, &.{ 10, 2 }, &.{}, 1, &.{ 1, 4 }));
+    try std.testing.expectEqual(@as(f64, 8), price.countsMs(&holds, &contexts, 9, 0, &.{ 10, 2 }, &.{}, 1, &.{ 1, 4 }));
+    try std.testing.expectEqual(@as(f64, 4), price.countsMs(&holds, &contexts, 32, 0, &.{ 9, 2, 1 }, &.{ false, true, true }, 1, &.{ 1000, 4, 1000 }));
+    try std.testing.expectEqual(@as(f64, 0), price.countsMs(&holds, &contexts, 32, 0, &.{ 1, 1 }, &.{}, 1, &.{ 1000, 1000 }));
 }
 
 test "copy allocations owe no neural context and serial depths pay their projection only once" {
@@ -227,4 +227,95 @@ test "depth funding sees newly staged debt and zero-budget rounds retain every c
             }
         }
     };
+}
+
+test "fixed query blocks fund the real split instead of four cheap short heads" {
+    const grid = [_]price.HoldCost{
+        .{ .streams = 1, .depth = 1, .ms = 3 },
+        .{ .streams = 2, .depth = 1, .ms = 4 },
+        .{ .streams = 3, .depth = 1, .ms = 5 },
+    };
+    const win = @import("windows.zig");
+    const NoCopy = struct {
+        fn copy(_: *anyopaque, _: *const depth.Who) bool {
+            return false;
+        }
+    };
+    for ([_]u32{ 0, 9, 0 }) |query_rows| {
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var head: dt.FakeDrafter = .{ .facts_ = .{
+            .depth = 1,
+            .step_ms = 0.5,
+            .prior = &.{0.8},
+            .batched = true,
+            .hold_costs = &grid,
+            .hold_rows = 32,
+            .hold_block_rows = query_rows,
+        } };
+        defer head.deinit();
+        var wrapped = try Drafted.init(gpa, target.backend(), head.drafter());
+        defer wrapped.deinit();
+        var costs: [8]@import("config.zig").Cost = undefined;
+        for (&costs, 1..) |*c, width| c.* = .{ .width = @intCast(width), .ms = 10 };
+        var cfg = try Config.init(gpa, wrapped.facts(.{
+            .exact_width = 8,
+            .window_costs = &costs,
+            .hidden_rows = true,
+            .batch_rows = 8,
+            .lone_copies = false,
+        }), 8, 7);
+        defer cfg.deinit(gpa);
+        try std.testing.expectEqual(query_rows, cfg.k.hold_block_rows);
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+        defer engine.deinit();
+        engine.rule.k.depth_probe_every = 128;
+        var streams: [4]sm.Stream = undefined;
+        var made: usize = 0;
+        defer for (streams[0..made]) |*s| s.deinit(gpa);
+        while (made < streams.len) : (made += 1) streams[made] = try sm.Stream.init(gpa, .{ .id = "fixed-query", .prompt = &.{ 2, 7, 13 }, .max_new = 32 });
+        var plans: [4]win.Plan = undefined;
+        var whos: [4]depth.Who = undefined;
+        for (&plans, &whos, &streams) |*p, *w, *s| {
+            p.* = .{ .stream = s, .position = 0, .kind = .none };
+            w.* = win.who(s);
+        }
+        var out: [4]i64 = undefined;
+        const want: []const i64 = if (query_rows == 0) &.{ 1, 1, 1, 1 } else &.{ 1, 1, 1, 0 };
+        // Variable one-row heads fit together: 7.2/16 pays. Four nine-row blocks
+        // split 3+1 and tie plain at 7.2/18; the first three still pay at 6.4/15.
+        try @import("shared_drafts.zig").budgets(&engine, &plans, &.{ 0, 1, 2, 3 }, &out);
+        try std.testing.expectEqualSlices(i64, want, &out);
+        try engine.rule.budgets(&whos, .{ .ptr = &engine, .copy = NoCopy.copy }, false, &out);
+        try std.testing.expectEqualSlices(i64, want, &out);
+        // The existing granted-hold consumer uses the same physical grouping without enabling it in production.
+        @memset(&out, 1);
+        for (&whos) |*w| {
+            w.granted = 1;
+            w.gain = 0.8;
+        }
+        try engine.rule.payHolds(&whos, false, &out);
+        try std.testing.expectEqualSlices(i64, want, &out);
+        // A historical zero-grant probe still survives, but its physical block is not free.
+        @memset(&out, 1);
+        whos[0].granted = 0;
+        try engine.rule.payHolds(&whos, false, &out);
+        try std.testing.expectEqualSlices(i64, want, &out);
+    }
+}
+
+test "fixed query context groups omit free and uncharged rows and pay each split's own debt" {
+    const grid = [_]price.HoldCost{
+        .{ .streams = 1, .depth = 1, .ms = 3 },
+        .{ .streams = 2, .depth = 1, .ms = 4 },
+        .{ .streams = 3, .depth = 1, .ms = 5 },
+    };
+    const contexts = [_]price.ContextCost{
+        .{ .streams = 1, .rows = 1, .ms = 1 },
+        .{ .streams = 1, .rows = 4, .ms = 3 },
+        .{ .streams = 4, .rows = 4, .ms = 8 },
+    };
+    try std.testing.expectEqual(@as(f64, 17), price.countsMs(&grid, &contexts, 32, 9, &.{ 2, 1, 2, 50, 2, 2 }, &.{ true, true, true, false, true, true }, 1, &.{ 1, 1000, 4, 1000, 1, 1 }));
+    try std.testing.expectEqual(@as(f64, 14), price.countsMs(&grid, &contexts, 32, 0, &.{ 2, 1, 2, 50, 2, 2 }, &.{ true, true, true, false, true, true }, 1, &.{ 1, 1000, 4, 1000, 1, 1 }));
 }
