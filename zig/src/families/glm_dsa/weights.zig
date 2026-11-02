@@ -78,7 +78,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, root: []const u8, c: *const cfg.
     const path = try std.fmt.allocPrint(gpa, "{s}/dense/exlr8-dense-{d:0>3}.safetensors", .{ root, n });
     defer gpa.free(path);
     var f = try st.File.open(gpa, io, path);
-    defer f.close(io);
+    defer f.closeCopied(io);
     const full = c.full.isSet(n);
     const h0 = c.head0();
     const nh = c.localHeads();

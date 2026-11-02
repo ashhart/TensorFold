@@ -24,10 +24,17 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
     if (page_tokens > 0 and (o.tp != 1 or o.slide or captured != null)) return error.FlashNextPagesUnsupported;
+    // pending DeltaNet rows run on one GPU only: TF_FLASHNEXT_KEEP_LATE=1 with tensor parallel is refused
+    const Draft = @import("cuda_mtp_draft.zig").Draft;
+    const late_fits = o.tp == 1;
+    if (Draft.lateWanted() == true and !late_fits) return error.FlashNextKeepLateUnsupported;
+    Draft.late_on = (Draft.lateWanted() orelse true) and late_fits;
     const driver: *cuda.Driver = @constCast(ctx.d);
     const own = try gpa.create(Cuda);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .context = o.context, .engine = undefined, .glue = undefined, .stream = undefined, .logits = undefined };
+    // fixed-size lane buffers reused across streams (cuda_lane_parts.zig; TF_FLASHNEXT_LANE_PARTS=0: allocate each)
+    own.parts.on = if (std.c.getenv("TF_FLASHNEXT_LANE_PARTS")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
     own.stream = try cuda.Stream.init(driver, true);
     errdefer own.stream.deinit();
     own.glue = try Glue.load(driver);
@@ -72,7 +79,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         if (std.c.getenv("TF_FLASHNEXT_CONFIDENCE")) |v| own.confidence = std.fmt.parseFloat(f64, std.mem.span(v)) catch mtp.default_confidence;
     }
     errdefer if (own.head) |h| h.deinit();
-    @import("cuda_prompt_wt.zig").dropPageCache(io, dir); // the weights and the head are on the device now
+    @import("cuda_prompt_wt.zig").dropPageCache(io, dir, e.ngram.files.items);
     const window = @min(o.context + mtp.max_rows, prompt.max_tokens);
     // and an attention block's block scores at the window (64 MiB at 262,144 tokens)
     _ = try own.engine.reserveScores(window, @min(o.context, own.engine.chunk));

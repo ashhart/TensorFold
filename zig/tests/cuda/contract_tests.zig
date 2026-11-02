@@ -585,6 +585,7 @@ pub fn run(gpu: check.Gpu) !void {
     const t1 = check.now(gpu.io);
     try @import("contract_qwen_served.zig").run(gpu);
     try @import("contract_qwen_pages.zig").run(gpu);
+    try @import("contract_qwen_pending.zig").run(gpu);
     try @import("contract_qwen_learning.zig").numerical(gpu);
     try @import("contract_fn_pages.zig").run(gpu);
     const lim = try live(gpu);

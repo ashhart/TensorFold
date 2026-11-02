@@ -145,6 +145,17 @@ pub const Drafter = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    pub fn relocate(p: *anyopaque) void {
+        cast(p).dropGraphs();
+    }
+
+    pub fn dropGraphs(x: *Drafter) void {
+        for (&x.graphs) |*row| for (row) |*g| if (g.*) |*e| {
+            e.deinit();
+            g.* = null;
+        };
+    }
+
     /// The target's last layer: its output before the final norm, which absorb applies.
     fn tapsFn(ptr: *anyopaque) []const u32 {
         return &cast(ptr).tap;
@@ -239,9 +250,14 @@ pub const Drafter = struct {
     }
 
     /// Assistant layer i on the rows: input normed in normed (sums in xs), residual h[cur] into h[1 - cur].
+    pub fn sourceWindow(x: *const Drafter, i: usize) Window {
+        const global = !x.c.sliding[i];
+        const t = x.sources[@intFromBool(global)];
+        return .{ .h = x.c.heads, .hk = x.m.geo.kvHeads(t), .d = x.c.headDim(i), .win = if (global) 0 else cfg.window, .ring = x.m.cacheLen(t), .scale = 1, .pg = if (global) x.m.pagesFor(null) else null };
+    }
+
     fn layer(x: *Drafter, i: usize, cur: usize, rows: usize) !void {
         const c = &x.c;
-        const geo = x.m.geo;
         const l = &x.w.layers[i];
         const s = x.x;
         const global = !c.sliding[i];
@@ -253,8 +269,7 @@ pub const Drafter = struct {
         const shape: cuda.qk_rows.Shape = .{ .norms = l.q_norm, .norm_k = l.q_norm, .norms_bf16 = true, .inv = if (global) x.m.inv_global else x.m.inv_sliding, .rot = dh, .eps = cfg.eps, .round = true };
         try x.k.qk.rowsFrom(x.s, src, .{ .h = c.heads, .hk = 1, .dim = dh }, shape, s.pos, null, .{ .q = s.q, .k = s.kj, .v = 0 }, rows);
         const t = x.sources[@intFromBool(global)];
-        const len = x.m.cacheLen(t);
-        const w: Window = .{ .h = c.heads, .hk = geo.kvHeads(t), .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1 };
+        const w = x.sourceWindow(i);
         var r: usize = 0;
         while (r < rows) : (r += 16) {
             const n = @min(16, rows - r);

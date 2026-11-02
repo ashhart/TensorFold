@@ -2,13 +2,17 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
+pub const precision = @import("attention_precision.zig");
 
 /// A prompt-kernel source with nax.h inlined; a GPU without tensor units takes nax.h's simdgroup-matrix layout.
 pub fn source(device: mtl.Device, a: std.mem.Allocator, text: []const u8) ![]u8 {
-    const src = try std.mem.replaceOwned(u8, a, text, "#include \"../nax.h\"", ks.nax);
-    if (device.tensorUnits()) return src;
-    defer a.free(src);
-    return std.mem.concat(a, u8, &.{ "#define TF_SIMD_FRAGS 1\n", src });
+    const full = if (std.mem.indexOf(u8, text, "TF_ATTN_PV_FP32") != null) try precision.requested() else false;
+    return sourceMode(device, a, text, full);
+}
+
+/// Contract libraries name their precision independently of the process environment.
+pub fn sourceMode(device: mtl.Device, a: std.mem.Allocator, text: []const u8, full: bool) ![]u8 {
+    return precision.source(a, device.tensorUnits(), text, ks.nax, full);
 }
 
 /// The op both ways the prompt kernels use it (a transposed right operand, a plain one) through nax.h's fragments.

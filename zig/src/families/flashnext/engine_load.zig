@@ -426,6 +426,9 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         e.tree = try @import("tree.zig").init(r, a, if (sib > 0) a * sib else b, feed, sib);
         if (sib > 0) std.log.info("flash next: tree rounds, a head chain of {d} and {d} head siblings a depth", .{ a, sib }) else std.log.info("flash next: tree rounds, a head chain of {d} and a branch of {d}", .{ a, b });
     };
+    if (r.fsr) |s| {
+        @import("checkpoint_cache.zig").finish(r.files.items, s.source.files);
+    } else @import("checkpoint_cache.zig").finish(r.files.items, &.{});
     return e;
 }
 

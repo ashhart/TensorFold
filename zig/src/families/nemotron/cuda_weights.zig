@@ -456,7 +456,7 @@ pub const PendingLoad = @import("cuda_load.zig").Pending;
 
 pub fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoint, dir: []const u8, c: Config) !void {
     var ck: core.Checkpoint = .{ .gpa = gpa, .io = io };
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     try ck.add(dir, mtp_file);
     try L.src.add(&ck);
     L.w.mtp = .{

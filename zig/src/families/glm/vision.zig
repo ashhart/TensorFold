@@ -437,14 +437,13 @@ fn loadWeights(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8) !Wei
     for (plan) |p| total = std.mem.alignForward(usize, total, 256) + p.src.len;
     w.buf = try device.buffer(total, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     errdefer w.buf.deinit();
+    var files: @import("weights_fix.zig").Files = .{ .a = gpa };
+    defer files.deinit();
     var at: usize = 0;
     for (plan) |p| {
         at = std.mem.alignForward(usize, at, 256);
         refOf(&w, p.spec.place).* = .{ .buf = w.buf, .off = at };
-        const fd = std.c.open(p.src.path, .{ .ACCMODE = .RDONLY });
-        if (fd < 0) return error.OpenFailed;
-        defer _ = std.c.close(fd);
-        _ = std.c.fcntl(fd, 48, @as(c_int, 1)); // F_NOCACHE, as the language model's shards
+        const fd = try files.open(p.src.path);
         const dst = w.buf.contents()[at..][0..p.src.len];
         try readAll(fd, dst, p.src.off);
         // the patch embedding channel by frame by row by column; the merge's [O, 2, 2, C], four patch rows tap by tap
