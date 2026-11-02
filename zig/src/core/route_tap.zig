@@ -529,3 +529,31 @@ test "a failed copy clears the slot so a later lap cannot keep the previous ids"
     try std.testing.expect(blank(sl.ids, sl.weights));
     try std.testing.expectEqual(@as(u32, 1), r.drops.load(.monotonic));
 }
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "stop frees the session and ring under the testing allocator" {
+    const a = std.testing.allocator;
+    try std.testing.expect(!live());
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}/route-tap.tfr1", .{tmp.sub_path}, 0);
+
+    const prev = if (std.c.getenv(env_name)) |p| try a.dupeSentinel(u8, std.mem.span(p), 0) else null;
+    defer if (prev) |p| a.free(p);
+    try std.testing.expectEqual(@as(c_int, 0), setenv(env_name, path, 1));
+    defer {
+        if (prev) |p| _ = setenv(env_name, p, 1) else _ = unsetenv(env_name);
+    }
+
+    try start(a, 0);
+    defer stop();
+    try std.testing.expect(live());
+    const sl = reserve(2) orelse return error.Reserve;
+    storeHost(sl, &.{ 3, 4 }, &.{ 0.5, 0.5 });
+    stop();
+    try std.testing.expect(!live());
+    stop();
+}
