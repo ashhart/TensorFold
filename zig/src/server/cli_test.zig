@@ -261,6 +261,11 @@ test "parse and capabilities share the table" {
     try std.testing.expect(urls.vision and urls.vision_urls);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision-urls" }, &u));
     try std.testing.expectEqualStrings("--vision-urls needs --vision", u.message);
+    const pdfs = try parse(a, &.{ "m", "--vision", "--vision-pdf" }, &u);
+    try std.testing.expect(pdfs.vision and pdfs.vision_pdf);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision-pdf" }, &u));
+    try std.testing.expectEqualStrings("--vision-pdf needs --vision", u.message);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--vision-pdf\": {}") != null);
 }
 
 test "learned disk floor parses once with a finite byte-safe default and is a native capability" {

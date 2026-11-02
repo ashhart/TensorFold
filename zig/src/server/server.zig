@@ -69,6 +69,8 @@ pub const Config = struct {
     use_drafts: bool = true,
     /// --vision-urls: image parts may name public HTTPS URLs, fetched before admission (media_fetch.zig).
     vision_urls: bool = false,
+    /// --vision-pdf: file/input_file and data:application/pdf parts are rendered via PDFium (pdf.zig).
+    vision_pdf: bool = false,
     seed_salt: i64 = 0,
     silence_mid: bool = false,
     silence_guard: bool = false,
@@ -168,6 +170,10 @@ pub const Server = struct {
     recall: ?*api.recall_store.Store = null,
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
+    pub fn media(srv: *const Server) @import("messages.zig").Media {
+        return .ofVision(srv.info.vision, srv.config.vision_pdf);
+    }
+
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
         const srv = try gpa.create(Server);
         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };

@@ -52,7 +52,7 @@ fn countTokens(srv: *Server, cx: *Cx, chat: Value) errors.Refused!usize {
     const on = thinking.enable orelse srv.config.enable_thinking;
     cx.clear_thinking = thinking.clear;
     const tools = try tool_specs.active(cx, chat.get("tools"), chat.get("tool_choice"));
-    const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, .of(srv.info.vision));
+    const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, srv.media());
     const ids_ = prompt.renderIds(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), true) catch |e| switch (e) {
         error.Refused => return cx.other(cx.message),
         else => |x| return x,
@@ -74,7 +74,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         };
         const chat = translate(&cx, body, count) catch return sendError(conn, a, cx.message, cx.status());
         if (count) {
-            const n = countTokens(srv, &cx, chat) catch return sendError(conn, a, cx.message, if (cx.kind == .capacity) 503 else 400);
+            const n = countTokens(srv, &cx, chat) catch return sendError(conn, a, cx.message, cx.status());
             const o = json.newObject(a) catch return;
             o.put(a, "input_tokens", json.intValue(a, n) catch return) catch return;
             return routes.sendValue(conn, a, 200, .{ .object = o });

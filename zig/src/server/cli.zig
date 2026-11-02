@@ -56,6 +56,7 @@ pub const flags = [_]Flag{
     .{ .name = "--dashboard", .kind = .store_true, .native = true },
     .{ .name = "--vision", .kind = .store_true, .native = true },
     .{ .name = "--vision-urls", .kind = .store_true, .native = true },
+    .{ .name = "--vision-pdf", .kind = .store_true, .native = true },
     .{ .name = "--vision-offload", .kind = .store_true },
     .{ .name = "--vision-max-images", .native = true },
     .{ .name = "--vision-max-videos", .native = true },
@@ -157,7 +158,7 @@ pub const flags = [_]Flag{
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's or the Metal build's.
-pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "BRAVE_SEARCH_API_KEY" } ++
+pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "TENSORFOLD_LIBPDFIUM", "TENSORFOLD_MAX_PDF_PAGES", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "BRAVE_SEARCH_API_KEY" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "TENSORFOLD_P2P_DIAGNOSTICS", "TENSORFOLD_P2P_PROBE" } else [_][]const u8{}) ++
     (if (builtin.os.tag == .macos) [_][]const u8{"TF_Q27_PROFILE"} else [_][]const u8{});
 pub const Args = struct {
@@ -247,6 +248,7 @@ pub const Args = struct {
     cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
     vision: bool = false, // image input (GLM-5.3-Flash): data-URL image_url parts in user messages
     vision_urls: bool = false, // with --vision, public HTTPS image URLs too (media_fetch.zig)
+    vision_pdf: bool = false, // with --vision, inline PDF document parts too (pdf.zig)
     vision_max_images: u32 = 4,
     vision_max_videos: u32 = 2,
     vision_image_tokens: u32 = 4096,
@@ -318,6 +320,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
         return fail(u, a, "invalid silence guard configuration: {s}", .{@errorName(err)});
     out.redraw.validate(out.silence) catch |err| return fail(u, a, "invalid redraw configuration: {s}", .{@errorName(err)});
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
+    if (out.vision_pdf and !out.vision) return fail(u, a, "--vision-pdf needs --vision", .{});
     if (out.idle_unload < 0 or out.idle_unload > std.math.maxInt(i64) / std.time.ns_per_s) return fail(u, a, "argument --idle-unload: expected a seconds count from 0 (off) under {d}: '{d}'", .{ std.math.maxInt(i64) / std.time.ns_per_s, out.idle_unload });
     out.alias = repeated.alias.items;
     out.name_priority = repeated.priorities.items;
@@ -461,7 +464,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-max-images")) {
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-pdf")) out.vision_pdf = true else if (is(name, "--vision-max-images")) {
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
