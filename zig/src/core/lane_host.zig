@@ -13,6 +13,7 @@ const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
 const pressure = @import("lane_host_pressure.zig");
 const load = @import("lane_host_load.zig");
+const ledger = @import("lane_host_ledger.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -89,6 +90,7 @@ pub const LaneHost = struct {
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
     capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
+    kv: ?@import("kv_ledger.zig").Ledger = null, // Info.ledger's budget, under mutex (lane_host_ledger.zig); null: none
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -100,10 +102,11 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
         shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv() };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
     }
 
     pub fn start(h: *LaneHost) !void {
+        if (h.rounds != null and h.kv != null) return error.LedgerWithRounds; // a planner admits past takeJob's promise
         if (h.rounds != null and !h.core.backend.pieces()) return error.PiecesUnsupported; // a drafter wrapper runs whole prompts
         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
     }
@@ -111,6 +114,7 @@ pub const LaneHost = struct {
     /// Stops admitting, cancels what is left and joins the engine thread (after `halt`: the thread is gone already).
     pub fn stop(h: *LaneHost) void {
         rows_host.drainThread(h);
+        ledger.checkIdle(h); // the engine thread has ended every job
         rows_host.close(h);
         @import("lane_host_fetch.zig").stop(h);
         scoring.close(h);
@@ -272,6 +276,7 @@ pub const LaneHost = struct {
     pub fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
         h.lock();
         h.memory_lanes = null; // a lane may have freed: the next admission asks the backend for memory again
+        ledger.release(h, job); // its stream's caches are already freed (reaped, discarded or released)
         load.ended(job);
         h.unlock();
         if (h.rounds) |rd| rd.vtable.left(rd.ctx, @intFromPtr(job));
@@ -323,6 +328,16 @@ pub const LaneHost = struct {
             h.unlock();
             return .none;
         };
+        if (ledger.never(h, h.queued.items[at])) { // past the whole budget alone: no release will ever make it fit
+            const job = h.queued.orderedRemove(at);
+            h.unlock();
+            h.finish(job, .failed, ledger.too_big);
+            return .failed;
+        }
+        if (!ledger.promise(h, h.queued.items[at])) { // bytes before any stream: the job stays queued, nothing taken
+            h.unlock();
+            return .none;
+        }
         const job = h.queued.orderedRemove(at);
         job.noteAdmission();
         job.seq = h.admissions;
