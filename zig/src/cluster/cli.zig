@@ -296,7 +296,9 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
     if (disaggregated) {
         const invs = try cli_model.inventories(src, c, members);
         const plan = mcdma_link.planDigest(c, m, members, .{});
-        const r = bringup.simulate(env.a, invs, try topology.edges(env.a, invs), plan) catch |err| {
+        // cabled as the real nodes are, by the declared links (a CUDA host probes no Thunderbolt peers), else as probed
+        const es = if (c.links.len > 0) try mcdma_link.cables(env.a, c, members) else try topology.edges(env.a, invs);
+        const r = bringup.simulate(env.a, invs, es, plan) catch |err| {
             try env.err.print("the fake cluster did not come up: {s}\n", .{@errorName(err)});
             return 1;
         };

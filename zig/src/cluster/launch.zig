@@ -29,7 +29,11 @@ pub const Saved = struct {
         .{ "system_profiler SPDisplaysDataType", "displays.txt" },
         .{ "system_profiler SPThunderboltDataType", "thunderbolt.txt" },
         .{ "ibv_devinfo", "ibv_devinfo.txt" },
-        .{ "df", "df.txt" },
+        .{ "df -k /System/Volumes/Data", "df.txt" },
+        .{ "cat /proc/meminfo", "meminfo.txt" },
+        .{ "nvidia-smi", "nvidia.txt" },
+        .{ "df -k /", "df-root.txt" },
+        .{ "cat /etc/machine-id", "machine-id.txt" },
     };
 
     fn run(ptr: *anyopaque, a: Allocator, name: []const u8, argv: []const []const u8) anyerror!Output {
@@ -82,15 +86,45 @@ pub const mac_probes = [_][]const u8{
     "df -k /System/Volumes/Data",
 };
 
+/// Linux tools for a CUDA host. nvidia-smi, ibv_devinfo and machine-id may be missing; meminfo and df may not.
+pub const linux_probes = [_][]const u8{
+    "cat /proc/meminfo",
+    "nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits",
+    "ibv_devinfo -v",
+    "df -k /",
+    "cat /etc/machine-id",
+};
+
+fn optionalProbe(cmd: []const u8) bool {
+    return std.mem.startsWith(u8, cmd, "ibv_devinfo") or std.mem.startsWith(u8, cmd, "nvidia-smi") or std.mem.startsWith(u8, cmd, "cat /etc/machine-id");
+}
+
+fn probeOut(a: Allocator, r: Runner, c: config.Config, n: config.Node, local: bool, cmd: []const u8) ![]const u8 {
+    const argv: []const []const u8 = if (local) &.{ "/bin/sh", "-c", cmd } else try sshArgv(a, c, n, cmd);
+    const out = try r.run(r.ptr, a, n.name, argv);
+    if (out.code != 0) return if (optionalProbe(cmd)) "" else error.ProbeFailed;
+    return out.stdout;
+}
+
 /// One node's inventory from its tools' output, over ssh (or locally when `local`).
+/// A CUDA node is read with Linux tools so a GB10 does not fail the macOS probes.
 pub fn inventory(a: Allocator, r: Runner, c: config.Config, n: config.Node, local: bool) !node.Inventory {
-    var texts: [mac_probes.len][]const u8 = undefined;
-    for (mac_probes, &texts) |cmd, *t| {
-        const argv: []const []const u8 = if (local) &.{ "/bin/sh", "-c", cmd } else try sshArgv(a, c, n, cmd);
-        const out = try r.run(r.ptr, a, n.name, argv);
-        if (out.code != 0 and !std.mem.startsWith(u8, cmd, "ibv_devinfo")) return error.ProbeFailed;
-        t.* = out.stdout;
+    if (n.backend == .cuda) {
+        var inv = probe.inventoryLinux(.{
+            .name = n.name,
+            .meminfo = try probeOut(a, r, c, n, local, linux_probes[0]),
+            .nvidia = try probeOut(a, r, c, n, local, linux_probes[1]),
+            .devinfo = try probeOut(a, r, c, n, local, linux_probes[2]),
+            .df = try probeOut(a, r, c, n, local, linux_probes[3]),
+            .machine_id = try probeOut(a, r, c, n, local, linux_probes[4]),
+        });
+        inv.backend = n.backend;
+        if (n.memory) |m| inv.memory = m;
+        if (n.gpu_limit) |g| inv.gpu_limit = g;
+        return inv;
     }
+    var texts: [mac_probes.len][]const u8 = undefined;
+    for (mac_probes, &texts) |cmd, *t| t.* = try probeOut(a, r, c, n, local, cmd);
     var inv = probe.inventory(.{ .name = n.name, .sysctl = texts[0], .displays = texts[1], .thunderbolt = texts[2], .devinfo = texts[3], .df = texts[4] });
     inv.backend = n.backend;
     if (n.memory) |m| inv.memory = m;

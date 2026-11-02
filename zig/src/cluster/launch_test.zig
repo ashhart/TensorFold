@@ -44,6 +44,40 @@ const four =
 
 const mesh = [_]fixtures.Cable{ .{ .a = 0, .a_bus = 1, .b = 3, .b_bus = 1 }, .{ .a = 0, .a_bus = 2, .b = 2, .b_bus = 2 }, .{ .a = 0, .a_bus = 3, .b = 1, .b_bus = 3 }, .{ .a = 1, .a_bus = 1, .b = 2, .b_bus = 1 }, .{ .a = 1, .a_bus = 2, .b = 3, .b_bus = 2 }, .{ .a = 2, .a_bus = 3, .b = 3, .b_bus = 3 } };
 
+test "a cuda node is probed with Linux tools and keeps a declared gpu limit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Rec = struct {
+        cmds: std.ArrayList([]const u8) = .empty,
+        fn runner(r: *@This()) launch.Runner {
+            return .{ .ptr = r, .run = run };
+        }
+        fn run(ptr: *anyopaque, alloc: std.mem.Allocator, _: []const u8, argv: []const []const u8) anyerror!launch.Output {
+            const r: *@This() = @ptrCast(@alignCast(ptr));
+            const cmd = argv[argv.len - 1];
+            try r.cmds.append(alloc, cmd);
+            if (std.mem.startsWith(u8, cmd, "cat /proc/meminfo")) return .{ .code = 0, .stdout = "MemTotal:       131072000 kB\nMemAvailable:    80000000 kB\n" };
+            if (std.mem.startsWith(u8, cmd, "nvidia-smi")) return .{ .code = 1, .stdout = "" };
+            if (std.mem.startsWith(u8, cmd, "ibv_devinfo")) return .{ .code = 127, .stdout = "" };
+            if (std.mem.startsWith(u8, cmd, "df")) return .{ .code = 0, .stdout = "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/nvme0n1p2 1 1 10 1% /\n" };
+            if (std.mem.startsWith(u8, cmd, "cat /etc/machine-id")) return .{ .code = 0, .stdout = "abc123\n" };
+            return .{ .code = 127, .stdout = "" };
+        }
+    };
+    var rec: Rec = .{};
+    var nodes = [_]config.Node{.{ .name = "gb10", .address = "192.0.2.30", .backend = .cuda, .gpu_limit = 100 * node.gib }};
+    const c: config.Config = .{ .name = "lab", .nodes = &nodes, .models = &.{} };
+    const inv = try launch.inventory(a, rec.runner(), c, nodes[0], true);
+    try std.testing.expectEqual(@as(usize, launch.linux_probes.len), rec.cmds.items.len);
+    try std.testing.expect(std.mem.startsWith(u8, rec.cmds.items[0], "cat /proc/meminfo"));
+    try std.testing.expect(std.mem.indexOf(u8, rec.cmds.items[1], "nvidia-smi") != null);
+    try std.testing.expectEqual(node.Backend.cuda, inv.backend);
+    try std.testing.expectEqual(@as(u64, 100 * node.gib), inv.gpu_limit);
+    try std.testing.expectEqual(@as(u64, 131_072_000 * 1024), inv.memory);
+    try std.testing.expectEqualStrings("CUDA", inv.chip.str());
+}
+
 test "ssh for a node behind a jump host is key-only and goes through it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

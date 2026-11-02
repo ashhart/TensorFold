@@ -202,3 +202,21 @@ test "every node of a model checked as it will check itself: a Mac's window agai
     try std.testing.expectError(error.NoLibrary, mcdma_link.specAll(a, bare, m, .{}, &why));
     try std.testing.expect(std.mem.indexOf(u8, why, "node-e names no MCDMA library") != null);
 }
+
+test "the declared links among a model's ranks are its fake bring-up's cables, ports in file order; other links are left out" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try parse(a, example);
+    const m = c.model("qwen-27b").?;
+    const es = try mcdma_link.cables(a, c, try mcdma_link.ranks(a, m));
+    try std.testing.expectEqual(@as(usize, 1), es.len);
+    // node-a (rank 1) is the link's first end, node-e (rank 0) its second
+    try std.testing.expectEqual(@as(u16, 1), es[0].a);
+    try std.testing.expectEqual(@as(u16, 0), es[0].b);
+    try std.testing.expectEqual(@as(u8, 0), es[0].a_port);
+    try std.testing.expectEqual(@as(u8, 0), es[0].b_port);
+    try std.testing.expect(es[0].up and es[0].kind == .cx5);
+    const k3 = c.model("kimi-k3").?;
+    try std.testing.expectEqual(@as(usize, 0), (try mcdma_link.cables(a, c, try mcdma_link.ranks(a, k3))).len);
+}
