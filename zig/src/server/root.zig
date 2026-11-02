@@ -82,6 +82,7 @@ test {
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_register_test.zig"); // over a Unix socket pair
     _ = @import("drama_prompt.zig");
     _ = @import("health_test.zig");
+    _ = @import("clef_encode_test.zig");
     _ = @import("memory_routes.zig");
     _ = @import("process_memory.zig");
     _ = @import("process_resident.zig");
