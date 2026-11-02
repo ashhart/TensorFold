@@ -80,7 +80,7 @@ const Shard = struct {
 
     fn close(self: *Shard) void {
         // A shard may mix loaded tensors with the n-gram table still read at runtime.
-        if (!runtimePages(self.f.names.keys())) self.f.release();
+        if (!runtimePages(self.f.names.keys())) self.f.release(std.heap.page_allocator); // no keep list: scratch unused
         self.f.close(self.io);
     }
 
@@ -190,7 +190,7 @@ pub const Store = struct {
     pub fn release(self: *Store) void {
         for (self.held.items) |h| {
             // the borrowers' pages leave this process (their bytes are copied), except the n-gram table's (Shard.close)
-            if (!runtimePages(h.file.f.names.keys())) h.file.f.release();
+            if (!runtimePages(h.file.f.names.keys())) h.file.f.release(self.gpa);
             self.released.append(self.gpa, h) catch {
                 var kept = h.file;
                 kept.close();
