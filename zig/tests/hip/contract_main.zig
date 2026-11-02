@@ -34,6 +34,8 @@ const columns_k = @import("contract_columns.zig");
 const vision_k = @import("contract_vision.zig");
 const full_k = @import("contract_vision_attention.zig");
 const text_k = @import("contract_dense_text.zig");
+const vl_k = @import("contract_vl.zig");
+const pos_k = @import("contract_vl_position.zig");
 
 const g = core.contract.gates;
 
@@ -303,6 +305,15 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&text, std.enums.values(text_k.Which)) |*v, w| v.* = .init(a, &r, s, &l, w);
     defer for (&text) |*v| v.deinit();
     for (&text) |*v| try kernels.append(a, v.kernel());
+    const vl_kernels = try hip.vision.Kernels.load(l.mods[0]);
+    var vl: [std.enums.values(vl_k.Which).len]vl_k.Vision = undefined;
+    for (&vl, std.enums.values(vl_k.Which)) |*v, which_vl| v.* = .init(a, &r, s, vl_kernels, which_vl);
+    defer for (&vl) |*v| v.deinit();
+    for (&vl) |*v| try kernels.append(a, v.kernel());
+    var pos: [std.enums.values(pos_k.Which).len]pos_k.Position = undefined;
+    for (&pos, std.enums.values(pos_k.Which)) |*p, which_pos| p.* = .init(a, &r, s, vl_kernels, which_pos);
+    defer for (&pos) |*p| p.deinit();
+    for (&pos) |*p| try kernels.append(a, p.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
