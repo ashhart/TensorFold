@@ -328,11 +328,23 @@ pub fn hrefs(a: Allocator, page: []const u8, max: usize, budget: ?*Budget) Alloc
     return out.items;
 }
 
+fn utf8Len(b: u8) usize {
+    if (b < 0x80) return 1;
+    if (b & 0xe0 == 0xc0) return 2;
+    if (b & 0xf0 == 0xe0) return 3;
+    if (b & 0xf8 == 0xf0) return 4;
+    return 1;
+}
+
 /// The largest length up to `max` that ends on a UTF-8 character boundary.
 pub fn cutAt(text: []const u8, max: usize) usize {
-    if (text.len <= max) return text.len;
-    var n = max;
-    while (n > 0 and (text[n] & 0xc0) == 0x80) n -= 1;
+    var n: usize = @min(text.len, max);
+    while (n > 0 and n < text.len and (text[n] & 0xc0) == 0x80) n -= 1;
+    var i = n;
+    while (i > 0 and (text[i - 1] & 0xc0) == 0x80) i -= 1;
+    if (i == 0) return 0;
+    const start = i - 1;
+    if (start + utf8Len(text[start]) > n) return start; // a partial character at the end is left out
     return n;
 }
 
@@ -449,4 +461,7 @@ test "a cut never splits a character" {
     try std.testing.expectEqual(@as(usize, 2), cutAt(s, 3));
     try std.testing.expectEqual(@as(usize, 5), cutAt(s, 5));
     try std.testing.expectEqual(s.len, cutAt(s, 100));
+    const partial = "ab\xe2\x82";
+    try std.testing.expectEqual(@as(usize, 2), cutAt(partial, partial.len));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(partial[0..cutAt(partial, partial.len)]));
 }
