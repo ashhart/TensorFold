@@ -3,6 +3,7 @@
 pub const config = @import("config.zig");
 pub const model = @import("model.zig");
 pub const forward = @import("forward.zig");
+pub const score = @import("score.zig");
 pub const engine = @import("engine.zig");
 pub const prompt = @import("prompt.zig");
 pub const native = @import("native.zig");
@@ -15,6 +16,7 @@ test {
     _ = config;
     _ = model;
     _ = forward;
+    _ = score;
     _ = engine;
     _ = prompt;
     _ = native;
