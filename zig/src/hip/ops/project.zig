@@ -46,6 +46,7 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
             },
             else => return error.BadShape,
         },
+        .bf16 => return error.BadShape,
     }
 }
 
@@ -55,7 +56,7 @@ pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: [
     if (ps.len > ws.len) return false;
     for (ps, ws[0..ps.len]) |pr, *w| switch (pr.handle) {
         .mlx => |h| w.* = affineOf(pr, h),
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     return affineGroup(o, x, ws[0..ps.len], m, outs);
 }
@@ -64,7 +65,7 @@ pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: [
 pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, limit: f32) Error!?Tensor {
     switch (proj.handle) {
         .mlx => |h| return affineRoutedAct(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, limit),
-        .dense => return null,
+        .dense, .bf16 => return null,
     }
 }
 
@@ -72,7 +73,7 @@ pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: 
 pub fn projectRelu2(o: Ops, x: Tensor, proj: Projection, m: usize, out: Tensor) Error!bool {
     const h = switch (proj.handle) {
         .mlx => |h| h,
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     const w = affineOf(proj, h);
     try w.check();
@@ -113,7 +114,7 @@ pub fn projectRoutedRelu2(
 ) Error!bool {
     const h = switch (proj.handle) {
         .mlx => |h| h,
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     const w = affineOf(proj, h);
     try w.check();
@@ -151,11 +152,11 @@ pub fn projectRoutedPlainRelu2(
 ) Error!bool {
     const ha = switch (routed.handle) {
         .mlx => |h| h,
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     const hb = switch (plain.handle) {
         .mlx => |h| h,
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     const wa = affineOf(routed, ha);
     const wb = affineOf(plain, hb);
@@ -202,7 +203,7 @@ pub fn projectRoutedPlainRelu2(
 pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize) Error!u64 {
     switch (proj.handle) {
         .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows),
-        .dense => return error.BadShape,
+        .dense, .bf16 => return error.BadShape,
     }
 }
 
@@ -211,6 +212,7 @@ pub fn embedRows(o: Ops, table: Projection, ids: u64, n: usize, out: Tensor) Err
     switch (table.handle) {
         .mlx => |h| return embedAffine(o, affineOf(table, h), ids, n, out),
         .dense => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(try kindOf(h.dtype)), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
+        .bf16 => return error.BadShape,
     }
 }
 
