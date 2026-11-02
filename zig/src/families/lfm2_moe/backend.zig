@@ -323,7 +323,8 @@ pub const Metal = struct {
         self.gen += 1;
         try fwd.runHeld(self.model, &self.scratch, segments[0..windows.len], ids[0..total], true, .all, held[0..count], wait);
         for (segments[0..windows.len]) |seg| {
-            const last = seg.cache.last.?;
+            const last = &seg.cache.last.?;
+            last.committed = &self.scratch;
             seg.cache.tap = self.tapped(seg.cache, last.rows, seg.tap, last.base);
         }
         const logits = self.scratch.logits.slice(u16, total * c.vocab);

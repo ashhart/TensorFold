@@ -58,6 +58,7 @@ const Loader = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
     check: *const ckpt.Checkpoint,
+    stage: *ckpt.Stage, // a matrix read from the file, one at a time, into one reused buffer
     owned: *std.ArrayList(mtl.Buffer),
     bits: u8,
 
@@ -68,13 +69,25 @@ const Loader = struct {
         return b;
     }
 
-    fn tensor(l: Loader, name: []const u8, shape: []const usize) !ckpt.Tensor {
-        const t = try l.check.get(name);
-        if (t.dtype != .bf16 or t.rank != shape.len or !std.mem.eql(usize, t.shape[0..t.rank], shape)) {
+    /// Check deferred metadata before allocating or reading a matrix's payload.
+    fn validate(l: Loader, name: []const u8, shape: []const usize) !void {
+        const valid = if (l.check.deferred.get(name)) |t| matches(t, shape) else matches(try l.check.get(name), shape);
+        if (!valid) {
             std.log.err("{s}: unexpected DSpark tensor dtype or shape", .{name});
             return error.BadDraftWeight;
         }
-        return t;
+    }
+
+    fn matches(t: anytype, shape: []const usize) bool {
+        return t.dtype == .bf16 and t.rank == shape.len and std.mem.eql(usize, t.shape[0..t.rank], shape);
+    }
+
+    /// A vector as loaded, or one staged matrix, valid until the next matrix read.
+    fn tensor(l: Loader, name: []const u8, shape: []const usize) !ckpt.Tensor {
+        try l.validate(name, shape);
+        l.stage.reset();
+        if (shape.len == 2) try l.stage.reserve(l.check, &.{name});
+        return if (shape.len == 2) l.stage.read(l.check, name) else l.check.get(name);
     }
 
     /// A bf16 vector copied out, its pairs reordered for half-split RoPE when `paired`.
@@ -86,28 +99,31 @@ const Loader = struct {
         return b;
     }
 
+    /// Unpaired BF16 reads into its final backing; paired rows copy from the one reusable stage.
+    fn bf16(l: Loader, name: []const u8, n: usize, k: usize, paired: bool) !Bf16 {
+        try l.validate(name, &.{ n, k });
+        const b = try l.buffer(n * k * 2);
+        if (paired) {
+            l.stage.reset();
+            try l.stage.reserve(l.check, &.{name});
+            const rows = (try l.stage.read(l.check, name)).host(u16);
+            const dst = b.slice(u16, n * k);
+            for (0..n) |r| @memcpy(dst[r * k ..][0..k], rows[quant.halfSplit(r, c.head_dim) * k ..][0..k]);
+        } else {
+            try l.check.read(name, 0, b.contents()[0 .. n * k * 2]);
+        }
+        return .{ .w = b, .n = n, .k = k };
+    }
+
     /// An [n, k] bf16 matrix as it is or as affine codes; rows reordered for half-split RoPE when `paired`.
     fn matrix(l: Loader, name: []const u8, n: usize, k: usize, paired: bool) !Linear {
-        const t = try l.tensor(name, &.{ n, k });
-        var rows = t.host(u16);
-        var moved: ?[]u16 = null;
-        defer if (moved) |m| l.gpa.free(m);
-        if (paired) {
-            const m = try l.gpa.alloc(u16, n * k);
-            moved = m;
-            for (0..n) |r| @memcpy(m[r * k ..][0..k], rows[quant.halfSplit(r, c.head_dim) * k ..][0..k]);
-            rows = m;
-        }
-        if (l.bits == 0) {
-            const b = try l.buffer(n * k * 2);
-            @memcpy(b.slice(u16, n * k), rows);
-            return .{ .bf16 = .{ .w = b, .n = n, .k = k } };
-        }
+        if (l.bits == 0) return .{ .bf16 = try l.bf16(name, n, k, paired) };
+        const rows = (try l.tensor(name, &.{ n, k })).host(u16);
         const codes = try l.buffer(n * k * l.bits / 8);
         const scales = try l.buffer(n * k / 64 * 2);
         const biases = try l.buffer(n * k / 64 * 2);
-        const job: quant.Job = .{ .src = rows, .k = k, .bits = l.bits, .codes = codes.slice(u8, n * k * l.bits / 8), .scales = scales.slice(u16, n * k / 64), .biases = biases.slice(u16, n * k / 64) };
-        try job.all(l.gpa, n);
+        const job: quant.Job = .{ .src = rows, .k = k, .bits = l.bits, .pair_dim = if (paired) c.head_dim else 0, .codes = codes.slice(u8, n * k * l.bits / 8), .scales = scales.slice(u16, n * k / 64), .biases = biases.slice(u16, n * k / 64) };
+        try job.all(n);
         return .{ .codes = .{ .w = codes, .scales = scales, .biases = biases, .n = n, .k = k, .bits = l.bits } };
     }
 };
@@ -116,18 +132,25 @@ fn part(buf: []u8, layer: usize, name: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "layers.{d}.{s}.weight", .{ layer, name });
 }
 
-/// The drafter's checkpoint read as released (`bits` 0) or quantized to 8-bit codes; its own buffers are freed after.
+/// Matrices stay in the file until the loader reads them; vectors load with the header.
+fn matrices(_: []const u8, rank: usize) bool {
+    return rank == 2;
+}
+
+/// The checkpoint read as released (`bits` 0) or quantized to 8-bit codes, a matrix at a time; buffers freed after.
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, io: std.Io, dir: []const u8, cfg: *const dc.Config, bits: u8) !Weights {
     if (bits != 0 and bits != 8) return error.UnsupportedDraftBits;
     var check = ckpt.Checkpoint.init(gpa);
     defer check.deinit();
+    var stage: ckpt.Stage = .{ .device = device };
+    defer stage.deinit();
     const files = try shards.shardFiles(gpa, io, dir);
     defer shards.freeShardFiles(gpa, files);
-    for (files) |path| try check.addFile(device, path, "");
+    for (files) |path| try check.addFileSplit(device, path, "", null, matrices);
     var w: Weights = undefined;
     w.owned = .empty;
     errdefer w.deinit(gpa);
-    const l: Loader = .{ .gpa = gpa, .device = device, .check = &check, .owned = &w.owned, .bits = bits };
+    const l: Loader = .{ .gpa = gpa, .device = device, .check = &check, .stage = &stage, .owned = &w.owned, .bits = bits };
     const qw = c.query_heads * c.head_dim;
     const kw = c.kv_heads * c.head_dim;
     w.fc = try l.matrix("fc.weight", c.hidden, cfg.tap_count * c.hidden, false);
@@ -147,9 +170,113 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, io: std.Io, dir: []const
         ly.q_norm = try l.vector(try part(&name, i, "self_attn.q_norm"), c.head_dim, true);
         ly.k_norm = try l.vector(try part(&name, i, "self_attn.k_norm"), c.head_dim, true);
     }
-    const w1 = (try l.tensor("markov_head.markov_w1.weight", &.{ c.vocab, cfg.rank })).host(u16);
-    w.w1 = try l.buffer(c.vocab * cfg.rank * 2);
-    @memcpy(w.w1.slice(u16, c.vocab * cfg.rank), w1);
+    w.w1 = (try l.bf16("markov_head.markov_w1.weight", c.vocab, cfg.rank, false)).w;
     w.w2 = try l.matrix("markov_head.markov_w2.weight", c.vocab, cfg.rank, false);
     return w;
+}
+
+fn fixture(gpa: std.mem.Allocator, tmp: *std.testing.TmpDir) ![:0]u8 {
+    const header =
+        \\{"matrix":{"dtype":"BF16","shape":[128,128],"data_offsets":[0,32768]},
+        \\ "gain":{"dtype":"BF16","shape":[64],"data_offsets":[32768,32896]}}
+    ;
+    var data: [8 + header.len + 32896]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    for (0..32896 / 2) |i| {
+        const value = quant.toBf16(@as(f32, @floatFromInt((i * 71 + i / 128 * 19) % 257)) * 0.0625 - 5);
+        std.mem.writeInt(u16, data[8 + header.len + i * 2 ..][0..2], value, .little);
+    }
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "weights.safetensors", .data = &data });
+    return std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/weights.safetensors", .{tmp.sub_path}, 0);
+}
+
+test "lfm2 dspark: deferred BF16 and codes keep released rows and paired gains" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixture(gpa, &tmp);
+    defer gpa.free(path);
+    var check = ckpt.Checkpoint.init(gpa);
+    defer check.deinit();
+    try check.addFileSplit(device, path, "", null, matrices);
+    var stage: ckpt.Stage = .{ .device = device };
+    defer stage.deinit();
+    var w: Weights = undefined;
+    w.owned = .empty;
+    defer w.deinit(gpa);
+    var l: Loader = .{ .gpa = gpa, .device = device, .check = &check, .stage = &stage, .owned = &w.owned, .bits = 0 };
+    var source: [128 * 128]u16 = undefined;
+    try check.read("matrix", 0, std.mem.sliceAsBytes(&source));
+    for ([_]u8{ 0, 8 }) |bits| {
+        l.bits = bits;
+        for ([_]bool{ false, true }) |paired| {
+            const loaded = try l.matrix("matrix", 128, 128, paired);
+            const gain = try l.vector("gain", c.head_dim, paired);
+            const gain_src = (try check.get("gain")).host(u16);
+            for (0..128) |r| {
+                const from = if (paired) quant.halfSplit(r, c.head_dim) else r;
+                const row = source[from * 128 ..][0..128];
+                switch (loaded) {
+                    .bf16 => |bf| try std.testing.expectEqualSlices(u16, row, bf.w.slice(u16, 128 * 128)[r * 128 ..][0..128]),
+                    .codes => |q| for (0..2) |g| {
+                        var codes: [64]u8 = undefined;
+                        var scale: u16 = undefined;
+                        var bias: u16 = undefined;
+                        quant.group(row[g * 64 ..][0..64], bits, &codes, &scale, &bias);
+                        try std.testing.expectEqualSlices(u8, &codes, q.w.slice(u8, 128 * 128)[r * 128 + g * 64 ..][0..64]);
+                        try std.testing.expectEqual(scale, q.scales.slice(u16, 256)[r * 2 + g]);
+                        try std.testing.expectEqual(bias, q.biases.slice(u16, 256)[r * 2 + g]);
+                    },
+                }
+                if (r < c.head_dim) try std.testing.expectEqual(gain_src[if (paired) quant.halfSplit(r, c.head_dim) else r], gain.slice(u16, c.head_dim)[r]);
+            }
+        }
+        // W1 stays BF16 even when other matrices use codes.
+        const raw = try l.bf16("matrix", 128, 128, false);
+        try std.testing.expectEqualSlices(u16, &source, raw.w.slice(u16, source.len));
+    }
+}
+
+test "lfm2 dspark: tensor admission checks deferred dtype and shape before payload access" {
+    var t: ckpt.Deferred = .{ .file = 0, .at = 0, .bytes = 128 * 128 * 2, .dtype = .bf16, .rank = 2 };
+    t.shape[0] = 128;
+    t.shape[1] = 128;
+    try std.testing.expect(Loader.matches(t, &.{ 128, 128 }));
+    try std.testing.expect(!Loader.matches(t, &.{ 64, 256 }));
+    try std.testing.expect(!Loader.matches(t, &.{128}));
+    t.dtype = .f16;
+    try std.testing.expect(!Loader.matches(t, &.{ 128, 128 }));
+}
+
+test "lfm2 dspark: failed ownership and short deferred reads unwind final buffers" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try fixture(gpa, &tmp);
+    defer gpa.free(path);
+    var check = ckpt.Checkpoint.init(gpa);
+    defer check.deinit();
+    try check.addFileSplit(device, path, "", null, matrices);
+    var stage: ckpt.Stage = .{ .device = device };
+    defer stage.deinit();
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    var owned: std.ArrayList(mtl.Buffer) = .empty;
+    defer owned.deinit(failing.allocator());
+    const l: Loader = .{ .gpa = failing.allocator(), .device = device, .check = &check, .stage = &stage, .owned = &owned, .bits = 0 };
+    try std.testing.expectError(error.OutOfMemory, l.matrix("matrix", 128, 128, false));
+    try std.testing.expectEqual(@as(usize, 0), owned.items.len);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "weights.safetensors", .data = "" });
+    for ([_]u8{ 0, 8 }) |bits| for ([_]bool{ false, true }) |paired| {
+        var w: Weights = undefined;
+        w.owned = .empty;
+        defer w.deinit(gpa);
+        const short: Loader = .{ .gpa = gpa, .device = device, .check = &check, .stage = &stage, .owned = &w.owned, .bits = bits };
+        try std.testing.expectError(error.ShortRead, short.matrix("matrix", 128, 128, paired));
+    };
 }

@@ -9,6 +9,7 @@ const am = @import("../../core/affine_mm.zig");
 const round = @import("tree_round_gpu");
 const ds = @import("dspark.zig");
 const dw = @import("dspark_weights.zig");
+const bf16 = @import("dspark_bf16.zig");
 const Drafter = ds.Drafter;
 const Lane = ds.Lane;
 
@@ -16,7 +17,6 @@ const kw = c.kv_heads * c.head_dim;
 const QkArgs = extern struct { len: u32, cap: u32, eps: f32, log2_theta: f32 };
 const AttnArgs = extern struct { len: u32, cap: u32, scale: f32, subs: u32 };
 const Pick = round.contract.Pick;
-const Bf16Args = extern struct { rows: u32, n: u32, k: u32 };
 const MarkovArgs = extern struct { stride: u32, rank: u32, vocab: u32, prev_stride: u32 };
 /// Tokens a Markov scan threadgroup takes (the kernel's MARKOV_SPAN), and threadgroups a stream's row takes.
 pub const scan_span = 512;
@@ -36,11 +36,11 @@ const Enc = struct {
         x.e.setPipeline(x.d.target.kernels.get(key));
     }
 
-    /// y[rows] = x[rows] W^T: the twin up to its rows, past them the M5's tensor-unit kernels, else the tiles.
+    /// BF16 uses GPU tensor units when available, else this stage's original 32-row limit; code routing is unchanged.
     fn project(x: Enc, lin: dw.Linear, in: Ref, out: Ref, rows: usize) !void {
         const w = switch (lin) {
             .codes => |m| m,
-            .bf16 => |m| return x.bf16(m, in, out, rows),
+            .bf16 => |m| return bf16.project(x.e, &x.d.target.kernels, m, in, out, rows, 32),
         };
         const t = &x.d.target.kernels.tiles;
         if (rows > tile.twin_rows) if (x.d.target.kernels.naxPipes(w.bits)) |p| {
@@ -52,20 +52,6 @@ const Enc = struct {
         if (rows <= tile.twin_rows and x.d.target.kernels.twin) return tile.encodeTwin(x.e, t, w, in.buf, in.off, out.buf, out.off, rows);
         tile.encodeSums(x.e, t, w.k, in.buf, in.off, x.d.s.sums, rows);
         try tile.encode(x.e, t, w, in.buf, in.off, x.d.s.sums, 0, out.buf, out.off, rows);
-    }
-
-    /// y[rows] = x[rows] W^T over the released bf16 matrix: 16 rows a pass of W up to 32 rows, else 64x64 tiles.
-    fn bf16(x: Enc, m: dw.Bf16, in: Ref, out: Ref, rows: usize) void {
-        const args = Bf16Args{ .rows = @intCast(rows), .n = @intCast(m.n), .k = @intCast(m.k) };
-        const few = rows <= 32;
-        if (few) x.pipe("lfm2_bf16_rows") else x.pipe("lfm2_bf16_mma");
-        x.e.setBuffer(in.buf, in.off, 0);
-        x.e.setBuffer(m.w, 0, 1);
-        x.e.setBytes(std.mem.asBytes(&args), 2);
-        x.e.setBuffer(out.buf, out.off, 3);
-        if (few) {
-            x.e.dispatchGroups(mtl.Size.of((m.n + 7) / 8, (rows + 15) / 16, 1), mtl.Size.of(256, 1, 1));
-        } else x.e.dispatchGroups(mtl.Size.of((m.n + 63) / 64, (rows + 63) / 64, 1), mtl.Size.of(128, 1, 1));
     }
 
     /// h += r when `add`, then out = norm(h) * gain: LFM2's own norm (the drafter's width and eps are the target's).
@@ -97,13 +83,26 @@ const Enc = struct {
         x.e.dispatchGroups(mtl.Size.of(c.query_heads + c.kv_heads, rows, 1), mtl.Size.of(32, 1, 1));
     }
 
+    /// Context rows write only normalized/rotated keys and values, never unused queries.
+    fn kv(x: Enc, k: Ref, v: Ref, layer: usize, lane: *const Lane, len: u64, rows: usize) void {
+        x.pipe("lfm2_dspark_kv");
+        x.e.setBuffer(k.buf, k.off, 0);
+        x.e.setBuffer(v.buf, v.off, 1);
+        x.e.setBuffer(x.d.w.layers[layer].k_norm, 0, 2);
+        const args = QkArgs{ .len = @intCast(len), .cap = @intCast(lane.cap), .eps = c.eps, .log2_theta = std.math.log2(x.d.config.theta) };
+        x.e.setBytes(std.mem.asBytes(&args), 3);
+        x.e.setBuffer(lane.keys[layer], 0, 4);
+        x.e.setBuffer(lane.values[layer], 0, 5);
+        x.e.dispatchGroups(mtl.Size.of(c.kv_heads, rows, 1), mtl.Size.of(32, 1, 1));
+    }
+
     /// Query rows [row, row + rows) against the lane's keys [0, keys), all of them visible to every row.
     fn attend(x: Enc, layer: usize, lane: *const Lane, row: usize, rows: usize, keys: u64) void {
         const s = &x.d.s;
         const args = AttnArgs{ .len = @intCast(keys - 1), .cap = @intCast(lane.cap), .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = st.subs };
         const used = (keys + st.chunk_keys - 1) / st.chunk_keys * st.subs;
         x.pipe("lfm2_attn_block");
-        x.e.setBuffer(s.queries, row * c.hidden * 2, 0);
+        x.e.setBuffer(s.x, row * c.hidden * 2, 0);
         x.e.setBuffer(lane.keys[layer], 0, 1);
         x.e.setBuffer(lane.values[layer], 0, 2);
         x.e.setBytes(std.mem.asBytes(&args), 3);
@@ -158,9 +157,7 @@ pub fn absorbPass(d: *Drafter, e: mtl.ComputeEncoder, pieces: []const Piece) !vo
         try x.project(ly.v, .{ .buf = s.hctx }, .{ .buf = s.v }, rows);
         var at: usize = 0;
         for (pieces) |pc| {
-            // the kernel rotates query heads too: they read the context rows and land in x, which no one reads
-            const q = Ref{ .buf = s.hctx, .off = at * c.hidden * 2 };
-            x.qk(q, .{ .buf = s.k, .off = at * kw * 2 }, .{ .buf = s.v, .off = at * kw * 2 }, i, pc.lane, pc.p0, .{ .buf = s.x }, pc.rows);
+            x.kv(.{ .buf = s.k, .off = at * kw * 2 }, .{ .buf = s.v, .off = at * kw * 2 }, i, pc.lane, pc.p0, pc.rows);
             at += pc.rows;
         }
     }
@@ -259,24 +256,29 @@ pub fn hold(d: *Drafter, blocks: []const Block, signal: ?Signal) !?mtl.CommandBu
         const ly = &d.w.layers[i];
         const out = if (i + 1 == d.config.layers) tail else rows;
         x.norm(s.h, s.r, ly.input_norm, i > 0, s.x, rows);
-        try x.project(ly.q, .{ .buf = s.x }, .{ .buf = s.q }, rows);
+        try x.project(ly.q, .{ .buf = s.x }, .{ .buf = s.queries }, rows);
         try x.project(ly.k, .{ .buf = s.x }, .{ .buf = s.k }, rows);
         try x.project(ly.v, .{ .buf = s.x }, .{ .buf = s.v }, rows);
         for (blocks, 0..) |b, bi| {
             const at = bi * n;
-            x.qk(.{ .buf = s.q, .off = at * c.hidden * 2 }, .{ .buf = s.k, .off = at * kw * 2 }, .{ .buf = s.v, .off = at * kw * 2 }, i, b.lane, b.anchor, .{ .buf = s.queries, .off = at * c.hidden * 2 }, n);
+            x.qk(.{ .buf = s.queries, .off = at * c.hidden * 2 }, .{ .buf = s.k, .off = at * kw * 2 }, .{ .buf = s.v, .off = at * kw * 2 }, i, b.lane, b.anchor, .{ .buf = s.x, .off = at * c.hidden * 2 }, n);
             x.attend(i, b.lane, at, if (blocks.len == 1) out else n, b.anchor + n);
         }
         try x.project(ly.o, .{ .buf = s.y }, .{ .buf = s.r }, out);
         x.norm(s.h, s.r, ly.post_norm, true, s.x, out);
-        try x.project(ly.gate, .{ .buf = s.x }, .{ .buf = s.gate }, out);
-        try x.project(ly.up, .{ .buf = s.x }, .{ .buf = s.up }, out);
-        x.pipe("lfm2_swiglu");
-        e.setBuffer(s.gate, 0, 0);
-        e.setBuffer(s.up, 0, 1);
-        e.setBuffer(s.act, 0, 2);
-        e.setValue(@as(u32, @intCast(out * d.config.intermediate)), 3);
-        e.dispatchThreads(mtl.Size.of(out * d.config.intermediate / 8, 1, 1), mtl.Size.of(256, 1, 1));
+        const row_glu = out >= 4 and out <= 16 and d.target.kernels.bf16_nax == null;
+        if (row_glu and ly.gate == .bf16 and ly.up == .bf16 and ly.gate.bf16.n > c.hidden) {
+            bf16.glu(e, &d.target.kernels, ly.gate.bf16, ly.up.bf16, Ref{ .buf = s.x }, Ref{ .buf = s.act }, out);
+        } else {
+            try x.project(ly.gate, .{ .buf = s.x }, .{ .buf = s.gate }, out);
+            try x.project(ly.up, .{ .buf = s.x }, .{ .buf = s.up }, out);
+            x.pipe("lfm2_swiglu");
+            e.setBuffer(s.gate, 0, 0);
+            e.setBuffer(s.up, 0, 1);
+            e.setBuffer(s.act, 0, 2);
+            e.setValue(@as(u32, @intCast(out * d.config.intermediate)), 3);
+            e.dispatchThreads(mtl.Size.of(out * d.config.intermediate / 8, 1, 1), mtl.Size.of(256, 1, 1));
+        }
         try x.project(ly.down, .{ .buf = s.act }, .{ .buf = s.r }, out);
     }
     x.norm(s.h, s.r, d.w.norm, true, s.x, tail);

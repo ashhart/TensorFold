@@ -11,6 +11,7 @@ const names = [_][:0]const u8{
     "lfm2_embed_b6",
     "lfm2_embed_b8",
     "lfm2_norm",
+    "lfm2_norm_tap",
     "lfm2_conv",
     "lfm2_qk",
     "lfm2_attn_mma",
@@ -22,21 +23,25 @@ const names = [_][:0]const u8{
     "lfm2_route_select",
     "lfm2_swiglu",
     "lfm2_combine_norm",
+    "lfm2_combine_norm_tap",
     "lfm2_sort",
     "lfm2_combine_sorted",
+    "lfm2_combine_sorted_norm",
+    "lfm2_combine_sorted_norm_tap",
     "lfm2_argmax",
     "lfm2_conv_segs",
     "lfm2_qk_segs",
     "lfm2_attn_segs",
     "lfm2_attn_merge_segs",
     "lfm2_tap",
-    "lfm2_tap_rows",
     "lfm2_markov_scan",
     "lfm2_markov_scan_bf16",
     "lfm2_bf16_rows",
     "lfm2_bf16_mma",
+    "lfm2_bf16_glu_rows",
     "lfm2_markov_pick",
     "lfm2_draft_ids",
+    "lfm2_dspark_kv",
 };
 
 pub const Kernels = struct {
@@ -48,6 +53,8 @@ pub const Kernels = struct {
     nax: ?[tile.bit_widths.len]am.Pipes = null,
     /// Prompt attention on the tensor units (with `nax`); null before the M5.
     attn_nax: ?mtl.Pipeline = null,
+    /// DSpark's BF16 projections on the tensor units; null keeps the original rows/MMA route.
+    bf16_nax: ?mtl.Pipeline = null,
 
     pub fn get(self: *const Kernels, comptime key: []const u8) mtl.Pipeline {
         inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return self.pipelines[i];
@@ -69,10 +76,17 @@ pub const Kernels = struct {
         return set[std.mem.indexOfScalar(u8, &tile.bit_widths, bits) orelse return null];
     }
 
+    /// Cache at BF16 drafter load, never for plain or 8-bit serving and never on pre-tensor devices.
+    pub fn loadBf16(self: *Kernels, device: mtl.Device) !void {
+        if (self.bf16_nax != null or !device.tensorUnits()) return;
+        self.bf16_nax = try bf16NaxLoad(device);
+    }
+
     pub fn deinit(self: *Kernels) void {
         for (self.pipelines) |p| p.deinit();
         if (self.nax) |set| for (set) |pipes| for (pipes) |p| p.deinit();
         if (self.attn_nax) |p| p.deinit();
+        if (self.bf16_nax) |p| p.deinit();
         self.tiles.deinit();
     }
 };
@@ -92,6 +106,7 @@ pub fn load(device: mtl.Device) !Kernels {
     out.twin = false;
     // `out` is undefined, so attn_nax's default does not apply: unset, it would hold stack garbage.
     out.attn_nax = null;
+    out.bf16_nax = null;
     out.nax = if (device.tensorUnits()) try naxLoad(device) else null;
     errdefer if (out.nax) |set| for (set) |pipes| for (pipes) |x| x.deinit();
     if (device.tensorUnits()) try attnNaxLoad(device, &out);
@@ -108,6 +123,15 @@ fn attnNaxLoad(device: mtl.Device, out: *Kernels) !void {
     const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
     defer lib.deinit();
     out.attn_nax = try mtl.Pipeline.init(device, lib, "lfm2_attn_nax", false);
+}
+
+fn bf16NaxLoad(device: mtl.Device) !mtl.Pipeline {
+    const a = std.heap.c_allocator;
+    const src = try frags.source(device, a, sources.lfm2_bf16_nax);
+    defer a.free(src);
+    const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    return mtl.Pipeline.init(device, lib, "lfm2_bf16_nax", false);
 }
 
 /// core/affine_mm compiled at 4, 6 and 8 bits (group 64) with mlx-lm's SwiGLU, for prompt calls on the tensor units.

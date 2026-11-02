@@ -11,6 +11,9 @@ const dc = @import("dspark_config.zig");
 const lanes = @import("lanes");
 const Model = @import("model.zig").Model;
 
+test {
+    _ = @import("dspark_glu_test.zig");
+}
 const shared = mtl.ResourceOptions.shared;
 
 pub const Rig = struct {
@@ -23,7 +26,10 @@ pub const Rig = struct {
         errdefer device.deinit();
         const queue = try device.queue();
         errdefer queue.deinit();
-        return .{ .device = device, .queue = queue, .k = try kernels.load(device) };
+        var k = try kernels.load(device);
+        errdefer k.deinit();
+        try k.loadBf16(device);
+        return .{ .device = device, .queue = queue, .k = k };
     }
 
     pub fn deinit(r: *Rig) void {

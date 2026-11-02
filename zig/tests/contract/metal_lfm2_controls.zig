@@ -11,8 +11,6 @@ pub const Mutation = enum {
     attention_first_cache,
     tap_packed_rows,
     tap_clobbers_column,
-    tap_rows_first_destination,
-    tap_rows_clobbers_column,
     markov_nonfinite_dropped,
     markov_first_prev,
     markov_pick_inf_dropped,
@@ -25,6 +23,8 @@ pub const Mutation = enum {
     bf16_rows_last_row,
     bf16_tile_untransposed,
     bf16_tile_last_column,
+    context_kv_first_row,
+    context_kv_theta,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -35,8 +35,6 @@ pub const Mutation = enum {
             .attention_first_cache => "control: metal lfm2 stream attention, every stream writes the first stream's cache",
             .tap_packed_rows => "control: metal lfm2 tap copy, rows packed at the hidden size, not the taps' row",
             .tap_clobbers_column => "control: metal lfm2 tap copy, a column of another tap is overwritten",
-            .tap_rows_first_destination => "control: metal lfm2 tap rows, every row writes the first row's destination",
-            .tap_rows_clobbers_column => "control: metal lfm2 tap rows, a column of another tap is overwritten",
             .markov_nonfinite_dropped => "control: metal lfm2 markov step, a nonfinite score is not flagged",
             .markov_first_prev => "control: metal lfm2 markov step, every stream reads the first stream's previous token",
             .markov_pick_inf_dropped => "control: metal lfm2 markov pick, isolated infinities are not flagged",
@@ -49,6 +47,8 @@ pub const Mutation = enum {
             .bf16_rows_last_row => "control: metal lfm2 bf16 rows, a group's last row is not computed",
             .bf16_tile_untransposed => "control: metal lfm2 bf16 tile, W's tile is read untransposed",
             .bf16_tile_last_column => "control: metal lfm2 bf16 tile, the last column is not written",
+            .context_kv_first_row => "control: metal lfm2 dspark context kv, every row overwrites the first position",
+            .context_kv_theta => "control: metal lfm2 dspark context kv, RoPE uses the wrong frequency",
         };
     }
 
@@ -84,8 +84,8 @@ pub const Mutation = enum {
             .bf16_tile_untransposed => .{ .from = "32, ulong2(0, 0), true);", .to = "32, ulong2(0, 0), false);" },
             .bf16_tile_last_column => .{ .from = "if (row < p.rows && col < p.n) y[", .to = "if (row < p.rows && col + 1 < p.n) y[" },
             .tap_clobbers_column => .{ .from = "[i.x] = from[i.x];\n}\n", .to = "[i.x] = from[i.x];\n  *(device bfloat*)(taps + size_t(i.y) * at.x) = 0;\n}\n" },
-            .tap_rows_first_destination => .{ .from = "device bfloat* out = dst[i.y].row;", .to = "device bfloat* out = dst[0].row;" },
-            .tap_rows_clobbers_column => .{ .from = "* D))[i.x] = saved;\n}\n", .to = "* D))[i.x] = saved;\n  *out = 0;\n}\n" },
+            .context_kv_first_row => .{ .from = "QH + tg.x, tg.y, lane);", .to = "QH + tg.x, 0, lane);" },
+            .context_kv_theta => .{ .from = "nullptr, k, v, nullptr, kn, p, nullptr", .to = "nullptr, k, v, nullptr, kn, lfm2_qk_args{p.len, p.cap, p.eps, 0.0f}, nullptr" },
         };
     }
 };

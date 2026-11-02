@@ -454,25 +454,27 @@ template [[host_name("lfm2_attn_block_merge")]] [[kernel]] decltype(lfm2_attn_me
   }
 }
 
+inline bfloat lfm2_swiglu_value(bfloat g, bfloat u) {
+  const float gf = g;
+  const bfloat s = static_cast<bfloat>(1.0f / (1.0f + metal::precise::exp(-gf)));
+  const bfloat silu = static_cast<bfloat>(gf * float(s));
+  return static_cast<bfloat>(float(silu) * float(u));
+}
+
 // act = silu(gate) * up, 8 a thread, bf16 at each step (mlx-lm's compiled swiglu, as the tiles' twin).
 [[kernel]] void lfm2_swiglu(const device bfloat* gate [[buffer(0)]], const device bfloat* up [[buffer(1)]],
                             device bfloat* act [[buffer(2)]], constant uint& count [[buffer(3)]], uint i [[thread_position_in_grid]]) {
   if (i * 8 >= count) return;
   const vec<bfloat, 8> g = ((const device vec<bfloat, 8>*)gate)[i], u = ((const device vec<bfloat, 8>*)up)[i];
   vec<bfloat, 8> out;
-  for (int j = 0; j < 8; ++j) {
-    const float gf = g[j];
-    const bfloat s = static_cast<bfloat>(1.0f / (1.0f + metal::precise::exp(-gf)));
-    const bfloat silu = static_cast<bfloat>(gf * float(s));
-    out[j] = static_cast<bfloat>(float(silu) * float(u[j]));
-  }
+  for (int j = 0; j < 8; ++j) out[j] = lfm2_swiglu_value(g[j], u[j]);
   ((device vec<bfloat, 8>*)act)[i] = out;
 }
 
-// Picks sorted by expert, in slot order within one: STARTS [E + 1], ORDER (sorted -> slot), POS (slot -> sorted).
+// Picks sorted by expert, in slot order within one: STARTS [E + 1], POS (slot -> sorted), ROWS (sorted -> token).
 constant constexpr uint SORT_CHUNKS = 16;  // thread (e, c) counts expert e's picks in chunk c, then places them
 [[kernel]] void lfm2_sort(const device uint* ids [[buffer(0)]], constant uint& slots [[buffer(1)]], device uint* starts [[buffer(2)]],
-                          device uint* order [[buffer(3)]], device uint* pos [[buffer(4)]], device uint* rows [[buffer(5)]],
+                          device uint* pos [[buffer(3)]], device uint* rows [[buffer(4)]],
                           uint t [[thread_position_in_threadgroup]]) {
   threadgroup uint counts[E * SORT_CHUNKS];
   threadgroup uint totals[E];
@@ -496,7 +498,6 @@ constant constexpr uint SORT_CHUNKS = 16;  // thread (e, c) counts expert e's pi
   for (uint i = 0; i < c; ++i) at += counts[e * SORT_CHUNKS + i];
   for (uint j = lo; j < hi; ++j)
     if (ids[j] == e) {
-      order[at] = j;
       rows[at] = j / TOPK;
       pos[j] = at;
       ++at;
@@ -579,17 +580,4 @@ constant constexpr uint SORT_CHUNKS = 16;  // thread (e, c) counts expert e's pi
   if (i.x >= D / 8) return;
   const device vec<bfloat, 8>* from = (const device vec<bfloat, 8>*)(h + size_t(i.y) * D);
   ((device vec<bfloat, 8>*)(taps + size_t(i.y) * at.x + at.y))[i.x] = from[i.x];
-}
-
-// A row's tap destination (null: none), the address of its first column.
-struct lfm2_tap_row_dst { device bfloat* row; };
-
-// Copy eight values per thread into each row's masked tap columns; null destinations are skipped.
-[[kernel]] void lfm2_tap_rows(const device bfloat* h [[buffer(0)]], const device lfm2_tap_row_dst* dst [[buffer(1)]], constant uint& mask [[buffer(2)]],
-                              uint2 i [[thread_position_in_grid]]) {
-  if (i.x >= D / 8) return;
-  device bfloat* out = dst[i.y].row;
-  if (out == nullptr) return;
-  const vec<bfloat, 8> saved = ((const device vec<bfloat, 8>*)(h + size_t(i.y) * D))[i.x];
-  for (uint m = mask; m != 0; m &= m - 1) ((device vec<bfloat, 8>*)(out + size_t(ctz(m)) * D))[i.x] = saved;
 }
