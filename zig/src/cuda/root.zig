@@ -220,3 +220,7 @@ test {
     _ = @import("tfq3_lifecycle_test.zig");
     _ = @import("gdn_chain_host_test.zig");
 }
+
+test {
+    _ = @import("moe_router_host_test.zig");
+}

@@ -26,7 +26,7 @@ test "GDN chain port: raw byte registration retains every output and both source
     const bytes = 2 * 33 * 48 * 128 * 2 + 48 * 128 * 128 * 4;
     try std.testing.expectEqual(@as(usize, bytes), t.count());
     const k = t.kernel();
-    try std.testing.expect(k.vt.replaced != null and k.vt.check != null and k.spec.replaces != null);
+    try std.testing.expect(k.vt.replaced != null and k.vt.check != null and k.spec.replaces != null and k.spec.in_place);
     t.sums = true;
     try std.testing.expectEqual(@as(usize, bytes + 33 * 48 * 2 * 4), t.count());
     for ([_]suite.Control{ .gate, .state }) |control| {
