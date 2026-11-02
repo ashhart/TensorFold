@@ -81,3 +81,20 @@ extern "C" __global__ void tf_ctl_big_lds(const float* X, float* Y) {
     __syncthreads();
     Y[t] = fixed[(t * 37) % 10240] + more[(t * 11) % 8192];
 }
+
+// Not a control: tf_embed_dense's fp32 gather as it was before its table kind, the baseline its fp32 rows must equal.
+__device__ __forceinline__ uint16_t tf_base_bf16(float f) {
+    if (f != f) return 0x7fc0;
+    uint32_t u = __float_as_uint(f);
+    return static_cast<uint16_t>((u + ((u >> 16) & 1u) + 0x7fffu) >> 16);
+}
+
+extern "C" __global__ void tf_base_embed_dense(const float* table, const int* ids, int n, int k, void* out, int out_kind) {
+    long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= static_cast<long long>(n) * k) return;
+    int r = static_cast<int>(i / k), c = static_cast<int>(i % k);
+    float v = table[static_cast<long long>(ids[r]) * k + c];
+    if (out_kind == 0) static_cast<float*>(out)[i] = v;
+    else if (out_kind == 1) static_cast<__half*>(out)[i] = __float2half_rn(v);
+    else static_cast<uint16_t*>(out)[i] = tf_base_bf16(v);
+}

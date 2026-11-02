@@ -13,7 +13,13 @@ const Api = struct {
     rocblas_destroy_handle: *const fn (Handle) callconv(.c) c_int,
     rocblas_set_stream: *const fn (Handle, abi.Stream) callconv(.c) c_int,
     rocblas_gemm_ex: *const fn (Handle, c_int, c_int, c_int, c_int, c_int, Const, Const, c_int, c_int, Const, c_int, c_int, Const, Const, c_int, c_int, Ptr, c_int, c_int, c_int, c_int, i32, u32) callconv(.c) c_int,
+    rocblas_set_workspace: *const fn (Handle, Ptr, usize) callconv(.c) c_int,
+    rocblas_get_device_memory_size: *const fn (Handle, *usize) callconv(.c) c_int,
+    rocblas_is_managing_device_memory: *const fn (Handle) callconv(.c) bool,
 };
+
+/// A handle's workspace: rocBLAS's own default size, which every product it serves runs within.
+pub const workspace_bytes: usize = 32 << 20;
 
 pub const Blas = struct {
     lib: platform.DynLib,
@@ -39,6 +45,19 @@ pub const Blas = struct {
             return .{ .lib = lib, .api = api, .handle = handle, .stream = stream };
         }
         return platform.optional_libraries.unavailable(.rocblas);
+    }
+
+    /// rocBLAS works in `bytes` at `ptr` (the caller's planned buffer) and frees its default: it allocates no more.
+    pub fn useWorkspace(b: *const Blas, ptr: u64, bytes: usize) Error!void {
+        if (ptr == 0 or bytes == 0) return error.Invalid;
+        try check(b.api.rocblas_set_workspace(b.handle, @ptrFromInt(ptr), bytes));
+    }
+
+    /// The device bytes the handle works in, and whether rocBLAS allocated them (false: the caller's workspace).
+    pub fn workspace(b: *const Blas) Error!struct { bytes: usize, managed: bool } {
+        var bytes: usize = 0;
+        try check(b.api.rocblas_get_device_memory_size(b.handle, &bytes));
+        return .{ .bytes = bytes, .managed = b.api.rocblas_is_managing_device_memory(b.handle) };
     }
 
     pub fn close(b: *Blas) void {
@@ -134,4 +153,6 @@ test "HIP BLAS: BLAS refuses impossible geometry and output aliases before libra
     try std.testing.expectError(error.Invalid, b.project(100, 200, 102, 2, 2, 2));
     try std.testing.expectError(error.Invalid, b.project(100, 200, 202, 2, 2, 2));
     try std.testing.expectError(error.Invalid, b.project(std.math.maxInt(u64) - 1, 100, 200, 1, 1, 2));
+    try std.testing.expectError(error.Invalid, b.useWorkspace(0, workspace_bytes));
+    try std.testing.expectError(error.Invalid, b.useWorkspace(256, 0));
 }

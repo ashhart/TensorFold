@@ -12,9 +12,10 @@ const pages = @import("../forward/pages.zig");
 const state = @import("../forward/state.zig");
 const worker = @import("worker.zig");
 const hip_lanes = @import("hip_lanes.zig");
+const config = @import("../../../weights/config.zig");
 
-/// The MLX affine widths the family loads.
-const mlx_formats: []const []const u8 = &.{ "mlx-q2", "mlx-q3", "mlx-q4", "mlx-q5", "mlx-q6", "mlx-q8" };
+/// The MLX affine widths the family loads, and unquantized BF16 (a decision backbone).
+const mlx_formats: []const []const u8 = &.{ "mlx-q2", "mlx-q3", "mlx-q4", "mlx-q5", "mlx-q6", "mlx-q8", "bf16" };
 
 /// The dense and the sparse checkpoints are two registry entries over one engine.
 pub fn Native(comptime type_name: []const u8) type {
@@ -55,6 +56,18 @@ fn refuse(a: std.mem.Allocator, problem: *[]const u8, comptime fmt: []const u8, 
 
 fn gibs(bytes: usize) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
+}
+
+/// Why `dir` cannot be served yet: a bf16 Qwen3.5 checkpoint answers decisions only; null for every other one.
+fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]const u8 {
+    // a config that does not read is the loader's to report
+    var c = config.Config.read(gpa, io, dir) catch return null;
+    defer c.deinit();
+    if (c.quant != .bf16) return null;
+    const what = "BF16 Qwen3.5 serves as a decision backbone only";
+    const path = std.fs.path.join(a, &.{ dir, "joint_head_config.json" }) catch return what;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
+    return what ++ ", and this build has no readout requests or joint schema head to serve its decisions yet";
 }
 
 /// One rank's loaded and sized engine: the streams and prompt cache every rank agreed on.
@@ -228,6 +241,7 @@ fn release(p: *anyopaque) void {
 
 /// The engine for `dir` on `dev`; under tensor parallelism this is rank 0, which serves.
 fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: Options, problem: *[]const u8) anyerror!Loaded {
+    if (decisionOnly(a, gpa, io, dir)) |why| return refuse(a, problem, "{s}", .{why});
     var steps: hip.Startup = .{ .link = if (dev.group) |g| g.link() else null };
     const p = try prepare(a, gpa, io, dev, dir, o, &steps, problem);
     errdefer p.e.deinit();
@@ -254,8 +268,8 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     if (p.cache.pages > 0) own.backend.keepPages(p.cache.pages, p.cache.snaps);
     // rank 0 serves only once every follower is ready behind it
     _ = try steps.together(a, .{ 0, 0 }, .first, problem);
-    // a lone rank times its forwards for the depth rule; the ranks of a group draft without costs
-    if (dev.group) |g| own.backend.withLink(g.link()) else own.backend.measure();
+    // a lone rank times its forwards for the depth rule; the ranks of a group draft without costs; bf16 drafts none
+    if (dev.group) |g| own.backend.withLink(g.link()) else if (!p.e.plain()) own.backend.measure();
     return .{
         .backend = own.backend.backend(),
         .facts = own.backend.facts(),
@@ -269,6 +283,7 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
 
 /// A rank above 0: holds its share of the model and runs rank 0's steps until rank 0 stops.
 fn followRank(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: Options, problem: *[]const u8) anyerror!void {
+    if (decisionOnly(a, gpa, io, dir)) |why| return refuse(a, problem, "{s}", .{why});
     var steps: hip.Startup = .{ .link = dev.group.?.link() };
     const p = try prepare(a, gpa, io, dev, dir, o, &steps, problem);
     defer p.e.deinit();
@@ -282,4 +297,32 @@ fn followRank(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     defer w.deinit();
     _ = try steps.together(a, .{ 0, 0 }, .first, problem);
     try w.follow(dev.group.?.link());
+}
+
+test "a bf16 checkpoint is refused as decision-only, naming what it lacks; an MLX one loads" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const text =
+        \\{"model_type": "qwen3_5", "tie_word_embeddings": false,
+        \\ "text_config": {"hidden_size": 64, "intermediate_size": 32, "num_hidden_layers": 2,
+        \\  "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 32, "linear_num_key_heads": 1,
+        \\  "linear_num_value_heads": 2, "linear_key_head_dim": 32, "linear_value_head_dim": 16,
+        \\  "linear_conv_kernel_dim": 4, "vocab_size": 16, "full_attention_interval": 2,
+        \\  "layer_types": ["linear_attention", "full_attention"], "eos_token_id": 1}}
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = text });
+    const bare = decisionOnly(a, std.testing.allocator, io, dir).?;
+    try std.testing.expect(std.mem.startsWith(u8, bare, "BF16 Qwen3.5 serves as a decision backbone only: "));
+    try std.testing.expect(std.mem.endsWith(u8, bare, "has no joint_head_config.json"));
+    try tmp.dir.writeFile(io, .{ .sub_path = "joint_head_config.json", .data = "{}" });
+    const headed = decisionOnly(a, std.testing.allocator, io, dir).?;
+    try std.testing.expect(std.mem.indexOf(u8, headed, "no readout requests or joint schema head") != null);
+    const mlx = try std.mem.replaceOwned(u8, a, text, "\"tie_word_embeddings\": false,", "\"tie_word_embeddings\": false, \"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"},");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
+    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
 }
