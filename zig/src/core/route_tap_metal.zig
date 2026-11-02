@@ -32,6 +32,7 @@ pub fn attach(device: mtl.Device) void {
         ring = null;
         return;
     };
+    tap.onStop(&detach);
 }
 
 pub fn detach() void {
