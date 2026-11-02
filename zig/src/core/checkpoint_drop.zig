@@ -52,7 +52,21 @@ fn Queue(comptime Ops: type) type {
         }
     };
 }
-const Files = struct {
+const Files = if (enabled) LinuxFiles else NoFiles;
+/// Other OSes keep no deferred advice: nothing here may name a Linux call on their handles (#1887, zig-windows).
+const NoFiles = struct {
+    pub const File = Io.File;
+    fn identity(_: File) !u128 {
+        return error.StatFailed;
+    }
+    fn copy(_: File) !File {
+        return error.DuplicateFailed;
+    }
+    fn close(_: File) void {}
+    fn adviseRange(_: File, _: u64, _: usize) void {}
+    fn advise(_: File) void {}
+};
+const LinuxFiles = struct {
     pub const File = Io.File;
     fn identity(file: File) !u128 {
         var stat: linux.Statx = undefined;
