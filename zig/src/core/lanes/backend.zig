@@ -88,6 +88,8 @@ pub const Backend = struct {
     pub const VTable = struct {
         /// After prompt work, synchronously write full-width vectors into the caller's host output before release.
         embedding: ?*const fn (*anyopaque, *Stream, []f32) anyerror!void = null,
+        /// After a readout's prompt work, write its BF16 logits into the request's slice; its state goes at release.
+        readout_finish: ?*const fn (*anyopaque, *Stream, []u16) anyerror!void = null,
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// One prompt-pass chunk of at most `max_rows` rows when capped (0: uncapped); null: the pass runs whole.

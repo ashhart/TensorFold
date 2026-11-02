@@ -1,6 +1,7 @@
 //! Host behavior checks for the shared engine API.
 test {
     _ = @import("lane_embedding_test.zig");
+    _ = @import("lane_readout_test.zig");
     _ = @import("speech_guard.zig");
     _ = @import("lane_host.zig");
     _ = @import("load_ledger.zig");
