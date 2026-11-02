@@ -57,6 +57,23 @@ pub fn merge(x: Tally, y: Tally) Tally {
     return t;
 }
 
+/// Every entry's selection resolves, so no run checks a family without its gate-5 records; `bad` names the fault.
+pub fn validateAll(a: std.mem.Allocator, entries: []const Entry, records: []const Record, bad: *[]const u8) Error!void {
+    for (entries) |e| a.free((try resolve(a, entries, records, @tagName(e.group), bad)).records);
+}
+
+/// Why a selection is refused, in words.
+pub fn explain(err: Error) []const u8 {
+    return switch (err) {
+        error.OutOfMemory => "out of memory",
+        error.UnknownGroup => "no kernel group has that name",
+        error.NoEntry => "the group has no entry in contract_families.zig",
+        error.MissingRecord => "the entry names a record that is not registered",
+        error.AmbiguousRecord => "the entry names a record that is registered more than once",
+        error.EmptySelection => "the entry selects no gate-5 record",
+    };
+}
+
 /// One entry's problems on its own tally: failed kernels, missed controls, and one when it ran no kernel.
 pub fn entryProblems(t: Tally) usize {
     return t.problems() + @intFromBool(t.kernels == 0);
@@ -178,4 +195,17 @@ test "contract select: each entry is judged on its own tally, so an empty run is
     try std.testing.expectEqual(@as(usize, 3), run.problems); // 0 + 2 failed + 1 for the empty run
     try std.testing.expectEqual(@as(usize, 5), run.tally.kernels); // the merged tally alone would miss the empty run
     try std.testing.expectEqual(@as(usize, 2), run.tally.problems());
+}
+
+test "contract select: the full run validates every entry first; an empty registry is valid" {
+    var bad: []const u8 = "";
+    try validateAll(std.testing.allocator, &.{}, &fixture, &bad);
+    const good = [_]Entry{ .{ .group = .ops, .records = &.{ "a", "fa" }, .run = cleanRun }, .{ .group = .prefill, .run = cleanRun } };
+    try validateAll(std.testing.allocator, &good, &fixture, &bad);
+    const empty = [_]Entry{ .{ .group = .ops, .run = cleanRun }, .{ .group = .decode, .run = cleanRun } };
+    try std.testing.expectError(error.EmptySelection, validateAll(std.testing.allocator, &empty, &fixture, &bad));
+    try std.testing.expectEqualStrings("decode", bad);
+    const missing = [_]Entry{.{ .group = .ops, .records = &.{"misspelt"}, .run = cleanRun }};
+    try std.testing.expectError(error.MissingRecord, validateAll(std.testing.allocator, &missing, &fixture, &bad));
+    try std.testing.expectEqualStrings("misspelt", bad);
 }
