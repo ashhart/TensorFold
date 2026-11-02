@@ -241,13 +241,11 @@ test "serve MODEL checks only the model it serves: another model in the file tha
     const text = try std.mem.replaceOwned(u8, a, try pairFile(a, cx_link, ", \"library\": \"/bin/sh\""), "\"192.0.2.3\", \"backend\": \"metal\", \"memory_gb\": 128", "\"192.0.2.3\", \"backend\": \"metal\"");
     try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = text });
     try std.testing.expectEqual(@as(u8, 1), (try run(a, &.{ "cluster", "check", "--cluster", file })).code);
-    for ([_][]const []const u8{ &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--dry-run" }, &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--dry-run", "--model", "q" } }) |args| {
-        const got = try run(a, args);
-        if (got.code != 0) std.debug.print("exit {d}\n{s}{s}", .{ got.code, got.out, got.err });
-        try std.testing.expectEqual(@as(u8, 0), got.code);
-        try std.testing.expect(has(got.out, "model q: disaggregated"));
-        try std.testing.expect(std.mem.indexOf(u8, got.out, "model k:") == null);
-    }
+    const got = try run(a, &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--dry-run" });
+    if (got.code != 0) std.debug.print("exit {d}\n{s}{s}", .{ got.code, got.out, got.err });
+    try std.testing.expectEqual(@as(u8, 0), got.code);
+    try std.testing.expect(has(got.out, "model q: disaggregated"));
+    try std.testing.expect(std.mem.indexOf(u8, got.out, "model k:") == null);
 }
 
 test "serve refuses before starting any node when another node's library, link or window is wrong, not only its own" {
@@ -280,4 +278,34 @@ test "serve refuses before starting any node when another node's library, link o
     try std.testing.expectEqual(@as(u8, 1), link.code);
     try std.testing.expect(has(link.err, "no link between gb10 and gb10b"));
     try std.testing.expect(std.mem.indexOf(u8, link.out, "starts tensorfold node") == null);
+}
+
+test "node and serve refuse a flag they do not take by name, before reading probes or opening anything" {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/cluster.json", .{tmp.sub_path});
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = try pairFile(a, cx_link, "") });
+    const Case = struct { args: []const []const u8, err: []const u8 };
+    const cases = [_]Case{
+        // node has no dry run: it used to open the real endpoint and wait for its peer
+        .{ .args = &.{ "node", "--name", "mac", "--model", "q", "--cluster", file, "--dry-run" }, .err = "node: unknown flag --dry-run" },
+        .{ .args = &.{ "node", "--name", "mac", "--cluster", file, "--hold", "5" }, .err = "node: unknown flag --hold" },
+        .{ .args = &.{ "node", "mac", "--cluster", file }, .err = "node: unexpected argument mac" },
+        .{ .args = &.{ "node", "--cluster", file, "--name" }, .err = "node: --name needs a value" },
+        .{ .args = &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--dryrun" }, .err = "serve: unknown flag --dryrun" },
+        .{ .args = &.{ "serve", "q", "--cluster", file, "--dry-run=yes" }, .err = "serve: --dry-run takes no value" },
+        .{ .args = &.{ "serve", "q", "k", "--cluster", file }, .err = "serve: unexpected argument k" },
+    };
+    for (cases) |k| {
+        const got = try run(a, k.args);
+        if (got.code != 2) std.debug.print("{s}: exit {d}\n{s}{s}", .{ k.err, got.code, got.out, got.err });
+        try std.testing.expectEqual(@as(u8, 2), got.code);
+        try std.testing.expect(has(got.err, k.err));
+        try std.testing.expectEqualStrings("", got.out);
+    }
+    // both spellings of a flag's value still pass; the file's missing library is the next refusal
+    try std.testing.expectEqual(@as(u8, 3), (try run(a, &.{ "node", "--name=mac", "--model", "q", try std.fmt.allocPrint(a, "--cluster={s}", .{file}), "--leader", "gb10" })).code);
 }
