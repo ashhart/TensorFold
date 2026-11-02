@@ -85,6 +85,49 @@ test "released expert planes keep every shard of a load open without invalidatin
     try std.testing.expectEqual(@as(usize, 0), store.held.items.len + store.released.items.len);
 }
 
+test "tensor() switching across three shards opens and parses each once a load, sharing the store's released shards" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(dir);
+    const names = [_][]const u8{ "a", "b", "c" };
+    for (names, 0..) |name, i| {
+        var header_buf: [80]u8 = undefined;
+        const header = try std.fmt.bufPrint(&header_buf, "{{\"x{s}\":{{\"dtype\":\"U8\",\"shape\":[1],\"data_offsets\":[0,1]}}}}", .{name});
+        var data: [8 + 80 + 1]u8 = undefined;
+        std.mem.writeInt(u64, data[0..8], header.len, .little);
+        @memcpy(data[8..][0..header.len], header);
+        data[8 + header.len] = @intCast(10 + i);
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = data[0 .. 8 + header.len + 1] });
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"xa\":\"a\",\"xb\":\"b\",\"xc\":\"c\"}}" });
+    var store = try Store.open(a, io, dir);
+    defer store.deinit();
+    // each shard's file is gone after its first open, so a second open or header parse fails the load
+    for (names, 0..) |name, i| {
+        var key = [_]u8{ 'x', name[0] };
+        try std.testing.expectEqual(@as(u8, @intCast(10 + i)), (try store.tensor(&key)).bytes[0]);
+        try tmp.dir.deleteFile(io, name);
+    }
+    for (0..4) |round| for (names, 0..) |name, i| {
+        var key = [_]u8{ 'x', name[0] };
+        try std.testing.expectEqual(@as(u8, @intCast(10 + i)), (try store.tensor(&key)).bytes[0]);
+        if (round != 1) continue;
+        const copy = try store.copyOf(&key);
+        defer a.free(copy);
+        try std.testing.expectEqual(@as(u8, @intCast(10 + i)), copy[0]);
+    };
+    // hold() takes a parked shard from the same set, and release() gives it back to tensor()
+    try std.testing.expectEqual(@as(u8, 10), (try store.hold("xa")).bytes[0]);
+    store.release();
+    try std.testing.expectEqual(@as(u8, 10), (try store.tensor("xa")).bytes[0]);
+    try std.testing.expectEqual(@as(u8, 11), (try store.tensor("xb")).bytes[0]);
+    store.loaded();
+    try std.testing.expect(store.file == null and store.held.items.len + store.released.items.len == 0);
+}
+
 test "centered scales add one in FP32 while direct scales preserve the original bits" {
     _ = @import("cuda_norms.zig");
     const raw = [_]f32{ -0.25, 0.0001, 2.75 };
