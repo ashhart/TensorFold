@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- `TENSORFOLD_PREFILL_ORDER=srpt` lets short replies decode ahead of a long prompt that is still filling, while the prompt keeps at least a tenth of the GPU time and `--decode-share` still applies. Replies are the same tokens. It is off by default (#1876). Thanks to @gilby.
+
 - Qwen3.8-27B with a DFlash drafter on Metal compiles the drafter head's lane pipeline at load, so the first request no longer waits on it, and a head that fails to compile is refused by name at start-up instead of failing that request (#1734). Thanks to @kieranscotney.
 
 - H3 on CUDA finds each tensor by its real header entry, so a look-alike in metadata no longer returns the wrong tensor, spaced JSON headers load, and malformed headers are refused (#1906, part of #1872). Thanks to @jschmied.
