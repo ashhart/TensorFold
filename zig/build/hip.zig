@@ -380,11 +380,23 @@ pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_
     return exe;
 }
 
+/// A group's source and whether it compiles with IEEE arithmetic (`strict`: -O2 -fno-fast-math, IEEE denormals).
+const Source = struct { path: []const u8, strict: bool = false };
+
 /// The model-free kernels' source groups, in zig/src/hip/kernels.zig's Group order.
-const groups = [_][]const u8{
-    "ops/ops.hip",           "ops/act.hip",             "attention/attention.hip", "recurrence/gated_delta.hip",
-    "attention/prefill.hip", "decode/decode.hip",       "decode/plan.hip",         "tiles/dot2_tiles.hip",
-    "tiles/dot2.hip",        "flashnext/flashnext.hip", "recurrence/mamba.hip",    "glm_ocr/pointwise.hip",
+const groups = [_]Source{
+    .{ .path = "ops/ops.hip" },
+    .{ .path = "ops/act.hip" },
+    .{ .path = "attention/attention.hip" },
+    .{ .path = "recurrence/gated_delta.hip" },
+    .{ .path = "attention/prefill.hip" },
+    .{ .path = "decode/decode.hip" },
+    .{ .path = "decode/plan.hip" },
+    .{ .path = "tiles/dot2_tiles.hip" },
+    .{ .path = "tiles/dot2.hip" },
+    .{ .path = "flashnext/flashnext.hip" },
+    .{ .path = "recurrence/mamba.hip" },
+    .{ .path = "glm_ocr/pointwise.hip" },
 };
 
 /// What the group sources include, so an edit to one rebuilds them.
@@ -404,7 +416,7 @@ const headers = [_][]const u8{
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
 
-const stub = "pub const arch = \"\";\npub const images: [12][]align(8) const u8 = @splat(&.{});\n";
+const stub = std.fmt.comptimePrint("pub const arch = \"\";\npub const images: [{d}][]align(8) const u8 = @splat(&.{{}});\n", .{groups.len});
 
 /// One code object a group for `arch`, built with the caps table's instruction switches, as the `hip_kernels` module.
 pub fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, relax_branches: bool, arch: []const u8) *std.Build.Module {
@@ -424,19 +436,26 @@ pub const Hipcc = struct { name: []const u8, resolved: []const u8, device_lib: ?
 /// The groups' code objects for `arch` in one directory, group0.hsaco onward.
 pub fn objectFiles(b: *std.Build, cc: Hipcc, arch: []const u8) *std.Build.Step.WriteFile {
     const files = b.addWriteFiles();
-    for (groups, 0..) |source, i| {
+    for (groups, 0..) |g, i| {
         const name = b.fmt("group{d}.hsaco", .{i});
-        _ = files.addCopyFile(compile(b, cc, arch, b.path(b.fmt("zig/kernels/hip/{s}", .{source})), name), name);
+        const source = b.path(b.fmt("zig/kernels/hip/{s}", .{g.path}));
+        _ = files.addCopyFile(compileSource(b, cc, arch, source, name, g.strict), name);
     }
     return files;
 }
 
 /// One source's code object for `arch`, with the kernels' flags and the caps table's instruction switches.
 pub fn compile(b: *std.Build, cc: Hipcc, arch: []const u8, source: std.Build.LazyPath, out: []const u8) LazyPath {
+    return compileSource(b, cc, arch, source, out, false);
+}
+
+/// `compile`, with `-O2 -fno-fast-math -fdenormal-fp-math=ieee` after the common flags when `strict`.
+fn compileSource(b: *std.Build, cc: Hipcc, arch: []const u8, source: LazyPath, out: []const u8, strict: bool) LazyPath {
     const c = caps.Caps.of(arch).?;
     const root = std.fs.path.dirname(std.fs.path.dirname(cc.resolved) orelse ".") orelse ".";
     const run = b.addSystemCommand(&.{ cc.name, "--genco" });
     run.addArgs(&flags);
+    if (strict) run.addArgs(&.{ "-O2", "-fno-fast-math", "-fdenormal-fp-math=ieee" });
     run.addArg(b.fmt("-DTF_WAVE={d}", .{c.wave}));
     run.addArg(b.fmt("-DTF_DOT2_F16={d}", .{@intFromBool(c.dot2_f16)}));
     run.addArg(b.fmt("-DTF_DOT2_BF16={d}", .{@intFromBool(c.dot2_bf16)}));
