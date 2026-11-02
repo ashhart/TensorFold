@@ -1,0 +1,48 @@
+//! Stable profiles preserve the caller's raw environment and make no new settings active.
+const std = @import("std");
+const p = @import("profile.zig");
+const t = std.testing;
+
+test "stable profile: live lookup is exactly the legacy libc lookup for every registered switch" {
+    inline for (p.entries) |e| {
+        const old = std.c.getenv(e.name());
+        const current = p.get(e.id);
+        if (old) |raw| {
+            try t.expect(current != null);
+            try t.expectEqualStrings(std.mem.span(raw), current.?);
+            try t.expectEqual(@as([*]const u8, raw), current.?.ptr);
+        } else try t.expect(current == null);
+    }
+}
+
+test "stable profile: registry covers its switches once, scopes metadata and never supplies a default" {
+    for (p.entries) |e| {
+        try t.expectEqual(e.id, p.entry(e.id).id);
+        try t.expect(e.name().len > 0 and e.families.len > 0 and e.effect.len > 0 and e.evidence.len > 0);
+        try t.expect(e.stable == null);
+        try t.expect(p.resolve(.stable, e.id, null) == null);
+        try t.expect(e.applies(e.families[0], "cuda"));
+        try t.expect(!e.applies(e.families[0], "mlx"));
+        try t.expect(!e.applies(e.families[0], "rocm"));
+        try t.expect(!e.applies("unknown-model", "cuda"));
+    }
+    try t.expectEqual(p.Class.debug, p.entry(.TF_QWEN_KV_PAGES_ALL).class);
+    try t.expectEqual(p.Class.experimental, p.entry(.TF_FLASHNEXT_KV_PAGES).class);
+}
+
+test "stable profile: explicit off, empty, malformed and ordinary values are returned without coercion" {
+    for (p.entries) |e| for ([_][:0]const u8{ "", "0", "1", "0000", "+0", "256", "-1", "false", "nan", " 1 ", "bad\nvalue" }) |raw| {
+        const got = p.resolve(.stable, e.id, raw).?;
+        try t.expectEqualStrings(raw, got);
+        try t.expectEqual(raw.ptr, got.ptr);
+    };
+}
+
+test "stable profile: reporting follows the original count and exact-one flag semantics" {
+    const count = p.entry(.TF_QWEN_KV_SHARE);
+    for ([_][]const u8{ "0", "00", "+0" }) |v| try t.expect(!count.differs(v));
+    for ([_][]const u8{ "1", "256", "", "-1", "not-a-count" }) |v| try t.expect(count.differs(v));
+    const flag = p.entry(.TF_QWEN_KV_PAGES_ALL);
+    try t.expect(flag.differs("1"));
+    for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |v| try t.expect(!flag.differs(v));
+}

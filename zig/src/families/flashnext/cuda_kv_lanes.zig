@@ -13,16 +13,16 @@ pub const window_rows: u32 = mtp.max_rows;
 
 /// TF_FLASHNEXT_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset or 0: none).
 pub fn paging() !usize {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_PAGES") orelse return 0;
-    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadFlashNextKvPages;
+    const v = @import("core").profile.get(.TF_FLASHNEXT_KV_PAGES) orelse return 0;
+    const n = std.fmt.parseInt(usize, v, 10) catch return error.BadFlashNextKvPages;
     if (n != 0 and !pages.valid(n)) return error.BadFlashNextKvPages;
     return n;
 }
 
 /// TF_FLASHNEXT_KV_PAGES_ALL=1: every stream on pages, none on its own contiguous caches (checks).
 pub fn pagedOnly() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_PAGES_ALL") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+    const v = @import("core").profile.get(.TF_FLASHNEXT_KV_PAGES_ALL) orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 /// Pages a stream maps at most: a full window and one more drafted window.

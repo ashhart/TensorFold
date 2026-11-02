@@ -65,8 +65,8 @@ pub const Blob = struct {
 
 /// TF_KV_SHARE=n: keep prompts as pool pages and at most n states past them (0 or unset: copies, as before).
 pub fn sharing() error{BadKvShare}!usize {
-    const v = std.c.getenv("TF_KV_SHARE") orelse return 0;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch error.BadKvShare;
+    const v = @import("profile").get(.TF_KV_SHARE) orelse return 0;
+    return std.fmt.parseInt(usize, v, 10) catch error.BadKvShare;
 }
 
 const testing = std.testing;
