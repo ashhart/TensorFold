@@ -24,6 +24,8 @@ pub const Rules = struct {
     tail: bool = false,
     /// Repeated raw prompts keep near their end; only families that allow any-row cuts opt in (0: off).
     repeat_min: u32 = 0,
+    /// Image and keyed prompts also count as repeats, under the key lookups and saves use (false: raw prompts only).
+    repeat_keyed: bool = false,
     /// Keep one before where the prompt parts from the one it resumed (a miss: the longest kept one), however near.
     fork: bool = false,
 };
