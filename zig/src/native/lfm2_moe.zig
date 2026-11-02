@@ -23,6 +23,7 @@ const Host = struct {
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        tf.route_tap.stop();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         mtl.resident.streams.drop(h);
