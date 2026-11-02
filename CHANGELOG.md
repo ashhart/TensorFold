@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_READOUT_ROWS=128` (off by default, 64 unset) moves the hyper-connection read-out's switch to the prompt tiles from 64 rows, so a large shared decode round keeps the row kernels: the same bits, and up to 7% more throughput at 16 streams on a GB10 (#1741, part of #1737). Thanks to @optimisme.
+
 - Flash Next on CUDA (one GPU): a partly kept window's DeltaNet rows are applied at the start of the next window instead of replayed, a lane's fixed buffers are reused across streams, and a pass's shared expert runs on a side stream, all with the same tokens; `TF_FLASHNEXT_KEEP_LATE=0`, `TF_FLASHNEXT_LANE_PARTS=0` and `TF_FLASHNEXT_SHARED_SIDE=0` turn each off (#1763). Thanks to @Arminova.
 
 - HIP: Flash Next loads oMLX checkpoints whose MTP head sits at the top-level `mtp.*`, so their drafts work, and the usual `language_model.mtp.*` layout gives the same tokens as before (#1613, fixes #1598). Thanks to @gilby.
@@ -19,7 +21,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-Flash-Next on Macs, opt-in: `TENSORFOLD_PREFILL_POLICY=fcfs` serves long prompts that arrive together oldest first, in chunks of `TENSORFOLD_PREFILL_TOKENS` rows (default 2,048) between decode rounds, with the same tokens. With eight 14K-token prompts at once on an M3 Ultra, the last user's first token comes after 93.6 s instead of 326.9 s, and each chunk pauses the streams decoding beside it for about 1.7 s; unset, nothing changes (#1843). Thanks to @ivanfioravanti.
 
 - Kernel contract (Metal): the M5's tensor units keep 10 mantissa bits of an fp32 `mma_16x32` operand, cut toward zero. The contract now states that cut for every kernel with an fp32 operand: Gemma 4's, Spark's, Flash Next's, Nemotron's and MiniMax's attention and Nemotron's SSD products. Each has a control that fails without it, and no output changes (#1748, part of #1546). Thanks to @BobClawblaw.
-- Flash Next on CUDA: `TF_FLASHNEXT_READOUT_ROWS=128` (off by default, 64 unset) moves the hyper-connection read-out's switch to the prompt tiles from 64 rows, so a large shared decode round keeps the row kernels: the same bits, and up to 7% more throughput at 16 streams on a GB10 (#1741, part of #1737). Thanks to @optimisme.
 
 - GLM-5.3-Flash on CUDA: `TF_GLM_CHUNK_SOLO=4096` (opt-in, on every rank) lets a prompt pass take 4,096 rows while no other stream is decoding, with the same bytes. On GB10s a cold prompt's first token comes 6% to 9% sooner from 8K to 128K tokens. It holds 1.6 to 1.9 GiB more for prompt buffers, and a request that arrives during a long pass waits for it to end. Unset, nothing changes (#1823, option C of #1554). Thanks to @Bizuayeu.
 
