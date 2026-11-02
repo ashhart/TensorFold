@@ -232,7 +232,7 @@ inline void lfm2_stage(const thread uint4* pre, threadgroup uint* ks, threadgrou
 }
 
 // Every row's attention partials (one kernel for prompt and decode): a threadgroup a (chunk, kv head, 8 * RB rows).
-template <int RB, bool FULL = false>  // RB row blocks share each staged K and V fragment; FULL: all see [0, len + 1)
+template <int RB, bool FULL = false, uint PARTS = CHUNKS>  // FULL: all rows see [0, len + 1)
 inline void lfm2_attn_rows(const device bfloat* queries, const device bfloat* keys, const device bfloat* values,
                            lfm2_attn_args p, device float* pm, device float* pl, device float* po, uint rows, uint3 tg,
                            uint tid, uint sg, uint lane, threadgroup uint (*ks)[HD * (KT / 2)],
@@ -332,7 +332,7 @@ inline void lfm2_attn_rows(const device bfloat* queries, const device bfloat* ke
   for (int b = 0; b < RB; ++b) {
     const uint row = r0 + 8 * b + fm;
     if (row >= rows) return;
-    const size_t at = (size_t(row) * QH + head) * (CHUNKS * p.subs) + chunk * p.subs + sub0;
+    const size_t at = (size_t(row) * QH + head) * (PARTS * p.subs) + chunk * p.subs + sub0;
     if ((lane & 9) == 0) {
       pm[at] = M[b];
       pl[at] = L[b];
@@ -355,15 +355,15 @@ template [[host_name("lfm2_attn_mma")]] [[kernel]] decltype(lfm2_attn_mma<1>) lf
 template [[host_name("lfm2_attn_mma_r2")]] [[kernel]] decltype(lfm2_attn_mma<2>) lfm2_attn_mma<2>;
 
 // The chunks merged in chunk order for (head, row): Y [rows, QH*HD] bf16.
-template <bool FULL = false>
+template <bool FULL = false, uint PARTS = CHUNKS>
 inline void lfm2_merge_row(const device float* pm, const device float* pl, const device float* po, lfm2_attn_args p,
                            device bfloat* y, uint head, uint r, uint lane) {
   const uint count = FULL ? p.len + 1 : p.len + r + 1;
   const uint per = PER;
   const uint chunks = (count + per - 1) / per;
-  const size_t at = (size_t(r) * QH + head) * (CHUNKS * p.subs);
+  const size_t at = (size_t(r) * QH + head) * (PARTS * p.subs);
   // Each chunk's state: its sub-spans' partials folded in order (one a chunk from the prompt tiles).
-  float cm[CHUNKS], cl[CHUNKS], c0[CHUNKS], c1[CHUNKS];
+  float cm[PARTS], cl[PARTS], c0[PARTS], c1[PARTS];
   for (uint c = 0; c < chunks; ++c) {
     const uint subs = min(p.subs, (count - c * per + SUB - 1) / SUB);
     float M = -INFINITY, L = 0.0f, O0 = 0.0f, O1 = 0.0f;
@@ -392,15 +392,15 @@ inline void lfm2_merge_row(const device float* pm, const device float* pl, const
   out[lane] = static_cast<bfloat>(o0 / l);
   out[lane + 32] = static_cast<bfloat>(o1 / l);
 }
-template <bool FULL = false>
+template <bool FULL = false, uint PARTS = CHUNKS>
 [[kernel]] void lfm2_attn_merge(const device float* pm [[buffer(0)]], const device float* pl [[buffer(1)]],
                                 const device float* po [[buffer(2)]], constant lfm2_attn_args& p [[buffer(3)]],
                                 device bfloat* y [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
                                 uint lane [[thread_index_in_simdgroup]]) {
-  lfm2_merge_row<FULL>(pm, pl, po, p, y, tg.x, tg.y, lane);
+  lfm2_merge_row<FULL, PARTS>(pm, pl, po, p, y, tg.x, tg.y, lane);
 }
 template [[host_name("lfm2_attn_merge")]] [[kernel]] decltype(lfm2_attn_merge<false>) lfm2_attn_merge<false>;
-template [[host_name("lfm2_attn_block_merge")]] [[kernel]] decltype(lfm2_attn_merge<true>) lfm2_attn_merge<true>;
+template [[host_name("lfm2_attn_block_merge")]] [[kernel]] decltype(lfm2_attn_merge<true, CHUNKS + 1>) lfm2_attn_merge<true, CHUNKS + 1>;
 
 // Router logits [rows, E] in fp32: a simdgroup an expert, lane l over inputs 4l..4l+3 of each 128, then simd_sum.
 [[kernel]] void lfm2_route_logits(const device bfloat* x [[buffer(0)]], const device float* router [[buffer(1)]],
