@@ -127,7 +127,7 @@ fn prepare(
         error.BadReserve => steps.refuseAll(
             a,
             problem,
-            "TENSORFOLD_MEMORY_RESERVE_GIB: a number of GiB from 2 to the memory's size",
+            "TENSORFOLD_MEMORY_RESERVE_GIB: a number of GiB from 0.5 (2 on shared memory) to the memory's size",
             .{},
         ),
         error.BadLimit => steps.refuseAll(

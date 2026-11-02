@@ -48,17 +48,17 @@ pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
 
 /// What a plan may take on `ctx`'s GPU: free (the host's when integrated without a carve-out), reserve, cap.
 pub fn budget(gpa: Allocator, io: std.Io, ctx: Context) !Pool {
-    const unified = (try ctx.attribute(.integrated)) != 0;
+    const integrated = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const text = if (unified) procText(gpa, io, "/proc/meminfo") else null;
-    defer if (text) |t| gpa.free(t);
-    const vram = if (unified) vramBytes(gpa, io, ctx) else null;
     const own: MemInfo = .{ .total = card.total, .available = card.free };
+    const vram = if (integrated) vramBytes(gpa, io, ctx) else null;
+    const text = if (sourceOf(integrated, own, vram) == .host) procText(gpa, io, "/proc/meminfo") else null;
+    defer if (text) |t| gpa.free(t);
     const env: Env = .{
         .reserve = getenv("TENSORFOLD_MEMORY_RESERVE_GIB"),
         .limit = getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB"),
     };
-    const p = try plan(unified, own, text, vram, env);
+    const p = try plan(integrated, own, text, vram, env);
     announce(p);
     return p.pool;
 }
@@ -74,8 +74,8 @@ pub const Plan = struct { pool: Pool, source: Source };
 pub const PlanError = error{ HostMemoryUnavailable, BadReserve, BadLimit };
 
 /// The pool from the card's count, /proc/meminfo's text and the device's dedicated VRAM (sysfs), without I/O.
-pub fn plan(unified: bool, card: MemInfo, text: ?[]const u8, vram: ?u64, env: Env) PlanError!Plan {
-    const source = sourceOf(unified, card, vram);
+pub fn plan(integrated: bool, card: MemInfo, text: ?[]const u8, vram: ?u64, env: Env) PlanError!Plan {
+    const source = sourceOf(integrated, card, vram);
     const c = if (source == .host) counts(true, card, text) catch return error.HostMemoryUnavailable else card;
     const shared = source == .host;
     const reserve = reserveBytes(env.reserve, c.total, shared) catch return error.BadReserve;
@@ -90,11 +90,11 @@ pub fn plan(unified: bool, card: MemInfo, text: ?[]const u8, vram: ?u64, env: En
     return .{ .pool = pool, .source = source };
 }
 
-/// An integrated GPU counts its own memory only when the card's total fits in the firmware's dedicated VRAM.
-pub fn sourceOf(unified: bool, card: MemInfo, vram: ?u64) Source {
-    if (!unified) return .card;
+/// An integrated GPU counts its own memory only when the card's total is the firmware's dedicated VRAM, within a 32nd.
+pub fn sourceOf(integrated: bool, card: MemInfo, vram: ?u64) Source {
+    if (!integrated) return .card;
     const v = vram orelse return .host;
-    return if (v > 0 and card.total <= v) .carve_out else .host;
+    return if (v > 0 and card.total <= v and card.total >= v - v / 32) .carve_out else .host;
 }
 
 /// The device's dedicated VRAM from sysfs (mem_info_vram_total under its PCI address), null when unreadable.
@@ -189,4 +189,28 @@ test "sysfs's dedicated-VRAM path names the GPU's PCI address" {
     const want = "/sys/bus/pci/devices/0000:c3:00.0/mem_info_vram_total";
     try std.testing.expectEqualStrings(want, try vramPath(&buf, 0, 0xc3, 0));
     try std.testing.expectError(error.Invalid, vramPath(&buf, 0, -1, 0));
+}
+
+test "a carve-out needs the card's total to be the dedicated VRAM: not past it, not a smaller GTT pool beside it" {
+    const g: u64 = 1 << 30;
+    const T = struct {
+        fn of(total: u64, vram: u64) Source {
+            return sourceOf(true, .{ .total = total, .available = 0 }, vram);
+        }
+    };
+    try std.testing.expectEqual(Source.carve_out, T.of(96 * g, 96 * g));
+    try std.testing.expectEqual(Source.carve_out, T.of(95 * g, 96 * g));
+    try std.testing.expectEqual(Source.host, T.of(96 * g + 1, 96 * g));
+    try std.testing.expectEqual(Source.host, T.of(15 * g, 96 * g)); // a GTT-sized pool beside a large carve-out
+    try std.testing.expectEqual(Source.host, T.of(60 * g, g / 2)); // a GTT pool beside a small carve-out
+    try std.testing.expectEqual(Source.host, T.of(0, 0));
+    try std.testing.expectEqual(Source.card, sourceOf(false, .{ .total = 48 * g, .available = 0 }, 96 * g));
+    const one: MemInfo = .{ .total = 96 * g, .available = 95 * g };
+    const blind = try plan(true, one, null, 96 * g, .{}); // a carve-out needs no /proc/meminfo
+    try std.testing.expectEqual(@as(u64, 95 * g), blind.pool.free);
+    const half = try plan(true, one, null, 96 * g, .{ .reserve = "0.5" });
+    try std.testing.expectEqual(@as(u64, g / 2), half.pool.reserve); // a carve-out takes the discrete floor
+    const big = "MemTotal: 127926272 kB\nMemAvailable: 115343360 kB\n";
+    const shared = plan(true, .{ .total = 60 * g, .available = 59 * g }, big, g / 2, .{ .reserve = "1" });
+    try std.testing.expectError(error.BadReserve, shared); // shared memory keeps its floor of 2
 }
