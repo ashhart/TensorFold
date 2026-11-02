@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
-pub const Metadata = @import("affine_metadata.zig").Type;
+pub const Metadata = @import("affine_metadata").Type;
 
 pub const weight_layout = "u32[ceil(N/32)][K/group][32][group*bits/32], low-bit-first codes, columns past N zero";
 pub const reg_layout = "u32[N/32][K/64][2][32 lanes][4] 4-bit codes, regBlock order";
@@ -505,5 +505,5 @@ test "group16 FP32 metadata uses whole encoded words even at K16, with exact byt
         try std.testing.expectEqual(@as(u32, @bitCast(s)), @as(u32, @bitCast(sb[i * 2])));
         try std.testing.expectEqual(@as(u32, @bitCast(b)), @as(u32, @bitCast(sb[i * 2 + 1])));
     }
-    try std.testing.expectEqual(@as(usize, 512), l.encodedBytes());
+    try std.testing.expectEqual(@as(usize, 512), l.packedBytes());
 }

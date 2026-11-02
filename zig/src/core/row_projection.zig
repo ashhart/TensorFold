@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
-pub const Metadata = @import("affine_metadata.zig").Type;
+pub const Metadata = @import("affine_metadata").Type;
 
 pub fn source(metadata: Metadata) []const u8 {
     return if (metadata == .bf16) sources.core_row_projection else "#define TF_RP_META float\n" ++ sources.core_row_projection;

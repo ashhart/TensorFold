@@ -56,6 +56,7 @@ test {
     _ = @import("rope_test.zig");
     _ = state;
     _ = projection;
+    _ = gpu_weights;
     _ = model;
     _ = quant_gpu;
     _ = @import("quant_rows_test.zig");

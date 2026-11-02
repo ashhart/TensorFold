@@ -40,7 +40,7 @@ pub const Weights = struct {
 };
 
 fn uniform(p: Linear) bool {
-    return p.bits == 4 and p.group == 64 and p.runs.len == 0;
+    return p.bits == 4 and p.group == 64 and p.metadata == .bf16 and p.runs.len == 0;
 }
 
 /// Modules the graph reads only through repacked copies: their tensors stay in the files until load stages them.
@@ -373,4 +373,19 @@ test "A_log loads in bf16 or in f32, as mlx-vlm conversions store it, and refuse
 fn affineTensor(t: Tensor, shape: []const usize) !Tensor {
     _ = try projection.metadata(t.dtype);
     return checked(t, t.dtype, shape);
+}
+
+test "Neural Engine eligibility keeps native FP32 metadata out of BF16-only MLP paths" {
+    var layers: [1]Layer = undefined;
+    var p = Linear{ .words = undefined, .pairs = undefined, .n = 64, .k = 128, .tile = 32, .slices = 1 };
+    layers[0].gu = p;
+    layers[0].down = p;
+    const weights = Weights{ .allocator = std.testing.allocator, .layers = &layers, .embed = undefined, .norm = undefined, .head = undefined };
+    try std.testing.expect(weights.uniformMlp());
+    p.metadata = .f32;
+    layers[0].down = p;
+    try std.testing.expect(!weights.uniformMlp());
+    layers[0].down = layers[0].gu;
+    layers[0].gu = p;
+    try std.testing.expect(!weights.uniformMlp());
 }
