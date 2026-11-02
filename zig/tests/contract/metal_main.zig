@@ -406,6 +406,9 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_ssd: @import("metal_nemotron_ssd_gemm.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_ssd.deinit();
     try nemotron_ssd.collect(o.only);
+    var attention_pv: @import("metal_attention_pv.zig").Suite = .{};
+    defer attention_pv.deinit();
+    try attention_pv.collect(a, device, queue, &kernels, o.only);
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);
     defer a.free(weight_source);

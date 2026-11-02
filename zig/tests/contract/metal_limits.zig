@@ -31,6 +31,19 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "attention pv ")) {
+        const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
+        const probe = @import("metal_attention_pv.zig");
+        if (std.mem.eql(u8, fun, probe.function)) {
+            const body = try probe.text(a, device, full);
+            return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+        }
+        const raw = for (sources.prefill) |f| {
+            if (std.mem.eql(u8, f.name, "attention_nax")) break f.text;
+        } else return error.UnknownLaunch;
+        const body = try tf.frags.sourceMode(device, a, raw, full);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
@@ -137,7 +150,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     } else return error.UnknownLaunch;
     const pre = if (frags) try preM5(a, head, text) else try std.mem.concat(a, u8, &.{ head, text });
     const here = if (frags and device.tensorUnits()) blk: {
-        const body = try std.mem.replaceOwned(u8, a, text, "#include \"../nax.h\"", sources.nax);
+        const body = try tf.frags.source(device, a, text);
         break :blk try std.mem.concat(a, u8, &.{ head, body });
     } else pre;
     return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
@@ -165,7 +178,7 @@ fn attentionLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaun
             if (std.mem.eql(u8, f.name, file)) break f.text;
         } else return error.UnknownLaunch;
         const pre = try preM5(a, "", text);
-        return .{ .decl = d, .function = fun, .here = if (tensor) try std.mem.replaceOwned(u8, a, text, "#include \"../nax.h\"", sources.nax) else pre, .pre_m5 = pre };
+        return .{ .decl = d, .function = fun, .here = if (tensor) try tf.frags.source(device, a, text) else pre, .pre_m5 = pre };
     }
     return .{ .decl = d, .function = fun, .here = sources.nemotron_glue, .pre_m5 = sources.nemotron_glue };
 }
@@ -185,13 +198,17 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
     }
     if (std.mem.indexOf(u8, d.name, " prompt ") != null) {
         const pre = try preM5(a, "", paged.prefill);
-        return .{ .decl = d, .function = fun, .here = if (tensor) try std.mem.replaceOwned(u8, a, paged.prefill, "#include \"../nax.h\"", sources.nax) else pre, .pre_m5 = pre };
+        return .{ .decl = d, .function = fun, .here = if (tensor) try tf.frags.source(device, a, paged.prefill) else pre, .pre_m5 = pre };
     }
     return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
+    if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
+        const full = std.mem.indexOf(u8, l.here, tf.frags.precision.define) != null;
+        std.debug.print("PRECISION limits {s}: shared P x V library {s}\n", .{ l.decl.name, if (full) "fp32" else "legacy" });
+    }
     const p = rig_.pipeline(device, l.here, l.function) catch |err| {
         std.debug.print("{s} {s}: no pipeline on this GPU ({t})\n", .{ if (control) "RED " else "FAIL", l.decl.name, err });
         return 1;

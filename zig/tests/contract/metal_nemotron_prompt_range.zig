@@ -1,6 +1,7 @@
 //! Nemotron's tf_attention_nax on the M5: attention_range at its arithmetic, fp32 P cut as the tensor units take it.
 const std = @import("std");
 const mtl = @import("metal");
+const tf = @import("tensorfold");
 const contract = @import("contract");
 const old = @import("metal_nemotron_attention.zig");
 const c = contract.spec;
@@ -11,7 +12,13 @@ const D = old.D;
 /// P with the tensor units' cut; P spread over [0, 1]; that case without the cut; a non-finite value at a masked key.
 const Case = enum { cut, spread, cutless, masked };
 
-fn name(k: Case) []const u8 {
+fn name(k: Case, full: bool) []const u8 {
+    if (full) return switch (k) {
+        .cut => "metal nemotron attention prompt nax, full fp32 P",
+        .spread => "metal nemotron attention prompt nax, full fp32 P spread over [0, 1]",
+        .cutless => "control: metal nemotron attention prompt nax, full fp32 P range with tensor-cut product",
+        .masked => "metal nemotron attention prompt nax, full fp32 P with a non-finite value at a masked key",
+    };
     return switch (k) {
         .cut => "metal nemotron attention prompt nax",
         .spread => "metal nemotron attention prompt nax, P spread over [0, 1]",
@@ -21,14 +28,16 @@ fn name(k: Case) []const u8 {
 }
 
 /// tf_attention_nax: 8 mma steps a score, fp32 SCALE * log2e, fast exp2; a 32-key block: 2 P x V steps, rescale, folds.
-fn form(n: usize, cut: f64) ar.Form {
+fn form(n: usize, cut: f64, full: bool) ar.Form {
     const blocks: f64 = @floatFromInt(n / 32 + 2);
-    return .{ .score = 9 * ar.mma_step, .fast_exp = true, .chunk_exp = false, .p_rel = 0, .p_cut = cut, .num = (2 * ar.mma_step + 1) * blocks + ar.mma_step + 2, .den = 3 * blocks + 6, .score_round = 4, .div = 2 };
+    const product: f64 = if (full) 32 else 2 * ar.mma_step;
+    return .{ .score = 9 * ar.mma_step, .fast_exp = true, .chunk_exp = false, .p_rel = 0, .p_cut = cut, .num = (product + 1) * blocks + ar.mma_step + 2, .den = 3 * blocks + 6, .score_round = 4, .div = 2 };
 }
 
 const Probe = struct {
     inner: old.Probe,
     case: Case,
+    full: bool,
     rig: *@import("rig.zig").Rig,
     point: []f64 = &.{},
     half: []f64 = &.{},
@@ -101,7 +110,7 @@ const Probe = struct {
         const vf = buf[most * D .. 2 * most * D];
         const w = buf[2 * most * D ..][0..most];
         const tau = buf[2 * most * D + most ..][0..most];
-        const cut: f64 = if (p.case == .cutless) 0 else ar.operand_cut;
+        const cut: f64 = if (p.full or p.case == .cutless) 0 else ar.operand_cut;
         var q: [D]f64 = undefined;
         for (0..old.kvh) |hk| {
             for (0..most * D) |i| {
@@ -110,7 +119,7 @@ const Probe = struct {
             }
             for (0..in.rows) |qi| for (hk * old.G..(hk + 1) * old.G) |h| {
                 const n = in.len + qi + 1;
-                const f = form(n, cut);
+                const f = form(n, cut, p.full);
                 in.query(qi, h, &q);
                 const o = in.outAt(qi, h);
                 ar.head(&q, kf, vf, n, D, old.scale, f, w, tau, want[o..][0..D], p.half[o..][0..D]);
@@ -149,15 +158,17 @@ pub const Suite = struct {
     /// Only on the tensor units, where the cut was measured; before the M5, attention_ref's bound stays.
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         if (!s.device.tensorUnits()) return;
+        const full = try tf.frags.precision.requested();
         for (std.enums.values(Case)) |k| {
-            if (only) |o| if (std.mem.indexOf(u8, name(k), o) == null) continue;
+            if (only) |o| if (std.mem.indexOf(u8, name(k, full), o) == null) continue;
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
-            p.* = .{ .inner = try old.Probe.init(s.a, s.device, s.queue, .prompt, 1, false), .case = k, .rig = undefined };
+            p.* = .{ .inner = try old.Probe.init(s.a, s.device, s.queue, .prompt, 1, false), .case = k, .full = full, .rig = undefined };
+            p.inner.prompt_full = full and k != .cutless;
             p.rig = &p.inner.rig;
             try s.probes.append(s.a, p);
             var spec = old.spec(.prompt, 1, false);
-            spec.name = name(k);
+            spec.name = name(k, full);
             if (k == .masked) {
                 spec.served = spec.served[0..1];
                 spec.known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };

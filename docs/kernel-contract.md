@@ -310,3 +310,13 @@ The sum fixtures use integers with exact FP32 partials below 2^24, including poo
 FP16 and BF16 simulations must fail in each of the three accumulator orders. Pooling declares its nine-term
 reduction separately from the physical grid width, so the small stress grid remains a valid launch.
 NaN and both infinity signs have explicit class controls. These registrations still require the device gates.
+
+## Shared M5 attention products
+
+The shared `attention_nax` defaults to the relaxed tensor P x V: float P is truncated to ten fraction bits.
+`TF_ATTENTION_PV_FP32=1` opts into full float P with FP32 FMA accumulation on M5; unset preserves the old arithmetic.
+The cut registration's independent formula includes the operand cut, while the full registration uses the full P.
+A third registration executes the real cut kernel against the full FP32 bound and must fail the shapes gate.
+The product fixture writes float output so BF16 rounding cannot conceal that control.
+Both modes still require exceptional-class, repeat, guard, shape, accumulator and separate launch checks.
+See [the mode's scope and device checks](recipes/m5-attention-precision.md); other families' rounding is unchanged.
