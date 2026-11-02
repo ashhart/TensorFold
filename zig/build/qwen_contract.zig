@@ -45,9 +45,7 @@ pub fn images(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Bui
 fn imageTests(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void {
     const files = b.addWriteFiles();
     const kernels = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/kernels.zig"), .target = b.graph.host });
-    const kernel_options = b.addOptions();
-    kernel_options.addOption(bool, "with_kernels", true);
-    kernels.addOptions("kernel_options", kernel_options);
+    kernels.addOptions("kernel_options", @import("cuda_runtime.zig").kernelOptions(b, true, null));
     for (@import("cuda_kernels.zig").kernels) |k| kernels.addAnonymousImport(b.fmt("fatbin_{s}", .{k.name}), .{
         .root_source_file = files.add(b.fmt("{s}.fatbin", .{k.name}), k.name),
     });

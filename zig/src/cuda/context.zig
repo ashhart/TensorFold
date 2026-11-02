@@ -21,6 +21,14 @@ pub const Context = struct {
     }
 
     pub fn init(d: *const Driver, ordinal: c_int) Error!Context {
+        // a -Dgpu server's images run on that one SM: refuse another GPU here, before any engine loads an image
+        if (@import("kernels.zig").built_sm) |sm| {
+            var buf: [192]u8 = undefined;
+            if (@import("driver.zig").gpuRefusal(sm, try d.capability(ordinal), ordinal, &buf)) |why| {
+                std.log.err("{s}", .{why});
+                return error.WrongGpu;
+            }
+        }
         var dev: abi.Device = 0;
         try d.check(d.api.cuDeviceGet(&dev, ordinal), "cuDeviceGet");
         var ctx: abi.Context = null;
