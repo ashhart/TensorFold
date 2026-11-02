@@ -336,8 +336,11 @@ fn withoutExtra(note: []const u8) []const u8 {
     var end = note.len;
     for ([_][]const u8{ files_head, split_head }) |h| if (std.mem.indexOf(u8, note, h)) |i| {
         var at = i;
-        if (at > 0 and note[at - 1] == '\n') at -= 1;
-        if (at > 0 and note[at - 1] == '\n') at -= 1;
+        var breaks: usize = 0;
+        while (at > 0 and breaks < 2) : (breaks += 1) {
+            if (note[at - 1] == '\n') at -= 1 else if (note[at - 1] != '\r') break;
+            if (at > 0 and note[at - 1] == '\r') at -= 1; // a carriage return belongs to the line break
+        }
         if (at < end) end = at;
     };
     return note[0..end];
@@ -562,19 +565,9 @@ test "a memory marker made of text parts keeps its note" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const head = try json.newObject(a);
-    try head.put(a, "type", .{ .string = "text" });
-    try head.put(a, "text", .{ .string = marker_line ++ "\n" });
-    const tail = try json.newObject(a);
-    try tail.put(a, "type", .{ .string = "text" });
-    try tail.put(a, "text", .{ .string = "STORED-NOTE" });
-    const parts = try a.alloc(Value, 2);
-    parts[0] = .{ .object = head };
-    parts[1] = .{ .object = tail };
-    const m = try json.newObject(a);
-    try m.put(a, "role", .{ .string = "user" });
-    try m.put(a, "content", .{ .array = parts });
-    try std.testing.expectEqualStrings("STORED-NOTE", (try markerBody(a, .{ .object = m })).?);
+    const raw = "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"" ++ marker_line ++ "\\n\"},{\"type\":\"text\",\"text\":\"STORED-NOTE\"}]}";
+    const m = (try json.parseText(a, raw)).ok;
+    try std.testing.expectEqualStrings("STORED-NOTE", (try markerBody(a, m)).?);
 }
 
 test "a memory marker's note starts after a carriage return" {
@@ -593,4 +586,11 @@ test "a remembered file path drops a trailing carriage return" {
     try pathsFromNote(a, &list, "## Files read and changed\n- src/a.zig\r\n");
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
     try std.testing.expectEqualStrings("src/a.zig", list.items[0]);
+}
+
+test "a generated section after carriage returns is left out of the note" {
+    const unix = "Goal\n\n" ++ files_head ++ "- src/a.zig\n";
+    const crlf = "Goal\r\n\r\n" ++ files_head ++ "- src/a.zig\r\n";
+    try std.testing.expectEqualStrings("Goal", withoutExtra(unix));
+    try std.testing.expectEqualStrings("Goal", withoutExtra(crlf));
 }
