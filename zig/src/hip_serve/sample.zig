@@ -52,8 +52,25 @@ fn larger(_: void, a: Candidate, b: Candidate) bool {
 
 /// draw(): greedy (no sampling or temperature <= 0) is the argmax; else `choose` at `position` over the candidates.
 pub fn draw(gpa: Allocator, row: []const u16, dtype: Dtype, sampling: ?lanes.Sampling, position: u64) !u32 {
-    const s = sampling orelse return argmax(row, dtype);
-    if (s.temperature <= 0.0) return argmax(row, dtype);
+    if (sampling == null or sampling.?.temperature <= 0) return argmax(row, dtype);
+    const values = try gpa.alloc(f32, row.len);
+    defer gpa.free(values);
+    for (values, 0..) |*v, i| v.* = widen(row, dtype, i);
+    return drawWide(gpa, values, sampling, position);
+}
+
+/// Already processed FP32 scores retain their precision through ranking and the keyed sampler.
+pub fn drawWide(gpa: Allocator, row: []const f32, sampling: ?lanes.Sampling, position: u64) !u32 {
+    if (row.len == 0) return error.NoAllowedToken;
+    if (sampling == null or sampling.?.temperature <= 0) {
+        var best: usize = 0;
+        for (row, 0..) |v, i| {
+            if (std.math.isNan(row[best])) break;
+            if (std.math.isNan(v) or v > row[best]) best = i;
+        }
+        return @intCast(best);
+    }
+    const s = sampling.?;
     const width = row.len;
     const count = if (s.top_k != 0) @min(width, @as(usize, s.top_k) + MARGIN) else width;
     const best = try gpa.alloc(Candidate, count);
@@ -61,10 +78,10 @@ pub fn draw(gpa: Allocator, row: []const u16, dtype: Dtype, sampling: ?lanes.Sam
     var filled: usize = 0;
     // the whole row when top_k is 0 (choose orders it), else the top `count` by value then id in one pass
     if (count == width) {
-        for (best, 0..) |*c, i| c.* = .{ .value = widen(row, dtype, i), .id = @intCast(i) };
+        for (best, 0..) |*c, i| c.* = .{ .value = row[i], .id = @intCast(i) };
         filled = width;
     } else for (0..width) |i| {
-        const c: Candidate = .{ .value = widen(row, dtype, i), .id = @intCast(i) };
+        const c: Candidate = .{ .value = row[i], .id = @intCast(i) };
         if (filled == count and !larger({}, c, best[count - 1])) continue;
         var at = if (filled < count) filled else count - 1;
         if (filled < count) filled += 1;
