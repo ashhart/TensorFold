@@ -186,6 +186,11 @@ fn join(
     };
 }
 
+/// The family's Info.reasoning: false when it declares `pub const reasoning = false` (no reasoning block).
+fn reasoning(comptime F: type) bool {
+    return if (@hasDecl(F, "reasoning")) F.reasoning else true;
+}
+
 /// The family's refusal of --slide or --mtp-confidence, when it names one.
 fn flagRefused(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.rope_yarn != null) return "--rope-yarn: the native HIP engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
@@ -271,7 +276,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = @intCast(loaded.streams), .context_window = @intCast(r.options.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = @intCast(loaded.streams), .context_window = @intCast(r.options.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = true, .reasoning = reasoning(F) });
     h.host.memory = .{ .read = readMemory };
     try h.host.start();
     served = true;
@@ -306,6 +311,14 @@ pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     }
     problem.* = try std.fmt.allocPrint(a, "the native HIP engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
     return false;
+}
+
+test "a HIP family declares replies without reasoning with `pub const reasoning = false`; others keep the default" {
+    try std.testing.expect(reasoning(struct {}));
+    try std.testing.expect(!reasoning(struct {
+        pub const reasoning = false;
+    }));
+    inline for (registry) |F| try std.testing.expect(reasoning(F));
 }
 
 test "every registered family is listed for capabilities" {
