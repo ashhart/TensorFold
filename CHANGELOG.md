@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- DeepSeek-V4.1 reads its pack's weight spans past the page cache with O_DIRECT, so a load no longer fills the cache first (`TF_LOAD_DIRECT=0` keeps buffered reads; part of #1857) (#1924).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).
