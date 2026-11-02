@@ -545,7 +545,7 @@ fn pathsFromNote(a: Allocator, list: *std.ArrayList([]const u8), note: []const u
         const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
         const line = rest[0..end];
         if (std.mem.startsWith(u8, line, "- ")) {
-            const p = std.mem.trim(u8, line[2..], " \t");
+            const p = std.mem.trim(u8, line[2..], " \t\r"); // a carriage return is not part of the path
             if (p.len > 0) try addUnique(a, list, p);
         } else if (line.len > 0) break;
         if (end == rest.len) break;
@@ -583,4 +583,14 @@ test "a memory marker's note starts after a carriage return" {
     const a = arena.allocator();
     const m = try msg(a, "user", marker_line ++ "\r\nSTORED-NOTE");
     try std.testing.expectEqualStrings("STORED-NOTE", (try markerBody(a, m)).?);
+}
+
+test "a remembered file path drops a trailing carriage return" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var list: std.ArrayList([]const u8) = .empty;
+    try pathsFromNote(a, &list, "## Files read and changed\n- src/a.zig\r\n");
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqualStrings("src/a.zig", list.items[0]);
 }
