@@ -67,6 +67,6 @@ test "GLM-OCR HIP contract: pointwise, rotary, layout and norms through all comm
         try std.testing.expect(record.launch.threads <= try function.attribute(.max_threads_per_block));
         checked += 1;
     }
-    try std.testing.expectEqual(@as(usize, 11), checked);
+    try std.testing.expectEqual(@as(usize, 12), checked);
     std.debug.print("GLM-OCR HIP contract: {d} kernels, {d} controls caught, {d} current launch records\n", .{ tally.kernels, tally.caught, checked });
 }

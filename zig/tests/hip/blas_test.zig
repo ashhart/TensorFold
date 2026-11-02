@@ -92,6 +92,10 @@ test "HIP BLAS device: BF16 projection preserves inputs, guards and exact FP32 s
     var b = try hip.blas.Blas.open(stream);
     defer b.close();
     const cases = [_][3]usize{ .{ 1, 1536, 1536 }, .{ 4, 1024, 1176 }, .{ 7, 9216, 1536 }, .{ 2, 1536, 4608 }, .{ 17, 2048, 1536 }, .{ 4, 1536, 2048 }, .{ 4, 1024, 1536 }, .{ 2, 59392, 1536 } };
+    var dimensions: [cases.len]hip.blas_fixed.Dimensions = undefined;
+    for (cases, &dimensions) |shape, *d| d.* = .{ .n = shape[1], .k = shape[2] };
+    var fixed = try hip.blas_fixed.Fixed.open(stream, &dimensions);
+    defer fixed.close();
     for (cases) |shape| {
         const m, const n, const k = shape;
         if ((try ctx.memInfo()).free < (m * k + n * k + m * n + 32) * 2 + (128 << 20)) return error.NoDeviceBudget;
@@ -117,8 +121,8 @@ test "HIP BLAS device: BF16 projection preserves inputs, guards and exact FP32 s
         var dy = try hip.DeviceBuffer.alloc(&r, out.len * 2);
         defer dy.free();
         try dy.fill8(0xa5);
-        for (0..5) |_| {
-            try b.project(dx.base(), dw.base(), dy.base() + 32, m, n, k);
+        for (0..10) |repeat| {
+            if (repeat < 5) try b.project(dx.base(), dw.base(), dy.base() + 32, m, n, k) else try fixed.project(dx.base(), dw.base(), dy.base() + 32, m, n, k);
             try stream.synchronize();
             try dy.download(0, std.mem.sliceAsBytes(out));
             try std.testing.expectEqualSlices(u16, want, out[16..][0 .. m * n]);

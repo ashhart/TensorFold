@@ -37,6 +37,12 @@ pub const records = [_]Record{
         .{ .vgprs = 8, .sgprs = 10, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
         .{ .vgprs = 8, .sgprs = 7, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
     } },
+    .{ .launch = .{ .name = "GLM-OCR tf_glmocr_silu_mul_packed", .symbol = "tf_glmocr_silu_mul_packed", .image = "glm_ocr", .threads = 256 }, .usage = .{
+        .{ .vgprs = 11, .sgprs = 20, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 11, .sgprs = 20, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 11, .sgprs = 20, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 11, .sgprs = 23, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+    } },
     .{ .launch = .{ .name = "GLM-OCR tf_glmocr_merge_layout", .symbol = "tf_glmocr_merge_layout", .image = "glm_ocr", .threads = 256 }, .usage = .{
         .{ .vgprs = 13, .sgprs = 20, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
         .{ .vgprs = 13, .sgprs = 20, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
@@ -50,10 +56,10 @@ pub const records = [_]Record{
         .{ .vgprs = 11, .sgprs = 27, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
     } },
     .{ .launch = .{ .name = "GLM-OCR tf_glmocr_norm", .symbol = "tf_glmocr_norm", .image = "glm_ocr", .threads = 256 }, .usage = .{
-        .{ .vgprs = 18, .sgprs = 27, .lds = 1024, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 17, .sgprs = 27, .lds = 1024, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 17, .sgprs = 27, .lds = 1024, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 16, .sgprs = 27, .lds = 1024, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 16, .sgprs = 30, .lds = 1024, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 15, .sgprs = 30, .lds = 1024, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 15, .sgprs = 30, .lds = 1024, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 15, .sgprs = 30, .lds = 1024, .private = 0, .bound = 256, .wave = 32 },
     } },
     .{ .launch = .{ .name = "GLM-OCR tf_glmocr_vision_rope", .symbol = "tf_glmocr_vision_rope", .image = "glm_ocr", .threads = 256 }, .usage = .{
         .{ .vgprs = 18, .sgprs = 14, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
