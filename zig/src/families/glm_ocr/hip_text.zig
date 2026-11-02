@@ -71,6 +71,10 @@ test "GLM-OCR HIP decoder: cache and text budgets refuse before device allocatio
     const ops: Ops = undefined;
     const blas: hip.blas.Blas = undefined;
     const flash: attention.Library = undefined;
+    var graph: Graph = undefined;
+    graph.logit_rows = 32;
+    try std.testing.expectError(error.Invalid, graph.logitsRows(0, 0));
+    try std.testing.expectError(error.Invalid, graph.logitsRows(0, 33));
     try std.testing.expectError(error.Invalid, Cache.init(stream, 0, 0));
     try std.testing.expectError(error.Invalid, Cache.init(stream, c.context + 1, 0));
     try std.testing.expectError(error.GlmOcrCacheDoesNotFit, Cache.init(stream, 512, 0));
@@ -148,6 +152,7 @@ pub const Graph = struct {
     lse: u64,
     counter: u64,
     logits: u64,
+    logit_rows: usize,
     positions: u64,
     max_rows: usize,
 
@@ -168,10 +173,11 @@ pub const Graph = struct {
         const inverse_offset = bytes;
         const counter_offset = bytes + 256;
         const logits_offset = bytes + 512;
-        bytes += 512 + c.vocab * 2;
+        const logit_rows: usize = @min(max_rows, 32);
+        bytes += 512 + logit_rows * c.vocab * 2;
         if (bytes > budget) return error.GlmOcrTextDoesNotFit;
         if (weights.buffer.r != stream.r or ops.module.r != stream.r or blas.stream.r != stream.r or blas.stream.handle != stream.handle) return error.Invalid;
-        var fixed = try hip.blas_fixed.Fixed.open(stream, &.{ .{ .n = c.query, .k = c.hidden }, .{ .n = c.kv, .k = c.hidden }, .{ .n = c.hidden, .k = c.query }, .{ .n = c.ffn * 2, .k = c.hidden }, .{ .n = c.hidden, .k = c.ffn } });
+        var fixed = try hip.blas_fixed.Fixed.open(stream, &.{ .{ .n = c.query, .k = c.hidden }, .{ .n = c.kv, .k = c.hidden }, .{ .n = c.hidden, .k = c.query }, .{ .n = c.ffn * 2, .k = c.hidden }, .{ .n = c.hidden, .k = c.ffn }, .{ .n = c.vocab, .k = c.hidden } });
         errdefer fixed.close();
         var buffer = try hip.DeviceBuffer.alloc(stream.r, bytes);
         errdefer buffer.free();
@@ -179,7 +185,7 @@ pub const Graph = struct {
         try buffer.upload(inverse_offset, std.mem.asBytes(&inverse));
         var slots: [9]u64 = undefined;
         for (&slots, offsets) |*slot, offset| slot.* = try buffer.address(offset);
-        return .{ .stream = stream, .weights = weights, .ops = ops, .blas = blas, .flash = flash, .fixed = fixed, .buffer = buffer, .slots = slots, .inverse = try buffer.address(inverse_offset), .lse = try buffer.address(lse_offset), .counter = try buffer.address(counter_offset), .logits = try buffer.address(logits_offset), .positions = try buffer.address(positions_offset), .max_rows = max_rows };
+        return .{ .stream = stream, .weights = weights, .ops = ops, .blas = blas, .flash = flash, .fixed = fixed, .buffer = buffer, .slots = slots, .inverse = try buffer.address(inverse_offset), .lse = try buffer.address(lse_offset), .counter = try buffer.address(counter_offset), .logits = try buffer.address(logits_offset), .logit_rows = logit_rows, .positions = try buffer.address(positions_offset), .max_rows = max_rows };
     }
     pub fn deinit(graph: *Graph) void {
         graph.stream.synchronize() catch {};
@@ -331,6 +337,13 @@ pub const Graph = struct {
     pub fn lastLogits(graph: *const Graph, normed: u64, rows: usize) !u64 {
         if (rows == 0 or rows > graph.max_rows) return error.Invalid;
         try graph.blas.project(normed + (rows - 1) * c.hidden * 2, try graph.weights.get("lm_head.weight"), graph.logits, 1, c.vocab, c.hidden);
+        return graph.logits;
+    }
+
+    /// All verification logits share the retained single-row algorithm and stay on the GPU for the shared drawer.
+    pub fn logitsRows(graph: *const Graph, normed: u64, rows: usize) !u64 {
+        if (rows == 0 or rows > graph.logit_rows) return error.Invalid;
+        try graph.fixed.project(normed, try graph.weights.get("lm_head.weight"), graph.logits, rows, c.vocab, c.hidden);
         return graph.logits;
     }
 };
