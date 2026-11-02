@@ -176,7 +176,7 @@ test "real hosts: a disaggregated model refuses by name before any node starts, 
     const serve: []const []const u8 = &.{ "serve", "q", "--cluster", file, "--leader", "mac" };
     const node: []const []const u8 = &.{ "node", "--name", "mac", "--model", "q", "--cluster", file };
     const cases = [_]Case{
-        .{ .links = "", .library = ", \"library\": \"/bin/sh\"", .args = serve, .code = 1, .err = "no link between mac and gb10" },
+        .{ .links = "", .library = ", \"library\": \"/bin/sh\"", .args = serve, .code = 1, .err = "no link between gb10 and mac" },
         .{ .links = cx_link, .library = "", .args = serve, .code = 3, .err = "mac names no MCDMA library" },
         .{ .links = cx_link, .library = ", \"library\": \"/nonexistent/libmcdma-fabric.dylib\"", .args = serve, .code = 3, .err = "no MCDMA library at /nonexistent/libmcdma-fabric.dylib" },
         .{ .links = cx_link, .library = "", .args = node, .code = 3, .err = "mac names no MCDMA library" },
@@ -248,4 +248,36 @@ test "serve MODEL checks only the model it serves: another model in the file tha
         try std.testing.expect(has(got.out, "model q: disaggregated"));
         try std.testing.expect(std.mem.indexOf(u8, got.out, "model k:") == null);
     }
+}
+
+test "serve refuses before starting any node when another node's library, link or window is wrong, not only its own" {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/cluster.json", .{tmp.sub_path});
+    const serve: []const []const u8 = &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--dry-run" };
+    // the GB10 names no library: its node would stop with exit 3 after serve had started it
+    const bare = try std.mem.replaceOwned(u8, a, try pairFile(a, cx_link, ", \"library\": \"/bin/sh\""), ", \"library\": \"/opt/mcdma/libmcdma-fabric.so\"", "");
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = bare });
+    const lib = try run(a, serve);
+    try std.testing.expectEqual(@as(u8, 3), lib.code);
+    try std.testing.expect(has(lib.err, "gb10 names no MCDMA library"));
+    try std.testing.expect(std.mem.indexOf(u8, lib.out, "starts tensorfold node") == null);
+    // two GB10s prefill for the Mac: the Mac reaches both, but nothing joins the two GB10s
+    const three =
+        \\{ "schema": "tensorfold-cluster/1", "cluster": "three",
+        \\  "nodes": [ { "name": "mac", "address": "192.0.2.1", "backend": "metal", "library": "/bin/sh" },
+        \\             { "name": "gb10", "address": "192.0.2.2", "backend": "cuda", "library": "/opt/mcdma/libmcdma-fabric.so" },
+        \\             { "name": "gb10b", "address": "192.0.2.4", "backend": "cuda", "library": "/opt/mcdma/libmcdma-fabric.so" } ],
+        \\  "links": [ { "name": "mb", "kind": "cx5", "ends": [ { "node": "mac", "device": "rdma_mcrdma0", "via": "en7/192.0.2.2", "port": 7490, "gid": 0 }, { "node": "gb10", "device": "r0", "via": "e0/192.0.2.1", "port": 7491, "gid": 1 } ] },
+        \\             { "name": "mb2", "kind": "cx5", "ends": [ { "node": "mac", "device": "rdma_mcrdma1", "via": "en8/192.0.2.4", "port": 7492, "gid": 0 }, { "node": "gb10b", "device": "r0", "via": "e0/192.0.2.1", "port": 7493, "gid": 1 } ] } ],
+        \\  "models": { "q": { "path": "/models/q", "mode": "disaggregated", "prefill": ["gb10", "gb10b"], "decode": ["mac"] } } }
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = three });
+    const link = try run(a, serve);
+    try std.testing.expectEqual(@as(u8, 1), link.code);
+    try std.testing.expect(has(link.err, "no link between gb10 and gb10b"));
+    try std.testing.expect(std.mem.indexOf(u8, link.out, "starts tensorfold node") == null);
 }

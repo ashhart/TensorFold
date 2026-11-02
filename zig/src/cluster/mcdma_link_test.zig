@@ -182,3 +182,23 @@ test "the plan digest is the same from either end and file order, and changes wi
     try std.testing.expect(mcdma_link.planDigest(c, longer, names, .{}) != d);
     try std.testing.expect(mcdma_link.planDigest(c, m, names, .{ .staging_bytes = 2 << 20 }) != d);
 }
+
+test "every node of a model checked as it will check itself: a Mac's window against the kext's regions even from a CUDA leader" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = try parse(a, example);
+    const m = c.model("qwen-27b").?;
+    var why: []const u8 = "";
+    try mcdma_link.specAll(a, c, m, .{}, &why);
+    // the GB10 (CUDA) alone passes these sizes; its Mac peer (node-a) does not, wherever the check runs
+    const big: mcdma_link.Sizes = .{ .step_bytes = 64 * mib };
+    _ = try mcdma_link.spec(a, c, m, "node-e", .{ .mac = false, .sizes = big }, &why);
+    try std.testing.expectError(error.TooManyRegions, mcdma_link.specAll(a, c, m, big, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "node-a's window"));
+    var bare = c;
+    bare.nodes = try a.dupe(config.Node, c.nodes);
+    bare.nodes[4].library = null;
+    try std.testing.expectError(error.NoLibrary, mcdma_link.specAll(a, bare, m, .{}, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why, "node-e names no MCDMA library") != null);
+}
