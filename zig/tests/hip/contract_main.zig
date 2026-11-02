@@ -18,6 +18,7 @@ const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
+const heads_rows_k = @import("contract_heads_rows.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
 const kit = @import("contract_kit.zig");
@@ -152,6 +153,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var pair = pair_k.Pair.init(a, &r, s, &l);
     defer pair.deinit();
     try kernels.append(a, pair.kernel());
+    var heads_rows = heads_rows_k.HeadsRows.init(a, &r, s, &l);
+    defer heads_rows.deinit();
+    try kernels.append(a, heads_rows.kernel());
     var gates: [3]gate_k.Gate = undefined;
     for (&gates, std.enums.values(gate_k.Which)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&gates) |*m| m.deinit();

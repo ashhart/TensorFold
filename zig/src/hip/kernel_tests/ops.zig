@@ -104,6 +104,38 @@ test "casts, sums, column copies and cache writes give torch's bits" {
     }
 }
 
+test "head-major attention rows become row-major o_proj input, rounded once to the activation or kept in fp32" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    const o = t.ops(&t.on);
+    var rng: rig.Rng = .{ .state = 0x4EAD };
+    const len = 37;
+    const heads = 5;
+    const d = 24;
+    const n = len * heads * d;
+    const ha = try gpa.alloc(f32, n);
+    defer gpa.free(ha);
+    for (ha) |*x| x.* = @floatCast(rng.normal() * 9.1);
+    var att = try t.upload(ha);
+    defer att.free();
+    var half = try t.alloc(n * 2);
+    defer half.free();
+    var wide = try t.alloc(n * 4);
+    defer wide.free();
+    try o.headsRows(at(att), tensor(half, act(t)), len, heads, d);
+    try o.headsRows(at(att), tensor(wide, .f32), len, heads, d);
+    try t.stream.synchronize();
+    const gh = try rig.download(u16, half);
+    defer gpa.free(gh);
+    const gw = try rig.download(f32, wide);
+    defer gpa.free(gw);
+    for (0..len) |r| for (0..heads) |h| for (0..d) |j| {
+        const x = ha[(h * len + r) * d + j];
+        try std.testing.expectEqual(round(t, x), gh[(r * heads + h) * d + j]);
+        try std.testing.expectEqual(x, gw[(r * heads + h) * d + j]);
+    };
+}
+
 test "argmax and top-k follow torch's order: the larger value, then the lower index" {
     const t = try Rig.open(1 << 20);
     defer t.close();

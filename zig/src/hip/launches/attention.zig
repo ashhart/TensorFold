@@ -134,6 +134,17 @@ pub fn tf_attn_gate(l: *const Launcher, att: CF, qg: C, out: P, kind: c_int, len
     try l.flat(l.op.attn_gate, @as(i64, len) * heads * d, s, &a);
 }
 
+pub fn tf_heads_rows(l: *const Launcher, att: CF, out: P, kind: c_int, len: c_int, heads: c_int, d: c_int, s: S) Error!void {
+    var a: Args = .{};
+    try a.add(ad(att));
+    try a.add(ad(out));
+    try a.add(kind);
+    try a.add(len);
+    try a.add(heads);
+    try a.add(d);
+    try l.flat(l.op.heads_rows, @as(i64, len) * heads * d, s, &a);
+}
+
 pub fn tf_kv_write(l: *const Launcher, src: C, cache: P, kind: c_int, len: c_int, kv_heads: c_int, d: c_int, total: c_int, pos0: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(src));

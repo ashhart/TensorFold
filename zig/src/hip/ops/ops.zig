@@ -56,6 +56,7 @@ pub const Ops = struct {
     }
 
     pub const attnGate = attention.attnGate;
+    pub const headsRows = attention.headsRows;
     pub const ropePrefill = attention.ropePrefill;
     pub const qkRope = attention.qkRope;
     pub const ropeDecode = attention.ropeDecode;

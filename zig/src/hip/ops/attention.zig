@@ -14,6 +14,11 @@ pub fn attnGate(o: Ops, att: u64, qg: Tensor, out: Tensor, len: usize, heads: us
     try o.l.tf_attn_gate(f(att), p(qg.ptr), p(out.ptr), @backingInt(out.kind), int(len), int(heads), int(d), @intFromBool(rows_major), o.stream);
 }
 
+/// The causal kernel's fp32 (heads, len, d) rows as (len, heads * d) of `out`'s kind, rounded once: o_proj's input.
+pub fn headsRows(o: Ops, att: u64, out: Tensor, len: usize, heads: usize, d: usize) Error!void {
+    try o.l.tf_heads_rows(f(att), p(out.ptr), @backingInt(out.kind), int(len), int(heads), int(d), o.stream);
+}
+
 /// Prefill RoPE of x (len, heads, d), rounded to x's kind, stored as `out` kind at out[h * s_head + r * s_row + j].
 pub fn ropePrefill(o: Ops, x: Tensor, out: Tensor, s_head: usize, s_row: usize, len: usize, heads: usize, d: usize, rotary: usize, pos0: usize, theta: f32) Error!void {
     try o.l.tf_rope_prefill(p(x.ptr), @backingInt(x.kind), p(out.ptr), @backingInt(out.kind), @intCast(s_head), @intCast(s_row), int(len), int(heads), int(d), int(rotary), int(pos0), theta, o.stream);
