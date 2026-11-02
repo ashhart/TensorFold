@@ -66,7 +66,7 @@ fn resultTarget(a: Allocator, href_raw: []const u8) Allocator.Error!?[]const u8 
         const end = std.mem.indexOfScalarPos(u8, href, start, '&') orelse href.len;
         return try decode(a, href[start..end]);
     }
-    if (std.mem.startsWith(u8, href, "http://") or std.mem.startsWith(u8, href, "https://")) return href;
+    if (std.ascii.startsWithIgnoreCase(href, "http://") or std.ascii.startsWithIgnoreCase(href, "https://")) return href; // HTTP:// is the same scheme
     return null;
 }
 
@@ -162,6 +162,17 @@ test "DuckDuckGo results: targets decoded, ads skipped, snippets read" {
     try std.testing.expectEqualStrings("The std.Io interface \u{2014} new.", results[0].snippet);
     try std.testing.expectEqualStrings("https://example.org/page", results[1].url);
     try std.testing.expectEqualStrings("", results[1].snippet);
+}
+
+test "a search result keeps a link whose scheme is written in capitals" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"HTTP://example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("HTTP://example.org/page", results[0].url);
+    try std.testing.expectEqualStrings("Example", results[0].title);
 }
 
 test "DuckDuckGo's lite page reads the same way" {

@@ -14,6 +14,7 @@ const registry = @import("core").registry;
 const quant = @import("core").quant;
 const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
+const stream_pick = @import("stream_pick.zig");
 
 const Error = runtime.Error;
 
@@ -341,22 +342,11 @@ pub const Kernels = struct {
     ) Error!void {
         const b = bitIndex(a.bits).?;
         var sides = sides_in;
-        // a pair's lane carries half as many output columns: a gate column and its up column make one
-        const pair_div: c_int = if (sides.pair_cols > 0) 2 else 1;
         var lpc_log2: u5 = 0;
         while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
-        const ri: usize = if (a.m == 1) 0 else if (a.m == 2) 1 else 2;
-        // the widest column count that still fills the card with waves, within the registers the lane's code words take
-        var pick: usize = 0;
-        var c: usize = stream_cbs.len;
-        while (c > 0) {
-            c -= 1;
-            if (stream_cbs[c] * stream_rows[ri] > 16 or stream_cbs[c] * a.bits > stream_code_words) continue;
-            pick = c;
-            const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[c], pair_div);
-            if (@as(u64, cdiv(total_n, per_block)) * stream_waves * @as(u64, @intCast(items)) * cdiv(a.m, stream_rows[ri]) >= streams_wanted) break;
-        }
-        const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[pick], pair_div);
+        const ri = stream_pick.rowTile(a.m);
+        const tile = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, total_n, items, sides.pair_cols > 0);
+        const per_block = tile.per_block;
         var blocks: c_uint = cdiv(total_n, per_block);
         if (sides.count > 0) {
             blocks = 0;
@@ -376,7 +366,7 @@ pub const Kernels = struct {
             else => 2,
         }));
         const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
-        const f = table[b][ri][pick].?;
+        const f = table[b][ri][tile.at].?;
         try go(r, f, .{ .x = blocks, .y = cdiv(a.m, stream_rows[ri]), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
     }
 
@@ -596,4 +586,5 @@ test "the lane groups of a row tile" {
 
 test {
     _ = mlx_entries;
+    _ = stream_pick;
 }

@@ -2,8 +2,7 @@ const std = @import("std");
 const shared = @import("dsv41_shared.zig");
 const units = @import("dsv41_units.zig");
 pub fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, images: bool) *std.Build.Module {
-    const options = b.addOptions();
-    options.addOption(bool, "with_kernels", images);
+    const options = @import("cuda_runtime.zig").kernelOptions(b, images, null);
     const cuda = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/root.zig"), .target = target, .optimize = .Debug, .link_libc = true });
     cuda.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     cuda.addOptions("kernel_options", options);

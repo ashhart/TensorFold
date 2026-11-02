@@ -113,6 +113,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         _ = h.admitted.orderedRemove(i);
         break;
     };
+    @import("lane_host_ledger.zig").release(h, job); // it promises again when it is next taken
     const others = h.admitted.items.len;
     const waits = others > 0 and blk: { // with nothing else running no memory comes back: it would wait forever
         h.queued.insert(h.gpa, 0, job) catch break :blk false;

@@ -73,6 +73,7 @@ pub const Config = struct {
             .taps = @splat(0),
             .n_taps = 0,
         };
+        try slidingLayers(o, c.layers);
         const taps = d.object.get("target_layer_ids") orelse return error.BadDraftConfig;
         if (taps != .array or taps.array.items.len == 0 or taps.array.items.len > c.taps.len) return error.BadDraftConfig;
         for (taps.array.items, 0..) |t, i| {
@@ -90,6 +91,19 @@ pub const Config = struct {
         return c;
     }
 };
+
+/// CUDA's drafter runs every layer over a sliding ring; no declaration may silently select full attention.
+fn slidingLayers(o: std.json.ObjectMap, layers: usize) !void {
+    const enabled = o.get("use_sliding_window") orelse return error.BadDraftConfig;
+    if (enabled != .bool) return error.BadDraftConfig;
+    if (!enabled.bool) return error.UnsupportedDraftConfig;
+    const types = o.get("layer_types") orelse return error.BadDraftConfig;
+    if (types != .array or types.array.items.len != layers) return error.BadDraftConfig;
+    for (types.array.items) |kind| {
+        if (kind != .string) return error.BadDraftConfig;
+        if (!std.mem.eql(u8, kind.string, "sliding_attention")) return error.UnsupportedDraftConfig;
+    }
+}
 
 /// The draft's rope_parameters, refused unless unscaled: its kernels rope with theta alone.
 fn plainRope(o: std.json.ObjectMap) !std.json.ObjectMap {
@@ -149,4 +163,8 @@ test "a drafter directory is DFlash2's by its config's dflash_config; a checkpoi
     try std.testing.expect(declared(a, io, root));
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "[1]" });
     try std.testing.expect(!declared(a, io, root));
+}
+
+test {
+    _ = @import("cuda_draft_config_test.zig");
 }

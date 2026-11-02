@@ -1,8 +1,18 @@
 name: App and mobile checks
 
 on:
+  # Only when the app can be affected: app/ (mobile is app/mobile), the repo README its docs test reads, and this file.
+  # Engine-only changes skip it; with ~4 runners at once its runs held main's engine checks for over an hour (2 Nov).
   pull_request:
+    paths:
+      - 'app/**'
+      - 'README.md'
+      - '.github/workflows/app.yml'
   push:
+    paths:
+      - 'app/**'
+      - 'README.md'
+      - '.github/workflows/app.yml'
   workflow_dispatch:
 
 permissions:
