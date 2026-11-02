@@ -9,6 +9,64 @@ fn dark(row: usize) bool {
     return row % 5 == 3;
 }
 
+test "lfm2 dspark: first normalization taps each row into its masked owned destination and leaves other buffers untouched" {
+    var rig = try base.Rig.init();
+    defer rig.deinit();
+    const cols = 3;
+    for ([_]usize{ 1, 16, 32, 2048 }) |rows| for ([_]u32{ 0b010, 0b101, 0b111 }) |mask| for ([_]bool{ false, true }) |nonfinite| {
+        const count = rows * c.hidden;
+        const h = try rig.buffer(u16, count);
+        defer h.deinit();
+        const normalized = try rig.buffer(u16, count);
+        defer normalized.deinit();
+        const gain = try rig.buffer(u16, c.hidden);
+        defer gain.deinit();
+        @memset(gain.slice(u16, c.hidden), 0x3f80);
+        // odd rows land in another buffer, as a window's streams land in their own stages
+        const dst = [2]mtl.Buffer{ try rig.buffer(u16, count * cols), try rig.buffer(u16, count * cols) };
+        defer for (dst) |b| b.deinit();
+        const table = try rig.buffer(u64, rows);
+        defer table.deinit();
+        base.noise(30, h.slice(u16, count), 2);
+        if (nonfinite) {
+            h.slice(u16, count)[0] = 0x7fc0;
+            h.slice(u16, count)[1] = 0x7f80;
+            h.slice(u16, count)[2] = 0xff80;
+        }
+        const state = try std.testing.allocator.dupe(u16, h.slice(u16, count));
+        defer std.testing.allocator.free(state);
+        for (dst) |b| @memset(b.slice(u16, count * cols), 0x7fc0);
+        for (table.slice(u64, rows), 0..) |*at, row| at.* = if (dark(row)) 0 else dst[row % 2].gpuAddress() + row * cols * c.hidden * 2;
+        const cb = rig.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        e.setPipeline(rig.k.get("lfm2_norm_tap"));
+        e.setBuffer(h, 0, 0);
+        e.setBuffer(h, 0, 1);
+        e.setBuffer(gain, 0, 2);
+        e.setValue(c.eps, 3);
+        e.setValue(@as(u32, 0), 4);
+        e.setBuffer(normalized, 0, 5);
+        for (dst) |b| e.useResource(b, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        e.setBuffer(table, 0, 6);
+        e.setValue(mask, 7);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(c.hidden / 4, 1, 1));
+        e.end();
+        cb.commit();
+        cb.wait();
+        defer cb.release();
+        if (cb.failure()) |_| return error.GpuFailed;
+        try std.testing.expectEqualSlices(u16, state, h.slice(u16, count));
+        for (0..rows) |row| for (0..cols) |col| {
+            const out = dst[row % 2].slice(u16, count * cols)[(row * cols + col) * c.hidden ..][0..c.hidden];
+            const other = dst[(row + 1) % 2].slice(u16, count * cols)[(row * cols + col) * c.hidden ..][0..c.hidden];
+            if (!dark(row) and mask >> @intCast(col) & 1 != 0) {
+                try std.testing.expectEqualSlices(u16, state[row * c.hidden ..][0..c.hidden], out);
+            } else for (out) |v| try std.testing.expectEqual(@as(u16, 0x7fc0), v);
+            for (other) |v| try std.testing.expectEqual(@as(u16, 0x7fc0), v);
+        };
+    };
+}
+
 test "lfm2 dspark: fused normalization taps match the separate copy bit for bit, and a row without a destination writes none" {
     var rig = try base.Rig.init();
     defer rig.deinit();
