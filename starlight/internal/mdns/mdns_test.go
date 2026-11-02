@@ -80,3 +80,20 @@ func TestAdvertiseAndBrowse(t *testing.T) {
 	}
 	t.Fatalf("own advertisement not found among %+v", found)
 }
+
+func TestCollectReadsEntriesOnlyAfterTheQueryReturns(t *testing.T) {
+	got, err := collect(func(entries chan<- *hmdns.ServiceEntry) error {
+		e := &hmdns.ServiceEntry{Name: "a." + Service + ".local.", Host: "a.local.", Port: 8443,
+			InfoFields: []string{"v=1", "url=https://starlight.example", "id=abc"}}
+		entries <- e
+		for i := range 200 {
+			e.InfoFields = []string{"v=1", "url=https://starlight.example", "id=abc"}
+			e.AddrV4 = net.IPv4(192, 0, 2, byte(i))
+			time.Sleep(50 * time.Microsecond)
+		}
+		return nil
+	})
+	if err != nil || len(got) != 1 || got[0].URL != "https://starlight.example" || got[0].Instance != "a" || len(got[0].Addrs) != 1 {
+		t.Fatalf("collect = %+v, %v", got, err)
+	}
+}

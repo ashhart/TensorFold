@@ -99,26 +99,38 @@ func Advertise(ctx context.Context, cfg Config) (stop func(), err error) {
 
 // Browse collects the Starlight servers that answer within timeout.
 func Browse(ctx context.Context, timeout time.Duration) ([]Found, error) {
-	entries := make(chan *hmdns.ServiceEntry, 64)
 	params := hmdns.DefaultParams(Service)
-	params.Entries, params.Timeout, params.Logger = entries, timeout, quiet
-	var out []Found
-	seen := map[string]bool{}
+	params.Timeout, params.Logger = timeout, quiet
+	return collect(func(entries chan<- *hmdns.ServiceEntry) error {
+		params.Entries = entries
+		return hmdns.QueryContext(ctx, params)
+	})
+}
+
+// collect reads entries after query returns, since the client keeps updating an entry it already sent.
+func collect(query func(chan<- *hmdns.ServiceEntry) error) ([]Found, error) {
+	entries := make(chan *hmdns.ServiceEntry, 64)
+	var got []*hmdns.ServiceEntry
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for e := range entries {
-			f, ok := parse(e)
-			if !ok || seen[f.URL+"|"+f.InstallationID] {
-				continue
-			}
-			seen[f.URL+"|"+f.InstallationID] = true
-			out = append(out, f)
+			got = append(got, e)
 		}
 	}()
-	err := hmdns.QueryContext(ctx, params)
+	err := query(entries)
 	close(entries)
 	<-done
+	var out []Found
+	seen := map[string]bool{}
+	for _, e := range got {
+		f, ok := parse(e)
+		if !ok || seen[f.URL+"|"+f.InstallationID] {
+			continue
+		}
+		seen[f.URL+"|"+f.InstallationID] = true
+		out = append(out, f)
+	}
 	return out, err
 }
 
