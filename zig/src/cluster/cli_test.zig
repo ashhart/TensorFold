@@ -2,6 +2,8 @@
 const std = @import("std");
 const platform = @import("sys");
 const cli = @import("cli.zig");
+const config = @import("config.zig");
+const mcdma_link = @import("mcdma_link.zig");
 const fixtures = @import("probe_fixtures.zig");
 
 const io = std.testing.io;
@@ -69,11 +71,17 @@ test "four fake hosts: init discovers the mesh, check plans GLM-5.3, serve bring
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, launches, "tensorfold node --name"));
     try std.testing.expect(has(launches, "ProxyCommand=ssh -i /keys/k -o IdentitiesOnly=yes -o BatchMode=yes -W %h:%p tf@192.0.2.10"));
     const node = try run(a, &.{ "node", "--name", "s3", "--cluster", file, "--probes", root });
-    try std.testing.expectEqual(@as(u8, 3), node.code);
-    try std.testing.expect(has(node.out, "s3 ") and has(node.err, "MCDMA endpoints"));
+    try std.testing.expectEqual(@as(u8, 1), node.code);
+    try std.testing.expect(has(node.out, "s3 ") and has(node.err, "fake hosts (--probes) have no MCDMA links"));
+    // converged on real hosts: refused before any node starts, naming the missing Shard
     const real = try run(a, &.{ "serve", "--cluster", file, "--model-config", glm });
-    try std.testing.expectEqual(@as(u8, 3), real.code);
-    try std.testing.expect(has(real.err, "nothing runs over TCP"));
+    try std.testing.expectEqual(@as(u8, 1), real.code);
+    try std.testing.expect(has(real.err, "real backend.Shard") and has(real.err, "no node was started"));
+    try std.testing.expect(std.mem.indexOf(u8, real.out, "starts tensorfold node") == null);
+    try std.testing.expectEqual(@as(u8, 0), (try run(a, &.{ "serve", "--cluster", file, "--model-config", glm, "--dry-run" })).code);
+    const real_node = try run(a, &.{ "node", "--name", "s3", "--cluster", file });
+    try std.testing.expectEqual(@as(u8, 1), real_node.code);
+    try std.testing.expect(has(real_node.err, "real backend.Shard"));
     try std.testing.expectEqual(@as(u8, 2), (try run(a, &.{"bogus"})).code);
 }
 
@@ -104,8 +112,96 @@ test "check plans K3 from its config and Hub file list and names the raise a low
     const fixed = try std.mem.replaceOwned(u8, a, studios, ", \"gpu_limit_gb\": 300", "");
     try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = fixed });
     const serve = try run(a, &.{ "serve", "--cluster", path, "--model-config", cfg, "--model-files", files });
-    try std.testing.expectEqual(@as(u8, 3), serve.code);
-    try std.testing.expect(has(serve.err, "MCDMA endpoints") and has(serve.out, "node-d"));
+    try std.testing.expectEqual(@as(u8, 1), serve.code);
+    try std.testing.expect(has(serve.err, "real backend.Shard") and has(serve.out, "node-d"));
+}
+
+test "a disaggregated model on fake hosts: no tensor-parallel group across its two lists, no model files, the plan the nodes derive" {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const names = [_][]const u8{ "s1", "s2", "s3", "s4" };
+    try fixtures.writeHosts(io, a, tmp.dir, &names, &fixtures.mesh4);
+    const init = try run(a, &.{ "cluster", "init", "--node", "s1=192.0.2.10", "--node", "s2=192.0.2.11", "--node", "s3=192.0.2.12", "--node", "s4=192.0.2.13", "--cuda", "s2", "--probes", root });
+    try std.testing.expectEqual(@as(u8, 0), init.code);
+    // the model's path is nowhere: a disaggregated bring-up plans no tensor placement, so it reads no model files
+    const models = ", \"models\": { \"q\": { \"path\": \"/nonexistent/q\", \"mode\": \"disaggregated\", \"prefill\": [\"s2\"], \"decode\": [\"s1\"] } } }\n";
+    const json = try std.mem.concat(a, u8, &.{ init.out[0..std.mem.lastIndexOf(u8, init.out, ",\n  \"models\"").?], models });
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = json });
+    const file = try std.fs.path.join(a, &.{ root, "cluster.json" });
+    const serve = try run(a, &.{ "serve", "--cluster", file, "--probes", root });
+    try std.testing.expectEqual(@as(u8, 0), serve.code);
+    var probs: config.Problems = .{ .a = a };
+    const c = try config.parse(a, json, &probs);
+    const m = c.model("q").?;
+    const want = try std.fmt.allocPrint(a, "fake cluster up: 2 nodes agree on disaggregated plan {x:0>16} (prefill on 1, decode on 1;", .{mcdma_link.planDigest(c, m, try mcdma_link.ranks(a, m), .{})});
+    try std.testing.expect(has(serve.out, want));
+    try std.testing.expect(std.mem.indexOf(u8, serve.out, "layout: tensor") == null);
+    // the leader (s1, the model's first node) starts the one other rank, not every node in the file
+    const launches = try tmp.dir.readFileAlloc(io, "launches.log", a, .limited(1 << 20));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, launches, "tensorfold node --name"));
+    try std.testing.expect(has(launches, "--name s2 --leader s1 --model q"));
+}
+
+/// A Mac decoding for a GB10 on real hosts, with `links` and the Mac's `library` as given.
+fn pairFile(a: std.mem.Allocator, links: []const u8, library: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a,
+        \\{{ "schema": "tensorfold-cluster/1", "cluster": "pair",
+        \\  "nodes": [ {{ "name": "mac", "address": "192.0.2.1", "backend": "metal", "memory_gb": 128{s} }},
+        \\             {{ "name": "gb10", "address": "192.0.2.2", "backend": "cuda", "memory_gb": 128, "library": "/opt/mcdma/libmcdma-fabric.so" }},
+        \\             {{ "name": "spare", "address": "192.0.2.3", "backend": "metal", "memory_gb": 128 }} ]{s},
+        \\  "models": {{ "q": {{ "path": "/models/q", "nodes": ["mac", "gb10"], "mode": "disaggregated", "prefill": ["gb10"], "decode": ["mac"] }},
+        \\              "k": {{ "path": "/models/k", "nodes": ["mac", "spare"] }} }} }}
+    , .{ library, links });
+}
+
+const cx_link =
+    \\,
+    \\  "links": [ { "name": "mb", "kind": "cx5", "mtu": 1024,
+    \\    "ends": [ { "node": "mac", "device": "rdma_mcrdma0", "via": "en7/192.0.2.2", "port": 7490, "gid": 0 },
+    \\              { "node": "gb10", "device": "rocep1s0f1", "via": "enp1/192.0.2.1", "port": 7491, "gid": 1 } ] } ]
+;
+
+test "real hosts: a disaggregated model refuses by name before any node starts, exit 3 for MCDMA's library, and a dry run shows each link" {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/cluster.json", .{tmp.sub_path});
+    const Case = struct { links: []const u8, library: []const u8, args: []const []const u8, code: u8, err: []const u8 };
+    const serve: []const []const u8 = &.{ "serve", "q", "--cluster", file, "--leader", "mac" };
+    const node: []const []const u8 = &.{ "node", "--name", "mac", "--model", "q", "--cluster", file };
+    const cases = [_]Case{
+        .{ .links = "", .library = ", \"library\": \"/bin/sh\"", .args = serve, .code = 1, .err = "no link between mac and gb10" },
+        .{ .links = cx_link, .library = "", .args = serve, .code = 3, .err = "mac names no MCDMA library" },
+        .{ .links = cx_link, .library = ", \"library\": \"/nonexistent/libmcdma-fabric.dylib\"", .args = serve, .code = 3, .err = "no MCDMA library at /nonexistent/libmcdma-fabric.dylib" },
+        .{ .links = cx_link, .library = "", .args = node, .code = 3, .err = "mac names no MCDMA library" },
+        .{ .links = cx_link, .library = ", \"library\": \"/nonexistent/libmcdma-fabric.dylib\"", .args = node, .code = 3, .err = "no MCDMA library at" },
+        .{ .links = cx_link, .library = "", .args = &.{ "serve", "q", "--cluster", file, "--leader", "spare" }, .code = 1, .err = "--leader spare is not one of model q's prefill or decode nodes" },
+        .{ .links = cx_link, .library = "", .args = &.{ "node", "--name", "spare", "--model", "q", "--cluster", file }, .code = 1, .err = "spare is not one of model q's prefill or decode nodes" },
+        .{ .links = cx_link, .library = "", .args = &.{ "node", "--name", "mac", "--model", "k", "--cluster", file }, .code = 1, .err = "real backend.Shard" },
+        .{ .links = cx_link, .library = "", .args = &.{ "serve", "k", "--cluster", file }, .code = 1, .err = "real backend.Shard" },
+    };
+    for (cases) |k| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = try pairFile(a, k.links, k.library) });
+        const got = try run(a, k.args);
+        if (got.code != k.code) std.debug.print("{s}: exit {d}\n{s}{s}", .{ k.err, got.code, got.out, got.err });
+        try std.testing.expectEqual(k.code, got.code);
+        try std.testing.expect(has(got.err, k.err));
+        try std.testing.expect(std.mem.indexOf(u8, got.out, "starts tensorfold node") == null);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = try pairFile(a, cx_link, ", \"library\": \"/bin/sh\"") });
+    try std.testing.expectEqual(@as(u8, 2), (try run(a, &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--hold", "soon" })).code);
+    const dry = try run(a, &.{ "serve", "q", "--cluster", file, "--leader", "mac", "--dry-run" });
+    try std.testing.expectEqual(@as(u8, 0), dry.code);
+    try std.testing.expect(has(dry.out, "starts tensorfold node over key-only ssh on: gb10\n"));
+    try std.testing.expect(has(dry.out, "mac: rank 1 of 2 (0 gb10 cuda, 1 mac metal); plan "));
+    try std.testing.expect(has(dry.out, "link \"mb\" to gb10: rdma_mcrdma0 via en7/192.0.2.2, port 7490 to 7491, gid 0, path MTU 1024, kind cx5"));
+    try std.testing.expect(has(dry.out, "dry run: no node was started and no link opened"));
 }
 
 test "check, status and serve fail when a model cannot be planned" {
