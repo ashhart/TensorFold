@@ -73,9 +73,9 @@ pub const Table = struct {
         return t.files[w.file].get(w.stored).?;
     }
 
-    /// Every key of the table (stripped names).
-    pub fn keys(t: *const Table) []const []const u8 {
-        return t.where.keys();
+    /// Every key of the table (stripped names), in no order.
+    pub fn keys(t: *const Table) std.StringHashMapUnmanaged(Where).KeyIterator {
+        return t.where.keyIterator();
     }
 
     /// The tensor's own width when the config names it (`key`, then the stripped prefix back on), else the global one.
@@ -131,7 +131,58 @@ pub const Files = struct {
         std.mem.sort([]const u8, side.items, {}, less);
         return .{ .arena = arena, .model = model.items, .side = side.items };
     }
+
+    /// The shards of `model.safetensors.index.json` (else `model.safetensors`) holding a text-tower or head tensor.
+    pub fn indexed(gpa: std.mem.Allocator, io: Io, dir: []const u8) !Files {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        const index = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
+        const text = Io.Dir.cwd().readFileAlloc(io, index, a, .limited(1 << 26)) catch |e| switch (e) {
+            error.FileNotFound => {
+                const one = try a.alloc([]const u8, 1);
+                one[0] = try std.fs.path.join(a, &.{ dir, "model.safetensors" });
+                return .{ .arena = arena, .model = one, .side = &.{} };
+            },
+            else => return e,
+        };
+        const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+        const map = if (doc == .object) doc.object.get("weight_map") else null;
+        if (map == null or map.? != .object) return error.NoSafetensors;
+        var names: std.StringArrayHashMapUnmanaged(void) = .empty;
+        for (map.?.object.keys(), map.?.object.values()) |k, v| {
+            if (v != .string or std.mem.indexOfScalar(u8, v.string, '/') != null) return error.NoSafetensors;
+            // a shard of only vision tensors is not the backbone's: it need not exist or parse
+            if (std.mem.startsWith(u8, k, "model.language_model.") or std.mem.startsWith(u8, k, "lm_head.")) try names.put(a, v.string, {});
+        }
+        const model = try a.alloc([]const u8, names.count());
+        for (model, names.keys()) |*m, n| m.* = try std.fs.path.join(a, &.{ dir, n });
+        std.mem.sort([]const u8, model, {}, struct {
+            fn f(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.order(u8, x, y) == .lt;
+            }
+        }.f);
+        return .{ .arena = arena, .model = model, .side = &.{} };
+    }
 };
+
+/// The bytes of a bf16 checkpoint's text tower and head (its index's shards): what loads, not the vision tower.
+pub fn textBytes(gpa: std.mem.Allocator, io: Io, dir: []const u8) !u64 {
+    var files = try Files.indexed(gpa, io, dir);
+    defer files.deinit();
+    var total: u64 = 0;
+    for (files.model) |path| {
+        var shard = try Shard.open(gpa, io, path);
+        defer shard.close(io);
+        var it = shard.names.iterator();
+        while (it.next()) |kv| {
+            const key = kv.key_ptr.*;
+            if (!std.mem.startsWith(u8, key, "model.language_model.") and !std.mem.eql(u8, key, "lm_head.weight")) continue;
+            total += kv.value_ptr.end - kv.value_ptr.begin;
+        }
+    }
+    return total;
+}
 
 fn containsLower(name: []const u8, needle: []const u8) bool {
     var i: usize = 0;
