@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The prompt cache keeps exact image identities beside its words (position, rows, grid and a content hash over the image bytes, never a path), so a cached state is never resumed for a different, moved or re-gridded image; image prompts' states are no longer saved to disk or learned. Text-only prompts are unchanged (#1962, part of #1927). Thanks to @laudney.
+
 - Cortheon reads a GitHub file as raw text from `GitHub.com` and `www.github.com` too, keeps search results and seen links whose scheme is written in capitals, and reads a link whose tag breaks after a carriage return (#1949). Thanks to @ppardus.
 
 - Cortheon finds every closing tag around a harness's context blocks in one pass, so a message with many unclosed tags no longer takes time quadratic in its length; the result is unchanged, and the fuzz harness checks it against the old scan (#1898). Thanks to @jishnuvenugopal.
