@@ -7,6 +7,7 @@ pub const protocol = @import("protocol.zig");
 pub const prefix = @import("prefix.zig");
 pub const backend = @import("backend.zig");
 pub const costs = @import("costs.zig");
+pub const Options = @import("options.zig").Options;
 
 test {
     _ = draw;
@@ -17,4 +18,5 @@ test {
     _ = prefix;
     _ = backend;
     _ = costs;
+    _ = @import("options.zig");
 }
