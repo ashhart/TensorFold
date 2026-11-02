@@ -36,7 +36,7 @@ pub fn begin(b: anytype, stream: *lanes.Stream, preferred: ?usize) !fill.State {
     s.m.reset();
     stream.cached = 0;
     if (stream.reuse.saved) |saved| {
-        const state: *snap.State = @ptrCast(@alignCast(saved));
+        const state = savedState(b, saved);
         if (state.at < prompt.len and state.at < s.m.cap) {
             try snap.restore(b.e, state);
             stream.cached = @intCast(state.at);
@@ -56,6 +56,10 @@ pub fn begin(b: anytype, stream: *lanes.Stream, preferred: ?usize) !fill.State {
     const at: u32 = @intCast(s.m.pos);
     stream.fill_at.store(at, .monotonic);
     return .{ .stream = stream, .slot = i, .at = at, .owner = owner };
+}
+
+pub fn savedState(b: anytype, saved: *anyopaque) *snap.State {
+    return if (b.unwrap_snapshot) |unwrap| unwrap(saved) else @ptrCast(@alignCast(saved));
 }
 
 pub fn rows(b: anytype, at: u32, end: u32) u32 {
