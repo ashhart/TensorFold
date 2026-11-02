@@ -90,7 +90,7 @@ pub const Weights = struct {
         defer gpa.free(path);
         var file = try core.safetensors.File.open(gpa, io, path);
         defer {
-            file.release();
+            file.release(gpa);
             file.close(io);
         }
         var problem: []const u8 = "";
