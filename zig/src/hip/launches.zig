@@ -9,6 +9,7 @@ const Function = @import("module.zig").Function;
 const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
+const dense = @import("launches/dense.zig");
 
 const util = @import("launches/util.zig");
 
@@ -86,6 +87,8 @@ pub const Launcher = struct {
     wide: bool,
     /// The MLX affine products and the registry that picks their tiles.
     affine: affine.Kernels,
+    /// The BF16 dense GEMM (raw BF16 weights through the dot2 GEMM tile).
+    dense: dense.Kernels,
     /// Flash Next's kernels: its residual streams, n-gram rows, indexer and sparse attention.
     fnx: flashnext.Fns,
     /// Nemotron's Mamba-2 mixer kernels.
@@ -291,7 +294,9 @@ pub const Launcher = struct {
         l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);
         const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
-        l.affine = try affine.Kernels.load(tiles, dot2, caps.Caps.of(kernels.arch) orelse return error.Invalid, choices.products);
+        const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;
+        l.affine = try affine.Kernels.load(tiles, dot2, chip, choices.products);
+        l.dense = try dense.Kernels.load(tiles, chip.act == .bf16);
         try l.affine.fillByteLut(r, dot2);
         l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
         return l;

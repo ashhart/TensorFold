@@ -6,6 +6,7 @@
 #include "tiles/stream.hpp"
 #include "tiles/matrix_gemm.hpp"
 #include "quant/mlx_tiles.hpp"
+#include "quant/dense_tiles.hpp"
 
 namespace tf {
 namespace rocm {
@@ -375,6 +376,9 @@ TF_TILES(4)
 TF_TILES(5)
 TF_TILES(6)
 TF_TILES(8)
+
+// The BF16 dense GEMM on every build (its body traps where there is no BF16 dot2), so every image has the symbol.
+template __global__ void dense_gemm_block<DotBF16, GemmShape<DotBF16>::rt>(Affine);
 
 }  // namespace rocm
 }  // namespace tf

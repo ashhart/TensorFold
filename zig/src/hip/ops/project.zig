@@ -30,11 +30,21 @@ fn affineOf(proj: Projection, h: mlx.Matrix) Affine {
 pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Error!Tensor {
     switch (proj.handle) {
         .mlx => |h| return affine(o, x, affineOf(proj, h), m, f32_out),
-        .dense => |h| {
-            if (f32_out or m == 0 or x.kind == .f32) return error.BadShape;
-            const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * x.kind.size()), .kind = x.kind };
-            try denseRows(o, x, h.weight, out, m, proj.n, proj.k);
-            return out;
+        .dense => |h| switch (h.dtype) {
+            .f32 => {
+                if (f32_out or m == 0 or x.kind == .f32) return error.BadShape;
+                const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * x.kind.size()), .kind = x.kind };
+                try denseRows(o, x, h.weight, out, m, proj.n, proj.k);
+                return out;
+            },
+            .bf16 => {
+                if (m == 0 or x.kind != .bf16) return error.BadShape;
+                const kind: t.Kind = if (f32_out) .f32 else .bf16;
+                const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * kind.size()), .kind = kind };
+                try denseGemm(o, x, h.weight, out, m, proj.n, proj.k);
+                return out;
+            },
+            else => return error.BadShape,
         },
     }
 }
@@ -200,7 +210,7 @@ pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usi
 pub fn embedRows(o: Ops, table: Projection, ids: u64, n: usize, out: Tensor) Error!void {
     switch (table.handle) {
         .mlx => |h| return embedAffine(o, affineOf(table, h), ids, n, out),
-        .dense => |h| try o.l.tf_embed_dense(f(h.weight), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
+        .dense => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(try kindOf(h.dtype)), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
     }
 }
 
@@ -350,4 +360,22 @@ pub fn embedAffine(o: Ops, table: Affine, ids: u64, n: usize, out: Tensor) Error
 /// x (rows, k) of x's kind times fp32 weights (n, k), out (rows, n) in x's kind: an unquantized draft projection.
 pub fn denseRows(o: Ops, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, k: usize) Error!void {
     try o.l.tf_dense_rows(p(x.ptr), @backingInt(x.kind), f(w), p(out.ptr), int(rows), int(n), int(k), o.stream);
+}
+
+/// x (rows, k) BF16 times BF16 weights [n, k] on the dot2 GEMM tile: `out` fp32, or BF16 rounded once.
+pub fn denseGemm(o: Ops, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, k: usize) Error!void {
+    if (x.kind != .bf16 or out.kind == .f16) return error.BadShape;
+    const wide = out.kind == .f32;
+    if (o.l.dense.refusal(x.ptr, w, int(rows), int(n), int(k)) != null) return error.BadShape;
+    try o.l.dense.gemm(o.l.r, x.ptr, w, if (wide) out.ptr else 0, if (wide) 0 else out.ptr, int(rows), int(n), int(k), o.stream);
+}
+
+/// The kernels' element kind of a dense weight's dtype.
+fn kindOf(dtype: quant.DType) Error!t.Kind {
+    return switch (dtype) {
+        .f32 => .f32,
+        .bf16 => .bf16,
+        .f16 => .f16,
+        else => error.BadShape,
+    };
 }

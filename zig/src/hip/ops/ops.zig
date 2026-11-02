@@ -48,6 +48,7 @@ pub const Ops = struct {
     pub const affineRouted = products.affineRouted;
     pub const embedAffine = products.embedAffine;
     pub const denseRows = products.denseRows;
+    pub const denseGemm = products.denseGemm;
 
     /// Whether decode.hip's merged launches are on.
     pub fn fused(o: Ops) bool {
