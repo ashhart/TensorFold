@@ -52,10 +52,17 @@ pub fn budget(gpa: Allocator, io: std.Io, ctx: Context) !Pool {
     const card = try ctx.memInfo();
     const text = if (unified) procText(gpa, io, "/proc/meminfo") else null;
     defer if (text) |t| gpa.free(t);
-    const c = counts(unified, .{ .total = card.total, .available = card.free }, text) catch return error.HostMemoryUnavailable;
+    const own: MemInfo = .{ .total = card.total, .available = card.free };
+    const host = counts(unified, own, text) catch return error.HostMemoryUnavailable;
+    const c = carved(unified, own, host);
     const reserve = reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), c.total, unified) catch return error.BadReserve;
     const limit = limitBytes(getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB")) catch return error.BadLimit;
     return .{ .free = c.available, .total = c.total, .reserve = reserve, .limit = limit, .unified = unified };
+}
+
+/// The integrated GPU's count: its own when a firmware carve-out gives it more than the host's /proc/meminfo total.
+pub fn carved(unified: bool, card: MemInfo, host: MemInfo) MemInfo {
+    return if (unified and card.total > host.total) card else host;
 }
 
 fn getenv(name: [:0]const u8) ?[]const u8 {
@@ -79,4 +86,14 @@ test "context windows: the family default inside the model's, 0 for the model's,
     try std.testing.expectError(error.PastNative, contextWindow(300000, 262144, 16384));
     try std.testing.expectError(error.Negative, contextWindow(-5, 262144, 16384));
     try std.testing.expectError(error.NoNative, contextWindow(0, 0, 16384));
+}
+
+test "an integrated GPU counts its carve-out when the card holds more than the host, else the host's pages" {
+    const g: u64 = 1 << 30;
+    const card: MemInfo = .{ .total = 96 * g, .available = 95 * g };
+    const host: MemInfo = .{ .total = 31 * g, .available = 25 * g };
+    try std.testing.expectEqual(card, carved(true, card, host));
+    const shared: MemInfo = .{ .total = 120 * g, .available = 118 * g };
+    const pages: MemInfo = .{ .total = 122 * g, .available = 110 * g };
+    try std.testing.expectEqual(pages, carved(true, shared, pages));
 }
