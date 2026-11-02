@@ -1,6 +1,6 @@
 //! Scalar roles added for native GGUF images require the image's config marker, never a tensor spelling alone.
 const std = @import("std");
-const DType = @import("../../core/safetensors.zig").DType;
+const DType = @import("core").safetensors.DType;
 
 pub fn gain(dtype: DType, gguf_image: bool) !DType {
     if (dtype == .bf16 or (gguf_image and dtype == .f32)) return dtype;
