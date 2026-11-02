@@ -6,6 +6,7 @@ const VisionWeights = @import("weights.zig").VisionWeights;
 const image = @import("image.zig");
 const Allocator = std.mem.Allocator;
 const vit = cuda.vit;
+const toBf16 = @import("core").bf16_round.bits;
 
 const patches_most = 1024; // a 512-pixel tile, or a thumbnail of at most 256 tokens
 const tiles_most = image.max_grid + 1; // max_tiles and the thumbnail
@@ -119,7 +120,7 @@ pub const Vision = struct {
         try v.copied.synchronize(); // the staging may still feed the last picture's copies, never its tiles' work
         const host = v.staging.slice(u16);
         const px = host[0 .. n * image.patch_width];
-        for (px, picture.patches[0..px.len]) |*o, p| o.* = vit.bf16(p);
+        for (px, picture.patches[0..px.len]) |*o, p| o.* = toBf16(p);
         const pos = host[px_bytes / 2 ..][0 .. n * c.hidden];
         var at: usize = 0;
         for (picture.tiles, 0..) |t, i| {
@@ -179,7 +180,7 @@ pub const Vision = struct {
         const resized = try gpa.alloc(f32, out.len);
         defer gpa.free(resized);
         try resize(gpa, v.position, side, v.c.hidden, t.h, t.w, resized);
-        for (out, resized) |*o, x| o.* = vit.bf16(x);
+        for (out, resized) |*o, x| o.* = toBf16(x);
     }
 };
 

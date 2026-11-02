@@ -141,10 +141,7 @@ fn bf(v: u16) f32 {
 }
 
 /// Round to nearest even, as MLX casts.
-fn toBf(f: f32) u16 {
-    const b: u32 = @bitCast(f);
-    return @intCast((b + 0x7FFF + ((b >> 16) & 1)) >> 16);
-}
+const toBf = core.bf16_round.bits;
 
 const Job = struct {
     src: []const u16,
