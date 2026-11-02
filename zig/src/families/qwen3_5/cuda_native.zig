@@ -83,7 +83,7 @@ pub const Loaded = struct {
     own_prompt_cache: bool = false,
     /// TF_QWEN_KV_SHARE or TF_QWEN_KV_PAGES_ALL: every stream runs on the pool's pages; the engine's window sits idle.
     all_on_pages: bool = false,
-    /// TF_QWEN_KV_PAGES_ALL=1: the engine's own stream takes pages too, a window of them set aside by the plan.
+    /// TF_QWEN_KV_PAGES_ALL (unset or 1; 0 keeps a window): the engine's own stream takes pages, set aside by the plan.
     engine_paged: bool = false,
     /// An integrated GPU: kept states in device memory on the host budget (Target.device), the startup line says so.
     device_snaps: bool = false,
@@ -136,7 +136,7 @@ pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
-    const page_tokens = try pages_mod.paging();
+    const page_tokens = try pages_mod.paging(o.slide);
     const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
@@ -221,11 +221,11 @@ pub const openDrafter = drafter_open.openDrafter;
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     if (ctx == null) return switch (err) {
         error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
-        error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset it",
+        error.QwenPagesNoLearner => "TF_QWEN_KV_PAGES: the learner reads whole windows, not pages; drop --slide or unset TF_QWEN_KV_PAGES",
         error.QwenShareNeedsPages => "TF_QWEN_KV_SHARE keeps prompts as pool pages: set TF_QWEN_KV_PAGES to a divisor of the 4096-row prompt chunk",
         error.BadQwenKvShare => "TF_QWEN_KV_SHARE takes the most recurrent-state snapshots the prompt cache keeps (0 or unset: off)",
         error.QwenYarnNoLearner => "--slide: the learner's attention ropes without YaRN; serve without --slide, or without --rope-yarn and a YaRN config",
-        error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
+        error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0: a window each; unset: 256)",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
         else => null,
     };
@@ -266,7 +266,7 @@ pub const Lanes = struct {
     /// TF_QWEN_KV_SHARE's snapshots (0: off) and the prompt cache over the pool's pages `attach` made.
     share_snaps: usize = 0,
     prefix: ?*prefix_mod.Prefix = null,
-    engine_paged: bool = false, // TF_QWEN_KV_PAGES_ALL=1: no window reserved, the engine's own stream a pool lane
+    engine_paged: bool = false, // TF_QWEN_KV_PAGES_ALL unset or 1: no window reserved, the engine's own stream a pool lane
     /// The DFlash2 drafter, when one is attached: its rings go into the pool lanes' runs.
     draft: ?*Draft = null,
     /// The MTP drafter (qwen3_5_moe), when attached: its ring and state go into the pool lanes' runs.

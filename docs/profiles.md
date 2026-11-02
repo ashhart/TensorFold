@@ -49,8 +49,9 @@ Initial coverage is:
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the
 switch is faster for every shape, device, or workload. The `*_ALL` checks stay `debug`; Flash Next paging remains
-`experimental`. No class turns a switch on. GLM's existing automatic paging default is preserved; other default-on
-paging outside this registry is unchanged. The two GLM host-memory switches carry [#1795](https://github.com/ashhart/TensorFold/pull/1795)'s
+`experimental`. No class turns a switch on. GLM's existing automatic paging default is preserved; Qwen3.5's family
+reader pages at 256 positions with the engine's stream on pages when both switches are unset (windows beside
+`--slide`), and `0` keeps windows; other default-on paging outside this registry is unchanged. The two GLM host-memory switches carry [#1795](https://github.com/ashhart/TensorFold/pull/1795)'s
 identical tokens at TP=2 on two GB10s, and `TF_GLM_PROMPT_TAIL` carries [#2226](https://github.com/ashhart/TensorFold/pull/2226)'s.
 `TF_GLM_KV_HOST_GIB` stays outside the registry: it sizes those pages rather
 than choosing a policy, and its reader keeps its own default.
@@ -64,13 +65,15 @@ still carries each resolved value, so ranks that disagree still stop before weig
 The serving process prints its profile and applicable registered overrides, for example:
 
 ```text
-[tensorfold] profile: stable; registered overrides: TF_QWEN_KV_PAGES=256 (identical, env); TF_QWEN_KV_SHARE=16 (identical, env)
+[tensorfold] profile: stable; registered overrides: TF_QWEN_KV_PAGES=128 (identical, env); TF_QWEN_KV_SHARE=16 (identical, env)
 ```
 
 When no applicable registered setting differs from its default, it prints `registered overrides: none`. This is
 explicitly the registry's coverage, not an assertion that the whole environment is at defaults. Settings for another
-model type/backend and arbitrary environment variables are omitted. Numeric zero for count switches and disabled exact-one
-flags do not count as changes. Dependency checks still determine whether a configured switch can be used.
+model type/backend and arbitrary environment variables are omitted. A count equal to what the family takes when it is
+unset (zero, or 256 for `TF_QWEN_KV_PAGES`) and a disabled exact-one flag do not count as changes; `TF_QWEN_KV_PAGES_ALL`
+is on unless it is exactly `0`, so only `0` is reported. Dependency checks still determine whether a configured switch
+can be used.
 
 For GLM CUDA, `TF_KV_PAGES` uses the registry's `auto` syntax: unset or exactly `auto` leaves the family's automatic choice,
 while every other explicit value is a policy override, including `off` and `0`. An explicit policy may select the

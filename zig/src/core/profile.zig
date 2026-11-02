@@ -15,7 +15,7 @@ pub const Switch = enum {
     TF_GLM_KV_HOST_SHARED,
     TF_GLM_PROMPT_TAIL,
 };
-pub const Syntax = enum { count, one, auto };
+pub const Syntax = enum { count, one, auto, off };
 pub const Entry = struct {
     id: Switch,
     /// When present, these exact values alone differ from the family default; otherwise use syntax.
@@ -26,6 +26,8 @@ pub const Entry = struct {
     effect: []const u8,
     evidence: []const u8,
     syntax: Syntax = .count,
+    /// The count the family's reader takes when the switch is unset (`count` syntax only).
+    unset: usize = 0,
     stable: ?[:0]const u8 = null,
 
     pub fn name(e: Entry) [:0]const u8 {
@@ -45,8 +47,9 @@ pub const Entry = struct {
         }
         return switch (e.syntax) {
             .one => std.mem.eql(u8, raw, "1"),
-            .count => (std.fmt.parseInt(usize, raw, 10) catch return true) != 0,
+            .count => (std.fmt.parseInt(usize, raw, 10) catch return true) != e.unset,
             .auto => !std.mem.eql(u8, raw, "auto"),
+            .off => std.mem.eql(u8, raw, "0"),
         };
     }
 };
@@ -55,8 +58,8 @@ const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
 
 pub const entries = [_]Entry{
-    .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },
-    .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .one, .effect = "Put the engine's own stream on pages too", .evidence = "#1357" },
+    .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .unset = 256, .effect = "KV pool page size (unset: 256; 0: a window each); memory and workload tradeoffs", .evidence = "#1357" },
+    .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .off, .effect = "The engine's own stream on pages too (unset); 0 keeps it a window", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_SHARE, .families = qwen, .class = .identical, .effect = "Keep prompt pages and bounded recurrent snapshots", .evidence = "#1357" },
     .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES, .families = flash, .class = .experimental, .effect = "KV pool page size; fast-profile qualification pending", .evidence = "#1660" },
