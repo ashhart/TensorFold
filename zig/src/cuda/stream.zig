@@ -44,7 +44,7 @@ pub const Stream = struct {
 
     pub fn synchronize(self: Stream) Error!void {
         try @import("copy_source.zig").synchronizeStream(self.d, self.handle);
-        @import("core").route_tap.publish();
+        @import("route_tap_copy.zig").land();
     }
 
     /// True once every queued item has finished.

@@ -345,7 +345,11 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
     e.setBuffer(s.picks, 0, 3);
     e.setBuffer(s.weights, 0, 4);
     enc.groups(.{ total, 1, 1 }, .{ 32, 1, 1 });
-    @import("../../core/route_tap_metal.zig").blitPicks(e, s.picks, 0, s.weights, 0, @intCast(slots));
+    const tap_m = @import("../../core/route_tap_metal.zig");
+    if (tap_m.live()) {
+        e.barrier();
+        tap_m.blitPicks(e, s.picks, 0, s.weights, 0, @intCast(slots));
+    }
     const t = &enc.m.kernels.tiles;
     if (!enc.prompt and enc.m.kernels.twin) {
         // Wide windows read each picked expert once for its rows (a row's own picks are distinct experts).

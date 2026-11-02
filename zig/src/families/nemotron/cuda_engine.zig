@@ -219,7 +219,7 @@ pub const Engine = struct {
             content = null;
             try cuda.tp_watch.ready(io, try x.finish());
         }
-        if (opts.graphs) try e.capture(mtp);
+        if (opts.graphs and !@import("core").route_tap.live()) try e.capture(mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
             return err;

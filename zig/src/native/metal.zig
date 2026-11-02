@@ -158,7 +158,7 @@ const Host = struct {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
-    if (!tf.route_tap.admit(a, gpa, o.model_type, o.rank, problem)) return null;
+    if (!tf.route_tap.admit(a, gpa, o.model_type, o.rank, "metal", problem)) return null;
     if (fsr_options.refuse(o, problem)) return null;
     if (o.prompt_int8 or o.rope_yarn != null) {
         problem.* = if (o.prompt_int8) prompt_int8_refusal else "--rope-yarn: the Metal engine has no YaRN rope; serve without --rope-yarn";

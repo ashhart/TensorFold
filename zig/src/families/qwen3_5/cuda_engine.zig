@@ -508,6 +508,8 @@ pub const Engine = struct {
             e.features = if (images) |im| im.features else 0;
             defer e.features = 0;
             try e.body(shape);
+        } else if (@import("core").route_tap.live()) {
+            try e.body(shape);
         } else {
             const gop = try e.graphs.getOrPut(e.gpa, shape.key());
             if (!gop.found_existing) {

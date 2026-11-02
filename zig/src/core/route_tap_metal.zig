@@ -69,6 +69,8 @@ fn copyInto(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, pick: mtl.Buffer, pick_
     if (n == 0) return;
     const sl = tap.reserve(@intCast(n)) orelse return;
     const off = tap.sharedOff(sl.index);
+    // Concurrent encoders otherwise copy the previous layer's picks; Nemotron barriers the same way.
+    enc.barrier();
     enc.setPipeline(pipe);
     enc.setBuffer(pick, pick_off, 0);
     enc.setBuffer(dest_buf, off, 1);

@@ -60,6 +60,8 @@ pub const Ring = struct {
     published: std.atomic.Value(u32) = .init(0),
     read: std.atomic.Value(u32) = .init(0),
     drops: std.atomic.Value(u32) = .init(0),
+    /// False when `ids`/`weights` are a backend's pinned host buffers (CUDA/HIP), not this allocator's.
+    owned: bool = true,
 
     pub fn init(a: std.mem.Allocator, cap: u32, ids_each: u16) !Ring {
         const recs = try a.alloc(Rec, cap);
@@ -70,12 +72,14 @@ pub const Ring = struct {
         @memset(recs, .{});
         @memset(ids, 0);
         @memset(weights, 0);
-        return .{ .recs = recs, .ids = ids, .weights = weights, .cap = cap, .max_ids = ids_each };
+        return .{ .recs = recs, .ids = ids, .weights = weights, .cap = cap, .max_ids = ids_each, .owned = true };
     }
 
     pub fn deinit(r: *Ring, a: std.mem.Allocator) void {
-        a.free(r.weights);
-        a.free(r.ids);
+        if (r.owned) {
+            a.free(r.weights);
+            a.free(r.ids);
+        }
         a.free(r.recs);
         r.* = undefined;
     }
@@ -143,9 +147,27 @@ pub fn refuse(a: std.mem.Allocator, model_type: []const u8, problem: *[]const u8
     return true;
 }
 
-/// Refuse an unsupported family, or start the rank-0 writer when the env is set.
-pub fn admit(a: std.mem.Allocator, gpa: std.mem.Allocator, model_type: []const u8, rank: u32, problem: *[]const u8) bool {
+/// Family and backend pairs that never copy (empty traces if admitted). Named, not inferred.
+pub fn neverCopies(backend: []const u8, model_type: []const u8) bool {
+    if (std.mem.eql(u8, backend, "xpu") and std.mem.eql(u8, model_type, "nemotron_h")) return true;
+    if (std.mem.eql(u8, backend, "metal") and std.mem.eql(u8, model_type, "qwen4_exp")) return true;
+    if (std.mem.eql(u8, backend, "metal") and std.mem.eql(u8, model_type, "qwen3_5_moe")) return true;
+    return false;
+}
+
+/// Refuse a family/backend pair that never copies, when the env is set.
+pub fn refusePair(a: std.mem.Allocator, model_type: []const u8, backend: []const u8, problem: *[]const u8) bool {
+    if (envPath() == null) return false;
+    if (!neverCopies(backend, model_type)) return false;
+    problem.* = std.fmt.allocPrint(a, "TF_ROUTE_TAP: {s} on {s} never copies; the switch is refused", .{ model_type, backend }) catch
+        "TF_ROUTE_TAP: this family never copies on this backend; the switch is refused";
+    return true;
+}
+
+/// Refuse an unsupported family or a no-copy pair, or start the rank-0 writer when the env is set.
+pub fn admit(a: std.mem.Allocator, gpa: std.mem.Allocator, model_type: []const u8, rank: u32, backend: []const u8, problem: *[]const u8) bool {
     if (refuse(a, model_type, problem)) return false;
+    if (refusePair(a, model_type, backend, problem)) return false;
     start(gpa, rank) catch |err| {
         problem.* = std.fmt.allocPrint(a, "TF_ROUTE_TAP: cannot write the trace ({s})", .{@errorName(err)}) catch
             "TF_ROUTE_TAP: cannot write the trace";
@@ -194,10 +216,28 @@ const Session = struct {
 };
 
 var g_session: ?*Session = null;
+var g_release: ?*const fn () void = null;
 
 /// True only after rank 0 opened a tapped family with `TF_ROUTE_TAP` set.
 pub fn live() bool {
     return g_session != null;
+}
+
+/// CUDA/HIP pin release: wait the step event, then free `cuMemHostAlloc` / `hipHostMalloc` buffers.
+pub fn onStop(f: *const fn () void) void {
+    g_release = f;
+}
+
+/// Replace the GPA ids/weights with a backend's pinned host ring. Recs stay on the allocator.
+pub fn adoptHost(ids: []i32, weights: []f32) void {
+    const s = g_session orelse return;
+    if (s.ring.owned) {
+        s.gpa.free(s.ring.ids);
+        s.gpa.free(s.ring.weights);
+        s.ring.owned = false;
+    }
+    s.ring.ids = ids;
+    s.ring.weights = weights;
 }
 
 pub fn start(gpa: std.mem.Allocator, rank: u32) !void {
@@ -225,10 +265,14 @@ pub fn start(gpa: std.mem.Allocator, rank: u32) !void {
 pub fn stop() void {
     const s = g_session orelse return;
     g_session = null;
+    if (g_release) |f| f();
+    g_release = null;
     s.ring.publish();
     s.stop.store(true, .release);
     if (s.thread) |t| t.join();
     s.file.close(s.threaded.io());
+    const n = s.ring.drops.load(.monotonic);
+    if (n > 0) std.log.info("TF_ROUTE_TAP: dropped {d} records", .{n});
     s.ring.deinit(s.gpa);
     s.gpa.destroy(s);
 }
@@ -263,6 +307,20 @@ pub fn sharedOff(index: u32) usize {
 pub fn reservedCount() u32 {
     const s = g_session orelse return 0;
     return s.ring.reserved.load(.monotonic);
+}
+
+/// Slots already marked readable. CUDA/HIP land only up to the event behind this step's copies.
+pub fn publishedCount() u32 {
+    const s = g_session orelse return 0;
+    return s.ring.published.load(.monotonic);
+}
+
+/// A failed device copy: clear the slot so a later lap cannot publish the previous ids under this header.
+pub fn dropSlot(sl: Slot) void {
+    const s = g_session orelse return;
+    @memset(sl.ids, 0);
+    @memset(sl.weights, 0);
+    _ = s.ring.drops.fetchAdd(1, .monotonic);
 }
 
 /// After a Metal wait: copy shared-storage ids/weights into the host ring, then publish.
@@ -396,6 +454,23 @@ test "tapped families are named; DeepSeek V4.1 and dense families are refused on
     try std.testing.expect(!refuse(std.testing.allocator, "gemma4", &problem));
 }
 
+test "named family/backend pairs that never copy are refused by name; others copy" {
+    try std.testing.expect(neverCopies("xpu", "nemotron_h"));
+    try std.testing.expect(neverCopies("metal", "qwen4_exp"));
+    try std.testing.expect(neverCopies("metal", "qwen3_5_moe"));
+    try std.testing.expect(!neverCopies("cuda", "nemotron_h"));
+    try std.testing.expect(!neverCopies("hip", "nemotron_h"));
+    try std.testing.expect(!neverCopies("metal", "nemotron_h"));
+    try std.testing.expect(!neverCopies("cuda", "qwen4_exp"));
+    try std.testing.expect(!neverCopies("hip", "qwen4_exp"));
+    try std.testing.expect(!neverCopies("cuda", "qwen3_5_moe"));
+    try std.testing.expect(!neverCopies("metal", "glm5_next"));
+    try std.testing.expect(!neverCopies("xpu", "qwen3_5"));
+    var problem: []const u8 = "";
+    try std.testing.expect(!refusePair(std.testing.allocator, "nemotron_h", "xpu", &problem));
+    try std.testing.expect(!refusePair(std.testing.allocator, "qwen4_exp", "metal", &problem));
+}
+
 test "unset env keeps live() false and reserve a no-op" {
     try std.testing.expect(envPath() == null);
     try std.testing.expect(!live());
@@ -437,4 +512,20 @@ test "publishTo leaves later reserved slots unpublished" {
     try std.testing.expect(r.pop() == null);
     r.published.store(3, .release);
     try std.testing.expectEqual(@as(u32, 1), r.pop().?);
+}
+
+test "a failed copy clears the slot so a later lap cannot keep the previous ids" {
+    const a = std.testing.allocator;
+    var r = try Ring.init(a, 2, 2);
+    defer r.deinit(a);
+    const i = r.reserve() orelse return error.Reserve;
+    r.put(i, .{ .step = 0, .layer = 0, .n_ids = 2 }, &.{ 9, 8 }, &.{ 0.5, 0.5 });
+    var sl = r.slot(i);
+    sl.ids = sl.ids[0..2];
+    sl.weights = sl.weights[0..2];
+    @memset(sl.ids, 0);
+    @memset(sl.weights, 0);
+    _ = r.drops.fetchAdd(1, .monotonic);
+    try std.testing.expect(blank(sl.ids, sl.weights));
+    try std.testing.expectEqual(@as(u32, 1), r.drops.load(.monotonic));
 }

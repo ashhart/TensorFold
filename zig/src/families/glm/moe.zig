@@ -124,7 +124,10 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
 
 fn tapRoute(x: *const Ctx, e: mtl.ComputeEncoder, rows: u32) void {
     const tap_m = @import("../../core/route_tap_metal.zig");
-    if (tap_m.live()) tap_m.blit(e, x.k.copy_u32, x.sc.pick.buf, x.sc.pick.off, x.sc.wts.buf, x.sc.wts.off, rows * x.c.topk);
+    if (tap_m.live()) {
+        e.barrier();
+        tap_m.blit(e, x.k.copy_u32, x.sc.pick.buf, x.sc.pick.off, x.sc.wts.buf, x.sc.wts.off, rows * x.c.topk);
+    }
 }
 
 /// Whether the shared expert, the routed ones or both take the generated 4/64 kernels.

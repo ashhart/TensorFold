@@ -229,7 +229,7 @@ pub const Drafter = struct {
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *Engine, model_dir: []const u8, graphs: bool, costs: ?[]const f64) !Drafter {
         const h = try Head.init(e);
         errdefer h.deinit();
-        if (graphs) try h.capture();
+        if (graphs and !@import("core").route_tap.live()) try h.capture();
         var m: Measured = undefined;
         if (costs) |given| {
             const rows = state.windowRows(e.c);
