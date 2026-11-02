@@ -11,8 +11,9 @@ pub const Switch = enum {
     TF_KV_SHARE,
     TF_FLASHNEXT_KV_PAGES,
     TF_FLASHNEXT_KV_PAGES_ALL,
+    TF_KV_PAGES,
 };
-pub const Syntax = enum { count, one };
+pub const Syntax = enum { count, one, auto };
 pub const Entry = struct {
     id: Switch,
     families: []const []const u8,
@@ -37,6 +38,7 @@ pub const Entry = struct {
         return switch (e.syntax) {
             .one => std.mem.eql(u8, raw, "1"),
             .count => (std.fmt.parseInt(usize, raw, 10) catch return true) != 0,
+            .auto => !std.mem.eql(u8, raw, "auto"),
         };
     }
 };
@@ -52,6 +54,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES, .families = flash, .class = .experimental, .effect = "KV pool page size; fast-profile qualification pending", .evidence = "#1660" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES_ALL, .families = flash, .class = .debug, .syntax = .one, .effect = "Put every stream on pool pages for checks", .evidence = "#1660" },
+    .{ .id = .TF_KV_PAGES, .families = &.{"glm5_next"}, .class = .identical, .syntax = .auto, .effect = "GLM KV pool pages; auto from two ranks with BF16, windows with FP8", .evidence = "#1322" },
 };
 
 comptime {
