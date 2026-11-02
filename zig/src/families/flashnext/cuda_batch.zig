@@ -133,20 +133,16 @@ pub fn Pass(comptime Tri: type) type {
             if (try zs.lane(self.k, self.stream, self.s, self.zero_slices, x, w, part, m, sk)) |one| return one;
             return tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
         }
-
         pub fn sumSlices(self: *Self, part: u64, out: u64, bf16: bool, n: usize, sk: usize) !void {
             return ops.sumSlices(self.k, self.stream, part, out, bf16, n, sk);
         }
-
         pub fn shiftWindow(self: *Self, win: u64, rows_ptr: u64, stride: usize, n: usize, taps: usize, c: usize) !void {
             return ops.shiftWindow(self.k, self.stream, win, rows_ptr, stride, n, taps, c);
         }
-
         /// rows x width 16-bit columns from src (src_pitch values a row) to dst (dst_pitch); dst 0: none.
         pub fn copyCols(self: *Self, src: u64, src_pitch: usize, dst: u64, dst_pitch: usize, width: usize, rows: usize) !void {
             return ops.copyCols(self.k, self.stream, src, src_pitch, dst, dst_pitch, width, rows);
         }
-
         /// The adds to layer `l`'s MoE output: a training pass's, else the model's pockets; null: none there.
         pub fn addAt(self: *const Self, l: usize) ?MoeAdd {
             const m = self.hooks.moe_add orelse self.m.pocket orelse return null;
