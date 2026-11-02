@@ -14,12 +14,14 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
 
     if (o.context > prompt.max_tokens) return error.ContextOverWindow;
     if (o.segments != 1) return error.UnsupportedOption;
-    if ((o.tp != 1 and o.tp != 2) or o.rank >= o.tp) return error.BadRank;
+    if (o.tp != 1 and o.tp != 2) return error.FlashNextRanksOverTwo;
+    if (o.rank >= o.tp) return error.BadRank;
     // refused before the stream, the glue or a captured set loads
     const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows()); // the largest pass, solo or not
     _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
     const mode = try config.mode(gpa, io, dir);
-    if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
+    if (o.tp != 1 and mode != .modelopt) return error.FlashNextRanksNeedModelopt;
+    if (o.tp != 1 and captured != null) return error.FlashNextRanksOnCapturedGlue;
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
