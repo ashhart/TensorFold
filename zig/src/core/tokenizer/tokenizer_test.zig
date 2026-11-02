@@ -312,3 +312,22 @@ test {
     _ = @import("identity.zig");
     _ = eos;
 }
+
+test "normalized added tokens match compatibility forms but decode their original spelling" {
+    const json =
+        \\{"added_tokens":[{"id":2,"content":"ǅ","special":false,"normalized":true}],
+        \\"normalizer":{"type":"NFKC"},
+        \\"model":{"type":"WordLevel","unk_token":"?","vocab":{"?":0,"Dž":1}}}
+    ;
+    const a = std.testing.allocator;
+    var t = try parse(a, json);
+    defer t.deinit();
+    for ([_][]const u8{ "ǅ", "Dž" }) |input| {
+        const ids = try t.encode(a, input);
+        defer a.free(ids);
+        try std.testing.expectEqualSlices(u32, &.{2}, ids);
+        const text = try t.decode(a, ids, false);
+        defer a.free(text);
+        try std.testing.expectEqualStrings("ǅ", text);
+    }
+}

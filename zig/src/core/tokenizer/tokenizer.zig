@@ -524,8 +524,8 @@ fn addTokens(t: *Tokenizer, keep: Allocator, scratch: Allocator, list: std.json.
         }
         var zero: usize = 0;
         const text = if (token.normalized and t.normalizer != null) try keep.dupe(u8, try t.normalizer.?.apply(&ctx, token.content, &zero)) else token.content;
-        // tokenizers matches and decodes a normalized added token by its normalized content.
-        try t.id_to_token.put(token.id, text);
+        // Normalization changes the matching key; the decoder retains the added token's original spelling.
+        try t.id_to_token.put(token.id, token.content);
         try (if (token.normalized) &t.normalized else &t.raw).insert(keep, text, @intCast(index));
     }
     if (tokens.items.len > 0) {
