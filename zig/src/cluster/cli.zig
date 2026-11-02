@@ -43,7 +43,7 @@ pub fn wants(args: []const []const u8) bool {
 }
 
 /// The exit code: 0 ok, 1 refused, not planned, invalid or a failed bring-up, 2 usage, 3 MCDMA's library not found (no "library" for
-/// this node, none at its path, or not libmcdma-fabric ABI 1).
+/// a node, none at this node's path, or not libmcdma-fabric ABI 1).
 pub fn run(env_in: Env, args: []const []const u8) !u8 {
     var env = env_in;
     var saved: launch.Saved = undefined;
@@ -219,7 +219,15 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
         try refuseConverged(env, m);
         return if (dry) 0 else 1;
     }
-    // on real hosts everything that can refuse does so before any node is started
+    // on real hosts everything that can refuse does so before any node is started: every node's links, library and
+    // window as that node will check them, then this one's library file
+    if (!fake) {
+        var why: []const u8 = "";
+        mcdma_link.specAll(env.a, c, m, .{}, &why) catch |err| {
+            try env.err.print("{s}\n", .{why});
+            return if (mcdma_link.libraryError(err)) 3 else 1;
+        };
+    }
     const here: ?Prepared = if (fake) null else switch (try prepare(env, c, m, leader)) {
         .ok => |p| p,
         .code => |x| return x,
