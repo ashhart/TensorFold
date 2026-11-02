@@ -78,6 +78,35 @@ test "a cuda node is probed with Linux tools and keeps a declared gpu limit" {
     try std.testing.expectEqualStrings("CUDA", inv.chip.str());
 }
 
+test "a GB10 with no memory figure is refused unless the cluster file sets gpu_limit_gb" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Rec = struct {
+        fn runner() launch.Runner {
+            return .{ .ptr = undefined, .run = run };
+        }
+        fn run(_: *anyopaque, _: std.mem.Allocator, _: []const u8, argv: []const []const u8) anyerror!launch.Output {
+            const cmd = argv[argv.len - 1];
+            if (std.mem.startsWith(u8, cmd, "cat /proc/meminfo")) return .{ .code = 0, .stdout = "MemTotal:       131072000 kB\nMemAvailable:    80000000 kB\n" };
+            if (std.mem.startsWith(u8, cmd, "nvidia-smi")) return .{ .code = 0, .stdout = "NVIDIA GB10, [N/A], [N/A]\n" };
+            if (std.mem.startsWith(u8, cmd, "ibv_devinfo")) return .{ .code = 0, .stdout = "" };
+            if (std.mem.startsWith(u8, cmd, "df")) return .{ .code = 0, .stdout = "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/nvme0n1p2 1 1 10 1% /\n" };
+            if (std.mem.startsWith(u8, cmd, "cat /etc/machine-id")) return .{ .code = 0, .stdout = "abc123\n" };
+            return .{ .code = 127, .stdout = "" };
+        }
+    };
+    var open = [_]config.Node{.{ .name = "gb10", .address = "192.0.2.30", .backend = .cuda }};
+    const bare: config.Config = .{ .name = "lab", .nodes = &open, .models = &.{} };
+    try std.testing.expectError(error.GpuLimitMissing, launch.inventory(a, Rec.runner(), bare, open[0], true));
+    var capped = [_]config.Node{.{ .name = "gb10", .address = "192.0.2.30", .backend = .cuda, .gpu_limit = 100 * node.gib }};
+    const set: config.Config = .{ .name = "lab", .nodes = &capped, .models = &.{} };
+    const inv = try launch.inventory(a, Rec.runner(), set, capped[0], true);
+    try std.testing.expect(inv.unified);
+    try std.testing.expectEqual(@as(u64, 100 * node.gib), inv.gpu_limit);
+    try std.testing.expectEqualStrings("NVIDIA GB10", inv.chip.str());
+}
+
 test "ssh for a node behind a jump host is key-only and goes through it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

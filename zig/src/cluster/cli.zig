@@ -166,7 +166,10 @@ fn initCmd(env: Env, args: []const []const u8) !u8 {
     var probs: config.Problems = .{ .a = env.a };
     config.validate(c, &probs);
     if (!probs.ok()) return problems(env, probs);
-    const found = try launch.discover(env.a, env.runner, c);
+    const found = launch.discover(env.a, env.runner, c) catch |err| {
+        if (err == error.GpuLimitMissing) return 1;
+        return err;
+    };
     try launch.writeJson(env.out, found.config);
     return 0;
 }
@@ -228,6 +231,7 @@ fn checkCmd(env: Env, args: []const []const u8, show_nodes: bool, only: ?[]const
 }
 
 fn reportErr(env: Env, err: anyerror) !u8 {
+    if (err == error.GpuLimitMissing) return 1;
     try env.err.print("{s}: give memory_gb for every node, or pass --probe or --probes DIR\n", .{@errorName(err)});
     return 1;
 }
@@ -289,12 +293,18 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
             try env.out.writeAll("dry run: no node was started and no link opened\n");
             return 0;
         }
-        const inv = try launch.inventory(env.a, env.runner, c, c.nodes[c.find(leader).?], true);
+        const inv = launch.inventory(env.a, env.runner, c, c.nodes[c.find(leader).?], true) catch |err| {
+            if (err == error.GpuLimitMissing) return 1;
+            return err;
+        };
         return hostRun(env, p, inv, hold);
     }
     const src = source(env, args);
     if (disaggregated) {
-        const invs = try cli_model.inventories(src, c, members);
+        const invs = cli_model.inventories(src, c, members) catch |err| {
+            if (err == error.GpuLimitMissing) return 1;
+            return err;
+        };
         const plan = mcdma_link.planDigest(c, m, members, .{});
         // cabled as the real nodes are, by the declared links (a CUDA host probes no Thunderbolt peers), else as probed
         const es = if (c.links.len > 0) try mcdma_link.cables(env.a, c, members) else try topology.edges(env.a, invs);
@@ -344,7 +354,10 @@ fn nodeCmd(env: Env, args: []const []const u8) !u8 {
         .code => |x| return x,
     };
     try describe(env, c, p);
-    const inv = try launch.inventory(env.a, env.runner, c, c.nodes[i], true);
+    const inv = launch.inventory(env.a, env.runner, c, c.nodes[i], true) catch |err| {
+        if (err == error.GpuLimitMissing) return 1;
+        return err;
+    };
     try status.nodes(env.out, &.{inv});
     return hostRun(env, p, inv, null);
 }
