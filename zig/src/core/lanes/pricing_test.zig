@@ -285,6 +285,8 @@ const price = @import("hold_price.zig");
 
 // SYNTHETIC, not performance data: forward 10 ms, modeled holds 7/9 ms; two .8-chance blocks pay above 1.25 ms.
 const deferred_holds = [_]depth.HoldCost{ .{ .streams = 1, .depth = 1, .ms = 7 }, .{ .streams = 2, .depth = 1, .ms = 9 } };
+// SYNTHETIC: three .8-chance drafts gain 1.952 tokens; a shared 24 ms pass pays only above ~2.295 ms fixed work.
+const deferred_deep_holds = [_]depth.HoldCost{ .{ .streams = 1, .depth = 3, .ms = 20 }, .{ .streams = 2, .depth = 3, .ms = 24 } };
 // SYNTHETIC TIMING: every target forward width costs 10 ms.
 var deferred_costs: [8]Cost = undefined;
 
@@ -314,17 +316,18 @@ fn deferredPlain(prompt: []const u32, max_new: u32, seed: ?u64) ![]u32 {
     return gpa.dupe(u32, s.emitted());
 }
 
-/// drafted_test's drafter whose holds settle late: a pass is charged to the round whose verify waits for it.
+/// drafted_test's drafter: encoding is accountable at launch, GPU work only when a later verify settles it.
 const Deferred = struct {
     head: dt.FakeDrafter,
     host_ms: f64, // SYNTHETIC TIMING: host work a round spends beyond its forward, the true fixed overhead
+    encode_ms: f64 = 0, // SYNTHETIC TIMING: CPU encoding before submission, disjoint from the pending GPU span
     vtable: dr.Drafter.VTable = undefined,
     inner_absorb: *const fn (*anyopaque, []const dr.Absorb) anyerror!void = undefined,
     inner_hold: *const fn (*anyopaque, []const dr.Hold) anyerror!void = undefined,
     inner_held: *const fn (*anyopaque, []const *sm.Stream, []const []u32) anyerror!void = undefined,
-    pending: f64 = 0, // ms of launched hold passes no wait has settled yet
-    window: f64 = 0, // ms settled since the round clock started
-    settled: f64 = 0, // ms settled since the timing source was last taken
+    pending: f64 = 0, // GPU ms of launched hold passes no wait has settled yet
+    window: f64 = 0, // nonoverlapping encode CPU + settled GPU ms since the round clock started
+    settled: f64 = 0, // accountable encode CPU + settled GPU ms since the timing source was last taken
     blocks: u32 = 0, // hold blocks launched
 
     fn of(ptr: *anyopaque) *Deferred {
@@ -341,7 +344,7 @@ const Deferred = struct {
         x.pending = 0;
     }
 
-    /// Settled GPU work outside any round (a load or calibration pass): the source holds it, no round window does.
+    /// Already-accountable startup/calibration work: the source holds it, no round window does.
     fn outside(x: *Deferred, ms: f64) void {
         x.settled += ms;
     }
@@ -364,7 +367,9 @@ const Deferred = struct {
         var deepest: i64 = 0;
         for (items) |it| deepest = @max(deepest, @as(i64, it.depth));
         x.blocks += @intCast(items.len);
-        x.pending += price.holdMs(&deferred_holds, items.len, deepest) + 4; // settled time differs from the model
+        x.window += x.encode_ms;
+        x.settled += x.encode_ms;
+        x.pending += price.holdMs(x.head.facts_.hold_costs, items.len, deepest) + 4; // actual GPU time differs from the quote
     }
 
     fn chances(ptr: *anyopaque, s: *sm.Stream, out: []f64) anyerror!bool {
@@ -385,7 +390,7 @@ const Deferred = struct {
         return ms;
     }
 
-    /// Reports only settled work; the callback cannot wait for a pending hold.
+    /// Reports completed encoding and settled GPU work; taking CPU time cannot consume the pending GPU span.
     fn drafter(x: *Deferred) dr.Drafter {
         const inner = x.head.drafter();
         x.vtable = inner.vtable.*;
@@ -407,7 +412,7 @@ const Deferred = struct {
         owner(ptr).window = 0;
     }
 
-    /// A round's wall ms: the 10 ms forward, the host's fixed work, and the earlier holds it waited on.
+    /// A round's wall ms: the 10 ms forward, fixed host work, encoding and earlier holds it waited on.
     fn elapsed(ptr: *anyopaque, _: be.Mark) f64 {
         const x = owner(ptr);
         return 10.0 + x.host_ms + x.window;
@@ -418,16 +423,18 @@ fn deferredLive(s: *const sm.Stream) bool {
     return !s.finished and s.emitted().len + 4 <= s.max_new;
 }
 
-/// Two drafting streams: assert real hold decisions, fixed-cost attribution and exact target-only tokens.
-fn deferredRun(host_ms: f64, seed: ?u64) !void {
+const DeferredCase = struct { live: usize = 2, shared: bool = true, deep: bool = false };
+
+/// Actual rounds: assert funded holds, fixed-cost attribution and exact target-only tokens.
+fn deferredRun(host_ms: f64, seed: ?u64, c: DeferredCase) !void {
     const prompts = [2][]const u32{ &dt.p1, dt.long[0..11] };
     const ids = [2][]const u8{ "a", "b" };
-    const max_new = [2]u32{ 48, 48 };
+    const max_new: u32 = if (c.deep) 96 else 48;
     var plain: [2][]u32 = undefined;
     var planned: usize = 0;
     defer for (plain[0..planned]) |p| gpa.free(p);
-    for (&plain, prompts, max_new) |*p, prompt, n| {
-        p.* = try deferredPlain(prompt, n, seed);
+    for (plain[0..c.live], prompts[0..c.live]) |*p, prompt| {
+        p.* = try deferredPlain(prompt, max_new, seed);
         planned += 1;
     }
     var target: fake.Fake = .{ .gpa = gpa };
@@ -435,43 +442,100 @@ fn deferredRun(host_ms: f64, seed: ?u64) !void {
     var strict: dt.Strict = .{ .inner = target.backend() };
     defer strict.deinit();
     var fix: Deferred = .{
-        .head = .{ .facts_ = .{ .depth = 1, .step_ms = 0.5, .plain_guard = false, .batched = true, .chances = true, .hold_costs = &deferred_holds } },
+        .head = .{ .facts_ = .{ .depth = if (c.deep) 3 else 1, .step_ms = 0.5, .plain_guard = false, .batched = true, .chances = true, .hold_costs = if (c.deep) &deferred_deep_holds else &deferred_holds } },
         .host_ms = host_ms,
+        .encode_ms = if (c.deep) 0.75 else 0,
     };
     defer fix.head.deinit();
     var wrapped = try Drafted.init(gpa, strict.backend(), fix.drafter());
     defer wrapped.deinit();
-    var cfg = try Config.init(gpa, wrapped.facts(deferredModel()), 16, 15);
+    var model = deferredModel();
+    model.draft_step_ms = if (c.deep) fix.head.facts_.step_ms else 0;
+    var cfg = try Config.init(gpa, wrapped.facts(model), 16, 15);
     defer cfg.deinit(gpa);
     cfg.k.depth_rate = 0; // no empirical acceptance learning: this fixture isolates how round time is attributed
+    cfg.family_streams = c.shared;
     var engine = Engine.init(gpa, &cfg, wrapped.backend(), fix.clock());
     defer engine.deinit();
-    try engine.rule.observeOverhead(2, 2, 10 + host_ms, seed != null, 0); // synthetic baseline, no holds
+    try engine.rule.observeOverhead(@intCast(c.live), c.live, 10 + host_ms, seed != null, 0); // synthetic baseline, no holds
     var streams: [2]sm.Stream = undefined;
     var made: usize = 0;
     defer for (streams[0..made]) |*s| s.deinit(gpa);
-    for (0..2) |i| {
-        streams[i] = try sm.Stream.init(gpa, .{ .id = ids[i], .prompt = prompts[i], .max_new = max_new[i], .sampling = seeded(seed) });
+    for (0..c.live) |i| {
+        streams[i] = try sm.Stream.init(gpa, .{ .id = ids[i], .prompt = prompts[i], .max_new = max_new, .sampling = seeded(seed) });
         made += 1;
         try engine.addStream(&streams[i]);
     }
 
     var seen: usize = 0;
     while (engine.activeCount() > 0) {
-        fix.outside(15); // calibration settled before this round starts: no part of its overhead, whatever the source
+        fix.outside(15); // startup/calibration CPU + GPU time before this round is never its overhead
         const before = fix.blocks;
         try engine.step();
-        if (!deferredLive(&streams[0]) or !deferredLive(&streams[1])) continue;
+        var all_live = true;
+        for (streams[0..c.live]) |*s| all_live = all_live and deferredLive(s);
+        if (!all_live) continue;
         seen += 1;
-        // The measured host cost, not a previous hold's unsettled GPU debt, decides whether the two blocks pay.
-        const want: u32 = if (host_ms > 1.25) 2 else 0;
+        // Deep shared holds barely pay at 2.5 ms: subtracting even one modeled step again eventually defunds them.
+        const want: u32 = if (c.deep or host_ms > 1.25) @intCast(c.live) else 0;
         try std.testing.expectEqual(want, fix.blocks - before);
-        try std.testing.expectApproxEqAbs(host_ms, engine.rule.fixedMs(2, seed != null), 1e-9);
+        if (c.deep) for (streams[0..c.live]) |s| try std.testing.expectEqual(@as(u32, 3), s.next.?.count);
+        try std.testing.expectApproxEqAbs(host_ms, engine.rule.fixedMs(c.live, seed != null), 1e-9);
     }
     try std.testing.expect(seen >= 12);
-    for (plain, 0..) |p, i| try std.testing.expectEqualSlices(u32, p, streams[i].emitted());
+    try std.testing.expectEqual(c.shared, engine.shared_rounds > 0);
+    for (plain[0..c.live], 0..) |p, i| try std.testing.expectEqualSlices(u32, p, streams[i].emitted());
 }
 
 test "a hold settled by a later verify is charged to that round: unpaid holds stop, paid ones stay, tokens are unchanged" {
-    for ([_]f64{ 0, 2.5 }) |host_ms| for ([_]?u64{ null, 1234 }) |seed| try deferredRun(host_ms, seed);
+    for ([_]f64{ 0, 2.5 }) |host_ms| for ([_]?u64{ null, 1234 }) |seed| try deferredRun(host_ms, seed, .{});
+}
+
+test "actual deep holds exclude encoding and deferred GPU once: shared and lone funding retains the true fixed cost" {
+    for ([_]?u64{ null, 1234 }) |seed| {
+        try deferredRun(2.5, seed, .{ .deep = true }); // two streams through roundStreams
+        try deferredRun(2.5, seed, .{ .deep = true, .live = 1 }); // priced lone stream through roundStreams
+        try deferredRun(2.5, seed, .{ .deep = true, .live = 1, .shared = false }); // familyRound
+    }
+}
+
+test "without actual timing deep shared rounds retain modeled extra-step and head deductions" {
+    for ([_]?u64{ null, 1234 }) |seed| {
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var strict: dt.Strict = .{ .inner = target.backend() };
+        defer strict.deinit();
+        var fix: Deferred = .{
+            .head = .{ .facts_ = .{ .depth = 3, .step_ms = 0.5, .plain_guard = false, .batched = true, .chances = true, .hold_costs = &deferred_holds } },
+            .host_ms = 2.5,
+            .encode_ms = 0.75,
+        };
+        defer fix.head.deinit();
+        var drafter = fix.drafter();
+        drafter.hold_timing = null; // the optional capability is absent, not an actual measurement of zero
+        var wrapped = try Drafted.init(gpa, strict.backend(), drafter);
+        defer wrapped.deinit();
+        var model = deferredModel();
+        model.draft_step_ms = fix.head.facts_.step_ms;
+        var cfg = try Config.init(gpa, wrapped.facts(model), 16, 15);
+        defer cfg.deinit(gpa);
+        cfg.k.depth_rate = 0;
+        var engine = Engine.init(gpa, &cfg, wrapped.backend(), fix.clock());
+        defer engine.deinit();
+        try engine.rule.observeOverhead(1, 1, 12.5, seed != null, 0);
+        var s = try sm.Stream.init(gpa, .{ .id = "modeled", .prompt = &dt.p1, .max_new = 96, .sampling = seeded(seed) });
+        defer s.deinit(gpa);
+        try engine.addStream(&s);
+        // SYNTHETIC: no first-hold GPU receipt; later fixed = 24.25 wall - 10 forward - 1 extra - 7 hold = 6.25.
+        for ([_]f64{ 2.0, 2.85, 3.53 }) |fixed_ms| {
+            fix.outside(15);
+            const before = fix.blocks;
+            try engine.step();
+            try std.testing.expectEqual(@as(u32, 1), fix.blocks - before);
+            try std.testing.expectEqual(@as(u32, 3), s.next.?.count);
+            try std.testing.expectApproxEqAbs(fixed_ms, engine.rule.fixedMs(1, seed != null), 1e-9);
+        }
+        try std.testing.expectEqual(@as(u64, 3), engine.shared_rounds);
+        engine.release(&s);
+    }
 }

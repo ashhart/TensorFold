@@ -19,8 +19,10 @@ const rows_served = [_]c.Shape{
     .{ .rows = 1, .n = 2048, .k = 2048 },  .{ .rows = 9, .n = 512, .k = 2048 },   .{ .rows = 16, .n = 6144, .k = 2048 },
     .{ .rows = 32, .n = 2048, .k = 6144 }, .{ .rows = 4, .n = 2048, .k = 10240 },
 };
-/// A cold prompt's absorb: the taps' projection (2,048 from 10,240) and k and v, up to 2,048 rows a pass.
+/// Shared holds past 16 rows, and a cold prompt's absorb up to 2,048 rows a pass.
 const tile_served = [_]c.Shape{
+    .{ .rows = 17, .n = 2048, .k = 2048 },    .{ .rows = 18, .n = 512, .k = 2048 },
+    .{ .rows = 24, .n = 6144, .k = 2048 },    .{ .rows = 32, .n = 2048, .k = 6144 },
     .{ .rows = 33, .n = 2048, .k = 2048 },    .{ .rows = 128, .n = 512, .k = 2048 },
     .{ .rows = 2048, .n = 2048, .k = 10240 }, .{ .rows = 70, .n = 6144, .k = 2048 },
 };

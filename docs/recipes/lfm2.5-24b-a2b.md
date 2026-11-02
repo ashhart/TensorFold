@@ -88,15 +88,22 @@ cohort into several passes, priced in execution order rather than as one impossi
 A new stream waits for its first funded hold while retaining its prompt context. Each lane owns incoming prompt
 and verified taps before the target overwrites them, projecting them only for a hold, snapshot or stage overflow.
 Zero-grant rounds therefore retain contiguous context for later drafts; they do not disable drafting by stream count.
-Decode and verify forwards capture their raw taps during normalization through each row's destination straight
-into the lane's stage, without a per-round host copy. A forward waits on a pending hold before replacing rows that hold still
-reads; only accepted rows become staged context. Stage overflow projects only the retained prefix before the next
-capture's anchor, so a reused anchor can replace its old row without losing contiguous context.
+Prompt, decode and verify forwards capture raw BF16 taps during normalization through each row's destination
+straight into the lane's separate stage allocation, without a per-round host copy. The stage retains up to
+2,048 rows, clipped to lane capacity, and admission counts those bytes independently of K/V storage. Its GPU
+base belongs to the live allocation; snapshots contain bytes and state, never virtual addresses. A target
+consumer waits on the pending hold's GPU event; checked host consumers settle before reading. Only accepted
+rows become staged context. Overflow projects only the retained prefix before the next capture's anchor.
+Declined snapshots leave the retained final anchor intact, including across other streams' forwards.
 
 `tf-kernel-contract --only lfm2` checks these kernels. `tf-lfm2-dspark MODEL DRAFTER TOKENS [ROWS]` runs the drafter
 against an fp32 host reference of the released checkpoint (the same taps and the target's embedding and head),
 prints each draft against the reference's pick with the margin between the reference's two best tokens, and times
 the drafter's passes; a near tie can pick the other token.
+The native diagnostic covers 64 context rows and a nine-row block, deferred context, the 2,143-row
+zero-row-rewind case, complete clean/context calibration grids, and NaN/+Inf/-Inf rejection on all three
+held-token consumer paths. Exact FC bytes and alternating-two-live-buffer raw-tap oracles remain separate
+from its floating-point reference comparison.
 
 Row-owned capture uses `lfm2_norm_tap`, `lfm2_combine_norm_tap` and the sorted-combine variant;
 the original diagnostic `lfm2_tap` interface is unchanged. The fused norms launch 512 threads with
@@ -114,9 +121,13 @@ running on the GPU is priced by its lane's last confidences, so the host does no
 without the head verifies by the core's depth rule, from each stream's measured acceptance by depth.
 
 A stream with a copy ahead verifies the copy and asks no hold, and a drafting stream prices its copy
-windows by its own copies. The lane core also weighs the hold pass itself: the drafter times holds of 1 to 16
-blocks at load and corrects those prices toward each settled hold's GPU time. Confidence still allocates verify
-rows unchanged, but a hold's expected gain is capped by that stream's actual head acceptance. If the full hold
+windows by its own copies. Clean holds are calibrated at every legal depth for 1, 2, 4, 8 and 16 blocks,
+within the 32-row pass limit. Context-only held passes use the same encoder, barriers, partitioning and
+gathering at powers-of-two row counts 1 through 2,048 for those five counts: 60 context quotes. Every shape
+warms once, then records the best of three valid CPU-encode + GPU measurements on finite nonzero raw taps;
+both grids publish only when complete. The newly retained context debt is staged before funding, and the
+matching calibrated context estimate is subtracted before updating the clean-hold EMA. Confidence still
+allocates verify rows unchanged, but a hold's expected gain is capped by its actual head acceptance. If the full hold
 cannot pay, the controller can retain a shorter prefix rather than discard all its useful drafts. Its separate
 hold-value estimate starts each newly tried conditional from the observed outcome; later trials use the
 existing depth learning rate. The reservation fallback keeps its original prior-initialized rates, and untested
@@ -130,9 +141,11 @@ probe cadence; cheaper live costs can fund the retained trial immediately. Actua
 ordinary holds; copies do not train head acceptance. These rules do not establish throughput qualification:
 that still needs the complete same-head no-drafter/BF16/8-bit matrix, including sampled one-stream replies.
 
-Observed fixed overhead excludes the completed hold's GPU time in the round that actually settles it, not
-the modeled price of a new unwaited hold. Work settled outside a round is discarded before its clock starts.
-Reading this accounting never submits GPU work or adds a wait; backends without it retain modeled pricing.
+Observed fixed overhead excludes completed hold encoding CPU at submission and successful GPU time at
+settlement, each once. A pending pass retains its encoding receipt only for clean-hold repricing, not a second
+charge. Metadata-only absorption and zero-row rewind create no command buffer or autorelease pool. Startup
+calibration is discarded before serving. Reading these receipts never submits work or waits; backends
+without actual timing retain modeled pricing.
 
 [Controller regression and native API receipts](../receipts/dspark-chain-restack/hold-value-controller.json)
 record the constructed timing cases and source hashes; they are not device-throughput qualification.
@@ -173,6 +186,9 @@ scalar projections through 32 rows, then 64x64 tiles. On non-tensor devices only
 projections fuse with SwiGLU at 4 through 16 physical rows. Projection and activation BF16 rounding
 remain canonical; smaller or narrow shapes and tensor-capable devices use separate projections.
 The 8-bit routing is unchanged.
+Context-FC gathering stays strictly below the shared BF16 tensor threshold when that pipeline exists;
+tensor-sized pieces retain their original independent calls. This preserves exact projection bytes rather
+than changing the numerical oracle to accommodate a different projection regime.
 
 Only a successfully completed native all-row verification marks its exact scratch owner. Keeping
 that full identity frame skips redundant convolution-state and logit copies. Partial, reordered,

@@ -12,9 +12,9 @@ const shared_drafts = @import("shared_drafts.zig");
 const gpa = std.testing.allocator;
 
 /// A pointer-stable engine over the existing fake target: forward ms by rows 1..8 and a mutable hold-cost table.
-const Fixture = struct {
+pub const Fixture = struct {
     /// `forward`: ms by rows 1..8, or null for a target with no timed forward costs (nothing is read of them).
-    const Setup = struct { drafts: u32, forward: ?[8]f64, holds: []const depth.HoldCost, prior: []const f64 };
+    pub const Setup = struct { drafts: u32, forward: ?[8]f64, holds: []const depth.HoldCost, prior: []const f64, contexts: []const @import("hold_price.zig").ContextCost = &.{} };
 
     holds: [3]depth.HoldCost = undefined,
     cfg: Config = undefined,
@@ -22,7 +22,7 @@ const Fixture = struct {
     clock: fake.FixedClock = .{},
     engine: Engine = undefined,
 
-    fn init(f: *Fixture, s: Setup) !void {
+    pub fn init(f: *Fixture, s: Setup) !void {
         @memcpy(f.holds[0..s.holds.len], s.holds);
         var costs: [8]Cost = undefined;
         if (s.forward) |forward| {
@@ -40,6 +40,7 @@ const Fixture = struct {
             .draft_prior = s.prior,
             .window_costs = if (s.forward != null) &costs else &.{},
             .hold_costs = f.holds[0..s.holds.len],
+            .hold_context_costs = s.contexts,
             .batch_rows = 8,
         }, 8, 7);
         f.target = .{ .gpa = gpa };
@@ -47,7 +48,7 @@ const Fixture = struct {
         f.engine = Engine.init(gpa, &f.cfg, f.target.backend(), f.clock.clock());
     }
 
-    fn deinit(f: *Fixture) void {
+    pub fn deinit(f: *Fixture) void {
         f.engine.deinit();
         f.target.deinit();
         f.cfg.deinit(gpa);
@@ -61,12 +62,12 @@ const Fixture = struct {
         return out[0];
     }
 
-    fn expectBudget(f: *Fixture, plans: []const win.Plan, want: i64) !void {
+    pub fn expectBudget(f: *Fixture, plans: []const win.Plan, want: i64) !void {
         try std.testing.expectEqual(want, try f.budget(plans));
     }
 
     /// The actual consumer for several head streams: plan indices `heads`, budgets in `out`.
-    fn budgetsFor(f: *Fixture, plans: []const win.Plan, heads: []const usize, out: []i64) !void {
+    pub fn budgetsFor(f: *Fixture, plans: []const win.Plan, heads: []const usize, out: []i64) !void {
         try shared_drafts.budgets(&f.engine, plans, heads, out);
     }
 };

@@ -71,7 +71,7 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .draft_timing = x.drafter.hold_timing, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .draft_timing = x.drafter.hold_timing, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.drafter.facts().hold_context_costs.len > 0) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -80,7 +80,17 @@ pub const Drafted = struct {
         break :blk tables;
     };
 
-    fn vtableFor(planned: bool, steps: bool, cancels: bool) *const be.Backend.VTable {
+    const prepared: [8]be.Backend.VTable = blk: {
+        var tables = [_]be.Backend.VTable{ legacy_vtable, planned_vtable, stepped_legacy, stepped_planned } ++ cancellable;
+        for (&tables) |*v| v.prepare_draft = prepareDraft;
+        break :blk tables;
+    };
+
+    fn vtableFor(planned: bool, steps: bool, cancels: bool, prepares: bool) *const be.Backend.VTable {
+        if (prepares) return &prepared[
+            @as(usize, @intFromBool(cancels)) * 4 +
+                @as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)
+        ];
         if (cancels) return &cancellable[@as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
         if (steps) return if (planned) &stepped_planned else &stepped_legacy;
         return if (planned) &planned_vtable else &legacy_vtable;
@@ -108,6 +118,7 @@ pub const Drafted = struct {
         m.head_trees = d.trees;
         m.copy_first = d.copy_first;
         m.hold_costs = d.hold_costs;
+        m.hold_context_costs = d.hold_context_costs;
         m.hold_rows = d.hold_rows;
         if (d.chances and x.drafter.vtable.chances != null) {
             // a chain's drafts priced by the drafter's own chances; the next hold as deep as the grant and its slack
@@ -282,13 +293,16 @@ pub const Drafted = struct {
         return x.target.keep(x.windows.items, paths);
     }
 
-    /// One absorb for every request's kept rows, then one hold for every request that wants drafts and can draft.
-    fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
+    /// Stage each unprepared request once, retaining pending tokens for the subsequent hold.
+    fn prepareDraft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
         x.absorbs.clearRetainingCapacity();
-        x.holds.clearRetainingCapacity();
         try x.firsts.resize(x.gpa, requests.len);
         for (requests, x.firsts.items) |r, *tok| {
+            if (r.prepared) {
+                if (r.rows) |rows| tok.* = r.follow[rows.len - 1];
+                continue;
+            }
             if (r.lanes != null and !x.drafter.facts().trees) return error.TreesNotBuilt;
             const lane = x.lanes.getPtr(r.stream) orelse return error.NotDrafting;
             lane.filler = 0; // a new request supersedes fillers a copy round left unused
@@ -317,6 +331,19 @@ pub const Drafted = struct {
                     lane.rows = true;
                 }
             }
+            tok.* = pending;
+        }
+        if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
+    }
+
+    /// Prepared requests staged before funding; ordinary callers retain stage then hold.
+    fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
+        const x = self(ptr);
+        try prepareDraft(ptr, requests);
+        x.holds.clearRetainingCapacity();
+        for (requests, x.firsts.items) |r, pending| {
+            if (r.lanes != null and !x.drafter.facts().trees) return error.TreesNotBuilt;
+            const lane = x.lanes.getPtr(r.stream) orelse return error.NotDrafting;
             if (r.depth == 0) continue;
             if (!lane.rows) { // nothing to draft from yet: fillers this round, the drafter from the next
                 lane.filler = r.depth;
@@ -324,7 +351,6 @@ pub const Drafted = struct {
             }
             try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth, .plan = r.plan, .lanes = r.lanes, .tokens = r.stream.context.items, .sampling = r.stream.sampling });
         }
-        if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
         if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
     }
 
