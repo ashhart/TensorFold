@@ -164,7 +164,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     const report = platform.optional_libraries.atBoundary();
     defer report.deinit();
     if (try refusals.startup(a, o, problem)) return null;
-    if (!@import("core").route_tap.admit(a, gpa, o.model_type, o.rank, "cuda", problem)) return null;
+    const route_tap = @import("core").route_tap;
+    var tap_guard: route_tap.Guard = .{};
+    defer tap_guard.deinit();
+    if (!route_tap.admit(a, gpa, o.model_type, o.rank, "cuda", problem)) return null;
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     // a checkpoint that serves pictures rather than tokens: its model_index.json decides, before any family's flags
     if (@import("moss_image_spec.zig").recognize(a, io, o.dir)) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
@@ -172,12 +175,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("cuda_qwen3.zig").open(a, gpa, io, o, problem, budget, windows);
+    if (std.mem.eql(u8, o.model_type, "qwen3")) return route_tap.held(&tap_guard, try @import("cuda_qwen3.zig").open(a, gpa, io, o, problem, budget, windows));
     switch (try open_family.special(a, gpa, io, o, problem)) {
         .not_mine => {},
-        .opened => |engine| return engine,
+        .opened => |engine| return route_tap.held(&tap_guard, engine),
     }
-    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
+    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return route_tap.held(&tap_guard, try openWith(F, a, gpa, io, o, problem));
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }

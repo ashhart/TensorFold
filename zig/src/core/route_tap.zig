@@ -176,6 +176,30 @@ pub fn admit(a: std.mem.Allocator, gpa: std.mem.Allocator, model_type: []const u
     return true;
 }
 
+/// Frees the session on scope exit unless `dismiss` ran (the engine opened and `close` will stop).
+pub const Guard = struct {
+    keep: bool = false,
+
+    pub fn dismiss(g: *Guard) void {
+        g.keep = true;
+    }
+
+    pub fn deinit(g: *Guard) void {
+        if (!g.keep) stop();
+    }
+};
+
+/// Keep the session if `opened` is a successful engine; otherwise `Guard.deinit` calls `stop`.
+pub fn held(g: *Guard, opened: anytype) @TypeOf(opened) {
+    const T = @TypeOf(opened);
+    if (comptime @typeInfo(T) == .optional) {
+        if (opened != null) g.dismiss();
+    } else {
+        g.dismiss();
+    }
+    return opened;
+}
+
 pub fn encodeHeader(out: *[header_bytes]u8, flags: u16) void {
     const h = Header{ .flags = flags };
     @memcpy(out[0..4], &h.magic);
@@ -556,4 +580,44 @@ test "stop frees the session and ring under the testing allocator" {
     stop();
     try std.testing.expect(!live());
     stop();
+}
+
+test "a failed open after admit frees the ring under the testing allocator" {
+    const a = std.testing.allocator;
+    try std.testing.expect(!live());
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}/route-tap-fail.tfr1", .{tmp.sub_path}, 0);
+
+    const prev = if (std.c.getenv(env_name)) |p| try a.dupeSentinel(u8, std.mem.span(p), 0) else null;
+    defer if (prev) |p| a.free(p);
+    try std.testing.expectEqual(@as(c_int, 0), setenv(env_name, path, 1));
+    defer {
+        if (prev) |p| _ = setenv(env_name, p, 1) else _ = unsetenv(env_name);
+        stop();
+    }
+
+    var problem: []const u8 = "";
+    try std.testing.expect(admit(a, a, "nemotron_h", 0, "cuda", &problem));
+    try std.testing.expect(live());
+    {
+        var g: Guard = .{};
+        defer g.deinit();
+        try std.testing.expect(live());
+    }
+    try std.testing.expect(!live());
+
+    try std.testing.expect(admit(a, a, "nemotron_h", 0, "cuda", &problem));
+    try std.testing.expect(live());
+    {
+        var g: Guard = .{};
+        defer g.deinit();
+        const opened: ?u8 = 1;
+        _ = held(&g, opened);
+        try std.testing.expect(g.keep);
+    }
+    try std.testing.expect(live());
+    stop();
+    try std.testing.expect(!live());
 }

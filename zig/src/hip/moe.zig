@@ -129,7 +129,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     if (r.remap != 0) {
         // every rank picks the same pairs, runs the ones it holds (the others group under an id past its experts)
         try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
-        @import("route_tap_copy.zig").afterSelect(o.l.r, o.stream, pick, wts, rows, slots);
+        if (@import("core").route_tap.live()) @import("route_tap_copy.zig").afterSelect(o.l.r, o.stream, pick, wts, rows, slots);
         const local = try o.arena.of(i32, size * slots);
         try o.moeLocalize(pick, r.remap, local, pairs, ex.count);
         tile = tileFor(o, rows);
@@ -211,7 +211,7 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
         // the launches' m: the most rows an item holds, the shared expert's whole item in a prompt pass
         tile = itemRowsFor(o, rows, shared != null);
     }
-    @import("route_tap_copy.zig").afterSelect(o.l.r, o.stream, pick, wts, rows, slots);
+    if (@import("core").route_tap.live()) @import("route_tap_copy.zig").afterSelect(o.l.r, o.stream, pick, wts, rows, slots);
     // beside the stack the shared pair's id is the stack's first id past its experts: zero its item, never read its row
     if (ex.shared != null) try o.moeForeignItems(items, count, ex.count);
     const expert_rows = expertRows(rows, r.top_k, r.count());

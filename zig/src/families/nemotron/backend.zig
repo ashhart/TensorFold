@@ -185,7 +185,8 @@ pub const Metal = struct {
         self.fence.wait(enc);
         var e = fwd.Enc{ .e = enc, .concurrent = self.concurrent };
         try body.encode(self, &e);
-        const tap_at = @import("../../core/route_tap.zig").reservedCount();
+        const tap = @import("../../core/route_tap.zig");
+        const tap_at = if (tap.live()) tap.reservedCount() else 0;
         self.fence.update(enc);
         enc.end();
         cb.commit();
