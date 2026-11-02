@@ -75,8 +75,15 @@ test "lone depth reacts to staged context without double charging an observed wh
     const costs: Table = .{ .slots = &slots };
     const contexts = [_]price.ContextCost{.{ .streams = 1, .rows = 4, .ms = 10 }};
     var rule: depth.Rule = .{
-        .gpa = gpa, .prior = &.{1}, .most_drafts = 1, .family_costs = &costs, .shared_costs = &costs,
-        .mtp_step_ms = 1, .plain_guard = true, .node_probabilities = false, .batch_rows = 8,
+        .gpa = gpa,
+        .prior = &.{1},
+        .most_drafts = 1,
+        .family_costs = &costs,
+        .shared_costs = &costs,
+        .mtp_step_ms = 1,
+        .plain_guard = true,
+        .node_probabilities = false,
+        .batch_rows = 8,
         .k = .{ .hold_costs = &holds, .hold_context_costs = &contexts },
     };
     defer rule.deinit();
@@ -152,8 +159,12 @@ test "depth funding sees newly staged debt and zero-budget rounds retain every c
         var strict: dt.Strict = .{ .inner = target.backend() };
         defer strict.deinit();
         var staged: Staged = .{ .head = .{ .facts_ = .{
-            .depth = 1, .step_ms = 0.5, .prior = &.{1}, .batched = batched,
-            .hold_costs = &holds, .hold_context_costs = &contexts,
+            .depth = 1,
+            .step_ms = 0.5,
+            .prior = &.{1},
+            .batched = batched,
+            .hold_costs = &holds,
+            .hold_context_costs = &contexts,
         } } };
         defer staged.head.deinit();
         var wrapped = try Drafted.init(gpa, strict.backend(), staged.drafter());
@@ -161,7 +172,11 @@ test "depth funding sees newly staged debt and zero-budget rounds retain every c
         var costs: [8]@import("config.zig").Cost = undefined;
         for (&costs, 1..) |*c, width| c.* = .{ .width = @intCast(width), .ms = 10 };
         var cfg = try Config.init(gpa, wrapped.facts(.{
-            .exact_width = 8, .window_costs = &costs, .hidden_rows = true, .batch_rows = 8, .lone_copies = false,
+            .exact_width = 8,
+            .window_costs = &costs,
+            .hidden_rows = true,
+            .batch_rows = 8,
+            .lone_copies = false,
         }), 8, 7);
         defer cfg.deinit(gpa);
         cfg.timed = false;
