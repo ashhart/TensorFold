@@ -3,6 +3,7 @@ package admission
 import (
 	"context"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -141,5 +142,24 @@ func TestRankGroupNeedsEveryNodeCleared(t *testing.T) {
 			t.Errorf("a restricted request may run on a group with %s", c.name)
 		}
 		exec(c.reset, member)
+	}
+}
+
+func TestConcurrentAdmitsShareOneLazyWaker(t *testing.T) {
+	a := &Admitter{}
+	got := make([]*Waker, 8)
+	var wg sync.WaitGroup
+	for i := range got {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i] = a.waker()
+		}()
+	}
+	wg.Wait()
+	for _, w := range got {
+		if w == nil || w != got[0] {
+			t.Fatal("concurrent admissions made their own wakers")
+		}
 	}
 }
