@@ -16,6 +16,8 @@ pub const Options = struct {
     cache_gib: ?f64 = null,
     /// The shared drawer reports its allocation size; the family does not duplicate that layout here.
     sampler_bytes: usize = 0,
+    sampler_host_bytes: usize = 0,
+    unified: bool = false,
 };
 
 pub const Plan = struct {
@@ -33,6 +35,7 @@ pub const Plan = struct {
     feature_bytes: usize,
     cache_bytes: usize,
     fixed_bytes: usize,
+    pinned_bytes: usize,
     planned_bytes: usize,
 };
 
@@ -59,6 +62,9 @@ pub fn make(c: cfg.Config, room: usize, weight_bytes: usize, o: Options) !Plan {
     const lane = try std.math.add(usize, try text.Cache.bytes(c, o.window), try std.math.add(usize, features, @as(usize, c.vocab) * 2));
     var fixed = try std.math.add(usize, weight_bytes, arena);
     for ([_]usize{ pixels, positions, ids, o.sampler_bytes }) |bytes| fixed = try std.math.add(usize, fixed, bytes);
+    var pinned: usize = 0;
+    for ([_]usize{ pixels, positions, ids, o.sampler_host_bytes }) |bytes| pinned = try std.math.add(usize, pinned, bytes);
+    if (o.unified) fixed = try std.math.add(usize, fixed, pinned);
     if (fixed > room or lane > room - fixed) return error.DotsMemoryBudget;
     const cache: usize = (try cacheBytes(o.cache_gib)) orelse @min(2 * gib, (room - fixed - lane) / 4);
     if (cache > room - fixed - lane) return error.DotsMemoryBudget;
@@ -68,7 +74,7 @@ pub fn make(c: cfg.Config, room: usize, weight_bytes: usize, o: Options) !Plan {
     const rows = try std.math.mul(usize, streams, width);
     if (rows > std.math.maxInt(u32)) return error.DotsStreamsDoNotFit;
     const total = try std.math.add(usize, fixed + cache, try std.math.mul(usize, streams, lane));
-    return .{ .window = o.window, .streams = streams, .rows = rows, .prompt_rows = chunk, .image_rows = image_rows, .image_tokens = o.image_tokens, .scratch_bytes = arena, .pixels_bytes = pixels, .positions_bytes = positions, .ids_bytes = ids, .lane_bytes = lane, .feature_bytes = features, .cache_bytes = cache, .fixed_bytes = fixed, .planned_bytes = total };
+    return .{ .window = o.window, .streams = streams, .rows = rows, .prompt_rows = chunk, .image_rows = image_rows, .image_tokens = o.image_tokens, .scratch_bytes = arena, .pixels_bytes = pixels, .positions_bytes = positions, .ids_bytes = ids, .lane_bytes = lane, .feature_bytes = features, .cache_bytes = cache, .fixed_bytes = fixed, .pinned_bytes = pinned, .planned_bytes = total };
 }
 
 test "dots HIP plan: explicit lanes refuse while automatic lanes fit the same checked budget" {
@@ -111,4 +117,17 @@ test "dots HIP plan: cache and image budgets cannot bypass context or memory lim
     o.image_tokens = 0;
     o.window = c.context + 1;
     try std.testing.expectError(error.DotsContext, make(c, 24 * gib, 6078358528, o));
+}
+
+test "dots HIP plan: unified admission counts pinned staging and rejects overflow" {
+    const cases = @import("config_test.zig");
+    const c = try cfg.Config.parse(std.testing.allocator, cases.sample, cases.generation);
+    var o: Options = .{ .window = 32768, .streams = 1, .fixed = true, .image_tokens = 14400, .cache_gib = 0, .sampler_host_bytes = 1234 };
+    const discrete = try make(c, 24 * gib, 6078358528, o);
+    o.unified = true;
+    const unified = try make(c, 24 * gib, 6078358528, o);
+    try std.testing.expectEqual(discrete.planned_bytes + discrete.pinned_bytes, unified.planned_bytes);
+    try std.testing.expectError(error.DotsMemoryBudget, make(c, unified.planned_bytes - 1, 6078358528, o));
+    o.sampler_host_bytes = std.math.maxInt(usize);
+    try std.testing.expectError(error.Overflow, make(c, 24 * gib, 6078358528, o));
 }
