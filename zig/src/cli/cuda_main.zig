@@ -11,6 +11,7 @@ const precision = @import("cuda_precision.zig");
 const kl = @import("cuda_kl.zig");
 const shared_checks = @import("cuda_shared_checks.zig");
 const checkpoint_cli = @import("checkpoint_cli");
+const cluster = @import("cluster");
 const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
 const train_check = @import("cuda_train_check.zig");
@@ -49,6 +50,9 @@ const usage =
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
     \\                (every prompt through the lane core at once, or one at a time with --solo)
+    \\       tensorfold cluster init|check|status
+    \\       tensorfold serve [MODEL] --cluster FILE
+    \\       tensorfold node --name NAME --cluster FILE
     \\
 ;
 
@@ -64,6 +68,8 @@ pub fn main(init: std.process.Init) !u8 {
         try std.Io.File.stdout().writeStreamingAll(init.io, "tensorfold " ++ @import("build_options").version ++ "\n");
         return 0;
     }
+    // Cluster commands must work without a model load. node joins over MCDMA, through the library each node names.
+    if (args.len >= 2 and cluster.cli.wants(@ptrCast(args[1..]))) return cluster.cli.main(init, args[1..]);
     // The checkpoint commands must work without a model, driver or GPU too.
     if (args.len >= 2 and checkpoint_cli.wants(@ptrCast(args[1..]))) return checkpoint_cli.main(init, args[1..]);
     // A leading flag is not a command: the usage covers it, without touching the GPU.
