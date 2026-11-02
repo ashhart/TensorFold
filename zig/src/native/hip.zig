@@ -429,6 +429,7 @@ test "a one-GPU family refuses --tp before the group forms; the others are not r
 }
 
 test "dots refuses unsupported group and head options before opening a device" {
+    try std.testing.expect(!reasoning(dots.native)); // dots.mocr replies carry no reasoning block
     const base: api.Open = .{ .dir = "d", .model_type = "dots_ocr" };
     try std.testing.expect(flagRefused(dots.native, base) == null);
     var o = base;
