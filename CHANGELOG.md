@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The CUDA kernel contract's NVFP4 expert-waves control goes red as planted on large GPUs such as the RTX 5090, where its test shape used to fit in one wave (#1832, fixes #1778). Thanks to @rootsbymenda.
+
 - The server's linear-time tests count thread cycles on Windows, so a busy CI runner no longer fails them by chance (#1854). Thanks to @Bizuayeu.
 
 - Nemotron on Intel GPUs refuses a config with an unknown `layers_block_type` name at load, instead of serving that layer as attention (#1865). Thanks to @jschmied.
