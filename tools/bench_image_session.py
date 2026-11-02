@@ -2,7 +2,8 @@
 
 Every request keeps the first user message's image part and adds a short new question; the assistant's replies stay in
 the history. Each turn records the reply text's sha256, completion tokens, cached prompt tokens and first-token time;
-the last line summarizes the session. Standard library only.
+the last line summarizes the session. Failed or incomplete turns stop the session and exit nonzero, preserving the
+failed turn and summary in the output. Standard library only.
 
   python3 tools/bench_image_session.py http://127.0.0.1:8080 --image picture.png --model MODEL --out session.jsonl
 """
@@ -69,10 +70,12 @@ def turn(base: str, model: str, messages: list[dict], tokens: int, temperature: 
     first = None
     text = []
     usage: dict = {}
+    complete = False
     with urllib.request.urlopen(req, timeout=600) as resp:
         for raw in resp:
             line = raw.decode().strip()
             if line == "data: [DONE]":
+                complete = True
                 break
             if not line.startswith("data:"):
                 continue
@@ -89,6 +92,8 @@ def turn(base: str, model: str, messages: list[dict], tokens: int, temperature: 
                     if first is None:
                         first = time.perf_counter()
                     text.append(piece)
+    if not complete:
+        raise RuntimeError("incomplete_stream")
     reply = "".join(text)
     return {"reply": reply, "sha256": hashlib.sha256(reply.encode()).hexdigest(),
             "completion_tokens": count(usage.get("completion_tokens")),
@@ -105,7 +110,7 @@ def summary(turns: list[dict]) -> dict:
             "ttft_s": [t.get("ttft_s") for t in turns], "sha256": [t.get("sha256") for t in turns]}
 
 
-def main() -> None:
+def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("base")
     p.add_argument("--turns", type=int, default=10)
@@ -166,7 +171,8 @@ def main() -> None:
         end = summary(records)
         print(json.dumps(end), flush=True)
         out.write(json.dumps(end) + "\n")
+    return 1 if end["errors"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
