@@ -533,7 +533,8 @@ test "a drafter config with a zero divisor is refused, and any admitted rank's s
         \\{"dflash_config":{"block_size":8,"conv_group_size":16,"conv_kernel_size":2,"mask_token_id":248070,"selector_rank":256,
         \\ "selector_top_k":16,"target_layer_ids":[5,19,33,47,61]},"head_dim":128,"hidden_size":5120,"intermediate_size":17408,
         \\ "num_attention_heads":32,"num_hidden_layers":5,"num_key_value_heads":8,"rms_norm_eps":1e-06,
-        \\ "rope_parameters":{"rope_theta":10000000},"sliding_window":2048,"vocab_size":248320}
+        \\ "rope_parameters":{"rope_theta":10000000},"sliding_window":2048,"vocab_size":248320,"use_sliding_window":true,
+        \\ "layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention"]}
     ;
     try std.testing.expectEqual(@as(usize, 256), (try Config.parse(gpa, text, target)).rank);
     for ([_][2][]const u8{ .{ "\"conv_group_size\":16", "\"conv_group_size\":0" }, .{ "\"num_key_value_heads\":8", "\"num_key_value_heads\":0" } }) |r| {
