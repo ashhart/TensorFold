@@ -47,6 +47,10 @@ fn chunk(data: []const u8, at: usize) error{Invalid}!?Chunk {
 }
 
 pub fn decode(a: Allocator, data: []const u8) picture.Error!picture.Samples {
+    return decodeWithLimits(a, data, .{});
+}
+
+pub fn decodeWithLimits(a: Allocator, data: []const u8, limits: picture.Limits) picture.Error!picture.Samples {
     var arena_state = std.heap.ArenaAllocator.init(a);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -64,7 +68,7 @@ pub fn decode(a: Allocator, data: []const u8) picture.Error!picture.Samples {
     const h = info.hdr orelse return error.Invalid;
     const bits = bitsPerPixel(h);
     if (bits == 0) return error.Invalid; // no mode: Pillow's open identified no image
-    try picture.fits(h.width, h.height);
+    try limits.fits(h.width, h.height);
     const frames = if (info.frames) |n| @as(u64, n) + @intFromBool(!info.frame_box) else 1;
     if (frames != 1) return error.Animated;
     // every chunk to IEND checked (verify), the consecutive image data gathered
