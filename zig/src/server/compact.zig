@@ -402,7 +402,8 @@ fn markerBody(a: Allocator, m: Value) Allocator.Error!?[]const u8 {
     const words = try contentOf(a, m); // text parts count, as a string note does
     if (!std.mem.startsWith(u8, words, marker_line)) return null;
     var rest = words[marker_line.len..];
-    if (std.mem.startsWith(u8, rest, "\n")) rest = rest[1..];
+    if (rest.len > 0 and rest[0] == '\r') rest = rest[1..]; // a carriage return is not part of the note
+    if (rest.len > 0 and rest[0] == '\n') rest = rest[1..];
     return rest;
 }
 
@@ -574,4 +575,12 @@ test "a memory marker made of text parts keeps its note" {
     try m.put(a, "role", .{ .string = "user" });
     try m.put(a, "content", .{ .array = parts });
     try std.testing.expectEqualStrings("STORED-NOTE", (try markerBody(a, .{ .object = m })).?);
+}
+
+test "a memory marker's note starts after a carriage return" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = try msg(a, "user", marker_line ++ "\r\nSTORED-NOTE");
+    try std.testing.expectEqualStrings("STORED-NOTE", (try markerBody(a, m)).?);
 }
