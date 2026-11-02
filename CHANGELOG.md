@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA reads its experts past the page cache with O_DIRECT, and keeps a load's shards open, so a cold start on a GB10 drops from about 100 s to 55 s with the same replies and the n-gram table still cached. `TF_LOAD_DIRECT=0` keeps the mapped reads (#1901, fixes #1873). Thanks to @jschmied.
+
 - Flash Next on CUDA reads its embedding shard's header with core's safetensors reader, so a malformed header is refused with an error instead of a panic, and a tensor's bytes must match its shape (#1917, part of #1872). Thanks to @jschmied.
 
 - The image session benchmark fails a turn whose stream ends before `[DONE]`, keeps it out of the next turn's history, and exits 1 when any turn failed, instead of reporting a partial reply as a success (#1916, fixes #1915). Thanks to @garvrao80.
