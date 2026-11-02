@@ -255,6 +255,17 @@ test "context-aware recovery funds unequal-depth optimism without spending refus
     try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
     try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, &out);
     for (streams[0..2]) |s| try std.testing.expectEqual(@as(?u64, 16), s.depth.?.wait);
+    // Split clean shapes keep their original optimism, but the selected debt alone must still pay.
+    f.engine.rule.k.hold_rows = 3;
+    contexts[0].ms = 10; // At most four extra tokens: even free clean work only ties 4/10.
+    for (streams[0..2]) |*s| s.depth.?.plain = 15;
+    try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out);
+    for (streams[0..2]) |s| try std.testing.expectEqual(@as(?u64, 16), s.depth.?.wait);
+    contexts[0].ms = 0.1;
+    try f.budgetsFor(&plans, &.{ 0, 1 }, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, &out);
+    for (streams[0..2]) |s| try std.testing.expectEqual(@as(?u64, 32), s.depth.?.wait);
 }
 
 const dt = @import("drafted_test.zig");

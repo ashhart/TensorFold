@@ -136,10 +136,14 @@ and physical-pass pricing, without disabling drafts at any stream count.
 
 A hold suppressed by this acceptance cap retains its context and uses the existing periodic probe backoff to
 try again. A probe requires a positive fresh reservation and funding in the full round's verify and physical
-hold costs, including companion rows, before other holds are selected. An impossible trial does not spend its
-probe cadence; cheaper live costs can fund the retained trial immediately. Actual profitable trials restore
-ordinary holds; copies do not train head acceptance. These rules do not establish throughput qualification:
-that still needs the complete same-head no-drafter/BF16/8-bit matrix, including sampled one-stream replies.
+hold costs, including companion rows and the selected trial's staged context, before other holds are selected.
+The original optimistic bound retains unequal-depth shapes when equal-depth padding cannot fit the target-row
+budget. An impossible trial does not spend its probe cadence; cheaper live costs can fund the retained trial
+immediately. Actual profitable trials restore ordinary holds; copies do not train head acceptance.
+Checkpoints without a confidence head retain the lone-depth controller: its modeled positive-depth round pays
+staged context once, while an observed whole-round price already includes that work. Its original periodic
+plain-round probes are unchanged. These rules do not establish throughput qualification: that still needs the
+complete same-head no-drafter/BF16/8-bit matrix, including sampled one-stream replies.
 
 Observed fixed overhead excludes completed hold encoding CPU at submission and successful GPU time at
 settlement, each once. A pending pass retains its encoding receipt only for clean-hold repricing, not a second

@@ -209,8 +209,9 @@ pub fn prefix(costs: *const Table, holds: []const HoldCost, context_ms: f64, bas
     return chosen;
 }
 
-/// Cached optimistic exploration bound; live cost changes invalidate it, and unknown costs remain feasible.
-pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
+/// Cached optimistic exploration bound with the selected trial's context fee; unknown clean prices stay feasible.
+pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64, context_ms: f64) bool {
+    if (!std.math.isFinite(context_ms)) return false;
     const costs = rule.shared_costs;
     const holds = rule.k.hold_costs;
     const plain = costs.get(base.rows) orelse return true;
@@ -225,10 +226,19 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
     }
     const room_rows = if (rule.batch_rows > base.rows) rule.batch_rows - base.rows else 0;
     if (heads == 0 or depth == 0 or room_rows == 0) return false;
-    // A smaller physical cap can split a reserved cohort; the single-pass bound cannot exclude those shapes.
-    if (rule.k.hold_rows != 0 and rule.batch_rows > rule.k.hold_rows) return true;
+    // Split clean shapes remain optimistic, but even free clean work must be able to pay the selected debt.
+    if (rule.k.hold_rows != 0 and rule.batch_rows > rule.k.hold_rows) {
+        if (context_ms == 0) return true;
+        var extra: u32 = 1;
+        while (extra <= room_rows) : (extra += 1) {
+            const verify = costs.get(@as(i64, base.rows) + extra) orelse return true;
+            if (base.tokens * (verify - plain + context_ms) <
+                @as(f64, @floatFromInt(extra)) * (plain + fixed)) return true;
+        }
+        return false;
+    }
     var hasher = std.hash.Wyhash.init(0);
-    inline for (.{ base.rows, heads, depth, rule.batch_rows }) |v| {
+    inline for (.{ base.rows, heads, depth, rule.batch_rows, @as(u64, @bitCast(context_ms)) }) |v| {
         const x: u64 = v;
         hasher.update(std.mem.asBytes(&x));
     }
@@ -260,7 +270,7 @@ pub fn canExplore(rule: anytype, whos: anytype, base: Base, fixed: f64) bool {
                 const last = @min(room_rows, padded * blocks);
                 while (extra <= last) : (extra += 1) {
                     const verify = costs.get(@as(i64, base.rows) + extra) orelse return true;
-                    lowest = @min(lowest, (verify - plain + hold) / @as(f64, @floatFromInt(extra)));
+                    lowest = @min(lowest, (verify - plain + hold + context_ms) / @as(f64, @floatFromInt(extra)));
                 }
             }
         }

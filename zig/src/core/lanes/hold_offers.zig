@@ -164,8 +164,8 @@ pub fn pay(rule: anytype, whos: anytype, sampled: bool, out: []i64, base: price.
             probe_depth = @max(probe_depth, probe.depth);
             probe_context = @max(probe_context, probe.hold_context_rows);
         }
-        const possible = price.canExplore(rule, whos, base, fixed) and
-            contextAllowsProbe(rule, whos, out, base, fixed, plain, probes, probe_depth, probe_context);
+        const possible = price.canExplore(rule, whos, base, fixed,
+            probeContextMs(rule, whos, out, probes, probe_depth, probe_context));
         for (rule.hold_order[rule.hold_order.len - probes ..]) |probe| {
             if (!possible) {
                 out[probe.index] = 0;
@@ -223,45 +223,24 @@ fn passCost(rule: anytype, whos: anytype, depths: []const i64, blocks: usize, de
 const View = struct {
     whos: []const @import("depth.zig").Who,
     depths: []const i64,
-    padded: ?u32 = null,
-    most: u32 = 0,
 
     pub fn len(v: @This()) usize {
         return v.depths.len;
     }
     pub fn at(v: @This(), i: usize) i64 {
-        const d = v.depths[i];
-        if (d <= 0) return 0;
-        return if (v.padded) |padded| @min(padded, v.most, @max(0, v.whos[i].draft_room - 1)) else d;
+        return v.depths[i];
     }
     pub fn contextRows(v: @This(), i: usize) u32 {
         return v.whos[i].hold_context_rows;
     }
 };
 
-/// Context belongs to the selected trial, while clean shape optimism still permits recovery through deeper holds.
-fn contextAllowsProbe(rule: anytype, whos: anytype, depths: []const i64, base: price.Base, fixed: f64, plain: f64, blocks: usize, deepest: i64, context_rows: u32) bool {
-    if (context_rows == 0 or rule.k.hold_context_costs.len == 0) return true;
+/// Charge only the selected trial's debt, including every physical pass it needs.
+fn probeContextMs(rule: anytype, whos: anytype, depths: []const i64, blocks: usize, deepest: i64, context_rows: u32) f64 {
+    if (context_rows == 0 or rule.k.hold_context_costs.len == 0) return 0;
     const one_pass = rule.k.hold_rows == 0 or
         @as(u64, @intCast(blocks)) * @as(u64, @intCast(deepest)) <= rule.k.hold_rows;
-    const context_ms = if (one_pass) price.contextMs(rule.k.hold_context_costs, blocks, context_rows) else price.rowsMs(&.{}, rule.k.hold_context_costs, rule.k.hold_rows, View{ .whos = whos, .depths = depths });
-    if (!std.math.isFinite(context_ms)) return false;
-    var view = View{ .whos = whos, .depths = depths, .most = rule.most_drafts };
-    var padded: u32 = 1;
-    while (padded <= rule.most_drafts) : (padded += 1) {
-        view.padded = padded;
-        var extra: u32 = 0;
-        for (0..depths.len) |i| {
-            const count: u32 = @intCast(view.at(i));
-            extra += count;
-        }
-        if (base.rows + extra > rule.batch_rows) break;
-        const verify = rule.shared_costs.get(base.rows + extra) orelse return true;
-        const clean_ms = price.rowsMs(rule.k.hold_costs, &.{}, rule.k.hold_rows, view);
-        if ((base.tokens + @as(f64, @floatFromInt(extra))) / (verify + fixed + clean_ms + context_ms) > plain)
-            return true;
-    }
-    return false;
+    return if (one_pass) price.contextMs(rule.k.hold_context_costs, blocks, context_rows) else price.rowsMs(&.{}, rule.k.hold_context_costs, rule.k.hold_rows, View{ .whos = whos, .depths = depths });
 }
 
 fn observedOf(who: anytype) []const f64 {
