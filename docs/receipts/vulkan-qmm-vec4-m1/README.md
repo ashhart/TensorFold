@@ -16,6 +16,6 @@ Files:
 - `identity-probe.txt` holds the probe that runs both images on 17 projection cases and compares the output bytes.
 - `PREREG.md` was written before any GPU run. It holds the forecast, the gates and the decision rule.
 - `raw-files-sha256.txt` lists the SHA-256 of every raw run file the summary was generated from.
-- The contract runner's output on the GPUs follows in a later commit.
+- `kernel-contract-*.txt` holds the contract runner's output, one file per GPU.
 
 Byte identity: each process writes the SHA-256 of its full logits stream. A case passes only if all six digests are equal and the ids match the pinned ids.
