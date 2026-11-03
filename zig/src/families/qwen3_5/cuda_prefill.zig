@@ -86,6 +86,10 @@ pub const Fill = struct {
 /// A prompt pass begins: its images encoded, a cache, a kept state restored where a cold pass cuts.
 fn opening(self: anytype, stream: *lanes.Stream) !Fill {
     const ids = stream.prompt();
+    if (stream.prompt_logprobs != null) {
+        stream.prompt_rows.clearRetainingCapacity();
+        try stream.prompt_rows.ensureTotalCapacity(self.gpa, ids.len -| 1);
+    }
     if (ids.len == 0 or ids.len + stream.max_new > self.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
     // an image prompt: its images through the tower first, then every chunk at its t, h, w positions
     var media: ?vision_prompt.Media = null;
@@ -101,7 +105,7 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
     };
     errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
     // TF_QWEN_KV_SHARE: the kept pages this prompt resumes, adopted; images and request cuts keep their own grid
-    const share = self.prefix != null and media == null and stream.chunks.len == 0;
+    const share = self.prefix != null and media == null and stream.chunks.len == 0 and stream.prompt_logprobs == null;
     const shared = if (share) try self.prefix.?.open(ids, stream.max_new, stream.history_len, stream.shared_prefixes) else null;
     errdefer if (shared) |x| self.gpa.free(x.plan.marks);
     const cache = if (shared) |x| x.cache else try self.take(ids.len, stream.max_new);
@@ -117,7 +121,7 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
         stream.cached = @intCast(at);
         cache.len = at;
         cache.written = at;
-    } else if (stream.reuse.saved) |saved| {
+    } else if (if (stream.prompt_logprobs == null) stream.reuse.saved else null) |saved| {
         if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at)) {
             if (reuse.restoreCache(self.e, cache, saved, seen)) {
                 at = stream.reuse.at;
@@ -145,6 +149,7 @@ fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
     const end = nextCut(ids.len, stream.chunks, f.at, 0);
     try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
+    try @import("cuda_prompt_logprobs.zig").collect(self.e, stream, ids, f.at, end);
     f.at = end;
     stream.fill_at.store(@intCast(end), .monotonic);
     // a mark the store asked for, where this pass cut anyway: the lane host copies the state here

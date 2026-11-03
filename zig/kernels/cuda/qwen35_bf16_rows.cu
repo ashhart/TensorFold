@@ -56,3 +56,38 @@ extern "C" __global__ void __launch_bounds__(256)
         Y[r * (size_t)n + j] = __float2bfloat16_rn(s);
     }
 }
+
+// The same fixed FP32 dots without the BF16 output rounding, for raw vocabulary scores.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_q35_dense_f32(const __nv_bfloat16 *__restrict__ X, const __nv_bfloat16 *__restrict__ W,
+                      float *__restrict__ Y, int n, int k) {
+    __shared__ float red[8];
+    const int j = blockIdx.x;
+    const size_t r = blockIdx.y;
+    const uint4 *x = reinterpret_cast<const uint4 *>(X + r * (size_t)k);
+    const uint4 *w = reinterpret_cast<const uint4 *>(W + (size_t)j * k);
+    float acc = 0.0f;
+    for (int c = threadIdx.x; c < k / 8; c += 256) {
+        const uint4 xv = x[c], wv = w[c];
+        const __nv_bfloat16 *xb = reinterpret_cast<const __nv_bfloat16 *>(&xv);
+        const __nv_bfloat16 *wb = reinterpret_cast<const __nv_bfloat16 *>(&wv);
+#pragma unroll
+        for (int e = 0; e < 8; e++)
+            acc = __fmaf_rn(__bfloat162float(xb[e]), __bfloat162float(wb[e]), acc);
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        acc += __shfl_xor_sync(0xffffffffu, acc, o);
+    if ((threadIdx.x & 31) == 0)
+        red[threadIdx.x >> 5] = acc;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float s = red[0];
+#pragma unroll
+        for (int i = 1; i < 8; i++)
+            s += red[i];
+        Y[r * (size_t)n + j] = s;
+    }
+}
+
+#include "qwen35_scores.cuh"

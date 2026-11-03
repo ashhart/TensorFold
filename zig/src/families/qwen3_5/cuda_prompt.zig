@@ -77,7 +77,10 @@ pub fn delta(e: *E.Engine, layer: usize, rows: usize, norm: u64, sums: u64) !boo
     const g = e.g;
     const sg = std.mem.bytesToValue(Seg, e.staged.bytes[E.Engine.segs_at..][0..@sizeOf(Seg)]);
     const state = sg.rec + layer * g.v_heads * geometry.dk * geometry.dk * 4;
-    return e.prompt_attn.chain.run(e.stream, .{
+    var chain = e.prompt_attn.chain;
+    // The plain checkpoint may store FP32 GDN scales; its post uses the shared FP32-weight RMS.
+    if (e.g.bf16) chain.fused = null;
+    return chain.run(e.stream, .{
         .q = e.q,
         .k = e.k,
         .v = e.v,

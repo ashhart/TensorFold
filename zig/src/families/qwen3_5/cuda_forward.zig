@@ -63,7 +63,8 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                     try e.deltaScan(record, shape.slots, nseg, layer);
                     break :blk false;
                 };
-                if (!norm_done) try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
+                if (m.norm_f32) try @import("cuda_bf16_post.zig").run(e, m.norm, total, sums) else if (!norm_done) try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params, sums });
+
                 try e.projAgain(m.out, e.mix, e.r, total, prompt);
                 di += 1;
             },

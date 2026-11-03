@@ -1,0 +1,8 @@
+//! Measured CUDA 13.0.88 and 13.3.73 scoring launches; both compilers give these five-SM records.
+const reg = @import("registry.zig");
+pub const records = [_]reg.CudaRecord{
+    .{ .launch = .{ .name = "qwen35_bf16_rows tf_q35_dense_f32", .symbol = "tf_q35_dense_f32", .image = "qwen35_bf16_rows", .threads = 256 }, .usage = .{ .{ .regs = 34, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 42, .static = 32, .bound = 256 }, .{ .regs = 42, .static = 32, .bound = 256 } } },
+    .{ .launch = .{ .name = "qwen35_bf16_rows tf_q35_score_stats", .symbol = "tf_q35_score_stats", .image = "qwen35_bf16_rows", .threads = 256 }, .usage = .{ .{ .regs = 25, .static = 5128, .bound = 256 }, .{ .regs = 25, .static = 5128, .bound = 256 }, .{ .regs = 25, .static = 5128, .bound = 256 }, .{ .regs = 40, .static = 5128, .bound = 256 }, .{ .regs = 40, .static = 5128, .bound = 256 } } },
+    .{ .launch = .{ .name = "contract_controls tf_ctl_q35_score_tail", .symbol = "tf_ctl_q35_score_tail", .image = "contract_controls", .threads = 256 }, .usage = .{ .{ .regs = 27, .static = 5136, .bound = 256 }, .{ .regs = 27, .static = 5136, .bound = 256 }, .{ .regs = 27, .static = 5136, .bound = 256 }, .{ .regs = 40, .static = 5136, .bound = 256 }, .{ .regs = 40, .static = 5136, .bound = 256 } } },
+    .{ .launch = .{ .name = "contract_controls tf_ctl_q35_dense_f32_half", .symbol = "tf_ctl_q35_dense_f32_half", .image = "contract_controls", .threads = 256 }, .usage = .{ .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 39, .static = 0, .bound = 256 }, .{ .regs = 39, .static = 0, .bound = 256 }, .{ .regs = 37, .static = 0, .bound = 256 }, .{ .regs = 37, .static = 0, .bound = 256 } } },
+};

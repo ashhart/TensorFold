@@ -139,7 +139,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer q35_bf16.unload();
     const Q35Bf16Case = q35_bf16_k.Case(@TypeOf(q35_bf16));
     var q35_cases: [q35_bf16_k.entries.len]Q35Bf16Case = undefined;
-    for (&q35_cases, q35_bf16_k.entries) |*item, entry| item.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kernels = &q35_bf16, .entry = entry, .ctl = if (entry.fault == .half) try mods[5].function("tf_ctl_q35_dense_half") else null };
+    for (&q35_cases, q35_bf16_k.entries) |*item, entry| item.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kernels = &q35_bf16, .entry = entry, .ctl = if (entry.fault == .half) try mods[5].function(if (entry.kind == .dense_f32) "tf_ctl_q35_dense_f32_half" else "tf_ctl_q35_dense_half") else if (entry.kind == .stats and entry.fault == .tail) try mods[5].function("tf_ctl_q35_score_tail") else null };
     defer for (&q35_cases) |*item| item.deinit();
     for (&q35_cases) |*item| try kernels.append(a, item.kernel());
     var row_list: [7]rows_k.Row = undefined;
