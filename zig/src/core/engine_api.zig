@@ -171,8 +171,14 @@ pub const Sink = struct {
     event: *const fn (ctx: *anyopaque, id: Id, event: *const Event) void,
 };
 
+pub const Benchmark = @import("benchmark_info.zig").Snapshot;
+
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
+    /// The loaded world; multi-rank engines override the local engine's one before publication.
+    benchmark_ranks: ?u32 = 1,
+    /// Frozen public startup inventory, owned by the engine; never invokes an HTTP-thread collective.
+    benchmark_group: ?[]const u8 = null,
     name: []const u8 = "lanes",
     text_generation: bool = true,
     embeddings: ?lanes.embedding.Info = null,

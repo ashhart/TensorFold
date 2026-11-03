@@ -112,6 +112,11 @@ pub fn Namespace(comptime Tri: type) type {
             return true;
         }
 
+        pub fn benchmark(ptr: *anyopaque) struct { ranks: ?u32, group: ?[]const u8 } {
+            const r = of(ptr).ranks;
+            return .{ .ranks = if (r != null) 2 else 1, .group = if (r) |s| s.benchmark_group else null };
+        }
+
         pub fn rankRoom(ptr: *anyopaque, local: u64) !u64 {
             if (of(ptr).ranks) |r| return r.room(local);
             return local;

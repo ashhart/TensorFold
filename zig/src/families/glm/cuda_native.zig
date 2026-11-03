@@ -70,6 +70,11 @@ pub const Loaded = struct {
     own_prompt_cache: bool = false, // TF_GLM_KV_SHARE: the family keeps prompts over the pool's pages, no host store
 };
 
+pub fn benchmark(p: *anyopaque) struct { ranks: ?u32, group: ?[]const u8 } {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return .{ .ranks = @intCast(own.group.world), .group = own.benchmark_group };
+}
+
 /// The pool behind every stream: the engine's own sequence and `streams` more on `pages` KV pages, on every rank.
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const own: *Owned = @ptrCast(@alignCast(p));
@@ -146,6 +151,7 @@ const snapshots = @import("cuda_snapshots.zig");
 
 const Owned = struct {
     gpa: std.mem.Allocator,
+    benchmark_group: ?[]const u8,
     group: cuda.tp_group.Group, // the ranks' communicator; two ranks add RoCE writes for the main stream's small gathers
     e: *engine.Engine,
     link: follow.Link,
@@ -230,6 +236,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
+    own.benchmark_group = null;
     own.share = a.share;
     // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
     if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
@@ -317,6 +324,8 @@ fn finishRank(a: OpenArgs) !Loaded {
     for (rooms[1..], 1..) |r, q| if (peer == null or r < peer.?.bytes) {
         peer = .{ .bytes = r, .rank = q };
     };
+    own.benchmark_group = try @import("core").benchmark_group.cuda(gpa, io, ctx, &own.group, own.e.stream);
+    errdefer if (own.benchmark_group) |b| gpa.free(b);
     // every rank loaded and agreed (cuda_ranks) before the first step; the digest names what they agreed on
     if (p.world > 1) try cuda.tp_watch.ready(io, own.e.checkpoint_digest);
     cuda.memory_receipt.emit(@intCast(p.rank), .load_end, false);
@@ -446,6 +455,7 @@ fn release(own: *Owned) void {
     if (own.e.images) |v| v.deinit();
     own.e.deinit();
     own.group.close();
+    if (own.benchmark_group) |b| own.gpa.free(b);
     own.gpa.destroy(own);
 }
 

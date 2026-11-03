@@ -62,6 +62,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (own.ranks) |r| {
         r.engine = own.engine;
         own.engine.collective = &r.collective;
+        r.benchmark_group = try @import("core").benchmark_group.cuda(gpa, io, ctx, &r.collective, own.stream);
     }
     errdefer own.engine.deinit();
     const e = own.engine;

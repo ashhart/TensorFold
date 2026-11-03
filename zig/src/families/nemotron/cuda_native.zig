@@ -71,6 +71,11 @@ pub const Loaded = struct {
     snap_bytes: usize,
 };
 
+pub fn benchmark(p: *anyopaque) struct { ranks: ?u32, group: ?[]const u8 } {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return .{ .ranks = if (own.e.tp) |g| @intCast(g.world) else 1, .group = own.e.benchmark_group };
+}
+
 /// The pool behind the engine's own sequence: `streams` paged sequences and `pages` KV pages, made now.
 pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
     const own: *Owned = @ptrCast(@alignCast(p));

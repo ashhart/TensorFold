@@ -93,6 +93,7 @@ pub const Model = struct {
     stream: cuda.Stream,
     kernels: dk.Kernels,
     session: tp.Session,
+    benchmark_group: ?[]const u8,
     cfg: Config,
     pack: Pack,
     pl: plan.Plan,
@@ -147,6 +148,7 @@ pub const Model = struct {
         m.retained_next = null;
         m.retained = false;
         m.boot_complete = false;
+        m.benchmark_group = null;
         m.io = io;
         m.progress = .{ .io = io };
         const stall_ns = try @import("round_progress.zig").timeoutNs(if (std.c.getenv("TF_DSV41_STALL_EXIT_S")) |v| std.mem.span(v) else null);
@@ -179,6 +181,8 @@ pub const Model = struct {
         else
             &.{};
         try m.session.open(&m.driver, m.tcfg, image);
+        var inventory_group: cuda.tp_group.Group = .{ .lib = m.session.lib, .comm = m.session.nccl.comm, .rank = m.session.nccl.me, .world = m.session.nccl.size };
+        m.benchmark_group = try @import("core").benchmark_group.cuda(a, io, &m.ctx, &inventory_group, m.stream);
         m.supervisor = .{ .io = io, .ctx = m, .healthy = @import("model_health.zig").context, .fail = @import("model_health.zig").failed, .progress = if (stall_ns > 0) &m.progress else null, .stall_ns = stall_ns };
         m.supervisor.?.start() catch |err| {
             m.session.bootFailed(err);

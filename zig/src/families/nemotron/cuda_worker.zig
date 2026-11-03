@@ -129,6 +129,8 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     var g = try cuda.tp_group.Group.open(ctx.d, c.rank, c.world);
     defer g.close();
     try latent.agree(gpa, io, c, &g, ctx.d, stream, dir);
+    const inventory = try @import("core").benchmark_group.cuda(gpa, io, ctx, &g, stream);
+    defer if (inventory) |b| gpa.free(b);
     var content: ?*identity.Content = try identity.Content.start(gpa, io, dir, c.held != null); // compared at ready
     errdefer if (content) |x| x.abandon();
     const ops: kern.Ops = .{ .k = &k, .s = stream };

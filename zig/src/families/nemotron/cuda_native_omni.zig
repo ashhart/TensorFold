@@ -16,6 +16,7 @@ pub const explains_open = true;
 pub const Loaded = native.Loaded;
 pub const LoneRun = native.LoneRun;
 pub const open = native.open;
+pub const benchmark = native.benchmark;
 pub const explain = native.explain;
 pub const warm_quiet = native.warm_quiet;
 pub const lone_min_budget = native.lone_min_budget;

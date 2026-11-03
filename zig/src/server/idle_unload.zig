@@ -105,6 +105,14 @@ pub const Manager = struct {
         return srv.engine.memory(reset_peak);
     }
 
+    /// Copies the inventory while unload is excluded; a parked engine cannot attest a loaded world.
+    pub fn readBenchmark(m: *Manager, srv: *server_mod.Server, a: std.mem.Allocator) !api.Benchmark {
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        if (m.parked) return .{};
+        return api.Benchmark.copy(a, srv.info);
+    }
+
     /// The resident engine's info under the manager's lock; the reload swaps `srv.info` under the same lock.
     pub fn readInfo(m: *Manager, srv: *server_mod.Server) api.Info {
         m.mutex.lockUncancelable(m.io);

@@ -173,6 +173,7 @@ pub const Api = struct {
     cuDriverGetVersion: *const fn (*c_int) callconv(.c) R,
     cuDeviceGet: *const fn (*Device, c_int) callconv(.c) R,
     cuDeviceGetCount: *const fn (*c_int) callconv(.c) R,
+    cuDeviceGetUuid_v2: *const fn (*[16]u8, Device) callconv(.c) R,
     cuDeviceGetName: *const fn ([*]u8, c_int, Device) callconv(.c) R,
     cuDeviceGetAttribute: *const fn (*c_int, DeviceAttribute, Device) callconv(.c) R,
     cuDeviceTotalMem_v2: *const fn (*usize, Device) callconv(.c) R,

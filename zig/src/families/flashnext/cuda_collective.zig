@@ -84,6 +84,28 @@ pub const Collective = struct {
         try c.wait(stream, wire.deadline(c.timeout_ms));
     }
 
+    pub fn benchmarkShape(c: *Collective) !nccl.Shape {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        const actual = try c.lib.shape(c.comm);
+        if (actual.world != 2) return error.BadRank;
+        return actual;
+    }
+
+    pub fn benchmarkGather(c: *Collective, comptime T: type, d: *const cuda.Driver, stream: cuda.Stream, mine: T, out: []T) !void {
+        const shape = try c.benchmarkShape();
+        if (out.len != shape.world or mine.rank != shape.rank) return error.BadRank;
+        const size = @sizeOf(T);
+        var dev = try cuda.DeviceBuffer.alloc(d, size * out.len);
+        defer dev.free();
+        errdefer c.abort();
+        try dev.uploadAsync(shape.rank * size, std.mem.asBytes(&mine), stream.handle);
+        try c.link.checkPeer();
+        try c.submitted(c.lib.api.ncclAllGather(dev.ptr + shape.rank * size, dev.ptr, size, .u8, c.comm, stream.handle));
+        try c.wait(null, wire.deadline(c.timeout_ms));
+        try c.finish(stream);
+        try dev.download(0, std.mem.sliceAsBytes(out));
+    }
+
     /// Disjoint BF16 vocabulary columns are concatenated without an arithmetic reduction.
     pub fn gather(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;

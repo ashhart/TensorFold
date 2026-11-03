@@ -114,6 +114,7 @@ pub const Engine = struct {
     snaps_configured: bool = false,
     snaps: marks.Slots = .{}, // the prompt cache's snapshot slots, made at load (cuda_reuse.slots)
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
+    benchmark_group: ?[]const u8 = null,
     tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
     vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
     snap_host: bool = false, // kept prompt states in pinned host memory (cuda_reuse.zig), set when the host opens the engine
@@ -160,6 +161,8 @@ pub const Engine = struct {
         if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(ctx.d, e.c.rank, e.c.world);
         errdefer if (!keep_owner) if (e.tp) |*g| g.close();
         if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream, model_dir);
+        e.benchmark_group = if (e.tp) |*g| try @import("core").benchmark_group.cuda(gpa, io, ctx, g, e.stream) else null;
+        errdefer if (!keep_owner) if (e.benchmark_group) |b| gpa.free(b);
         // every byte this rank holds, hashed while the weights load; the ranks compare the digests at ready
         var content: ?*identity.Content = if (e.tp != null) try identity.Content.start(gpa, io, model_dir, e.c.held != null) else null;
         errdefer if (content) |x| x.abandon();
@@ -326,6 +329,7 @@ pub const Engine = struct {
         if (e.tp) |*g| g.close();
         if (e.vision) |v| v.deinit();
         e.stream.deinit();
+        if (e.benchmark_group) |b| e.gpa.free(b);
         e.gpa.destroy(e);
     }
 

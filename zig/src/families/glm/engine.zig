@@ -231,7 +231,7 @@ pub const Engine = struct {
             me.rest[0] = @intFromBool(rows);
             me.rest[1] = @intCast(e.c.tp);
             me.rest[2] = @intFromBool(learn); // --learn on both Macs or neither: each holds its half of a learned state
-            e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
+            e.ep = try ep_mod.Ep.init(gpa, io, e.device, s, me);
         }
         if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
         errdefer if (e.vision) |v| v.deinit();
