@@ -74,9 +74,9 @@ test "Qwen27 GGUF: complete mixed graph matches JSON and every original dequanti
         try t.expectEqual(null, open.get("model.layers.4.self_attn.q_proj.weight"));
     }
 }
-test "Qwen27 GGUF: dense native dtypes stay borrowed and qwen3 scoped metadata uses the same contract" {
+test "Qwen27 GGUF: dense native dtypes stay borrowed for the observed qwen35 architecture" {
     for ([_]g.TensorKind{ .f32, .f16, .bf16 }) |kind| {
-        const bytes = try f.image(a, kind, "qwen3");
+        const bytes = try f.image(a, kind, "qwen35");
         defer a.free(bytes);
         var p: adapter.Problem = .{};
         var open = try adapter.Adapter.open(a, bytes, &p);
@@ -168,4 +168,8 @@ test "Qwen27 GGUF: transposed source rows and a full-attention gate of the wrong
     var p: adapter.Problem = .{};
     try t.expectError(error.UnsupportedQwenGguf, adapter.Adapter.open(a, bytes, &p));
     try t.expect(std.mem.indexOf(u8, p.message(), name) != null);
+}
+
+test {
+    _ = @import("gguf_real_test.zig");
 }

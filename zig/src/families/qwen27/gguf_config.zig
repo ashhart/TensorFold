@@ -15,7 +15,7 @@ pub const Problem = struct {
         return error.UnsupportedQwenGguf;
     }
 };
-const fields = [_][]const u8{ "block_count", "context_length", "embedding_length", "feed_forward_length", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.value_length", "rope.dimension_count", "rope.freq_base", "rope.dimension_sections", "attention.layer_norm_rms_epsilon", "ssm.conv_kernel", "ssm.state_size", "ssm.group_count", "ssm.time_step_rank", "ssm.inner_size", "attention.recurrent_layers", "full_attention_interval" };
+pub const fields = [_][]const u8{ "block_count", "context_length", "embedding_length", "feed_forward_length", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.value_length", "rope.dimension_count", "rope.freq_base", "rope.dimension_sections", "attention.layer_norm_rms_epsilon", "ssm.conv_kernel", "ssm.state_size", "ssm.group_count", "ssm.time_step_rank", "ssm.inner_size", "attention.recurrent_layers", "full_attention_interval" };
 const Read = struct {
     doc: *const g.Document,
     arch: []const u8,
@@ -38,7 +38,7 @@ pub fn parse(doc: *const g.Document, p: *Problem) !cfg.Config {
     const architecture = doc.get("general.architecture") orelse return p.fail("general.architecture: missing", .{});
     if (architecture != .string) return p.fail("general.architecture: expected string", .{});
     const arch = architecture.string;
-    if (!std.mem.eql(u8, arch, "qwen35") and !std.mem.eql(u8, arch, "qwen3")) return p.fail("general.architecture: unsupported {s}", .{arch});
+    if (!std.mem.eql(u8, arch, "qwen35")) return p.fail("general.architecture: unsupported {s}", .{arch});
     for (doc.metadata) |entry| {
         if (!std.mem.startsWith(u8, entry.key, arch) or entry.key.len <= arch.len or entry.key[arch.len] != '.') continue;
         const suffix = entry.key[arch.len + 1 ..];
