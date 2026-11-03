@@ -66,7 +66,7 @@ No throughput improvement or external-provider comparison is established here.
 
 ## Complete CUDA contract
 
-[cuda-contract.log](cuda-contract.log) retains the complete run, and
+[cuda-contract.txt](cuda-contract.txt) retains the complete run, and
 [cuda-contract.json](cuda-contract.json) identifies its binary, verdict and known findings.
 The required command was run without a diagnostic subset or disabled gate:
 
