@@ -34,6 +34,7 @@ pub const attention_aotriton = @import("attention_aotriton.zig");
 pub const columns = @import("ops/columns.zig");
 pub const vision = @import("ops/vision.zig");
 pub const dense_text = @import("ops/dense_text.zig");
+pub const joint_schema = @import("joint_schema/joint_schema.zig");
 pub const plan_ops = @import("ops/plan.zig");
 pub const policy = @import("policy.zig");
 pub const Policy = policy.Policy;
