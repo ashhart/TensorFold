@@ -2,7 +2,9 @@
 
 This candidate adds a dense, unquantized BF16 format to the existing native Qwen3.5 CUDA engine.
 It serves nonstreamed `/v1/completions` requests with `prompt_logprobs: 0..20` through the normal lane scheduler.
-It does not introduce a separate inference worker. Qualification is incomplete until the receipt below is filled.
+It does not introduce a separate inference worker. Qualification remains incomplete.
+The [partial receipt](../receipts/qwen35-bf16-scoring/README.md) retains completed API and FP64 checks;
+its manifest names the remaining gates.
 
 ## Checkpoint and precision
 

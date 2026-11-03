@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "status": "partial qualification; draft",
+  "source_commit": "5332d97eb387af7e1a10433d77ee032a86bc631a",
+  "stack_parent": "b0b5beb8db0856091798123cf62dcdfaec1e0445",
+  "native_binary_sha256": "271398a1c9dab32785759182ae78e2921907d68f86b0053b64e2613cc9038886",
+  "inference_source_tree": "58f8dfd99868cc1f928754ca3879e283eeac2079",
+  "kernel_source_tree": "c76669664406836e32b89ba33d9b9734c71bd90c",
+  "files": {
+    "api.json": "3541b3afa2debed9030b0e69371f413b053001195bffafd117110624f5e08667",
+    "fixtures.json": "c83f0cb7e56f447de3b6131b921ac06b0743cbfcdfbe856970f0f5e7e9c61fe4",
+    "fp64.json": "9a7344dfeca63b07c94fd36f6e0cabf5cbceec7fee4f26812c16e95b8fea6b2a",
+    "reference-fixtures.json": "c2b05afefcdbea4504deb799e68b581e0635b9c316927549418674a480efb289"
+  },
+  "pending": [
+    "complete strict CUDA SUMMARY",
+    "matched serving performance and lifecycle",
+    "cold 2k/8k/32k/64k",
+    "existing-format comparisons",
+    "peak memory",
+    "completed hosted CI"
+  ]
+}
