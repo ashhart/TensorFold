@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The Recall tests set their own disk floor, so the full host suite passes on a machine with less than 4 GiB free. The 4 GiB floor itself is unchanged and has its own test (#2051).
+
 - Passing test binaries no longer print, so `zig build test` shows a `failed command:` line only for a real failure.
 
 - Community-v2 benchmark receipts can carry 1-8 loaded ranks and per-node hardware in separate single-node and multi-node categories. Both managed and attached clients read the running group, while v1 remains unchanged and v2 uploads stay disabled (#974).
