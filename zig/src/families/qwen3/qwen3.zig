@@ -10,7 +10,12 @@ pub const native = @import("native.zig");
 pub const Spec = config.Spec;
 pub const Model = model.Model;
 pub const readRows = model.readRows;
+pub const readVector = model.readVector;
+pub const readSpec = model.readSpec;
+pub const scopedKey = model.scopedKey;
 pub const lastRows = forward.lastRows;
+pub const layerInputs = forward.layerInputs;
+pub const Taps = forward.Taps;
 
 test {
     _ = config;
