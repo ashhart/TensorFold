@@ -88,6 +88,10 @@ const Fake = struct {
     verifying: usize = 0,
     flushed: usize = 0,
     released: usize = 0,
+    /// Each readout piece's (first row, count), and the logits slice a finish was handed.
+    pieces: [8][2]usize = undefined,
+    piece_count: usize = 0,
+    finished: ?[]u16 = null,
 
     pub fn drawer(h: *Fake) *Drawer {
         return &h.drawer_state;
@@ -122,6 +126,17 @@ const Fake = struct {
         h.rec.prefill_calls += 1;
         try h.rec.capture(prompt.len - from, cancel);
         return 7;
+    }
+
+    pub fn readoutPiece(h: *Fake, _: *Lane, _: []const u32, from: usize, to: usize, cancel: ?Cancel) !void {
+        h.pieces[h.piece_count] = .{ from, to - from };
+        h.piece_count += 1;
+        try h.rec.capture(to - from, cancel);
+    }
+
+    pub fn readoutFinish(h: *Fake, lane: *Lane, logits: []u16) !void {
+        if (lane.fill != null) return error.PromptNotFilled;
+        h.finished = logits;
     }
 
     pub fn keepCut(h: *Fake, _: *Lane, _: []const u32, _: usize) !void {
@@ -301,4 +316,40 @@ test "a test's cut rows fix every piece end, which the recorder lists" {
     cuts.clearRetainingCapacity();
     _ = try h.reach(&lane, 0, 5000);
     try T.expectEqualSlices(u32, &.{prefix.chunk}, cuts.items); // no stream decodes: the chunk rule
+}
+
+test "every piece of a readout, the last too, goes to its readout with no projection, draw or kept cut" {
+    var tokens: [1300]u32 = @splat(1);
+    var logits: [1]u16 = undefined;
+    const spec: lanes.readout.Spec = .{ .question_spans = &.{.{ 0, 1 }}, .question_types = &.{1}, .option_spans = &.{.{ 1, 2 }}, .option_question = &.{0}, .logits = &logits };
+    var flag: Flag = .{};
+    var s = try lanes.Stream.init(T.allocator, .{ .id = "r", .prompt = &tokens, .max_new = 0, .drafts = false, .readout = &spec, .cancel_check = .{ .ptr = &flag, .check = Flag.check } });
+    defer s.deinit(T.allocator);
+    var lane: Lane = .{};
+    var rec: Record = .{ .flag = &flag };
+    inert.runtime.api.hipCtxSetCurrent = setCurrent;
+    var fake: Fake = .{
+        .gpa = T.allocator,
+        .e = .{ .ctx = .{ .r = &inert.runtime, .device = 0, .handle = null } },
+        .streams = serve.backend.Streams(Lane).init(T.allocator),
+        .tp = .{ .gpa = T.allocator },
+        .rec = &rec,
+        .lane = &lane,
+    };
+    defer fake.streams.deinit();
+    const route = Shared.backend(&fake);
+    const step = route.vtable.prefill_step.?;
+    try T.expect(!try step(fake_ptr(&fake), &s, 0));
+    try T.expectError(error.PromptNotFilled, route.vtable.readout_finish.?(fake_ptr(&fake), &s, &logits));
+    try T.expect(!try step(fake_ptr(&fake), &s, 0));
+    try T.expect(try step(fake_ptr(&fake), &s, 0));
+    try T.expectEqualSlices([2]usize, &.{ .{ 0, 512 }, .{ 512, 512 }, .{ 1024, 276 } }, fake.pieces[0..fake.piece_count]);
+    try T.expect(lane.fill == null);
+    try T.expectEqual(@as(usize, 0), rec.prefill_calls); // the last piece projects nothing
+    try T.expectEqual(@as(usize, 0), rec.advance_calls);
+    try T.expectEqual(@as(u64, 0), fake.streams.drawn.next); // and draws no first token
+    try T.expectEqual(@as(usize, 0), fake.kept);
+    try T.expect(rec.forwarded.?.ctx == @as(*anyopaque, &flag)); // a cancel still stops a long piece between layers
+    try route.vtable.readout_finish.?(fake_ptr(&fake), &s, &logits);
+    try T.expectEqual(@as(?[]u16, &logits), fake.finished);
 }
