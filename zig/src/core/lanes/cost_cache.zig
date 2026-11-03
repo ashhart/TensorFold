@@ -79,34 +79,54 @@ pub fn load(comptime T: type, a: Allocator, io: std.Io, k: [32]u8) ?T {
 
 /// The same cache envelope in an explicit directory; null keeps the standard user cache.
 pub fn loadAt(comptime T: type, a: Allocator, io: std.Io, k: [32]u8, root: ?[]const u8) ?T {
-    const p = (path(a, k, ".bin", root) catch return null) orelse return null;
+    return switch (readAt(T, a, io, k, root)) {
+        .value => |v| v,
+        .missing, .refused => null,
+    };
+}
+
+/// What a read found: no file it could open and read, a file that is not one whole value of ours, or that value.
+pub fn Kept(comptime T: type) type {
+    return union(enum) { missing, refused, value: T };
+}
+
+/// loadAt's read with a miss told apart from a refused file, so a check can prove no reader saw a torn table.
+pub fn readAt(comptime T: type, a: Allocator, io: std.Io, k: [32]u8, root: ?[]const u8) Kept(T) {
+    const p = (path(a, k, ".bin", root) catch return .missing) orelse return .missing;
     defer a.free(p);
     if (platform.windows) return loadShared(T, a, p);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, p, a, .limited(1 << 20)) catch return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, p, a, .limited(1 << 20)) catch |err| return switch (err) {
+        error.StreamTooLong => .refused,
+        else => .missing,
+    };
     defer a.free(bytes);
-    return parse(T, bytes);
+    return kept(T, bytes);
 }
 
 /// Win32's shared open permits replacement and reports a pending delete without std.Io's unexpected-status log.
-fn loadShared(comptime T: type, a: Allocator, p: []const u8) ?T {
+fn loadShared(comptime T: type, a: Allocator, p: []const u8) Kept(T) {
     const size = magic.len + @sizeOf(T);
-    if (size > 1 << 20 or std.mem.indexOfScalar(u8, p, 0) != null) return null;
-    const name = a.dupeSentinel(u8, p, 0) catch return null;
+    if (size > 1 << 20 or std.mem.indexOfScalar(u8, p, 0) != null) return .missing;
+    const name = a.dupeSentinel(u8, p, 0) catch return .missing;
     defer a.free(name);
-    const bytes = a.alloc(u8, size + 1) catch return null;
+    const bytes = a.alloc(u8, size + 1) catch return .missing;
     defer a.free(bytes);
     const fd = platform.c.open(name, .{ .ACCMODE = .RDONLY });
-    if (fd < 0) return null;
+    if (fd < 0) return .missing;
     defer _ = platform.c.close(fd);
-    if (comptime platform.windows) if (fd >= platform.c.dir_base) return null;
+    if (comptime platform.windows) if (fd >= platform.c.dir_base) return .missing;
     var used: usize = 0;
     while (used < bytes.len) {
         const n = platform.c.read(fd, bytes[used..].ptr, bytes.len - used);
-        if (n < 0) return null;
+        if (n < 0) return .missing;
         if (n == 0) break;
         used += @intCast(n);
     }
-    return parse(T, bytes[0..used]);
+    return kept(T, bytes[0..used]);
+}
+
+fn kept(comptime T: type, bytes: []const u8) Kept(T) {
+    return if (parse(T, bytes)) |v| .{ .value = v } else .refused;
 }
 
 fn parse(comptime T: type, bytes: []const u8) ?T {
@@ -179,16 +199,17 @@ test "window cost cache: shared reader retains exact envelopes and treats failed
     const bytes = try std.mem.concat(a, u8, &.{ magic, std.mem.asBytes(&v), "extra" });
     defer a.free(bytes);
     const size = magic.len + @sizeOf(V);
-    try std.testing.expect(loadShared(V, a, file) == null);
-    try std.testing.expect(loadShared(V, a, dir) == null);
+    try std.testing.expect(loadShared(V, a, file) == .missing);
+    try std.testing.expect(loadShared(V, a, dir) == .missing);
     for ([_]usize{ 0, 3, size - 1, size, size + 1, bytes.len }) |len| {
         try tmp.dir.writeFile(io, .{ .sub_path = "table.bin", .data = bytes[0..len] });
-        if (len == size) try std.testing.expectEqualDeep(v, loadShared(V, a, file).?) else try std.testing.expect(loadShared(V, a, file) == null);
+        const got = loadShared(V, a, file);
+        if (len == size) try std.testing.expectEqualDeep(v, got.value) else try std.testing.expect(got == .refused);
     }
     bytes[0] = 'X';
     try tmp.dir.writeFile(io, .{ .sub_path = "table.bin", .data = bytes[0..size] });
-    try std.testing.expect(loadShared(V, a, file) == null);
-    try std.testing.expect(loadShared(V, a, "bad\x00path") == null);
+    try std.testing.expect(loadShared(V, a, file) == .refused);
+    try std.testing.expect(loadShared(V, a, "bad\x00path") == .missing);
 }
 
 test "window cost cache: pending deletion is a silent miss and the next publication reads whole" {

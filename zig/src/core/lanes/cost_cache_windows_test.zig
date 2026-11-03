@@ -43,7 +43,7 @@ pub fn pendingDelete() !void {
         const got = w.ntdll.NtCreateFile(&probe, .{ .GENERIC = .{ .READ = true }, .STANDARD = .{ .SYNCHRONIZE = true } }, &attr, &status, null, .{ .NORMAL = true }, .VALID_FLAGS, .OPEN, .{ .NON_DIRECTORY_FILE = true, .IO = .SYNCHRONOUS_NONALERT }, null, 0);
         if (got == .SUCCESS) w.CloseHandle(probe);
         try std.testing.expect(got == .DELETE_PENDING or got == .FILE_DELETED);
-        try std.testing.expect(cache.loadAt(V, a, io, key, dir) == null);
+        try std.testing.expect(cache.readAt(V, a, io, key, dir) == .missing);
     }
     cache.saveAt(V, a, io, key, .{ .n = 456 }, dir);
     try std.testing.expectEqual(@as(u32, 456), cache.loadAt(V, a, io, key, dir).?.n);

@@ -230,6 +230,12 @@ test "window cost cache: safe publication preserves the old file and cleans a fa
 test "window cost cache: concurrent writers and readers see only complete tables" {
     try @import("qwen35_cost_files_test.zig").concurrent();
 }
+test "window cost cache: a reader in a planted replace window misses and never sees a torn table" {
+    try @import("qwen35_cost_files_test.zig").replaceWindow();
+}
+test "window cost cache: the concurrent check refuses a planted torn publication" {
+    try @import("qwen35_cost_files_test.zig").tornPublication();
+}
 test "window cost cache: unavailable storage still measures every width" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
