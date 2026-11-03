@@ -26,13 +26,28 @@ pub const names = [_][]const u8{
     "uv_attention",
     "uv_concat",
     "uv_clip_embed",
+    // the decoder's
+    "ud_rms_norm",
+    "ud_rope",
+    "ud_router_norm",
+    "ud_block_keys",
+    "ud_route",
+    "ud_attend",
+    "ud_silu_mul",
+    "ud_add",
+    "ud_moe_gate",
+    "ud_gather",
+    "ud_scatter",
+    "ud_moe_combine",
 };
 const tower_count = 6;
+const decoder_first = tower_count + 13;
 const sums = 4;
 
 pub const Kernels = struct {
     tower: mtl.Library,
     own: mtl.Library,
+    decoder: mtl.Library,
     p: [names.len]mtl.Pipeline,
 
     pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !Kernels {
@@ -43,10 +58,12 @@ pub const Kernels = struct {
         errdefer k.tower.deinit();
         k.own = try mtl.Library.fromSource(device, sources.uocr, mtl.CompileOptions.mlx());
         errdefer k.own.deinit();
+        k.decoder = try mtl.Library.fromSource(device, sources.uocr_decoder, mtl.CompileOptions.mlx());
+        errdefer k.decoder.deinit();
         var made: usize = 0;
         errdefer for (k.p[0..made]) |p| p.deinit();
         for (names, 0..) |name, i| {
-            k.p[i] = try mtl.Pipeline.init(device, if (i < tower_count) k.tower else k.own, name, false);
+            k.p[i] = try mtl.Pipeline.init(device, if (i < tower_count) k.tower else if (i < decoder_first) k.own else k.decoder, name, false);
             made += 1;
         }
         return k;
@@ -54,6 +71,7 @@ pub const Kernels = struct {
 
     pub fn deinit(k: *Kernels) void {
         for (k.p) |p| p.deinit();
+        k.decoder.deinit();
         k.own.deinit();
         k.tower.deinit();
     }
@@ -63,9 +81,9 @@ pub const Kernels = struct {
         @compileError("no pipeline " ++ name);
     }
 
-    /// y [M, N] = bf16(x [M, K] w^T) with fp32 sums (tfp::gemm_nax), w as stored [N, K]; K a multiple of 256.
+    /// y [M, N] = bf16(x [M, K] w^T) with fp32 sums (tfp::gemm_nax), w as stored [N, K]; K a multiple of 32.
     pub fn linear(k: *const Kernels, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref, M: usize, N: usize, K: usize) void {
-        std.debug.assert(K % 256 == 0);
+        std.debug.assert(K % 32 == 0);
         const tn = (N + 127) / 128;
         const tm = (M + 63) / 64;
         e.setPipeline(k.p[@as(usize, @intFromBool(M % 64 == 0)) * 2 + @intFromBool(N % 128 == 0)]);
@@ -99,11 +117,11 @@ pub const Kernels = struct {
         e.dispatchThreads(mtl.Size.of(N, M, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// One kernel's buffers in order, then its parameters at the next index.
+    /// One kernel's buffers in order, then its parameters (if any) at the next index.
     pub fn bind(e: mtl.ComputeEncoder, p: mtl.Pipeline, refs: []const Ref, params: anytype) void {
         e.setPipeline(p);
         for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-        e.setValue(params, refs.len);
+        if (@TypeOf(params) != void) e.setValue(params, refs.len);
     }
 };
 

@@ -138,6 +138,7 @@ pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("
 pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
 /// Unlimited-OCR-2: its image encoder's and decoder's own steps (projections: core_qwen_vision).
 pub const uocr = @embedFile("uocr_vision.metal");
+pub const uocr_decoder = @embedFile("uocr_decoder.metal");
 /// MOSS-Image's image decoder: its own float32 steps, without a template.
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).

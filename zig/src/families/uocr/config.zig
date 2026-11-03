@@ -30,6 +30,25 @@ pub const rope_token_pairs = 63;
 pub const rope_token_theta: f64 = 10000.0;
 pub const rope_page_mod = 2;
 
+/// The page2d rotary's 63 token frequencies 1 / 10000^(i / 63) as torch's float32 pow gives them (bit patterns).
+pub const inv_tok_bits = [rope_token_pairs]u32{
+    0x3f800000, 0x3f5d2e59, 0x3f3f190e, 0x3f251b3a, 0x3f0ea665, 0x3ef67ef2, 0x3ed4f836,
+    0x3eb800d6, 0x3e9efa07, 0x3e895aa1, 0x3e6d5835, 0x3e4d101f, 0x3e312c0b, 0x3e191319,
+    0x3e044133, 0x3de48876, 0x3dc5732b, 0x3daa982c, 0x3d936440, 0x3d7eb076, 0x3d5c0c72,
+    0x3d3e1e95, 0x3d2442d2, 0x3d0deb6d, 0x3cf53bdc, 0x3cd3e113, 0x3cb70faa, 0x3c9e29aa,
+    0x3c88a69b, 0x3c6c2121, 0x3c4c035a, 0x3c3043d4, 0x3c184a75, 0x3c0393d9, 0x3be35cea,
+    0x3bc47060, 0x3ba9b892, 0x3b92a311, 0x3b7d62a4, 0x3b5aec07, 0x3b3d2564, 0x3b236b86,
+    0x3b0d3169, 0x3af3fa6f, 0x3ad2cb5d, 0x3ab61fb9, 0x3a9d5a5c, 0x3a87f37e, 0x3a6aeba2,
+    0x3a4af7f3, 0x3a2f5ccc, 0x3a1782dc, 0x3a02e766, 0x39e232ec, 0x39c36ee9, 0x39a8da22,
+    0x3991e2e1, 0x397c168a, 0x3959cd1a, 0x393c2d7d, 0x39229557, 0x390c785b, 0x38f2baaa,
+};
+
+pub fn invTok() [rope_token_pairs]f32 {
+    var out: [rope_token_pairs]f32 = undefined;
+    for (&out, inv_tok_bits) |*o, b| o.* = @bitCast(b);
+    return out;
+}
+
 // The ids the prompt and the reply use.
 pub const bos = 0;
 pub const eos = 1;
@@ -39,6 +58,8 @@ pub const page_token = 128827;
 pub const instruction = [_]u32{ 37460, 4366, 76466, 16 };
 /// Tokens a page may run to before the reply's page guard closes it (infer's max_page_tokens).
 pub const max_page_tokens = 20000;
+/// The longest sequence the publisher generates to (its max_length).
+pub const max_context = 131072;
 
 // The image encoder: SAM ViT-B's 12 blocks (global attention in four), its neck, then CLIP-L's 24 on SAM's map.
 pub const base_size = 1024;

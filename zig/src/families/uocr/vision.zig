@@ -165,6 +165,35 @@ pub const Encoder = struct {
     }
 };
 
+/// A page's image-token rows [tokens, 1280] in the publisher's order: with tiles, the tiles' rows first (10 per tile
+/// row, running across every tile of that row, each followed by the newline row), then the global view's 16 rows of
+/// 16 with their newlines, then the separator. `tiles` holds `across` x `down` tiles' 100 rows each, row-major.
+pub fn layout(w: *const wts.Weights, global: []const u16, tiles: []const u16, across: usize, down: usize, out: []u16) void {
+    const newline = halves(w.newline, H);
+    var at: usize = 0;
+    const put = struct {
+        fn row(o: []u16, i: *usize, r: []const u16) void {
+            @memcpy(o[i.* * H ..][0..H], r);
+            i.* += 1;
+        }
+    }.row;
+    const t = cfg.side(cfg.tile_size);
+    if (across * down > 1) for (0..t * down) |r| {
+        for (0..across) |tc| for (0..t) |c| {
+            const tile = (r / t) * across + tc;
+            put(out, &at, tiles[(tile * t * t + (r % t) * t + c) * H ..][0..H]);
+        };
+        put(out, &at, newline);
+    };
+    const g = cfg.side(cfg.base_size);
+    for (0..g) |r| {
+        for (0..g) |c| put(out, &at, global[(r * g + c) * H ..][0..H]);
+        put(out, &at, newline);
+    }
+    put(out, &at, halves(w.separator, H));
+    std.debug.assert(at * H == out.len);
+}
+
 const UvWindow = extern struct { side: u32, padded: u32, window: u32, channels: u32 };
 const UvRel = extern struct { groups: u32, side: u32, heads: u32, width: u32 };
 const UvAttn = extern struct { groups: u32, len: u32, heads: u32, width: u32, side: u32, scale: f32 };
