@@ -96,6 +96,8 @@ results in the CUDA family pages are historical measurements, not release qualif
 
 ## Kernel checks
 
+For CUDA refactors that promise unchanged machine code, use the [five-SM SASS identity runner](cuda-sass-identity.md).
+
 Use exact equality for serial versus multi-row kernels and committed caches. Use a separate trusted
 forward for model-quality checks; agreement with one's own serial implementation does not establish
 model fidelity. Include real head dimensions, sparse-attention boundaries, partial keeps and concurrent
