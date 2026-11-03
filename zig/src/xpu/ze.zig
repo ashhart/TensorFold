@@ -425,6 +425,9 @@ pub const Gpu = struct {
 };
 
 test "close drains every list before it destroys anything, and destroys nothing while one will not drain" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const Fake = struct {
         var calls: [16]u8 = undefined;
         var n: usize = 0;

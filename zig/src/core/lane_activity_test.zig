@@ -86,6 +86,9 @@ const Failed = struct {
     }
 };
 test "lane activity: a failed round reaches the failure hook while its streams keep the error's name" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var cfg = try lanes.Config.init(t.allocator, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(t.allocator);
     var fake: lanes.fake.Fake = .{ .gpa = t.allocator, .fail_round = 3 };

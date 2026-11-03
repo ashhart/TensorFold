@@ -371,7 +371,14 @@ fn probeSplit(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.n
     };
 }
 
+/// The latest pair split refused, which a test build keeps for its test instead of printing the refusal.
+pub var refused_pair: ?[2]usize = null;
+
 fn unreachablePeer(rank: usize, peer: usize) error{SplitUnreachable} {
+    if (@import("builtin").is_test) {
+        refused_pair = .{ rank, peer };
+        return error.SplitUnreachable;
+    }
     std.debug.print("REFUSE TF_GLM_PREFILL_REDUCE=split: rank {d} cannot exchange with rank {d}; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather\n", .{ rank, peer });
     return error.SplitUnreachable;
 }

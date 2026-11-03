@@ -388,6 +388,9 @@ test "full and selected checkpoint views retain data, ownership and relative off
 }
 
 test "a split checkpoint keeps later tensors in the file, packs the rest, and stages the same bytes" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const gpa = std.testing.allocator;

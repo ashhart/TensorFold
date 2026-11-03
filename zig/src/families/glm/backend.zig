@@ -482,5 +482,5 @@ test "GLM disk charge: a whole read is larger than a resident save and charged a
     try std.testing.expectEqual(whole, Backend.snapCharged(&b, &snap));
     snap.bytes = @intCast(resident);
     try std.testing.expectEqual(resident, Backend.snapCharged(&b, &snap));
-    std.debug.print("GLM_DISK_CHARGE at=130000 resident={d} whole={d} missing={d}\n", .{ resident, whole, whole - resident });
+    try std.testing.expectEqual([2]u64{ 147619840, 2643622912 }, [2]u64{ resident, whole });
 }

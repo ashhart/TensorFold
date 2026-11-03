@@ -144,7 +144,7 @@ test "provenance property covers every implemented filter" {
         if (std.mem.eql(u8, name, "replace")) args = &.{ v.Value.literal("SPECIAL"), req };
         try checkValue(&c.rt, try filters.filter(&c, name, input, args, &.{}));
     }
-    std.debug.print("PROVENANCE_FILTERS {d}\n", .{filters.implemented.len});
+    try t.expectEqual(@as(usize, 30), filters.implemented.len);
 }
 
 const str_supported = [_][]const u8{ "capitalize", "count", "endswith", "find", "index", "join", "lower", "lstrip", "removeprefix", "removesuffix", "replace", "rfind", "rindex", "rsplit", "rstrip", "split", "startswith", "strip", "upper" };
@@ -175,7 +175,8 @@ test "provenance property covers every exposed string dict and list method inclu
             if (supported) try checkValue(&c.rt, try eval.call(&c, method, args, &.{})) else try t.expectError(error.TemplateError, eval.call(&c, method, args, &.{}));
         }
     }
-    std.debug.print("PROVENANCE_METHODS str={d} dict={d} list={d}\n", .{ access.str_methods.len, access.dict_methods.len, access.list_methods.len });
+    const counts = [3]usize{ access.str_methods.len, access.dict_methods.len, access.list_methods.len };
+    try t.expectEqual([3]usize{ 47, 11, 11 }, counts);
 }
 
 test "provenance deterministic render fuzz and linear append span work" {
@@ -197,7 +198,7 @@ test "provenance deterministic render fuzz and linear append span work" {
     for (0..10000) |_| try out.append(a, req);
     try t.expectEqual(@as(usize, 10000), out.span_steps);
     try t.expect(out.span_steps <= out.text.items.len);
-    std.debug.print("PROVENANCE_FUZZ 1000; append spans={d} bytes={d}\n", .{ out.span_steps, out.text.items.len });
+    try t.expectEqual(@as(usize, 90000), out.text.items.len);
 }
 
 test "provenance checkpoint globals are literals and request context overrides them" {

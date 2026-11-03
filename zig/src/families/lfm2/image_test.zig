@@ -6,11 +6,13 @@ const core = @import("core");
 const tokenizer = core.tokenizer;
 const jpeg = core.picture.jpeg;
 
-/// JPEG cases need the pinned libjpeg-turbo: required when TENSORFOLD_LIBTURBOJPEG names one, skipped when none loads.
+/// JPEG cases need the pinned libjpeg-turbo: required if TENSORFOLD_LIBTURBOJPEG names one, else the test skips.
 fn jpegReady() !bool {
+    const level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = level;
     if (jpeg.available(std.testing.io, std.testing.allocator)) return true;
     if (@import("sys").getenv(jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
-    std.debug.print("libjpeg-turbo {s} not found: LFM2's JPEG cases skipped\n", .{jpeg.pinned});
     return false;
 }
 
@@ -83,6 +85,7 @@ test "pictures match tensorfold's loader and the LFM2-VL processor" {
         try std.testing.expectEqualSlices(u32, want.items, ids.items);
         try std.testing.expectEqual(std.mem.count(u32, ids.items, &.{marks.image}), pic.tokens());
     }
+    if (!with_jpeg) return error.SkipZigTest;
 }
 
 test "truncated and corrupted pictures are refused or prepared, never trapped" {
@@ -130,6 +133,7 @@ test "truncated and corrupted pictures are refused or prepared, never trapped" {
     }
     const least: usize = if (with_jpeg) 3000 else 2000;
     try std.testing.expect(outcomes[0] + outcomes[1] >= least and outcomes[0] > 0 and outcomes[1] > 0);
+    if (!with_jpeg) return error.SkipZigTest;
 }
 
 /// Rewrites each whole chunk's CRC, so a corruption reaches the decoder past the checksum.

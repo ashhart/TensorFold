@@ -149,7 +149,11 @@ const Fabric = struct {
 };
 
 test "a direct split start on a ring of four without a switch is refused before loading, at every rank" {
-    for (0..4) |r| try std.testing.expectError(error.SplitUnreachable, Fabric.probe(.{}, r, 4, false));
+    for (0..4, [_]usize{ 2, 3, 0, 1 }) |r, peer| {
+        ranks.refused_pair = null;
+        try std.testing.expectError(error.SplitUnreachable, Fabric.probe(.{}, r, 4, false));
+        try std.testing.expectEqual(@as(?[2]usize, .{ r, peer }), ranks.refused_pair);
+    }
     // the same start on four ranks behind a switch probes each pair once each way
     for (0..4) |r| try std.testing.expectEqual(@as(usize, 6), try Fabric.probe(.{}, r, 4, true));
     // two ranks are each other's neighbours: a direct split starts on a ring of two

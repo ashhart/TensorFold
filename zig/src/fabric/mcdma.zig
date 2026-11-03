@@ -360,6 +360,9 @@ pub const Endpoint = struct {
 pub const Region = Endpoint;
 
 test "an endpoint gives the library's placing thread user-interactive QoS unless MCDMA_FABRIC_QOS is set" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const link: Link = .{ .peer = 1, .device = "rdma_en4", .via = "en4/192.0.2.2", .port = 7490, .name = "pair" };
     const config: Config = .{ .rank = 0, .ranks = 2, .window_bytes = alignment, .staging_bytes = alignment, .links = &.{link} };
     defer _ = env.unsetenv("MCDMA_FABRIC_QOS");

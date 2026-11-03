@@ -233,13 +233,21 @@ test "GLM FP8 KV: canonical per-rank state bytes at configured long windows are 
         l.mixer = .{ .kda = undefined };
     };
     w.layers = &layers;
-    for ([_]usize{ 8192, 65536, 199307, 245760 }) |context| {
+    try t.expectEqual(@as(usize, 11), mla);
+    const contexts = [_]usize{ 8192, 65536, 199307, 245760 };
+    const bytes = [_][3]usize{
+        .{ 8256, 296101376, 245772800 },
+        .{ 65600, 1044784640, 644887040 },
+        .{ 199360, 2791155200, 1575856640 },
+        .{ 245824, 3397789184, 1899246080 },
+    };
+    for (contexts, bytes) |context, want| {
         const capacity = @import("cuda_native.zig").capacity(context);
         var bf = try state.State.init(t.allocator, &d, &w, capacity);
         defer bf.deinit();
         var fp = try state.State.initFormat(t.allocator, &d, &w, capacity, true);
         defer fp.deinit();
         try t.expectEqual((mla + 1) * capacity * 508, bf.arena.buf.len - fp.arena.buf.len);
-        std.debug.print("GLM_KV_BYTES context={d} capacity={d} main_layers={d} bf16={d} fp8={d}\n", .{ context, capacity, mla, bf.arena.buf.len, fp.arena.buf.len });
+        try t.expectEqual(want, [3]usize{ capacity, bf.arena.buf.len, fp.arena.buf.len });
     }
 }

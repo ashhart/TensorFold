@@ -385,6 +385,9 @@ const RestoreFake = struct {
 };
 
 test "a failed restore's host copy stays through a drop until a wait, the restore's or the drop's, drains the stream" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var api: cuda.abi.Api = undefined;
     api.cuMemcpyHtoDAsync_v2 = RestoreFake.htod;
     api.cuStreamSynchronize = RestoreFake.sync;

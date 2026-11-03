@@ -125,6 +125,9 @@ test "appends from several threads keep every line whole" {
 }
 
 test "a log others can read, or a symbolic link, gets no requests; the owner's own file still does" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     if (builtin.os.tag == .windows) return error.SkipZigTest; // refusal by mode bits and links; NTFS keeps access in ACLs
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -1,5 +1,6 @@
 //! One safetensors file mapped read-only, its tensors found by name in core's index of the header.
 const std = @import("std");
+const report = @import("report.zig");
 const st = @import("safetensors");
 
 const c = struct {
@@ -62,7 +63,7 @@ pub const Checkpoint = struct {
 
     pub fn bf16(self: *const Checkpoint, name: []const u8) !Entry {
         const span = locate(self.names, name) catch |e| {
-            std.debug.print("tensor {s}: {t}\n", .{ name, e });
+            report.say("tensor {s}: {t}", .{ name, e });
             return e;
         };
         if (self.data > self.bytes.len or span.end > self.bytes.len - self.data) return error.BadHeader;

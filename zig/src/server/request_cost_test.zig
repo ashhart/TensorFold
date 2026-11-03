@@ -1,4 +1,4 @@
-//! Fixed-size synthetic cost receipts compare the original render/encode path with masked encoding.
+//! Synthetic cost receipts (printed under TF_TEST_RECEIPTS=1) compare original render/encode with masked encoding.
 const std = @import("std");
 const json = @import("json");
 const tokenizer = @import("tokenizer");
@@ -56,6 +56,7 @@ test "request provenance: 400 KiB and 1000 spellings have bounded mask work and 
     const hf = try HfText.load(a, t.io, fixture.path, null, a, &problem);
     defer hf.deinit();
     try t.expectEqual(@as(usize, 1000), hf.tok.added.len);
+    const receipts = t.environ.getPosix("TF_TEST_RECEIPTS") != null;
     const input = try a.alloc(u8, 400 * 1024);
     for ([_]bool{ false, true }) |one_spelling| {
         @memset(input, 'a');
@@ -66,6 +67,8 @@ test "request provenance: 400 KiB and 1000 spellings have bounded mask work and 
             var total: i96 = 0;
             const rounds = 12;
             for (0..rounds) |_| total += try once(hf, input, masked);
+            try t.expect(total > 0);
+            if (!receipts) continue;
             std.debug.print("PROVENANCE_TIMING mode={s} one={d} bytes={d} added={d} rounds={d} ns_per={d}\n", .{
                 if (masked) "masked" else "raw", @intFromBool(one_spelling), input.len, hf.tok.added.len, rounds, @divTrunc(total, rounds),
             });
@@ -76,7 +79,7 @@ test "request provenance: 400 KiB and 1000 spellings have bounded mask work and 
             _ = try hf.tok.encodeMaskedCounted(a, rendered.text, rendered.spans, &work);
             try t.expect(work.spans + work.matcher <= 12 * (rendered.text.len + 1));
             try t.expectEqual(@as(usize, 1), rendered.spans.len);
-            std.debug.print("PROVENANCE_MASK_WORK one={d} spans={d} matcher={d} output={d}\n", .{ @intFromBool(one_spelling), work.spans, work.matcher, rendered.text.len });
+            try t.expectEqual([3]usize{ 3, 3, input.len + 3 }, [3]usize{ work.spans, work.matcher, rendered.text.len });
         }
     }
 }

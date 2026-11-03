@@ -62,6 +62,9 @@ test "a global group of 64 or 128 is admitted for every matrix, and the n-gram t
 }
 
 test "text and MTP overrides at other widths are admitted, and a stored matrix declared plain is refused" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     for ([_]struct { path: []const u8, value: []const u8 }{
         .{ .path = "language_model.model.layers.0.linear_attn.in_proj_qkv", .value = "{\"bits\":4,\"group_size\":32}" },
         .{ .path = "model.layers.0.linear_attn.in_proj_qkv.weight", .value = "{\"bits\":6,\"group_size\":64}" },

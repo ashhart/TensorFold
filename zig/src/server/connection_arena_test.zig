@@ -64,6 +64,9 @@ fn countTokens(r: *std.Io.Reader, w: *std.Io.Writer, size: usize) !void {
 }
 
 test "Connection arena: after two long non-streaming requests a kept-alive connection holds at most the limit" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const io = testing.io;
     var live: Live = .{ .child = testing.allocator };
     var tt: d.TestText = .{};

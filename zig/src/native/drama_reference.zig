@@ -289,6 +289,9 @@ test "drama reference cache: the least recently used entry goes first, and the d
 }
 
 test "drama reference cache: failed saves keep no entry, a failed restore drops it, and requests still finish" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const t = std.testing;
     const o: d3.common.Options = .{ .max_rows = 4, .attn_chunk = 4 };
     var l: FakeLane = .{ .o = o };

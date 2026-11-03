@@ -51,6 +51,9 @@ test "the reader refuses a pack whose checkpoint changed after the build" {
 }
 
 test "the reader loads a pack with no recorded source and refuses a mismatching one" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();

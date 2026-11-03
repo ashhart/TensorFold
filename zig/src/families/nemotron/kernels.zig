@@ -387,6 +387,9 @@ test "the prebuilt metallib carries every packed kernel function" {
 }
 
 test "without tensor units the kernels load when the packed ones cannot link, as on macOS 26.3" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     if (device.tensorUnits()) return error.SkipZigTest; // chips that dispatch the packed kernels still fail the load

@@ -181,5 +181,8 @@ test "native waits follow the library's sequence rule" {
 }
 
 test "a missing library is reported, not guessed" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     try std.testing.expectError(error.McdmaRpcUnavailable, Library.openPath("/nonexistent/libmcdma-rpc.dylib"));
 }

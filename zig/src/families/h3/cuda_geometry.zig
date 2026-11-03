@@ -1,5 +1,6 @@
 //! The H3 CUDA family's buffers that depend on the packed sequence: allocated again when its rows or tiles change.
 const std = @import("std");
+const report = @import("report.zig");
 const cuda = @import("cuda");
 const h3 = @import("cuda.zig");
 const Model = h3.Model;
@@ -35,7 +36,7 @@ pub const Geometry = struct {
 
 pub fn release(self: *Model) void {
     self.drain() catch |e| {
-        std.debug.print("H3 geometry retained: {t}\n", .{e});
+        report.say("H3 geometry retained: {t}", .{e});
         return;
     };
     releaseCompleted(self);
