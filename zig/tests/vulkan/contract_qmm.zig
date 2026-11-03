@@ -105,6 +105,8 @@ pub const Fixture = struct {
     name: ?[]const u8 = null,
     /// Tiled image: inputs are repacked into 32-column tiles before upload; shapes that cannot be tiled are refused.
     tiled: bool = false,
+    /// Rows of x a thread computes (qmm_q4_tile_rows: 4); the dispatch has ceil(rows / this) * n threads.
+    rows_per_thread: usize = 1,
 
     pub fn init(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, pipeline: *dispatch.Pipeline) Fixture {
         return .{ .a = a, .dev = dev, .cmds = cmds, .staging = staging, .pipeline = pipeline };
@@ -242,7 +244,8 @@ pub const Fixture = struct {
         const s = f.shape;
         const p = Params{ .count = @intCast(s.rows * s.n), .output_size = @intCast(s.rows * s.n), .matrix_m = @intCast(s.rows), .matrix_n = @intCast(s.n), .matrix_k = @intCast(s.k) };
         try vk.orExit(vk.upload(f.cmds, f.buffers[4], 0, f.staging, std.mem.sliceAsBytes(f.out), timeout_ns));
-        try vk.orExit(f.pipeline.run(f.cmds, std.mem.asBytes(&p), .{ @intCast((s.rows * s.n + local_size_x - 1) / local_size_x), 1, 1 }, timeout_ns));
+        const threads = (s.rows + f.rows_per_thread - 1) / f.rows_per_thread * s.n;
+        try vk.orExit(f.pipeline.run(f.cmds, std.mem.asBytes(&p), .{ @intCast((threads + local_size_x - 1) / local_size_x), 1, 1 }, timeout_ns));
         if (f.corrupt) |i| {
             var from: usize = 0;
             for (f.bindings[0..i]) |b| from += b.len;
