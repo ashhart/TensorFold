@@ -1,7 +1,7 @@
 //! A stage link's frame header: 32 little-endian bytes (magic, version, kind, round, rows, payload bytes).
 const std = @import("std");
 
-pub const magic: u32 = 0x5446_5354; // "TFST"
+pub const magic: u32 = 0x5453_4654; // "TFST" in its little-endian bytes (54 46 53 54)
 pub const version: u16 = 1;
 pub const size = 32;
 
@@ -41,9 +41,10 @@ pub fn decode(raw: *const [size]u8, cap: u64) Error!Header {
     return .{ .kind = kind, .round = std.mem.readInt(u64, raw[8..16], .little), .rows = std.mem.readInt(u32, raw[16..20], .little), .bytes = bytes };
 }
 
-test "stage frame: a header round-trips, and a wrong magic, version, kind or size is refused" {
+test "stage frame: a header round-trips with TFST on the wire, and a wrong magic, version, kind or size is refused" {
     const h: Header = .{ .kind = .rows, .round = 0x0102_0304_0506_0708, .rows = 4096, .bytes = 80 << 20 };
     const raw = encode(h);
+    try std.testing.expectEqualStrings("TFST", raw[0..4]);
     try std.testing.expectEqual(h, try decode(&raw, 80 << 20));
     try std.testing.expectError(error.TooLarge, decode(&raw, (80 << 20) - 1));
     var bad = raw;
