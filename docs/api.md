@@ -498,6 +498,22 @@ On a discrete card (an RTX 3090, an A100) the server sizes its window from the c
 reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
 0.5 GiB up.
 
+## Embeddings
+
+`POST /v1/embeddings` takes OpenAI's body: `input` is one text, a list of texts, one list of token IDs or a list of
+them, with `encoding_format` (`float` or `base64`) and `dimensions`. Every family that serves embeddings shares these
+refusals, each an HTTP 400 `invalid_request_error`:
+
+| Input | Refusal |
+| --- | --- |
+| a text that is empty or whitespace only (Python's whitespace set, which SGLang strips before it refuses) | "embedding text must not be empty or whitespace only"; in a list, "embedding input at index N must not be empty or whitespace only" |
+| one input longer than the model's context | code `context_length_exceeded`: "the input (N tokens) is longer than the model's context length (C tokens)" |
+| inputs that each fit but together reach the server's batch limit | "the embedding batch exceeds the admitted N tokens" |
+
+An over-long input is named before the batch limit is checked, so a client learns that the input itself is too long,
+not that the batch is too full. `dimensions` crops each vector to that many leading values and renormalizes it; a
+model with Matryoshka (MRL) widths takes any width in its declared range (32 to 4,096 for Qwen3-Embedding-8B).
+
 ## Responses
 
 `choices[0].message.content` holds the answer. Reasoning uses `reasoning_content`, or
