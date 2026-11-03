@@ -478,29 +478,31 @@ fn projectGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
     return true;
 }
 
-// The tiled image reads a host repack of the same weights: its bytes must equal the default image's. Null: not tileable.
+// The tiled image reads a host repack of the same weights; its bytes must equal the default image's. Null: too large.
 fn tileProject(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, o: *vk.ops.Ops, f: fx.Fixture, case: fx.Case, x_view: vk.tensor.View, out: Poisoned16, out_view: vk.tensor.View, want: []const u16, timeout: u64) !?bool {
     const n: usize = case.shape.n;
     const k: usize = case.shape.k;
-    if (!vk.tile.fits(n, k) or n * k / 2 > dev.properties.limits.maxStorageBufferRange) return null;
+    const stored = vk.tile.padded(n);
+    if (!vk.tile.fits(n, k) or stored * k / 2 > dev.properties.limits.maxStorageBufferRange) return null;
     const groups = k / 64;
     const words = std.mem.sliceAsBytes(f.w)[f.case.at.w * 4 ..][0 .. n * k / 2];
     const scales = std.mem.sliceAsBytes(f.scales)[f.case.at.scales * 2 ..][0 .. n * groups * 2];
     const biases = std.mem.sliceAsBytes(f.biases)[f.case.at.biases * 2 ..][0 .. n * groups * 2];
-    const tiled = try a.alloc(u8, words.len);
+    const tiled = try a.alloc(u8, stored * k / 2);
     defer a.free(tiled);
     vk.tile.tileWords(tiled, words, n, k);
     var w_buf = try uploaded(a, dev, cmds, staging, tiled, timeout);
     defer w_buf.deinit();
-    vk.tile.tileParams(tiled[0..scales.len], scales, n, k);
-    var s_buf = try uploaded(a, dev, cmds, staging, tiled[0..scales.len], timeout);
+    const params = tiled[0 .. stored * groups * 2];
+    vk.tile.tileParams(params, scales, n, k);
+    var s_buf = try uploaded(a, dev, cmds, staging, params, timeout);
     defer s_buf.deinit();
-    vk.tile.tileParams(tiled[0..biases.len], biases, n, k);
-    var b_buf = try uploaded(a, dev, cmds, staging, tiled[0..biases.len], timeout);
+    vk.tile.tileParams(params, biases, n, k);
+    var b_buf = try uploaded(a, dev, cmds, staging, params, timeout);
     defer b_buf.deinit();
-    const w_view = try vk.tensor.View.init(&w_buf, .u32, 0, words.len / 4);
-    const s_view = try vk.tensor.View.init(&s_buf, .bf16, 0, n * groups);
-    const b_view = try vk.tensor.View.init(&b_buf, .bf16, 0, n * groups);
+    const w_view = try vk.tensor.View.init(&w_buf, .u32, 0, tiled.len / 4);
+    const s_view = try vk.tensor.View.init(&s_buf, .bf16, 0, stored * groups);
+    const b_view = try vk.tensor.View.init(&b_buf, .bf16, 0, stored * groups);
     const got = try a.alloc(u16, want.len);
     defer a.free(got);
     try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
