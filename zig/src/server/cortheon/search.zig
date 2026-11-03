@@ -67,6 +67,7 @@ fn resultTarget(a: Allocator, href_raw: []const u8) Allocator.Error!?[]const u8 
         return try decode(a, href[start..end]);
     }
     if (std.ascii.startsWithIgnoreCase(href, "http://") or std.ascii.startsWithIgnoreCase(href, "https://")) return href; // HTTP:// is the same scheme
+    if (std.mem.startsWith(u8, href, "//")) return try std.fmt.allocPrint(a, "https:{s}", .{href}); // a scheme-relative link is still a page
     return null;
 }
 
@@ -173,6 +174,16 @@ test "a search result keeps a link whose scheme is written in capitals" {
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("HTTP://example.org/page", results[0].url);
     try std.testing.expectEqualStrings("Example", results[0].title);
+}
+
+test "a search result keeps a link written without a scheme" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"//example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
 }
 
 test "DuckDuckGo's lite page reads the same way" {
