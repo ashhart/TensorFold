@@ -11,8 +11,8 @@ const fx = cuda.experts.Nvfp4Experts;
 const Y = cuda.experts32.Nvfp4b32Experts;
 const grouped = cuda.grouped;
 
-/// Fact up/down, a control, experts_waves' entries, TF_NVFP4_DECODE_WARPS=1's CTAs, two cut controls, block 32's five.
-pub const Kind = enum { up, down, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one, b32_up, b32_down, b32_down_bf16, b32_prompt_up, b32_prompt_down };
+/// Fact up/down, a control, experts_waves' entries, 1-warp CTAs, two cut controls, block 32's five and its control.
+pub const Kind = enum { up, down, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one, b32_up, b32_down, b32_down_bf16, b32_prompt_up, b32_prompt_down, b32_control };
 
 /// experts_waves.zig's entry a kind launches, or null for the prompt-tile and classic kinds.
 fn wavesEntry(kind: Kind) ?usize {
@@ -49,7 +49,7 @@ fn epiOf(kind: Kind) cuda.experts.Epi {
 /// nvfp4_experts32.cu's kinds, which replace block 16's kernels on scales written two by two.
 fn isB32(kind: Kind) bool {
     return switch (kind) {
-        .b32_up, .b32_down, .b32_down_bf16, .b32_prompt_up, .b32_prompt_down => true,
+        .b32_up, .b32_down, .b32_down_bf16, .b32_prompt_up, .b32_prompt_down, .b32_control => true,
         else => false,
     };
 }
@@ -121,6 +121,7 @@ pub fn spec(kind: Kind) c.Spec {
         .b32_down_bf16 => .{ .name = "cuda nvfp4 block 32 decode down bf16 tf_nvfp4_decode32_down_bf16", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "nvfp4_expert_kernel<1, 3, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_down_served, .sums = .{ .bf16 = 30, .why = why } },
         .b32_prompt_up => .{ .name = "cuda nvfp4 block 32 prompt gate-up tf_nvfp4_prompt32_swiglu", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "tf_nvfp4_prompt_swiglu", .nan = .{ .stated = rule }, .tiles = up32_tiles, .served = &b32_up_served, .sums = .{ .bf16 = 30, .why = why } },
         .b32_prompt_down => .{ .name = "cuda nvfp4 block 32 prompt down tf_nvfp4_prompt32_down", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "tf_nvfp4_prompt_down", .nan = .{ .stated = rule }, .tiles = down32_tiles, .served = &b32_down_served, .sums = .{ .bf16 = 30, .why = why } },
+        .b32_control => .{ .name = "control: tf_nvfp4_decode32_swiglu on offsets with each byte's nibbles swapped, posing as the decode gate-up", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = b32_up_served[1..2] },
     };
 }
 
@@ -196,7 +197,7 @@ pub const Experts = struct {
             entry.served = &self.served;
         };
         return .{ .spec = entry, .ctx = self, .vt = &vt, .control = switch (self.kind) {
-            .control, .cut_waves, .cut_waves_one => .shapes,
+            .control, .cut_waves, .cut_waves_one, .b32_control => .shapes,
             else => null,
         } };
     }
@@ -281,6 +282,9 @@ pub const Experts = struct {
         }
         self.wd = try self.rig.input(std.mem.sliceAsBytes(words));
         if (isB32(self.kind)) {
+            if (self.kind == .b32_control) for (self.offsets) |*o| { // the planted fault: each group read with its pair's offset
+                o.* = o.* << 4 | o.* >> 4;
+            };
             const per32 = Y.bytes(1, n, k, self.parts()) / 4;
             const words32 = try a.alloc(u32, experts * per32);
             defer a.free(words32);
