@@ -12,27 +12,27 @@ fn promptTile(comptime symbol: []const u8, usage: [limits.rdna.len]U) Record {
 
 pub const records = [_]Record{
     promptTile("tf_fa_wide_f16", .{
-        .{ .vgprs = 231, .sgprs = 45, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 231, .sgprs = 45, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 231, .sgprs = 45, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 231, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 49, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
     }),
     promptTile("tf_fa_wide_bf16", .{
-        .{ .vgprs = 247, .sgprs = 45, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 231, .sgprs = 45, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 231, .sgprs = 45, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 231, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 246, .sgprs = 46, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 49, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
     }),
     promptTile("tf_fa_paged_f16", .{
-        .{ .vgprs = 232, .sgprs = 51, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 232, .sgprs = 51, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 232, .sgprs = 51, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 232, .sgprs = 51, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
     }),
     promptTile("tf_fa_paged_bf16", .{
-        .{ .vgprs = 250, .sgprs = 50, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 232, .sgprs = 51, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 232, .sgprs = 51, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-        .{ .vgprs = 232, .sgprs = 51, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 249, .sgprs = 52, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
     }),
 };

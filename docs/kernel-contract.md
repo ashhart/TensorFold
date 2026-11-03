@@ -88,7 +88,8 @@ On an AMD machine, run `zig build hip-kernel-contract -Dhip-arch=ARCH -Dhipcc=..
 controls are built with the kernels). For the limits of every served chip, `zig build hip-kernel-contract-limits
 -Dhipcc=...` compiles every kernel group and the controls for gfx1030, gfx1100, gfx1151 and gfx1201 and checks each
 record against them, no GPU needed; `hip-kernel-contract-objects` installs those code objects into `zig-out/hsaco/`.
-Its `RECORD` lines are the values `hip_records.zig` holds for that hipcc.
+Its `RECORD` lines are the values `hip_records.zig` holds for that hipcc. The records hold ROCm 10.1's hipcc (HIP 7.16),
+which ROCm 10.1 installs under `core/bin` of its root.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
