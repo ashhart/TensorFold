@@ -318,7 +318,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const t = o.model_type;
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
-    if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
+    if (!(dense and std.mem.eql(u8, t, "qwen3_5")) and !learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
     const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
@@ -343,10 +343,11 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
         problem.* = "--drafter-bits takes 0 (bf16) or 4";
         return null;
     }
+    if (o.slide and try @import("qwen27_slide.zig").refused(a, io, o.dir, problem)) return null;
     var why: []const u8 = "";
     const drafter = if (o.drafts) o.drafter else null;
     const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .spill = o.spill, .slots = spill.slots(o) } else null else null;
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision }, a, &why) catch |err| {
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .slide = if (o.slide) o.dir else null, .learn = learn, .vision = o.vision }, a, &why) catch |err| {
         problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };
@@ -531,12 +532,14 @@ test "--recall is refused by Flash Next before any load, and not by the lane eng
     }
 }
 
-test "--slide is refused by every family but Nemotron, which learns into its weights" {
+test "--slide admits Nemotron and the dense 27B, refusing other Metal families" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .slide = true }, false)) == null);
-    for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next", "qwen3_5" }) |t| {
+    try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "qwen3_5", .slide = true }, true)) == null);
+    try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "qwen3_5", .slide = true }, false)) != null);
+    for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next" }) |t| {
         const why = (try refusal(a, .{ .dir = "d", .model_type = t, .slide = true }, true)) orelse return error.TestExpectedRefusal;
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t}), why);
     }
@@ -553,7 +556,7 @@ test "prompt precision: Metal refuses int8 before any model or family-specific l
 
 test "slide admission: Metal entry points refuse before checkpoint or device access" {
     const check = @import("slide_open_test.zig").check;
-    for (families) |f| if (!std.mem.eql(u8, f.model_type, "nemotron_h")) try check(open, "Macs", &.{f.model_type});
+    for (families) |f| if (!std.mem.eql(u8, f.model_type, "nemotron_h") and !std.mem.eql(u8, f.model_type, "qwen3_5")) try check(open, "Macs", &.{f.model_type});
     try check(@import("qwen35.zig").open, "Macs", &.{"qwen3_5"});
     try check(@import("gemma4.zig").open, "Macs", &.{"gemma4"});
     try check(@import("lfm2_moe.zig").open, "Macs", &.{"lfm2_moe"});

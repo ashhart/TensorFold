@@ -6,7 +6,7 @@ const Frame = @import("gpu_frame.zig").Frame;
 const forward = @import("forward.zig");
 const Ref = @import("projection.zig").Ref;
 /// Layers a verify encodes before committing them, so the GPU starts while the CPU encodes the rest.
-const commit_every = 4;
+const schedule = @import("train_schedule.zig");
 const wts = @import("gpu_weights.zig");
 const attn = @import("attention.zig");
 const abi = @import("gdn_contract.zig");
@@ -41,12 +41,16 @@ pub const Runner = struct {
     owned: std.ArrayList(mtl.Buffer),
     taps: Taps,
     slots: u32,
+    untaught: [attn.planning.max_streams]bool = @splat(false),
     ready: u32, // slots [0, ready) have their K/V rows; a later slot takes its own when first used (ensure)
     capacity: u32,
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
     tail: ?forward.Tail = null,
+    learning_rows: bool = false, // the trainer uses the same row kernels with fewer submissions
+    learning_io: ?std.Io = null,
+    learning_stats: @import("train_submit.zig").Stats = .{},
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
     gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
@@ -261,8 +265,14 @@ pub const Runner = struct {
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
+        if (r.model.pockets) |*pockets| {
+            pockets.selected = try @import("pocket_rows.zig").Selection.windows(round.slots, round.firsts, round.windows, &r.untaught);
+        }
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks };
-        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
+        r.last_gpu_seconds = (if (schedule.commitEvery(r.learning_rows) == 0)
+            @import("train_submit.zig").run(r.model.queue, RowProgram{ .stages = &stages, .layers = r.model.config.layers }, &r.learning_stats, r.learning_io)
+        else
+            @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, 4)) catch |err| {
             r.failed = true;
             return err;
         };
@@ -453,7 +463,7 @@ pub const Runner = struct {
 
     fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
-        var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain };
+        var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain, .learning = r.model.learning };
         try GdnHook.forward(&hook, e, block, weights, frame, rows);
     }
 
@@ -471,7 +481,9 @@ pub const Runner = struct {
         try r.model.glue.unstack(e, f.get(.mixed), f.get(.key), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = 0 });
         try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
         e.barrier();
+        try r.model.capture(e, .attention, block, &.{ f.get(.q_gate), f.get(.key), f.get(.value) }, rows);
         try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry });
+        try r.model.capture(e, .prepared_attention, block, &.{ f.get(.query), f.get(.rotated_key), f.get(.value) }, rows);
         try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
     }
 
@@ -514,3 +526,18 @@ fn fingerprint(round: *const Round) [32]u8 {
     hash.final(&out);
     return out;
 }
+
+const RowProgram = struct {
+    stages: *forward.Stages,
+    layers: usize,
+    pub fn encode(p: @This(), e: mtl.ComputeEncoder) !void {
+        var lane: @import("core").segments.Lane = .{ .k = 0, .cb = undefined, .enc = e, .fence = undefined };
+        try p.stages.begin(&lane);
+        for (0..p.layers) |l| {
+            try p.stages.pre(&lane, l);
+            try p.stages.mixer(&lane, l);
+            try p.stages.post(&lane, l);
+        }
+        try p.stages.finish(&lane);
+    }
+};

@@ -19,6 +19,7 @@ const images = @import("qwen27_images.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
+    slide: ?[]const u8 = null, // The writable checkpoint folder; null keeps the ordinary serving allocation.
     context: u32,
     streams: u32, // --parallel: slots at most, fewer when their caches do not fit
     streams_fixed: bool = false, // --parallel named a number: every slot fits, or the server refuses
@@ -49,8 +50,10 @@ pub const Host = struct {
     cache: ?pc.Store = null,
     resident: ?Resident = null,
     warm: mtl.keepalive.Target,
+    disk_rows: ?*pc.rows.Rows = null, // Owned even after a learned-weight change detaches the cache from disk.
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
+    slide: ?*@import("qwen27_slide.zig").Bridge = null,
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
 
     pub fn engine(h: *Host) api.Engine {
@@ -186,6 +189,10 @@ fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
 
 /// Room left beside the weights and an 8 GiB margin.
 fn room(model: *const q.model.Model) usize {
+    return rawRoom(model) -| model.learn_reserved;
+}
+
+fn rawRoom(model: *const q.model.Model) usize {
     const dev = model.device;
     return q.prompt_memory.room(dev.maxWorkingSet(), dev.allocated(), if (std.c.getenv("TF_QWEN27_WORKING_SET_BYTES")) |v| std.mem.span(v) else null) catch 0;
 }
@@ -338,6 +345,16 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     };
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
+    const reserve_before = model.learn_reserved;
+    if (o.slide != null) {
+        if (model.widths_tag != 0) return error.UnsupportedLearningFormat;
+        model.learn_reserved = try q.train_memory.bytes(model.config, q.gpu_frame.max_rows, model.device.tensorUnits());
+        if (room(model) == 0) {
+            model.learn_reserved = reserve_before;
+            return error.LearningMemory;
+        }
+    }
+    errdefer model.learn_reserved = reserve_before;
     const memory = q.prompt_memory;
     const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .current_rows = model.frame.capacity, .left = room(model) };
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
@@ -360,8 +377,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.cache = null;
     h.resident = null;
     h.disk_stage = null;
+    h.disk_rows = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
+    h.slide = null;
+    h.spares = .{};
     h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
@@ -410,9 +430,15 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
     if (o.learn) |l| try disk.attach(h, io, a, l);
-    errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
+    errdefer if (h.disk_rows) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
+    if (o.slide) |dir| {
+        h.slide = try @import("qwen27_slide.zig").Bridge.init(h, io, dir);
+        h.host.learner = h.slide.?.hook();
+        h.host.info_.slide_conversations = h.slide.?.conversations();
+    }
+    errdefer if (h.slide) |learner| learner.deinit();
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
     return h;
@@ -442,7 +468,7 @@ fn gibBytes(gib: f64) u64 {
 fn laterFootprint(h: *const Host) !u64 {
     const tower: u64 = if (h.back.vision) |v| v.firstUse() else 0;
     const share = try h.model.shareCacheBytes();
-    return std.math.add(u64, try std.math.add(u64, laterBytes(h), tower), share);
+    return std.math.add(u64, try std.math.add(u64, try std.math.add(u64, laterBytes(h), tower), share), h.model.learn_reserved);
 }
 
 /// The prompt bank may capture marks without splitting; only request starts are guaranteed cold cuts.
@@ -453,7 +479,7 @@ pub fn cacheRules(chunk: u32) pc.Rules {
 /// Prompt reuse in up to 16 GiB of what 70% of RAM leaves once every slot has its memory; CacheOverCap: `why` says why.
 fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
     const later = try laterFootprint(h);
-    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
+    const plan = try cache_fit.budgetBeside(gib, over, rawRoom(h.model) -| later, later, a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
     h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
@@ -471,7 +497,8 @@ const holdResident = q.residency.hold;
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
-    const rows = if (h.cache) |*store| store.disk else null;
+    if (h.slide) |learner| learner.deinit();
+    const rows = q.learning_epoch.takeDisk(h);
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go

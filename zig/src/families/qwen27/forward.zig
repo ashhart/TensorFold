@@ -104,6 +104,7 @@ pub const Stages = struct {
             std.mem.swap(Ref, &s.hidden, &s.residual);
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
         }
+        try m.capture(e, .input, index, &.{ s.hidden, f.get(.input) }, s.rows);
     }
     pub fn mixer(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
         const m = s.model;
@@ -112,6 +113,7 @@ pub const Stages = struct {
             .attention => |a| try s.hooks.attention(s.hooks.ptr, lane.enc, index, a, &m.frame, s.rows),
         }
         lane.enc.barrier();
+        try m.capture(lane.enc, .gated, index, &.{m.frame.get(.mixer_out)}, s.rows);
     }
     pub fn post(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
         const m = s.model;
@@ -148,6 +150,7 @@ pub const Stages = struct {
         try m.kernels.norm(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
+        try m.capture(e, .post, index, &.{ s.hidden, f.get(.input) }, s.rows);
         var up = f.get(.mixed);
         up.offset += @as(usize, m.config.intermediate) * 2;
         const width: u32 = @intCast(m.config.intermediate);
@@ -174,11 +177,13 @@ pub const Stages = struct {
                 try m.kernels.addAne(lane.enc, .{ .buffer = share.partial }, .{ .buffer = share.outputs[slice].buffer }, f.get(.output), h, width, share.columns, @min(ane_mlp.width, s.rows - base), base);
             }
             lane.enc.barrier();
+            try m.addPocket(lane.enc, index, f.get(.input), f.get(.output), s.rows);
             s.pending = f.get(.output);
             return;
         } else {
             try m.kernels.quant(e, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
             e.barrier();
+            try m.capture(e, .mlp, index, &.{f.get(.mixed)}, s.rows);
             try m.kernels.mlp(e, f.get(.mixed), up, f.get(.dims), f.get(.activated), f.get(.act_sums), width, s.rows);
         }
         lane.enc.barrier();
@@ -205,6 +210,7 @@ pub const Stages = struct {
             if (s.reduce.?.broken()) return error.PairFailed;
             e.barrier();
         }
+        try m.addPocket(lane.enc, index, f.get(.input), f.get(.output), s.rows);
         s.pending = f.get(.output);
     }
     pub fn finish(s: *Stages, lane: *@import("core").segments.Lane) !void {
@@ -215,6 +221,7 @@ pub const Stages = struct {
         try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
+        try m.capture(e, .final, m.config.layers, &.{ s.hidden, f.get(.input) }, s.rows);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
@@ -227,6 +234,7 @@ pub const Stages = struct {
             try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
         }
         e.barrier();
+        if (s.head != .none) try m.capture(e, .logits, m.config.layers, &.{f.get(.logits)}, if (s.head == .last) 1 else s.rows);
         if (s.reduce) |r| {
             if (s.head != .none) {
                 const picks = s.picks orelse return error.HeadSeamMissing;

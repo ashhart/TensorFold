@@ -35,6 +35,10 @@ const Walk = struct {
             const path = root.src_path.sub_path;
             if ((std.mem.endsWith(u8, path, "native/metal.zig") or std.mem.endsWith(u8, path, "tests/contract/metal_main.zig")) and !m.import_table.contains("qwen4"))
                 @import("qwen4.zig").metalNative(w.b, target, m);
+            if (std.mem.endsWith(u8, path, "tests/contract/metal_main.zig") and !m.import_table.contains("qwen27_learning")) {
+                m.addImport("qwen27_learning", w.b.createModule(.{ .root_source_file = w.b.path("zig/tests/qwen27/learning.zig"), .target = target, .optimize = m.optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.import_table.get("metal").? }, .{ .name = "tensorfold", .module = m.import_table.get("tensorfold").? } } }));
+                m.addImport("qwen27_learning_checks", @import("qwen27_learning_checks.zig").module(w.b, target, m.optimize, m.import_table.get("metal").?, m.import_table.get("tensorfold").?.import_table.get("qwen_runtime_sources").?, m.import_table.get("contract")));
+            }
             const needs_memory = std.mem.indexOf(u8, path, "flashnext") != null or
                 std.mem.indexOf(u8, path, "residency") != null or std.mem.endsWith(u8, path, "cli/tests.zig") or
                 std.mem.endsWith(u8, path, "src/tensorfold.zig") or std.mem.endsWith(u8, path, "cli/cli.zig") or

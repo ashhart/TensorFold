@@ -125,6 +125,10 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (o.gates) try @import("metal_delta_slots.zig").run(a, device, queue, o.only, o.seed);
+    if (o.gates and (o.only == null or std.mem.indexOf(u8, "qwen27 learning", o.only.?) != null)) {
+        const path = try std.fmt.allocPrint(a, "zig-out/qwen27-learning-contract-{d}", .{std.Io.Clock.awake.now(init.io).toNanoseconds()});
+        try @import("qwen27_learning").run(a, init.io, path);
+    }
     try gemma.requireComplete(gemma.entries);
     var gemma_list: std.ArrayList(*gemma.Probe) = .empty;
     defer {
@@ -463,6 +467,7 @@ pub fn main(init: std.process.Init) !u8 {
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
+        try @import("qwen27_learning_checks").run(@import("rig.zig"), a, device, queue, o.only, &t);
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);

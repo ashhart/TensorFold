@@ -194,7 +194,9 @@ pub const Metal = struct {
     }
 
     pub fn slotFor(b: *const Metal, s: *const lanes.Stream) !u32 {
-        return b.slotOf(s) orelse error.UnknownStream;
+        const slot = b.slotOf(s) orelse return error.UnknownStream;
+        b.runner.untaught[slot] = s.untaught;
+        return slot;
     }
 
     fn push(b: *Metal, token: u32) u64 {

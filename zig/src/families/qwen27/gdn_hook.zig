@@ -15,6 +15,7 @@ pub const Hook = struct {
     plan: *const Plan,
     linear_index: []const u32,
     accepted_chain: bool = false,
+    learning: ?@import("train_hooks.zig").Hooks = null,
 
     pub fn forward(ptr: *anyopaque, e: metal.ComputeEncoder, block: usize, weight: Weights.Gdn, frame: *Frame, rows: u32) !void {
         const hook: *Hook = @ptrCast(@alignCast(ptr));
@@ -24,7 +25,12 @@ pub const Hook = struct {
         try hook.quant.quant(e, weight.qkv, frame.get(.input), sums, frame.get(.dims), try hook.pool.projected(layer), rows);
         try hook.quant.quant(e, weight.zba, frame.get(.input), sums, frame.get(.dims), frame.get(.mixed), rows);
         e.barrier();
+        if (hook.learning) |keep| try keep.capture(e, .gdn, block, &.{ try hook.pool.projected(layer), frame.get(.mixed) }, rows);
         if (hook.accepted_chain) try hook.pool.forwardChain(layer, devicePlan(hook.plan.*, frame), try refs(weight, frame), e, hook.quant.prompt) else try hook.pool.forward(layer, devicePlan(hook.plan.*, frame), try refs(weight, frame), e);
+        if (hook.learning) |keep| {
+            const saved = try hook.pool.trainingRows(layer);
+            try keep.capture(e, .gdn_state, block, &saved, rows);
+        }
     }
 
     pub fn commit(hook: *Hook, e: metal.ComputeEncoder, block: usize, frame: *Frame) !void {

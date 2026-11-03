@@ -133,6 +133,7 @@ pub fn attach(h: *Host, io: std.Io, a: Allocator, o: Learn) !void {
     const store = &(h.cache orelse return std.log.warn("Qwen3.8-27B: --learn-conversations needs the prompt cache, which --prompt-cache-gib 0 turned off", .{}));
     const id = try identity(h, io, a, o.dir, o.drafter);
     const r = try rows.attach(h.gpa, store, .{ .root = o.root, .identity = id.id, .cap = o.cap, .floor = o.floor, .daily = o.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = o.spill, .slots = o.slots });
+    h.disk_rows = r;
     r.prefill_rate = id.rate;
     std.log.info("Qwen3.8-27B: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, o.cap >> 20 });
 }

@@ -16,15 +16,24 @@ pub const Shared = struct {
 };
 
 /// The 27B's Metal sources, embedded by name (zig/kernels/metal/qwen27).
-const parts = [_][]const u8{ "xsum", "norm_xs", "norm_input", "mlp_xs", "mlp_ane", "glue", "copy", "attention_mpp", "attention_io", "attention_prompt", "attention_prompt_sg", "prompt_glue", "prompt_state" };
+const parts = [_][]const u8{ "xsum", "norm_xs", "norm_input", "mlp_xs", "mlp_ane", "glue", "copy", "attention_mpp", "attention_io", "attention_prompt", "attention_prompt_sg", "prompt_glue", "prompt_state", "pocket", "learn_rows", "learn_linear", "gdn_train", "attn_train" };
 
 /// The shared modules, imported into `engine` (whose `core` is itself) for the server and the release binary.
 pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module) Shared {
     const files = b.addWriteFiles();
     var index: []const u8 = "";
     for (parts) |part| {
-        _ = files.addCopyFile(b.path(b.fmt("zig/kernels/metal/qwen27/{s}.metal", .{part})), b.fmt("{s}.metal", .{part}));
-        index = b.fmt("{s}pub const {s} = @embedFile(\"{s}.metal\");\n", .{ index, part, part });
+        if (std.mem.eql(u8, part, "gdn_train") or std.mem.eql(u8, part, "attn_train")) {
+            for ([_][]const u8{ "impl", "entries" }) |suffix| {
+                const name = b.fmt("{s}_{s}.h", .{ part, suffix });
+                _ = files.addCopyFile(b.path(b.fmt("zig/kernels/metal/qwen27/{s}", .{name})), name);
+            }
+            index = b.fmt("{s}pub const {s} = @embedFile(\"{s}_impl.h\") ++ \"\\n\" ++ @embedFile(\"{s}_entries.h\");\n", .{ index, part, part, part });
+        } else {
+            const folder = if (std.mem.startsWith(u8, part, "learn_")) "core" else "qwen27";
+            _ = files.addCopyFile(b.path(b.fmt("zig/kernels/metal/{s}/{s}.metal", .{ folder, part })), b.fmt("{s}.metal", .{part}));
+            index = b.fmt("{s}pub const {s} = @embedFile(\"{s}.metal\");\n", .{ index, part, part });
+        }
     }
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/deltanet.metal"), "gdn.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/deltanet_slots.metal"), "gdn_slots.metal");
@@ -41,6 +50,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, metal: *st
         .tree_commit = b.createModule(.{ .root_source_file = b.path("zig/src/core/tree_commit_gpu.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tree_round", .module = tree_round }, .{ .name = "tree_commit_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/tree_commit_sources.zig") }) } } }),
         .draft_ops = b.createModule(.{ .root_source_file = b.path("zig/src/core/draft_ops.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "draft_ops_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/draft_ops_sources.zig") }) } } }),
     };
+    if (!engine.import_table.contains("living")) engine.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true }));
     engine.addImport("core", engine);
     engine.addImport("core_delta", s.delta);
     engine.addImport("qwen_runtime_sources", s.runtime_sources);
@@ -101,6 +111,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
     const qwen_core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_core.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tokenizer", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true }) } } });
     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/qwen27.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } } });
+    qwen27.addImport("living", engine.import_table.get("living").?);
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "core", qwen_core }, .{ "core_lane", core_lane }, .{ "core_row", core_row }, .{ "bf16_topk", s.bf16_topk }, .{ "bf16_topk_gpu", s.bf16_topk_gpu }, .{ "tree_round", s.tree_round }, .{ "tree_round_gpu", s.tree_round_gpu }, .{ "tree_commit_gpu", s.tree_commit }, .{ "draft_ops", s.draft_ops }, .{ "kernel_sources", sources } }) |m| qwen_core.addImport(m[0], m[1]);
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "core_lane", core_lane }, .{ "qwen_runtime_sources", s.runtime_sources }, .{ "core_delta", s.delta }, .{ "qwen_gdn_source", s.gdn_source } }) |m| qwen27.addImport(m[0], m[1]);
     for ([_]*std.Build.Module{ s.bf16_topk, s.tree_round, s.draft_ops }) |m| test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);

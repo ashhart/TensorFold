@@ -1,0 +1,381 @@
+{
+  "gdn_train": {
+    "source": "zig/kernels/cuda/gdn_train.cu",
+    "sha256": "7778b3e03065cdf26285af0990b5a0dffcfb51bc3ffc1bd2547c044c4c806ca8",
+    "dependencies": {
+      "zig/kernels/cuda/common/act.cuh": "46ac1df9631e99f1987b2b522022b1e37e1294ed0808ac095b992bfeb913b59f"
+    },
+    "kernels": [
+      {
+        "name": "tf_gdn_norm_back",
+        "pointers": [
+          {
+            "type": "const bf16*",
+            "name": "y"
+          },
+          {
+            "type": "const bf16*",
+            "name": "P"
+          },
+          {
+            "type": "const bf16*",
+            "name": "norm_w"
+          },
+          {
+            "type": "const float*",
+            "name": "dout"
+          },
+          {
+            "type": "float*",
+            "name": "dy"
+          },
+          {
+            "type": "float*",
+            "name": "dproj"
+          }
+        ],
+        "scalars": [
+          {
+            "type": "GdnShape",
+            "name": "s"
+          },
+          {
+            "type": "float",
+            "name": "eps"
+          }
+        ],
+        "threadgroup_bytes": 644,
+        "max_threads": 128
+      },
+      {
+        "name": "tf_gdn_scan_back",
+        "pointers": [
+          {
+            "type": "const bf16*",
+            "name": "act"
+          },
+          {
+            "type": "const float*",
+            "name": "q"
+          },
+          {
+            "type": "const float*",
+            "name": "k"
+          },
+          {
+            "type": "const float*",
+            "name": "g"
+          },
+          {
+            "type": "const float*",
+            "name": "beta"
+          },
+          {
+            "type": "const float*",
+            "name": "ckpt"
+          },
+          {
+            "type": "const float*",
+            "name": "dy"
+          },
+          {
+            "type": "float*",
+            "name": "work"
+          },
+          {
+            "type": "float*",
+            "name": "dqp"
+          },
+          {
+            "type": "float*",
+            "name": "dkp"
+          },
+          {
+            "type": "float*",
+            "name": "dact"
+          },
+          {
+            "type": "float*",
+            "name": "dg"
+          },
+          {
+            "type": "float*",
+            "name": "dbeta"
+          }
+        ],
+        "scalars": [
+          {
+            "type": "GdnShape",
+            "name": "s"
+          },
+          {
+            "type": "int",
+            "name": "from"
+          }
+        ],
+        "threadgroup_bytes": 9536,
+        "max_threads": 256
+      },
+      {
+        "name": "tf_gdn_qk_back",
+        "pointers": [
+          {
+            "type": "const bf16*",
+            "name": "act"
+          },
+          {
+            "type": "const float*",
+            "name": "dqp"
+          },
+          {
+            "type": "const float*",
+            "name": "dkp"
+          },
+          {
+            "type": "float*",
+            "name": "dact"
+          }
+        ],
+        "scalars": [
+          {
+            "type": "GdnShape",
+            "name": "s"
+          }
+        ],
+        "threadgroup_bytes": 128,
+        "max_threads": 128
+      },
+      {
+        "name": "tf_gdn_gates_back",
+        "pointers": [
+          {
+            "type": "const bf16*",
+            "name": "P"
+          },
+          {
+            "type": "const float*",
+            "name": "a_log"
+          },
+          {
+            "type": "const float*",
+            "name": "dt_bias"
+          },
+          {
+            "type": "const float*",
+            "name": "g"
+          },
+          {
+            "type": "const float*",
+            "name": "dg"
+          },
+          {
+            "type": "const float*",
+            "name": "dbeta"
+          },
+          {
+            "type": "float*",
+            "name": "dproj"
+          }
+        ],
+        "scalars": [
+          {
+            "type": "GdnShape",
+            "name": "s"
+          }
+        ],
+        "threadgroup_bytes": 4,
+        "max_threads": 256
+      },
+      {
+        "name": "tf_gdn_conv_back",
+        "pointers": [
+          {
+            "type": "const bf16*",
+            "name": "P"
+          },
+          {
+            "type": "const bf16*",
+            "name": "hist"
+          },
+          {
+            "type": "const bf16*",
+            "name": "cw"
+          },
+          {
+            "type": "const float*",
+            "name": "dact"
+          },
+          {
+            "type": "float*",
+            "name": "dproj"
+          }
+        ],
+        "scalars": [
+          {
+            "type": "GdnShape",
+            "name": "s"
+          }
+        ],
+        "threadgroup_bytes": 4,
+        "max_threads": 256
+      }
+    ]
+  },
+  "attn_train": {
+    "source": "zig/kernels/cuda/attn_train.cu",
+    "sha256": "8e26df47c2c573c846f270ed61f452b621486f4c131fde1162aa9eb1a56d4042",
+    "dependencies": {
+      "zig/kernels/cuda/attn_back.cuh": "f9f7f3666999cbf25e086ca04e4e2380e3c76ad371297c1936eed8f957395fe8",
+      "zig/kernels/cuda/common/act.cuh": "46ac1df9631e99f1987b2b522022b1e37e1294ed0808ac095b992bfeb913b59f"
+    },
+    "kernels": [
+      {
+        "name": "tf_attn_q",
+        "pointers": [
+          {
+            "type": "const bf16*",
+            "name": "qkv"
+          },
+          {
+            "type": "const float*",
+            "name": "dout"
+          },
+          {
+            "type": "float*",
+            "name": "probs"
+          },
+          {
+            "type": "float*",
+            "name": "dscores"
+          },
+          {
+            "type": "float*",
+            "name": "dq"
+          },
+          {
+            "type": "const bf16*",
+            "name": "pk"
+          },
+          {
+            "type": "const bf16*",
+            "name": "pv"
+          }
+        ],
+        "scalars": [
+          {
+            "type": "Heads",
+            "name": "a"
+          }
+        ],
+        "threadgroup_bytes": 18560,
+        "max_threads": 256
+      },
+      {
+        "name": "tf_attn_gate_back",
+        "pointers": [
+          {
+            "type": "const float*",
+            "name": "dgated"
+          },
+          {
+            "type": "const bf16*",
+            "name": "gated"
+          },
+          {
+            "type": "const bf16*",
+            "name": "pq"
+          },
+          {
+            "type": "float*",
+            "name": "dout"
+          },
+          {
+            "type": "float*",
+            "name": "dpq"
+          }
+        ],
+        "scalars": [
+          {
+            "type": "int",
+            "name": "heads"
+          },
+          {
+            "type": "int",
+            "name": "dim"
+          }
+        ],
+        "threadgroup_bytes": 4,
+        "max_threads": 256
+      },
+      {
+        "name": "tf_attn_prep_back",
+        "pointers": [
+          {
+            "type": "const bf16*",
+            "name": "pq"
+          },
+          {
+            "type": "const bf16*",
+            "name": "pk"
+          },
+          {
+            "type": "const float*",
+            "name": "qscale"
+          },
+          {
+            "type": "const float*",
+            "name": "kscale"
+          },
+          {
+            "type": "const float*",
+            "name": "inv"
+          },
+          {
+            "type": "const float*",
+            "name": "dq"
+          },
+          {
+            "type": "const float*",
+            "name": "dk"
+          },
+          {
+            "type": "float*",
+            "name": "dpq"
+          },
+          {
+            "type": "float*",
+            "name": "dpk"
+          }
+        ],
+        "scalars": [
+          {
+            "type": "int",
+            "name": "pos0"
+          },
+          {
+            "type": "int",
+            "name": "heads"
+          },
+          {
+            "type": "int",
+            "name": "kv_heads"
+          },
+          {
+            "type": "int",
+            "name": "dim"
+          },
+          {
+            "type": "int",
+            "name": "rope_half"
+          },
+          {
+            "type": "float",
+            "name": "eps"
+          }
+        ],
+        "threadgroup_bytes": 1152,
+        "max_threads": 256
+      }
+    ]
+  }
+}

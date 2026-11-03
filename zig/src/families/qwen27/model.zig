@@ -27,6 +27,9 @@ pub const Model = struct {
     kernels: quant.Kernels,
     glue: glue.Kernels,
     frame: Frame,
+    pockets: ?@import("pocket.zig").Pockets = null,
+    learning: ?@import("train_hooks.zig").Hooks = null,
+    learn_reserved: u64 = 0,
     /// The Neural Engine's share of prompt-chunk MLPs, when it loaded.
     ane: ?*ane_mlp.Share = null,
     /// A deferred share still needs the checkpoint mappings, until loadShare decides and closes them.
@@ -110,8 +113,16 @@ pub const Model = struct {
         defer core.checkpoint_host.freeShardFiles(a, files);
         // projections stay in the files until load repacks them: the weights live once, in their lane layouts
         for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
+        m.pockets = null;
+        m.learning = null;
+        m.learn_reserved = 0;
+        errdefer if (m.pockets) |*pockets| pockets.deinit();
         m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
         errdefer m.weights.deinit();
+        if (c.pocket > 0) {
+            m.pockets = try @import("pocket.zig").Pockets.init(a, m.device, c.hidden, c.layers);
+            try m.pockets.?.load(io, dir, c);
+        }
         m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
@@ -169,9 +180,19 @@ pub const Model = struct {
         return if (m.ane) |share| share.cacheBytes(m.config) else 0;
     }
 
+    pub fn capture(m: *Model, e: mtl.ComputeEncoder, point: @import("train_hooks.zig").Point, layer: usize, refs: []const @import("projection.zig").Ref, rows: u32) !void {
+        if (m.learning) |hooks| try hooks.capture(e, point, layer, refs, rows);
+    }
+
+    pub fn addPocket(m: *Model, e: mtl.ComputeEncoder, layer: usize, input: @import("projection.zig").Ref, output: @import("projection.zig").Ref, rows: usize) !void {
+        if (m.learning) |hooks| return hooks.add(hooks.ctx, e, layer, input, output, @intCast(rows));
+        if (m.pockets) |*pockets| try pockets.add(e, layer, input, output, rows);
+    }
+
     pub fn deinit(m: *Model) void {
         if (m.ane) |share| share.deinit();
         m.frame.deinit();
+        if (m.pockets) |*pockets| pockets.deinit();
         m.glue.deinit();
         m.kernels.deinit();
         m.weights.deinit();
