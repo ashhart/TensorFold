@@ -69,6 +69,15 @@ fn cell(t: *Trainer, sq: train.Seq, layer: usize, row: usize) !void {
         std.debug.print("RESULT step layer {d} row {d}: fraction {e:.8}, norm_h {e:.8}, trimmed_h {e:.8}\n", .{ layer, row, fraction, residual.normStep(fraction), residual.step(fraction) });
         fd.* = try slope(t, sq, layer, &dir, residual.step(fraction));
     }
+    const fractions = [_]f64{ 0.001, 0.002, 0.004, 0.008 };
+    var norm_slopes: [4]f64 = undefined;
+    for (fractions, &norm_slopes) |fraction, *fd|
+        fd.* = try slope(t, sq, layer, &dir, residual.normStep(fraction));
+    for (fractions, norm_slopes, 0..) |fraction, fd, i| {
+        const fine = if (i == 0) 0 else i - 1;
+        const extrapolated = diagnostic.richardson(norm_slopes[fine], norm_slopes[fine + 1]);
+        std.debug.print("RESULT norm-slope layer {d} row {d}: h {e:.8}, slope {e:.8}, Richardson {e:.8}, Richardson_fine_h {e:.8}, relative {d:.6}\n", .{ layer, row, residual.normStep(fraction), fd, extrapolated, residual.normStep(fractions[fine]), @abs(fd - length) / length });
+    }
     var errors: [3]f64 = undefined;
     for (&errors, 1..) |*relative, i| {
         relative.* = @abs(slopes[i] - length) / length;

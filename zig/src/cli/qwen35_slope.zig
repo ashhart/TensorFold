@@ -34,7 +34,7 @@ pub const Residual = struct {
     }
 };
 
-/// Remove the largest ceil(width/100) magnitudes to report a separate robust perturbation scale.
+/// Remove the largest ceil(width/100) magnitudes for the reported and accepted trimmed perturbation scale.
 pub fn residual(values: []const u16, scratch: []f64) !Residual {
     if (values.len < 2 or scratch.len < values.len) return error.BadResidual;
     var sum: f64 = 0;
