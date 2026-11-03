@@ -27,6 +27,7 @@ pub fn setRunner(r: anytype, hook: ?mtl.ResidencySet.Follow) void {
 
 pub fn appendDraft(b: anytype, a: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
     try fields.append(a, list, &b.attention);
+    if (b.attention_full) |*x| try fields.append(a, list, x);
     try fields.append(a, list, &b.topk);
     try list.appendSlice(a, b.head.owned.items);
     try list.appendSlice(a, b.frame.pool.items);
@@ -42,6 +43,7 @@ pub fn appendDraft(b: anytype, a: std.mem.Allocator, list: *std.ArrayList(mtl.Bu
 
 fn draftBuffers(b: anytype, hook: mtl.ResidencySet.Follow, joining: bool) void {
     fields.apply(&b.attention, hook, joining);
+    if (b.attention_full) |*x| fields.apply(x, hook, joining);
     fields.apply(&b.topk, hook, joining);
     for (b.head.owned.items) |buffer| fields.one(buffer, hook, joining);
     for (b.caches) |*c| fields.apply(c, hook, joining);

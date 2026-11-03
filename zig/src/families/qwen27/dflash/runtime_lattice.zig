@@ -10,9 +10,10 @@ fn value(r: @import("runtime_frame.zig").Ref, at: usize) f32 {
 pub fn read(a: std.mem.Allocator, frame: *const Frame, topk: op.View, hidden: op.View, c: Config, head: op.Head) !op.Lattice {
     if (!frame.completed) return error.DraftLatticeShape;
     try topk.check(head.logits.rows, @sizeOf(@import("core").bf16_topk.Row), .u8);
-    try hidden.check(head.logits.rows, c.rank, .bf16);
+    // rank 0 (a v1 draft): no selector projection to read, whatever `hidden` holds
+    if (c.rank > 0) try hidden.check(head.logits.rows, c.rank, .bf16);
     const picked = try frame.ref(topk);
-    const projected = try frame.ref(hidden);
+    const projected = if (c.rank > 0) try frame.ref(hidden) else picked;
     const mapping = if (head.token_ids) |ids| try frame.ref(ids) else null;
     const count = @as(usize, head.logits.rows) * c.topk;
     var out = op.Lattice{ .gpa = a, .depth = head.logits.rows, .topk = c.topk, .rank = c.rank, .candidates = try a.alloc(u32, count), .unary = undefined, .projected = undefined };

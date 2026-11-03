@@ -84,7 +84,8 @@ fn expand(g: *const weights.Graph, lattice: op.Lattice, options: Options, first:
 }
 pub fn propose(gpa: std.mem.Allocator, g: *const weights.Graph, lattice: op.Lattice, anchor: u32, first_position: u64, options: Options) !Tree {
     try g.config.check();
-    for ([_]weights.Tensor{ g.predecessor, g.successor }) |t| if (t.dtype != .bf16 or t.rank != 2 or t.shape[0] != g.config.vocab or t.shape[1] != g.config.rank) return error.DraftCodebookShape;
+    // a v1 draft has no codebooks (rank 0): its edges score nothing and its tree follows each depth's marginals
+    if (g.config.rank > 0) for ([_]weights.Tensor{ g.predecessor, g.successor }) |t| if (t.dtype != .bf16 or t.rank != 2 or t.shape[0] != g.config.vocab or t.shape[1] != g.config.rank) return error.DraftCodebookShape;
     try lattice.check(g.config);
     if (anchor >= g.config.vocab or options.nodes > 63 or options.children == 0 or options.children > 16 or lattice.topk > 16 or !std.math.isFinite(options.tau) or options.tau <= 0 or !std.math.isFinite(options.edge) or !std.math.isFinite(options.noise_weight) or !std.math.isFinite(options.temperature) or options.temperature <= 0) return error.BadDraftSelector;
     if (!std.math.isFinite(options.overhead_ms) or options.overhead_ms < 0) return error.BadDraftCosts;
