@@ -4,6 +4,12 @@ const c = @import("core").contract.spec;
 pub const words = 43;
 pub const top = 20;
 pub const Row = struct { bits: [words]u32, lse: f64 };
+pub fn reductionDepth(shape: c.Shape) usize {
+    return (shape.n + 255) / 256 + 8;
+}
+pub fn stress(logits: []f32) void {
+    for (logits, 0..) |*x, i| x.* = if (i % 2 == 0) 0 else -@log(@as(f32, 2048));
+}
 pub fn row(logits: []const f32, pick: u32, k: usize) Row {
     var out: Row = .{ .bits = @splat(0), .lse = 0 };
     var max: f64 = -std.math.inf(f64);
@@ -78,4 +84,24 @@ test "Qwen score reference keeps NaN, infinities, ties and selected-token ranks 
     try std.testing.expectEqual(@as(u32, 2), inf.bits[42]);
     const bad = [_]f32{ 1, std.math.nan(f32) };
     try std.testing.expect(std.math.isNan(row(&bad, 0, 1).lse));
+}
+
+test "Qwen score stress: smaller accumulators miss every summation order by the required margin" {
+    var logits: [257]f32 = undefined;
+    stress(&logits);
+    const expected = row(&logits, 0, 20).lse;
+    const shape: c.Shape = .{ .rows = 1, .n = logits.len, .k = 20 };
+    const spec: c.Spec = .{ .name = "stats stress", .accum = .f32, .depth = reductionDepth, .ops = 12, .out = .f32, .served = &.{shape}, .sums = .{ .exact = false } };
+    const bound = c.bound(spec, shape, expected, 1);
+    var terms: [257]f64 = undefined;
+    for (&terms, logits) |*term, x| term.* = @exp(@as(f64, x));
+    const contract = @import("core").contract;
+    for ([_]contract.gates.Order{ .sequential, .pairwise, .strided }) |order| {
+        const fp32 = @log(contract.rows.sumIn(.f32, order, &terms));
+        try std.testing.expect(@abs(fp32 - expected) <= bound);
+        for ([_]c.Accum{ .f16, .bf16 }) |acc| {
+            const reduced = @log(contract.rows.sumIn(acc, order, &terms));
+            try std.testing.expect(@abs(reduced - expected) / bound >= 100);
+        }
+    }
 }

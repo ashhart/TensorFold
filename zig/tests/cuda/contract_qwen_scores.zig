@@ -6,11 +6,8 @@ const ref = @import("qwen_scores_ref.zig");
 const Rig = @import("contract_rig.zig").Rig;
 const c = core.contract.spec;
 const g = core.contract.gates;
-fn depth(s: c.Shape) usize {
-    return (s.n + 255) / 256 + 8;
-}
 pub fn spec(control: bool) c.Spec {
-    return .{ .name = if (control) "control: Qwen stats omit vocabulary tail" else "cuda qwen35_bf16_rows tf_q35_score_stats", .accum = .f32, .depth = depth, .ops = 12, .out = .f32, .nan = .{ .stated = "NaN propagates to LSE; top ignores NaNs; +/-Inf normalizers retained; lower-ID ties; unfilled words zero" }, .tiles = .{ .{ .size = 128 }, .{ .size = 256 }, .{ .size = 20 } }, .served = &.{ .{ .rows = 4, .n = 33, .k = 2 }, .{ .rows = 128, .n = 257, .k = 20 }, .{ .rows = 1, .n = 248320, .k = 1 }, .{ .rows = 17, .n = 65537, .k = 0 } }, .sums = .{ .exact = false, .f16 = 0, .bf16 = 0, .why = "positive exponent sums followed by log cannot separate every lower-precision order; measured margins printed, FP64 bound enforced" } };
+    return .{ .name = if (control) "control: Qwen stats omit vocabulary tail" else "cuda qwen35_bf16_rows tf_q35_score_stats", .accum = .f32, .depth = ref.reductionDepth, .ops = 12, .out = .f32, .nan = .{ .stated = "NaN propagates to LSE; top ignores NaNs; +/-Inf normalizers retained; lower-ID ties; unfilled words zero" }, .tiles = .{ .{ .size = 128 }, .{ .size = 256 }, .{ .size = 20 } }, .served = &.{ .{ .rows = 4, .n = 33, .k = 2 }, .{ .rows = 128, .n = 257, .k = 20 }, .{ .rows = 1, .n = 248320, .k = 1 }, .{ .rows = 17, .n = 65537, .k = 0 } }, .sums = .{ .exact = false } };
 }
 pub const Case = struct {
     const vt = g.hooks(@This());
@@ -46,9 +43,7 @@ pub const Case = struct {
             pick.* = @intCast(r % s.n);
             const row = self.input[r * s.n ..][0..s.n];
             row[s.n - 1] = 20;
-            if (fill == .stress) for (row, 0..) |*x, i| {
-                x.* = -@as(f32, @floatFromInt(i % 10));
-            };
+            if (fill == .stress) ref.stress(row);
             if (fill == .nonfinite) switch (r % 5) {
                 0 => row[0] = std.math.nan(f32),
                 1 => row[0] = std.math.inf(f32),
