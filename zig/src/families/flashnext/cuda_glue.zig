@@ -41,6 +41,7 @@ const Fns = struct {
     normalize: cuda.Function,
     normalize_cols: cuda.Function, // fn_hc_normalize's bits over 256-column slices (dims a multiple of 256)
     dense_mix8: cuda.Function, // fn_hc_dense_mix's bits, a warp a 32-column group, eight a block
+    dense_mix_vec: cuda.Function, // dense_mix8's bytes at 2560 x 4 streams: a BF16 pair a thread, five blocks a row
     dense_mix: cuda.Function,
     shared_swiglu: cuda.Function,
     shared_scatter: cuda.Function,
@@ -137,6 +138,7 @@ pub const Glue = struct {
             .normalize = try g.hc.function("fn_hc_normalize"),
             .normalize_cols = try g.hc.function("fn_hc_normalize_cols"),
             .dense_mix8 = try g.hc.function("fn_hc_dense_mix8"),
+            .dense_mix_vec = try g.hc.function("fn_hc_dense_mix_vec"),
             .dense_mix = try g.hc.function("fn_hc_dense_mix"),
             .shared_swiglu = try g.hc.function("fn_shared_swiglu"),
             .shared_scatter = try g.hc.function("fn_shared_scatter"),
@@ -374,12 +376,21 @@ pub const Glue = struct {
     }
 
     pub fn hcDenseMix(g: *const Glue, s: cuda.Stream, up: u64, norm: u64, mixed: u64, sums: u64, rows: usize, dims: usize, streams: usize) !void {
+        if (mixVec(rows, dims, streams)) return g.hcDenseMixVec(s, up, norm, mixed, sums, rows);
         var args: cuda.Args = .{};
         for ([_]u64{ up, norm, mixed, sums }) |v| args.add(v);
         args.add(int(dims));
         args.add(int(streams));
         // eight 32-column groups a block, a warp each: fn_hc_dense_mix's bits with an eighth of its blocks
         try cuda.launch.launch(g.f.dense_mix8, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((dims / 32 + 7) / 8) }, .block = .{ .x = 256 } }, s, &args);
+    }
+
+    /// fn_hc_dense_mix_vec over `rows` of 2560 columns and 4 streams: dense_mix8's mixed rows and group sums.
+    pub fn hcDenseMixVec(g: *const Glue, s: cuda.Stream, up: u64, norm: u64, mixed: u64, sums: u64, rows: usize) !void {
+        if (rows == 0) return error.RowShape;
+        var args: cuda.Args = .{};
+        for ([_]u64{ up, norm, mixed, sums }) |v| args.add(v);
+        try cuda.launch.launch(g.f.dense_mix_vec, .{ .grid = .{ .x = @intCast(rows), .y = 5 }, .block = .{ .x = 256 } }, s, &args);
     }
 
     pub fn sharedSwiGLU(g: *const Glue, s: cuda.Stream, gate: u64, up: u64, act: u64, rows: usize, width: usize) !void {
@@ -539,6 +550,18 @@ pub const Glue = struct {
         try g.route.topk(s, logits, wt.experts_n + 1, wt.experts_n, wt.slots - 1, pick, wts, wt.slots, rows, true);
     }
 };
+
+/// hcDenseMix takes the vector mix from 512 rows of Flash Next's 2560 x 4 streams; fewer rows keep dense_mix8.
+pub fn mixVec(rows: usize, dims: usize, streams: usize) bool {
+    return rows >= 512 and dims == 2560 and streams == 4;
+}
+
+test "the HC mix takes the vector kernel from 512 rows of 2560 x 4 streams only" {
+    for ([_]usize{ 512, 513, 1536, 4218 }) |rows| try std.testing.expect(mixVec(rows, 2560, 4));
+    for ([_]usize{ 0, 1, 64, 511 }) |rows| try std.testing.expect(!mixVec(rows, 2560, 4));
+    try std.testing.expect(!mixVec(1536, 2048, 4));
+    try std.testing.expect(!mixVec(1536, 2560, 2));
+}
 
 test "every entry point has its own bit" {
     try std.testing.expectEqual(@as(u32, 1), entryBit("_embed"));

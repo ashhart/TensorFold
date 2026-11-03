@@ -101,6 +101,7 @@ const flashnext_fp8_experts_tests = @import("flashnext_fp8_experts_tests.zig");
 const nvfp4_fact_tests = @import("nvfp4_fact_tests.zig");
 const lane_half_tests = @import("lane_half_tests.zig");
 const flashnext_dense_hc_tests = @import("flashnext_dense_hc_tests.zig");
+const flashnext_hc_mix_vec_tests = @import("flashnext_hc_mix_vec_tests.zig");
 const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
 const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
 const ggml_tests = @import("ggml_tests.zig");
@@ -143,6 +144,9 @@ const usage =
     \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
     \\  lane-half                 lane half tiles (MXFP8, BF16): bytes equal to the 64-column tile, FP64, cold-weight time
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
+    \\  flashnext-hc-mix          HC vector mix against dense_mix8: bytes, guards, repeats and solo rows
+    \\  flashnext-hc-mix-contract focused HC vector mix gates and swapped-input control
+    \\  flashnext-hc-mix-bench [ROWS] alternating dense_mix8/vector mix timing, default 4218 rows
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
     \\  flashnext-pages           the attention glue's caches through a page table: paged == contiguous, float64, controls
@@ -357,6 +361,12 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "lane-half")) return lane_half_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-dense-hc")) return flashnext_dense_hc_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-hc-mix")) return flashnext_hc_mix_vec_tests.run(gpu, false);
+    if (std.mem.eql(u8, cmd, "flashnext-hc-mix-contract")) return @import("contract_hc_mix.zig").runVectors(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-hc-mix-bench")) {
+        if (rest.len > 1) return error.HcBenchArguments;
+        return flashnext_hc_mix_vec_tests.bench(gpu, try flashnext_hc_mix_vec_tests.benchRows(if (rest.len > 0) rest[0] else null));
+    }
     if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-pages")) return @import("contract_fn_pages.zig").run(gpu);

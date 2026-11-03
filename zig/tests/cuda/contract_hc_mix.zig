@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
+const gpu_check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
 const c = core.contract.spec;
 const g = core.contract.gates;
@@ -13,6 +14,55 @@ const tiles: [3]c.Tile = .{ .{ .size = 1 }, .{ .size = 256, .step = 32, .min = 3
 const served = [_]c.Shape{ .{ .rows = 1, .n = 2560, .k = 4 }, .{ .rows = 17, .n = 2560, .k = 4 }, .{ .rows = 3, .n = 96, .k = 4 } };
 
 const rule = "as fn_hc_dense_mix gives them: NaN and infinite up rows and normed rows";
+
+pub const Registrations = struct {
+    mixes: [4]Mix,
+    vectors: [3]Mix,
+
+    pub fn init(gpu: gpu_check.Gpu, s: cuda.Stream, hc: cuda.Module, control: ?cuda.Function) !Registrations {
+        const old = try hc.function("fn_hc_dense_mix");
+        const mix8 = try hc.function("fn_hc_dense_mix8");
+        const vec = try hc.function("fn_hc_dense_mix_vec");
+        var out: Registrations = undefined;
+        for (std.enums.values(Kind), &out.mixes) |kind, *mix|
+            mix.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .new_fn = mix8, .old_fn = old, .ctl_fn = control };
+        for ([_]Kind{ .mix8, .sums, .control }, &out.vectors) |kind, *mix|
+            mix.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .vec = true, .new_fn = vec, .old_fn = mix8 };
+        return out;
+    }
+
+    pub fn deinit(self: *Registrations) void {
+        for (&self.mixes) |*mix| mix.deinit();
+        for (&self.vectors) |*mix| mix.deinit();
+    }
+
+    pub fn append(self: *Registrations, a: std.mem.Allocator, kernels: *std.ArrayList(g.Kernel)) !void {
+        for (&self.mixes) |*mix| try kernels.append(a, mix.kernel());
+        try self.appendVectors(a, kernels);
+    }
+
+    pub fn appendVectors(self: *Registrations, a: std.mem.Allocator, kernels: *std.ArrayList(g.Kernel)) !void {
+        for (&self.vectors) |*mix| try kernels.append(a, mix.kernel());
+    }
+};
+
+pub fn runVectors(gpu: gpu_check.Gpu) !void {
+    var s = try cuda.Stream.init(gpu.d, false);
+    defer s.deinit();
+    var hc = try cuda.Module.load(gpu.d, cuda.kernels.flashnext_hc);
+    defer hc.unload();
+    var registrations = try Registrations.init(gpu, s, hc, null);
+    defer registrations.deinit();
+    var kernels: std.ArrayList(g.Kernel) = .empty;
+    defer kernels.deinit(gpu.gpa);
+    try registrations.appendVectors(gpu.gpa, &kernels);
+    var tally: g.Tally = .{};
+    try g.runAll(gpu.gpa, kernels.items, 0x1754, &tally);
+    std.debug.print("SUMMARY hc_mix_vectors: {d} pass, {d} fail; {d} controls red, {d} missed\n", .{
+        tally.passed, tally.failed, tally.caught, tally.missed,
+    });
+    try gpu_check.expect(tally.problems() == 0, "HC vector mix contract: {d} failures", .{tally.problems()});
+}
 
 fn depth(s: c.Shape) usize {
     return s.k + 8;
@@ -55,6 +105,7 @@ pub fn spec(kind: Kind) c.Spec {
 }
 
 pub const Mix = struct {
+    vec: bool = false,
     rig: rig_.Rig,
     kind: Kind,
     new_fn: cuda.Function,
@@ -85,7 +136,19 @@ pub const Mix = struct {
             .sums_control => .sums,
             else => null,
         };
-        return .{ .spec = spec(self.kind), .ctx = self, .vt = &vt, .control = control };
+        var selected = spec(self.kind);
+        if (self.vec) {
+            selected.replaces = "fn_hc_dense_mix8";
+            selected.name = switch (self.kind) {
+                .mix8 => "cuda HC vectorized BF16 mix",
+                .sums => "cuda HC vectorized BF16 mix group sums",
+                .control => "control: HC vectorized BF16 mix with swapped inputs",
+                .sums_control => unreachable,
+            };
+            selected.served = &.{ .{ .rows = 1, .n = 2560, .k = 4 }, .{ .rows = 64, .n = 2560, .k = 4 }, .{ .rows = 65, .n = 2560, .k = 4 }, .{ .rows = 511, .n = 2560, .k = 4 }, .{ .rows = 512, .n = 2560, .k = 4 }, .{ .rows = 513, .n = 2560, .k = 4 }, .{ .rows = 1536, .n = 2560, .k = 4 }, .{ .rows = 4218, .n = 2560, .k = 4 }, .{ .rows = 16384, .n = 2560, .k = 4 } };
+            selected.tiles = .{ .{ .size = 64 }, .{}, .{} };
+        }
+        return .{ .spec = selected, .ctx = self, .vt = &vt, .control = control };
     }
 
     fn rowBytes(self: *const Mix) usize {
@@ -113,7 +176,8 @@ pub const Mix = struct {
     }
 
     pub fn prepare(self: *Mix, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows == 0 or shape.rows > 64 or shape.n == 0 or shape.n % 32 != 0 or shape.k == 0 or shape.k > 8) return false;
+        if (self.vec and (shape.n != 2560 or shape.k != 4)) return false;
+        if (shape.rows == 0 or shape.rows > (if (self.vec) @as(usize, 16384) else 64) or shape.n == 0 or shape.n % 32 != 0 or shape.k == 0 or shape.k > 8) return false;
         self.rig.reset();
         if (self.arena) |*arena| arena.deinit();
         self.arena = std.heap.ArenaAllocator.init(self.rig.gpu.gpa);
@@ -146,10 +210,12 @@ pub const Mix = struct {
     fn launch(self: *Mix, f: cuda.Function, new: bool, swap: bool, rows: u64, sums: u64) !void {
         var args: cuda.Args = .{};
         for ([_]u64{ if (swap) self.dnormed else self.dup, if (swap) self.dup else self.dnormed, rows, sums }) |v| args.add(v);
-        args.add(@as(c_int, @intCast(self.shape.n)));
-        args.add(@as(c_int, @intCast(self.shape.k)));
+        if (!(new and self.vec)) {
+            args.add(@as(c_int, @intCast(self.shape.n)));
+            args.add(@as(c_int, @intCast(self.shape.k)));
+        }
         const groups = self.shape.n / 32;
-        const cfg: cuda.launch.Config = if (new) .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast((groups + 7) / 8) }, .block = .{ .x = 256 } } else .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast(groups) }, .block = .{ .x = 32 } };
+        const cfg: cuda.launch.Config = if (new and self.vec) .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast((self.shape.n + 511) / 512) }, .block = .{ .x = 256 } } else if (new or self.vec) .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast((groups + 7) / 8) }, .block = .{ .x = 256 } } else .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast(groups) }, .block = .{ .x = 32 } };
         try cuda.launch.launch(f, cfg, self.rig.s, &args);
         try self.rig.s.synchronize();
     }
@@ -247,10 +313,18 @@ pub const Mix = struct {
 };
 
 test "dense mix group sums: gate 4's groups sum to 1 or -1 in fp32 in every order, 0 in bf16 and fp16" {
+    try groupStress(false);
+}
+
+test "vector mix group sums reject bf16 and fp16 accumulators in every order" {
+    try groupStress(true);
+}
+
+fn groupStress(vec: bool) !void {
     const a = std.testing.allocator;
     try std.testing.expectEqual(@as(f64, 1), c.fromBf16(c.toBf16(@floatCast(1.0 / (1.0 + @exp(-16.0))))));
     const shape: c.Shape = .{ .rows = 1, .n = 2560, .k = 4 };
-    var m = Mix{ .rig = undefined, .kind = .sums, .new_fn = undefined, .old_fn = undefined, .shape = shape, .fill = .stress };
+    var m = Mix{ .rig = undefined, .kind = .sums, .vec = vec, .new_fn = undefined, .old_fn = undefined, .shape = shape, .fill = .stress };
     m.up = try a.alloc(u16, shape.rows * shape.k * shape.n);
     defer a.free(m.up);
     m.normed = try a.alloc(u16, m.up.len);
