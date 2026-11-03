@@ -1,7 +1,7 @@
 //! Destination identities and shapes; GGUF decay and head order remain explicit source conventions, not native weights.
 const std = @import("std");
 const cfg = @import("config.zig");
-pub const Role = enum { matrix, vector, convolution, negative_exp_decay };
+pub const Role = enum { matrix, vector, rms_gain, convolution, negative_exp_decay };
 pub const Name = struct { gguf: []const u8, native: []const u8, rank: u8, dims: [3]usize, role: Role };
 const Builder = struct {
     a: std.mem.Allocator,
@@ -19,10 +19,10 @@ pub fn plan(a: std.mem.Allocator, c: cfg.Config) ![]Name {
     var b = Builder{ .a = a };
     try b.add(null, "token_embd.weight", "model.embed_tokens.weight", &.{ c.vocab, c.hidden }, .matrix);
     try b.add(null, "output.weight", "lm_head.weight", &.{ c.vocab, c.hidden }, .matrix);
-    try b.add(null, "output_norm.weight", "model.norm.weight", &.{c.hidden}, .vector);
+    try b.add(null, "output_norm.weight", "model.norm.weight", &.{c.hidden}, .rms_gain);
     for (0..c.layers) |l| {
-        try b.add(l, "attn_norm.weight", "input_layernorm.weight", &.{c.hidden}, .vector);
-        try b.add(l, "post_attention_norm.weight", "post_attention_layernorm.weight", &.{c.hidden}, .vector);
+        try b.add(l, "attn_norm.weight", "input_layernorm.weight", &.{c.hidden}, .rms_gain);
+        try b.add(l, "post_attention_norm.weight", "post_attention_layernorm.weight", &.{c.hidden}, .rms_gain);
         try b.add(l, "ffn_gate.weight", "mlp.gate_proj.weight", &.{ c.intermediate, c.hidden }, .matrix);
         try b.add(l, "ffn_up.weight", "mlp.up_proj.weight", &.{ c.intermediate, c.hidden }, .matrix);
         try b.add(l, "ffn_down.weight", "mlp.down_proj.weight", &.{ c.hidden, c.intermediate }, .matrix);
@@ -35,14 +35,14 @@ pub fn plan(a: std.mem.Allocator, c: cfg.Config) ![]Name {
             try b.add(l, "ssm_conv1d.weight", "linear_attn.conv1d.weight", &.{ c.gdnQkvDim(), c.conv_kernel, 1 }, .convolution);
             try b.add(l, "ssm_a", "linear_attn.A_log", &.{c.v_heads}, .negative_exp_decay);
             try b.add(l, "ssm_dt.bias", "linear_attn.dt_bias", &.{c.v_heads}, .vector);
-            try b.add(l, "ssm_norm.weight", "linear_attn.norm.weight", &.{c.dv}, .vector);
+            try b.add(l, "ssm_norm.weight", "linear_attn.norm.weight", &.{c.dv}, .rms_gain);
         } else {
             try b.add(l, "attn_q.weight", "self_attn.q_proj.weight", &.{ c.qDim(), c.hidden }, .matrix);
             try b.add(l, "attn_k.weight", "self_attn.k_proj.weight", &.{ c.kvDim(), c.hidden }, .matrix);
             try b.add(l, "attn_v.weight", "self_attn.v_proj.weight", &.{ c.kvDim(), c.hidden }, .matrix);
             try b.add(l, "attn_output.weight", "self_attn.o_proj.weight", &.{ c.hidden, c.heads * c.head_dim }, .matrix);
-            try b.add(l, "attn_q_norm.weight", "self_attn.q_norm.weight", &.{c.head_dim}, .vector);
-            try b.add(l, "attn_k_norm.weight", "self_attn.k_norm.weight", &.{c.head_dim}, .vector);
+            try b.add(l, "attn_q_norm.weight", "self_attn.q_norm.weight", &.{c.head_dim}, .rms_gain);
+            try b.add(l, "attn_k_norm.weight", "self_attn.k_norm.weight", &.{c.head_dim}, .rms_gain);
         }
     }
     return b.names.toOwnedSlice(a);
