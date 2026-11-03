@@ -20,7 +20,7 @@ pub fn release(ck: anytype, model: anytype) void {
             const other = held.file.stat(ck.io) catch continue :files;
             if (id.inode == other.inode) continue :files;
         };
-        file.release();
+        file.release(std.heap.page_allocator); // no keep list: scratch unused
     }
 }
 
@@ -40,7 +40,7 @@ test "Qwen4 cache: load-only files leave after reads, runtime lookup companions 
         },
         reads: u32 = 3,
         released: bool = false,
-        pub fn release(f: *@This()) void {
+        pub fn release(f: *@This(), _: std.mem.Allocator) void {
             std.debug.assert(f.reads == 3);
             f.released = true;
         }
