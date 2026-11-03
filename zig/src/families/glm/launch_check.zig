@@ -5,7 +5,7 @@ const sources = @import("kernel_sources");
 
 /// TF_TEST_RECEIPTS=1 prints each check's measured error; the bounds are checked either way.
 fn receipts() bool {
-    return std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
+    return if (@import("builtin").os.tag == .windows) false else std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
 }
 
 fn kernel(comptime key: []const u8) sources.glm.Kernel {
