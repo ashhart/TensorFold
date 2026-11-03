@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA prefetches a decode window's next weights into L2 on a side stream, on by default on GB10 (sm_121) only, inside a 12 MiB budget; replies are identical, and every other GPU is unchanged (#1580). Thanks to @Bizuayeu.
+
 - GLM on CUDA runs a prompt chunk's MTP pass on its last row past the caches, about 2.7% faster prompts at TP=2 with identical replies (#1577). Thanks to @gilby.
 
 - Flash Next on CUDA runs the MTP head's experts on a call's last row only, the one row that reaches the draft; the head's cache is still written for every row, and replies are unchanged (#1925). Thanks to @jschmied.
