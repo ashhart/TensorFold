@@ -24,6 +24,7 @@ pub const stage = @import("cuda_stage.zig");
 
 test {
     _ = @import("cuda_projection_many.zig");
+    _ = @import("cuda_bf16_format_test.zig");
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_prompt.zig");
     _ = @import("cuda_prompt_tail.zig");

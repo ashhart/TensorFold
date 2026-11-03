@@ -38,3 +38,7 @@ test "Qwen BF16 reference: stress proves fp32 exact and both smaller accumulator
         try std.testing.expect(@abs(c.rows.sumIn(.bf16, order, &terms) - want) >= 16);
     }
 }
+
+test {
+    _ = @import("qwen_scores_ref.zig");
+}

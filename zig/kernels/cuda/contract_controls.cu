@@ -7,6 +7,9 @@
 #include "common/reduce.cuh"
 #include "gemma4_ple.cuh"
 
+#define TF_Q35_SCORE_CONTROL
+#include "qwen35_scores.cuh"
+
 __device__ __forceinline__ float tf_ctl_x(const __nv_bfloat16* x, int64_t i) { return __bfloat162float(x[i]); }
 
 // Gate 1: a row's maximum by fmaxf, which drops a NaN input, so a row holding NaN reads as its largest number.

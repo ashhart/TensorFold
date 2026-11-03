@@ -29,6 +29,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen-pdl-policy-host", "Qwen3.8 PDL environment and compute-capability launch policy without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen PDL policy:", "a Qwen launch keeps", "TF_QWEN_PDL changes only" } })).step);
     b.step("test-memory-pressure-host", "Shared memory-pressure governor, admission and cache shedding without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.api, .filters = &.{"memory pressure:"} })).step);
     b.step("test-qwen35-shapes-host", "Captured window buckets for one and 2-8 rows, and the MT2 envelope, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "one-row and 2-8-row", "MT2 dispatch" } })).step);
+    const bf16 = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"BF16 scoring:"} }));
+    b.step("test-qwen35-bf16-host", "Plain BF16 scoring admission and native row contracts without devices").dependOn(&bf16.step);
+    step.dependOn(&bf16.step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("idol_cuda.zig").hostTests(b, cuda, mods.core, step);
     @import("inkling2.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);

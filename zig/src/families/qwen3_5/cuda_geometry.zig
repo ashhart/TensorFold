@@ -70,6 +70,7 @@ pub const Kinds = struct {
 };
 
 pub const Geometry = struct {
+    bf16: bool = false,
     pocket: usize = 0,
     hidden: usize,
     intermediate: usize,
@@ -357,7 +358,7 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
     const modelopt = !exl3 and qv == null and root.get("quantization_config") != null;
     // neither table nor config: the publisher's BF16 weights (a decision backbone, dense only)
     const bf16 = !modelopt and !exl3 and qv == null;
-    if (bf16 and moe) return error.UnsupportedQwenQuantization;
+    if (bf16) try @import("cuda_bf16_format.zig").admit(root, t, moe);
     var g: Geometry = .{
         .hidden = try integer(text, "hidden_size"),
         .intermediate = try integer(text, if (moe) "moe_intermediate_size" else "intermediate_size"),
@@ -400,7 +401,13 @@ pub fn parseWhy(gpa: std.mem.Allocator, bytes: []const u8, p: *fields.Problem) !
     var full: [max_layers]bool = undefined;
     try layer_pattern.read(full[0..g.layers], t);
     for (g.linear[0..g.layers], full[0..g.layers]) |*l, f| l.* = !f;
-    if (modelopt or bf16) {
+    if (bf16) {
+        if (g.pocket != 0) return error.UnsupportedLearningFormat;
+        g.bits = .{ .embed = 16, .head = 16, .proj = @splat(@splat(16)) };
+        g.kinds = .{ .head = .bf16, .proj = @splat(@splat(.bf16)) };
+        return g;
+    }
+    if (modelopt) {
         if (g.pocket > 0) return error.UnsupportedLearningFormat;
         const mo = @import("cuda_modelopt.zig");
         g.kinds = if (bf16) try mo.plain(g) else try mo.kinds(gpa, bytes, g);

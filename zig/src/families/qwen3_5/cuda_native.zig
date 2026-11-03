@@ -32,8 +32,8 @@ pub const vision = @import("cuda_vision.zig");
 pub const slide = @import("cuda_slide.zig");
 pub const linked = slide.linked;
 pub const model_type = "qwen3_5";
-/// MLX's 4-bit tables, EXL3, TFQ3; ModelOpt's MIXED_PRECISION (nvidia/Qwen3.8-27B-NVFP4) and single-format NVFP4.
-pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3", "tfq3", "modelopt-mixed", "modelopt-nvfp4" };
+/// MLX's 4-bit tables, EXL3, TFQ3, dense BF16; ModelOpt's MIXED_PRECISION (nvidia/Qwen3.8-27B-NVFP4) and single-format NVFP4.
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3", "tfq3", "bf16", "modelopt-mixed", "modelopt-nvfp4" };
 pub const default_context: i64 = 32768;
 /// A plain BF16 checkpoint's preflight counts its text tensors, not the tower and MTP in its shards.
 pub const textWeightBytes = @import("cuda_bf16_bytes.zig").textWeightBytes;
@@ -187,6 +187,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
+    try @import("cuda_bf16_format.zig").options((try E.Geometry.read(gpa, io, dir)).bf16, o.vision != null, o.prompt_int8, o.slide);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     if (kv_host_mod.onHost()) try kv_host_mod.checkDevice(try ctx.attribute(.integrated) != 0, page_tokens, engine_paged);
     const share_snaps = try prefix_mod.sharing();
@@ -263,6 +264,7 @@ pub const Opened = drafter_open.Opened;
 pub const openDrafter = drafter_open.openDrafter;
 pub const finishDrafterOpen = drafter_open.finishDrafterOpen;
 pub const explain = @import("cuda_native_explain.zig").explain;
+
 fn release(p: *anyopaque) void {
     @as(*Lanes, @ptrCast(@alignCast(p))).deinit();
 }
@@ -381,8 +383,13 @@ pub const Lanes = struct {
         break :blk v;
     };
 
+    const scoring_vtable: be.Backend.VTable = comptime blk: {
+        var v = text_vtable;
+        v.prompt_rows = true;
+        break :blk v;
+    };
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .chunk_invariant = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .chunk_invariant = true, .vtable = if (self.readout.readout != null) &read_vtable else if (self.e.g.bf16) &scoring_vtable else &text_vtable };
     }
 
     /// Readout streams from now on fill through `r` (one rank; before the first stream): the backend to hand on.

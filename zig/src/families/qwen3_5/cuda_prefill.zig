@@ -338,6 +338,10 @@ pub const Fill = struct {
 /// A prompt pass begins: its images encoded, a cache, a kept state restored where a cold pass cuts.
 fn opening(self: anytype, stream: *lanes.Stream, stepped: bool) !Fill {
     const ids = stream.prompt();
+    if (stream.prompt_logprobs != null) {
+        stream.prompt_rows.clearRetainingCapacity();
+        try stream.prompt_rows.ensureTotalCapacity(self.gpa, ids.len -| 1);
+    }
     if (ids.len == 0 or ids.len + stream.max_new > self.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
     // an image prompt: its images through the tower once the resume is known, then every chunk at its t, h, w positions
     if (stream.images.len > 0 and self.vision == null) return error.QwenServedWithoutVision;
@@ -349,7 +353,7 @@ fn opening(self: anytype, stream: *lanes.Stream, stepped: bool) !Fill {
     errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
     // TF_QWEN_KV_SHARE: snapshots use the request's effective key, not raw prompt ids
     const cache_key = if (stream.key.len != 0) stream.key else ids;
-    const share = self.prefix != null and stream.images.len == 0 and stream.chunks.len == 0;
+    const share = self.prefix != null and stream.images.len == 0 and stream.chunks.len == 0 and stream.prompt_logprobs == null;
     const shared = if (share) try self.prefix.?.open(cache_key, stream.max_new, stream.history_len, stream.shared_prefixes, stream.cache_salt) else null;
     errdefer if (shared) |x| self.gpa.free(x.plan.marks);
     const cache = if (shared) |x| x.cache else try self.take(ids.len, stream.max_new);
@@ -365,7 +369,7 @@ fn opening(self: anytype, stream: *lanes.Stream, stepped: bool) !Fill {
         stream.cached = @intCast(at);
         cache.len = at;
         cache.written = at;
-    } else if (stream.reuse.saved) |saved| {
+    } else if (if (stream.prompt_logprobs == null) stream.reuse.saved else null) |saved| {
         if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at)) {
             if (self.restoreKept(cache, saved, seen)) {
                 at = stream.reuse.at;
@@ -450,6 +454,9 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
                 self.last_mtp_direct_expected = .{ .stream = stream, .chunk_start = f.at, .end = forward_end, .valid_from = valid_from, .epoch = self.e.mtp_prompt.epoch };
             }
         }
+    }
+    if (comptime @TypeOf(self.e) == *E.Engine) {
+        try @import("cuda_prompt_logprobs.zig").collect(self.e, stream, ids, f.at, forward_end);
     }
     lanes.prefill_widths.completed(self.gpa, stream, forward_end - f.at);
     f.at = forward_end;
