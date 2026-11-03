@@ -10,19 +10,9 @@
 // Lane t of a 32-input group holds inputs 8t .. 8t + 3 (step 0) and 8t + 4 .. 8t + 7 (step 1), in both operands.
 namespace tf_ggml {
 
-__device__ __forceinline__ uint4 ld_nc(const uint8_t* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint4 ld_nc(const uint8_t* p) { return tf_common::ld_nc(reinterpret_cast<const uint4*>(p)); }
 
-__device__ __forceinline__ uint32_t ld_nc32(const uint8_t* p) {
-  uint32_t r;
-  asm volatile("ld.global.nc.L1::no_allocate.u32 %0, [%1];\n" : "=r"(r) : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint32_t ld_nc32(const uint8_t* p) { return tf_common::ld_nc32(p); }
 
 __device__ __forceinline__ float half_f(uint32_t bits) { return __half2float(__ushort_as_half((unsigned short)bits)); }
 
