@@ -3,8 +3,9 @@
 This candidate adds a dense, unquantized BF16 format to the existing native Qwen3.5 CUDA engine.
 It serves nonstreamed `/v1/completions` requests with `prompt_logprobs: 0..20` through the normal lane scheduler.
 It does not introduce a separate inference worker. Qualification remains incomplete.
-The [partial receipt](../receipts/qwen35-bf16-scoring/README.md) retains API, FP64 and complete CUDA results;
-its manifest names the remaining gates.
+The [qualification receipt](../receipts/qwen35-bf16-scoring/README.md) retains API, FP64, complete CUDA,
+served/cold, cache/cancellation, existing-format and memory results. The full CUDA launch-limit gate fails;
+BF16 prefill and concurrency performance remain limiting. This remains a draft, not a performance-qualified format.
 
 ## Checkpoint and precision
 
@@ -81,9 +82,12 @@ The initial device is one RTX PRO 6000 Blackwell Max-Q workstation GPU (sm_120),
 A four-CPU/32 GiB container budget is not evidence of fit on a physical 32 GiB machine.
 Compiled images for sm_80/86/89/120/121 do not qualify execution on those other devices.
 Metal, HIP, XPU, multiple ranks, image inputs, int8 prompts and learning remain unqualified for this new format.
-Existing MLX and ModelOpt formats require matching baseline/candidate token and performance receipts separately.
+The receipt retains matched MLX/Qwen3.5 and ModelOpt/Qwen3.8 parent/candidate tokens and descriptive performance.
+The public EXL3 export is rejected by both builds because its embeddings are F16; EXL3 inference is unqualified.
+FP8 KV and optional grammar/tool generation are also unqualified for this new format.
 
-Before calling the contribution ready, attach the exact source identities, complete CUDA SUMMARY and status, launch
-limit findings, host/plain-build results, zero-new lean comparison, public fixture hashes, independent FP64 report,
-matched existing-format results, cold 2k/8k/32k/64k timings and peak physical/device/pinned allocations.
-No speedup or external-provider comparison is established by bring-up or by a different checkpoint/workload.
+The receipt binds source identities, the failed complete CUDA SUMMARY, matched parent asset-limit diagnostics,
+host/plain-build and zero-new lean checks, public fixture hashes, independent FP64 reports and served measurements.
+Cold 2k/8k/32k/64k arrays and requests are retained. Memory separates Linux RSS, container budgets, CUDA-owned peaks
+and sampled pinned maxima. SGLang HTTP cache counters are absent; actual zero-cache scheduler records are separate.
+Resolve launch-limit catalog findings and agree performance acceptance before calling this contribution ready.
