@@ -327,4 +327,9 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const gemma4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_config.zig"), .target = host, .optimize = .debug });
     gemma4.addImport("core", core);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gemma4 })).step);
+    // the Qwen27 runner's GDN FP64 reference (xpu/fp64_gdn.zig), which only the device runner otherwise compiles
+    const gdn = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/fp64_gdn.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
+    const gdn_tests = b.addRunArtifact(b.addTest(.{ .root_module = gdn }));
+    b.step("test-fp64-gdn-xpu-host", "The XPU GDN FP64 reference's bf16 rounding without devices or ocloc").dependOn(&gdn_tests.step);
+    step.dependOn(&gdn_tests.step);
 }
