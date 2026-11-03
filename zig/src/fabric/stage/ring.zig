@@ -13,7 +13,7 @@ pub const Options = struct {
     peers: []const Peer,
     /// The checkpoint's and layout's fingerprint: a neighbour with another one is refused.
     fingerprint: [32]u8,
-    /// The ring's shared key (secret.zig): each link proves it both ways before any frame.
+    /// The ring's shared key (secret.zig): proven both ways after the hello, before any plan or rows frame.
     key: secret.Key,
     /// How long the ring may take to form, and each later send or receive by default.
     timeout_ns: u64 = 60 * std.time.ns_per_s,
@@ -91,9 +91,18 @@ pub const Ring = struct {
         return h;
     }
 
-    /// A clean stop to the next rank: it sees `error.Stopped` where it waited for a frame.
+    /// A clean stop to the next rank: it sees `error.Stopped` where it waited for a frame; on a broken link, a hang-up.
     pub fn stop(r: *Ring) void {
-        r.put(.stop, r.sent, 0, &.{}, net.nowNs() + r.timeout_ns) catch {};
+        if (!r.broken) r.put(.stop, r.sent, 0, &.{}, net.nowNs() + r.timeout_ns) catch {
+            r.broken = true;
+        };
+        if (r.broken) r.hangUp(); // a stop header could complete a half-sent frame
+    }
+
+    /// Both links ended, the descriptors kept for `close`.
+    fn hangUp(r: *Ring) void {
+        net.hangUp(r.next);
+        net.hangUp(r.prev);
     }
 
     /// Both links closed: a neighbour waiting on either sees `error.Closed`, so a failed rank ends the ring.

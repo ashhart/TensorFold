@@ -187,6 +187,22 @@ test "stage ring: a stop ends the next rank's wait" {
     try t.expectError(error.Stopped, j[1].r.?.recv(.rows, 2, &buf));
 }
 
+test "stage ring: a stop after a send that failed mid-payload hangs up, so the next rank never sees a whole frame" {
+    const big = 64 << 20; // past loopback's socket buffers, so the send times out partway
+    const rows = try t.allocator.alloc(u8, big);
+    defer t.allocator.free(rows);
+    @memset(rows, 0x5A);
+    const out = try t.allocator.alloc(u8, big);
+    defer t.allocator.free(out);
+    var j: [most]Joined = undefined;
+    try pair(&j);
+    defer closePair(&j);
+    j[0].r.?.timeout_ns = 200 * std.time.ns_per_ms;
+    try t.expectError(error.Timeout, j[0].r.?.send(.rows, 1, 1, &.{rows}));
+    j[0].r.?.stop();
+    try t.expectError(error.Closed, j[1].r.?.recv(.rows, 1, out));
+}
+
 test "stage ring: a frame past the receiver's buffer is refused before its payload is read" {
     var s: Setup = undefined;
     try s.init(2);

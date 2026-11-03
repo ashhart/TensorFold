@@ -5,7 +5,7 @@ const posix = std.posix;
 
 pub const Fd = c.fd_t;
 
-pub const Error = error{ SocketFailed, AddressUnresolved, AddressInUse, Timeout, Closed };
+pub const Error = error{ SocketFailed, AddressUnresolved, AddressInUse, WildcardAddress, Timeout, Closed };
 
 /// MSG_NOSIGNAL where the platform has it; macOS sets SO_NOSIGPIPE on the socket instead.
 const nosignal: u32 = if (@hasDecl(posix.MSG, "NOSIGNAL")) posix.MSG.NOSIGNAL else 0;
@@ -56,6 +56,7 @@ fn resolve(host: []const u8) Error!u32 {
 /// A listening socket on `host`'s address only (never every interface), at `port` (0: the kernel picks one).
 pub fn listen(host: []const u8, at: u16) Error!Fd {
     const ip = try resolve(host);
+    if (ip == 0) return error.WildcardAddress; // 0.0.0.0 would listen on every interface
     const fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     if (fd < 0) return error.SocketFailed;
     closeOnExec(fd);
@@ -156,8 +157,13 @@ pub fn recvExact(fd: Fd, out: []u8, deadline: u64) Error!void {
     }
 }
 
-pub fn close(fd: Fd) void {
+/// Ends the stream both ways, the descriptor kept: the peer sees `error.Closed`, and `close` still frees it.
+pub fn hangUp(fd: Fd) void {
     _ = c.shutdown(fd, posix.SHUT.RDWR);
+}
+
+pub fn close(fd: Fd) void {
+    hangUp(fd);
     _ = c.close(fd);
 }
 
@@ -179,6 +185,7 @@ test "stage net: a listener on loopback trades bytes, times out and sees the han
 
 test "stage net: an unknown host is refused, and a connect with no listener times out" {
     try std.testing.expectError(error.AddressUnresolved, listen("no-such-host.invalid", 0));
+    try std.testing.expectError(error.WildcardAddress, listen("0.0.0.0", 0));
     const l = try listen("127.0.0.1", 0);
     const free = try port(l);
     close(l);

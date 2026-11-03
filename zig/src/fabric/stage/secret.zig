@@ -12,12 +12,12 @@ pub const Proof = [Hmac.mac_length]u8;
 /// The fewest secret bytes a key file holds.
 pub const least_bytes = 16;
 
-pub const Error = error{ SecretUnreadable, SecretNotPrivate, SecretTooShort, NoRandom };
+pub const Error = error{ SecretUnreadable, SecretNotPrivate, SecretTooShort, SecretTooLong, NoRandom };
 
 /// Which end of a link proves: the rank that connected, or the one that accepted.
 pub const Role = enum(u8) { connector = 'C', acceptor = 'A' };
 
-/// The key for the secret in `path`: the SHA-256 of its bytes, trailing whitespace dropped; refused unless owner-only.
+/// The key for the secret in `path`: its SHA-256, trailing whitespace dropped; owner-only and at most 4 KiB.
 pub fn fromFile(path: [:0]const u8) Error!Key {
     const fd = c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
     if (fd < 0) return error.SecretUnreadable;
@@ -32,6 +32,10 @@ pub fn fromFile(path: [:0]const u8) Error!Key {
         n += @intCast(got);
     }
     defer std.crypto.secureZero(u8, &buf);
+    if (n == buf.len) {
+        var more: [1]u8 = undefined;
+        if (c.read(fd, &more, 1) != 0) return error.SecretTooLong;
+    }
     return fromBytes(buf[0..n]);
 }
 
@@ -112,7 +116,7 @@ test "stage secret: proofs bind the key, the role, the rank, the fingerprint and
     try std.testing.expect(!std.mem.eql(u8, &a, &b));
 }
 
-test "stage secret: a key file must be owner-only and hold at least 16 bytes" {
+test "stage secret: a key file must be owner-only and hold 16 bytes to 4 KiB" {
     try std.testing.expectError(error.SecretTooShort, fromBytes("short secret \n"));
     try std.testing.expectError(error.SecretUnreadable, fromFile("/nonexistent/stage-secret"));
     var dir_buf: [64]u8 = undefined;
@@ -129,4 +133,11 @@ test "stage secret: a key file must be owner-only and hold at least 16 bytes" {
             try std.testing.expectEqual(try fromBytes("0123456789abcdef0123"), try fromFile(path));
         } else try std.testing.expectError(error.SecretNotPrivate, fromFile(path));
     }
+    _ = c.unlink(path);
+    const fd = c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, @as(c.mode_t, 0o600));
+    try std.testing.expect(fd >= 0);
+    const big: [4097]u8 = @splat('k');
+    _ = c.write(fd, &big, big.len);
+    _ = c.close(fd);
+    try std.testing.expectError(error.SecretTooLong, fromFile(path));
 }
