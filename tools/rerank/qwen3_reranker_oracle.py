@@ -304,13 +304,15 @@ CUSTOM = ["Judge code relevance", "Given a question in German, find the passage 
           "  An instruction with spaces, a tab\tand\nnew lines  "]
 
 
-def card_ids(tok, instruction, query, doc):
-    """The ids the card's process_inputs builds for one pair (no truncation: every case is under its 8,192)."""
+def card_ids(tok, instruction, query, doc, max_length=8192):
+    """The ids the card's process_inputs builds for one pair: its content cut to max_length less prefix and suffix."""
     if instruction is None:
         instruction = DEFAULT_INSTRUCT
+    prefix = tok.encode(CARD_PREFIX, add_special_tokens=False)
+    suffix = tok.encode(CARD_SUFFIX, add_special_tokens=False)
     content = f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}"
-    return (tok.encode(CARD_PREFIX, add_special_tokens=False) + tok(content).input_ids
-            + tok.encode(CARD_SUFFIX, add_special_tokens=False))
+    cut = tok(content, truncation="longest_first", max_length=max_length - len(prefix) - len(suffix)).input_ids
+    return prefix + cut + suffix
 
 
 def formatter(args):
@@ -324,18 +326,26 @@ def formatter(args):
     cases = [(None, q, d, None) for q, d in pairs]
     cases += [(ins, q, d, "instruction") for ins in CUSTOM for q, d in pairs]
     cases += [(CUSTOM[0], q, d, "instruct") for q, d in pairs]
+    cases = [c + (None,) for c in cases]
+    # max_length cuts the content's end as the card's tokenizer does: by default (8,192) and as sent
+    cases += [(None, LENGTH_QUERY, synthetic(tok, 9000), None, None),
+              (CUSTOM[1], LENGTH_QUERY, synthetic(tok, 9000), "instruction", None),
+              (None, LENGTH_QUERY, synthetic(tok, 2048), None, 512),
+              (CUSTOM[0], CARD_QUERIES[1], CARD_DOCS[1], "instruction", 70)]
     bad = 0
-    for ins, q, d, field in cases:
+    for ins, q, d, field, cap in cases:
         body = {"query": q, "documents": [d], "return_documents": False, "return_prompt_token_ids": True}
         if field:
             body[field] = ins
+        if cap:
+            body["max_length"] = cap
         meta = post(args.url + "/v1/rerank", body)["results"][0]["meta_info"]
-        want = card_ids(tok, ins, q, d)
+        want = card_ids(tok, ins, q, d, cap or 8192)
         if meta["prompt_token_ids"] != want:
             bad += 1
             print(f"FAIL: {field or 'default'} {ins!r} {q!r}: served ids differ from the card's ({len(want)} tokens)")
     print(f"formatter: {len(cases) - bad}/{len(cases)} prompts equal the card's ids token for token "
-          f"(default instruction: {len(pairs)}, custom: {len(cases) - len(pairs)})  "
+          f"(default instruction: {len(pairs) + 2}, custom: {len(cases) - len(pairs) - 2}; cut to max_length: 4)  "
           f"verdict={'PASS' if bad == 0 else 'FAIL'}")
     return 0 if bad == 0 else 1
 
@@ -348,12 +358,12 @@ def post(url, body):
 
 def refusal(url, case):
     """The 400 message a case gets, or None when the server scored it."""
-    body = {"query": case["query"], "documents": [case["document"]]}
+    body = {"query": case["query"], "documents": [case["document"]], "max_length": case["tokens"]}  # never cut
     try:
         post(url + "/v1/rerank", body)
         return None
     except urllib.error.HTTPError as e:
-        return json.load(e).get("message", "") if e.code == 400 else f"HTTP {e.code}"
+        return json.load(e).get("error", {}).get("message", "") if e.code == 400 else f"HTTP {e.code}"
 
 
 class Gate:
@@ -374,7 +384,7 @@ class Gate:
     def scored(self, url, c):
         """One case through the route: ids equal HF's, finite logits and score within the gates."""
         body = {"query": c["query"], "documents": [c["document"]], "return_documents": False,
-                "return_logits": True, "return_prompt_token_ids": True}
+                "return_logits": True, "return_prompt_token_ids": True, "max_length": c["tokens"]}
         if c["instruct"]:
             body["instruct"] = c["instruct"]
         items = post(url + "/v1/rerank", body)["results"]
@@ -399,7 +409,7 @@ class Gate:
     def special(self, url, c):
         """The masked case: TensorFold's ids must differ from HF's (request text stays plain)."""
         items = post(url + "/v1/rerank", {"query": c["query"], "documents": [c["document"]],
-                                          "return_prompt_token_ids": True})["results"]
+                                          "return_prompt_token_ids": True, "max_length": 1 << 20})["results"]
         meta = items[0].get("meta_info") if len(items) == 1 else None
         ids = meta.get("prompt_token_ids") if isinstance(meta, dict) else None
         if not isinstance(ids, list) or not ids or not all(type(i) is int and i >= 0 for i in ids):
@@ -411,7 +421,8 @@ class Gate:
 
     def ranking(self, url, ins, q, group):
         """One request of a query's documents: a full permutation, no pair against the oracle beyond the tie band."""
-        body = {"query": q, "documents": [c["document"] for c in group], "return_documents": False}
+        body = {"query": q, "documents": [c["document"] for c in group], "return_documents": False,
+                "max_length": max(c["tokens"] for c in group)}
         if ins:
             body["instruct"] = ins
         order = [r["index"] for r in post(url + "/v1/rerank", body)["results"]]

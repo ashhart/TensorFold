@@ -1,8 +1,9 @@
-//! POST /v1/rerank in #1895's shape, SGLang's request fields too: each document scored by the score hook.
+//! POST /v1/rerank in #1895's shape, SGLang's request fields too, each document scored by the engine's score hook.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
+const openai = @import("openai.zig");
 const http_body = @import("http_body.zig");
 const reply_text = @import("reply_text.zig");
 const model_text = @import("model_text.zig");
@@ -21,12 +22,15 @@ const Ask = struct {
     given: []const Value,
     instruct: ?[]const u8,
     top_n: ?usize,
-    /// #1895's cap on a prompt's tokens; this server refuses a longer prompt rather than cut it.
-    max_length: ?usize,
+    /// #1895's cap on a prompt's tokens: a longer prompt's content is cut from its end to fit.
+    max_length: usize,
     return_documents: bool,
     return_logits: bool,
     return_ids: bool,
 };
+
+/// #1895's default cap on a prompt's tokens: the model card's max_length.
+pub const max_length_default = 8192;
 
 /// One document's score and the label logits it came from.
 const Scored = struct { score: f64, yes: f64, no: f64 };
@@ -54,7 +58,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     send(conn, a, 200, value);
 }
 
-/// SGLang's bytes: compact separators and UTF-8 as it is (FastAPI's ORJSONResponse).
+/// Compact separators and UTF-8 as it is.
 pub fn encode(a: Allocator, v: Value) Allocator.Error![]u8 {
     return json.stringify(a, v, .{ .compact = true, .ascii = false }) catch return error.OutOfMemory;
 }
@@ -68,20 +72,9 @@ fn outOfMemory(cx: *Cx) void {
     cx.message = "out of memory";
 }
 
-/// SGLang's error body; type "Bad Request" for a schema error (`other`), "BadRequestError" for a handler refusal.
+/// The server's error envelope, as every route sends it: `{"error": {"message", "type", ...}}`.
 pub fn errorBody(cx: *const Cx) Allocator.Error!Value {
-    const status = cx.status();
-    const o = try json.newObject(cx.a);
-    try o.put(cx.a, "object", .{ .string = "error" });
-    try o.put(cx.a, "message", .{ .string = cx.message });
-    try o.put(cx.a, "type", .{ .string = switch (status) {
-        500 => "InternalServerError",
-        503 => "ServiceUnavailableError",
-        else => if (cx.kind == .other) "Bad Request" else "BadRequestError",
-    } });
-    try o.put(cx.a, "param", .null);
-    try o.put(cx.a, "code", try json.intValue(cx.a, status));
-    return .{ .object = o };
+    return openai.wrapError(cx.a, try openai.errorBody(cx.a, cx, "documents"));
 }
 
 fn sendErr(conn: *Conn, cx: *Cx) void {
@@ -96,23 +89,19 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value, gone: anytype) Failure!Value {
     // each prompt is built in a scratch arena and dropped: a small body of many documents keeps no ids alive
     var scratch = std.heap.ArenaAllocator.init(srv.gpa);
     defer scratch.deinit();
-    const window = srv.info.context_window;
+    var frame: ?Frame = null;
     // every document fits the window before the first pass, so a refusal costs no GPU work
     for (ask.documents, 0..) |doc, i| {
         if (gone.check()) return error.Cancelled;
         _ = scratch.reset(.retain_capacity);
-        const ids = try prompt(srv, cx, scratch.allocator(), ask, doc);
-        if (window > 0 and ids.len > window)
-            return cx.fail(.request, "document {d}: the prompt has {d} tokens, which does not fit the context length of {d} tokens", .{ i, ids.len, window });
-        if (ask.max_length) |cap| if (ids.len > cap)
-            return cx.fail(.request, "document {d}: the prompt has {d} tokens, past max_length {d}; this server does not truncate", .{ i, ids.len, cap });
+        _ = try ready(srv, cx, scratch.allocator(), ask, &frame, doc, i);
     }
     const scored = try cx.a.alloc(Scored, ask.documents.len);
     var tokens: usize = 0;
-    for (ask.documents, scored) |doc, *row| {
+    for (ask.documents, scored, 0..) |doc, *row, i| {
         if (gone.check()) return error.Cancelled;
         _ = scratch.reset(.retain_capacity);
-        const ids = try prompt(srv, cx, scratch.allocator(), ask, doc);
+        const ids = try ready(srv, cx, scratch.allocator(), ask, &frame, doc, i);
         tokens += ids.len;
         var logits: [2]f64 = undefined;
         _ = srv.engine.score(ids, &.{ labels.yes, labels.no }, &logits, false) catch |err| switch (err) {
@@ -126,7 +115,7 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value, gone: anytype) Failure!Value {
         if (!std.math.isFinite(logits[0]) or !std.math.isFinite(logits[1])) return cx.fail(.server, "rerank inference failed", .{});
         row.* = .{ .score = 1.0 / (1.0 + @exp(logits[1] - logits[0])), .yes = logits[0], .no = logits[1] };
     }
-    return build(srv, cx, ask, scored, tokens);
+    return build(srv, cx, ask, &frame, scored, tokens);
 }
 
 fn healthy(srv: *Server) bool {
@@ -153,8 +142,8 @@ fn parse(cx: *Cx, body: Value) errors.Refused!Ask {
         .null => null,
         else => |v| try topN(cx, v),
     };
-    const max_length: ?usize = switch (body.get("max_length") orelse Value.null) {
-        .null => null,
+    const max_length: usize = switch (body.get("max_length") orelse Value.null) {
+        .null => max_length_default,
         .int => |d| if (d[0] == '-' or std.mem.eql(u8, d, "0")) return cx.other("max_length: input should be at least 1") else std.fmt.parseInt(usize, d, 10) catch std.math.maxInt(usize),
         else => return cx.other("max_length: input should be a valid integer"),
     };
@@ -297,10 +286,66 @@ fn flag(cx: *Cx, body: Value, comptime key: []const u8, default: bool) errors.Re
     };
 }
 
+/// The template's tail after the document, from probe documents "0" and "1": a cut keeps it whole (see `ready`).
+const Frame = struct { p0: []const u32, p1: []const u32, suffix: usize, tail: []const u8, fixed: bool };
+
+fn frameOf(srv: *Server, cx: *Cx, ask: Ask) errors.Refused!Frame {
+    const p0 = try prompt(srv, cx, cx.a, ask, "0");
+    const p1 = try prompt(srv, cx, cx.a, ask, "1");
+    const both = @min(p0.ids.len, p1.ids.len);
+    var suffix: usize = 0;
+    while (suffix < both and p0.ids[p0.ids.len - 1 - suffix] == p1.ids[p1.ids.len - 1 - suffix]) suffix += 1;
+    // the whole rendered tail, encoded alone, must be exactly the shared ids: no template byte merged into the document
+    const alone = srv.text.encode(cx.a, p0.tail, false) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return cx.fail(.request, "the chat template failed: {s}", .{"the tokenizer cannot encode this prompt"}),
+    };
+    // a cut needs a tail that starts at an added token (the masked encoder splits only there) and renders alike
+    const fixed = suffix > 0 and suffix < both and std.mem.eql(u8, p0.tail, p1.tail) and
+        srv.text.isAdded(p0.ids[p0.ids.len - suffix]) and std.mem.eql(u32, alone, p0.ids[p0.ids.len - suffix ..]);
+    return .{ .p0 = p0.ids, .p1 = p1.ids, .suffix = suffix, .tail = p0.tail, .fixed = fixed };
+}
+
+/// The length of the ids `x` and `y` begin with alike.
+fn common(x: []const u32, y: []const u32) usize {
+    var n: usize = 0;
+    while (n < @min(x.len, y.len) and x[n] == y[n]) n += 1;
+    return n;
+}
+
+/// Document `i`'s prompt as scored: past max_length its content loses its last tokens, as the card's tokenizer cuts.
+fn ready(srv: *Server, cx: *Cx, a: Allocator, ask: Ask, frame: *?Frame, document: []const u8, i: usize) errors.Refused![]const u32 {
+    const built = try prompt(srv, cx, a, ask, document);
+    var ids = built.ids;
+    const cap = ask.max_length;
+    if (ids.len > cap) {
+        const f = frame.* orelse try frameOf(srv, cx, ask);
+        frame.* = f;
+        // a tail this template renders otherwise for this document, a cut leaving no document token: refused
+        if (!f.fixed or !std.mem.eql(u8, built.tail, f.tail) or !std.mem.endsWith(u32, ids, f.p0[f.p0.len - f.suffix ..]))
+            return cx.fail(.request, "document {d}: the prompt has {d} tokens, past max_length {d}, and this chat template has no fixed tail after the document to cut its content before", .{ i, ids.len, cap });
+        // where this document starts: before the first token either probe's document changes
+        const start = @min(common(ids, f.p0), common(ids, f.p1));
+        if (cap <= start + f.suffix)
+            return cx.fail(.request, "document {d}: max_length {d} leaves no room for the document; the prompt without it takes {d} tokens", .{ i, cap, start + f.suffix });
+        const cut = try a.alloc(u32, cap);
+        @memcpy(cut[0 .. cap - f.suffix], ids[0 .. cap - f.suffix]);
+        @memcpy(cut[cap - f.suffix ..], ids[ids.len - f.suffix ..]);
+        ids = cut;
+    }
+    const window = srv.info.context_window;
+    if (window > 0 and ids.len > window)
+        return cx.fail(.context_length, "document {d}: the prompt has {d} tokens, which does not fit the context length of {d} tokens", .{ i, ids.len, window });
+    return ids;
+}
+
+/// A prompt's ids and the template text after its last request span (the document's).
+const Built = struct { ids: []const u32, tail: []const u8 };
+
 /// The checkpoint template over [system?, query, document] in `a`; the request's text is encoded as plain text.
-fn prompt(srv: *Server, cx: *Cx, a: Allocator, ask: Ask, document: []const u8) errors.Refused![]const u32 {
+fn prompt(srv: *Server, cx: *Cx, a: Allocator, ask: Ask, document: []const u8) errors.Refused!Built {
     var messages: std.ArrayList(Value) = .empty;
-    if (ask.instruct) |i| try messages.append(a, try message(a, "system", i));
+    if (ask.instruct) |ins| try messages.append(a, try message(a, "system", ins));
     try messages.append(a, try message(a, "query", ask.query));
     try messages.append(a, try message(a, "document", document));
     var problem: []const u8 = "";
@@ -308,10 +353,12 @@ fn prompt(srv: *Server, cx: *Cx, a: Allocator, ask: Ask, document: []const u8) e
         error.OutOfMemory => return error.OutOfMemory,
         error.Template => return cx.fail(.request, "the chat template failed: {s}", .{problem}),
     };
-    return rendered.encode(srv.text, a, &problem) catch |e| switch (e) {
+    const ids = rendered.encode(srv.text, a, &problem) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Template => return cx.fail(.request, "the chat template failed: {s}", .{"the tokenizer cannot encode this prompt"}),
     };
+    const spans = rendered.spans;
+    return .{ .ids = ids, .tail = if (spans.len > 0) rendered.text[spans[spans.len - 1][1]..] else rendered.text };
 }
 
 fn message(a: Allocator, role: []const u8, words: []const u8) Allocator.Error!Value {
@@ -322,7 +369,7 @@ fn message(a: Allocator, role: []const u8, words: []const u8) Allocator.Error!Va
 }
 
 /// #1895's shape: `results` best first (equal scores in request order, cut to top_n), then `usage`.
-fn build(srv: *Server, cx: *Cx, ask: Ask, scored: []const Scored, tokens: usize) errors.Refused!Value {
+fn build(srv: *Server, cx: *Cx, ask: Ask, frame: *?Frame, scored: []const Scored, tokens: usize) errors.Refused!Value {
     const order = try cx.a.alloc(usize, scored.len);
     for (order, 0..) |*o, i| o.* = i;
     std.sort.insertion(usize, order, scored, struct {
@@ -337,8 +384,8 @@ fn build(srv: *Server, cx: *Cx, ask: Ask, scored: []const Scored, tokens: usize)
         try o.put(cx.a, "index", try json.intValue(cx.a, i));
         try o.put(cx.a, "relevance_score", .{ .float = scored[i].score });
         if (ask.return_documents) try o.put(cx.a, "document", ask.given[i]);
-        // the returned documents' ids rendered again (the same bytes give the same ids): none kept while scoring
-        const ids = if (ask.return_ids) try prompt(srv, cx, cx.a, ask, ask.documents[i]) else &.{};
+        // the returned documents' ids built again, cut as scored (the same bytes give the same ids): none kept
+        const ids = if (ask.return_ids) try ready(srv, cx, cx.a, ask, frame, ask.documents[i], i) else &.{};
         if (try meta(cx.a, ask, scored[i], ids)) |m| try o.put(cx.a, "meta_info", m);
         item.* = .{ .object = o };
     }
