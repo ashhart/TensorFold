@@ -92,4 +92,4 @@ Results on the R9700 (ROCm 10.1):
 | 4 requests at once against one at a time | byte-equal |
 | A client that leaves mid-request | the next request equals its earlier answer |
 | Device memory, peak | 16.4 GB (32,768 window), 16.7 GB (40,960) |
-| 16 documents of ~260 tokens, cold, one request | 2.69 s on the dot2 tile, 1.00 s with gfx12's WMMA tile (#2034); SGLang 0.53 s on the same card |
+| 16 documents of ~260 tokens, cold, one request | 2.69 s on the dot2 tile (the default), 1.00 s with gfx12's WMMA tile (#2034, opt-in with `--policy matrix=on`); SGLang 0.53 s on the same card |
