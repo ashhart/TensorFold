@@ -113,6 +113,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const tune_run = b.addRunArtifact(tune_test);
     tune_run.has_side_effects = true; // timings: run every time, never from the cache
     b.step("hip-affine-tune", "Time every MLX affine prompt tile the GPU has and propose table rows (-Dhip-arch)").dependOn(&tune_run.step);
+    const dense_tune_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/dense_tune.zig"), .target = target, .link_libc = true });
+    dense_tune_module.addIncludePath(.{ .cwd_relative = hip_include });
+    dense_tune_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
+    dense_tune_module.addImport("hip_kernels", objects);
+    dense_tune_module.addImport("core", coreModule(b, target));
+    const dense_tune_run = b.addRunArtifact(b.addTest(.{ .root_module = dense_tune_module }));
+    dense_tune_run.has_side_effects = true; // timings: run every time, never from the cache
+    b.step("hip-dense-tune", "Time the dot2 and WMMA BF16 dense tiles at Qwen3-8B's shapes (-Dhip-arch)").dependOn(&dense_tune_run.step);
     const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
     b.step("test-slide-hip-host", "Unsupported HIP learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"slide admission:"} })).step);
@@ -372,7 +380,7 @@ const headers = [_][]const u8{
     "quant/mlx_tiles.hpp",        "tiles/dot2.hpp",         "tiles/epilogue.hpp",    "tiles/gemm.hpp",
     "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp",  "tiles/plan.hpp",        "tiles/stream.hpp",
     "flashnext/streams.hpp",      "flashnext/ngram.hpp",    "flashnext/indexer.hpp", "flashnext/sparse.hpp",
-    "ops/nemotron_moe.hpp",       "quant/bf16_decoder.hpp", "quant/dense_tiles.hpp",
+    "ops/nemotron_moe.hpp",       "quant/bf16_decoder.hpp", "quant/dense_tiles.hpp", "tiles/wmma12_gemm.hpp",
 };
 
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.

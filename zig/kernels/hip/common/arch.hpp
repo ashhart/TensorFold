@@ -50,4 +50,11 @@ inline constexpr bool kWmma = false;
 #else
 #define TF_DEVICE_WMMA_GFX11 0
 #endif
+
+// gfx12 device code: v_wmma_f32_16x16x16_bf16 with gfx12's wave32 layouts (tiles/wmma12_gemm.hpp).
+#if defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx12_generic__)
+#define TF_DEVICE_WMMA_GFX12 1
+#else
+#define TF_DEVICE_WMMA_GFX12 0
+#endif
 }  // namespace tf
