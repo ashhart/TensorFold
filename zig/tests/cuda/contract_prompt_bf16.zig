@@ -19,6 +19,7 @@ fn depth(shape: c.Shape) usize {
 }
 
 pub const Tile = struct {
+    pub const callbacks = g.hooks(Tile);
     product: Product,
     rig: *@import("contract_rig.zig").Rig = undefined,
     prompt: *const cuda.nvfp4.Prompt,
@@ -32,7 +33,7 @@ pub const Tile = struct {
 
     pub fn kernel(t: *Tile) g.Kernel {
         t.rig = &t.product.rig;
-        return .{ .ctx = t, .vt = &g.hooks(Tile), .control = if (t.control) .shapes else null, .spec = .{
+        return .{ .ctx = t, .vt = &callbacks, .control = if (t.control) .shapes else null, .spec = .{
             .name = if (t.control) (if (t.product.out_kind == .f32) "control: BF16 prompt fp32 scaled" else "control: BF16 prompt scaled") else if (t.replacement) (if (t.product.out_kind == .f32) "cuda BF16 prompt fp32 lane replacement" else "cuda BF16 prompt lane replacement") else if (t.product.out_kind == .f32) "cuda BF16 prompt fp32 FP64" else "cuda BF16 prompt FP64",
             .accum = .f32,
             .depth = depth,
