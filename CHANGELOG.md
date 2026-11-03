@@ -53,6 +53,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Dory on CUDA takes its RoPE tables from core's exact helper, so they match transformers' words (they moved by up to 5 ulp) (#2035, part of #1852).
 - fabric/mcdma: ConnectX (RoCE v2) links (#1957, step 1 of #1594). Thanks to @ThinkOffApp.
 
+- `cluster check`, `cluster status` and `serve`'s preflight now exit 1 when a configured model cannot be planned (#2069).
+
 ## 1.2.2
 
 - CUDA lanes: Gemma 4, MiniMax M3, Kolibri-1, Spark 2.5 and Dory can verify root and context copies as Nemotron does, opt-in: set `TF_GEMMA4_COPIES`, `TF_MINIMAX_COPIES`, `TF_KOLIBRI_COPIES`, `TF_SPARK_COPIES` or `TF_DORY_COPIES` to 1. Replies equal `"draft": false`, and unset is the old policy (#2022, part of #1910).
