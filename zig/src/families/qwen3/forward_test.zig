@@ -109,29 +109,47 @@ fn text(v: std.json.Value, key: []const u8) ?[]const u8 {
     return if (x == .string) x.string else null;
 }
 
+fn same(expected: []const u8, got: ?[]const u8) !void {
+    if (!std.mem.eql(u8, expected, got orelse "")) return error.ReferenceMismatch;
+}
+
+/// A silent check: a refused reference is an error, without the expect helpers' diff on stderr.
+fn holds(ok: bool) !void {
+    if (!ok) return error.ReferenceMismatch;
+}
+
 /// Refuses, before any GPU work, references that are not the fp32 target and BF16 bar of the same pinned inputs.
 fn checkReferences(ref: std.json.Value, bar: std.json.Value) !void {
-    try t.expectEqualStrings("float32", text(ref, "dtype") orelse "");
-    try t.expectEqualStrings("bfloat16", text(bar, "dtype") orelse "");
+    try same("float32", text(ref, "dtype"));
+    try same("bfloat16", text(bar, "dtype"));
+    // the oracle checks every hash of the pin record; here both references carry one complete, identical record
     for ([_]std.json.Value{ ref, bar }) |r| {
         const pins = r.object.get("pins") orelse return error.UnpinnedReference;
-        try t.expectEqualStrings(embed_revision, text(pins, "revision") orelse "");
-        try t.expectEqualStrings(transformers_tree, text(pins, "transformers_tree") orelse "");
+        try same("Qwen/Qwen3-Embedding-8B", text(pins, "repo"));
+        try same(embed_revision, text(pins, "revision"));
+        try same("5.22.1", text(pins, "transformers"));
+        try same(transformers_tree, text(pins, "transformers_tree"));
+        for ([_][]const u8{ "checkpoint", "weights", "library" }) |key| {
+            const files = pins.object.get(key) orelse return error.UnpinnedReference;
+            try holds(files == .object and files.object.count() > 0);
+            for (files.object.values()) |hash| try holds(hash == .string and hash.string.len == 64);
+        }
     }
+    try holds(jsonEqual(ref.object.get("pins").?, bar.object.get("pins").?));
     for ([_][]const u8{ "texts", "ids" }) |key| {
         const x = ref.object.get(key) orelse return error.IncompleteReference;
         const y = bar.object.get(key) orelse return error.IncompleteReference;
-        try t.expect(std.meta.activeTag(x) == .array and std.meta.activeTag(y) == .array and x.array.items.len == y.array.items.len);
-        for (x.array.items, y.array.items) |p, q| try t.expect(jsonEqual(p, q));
+        try holds(std.meta.activeTag(x) == .array and std.meta.activeTag(y) == .array and x.array.items.len == y.array.items.len);
+        for (x.array.items, y.array.items) |p, q| try holds(jsonEqual(p, q));
     }
     for ([_]std.json.Value{ ref, bar }) |r| for (r.object.get("vectors").?.array.items) |v| {
         var square: f64 = 0;
         for (v.array.items) |x| {
             const f = number(x);
-            try t.expect(std.math.isFinite(f));
+            try holds(std.math.isFinite(f));
             square += f * f;
         }
-        try t.expect(square > 0);
+        try holds(square > 0);
     };
 }
 
@@ -143,6 +161,10 @@ fn jsonEqual(p: std.json.Value, q: std.json.Value) bool {
         .array => |x| x.items.len == q.array.items.len and for (x.items, q.array.items) |a, b| {
             if (!jsonEqual(a, b)) break false;
         } else true,
+        .object => |x| x.count() == q.object.count() and for (x.keys(), x.values()) |k, v| {
+            const w = q.object.get(k) orelse break false;
+            if (!jsonEqual(v, w)) break false;
+        } else true,
         else => false,
     };
 }
@@ -152,8 +174,12 @@ test "Qwen3-Embedding references: a bar of other inputs, an unpinned one or a no
     defer arena.deinit();
     const a = arena.allocator();
     const good =
-        \\{"dtype": "float32", "pins": {"revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
-        \\ "transformers_tree": "b08cead6d1b841ef9723106a81a92ec37d67aff3e43a198e56b7dc76538d377b"},
+        \\{"dtype": "float32", "pins": {"repo": "Qwen/Qwen3-Embedding-8B",
+        \\ "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af", "transformers": "5.22.1",
+        \\ "transformers_tree": "b08cead6d1b841ef9723106a81a92ec37d67aff3e43a198e56b7dc76538d377b",
+        \\ "checkpoint": {"config.json": "dcccf7c7890c8debc4af8dace8d6acd8dd50bd56d50d4d8b60529381ba3de3d7"},
+        \\ "weights": {"model-00001-of-00004.safetensors": "99b343597fe840706146144699a8b9188dd3387e43eb61faf0231b70b249d451"},
+        \\ "library": {"models/qwen3/modeling_qwen3.py": "63a6213c15d6fb04e58a1c64fd05a4cdfb49476443fbeef524f0e0486043824b"}},
         \\ "texts": ["a"], "ids": [[1, 2]], "vectors": [[0.6, 0.8]]}
     ;
     const ref = try std.json.parseFromSliceLeaky(std.json.Value, a, good, .{});
@@ -164,6 +190,9 @@ test "Qwen3-Embedding references: a bar of other inputs, an unpinned one or a no
         .{ "\"texts\": [\"a\"]", "\"texts\": [\"b\"]" },
         .{ "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af", "0000000000000000000000000000000000000000" },
         .{ "[[0.6, 0.8]]", "[[0.0, 0.0]]" },
+        .{ "99b343597fe840706146144699a8b9188dd3387e43eb61faf0231b70b249d451", "00b343597fe840706146144699a8b9188dd3387e43eb61faf0231b70b249d451" },
+        .{ "\"weights\": {\"model-00001-of-00004.safetensors\": \"99b343597fe840706146144699a8b9188dd3387e43eb61faf0231b70b249d451\"},", "" },
+        .{ "\"transformers\": \"5.22.1\"", "\"transformers\": \"5.22.0\"" },
     };
     for (bad) |swap| {
         const other = try std.mem.replaceOwned(u8, a, bar_text, swap[0], swap[1]);
