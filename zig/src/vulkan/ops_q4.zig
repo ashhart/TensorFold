@@ -89,6 +89,9 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
     return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
 }
 
+/// Rows of x one thread of qmm_q4_tile_rows computes; a prompt chunk of at least this many rows takes that image.
+pub const tile_rows: u64 = 4;
+
 /// `project` over weights repacked by `tile`: one dispatch, so w must fit one binding and start 16-byte aligned.
 pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, timeout_ns: u64) Error!void {
     const g = try projectGeometry(out, x, w, scales, biases, k, .tiles);
@@ -96,10 +99,12 @@ pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scale
     const range = o.dev.properties.limits.maxStorageBufferRange;
     if (x.byteLen() > range or out.byteLen() > range or w.byteLen() > range) return error.TooLarge;
     if (qmmVariant(x, w) != .vec4) return error.Misaligned;
-    const pipe = &o.qmm_q4_tile;
+    const many = g.m >= tile_rows;
+    const pipe = if (many) &o.qmm_q4_tile_rows else &o.qmm_q4_tile;
     try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
     const p = try q4Push(g.m, g.n, k);
-    try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
+    const threads = if (many) try ops_mod.cast32((g.m + tile_rows - 1) / tile_rows * g.n) else p.count;
+    try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(threads, pipe.local[0]), timeout_ns);
 }
 
 /// `project` with the qmm image forced (null picks by alignment); a forced vec4 over unaligned windows is refused.
