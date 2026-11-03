@@ -214,3 +214,6 @@ variant is in `zig/kernels/metal/gemma4/lane_projection.metal`, with host encodi
 Ordinary Gemma lane packing and projections still use the shared lane module. The measurements above are the original
 PR's receipts. They do not qualify the isolated landing tree. Re-run numerical, resource, teacher-forced, draft/plain,
 resumed/fresh, concurrent/solo, vision and performance gates on that tree.
+
+The host attention adjoint and native learner implementation plan are in
+[Gemma Living Weights](gemma4-living-weights.md).
