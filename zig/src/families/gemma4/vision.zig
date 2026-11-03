@@ -6,6 +6,7 @@ const frags = @import("../../core/frags.zig");
 const ck = @import("../../core/checkpoint_metal.zig");
 const affine_mm = @import("affine_mm.zig");
 const lane = @import("../../core/lane_projection.zig");
+const rope_freq = @import("../../core/rope_freq.zig");
 const Mlx = @import("weights.zig").Mlx;
 const image = @import("image.zig");
 
@@ -307,11 +308,17 @@ pub fn bf16(x: f32) u16 {
     return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
 
+/// The tower's 18 inverse frequencies: half of a 72-wide head's pairs, theta from the tower.
+fn inverseFrequencies() [head_dim / 4]f32 {
+    var inv: [head_dim / 4]f32 = undefined;
+    rope_freq.inverseFrequencies(rope_theta, head_dim / 2, &inv);
+    return inv;
+}
+
 /// Gemma4VisionRotaryEmbedding, gw wide: dims 0-35 by x and 36-71 by y, 18 frequencies twice each, bf16 cos and sin.
 fn rope(cs: []u16, sn: []u16, gw: u32, P: u32) void {
     const half = head_dim / 2;
-    var inv: [half / 2]f32 = undefined;
-    for (&inv, 0..) |*f, i| f.* = 1.0 / std.math.pow(f32, rope_theta, @as(f32, @floatFromInt(2 * i)) / @as(f32, half));
+    const inv = inverseFrequencies();
     for (0..P) |p| for (0..head_dim) |d| {
         const axis: f32 = @floatFromInt(if (d < half) p % gw else p / gw);
         const angle = axis * inv[(d % half) % (half / 2)];
