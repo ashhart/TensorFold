@@ -108,7 +108,7 @@ format ([prompt precision](#prompt-precision)):
 
 ## Native prompt controls
 
-Qwen dense/MoE and Nemotron ModelOpt BF16 projections use the shared BF16 prompt tile from 1,024 rows.
+Qwen dense/MoE, Nemotron ModelOpt and Dory BF16 projections use the shared BF16 prompt tile from 1,024 rows.
 `TF_CUDA_PROMPT_BF16=0` restores their lane projections; unset or any other value selects the tile.
 The threshold is fixed. The prompt module always binds its required BF16 symbols, including with the switch off.
 Flash Next keeps its own prompt selection and controls.
