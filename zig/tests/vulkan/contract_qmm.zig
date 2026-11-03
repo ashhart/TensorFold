@@ -103,6 +103,8 @@ pub const Fixture = struct {
     corrupt: ?usize = null,
     /// The kernel's reported name when it is not the default qmm_bf16 spec's.
     name: ?[]const u8 = null,
+    /// Tiled image: inputs are repacked into 32-column tiles before upload; shapes that cannot be tiled are refused.
+    tiled: bool = false,
 
     pub fn init(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, pipeline: *dispatch.Pipeline) Fixture {
         return .{ .a = a, .dev = dev, .cmds = cmds, .staging = staging, .pipeline = pipeline };
@@ -150,8 +152,20 @@ pub const Fixture = struct {
         @memset(p, poison);
         return p;
     }
+    // The tiled image reads host-repacked inputs; the float64 reference was computed from the row layout before this.
+    fn tileInputs(a: std.mem.Allocator, words: []u8, scales: []u8, biases: []u8, shape: c.Shape) !void {
+        const copy = try a.alloc(u8, words.len);
+        defer a.free(copy);
+        @memcpy(copy, words);
+        vk.tile.tileWords(words, copy, shape.n, shape.k);
+        @memcpy(copy[0..scales.len], scales);
+        vk.tile.tileParams(scales, copy[0..scales.len], shape.n, shape.k);
+        @memcpy(copy[0..biases.len], biases);
+        vk.tile.tileParams(biases, copy[0..biases.len], shape.n, shape.k);
+    }
     pub fn prepare(f: *Fixture, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.k % group != 0 or shape.n * shape.k > max_weights or shape.rows * shape.n > max_outputs) return false;
+        if (f.tiled and !vk.tile.fits(shape.n, shape.k)) return false;
         f.reset();
         f.shape = shape;
         var q = try contract.affine.Affine.init(f.a, shape, 4, group);
@@ -185,6 +199,7 @@ pub const Fixture = struct {
         errdefer f.a.free(mag);
         try q.reference(want, mag);
         if (fill != .nonfinite) for (want, mag) |v, m| if (!std.math.isFinite(v) or !std.math.isFinite(m)) return error.NonFiniteReference;
+        if (f.tiled) try tileInputs(f.a, std.mem.sliceAsBytes(w[0..words_len]), std.mem.sliceAsBytes(scales[0..nparam]), std.mem.sliceAsBytes(biases[0..nparam]), shape);
         f.x = x;
         f.w = w;
         f.scales = scales;
