@@ -80,6 +80,10 @@ jobs:
       - name: build options
         run: python3 -m unittest discover -s tools/zig -p build_options_test.py
       # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
+      - name: Shared CUDA primitive copies
+        run: |
+          python3 tools/zig/cuda_common_check.py
+          python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
       - name: lean check
         env:
           BASE_REF: ${{ github.base_ref }}
