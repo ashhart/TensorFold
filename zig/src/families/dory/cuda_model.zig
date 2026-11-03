@@ -374,7 +374,7 @@ pub const Model = struct {
     /// The forward's launches over staged ids, positions and slots: no host copies, so a graph can hold them.
     fn launch(m: *Model, k: *const Kernels, s: cuda.Stream, n: usize, prompt: bool, p0: usize, slot: usize, fslot: usize, flat: bool, head0: usize, heads: usize) !void {
         const c = m.c;
-        const lin: cuda.qlinear.Linear = .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt };
+        const lin = k.linear();
         const d = c.hidden;
         const f = c.factors();
         const x = m.s;
