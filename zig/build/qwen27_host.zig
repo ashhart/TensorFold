@@ -79,6 +79,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
     pocketProbe(b, metal);
+    @import("qwen27_learning_checks.zig").steps(b, metal, engine);
     const learner = b.addExecutable(.{ .name = "tf-qwen27-learning", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27/learning.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } }) });
     b.step("tf-qwen27-learning", "Build native forward/trainer identity and gradient checks without running a GPU").dependOn(&b.addInstallArtifact(learner, .{}).step);
     const untaught = b.addExecutable(.{ .name = "tf-qwen27-untaught", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27/untaught.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } }) });

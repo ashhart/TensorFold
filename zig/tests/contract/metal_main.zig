@@ -467,6 +467,7 @@ pub fn main(init: std.process.Init) !u8 {
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
+        try @import("qwen27_learning_checks").run(@import("rig.zig"), a, device, queue, o.only, &t);
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);

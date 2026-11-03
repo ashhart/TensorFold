@@ -147,3 +147,32 @@ A refusal, missing counters, failed checker or incomplete portability cell canno
 
 No real-checkpoint retention, speed or whole-model numerical qualification is implied by these commands.
 The shared lesson acceptance checks and directional error limit remain unchanged.
+
+## Local backward checks
+
+`zig build test-qwen27-linear-host test-qwen27-learning-reference-host` runs without a device.
+The loader check passes 2-, 3-, 4-, 5-, 6- and 8-bit projections through the actual linear builder,
+including a rank slice, and compares every copied byte with the original views.
+
+`zig build tf-qwen27-learning-local` builds a bounded, checkpoint-free Metal panel.
+Run `zig-out/bin/tf-qwen27-learning-local` under the machine's GPU lock.
+The same panel is called by `tf-kernel-contract --only "qwen27 learning local" --no-limits`.
+Its four source mutations contribute to the contract's control tally and a missed control fails the run.
+Compile, launch, ownership or repeat errors fail the run; they never count as a caught numerical fault.
+
+Independent binary64 references cover pocket input adjoints with saved/open neuron scaling, raw affine4 input
+adjoints with add mode and a ragged four-row batch, weighted partial-RoPE Q/K RMS adjoints, and all split outputs
+of a five-row GDN recurrence across its four-row checkpoint. Every checked output repeats byte for byte five times,
+all guards survive and inputs stay unchanged. The affine fixture's dyadic expression is exact; the other three
+retain the existing local numerical panel's 2e-6 absolute allowance. These local fixture limits do not replace or
+relax the whole-model directional rule or any declared compiler/resource limit.
+
+The host also checks independent smooth central slopes for the pocket, weighted RMS/RoPE and recurrence references.
+Stored BF16 inputs are base nodes, not a differentiable quantizer. The recurrence's saved checkpoint offsets are
+frozen at the base point for its local straight-through check. These are local mathematical checks, not proof of
+real-checkpoint gradients through every served rounding point. The panel supplements the contract; it does not
+claim all shapes, exceptional classes, accumulator witnesses or all 22 backward kernels are qualified.
+
+Before advertising learning, retain the complete whole-model directional panel, full contract and resource receipts,
+pre-M5/M5 slide-off token and speed comparisons, the mixed-width release checkpoints, keep-rate and exact removal,
+and the CUDA/Metal saved-folder round trip. Every refusal and every failed device cell remains in the receipts.
