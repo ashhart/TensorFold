@@ -85,6 +85,12 @@ pub const Kernels = struct {
     /// `gemm` on one named kernel of `tile` (hip-dense-tune times each geometry); the shape must belong to the tile.
     pub fn gemmOn(k: *const Kernels, r: *const runtime.Runtime, tile: Tile, shape: Shape, x: u64, w: u64, out: u64, out16: u64, m: c_int, n: c_int, kk: c_int, s: abi.Stream) Error!void {
         if ((tile == .dot2) != (shape == .dot2)) return error.Invalid;
+        return k.gemmWith(r, k.fns[@backingInt(shape)], shape, x, w, out, out16, m, n, kk, s);
+    }
+
+    /// `gemmOn` through `f`, a kernel of `shape`'s geometry and arguments (the contract's planted control is one).
+    pub fn gemmWith(k: *const Kernels, r: *const runtime.Runtime, f: Function, shape: Shape, x: u64, w: u64, out: u64, out16: u64, m: c_int, n: c_int, kk: c_int, s: abi.Stream) Error!void {
+        const tile: Tile = if (shape == .dot2) .dot2 else .wmma12;
         if (k.refusal(tile, x, w, m, n, kk)) |why| {
             std.log.err("dense gemm ({t}): {s} (m {d}, n {d}, k {d})", .{ tile, why, m, n, kk });
             return error.Invalid;
@@ -111,7 +117,7 @@ pub const Kernels = struct {
         var args: hl.Args = .{};
         try args.add(a);
         const g = geometry(shape);
-        try hl.launch(k.fns[@backingInt(shape)], .{ .grid = .{ .x = cdiv(n, g.cols), .y = cdiv(m, g.rows) }, .block = .{ .x = g.threads } }, .{ .r = r, .handle = s }, &args);
+        try hl.launch(f, .{ .grid = .{ .x = cdiv(n, g.cols), .y = cdiv(m, g.rows) }, .block = .{ .x = g.threads } }, .{ .r = r, .handle = s }, &args);
     }
 
     /// The dot2 tile's longest rounding chain of an output: a group's 64 dot2s (two roundings each), one add a group.

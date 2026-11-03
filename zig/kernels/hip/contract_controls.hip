@@ -5,6 +5,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "quant/dense_tiles.hpp"
+
 __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
     return __uint_as_float(static_cast<uint32_t>(x[i]) << 16);
 }
@@ -97,4 +99,23 @@ extern "C" __global__ void tf_base_embed_dense(const float* table, const int* id
     if (out_kind == 0) static_cast<float*>(out)[i] = v;
     else if (out_kind == 1) static_cast<__half*>(out)[i] = __float2half_rn(v);
     else static_cast<uint16_t*>(out)[i] = tf_base_bf16(v);
+}
+
+// Gate 4: the WMMA dense tile adding each 16-deep step in BF16 (v_wmma_bf16), while its spec declares fp32 sums.
+struct TfCtlBf16Step {
+#if TF_DEVICE_WMMA_GFX12
+    __device__ static tf::rocm::f32x8 mma(tf::rocm::bf16x8 a, tf::rocm::bf16x8 b, tf::rocm::f32x8 c) {
+        tf::rocm::bf16x8 s;
+        for (int e = 0; e < 8; ++e) s[e] = static_cast<__bf16>(c[e]);
+        s = __builtin_amdgcn_wmma_bf16_16x16x16_bf16_w32_gfx12(a, b, s);
+        tf::rocm::f32x8 d;
+        for (int e = 0; e < 8; ++e) d[e] = static_cast<float>(s[e]);
+        return d;
+    }
+#endif
+};
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Small::Threads) tf_ctl_wmma12_bf16_sum(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_gemm_tile<W12Small, IdentityAct<DotBF16>, GemmOut<DotBF16>, TfCtlBf16Step>(a);
 }

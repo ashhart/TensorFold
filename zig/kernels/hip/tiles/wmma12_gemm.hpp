@@ -28,6 +28,15 @@ constexpr int kW12Band = 4;  // row blocks a band of the launch order walks the 
 
 typedef __bf16 bf16x8 __attribute__((ext_vector_type(8)));
 
+// The served step, a 16-deep BF16 product into fp32 sums; the contract's control swaps in a less exact one.
+struct W12Step {
+#if TF_DEVICE_WMMA_GFX12
+    __device__ static f32x8 mma(bf16x8 a, bf16x8 b, f32x8 c) {
+        return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(a, b, c);
+    }
+#endif
+};
+
 // Block (x, y) in launch order takes tile (bx, by): bands of kW12Band row blocks share each column block's weights.
 __device__ __forceinline__ void w12_band(int& bx, int& by) {
     const int cols = gridDim.x, rows = gridDim.y;
@@ -42,7 +51,7 @@ __device__ __forceinline__ void w12_band(int& bx, int& by) {
 // One G::BM x G::BN block. gfx12 wave32 operands: A lane l holds row l % 16 with k = 8 (l / 16) + i, B lane l column
 // l % 16 with the same k; D lane l, element i is row 8 (l / 16) + i, column l % 16.
 // Rows past m stage row 0 and columns past n the last column; neither is stored.
-template <class G, class Act, class Epi, class Args>
+template <class G, class Act, class Epi, class Step = W12Step, class Args>
 __device__ __forceinline__ void wmma12_gemm_tile(const Args& a) {
 #if TF_DEVICE_WMMA_GFX12
     constexpr int kW12M = G::BM, kW12N = G::BN, kW12K = G::BK, kW12Ld = G::Ld;
@@ -121,7 +130,7 @@ __device__ __forceinline__ void wmma12_gemm_tile(const Args& a) {
 #pragma unroll
             for (int i = 0; i < TM; ++i)
 #pragma unroll
-                for (int j = 0; j < TN; ++j) acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32_gfx12(av[i], bv[j], acc[i][j]);
+                for (int j = 0; j < TN; ++j) acc[i][j] = Step::mma(av[i], bv[j], acc[i][j]);
         }
         if (s + 1 < steps) stash(buf ^ 1);
         __syncthreads();
