@@ -86,6 +86,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: Qwen3.8-27B's keep gathers and scatters the binding's KV heads a row, so a keep stages what the layout holds (#2013). Thanks to @cshintov.
 
 - `TF_LOAD_PREFETCH`: Gemma 4 and Qwen 3.5 on CUDA read each layer ahead while the current one uploads, so the 27B loads about a third faster on a GB10. Replies are unchanged, and `TF_LOAD_PREFETCH=0` is the old path (#1928). Thanks to @jschmied.
+- The Qwen3.8-27B Metal engine serves Qwen3.5-MoE checkpoints (`qwen3_5_moe`): Ornith-1.5-122B on one M5 Ultra from the publisher's own 4-bit MLX weights, with routed and shared experts, 32 query heads over 2 KV heads, its eight-tap DFlash2 drafter, images, the prompt cache and several streams; the dense 27B is unchanged (#1125). Thanks to @BobClawblaw.
 
 - Flash Next on CUDA loads its experts about 12% faster with the direct load: the next chunk is read while the current one packs, and the store switches shards without reopening them. Replies are unchanged (#1960). Thanks to @jschmied.
 
