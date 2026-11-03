@@ -3,29 +3,9 @@
 #include <math.h>
 #include <cuda_bf16.h>
 #include "common/reduce.cuh"
+#include "drama3_common.cuh"
 
-namespace {
-constexpr unsigned FULL = 0xFFFFFFFFu;
 
-using tf_common::warp_sum;
-
-__device__ float block_sum(float v) {
-  __shared__ float part[32];
-  __shared__ float total;
-  const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, nw = blockDim.x >> 5;
-  v = warp_sum(v);
-  __syncthreads();
-  if (lane == 0) part[w] = v;
-  __syncthreads();
-  if (w == 0) {
-    float s = lane < nw ? part[lane] : 0.f;
-    s = warp_sum(s);
-    if (lane == 0) total = s;
-  }
-  __syncthreads();
-  return total;
-}
-}  // namespace
 
 // out[t] = table[code 0] + sum of residual codebook rows of codes 1..9 (frames [t, fs] columns 1..10, clamped).
 extern "C" __global__ void c_vq_gather(const int* __restrict__ frames, int fs, const float* __restrict__ table,
