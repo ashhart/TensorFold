@@ -41,8 +41,9 @@ pub fn parse(cx: *Cx, text: Text, cap: api.EmbeddingInfo, context: u32, body: Va
             try sequence(cx, text, cap, context, input, &tokens, &ends);
         } else if (first == .string or first == .array) {
             if (input.array.len > cap.max_inputs) return cx.refuse("too many embedding inputs");
-            for (input.array) |item| {
+            for (input.array, 0..) |item, i| {
                 if (@as(std.meta.Tag(Value), item) != @as(std.meta.Tag(Value), first)) return cx.refuse("embedding input forms cannot be mixed");
+                if (item == .string and blank(item.string)) return cx.fail(.request, "embedding input at index {d} must not be empty or whitespace only", .{i});
                 try sequence(cx, text, cap, context, item, &tokens, &ends);
             }
         } else return cx.refuse("input must contain strings or token IDs");
@@ -56,14 +57,16 @@ fn sequence(cx: *Cx, text: Text, cap: api.EmbeddingInfo, context: u32, input: Va
     if (ends.items.len >= cap.max_inputs) return cx.refuse("too many embedding inputs");
     const at = tokens.items.len;
     if (input == .string) {
-        if (input.string.len == 0) return cx.refuse("embedding text must not be empty");
+        if (blank(input.string)) return cx.refuse("embedding text must not be empty or whitespace only");
         const ids = text.encode(cx.a, input.string, true) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Template => cx.refuse("the tokenizer cannot encode this embedding input"),
         };
         defer cx.a.free(ids);
+        try fits(cx, context, ids.len);
         for (ids) |id| try token(cx, cap, id, tokens);
     } else if (input == .array) {
+        try fits(cx, context, input.array.len);
         for (input.array) |item| {
             if (item != .int) return cx.refuse("token IDs must be integers");
             const id = std.fmt.parseInt(u32, item.int, 10) catch return cx.refuse("token ID is outside the vocabulary");
@@ -72,12 +75,32 @@ fn sequence(cx: *Cx, text: Text, cap: api.EmbeddingInfo, context: u32, input: Va
     } else return cx.refuse("each embedding input must be text or token IDs");
     const count = tokens.items.len - at;
     if (count == 0) return cx.refuse("embedding input must contain tokens");
-    if (context > 0 and count > context) return cx.fail(.context_length, "embedding input exceeds the {d}-token context", .{context});
     try ends.append(cx.a, @intCast(tokens.items.len));
+}
+
+/// One input longer than the context is refused as such, before the batch's own limit.
+fn fits(cx: *Cx, context: u32, count: usize) errors.Refused!void {
+    if (context > 0 and count > context) return cx.fail(.context_length, "the input ({d} tokens) is longer than the model's context length ({d} tokens)", .{ count, context });
+}
+
+/// Empty or whitespace only, by Python's str.isspace (as SGLang strips): nothing to embed; invalid UTF-8 is not blank.
+fn blank(s: []const u8) bool {
+    const view = std.unicode.Utf8View.init(s) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| if (!space(c)) return false;
+    return true;
+}
+
+fn space(c: u21) bool {
+    return switch (c) {
+        0x09...0x0d, 0x1c...0x20, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
+        else => false,
+    };
 }
 
 fn token(cx: *Cx, cap: api.EmbeddingInfo, id: u32, tokens: *std.ArrayList(u32)) errors.Refused!void {
     if (id >= cap.vocabulary) return cx.refuse("token ID is outside the vocabulary");
-    if (tokens.items.len >= cap.max_batch_tokens) return cx.refuse("embedding batch exceeds the admitted token limit");
+    // the input's own length was checked before: here only the whole batch can pass the admitted tokens
+    if (tokens.items.len >= cap.max_batch_tokens) return cx.fail(.request, "the embedding batch exceeds the admitted {d} tokens", .{cap.max_batch_tokens});
     try tokens.append(cx.a, id);
 }
