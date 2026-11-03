@@ -128,6 +128,10 @@ const Host = struct {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (o.slide and (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))) if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    };
     if (fsr_options.refuse(o, problem)) return null;
     if (o.prompt_int8 or o.rope_yarn != null) {
         problem.* = if (o.prompt_int8) prompt_int8_refusal else "--rope-yarn: the Metal engine has no YaRN rope; serve without --rope-yarn";
@@ -519,7 +523,7 @@ test "slide admission: Metal entry points refuse before checkpoint or device acc
     const check = @import("slide_open_test.zig").check;
     const kimi = @import("kimi_metal.zig");
     for (families) |f| {
-        if (std.mem.eql(u8, f.model_type, "nemotron_h") or std.mem.eql(u8, f.model_type, "qwen4") or std.mem.eql(u8, f.model_type, "qwen4_text")) continue;
+        if (std.mem.eql(u8, f.model_type, "nemotron_h")) continue;
         if (std.mem.eql(u8, f.model_type, "kimi_k3") or std.mem.eql(u8, f.model_type, "kimi_k31")) {
             const want = "Kimi: learned states and on-disk prompt states are not implemented";
             try @import("slide_open_test.zig").message(open, f.model_type, want);

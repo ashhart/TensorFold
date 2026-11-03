@@ -57,10 +57,7 @@ pub fn qsa(t: anytype, l: usize, w: anytype) !void {
     ap.u[4] = @intCast(try g.ids());
     ap.u[5] = @intFromBool(t.runtime.kernels.probabilityCut(&t.e.gpu));
     ap.f[0] = 1 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
-    try o.qsa(.scores, ap, &.{ .{ 0, q }, .{ 1, k }, .{ 2, v }, .{ 3, t.buf(.qsa_context) }, .{ 4, ids }, .{ 5, counts }, .{ 6, sparse }, .{ 8, t.buf(.qsa_scores) }, .{ 9, t.buf(.qsa_dp) } });
-    try o.qsa(.softmax, ap, &.{ .{ 0, t.buf(.qsa_scores) }, .{ 1, t.buf(.qsa_dp) }, .{ 2, ids }, .{ 3, counts }, .{ 4, sparse }, .{ 8, t.buf(.qsa_p) }, .{ 9, t.buf(.qsa_ds) } });
-    try o.qsa(.query, ap, &.{ .{ 0, t.buf(.qsa_ds) }, .{ 1, k }, .{ 2, ids }, .{ 3, counts }, .{ 4, sparse }, .{ 8, t.buf(.qsa_q) } });
-    try o.qsa(.key_value, ap, &.{ .{ 0, t.buf(.qsa_ds) }, .{ 1, t.buf(.qsa_p) }, .{ 2, q }, .{ 3, t.buf(.qsa_context) }, .{ 4, ids }, .{ 5, counts }, .{ 6, sparse }, .{ 8, t.buf(.qsa_k) }, .{ 9, t.buf(.qsa_v) } });
+    try selected(t, ap, q, k, v, ids, counts, sparse);
     const frequency = try t.runtime.kernels.frequency(&t.e.gpu, c.rotary / 2 * 4);
     p.u[1] = @intCast(c.heads);
     p.u[3] = @intCast(c.rotary);
@@ -78,4 +75,13 @@ pub fn qsa(t: anytype, l: usize, w: anytype) !void {
     try o.matrix(w.q, t.buf(.projection), t.buf(.mixed), t.rows, g.projectionWidth(), 0, false);
     try o.matrix(w.k, t.buf(.projection), t.buf(.mixed), t.rows, g.projectionWidth(), 2 * c.heads * c.head_dim, true);
     try o.matrix(w.v, t.buf(.projection), t.buf(.mixed), t.rows, g.projectionWidth(), 2 * c.heads * c.head_dim + kv, true);
+}
+
+/// The native selected-attention chain is shared with its independent prepared-node regression.
+pub fn selected(t: anytype, ap: core.living_qsa.Params, q: anytype, k: @TypeOf(q), v: @TypeOf(q), ids: @TypeOf(q), counts: @TypeOf(q), sparse: @TypeOf(q)) !void {
+    const o = t.ops();
+    try o.qsa(.scores, ap, &.{ .{ 0, q }, .{ 1, k }, .{ 2, v }, .{ 3, t.buf(.qsa_context) }, .{ 4, ids }, .{ 5, counts }, .{ 6, sparse }, .{ 8, t.buf(.qsa_scores) }, .{ 9, t.buf(.qsa_dp) } });
+    try o.qsa(.softmax, ap, &.{ .{ 0, t.buf(.qsa_scores) }, .{ 1, t.buf(.qsa_dp) }, .{ 2, ids }, .{ 3, counts }, .{ 4, sparse }, .{ 8, t.buf(.qsa_p) }, .{ 9, t.buf(.qsa_ds) } });
+    try o.qsa(.query, ap, &.{ .{ 0, t.buf(.qsa_ds) }, .{ 1, k }, .{ 2, ids }, .{ 3, counts }, .{ 4, sparse }, .{ 8, t.buf(.qsa_q) } });
+    try o.qsa(.key_value, ap, &.{ .{ 0, t.buf(.qsa_ds) }, .{ 1, t.buf(.qsa_p) }, .{ 2, q }, .{ 3, t.buf(.qsa_context) }, .{ 4, ids }, .{ 5, counts }, .{ 6, sparse }, .{ 8, t.buf(.qsa_k) }, .{ 9, t.buf(.qsa_v) } });
 }

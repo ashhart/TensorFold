@@ -35,6 +35,26 @@ const Capture = struct {
     }
 };
 
+test "Qwen4 learning: native dense gate records its input only with a learner" {
+    var f = try @import("numeric_engine_test.zig").Fixture.open();
+    defer f.deinit();
+    const e = f.e;
+    const x = try e.scratch.take(1, e.c.hidden, .bf16);
+    @memset(n.bits(x), 0x3f80);
+    var problem: @import("config.zig").Problem = .{};
+    var ops: @import("gpu_ops.zig").Ops(n.G) = .{ .gpu = &e.gpu, .model = &e.model, .scratch = &e.scratch, .host = a, .problem = &problem };
+    const off = try ops.denseProject(0, .gate, x);
+    try std.testing.expectEqual(null, ops.dense_input);
+    const R = @import("learning_runtime.zig").Runtime(E, K);
+    const r = try R.init(a, e);
+    defer r.close() catch unreachable;
+    ops.learning = r.listener();
+    const on = try ops.denseProject(0, .gate, x);
+    try std.testing.expectEqual(x, ops.dense_input.?);
+    try std.testing.expectEqualSlices(u16, n.bits(off), n.bits(on));
+    try std.testing.expectEqual(@as(usize, 0), r.kernels.calls);
+}
+
 test "Qwen4 learning: native mixed forward isolates untaught rows and an empty hook changes no launch" {
     var f = try @import("numeric_engine_test.zig").Fixture.open();
     defer f.deinit();
