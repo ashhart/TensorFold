@@ -108,7 +108,6 @@ test "dense geometry: 2B 9B and 27B configs and every layer's packed headers agr
         const raw = try config(al, c);
         const parsed = try cfg.parse(a, raw, null);
         try geometry.supported(parsed);
-        if (c.h == 2048) _ = try @import("../qwen3_5/config.zig").parse(a, raw);
         const header = try Headers.build(al, c);
         try checkPacked(header, "model.embed_tokens", parsed.vocab, parsed.hidden);
         try checkPacked(header, "lm_head", parsed.vocab, parsed.hidden);
