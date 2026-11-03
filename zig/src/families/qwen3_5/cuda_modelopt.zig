@@ -238,6 +238,7 @@ pub const Kernels = struct {
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();
+        try prompt.enableBf16();
         var pack = try cuda.modelopt.Packer.load(d);
         errdefer pack.unload();
         var experts: ?cuda.experts.Nvfp4Experts = if (moe) try cuda.experts.Nvfp4Experts.load(d, sms) else null;
@@ -255,7 +256,7 @@ pub const Kernels = struct {
     }
 
     pub fn linear(k: *const Kernels) cuda.qlinear.Linear {
-        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt };
+        return .{ .lane = &k.lane, .nvfp4_prompt = &k.prompt, .bf16_prompt = true };
     }
 
     /// The slice partials every projection of `e` takes below fused_rows (none with clusters).
