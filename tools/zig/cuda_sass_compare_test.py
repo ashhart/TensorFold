@@ -24,6 +24,10 @@ class Parser(unittest.TestCase):
         for text in ('',dump()+dump()):
             with self.assertRaises(ValueError):compare.parsed(text,IMAGE)
 
+    def test_image_above_every_served_sm_refuses(self):
+        with self.assertRaisesRegex(ValueError,'no emitted'):
+            compare.parsed('',('unit',[],False,200))
+
     def test_missing_encoding_word_refuses(self):
         text=dump().replace('/* 0x000fea0003800000 */','')
         with self.assertRaises(ValueError):compare.parsed(text,IMAGE)
