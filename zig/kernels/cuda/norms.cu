@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 #include "norms_tail.cuh"
 
 namespace tf_norms {
@@ -528,4 +529,3 @@ extern "C" __global__ void __launch_bounds__(tf_rms_strided::LT) tf_moe_add_rms_
 }
 
 #include "rms_tiles.cuh"
-#include "common/reduce.cuh"
