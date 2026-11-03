@@ -472,7 +472,7 @@ model for anything that matters.
 
 ### Fixed drift and supplied recall
 
-Each candidate that reaches the commit checks is measured against `server/slide_panel.zig`:
+With `--slide --slide-drift-gate`, each candidate that reaches the commit checks is measured against `server/slide_panel.zig`:
 115 original unrelated prompts, 15 untold personal controls and 20 fictional neighbour questions.
 This is a new fixed panel, not the reporter's unavailable 155-question panel.
 The graph records the untaught replies and token SHA-256 hashes once. Every later candidate checks
@@ -498,7 +498,10 @@ The hard limits are zero invented personal answers, zero leaks, at most two mean
 kept facts and at most five from ten onward, plus 90% supplied recall and, from ten facts, 90% earlier-fact retention.
 Drift uses the worst of three greedy passes and recall the median. Thinking recall is reported separately.
 Byte-equality targets (103/115 after three facts, 92/115 after ten) remain report-only.
-Without the flag, measurements do not change lesson acceptance or training rows.
+Without the flag, `recall` is ignored and no fixed-panel requests, receipt writes or new graph fields are added.
+An earlier fact without supplied recall and a complete receipt makes the next measurement incomplete.
+To enable the gate over an existing graph, delete facts missing those records, then re-teach them with the gate
+and external wordings enabled.
 
 These three passes observe one fitted candidate. They do not replace the release experiment's three
 fresh-checkpoint lesson sequences. Full-model results, keep rates and measurement cost on every backend

@@ -76,6 +76,7 @@ pub const Graph = struct {
     talks: slide_talks.Talks = .{}, // conversations written once, kept with the facts (slide_context.zig)
     drift_base: ?json.Value = null,
     fault: Fault = .none, // a test's failure of the next file write (read in tests only)
+    test_persist_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
     pub const Fault = enum { none, write, rename };
     pub const record = deleting.record;
@@ -461,6 +462,7 @@ pub const Graph = struct {
 
     /// `save` with its failure returned, the old file then kept whole (called under the lock).
     pub fn persist(g: *Graph) !void {
+        if (builtin.is_test) g.test_persist_calls += 1;
         const path = g.path orelse return;
         var scratch = std.heap.ArenaAllocator.init(g.gpa);
         defer scratch.deinit();

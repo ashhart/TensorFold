@@ -1,0 +1,23 @@
+[
+  {
+    "calls": 278,
+    "learns": 3,
+    "writes": 4,
+    "graph": "{\"next\":2,\"facts\":[{\"id\":1,\"text\":\"I like blue.\",\"source\":\"chat\",\"at\":0,\"state\":\"learned\",\"links\":[],\"round\":1,\"questions\":[\"Which colour do I like?\",\"What colour did I say I like?\"],\"answers\":[{\"question\":\"Which colour do I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"},{\"question\":\"What colour did I say I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"}]}]}",
+    "events": "fact\n{\"id\":1,\"text\":\"I like blue.\"}\nlearning\n{\"id\":1}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nlearned\n{\"id\":1,\"recalled\":true,\"steps\":1}\nprogress\n{\"id\":0,\"phase\":\"saving\",\"at\":0,\"of\":0}\nsaved\n{\"saved\":true}\n[DONE]\n"
+  },
+  {
+    "calls": 618,
+    "learns": 11,
+    "writes": 7,
+    "graph": "{\"next\":2,\"facts\":[{\"id\":1,\"text\":\"I like blue.\",\"source\":\"chat\",\"at\":0,\"state\":\"missed\",\"links\":[],\"round\":5,\"message\":\"lesson refused; last recall checks: fact 1: held plain 0/2 FAIL, held thinking 0/0, probes 0/0\",\"questions\":[\"Which colour do I like?\",\"What colour did I say I like?\"],\"answers\":[{\"question\":\"Which colour do I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"},{\"question\":\"What colour did I say I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"}]}]}",
+    "events": "fact\n{\"id\":1,\"text\":\"I like blue.\"}\nlearning\n{\"id\":1}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nlearned\n{\"id\":1,\"recalled\":false,\"steps\":5,\"message\":\"lesson refused; last recall checks: fact 1: held plain 0/2 FAIL, held thinking 0/0, probes 0/0\"}\nprogress\n{\"id\":0,\"phase\":\"saving\",\"at\":0,\"of\":0}\nsaved\n{\"saved\":true}\n[DONE]\n"
+  },
+  {
+    "calls": 6,
+    "learns": 2,
+    "writes": 4,
+    "graph": "{\"next\":2,\"facts\":[{\"id\":1,\"text\":\"I like blue.\",\"source\":\"chat\",\"at\":0,\"state\":\"missed\",\"links\":[],\"message\":\"too few clean answers to learn from\"}]}",
+    "events": "fact\n{\"id\":1,\"text\":\"I like blue.\"}\nlearning\n{\"id\":1}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nlearned\n{\"id\":1,\"recalled\":false,\"message\":\"too few clean answers to learn from\"}\nprogress\n{\"id\":0,\"phase\":\"saving\",\"at\":0,\"of\":0}\nsaved\n{\"saved\":true}\n[DONE]\n"
+  }
+]
