@@ -1,11 +1,13 @@
 //! macOS: Drama 3's metallib, the family module over Metal, `zig build drama3-generate` and its host tests.
 const std = @import("std");
 
+const embedded = @import("metal_targets.zig").embedded;
+
 const dir = "zig/kernels/metal/drama3";
 const sources = [_][]const u8{ "dense.metal", "gdn.metal", "attn.metal", "moe.metal", "nvfp4.metal", "guidance.metal", "sample.metal", "codec.metal" };
 
 /// Drama in the Metal engines: its `core` is the engine's safetensors, the server's tokenizer and frame_rounds.
-pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, native: *std.Build.Module, metal_std: []const u8, shaders: bool) void {
+pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, native: *std.Build.Module, lib: std.Build.LazyPath) void {
     const tokenizer = native.import_table.get("tokenizer") orelse tok: {
         const t = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
         native.addImport("tokenizer", t);
@@ -18,7 +20,7 @@ pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .{ .name = "tokenizer", .module = tokenizer },
         .{ .name = "frame_rounds", .module = rounds },
     } });
-    const bytes = embedded(b, metallib(b, metal_std), shaders);
+    const bytes = embedded(b, lib, "drama3.metallib");
     const family = b.createModule(.{
         .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"),
         .target = target,
@@ -30,15 +32,8 @@ pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     native.addImport("drama3", family);
 }
 
-/// drama3.metallib as a module: empty bytes without the offline compiler, as the compile-only host targets embed.
-fn embedded(b: *std.Build, lib: std.Build.LazyPath, shaders: bool) *std.Build.Module {
-    const wf = b.addWriteFiles();
-    _ = if (shaders) wf.addCopyFile(lib, "drama3.metallib") else wf.add("drama3.metallib", "");
-    return b.createModule(.{ .root_source_file = wf.add("metallib.zig", "pub const bytes = @embedFile(\"drama3.metallib\");\n") });
-}
-
 /// Each source compiled with `dir` on the include path (d3_common.h), safe math and precise fp32 functions.
-fn metallib(b: *std.Build, metal_std: []const u8) std.Build.LazyPath {
+pub fn metallib(b: *std.Build, metal_std: []const u8) std.Build.LazyPath {
     const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metallib", "-o" });
     const out = link.addOutputFileArg("drama3.metallib");
     for (sources) |name| {
@@ -53,10 +48,8 @@ fn metallib(b: *std.Build, metal_std: []const u8) std.Build.LazyPath {
     return out;
 }
 
-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, metal_std: []const u8, shaders: bool, test_step: *std.Build.Step) void {
-    const lib = metallib(b, metal_std);
-    b.getInstallStep().dependOn(&b.addInstallFile(lib, "lib/drama3.metallib").step);
-    const bytes = embedded(b, lib, shaders);
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, lib: std.Build.LazyPath, test_step: *std.Build.Step) void {
+    const bytes = embedded(b, lib, "drama3.metallib");
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("tokenizer", tokenizer);

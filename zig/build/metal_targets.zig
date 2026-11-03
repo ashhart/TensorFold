@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const qwen27_build = @import("qwen27.zig");
+const drama3_build = @import("drama3_metal.zig");
 const core_checks = @import("core_checks.zig");
 const glm_checks = @import("glm_checks.zig");
 const flashnext_checks = @import("flashnext_checks.zig");
@@ -220,8 +221,11 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
     });
     engines.addImport("living", mods.living);
-    @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std, shaders);
-    @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, shaders, test_step);
+    const drama3_lib = drama3_build.metallib(b, metal_std);
+    b.getInstallStep().dependOn(&b.addInstallFile(drama3_lib, "lib/drama3.metallib").step);
+    const drama3_embed = if (shaders) drama3_lib else no_shaders;
+    drama3_build.addNative(b, target, optimize, metal, engines, drama3_embed);
+    drama3_build.targets(b, target, optimize, metal, drama3_embed, test_step);
 
     const programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
         .{ .name = "tf-metal-tests", .path = "zig/tests/gpu_tests.zig", .about = "GPU runtime tests" },
@@ -581,7 +585,7 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = m.lanes }} });
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
     engines.addImport("living", m.living);
-    @import("drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b), true);
+    drama3_build.addNative(b, target, .fast, m.metal, engines, drama3_build.metallib(b, mlxMetalStd(b)));
     engines.addImport("kimi_k3", kimiModule(b, target, .fast, m.metal, m.engine, m.lanes));
     engines.addImport("kimi_metallib", embedded(b, kimiMetallib(b, &flags), "kimi.metallib"));
     return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null);
