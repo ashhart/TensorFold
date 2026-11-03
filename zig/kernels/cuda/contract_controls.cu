@@ -4,6 +4,7 @@
 #include <cuda_fp16.h>
 #include <math.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 __device__ __forceinline__ float tf_ctl_x(const __nv_bfloat16* x, int64_t i) { return __bfloat162float(x[i]); }
 
@@ -521,7 +522,6 @@ extern "C" __global__ void tf_ctl_exl3_plan_finish_alpha_one(const PlanStage a) 
 
 // Gate 3: main's grouped EXL3 loop, the baseline its load-ahead replaces, and two load-ahead faults that must go red.
 #include "exl3_grouped.cuh"
-#include "common/reduce.cuh"
 
 #define TF_CTL_EXL3_GROUPED(NAME, CB, LOAD)                                                                       \
     extern "C" __global__ void NAME(tf_exl3::GroupedArgs a) {                                                  \
