@@ -202,6 +202,7 @@ fn bundle() engine_mod.ShaderBundle {
     return .{
         .ops = .{
             .qmm_bf16 = &q35s.qmm_bf16,
+            .qmm_q4_vec4 = &q35s.qmm_q4_vec4,
             .dequant_bf16 = &q35s.dequant_bf16,
             .gather_u32 = &q35s.gather_u32,
             .gather_u16 = &q35s.gather_u16,

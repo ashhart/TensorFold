@@ -86,6 +86,7 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     defer staging.deinit();
     const sh = vk.ops.Shaders{
         .qmm_bf16 = &shaders.qmm_bf16,
+        .qmm_q4_vec4 = &shaders.qmm_q4_vec4,
         .dequant_bf16 = &shaders.dequant_bf16,
         .gather_u32 = &shaders.gather_u32,
         .gather_u16 = &shaders.gather_u16,
@@ -411,6 +412,7 @@ fn projectGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
         try vk.orExit(vk.ops_q4.project(o, cmds, out_view, x_view, w_view, s_view, b_view, case.shape.k, scratch, timeout));
+        try scratch.reset(mark);
         try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(bits), timeout);
         r = f.check(bits) catch |e| {
             const m = f.measure(bits);
@@ -424,6 +426,27 @@ fn projectGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
             std.debug.print("FAIL project case=\"{s}\": repeat {d} differs at element {d}\n", .{ case.name, rep, at });
             return false;
         }
+    }
+    // The vec4 image is the scalar image with wider loads: its bytes must equal the scalar bytes exactly.
+    if (vk.ops_q4.qmmVariant(x_view, w_view) != .vec4) {
+        std.debug.print("FAIL project case=\"{s}\": its windows are not 16-byte aligned, so the vec4 image is not exercised\n", .{case.name});
+        return false;
+    }
+    const scalar_bits = try a.alloc(u16, f.out.len);
+    defer a.free(scalar_bits);
+    inline for (.{ vk.ops_q4.Qmm.scalar, vk.ops_q4.Qmm.vec4 }) |force| {
+        try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
+        try vk.orExit(vk.ops_q4.projectAs(o, force, cmds, out_view, x_view, w_view, s_view, b_view, case.shape.k, scratch, timeout));
+        try scratch.reset(mark);
+        try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(if (force == .scalar) scalar_bits else bits), timeout);
+    }
+    if (std.mem.indexOfDiff(u16, scalar_bits, bits)) |at| {
+        std.debug.print("FAIL project case=\"{s}\": the vec4 image differs from the scalar image at element {d}\n", .{ case.name, at });
+        return false;
+    }
+    if (std.mem.indexOfDiff(u16, first, bits)) |at| {
+        std.debug.print("FAIL project case=\"{s}\": the default pick differs from the forced vec4 image at element {d}\n", .{ case.name, at });
+        return false;
     }
     const back = try a.alloc(u8, @max(std.mem.sliceAsBytes(f.x).len, std.mem.sliceAsBytes(f.w).len, std.mem.sliceAsBytes(f.scales).len, std.mem.sliceAsBytes(f.biases).len));
     defer a.free(back);
