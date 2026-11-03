@@ -243,6 +243,9 @@ const HostSums = struct {
 
 test "exl3 grouped contract: gate 4's stress rows hold fp32 replays and make fp16 and bf16 sums miss" {
     const gates = core.contract.gates;
+    const was = gates.quiet;
+    gates.quiet = true;
+    defer gates.quiet = was;
     for ([_]Codebook{ .inst3, .mcg, .mul1 }) |cb| {
         var h: HostSums = .{ .a = std.testing.allocator, .cb = cb };
         defer {

@@ -51,7 +51,7 @@ test "DeepSeek chat: missing Jinja uses the committed encoding.py text goldens" 
         checked += 1;
     }
     try t.expect(checked >= 20);
-    std.debug.print("DEEPSEEK_CHAT_GOLDENS {d} committed encoding.py cases\n", .{checked});
+    try t.expectEqual(@as(usize, 178), checked);
 }
 
 test "DeepSeek chat: native request control spellings stay masked and structural tokens stay trusted" {

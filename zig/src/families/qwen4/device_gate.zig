@@ -58,7 +58,7 @@ pub fn Gate(comptime G: type, comptime D: type, comptime L: type, comptime read:
             defer file.close();
             var p: cfg.Problem = .{};
             const e = @import("engine.zig").Engine(G).open(a, io, file.path, b, .{ .capacity = 32, .window = 16, .streams = 2, .budget = std.math.maxInt(u64) }, &p, loader) catch |err| {
-                std.debug.print("FAIL qwen4 engine open: {s}: {t}\n", .{ p.name(), err });
+                if (fixture.say != .nothing) std.debug.print("FAIL qwen4 engine open: {s}: {t}\n", .{ p.name(), err });
                 return err;
             };
             var closed = false;
@@ -76,7 +76,9 @@ pub fn Gate(comptime G: type, comptime D: type, comptime L: type, comptime read:
             const baseline = try s.one(left, ids);
             try fixture.oracle(doc.value, baseline.logits, baseline.picks);
             try e.keep(left, ids.len);
-            std.debug.print("PASS qwen4 binary64: {d} logits and {d} GPU token picks\n", .{ baseline.logits.len, baseline.picks.len });
+            if (fixture.say == .all) std.debug.print("PASS qwen4 binary64: {d} logits and {d} GPU token picks\n", .{
+                baseline.logits.len, baseline.picks.len,
+            });
             for (0..5) |_| {
                 try left.state.reset();
                 try equal("repeat", baseline, try s.one(left, ids));
@@ -100,7 +102,10 @@ pub fn Gate(comptime G: type, comptime D: type, comptime L: type, comptime read:
                 try equal("resumed suffix", s.slice(baseline, cut, ids.len), try s.one(right, ids[cut..]));
                 try e.keep(right, ids.len - cut);
             }
-            std.debug.print("PASS qwen4 prompt cuts and resumed == fresh: {d} cuts, every logit and token\n", .{ids.len - 1});
+            if (fixture.say == .all) std.debug.print(
+                "PASS qwen4 prompt cuts and resumed == fresh: {d} cuts, every logit and token\n",
+                .{ids.len - 1},
+            );
             const other = [_]u32{ 19, 1, 4, 17, 9, 6, 12, 24, 8, 3, 5, 11 };
             try right.state.reset();
             const other_baseline = try s.one(right, &other);
@@ -121,7 +126,10 @@ pub fn Gate(comptime G: type, comptime D: type, comptime L: type, comptime read:
             try equal("concurrent packed right", other_baseline, s.slice(paired, ids.len, ids.len + other.len));
             try e.keep(left, ids.len);
             try e.keep(right, other.len);
-            std.debug.print("PASS qwen4 concurrent == solo: unequal histories, single rows and packed prompts\n", .{});
+            if (fixture.say == .all) std.debug.print(
+                "PASS qwen4 concurrent == solo: unequal histories, single rows and packed prompts\n",
+                .{},
+            );
             for (0..ids.len) |accepted| {
                 try left.state.reset();
                 _ = try s.one(left, ids);
@@ -142,8 +150,12 @@ pub fn Gate(comptime G: type, comptime D: type, comptime L: type, comptime read:
             released = true;
             try e.close();
             closed = true;
+            if (fixture.say != .all) return;
             std.debug.print("N/A qwen4 learned MTP: no declared head; positive MTP configs refuse admission\n", .{});
-            std.debug.print("PASS qwen4 device: binary64, tokens, repeats, cuts, resume, concurrency, rollback and copied drafts\n", .{});
+            std.debug.print(
+                "PASS qwen4 device: binary64, tokens, repeats, cuts, resume, concurrency, rollback and copied drafts\n",
+                .{},
+            );
         }
     };
 }

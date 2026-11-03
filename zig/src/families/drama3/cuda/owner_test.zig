@@ -158,6 +158,9 @@ test "drama poison completes default-stream fills before reset can reuse buffers
 }
 
 test "drama owner: failed fork teardown pins shared codec buffers descriptors and module through base teardown" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var e: Engine = undefined;
     Mock.init(&e);
     const base = try Mock.base(&e);
@@ -179,6 +182,9 @@ test "drama owner: failed fork teardown pins shared codec buffers descriptors an
     try std.testing.expectEqual(@as(usize, 0), Mock.count());
 }
 test "drama owner: partial warmup failure retains real Tts codec and zero buffer until drain succeeds" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var e: Engine = undefined;
     Mock.init(&e);
     const t = try Mock.base(&e);

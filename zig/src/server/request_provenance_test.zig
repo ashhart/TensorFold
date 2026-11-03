@@ -87,7 +87,7 @@ test "request provenance: every fixture added spelling in every request field an
         try sameAdded(hf, own, try appended.encode(hf.text(), a, &problem));
         try std.testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ rendered.text, all.items }), appended.text);
     }
-    std.debug.print("PROVENANCE_FIELDS fixtures={d} fields={d} plus decision labels\n", .{ f.names.len, field_paths.len });
+    try std.testing.expectEqual([2]usize{ 3, 14 }, [2]usize{ f.names.len, field_paths.len });
 }
 
 test "request provenance: a schema key cannot construct an added spelling" {

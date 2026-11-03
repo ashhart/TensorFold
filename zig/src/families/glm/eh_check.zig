@@ -4,6 +4,11 @@ const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const wide = @import("wide.zig");
 
+/// TF_TEST_RECEIPTS=1 prints each check's measured error; the bounds are checked either way.
+fn receipts() bool {
+    return std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
+}
+
 const n: usize = 4096; // D, kept for every shape
 const k: usize = 8192;
 const max_rows: usize = 8192;
@@ -187,7 +192,8 @@ fn ehCheck() !void {
                 }
             }
         }
-        std.debug.print(
+        const say = receipts() or !pair_ok or !ref_ok;
+        if (say) std.debug.print(
             "eh nax vs scal rows={d} k={d} n={d}: worst-col scal={d:.2} nax={d:.2} max={d:.2} pair-abs={d:.3} fp64-abs bf16-steps={d:.2} floor-cols; sampled fp64: cols step 16 x 32 rows + 4 corner rows (used {d} rows x {d} cols)\n",
             .{
                 rows,
@@ -208,7 +214,11 @@ fn ehCheck() !void {
         sh1.update(std.mem.sliceAsBytes(row_out));
         var sh2: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{});
         sh2.update(std.mem.sliceAsBytes(nax_out));
-        std.debug.print("eh byte-hash rows={d}: scalar sha256={s} nax={s} diverging-elements={d}\n", .{ rows, std.fmt.bytesToHex(sh1.finalResult(), .lower), std.fmt.bytesToHex(sh2.finalResult(), .lower), pair_div });
+        const scalar_hex = std.fmt.bytesToHex(sh1.finalResult(), .lower);
+        const nax_hex = std.fmt.bytesToHex(sh2.finalResult(), .lower);
+        if (say) std.debug.print("eh byte-hash rows={d}: scalar sha256={s} nax={s} diverging-elements={d}\n", .{
+            rows, scalar_hex, nax_hex, pair_div,
+        });
         if (!pair_ok) std.debug.print(
             "eh nax pair fail rows={d} r={d} c={d} scal={d:.4} nax={d:.4} fp64-abs\n",
             .{ rows, pair_i / n, pair_i % n, f32of(row_out[pair_i]), f32of(nax_out[pair_i]) },

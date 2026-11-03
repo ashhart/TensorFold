@@ -311,7 +311,6 @@ test "vision markers: every LFM2 picture and tile marker must be added" {
         try std.testing.expectEqual(@as(?u32, @intCast(i + 300)), marks.firstNonAdded(&tok));
         added[i].id -= 1000;
     }
-    std.debug.print("VISION_LFM2 markers={d}; every omitted entry refused\n", .{added.len});
 }
 
 test "automatic LFM2 pictures warn and turn off for missing or non-added markers" {
@@ -354,5 +353,4 @@ test "automatic LFM2 pictures warn and turn off for missing or non-added markers
             try std.testing.expect(std.mem.indexOf(u8, warning, if (mode == 1) "missing" else "not an added token") != null);
         }
     }
-    std.debug.print("VISION_LFM2_AUTO valid stays enabled; missing and non-added disable pictures with warning\n", .{});
 }

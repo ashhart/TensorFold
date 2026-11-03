@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     var d = try D.load(init.gpa, &b, 32, 32, 2);
     var drawer_closed = false;
     defer if (!drawer_closed) d.close() catch {};
-    const nodes = try F.node_gate.run(G, read, init.gpa, init.io, &b, Loader{}, true);
+    const nodes = try F.node_gate.run(G, read, init.gpa, init.io, &b, Loader{}, .nodes);
     if (nodes.different != 0) return error.Qwen4NodeMismatch;
     try F.device_gate.Gate(G, D, @import("lanes"), read).runAll(init.gpa, init.io, &b, Loader{}, &d);
     try d.close();

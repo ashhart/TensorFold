@@ -33,6 +33,9 @@ test "an engine whose backend gives no score refuses decisions as unsupported" {
 }
 
 test "a backend's score runs on the engine thread, a failure comes back as Failed, and a stopped host fails" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
     defer cfg.deinit(gpa);

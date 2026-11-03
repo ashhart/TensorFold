@@ -121,7 +121,6 @@ test "GLM pages: a failed page-owner wait must fall back to the context before f
     f.p.deinit();
     F.pending = false;
     F.fail_wait = false;
-    std.debug.print("page deinit: context_waits={d}, unsafe_frees={d}\n", .{ F.context_waits, F.unsafe_frees });
     try t.expect(F.context_waits > 0);
     try t.expectEqual(@as(usize, 0), F.unsafe_frees);
 }
@@ -147,11 +146,9 @@ fn overflow(capped: bool) !void {
     }
     const b = back.backend();
     const result = b.vtable.prefill_step.?(b.ptr, &ss[2], 0);
-    if (result) |_| return error.ExpectedFailure else |err| {
-        std.debug.print("all-on-pages third opening: capped={}, error={s}, allocations={d}->{d}, slots={d}\n", .{ capped, @errorName(err), before, F.allocs, f.e.seqs.items.len });
-        try t.expectEqual(error.LaneMemory, err);
-    }
+    if (result) |_| return error.ExpectedFailure else |err| try t.expectEqual(error.LaneMemory, err);
     try t.expectEqual(before, F.allocs);
+    try t.expectEqual(@as(usize, 2), f.e.seqs.items.len);
     try t.expect(!back.lanes.contains(&ss[2]));
     try t.expectEqual(@as(usize, 2), back.lanes.count());
 }

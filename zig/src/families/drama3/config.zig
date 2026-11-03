@@ -161,6 +161,9 @@ test "the shipped Drama 3 config parses" {
 }
 
 test "a checkpoint whose shape differs from the kernels' is refused" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const text =
         \\{"eos_token_id": 1, "pad_token_id": 2, "semantic_start_token_id": 10, "semantic_end_token_id": 4105,
         \\ "audio_pad_token_id": 3, "text_config": {"hidden_size": 4096}, "audio_decoder_config": {}}

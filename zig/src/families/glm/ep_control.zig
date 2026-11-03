@@ -253,6 +253,9 @@ test "identities: the halves tile the experts and everything else matches" {
 }
 
 test "hello refuses a peer that runs another layer subset, on both ranks" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = std.testing.allocator;
     const p = try Pair.init(gpa);
     defer p.deinit(gpa);
