@@ -77,8 +77,11 @@ fn fill(p: *Pending, io: std.Io, dir: []const u8, c: Config, with_mtp: bool) !vo
     defer core.checkpoint.cache.close(&ck);
     try src.add(&ck);
     const pre = c.prefix();
+    const readers = try core.checkpoint_read_ahead.readers();
     w.blocks = try gpa.alloc(Block, c.layers);
     for (c.kinds[0..c.layers], 0..) |kind, i| {
+        var reading = try @import("cuda_load_prefetch.zig").begin(&ck, pre, i, readers);
+        defer reading.deinit();
         var nm: [128]u8 = undefined;
         var nb: [128]u8 = undefined;
         var pb: [128]u8 = undefined;
@@ -92,6 +95,7 @@ fn fill(p: *Pending, io: std.Io, dir: []const u8, c: Config, with_mtp: bool) !vo
             .moe => b.moe = if (c.bolt) try modelopt.latent(L, &ck, try join(&nb, name, ".moe"), mixer, c, i) else if (c.latent > 0) try latent.load(L, &ck, try join(&nb, name, ".moe"), mixer, c, @intCast(i)) else try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
         }
         w.blocks[i] = b;
+        _ = try reading.check();
     }
     if (c.format == .modelopt) w.embed = try modelopt.embed(L, &ck, c) else {
         const emb = try ck.get("backbone.embeddings.weight");
