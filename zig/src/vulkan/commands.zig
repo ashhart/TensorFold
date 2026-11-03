@@ -62,8 +62,7 @@ pub const Commands = struct {
         return self.cmd;
     }
 
-    /// Submits everything recorded since the last submission (nothing, if nothing is open); the fence wait is finite.
-    /// Timeout/InFlight require orExit to avoid freeing resources the GPU may still use.
+    /// Submits what is recorded (nothing if nothing is open), with a finite fence wait; Timeout and InFlight need orExit.
     pub fn submit(self: *Commands, timeout_ns: u64) Error!void {
         if (!self.recording) return;
         const api = &self.dev.api;
