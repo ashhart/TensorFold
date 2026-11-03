@@ -574,3 +574,7 @@ test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
     try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni" });
 }
+
+test {
+    _ = @import("copy_drafts_cuda_test.zig");
+}

@@ -138,3 +138,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     live_run.has_side_effects = true;
     b.step("test-qwen35-live-host", "Live CUDA launch buckets and startup warmups without devices").dependOn(&live_run.step);
 }
+
+pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {
+    const family_copies = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA lane copies:"} }));
+    b.step("test-family-copies-host", "Actual Gemma, MiniMax, Spark and Kolibri copy policies through the lane core").dependOn(&family_copies.step);
+    step.dependOn(&family_copies.step);
+}

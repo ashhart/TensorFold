@@ -120,6 +120,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_SPARK_GRAPHS"); // =0: every decode forward eager
     own.sb = try be.Spark.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    own.sb.copy_drafts = o.drafts;
     errdefer own.sb.deinit();
     return .{
         .backend = own.sb.backend(),

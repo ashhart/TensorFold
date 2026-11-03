@@ -23,6 +23,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the cache benchmark receipts say which tool-call content they count (#1999). Thanks to @garvrao80.
 
 - `zig build test-info-config` runs info's issue-934 test again: it was built from the CUDA CLI root, which never reached it (#2006). Thanks to @jishnuvenugopal.
+- Gemma 4, MiniMax M3, Kolibri-1 and Spark on CUDA prioritize verified root and context copies through their existing drafts switch, using the same four-token match policy as Nemotron (#1910).
 
 - The Nemotron XPU loader and the XPU safetensors reader read shard headers through core, so a malformed or oversized header is refused before anything is read (#1919). Thanks to @jschmied.
 
@@ -43,6 +44,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next on HIP routes from the checkpoint's stored BF16 router rows, widened in the router kernel with the FP32 lane order kept, with the same tokens, for about 2.5 MiB more memory a layer (the BF16 rows are held beside the FP32 ones) (#1614). Thanks to @gilby.
 
 - The Metal vision towers' shard reader and the cluster planner's checkpoint reader check a safetensors header's length with core's `headerSize` before reading it, so a malformed or oversized header is refused before any large allocation (#1983, part of #1872).
+
 
 - `serve --prompt-cache-disk DIR` is a shorter spelling of `--learn-conversations --learn-dir DIR`, with the same limits, spill and start-up line; giving it together with either legacy flag is refused (#1908). Thanks to @garvrao80.
 

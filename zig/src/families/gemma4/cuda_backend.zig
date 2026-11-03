@@ -49,6 +49,7 @@ pub const Keeper = struct { ctx: *anyopaque, bytes: *const fn (*anyopaque, usize
 const Tap = struct { row: usize = 0, start: u64 = 0, rows: usize = 0, gen: u64 = 0 };
 
 pub const Gemma = struct {
+    copy_drafts: bool = true,
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     m: *fwd.Model,
@@ -182,7 +183,7 @@ pub const Gemma = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Gemma) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(if (x.m.paged) round_rows else x.m.slots, round_rows)) };
+        return .{ .copy_drafts = x.copy_drafts, .root_copies = x.copy_drafts, .context_copies = x.copy_drafts, .copy_match = if (x.copy_drafts) 4 else 8, .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(if (x.m.paged) round_rows else x.m.slots, round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Gemma {
@@ -582,15 +583,19 @@ test "a greedy pick under a grammar: the first largest allowed token, refusals b
 test "zero grant: Gemma CUDA assistant and DFlash preserve tokens through a long shared skip" {
     var m: fwd.Model = undefined;
     m.slots = 16;
+    m.paged = false;
     var b: Gemma = undefined;
     b.m = &m;
+    b.copy_drafts = true;
     try lanes.shared_draft_check.check(b.facts(), true);
 }
 
 test "shared head costs: Gemma CUDA assistant and DFlash retain costed copy grants" {
     var m: fwd.Model = undefined;
     m.slots = 16;
+    m.paged = false;
     var b: Gemma = undefined;
     b.m = &m;
+    b.copy_drafts = true;
     try @import("cuda_head_cost_test.zig").check(b.facts());
 }
