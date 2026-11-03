@@ -130,3 +130,65 @@ test "benchmark group: Metal endpoint inventories and legacy HELLO peers preserv
         if (bytes) |b| try expect(std.mem.indexOf(u8, b, "multi-node") != null);
     };
 }
+
+test "benchmark group: a delayed Metal peer retains the startup wait without a new deadline" {
+    const Clock = struct {
+        var calls: std.atomic.Value(u32) = .init(0);
+        var table: std.Io.VTable = undefined;
+        fn now(ctx: ?*anyopaque, kind: std.Io.Clock) std.Io.Timestamp {
+            if (kind == .awake) return .{ .nanoseconds = @as(i96, calls.fetchAdd(1, .monotonic)) * 61 * std.time.ns_per_s };
+            return std.testing.io.vtable.now(ctx, kind);
+        }
+        fn io() std.Io {
+            calls.store(0, .monotonic);
+            table = std.testing.io.vtable.*;
+            table.now = now;
+            return .{ .userdata = std.testing.io.userdata, .vtable = &table };
+        }
+    };
+    const Device = struct {
+        pub fn name(_: @This()) [*:0]const u8 {
+            return "Apple Test GPU";
+        }
+    };
+    const Link = struct {
+        bytes: [8192]u8 align(8) = @splat(0),
+        sent: ?g.Wire = null,
+        flushed: std.atomic.Value(bool) = .init(false),
+        ready: u64,
+        pub fn size(_: *@This()) u32 {
+            return 2;
+        }
+        pub fn rank(_: *@This()) u32 {
+            return 0;
+        }
+        pub fn window(x: *@This()) []u8 {
+            return &x.bytes;
+        }
+        pub fn write2Signal(x: *@This(), _: u32, _: usize, head: []const u8, _: []const u8, _: usize, _: u64) !void {
+            x.sent = std.mem.bytesToValue(g.Wire, head[0..@sizeOf(g.Wire)]);
+        }
+        pub fn flush(x: *@This()) !void {
+            x.flushed.store(true, .release);
+        }
+        fn peer(x: *@This()) void {
+            while (!x.flushed.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..4096) |_| std.atomic.spinLoopHint();
+            const word: *u64 = @ptrCast(@alignCast(x.bytes[64..][0..8]));
+            @atomicStore(u64, word, x.ready, .release);
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u64{ 2, 3 }) |ready| {
+        var link: Link = .{ .ready = ready };
+        const peer = fixture(1, 2, 2, 1);
+        @memcpy(link.bytes[4096..][0..@sizeOf(g.Wire)], std.mem.asBytes(&peer));
+        const thread = try std.Thread.spawn(.{}, Link.peer, .{&link});
+        defer thread.join();
+        const bytes = (try g.metal(arena.allocator(), Clock.io(), Device{}, &link, 4096, 64, ready)).?;
+        try expect(link.flushed.load(.acquire) and link.sent.?.rank == 0);
+        try expect(std.mem.indexOf(u8, bytes, "multi-node") != null);
+        try std.testing.expectEqual(@as(u32, 0), Clock.calls.load(.monotonic));
+    }
+}

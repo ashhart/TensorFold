@@ -107,9 +107,7 @@ pub fn metal(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usi
     try rd.write2Signal(1 - rank, offset, std.mem.asBytes(&mine), &.{}, hello, ready);
     try rd.flush();
     const word: *const u64 = @ptrCast(@alignCast(win[hello..][0..8]));
-    const until = std.Io.Clock.awake.now(io).toNanoseconds() + 60 * std.time.ns_per_s;
     while (@atomicLoad(u64, word, .acquire) < ready and @atomicLoad(u64, word, .acquire) != 1) {
-        if (std.Io.Clock.awake.now(io).toNanoseconds() >= until) return error.RankTimeout;
         std.atomic.spinLoopHint();
     }
     if (@atomicLoad(u64, word, .acquire) != ready) return null;

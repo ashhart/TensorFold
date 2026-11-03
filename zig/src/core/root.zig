@@ -66,6 +66,7 @@ pub const kv_pool = @import("kv_pool.zig");
 pub const kv_prompts = @import("kv_prompts.zig");
 
 test {
+    _ = benchmark_group;
     _ = profile;
     _ = checkpoint_weights;
     _ = safetensors;
