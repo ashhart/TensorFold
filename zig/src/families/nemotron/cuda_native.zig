@@ -35,7 +35,11 @@ pub const prompt_rows: u32 = state.pass_rows;
 pub const window_rows: u32 = state.max_rows; // a request's last verify window: its pages hold that many rows past it
 pub const max_drafts: u32 = @import("cuda_mtp.zig").max_chain; // Super's; open refuses more than a checkpoint's window holds
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null, mtp_drafts: ?u32 = null, mtp_confidence: ?f64 = null };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, slide_forget: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null, mtp_drafts: ?u32 = null, mtp_confidence: ?f64 = null };
+pub fn usageEnabled(o: Options, bolt: bool, latent: usize) bool {
+    return @import("lanes").pocket_usage.enabled(o.slide, o.slide_forget) and !bolt and latent == 0;
+}
+
 pub const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
@@ -64,6 +68,7 @@ pub const Loaded = struct {
     learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
     vision: ?*vision.Vision = null, // --vision: the tower the server's image requests reach
     taps: []const u32 = &.{}, // the rows a recorder may ask `backend` for (empty: none)
+    pocket_usage: bool = false,
     host_snaps: bool = false, // a discrete card: prompt states go to pinned host memory when the cache does not fit
     /// The other streams' memory as one pool of KV pages (null: each allocates a window at its prefill).
     layout: ?kv.Layout = null,
@@ -129,6 +134,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
     own.lanes.copy_drafts = o.drafts;
+    own.lanes.usage_enabled = usageEnabled(o, e.c.bolt, e.c.latent);
     own.lanes.mtp_drafts = o.mtp_drafts;
     own.lanes.mtp_confidence = o.mtp_confidence;
     own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
@@ -137,6 +143,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.taps = .{@import("cuda_lanes.zig").finalTap(e.c)};
     return .{
         .backend = own.lanes.backend(),
+        .pocket_usage = own.lanes.usage_enabled,
         .facts = own.lanes.facts(),
         .rows = own.lanes.facts().exact_width,
         .stream_bytes = e.seqBytes(),

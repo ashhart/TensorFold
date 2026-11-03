@@ -22,6 +22,7 @@ const Allocator = std.mem.Allocator;
 pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
 /// What a route hands the reply: Python's chat() arguments.
 pub const Input = struct {
+    usage: ?*@import("slide_usage_stream.zig").Scope = null,
     messages: Value = .{ .array = &.{} },
     tools: []const Value = &.{},
     prompt: ?Prompt = null,
@@ -207,6 +208,9 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const a = cx.a;
     const io = srv.io;
     var request = prepared.request;
+    if (!request.background and request.max_tokens > 0) if (prepared.input.usage) |s| {
+        request.usage = s.observer();
+    };
     const input = prepared.input;
     const received = prepared.received;
     const effort = prepared.effort;
@@ -592,9 +596,4 @@ const Generation = struct {
     }
 };
 
-/// ``{key: text}``: a streamed delta (role, content or reasoning_content).
-pub fn deltaOf(a: Allocator, key: []const u8, text: []const u8) Allocator.Error!Value {
-    const o = try json.newObject(a);
-    try o.put(a, key, .{ .string = text });
-    return .{ .object = o };
-}
+pub const deltaOf = @import("chat_delta.zig").deltaOf;

@@ -9,6 +9,8 @@ pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject:
 /// One fact's examples; `more` another round, `undo` one back, `save` writes every kept lesson.
 pub const Lesson = struct {
     train: []const Example = &.{},
+    reuse_deleted: bool = false, // opt-in capacity policy may reuse silent, unowned interior neurons
+    against: []const Example = &.{}, // a correction's old answers, cancelled by new subject neurons only
     think: []const Example = &.{}, // the facts' answers with thinking on, one learned beside each plain one
     held: []const Example = &.{},
     near: []const Example = &.{},
@@ -22,6 +24,7 @@ pub const Lesson = struct {
     reroute: bool = false, // the open lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the open lesson taken out whole
     save: bool = false,
+    shrink: enum { none, next, keep, restore } = .none, // one provisional neuron removal, resolved by the server checks
     retire: []const [2]u16 = &.{}, // (layer, neuron) of facts a newer one replaces, zeroed
     unretire: bool = false, // the last retire's neurons put back
     forget: []const [2]u16 = &.{}, // (layer, neuron) of a fact deleted on request, their input weights zeroed
@@ -103,7 +106,7 @@ pub fn readsConversations(comptime Trainer: type, pocket: bool) bool {
 
 /// `lesson` checked, as a learner reads it: a prompt in a conversation longer than its passes' `rows` only by `taps`.
 pub fn readable(gpa: std.mem.Allocator, lesson: Lesson, taps: bool, rows: usize, bufs: *[4]std.ArrayList(Example)) !Lesson {
-    for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
+    for ([_][]const Example{ lesson.train, lesson.against, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
         if (ex.start < 1 or ex.start >= ex.ids.len or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
         // a prompt in a conversation is read through the host's taps, at any length
         if (ex.ids.len - 1 > rows and ex.context == 0) return error.ExampleTooLong;
@@ -128,7 +131,7 @@ pub fn disown(gpa: std.mem.Allocator, xs: []Example) void {
 }
 
 /// The lists of a lesson an edit reads.
-const edit_lists = .{ "train", "think", "held", "near", "keep", "asked", "unasked" };
+const edit_lists = .{ "train", "against", "think", "held", "near", "keep", "asked", "unasked" };
 
 /// Copies of the lists of `lesson` an edit reads, the caller's to free (disownLesson).
 pub fn ownLesson(gpa: std.mem.Allocator, lesson: Lesson) !Lesson {
@@ -169,4 +172,9 @@ test "a learner without taps reads a prompt in a conversation only when its pass
     try std.testing.expectEqual(@as(usize, 1), tapped.train.len); // an answer is read by passes whole
     try std.testing.expectEqual(@as(usize, 2), tapped.asked.len);
     try std.testing.expectEqual(@as(usize, 1), tapped.unasked.len);
+}
+
+/// The learner exposes its host and pocket type, so capability checks stay beside example planning.
+pub fn ofLearner(l: anytype) bool {
+    return readsConversations(@TypeOf(l.*).Host.Trainer, @TypeOf(l.pockets) != void and l.whole and l.method == .pocket);
 }

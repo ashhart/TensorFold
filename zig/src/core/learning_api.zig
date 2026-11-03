@@ -1,6 +1,9 @@
 const Example = @import("engine_api.zig").Example;
 pub const LearnRequest = struct {
+    audit: ?*const @import("pocket_audit.zig").Request = null,
     train: []const Example = &.{},
+    reuse_deleted: bool = false, // opt-in capacity policy may reuse silent, unowned interior neurons
+    against: []const Example = &.{}, // a correction's old answers, cancelled by new subject neurons only
     think: []const Example = &.{}, // the facts' answers with thinking on, learned beside `train` (one of each a step)
     held: []const Example = &.{},
     near: []const Example = &.{},
@@ -14,6 +17,7 @@ pub const LearnRequest = struct {
     reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the last lesson taken out whole
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
+    shrink: enum { none, next, keep, restore } = .none, // one trial removal, resolved by the server's checks
     retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
     unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
     // instead zero these neurons' input weights (a fact deleted on request), kept to put back
@@ -34,9 +38,9 @@ pub const LearnProgress = struct { phase: LearnPhase, at: u32 = 0, of: u32 = 0, 
 
 /// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
 pub const LearnEvent = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{} }, // neurons: a pocket's
+    learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{}, candidate: bool = false }, // neurons: a pocket's
     progress: LearnProgress,
-    done: struct { message: []const u8 = "" },
+    done: struct { message: []const u8 = "", before_begin: bool = false },
 };
 
 /// Where a learn request's events go; called on the engine's thread, so it must return at once.
@@ -50,6 +54,7 @@ pub const LearnError = error{ Closed, Busy, Unsupported };
 /// A family's learner, which LaneHost steps one bounded unit at a time while no stream decodes.
 pub const Learner = struct {
     ctx: *anyopaque,
+    read_only_audit: bool = false,
     /// Start a job; its events, `done` last, go to `sink` from later steps.
     begin: *const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) anyerror!void,
     /// One unit of the job: `changed` when weights moved (kept prompt states are then dropped), `done` when it ended.

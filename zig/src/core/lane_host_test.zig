@@ -328,10 +328,26 @@ test "a learn request steps while the engine idles, its events in order; a host 
     defer refused.tags.deinit(gpa);
     var bare = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
     try std.testing.expectError(error.Unsupported, bare.engine().learn(&learn, refused.sink()));
+    const audit: api.LearnRequest = .{ .audit = &.{ .probe_only = true, .neurons = &.{}, .probes = &.{}, .peaks = &.{} } };
+    try std.testing.expectError(error.Unsupported, bare.engine().learn(&audit, refused.sink()));
 
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     var fake: FakeLearner = .{};
     host.learner = .{ .ctx = &fake, .begin = FakeLearner.begin, .step = FakeLearner.step, .abort = FakeLearner.abort };
+    try std.testing.expectError(error.Unsupported, host.engine().learn(&audit, refused.sink()));
+    host.learner.?.read_only_audit = true;
+    host.stale = true;
+    try std.testing.expectError(error.Busy, host.engine().learn(&audit, refused.sink()));
+    host.stale = false;
+    var stale_audit: LearnBox = .{};
+    defer stale_audit.tags.deinit(gpa);
+    try host.engine().learn(&audit, stale_audit.sink());
+    host.stale = true;
+    @import("lane_host_learn.zig").step(&host);
+    stale_audit.wait();
+    try std.testing.expectEqualSlices(std.meta.Tag(api.LearnEvent), &.{.done}, stale_audit.tags.items);
+    try std.testing.expect(host.stale and fake.examples == 0);
+    host.stale = false;
     try host.start();
     defer host.stop();
     var box: LearnBox = .{};

@@ -54,6 +54,9 @@ fn send(conn: *Conn, kind: []const u8, body: []const u8) void {
 }
 
 pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
+    const audit = @import("slide_audit.zig");
+    const opts = audit.options(conn.path) catch return refuse(conn, a, 400, "invalid audit options");
+    if (opts) |o| return audit.serve(srv, conn, a, o);
     const body = srv.slide.render(a, folder(srv)) catch return refuse(conn, a, 500, "out of memory");
     conn.sendJson(200, body);
 }
@@ -76,6 +79,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     const text = @import("slide_input.zig").read(body) catch |e|
         return refuse(conn, a, 400, @import("slide_input.zig").message(e));
+    const correcting = @import("slide_correction.zig").requested(body) catch return refuse(conn, a, 400, "correction must be true or false");
     const source = body.strField("source") orelse "chat";
     const supplied = supplied_questions.read(a, body) catch |e| switch (e) {
         error.OutOfMemory => return,
@@ -117,38 +121,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
-        srv.slide.mark(id, .learning);
-        srv.slide.phase(id, .writing);
-        out.event("learning", .{ .id = id });
-        out.stage(id, "writing");
-        var kept = [1]bool{false};
-        const written = now(srv);
-        // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
-        const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
-        const gave = if (document) &.{} else giveWay(srv, a, &cx, fact, id, gone);
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, supplied, gone) catch |e| {
-            missed(srv, &out, id, words(&cx, e));
-            putBack(srv, a, gave, id);
-            continue;
-        }) orelse {
-            missed(srv, &out, id, "too few clean answers to learn from");
-            putBack(srv, a, gave, id);
-            continue;
-        };
-        log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
-        srv.slide.asked(id, expected(a, plan));
-        const result = rounds(srv, a, &cx, plan, gone, id, &out);
-        const back = result.recalled.len == 1 and result.recalled[0];
-        srv.teacher.ended(back); // a lesson given up leaves the next one's checks as if it never ran
-        if (!back) putBack(srv, a, gave, id);
-        if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
-        if (result.why) |why| srv.slide.note(id, why);
-        srv.slide.mark(id, if (back) .learned else .missed);
-        if (back) talks.chainAfter(srv, id, plan);
-        if (back and document) for (plan.held) |h| if (h.subject.len > 0 and h.context.len == 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
-        if (result.why) |why| {
-            out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
-        } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
+        @import("slide_fact.zig").learn(srv, a, &cx, &out, fact, id, source, facts, supplied, correcting, gone);
     }
 }
 
@@ -202,7 +175,9 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         return out;
     };
     var committed = false;
-    defer if (!committed) takeOut(srv, a, &out, id, out.why orelse "taken out: its full commit gate did not pass");
+    var before_begin = false;
+    var had_round = false;
+    defer if (!committed and (!before_begin or had_round)) takeOut(srv, a, &out, id, out.why orelse "taken out: its full commit gate did not pass");
     var asked_after = false; // the facts before it were asked again after its take-out: their verdicts are current
     // a lesson not kept leaves the facts before it as it found them, so their verdicts go back to what they were
     defer if (!asked_after and !std.mem.allEqual(bool, out.recalled, true)) srv.slide.restoreChecks(before);
@@ -216,8 +191,9 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         var held = false;
         srv.slide.round(id, @intCast(round + 1));
         o.stage(id, "initializing");
-        switch (runReported(srv, a, &request, id, o)) {
+        switch (runWithBegin(srv, a, &request, id, o, &before_begin)) {
             .learned => |l| {
+                had_round = true;
                 out.steps += l.steps;
                 held = l.recalled;
             },
@@ -278,6 +254,10 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
                 return out;
             };
             if (lost.len == 0) {
+                @import("slide_shrink.zig").run(srv, a, cx, plan, gone, id, o) catch |e| {
+                    out.why = words(cx, e);
+                    return out;
+                };
                 committed = true;
                 // a diagnostic: every kept lesson taken out again, to see the facts before it come back as they were
                 if (std.c.getenv("TF_SLIDE_TAKE_OUT_CHECK") != null) {
@@ -326,14 +306,6 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         _ = run(srv, a, &.{ .drop = true }, 0);
         srv.slide.placed(id, &.{});
     }
-    return out;
-}
-
-/// What a lesson's checks expect: each held-out question's answer as written (and its conversation), then unseen ones'.
-fn expected(a: Allocator, plan: teach.Plan) []const slide_graph.Answer {
-    const out = a.alloc(slide_graph.Answer, plan.held.len + plan.probes.len) catch return &.{};
-    for (plan.held, out[0..plan.held.len]) |h, *x| x.* = .{ .question = h.question, .answer = h.answer, .short = h.short, .context = h.context };
-    for (plan.probes, out[plan.held.len..]) |h, *x| x.* = .{ .question = h.question, .answer = h.answer, .short = h.short, .probe = true };
     return out;
 }
 
@@ -391,7 +363,7 @@ pub fn saveAll(srv: *Server, a: Allocator) ?[]const u8 {
 }
 
 /// Earlier chat facts `fact` replaces ("I like blue." for "Now I like red."): their neurons zeroed, marked replaced.
-fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: anytype) []const slide_graph.Fact {
+pub fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: anytype) []const slide_graph.Fact {
     const olds = replace.replaced(srv, cx, fact, id, gone) catch return &.{};
     if (olds.len == 0) return &.{};
     var neurons: std.ArrayList(api.Neuron) = .empty;
@@ -409,7 +381,7 @@ fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32
 }
 
 /// The facts fact `id` replaced, put back as they were: it was not learned, so what they said still stands.
-fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) void {
+pub fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) void {
     if (olds.len == 0) return;
     switch (run(srv, a, &.{ .unretire = true }, 0)) {
         .failed, .refused => return,
@@ -424,7 +396,7 @@ fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) 
 }
 
 /// A fact the lesson could not learn, and why.
-fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
+pub fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
     srv.slide.note(id, why);
     srv.slide.mark(id, .missed);
     out.event("learned", .{ .id = id, .recalled = false, .message = why });
@@ -432,7 +404,7 @@ fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
 
 pub const Outcome = union(enum) {
     none,
-    learned: struct { recalled: bool, steps: u32 },
+    learned: struct { recalled: bool, steps: u32, candidate: bool = false },
     failed: []const u8,
     refused: api.LearnError,
 };
@@ -444,9 +416,18 @@ pub fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32
 
 /// A lesson with progress sent to its open stream as well as its graph.
 pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32, out: ?*Out) Outcome {
+    var before_begin = false;
+    return runWithBegin(srv, a, request, id, out, &before_begin);
+}
+
+fn runWithBegin(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32, out: ?*Out, before_begin: *bool) Outcome {
+    before_begin.* = false;
     var box: Box = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
-    srv.engine.learn(request, box.sink()) catch |e| return .{ .refused = e };
+    srv.engine.learn(request, box.sink()) catch |e| {
+        before_begin.* = true;
+        return .{ .refused = e };
+    };
     var outcome: Outcome = .none;
     var batch: std.ArrayList(Box.Copy) = .empty;
     defer batch.deinit(srv.gpa);
@@ -455,7 +436,7 @@ pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest,
         for (batch.items) |c| {
             switch (c.kind) {
                 .learned => {
-                    outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps } };
+                    outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps, .candidate = c.candidate } };
                     if (id != 0) srv.slide.placed(id, c.neurons);
                 },
                 .progress => if (id != 0) {
@@ -464,8 +445,9 @@ pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest,
                     srv.slide.progress(id, p);
                     if (out) |o| o.progress(id, p);
                 },
-                .done => if (c.text.len > 0) {
-                    outcome = .{ .failed = a.dupe(u8, lessonWords(c.text)) catch "the learner failed" };
+                .done => {
+                    before_begin.* = c.before_begin;
+                    if (c.text.len > 0) outcome = .{ .failed = a.dupe(u8, lessonWords(c.text)) catch "the learner failed" };
                 },
             }
             srv.gpa.free(c.text);
@@ -526,61 +508,4 @@ pub fn refuse(conn: *Conn, a: Allocator, code: u16, message: []const u8) void {
 }
 
 /// Learn events copied off the engine's thread, read by the request's own thread.
-const Box = struct {
-    io: std.Io,
-    gpa: Allocator,
-    mutex: std.Io.Mutex = .init,
-    cond: std.Io.Condition = .init,
-    events: std.ArrayList(Copy) = .empty,
-    done: bool = false,
-
-    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0, progress: api.LearnProgress = .{ .phase = .reading }, neurons: []const api.Neuron = &.{} };
-
-    fn sink(b: *Box) api.LearnSink {
-        return .{ .ctx = b, .event = onEvent };
-    }
-
-    fn onEvent(ctx: *anyopaque, e: *const api.LearnEvent) void {
-        const b: *Box = @ptrCast(@alignCast(ctx));
-        var c: Copy = .{ .kind = e.* };
-        switch (e.*) {
-            .learned => |l| {
-                c.recalled = l.recalled;
-                c.steps = l.steps;
-                c.neurons = b.gpa.dupe(api.Neuron, l.neurons) catch &.{};
-            },
-            .progress => |p| {
-                c.progress = p;
-                c.progress.neurons = &.{};
-                c.neurons = b.gpa.dupe(api.Neuron, p.neurons) catch &.{};
-            },
-            .done => |d| c.text = b.gpa.dupe(u8, d.message) catch "",
-        }
-        b.mutex.lockUncancelable(b.io);
-        defer b.mutex.unlock(b.io);
-        b.events.append(b.gpa, c) catch {
-            b.gpa.free(c.text);
-            b.gpa.free(c.neurons);
-        };
-        if (e.* == .done) b.done = true;
-        b.cond.signal(b.io);
-    }
-
-    /// Waits for events and moves them to `out`; true once `done` has arrived.
-    fn take(b: *Box, out: *std.ArrayList(Copy)) bool {
-        b.mutex.lockUncancelable(b.io);
-        defer b.mutex.unlock(b.io);
-        while (b.events.items.len == 0 and !b.done) b.cond.waitUncancelable(b.io, &b.mutex);
-        out.appendSlice(b.gpa, b.events.items) catch {};
-        b.events.clearRetainingCapacity();
-        return b.done;
-    }
-
-    fn deinit(b: *Box) void {
-        for (b.events.items) |c| {
-            b.gpa.free(c.text);
-            b.gpa.free(c.neurons);
-        }
-        b.events.deinit(b.gpa);
-    }
-};
+const Box = @import("slide_learn_box.zig").Box;

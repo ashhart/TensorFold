@@ -27,7 +27,7 @@ const disownLesson = examples.disownLesson;
 pub const Codes = struct { words: []u32, scales: []const u16, biases: []const u16 };
 
 pub const Report = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32 },
+    learned: struct { recalled: bool, steps: u32, loss: f32, candidate: bool = false },
     failed: []const u8,
 };
 
@@ -39,7 +39,7 @@ const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they 
 const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
 /// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
-const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire };
+const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire, shrink };
 
 /// The lessons over host H: its trainer and hooks (family.zig), routed blocks only when its trainer keeps `sites`.
 pub fn Learner(comptime H: type) type {
@@ -53,6 +53,7 @@ pub fn Learner(comptime H: type) type {
         const Probes = if (has_edits) probe.Probe(H.Trainer) else void;
         const Pockets = if (has_pocket) pocket.Pocket(H.Trainer, H.family) else void;
         pub const Host = H;
+        pub const Audit = if (has_pocket) @import("pocket_audit.zig").Audit(H) else void;
 
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -131,9 +132,7 @@ pub fn Learner(comptime H: type) type {
         }
 
         /// Whether the learner reads conversation prompts at any length, for both teaching and checking.
-        pub fn readsConversations(l: *const Self) bool {
-            return examples.readsConversations(H.Trainer, has_pocket and l.whole and l.method == .pocket);
-        }
+        pub const readsConversations = examples.ofLearner;
 
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
@@ -141,7 +140,12 @@ pub fn Learner(comptime H: type) type {
             if (has_pocket and l.trainer != null) {
                 if (lesson.save) try whole_lessons.healLive(l) else try whole_lessons.heal(l);
             }
+            if (lesson.against.len > 0 and (!@hasDecl(H.Trainer, "causalLogit") or !l.whole or l.method != .pocket)) return error.CorrectionsUnsupported;
             l.lesson = lesson;
+            if (lesson.shrink != .none) {
+                l.phase = .shrink;
+                return;
+            }
             if (lesson.undo) {
                 l.phase = .undo;
                 return;
@@ -199,8 +203,8 @@ pub fn Learner(comptime H: type) type {
             for ([_][]const Example{ kept.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
         }
 
-        /// The trainer, made the first time a lesson needs it.
-        fn ready(l: *Self) !void {
+        /// The trainer, made the first time a lesson or audit needs it.
+        pub fn ready(l: *Self) !void {
             if (l.trainer != null) return;
             const t0 = H.seconds(l.io);
             if (has_sites) l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
@@ -263,6 +267,10 @@ pub fn Learner(comptime H: type) type {
                     return .{ .done = true, .changed = true };
                 },
                 .save => return l.saveOnce(),
+                .shrink => {
+                    l.phase = .idle;
+                    return if (has_pocket) whole_lessons.shrink(l) else .{ .done = true };
+                },
                 .retire => {
                     l.phase = .idle;
                     if (has_whole and l.whole) if (try whole_lessons.retire(l, l.lesson)) |s| return s;

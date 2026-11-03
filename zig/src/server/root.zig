@@ -121,6 +121,11 @@ test {
     _ = @import("slide_writer_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_cli.zig");
+    _ = @import("slide_audit.zig");
+    _ = @import("slide_audit_cli.zig");
+    _ = @import("slide_audit_probes.zig");
+    _ = @import("slide_audit_test.zig");
+    _ = @import("slide_audit_endpoint_test.zig");
     _ = @import("slide_key.zig");
     _ = @import("slide_graph.zig");
     _ = @import("slide_graph_delete.zig");
@@ -185,6 +190,8 @@ test {
 
 test {
     _ = @import("slide_retention_test.zig");
+    _ = @import("slide_shrink_test.zig");
+    _ = @import("slide_correction_test.zig");
 }
 
 test {
@@ -206,4 +213,16 @@ test {
     _ = @import("request_provenance_test.zig");
     _ = @import("request_cost_test.zig");
     _ = @import("prompt_tool_turn_test.zig");
+}
+
+test {
+    _ = @import("slide_policy_test.zig");
+}
+
+test {
+    _ = @import("slide_pin_cli.zig");
+}
+
+test {
+    _ = @import("slide_usage_live_test.zig");
 }

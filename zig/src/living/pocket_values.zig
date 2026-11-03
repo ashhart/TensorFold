@@ -223,6 +223,7 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
         }
         at += m;
     }
+    try @import("pocket_correction.zig").add(p, t, grad, take);
     const mean = s.loss / @as(f32, @floatFromInt(take));
     const kept = s.kept / @as(f32, @floatFromInt(@max(keeps, 1)));
     const joined = s.joint / @as(f32, @floatFromInt(@max(joins, 1)));

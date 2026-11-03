@@ -116,9 +116,10 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_decisions = std.mem.endsWith(u8, route, "/decisions");
     const is_systemone = std.mem.endsWith(u8, route, "/systemone");
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
+    const is_pin = std.mem.startsWith(u8, route, @import("slide_pin.zig").prefix) and std.mem.endsWith(u8, route, "/pin");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
-    if (!is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    if (!is_embedding and !is_speech and !is_slide and !is_pin and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
@@ -164,6 +165,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (is_embedding) return embeddings.post(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
+    if (is_pin) return @import("slide_pin.zig").route(srv, conn, a, route);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
     if (is_decisions) return decisions.post(srv, conn, a);
     if (is_systemone) return systemone.post(srv, conn, a);

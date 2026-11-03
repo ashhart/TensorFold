@@ -287,6 +287,9 @@ pub const LaneHost = struct {
         const stats: Stats = if (job.started) .{ .rounds = s.rounds, .grammar = if (s.grammar_time.windows > 0) s.grammar_time else null, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .gpu_seconds = s.gpu_seconds, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         var told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
         told.queued_seconds = if (job.admitted_ns) |at| @as(f64, @floatFromInt(@max(0, at - job.submitted))) / 1e9 else 0;
+        if (job.started and job.delivered > 0 and job.request.max_tokens > 0 and
+            !job.request.background and !job.request.untaught and (reason == .stop or reason == .length))
+            if (job.request.usage) |u| u.done(u.ctx, job.stream.pocket_usage);
         emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
         if (job.started) {
             if (s.grammar) |g| g.deinit(h.gpa);
