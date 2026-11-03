@@ -15,7 +15,7 @@ pub fn copy(a: Allocator, v: json.Value) !json.Value {
 }
 
 pub fn decode(comptime T: type, a: Allocator, v: json.Value) !T {
-    return std.json.parseFromSliceLeaky(T, a, try json.stringify(a, v, .{}), .{});
+    return @import("slide_metrics_decode.zig").decode(T, a, v);
 }
 
 pub fn supplied(g: *Graph, id: u32, xs: []const answers.Answer) !void {
