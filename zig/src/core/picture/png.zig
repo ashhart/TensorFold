@@ -333,8 +333,8 @@ const Keys = struct {
             }
         }.at;
         return switch (h.color) {
-            0 => if (t.len < 2) .{} else .{ .gray = if (h.depth == 1) @as(u16, if (k(t, 0) != 0) 255 else 0) else k(t, 0) },
-            2 => if (t.len < 6) .{} else .{ .rgb = .{ k(t, 0), k(t, 1), k(t, 2) } },
+            0 => if (t.len < 2) .{} else .{ .gray = if (h.depth == 1) @as(u16, if (k(t, 0) != 0) 255 else 0) else k(t, 0) & 0xff },
+            2 => if (t.len < 6) .{} else .{ .rgb = .{ k(t, 0) & 0xff, k(t, 1) & 0xff, k(t, 2) & 0xff } },
             else => .{},
         };
     }

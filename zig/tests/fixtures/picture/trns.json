@@ -1,0 +1,40 @@
+{
+  "source": "Pillow 12.3.0; generated PNG layouts and expected RGB from zspark tools/reference/image_cases.py",
+  "cases": [
+    {
+      "name": "png_rgb16_key",
+      "b64": "iVBORw0KGgoAAAANSUhEUgAAAA0AAAAHEAIAAAAMgowOAAAABnRSTlMBAQICAwODM+MYAAAATklEQVR42mNgZGRiYmY+cSIlxcgIQlIiwgjhMICBpeW8eRcvHj+elKSvT54IE7UMgogwz5174cKrV5QbBBFhoZZBUBHKgx9VBCxELTcCAKjGsRoePdvYAAAAAElFTkSuQmCC",
+      "width": 13,
+      "height": 7,
+      "rgb": "7e84d6ab516c6d36ce251c66c2dc45bd8f4d7d45981f8e2ac044b44a141aad90"
+    },
+    {
+      "name": "png_gray16_key_low_byte",
+      "b64": "iVBORw0KGgoAAAANSUhEUgAAAAcAAAADEAAAAAAqOJZaAAAAAnRSTlMBLF1QkJoAAAAoSURBVHjaY2DQYdRh+M/8goGBQYeBnRHIZfh/mfnlXwkg9zYTAwoAAMupB4G714OOAAAAAElFTkSuQmCC",
+      "width": 7,
+      "height": 3,
+      "rgb": "fde8370255860f8f727c9d25c9d44ee5d3c704656fe2d21201b23402a94b4e5e"
+    },
+    {
+      "name": "png_gray8_key_past_255",
+      "b64": "iVBORw0KGgoAAAANSUhEUgAAAAcAAAADCAAAAAB6qEoZAAAAAnRSTlMBLF1QkJoAAAAcSURBVHjaY9BhZNL5z8DMqHOVUesyIzMTAwQAADRxA2SBB/yiAAAAAElFTkSuQmCC",
+      "width": 7,
+      "height": 3,
+      "rgb": "1f0571484a74c4f31f7b68059a130e484d69b2aab0720ea5bddb2c11ff712b01"
+    },
+    {
+      "name": "png_rgb8_key_past_255",
+      "b64": "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAABnRSTlMBLAACAAM7RpPlAAAAG0lEQVR42mPQYWJmZGLm5ORkBLKuMjBwsLMBAAwwAW/ZPO14AAAAAElFTkSuQmCC",
+      "width": 3,
+      "height": 2,
+      "rgb": "f345e3f51787276a14cc64f10b43afd557acd0c154d500a4a8a57d5bc9d40a78"
+    },
+    {
+      "name": "png_gray1_key_256",
+      "b64": "iVBORw0KGgoAAAANSUhEUgAAAA0AAAAHAQAAAAD7C/q3AAAAAnRSTlMBAG+I/HkAAAAeSURBVHjaY5h7g3HRN6bIF8wRbSzHJjDcjWBkKgMAYPMIO+UMxk0AAAAASUVORK5CYII=",
+      "width": 13,
+      "height": 7,
+      "rgb": "540a28acf19e592e97e8d093c2d52e42b50a4e1774ca010542bf2b014ea37f5f"
+    }
+  ]
+}
