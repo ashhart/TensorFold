@@ -97,6 +97,7 @@ pub const Linear = struct {
     affine4: ?*const Affine4Kernels = null,
     lane: ?*const qmmf.Lane = null, // decode rows of every lane format; fp8g and bf16 prompt rows too
     nvfp4_prompt: ?*const nvfp4.Prompt = null, // the prompt GEMM: nvfp4 and fp8 prompt rows (linear.py's prefill)
+    bf16_prompt: bool = false,
     ck: ?*const ck.Ck = null, // the checkpoint's own math: an fp8 weight with an input scale takes e4m3 rows
     ck_rows: u64 = 0, // its e4m3 rows (at least rows * k bytes), and slice partials where no cluster meets them
     ck_part: u64 = 0,
@@ -149,7 +150,12 @@ pub const Linear = struct {
             .mxfp8 => |q| return l.onLane(s, q, .mxfp8, in, out, rows),
             .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onPrompt(s, q, .fp8, in, out, rows),
-            .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
+            .bf16 => |q| {
+                if (l.bf16_prompt) if (l.nvfp4_prompt) |p| {
+                    if (p.usesBf16(rows)) return l.onPrompt(s, q, .bf16, in, out, rows);
+                };
+                return l.onLane(s, q, .bf16, in, out, rows);
+            },
             // prompt rows always take the prompt GEMM: a row's bits must not depend on where a prompt's chunks are cut
             .q8_0, .iq2xxs => |q| return (l.ggml orelse return error.FormatNotLoaded).promptRows(s, q, in.x, in.ldx, rows, out, .bf16),
         }
