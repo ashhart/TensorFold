@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol (speridlabs/idol, image to 3D Gaussian splat), first step: its 0.37B denoiser runs natively on M5 Metal from the released checkpoint, the condition refiner once an image and all 50 guided steps on the GPU. On an M5 Ultra a forward takes 0.275 s against the publisher's SDK on torch MPS at 0.939 s, with a 1.84 GB peak footprint. Each step's velocities on the SDK's own input sit as close to an fp32 run as the SDK's own, and each joint block alone passes the same gate; `tf-idol` runs those gates from a case `tools/zig/idol_case.py` records. RePo's fp32 maps run as an fp16 hi/lo split on the tensor units, whose fp32 GEMM truncates its inputs to 10 mantissa bits (#1772). The image encoders and the decoders are not ported yet (#1766, fixes #1757). Thanks to @jayleaton.
+
 - Living Weights on Qwen4 dense, step 1: the QSA backward pass on the host, checked against a binary64 reference; nothing served changes (#2021, part of #1804).
 
 - CUDA kernels share their duplicated device primitives; the machine code is identical on sm_80, 86, 89, 120 and 121 (#2018, closes #1409).

@@ -262,6 +262,10 @@ HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
 and the exact sums of gate 4.
 
+Metal also checks Idol's denoiser (`metal_idol*.zig`): its fp16 projections and GELU form, the split-K fp32 rows,
+`id_gemm32` (true fp32 sums: the NAX fp32 path in its place is a control gate 4 must catch), the LayerNorms, RePo's
+angles, the heads, the elementwise steps and the attention's four forms, each at idol-sdk's fp16 points (19 controls).
+
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
 CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: the latent write and the pooled keys
