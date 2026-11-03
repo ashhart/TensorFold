@@ -7,6 +7,7 @@ pub fn Case(comptime B: type, comptime spec: type) type {
     return struct {
         const Self = @This();
         pub const Fixture = data.Fixture(spec);
+        const vtable = contract.gates.hooks(Self);
         a: std.mem.Allocator,
         backend: B,
         rig: struct {
@@ -48,7 +49,7 @@ pub fn Case(comptime B: type, comptime spec: type) type {
                 .repeat => .repeat,
                 .tail => .shapes,
                 .sums => .sums,
-            }, .spec = .{ .name = c.label, .accum = if (data.reduces(spec, c.op)) .f32 else .none, .depth = depth, .out = .f32, .served = &c.shapes, .tiles = .{ .{ .size = 16, .min = 1 }, .{}, .{ .size = 64, .step = 64, .min = 64 } } }, .ctx = c, .vt = &contract.gates.hooks(Self) };
+            }, .spec = .{ .name = c.label, .accum = if (data.reduces(spec, c.op)) .f32 else .none, .depth = depth, .out = .f32, .served = &c.shapes, .tiles = .{ .{ .size = 16, .min = 1 }, .{}, .{ .size = 64, .step = 64, .min = 64 } } }, .ctx = c, .vt = &vtable };
         }
         pub fn prepare(c: *Self, shape: contract.spec.Shape, fill: contract.gates.Fill, seed: u64) !bool {
             c.rig.parent = c;

@@ -74,6 +74,7 @@ test {
     _ = @import("learning_contract_test.zig");
     _ = @import("learning_stress_test.zig");
     _ = @import("learning_qsa_test.zig");
+    _ = @import("learning_qsa_chain_test.zig");
     _ = @import("learning_gdn_test.zig");
     _ = @import("learning_runtime_test.zig");
     _ = @import("learning_rows_test.zig");
