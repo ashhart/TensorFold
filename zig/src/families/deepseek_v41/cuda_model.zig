@@ -251,7 +251,10 @@ pub const Model = struct {
         var t_build: i96 = 0;
         var t_upload: i96 = 0;
         const t_load = std.Io.Clock.awake.now(io).toNanoseconds();
+        const readers = try @import("core").checkpoint_read_ahead.readers();
         for (m.pl.layers, 0..) |*l, i| {
+            var reading: @import("core").checkpoint_read_ahead.Scope = .{};
+            defer reading.deinit();
             var b: named.Builder = .{ .gpa = gpa, .io = io, .pack = &m.pack };
             defer b.deinit();
             var tag_buf: [16]u8 = undefined;
@@ -261,7 +264,9 @@ pub const Model = struct {
             defer schema.deinit();
             if (cache != null) try schema.layer(l, m.cfg.o_groups, m.tcfg.rank, world);
             if (cache == null or !try cache.?.get(&b, tag, schema.out.items)) {
+                reading = try @import("cuda_load_prefetch.zig").begin(gpa, io, &m.pack, &m.cfg, l.index, readers);
                 try b.layer(l, m.cfg.o_groups, m.tcfg.rank, world);
+                _ = try reading.check();
                 if (cache) |*c| c.put(&b, tag) catch |e| if (!quiet) std.log.warn("dsv41 prepared: {s} not written ({t})", .{ tag, e });
             }
             const t1 = std.Io.Clock.awake.now(io).toNanoseconds();

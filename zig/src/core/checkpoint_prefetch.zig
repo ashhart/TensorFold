@@ -24,7 +24,7 @@ pub fn configured() !usize {
 }
 
 /// A piece of one file: its path lives in the checkpoint's arena, which outlives the readers.
-const Span = struct { path: [*:0]const u8, lo: u64, hi: u64 };
+pub const Span = struct { path: [*:0]const u8, lo: u64, hi: u64 };
 
 const Work = struct {
     gpa: std.mem.Allocator,
@@ -69,7 +69,7 @@ pub fn start(ck: *const Checkpoint, prefix: []const u8, readers: usize) Ahead {
 }
 
 /// The byte ranges of `prefix`'s tensors in each mapped file, joined where they touch and cut into `chunk` pieces.
-fn cut(ck: *const Checkpoint, prefix: []const u8) ![]Span {
+pub fn cut(ck: *const Checkpoint, prefix: []const u8) ![]Span {
     const gpa = ck.gpa;
     var out: std.ArrayList(Span) = .empty;
     errdefer out.deinit(gpa);

@@ -11,6 +11,7 @@ pub const exlr8 = @import("exlr8.zig");
 pub const eaq_container = @import("eaq_container.zig");
 pub const digest_cache = @import("digest_cache.zig");
 pub const checkpoint_identity = @import("checkpoint_identity.zig");
+pub const checkpoint_read_ahead = @import("checkpoint_read_ahead.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const checkpoint_fixture = @import("checkpoint_fixture.zig");
 pub const exl3_load = @import("exl3_load.zig");

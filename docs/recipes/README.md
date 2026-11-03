@@ -70,6 +70,8 @@ previous start and otherwise end at the first eligible point or after 2,048 toke
 markers, chunks use the 2,048-token grid. Rewriting earlier template text can invalidate reuse.
 The chunk scheme and kernel/runtime identity must match before a stored prefix can be reused.
 
+For CUDA checkpoint loading, see [load-time prefetch](cuda-load-prefetch.md).
+
 ## Measurements
 
 `tools/bench_openai.py` contains public fixtures: a raw Fibonacci-function prompt and a chat prompt asking
