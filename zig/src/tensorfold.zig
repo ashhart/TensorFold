@@ -147,6 +147,9 @@ pub const tree_commit_gpu = @import("tree_commit_gpu");
 pub const tree_slots = @import("core/tree_slots.zig");
 
 pub const weight_only = @import("core/weight_only.zig");
+pub const living_rows = @import("core/living_rows.zig");
+pub const living_gdn = @import("core/living_gdn.zig");
+pub const living_qsa = @import("core/living_qsa.zig");
 pub const weight_only_contract = @import("core/contract/weight_only.zig");
 pub const weight_only_cuda_adapter = @import("core/weight_only_cuda_impl.zig").Adapter;
 pub const weight_only_metal_adapter = @import("core/weight_only_metal_impl.zig").Adapter;

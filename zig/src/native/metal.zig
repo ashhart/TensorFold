@@ -519,7 +519,7 @@ test "slide admission: Metal entry points refuse before checkpoint or device acc
     const check = @import("slide_open_test.zig").check;
     const kimi = @import("kimi_metal.zig");
     for (families) |f| {
-        if (std.mem.eql(u8, f.model_type, "nemotron_h")) continue;
+        if (std.mem.eql(u8, f.model_type, "nemotron_h") or std.mem.eql(u8, f.model_type, "qwen4") or std.mem.eql(u8, f.model_type, "qwen4_text")) continue;
         if (std.mem.eql(u8, f.model_type, "kimi_k3") or std.mem.eql(u8, f.model_type, "kimi_k31")) {
             const want = "Kimi: learned states and on-disk prompt states are not implemented";
             try @import("slide_open_test.zig").message(open, f.model_type, want);

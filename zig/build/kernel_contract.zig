@@ -111,6 +111,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "masked_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/masked_value_sources.zig"), .imports = &.{.{ .name = "kernel_sources", .module = sources }} }) },
         },
     }) });
+    @import("qwen4_learning_host.zig").wire(b, exe.root_module);
     const install = b.addInstallArtifact(exe, .{});
     b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
     const limits_run = b.addRunArtifact(exe);
@@ -135,6 +136,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
 pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath) *std.Build.Step {
+    @import("qwen4_learning_host.zig").wire(b, runner.root_module);
     const opts = b.addOptions();
     opts.addOption(bool, "controls", controls != null);
     runner.root_module.addOptions("contract_options", opts);

@@ -115,6 +115,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3, "\n", sources.lfm3_attention });
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "living-native ")) {
+        if (!assemble) return undefined;
+        const body = try registry.living_native.source(@import("qwen4").family, a, d.name);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         if (!assemble) return undefined;
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
