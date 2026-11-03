@@ -26,15 +26,6 @@ fn relu2Tile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
 /// HIP kernels as launched; tf-hip-kernel-contract limits DIR re-derives the usage records from the code objects.
 const own_records = [_]Record{
     .{
-        .launch = .{ .name = "attention tf_heads_rows", .symbol = "tf_heads_rows", .image = "ops", .threads = 256 },
-        .usage = .{
-            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 30, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-        },
-    },
-    .{
         .launch = .{ .name = "RMS norm tf_rms_rows", .symbol = "tf_rms_rows", .image = "ops", .threads = 256 },
         .usage = .{
             .{ .vgprs = 58, .sgprs = 45, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
@@ -509,7 +500,7 @@ pub const records = own_records ++ @import("hip_records_stream.zig").records ++
     @import("hip_records_router.zig").records ++
     @import("hip_records_glm_ocr.zig").records ++
     @import("hip_records_item.zig").records ++
-    @import("hip_records_dense.zig").records;
+    @import("hip_records_qwen3.zig").records;
 
 /// Gate 5's planted HIP controls: a launch past its __launch_bounds__, and 72 KiB of LDS where a workgroup has 64.
 pub const controls = [_]Record{
@@ -577,10 +568,6 @@ pub fn controlProblems(a: std.mem.Allocator, r: Record, quiet: bool) !usize {
     }
     if (!quiet and n != 0) std.debug.print("{s}", .{out.items});
     return n;
-}
-
-test {
-    _ = @import("hip_records_dense.zig");
 }
 
 test "every registered HIP launch fits every RDNA chip we serve, and each planted control breaks one" {
