@@ -26,8 +26,8 @@ Use the exact Zig version in `.zig-version`. On an authorized CUDA machine, gene
 
 ```sh
 zig build fatbins kernel-contract-fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=80,86,89,120,121
-zig build -Dfatbins=zig-out/fatbin -Dcontract-controls=zig-out/fatbin/contract_controls.fatbin -Doptimize=ReleaseFast
-zig build native qwen35-score-reference -Dfatbins=zig-out/fatbin -Doptimize=ReleaseFast
+zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=80,86,89,120,121 -Dfatbins=zig-out/fatbin -Dcontract-controls=zig-out/fatbin/contract_controls.fatbin -Doptimize=ReleaseFast
+zig build native qwen35-score-reference -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=80,86,89,120,121 -Dfatbins=zig-out/fatbin -Doptimize=ReleaseFast
 ```
 
 Use the native binary's `serve --help` for startup flags. Keep the listener on loopback, use the existing GPU lock and
