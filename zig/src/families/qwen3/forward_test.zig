@@ -1,6 +1,6 @@
 //! lastRows on the GPU against transformers: the embedding's pooled rows and the reranker's yes/no logits.
 
-// Skipped without TF_QWEN3_EMBED_DIR / _REF / _BAR (fp32, BF16 oracles) or TF_QWEN3_RERANK_DIR / _REF.
+// Skipped without TF_QWEN3_EMBED_DIR / _REF / _BAR or TF_QWEN3_RERANK_DIR / _REF; TF_QWEN3_MATRIX picks matrix=.
 const std = @import("std");
 const hip = @import("hip");
 const qwen3 = @import("qwen3");
@@ -23,7 +23,9 @@ const Gpu = struct {
         errdefer g.ctx.deinit();
         g.stream = try hip.Stream.init(&g.r);
         errdefer g.stream.deinit();
-        g.l = try hip.Launcher.load(&g.r, .{}, hip.kernels.images);
+        const matrix = try matrixChoice();
+        g.l = try hip.Launcher.load(&g.r, .{ .products = .{ .matrix = matrix } }, hip.kernels.images);
+        std.debug.print("qwen3 GPU checks: matrix={t}, dense products on {t}\n", .{ matrix, g.l.dense.serve });
         errdefer g.l.unload();
         g.arena = try hip.Arena.init(&g.r, arena_bytes);
     }
@@ -58,7 +60,19 @@ const Gpu = struct {
     }
 };
 
-fn env(a: std.mem.Allocator, key: []const u8) !?[]u8 {
+pub const Matrix = @FieldType(@FieldType(hip.Launcher.Choices, "products"), "matrix");
+
+/// TF_QWEN3_MATRIX as the policy's matrix choice; unset is auto.
+pub fn matrixChoice() !Matrix {
+    const v = t.environ.getAlloc(gpa, "TF_QWEN3_MATRIX") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return .auto,
+        else => return err,
+    };
+    defer gpa.free(v);
+    return std.meta.stringToEnum(Matrix, v) orelse error.BadMatrixChoice;
+}
+
+pub fn env(a: std.mem.Allocator, key: []const u8) !?[]u8 {
     return t.environ.getAlloc(a, key) catch |err| switch (err) {
         error.EnvironmentVariableMissing => null,
         else => err,
@@ -69,12 +83,12 @@ fn widen(bits: u16) f64 {
     return @as(f32, @bitCast(@as(u32, bits) << 16));
 }
 
-fn readJson(a: std.mem.Allocator, path: []const u8) !std.json.Value {
+pub fn readJson(a: std.mem.Allocator, path: []const u8) !std.json.Value {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .limited(256 << 20));
     return std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
 }
 
-fn idsOf(a: std.mem.Allocator, v: std.json.Value) ![]i32 {
+pub fn idsOf(a: std.mem.Allocator, v: std.json.Value) ![]i32 {
     const out = try a.alloc(i32, v.array.items.len);
     for (v.array.items, out) |x, *o| o.* = @intCast(x.integer);
     return out;
@@ -491,4 +505,8 @@ test "Qwen3-Reranker: each case's yes - no logit from lastRows and lm_head rows 
     try t.expect(cases >= 32);
     try t.expect(worst_diff <= 0.25);
     try t.expect(worst_score <= 0.02);
+}
+
+test {
+    _ = @import("projection_test.zig");
 }
