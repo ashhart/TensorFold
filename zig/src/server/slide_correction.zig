@@ -54,6 +54,7 @@ pub fn prepare(srv: *Server, cx: *errors.Cx, plan: *teach.Plan, gone: anytype) !
         const bare = if (back) old else try reads.bare(srv, cx, h.question, h.context, gone);
         const old_short = std.mem.trim(u8, bare.content, " \t\r\n\"'.*");
         if (!back and (old_short.len == 0 or std.mem.count(u8, old_short, " ") > 7 or std.ascii.findIgnoreCase(old.content, old_short) == null or std.ascii.findIgnoreCase(h.question, old_short) != null)) return error.CorrectionValueMissing;
+        try @import("slide_correction_source.zig").independent(srv, cx, h, old_short, tokens, gone);
         try entries.append(a, .{ .h = h, .old = old.content, .old_ids = tokens, .old_short = old_short, .opposes = !back });
         changed = changed or !back;
         if (!back and !held(plan.*, h) and h.context.len == 0) {

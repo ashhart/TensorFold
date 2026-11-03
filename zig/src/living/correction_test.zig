@@ -37,6 +37,7 @@ const Toy = struct {
     residual_row: [d]u16 = @splat(0x3f80),
     gradient: [d]f32 = @splat(0),
     delta: [d]f32 = @splat(0),
+    quiet_gradient: [d]f32 = @splat(0),
     pub fn packs(_: *@This()) bool {
         return false;
     }
@@ -52,8 +53,11 @@ const Toy = struct {
     pub fn residual(m: *@This(), _: usize, _: usize) []const u16 {
         return &m.residual_row;
     }
-    pub fn pushAt(m: *@This(), _: usize, _: usize, _: usize) []const f32 {
-        return &m.gradient;
+    fn reaches(layer: usize) bool {
+        return layer == 1 or layer == 5;
+    }
+    pub fn pushAt(m: *@This(), _: usize, _: usize, layer: usize) []const f32 {
+        return if (reaches(layer)) &m.gradient else &m.quiet_gradient;
     }
     pub fn deltaAt(m: *@This(), _: usize, _: usize, _: usize) []f32 {
         return &m.delta;
@@ -67,6 +71,8 @@ const Toy = struct {
             };
         } else out[2] = 2;
         for (m.p.moe.items, 0..) |l, slot| for (0..m.p.used.items[slot]) |n| {
+            // The subject-to-answer readout is absent at other layers, including the planted wrong placement.
+            if (!reaches(l)) continue;
             const activation = m.p.act(slot, n, m.normed(l, 1));
             const v = m.p.neuron(m.p.down.items, slot, n, d);
             for (&out, v[0..3]) |*o, value| o.* += @as(f64, activation) * m.scale * value;
@@ -158,7 +164,6 @@ fn place(m: *Toy) !void {
 fn fit(m: *Toy) !void {
     var units: usize = 0;
     while (!try m.p.step(m, Host{})) : (units += 1) if (units > 1000) return error.CorrectionDidNotFinish;
-    try t.expect(m.p.recalled());
 }
 test "correction: actual output fitter overturns a planted belief, preserves its neighbour and undoes exactly" {
     const p = try init();
@@ -169,6 +174,7 @@ test "correction: actual output fitter overturns a planted belief, preserves its
     const untouched = m.logits(&neighbour);
     try t.expectEqual(@as(u32, 1), Toy.best(m.logits(&new_ids)));
     try fit(&m);
+    try t.expect(p.recalled());
     try t.expectEqual(@as(u32, 0), Toy.best(m.logits(&new_ids)));
     try t.expectEqual(@as(u32, 0), Toy.best(m.logits(&held_ids)));
     try t.expectEqual(untouched, m.logits(&neighbour));
@@ -214,4 +220,33 @@ test "correction: opposing gradient matches a central FP64 difference of new CE 
         v.* = 0;
         try t.expectApproxEqAbs((high - low) / (2 * delta), @as(f64, grad[j * d + col]), 0.00001);
     };
+}
+
+test "correction: a planted wrong layer cannot pass the actual output fitter's held-out checks" {
+    const p = try init();
+    defer deinit(p);
+    var m: Toy = .{ .p = p };
+    try place(&m);
+    const original = m.logits(&new_ids);
+    const adjacent = m.logits(&neighbour);
+    const frozen = m.bias;
+    // Move both exact subject detectors from the located belief layers to an irrelevant layer before fitting.
+    for (p.taken.items) |x| {
+        @memset(p.neuron(p.up.items, x.slot, x.neuron, d), 0);
+        p.used.items[x.slot] = 0;
+    }
+    p.taken.clearRetainingCapacity();
+    p.learned.clearRetainingCapacity();
+    const wrong = std.mem.indexOfScalar(usize, p.moe.items, 3).?;
+    p.used.items[wrong] = 1;
+    p.neuron(p.up.items, wrong, 0, d)[0] = 1;
+    try p.taken.append(t.allocator, .{ .slot = wrong, .neuron = 0, .key = .subject });
+    try p.learned.append(t.allocator, .{ .slot = wrong, .neuron = 0, .key = .subject, .start = 0, .count = 0, .subject = 9, .lesson = 1 });
+    try p.v.begin(t.allocator, 1, d, 1);
+    try fit(&m);
+    try t.expect(!p.recalled());
+    try t.expectEqual(original, m.logits(&new_ids));
+    try t.expectEqual(@as(u32, 1), Toy.best(m.logits(&held_ids)));
+    try t.expectEqual(adjacent, m.logits(&neighbour));
+    try t.expectEqual(frozen, m.bias);
 }

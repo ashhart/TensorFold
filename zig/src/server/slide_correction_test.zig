@@ -37,6 +37,9 @@ const Model = struct {
     dropped: usize = 0,
     correct_sampler: bool = true,
     correct_against: bool = false,
+    pocket_belief: bool = false,
+    base_reads: usize = 0,
+    pocket_present: bool = false,
     fn engine(m: *@This()) api.Engine {
         return .{ .ctx = m, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
@@ -60,11 +63,14 @@ const Model = struct {
             m.correct_sampler = m.correct_sampler and @abs(s.temperature - 0.7) < 1e-9 and s.top_k == 17 and @abs(s.top_p - 0.9) < 1e-9 and @abs(s.min_p - 0.03) < 1e-9 and s.seed >= 1968 and s.seed < 1971;
             if (m.learned) m.sampled += 1;
         }
+        if (req.untaught) m.base_reads += 1;
+        const active = m.learned and !req.untaught;
+        const base_old = if (m.pocket_belief) "The capital of Rula is Velan." else old_answer;
         const own = std.mem.indexOf(u8, q, "Rula") != null;
         const bad = (m.mode == .sampled and req.sampling != null) or
             (m.mode == .training and std.mem.indexOf(u8, q, "Name") != null) or
             (m.mode == .prune_sampled and m.pending and req.sampling != null);
-        const said = if (own) (if (!m.learned) (if (m.deleted and m.mode == .delete_changed) "The capital of Rula is Soren!" else old_answer) else if (bad) old_answer else if (m.mode == .mixed) "Taren or Soren." else new_answer) else if (std.mem.indexOf(u8, q, "Nela") != null) other_answer else "The ocean is large.";
+        const said = if (own) (if (!active) (if (m.deleted and m.mode == .delete_changed) "The capital of Rula is Soren!" else if (m.pocket_present and !req.untaught) old_answer else base_old) else if (bad) old_answer else if (m.mode == .mixed) "Taren or Soren." else new_answer) else if (std.mem.indexOf(u8, q, "Nela") != null) other_answer else "The ocean is large.";
         var ids: [128]u32 = undefined;
         for (said, ids[0..said.len]) |c, *x| x.* = c;
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
@@ -98,6 +104,9 @@ const Model = struct {
             m.learned = false;
             m.dropped += 1;
         } else if (req.forget.len > 0) {
+            for (req.forget) |x| if (x.layer == 2) {
+                m.pocket_present = false;
+            };
             m.learned = false;
             m.deleted = true;
             steps = @intCast(req.forget.len);
@@ -269,4 +278,95 @@ test "Learning persistence: a correction refused before begin cannot drop the pr
     try t.expectEqualSlices(bool, &.{false}, f.rounds().recalled);
     try t.expectEqual(@as(usize, 0), f.model.dropped);
     try t.expect(f.srv.slide.find(f.neighbour_id).?.recalled.?);
+}
+
+fn dependentRefused(f: *Fixture, prior: u32) !void {
+    const rounds = f.model.rounds;
+    try t.expectError(error.Refused, correction.prepare(f.srv, &f.cx, &f.plan, Stays{}));
+    const label = try std.fmt.allocPrint(f.arena.allocator(), "fact {d}", .{prior});
+    try t.expect(std.mem.indexOf(u8, f.cx.message, label) != null);
+    try t.expect(std.mem.indexOf(u8, f.cx.message, f.srv.slide.find(prior).?.text) != null);
+    try t.expectEqual(rounds, f.model.rounds);
+    try t.expect(f.model.base_reads > 0);
+}
+fn underlying(f: *Fixture) u32 {
+    const id = f.srv.slide.add(old_answer, "chat", 3);
+    f.srv.slide.mark(id, .learned);
+    f.srv.slide.placed(id, &.{.{ .layer = 2, .neuron = 0, .key = .subject }});
+    f.srv.slide.asked(id, &.{.{ .question = held.question, .answer = old_answer, .short = "Soren" }});
+    f.model.pocket_belief = true;
+    f.model.pocket_present = true;
+    return id;
+}
+test "Learning persistence: refuses a dependent correction before its underlying lesson could be deleted first" {
+    const f = try Fixture.init(.correct);
+    defer f.deinit();
+    const prior = underlying(f);
+    try dependentRefused(f, prior);
+    try t.expect(!f.model.learned and f.srv.slide.find(prior).?.state == .learned);
+    try t.expectEqual(@as(usize, 0), f.model.dropped);
+    f.srv.slide.mark(f.id, .missed);
+    const facts = try f.srv.slide.snapshot(f.arena.allocator());
+    try @import("slide_forget.zig").delete(f.srv, &f.cx, &f.out, facts, facts.len - 1, "fixture", Stays{});
+    try t.expectEqual(.deleted, f.srv.slide.find(prior).?.state);
+    try t.expect(!f.model.pocket_present and f.model.saved == 1);
+}
+test "Learning persistence: refuses a dependent correction before a combined delete could strand it" {
+    const f = try Fixture.init(.correct);
+    defer f.deinit();
+    const prior = underlying(f);
+    try dependentRefused(f, prior);
+    // The refused correction owns no neurons, so it cannot join or obstruct a delete of the underlying fact.
+    try t.expectEqual(@as(usize, 0), f.srv.slide.find(f.id).?.neurons.len);
+    f.srv.slide.mark(f.id, .missed);
+    const facts = try f.srv.slide.snapshot(f.arena.allocator());
+    const both = try json.newObject(f.arena.allocator());
+    try both.put(f.arena.allocator(), "ids", .{ .array = try f.arena.allocator().dupe(json.Value, &.{ try json.intValue(f.arena.allocator(), prior), try json.intValue(f.arena.allocator(), f.id) }) });
+    try t.expectError(error.FactNotLearned, @import("slide_forget_many.zig").indices(f.arena.allocator(), .{ .object = both }, facts));
+    const batch = try @import("slide_forget_many.zig").plan(f.arena.allocator(), facts, &.{facts.len - 1});
+    try t.expectEqualSlices(u32, &.{prior}, batch.ids);
+    try t.expectEqual(@as(usize, 1), batch.neurons.len);
+}
+test "Learning persistence: refuses a second correction before deleting the earlier correction could strand it" {
+    const f = try Fixture.init(.correct);
+    defer f.deinit();
+    try f.accept();
+    const next = "The capital of Rula is Lumen.";
+    var q = training;
+    q.answer = next;
+    q.short = "Lumen";
+    f.plan = .{ .facts = &.{next}, .questions = &.{q}, .held = &.{}, .probes = &.{}, .checks = &.{}, .full = .{} };
+    try dependentRefused(f, f.id);
+    // The first correction is still independently deletable, with its exact original reference.
+    try f.remove();
+    try t.expectEqual(.deleted, f.srv.slide.find(f.id).?.state);
+    try t.expect(!f.model.learned and f.model.unforgot == 0);
+}
+
+test "Learning persistence: a matching kept value refuses even when pocket contributions cancel in the greedy reply" {
+    const f = try Fixture.init(.correct);
+    defer f.deinit();
+    const prior = underlying(f);
+    f.model.pocket_belief = false;
+    try dependentRefused(f, prior);
+}
+test "Learning persistence: pretrained corrections remain allowed beside an unrelated pocket" {
+    const f = try Fixture.init(.correct);
+    defer f.deinit();
+    f.srv.slide.placed(f.neighbour_id, &.{.{ .layer = 3, .neuron = 0, .key = .subject }});
+    try correction.prepare(f.srv, &f.cx, &f.plan, Stays{});
+    try f.accept();
+    try f.remove();
+    try t.expectEqual(.deleted, f.srv.slide.find(f.id).?.state);
+    try t.expectEqual(.learned, f.srv.slide.find(f.neighbour_id).?.state);
+}
+
+test "Learning persistence: a pocket-dependent reference without graph ownership refuses before training" {
+    const f = try Fixture.init(.correct);
+    defer f.deinit();
+    f.model.pocket_belief = true;
+    f.model.pocket_present = true;
+    try t.expectError(error.Refused, correction.prepare(f.srv, &f.cx, &f.plan, Stays{}));
+    try t.expect(std.mem.indexOf(u8, f.cx.message, "pocket neurons missing from this graph") != null);
+    try t.expect(!f.model.learned and f.model.rounds == 0);
 }

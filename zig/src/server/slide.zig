@@ -126,7 +126,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         const written = now(srv);
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
         const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
-        const gave = if (document) &.{} else giveWay(srv, a, &cx, fact, id, gone);
+        const gave = if (document or correcting) &.{} else giveWay(srv, a, &cx, fact, id, gone);
         var plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, supplied, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             putBack(srv, a, gave, id);
