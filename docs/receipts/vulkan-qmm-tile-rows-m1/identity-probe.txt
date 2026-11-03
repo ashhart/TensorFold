@@ -1,4 +1,4 @@
-RESULT stage1 elapsed_ms=6496 on "Apple M1 (G13G B1)": passed=25 total=25
+RESULT stage1 elapsed_ms=6532 on "Apple M1 (G13G B1)": passed=25 total=25
 m1 n8 k64: identical
 m2 n257 k128: identical
 m2 n256 k128 offsets: identical
