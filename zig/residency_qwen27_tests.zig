@@ -82,11 +82,11 @@ test "residency owner Qwen27: actual reusable drafter frame buffers follow alloc
         try record.check();
         frame.release();
         _ = try frame.begin();
-        record.fail_at = record.allocations.items.len;
-        try std.testing.expectError(error.InjectedBufferFailure, frame.alloc(32, 16, .bf16));
+        record.fail_at = record.allocations.items.len; // 128 KiB outgrows the first slot's 64 KiB: a replacement
+        try std.testing.expectError(error.InjectedBufferFailure, frame.alloc(4096, 16, .bf16));
         record.fail_at = null;
         try record.check();
-        _ = try frame.alloc(32, 16, .bf16);
+        _ = try frame.alloc(4096, 16, .bf16);
         owner.held.flush();
         try record.check();
         frame.release();
