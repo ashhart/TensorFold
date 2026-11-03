@@ -1,13 +1,10 @@
 //! The host's part of a Qwen-Image-2.1 pass: rotary tables, the time embedding and the modulation all blocks share.
 const std = @import("std");
 const cfg = @import("config.zig");
+const bf16_round = @import("bf16_round");
 
 /// fp32 to bf16, round to nearest even (torch's and MLX's cast); NaN stays NaN.
-pub fn bf16(x: f32) u16 {
-    const b: u32 = @bitCast(x);
-    if (b & 0x7fffffff > 0x7f800000) return @truncate((b >> 16) | 0x40);
-    return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+pub const bf16 = bf16_round.bits;
 
 pub fn widen(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
@@ -113,6 +110,32 @@ test "bf16 rounds to nearest even and keeps NaN" {
     try std.testing.expectEqual(@as(u16, 0x3f80), bf16(@bitCast(@as(u32, 0x3f808000))));
     try std.testing.expectEqual(@as(u16, 0x3f82), bf16(@bitCast(@as(u32, 0x3f818000))));
     try std.testing.expect(std.math.isNan(widen(bf16(std.math.nan(f32)))));
+}
+
+test "Qwen-Image bf16: the old spelling's bits on every zero, subnormal, infinity, NaN and tie" {
+    const old = struct {
+        /// bf16 as it was spelled before it was core's bits(): the oracle for every input, NaN included.
+        fn spelled(x: f32) u16 {
+            const b: u32 = @bitCast(x);
+            if (b & 0x7fffffff > 0x7f800000) return @truncate((b >> 16) | 0x40);
+            return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = bf16(v);
+            try std.testing.expectEqual(spelled(v), h);
+            if (std.math.isNan(v)) try std.testing.expect(std.math.isNan(widen(h)));
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+    try std.testing.expect(std.math.isNan(round(-std.math.nan(f32)))); // a NaN modulation stays NaN
 }
 
 test "rotary positions: the prompt on the diagonal, the image centred, the frame held at the prompt's length" {

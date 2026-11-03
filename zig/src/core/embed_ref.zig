@@ -1,6 +1,6 @@
 //! Token rows in float64 at their rounding points: MLX's affine dequantize and a bf16 scale (cuda/embed_rows.zig).
 const std = @import("std");
-const bf = @import("bf16_round.zig");
+const bf = @import("bf16_round");
 
 /// Code i of an MLX row packed `bits` wide in little-endian u32 words, low code first (a code may cross a word).
 pub fn code(row: []const u32, i: usize, bits: u4) u32 {

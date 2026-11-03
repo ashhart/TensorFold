@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const st = @import("../safetensors.zig");
+const bf16_round = @import("bf16_round");
 
 const Tensor = st.Tensor;
 const DType = st.DType;
@@ -31,11 +32,7 @@ pub fn tableDtype(dtype: DType) bool {
 }
 
 /// torch's fp32 -> bf16: round to nearest even, NaN stays a NaN.
-pub fn bf16(x: f32) u16 {
-    const bits: u32 = @bitCast(x);
-    if (std.math.isNan(x)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+pub const bf16 = bf16_round.bits;
 
 /// Writes `src` as little-endian fp32 into `dst` (4 bytes an element).
 pub fn widenInto(dst: []u8, src: Tensor) Error!void {
@@ -65,4 +62,29 @@ test "bf16 rounds to nearest even" {
     try std.testing.expectEqual(@as(u16, 0x3F82), bf16(@bitCast(@as(u32, 0x3F818000))));
     try std.testing.expectEqual(@as(u16, 0x3F80), bf16(@bitCast(@as(u32, 0x3F808000))));
     try std.testing.expect(std.math.isNan(@as(f32, @bitCast(@as(u32, bf16(std.math.nan(f32))) << 16))));
+}
+
+test "loader bf16: the old spelling's bits on every zero, subnormal, infinity, NaN and tie" {
+    const old = struct {
+        /// bf16 as it was spelled before it was core's bits(): the oracle for every input, NaN included.
+        fn spelled(x: f32) u16 {
+            const bits: u32 = @bitCast(x);
+            if (std.math.isNan(x)) return @intCast((bits >> 16) | 0x40);
+            return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = bf16(v);
+            try std.testing.expectEqual(spelled(v), h);
+            if (std.math.isNan(v)) try std.testing.expect(std.math.isNan(bf16_round.value(h)));
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
 }

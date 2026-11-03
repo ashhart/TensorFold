@@ -1,5 +1,6 @@
 //! CPU affine q4/group64 preparation preserves BF16 metadata and low-bit-first MLX words.
 const std = @import("std");
+const bf16_round = @import("bf16_round");
 pub const Prepared = struct {
     allocator: std.mem.Allocator,
     n: usize,
@@ -17,10 +18,7 @@ pub const Prepared = struct {
 pub fn asFloat(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
 }
-pub fn asBf16(value: f32) u16 {
-    const bits: u32 = @bitCast(value);
-    return @truncate((bits +% 0x7fff +% ((bits >> 16) & 1)) >> 16);
-}
+pub const asBf16 = bf16_round.bits;
 pub fn prepare(a: std.mem.Allocator, weights: []const u16, n: usize, k: usize) !Prepared {
     if (n == 0 or k == 0 or k % 64 != 0 or weights.len != try std.math.mul(usize, n, k)) return error.BadAffineShape;
     const words = try a.alloc(u32, weights.len / 8);
@@ -111,6 +109,32 @@ test "constant positive, negative and tiny groups retain signed scales and exact
     try std.testing.expectEqual(@as(u16, 0x3d89), p.scales[1]);
     try std.testing.expectEqual(@as(u16, 0), p.biases[2]);
     for (p.words) |word| try std.testing.expectEqual(@as(u32, 0), word);
+}
+test "q4 asBf16: today's bits on every zero, subnormal, infinity and tie; a NaN stays NaN" {
+    const old = struct {
+        /// asBf16 as it was spelled before it was core's bits(): the oracle for every non-NaN input.
+        fn spelled(value: f32) u16 {
+            const bits: u32 = @bitCast(value);
+            return @truncate((bits +% 0x7fff +% ((bits >> 16) & 1)) >> 16);
+        }
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = asBf16(v);
+            if (!std.math.isNan(v)) return std.testing.expectEqual(spelled(v), h);
+            try std.testing.expect(std.math.isNan(asFloat(h)));
+            try std.testing.expectEqual(u >> 31, h >> 15);
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+    try std.testing.expectEqual(@as(u16, 0x7f80), old.spelled(@bitCast(@as(u32, 0x7f800001)))); // the old copy's +Inf
+    try std.testing.expectEqual(@as(u16, 0x8000), old.spelled(@bitCast(@as(u32, 0x7fff8001)))); // and its -0
+    for ([_]u32{ 0x7f800001, 0x7fff8001, 0xffff8001, 0x7fc00000, 0xffffffff, 0x7fbfffff, 0xffa00000 }) |u| try old.kept(u);
 }
 
 pub fn signature() [32]u8 {

@@ -1,6 +1,6 @@
 //! The host's per-layer input steps against MLX 0.32.4 at the E4B's shapes: prints, full outputs, float64.
 const std = @import("std");
-const bf16_round = @import("../../core/bf16_round.zig");
+const bf16_round = @import("bf16_round");
 const cfg = @import("config.zig");
 const li = @import("layer_input.zig");
 
