@@ -64,6 +64,38 @@ test "stable profile: default and explicit spelling preserve every argument and 
     }
 }
 
+test "stable profile: capabilities describe the shared paging variable by family without changing its name" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try capabilities(&output.writer, .{ .version = "test" });
+    const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output.written(), .{});
+    defer decoded.deinit();
+    const entries = decoded.value.object.get("profiles").?.object.get("registered_switches").?.array.items;
+    var policies: usize = 0;
+    for (entries) |row| {
+        const fields = row.object;
+        if (!std.mem.eql(u8, fields.get("id").?.string, "TF_KV_PAGES")) continue;
+        policies += 1;
+        try std.testing.expectEqualStrings("cuda", fields.get("backend").?.string);
+        try std.testing.expect(fields.get("stable").? == .null);
+        const families = fields.get("families").?.array.items;
+        if (fields.get("report_values").? == .null) {
+            try std.testing.expectEqualStrings("auto", fields.get("syntax").?.string);
+            try std.testing.expectEqual(@as(usize, 1), families.len);
+            try std.testing.expectEqualStrings("glm5_next", families[0].string);
+        } else {
+            const values = fields.get("report_values").?.array.items;
+            try std.testing.expectEqual(@as(usize, 2), values.len);
+            try std.testing.expectEqualStrings("0", values[0].string);
+            try std.testing.expectEqualStrings("all", values[1].string);
+            try std.testing.expectEqual(@as(usize, 2), families.len);
+            try std.testing.expectEqualStrings("nemotron_h", families[0].string);
+            try std.testing.expectEqualStrings("nemotron_h_omni", families[1].string);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), policies);
+}
+
 test "max frames CLI bounds and engine request preserve the default" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
