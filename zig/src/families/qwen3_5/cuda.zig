@@ -45,6 +45,7 @@ test {
     _ = @import("cuda_mtp_area_test.zig");
     _ = @import("cuda_prefix.zig");
     _ = @import("cuda_prefix_fault_test.zig");
+    _ = @import("cuda_pend_test.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");

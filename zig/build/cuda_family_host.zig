@@ -37,6 +37,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const prompt_layout = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen prompt layout:"} }));
     b.step("test-qwen35-prompt-layout-host", "Actual whole and paged CUDA prompt ABI and stride calculations without devices").dependOn(&prompt_layout.step);
     step.dependOn(&prompt_layout.step);
+    const pending = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen pending keeps:"} }));
+    pending.setEnvironmentVariable("TF_QWEN_KEEP_LATE", "1"); // deferred keeps are opt-in; the step tests them
+    b.step("test-qwen35-pending-host", "Kept paths of every length inside the pending buffer and the log without devices").dependOn(&pending.step);
+    step.dependOn(&pending.step);
     const proposal = b.createModule(.{ .root_source_file = b.path("zig/proposal_router_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
     b.step("test-proposal-router-host", "Optional common proposal routing, legacy parity and lifecycle").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = proposal, .filters = &.{"proposal router:"} })).step);
 
