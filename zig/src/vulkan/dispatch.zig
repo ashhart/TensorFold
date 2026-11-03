@@ -5,6 +5,7 @@ const runtime = @import("runtime.zig");
 const Device = @import("device.zig").Device;
 const Buffer = @import("memory.zig").Buffer;
 const commands = @import("commands.zig");
+const hazard = @import("hazard.zig");
 
 const check = runtime.check;
 
@@ -35,6 +36,8 @@ pub const Pipeline = struct {
     sets: [batch_max]c.VkDescriptorSet = @splat(null),
     slot: usize = 0,
     bound: bool = false,
+    /// The byte range of each binding of the current bind, for the hazard check of the next run.
+    ranges: [max_bindings]hazard.Range = undefined,
 
     /// Checks the module and the device's limits before creating anything; a failure destroys what was made.
     pub fn init(dev: *const Device, spirv: []align(4) const u8, layout: Layout) Error!Pipeline {
@@ -153,13 +156,19 @@ pub const Pipeline = struct {
             };
         }
         try disjoint(bindings, p.layout.writes);
+        for (bindings, 0..) |b, i| p.ranges[i] = .{ .buffer = @intFromPtr(b.buffer.handle), .start = b.offset, .end = b.offset + b.len };
         p.dev.api.vkUpdateDescriptorSets(p.dev.handle, p.layout.bindings, &writes, 0, null);
         p.slot = (p.slot + 1) % batch_max;
         p.bound = true;
     }
 
-    /// Records one dispatch, then a barrier making its writes visible to a later dispatch or transfer.
+    /// Records one dispatch and a barrier after it, for callers that record into a command buffer themselves.
     pub fn record(p: *const Pipeline, cmd: c.VkCommandBuffer, push: []const u8, groups: [3]u32) Error!void {
+        try p.dispatchOnly(cmd, push, groups);
+        commands.dispatchBarrier(p.dev, cmd);
+    }
+
+    fn dispatchOnly(p: *const Pipeline, cmd: c.VkCommandBuffer, push: []const u8, groups: [3]u32) Error!void {
         if (!p.bound) return error.BadBindings;
         if (push.len != p.layout.push_bytes) return error.BadPushSize;
         const most = p.dev.properties.limits.maxComputeWorkGroupCount;
@@ -172,14 +181,30 @@ pub const Pipeline = struct {
         api.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, p.pipeline_layout, 0, 1, &p.sets[p.slot], 0, null);
         if (push.len > 0) api.vkCmdPushConstants(cmd, p.pipeline_layout, c.VK_SHADER_STAGE_COMPUTE_BIT, 0, p.layout.push_bytes, push.ptr);
         api.vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
-        const reads = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_SHADER_WRITE_BIT | c.VK_ACCESS_TRANSFER_READ_BIT | c.VK_ACCESS_TRANSFER_WRITE_BIT;
-        const stages = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT;
-        commands.barrier(p.dev, cmd, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_ACCESS_SHADER_WRITE_BIT, stages, reads);
     }
 
-    /// Records one dispatch into the open command buffer; submitted with half a batch, or with the next copy or fill.
+    /// Records one dispatch, after a compute barrier only if it conflicts with one since the last barrier.
     pub fn run(p: *const Pipeline, cmds: *commands.Commands, push: []const u8, groups: [3]u32, timeout_ns: u64) Error!void {
-        try p.record(try cmds.begin(), push, groups);
+        var reads: [max_bindings]hazard.Range = undefined;
+        var writes: [max_bindings]hazard.Range = undefined;
+        var n_reads: usize = 0;
+        var n_writes: usize = 0;
+        for (p.ranges[0..p.layout.bindings], 0..) |r, i| {
+            if (p.layout.writes >> @intCast(i) & 1 != 0) {
+                writes[n_writes] = r;
+                n_writes += 1;
+            } else {
+                reads[n_reads] = r;
+                n_reads += 1;
+            }
+        }
+        const cmd = try cmds.begin();
+        if (cmds.hazards.conflicts(reads[0..n_reads], writes[0..n_writes])) {
+            commands.dispatchBarrier(p.dev, cmd);
+            cmds.hazards.clear();
+        }
+        try p.dispatchOnly(cmd, push, groups);
+        cmds.hazards.add(reads[0..n_reads], writes[0..n_writes]);
         cmds.pending += 1;
         if (cmds.pending >= batch_flush) try cmds.submit(timeout_ns);
     }

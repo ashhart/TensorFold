@@ -6,6 +6,7 @@ const runtime = @import("runtime.zig");
 const memory = @import("memory.zig");
 const Device = @import("device.zig").Device;
 const Buffer = memory.Buffer;
+const Hazards = @import("hazard.zig").Hazards;
 const Error = runtime.Error;
 const check = runtime.check;
 
@@ -18,6 +19,8 @@ pub const Commands = struct {
     recording: bool = false,
     /// Dispatches in the open command buffer; Pipeline.run submits when it reaches half a batch.
     pending: u32 = 0,
+    /// Ranges the open command buffer's dispatches read or wrote since the last barrier; empty after a submission.
+    hazards: Hazards = .{},
     /// Set by a state-corrupting failure (signaled fence or invalid buffer): later begin and submit refuse.
     poison: ?Error = null,
 
@@ -58,12 +61,14 @@ pub const Commands = struct {
         _ = self.dev.api.vkResetCommandBuffer(self.cmd, 0);
         self.recording = false;
         self.pending = 0;
+        self.hazards.clear();
     }
 
     /// The open command buffer; begun (and reset) only when nothing recorded earlier still waits for a submission.
     pub fn begin(self: *Commands) Error!c.VkCommandBuffer {
         if (self.poison) |p| return p;
         if (self.recording) return self.cmd;
+        self.hazards.clear();
         try check(self.dev.api.vkResetCommandBuffer(self.cmd, 0));
         const info: c.VkCommandBufferBeginInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -72,6 +77,16 @@ pub const Commands = struct {
         try check(self.dev.api.vkBeginCommandBuffer(self.cmd, &info));
         self.recording = true;
         return self.cmd;
+    }
+
+    /// The open command buffer after a barrier that fences every dispatch run since the last one; for direct recorders.
+    pub fn sync(self: *Commands) Error!c.VkCommandBuffer {
+        const cmd = try self.begin();
+        if (!self.hazards.empty()) {
+            dispatchBarrier(self.dev, cmd);
+            self.hazards.clear();
+        }
+        return cmd;
     }
 
     /// Submits what is recorded (nothing if none); timeout_ns covers the whole batch; Timeout and InFlight need orExit.
@@ -151,6 +166,13 @@ pub fn barrier(dev: *const Device, cmd: c.VkCommandBuffer, src_stage: u32, src_a
         .dstAccessMask = dst_access,
     };
     dev.api.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 1, &b, 0, null, 0, null);
+}
+
+/// The barrier after a dispatch: its shader writes are visible to a later dispatch or copy.
+pub fn dispatchBarrier(dev: *const Device, cmd: c.VkCommandBuffer) void {
+    const reads = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_SHADER_WRITE_BIT | c.VK_ACCESS_TRANSFER_READ_BIT | c.VK_ACCESS_TRANSFER_WRITE_BIT;
+    const stages = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+    barrier(dev, cmd, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_ACCESS_SHADER_WRITE_BIT, stages, reads);
 }
 
 // Fill geometry requires nonzero 4-byte-aligned offset/length within the buffer; host-tested.
