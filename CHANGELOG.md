@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The kernel contract checks Qwen3.8-27B's attention_io pack, append and keep at the other two head shapes the family admits, GQA16 (32 query heads over 2) and the 9B's 16 over 4 (#2063). Thanks to @cshintov.
+
 - `kernel-contract` frees each kernel's device buffers once its gates are done, so the full suite fits on a 16 GiB card instead of running out of memory in the MoE backward suite (#2042). Thanks to @BlivionIaG.
 
 - The remaining fp32-to-bf16 rounding copies use core's `bf16_round.bits()`, now a std-only module every module imports by name. Bits are unchanged on every non-NaN input, and a NaN now stays NaN in the six copies that had no NaN rule (#2052).
