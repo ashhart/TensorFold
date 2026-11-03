@@ -114,7 +114,7 @@ pub fn Ops(comptime G: type) type {
         }
         pub fn denseProject(o: *Self, layer: usize, p: graph.Projection, x: Tensor) !Tensor {
             const d = o.model.layers[layer].dense;
-            if (p == .gate) o.dense_input = x;
+            if (p == .gate and o.learning != null) o.dense_input = x;
             const out = try o.project(switch (p) {
                 .gate => d.gate,
                 .value => d.up,
