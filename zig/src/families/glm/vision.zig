@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
+const rope_freq = @import("core").rope_freq;
 const st = @import("../../core/safetensors.zig");
 const wts = @import("weights.zig");
 const fwd = @import("forward.zig");
@@ -344,7 +345,7 @@ pub fn bf16(x: f32) u16 {
 /// Each patch's 2-D rotary cos and sin: its row and column in the patch grid times the 16 frequencies 10000^(-k/16).
 fn rotary(v: *Vision, gh: u32, gw: u32) void {
     var inv: [16]f32 = undefined;
-    for (&inv, 0..) |*f, k| f.* = 1.0 / @as(f32, @floatCast(std.math.pow(f64, 10000.0, @as(f64, @floatFromInt(2 * k)) / 32.0)));
+    rope_freq.inverseFrequencies(10000.0, 32, &inv);
     const cs: [*]f32 = @ptrCast(@alignCast(v.cos.addr()));
     const sn: [*]f32 = @ptrCast(@alignCast(v.sin.addr()));
     const wx_n = gw / merge;
