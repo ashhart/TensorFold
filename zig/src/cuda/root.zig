@@ -167,3 +167,11 @@ test {
     _ = @import("graph_instantiate_failure_test.zig");
 }
 pub const qwen35_bf16_rows = @import("qwen35_bf16_rows.zig");
+
+pub const l2_prefetch = @import("l2_prefetch.zig");
+pub const l2_sources = @import("l2_sources.zig");
+test {
+    _ = l2_prefetch;
+    _ = l2_sources;
+    _ = @import("l2_prefetch_test.zig");
+}

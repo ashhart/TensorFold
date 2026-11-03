@@ -2,6 +2,10 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
+    const prefetch = b.step("test-l2-prefetch-host", "Decode prefetch settings, resident ranges and recording-driver lifecycle without GPUs");
+    for ([_]*std.Build.Module{ cuda, mods.qwen35, mods.nemotron, glm }) |m| {
+        prefetch.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{ "L2 prefetch:", "TF_GLM_L2PF:", "take:", "the table:" } })).step);
+    }
     const host = b.graph.host;
     const startup = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/cuda_start_test.zig"), .target = host, .optimize = .debug });
     const startup_run = b.addRunArtifact(b.addTest(.{ .root_module = startup }));
@@ -59,6 +63,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
 }
 
 pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+    const prefetch_compile = b.addObject(.{ .name = "decode-prefetch-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/l2_prefetch_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "nemotron", .module = mods.nemotron } } }) });
+    _ = prefetch_compile.getEmittedBin();
+    b.step("compile-l2-prefetch-host", "Compile the real Qwen and Nemotron CUDA prefetch and decode hooks without GPU execution").dependOn(&prefetch_compile.step);
+
     const fp8_gate = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm_ref_fp8.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     const fp8_object = b.addObject(.{ .name = "glm-fp8-gate-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_fp8_gate_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "gate", .module = fp8_gate }} }) });
     _ = fp8_object.getEmittedBin();

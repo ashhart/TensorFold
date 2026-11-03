@@ -75,3 +75,8 @@ test {
 test {
     _ = @import("cuda_subset_host_test.zig");
 }
+
+pub const prefetch = @import("cuda_l2pf.zig");
+test {
+    _ = prefetch;
+}

@@ -106,6 +106,7 @@ pub const Engine = struct {
     segments: usize = 1, // Options.segments
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
+    l2pf: ?cuda.l2_prefetch.Runtime = null,
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
     prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
     taps: ?Taps = null, // a prompt pass's hidden rows for a recorder (serial chunks)
@@ -219,6 +220,8 @@ pub const Engine = struct {
             content = null;
             try cuda.tp_watch.ready(io, try x.finish());
         }
+        e.l2pf = try @import("cuda_l2pf.zig").init(e);
+        errdefer if (!keep_owner) if (e.l2pf) |*p| p.deinit();
         if (opts.graphs) try e.capture(mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
@@ -306,6 +309,7 @@ pub const Engine = struct {
         load_owner.closeEntry(e.ctx) catch {}; // this engine's context current first, whichever one the caller had
         if (e.tp != null) @import("cuda_worker.zig").end(e) catch {}; // the other ranks leave their job loops
         e.stream.synchronize() catch {};
+        if (e.l2pf) |*p| p.deinit();
         e.snaps.deinit();
         e.spares.deinit();
         if (e.serial) |*g| g.deinit();
@@ -401,17 +405,7 @@ pub const Engine = struct {
         return .{ .k = &e.k, .s = e.stream, .part = e.b.lane_part };
     }
 
-    pub fn forward(e: *const Engine, dump: ?*Dump) Forward {
-        var f = Forward.init(e.c, &e.w, &e.b, e.ops(), e.max_len, e.nch, e.sampling != null);
-        f.page_elems = e.pageBytes() / 2;
-        f.dump = dump;
-        f.slot = e.slot;
-        f.untaught = e.bound.untaught;
-        f.tp = if (e.tp) |*g| g else null;
-        f.vision = e.vision;
-        if (dump == null and (e.c.latent > 0 or (e.c.experts <= 128 and e.c.slots() <= 8))) f.side = e.side; // tf_plan_routed's bounds; a latent MoE plans without it
-        return f;
-    }
+    pub const forward = @import("cuda_engine_forward.zig").forward;
 
     /// Engine.reset: zeroed caches and state, position 0.
     pub fn reset(e: *Engine) !void {

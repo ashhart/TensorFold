@@ -128,6 +128,7 @@ test "full mode: stored FP8 packing ignores even malformed activation scales" {
     e.mo = fullKernels(&d);
     e.arena = .{ .d = &d, .ptr = 0x2000, .len = 16384 };
     e.arena_at = 0;
+    e.l2_ranges = null;
     var stage: cuda.DeviceBuffer = .{ .d = &d, .ptr = 0x1000, .len = 128 };
     Recorded.count = 0;
     const result = try modelopt.linear(&e, &ck, &stage, "", "probe", 2, 64, .fp8);

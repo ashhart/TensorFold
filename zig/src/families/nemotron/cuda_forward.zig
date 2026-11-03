@@ -55,6 +55,7 @@ pub const Forward = struct {
     sampled: bool, // the target draws by the bound sequence's rule (sample.cu); false: torch.argmax
     dump: ?*Dump = null,
     side: ?Side = null, // decode MoE layers run the shared expert here (null: one stream)
+    l2pf: ?*const cuda.l2_prefetch.Runtime = null,
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
     slot: u32 = 0, // the bound sequence's lesson latch slot, which a window's rows read
@@ -166,13 +167,15 @@ pub const Forward = struct {
         var delta: Delta = .none;
         var mj: usize = 0;
         var aj: usize = 0;
-        for (f.w.blocks) |blk| {
+        for (f.w.blocks, 0..) |blk, i| {
+            if (f.l2pf) |p| try p.fork(o.s, i, .n);
             try f.norm(&x, delta, blk.norm, rows, true);
             switch (blk.kind) {
                 .mamba => {
                     const m = blk.mamba;
                     const W: u64 = ms.rmax;
                     try o.dense(b.y, b.xs, m.in_proj, b.proj, rows);
+                    if (f.l2pf) |p| try p.fork(o.s, i, .o);
                     try f.mark(.mamba_in);
                     var k0: usize = 0;
                     while (k0 < segs.len) : (k0 += glue.max_segs) {
@@ -208,6 +211,7 @@ pub const Forward = struct {
                     const a = blk.attn;
                     const qd: u64 = c.heads * c.head_dim;
                     try o.dense(b.y, b.xs, a.qkv, b.qkv, rows);
+                    if (f.l2pf) |p| try p.fork(o.s, i, .o);
                     try f.mark(.qkv);
                     var k0: usize = 0;
                     while (k0 < segs.len) : (k0 += glue.max_segs) {
@@ -233,6 +237,7 @@ pub const Forward = struct {
                 },
             }
         }
+        if (f.l2pf) |p| try p.join(o.s);
         try f.norm(&x, delta, f.w.norm_f, rows, true);
         for (segs) |s| try o.copy(s.b.hidden, b.y + s.row0 * D * 2, s.rows * c.hidden * 2);
         try o.dense(b.y, b.xs, f.w.head, b.logits, rows);

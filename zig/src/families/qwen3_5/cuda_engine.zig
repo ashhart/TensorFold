@@ -100,6 +100,8 @@ pub const Engine = struct {
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
     arena: DeviceBuffer,
     arena_at: usize = 0,
+    l2pf: ?cuda.l2_prefetch.Runtime = null,
+    l2_ranges: ?*std.ArrayList(cuda.l2_sources.Range) = null,
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -199,6 +201,12 @@ pub const Engine = struct {
         e.rope_buf = null;
         e.window_rows = most_window;
         e.arena_at = 0;
+        e.l2pf = null;
+        const l2o = try @import("cuda_l2pf.zig").options();
+        var ranges: std.ArrayList(cuda.l2_sources.Range) = .empty;
+        defer ranges.deinit(gpa);
+        e.l2_ranges = if (l2o.on) &ranges else null;
+        defer e.l2_ranges = null;
         e.graphs = .empty;
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
         errdefer @import("cuda_rope_table.zig").free(e);
@@ -261,32 +269,24 @@ pub const Engine = struct {
             try weights.load(e, &ck, &stage);
         }
         if (e.mo) |*m| try m.reserveParts(e);
+        e.l2_ranges = null;
+        e.l2pf = try @import("cuda_l2pf.zig").init(e, l2o, ranges.items);
+        errdefer if (e.l2pf) |*p| {
+            cuda.completion.drain(e.d, e.stream, "decode prefetch startup work did not drain");
+            p.deinit();
+        };
         try @import("cuda_engine_tail.zig").finish(e, io, started);
         return e;
     }
 
-    pub fn finishWarm(e: *Engine, io: std.Io, started: i96) !void {
-        const warm_start = profile.now(io);
-        e.startup = .{ .load = warm_start - started };
-        errdefer recurrent.shutdown(e);
-        e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
-    }
-
-    /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
-    pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
-        const ids: [32]u32 = @splat(0);
-        const greedy: Draw = .{ .rule = null, .position = 33 };
-        try e.forward(&.{.{ .cache = warm_cache, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
-        try e.forward(&.{.{ .cache = warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{greedy} });
-        try e.forward(&.{.{ .cache = warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{.{ .rule = .{ .seed = 1, .inv_t = 1.0 / 0.7, .top_p = 0.95, .near = 20.0, .min_log = -std.math.inf(f32), .top_k = 20 }, .position = 34 }} });
-        // a tree window and a branch of it kept: the keep kernels, and the forward's branch path
-        try e.forward(&.{.{ .cache = warm_cache, .rows = 3, .parents = &.{ -1, 0, 0 } }}, ids[0..3], .{ .draws = &.{ greedy, greedy, greedy } });
-        try warm_cache.keep(e, &.{ 0, 2 });
-        try e.stream.synchronize();
-        recurrent.completed(e);
-    }
+    pub const finishWarm = @import("cuda_engine_tail.zig").finishWarm;
+    pub const warmCache = @import("cuda_engine_tail.zig").warmCache;
 
     pub fn deinit(e: *Engine) void {
+        if (e.l2pf) |*p| {
+            cuda.completion.drain(e.d, e.stream, "decode prefetch main stream did not drain");
+            p.deinit();
+        }
         recurrent.shutdown(e);
         @import("cuda_rope_table.zig").free(e);
         if (e.kit) |k| k.deinit(e.gpa);
@@ -316,9 +316,7 @@ pub const Engine = struct {
     }
 
     /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
-    pub fn tapBytes(e: *const Engine) usize {
-        return tap_rows * e.n_taps * e.g.hidden * 2;
-    }
+    pub const tapBytes = @import("cuda_engine_tail.zig").tapBytes;
 
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
     pub fn setTaps(e: *Engine, taps: []const u32) !void {
@@ -332,6 +330,7 @@ pub const Engine = struct {
     pub fn alloc(e: *Engine, bytes: usize) !u64 {
         const at = aligned(e.arena_at);
         if (at + bytes > e.arena.len) return error.ArenaExhausted;
+        if (e.l2_ranges) |ranges| try ranges.append(e.gpa, .{ .ptr = e.arena.ptr + at, .len = bytes });
         e.arena_at = at + bytes;
         return e.arena.ptr + at;
     }
