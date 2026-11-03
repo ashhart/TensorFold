@@ -489,7 +489,7 @@ test "glm prefill: the flag share keeps every CUDA chunk start on the grid while
     try std.testing.expectEqualSlices(u32, &.{ 0, 2048, 4096 }, f.starts.items); // every start on 2048; BadChunk never raised
 }
 
-test "glm prefill: a family that opts into chunk invariance gets the cap, and the grid guard raises BadChunk" {
+test "glm prefill: a family that opts into chunk invariance gets the cap, and GLM's step still keeps the 2048 grid" {
     const hostfill = @import("../../core/lane_host_fill.zig");
     var f: Fake = .{ .grid = 2048, .decode_shrink = false, .invariant = true };
     defer f.deinit();
@@ -510,7 +510,8 @@ test "glm prefill: a family that opts into chunk invariance gets the cap, and th
     @memset(tokens, 7);
     var s = try Stream.init(a, .{ .id = "capped", .prompt = tokens, .max_new = 4, .chunks = &.{ 2048, 4096 } });
     defer s.deinit(a);
-    try std.testing.expect(!try fill.step(&f, &s, hint)); // one 512-row chunk goes out...
-    try std.testing.expectError(error.BadChunk, fill.step(&f, &s, hint)); // ...and the next start, 512, breaks the grid
-    try std.testing.expectEqualSlices(u32, &.{ 0, 512 }, f.starts.items); // Bizuayeu's failure, reproduced only under opt-in
+    try std.testing.expect(!try fill.step(&f, &s, hint)); // the step takes the hint as `_`: a whole 2048-row chunk...
+    try std.testing.expect(!try fill.step(&f, &s, hint));
+    try std.testing.expect(try fill.step(&f, &s, hint)); // ...so the prompt ends on the cold plan's cuts
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2048, 4096 }, f.starts.items); // every start on 2048: no BadChunk
 }
