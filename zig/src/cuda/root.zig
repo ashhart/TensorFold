@@ -169,6 +169,7 @@ test {
 
 test {
     _ = @import("context_health.zig");
+    _ = @import("prompt_bf16_host_test.zig");
 }
 
 test {
