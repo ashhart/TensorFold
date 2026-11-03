@@ -347,8 +347,9 @@ pub const Streamer = struct {
     }
 };
 
-/// A streamed reply's final prose: ``cutProse`` when max_tokens left a call open, else ``finishedProse``.
-pub fn endProse(a: Allocator, content: []const u8, text: []const u8, tools: []const Value, reason: []const u8) Allocator.Error![]const u8 {
+/// A streamed reply's final prose: ``cutProse`` for a cut call, else ``finishedProse``; one-call mode rstrips it.
+pub fn endProse(a: Allocator, content: []const u8, text: []const u8, tools: []const Value, reason: []const u8, single: bool) Allocator.Error![]const u8 {
+    if (single) return reply_text.pyRstrip(try reply_text.finishedProse(a, content));
     const cut = std.mem.eql(u8, reason, "length") and (try cutCalls(a, text, tools)) != null;
     return if (cut) reply_text.cutProse(a, content) else reply_text.finishedProse(a, content);
 }
@@ -407,24 +408,28 @@ fn nameLike(s: []const u8) bool {
 pub const TextFilter = struct {
     pending: std.ArrayList(u8) = .empty,
     hidden: ?[]const u8 = null,
+    deferred: bool = false, // a closed envelope was hidden: later prose waits for the reply's final content
 
     pub fn feed(f: *TextFilter, a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        if (f.deferred) return "";
         try f.pending.appendSlice(a, text);
         var out: std.ArrayList(u8) = .empty;
         while (f.pending.items.len > 0) {
             const p = f.pending.items;
             if (f.hidden) |name| {
                 const close = try std.mem.concat(a, u8, &.{ "</", name, ">" });
-                const end = std.ascii.findIgnoreCase(p, close) orelse {
+                if (std.ascii.findIgnoreCase(p, close) == null) {
                     const keep = reply_text.charCount(close) - 1;
                     const chars = reply_text.charCount(p);
                     const tail = if (chars > keep) reply_text.afterChars(p, chars - keep) else p;
                     try f.reset(a, tail);
                     break;
-                };
-                try f.reset(a, p[end + close.len ..]);
+                }
+                // The whole reply may keep this envelope as text, so what follows cannot overtake it.
                 f.hidden = null;
-                continue;
+                f.deferred = true;
+                f.pending.clearRetainingCapacity();
+                break;
             }
             const start = std.mem.indexOfScalar(u8, p, '<') orelse {
                 try out.appendSlice(a, p);
@@ -462,7 +467,7 @@ pub const TextFilter = struct {
     }
 
     pub fn finish(f: *TextFilter) []const u8 {
-        const tail = if (f.hidden != null) "" else f.pending.items;
+        const tail = if (f.hidden != null or f.deferred) "" else f.pending.items;
         f.pending = .empty;
         return tail;
     }
@@ -514,11 +519,12 @@ pub const Policy = struct {
     }
 
     /// Held-back malformed or unoffered call envelopes kept as reply text: ``final`` past the prose ``sent``.
-    pub fn kept(_: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
+    pub fn kept(p: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
         // Replies without parsed calls retain their leading whitespace; parsed content may be stripped.
         const shown = if (std.mem.startsWith(u8, final, sent)) sent else reply_text.pyLstrip(sent);
         if (!std.mem.startsWith(u8, final, shown)) return null;
         const rest = final[shown.len..];
+        if (p.single) return if (rest.len > 0) rest else null;
         return if (reply_text.pyStrip(rest).len > 0) rest else null;
     }
 };
