@@ -1,0 +1,26 @@
+{{- bos_token -}}
+{%- for message in messages -%}
+{{- "<|im_start|>" + message['role'] + "\n" -}}
+{%- if message['content'] is string -%}
+{{- message['content'] -}}
+{%- else -%}
+{%- for part in message['content'] -%}
+{%- if part['type'] == 'text' -%}
+{{- part['text'] -}}
+{%- elif part['type'] == 'image' or part['type'] == 'image_url' -%}
+{{- "<|vision_start|><|image|><|vision_end|>" -}}
+{%- elif part['type'] == 'video' or part['type'] == 'video_url' -%}
+{{- "<|vision_start|><|video|><|vision_end|>" -}}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{{- "<|im_end|>\n" -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- "<|im_start|>assistant\n" -}}
+{%- if enable_thinking is defined and enable_thinking -%}
+{{- "<think>" -}}
+{%- else -%}
+{{- "<think></think>" -}}
+{%- endif -%}
+{%- endif -%}
