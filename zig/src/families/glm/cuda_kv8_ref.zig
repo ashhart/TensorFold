@@ -1,13 +1,11 @@
 //! CPU format reference for synthetic device gates, never an inference implementation.
 const std = @import("std");
 const fp8 = @import("core").quant.fp8;
+const bf16_round = @import("bf16_round");
 pub fn bf(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
 }
-pub fn bfBits(x: f32) u16 {
-    const b: u32 = @bitCast(x);
-    return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+pub const bfBits = bf16_round.bits;
 pub fn code(x: f32) u8 {
     const sign: u8 = @intCast((@as(u32, @bitCast(x)) >> 24) & 0x80);
     const v: f32 = @floatCast(@abs(fp8.toE4m3(x)));
@@ -50,4 +48,17 @@ test "GLM FP8 KV: reference handles every finite BF16 magnitude and round-even t
     }
     var q: [1]u8 = undefined;
     try std.testing.expectError(error.NonFiniteRow, pack(&.{0x7fc0}, &q));
+}
+
+test "GLM FP8 KV: bfBits is core's bits(), 0xffffffff gives a NaN, other words the plain + copy's bits" {
+    try std.testing.expect(std.math.isNan(bf(bfBits(@bitCast(@as(u32, 0xffff_ffff))))));
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 19) |i| { // every bf16 value's tie and carry edges, then random words
+        const lo = [_]u32{ 0x7fff, 0x8000, 0x8001, 0xffff };
+        const w: u32 = if (i < 1 << 18) @as(u32, @intCast(i >> 2)) << 16 | lo[i & 3] else prng.random().int(u32);
+        const v: f32 = @bitCast(w);
+        if (std.math.isNan(v)) {
+            try std.testing.expect(std.math.isNan(bf(bfBits(v))));
+        } else try std.testing.expectEqual(@as(u16, @intCast((w + 0x7fff + ((w >> 16) & 1)) >> 16)), bfBits(v));
+    }
 }

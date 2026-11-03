@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const wide = @import("wide.zig");
+const bf16_round = @import("bf16_round");
 
 /// TF_TEST_RECEIPTS=1 prints each check's measured error; the bounds are checked either way.
 fn receipts() bool {
@@ -17,10 +18,7 @@ const few: f64 = 2; // attn_check's pair bar, and the ~2-step fp64 sanity bound
 // An fp32 reduction of this k can move a small column by more than one bf16 step: acc_floor.
 const acc_floor: f64 = 0.1;
 
-fn bf16(v: f32) u16 {
-    const u: u32 = @bitCast(v);
-    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
-}
+const bf16 = bf16_round.bits;
 
 fn f32of(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
@@ -234,4 +232,17 @@ fn ehCheck() !void {
 
 test "eh_proj on the tensor units: fp64 error no worse than the row kernel, decode and prompt apart" {
     try ehCheck();
+}
+
+test "eh_proj's bf16 is core's bits(): 0xffffffff gives a NaN, other words the plain + copy's bits" {
+    try std.testing.expect(std.math.isNan(f32of(bf16(@bitCast(@as(u32, 0xffff_ffff))))));
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 19) |i| { // every bf16 value's tie and carry edges, then random words
+        const lo = [_]u32{ 0x7fff, 0x8000, 0x8001, 0xffff };
+        const w: u32 = if (i < 1 << 18) @as(u32, @intCast(i >> 2)) << 16 | lo[i & 3] else prng.random().int(u32);
+        const v: f32 = @bitCast(w);
+        if (std.math.isNan(v)) {
+            try std.testing.expect(std.math.isNan(f32of(bf16(v))));
+        } else try std.testing.expectEqual(@as(u16, @intCast((w + 0x7fff + ((w >> 16) & 1)) >> 16)), bf16(v));
+    }
 }
