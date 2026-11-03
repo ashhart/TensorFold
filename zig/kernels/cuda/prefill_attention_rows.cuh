@@ -5,6 +5,7 @@
     extern __shared__ uint4 smem[];
     uint4* slots = smem;
     uint4* qs = smem + NS * HALF * CS;
+    int* ids = reinterpret_cast<int*>(qs + WARPS * 16 * CS);  // IDS: the chunk's PN page ids, past the queries
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, qd = lane % 4, mt = lane / 8;
     const int groups = G / HPC, hk = blockIdx.y / groups, hg = blockIdx.y % groups;
     const int row0 = first_row(), last = min(row0 + 16 * RB, W) - 1;
@@ -74,15 +75,14 @@
             fetch(item);
             put(item);
         } else if constexpr (P256) {
-            // pages of 256 positions: an item's HALF keys sit in one page, so one table read and one base an item
+            // pages of 256 positions: a tile's keys, filled or not, sit in one allocated page, so key0 needs no clamp
             const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(item % 4 < 2 ? kc : vc);
-            const int key0 = (item / 4) * BN + (item % 2) * HALF, k0 = min(key0, limit - 1);
+            const int key0 = (item / 4) * BN + (item % 2) * HALF, p = key0 / PTOK;
             uint4* dst = slots + (item % NS) * HALF * CS;
-            const __nv_bfloat16* base = src + (int64_t)PT[k0 / PTOK] * PS + ((int64_t)hk * PTOK + k0 % PTOK) * D;
+            const __nv_bfloat16* base = src + (int64_t)(IDS ? ids[p] : PT[p]) * PS + ((int64_t)hk * PTOK + key0 % PTOK) * D;
             for (int i = threadIdx.x; i < HALF * NB; i += THREADS) {
-                const int key = key0 + i / NB, chunk = i % NB;
-                const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
-                cp16z(dst + sw<8 * CS>(i / NB, chunk), base + (int64_t)(in ? key - k0 : 0) * D + chunk * 8, in);
+                const int row = i / NB, chunk = i % NB;
+                cp16z(dst + sw<8 * CS>(i / NB, chunk), base + (i / NB) * D + chunk * 8, key0 + row < limit && (NB == C || chunk < C));
             }
         } else {
             const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(item % 4 < 2 ? kc : vc);
@@ -128,6 +128,10 @@
             cp16z(qs + sw<8 * CS>(i / C, i % C), q + ((int64_t)min(row, W - 1) * H + hd) * D + (i % C) * 8, row < W);
         }
         commit();
+    }
+    if constexpr (IDS) {  // every page id the chunk reads, once, so staging never waits on the table
+        for (int i = threadIdx.x; i < PN; i += THREADS) ids[i] = PT[i];
+        __syncthreads();
     }
 #pragma unroll
     for (int i = 0; i < NS; ++i) {
