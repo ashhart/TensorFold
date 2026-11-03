@@ -67,6 +67,7 @@ test {
     _ = columns;
     _ = vision;
     _ = dense_text;
+    _ = joint_schema;
     _ = policy;
     _ = admission;
     _ = Device;
