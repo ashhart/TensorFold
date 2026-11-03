@@ -47,6 +47,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM on CUDA with TF_GLM_KV_SHARE no longer reports a balanced idle KV pool as (UNEVEN) at close; nothing else changes (#1993). Thanks to @Bizuayeu.
 
 - lfm3, Spark 2.5 and the GLM vision tower take their RoPE frequency tables from core's exact helper; no value changes (#1995, part of #1852).
+- Passing test binaries no longer print, so `zig build test` shows a `failed command:` line only for a real failure.
 
 - GLM refuses a checkpoint whose `tensorfold_activation_dtype` asks for anything but bfloat16, naming the key, instead of silently serving bf16 activations; docs/api.md says which engines serve `/v1/decisions` (#1987, for #840).
 
