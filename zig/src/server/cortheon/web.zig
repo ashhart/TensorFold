@@ -219,6 +219,14 @@ pub fn resolveUrl(a: Allocator, base: []const u8, location: []const u8) Allocato
     if (std.mem.startsWith(u8, loc, "//")) return std.fmt.allocPrint(a, "{s}:{s}", .{ base[0..scheme_end], loc });
     const host_start = scheme_end + 3;
     const path_start = std.mem.indexOfAnyPos(u8, base, host_start, "/?#") orelse base.len;
+    if (std.mem.startsWith(u8, loc, "#")) {
+        const cut = std.mem.indexOfScalarPos(u8, base, path_start, '#') orelse base.len; // a fragment stays on this page, query included
+        return std.fmt.allocPrint(a, "{s}{s}", .{ base[0..cut], loc });
+    }
+    if (std.mem.startsWith(u8, loc, "?")) {
+        const cut = std.mem.indexOfAnyPos(u8, base, path_start, "?#") orelse base.len; // a query replaces the old one and its fragment
+        return std.fmt.allocPrint(a, "{s}{s}", .{ base[0..cut], loc });
+    }
     if (std.mem.startsWith(u8, loc, "/")) return std.fmt.allocPrint(a, "{s}{s}", .{ base[0..path_start], loc });
     const query = std.mem.indexOfAnyPos(u8, base, path_start, "?#") orelse base.len;
     const dir_end = if (std.mem.lastIndexOfScalar(u8, base[path_start..query], '/')) |s| path_start + s + 1 else path_start;
@@ -249,6 +257,15 @@ test "redirect locations resolve against the page" {
     try std.testing.expectEqualStrings("https://a.org/root", try resolveUrl(a, "https://a.org/p/q?z=1", "/root"));
     try std.testing.expectEqualStrings("https://a.org/p/sib", try resolveUrl(a, "https://a.org/p/q", "sib"));
     try std.testing.expectEqualStrings("https://a.org/sib", try resolveUrl(a, "https://a.org", "sib"));
+}
+
+test "a link that only replaces the query or the fragment stays on its page" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("https://a.org/p/q?page=2", try resolveUrl(a, "https://a.org/p/q?z=1#f", "?page=2"));
+    try std.testing.expectEqualStrings("https://a.org/p/q?z=1#section", try resolveUrl(a, "https://a.org/p/q?z=1#f", "#section"));
+    try std.testing.expectEqualStrings("https://a.org/p/q#section", try resolveUrl(a, "https://a.org/p/q", "#section"));
 }
 
 test "request lines stay plain and URLs carry no more than an address" {
