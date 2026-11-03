@@ -37,6 +37,8 @@ pub const Options = struct {
     snapshots: usize = 0,
     /// Rows one prompt pass takes at most (a longer one is refused): the server's chunk, a check's longest prompt.
     prompt_rows: usize = prefix.chunk,
+    /// Test only: every prompt piece ends on a multiple of these rows (0: the chunk rule); `prompt_rows` holds one.
+    cut_rows: usize = 0,
     /// The device ordinal among the visible ones.
     device: c_int = 0,
     /// Positions past a reply a verify writes (the window's rows and one more).
@@ -115,6 +117,7 @@ pub const Engine = struct {
         errdefer gpa.destroy(e);
         e.gpa = gpa;
         e.o = o;
+        e.o.prompt_rows = @max(o.prompt_rows, o.cut_rows); // a test's cut is one piece: the prompts arena holds it
         e.sized = false;
         e.stopped = false;
         e.blas = null;
