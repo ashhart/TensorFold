@@ -42,7 +42,7 @@ pub const Commands = struct {
         return .{ .dev = dev, .pool = pool, .cmd = cmd, .fence = fence };
     }
 
-    /// Frees the pool, its command buffer and the fence; call only after the last submit returned success.
+    /// Frees the pool, its command buffer and the fence after the last submit; dispatches never submitted are dropped.
     pub fn deinit(self: *Commands) void {
         self.dev.api.vkDestroyFence(self.dev.handle, self.fence, null);
         self.dev.api.vkDestroyCommandPool(self.dev.handle, self.pool, null);
@@ -62,7 +62,7 @@ pub const Commands = struct {
         return self.cmd;
     }
 
-    /// Submits what is recorded (nothing if none), waiting on a finite fence; Timeout and InFlight need orExit.
+    /// Submits what is recorded (nothing if none); timeout_ns covers the whole batch; Timeout and InFlight need orExit.
     pub fn submit(self: *Commands, timeout_ns: u64) Error!void {
         if (!self.recording) return;
         const api = &self.dev.api;
