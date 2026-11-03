@@ -19,7 +19,7 @@ __device__ __forceinline__ void wmma_gemm_tile(typename Dec::Args& a) {
     band_tile(bx, by);
     const int m0 = by * kGemmM;
     if (m0 >= a.m) return;
-    // Rows padded to 20 words, or with SKEW unpadded and each pair 16 bytes on in an 8-row group: eight readers, eight bank groups.
+    // Rows padded to 20 words, or with SKEW unpadded, a pair 16 bytes on in 8-row groups: 8 readers on 8 bank groups.
     constexpr int kLdw = SKEW ? kGemmK / 2 : kGemmLd / 2;
     constexpr int kGroupW = SKEW ? 8 * kLdw + 12 : 8 * kLdw;
     auto rowat = [](int r) { return SKEW ? (r >> 3) * kGroupW + (r & 7) * kLdw + (((r >> 1) & 3) << 2) : r * kLdw; };
