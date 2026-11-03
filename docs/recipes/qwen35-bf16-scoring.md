@@ -70,7 +70,7 @@ they do not claim that every layer's intermediate activation matches a separate 
 The head bound uses `gamma(ceil(hidden/2048)*8+13) * sum(abs(x*w))` plus output rounding. The reduction bound uses
 `ceil(vocab/256)+8` depth and 12 post-reduction operations. Logprob bounds include per-token and row-max head errors,
 reduction error and FP32 subtraction rounding. The script records the formulas and every capture's result.
-The stats stress fixture reports its lower-precision discrimination limitations; the FP64 bound is still mandatory.
+The stats stress fixture requires both smaller accumulators to miss by at least 100x in all three simulated orders.
 Both the omitted-vocabulary-tail and FP16-head-accumulator GPU controls must fail their intended gates.
 
 ## Qualification scope
