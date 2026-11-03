@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cuda_fp16.h>
+#include "common/qmm_frag.cuh"
 
 namespace tf_exl3 {
 
@@ -52,11 +53,7 @@ __device__ __forceinline__ void load_lane_words(const uint32_t* tile, int lane, 
 }
 
 // The weight stream is read once, so do not allocate L1 for it: same value as __ldg, cache policy only.
-__device__ __forceinline__ uint32_t ldg_stream_u32(const uint32_t* p) {
-    uint32_t v;
-    asm volatile("ld.global.nc.L1::no_allocate.u32 %0, [%1];" : "=r"(v) : "l"(p));
-    return v;
-}
+__device__ __forceinline__ uint32_t ldg_stream_u32(const uint32_t* p) { return tf_common::ld_nc32(p); }
 
 // The same from global memory through the read-only cache.
 template <int K2>
@@ -135,10 +132,7 @@ __host__ __device__ constexpr int value_col(int lane, int j) { return (lane >> 2
 
 // mma.m16n8k16, fp16 inputs, fp32 accumulators: d += a @ b.
 __device__ __forceinline__ void mma16816(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};\n"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+    qmm_frag::mma_f16_v(d, a, b);
 }
 
 // Unscaled Walsh-Hadamard transform of 128 fp32 values, 4 a lane, in a fixed butterfly order (multiply by 1/sqrt(128)).
