@@ -59,6 +59,7 @@ fn run(a: std.mem.Allocator, vendor: ?u32, timeout_ns: u64) !u8 {
     const sh = vk.ops.Shaders{
         .qmm_bf16 = &shaders.qmm_bf16,
         .qmm_q4_vec4 = &shaders.qmm_q4_vec4,
+        .qmm_q4_tile = &shaders.qmm_q4_tile,
         .dequant_bf16 = &shaders.dequant_bf16,
         .gather_u32 = &shaders.gather_u32,
         .gather_u16 = &shaders.gather_u16,

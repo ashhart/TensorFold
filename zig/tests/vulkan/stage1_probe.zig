@@ -87,6 +87,7 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     const sh = vk.ops.Shaders{
         .qmm_bf16 = &shaders.qmm_bf16,
         .qmm_q4_vec4 = &shaders.qmm_q4_vec4,
+        .qmm_q4_tile = &shaders.qmm_q4_tile,
         .dequant_bf16 = &shaders.dequant_bf16,
         .gather_u32 = &shaders.gather_u32,
         .gather_u16 = &shaders.gather_u16,
@@ -448,6 +449,8 @@ fn projectGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
         std.debug.print("FAIL project case=\"{s}\": the default pick differs from the forced vec4 image at element {d}\n", .{ case.name, at });
         return false;
     }
+    const tiled = try tileProject(a, dev, cmds, staging, o, f, case, x_view, out, out_view, bits, timeout);
+    if (tiled == false) return false;
     const back = try a.alloc(u8, @max(std.mem.sliceAsBytes(f.x).len, std.mem.sliceAsBytes(f.w).len, std.mem.sliceAsBytes(f.scales).len, std.mem.sliceAsBytes(f.biases).len));
     defer a.free(back);
     for ([_][]const u8{ std.mem.sliceAsBytes(f.x), std.mem.sliceAsBytes(f.w), std.mem.sliceAsBytes(f.scales), std.mem.sliceAsBytes(f.biases) }, [_]vk.Buffer{ x_buf, w_buf, s_buf, b_buf }, 0..) |bytes, buf, n| {
@@ -470,8 +473,43 @@ fn projectGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds
             return false;
         }
     }
-    std.debug.print("MILESTONE project elapsed_ms={d} case=\"{s}\" worst={d:.4} of bound at row {d} col {d}, max_abs={e}, " ++
-        "repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused\n", .{ clock.ms(), case.name, r.worst, r.row, r.col, r.max_abs });
+    std.debug.print("MILESTONE project elapsed_ms={d} case=\"{s}\" worst={d:.4} of bound at row {d} col {d}, max_abs={e}, tile={s}, " ++
+        "repeats byte-identical, inputs and guards unchanged, planted nan/+inf/-inf refused\n", .{ clock.ms(), case.name, r.worst, r.row, r.col, r.max_abs, if (tiled == null) "n/a" else "identical" });
+    return true;
+}
+
+// The tiled image reads a host repack of the same weights: its bytes must equal the default image's. Null: not tileable.
+fn tileProject(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, o: *vk.ops.Ops, f: fx.Fixture, case: fx.Case, x_view: vk.tensor.View, out: Poisoned16, out_view: vk.tensor.View, want: []const u16, timeout: u64) !?bool {
+    const n: usize = case.shape.n;
+    const k: usize = case.shape.k;
+    if (!vk.tile.fits(n, k) or n * k / 2 > dev.properties.limits.maxStorageBufferRange) return null;
+    const groups = k / 64;
+    const words = std.mem.sliceAsBytes(f.w)[f.case.at.w * 4 ..][0 .. n * k / 2];
+    const scales = std.mem.sliceAsBytes(f.scales)[f.case.at.scales * 2 ..][0 .. n * groups * 2];
+    const biases = std.mem.sliceAsBytes(f.biases)[f.case.at.biases * 2 ..][0 .. n * groups * 2];
+    const tiled = try a.alloc(u8, words.len);
+    defer a.free(tiled);
+    vk.tile.tileWords(tiled, words, n, k);
+    var w_buf = try uploaded(a, dev, cmds, staging, tiled, timeout);
+    defer w_buf.deinit();
+    vk.tile.tileParams(tiled[0..scales.len], scales, n, k);
+    var s_buf = try uploaded(a, dev, cmds, staging, tiled[0..scales.len], timeout);
+    defer s_buf.deinit();
+    vk.tile.tileParams(tiled[0..biases.len], biases, n, k);
+    var b_buf = try uploaded(a, dev, cmds, staging, tiled[0..biases.len], timeout);
+    defer b_buf.deinit();
+    const w_view = try vk.tensor.View.init(&w_buf, .u32, 0, words.len / 4);
+    const s_view = try vk.tensor.View.init(&s_buf, .bf16, 0, n * groups);
+    const b_view = try vk.tensor.View.init(&b_buf, .bf16, 0, n * groups);
+    const got = try a.alloc(u16, want.len);
+    defer a.free(got);
+    try vk.orExit(vk.upload(cmds, out.buf, 0, staging, std.mem.sliceAsBytes(f.out), timeout));
+    try vk.orExit(vk.ops_q4.projectTiled(o, cmds, out_view, x_view, w_view, s_view, b_view, case.shape.k, timeout));
+    try fetch(cmds, staging, out.buf, std.mem.sliceAsBytes(got), timeout);
+    if (std.mem.indexOfDiff(u16, want, got)) |at| {
+        std.debug.print("FAIL project case=\"{s}\": the tiled image differs from the default image at element {d}\n", .{ case.name, at });
+        return false;
+    }
     return true;
 }
 

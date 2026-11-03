@@ -6,6 +6,7 @@ const params = @import("stage1_params");
 const tensor = @import("tensor.zig");
 const arena_mod = @import("arena.zig");
 const ops_mod = @import("ops.zig");
+const tile = @import("tile.zig");
 const Commands = commands.Commands;
 const Arena = arena_mod.Arena;
 const Ops = ops_mod.Ops;
@@ -82,6 +83,19 @@ fn qmmPipeline(o: *Ops, force: ?Qmm, x: View, w: View) Error!*dispatch.Pipeline 
 // Q4 projection out[m,n] = x[m,k] . dequant(w,scales,biases)[n,k]; scratch + copy_general above maxStorageBufferRange.
 pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, scratch: *Arena, timeout_ns: u64) Error!void {
     return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
+}
+
+/// `project` over weights repacked by `tile`: one dispatch, so w must fit one binding and start 16-byte aligned.
+pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, timeout_ns: u64) Error!void {
+    const g = try projectGeometry(out, x, w, scales, biases, k);
+    if (!tile.fits(g.n, k)) return error.Invalid;
+    const range = o.dev.properties.limits.maxStorageBufferRange;
+    if (x.byteLen() > range or out.byteLen() > range or w.byteLen() > range) return error.TooLarge;
+    if (qmmVariant(x, w) != .vec4) return error.Misaligned;
+    const pipe = &o.qmm_q4_tile;
+    try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
+    const p = try q4Push(g.m, g.n, k);
+    try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
 }
 
 /// `project` with the qmm image forced (null picks by alignment); a forced vec4 over unaligned windows is refused.
