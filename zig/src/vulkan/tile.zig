@@ -30,7 +30,7 @@ pub fn tileWords(dst: []u8, src: []const u8, n: usize, k: usize) void {
     }
 }
 
-/// Scales or biases (rows of k/64) into [tiles][k/64 groups][32 lanes]; src is n * k / 32 bytes, dst padded(n) * k / 32.
+/// Scales or biases (rows of k/64) into [tiles][k/64 groups][32 lanes]; src is n*k/32 bytes, dst padded(n)*k/32.
 pub fn tileParams(dst: []u8, src: []const u8, n: usize, k: usize) void {
     std.debug.assert(fits(n, k) and src.len == n * k / 32 and dst.len == padded(n) * k / 32);
     @memset(dst, 0);
