@@ -35,6 +35,8 @@ def parsed(text,image):
     if text.startswith('BUILD FAIL'):
         raise RuntimeError(text)
     data=sid.functions(text)
+    if not data:
+        raise ValueError('no emitted SASS functions; no identity proof')
     expected={s for s in sid.SMS if s>=image[3]}
     actual=set()
     headers=0
