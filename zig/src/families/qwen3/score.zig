@@ -8,6 +8,15 @@ pub const labels_most = 16;
 
 pub const Refusal = error{ MassUnsupported, BadPrompt, BadLabels };
 
+/// A refusal's reason as a client reads it.
+pub fn problemOf(err: Refusal) []const u8 {
+    return switch (err) {
+        error.MassUnsupported => "this engine gives no vocabulary mass",
+        error.BadPrompt => "a prompt is empty, holds a token outside the vocabulary, or does not fit the window",
+        error.BadLabels => "a branch's label count, or a label, does not fit the score head",
+    };
+}
+
 /// Head rows read so far, by token id, as fp32 host rows: the 1.24 GB head never goes to the device.
 pub const Heads = struct {
     rows: std.AutoHashMapUnmanaged(u32, []f32) = .empty,
@@ -196,6 +205,9 @@ test "a bad decision is refused before any work" {
     try std.testing.expectError(error.BadLabels, checkDecision(&.{1}, two, &.{ 2, 0 }, &.{ 5, 6 }, out[0..2], 8, 10, 10));
     try std.testing.expectError(error.BadLabels, checkDecision(&.{1}, two, &.{ 2, 1 }, &.{ 5, 6, 10 }, &out, 8, 10, 10));
     try std.testing.expectError(error.BadLabels, checkDecision(&.{1}, two, &.{ 2, 1 }, &.{ 5, 6, 7 }, out[0..2], 8, 10, 10));
+    // each refusal has its own reason for the client
+    const all = [_]Refusal{ error.MassUnsupported, error.BadPrompt, error.BadLabels };
+    for (all, 0..) |x, i| for (all[i + 1 ..]) |y| try std.testing.expect(!std.mem.eql(u8, problemOf(x), problemOf(y)));
 }
 
 /// A fake engine of 2-wide rows: an input's row is (its length, the sum of its tokens); counts its runs.

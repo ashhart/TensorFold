@@ -60,11 +60,14 @@ pub const Prompt = struct {
     }
 
     /// The decide hook: branches packed into few runs; a last row keeps its prompt's bits, so scoreLabels's logits.
-    pub fn decideLabels(ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) anyerror!void {
+    pub fn decideLabels(ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, problem: *[]const u8) anyerror!void {
         const p = of(ptr);
         const heads = if (p.heads) |*h| h else return error.NoScoreHead;
         const e = p.engine;
-        try score.checkDecision(trunk, branches, counts, labels, logits, e.window, e.m.spec.vocab, heads.count);
+        score.checkDecision(trunk, branches, counts, labels, logits, e.window, e.m.spec.vocab, heads.count) catch |err| {
+            problem.* = score.problemOf(err);
+            return error.Refused;
+        };
         const Runner = struct {
             e: *Engine,
             hidden: usize,

@@ -14,6 +14,9 @@ pub const Ask = struct {
     branches: []const []const u32 = &.{},
     counts: []const usize = &.{},
     logsumexp: f64 = 0,
+    /// A decision the backend refused, and its reason (a client's error, not the engine's).
+    refused: bool = false,
+    problem: []const u8 = "",
     failed: bool = false,
     done: bool = false,
 };
@@ -40,6 +43,10 @@ pub fn decide(ctx: *anyopaque, d: *api.Decision) error{ Failed, Refused }!void {
     }
     var ask: Ask = .{ .kind = .decide, .prompt = d.trunk, .labels = d.labels, .logits = d.logits, .branches = d.branches, .counts = d.counts };
     try put(h, &ask);
+    if (ask.refused) {
+        d.problem = ask.problem;
+        return error.Refused;
+    }
     var read = d.trunk.len;
     for (d.branches) |b| read += b.len;
     d.read = read;
@@ -95,7 +102,11 @@ pub fn answer(h: *LaneHost) void {
                     a.failed = true;
                     continue;
                 };
-                run(backend.ptr, a.prompt, a.branches, a.counts, a.labels, a.logits) catch |err| {
+                run(backend.ptr, a.prompt, a.branches, a.counts, a.labels, a.logits, &a.problem) catch |err| {
+                    if (err == error.Refused) {
+                        a.refused = true;
+                        continue;
+                    }
                     std.log.warn("lane host: a packed decision failed ({s})", .{@errorName(err)});
                     a.failed = true;
                 };
