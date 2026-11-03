@@ -121,6 +121,14 @@ pub fn raw(text: []const u8) void {
     if (text.len > 0) line_start = text[text.len - 1] == '\n';
 }
 
+fn shownLine(text: []const u8, width: usize) []const u8 {
+    const room = @max(@as(usize, 20), width) -| 1;
+    if (text.len <= room) return text;
+    var n = room;
+    while (n > 0 and (text[n] & 0xc0) == 0x80) n -= 1; // a cut character is left out whole
+    return text[0..n];
+}
+
 /// Redraws the status line unless a log line is half written.
 pub fn status(text: []const u8, width: usize) void {
     const m = io();
@@ -128,7 +136,7 @@ pub fn status(text: []const u8, width: usize) void {
     defer mutex.unlock(m);
     if (!line_start) return;
     writeOut(clear);
-    writeOut(text[0..@min(text.len, @max(20, width) - 1)]);
+    writeOut(shownLine(text, width));
     shown = true;
 }
 
@@ -170,6 +178,17 @@ pub fn ended(buf: []u8, id: []const u8, why: ?[]const u8, prompt: usize, tokens:
     if (why) |e| w.print("error ({s})", .{e}) catch {} else w.writeAll("client-left") catch {};
     w.print(" prompt={d} tokens={d} after={d:.2}s", .{ prompt, tokens, after }) catch {};
     return w.buffered();
+}
+
+test "a status line ends on a character boundary" {
+    var buf: [24]u8 = undefined;
+    @memset(&buf, 'x');
+    buf[17] = 0xe2;
+    buf[18] = 0x82;
+    buf[19] = 0xac;
+    const s = shownLine(&buf, 20);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(s));
+    try std.testing.expectEqual(@as(usize, 17), s.len);
 }
 
 test "a request's refused and ended lines" {
