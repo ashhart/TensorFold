@@ -33,11 +33,6 @@ const Lane = struct { seq: *state.Seq, own: bool = false, paged: bool = false, p
 /// A recorded stream's rows: its prompt's on the host until its first verify, then where its last verify started.
 const Taps = struct { prompt: std.ArrayList(u8) = .empty, from: usize = 0, verified: ?u64 = null };
 
-/// The one tap Nemotron gives: past its last layer, the final norm's rows its head and MTP head read.
-pub fn finalTap(c: config.Config) u32 {
-    return @intCast(c.layers);
-}
-
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -299,6 +294,8 @@ pub const Cuda = struct {
         const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
         if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
         defer if (e.vision) |v| v.end();
+        if (s.audios.len > 0) try (e.audio orelse return error.NoAudio).begin(e.stream, s.audios, from);
+        defer if (e.audio) |a| a.end();
         var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
         s.prompt_rows.clearRetainingCapacity();
         if (s.prompt_logprobs) |k| {
@@ -368,14 +365,14 @@ pub const Cuda = struct {
     /// Recording asks for the final norm's rows alone; their staging buffer is made here.
     fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) anyerror!void {
         const self = of(ptr);
-        if (taps.len != 1 or taps[0] != finalTap(self.e.c)) return error.UnsupportedTaps;
+        if (taps.len != 1 or taps[0] != engine.finalTap(self.e.c)) return error.UnsupportedTaps;
         if (self.tapped == null) self.tapped = try cuda.HostBuffer.alloc(self.e.ctx.d, state.pass_rows * self.e.c.hidden * 2);
     }
 
     /// The prompt's rows from the host until the first verify; then the last verify's, read from its sequence.
     fn featuresFn(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
         const self = of(ptr);
-        if (self.tapped == null or taps.len != 1 or taps[0] != finalTap(self.e.c)) return error.UnsupportedTaps;
+        if (self.tapped == null or taps.len != 1 or taps[0] != engine.finalTap(self.e.c)) return error.UnsupportedTaps;
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         const d = self.e.c.hidden * 2;
         const t = &l.taps;
