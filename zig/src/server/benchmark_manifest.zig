@@ -116,7 +116,7 @@ pub fn parse(a: Allocator, bytes: []const u8, backend: []const u8) Allocator.Err
         .tokenizer_sha256 = tok_sha,
         .family = family,
         .quantization = quant,
-        .rank_count = rank_count,
+        .rank_count = if (topology != null) rank_count else null,
         .group = topology,
     };
 }
@@ -262,14 +262,14 @@ fn builtinTagIsMacos() bool {
     return @import("builtin").os.tag == .macos;
 }
 
-test "a manifest with a GB10 and two ranks is accepted" {
+test "a legacy manifest keeps metadata but cannot attest its two-rank hint" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const body =
         \\{"schema_version":1,"rank_count":2,"runtime":{"tensorfold_version":"1.0.12","backend":"cuda","python_version":"none","platform":"linux"},"model":{"revision":"82d93699acd3be9e4617c53360fe5b3f5dbeb1b3"},"hardware":{"cpu_model":"ARM Cortex","system_memory_bytes":130000000000,"memory_type":"unified","gpus":[{"name":"NVIDIA GB10","memory_bytes":null,"cores":null}],"gpu_count":1,"source":"partial"}}
     ;
     const facts = (try parse(arena.allocator(), body, "cuda")).?;
-    try std.testing.expectEqual(@as(?u8, 2), facts.rank_count);
+    try std.testing.expectEqual(@as(?u8, null), facts.rank_count);
     try std.testing.expect(std.mem.eql(u8, facts.hardware.source, "partial"));
     try std.testing.expect(facts.revision != null);
 }
