@@ -105,7 +105,7 @@ fn unmark(line: []const u8) []const u8 {
     if (line.len > 1 and (line[0] == '-' or line[0] == '*' or line[0] == '#')) return std.mem.trimStart(u8, line[1..], " *#");
     var i: usize = 0;
     while (i < line.len and std.ascii.isDigit(line[i])) i += 1;
-    if (i > 0 and i + 1 < line.len and (line[i] == '.' or line[i] == ')') and line[i + 1] == ' ') return std.mem.trimStart(u8, line[i + 1 ..], " ");
+    if (i > 0 and i + 1 < line.len and (line[i] == '.' or line[i] == ')') and (line[i + 1] == ' ' or line[i + 1] == '\t')) return std.mem.trimStart(u8, line[i + 1 ..], " \t"); // a tab separates a list number too
     return line;
 }
 
@@ -233,6 +233,7 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     try std.testing.expectEqualStrings("Zig 0.17 std.http.Client docs", qs[0]);
     try std.testing.expectEqualStrings("Zig 0.17 release notes", qs[1]);
     try std.testing.expectEqualStrings("zig std.Io async", qs[2]);
+    try std.testing.expectEqualStrings("Zig 0.17 docs", (try parseQueries(a, "1.\tZig 0.17 docs"))[0]);
     try std.testing.expectEqual(@as(usize, 0), (try parseQueries(a, "NONE")).len);
     try std.testing.expectEqualStrings("2025 tax brackets for Canada", (try parseQueries(a, "2025 tax brackets for Canada"))[0]);
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
