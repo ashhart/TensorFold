@@ -5,7 +5,7 @@ const sources = @import("kernel_sources");
 
 /// TF_TEST_RECEIPTS=1 prints each check's measured error; the bounds are checked either way.
 fn receipts() bool {
-    return std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
+    return if (@import("builtin").os.tag == .windows) false else std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
 }
 
 const Shape = extern struct { rows: u32, heads: u32, dh: u32, groups: u32, n: u32, inner: u32, conv: u32, proj: u32 };

@@ -6,7 +6,7 @@ const frags = @import("../../core/frags.zig");
 
 /// TF_TEST_RECEIPTS=1 prints each check's measured error; the bounds are checked either way.
 fn receipts() bool {
-    return std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
+    return if (@import("builtin").os.tag == .windows) false else std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
 }
 
 const H = 64;
