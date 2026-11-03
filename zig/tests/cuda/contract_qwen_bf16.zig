@@ -84,7 +84,7 @@ pub fn Case(comptime Kernels: type) type {
                 for (self.x) |*v| v.* = c.toBf16(rng.float(f32) * 4 - 2);
                 for (self.w) |*v| v.* = c.toBf16(rng.float(f32) * 2 - 1);
                 if (fill == .stress) {
-                    ref.stress(self.x);
+                    for (0..s.rows) |r| ref.stress(self.x[r * s.k ..][0..s.k]);
                     @memset(self.w, 0x3f80);
                 }
                 if (fill == .nonfinite) {
