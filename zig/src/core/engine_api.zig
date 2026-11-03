@@ -65,7 +65,11 @@ pub const Structure = struct {
 pub const grammar = lanes.grammar;
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
+pub const pocket_usage = lanes.pocket_usage;
+
 pub const Request = struct {
+    /// External request accounting only; writers, checks and warm passes leave this null.
+    usage: ?pocket_usage.Observer = null,
     prompt: []const u32,
     embedding: ?lanes.embedding.Batch = null,
     max_tokens: u32,
@@ -191,6 +195,8 @@ pub const Info = struct {
     reasoning: bool = true,
     /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).
     answer_limit: bool = false,
+    /// Accepted-path pocket activity is reported once per completed external request, with no extra forward.
+    pocket_usage: bool = false,
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,

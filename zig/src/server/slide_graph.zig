@@ -22,6 +22,8 @@ pub const Fact = struct {
     source: []const u8,
     at: i64,
     state: State,
+    uses: u64 = 0, // completed external requests in which an owned neuron contributed
+    pinned: bool = false,
     neurons: []const api.Neuron = &.{}, // where its neurons sit in the pocket, once placed
     questions: []const []const u8 = &.{}, // the wordings its checks ask
     answers: []const Answer = &.{}, // what they expect: each held-out wording's answer, then those it never learned
@@ -72,9 +74,15 @@ pub const Graph = struct {
     model_arena: std.heap.ArenaAllocator,
     saved: Save = .{},
     talks: slide_talks.Talks = .{}, // conversations written once, kept with the facts (slide_context.zig)
+    usage_invalid: bool = false, // a failed graph load cannot supply trusted eviction counts
+    usage_missing: bool = false, // a cached prefix lacked firing metadata; automatic retirement stays refused
+    usage_dirty: bool = false, // an observed use has not reached the graph file
     fault: Fault = .none, // a test's failure of the next file write (read in tests only)
 
     pub const Fault = enum { none, write, rename };
+    pub const used = @import("slide_usage.zig").used;
+    pub const pin = @import("slide_usage.zig").pin;
+    pub const flushUsage = @import("slide_usage.zig").flush;
     pub const record = deleting.record;
     pub const remove = deleting.remove;
     pub const recordMany = deleting.recordMany;
@@ -85,11 +93,14 @@ pub const Graph = struct {
     /// A graph that starts from `path`'s file when it reads, else empty.
     pub fn init(gpa: Allocator, io: Io, path: ?[]const u8) Graph {
         var g: Graph = .{ .gpa = gpa, .io = io, .path = path, .arena = .init(gpa), .model_arena = .init(gpa) };
-        g.load() catch {};
+        g.load() catch |e| {
+            g.usage_invalid = e != error.FileNotFound;
+        };
         return g;
     }
 
     pub fn deinit(g: *Graph) void {
+        if (g.usage_dirty) g.persist() catch |e| std.log.warn("slide: pending usage counts could not be saved ({s})", .{@errorName(e)});
         g.facts.deinit(g.gpa);
         g.talks.deinit(g.gpa);
         g.trace.deinit(g.gpa);
@@ -129,7 +140,7 @@ pub const Graph = struct {
         var i = g.facts.items.len;
         while (i > 0 and out.items.len < max) : (i -= 1) {
             const f = g.facts.items[i - 1];
-            if (f.id == id or f.state != .learned or !std.mem.eql(u8, f.source, "chat") or f.neurons.len == 0) continue;
+            if (f.id == id or f.pinned or f.state != .learned or !std.mem.eql(u8, f.source, "chat") or f.neurons.len == 0) continue;
             const qs = try a.alloc([]const u8, f.questions.len);
             for (f.questions, qs) |q, *c| c.* = try a.dupe(u8, q);
             try out.append(a, .{ .id = f.id, .text = try a.dupe(u8, f.text), .source = "chat", .at = f.at, .state = f.state, .neurons = try a.dupe(api.Neuron, f.neurons), .questions = qs });
@@ -145,7 +156,7 @@ pub const Graph = struct {
         g.enter(f, p);
         if (p != .writing) return;
         const old = f.*;
-        f.* = .{ .id = old.id, .text = old.text, .source = old.source, .at = old.at, .state = old.state, .phase = .writing, .since = old.since };
+        f.* = .{ .id = old.id, .text = old.text, .source = old.source, .at = old.at, .state = old.state, .uses = old.uses, .pinned = old.pinned, .phase = .writing, .since = old.since };
         g.trace.clearRetainingCapacity();
         g.cuts.clearRetainingCapacity();
         g.traced = id;
@@ -365,6 +376,8 @@ pub const Graph = struct {
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
         g.facts.clearRetainingCapacity();
+        g.usage_invalid = false;
+        g.usage_dirty = false;
         if (g.path) |p| Io.Dir.cwd().deleteFile(g.io, p) catch {};
     }
 
@@ -401,6 +414,7 @@ pub const Graph = struct {
             try o.put(a, "source", .{ .string = f.source });
             try o.put(a, "at", try json.intValue(a, f.at));
             try o.put(a, "state", .{ .string = @tagName(f.state) });
+            try @import("slide_usage.zig").fields(a, o, f.*);
             try o.put(a, "links", .{ .array = links.items });
             if (f.round > 0) try o.put(a, "round", try json.intValue(a, f.round));
             if (f.message.len > 0) try o.put(a, "message", .{ .string = f.message });
@@ -413,6 +427,7 @@ pub const Graph = struct {
             out.* = .{ .object = o };
         }
         const root = try json.newObject(a);
+        try @import("slide_usage.zig").root(g, a, root);
         try root.put(a, "next", try json.intValue(a, g.next));
         try root.put(a, "facts", .{ .array = facts });
         if (g.talks.list.items.len > 0) try root.put(a, "talks", try g.talks.value(a));
@@ -451,7 +466,10 @@ pub const Graph = struct {
 
     /// `save` with its failure returned, the old file then kept whole (called under the lock).
     pub fn persist(g: *Graph) !void {
-        const path = g.path orelse return;
+        const path = g.path orelse {
+            g.usage_dirty = false;
+            return;
+        };
         var scratch = std.heap.ArenaAllocator.init(g.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
@@ -464,6 +482,7 @@ pub const Graph = struct {
         try Io.Dir.cwd().writeFile(g.io, .{ .sub_path = tmp, .data = body });
         if (fault == .rename) return error.GraphRename;
         try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, g.io);
+        g.usage_dirty = false;
     }
 
     fn load(g: *Graph) !void {
@@ -474,14 +493,16 @@ pub const Graph = struct {
             .ok => |v| v,
             .err => return error.BadGraph,
         };
+        try @import("slide_usage.zig").readRoot(g, root);
         for ((root.field("facts") orelse return error.BadGraph).items() orelse return error.BadGraph) |f| {
             const state = std.meta.stringToEnum(State, f.strField("state") orelse "") orelse .queued;
             var fact: Fact = .{ .id = try int(u32, f.field("id")), .text = f.strField("text") orelse "", .source = f.strField("source") orelse "", .at = try int(i64, f.field("at")), .state = state };
+            try @import("slide_usage.zig").read(&fact, f);
             fact.message = f.strField("message") orelse "";
             fact.round = int(u32, f.field("round")) catch 0;
             fact.deleted = int(i64, f.field("deleted")) catch 0;
             if (f.field("answers")) |xs| fact.answers = try answers.read(a, xs);
-            fact.questions = try stringList(a, f.field("questions"));
+            fact.questions = try answers.readQuestions(a, f.field("questions"));
             if (f.field("chain")) |c| if (c.items()) |xs| if (xs.len == 2) {
                 fact.chain = .{ xs[0].str() orelse "", xs[1].str() orelse "" };
             };
@@ -524,14 +545,6 @@ fn records(a: Allocator, f: Fact) ![]const Answer {
     if (f.answers.len > 0) return f.answers;
     const out = try a.alloc(Answer, f.questions.len);
     for (f.questions, out) |q, *x| x.* = .{ .question = q };
-    return out;
-}
-
-/// A JSON array of strings as read (none: empty).
-fn stringList(a: Allocator, v: ?json.Value) ![]const []const u8 {
-    const xs = (v orelse return &.{}).items() orelse return &.{};
-    const out = try a.alloc([]const u8, xs.len);
-    for (xs, out) |x, *o| o.* = x.str() orelse "";
     return out;
 }
 

@@ -250,3 +250,45 @@ test "correction: a planted wrong layer cannot pass the actual output fitter's h
     try t.expectEqual(adjacent, m.logits(&neighbour));
     try t.expectEqual(frozen, m.bias);
 }
+
+test "capacity: a checked interior deletion can be reused only by opt-in and a failed new lesson restores it exactly" {
+    const p = try init();
+    defer deinit(p);
+    var m: Toy = .{ .p = p };
+    const slot = 0;
+    p.used.items[slot] = P.neurons;
+    for (0..P.neurons) |n| {
+        p.neuron(p.up.items, slot, n, d)[0] = 1;
+        p.neuron(p.down.items, slot, n, d)[0] = 0.25;
+        try p.learned.append(t.allocator, .{ .slot = slot, .neuron = n, .key = .subject, .start = 0, .count = 0, .subject = 9, .lesson = @intCast(n + 1) });
+    }
+    _ = try forgetting.forget(p, &m, Host{}, &.{.{ @intCast(p.moe.items[slot]), 1 }});
+    try t.expectEqual(P.neurons, p.used.items[slot]);
+    const vacancy = @import("pocket_vacancy.zig");
+    try t.expectEqual(@as(?usize, null), vacancy.next(p, slot));
+    const deleted = @import("pocket_mark.zig").hash(p);
+    const adjacent_up = p.neuron(p.up.items, slot, 2, d)[0];
+    const adjacent_down = p.neuron(p.down.items, slot, 2, d)[0];
+    const silent_down = p.neuron(p.down.items, slot, 1, d)[0];
+    try p.mark();
+    p.reuse_deleted = true;
+    try t.expectEqual(@as(?usize, 1), vacancy.next(p, slot));
+    try p.retired.append(t.allocator, .{ slot, 1 });
+    try t.expectEqual(@as(?usize, null), vacancy.next(p, slot));
+    p.retired.clearRetainingCapacity();
+    try p.learned.append(t.allocator, .{ .slot = slot, .neuron = 1, .key = .subject, .start = 0, .count = 0, .subject = 9, .lesson = 2 });
+    try t.expectEqual(@as(?usize, null), vacancy.next(p, slot));
+    _ = p.learned.pop();
+    var detector: [d]f32 = @splat(0);
+    detector[0] = 2;
+    try p.take(slot, .subject, &detector, .{}, &.{}, d);
+    try t.expectEqual(@as(usize, 1), p.taken.items[0].neuron);
+    try t.expectEqual(P.neurons, p.used.items[slot]);
+    try t.expectEqual(adjacent_up, p.neuron(p.up.items, slot, 2, d)[0]);
+    try t.expectEqual(adjacent_down, p.neuron(p.down.items, slot, 2, d)[0]);
+    try p.undo(&m, Host{});
+    try t.expectEqual(deleted, @import("pocket_mark.zig").hash(p));
+    try t.expectEqual(silent_down, p.neuron(p.down.items, slot, 1, d)[0]);
+    p.reuse_deleted = false;
+    try t.expectEqual(@as(?usize, null), vacancy.next(p, slot));
+}

@@ -12,8 +12,8 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 /// Renders every message as ROLE:CONTENT| and the reply's head as A:, bytes as tokens.
-const Text = struct {
-    fn text(t: *@This()) model_text.Text {
+pub const Text = struct {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .encode_masked = encodeMasked } };
     }
     fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
@@ -91,7 +91,14 @@ fn has(text: []const u8, word: []const u8) bool {
 }
 
 /// The scripted model: answers the lesson writer's prompts, and the taught model answers the facts it holds.
-const Model = struct {
+pub const Model = struct {
+    capacity: bool = false,
+    capacity_break: bool = false,
+    capacity_stuck: bool = false,
+    pocket_audit: bool = true,
+    force_replace: bool = false,
+    forget_before: [topics.len]bool = @splat(false),
+    cuts: usize = 0,
     gives_up: []const u8 = "", // a fact whose lessons never bring it back
     live: [topics.len]bool = @splat(false), // the facts the pocket holds now
     open: ?usize = null, // the fact the lesson running now teaches
@@ -107,10 +114,10 @@ const Model = struct {
     draft_index: ?usize = null,
     gpa: Allocator = testing.allocator,
 
-    fn engine(m: *Model) api.Engine {
+    pub fn engine(m: *Model) api.Engine {
         return .{ .ctx = m, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
-    fn deinit(m: *Model) void {
+    pub fn deinit(m: *Model) void {
         for (m.trained.items) |t| m.gpa.free(t);
         m.trained.deinit(m.gpa);
         m.pending.deinit(m.gpa);
@@ -121,8 +128,9 @@ const Model = struct {
         try m.trained.append(m.gpa, kept);
         m.draft_index = m.trained.items.len - 1;
     }
-    fn info(_: *anyopaque) api.Info {
-        return .{};
+    fn info(ctx: *anyopaque) api.Info {
+        const m: *Model = @ptrCast(@alignCast(ctx));
+        return .{ .pocket_usage = m.capacity and m.pocket_audit };
     }
     fn topicOf(text: []const u8) ?usize {
         // the fact's own words first, the first named (a writer's prompt quotes the fact before its examples)
@@ -165,6 +173,7 @@ const Model = struct {
         if (has(user, "List six other things")) return "car\nhouse\nshirt\nhat\nbike\nphone\n";
         if (has(user, "Reply with its number only")) return "0";
         if (has(user, "What language")) return "English";
+        if (m.capacity and !m.force_replace and has(user, "Is what they told you earlier still true?")) return "yes";
         if (has(user, "Reply yes or no") or has(user, "(answer yes)") or has(user, "Does B tell")) {
             if (has(user, "Does it answer this question")) return if (topicOf(user)) |_| "yes" else "no";
             return "no";
@@ -175,7 +184,7 @@ const Model = struct {
         // a question asked with the fact before it (the lesson's own answers), or of the taught model
         const t = topicOf(user) orelse return if (has(user, "Hello")) "Hello." else "I don't know.";
         if (has(system, "told you") or has(system, "You know this")) return if (has(user, "few words")) topics[t].value else try std.fmt.allocPrint(a, "You like {s}.", .{topics[t].value});
-        if (!untaught and m.live[t]) return try std.fmt.allocPrint(a, "You like {s}.", .{topics[t].value});
+        if (!untaught and m.live[t] and !(m.capacity_break and m.cuts > 0 and t == 0 and !m.live[1])) return try std.fmt.allocPrint(a, "You like {s}.", .{topics[t].value});
         return "I don't know.";
     }
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
@@ -194,6 +203,13 @@ const Model = struct {
         for (said, ids) |b, *x| x.* = b;
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = ids });
+        if (request.usage) |u| {
+            var mask: api.pocket_usage.Masks = .{};
+            if (!request.untaught) if (topicOf(prompt)) |layer| {
+                if (m.live[layer]) mask.bits[layer] = 1;
+            };
+            u.done(u.ctx, mask);
+        }
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
@@ -206,10 +222,21 @@ const Model = struct {
     fn learn(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
         const state: *Model = @ptrCast(@alignCast(ctx));
         if (request.retire.len > 0) state.retires += 1;
-        if (request.train.len == 0 and !request.drop and !request.undo and !request.save and !request.reroute) {
+        if (request.forget.len == 0 and !request.unforget and request.train.len == 0 and !request.drop and !request.undo and !request.save and !request.reroute) {
             return sink.event(sink.ctx, &.{ .done = .{} });
         }
         const m: *Model = @ptrCast(@alignCast(ctx));
+        if (request.forget.len > 0 or request.unforget) {
+            if (request.unforget) m.live = m.forget_before else {
+                m.forget_before = m.live;
+                m.cuts += 1;
+                for (request.forget) |x| if (x.layer < topics.len) {
+                    m.live[x.layer] = false;
+                };
+            }
+            sink.event(sink.ctx, &.{ .learned = .{ .recalled = true, .steps = @intCast(request.forget.len), .loss = 0 } });
+            return sink.event(sink.ctx, &.{ .done = .{} });
+        }
         if (request.drop or request.undo) {
             m.drops += 1;
             if (m.open) |t| m.live[t] = false;
@@ -227,6 +254,9 @@ const Model = struct {
             for (ex.ids[0..n], buf[0..n]) |x, *b| b.* = @intCast(x);
             m.open = topicOf(buf[0..n]);
             m.draft_index = null;
+            if (m.capacity and (std.mem.count(bool, &m.live, &.{true}) >= 2 or (m.capacity_stuck and m.cuts > 0))) {
+                return sink.event(sink.ctx, &.{ .done = .{ .message = "PocketFull" } });
+            }
             if ((m.mode == .training or m.mode == .rounding) and m.open == 1) {
                 m.failures += 1;
                 return sink.event(sink.ctx, &.{ .done = .{ .message = if (m.mode == .rounding) "LayerRoundsAgain" else "injected training failure" } });
@@ -248,7 +278,8 @@ const Model = struct {
         const back = !std.mem.eql(u8, topics[t].fact, m.gives_up);
         if (request.train.len > 0) {
             m.live[t] = back;
-            sink.event(sink.ctx, &.{ .learned = .{ .recalled = back, .steps = 1, .loss = 0 } });
+            const neurons = [_]api.Neuron{.{ .layer = @intCast(t), .neuron = 0, .key = .reply }};
+            sink.event(sink.ctx, &.{ .learned = .{ .recalled = back, .steps = 1, .loss = 0, .neurons = if (m.capacity) &neurons else &.{} } });
         }
 
         sink.event(sink.ctx, &.{ .done = .{} });
@@ -260,7 +291,7 @@ const drain_slice_ms = 50;
 const drain_idle_ms = 10_000;
 
 /// One POST /v1/slide/learn through the router, its whole event stream read.
-fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
+pub fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
     return learnCase(srv, text, failure, false);
 }
 fn learnCase(srv: *Server, text: []const u8, failure: ?[]const u8, correcting: bool) !void {

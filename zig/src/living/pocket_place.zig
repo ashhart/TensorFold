@@ -55,7 +55,7 @@ pub fn all(p: anytype, t: anytype, host: anytype) !bool {
         var order: std.ArrayList(usize) = .empty;
         defer order.deinit(p.gpa);
         // a layer whose pocket is full is passed over
-        for (p.moe.items, 0..) |l, j| if (p.candidate(j, l, key) and p.used.items[j] < @TypeOf(p.*).neurons) try order.append(p.gpa, j);
+        for (p.moe.items, 0..) |l, j| if (p.candidate(j, l, key) and @import("pocket_vacancy.zig").next(p, j) != null) try order.append(p.gpa, j);
         if (order.items.len == 0) return error.PocketFull;
         std.mem.sort(usize, order.items, @as([]const Fit, fits[k * n ..][0..n]), better);
         var added: usize = 0;

@@ -132,9 +132,7 @@ pub fn Learner(comptime H: type) type {
         }
 
         /// Whether the learner reads conversation prompts at any length, for both teaching and checking.
-        pub fn readsConversations(l: *const Self) bool {
-            return examples.readsConversations(H.Trainer, has_pocket and l.whole and l.method == .pocket);
-        }
+        pub const readsConversations = examples.ofLearner;
 
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
@@ -205,16 +203,8 @@ pub fn Learner(comptime H: type) type {
             for ([_][]const Example{ kept.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
         }
 
-        /// Prepare the read-only trainer only when no lesson or unresolved write is open.
-        pub fn auditTrainer(l: *Self) !void {
-            if (comptime !has_pocket) return error.AuditUnsupported;
-            if (l.phase != .idle) return error.AuditBusy;
-            if (!l.whole or l.method != .pocket) return error.AuditUnsupported;
-            if (whole_lessons.stale(l)) return error.AuditUnresolved;
-            try l.ready();
-        }
         /// The trainer, made the first time a lesson or audit needs it.
-        fn ready(l: *Self) !void {
+        pub fn ready(l: *Self) !void {
             if (l.trainer != null) return;
             const t0 = H.seconds(l.io);
             if (has_sites) l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));

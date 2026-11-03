@@ -4,6 +4,7 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const chat = @import("chat.zig");
+const roleDelta = @import("chat_delta.zig").role;
 const compact = @import("compact.zig");
 const grammar = @import("grammar.zig");
 const messages = @import("messages.zig");
@@ -241,6 +242,9 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
         out.vt.reply(out.ctx, cx.status(), wrapError(a, body) catch return);
         return;
     };
+    var usage = @import("slide_usage_stream.zig").Scope.init(srv);
+    defer usage.deinit();
+    if (srv.info.pocket_usage) p.input.usage = &usage;
     p.input.id = id;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn };
@@ -594,7 +598,3 @@ const Run = struct {
         r.warmNext(&reply, calls);
     }
 };
-
-fn roleDelta(a: Allocator) Allocator.Error!Value {
-    return chat.deltaOf(a, "role", "assistant");
-}

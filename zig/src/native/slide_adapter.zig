@@ -29,6 +29,13 @@ fn folderShard(a: Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
     return null;
 }
 
+/// Serving receipts describe pocket neurons only; routed lessons and bare adapters cannot advertise them.
+pub fn pocketUsage(l: anytype) bool {
+    const L = @TypeOf(l);
+    if (!@hasDecl(L, "Audit") or !@hasField(L, "whole") or !@hasField(L, "method")) return false;
+    return L.Audit != void and l.whole and l.method == .pocket;
+}
+
 /// The hook over `slide`, a backend's learner (its Learner, Example and Lesson): Metal's or CUDA's.
 pub fn Adapter(comptime slide: type) type {
     return struct {
@@ -62,7 +69,7 @@ pub fn Adapter(comptime slide: type) type {
         fn begin(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
             const a: *Self = @ptrCast(@alignCast(ctx));
             if (request.audit) |r| {
-                if (request.shrink != .none) return error.BadAudit;
+                if (request.shrink != .none or request.reuse_deleted) return error.BadAudit;
                 if (comptime Audit == void) return error.AuditUnsupported;
                 try r.validate();
                 if (r.completed) |done| done.* = false;
@@ -78,7 +85,7 @@ pub fn Adapter(comptime slide: type) type {
             }
             _ = a.arena.reset(.retain_capacity);
             const al = a.arena.allocator();
-            try a.learner.begin(.{ .train = try examples(al, request.train), .against = try examples(al, request.against), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .shrink = @as(Shrink, @fromBackingInt(@intCast(@backingInt(request.shrink)))), .retire = try retired(al, request.retire), .unretire = request.unretire, .forget = try retired(al, request.forget), .unforget = request.unforget });
+            try a.learner.begin(.{ .train = try examples(al, request.train), .against = try examples(al, request.against), .reuse_deleted = request.reuse_deleted, .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .shrink = @as(Shrink, @fromBackingInt(@intCast(@backingInt(request.shrink)))), .retire = try retired(al, request.retire), .unretire = request.unretire, .forget = try retired(al, request.forget), .unforget = request.unforget });
             a.sink = sink;
             a.sent = null;
             a.progress();
