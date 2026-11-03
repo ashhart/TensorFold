@@ -140,6 +140,8 @@ The lane switch accepts only 0 or 1; the copy switch accepts only 0 or 1. Invali
 Speed-up mode splits one Qwen3.8-27B reply across two Macs over a Thunderbolt 5 cable: both Macs hold the same
 `TensorFold/Qwen3.8-27B-MLX-4bit` checkpoint, each serves it from its own directory with its own settings file, and
 rank 1 starts before rank 0.
+Speed-up mode is opt-in: a one-Mac serve passes no `--speed-up` and keeps its defaults, and both ranks of a pair pass
+their settings file.
 [Speed-up mode](../speed-up-mode.md) builds the server, sets up MCDMA and writes the two settings files; this
 subsection covers what the 27B pair serves and what it leaves out.
 Send requests to rank 0 only; rank 1 holds the other half of the weights and replays rank 0's rounds.
@@ -183,6 +185,14 @@ rather than being answered greedily for one token and failing on the next: a pai
 A pair's logits are byte-identical to one Mac's on the recorded fixtures, so its reply is a single Mac's token for
 token. The pair-vs-single gate is `tp_check` (`tf-qwen27-tp-check`), which returns
 `error.PairTokensDifferFromSingleMac` on any token difference, with no exemptions.
+
+The acceptance run replays the checked-in oracle against a served pair: `tools/qwen27/pair_accept.py run` sends
+each case twice, and both replies must be identical and match the oracle's `token_sha`; `cold` passes only when
+the pair reports no reused prompt tokens. The oracle (`tools/qwen27/qwen38_27b_oracle.json`) is recorded on
+`apple-m4`, and `pair_accept.py` refuses a Mac in another GPU family before it sends a request: before the M5
+the bits come from `simd_qmm` and on the M5 from the lane kernels with their own K splits, so one family's
+`token_sha` cannot accept another. Whoever runs a pair on another family re-records the oracle on rank 0's Mac
+first, from a single-Mac serve, then accepts there; the checked-in record stays `apple-m4`'s.
 
 ## Weights other than 4-bit
 
