@@ -33,8 +33,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the cache benchmark receipts say which tool-call content they count (#1999). Thanks to @garvrao80.
 
 - `zig build test-info-config` runs info's issue-934 test again: it was built from the CUDA CLI root, which never reached it (#2006). Thanks to @jishnuvenugopal.
-- Gemma 4, MiniMax M3, Kolibri-1 and Spark on CUDA prioritize verified root and context copies through their existing drafts switch, using the same four-token match policy as Nemotron (#1910).
-- Gemma 4, MiniMax M3, Kolibri-1, Spark and Dory on CUDA can opt into verified root and context copies with a four-token match. Their existing suffix-copy policy remains the default until each checkpoint passes its device campaign (#1910).
 
 - The Nemotron XPU loader and the XPU safetensors reader read shard headers through core, so a malformed or oversized header is refused before anything is read (#1919). Thanks to @jschmied.
 
@@ -107,7 +105,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `zig build -Dgpu=<gpu>` builds one stripped server for one GPU with every model family: about 69% smaller on CUDA (`sm_80`, `sm_86`, `sm_89`, `sm_120`, `sm_121` or `spark`) and 58% on HIP (a `gfx` name), and a CUDA one refuses a GPU of another SM at startup, naming both (#1936, fixes #1934). Thanks to @laudney.
 
 - A lane stream that finishes on its first token is released when its reply ends, in every family (it leaked until the server stopped), and the lane host gains a byte ledger that families can opt into, so a request reserves its prompt and reply and waits when it doesn't fit; no family uses it yet (#1945, part of #1943). Thanks to @laudney.
-
 
 - On Ryzen AI Max (RDNA 3.5) GPUs, one- and two-row decode launches use narrower stream tiles, so Qwen3.6-35B-A3B chat decodes about 18% faster with drafts on, and Qwen3.8-27B about 5% faster, with the same tokens (#1855). Thanks to @AbrahamCete.
 
