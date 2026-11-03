@@ -1,5 +1,6 @@
 //! Admission for LFM3-1.7B and LFM3-VL-2B MLX checkpoints; this parser does not advertise an engine.
 const std = @import("std");
+const rope_freq = @import("rope_freq");
 
 pub const hidden = 2048;
 pub const vocab = 128000;
@@ -31,15 +32,7 @@ pub const Rotary = struct {
     pub fn inverseFrequencies(rot: Rotary) [head_dim / 2]f32 {
         var out: [head_dim / 2]f32 = undefined;
         const angles: usize = @intFromFloat(rot.partial * @as(f32, head_dim) / 2);
-        for (&out, 0..) |*v, i| {
-            if (i >= angles) {
-                v.* = 0;
-                continue;
-            }
-            const e: f32 = @as(f32, @floatFromInt(2 * i)) / @as(f32, head_dim);
-            const pw: f32 = @floatCast(std.math.pow(f64, rot.theta, e));
-            v.* = 1.0 / pw;
-        }
+        rope_freq.proportional(@as(f64, rot.theta), head_dim, angles, &out);
         return out;
     }
 };

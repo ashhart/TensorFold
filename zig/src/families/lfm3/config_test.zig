@@ -2,6 +2,26 @@
 const std = @import("std");
 const c = @import("config.zig");
 
+test "the rotary table is transformers' fp32 words, 0 past the partial angles" {
+    var out: [64]f32 = undefined;
+    var old: [64]f32 = undefined;
+    const cases = [_]c.Rotary{ .{ .theta = 1e6, .partial = 0.5 }, .{ .theta = 1e4, .partial = 1 } };
+    for (cases) |r| {
+        out = r.inverseFrequencies();
+        const angles: usize = @intFromFloat(128.0 * r.partial / 2.0);
+        for (&old, 0..) |*f, i| {
+            if (i >= angles) {
+                f.* = 0;
+                continue;
+            }
+            const e: f32 = @as(f32, @floatFromInt(2 * i)) / 128.0;
+            const p: f32 = @floatCast(std.math.pow(f64, @as(f64, r.theta), e));
+            f.* = 1.0 / p;
+        }
+        try std.testing.expectEqualSlices(f32, &old, &out);
+    }
+}
+
 test "text and VL preserve their distinct context and actual mixed embedding width" {
     var t = try c.parse(std.testing.allocator, text);
     defer t.deinit();

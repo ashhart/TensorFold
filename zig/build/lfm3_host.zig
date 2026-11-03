@@ -8,6 +8,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
         .link_libc = true,
     });
     const checks = b.step("test-lfm3-host", "LFM3 text and VL checkpoint config and tensor admission without a GPU");
+    const rope = b.createModule(.{ .root_source_file = b.path("zig/src/core/rope_freq.zig"), .target = b.graph.host });
     for ([_][]const u8{ "config_test", "weights" }) |part| {
         const root = b.createModule(.{
             .root_source_file = b.path(b.fmt("zig/src/families/lfm3/{s}.zig", .{part})),
@@ -15,6 +16,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
             .link_libc = true,
         });
         root.addImport("safetensors", st);
+        root.addImport("rope_freq", rope);
         const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
         checks.dependOn(&run.step);
     }
@@ -23,7 +25,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
         .root_source_file = b.path("zig/src/families/lfm3/lfm3.zig"),
         .target = b.graph.host,
         .link_libc = true,
-        .imports = &.{.{ .name = "safetensors", .module = st }},
+        .imports = &.{ .{ .name = "safetensors", .module = st }, .{ .name = "rope_freq", .module = rope } },
     });
     const tool = b.addExecutable(.{ .name = "tf-lfm3-check", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/lfm3_check.zig"),
