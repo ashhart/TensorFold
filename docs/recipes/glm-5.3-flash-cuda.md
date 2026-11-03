@@ -99,6 +99,11 @@ Each setting is two fresh servers (one at TP=2 for the cold row), `--parallel 4 
 repeated filler line gains 2 to 5% at the same sizes. The other rows ran with the prompt cache on (the default at TP=2,
 2 GiB at TP=3). Three rows at TP=2 that waited on the heat guard are left out.
 
+At TP=3 with `TF_GLM_ROCE_MULTI=1` (#1524) the gain is a little under half: on three GB10s at `--parallel 8` with
+`TF_GLM_KV_SHARE=32` and `TENSORFOLD_PREFILL_SHARE=0.7`, not the table's settings, cold Python-source prompts of 8K to
+128K tokens came 3.2 to 3.4% sooner with the wire and 7.3 to 8.4% sooner without it, two fresh servers each. The wire's
+extra time is in the side stream's exchanges and grows when solo doubles a pass (#1994).
+
 ## Long runs on GB10
 
 Long prompts and long runs of replies heat a GB10. The runbook's [heat bands](../../RUNBOOK.md#linux-and-cuda) (with a
