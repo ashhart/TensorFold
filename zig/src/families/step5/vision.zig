@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
 const ck = @import("../../core/checkpoint_metal.zig");
+const rope_freq = @import("../../core/rope_freq.zig");
 const image = @import("image.zig");
 
 pub const width = 1536;
@@ -292,11 +293,12 @@ fn resizePos(src: []const u16, dst: []u16) void {
 /// The encoder's 2D RoPE for a g x g grid: dims [w | h] freqs, pairs repeated, bf16 angles, bf16 cos and sin.
 fn rope(cs: []u16, sn: []u16, g: usize) void {
     const half = head_dim / 2; // 48 dims an axis: 24 frequencies, each twice
+    var inv: [half / 2]f32 = undefined;
+    rope_freq.inverseFrequencies(10000.0, half, &inv);
     for (0..g) |r| for (0..g) |c| for (0..head_dim) |d| {
         const axis_pos: f32 = @floatFromInt(if (d < half) c else r);
         const i = (d % half) / 2;
-        const inv = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / @as(f32, half));
-        const angle = f32of(bf16(axis_pos * inv));
+        const angle = f32of(bf16(axis_pos * inv[i]));
         cs[(r * g + c) * head_dim + d] = bf16(@cos(angle));
         sn[(r * g + c) * head_dim + d] = bf16(@sin(angle));
     };
@@ -366,4 +368,92 @@ pub fn validate(c: *const ck.Checkpoint, hidden: u32) !void {
 
 test {
     _ = @import("vision_test.zig");
+}
+
+/// The replaced frequency (rope before #1852), kept as a reference: Zig's f32 pow, an fp32 reciprocal.
+fn replacedInv(i: usize) f32 {
+    return 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / @as(f32, head_dim / 2));
+}
+
+/// The replaced rope: its frequencies through the same bf16 angles and bf16 cos and sin.
+fn replacedRope(cs: []u16, sn: []u16, g: usize) void {
+    const half = head_dim / 2;
+    for (0..g) |r| for (0..g) |c| for (0..head_dim) |d| {
+        const axis_pos: f32 = @floatFromInt(if (d < half) c else r);
+        const angle = f32of(bf16(axis_pos * replacedInv((d % half) / 2)));
+        cs[(r * g + c) * head_dim + d] = bf16(@cos(angle));
+        sn[(r * g + c) * head_dim + d] = bf16(@sin(angle));
+    };
+}
+
+const Diff = struct { differ: usize, ulps: u32 };
+
+/// Prints both tables' words and values side by side, then the largest absolute and relative difference.
+fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
+    var r: Diff = .{ .differ = 0, .ulps = 0 };
+    var abs: f64 = 0;
+    var rel: f64 = 0;
+    std.debug.print("{s}\n   i  old                         new                         ulps\n", .{label});
+    for (old, new, 0..) |o, n, i| {
+        const a: u32 = @bitCast(o);
+        const b: u32 = @bitCast(n);
+        const u = if (a > b) a - b else b - a;
+        const d = @abs(@as(f64, n) - o);
+        if (u != 0) r.differ += 1;
+        r.ulps = @max(r.ulps, u);
+        abs = @max(abs, d);
+        rel = @max(rel, d / @abs(@as(f64, o)));
+        const sign = if (b > a) "+" else if (b < a) "-" else " ";
+        std.debug.print("{d:>4}  0x{x:0>8} {e:<16}  0x{x:0>8} {e:<16}  {s}{d}\n", .{ i, a, o, b, n, sign, u });
+    }
+    std.debug.print("{s}: {d} of {d} words differ, largest {d} ulp, abs {e:.3}, rel {e:.3}\n", .{
+        label, r.differ, old.len, r.ulps, abs, rel,
+    });
+    return r;
+}
+
+/// The bf16 entries of two tables that differ, printed with the largest difference and the first patch hit.
+fn tableDiff(label: []const u8, old: []const u16, new: []const u16) usize {
+    var differ: usize = 0;
+    var most: f32 = 0;
+    var first: ?usize = null;
+    for (old, new, 0..) |o, n, i| if (o != n) {
+        differ += 1;
+        most = @max(most, @abs(f32of(n) - f32of(o)));
+        if (first == null) first = i / head_dim;
+    };
+    std.debug.print("{s}: {d} of {d} entries differ, largest {e:.3}, first at patch {?d}\n", .{
+        label, differ, old.len, most, first,
+    });
+    return differ;
+}
+
+test "step5 host: tower RoPE frequencies (theta 1e4 over 48) on rope_freq, printed beside the fp32-pow form" {
+    // transformers' form in exact arithmetic, rn32(1 / rn32(1e4^rn32(2i / 48))): it gives rope_freq.zig's torch words
+    const want = [24]u32{
+        0x3f800000, 0x3f2e6928, 0x3eeda63c, 0x3ea1e89b, 0x3e5c9d35, 0x3e164d7a, 0x3dcccccd, 0x3d8b8754,
+        0x3d3e1e95, 0x3d0186e3, 0x3cb07dc6, 0x3c707bf6, 0x3c23d70a, 0x3bdf3ee9, 0x3b98187a, 0x3b4f3e38,
+        0x3b0d3169, 0x3ac0632e, 0x3a83126f, 0x3a3298ba, 0x39f35a5c, 0x39a5cb60, 0x3961e8a7, 0x3919e8f2,
+    };
+    var new: [head_dim / 4]f32 = undefined;
+    rope_freq.inverseFrequencies(10000.0, head_dim / 2, &new);
+    for (want, new) |w, f| try std.testing.expectEqual(w, @as(u32, @bitCast(f)));
+    var old: [head_dim / 4]f32 = undefined;
+    for (&old, 0..) |*f, i| f.* = replacedInv(i);
+    const got = sideBySide("Step-5 tower (theta 1e4, 48 dims an axis)", &old, &new);
+    try std.testing.expectEqual(Diff{ .differ = 8, .ulps = 2 }, got);
+    const a = std.testing.allocator;
+    var counts: [2][2]usize = undefined;
+    for ([_]usize{ big, small }, &counts) |g, *count| {
+        const n = g * g * head_dim;
+        const t = try a.alloc(u16, 4 * n);
+        defer a.free(t);
+        rope(t[0..n], t[n..][0..n], g);
+        replacedRope(t[2 * n ..][0..n], t[3 * n ..][0..n], g);
+        var names: [2][64]u8 = undefined;
+        const cos = try std.fmt.bufPrint(&names[0], "Step-5 tower bf16 cos, {d} x {d}", .{ g, g });
+        const sin = try std.fmt.bufPrint(&names[1], "Step-5 tower bf16 sin, {d} x {d}", .{ g, g });
+        count.* = .{ tableDiff(cos, t[2 * n ..][0..n], t[0..n]), tableDiff(sin, t[3 * n ..][0..n], t[n..][0..n]) };
+    }
+    try std.testing.expectEqual([2][2]usize{ .{ 0, 0 }, .{ 0, 0 } }, counts);
 }

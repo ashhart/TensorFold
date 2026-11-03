@@ -5,6 +5,7 @@ const cfg = @import("encoder_config.zig");
 const wts = @import("encoder_weights.zig");
 const ks = @import("kernels.zig");
 const bf16_round = @import("bf16_round");
+const rope_freq = @import("../../core/rope_freq.zig");
 const Ref = ks.Ref;
 
 const H = cfg.hidden;
@@ -29,9 +30,9 @@ pub fn ids(tok: anytype, a: std.mem.Allocator, prompt: []const u8) ![]u32 {
 /// The rotary tables [rows, 32] as the text model computes them: fp32 angles, their cos and sin, rounded to bf16.
 pub fn rotary(cos: []f32, sin: []f32, rows: usize) void {
     const half = cfg.rotary / 2;
-    for (0..half) |i| {
-        const exponent: f32 = @as(f32, @floatFromInt(2 * i)) / @as(f32, cfg.rotary);
-        const freq: f32 = 1.0 / std.math.pow(f32, @floatCast(cfg.theta), exponent);
+    var freqs: [half]f32 = undefined;
+    rope_freq.inverseFrequencies(cfg.theta, cfg.rotary, &freqs);
+    for (freqs, 0..) |freq, i| {
         for (0..rows) |r| {
             const angle: f32 = @as(f32, @floatFromInt(r)) * freq;
             cos[r * half + i] = bf(@floatCast(@cos(@as(f64, angle))));
@@ -271,4 +272,95 @@ test "rotary bf16: today's bits on every zero, subnormal, infinity and tie; a Na
     try std.testing.expect(std.math.isInf(old.spelled(@bitCast(@as(u32, 0x7f800001))))); // the old copy's +Inf
     try std.testing.expectEqual(@as(u32, 0x80000000), @as(u32, @bitCast(old.spelled(@bitCast(@as(u32, 0x7fff8001)))))); // its -0
     for ([_]u32{ 0x7f800001, 0x7fff8001, 0xffff8001, 0x7fc00000, 0xffffffff, 0x7fbfffff, 0xffa00000 }) |u| try old.kept(u);
+}
+
+/// The replaced frequency (rotary before #1852), kept as a reference: Zig's f32 pow of an f32 theta, fp32 reciprocal.
+fn replacedFrequency(i: usize) f32 {
+    const exponent: f32 = @as(f32, @floatFromInt(2 * i)) / @as(f32, cfg.rotary);
+    return 1.0 / std.math.pow(f32, @floatCast(cfg.theta), exponent);
+}
+
+/// The replaced rotary: its frequencies through the same fp32 angles and bf16 cos and sin.
+fn replacedRotary(cos: []f32, sin: []f32, rows: usize) void {
+    const half = cfg.rotary / 2;
+    for (0..half) |i| {
+        const freq = replacedFrequency(i);
+        for (0..rows) |r| {
+            const angle: f32 = @as(f32, @floatFromInt(r)) * freq;
+            cos[r * half + i] = bf(@floatCast(@cos(@as(f64, angle))));
+            sin[r * half + i] = bf(@floatCast(@sin(@as(f64, angle))));
+        }
+    }
+}
+
+const Diff = struct { differ: usize, ulps: u32 };
+
+/// Prints both tables' words and values side by side, then the largest absolute and relative difference.
+fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
+    var r: Diff = .{ .differ = 0, .ulps = 0 };
+    var abs: f64 = 0;
+    var rel: f64 = 0;
+    std.debug.print("{s}\n   i  old                         new                         ulps\n", .{label});
+    for (old, new, 0..) |o, n, i| {
+        const a: u32 = @bitCast(o);
+        const b: u32 = @bitCast(n);
+        const u = if (a > b) a - b else b - a;
+        const d = @abs(@as(f64, n) - o);
+        if (u != 0) r.differ += 1;
+        r.ulps = @max(r.ulps, u);
+        abs = @max(abs, d);
+        rel = @max(rel, d / @abs(@as(f64, o)));
+        const sign = if (b > a) "+" else if (b < a) "-" else " ";
+        std.debug.print("{d:>4}  0x{x:0>8} {e:<16}  0x{x:0>8} {e:<16}  {s}{d}\n", .{ i, a, o, b, n, sign, u });
+    }
+    std.debug.print("{s}: {d} of {d} words differ, largest {d} ulp, abs {e:.3}, rel {e:.3}\n", .{
+        label, r.differ, old.len, r.ulps, abs, rel,
+    });
+    return r;
+}
+
+const TableDiff = struct { differ: usize, first: ?usize };
+
+/// The entries of two bf16-valued tables that differ, printed with the largest difference and the first row hit.
+fn tableDiff(label: []const u8, old: []const f32, new: []const f32, width: usize) TableDiff {
+    var r: TableDiff = .{ .differ = 0, .first = null };
+    var most: f32 = 0;
+    for (old, new, 0..) |o, n, i| if (o != n) {
+        r.differ += 1;
+        most = @max(most, @abs(n - o));
+        if (r.first == null) r.first = i / width;
+    };
+    std.debug.print("{s}: {d} of {d} entries differ, largest {e:.3}, first at row {?d}\n", .{
+        label, r.differ, old.len, most, r.first,
+    });
+    return r;
+}
+
+test "rotary: transformers' frequencies (theta 1e7 over 64), printed beside the fp32-pow form they replace" {
+    // transformers 5.22.1's words for this config, as rope_freq.zig's first test has them
+    const torch = [32]u32{
+        0x3f800000, 0x3f1ab32b, 0x3ebaf81b, 0x3e61f835, 0x3e088d77, 0x3da50956, 0x3d47763f, 0x3cf11177,
+        0x3c91ad39, 0x3c301052, 0x3bd4ca15, 0x3b80967d, 0x3b1b690d, 0x3abbd3ed, 0x3a6301e2, 0x3a092e02,
+        0x39a5cb60, 0x394860c1, 0x38f22ce2, 0x3892587e, 0x3830df52, 0x37d5c441, 0x37812dab, 0x371c1fc4,
+        0x36bcb0c1, 0x36640cc6, 0x3609cf4a, 0x35a68e4c, 0x35494c57, 0x34f3499d, 0x3493048e, 0x3431af44,
+    };
+    const half = cfg.rotary / 2;
+    var new: [half]f32 = undefined;
+    rope_freq.inverseFrequencies(cfg.theta, cfg.rotary, &new);
+    for (torch, new) |w, f| try std.testing.expectEqual(w, @as(u32, @bitCast(f)));
+    var old: [half]f32 = undefined;
+    for (&old, 0..) |*f, i| f.* = replacedFrequency(i);
+    const got = sideBySide("MOSS-Image encoder (theta 1e7, rotary 64)", &old, &new);
+    try std.testing.expectEqual(Diff{ .differ = 15, .ulps = 5 }, got);
+    const a = std.testing.allocator;
+    const n = cfg.max_rows * half;
+    const t = try a.alloc(f32, 4 * n);
+    defer a.free(t);
+    rotary(t[0..n], t[n..][0..n], cfg.max_rows);
+    replacedRotary(t[2 * n ..][0..n], t[3 * n ..][0..n], cfg.max_rows);
+    const cos = tableDiff("MOSS-Image encoder bf16 cos over 4096 rows", t[2 * n ..][0..n], t[0..n], half);
+    const sin = tableDiff("MOSS-Image encoder bf16 sin over 4096 rows", t[3 * n ..][0..n], t[n..][0..n], half);
+    // a prompt of up to 565 rows (its formatted ids) reads the same tables as before
+    try std.testing.expectEqual(TableDiff{ .differ = 76, .first = 565 }, cos);
+    try std.testing.expectEqual(TableDiff{ .differ = 65, .first = 860 }, sin);
 }
