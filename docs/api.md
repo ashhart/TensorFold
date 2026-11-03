@@ -136,8 +136,8 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 ## Decisions
 
-`POST /v1/decisions` is served by the MLX server, by the CUDA GLM engine and by Flash Next on one CUDA GPU.
-Another CUDA engine, one without label scoring, returns HTTP 400.
+`POST /v1/decisions` is served by Flash Next on one CUDA GPU, by LFM2 on CUDA and by Gemma 4 on XPU.
+Every other engine, which includes all Metal families and CUDA GLM today, returns HTTP 400.
 The prompt wording is SGLang's decision prompt format version 1: the input, a blank line, the question, one line per
 option, level, or described yes or no answer, and a closing instruction to answer with one label. Choice labels are
 `A` to `Z`, score labels are `0` to `9`, and a yes/no question uses `yes` and `no`. Each label must be one distinct

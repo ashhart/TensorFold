@@ -138,12 +138,26 @@ fn float(o: std.json.ObjectMap, key: []const u8) !f64 {
     };
 }
 
+/// The activation dtype the native engine serves; `tensorfold_activation_dtype` is refused by name otherwise.
+const served_activation = "bfloat16";
+
+/// A refused dtype's value for the log line: its string, or its JSON type.
+fn dtypeName(v: std.json.Value) []const u8 {
+    return if (v == .string) v.string else @tagName(v);
+}
+
 /// text_config with GLM-5.3-Flash's widths; smaller counts pass (synthetic), experts >= top-k, vocab a multiple of 128.
 pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
     const root = parsed.value.object;
     const t = (root.get("text_config") orelse parsed.value).object;
+    for ([_]?std.json.Value{ t.get("tensorfold_activation_dtype"), root.get("tensorfold_activation_dtype") }) |maybe| if (maybe) |v| {
+        if (v != .string or !std.mem.eql(u8, v.string, served_activation)) {
+            std.debug.print("config.json: tensorfold_activation_dtype = {s}: the native engine serves bfloat16 activations only\n", .{dtypeName(v)});
+            return error.UnsupportedActivationDtype;
+        }
+    };
     var c = Config{};
     const want = c;
     c.hidden = @intCast(try int(t, "hidden_size"));
@@ -265,6 +279,13 @@ test "GLM-5.3-Flash's layer kinds: 34 KDA and 11 MLA in the backbone, the MTP la
     try std.testing.expectEqual(@as(u32, 10), c.kindIndex(43));
 }
 
+/// The same JSON with `tensorfold_activation_dtype` set to `value` in its text_config.
+fn withDtype(gpa: std.mem.Allocator, base: []const u8, value: []const u8) ![]u8 {
+    const to = try std.fmt.allocPrint(gpa, "\"text_config\": {{\"tensorfold_activation_dtype\": \"{s}\", ", .{value});
+    defer gpa.free(to);
+    return std.mem.replaceOwned(u8, gpa, base, "\"text_config\": {", to);
+}
+
 /// GLM-5.3-Flash's text_config with the counts given (the widths as the checkpoint has them), for the tests.
 pub fn textConfig(gpa: std.mem.Allocator, layers: u32, dense: u32, mla: []const u32, experts: u32, vocab: u32, hidden: u32) ![]u8 {
     var list: std.ArrayList(u8) = .empty;
@@ -303,6 +324,22 @@ test "the real counts parse to the defaults; smaller counts parse, other widths 
     const few = try textConfig(gpa, 2, 1, &.{1}, 4, 8192, 4096);
     defer gpa.free(few);
     try std.testing.expectError(error.NotGlm53Flash, parse(gpa, few));
+}
+
+test "tensorfold_activation_dtype: absent and bfloat16 parse; float32 and float16 refuse by name" {
+    const gpa = std.testing.allocator;
+    const real = try textConfig(gpa, 45, 3, &.{ 3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43 }, 288, 154880, 4096);
+    defer gpa.free(real);
+    _ = try parse(gpa, real);
+    const bf16 = try withDtype(gpa, real, "bfloat16");
+    defer gpa.free(bf16);
+    try std.testing.expectEqual(@as(u32, 45), (try parse(gpa, bf16)).layers);
+    const act32 = try withDtype(gpa, real, "float32");
+    defer gpa.free(act32);
+    try std.testing.expectError(error.UnsupportedActivationDtype, parse(gpa, act32));
+    const act16 = try withDtype(gpa, real, "float16");
+    defer gpa.free(act16);
+    try std.testing.expectError(error.UnsupportedActivationDtype, parse(gpa, act16));
 }
 
 test "a layer subset keeps the MTP layer's place and refuses an empty or oversized count" {
