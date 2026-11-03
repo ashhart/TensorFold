@@ -18,6 +18,7 @@ const earlier = [_][]const u8{ "status", "model", "model_ids", "max_batch_size",
 /// Four lanes, some memory, nothing running.
 const Idle = struct {
     healthy: bool = true,
+    benchmark: api.Benchmark = .{ .ranks = 1 },
     resets: std.atomic.Value(u32) = .init(0),
     scores: std.atomic.Value(u32) = .init(0),
     submits: std.atomic.Value(u32) = .init(0),
@@ -32,8 +33,9 @@ const Idle = struct {
         } };
     }
 
-    fn info(_: *anyopaque) api.Info {
-        return .{ .lanes = 4 };
+    fn info(ctx: *anyopaque) api.Info {
+        const e: *Idle = @ptrCast(@alignCast(ctx));
+        return .{ .lanes = 4, .benchmark_ranks = e.benchmark.ranks, .benchmark_group = e.benchmark.group };
     }
 
     fn submit(ctx: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
@@ -312,11 +314,11 @@ const manifest_get = "GET /v1/benchmark/manifest HTTP/1.1\r\nHost: localhost\r\n
 
 /// The manifest a server with `environ` sends over a socket, parsed back as a client reads it.
 fn manifestServed(a: Allocator, environ: ?*const std.process.Environ.Map) !std.json.ObjectMap {
-    return manifestWithBackend(a, environ, "cuda");
+    return manifestWithBackend(a, environ, "cuda", .{ .ranks = 1 });
 }
 
-fn manifestWithBackend(a: Allocator, environ: ?*const std.process.Environ.Map, backend: []const u8) !std.json.ObjectMap {
-    var engine: Idle = .{};
+fn manifestWithBackend(a: Allocator, environ: ?*const std.process.Environ.Map, backend: []const u8, loaded: api.Benchmark) !std.json.ObjectMap {
+    var engine: Idle = .{ .benchmark = loaded };
     var text: Bytes = .{};
     var identity = build_identity.of(WithGpu, a, "9.8.7", 1);
     identity.backend = backend;
@@ -334,7 +336,7 @@ fn manifestWithBackend(a: Allocator, environ: ?*const std.process.Environ.Map, b
     return doc.object;
 }
 
-test "the manifest names the rank count and revision from the server's environment, and nothing it was not given" {
+test "benchmark manifest: loaded rank count ignores environment hints while revision remains attested" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -343,25 +345,25 @@ test "the manifest names the rank count and revision from the server's environme
     try env.put("TF_CHECKPOINT_REVISION", "0123456789abcdef0123456789abcdef01234567");
     const o = try manifestServed(a, &env);
     try std.testing.expectEqual(@as(i64, 1), o.get("schema_version").?.integer);
-    try std.testing.expectEqual(@as(i64, 2), o.get("rank_count").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), o.get("rank_count").?.integer);
     try std.testing.expectEqualStrings("9.8.7", o.get("runtime").?.object.get("tensorfold_version").?.string);
     try std.testing.expectEqualStrings("cuda", o.get("runtime").?.object.get("backend").?.string);
     const rev = o.get("model").?.object.get("revision").?.string;
     try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", rev);
-    try env.put("TF_NEMOTRON_WORLD", "3"); // a count the board does not rank, and a revision that names no commit
+    try env.put("TF_NEMOTRON_WORLD", "8"); // the loaded count remains one; this revision names no commit
     try env.put("TF_CHECKPOINT_REVISION", "main");
     const odd = try manifestServed(a, &env);
-    try std.testing.expect(odd.get("rank_count") == null);
+    try std.testing.expect(odd.get("rank_count").?.integer == 1);
     try std.testing.expect(odd.get("model").?.object.get("revision") == null);
     const bare = try manifestServed(a, null);
-    try std.testing.expect(bare.get("rank_count") == null);
+    try std.testing.expect(bare.get("rank_count").?.integer == 1);
     try std.testing.expect(bare.get("model").?.object.get("revision") == null);
 }
 
 test "benchmark manifest: an unknown server backend is never attested as CUDA" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const o = try manifestWithBackend(arena.allocator(), null, "");
+    const o = try manifestWithBackend(arena.allocator(), null, "", .{ .ranks = 1 });
     try std.testing.expectEqualStrings("", o.get("runtime").?.object.get("backend").?.string);
 }
 
@@ -538,4 +540,19 @@ fn responseLength(reply: []const u8) !usize {
     var lines = std.mem.splitSequence(u8, reply[0..end], "\r\n");
     while (lines.next()) |line| if (std.mem.startsWith(u8, line, "Content-Length: ")) return std.fmt.parseInt(usize, line[16..], 10);
     return error.MissingContentLength;
+}
+
+test "benchmark group: HTTP manifest copies the loaded four-rank topology" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const group = try @import("benchmark_group_test.zig").topology(a, 4, true);
+    const bytes = try json.stringify(a, group, .{});
+    var env: std.process.Environ.Map = .init(a);
+    try env.put("TF_NEMOTRON_WORLD", "8");
+    const o = try manifestWithBackend(a, &env, "cuda", .{ .ranks = 4, .group = bytes });
+    try std.testing.expect(o.get("rank_count").?.integer == 4);
+    const got = o.get("group").?.object;
+    try std.testing.expectEqualStrings("multi-node", got.get("category").?.string);
+    try std.testing.expect(got.get("nodes").?.array.items.len == 4);
 }

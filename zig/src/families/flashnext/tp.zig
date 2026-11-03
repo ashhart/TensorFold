@@ -108,6 +108,7 @@ const JOBS = 1024;
 pub const Tp2 = struct {
     owned: @import("owned.zig").Owner(mtl) = .{},
     allocator: ?std.mem.Allocator = null,
+    benchmark_group: ?[]const u8 = null,
     rank: u32,
     peer: u32,
     ep: *fabric.mcdma.Endpoint,
@@ -149,7 +150,7 @@ pub const Tp2 = struct {
         return WINDOW + (32 << 20) + 32 + @sizeOf(Tp2) + JOBS * @sizeOf(Job);
     }
     /// Connect to the peer named in the settings file and start the host's service thread.
-    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, settings_path: []const u8) !*Tp2 {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, settings_path: []const u8) !*Tp2 {
         const f = try mtl.MappedFile.open(try gpa.dupeSentinel(u8, settings_path, 0));
         const s = try settings.read(gpa, f.bytes[0..f.size]);
         if (s.rank > 1 or s.links.len != 1) return error.TpTwoRanksOneLink;
@@ -191,8 +192,8 @@ pub const Tp2 = struct {
         t.local = platform.c.getenv("TF_TP_LOCAL") != null;
         t.stats = platform.c.getenv("TF_TP_STATS") != null;
         // both ranks up before the first round: a word each way
-        try rd.signal(t.peer, HELLO, 1);
-        while (@atomicLoad(u64, t.word64(HELLO), .acquire) < 1) std.atomic.spinLoopHint();
+        t.benchmark_group = try @import("core").benchmark_group.metal(gpa, io, device, rd, FLAGS + 4096, HELLO, 2);
+        errdefer if (t.benchmark_group) |b| gpa.free(b);
         t.thread = try std.Thread.spawn(.{}, service, .{ t, t.seq +% 1 });
         std.log.info("TP=2 rank {d} connected", .{t.rank});
         return t;
@@ -203,6 +204,7 @@ pub const Tp2 = struct {
         t.owned.deinit();
         t.ep.deinit();
         if (t.allocator) |a| {
+            if (t.benchmark_group) |b| a.free(b);
             a.free(t.jobs);
             a.destroy(t);
         }

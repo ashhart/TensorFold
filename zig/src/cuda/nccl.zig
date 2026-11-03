@@ -12,6 +12,7 @@ pub fn requireVersion(loaded: c_int) error{NcclVersion}!void {
 }
 
 pub const Result = c_int;
+pub const Shape = struct { rank: u32, world: u32 };
 pub const Comm = ?*opaque {};
 pub const UniqueId = extern struct { internal: [128]u8 };
 
@@ -55,6 +56,8 @@ pub const Api = struct {
     ncclGetUniqueId: *const fn (*UniqueId) callconv(.c) R,
     ncclCommInitRank: *const fn (*Comm, c_int, UniqueId, c_int) callconv(.c) R,
     ncclCommInitAll: *const fn ([*]Comm, c_int, ?[*]const c_int) callconv(.c) R,
+    ncclCommCount: *const fn (Comm, *c_int) callconv(.c) R,
+    ncclCommUserRank: *const fn (Comm, *c_int) callconv(.c) R,
     ncclCommDestroy: *const fn (Comm) callconv(.c) R,
     ncclGetErrorString: *const fn (R) callconv(.c) ?[*:0]const u8,
     ncclAllReduce: *const fn (D, D, usize, DataType, RedOp, Comm, abi.Stream) callconv(.c) R,
@@ -89,6 +92,15 @@ pub const Library = struct {
             };
         }
         return .{ .lib = lib, .api = api };
+    }
+
+    pub fn shape(self: *const Library, comm: Comm) !Shape {
+        var world: c_int = 0;
+        var rank: c_int = -1;
+        try self.check(self.api.ncclCommCount(comm, &world), "ncclCommCount");
+        try self.check(self.api.ncclCommUserRank(comm, &rank), "ncclCommUserRank");
+        if (world < 1 or rank < 0 or rank >= world) return error.BadWorld;
+        return .{ .rank = @intCast(rank), .world = @intCast(world) };
     }
 
     pub fn close(self: *Library) void {

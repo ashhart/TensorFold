@@ -127,7 +127,7 @@ pub const Served = struct {
         s.core = lanes.Engine.init(gpa, &s.cfg, s.x.backend(), s.clock.clock());
         s.x.attach(&s.core);
         const window: u32 = @intCast(@min(context orelse m.f.opts.limit, m.f.opts.limit));
-        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = "dsv41-cuda", .lanes = m.slots, .context_window = window, .prefill_step = m.gt.prefill_rows });
+        s.host = api.LaneHost.init(gpa, io, &s.core, .{ .benchmark_ranks = m.session.nccl.size, .benchmark_group = m.benchmark_group, .name = "dsv41-cuda", .lanes = m.slots, .context_window = window, .prefill_step = m.gt.prefill_rows });
         s.host.info_.draft_sources = draftSources(m.pass != null, s.cfg.max_copy > 0);
         // the lanes run on LaneHost's thread: the model's CUDA context must be current there
         s.host.on_thread = .{ .ctx = m, .run = bindContext };

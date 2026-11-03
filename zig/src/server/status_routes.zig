@@ -66,10 +66,12 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
 
 /// Facts an attached benchmark may copy. A missing or rejected manifest leaves the run unranked.
 pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
+    if (srv.draining.load(.seq_cst)) return routes.sendDraining(conn, "{\"status\":\"draining\"}");
+    const loaded = if (srv.idle_manager) |m| try m.readBenchmark(srv, a) else try api.Benchmark.copy(a, srv.info);
     const none: std.process.Environ.Map = .init(a);
     const env = srv.config.environ orelse &none;
     const backend = srv.config.identity.backend;
-    routes.sendValue(conn, a, 200, try manifest.serveDocument(a, srv.io, env, srv.config.identity.version, backend, srv.config.model_dir));
+    routes.sendValue(conn, a, 200, try manifest.serveDocument(a, srv.io, env, srv.config.identity.version, backend, srv.config.model_dir, loaded));
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {

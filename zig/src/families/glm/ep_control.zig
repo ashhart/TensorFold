@@ -61,6 +61,7 @@ fn ticks() u64 {
 }
 
 pub const Control = struct {
+    inventory: bool = false, // HELLO=2 announces the optional public inventory exchange after identity agreement
     rank: u32,
     peer: u32,
     rd: Rdma,
@@ -107,7 +108,7 @@ pub const Control = struct {
 
     /// Send this Mac's identity, wait for the peer's, and refuse a peer that runs something else (both Macs refuse).
     pub fn hello(c: *Control, me: Identity) !Identity {
-        try c.rd.write2Signal(c.peer, c.base + IDENT, std.mem.asBytes(&me), &.{}, c.base + HELLO, 1);
+        try c.rd.write2Signal(c.peer, c.base + IDENT, std.mem.asBytes(&me), &.{}, c.base + HELLO, if (c.inventory) 2 else 1);
         _ = try c.reach(HELLO, 1, true) orelse return error.EpClosed;
         const peer: *const Identity = @ptrCast(@alignCast(c.rd.window().ptr + c.base + IDENT));
         if (!me.compatible(peer.*)) {
