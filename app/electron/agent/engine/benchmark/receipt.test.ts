@@ -54,3 +54,26 @@ assert.equal(benchmarkCells(parseBenchmarkReceipt(JSON.stringify(buffered)))[0].
 const unknown = structuredClone(receipt); unknown.hardware.gpus = []; unknown.hardware.gpu_count = null; unknown.hardware.source = 'unavailable'
 assert.equal(benchmarkProtocolComplete(parseBenchmarkReceipt(JSON.stringify(unknown))), false)
 console.log('Benchmark strict receipt, privacy, exact samples, complete-only aggregates, earlyEOS, warmup errors and unknown metrics passed')
+
+for (const family of [null, 'Mac mini', 'Mac Studio', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Pro'] as const) {
+  const withFamily = structuredClone(receipt)
+  Object.assign(withFamily.hardware, { form_factor: family })
+  const result = parseBenchmarkReceipt(JSON.stringify(withFamily), { model: receipt.model.repo_id, serial: false })
+  assert.equal(result.hardware.form_factor, family)
+  assert.deepEqual(result, withFamily, 'The app preserves the accepted metadata for storage and export')
+  assert.deepEqual(benchmarkCells(result), benchmarkCells(parsed), 'A product family cannot alter measured benchmark cells')
+  assert.equal(benchmarkProtocolComplete(result), true)
+}
+assert.equal(Object.hasOwn(parsed.hardware, 'form_factor'), false, 'Old receipts keep the field absent')
+for (const family of ['', 'Mac17,16', 'mac mini', 'Mac mini M5 Pro', 'Mac mini\n', true, 7, [], {}, ['Mac mini']]) {
+  const invalid = structuredClone(receipt) as any
+  invalid.hardware.form_factor = family
+  assert.throws(() => parseBenchmarkReceipt(JSON.stringify(invalid)), /invalid|unsupported/)
+}
+for (const formFactor of [undefined, null, 'Mac mini']) {
+  const invalid = structuredClone(receipt) as any
+  if (formFactor !== undefined) invalid.hardware.form_factor = formFactor
+  invalid.hardware.model_identifier = 'Mac17,16'
+  assert.throws(() => parseBenchmarkReceipt(JSON.stringify(invalid)), /invalid|unsupported/, 'The optional key cannot admit unrelated hardware fields')
+}
+console.log('Studio accepts absent, null and six coarse product families, preserves metadata and rejects raw IDs, extra keys and invalid values.')
