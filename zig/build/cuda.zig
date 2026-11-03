@@ -429,10 +429,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-runtime-capabilities-host", "Optional library discovery in actual capabilities JSON").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"runtime library:"} })).step);
     b.step("test-vision-cli-host", "Image token budgets through parsing and engine admission options without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"vision image budget:"} })).step);
     windows_port.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"hardware names"} })).step);
-    const group_test = b.step("test-benchmark-group-host", "Loaded benchmark group inventory and receipt consistency on the CPU");
-    group_test.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"benchmark group:"} })).step);
-    group_test.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"benchmark group:"} })).step);
-    group_test.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark group:"} })).step);
+    @import("benchmark_group_host.zig").steps(b, &.{ cuda, mods.core, server_tests });
     b.step("test-benchmark-manifest-host", "Manifest identity through the HTTP server without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"manifest"} })).step);
     b.step("test-lesson-questions-host", "Supplied questions through the production lesson without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Lesson questions:"} })).step);
     b.step("test-grammar-metrics-host", "Grammar totals in whole and streamed replies without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"grammar timing:"} })).step);
