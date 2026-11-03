@@ -250,3 +250,55 @@ test "the production hook is the stream's own cancel check" {
     try T.expect(c.?.check == Flag.check);
     try T.expect(source.Hip.cancelOf(&engine, &without) == null);
 }
+
+/// A prefix tree with retention on that has kept this prompt: a lookup resumes at row 64 with a cut at 128.
+const Kept = struct {
+    lookups: usize = 0,
+
+    pub fn begin(t: *Kept, _: []const u32, _: u32, _: []const u32, _: anytype, _: *std.ArrayList(u32)) !@import("engine_api").prompt_radix.Plan {
+        t.lookups += 1;
+        return .{ .from = 64, .marks = try T.allocator.dupe(u32, &.{128}) };
+    }
+};
+
+test "a readout begins at row 0 with no cuts while the tree would resume a plain stream" {
+    var tokens: [256]u32 = @splat(1);
+    var logits: [1]u16 = undefined;
+    const spec: lanes.readout.Spec = .{ .question_spans = &.{.{ 0, 1 }}, .question_types = &.{1}, .option_spans = &.{.{ 1, 2 }}, .option_question = &.{0}, .logits = &logits };
+    var reader = try lanes.Stream.init(T.allocator, .{ .id = "r", .prompt = &tokens, .max_new = 0, .drafts = false, .readout = &spec });
+    defer reader.deinit(T.allocator);
+    var plain = try lanes.Stream.init(T.allocator, .{ .id = "p", .prompt = &tokens, .max_new = 4 });
+    defer plain.deinit(T.allocator);
+    var tree: Kept = .{};
+    var matched: std.ArrayList(u32) = .empty;
+    const owner: u8 = 0;
+    const fresh = try source.startPlan(&tree, &reader, &owner, &matched);
+    try T.expectEqual(@as(u32, 0), fresh.from);
+    try T.expectEqual(@as(usize, 0), fresh.marks.len);
+    try T.expectEqual(@as(usize, 0), tree.lookups);
+    const resumed = try source.startPlan(&tree, &plain, &owner, &matched);
+    defer T.allocator.free(resumed.marks);
+    try T.expectEqual(@as(u32, 64), resumed.from);
+    try T.expectEqual(@as(usize, 1), tree.lookups);
+}
+
+test "a test's cut rows fix every piece end, which the recorder lists" {
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{ .cut_rows = 300 };
+    var h: source.Hip = undefined;
+    h.gpa = T.allocator;
+    h.e = &e;
+    h.streams = .init(T.allocator);
+    defer h.streams.deinit();
+    var cuts: std.ArrayList(u32) = .empty;
+    defer cuts.deinit(T.allocator);
+    h.cuts = &cuts;
+    var lane: source.Lane = undefined;
+    var at: usize = 0;
+    while (at < 1000) at = try h.reach(&lane, at, 1000);
+    try T.expectEqualSlices(u32, &.{ 300, 600, 900, 1000 }, cuts.items);
+    e.o.cut_rows = 0;
+    cuts.clearRetainingCapacity();
+    _ = try h.reach(&lane, 0, 5000);
+    try T.expectEqualSlices(u32, &.{prefix.chunk}, cuts.items); // no stream decodes: the chunk rule
+}
