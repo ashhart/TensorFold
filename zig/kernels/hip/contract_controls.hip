@@ -121,3 +121,43 @@ extern "C" __global__ void __launch_bounds__(tf::rocm::W12Small::Threads) tf_ctl
     using namespace tf::rocm;
     wmma12_gemm_tile<W12Small, IdentityAct<DotBF16>, GemmOut<DotBF16>, TfCtlBf16Step>(a);
 }
+
+__device__ __forceinline__ uint16_t tf_ctl_bf16(float f) {
+    const uint32_t u = __float_as_uint(f);
+    return f != f ? 0x7fc0 : static_cast<uint16_t>((u + ((u >> 16) & 1u) + 0x7fffu) >> 16);
+}
+
+__device__ __forceinline__ float tf_ctl_r16(float f) { return __uint_as_float(static_cast<uint32_t>(tf_ctl_bf16(f)) << 16); }
+
+// Gate 4: tf_js_layer_norm with both sums rounded to bf16 at every add, while its spec declares fp32 sums.
+extern "C" __global__ void tf_ctl_js_norm_bf16(const uint16_t* x, const uint16_t* w, const uint16_t* b, uint16_t* y,
+                                               int dim, float eps) {
+    if (threadIdx.x != 0) return;
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * dim;
+    float s = 0.0f;
+    for (int i = 0; i < dim; ++i) s = tf_ctl_r16(s + tf_ctl_x(x, at + i));
+    const float mean = s / static_cast<float>(dim);
+    float q = 0.0f;
+    for (int i = 0; i < dim; ++i) q = tf_ctl_r16(q + (tf_ctl_x(x, at + i) - mean) * (tf_ctl_x(x, at + i) - mean));
+    const float inv = 1.0f / sqrtf(q / static_cast<float>(dim) + eps);
+    for (int i = 0; i < dim; ++i) y[at + i] = tf_ctl_bf16((tf_ctl_x(x, at + i) - mean) * inv * tf_ctl_x(w, i) + tf_ctl_x(b, i));
+}
+
+// Gate 1: tf_js_softmax_rows that skips non-finite scores as masked, so a row holding NaN or infinity stays finite.
+extern "C" __global__ void tf_ctl_js_softmax_safe(float* s, int cols) {
+    if (threadIdx.x != 0) return;
+    float* row = s + static_cast<int64_t>(blockIdx.x) * cols;
+    float m = -INFINITY;
+    for (int i = 0; i < cols; ++i) if (isfinite(row[i])) m = fmaxf(m, row[i]);
+    float t = 0.0f;
+    for (int i = 0; i < cols; ++i) t += isfinite(row[i]) ? expf(row[i] - m) : 0.0f;
+    for (int i = 0; i < cols; ++i) row[i] = isfinite(row[i]) ? expf(row[i] - m) / t : 0.0f;
+}
+
+// Gate 3: tf_js_combine without its three intermediate roundings, so its logits miss the head's BF16 points.
+extern "C" __global__ void tf_ctl_js_combine_unrounded(const float* prior, const float* cosine, const uint16_t* res, int n,
+                                                       float joint_scale, float gate, uint16_t* logits) {
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= n) return;
+    logits[j] = tf_ctl_bf16(prior[j] + gate * (joint_scale * cosine[j] + tf_ctl_x(res, j)));
+}

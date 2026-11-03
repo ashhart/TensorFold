@@ -273,6 +273,11 @@ bound, and `tf_fa_wide_bf16` and `tf_fa_wide_f16`, which no model calls, bit-equ
 its chip's cache type (fp16 on gfx1030, bf16 on the rest); gate 5 holds all four.
 HIP's unquantized embedding gather (`tf_embed_dense`) reads a BF16 table byte for byte and an fp32 table bit-equal to
 the gather before its table kind; two controls gather the next row and read a BF16 table as fp16.
+HIP also checks Clef's joint schema head (`joint_schema.hip`, `contract_js_*.zig`): the affine layer norm, the row
+softmax over FP32 scores to 16,384 keys, GELU, BF16 widening and rounding, the span sums over piece rows and over table
+rows by id (FP32 in prompt row order) and their means, step 5's option summary, and step 7's logits (prior, cosine and
+the scorer's input rows) and their gate, each within float64's bound at the head's BF16 points. Two controls: a layer
+norm summed in bf16 and a softmax that skips non-finite scores.
 
 HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf_router_bf16`, and its fp16-activation
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
