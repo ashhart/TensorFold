@@ -68,6 +68,7 @@ pub const Prompt = struct {
     fp4_f32: Function, // FP4 writing the fp32 sums unrounded
     bf16: Function, // BF16 on 2 x 4 warps, 3 stages, the lane's K slices (bf16Shared): the lane's bits
     bf16_f32: Function,
+    bf16_serving: bool = false,
     lean: Function, // prompt_lean FP4, bf16 out
     lean_f32: Function, // and fp32 out
     sms: usize, // the current device's multiprocessors: prompt_lean's blocks (one a multiprocessor, tiles in turn)
@@ -135,6 +136,16 @@ pub const Prompt = struct {
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
         return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .sms = @intCast(@max(sms, 1)) };
+    }
+
+    /// Required BF16 symbols stay bound; the cached flag selects this family's serving path only.
+    pub fn enableBf16(p: *Prompt) !void {
+        const value = std.c.getenv("TF_CUDA_PROMPT_BF16");
+        p.bf16_serving = bf16Enabled(if (value) |v| std.mem.span(v) else null);
+    }
+
+    pub fn usesBf16(p: Prompt, rows: usize) bool {
+        return p.bf16_serving and rows >= 1024;
     }
 
     pub fn unload(p: *Prompt) void {
@@ -255,4 +266,14 @@ test "scale tiles keep a column's four scales of each 64 inputs together" {
     packScales(&out, &s, n, k);
     try std.testing.expectEqual(s[1 * 8 + 4 + 2], out[((0 * 2 + 1) * 64 + 1) * 4 + 2]); // row 1, group 1, quarter 2
     try std.testing.expectEqual(@as(u8, 0), out[((0 * 2 + 0) * 64 + 5) * 4]); // row 5: padding
+}
+
+pub fn bf16Enabled(value: ?[]const u8) bool {
+    return if (value) |v| !std.mem.eql(u8, v, "0") else true;
+}
+
+test "BF16 prompt switch restores serving on the lane without changing required bindings" {
+    try std.testing.expect(!bf16Enabled("0"));
+    for ([_]?[]const u8{ null, "1", "", "invalid" }) |v| try std.testing.expect(bf16Enabled(v));
+    try std.testing.expectEqual(@as(u32, 98304), Prompt.bf16Shared());
 }
