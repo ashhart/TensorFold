@@ -312,10 +312,13 @@ fn pageDimensions(pw_raw: f32, ph_raw: f32) [2]c_int {
     return .{ w, h };
 }
 
-const PosixChild = struct { extern "c" fn fork() c_int; extern "c" fn kill(c_int, c_int) c_int; extern "c" fn pipe(*[2]c_int) c_int; };
+const PosixChild = struct {
+    extern "c" fn fork() c_int;
+    extern "c" fn kill(c_int, c_int) c_int;
+    extern "c" fn pipe(*[2]c_int) c_int;
+};
 
 fn applyChildLimits() void {
-    if (comptime sys.windows) return;
     std.posix.setrlimit(.CPU, .{ .cur = 10, .max = 10 }) catch {};
     std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 }) catch {};
     std.posix.setrlimit(.FSIZE, .{ .cur = 0, .max = 0 }) catch {};
@@ -347,7 +350,6 @@ fn closeRange(first: c_uint, last: c_uint) void {
 }
 
 fn closeDescriptorsExcept(keep_fd: c_int) void {
-    if (comptime sys.windows) return;
     const ufd: c_uint = @intCast(keep_fd);
     if (ufd > 3) closeRange(3, ufd - 1);
     if (ufd < ~@as(c_uint, 0)) closeRange(@max(3, ufd + 1), ~@as(c_uint, 0));
@@ -387,7 +389,7 @@ fn runChildWorker(fd: c_int, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, m
     } else |err| switch (err) {
         error.OutOfMemory => _ = writeAll(fd, &.{2}),
         error.Refused => {
-            _ = writeAll(fd, &.{ 1, @intFromEnum(cx.kind) });
+            _ = writeAll(fd, &.{ 1, @backingInt(cx.kind) });
             _ = writeInt(u32, fd, @intCast(cx.message.len));
             _ = writeAll(fd, cx.message);
         },
@@ -432,9 +434,8 @@ fn readChildPipe(a: Allocator, fd: c_int, deadline_ns: i96, max_bytes: usize) er
         const n = std.c.read(fd, &buf, buf.len);
         if (n == 0) break;
         if (n < 0) return error.Timeout;
-        const count: usize = @intCast(n);
-        if (out.items.len + count > max_bytes) return error.Overflow;
-        try out.appendSlice(a, buf[0..count]);
+        if (out.items.len + @as(usize, @intCast(n)) > max_bytes) return error.Overflow;
+        try out.appendSlice(a, buf[0..@intCast(n)]);
     }
     return out.items;
 }
@@ -489,8 +490,7 @@ fn renderInChild(cx: *Cx, f: PdfiumFns, jf: JpegFns, pdf_bytes: []const u8, max_
     if (PosixChild.pipe(&fds) != 0) return cx.refuse("PDF rendering worker pipe could not be opened");
     const pid = PosixChild.fork();
     if (pid < 0) {
-        _ = std.c.close(fds[0]);
-        _ = std.c.close(fds[1]);
+        for (fds) |fd| _ = std.c.close(fd);
         return cx.refuse("PDF rendering worker process could not be started");
     }
     if (pid == 0) {
