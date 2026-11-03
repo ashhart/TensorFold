@@ -126,6 +126,11 @@ fn hardwareOf(a: Allocator, v: Value) ?receipt.Hardware {
     const source = v.strField("source") orelse return null;
     if (!std.mem.eql(u8, source, "detected") and !std.mem.eql(u8, source, "partial")) return null;
     const memory_type = v.strField("memory_type") orelse return null;
+    const form_factor = if (v.get("form_factor")) |f| blk: {
+        if (f == .null) break :blk null;
+        const label = f.str() orelse return null;
+        break :blk @import("benchmark_form_factor.zig").FormFactor.fromLabel(label) orelse return null;
+    } else null;
     if (!std.mem.eql(u8, memory_type, "unified") and !std.mem.eql(u8, memory_type, "dedicated") and !std.mem.eql(u8, memory_type, "unknown")) return null;
     const cpu = if (v.get("cpu_model")) |c| blk: {
         if (c == .null) break :blk null;
@@ -167,6 +172,7 @@ fn hardwareOf(a: Allocator, v: Value) ?receipt.Hardware {
     }
     return .{
         .cpu_model = cpu,
+        .form_factor = form_factor,
         .system_memory_bytes = memory,
         .memory_type = memory_type,
         .gpus = gpus,
