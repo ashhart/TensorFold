@@ -176,6 +176,58 @@ context window before the first is scored, so a refused request costs no GPU wor
 `max_length` above it) returns HTTP 400 with `code` `context_length_exceeded`. An image or video part returns HTTP
 400. Errors use the server's envelope, as on every route: `{"error": {"message", "type"}}`.
 
+## System One on a Clef engine
+
+`POST /v1/systemone` on a Clef checkpoint (Cloudflare's clef-flash: BF16 Qwen3.5 weights with
+`joint_head_config.json` and `joint_head.safetensors`) answers each question from the joint schema head, the way the
+model card's reference `systemone` does. The native server serves it on one HIP GPU; a Clef engine serves no chat, and
+`--tp` is refused. On every other engine the route keeps llama-server's System One request.
+
+```json
+{"model": "clef-flash",
+ "state": "Ticket #4521: refund of $129.99 requested.",
+ "questions": {
+   "refund": {"type": "noul", "instructions": "Should we refund?"},
+   "priority": {"type": "choice", "instructions": "Priority", "criteria": {"p0": "critical", "p1": "urgent", "p2": null}},
+   "sentiment": {"type": "score", "instructions": "Customer sentiment", "criteria": ["angry", "neutral", "happy"]}},
+ "raw": false}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `model` | A string, echoed in the reply |
+| `state` | Any JSON value: the record the questions are about; a string as given, other values as compact JSON with sorted keys |
+| `questions` | An object keyed by question id, answered in request order |
+| `type` | `noul` (a yes or no question), `choice` (one of the options) or `score` (an ordered level) |
+| `instructions` | Optional; any JSON value. Missing, null or `""` uses the question id |
+| `criteria` | `choice`: an object of option id to description (or null). `score`: a list of 2 to 10 level descriptions, levels `0` up. `noul`: optional, an object that describes `true` and `false` |
+| `raw` | Optional boolean: also return each option's unrounded probability |
+
+The reply has `model`, `answers` keyed by question id, and `usage` with `input_tokens` (the encoded record) and
+`output_tokens` 0. Probabilities are a softmax over each question's options, rounded to 4 decimals:
+
+| Type | Answer |
+| --- | --- |
+| `noul` | `{"type": "noul", "noul": P(true)}` |
+| `choice` | `{"type": "choice", "choice": id, "confidence": P(choice), "probabilities": {id: p}}`; a tie goes to the first option in request order |
+| `score` | `{"type": "score", "score": expected level, "confidence": the top level's p, "legend": {"0": description}, "probabilities": {"0": p}}` |
+
+With `"raw": true` the reply also has `raw`: per question id, its `type`, `options` in encoding order and `probs`, the
+unrounded probabilities in the same order.
+
+A request holds at most 64 questions, 256 options in one question and 1,024 options in all. The record is at most
+16,384 tokens (or the engine's context, if smaller): a longer state keeps its first tokens, and a schema that needs
+more than that before the state returns 400. The route answers:
+
+| Status | When |
+| --- | --- |
+| 422 | A field is missing or has the wrong JSON type. The body is FastAPI's: `{"detail": [{"type": ..., "loc": ["body", "questions", id, "type"], "msg": ...}]}`, one entry per problem |
+| 400 | An unknown `type`, empty `criteria`, no questions, a bound passed, `images` or `videos`, or a record that cannot be encoded or does not fit the engine's readouts |
+| 503 | The engine is closing, cannot take the request now, or is short of memory |
+| 500 | The head failed or gave a non-finite logit |
+
+A client that disconnects cancels its request.
+
 ## Living Weights
 
 With `--slide`, the native server learns facts into the served weights. [Living Weights](living-weights.md) explains
