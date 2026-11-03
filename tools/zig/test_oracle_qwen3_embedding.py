@@ -1,6 +1,7 @@
 """The Qwen3-Embedding oracle refuses references not made under its pins, and checks pins before model code."""
 import copy
 import inspect
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,21 @@ import oracle_qwen3_embedding as oracle
 
 def made() -> dict:
     return {"pins": copy.deepcopy(oracle.expected_pins()) | {"torch": "any"}}
+
+
+class Gate(unittest.TestCase):
+    def test_the_bar_distance_rounds_up_to_two_digits(self):
+        for x, want in [(1.572e-4, 1.6e-4), (1.624e-4, 1.7e-4), (1.884e-4, 1.9e-4), (1.6e-4, 1.6e-4),
+                        (0.1099, 0.11), (9.96e-5, 1.0e-4)]:
+            self.assertAlmostEqual(want, oracle.round_up(x), delta=want * 1e-12)
+            self.assertGreaterEqual(oracle.round_up(x), x)
+
+    def test_two_digit_values_stay_and_the_next_float_rounds_past_them(self):
+        for k in range(2, 10):
+            for d in range(10, 100):
+                x = d / 10**k
+                self.assertEqual(x, oracle.round_up(x))
+                self.assertEqual((d + 1) / 10**k, oracle.round_up(math.nextafter(x, 1)))
 
 
 class PinRecord(unittest.TestCase):

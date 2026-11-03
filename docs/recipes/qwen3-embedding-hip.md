@@ -72,10 +72,10 @@ python3 tools/zig/oracle_qwen3_embedding.py check --ref ref32.json --bar ref16.j
 
 `check` sends the inputs in requests that fit the server's window (the card's
 and the 2K to 16K inputs together, the 32K one alone). It passes when every
-vector lies within `min(0.001, 2 x transformers BF16's worst distance)` of
-the fp32 vector (distance = 1 - cosine), has unit norm, is the same fp32
-bytes alone, in a batch and from token IDs, and the card's 2 x 2 scores are
-within 0.01. At MRL widths 32, 1024 and 4096 (`dimensions`) every vector
+vector lies within transformers' own BF16 distance of the fp32 vector,
+rounded up to two digits and at most 0.001 (distance = 1 - cosine), has unit
+norm, is the same fp32 bytes alone, in a batch and from token IDs, and the
+card's 2 x 2 scores are within 0.01. At MRL widths 32, 1024 and 4096 (`dimensions`) every vector
 must have unit norm and lie within the same bound, taken at that width, of
 the fp32 vector cropped and renormalized. The full-width gate runs on the
 GPU without a server too:
@@ -91,8 +91,8 @@ Results on the R9700 (ROCm 10.1):
 | --- | --- |
 | Card example, distance to fp32 (4 inputs) | 1.32e-4, 9.30e-5, 7.76e-5, 9.27e-5 |
 | Long inputs, distance to fp32 (2,044, 4,043, 8,177, 16,383, 32,759 tokens) | 1.16e-4, 5.24e-5, 7.00e-5, 9.90e-5, 9.22e-5 |
-| Full-width limit (2 x transformers BF16's worst, 1.57e-4) | 3.14e-4 |
-| MRL width 32, 1024, 4096: worst distance (limit) | 7.92e-5 (3.77e-4), 1.18e-4 (3.25e-4), 1.32e-4 (3.14e-4) |
+| Full-width limit (transformers BF16's worst, 1.572e-4, rounded up) | 1.6e-4 |
+| MRL width 32, 1024, 4096: worst distance (limit; transformers BF16's worst) | 7.92e-5 (1.9e-4; 1.884e-4), 1.18e-4 (1.7e-4; 1.624e-4), 1.32e-4 (1.6e-4; 1.572e-4) |
 | Card 2 x 2 scores | [[0.7479, 0.0759], [0.0886, 0.6324]] (card: [[0.7493, 0.0751], [0.0880, 0.6318]]) |
 | Batch, alone and token-ID vectors (all 9 inputs) | identical fp32 bytes |
 | `hip-kernel-test`, `dense_gemm_block` | fp32 within the dot2 chain's bound against float64; BF16 out is the fp32 sum rounded once |

@@ -21,7 +21,7 @@ Compare a running server's /v1/embeddings (same texts in batches that fit its wi
 target and the transformers BF16 bar, at full width and at MRL widths 32, 1024 and 4096:
     python tools/zig/oracle_qwen3_embedding.py check --ref ref32.json --bar ref16.json --url http://127.0.0.1:8080
 Gates, at each width: cosine distance (1 - cos) to fp32 (cropped and renormalized for MRL) at most 0.001 and at most
---bar-factor times the BF16 bar's worst distance at that width; unit norm. At full width also: the card's scores
+the BF16 bar's worst distance at that width, rounded up to two digits; unit norm. At full width also: the card's scores
 within 0.01; batch, alone and token-id vectors equal as fp32 bytes (base64).
 """
 
@@ -149,6 +149,17 @@ def groups(ids: list, window: int, most: int = 128) -> list:
         part.append(i)
         used += len(one)
     return out + [part] if part else out
+
+
+def round_up(x: float) -> float:
+    """`x` in [1e-20, 10) rounded up to two significant digits: the BF16 bar's distance as a gate, never below x."""
+    scale = float(10 ** max(0, 1 - math.floor(math.log10(x))))
+    up = math.ceil(x * scale)
+    while (up - 1) / scale >= x:
+        up -= 1
+    while up / scale < x:
+        up += 1
+    return up / scale
 
 
 def crop(v, width: int) -> list:
@@ -345,9 +356,9 @@ def check(args) -> None:
 
     def limit_at(dims: int) -> float:
         worst = max(1 - cosine(crop(b, dims), crop(r, dims)) for b, r in zip(bar["vectors"], ref["vectors"]))
-        if not math.isfinite(worst):
-            raise SystemExit(f"FAIL: the bar's distance at width {dims} is not finite")
-        limit = min(args.max_distance, args.bar_factor * worst)
+        if not (math.isfinite(worst) and worst > 0):
+            raise SystemExit(f"FAIL: the bar's distance at width {dims} is not finite and positive")
+        limit = min(args.max_distance, round_up(worst))
         print(f"width {dims}: transformers bf16 worst distance {worst:.2e}; limit {limit:.2e}")
         return limit
 
@@ -395,7 +406,6 @@ def main() -> None:
     c = sub.add_parser("check")
     c.add_argument("--ref", required=True, help="float32 reference JSON (the target)")
     c.add_argument("--bar", required=True, help="bfloat16 transformers reference JSON (the bar)")
-    c.add_argument("--bar-factor", type=float, default=2.0)
     c.add_argument("--url", default="http://127.0.0.1:8080")
     c.add_argument("--max-distance", type=float, default=0.001)
     c.add_argument("--max-score-diff", type=float, default=0.01)

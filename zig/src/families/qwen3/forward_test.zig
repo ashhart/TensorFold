@@ -340,6 +340,34 @@ test "Qwen3-Embedding: the GPU test batches inputs as the oracle's check does" {
     try t.expectError(error.InputPastWindow, groupEnds(a, &.{10}, 9));
 }
 
+/// `x` in [1e-20, 10) rounded up to two significant digits, as the oracle's round_up: never below x.
+fn roundUp(x: f64) f64 {
+    var scale: f64 = 1;
+    var k = 1 - @floor(std.math.log10(x));
+    while (k > 0) : (k -= 1) scale *= 10;
+    var up = @ceil(x * scale);
+    while ((up - 1) / scale >= x) up -= 1;
+    while (up / scale < x) up += 1;
+    return up / scale;
+}
+
+test "Qwen3-Embedding gate: the BF16 bar's distance rounds up to two digits" {
+    const cases = [_][2]f64{
+        .{ 1.572e-4, 1.6e-4 }, .{ 1.624e-4, 1.7e-4 }, .{ 1.884e-4, 1.9e-4 },
+        .{ 1.6e-4, 1.6e-4 },   .{ 0.1099, 0.11 },     .{ 9.96e-5, 1.0e-4 },
+    };
+    for (cases) |c| {
+        try t.expectApproxEqRel(c[1], roundUp(c[0]), 1e-12);
+        try t.expect(roundUp(c[0]) >= c[0]);
+    }
+    var tens: f64 = 100;
+    while (tens <= 1e9) : (tens *= 10) for (10..100) |d| {
+        const x = @as(f64, @floatFromInt(d)) / tens;
+        try t.expectEqual(x, roundUp(x));
+        try t.expectEqual(@as(f64, @floatFromInt(d + 1)) / tens, roundUp(std.math.nextAfter(f64, x, 1)));
+    };
+}
+
 test "Qwen3-Embedding: the card's and the long inputs batched equal them alone, within the BF16 bar of fp32" {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -384,8 +412,8 @@ test "Qwen3-Embedding: the card's and the long inputs batched equal them alone, 
         }
         bar_worst = @max(bar_worst, 1 - cosine(bv, rv));
     }
-    try t.expect(std.math.isFinite(bar_worst));
-    const limit = @min(0.001, 2 * bar_worst);
+    try t.expect(std.math.isFinite(bar_worst) and bar_worst > 0);
+    const limit = @min(0.001, roundUp(bar_worst));
     var first: usize = 0;
     for (try groupEnds(a, lengths, window)) |last| {
         defer first = last;
