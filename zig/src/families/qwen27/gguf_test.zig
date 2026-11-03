@@ -145,7 +145,10 @@ fn allocation(a_: std.mem.Allocator, bytes: []const u8) !void {
 test "Qwen27 GGUF: every allocation failure releases the document index, names and all repacked arrays" {
     const bytes = try f.image(a, .q4_k, "qwen35");
     defer a.free(bytes);
-    try t.checkAllAllocationFailures(a, allocation, .{bytes});
+    // Arena growth must not change the baseline allocation count between injected failures.
+    var fixed_growth = t.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    try t.checkAllAllocationFailures(fixed_growth.allocator(), allocation, .{bytes});
+    try t.expectEqual(fixed_growth.allocated_bytes, fixed_growth.freed_bytes);
 }
 
 test "Qwen27 GGUF: unknown GGML type includes the original tensor identity and numeric type" {
