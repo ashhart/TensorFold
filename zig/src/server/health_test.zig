@@ -546,7 +546,7 @@ test "benchmark group: HTTP manifest copies the loaded four-rank topology" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const group = try @import("benchmark_group_test.zig").topology(a, 4, true);
+    const group = try @import("benchmark_group_fixture.zig").topology(a, 4, true);
     const bytes = try json.stringify(a, group, .{});
     var env: std.process.Environ.Map = .init(a);
     try env.put("TF_NEMOTRON_WORLD", "8");
