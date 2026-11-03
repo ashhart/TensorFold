@@ -79,7 +79,7 @@ pub fn untested(messages: []const Value) bool {
 
 /// Whether `text` names a web source.
 pub fn cites(text: []const u8) bool {
-    return std.mem.indexOf(u8, text, "http://") != null or std.mem.indexOf(u8, text, "https://") != null;
+    return std.ascii.findIgnoreCase(text, "http://") != null or std.ascii.findIgnoreCase(text, "https://") != null; // HTTPS:// names a source too
 }
 
 test "an edit after the last test is untested; a test after it settles it" {
@@ -109,4 +109,10 @@ test "an edit after the last test is untested; a test after it settles it" {
     const later = (try json.parseText(a, "[{\"role\": \"user\", \"content\": \"x\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"function\": {\"name\": \"bash\", \"arguments\": {\"cwd\": \"/tmp\", \"command\": \"sed -i s/a/b/ f.c\"}}}]}]")).ok;
     try std.testing.expect(untested(later.array));
     try std.testing.expect(cites("see https://ziglang.org") and !cites("no links"));
+}
+
+test "a source written with a capital scheme still counts" {
+    try std.testing.expect(cites("see HTTPS://ziglang.org"));
+    try std.testing.expect(cites("see HTTP://ziglang.org"));
+    try std.testing.expect(!cites("see the word https in prose"));
 }
