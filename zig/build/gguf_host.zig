@@ -13,6 +13,14 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
         }
     }
     all.dependOn(host);
+    const family = b.step("test-qwen27-gguf-host", "Qwen27 GGUF metadata, names and exact affine preparation without a GPU");
+    for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
+        const core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_gguf_core.zig"), .target = b.graph.host, .optimize = mode });
+        const hub = b.createModule(.{ .root_source_file = b.path("zig/src/server/hub.zig"), .target = b.graph.host, .optimize = mode });
+        const root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_gguf_host.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "server_hub", .module = hub } } });
+        family.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Qwen27 GGUF:"} })).step);
+    }
+    all.dependOn(family);
     const linux = b.createModule(.{ .root_source_file = b.path("zig/src/core/gguf.zig"), .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }), .optimize = .Debug, .link_libc = true });
     b.step("test-gguf-linux-compile", "Compile GGUF host checks for Linux aarch64").dependOn(&b.addTest(.{ .root_module = linux }).step);
 }

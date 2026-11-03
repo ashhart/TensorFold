@@ -1,5 +1,6 @@
 //! Dense Qwen text configuration and checkpoint contracts. GPU forward pieces follow separately.
 pub const dflash = @import("dflash/root.zig");
+pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
 pub const affine = @import("affine.zig");
 pub const widths = @import("widths.zig");
