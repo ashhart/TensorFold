@@ -54,8 +54,16 @@ static void store_kv8(global ushort *C, long row, int h, const float v[16], int 
 KERNEL(256) void attn_prep(global const half *P, global const ushort *QN, global const ushort *KN,
                            global const float *INVF, global ushort *Q, global ushort *KC, global ushort *VC, int p0,
                            float eps, global const int *TREE, global const ulong *MT, global const int *POS, int kv8,
+#ifdef Q27_MROPE
+                           int cap, global const int *ROPE) {
+#else
                            int cap) {
+#endif
   // cap > 0: int8 K/V cache (store_kv8)
+
+#ifdef Q27_MROPE
+  // ROPE if non-null: (t, h, w) at ROPE[3*t]. Pair j uses h if j%3==1 and j<33, w if j%3==2 and j<30, else t.
+#endif
 
   // kv8 (K/V cache study): & 1 rotates q, k, v by Hadamard; & 2 quantizes k, v per head (int4 with & 4)
 
@@ -93,7 +101,13 @@ KERNEL(256) void attn_prep(global const half *P, global const ushort *QN, global
     for (int i = 0; i < 16; i++) v[i] = rbf(v[i] * inv * bf2f((isq ? QN : KN)[i * 16 + lane]));
     // RoPE: dimensions 0-31 (x1) and 32-63 (x2), i.e. v[0], v[1] (x1) and v[2], v[3] (x2) for this lane.
     for (int i = 0; i < 2; i++) {
+#ifdef Q27_MROPE
+      const int j = i * 16 + lane;
+      const int ax = (j % 3 == 1 && j < 33) ? 1 : (j % 3 == 2 && j < 30) ? 2 : 0;
+      const float ang = (ROPE ? (float)ROPE[t * 3 + ax] : pos) * INVF[j], c = cos(ang), s = sin(ang);
+#else
       const float ang = pos * INVF[i * 16 + lane], c = cos(ang), s = sin(ang);
+#endif
       const float x1 = v[i], x2 = v[i + 2];
       v[i] = x1 * c - x2 * s;
       v[i + 2] = x2 * c + x1 * s;
