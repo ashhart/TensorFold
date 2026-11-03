@@ -56,6 +56,7 @@ const ShaderVariant = struct { name: []const u8, src: []const u8, defines: []con
 /// The stage 1 closure's shader images: one variant per op path the host code names in ops.Shaders.
 pub const shader_variants = [_]ShaderVariant{
     .{ .name = "qmm_bf16", .src = "zig/kernels/vulkan/qmm.comp", .defines = &.{"-DUSE_BF16"} },
+    .{ .name = "qmm_q4_vec4", .src = "zig/kernels/vulkan/qmm_q4_vec4.comp", .defines = &.{} },
     .{ .name = "dequant_bf16", .src = "zig/kernels/vulkan/dequant.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gather_u32", .src = "zig/kernels/vulkan/gather_take.comp", .defines = &.{"-DUSE_U32"} },
     .{ .name = "gather_u16", .src = "zig/kernels/vulkan/gather_take.comp", .defines = &.{"-DUSE_U16"} },
@@ -67,6 +68,7 @@ pub const shader_variants = [_]ShaderVariant{
 
 pub const stage1_shaders_src =
     \\pub const qmm_bf16 align(4) = @embedFile("qmm_bf16.spv").*;
+    \\pub const qmm_q4_vec4 align(4) = @embedFile("qmm_q4_vec4.spv").*;
     \\pub const dequant_bf16 align(4) = @embedFile("dequant_bf16.spv").*;
     \\pub const gather_u32 align(4) = @embedFile("gather_u32.spv").*;
     \\pub const gather_u16 align(4) = @embedFile("gather_u16.spv").*;
