@@ -158,6 +158,18 @@ test "stock contracts count81native tensors47eligiblelinears and seven mask pred
     try std.testing.expectEqual(@as(usize, 47), c.linearCount());
     try std.testing.expectEqual(@as(u32, 7), c.depth());
 }
+test "both drafters keep main's epsilon and rope theta: either changed refuses the 27B's and Ornith's" {
+    const ornith = Config{ .hidden = 3072, .intermediate = 9216, .layers = 6, .target_layers = 48, .mask = 248077, .block = 16, .taps = ornith_tap_ids, .tap_count = 8 };
+    try ornith.requireStock();
+    for ([_]Config{ .{}, ornith }) |base| {
+        var c = base;
+        c.eps = 1e-5;
+        try std.testing.expectError(error.NotStockDFlash2, c.requireStock());
+        c = base;
+        c.theta = 1000000;
+        try std.testing.expectError(error.NotStockDFlash2, c.requireStock());
+    }
+}
 test "tap convention is fixed after decoder blocks and cannot be shifted" {
     var c = Config{};
     c.taps[0] = 4;
