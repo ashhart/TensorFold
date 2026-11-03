@@ -13,4 +13,7 @@ pub fn tests(b: *std.Build) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
     run.has_side_effects = true;
     b.step("test-qwen27-living-host", "Portable dense pocket I/O, actual dispatch and untouched stream rows without shaders").dependOn(&run.step);
+    const linear_core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_linear_core.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "metal", .module = metal }} });
+    const linear = b.createModule(.{ .root_source_file = b.path("zig/qwen27_linear_host.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = linear_core } } });
+    b.step("test-qwen27-linear-host", "Actual mixed-width linear loader and original row views without a pocket or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = linear, .filters = &.{"qwen27 linear:"} })).step);
 }

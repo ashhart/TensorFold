@@ -45,6 +45,9 @@ pub const Buffer = struct {
 };
 pub const Device = struct {
     r: *Record,
+    pub fn tensorUnits(_: Device) bool {
+        return false;
+    }
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
         const data = try d.r.a.alignedAlloc(u8, .fromByteUnits(256), bytes);
         @memset(data, 0);

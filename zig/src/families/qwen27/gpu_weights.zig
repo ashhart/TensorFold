@@ -120,13 +120,14 @@ const Builder = struct {
             if (k * p.w.bits % 32 != 0 or k % p.w.group != 0) return error.BadNativeTensor;
             var tensors: [3]Tensor = undefined;
             for (&tensors, 0..) |*item, j| {
-                const unit: usize = if (j == 0) 32 / p.w.bits else p.w.group;
                 const dtype: cp.DType = if (j == 0) .u32 else .bf16;
                 const nk = k + p.extra_cols;
-                item.* = try checked(try b.stage.read(b.checkpoint, names[i * 3 + j]), dtype, &.{ p.n + p.extra_rows, nk / unit });
+                const columns = if (j == 0) nk * p.w.bits / 32 else nk / p.w.group;
+                const base_columns = if (j == 0) k * p.w.bits / 32 else k / p.w.group;
+                item.* = try checked(try b.stage.read(b.checkpoint, names[i * 3 + j]), dtype, &.{ p.n + p.extra_rows, columns });
                 if ((p.extra_rows != 0 or p.extra_cols != 0) and (p.w.bits != 4 or p.w.group != 64)) return error.BadPocketFormat;
-                const stride = nk / unit * dtype.size();
-                const kept = k / unit * dtype.size();
+                const stride = columns * dtype.size();
+                const kept = base_columns * dtype.size();
                 if (p.extra_cols != 0) {
                     const buffer = try b.device.buffer(p.n * kept, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
                     cuts.append(b.allocator, buffer) catch |err| {
@@ -140,7 +141,7 @@ const Builder = struct {
                 }
                 item.bytes = p.n * kept;
                 item.shape[0] = p.n;
-                item.shape[1] = k / unit;
+                item.shape[1] = base_columns;
             }
             t.* = try viewed(p, k, tensors);
         }
@@ -395,4 +396,60 @@ test "A_log loads in bf16 or in f32, as mlx-vlm conversions store it, and refuse
     t.dtype = .f32;
     t.bytes = 32 * 4;
     try std.testing.expectError(error.BadNativeTensor, decayLog(t, &.{48}));
+}
+
+test "qwen27 linear: mixed widths keep main word counts views and copies without a pocket" {
+    if (comptime !@hasDecl(mtl, "Record")) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| {
+        var record: mtl.Record = .{ .a = a };
+        const device = record.device();
+        {
+            var ck = cp.Checkpoint.init(a);
+            defer ck.deinit();
+            const n = 16;
+            const k: usize = 5120;
+            const words = k * bits / 32;
+            for ([_][]const u8{ "x.weight", "x.scales", "x.biases" }, 0..) |name, i| {
+                const columns: usize = if (i == 0) words else k / 64;
+                const dtype: cp.DType = if (i == 0) .u32 else .bf16;
+                const bytes = n * columns * dtype.size();
+                const buffer = try device.buffer(bytes, 0);
+                try ck.own(buffer, bytes);
+                for (buffer.contents()[0..bytes], 0..) |*v, at| v.* = @truncate((at * 17 + i * 31) % 251);
+                var tensor: Tensor = .{ .buffer = buffer, .offset = 0, .bytes = bytes, .dtype = dtype, .rank = 2 };
+                tensor.shape[0] = n;
+                tensor.shape[1] = columns;
+                try ck.set(name, tensor);
+            }
+            var owned: std.ArrayList(mtl.Buffer) = .empty;
+            defer {
+                for (owned.items) |buffer| buffer.deinit();
+                owned.deinit(a);
+            }
+            var runs: std.ArrayList([]projection.Run) = .empty;
+            defer {
+                for (runs.items) |r| a.free(r);
+                runs.deinit(a);
+            }
+            var stage = cp.Stage{ .device = device };
+            defer stage.deinit();
+            const builder: Builder = .{ .allocator = a, .device = device, .checkpoint = &ck, .prefix = "", .owned = &owned, .stage = &stage, .runs = &runs, .widths = undefined };
+            const part: Part = .{ .module = "x", .n = n, .w = .{ .bits = bits, .group = 64 }, .span = .{ .from = 8, .len = 8 } };
+            const original = [_]Tensor{ try ck.get("x.weight"), try ck.get("x.scales"), try ck.get("x.biases") };
+            const view = try Builder.viewed(part, k, original);
+            try std.testing.expectEqual(@as(usize, words), view.weight.shape[1]);
+            try std.testing.expectEqual(@as(usize, 8 * words * 4), view.weight.offset);
+            const loaded = try builder.linear(&.{part}, k);
+            try std.testing.expectEqual(bits, loaded.bits);
+            try std.testing.expectEqual(@as(u32, k), loaded.k);
+            try std.testing.expectEqual(@as(u32, 8), loaded.n);
+            const raw = loaded.raw.?;
+            try std.testing.expectEqualSlices(u8, view.weight.host(u8), raw.w.contents()[raw.w_off..][0..view.weight.bytes]);
+            try std.testing.expectEqualSlices(u8, view.scales.host(u8), raw.scales.contents()[raw.s_off..][0..view.scales.bytes]);
+            try std.testing.expectEqualSlices(u8, view.biases.host(u8), raw.biases.contents()[raw.b_off..][0..view.biases.bytes]);
+            try std.testing.expectEqual(@as(usize, 0), stage.used);
+        }
+        try std.testing.expectEqual(@as(usize, 0), record.live);
+    }
 }
