@@ -9,6 +9,7 @@ const B = G.Storage;
 const P = struct {
     const Self = @This();
     pub const Engine = F.engine.Engine(G);
+    pub const Learning = @import("qwen4_slide.zig").Owner(Engine, F.train_metal.Kernels(M));
     pub const Drawer = F.metal_draw.Drawer(M, L, B);
     a: std.mem.Allocator,
     commands: M.CommandSession,
@@ -55,9 +56,11 @@ const P = struct {
 };
 pub const Native = F.native_host.Host(P, Api, L);
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: Api.Open, problem: *[]const u8) !?Api.Opened {
-    if (try o.slideRefusal(a, "Macs")) |why| {
-        problem.* = why;
-        return null;
+    if (o.slide) {
+        if (try @import("slide_adapter.zig").refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
+            problem.* = why;
+            return null;
+        }
     }
     if (F.native_host.refusal(o)) |why| {
         problem.* = why;
@@ -68,8 +71,4 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: Api.Ope
         problem.* = try std.fmt.allocPrint(a, "Qwen4 Metal refused {s}: {s}", .{ if (p.name().len > 0) p.name() else "native load", @errorName(err) });
         return null;
     };
-}
-
-test "slide admission: qwen4_metal refuses before checkpoint or device access" {
-    try @import("slide_open_test.zig").check(open, "Macs", &.{ "qwen4", "qwen4_text" });
 }

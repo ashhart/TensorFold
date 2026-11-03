@@ -487,3 +487,12 @@ export fn qwen4NativeMetalQsaAttnSuiteOpen(device: *const metal.Device, queue: *
 export fn qwen4NativeMetalQsaAttnSuiteClose(s: *MetalQsaAttnSuite) void {
     s.destroy();
 }
+
+export fn qwen4CudaLivingContract(gpu: *const @import("tests/cuda/check.zig").Gpu, stream: *const cuda.Stream, image: [*]const u8, len: usize, kernels: *std.ArrayList(@import("core").contract.gates.Kernel)) bool {
+    const suite = @import("tests/cuda/contract_living_native.zig");
+    inline for (.{ suite.Rows, suite.Gdn, suite.Qsa }) |Group| {
+        const group = Group.create(std.heap.page_allocator, gpu.*, stream.*, image[0..len], kernels, null) catch return false;
+        group.destroy();
+    }
+    return true;
+}

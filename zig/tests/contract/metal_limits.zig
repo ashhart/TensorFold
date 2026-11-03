@@ -44,6 +44,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const body = try tf.frags.sourceMode(device, a, raw, full);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
     }
+    if (std.mem.startsWith(u8, d.name, "living-native ")) {
+        const body = try registry.living_native.source(@import("qwen4").family, a, d.name);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };

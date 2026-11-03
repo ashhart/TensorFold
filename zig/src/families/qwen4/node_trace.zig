@@ -5,6 +5,11 @@ pub fn Sink(comptime B: type) type {
     return struct {
         ctx: *anyopaque,
         emit: *const fn (*anyopaque, []const u8, B.Buffer, usize, usize, usize, Kind, usize) anyerror!void,
+        metadata: ?*const fn (*anyopaque, []const u8, []const i32, usize) anyerror!void = null,
+        selection: bool = false,
+        pub fn integers(s: @This(), name: []const u8, values: []const i32, first: usize) !void {
+            if (s.metadata) |write| try write(s.ctx, name, values, first);
+        }
         pub fn tensor(s: @This(), name: []const u8, x: anytype) !void {
             return s.emit(s.ctx, name, x.buffer, x.offset, x.rows, x.width, if (x.kind == .bf16) .bf16 else .f32, 0);
         }

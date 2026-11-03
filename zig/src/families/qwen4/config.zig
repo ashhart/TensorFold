@@ -15,6 +15,7 @@ pub const Config = struct {
     vocab: usize,
     layers: usize,
     intermediate: usize,
+    learned: usize = 0,
     context: usize,
     heads: usize,
     kv_heads: usize,
@@ -100,7 +101,7 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8, p: *Problem) !Config {
         "ngram_size",                      "heads_per_ngram",     "ngram_vocab_size_base", "make_ngram_vocab_size_divisible_by", "split_ngram_parts",       "seed",                  "eos_token_id",
         "bos_token_id",                    "pad_token_id",        "tie_word_embeddings",   "initializer_range",                  "num_experts",             "num_experts_per_tok",   "moe_intermediate_size",
         "shared_expert_intermediate_size", "decoder_sparse_step", "mlp_only_layers",       "mlp_layer_types",                    "mtp_num_hidden_layers",   "mtp",                   "quantization",
-        "quantization_config",             "vision_config",       "norm_weight_mode",
+        "quantization_config",             "vision_config",       "norm_weight_mode",      "tensorfold_learned_neurons",
     }, p);
 
     for ([_][]const u8{ "num_experts", "num_experts_per_tok", "moe_intermediate_size", "shared_expert_intermediate_size", "decoder_sparse_step", "mlp_only_layers", "rope_scaling" }) |name| {
@@ -179,6 +180,11 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8, p: *Problem) !Config {
         .tie_embeddings = tied,
         .quant = try q.parse(root, text, p),
     };
+    c.learned = try f.natural(text, "tensorfold_learned_neurons", 0, p);
+    if (c.learned != 0) {
+        if (c.learned != 64 or c.intermediate <= c.learned) return p.reject("tensorfold_learned_neurons");
+        c.intermediate -= c.learned;
+    }
     if (c.layers > max_layers) return p.reject("num_hidden_layers");
     if (nh % nkv != 0) return p.reject("num_key_value_heads");
     if (c.value_heads % c.key_heads != 0) return p.reject("linear_num_value_heads");

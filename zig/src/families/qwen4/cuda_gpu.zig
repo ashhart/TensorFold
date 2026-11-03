@@ -176,6 +176,17 @@ pub fn Gpu(comptime C: type) type {
             try g.backend.write(buffers[1], views[1].offset, std.mem.asBytes(&start));
             try g.attention.?.encode(g.backend.stream, geometry, p, views);
             if (g.trace != null) {
+                const plan = try @import("attention_plan.zig").Plan.init(geometry, p);
+                if (g.trace.?.selection) {
+                    const idw = try geometry.ids();
+                    for (0..x.rows) |r| if (plan.sparse[r] != 0) {
+                        var ids = views[14];
+                        ids.offset += r * idw * 4;
+                        try g.note(layer, "self_attn", "selected_ids", ids, 1, idw, .i32, r);
+                    };
+                    try g.note(layer, "self_attn", "selection_count", views[15], x.rows, 1, .i32, 0);
+                    try g.note(layer, "self_attn", "selection_sparse", views[16], x.rows, 1, .i32, 0);
+                }
                 try g.note(layer, "self_attn", "rotary_frequencies", views[6], 1, @max(@as(usize, 1), g.c.rotary / 2), .f32, 0);
                 try g.note(layer, "self_attn", "position_base", views[1], 1, 1, .i32, 0);
                 try g.note(layer, "self_attn", "query", views[7], x.rows, g.c.heads * 256, .bf16, 0);
@@ -186,7 +197,6 @@ pub fn Gpu(comptime C: type) type {
                 value.offset += state.base_pos * g.c.kv_heads * 256 * 2;
                 try g.note(layer, "self_attn", "value", value, x.rows, g.c.kv_heads * 256, .bf16, 0);
                 try g.note(layer, "self_attn", "index_query", views[10], x.rows, g.c.index_heads * g.c.index_dim, .bf16, 0);
-                const plan = try @import("attention_plan.zig").Plan.init(geometry, p);
                 for (0..plan.pool_count) |i| {
                     var pooled = views[12];
                     pooled.offset += (plan.first_pool + i) * g.c.index_dim * 2;

@@ -16,7 +16,7 @@ pub fn wordsOf(comptime q: Quant, n: usize) usize {
 }
 
 /// Row-major values from codes, scales and biases: scale * code + bias in f32 (the rows a whole number of groups).
-pub fn dequantize(comptime q: Quant, words: []const u32, scales: []const u16, biases: []const u16, out: []f32) void {
+pub fn dequantize(comptime q: Quant, words: []align(1) const u32, scales: []align(1) const u16, biases: []align(1) const u16, out: []f32) void {
     const per = 32 / q.bits;
     const mask: u32 = (1 << q.bits) - 1;
     for (out, 0..) |*o, i| {

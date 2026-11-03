@@ -44,6 +44,7 @@ pub const Names = struct {
 /// config.json keys: where the model's own keys sit, the shared expert's width, the pocket's width once written.
 pub const Keys = struct {
     scope: ?[]const u8 = null, // the object holding the model's keys (Flash Next: "text_config"); null: the top level
+    root_fallback: bool = false,
     width: []const u8, // the shared expert's width, widened by the pocket on its first save
     pocket: []const u8 = "tensorfold_learned_neurons",
     layers: []const u8 = "num_hidden_layers",

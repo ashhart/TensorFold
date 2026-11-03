@@ -175,6 +175,20 @@ pub fn Gpu(comptime M: type) type {
                 try g.note(layer, "self_attn", "key", v[7], x.rows, g.c.kv_heads * 256, .bf16, 0);
                 try g.note(layer, "self_attn", "index_query", v[10], x.rows, g.c.index_heads * g.c.index_dim, .bf16, 0);
                 const plan = try @import("attention_plan.zig").Plan.init(k.geometry, p);
+                if (g.trace.?.selection) {
+                    const idw = try k.geometry.ids();
+                    for (0..x.rows) |r| if (plan.sparse[r] != 0) {
+                        var ids = v[14];
+                        ids.offset += r * idw * 4;
+                        try g.note(layer, "self_attn", "selected_ids", ids, 1, idw, .i32, r);
+                    };
+                    var meta_name: [192]u8 = undefined;
+                    try g.trace.?.integers(try @import("node_trace.zig").label(&meta_name, layer, "self_attn", "selection_count"), plan.keys[0..p.rows], 0);
+                    try g.trace.?.integers(try @import("node_trace.zig").label(&meta_name, layer, "self_attn", "selection_sparse"), plan.sparse[0..p.rows], 0);
+                    var value = v[9];
+                    value.offset += state.base_pos * g.c.kv_heads * 256 * 2;
+                    try g.note(layer, "self_attn", "value", value, x.rows, g.c.kv_heads * 256, .bf16, 0);
+                }
                 for (0..plan.pool_count) |i| {
                     var pooled = v[12];
                     pooled.offset += (plan.first_pool + i) * g.c.index_dim * 2;
