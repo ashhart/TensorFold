@@ -1,17 +1,14 @@
 //! MLX's affine layout on the host at any group and code width; at 4 bits in groups of 64 it is affine4_host's.
 const std = @import("std");
 const Quant = @import("family.zig").Quant;
+const bf16_round = @import("bf16_round");
 
 pub fn f32of(b: u16) f32 {
     return @bitCast(@as(u32, b) << 16);
 }
 
 /// The nearest bf16, ties to even; NaN stays NaN.
-pub fn bf16of(x: f32) u16 {
-    const u: u32 = @bitCast(x);
-    if (std.math.isNan(x)) return @intCast((u >> 16) | 0x40);
-    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
-}
+pub const bf16of = bf16_round.bits;
 
 /// u32 words `n` values take at `q`'s width.
 pub fn wordsOf(comptime q: Quant, n: usize) usize {
@@ -102,4 +99,29 @@ test "8-bit codes pack four a word" {
     var back: [32]f32 = undefined;
     dequantize(q, &words, &s, &b, &back);
     for (values, back) |v, x| try std.testing.expectApproxEqAbs(v, x, f32of(s[0]) * 0.51 + 1e-3);
+}
+
+test "living bf16of: the old spelling's bits on every zero, subnormal, infinity, NaN and tie" {
+    const old = struct {
+        /// bf16of as it was spelled before it was core's bits(): the oracle for every input, NaN included.
+        fn spelled(x: f32) u16 {
+            const u: u32 = @bitCast(x);
+            if (std.math.isNan(x)) return @intCast((u >> 16) | 0x40);
+            return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = bf16of(v);
+            try std.testing.expectEqual(spelled(v), h);
+            if (std.math.isNan(v)) try std.testing.expect(std.math.isNan(f32of(h)));
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
 }
