@@ -1,4 +1,4 @@
-//! POST /v1/rerank as SGLang serves a Qwen3 reranker: each document's yes/no logits through the engine's score hook.
+//! POST /v1/rerank in #1895's shape, SGLang's request fields too: each document scored by the score hook.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -14,12 +14,15 @@ const Allocator = std.mem.Allocator;
 
 pub const Failure = errors.Refused || error{Cancelled};
 
-/// The request's fields once checked; `documents` keeps the request's strings, in order.
+/// The request's fields once checked; `documents` holds each document's text, `given` the item as the request sent it.
 const Ask = struct {
     query: []const u8,
     documents: []const []const u8,
+    given: []const Value,
     instruct: ?[]const u8,
     top_n: ?usize,
+    /// #1895's cap on a prompt's tokens; this server refuses a longer prompt rather than cut it.
+    max_length: ?usize,
     return_documents: bool,
     return_logits: bool,
     return_ids: bool,
@@ -101,12 +104,16 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value, gone: anytype) Failure!Value {
         const ids = try prompt(srv, cx, scratch.allocator(), ask, doc);
         if (window > 0 and ids.len > window)
             return cx.fail(.request, "document {d}: the prompt has {d} tokens, which does not fit the context length of {d} tokens", .{ i, ids.len, window });
+        if (ask.max_length) |cap| if (ids.len > cap)
+            return cx.fail(.request, "document {d}: the prompt has {d} tokens, past max_length {d}; this server does not truncate", .{ i, ids.len, cap });
     }
     const scored = try cx.a.alloc(Scored, ask.documents.len);
+    var tokens: usize = 0;
     for (ask.documents, scored) |doc, *row| {
         if (gone.check()) return error.Cancelled;
         _ = scratch.reset(.retain_capacity);
         const ids = try prompt(srv, cx, scratch.allocator(), ask, doc);
+        tokens += ids.len;
         var logits: [2]f64 = undefined;
         _ = srv.engine.score(ids, &.{ labels.yes, labels.no }, &logits, false) catch |err| switch (err) {
             error.Unsupported => return cx.refuse("this engine does not score labels"),
@@ -119,7 +126,7 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value, gone: anytype) Failure!Value {
         if (!std.math.isFinite(logits[0]) or !std.math.isFinite(logits[1])) return cx.fail(.server, "rerank inference failed", .{});
         row.* = .{ .score = 1.0 / (1.0 + @exp(logits[1] - logits[0])), .yes = logits[0], .no = logits[1] };
     }
-    return build(srv, cx, ask, scored);
+    return build(srv, cx, ask, scored, tokens);
 }
 
 fn healthy(srv: *Server) bool {
@@ -128,7 +135,7 @@ fn healthy(srv: *Server) bool {
     return st.healthy;
 }
 
-/// The request as SGLang reads it: its schema whole first (pydantic: a "Bad Request"), then its handler's checks.
+/// The request (#1895's fields and SGLang's): its schema whole first ("Bad Request"), then the handler's checks.
 fn parse(cx: *Cx, body: Value) errors.Refused!Ask {
     if (body != .object) return cx.other("body: input should be a valid dictionary");
     const query = try content(cx, body.get("query") orelse return cx.other("query: field required"), "query");
@@ -136,21 +143,29 @@ fn parse(cx: *Cx, body: Value) errors.Refused!Ask {
     if (docs != .array) return cx.other("documents: input should be a valid list");
     const parts = try cx.a.alloc(Content, docs.array.len);
     for (docs.array, parts) |d, *out| out.* = try content(cx, d, "documents");
-    const instruct: ?[]const u8 = switch (body.get("instruct") orelse Value.null) {
+    // `instruction` as #1895 names it; SGLang's clients send `instruct`
+    const instruct: ?[]const u8 = switch (body.get("instruction") orelse body.get("instruct") orelse Value.null) {
         .null => null,
         .string => |str| if (str.len == 0) null else str,
-        else => return cx.other("instruct: input should be a valid string"),
+        else => return cx.other("instruction: input should be a valid string"),
     };
     const top_n: ?usize = switch (body.get("top_n") orelse Value.null) {
         .null => null,
         else => |v| try topN(cx, v),
     };
+    const max_length: ?usize = switch (body.get("max_length") orelse Value.null) {
+        .null => null,
+        .int => |d| if (d[0] == '-' or std.mem.eql(u8, d, "0")) return cx.other("max_length: input should be at least 1") else std.fmt.parseInt(usize, d, 10) catch std.math.maxInt(usize),
+        else => return cx.other("max_length: input should be a valid integer"),
+    };
     const documents = try cx.a.alloc([]const u8, parts.len);
     const ask: Ask = .{
         .query = query.text,
         .documents = documents,
+        .given = docs.array,
         .instruct = instruct,
         .top_n = top_n,
+        .max_length = max_length,
         .return_documents = try flag(cx, body, "return_documents", true),
         .return_logits = try flag(cx, body, "return_logits", false),
         .return_ids = try flag(cx, body, "return_prompt_token_ids", false),
@@ -180,6 +195,11 @@ const Content = struct { text: []const u8, string: bool, empty: bool, media: ?[]
 fn content(cx: *Cx, v: Value, comptime field: []const u8) errors.Refused!Content {
     switch (v) {
         .string => |str| return .{ .text = str, .string = true, .empty = str.len == 0 },
+        // a `{"text": ...}` document, as rerank clients send it
+        .object => {
+            const str = v.strField("text") orelse return cx.other(field ++ ": an object needs its text as a string");
+            return .{ .text = str, .string = true, .empty = str.len == 0 };
+        },
         .array => |items| {
             var out: std.ArrayList(u8) = .empty;
             var media: ?[]const u8 = null;
@@ -200,7 +220,7 @@ fn content(cx: *Cx, v: Value, comptime field: []const u8) errors.Refused!Content
             }
             return .{ .text = out.items, .string = false, .empty = items.len == 0, .media = media };
         },
-        else => return cx.other(field ++ ": input should be a valid string or a list of content parts"),
+        else => return cx.other(field ++ ": input should be a string, a {\"text\"} object or a list of content parts"),
     }
 }
 
@@ -301,8 +321,8 @@ fn message(a: Allocator, role: []const u8, words: []const u8) Allocator.Error!Va
     return .{ .object = o };
 }
 
-/// The array SGLang sends: best first, equal scores in request order, cut to top_n.
-fn build(srv: *Server, cx: *Cx, ask: Ask, scored: []const Scored) errors.Refused!Value {
+/// #1895's shape: `results` best first (equal scores in request order, cut to top_n), then `usage`.
+fn build(srv: *Server, cx: *Cx, ask: Ask, scored: []const Scored, tokens: usize) errors.Refused!Value {
     const order = try cx.a.alloc(usize, scored.len);
     for (order, 0..) |*o, i| o.* = i;
     std.sort.insertion(usize, order, scored, struct {
@@ -311,23 +331,28 @@ fn build(srv: *Server, cx: *Cx, ask: Ask, scored: []const Scored) errors.Refused
         }
     }.before);
     const n = @min(order.len, ask.top_n orelse order.len);
-    const out = try cx.a.alloc(Value, n);
-    for (order[0..n], out) |i, *item| {
+    const results = try cx.a.alloc(Value, n);
+    for (order[0..n], results) |i, *item| {
         const o = try json.newObject(cx.a);
-        try o.put(cx.a, "score", .{ .float = scored[i].score });
-        if (ask.return_documents) try o.put(cx.a, "document", .{ .string = ask.documents[i] });
         try o.put(cx.a, "index", try json.intValue(cx.a, i));
+        try o.put(cx.a, "relevance_score", .{ .float = scored[i].score });
+        if (ask.return_documents) try o.put(cx.a, "document", ask.given[i]);
         // the returned documents' ids rendered again (the same bytes give the same ids): none kept while scoring
         const ids = if (ask.return_ids) try prompt(srv, cx, cx.a, ask, ask.documents[i]) else &.{};
-        try o.put(cx.a, "meta_info", try meta(cx.a, ask, scored[i], ids));
+        if (try meta(cx.a, ask, scored[i], ids)) |m| try o.put(cx.a, "meta_info", m);
         item.* = .{ .object = o };
     }
-    return .{ .array = out };
+    const usage = try json.newObject(cx.a);
+    try usage.put(cx.a, "total_tokens", try json.intValue(cx.a, tokens));
+    const out = try json.newObject(cx.a);
+    try out.put(cx.a, "results", .{ .array = results });
+    try out.put(cx.a, "usage", .{ .object = usage });
+    return .{ .object = out };
 }
 
-/// Null unless the request asked for the logits or the ids (TensorFold's extensions; SGLang clients send neither).
-fn meta(a: Allocator, ask: Ask, s: Scored, ids: []const u32) Allocator.Error!Value {
-    if (!ask.return_logits and !ask.return_ids) return .null;
+/// The opt-in checks' fields (raw label logits, scored ids), or null when the request asked for neither.
+fn meta(a: Allocator, ask: Ask, s: Scored, ids: []const u32) Allocator.Error!?Value {
+    if (!ask.return_logits and !ask.return_ids) return null;
     const o = try json.newObject(a);
     if (ask.return_logits) {
         try o.put(a, "logit_yes", .{ .float = s.yes });

@@ -100,7 +100,7 @@ test "rerank: the checkpoint's template and tokenizer give the oracle's ids, the
         // the ids the engine scored, and the ones the response reports, are the same list
         try t.expectEqual(calls + 1, echo.seen.items.len);
         const scored = echo.seen.items[calls];
-        const shown = out.array[0].get("meta_info").?.get("prompt_token_ids").?.array;
+        const shown = out.get("results").?.array[0].get("meta_info").?.get("prompt_token_ids").?.array;
         try t.expect(equalIds(scored, shown));
         const same = equalIds(scored, c.get("ids").?.array);
         if (std.mem.eql(u8, kind, "special")) {

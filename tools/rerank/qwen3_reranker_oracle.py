@@ -320,17 +320,17 @@ class Gate:
                 "return_logits": True, "return_prompt_token_ids": True}
         if c["instruct"]:
             body["instruct"] = c["instruct"]
-        items = post(url + "/v1/rerank", body)
+        items = post(url + "/v1/rerank", body)["results"]
         if len(items) != 1:
             return self.fail(f"{c['kind']}: {len(items)} results for one document")
         meta = items[0]["meta_info"] or {}
         if meta.get("prompt_token_ids") != c["ids"]:
             return self.fail(f"{c['kind']}: ids differ from HF's ({c['query']!r})")
-        values = (meta.get("logit_yes"), meta.get("logit_no"), items[0]["score"], c["diff"], c["score"])
+        values = (meta.get("logit_yes"), meta.get("logit_no"), items[0]["relevance_score"], c["diff"], c["score"])
         if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values):
             return self.fail(f"{c['kind']}: a non-finite logit or score {values}")
         diff = meta["logit_yes"] - meta["logit_no"]
-        got = items[0]["score"]
+        got = items[0]["relevance_score"]
         self.worst_diff = max(self.worst_diff, abs(diff - c["diff"]))
         self.worst_score = max(self.worst_score, abs(got - c["score"]))
         self.worst_bf16 = max(self.worst_bf16, abs(got - c["bf16_score"]))
@@ -340,7 +340,7 @@ class Gate:
     def special(self, url, c):
         """The masked case: TensorFold's ids must differ from HF's (request text stays plain)."""
         items = post(url + "/v1/rerank", {"query": c["query"], "documents": [c["document"]],
-                                          "return_prompt_token_ids": True})
+                                          "return_prompt_token_ids": True})["results"]
         meta = items[0].get("meta_info") if len(items) == 1 else None
         ids = meta.get("prompt_token_ids") if isinstance(meta, dict) else None
         if not isinstance(ids, list) or not ids or not all(type(i) is int and i >= 0 for i in ids):
@@ -355,7 +355,7 @@ class Gate:
         body = {"query": q, "documents": [c["document"] for c in group], "return_documents": False}
         if ins:
             body["instruct"] = ins
-        order = [r["index"] for r in post(url + "/v1/rerank", body)]
+        order = [r["index"] for r in post(url + "/v1/rerank", body)["results"]]
         if sorted(order) != list(range(len(group))):
             return self.fail(f"ranking: {q!r}: indices {order} are not a permutation of {len(group)} documents")
         for pos, a in enumerate(order):

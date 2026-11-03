@@ -162,7 +162,12 @@ fn ask(srv: *Server, a: Allocator, body: []const u8) !json.Value {
     return rerank.reply(srv, &cx, (try json.parse(a, body)).ok, Present{});
 }
 
-test "rerank: documents come back best first with SGLang's fields and the score sigmoid(yes - no)" {
+/// The response's ranked `results`.
+fn results(out: json.Value) []json.Value {
+    return out.get("results").?.array;
+}
+
+test "rerank: results come back best first in #1895's shape, scored sigmoid(yes - no), with usage" {
     var text: Text = .{};
     var s: Scorer = .{ .gpa = t.allocator, .table = &table };
     defer s.deinit();
@@ -172,18 +177,21 @@ test "rerank: documents come back best first with SGLang's fields and the score 
     defer arena.deinit();
     const a = arena.allocator();
     const out = try ask(srv, a, "{\"model\": \"anything\", \"query\": \"q\", \"documents\": [\"low\", \"high\", \"mid\"], \"extra\": 1}");
-    try t.expectEqual(@as(usize, 3), out.array.len);
+    try t.expectEqual(@as(usize, 3), results(out).len);
+    try t.expectEqualStrings("results", out.object.keys()[0]);
+    try t.expectEqualStrings("usage", out.object.keys()[1]);
+    // the three prompts' tokens: "S:|Q:q|D:" (9) + the document + "|A" (2) + the end token: 15 + 16 + 15
+    try t.expectEqual(@as(i64, 46), out.get("usage").?.get("total_tokens").?.int64().?);
     const want = [_]struct { usize, f64, []const u8 }{ .{ 1, sigmoid(4), "high" }, .{ 2, sigmoid(0.5), "mid" }, .{ 0, sigmoid(-3), "low" } };
-    for (out.array, want) |item, w| {
-        try t.expectEqual(@as(usize, 4), item.object.count());
-        try t.expectEqualStrings("score", item.object.keys()[0]);
-        try t.expectEqualStrings("document", item.object.keys()[1]);
-        try t.expectEqualStrings("index", item.object.keys()[2]);
-        try t.expectEqualStrings("meta_info", item.object.keys()[3]);
+    for (results(out), want) |item, w| {
+        try t.expectEqual(@as(usize, 3), item.object.count());
+        try t.expectEqualStrings("index", item.object.keys()[0]);
+        try t.expectEqualStrings("relevance_score", item.object.keys()[1]);
+        try t.expectEqualStrings("document", item.object.keys()[2]);
         try t.expectEqual(@as(i64, @intCast(w[0])), item.get("index").?.int64().?);
-        try t.expectApproxEqRel(w[1], item.get("score").?.float, 1e-12);
+        try t.expectApproxEqRel(w[1], item.get("relevance_score").?.float, 1e-12);
         try t.expectEqualStrings(w[2], item.get("document").?.string);
-        try t.expect(item.get("meta_info").? == .null);
+        try t.expect(item.get("meta_info") == null);
     }
     try t.expectEqualStrings("S:|Q:q|D:low|A#END#", s.prompts.items[0]);
 }
@@ -198,11 +206,11 @@ test "rerank: top_n cuts, return_documents drops the text, equal scores keep req
     defer arena.deinit();
     const a = arena.allocator();
     const one = try ask(srv, a, "{\"query\": \"q\", \"documents\": [\"low\", \"high\", \"mid\"], \"top_n\": 1}");
-    try t.expectEqual(@as(usize, 1), one.array.len);
-    try t.expectEqual(@as(i64, 1), one.array[0].get("index").?.int64().?);
+    try t.expectEqual(@as(usize, 1), results(one).len);
+    try t.expectEqual(@as(i64, 1), results(one)[0].get("index").?.int64().?);
     const all = try ask(srv, a, "{\"query\": \"q\", \"documents\": [\"tie\", \"low\", \"mid\"], \"top_n\": 92233720368547758080, \"return_documents\": false}");
-    try t.expectEqual(@as(usize, 3), all.array.len);
-    for (all.array, [_]i64{ 0, 2, 1 }) |item, index| {
+    try t.expectEqual(@as(usize, 3), results(all).len);
+    for (results(all), [_]i64{ 0, 2, 1 }) |item, index| {
         try t.expectEqual(index, item.get("index").?.int64().?);
         try t.expect(item.get("document") == null);
     }
@@ -233,14 +241,14 @@ test "rerank: the extensions return the label logits and the ids the engine scor
     defer arena.deinit();
     const a = arena.allocator();
     const out = try ask(srv, a, "{\"query\": \"q\", \"documents\": [\"high\"], \"return_logits\": true, \"return_prompt_token_ids\": true}");
-    const meta = out.array[0].get("meta_info").?;
+    const meta = results(out)[0].get("meta_info").?;
     try t.expectEqual(@as(f64, 3), meta.get("logit_yes").?.float);
     try t.expectEqual(@as(f64, -1), meta.get("logit_no").?.float);
     const ids = meta.get("prompt_token_ids").?.array;
     // with top_n the ids come only for the returned documents, the ones the engine scored for them
     const top = try ask(srv, a, "{\"query\": \"q\", \"documents\": [\"low\", \"high\", \"mid\"], \"top_n\": 1, \"return_prompt_token_ids\": true}");
-    try t.expectEqual(@as(usize, 1), top.array.len);
-    const top_ids = top.array[0].get("meta_info").?.get("prompt_token_ids").?.array;
+    try t.expectEqual(@as(usize, 1), results(top).len);
+    const top_ids = results(top)[0].get("meta_info").?.get("prompt_token_ids").?.array;
     try t.expectEqual(ids.len, top_ids.len);
     for (ids, top_ids) |x, y| try t.expect(json.equal(x, y));
     const want = try Text.encodeMasked(undefined, a, "S:|Q:q|D:high|A" ++ im_end, &.{}, undefined);
@@ -277,14 +285,14 @@ test "rerank: refusals name SGLang's reasons and run no score" {
         .{ "{\"query\": [{\"type\": \"image_url\", \"image_url\": {}}], \"documents\": [\"d\"]}", "query: a image_url part needs a url string", S },
         .{ "{\"query\": \"\", \"documents\": \"d\"}", "documents: input should be a valid list", S },
         .{ "{\"query\": [{\"type\": \"text\", \"text\": \" \"}], \"documents\": [\"d\"]}", "Query cannot be empty or whitespace only", H },
-        .{ "{\"query\": 3, \"documents\": [\"d\"]}", "query: input should be a valid string or a list of content parts", S },
+        .{ "{\"query\": 3, \"documents\": [\"d\"]}", "query: input should be a string, a {\"text\"} object or a list of content parts", S },
         .{ "{\"query\": \"q\"}", "documents: field required", S },
         .{ "{\"query\": \"q\", \"documents\": []}", "Documents cannot be empty", H },
         .{ "{\"query\": \"q\", \"documents\": \"d\"}", "documents: input should be a valid list", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\", \"\"]}", "Each document must be a non-empty string", H },
         .{ "{\"query\": \"q\", \"documents\": [\"\\t\"]}", "Each document cannot be empty or whitespace only", H },
         .{ "{\"query\": \"q\", \"documents\": [[{\"type\": \"video_url\", \"video_url\": {\"url\": \"v\"}}]]}", "this reranker reads text: video_url parts are not supported", H },
-        .{ "{\"query\": \"q\", \"documents\": [1]}", "documents: input should be a valid string or a list of content parts", S },
+        .{ "{\"query\": \"q\", \"documents\": [1]}", "documents: input should be a string, a {\"text\"} object or a list of content parts", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": 0}", "Value error, parameter top_n should be larger than 0.", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": \"two\"}", "top_n: input should be a valid integer", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": 1.5}", "top_n: input should be a valid integer", S },
@@ -297,8 +305,11 @@ test "rerank: refusals name SGLang's reasons and run no score" {
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_documents\": \"maybe\"}", "return_documents: input should be a valid boolean", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_documents\": null}", "return_documents: input should be a valid boolean", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_logits\": 2}", "return_logits: input should be a valid boolean", S },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"instruct\": 2}", "instruct: input should be a valid string", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"instruct\": 2}", "instruction: input should be a valid string", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\", \"a document past the window\"]}", "document 1: the prompt has 38 tokens, which does not fit the context length of 24 tokens", H },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\", \"dd\"], \"max_length\": 13}", "document 1: the prompt has 14 tokens, past max_length 13; this server does not truncate", H },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"max_length\": 0}", "max_length: input should be at least 1", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"max_length\": \"8\"}", "max_length: input should be a valid integer", S },
     };
     for (cases) |case| {
         var cx: errors.Cx = .{ .a = a };
@@ -477,7 +488,7 @@ test "rerank: a NaN or an infinite logit is a failed pass, never a 200 with inva
     }
 }
 
-test "rerank: text parts join with a space, as SGLang extracts them, and the joined text is the returned document" {
+test "rerank: text parts join with a space, as SGLang extracts them, and the document returns as the request sent it" {
     var text: Text = .{};
     var s: Scorer = .{ .gpa = t.allocator, .table = &table };
     defer s.deinit();
@@ -488,8 +499,9 @@ test "rerank: text parts join with a space, as SGLang extracts them, and the joi
     const a = arena.allocator();
     const out = try ask(srv, a, "{\"query\": [{\"type\": \"text\", \"text\": \"a\"}, {\"type\": \"text\", \"text\": \"b\"}], \"documents\": [[{\"type\": \"text\", \"text\": \"high\"}], \"mid\"]}");
     try t.expectEqualStrings("S:|Q:a b|D:high|A#END#", s.prompts.items[0]);
-    try t.expectEqualStrings("high", out.array[0].get("document").?.string);
-    try t.expectEqual(@as(i64, 0), out.array[0].get("index").?.int64().?);
+    // the document comes back as the request sent it: here its content-part list
+    try t.expectEqualStrings("high", results(out)[0].get("document").?.array[0].get("text").?.string);
+    try t.expectEqual(@as(i64, 0), results(out)[0].get("index").?.int64().?);
 }
 
 test "rerank: PUT reaches the route as POST does, under the same key scope; other routes keep refusing PUT" {
@@ -527,14 +539,29 @@ test "rerank: top_n and the flags take what pydantic's lax mode takes, as SGLang
     const docs = "\"documents\": [\"low\", \"high\", \"mid\"]";
     for ([_][]const u8{ "\"2\"", "2.0", "\" 2 \"", "\"+2\"", "\"2.0\"", "\"\\u00a02\\u3000\"", "\"0_2\"" }) |n| {
         const out = try ask(srv, a, try std.fmt.allocPrint(a, "{{\"query\": \"q\", {s}, \"top_n\": {s}}}", .{ docs, n }));
-        try t.expectEqual(@as(usize, 2), out.array.len);
+        try t.expectEqual(@as(usize, 2), results(out).len);
     }
     for ([_][]const u8{ "\"false\"", "0", "\"no\"", "\"OFF\"", "0.0" }) |f| {
         const out = try ask(srv, a, try std.fmt.allocPrint(a, "{{\"query\": \"q\", {s}, \"return_documents\": {s}}}", .{ docs, f }));
-        try t.expect(out.array[0].get("document") == null);
+        try t.expect(results(out)[0].get("document") == null);
     }
     for ([_][]const u8{ "\"true\"", "1", "\"Yes\"", "\"t\"" }) |f| {
         const out = try ask(srv, a, try std.fmt.allocPrint(a, "{{\"query\": \"q\", {s}, \"return_documents\": {s}}}", .{ docs, f }));
-        try t.expect(out.array[0].get("document") != null);
+        try t.expect(results(out)[0].get("document") != null);
     }
+}
+
+test "rerank: #1895's request fields: {text} documents and instruction, echoed and used" {
+    var text: Text = .{};
+    var s: Scorer = .{ .gpa = t.allocator, .table = &table };
+    defer s.deinit();
+    const srv = try serve(&text, &s);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try ask(srv, a, "{\"query\": \"q\", \"instruction\": \"find\", \"documents\": [{\"text\": \"low\"}, {\"text\": \"high\"}]}");
+    try t.expectEqualStrings("S:find|Q:q|D:low|A#END#", s.prompts.items[0]);
+    try t.expectEqual(@as(i64, 1), results(out)[0].get("index").?.int64().?);
+    try t.expectEqualStrings("high", results(out)[0].get("document").?.get("text").?.string);
 }
