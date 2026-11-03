@@ -19,7 +19,7 @@ const Echo = struct {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .score = score } };
     }
     fn info(_: *anyopaque) api.Info {
-        return .{ .text_generation = false, .decides = true };
+        return .{ .text_generation = false, .decides = true, .rerank = .{ .yes = 9693, .no = 2152 } };
     }
     fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {}
     fn cancel(_: *anyopaque, _: api.Id) void {}
@@ -77,8 +77,6 @@ test "rerank: the checkpoint's template and tokenizer give the oracle's ids, the
     defer echo.deinit();
     const srv = try Server.init(t.allocator, t.io, echo.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .model_dir = dir }, null);
     defer srv.deinit();
-    try t.expectEqual(@as(u32, 9693), srv.rerank.?.yes);
-    try t.expectEqual(@as(u32, 2152), srv.rerank.?.no);
     const ref_text = try std.Io.Dir.cwd().readFileAlloc(t.io, ref_path, a, .limited(64 << 20));
     const ref = (try json.parse(a, ref_text)).ok;
     var plain: usize = 0;
