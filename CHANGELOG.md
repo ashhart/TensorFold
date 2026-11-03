@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Dory on CUDA takes its RoPE tables from core's exact helper, so they match transformers' words (they moved by up to 5 ulp) (#2035, part of #1852).
+
 ## 1.2.2
 
 - CUDA lanes: Gemma 4, MiniMax M3, Kolibri-1, Spark 2.5 and Dory can verify root and context copies as Nemotron does, opt-in: set `TF_GEMMA4_COPIES`, `TF_MINIMAX_COPIES`, `TF_KOLIBRI_COPIES`, `TF_SPARK_COPIES` or `TF_DORY_COPIES` to 1. Replies equal `"draft": false`, and unset is the old policy (#2022, part of #1910).
