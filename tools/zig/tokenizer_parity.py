@@ -42,8 +42,7 @@ SCRIPTS = ("\u0391\u03b8\u03ae\u03bd\u03b1 \u041c\u043e\u0441\u043a\u0432\u0430 
            "\u10d7\u10d1\u10d8\u10da\u10d8\u10e1\u10d8 "
            "\u0535\u0580\u0587\u0561\u0576 \u1200\u1208 \u13a0\u13a1 \U000105C0\U00016100\U00011BC0 \U00010D50 "
            "\u01c5 \u01c8 \u1f88 \u0130stanbul \u0131 STRASSE stra\xdfe \u1e9e \ufb01 \ufb00 \u212a \xb5")
-# One IN22-Gen sentence (AI4Bharat, CC BY 4.0) in all 22 scheduled Indian languages, then canonical-composition
-# exclusions in both forms (Devanagari qa, Bengali rra/yya, Gurmukhi khha, Oriya rra) and ZWJ/ZWNJ conjuncts.
+# An IN22-Gen sentence (AI4Bharat, CC BY 4.0) in the 22 scheduled languages, composition exclusions and ZWJ/ZWNJ.
 INDIC = ("\u09b6\u09c7\u09a0 \u0986\u09f0\u09c1 \u09a4\u09c7\u0993\u0981\u09f0 \u0995\u09c7\u09f0\u09be\u09a3"
          "\u09c0\u0995\u09c7\u0987\u0997\u09f0\u09be\u0995\u09c0 \u09ae\u09cb\u09f0 \u099a\u09be\u09f0\u09bf\u0993"
          "\u09ab\u09be\u09b2\u09c7 \u0997\u09cb\u099f \u0996\u09be\u09b2\u09c7\u09f7 \u09b6\u09c7\u09a0 \u098f"
