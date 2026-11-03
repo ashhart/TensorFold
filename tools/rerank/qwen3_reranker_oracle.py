@@ -16,6 +16,7 @@ import importlib.metadata
 import importlib.util
 import json
 import math
+import statistics
 import sys
 from pathlib import Path
 import urllib.error
@@ -70,8 +71,11 @@ LIBRARY = {
 TRANSFORMERS_TREE = "b08cead6d1b841ef9723106a81a92ec37d67aff3e43a198e56b7dc76538d377b"
 DEFAULT_INSTRUCT = "Given a web search query, retrieve relevant passages that answer the query"
 WINDOW = 32768
-GATE_DIFF = 0.25  # |(l_yes - l_no) - oracle|
-GATE_SCORE = 0.02  # |score - oracle| and the ranking tie band
+GATE_DIFF = 0.25  # |(l_yes - l_no) - oracle|, against the BF16 transformers reference
+GATE_SCORE = 0.02  # |score - oracle| and the ranking tie band, against the BF16 reference
+# Against the FP32 reference (#1895): transformers' own BF16 run sits 0.110 and 0.0108 from it on these cases, so a
+# BF16 engine must sit no farther than that, rounded up; a pair may swap only when FP32 puts it within 2 x the diff gate.
+GATES_FP32 = (0.125, 0.0125)
 
 CARD_QUERIES = ["What is the capital of China?", "Explain gravity"]
 CARD_DOCS = [
@@ -355,9 +359,13 @@ def refusal(url, case):
 class Gate:
     """The receipt's verdict: every failed check is printed, and any one fails the run."""
 
-    def __init__(self):
+    def __init__(self, fp32):
         self.ok = True
         self.worst_diff = self.worst_score = self.worst_own = 0.0
+        self.diffs, self.scores = [], []
+        self.fp32 = fp32
+        self.gates = GATES_FP32 if fp32 else (GATE_DIFF, GATE_SCORE)
+        self.swaps = 0
 
     def fail(self, why):
         self.ok = False
@@ -381,6 +389,8 @@ class Gate:
         diff = meta["logit_yes"] - meta["logit_no"]
         got = items[0]["relevance_score"]
         self.worst_diff = max(self.worst_diff, abs(diff - c["diff"]))
+        self.diffs.append(abs(diff - c["diff"]))
+        self.scores.append(abs(got - c["score"]))
         self.worst_score = max(self.worst_score, abs(got - c["score"]))
         self.worst_own = max(self.worst_own, abs(got - c.get("own_score", c.get("bf16_score"))))  # older files: bf16_
         print(f"{c['kind']:12} tokens={c['tokens']:6} ref={c['score']:.6f} got={got:.6f} "
@@ -409,7 +419,14 @@ class Gate:
             return self.fail(f"ranking: {q!r}: indices {order} are not a permutation of {len(group)} documents")
         for pos, a in enumerate(order):
             for b in order[pos + 1:]:
-                if group[b]["score"] - group[a]["score"] >= GATE_SCORE:
+                if self.fp32:
+                    gap = group[b]["diff"] - group[a]["diff"]
+                    if gap > 0:
+                        self.swaps += 1
+                        print(f"ranking: {q!r}: {a} before {b}, FP32 puts {b} ahead by {gap:.4f} in yes - no")
+                    if gap > 2 * self.gates[0]:
+                        self.fail(f"ranking: {q!r}: {a} before {b} against the oracle by {gap:.4f}")
+                elif group[b]["score"] - group[a]["score"] >= GATE_SCORE:
                     self.fail(f"ranking: {q!r}: {a} before {b} against the oracle")
 
 
@@ -417,7 +434,7 @@ def compare(args):
     with open(args.ref) as f:
         ref = json.load(f)
     cases = ref["cases"]
-    g = Gate()
+    g = Gate(ref.get("dtype") == "float32")
     plain = [c for c in cases if c["kind"] not in ("special",) and not c["kind"].startswith(("window", "over"))]
     specials = [c for c in cases if c["kind"] == "special"]
     if len(plain) < 32 or len(specials) != 1 or not all("score" in c and "ids" in c for c in plain):
@@ -446,11 +463,20 @@ def compare(args):
     for (ins, q), group in by_query.items():
         if len(group) > 1:
             g.ranking(args.url, ins, q, group)
-    if g.worst_diff > GATE_DIFF:
-        g.fail(f"worst |diff| {g.worst_diff:.4f} > {GATE_DIFF}")
-    if g.worst_score > GATE_SCORE:
-        g.fail(f"worst |score| {g.worst_score:.5f} > {GATE_SCORE}")
-    print(f"worst |diff|={g.worst_diff:.4f} (gate {GATE_DIFF})  worst |score|={g.worst_score:.5f} (gate {GATE_SCORE})  "
+    gate_diff, gate_score = g.gates
+    if g.worst_diff > gate_diff:
+        g.fail(f"worst |diff| {g.worst_diff:.4f} > {gate_diff}")
+    if g.worst_score > gate_score:
+        g.fail(f"worst |score| {g.worst_score:.5f} > {gate_score}")
+    if g.fp32:
+        print(f"ranking: {g.swaps} pair(s) in another order than FP32's, each within {2 * gate_diff} in yes - no")
+    def spread(v):  # median, p99 (nearest rank) and worst of the scored cases
+        if not v:
+            return "no case scored"
+        v = sorted(v)
+        return f"median {statistics.median(v):.5f} p99 {v[math.ceil(0.99 * len(v)) - 1]:.5f} worst {v[-1]:.5f}"
+    print(f"reference {ref.get('dtype', 'bfloat16')}: |diff| {spread(g.diffs)}; |score| {spread(g.scores)}")
+    print(f"worst |diff|={g.worst_diff:.4f} (gate {gate_diff})  worst |score|={g.worst_score:.5f} (gate {gate_score})  "
           f"worst |score - the reference's own-head score|={g.worst_own:.5f} (recorded)  verdict={'PASS' if g.ok else 'FAIL'}")
     return 0 if g.ok else 1
 
