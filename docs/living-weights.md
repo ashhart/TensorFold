@@ -468,3 +468,13 @@ If the fact does not come back, or another answer changes, the whole lesson is t
 It also asks a few questions about the user that nothing told it, such as a cat's name or the user's own name; a lesson
 that makes it answer one with something made up ("Your cat's name is Whiskers.") is taken out too. Keep the original
 model for anything that matters.
+
+### Counting for automatic forgetting
+
+Firing counts run only with both `--slide` and `--slide-forget`. With forgetting off, ordinary requests do not
+read back pocket products, attach a counting observer or write the graph for counting. Historical counts stay
+in the graph; new requests are counted only while the opt-in is enabled. Pinning metadata remains available.
+
+The current firing mask represents at most 64 neurons per layer. A wider active Metal pocket returns an
+incomplete receipt instead of shifting beyond the mask. Replies continue, and automatic retirement refuses
+an incomplete count. Device token equality and performance qualification remain pending.

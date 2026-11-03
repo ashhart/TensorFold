@@ -84,3 +84,13 @@ test "pocket usage: warm end snapshots retain their completed prefix without a l
     try t.expect((try @import("cuda_usage.zig").saved(&e, &s, 6)) == null);
     try t.expect((try @import("cuda_usage.zig").saved(&e, null, 7)) == null);
 }
+
+test "pocket usage: actual native CUDA gating keeps slide-only on the ordinary prompt path" {
+    const native = @import("cuda_native.zig");
+    for ([_]bool{ false, true }) |slide| for ([_]bool{ false, true }) |forget| {
+        const o: native.Options = .{ .context = 64, .drafts = false, .slide = slide, .slide_forget = forget };
+        try t.expectEqual(slide and forget, native.usageEnabled(o, false, 0));
+        try t.expect(!native.usageEnabled(o, true, 0));
+        try t.expect(!native.usageEnabled(o, false, 1));
+    };
+}

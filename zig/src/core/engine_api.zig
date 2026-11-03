@@ -15,7 +15,6 @@ pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
-
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
 
@@ -332,6 +331,7 @@ pub const Open = struct {
     spill: prompt_cache.rows.Spill = .off,
     /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
     slide: bool = false,
+    slide_forget: bool = false,
     /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.
     recall: bool = false,
     kv8: bool = false, // --kv-cache fp8: e4m3 attention caches, an fp32 scale a row (families whose Options take kv8)

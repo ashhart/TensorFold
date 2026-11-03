@@ -2,6 +2,10 @@
 const std = @import("std");
 pub const activation_floor = 1e-4;
 pub const max_layers = 256;
+
+pub fn enabled(learning: bool, forgetting: bool) bool {
+    return learning and forgetting;
+}
 pub const Masks = struct {
     bits: [max_layers]u64 = @splat(0),
     complete: bool = true,
@@ -17,6 +21,20 @@ pub const Masks = struct {
 
 pub fn fires(x: f32) bool {
     return std.math.isFinite(x) and @abs(x) > activation_floor;
+}
+
+/// Accumulate a Metal chunk without shifting outside the audited 64-neuron mask.
+pub fn products(mask: *Masks, layer: usize, width: usize, acts: []const f32) void {
+    if (layer >= max_layers or width > 64 or (width == 0 and acts.len != 0) or
+        (width != 0 and acts.len % width != 0))
+    {
+        mask.complete = false;
+        return;
+    }
+    for (acts, 0..) |x, at| {
+        if (!std.math.isFinite(x)) mask.complete = false;
+        if (fires(x)) mask.bits[layer] |= @as(u64, 1) << @intCast(at % width);
+    }
 }
 
 /// Called before the engine releases a completed request, so ownership cannot change before the count.
@@ -94,4 +112,25 @@ test "pocket usage: strict audit floor, negative firing, interior marks and rest
     try t.expect(next.has(1, 0) and next.has(2, 0) and !next.has(2, 1));
     c.restore(2, null);
     try t.expect(!(try c.through(2)).complete);
+}
+
+test "pocket usage: Metal products at 64, 65 and 128 neurons never shift outside the mask" {
+    var mask: Masks = .{};
+    var edge: [128]f32 = @splat(0);
+    edge[63] = 1;
+    products(&mask, 2, 64, &edge);
+    try std.testing.expect(mask.complete and mask.has(2, 63));
+    for ([_]usize{ 65, 128 }) |width| {
+        mask = .{};
+        var wide: [256]f32 = @splat(1);
+        products(&mask, 2, width, wide[0 .. 2 * width]);
+        try std.testing.expect(!mask.complete);
+        try std.testing.expectEqual(@as(u64, 0), mask.bits[2]);
+    }
+    mask = .{};
+    products(&mask, max_layers, 1, &.{1});
+    try std.testing.expect(!mask.complete);
+    mask = .{};
+    products(&mask, 0, 0, &.{});
+    try std.testing.expect(mask.complete);
 }
