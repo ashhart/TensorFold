@@ -26,4 +26,5 @@ test {
     _ = keepalive;
     _ = fixtures;
     _ = @import("protocol_test.zig");
+    _ = @import("fixtures_test.zig");
 }
