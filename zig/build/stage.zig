@@ -10,7 +10,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     if (host.result.os.tag != .linux and host.result.os.tag != .macos) return;
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, host, .Debug) }));
     run.has_side_effects = true; // loopback sockets
-    const step = b.step("test-stage", "Pipeline stage link: rings of two and three ranks on loopback, refusals and failures");
+    const step = b.step("test-stage", "Stage link and protocol: loopback rings, refusals, failures, golden fixtures");
     step.dependOn(&run.step);
     all.dependOn(step);
     const compile = b.step("test-stage-compile", "Compile the stage link's tests for Linux and macOS on aarch64");
