@@ -55,4 +55,19 @@ __device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
     return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
 }
 
+__device__ __forceinline__ float block_sum_serial(float v, float* scratch) {
+    v = warp_sum(v);
+    const int warps = blockDim.x >> 5;
+    if ((threadIdx.x & 31) == 0) scratch[threadIdx.x >> 5] = v;
+    __syncthreads();
+    float total = 0.0f;
+    for (int w = 0; w < warps; ++w) total = __fadd_rn(total, scratch[w]);
+    __syncthreads();
+    return total;
+}
+
+__device__ __forceinline__ float rms_scale(float ss, int width, float eps) {
+    return __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ss, static_cast<float>(width)), eps)));
+}
+
 }  // namespace tf_common
