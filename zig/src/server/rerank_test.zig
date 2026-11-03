@@ -257,35 +257,55 @@ test "rerank: refusals name SGLang's reasons and run no score" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const cases = [_][2][]const u8{
-        .{ "[1]", "the request body must be a JSON object" },
-        .{ "{\"documents\": [\"d\"]}", "Query cannot be empty" },
-        .{ "{\"query\": \"\", \"documents\": [\"d\"]}", "Query cannot be empty" },
-        .{ "{\"query\": \" \\n\", \"documents\": [\"d\"]}", "Query cannot be empty or whitespace only" },
-        .{ "{\"query\": \"\\u3000\\u00a0\", \"documents\": [\"d\"]}", "Query cannot be empty or whitespace only" },
-        .{ "{\"query\": \"q\", \"documents\": [\"\\u001c\\u2028\"]}", "Each document cannot be empty or whitespace only" },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": -3}", "Value error, parameter top_n should be larger than 0." },
-        .{ "{\"query\": [{\"type\": \"text\", \"text\": \"q\"}], \"documents\": [\"d\"]}", "this reranker reads text: query and documents must be strings" },
-        .{ "{\"query\": 3, \"documents\": [\"d\"]}", "Query must be a string" },
-        .{ "{\"query\": \"q\"}", "Documents cannot be empty" },
-        .{ "{\"query\": \"q\", \"documents\": []}", "Documents cannot be empty" },
-        .{ "{\"query\": \"q\", \"documents\": \"d\"}", "this reranker reads text: query and documents must be strings" },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\", \"\"]}", "Each document must be a non-empty string" },
-        .{ "{\"query\": \"q\", \"documents\": [\"\\t\"]}", "Each document cannot be empty or whitespace only" },
-        .{ "{\"query\": \"q\", \"documents\": [[\"d\"]]}", "this reranker reads text: query and documents must be strings" },
-        .{ "{\"query\": \"q\", \"documents\": [1]}", "Each document must be a string" },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": 0}", "Value error, parameter top_n should be larger than 0." },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": \"2\"}", "top_n must be an integer" },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_documents\": null}", "return_documents must be a boolean" },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_logits\": 1}", "return_logits must be a boolean" },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"instruct\": 2}", "instruct must be a string" },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\", \"a document past the window\"]}", "document 1: the prompt has 38 tokens, which does not fit the context length of 24 tokens" },
+    // S: a schema error (SGLang's pydantic "Bad Request"); H: its handler's refusal ("BadRequestError")
+    const S = "Bad Request";
+    const H = "BadRequestError";
+    const cases = [_][3][]const u8{
+        .{ "[1]", "body: input should be a valid dictionary", S },
+        .{ "{\"documents\": [\"d\"]}", "query: field required", S },
+        .{ "{\"query\": \"\", \"documents\": [\"d\"]}", "Query cannot be empty", H },
+        .{ "{\"query\": \" \\n\", \"documents\": [\"d\"]}", "Query cannot be empty or whitespace only", H },
+        .{ "{\"query\": \"\\u3000\\u00a0\", \"documents\": [\"d\"]}", "Query cannot be empty or whitespace only", H },
+        .{ "{\"query\": \"q\", \"documents\": [\"\\u001c\\u2028\"]}", "Each document cannot be empty or whitespace only", H },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": -3}", "Value error, parameter top_n should be larger than 0.", S },
+        .{ "{\"query\": [], \"documents\": [\"d\"]}", "Query cannot be empty", H },
+        .{ "{\"query\": [{\"type\": \"image_url\", \"image_url\": {\"url\": \"x\"}}], \"documents\": [\"d\"]}", "this reranker reads text: image_url parts are not supported", H },
+        .{ "{\"query\": [{\"text\": \"q\"}], \"documents\": [\"d\"]}", "query: each content part needs a type", S },
+        .{ "{\"query\": [{\"type\": \"text\", \"text\": 3}], \"documents\": [\"d\"]}", "query: a text part needs its text as a string", S },
+        .{ "{\"query\": [{\"type\": \"bogus\"}], \"documents\": [\"d\"]}", "query: bogus is not a content part type", S },
+        .{ "{\"query\": \"q\", \"documents\": [[{\"type\": \"video_url\"}]]}", "documents: a video_url part needs its video_url object", S },
+        .{ "{\"query\": [{\"type\": \"image_url\", \"image_url\": {}}], \"documents\": [\"d\"]}", "query: a image_url part needs a url string", S },
+        .{ "{\"query\": \"\", \"documents\": \"d\"}", "documents: input should be a valid list", S },
+        .{ "{\"query\": [{\"type\": \"text\", \"text\": \" \"}], \"documents\": [\"d\"]}", "Query cannot be empty or whitespace only", H },
+        .{ "{\"query\": 3, \"documents\": [\"d\"]}", "query: input should be a valid string or a list of content parts", S },
+        .{ "{\"query\": \"q\"}", "documents: field required", S },
+        .{ "{\"query\": \"q\", \"documents\": []}", "Documents cannot be empty", H },
+        .{ "{\"query\": \"q\", \"documents\": \"d\"}", "documents: input should be a valid list", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\", \"\"]}", "Each document must be a non-empty string", H },
+        .{ "{\"query\": \"q\", \"documents\": [\"\\t\"]}", "Each document cannot be empty or whitespace only", H },
+        .{ "{\"query\": \"q\", \"documents\": [[{\"type\": \"video_url\", \"video_url\": {\"url\": \"v\"}}]]}", "this reranker reads text: video_url parts are not supported", H },
+        .{ "{\"query\": \"q\", \"documents\": [1]}", "documents: input should be a valid string or a list of content parts", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": 0}", "Value error, parameter top_n should be larger than 0.", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": \"two\"}", "top_n: input should be a valid integer", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": 1.5}", "top_n: input should be a valid integer", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": 1e19}", "top_n: input should be a valid integer", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": \"1__0\"}", "top_n: input should be a valid integer", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": \"_1\"}", "top_n: input should be a valid integer", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": \"2.5\"}", "top_n: input should be a valid integer", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": \"2.\"}", "top_n: input should be a valid integer", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"top_n\": \"0\"}", "Value error, parameter top_n should be larger than 0.", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_documents\": \"maybe\"}", "return_documents: input should be a valid boolean", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_documents\": null}", "return_documents: input should be a valid boolean", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_logits\": 2}", "return_logits: input should be a valid boolean", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"instruct\": 2}", "instruct: input should be a valid string", S },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\", \"a document past the window\"]}", "document 1: the prompt has 38 tokens, which does not fit the context length of 24 tokens", H },
     };
     for (cases) |case| {
         var cx: errors.Cx = .{ .a = a };
         try t.expectError(error.Refused, rerank.reply(srv, &cx, (try json.parse(a, case[0])).ok, Present{}));
         try t.expectEqualStrings(case[1], cx.message);
         try t.expectEqual(@as(u16, 400), cx.status());
+        try t.expectEqualStrings(case[2], (try rerank.errorBody(&cx)).get("type").?.string);
     }
     try t.expectEqual(@as(usize, 0), s.prompts.items.len);
 }
@@ -359,13 +379,18 @@ const Wire = struct {
 
 /// POSTs `body` to `path` through the server's dispatcher; the reply's bytes land in `wire`.
 fn dispatch(srv: *Server, path: []const u8, body: []const u8, wire: *Wire) !void {
+    return dispatchAs(srv, "POST", path, body, wire);
+}
+
+/// `dispatch` by `method`.
+fn dispatchAs(srv: *Server, method: []const u8, path: []const u8, body: []const u8, wire: *Wire) !void {
     const http = @import("http_conn.zig");
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     var c = try http.Conn.init(t.allocator, -1, "fixture");
     defer c.deinit();
     c.write_hooks = .{ .ctx = wire, .write = Wire.write };
-    c.method = "POST";
+    c.method = method;
     c.path = path;
     c.version = "HTTP/1.1";
     c.close = false;
@@ -404,7 +429,7 @@ test "rerank: a reranker server sends every other engine route to /v1/rerank and
     try dispatch(srv, "/v1/rerank", "{not js", &bad);
     try t.expect(std.mem.indexOf(u8, bad.bytes.items, "400 Bad Request") != null);
     try t.expect(std.mem.indexOf(u8, bad.bytes.items, "{\"object\":\"error\",") != null);
-    try t.expect(std.mem.indexOf(u8, bad.bytes.items, "\"type\":\"BadRequestError\",\"param\":null,\"code\":400}") != null);
+    try t.expect(std.mem.indexOf(u8, bad.bytes.items, "\"type\":\"Bad Request\",\"param\":null,\"code\":400}") != null); // SGLang: json_invalid
     try t.expectEqual(@as(usize, 2), s.prompts.items.len);
     try t.expectEqual(@as(u32, 0), srv.generating.load(.seq_cst));
     const scope = @import("auth_scope.zig");
@@ -449,5 +474,67 @@ test "rerank: a NaN or an infinite logit is a failed pass, never a 200 with inva
         try t.expectError(error.Refused, rerank.reply(srv, &cx, (try json.parse(a, body)).ok, Present{}));
         try t.expectEqualStrings("rerank inference failed", cx.message);
         try t.expectEqual(@as(u16, 500), cx.status());
+    }
+}
+
+test "rerank: text parts join with a space, as SGLang extracts them, and the joined text is the returned document" {
+    var text: Text = .{};
+    var s: Scorer = .{ .gpa = t.allocator, .table = &table };
+    defer s.deinit();
+    const srv = try serve(&text, &s);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const out = try ask(srv, a, "{\"query\": [{\"type\": \"text\", \"text\": \"a\"}, {\"type\": \"text\", \"text\": \"b\"}], \"documents\": [[{\"type\": \"text\", \"text\": \"high\"}], \"mid\"]}");
+    try t.expectEqualStrings("S:|Q:a b|D:high|A#END#", s.prompts.items[0]);
+    try t.expectEqualStrings("high", out.array[0].get("document").?.string);
+    try t.expectEqual(@as(i64, 0), out.array[0].get("index").?.int64().?);
+}
+
+test "rerank: PUT reaches the route as POST does, under the same key scope; other routes keep refusing PUT" {
+    var text: Text = .{};
+    var s: Scorer = .{ .gpa = t.allocator, .table = &table };
+    defer s.deinit();
+    const srv = try serve(&text, &s);
+    defer srv.deinit();
+    for ([_][]const u8{ "/v1/rerank", "/rerank" }) |path| {
+        var wire: Wire = .{};
+        defer wire.bytes.deinit(t.allocator);
+        try dispatchAs(srv, "PUT", path, "{\"query\": \"q\", \"documents\": [\"low\", \"high\"]}", &wire);
+        try t.expect(std.mem.indexOf(u8, wire.bytes.items, "200 OK") != null);
+        try t.expect(std.mem.indexOf(u8, wire.bytes.items, "\"index\":1") != null);
+    }
+    var other: Wire = .{};
+    defer other.bytes.deinit(t.allocator);
+    try dispatchAs(srv, "PUT", "/v1/completions", "{}", &other);
+    try t.expect(std.mem.indexOf(u8, other.bytes.items, "501") != null);
+    const scope = @import("auth_scope.zig");
+    try t.expect(scope.allows(.{ .inference = true }, "PUT", "/v1/rerank"));
+    try t.expect(!scope.allows(.{ .read = true }, "PUT", "/v1/rerank"));
+    try t.expect(!scope.allows(.{ .inference = true }, "PUT", "/v1/completions"));
+}
+
+test "rerank: top_n and the flags take what pydantic's lax mode takes, as SGLang's schema does" {
+    var text: Text = .{};
+    var s: Scorer = .{ .gpa = t.allocator, .table = &table };
+    defer s.deinit();
+    const srv = try serve(&text, &s);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = "\"documents\": [\"low\", \"high\", \"mid\"]";
+    for ([_][]const u8{ "\"2\"", "2.0", "\" 2 \"", "\"+2\"", "\"2.0\"", "\"\\u00a02\\u3000\"", "\"0_2\"" }) |n| {
+        const out = try ask(srv, a, try std.fmt.allocPrint(a, "{{\"query\": \"q\", {s}, \"top_n\": {s}}}", .{ docs, n }));
+        try t.expectEqual(@as(usize, 2), out.array.len);
+    }
+    for ([_][]const u8{ "\"false\"", "0", "\"no\"", "\"OFF\"", "0.0" }) |f| {
+        const out = try ask(srv, a, try std.fmt.allocPrint(a, "{{\"query\": \"q\", {s}, \"return_documents\": {s}}}", .{ docs, f }));
+        try t.expect(out.array[0].get("document") == null);
+    }
+    for ([_][]const u8{ "\"true\"", "1", "\"Yes\"", "\"t\"" }) |f| {
+        const out = try ask(srv, a, try std.fmt.allocPrint(a, "{{\"query\": \"q\", {s}, \"return_documents\": {s}}}", .{ docs, f }));
+        try t.expect(out.array[0].get("document") != null);
     }
 }
