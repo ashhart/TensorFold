@@ -298,7 +298,7 @@ pub const Launcher = struct {
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;
         l.affine = try affine.Kernels.load(tiles, dot2, chip, choices.products);
-        l.dense = try dense.Kernels.load(tiles, chip.act == .bf16, chip.matrix == .wmma12);
+        l.dense = try dense.Kernels.load(tiles, chip.act == .bf16, chip.matrix == .wmma12, choices.products.matrix);
         try l.affine.fillByteLut(r, dot2);
         l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
         return l;
