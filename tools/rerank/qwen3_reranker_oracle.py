@@ -1,10 +1,13 @@
 """Qwen3-Reranker reference scores and prompt ids from transformers, and a comparison against a /v1/rerank server.
 
 sources MODEL_DIR                             check the snapshot and Transformers against the pins (no model loads)
-oracle MODEL_DIR OUT.json [--window N ...]   write the reference cases (on the GPU, ROCm torch venv); each
-                                              --window adds a prompt of exactly N tokens and one of N + 1
+oracle MODEL_DIR OUT.json [--window N ...]   write the reference cases (BF16 on the GPU by default, ROCm torch
+       [--dtype float32 --device cpu]         venv; FP32 on the CPU for #1895's reference); each --window adds a
+                                              prompt of exactly N tokens and one of N + 1
 compare OUT.json URL [--window N]            post the cases to URL/v1/rerank and print the gate verdicts; with
                                               --window, also the served window's cases (N + 1 must be refused)
+formatter MODEL_DIR URL                       the served prompt ids against the model card's own formatter, token
+                                              for token, with the default and with custom instructions
 """
 
 import argparse
@@ -221,7 +224,8 @@ def oracle(args):
         labels = json.load(f)
     yes, no = labels["true_token_id"], labels["false_token_id"]
     tok = AutoTokenizer.from_pretrained(args.model, local_files_only=True, trust_remote_code=False)
-    model, loading = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16, local_files_only=True,
+    dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
+    model, loading = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype, local_files_only=True,
                                                           trust_remote_code=False, output_loading_info=True)
     keys = ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")
     if errors := {key: loading[key] for key in keys if loading.get(key)}:
@@ -229,7 +233,7 @@ def oracle(args):
     if (model.config.tie_word_embeddings
             and model.get_input_embeddings().weight.data_ptr() != model.get_output_embeddings().weight.data_ptr()):
         raise SystemExit("the model did not tie its input and output embeddings")
-    model = model.to("cuda").eval()
+    model = model.to(args.device).eval()
     head = model.lm_head.weight.detach()
     rows = head[[yes, no]].double().cpu()
 
@@ -263,11 +267,11 @@ def oracle(args):
             ids = tok(text, add_special_tokens=False).input_ids
             rec = dict(c, text=text, ids=ids, tokens=len(ids))
             if not c.get("score_skip"):
-                t = torch.tensor([ids], device="cuda")
+                t = torch.tensor([ids], device=args.device)
                 last = model.model(input_ids=t).last_hidden_state[0, -1]
                 logits = model.lm_head(last)
                 own = model(input_ids=t, logits_to_keep=1).logits[0, -1]  # one row: 40k rows of logits are 12 GB
-                # a one-row lm_head and the full forward's head take different kernels: equal within BF16 steps
+                # a one-row lm_head and the full forward's head take different kernels: equal within the dtype's steps
                 gap = float((logits.float() - own.float()).abs().max())
                 assert gap <= 0.25 and int(logits.argmax()) == int(own.argmax()), f"last row is not final-normed: {gap}"
                 rec["head_gap"] = gap
@@ -276,15 +280,60 @@ def oracle(args):
                 rec["diff"] = ly - ln
                 rec["score"] = 1.0 / (1.0 + math.exp(-(ly - ln)))
                 by, bn = float(own[yes].float()), float(own[no].float())
-                rec["bf16_diff"] = by - bn
-                rec["bf16_score"] = 1.0 / (1.0 + math.exp(-(by - bn)))
+                rec["own_diff"] = by - bn  # the reference model's own head, at its dtype
+                rec["own_score"] = 1.0 / (1.0 + math.exp(-(by - bn)))
             out.append(rec)
             print(f"{c['kind']:8} tokens={len(ids):6} score={rec.get('score', float('nan')):.6f}", file=sys.stderr)
     partial = out_path.with_name(out_path.name + ".partial")
     with open(partial, "w") as f:
-        json.dump({"model": str(args.model), "sources": pins, "weights_sha256": weights,
+        json.dump({"model": str(args.model), "dtype": args.dtype, "device": args.device,
+                   "torch": torch.__version__, "sources": pins, "weights_sha256": weights,
                    "yes": yes, "no": no, "cases": out}, f, ensure_ascii=False, indent=1)
     partial.replace(out_path)  # whole or not at all
+
+
+# The model card's formatter, verbatim (README "Transformers Usage"): prefix, content and suffix encoded apart.
+CARD_PREFIX = ("<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the "
+               "Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n")
+CARD_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+CUSTOM = ["Judge code relevance", "Given a question in German, find the passage that answers it",
+          "  An instruction with spaces, a tab\tand\nnew lines  "]
+
+
+def card_ids(tok, instruction, query, doc):
+    """The ids the card's process_inputs builds for one pair (no truncation: every case is under its 8,192)."""
+    if instruction is None:
+        instruction = DEFAULT_INSTRUCT
+    content = f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}"
+    return (tok.encode(CARD_PREFIX, add_special_tokens=False) + tok(content).input_ids
+            + tok.encode(CARD_SUFFIX, add_special_tokens=False))
+
+
+def formatter(args):
+    """Every case's served ids equal the card formatter's, with the default instruction, each custom one sent as
+    #1895's `instruction`, and once as SGLang's `instruct`."""
+    pinned(args.model)
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(args.model, local_files_only=True, trust_remote_code=False)
+    pairs = [(q, d) for q in CARD_QUERIES for d in CARD_DOCS] + [(q, d) for _, q, d in FIXED]
+    pairs += [(LENGTH_QUERY, synthetic(tok, n)) for n in (16, 512, 2048)]
+    cases = [(None, q, d, None) for q, d in pairs]
+    cases += [(ins, q, d, "instruction") for ins in CUSTOM for q, d in pairs]
+    cases += [(CUSTOM[0], q, d, "instruct") for q, d in pairs]
+    bad = 0
+    for ins, q, d, field in cases:
+        body = {"query": q, "documents": [d], "return_documents": False, "return_prompt_token_ids": True}
+        if field:
+            body[field] = ins
+        meta = post(args.url + "/v1/rerank", body)["results"][0]["meta_info"]
+        want = card_ids(tok, ins, q, d)
+        if meta["prompt_token_ids"] != want:
+            bad += 1
+            print(f"FAIL: {field or 'default'} {ins!r} {q!r}: served ids differ from the card's ({len(want)} tokens)")
+    print(f"formatter: {len(cases) - bad}/{len(cases)} prompts equal the card's ids token for token "
+          f"(default instruction: {len(pairs)}, custom: {len(cases) - len(pairs)})  "
+          f"verdict={'PASS' if bad == 0 else 'FAIL'}")
+    return 0 if bad == 0 else 1
 
 
 def post(url, body):
@@ -308,7 +357,7 @@ class Gate:
 
     def __init__(self):
         self.ok = True
-        self.worst_diff = self.worst_score = self.worst_bf16 = 0.0
+        self.worst_diff = self.worst_score = self.worst_own = 0.0
 
     def fail(self, why):
         self.ok = False
@@ -333,7 +382,7 @@ class Gate:
         got = items[0]["relevance_score"]
         self.worst_diff = max(self.worst_diff, abs(diff - c["diff"]))
         self.worst_score = max(self.worst_score, abs(got - c["score"]))
-        self.worst_bf16 = max(self.worst_bf16, abs(got - c["bf16_score"]))
+        self.worst_own = max(self.worst_own, abs(got - c.get("own_score", c.get("bf16_score"))))  # older files: bf16_
         print(f"{c['kind']:12} tokens={c['tokens']:6} ref={c['score']:.6f} got={got:.6f} "
               f"diff={diff:+.4f} ref_diff={c['diff']:+.4f}")
 
@@ -402,7 +451,7 @@ def compare(args):
     if g.worst_score > GATE_SCORE:
         g.fail(f"worst |score| {g.worst_score:.5f} > {GATE_SCORE}")
     print(f"worst |diff|={g.worst_diff:.4f} (gate {GATE_DIFF})  worst |score|={g.worst_score:.5f} (gate {GATE_SCORE})  "
-          f"worst |score - bf16 score|={g.worst_bf16:.5f} (recorded)  verdict={'PASS' if g.ok else 'FAIL'}")
+          f"worst |score - the reference's own-head score|={g.worst_own:.5f} (recorded)  verdict={'PASS' if g.ok else 'FAIL'}")
     return 0 if g.ok else 1
 
 
@@ -415,11 +464,18 @@ def main():
     o.add_argument("model", type=Path)
     o.add_argument("out")
     o.add_argument("--window", type=int, action="append", default=[])
+    o.add_argument("--dtype", choices=("bfloat16", "float32"), default="bfloat16")
+    o.add_argument("--device", default="cuda")
     c = sub.add_parser("compare")
     c.add_argument("ref")
     c.add_argument("url")
     c.add_argument("--window", type=int, default=0)
+    fm = sub.add_parser("formatter")
+    fm.add_argument("model", type=Path)
+    fm.add_argument("url")
     args = p.parse_args()
+    if args.cmd == "formatter":
+        return formatter(args)
     if args.cmd == "sources":
         return sources(args)
     if args.cmd == "oracle":
