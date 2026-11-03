@@ -68,7 +68,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     const count = @min(layers orelse c.layers, c.layers);
     w.layers = try gpa.alloc(Layer, count);
     w.embed = try w.upload(d, m.embed.bytes);
-    const readers = try core.checkpoint_read_ahead.readers();
+    const readers = try core.checkpoint_read_ahead.optInReaders();
     for (w.layers, m.layers[0..count], 0..) |*out, ml, i| {
         var reading = try @import("cuda_load_prefetch.zig").begin(&ck, i, readers);
         defer reading.deinit();

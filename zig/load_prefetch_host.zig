@@ -133,6 +133,22 @@ test "load prefetch: every family balances allocation failures while readers may
     }
 }
 
+test "load prefetch: new CUDA ports are opt-in while donor and GLM defaults stay unchanged" {
+    try t.expectEqual(@as(usize, 0), try ahead.optInCount(null));
+    for (0..17) |count| {
+        var buf: [3]u8 = undefined;
+        const value = try std.fmt.bufPrint(&buf, "{d}", .{count});
+        try t.expectEqual(count, try ahead.optInCount(value));
+    }
+    for ([_][]const u8{ "17", "word", "-1" }) |bad| try t.expectError(error.BadLoadPrefetch, ahead.optInCount(bad));
+    try t.expectEqual(@as(usize, 16), try ahead.readerCount(null));
+    const glm = @import("src/families/glm/cuda_load_ahead.zig");
+    try t.expectEqual(@as(usize, 16), try glm.configured(null, null));
+    try t.expectEqual(@as(usize, 8), try glm.configured(null, "8"));
+    try t.expectEqual(@as(usize, 0), try glm.configured("0", "16"));
+    try t.expectEqual(@as(usize, 16), try glm.configured("16", "0"));
+}
+
 test "load prefetch: malformed options and truncated data refuse without changing the source" {
     try t.expectEqual(@as(usize, 16), try ahead.readerCount(null));
     try t.expectEqual(@as(usize, 0), try ahead.readerCount("0"));

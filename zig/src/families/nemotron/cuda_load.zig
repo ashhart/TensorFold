@@ -77,7 +77,7 @@ fn fill(p: *Pending, io: std.Io, dir: []const u8, c: Config, with_mtp: bool) !vo
     defer core.checkpoint.cache.close(&ck);
     try src.add(&ck);
     const pre = c.prefix();
-    const readers = try core.checkpoint_read_ahead.readers();
+    const readers = try core.checkpoint_read_ahead.optInReaders();
     w.blocks = try gpa.alloc(Block, c.layers);
     for (c.kinds[0..c.layers], 0..) |kind, i| {
         var reading = try @import("cuda_load_prefetch.zig").begin(&ck, pre, i, readers);
