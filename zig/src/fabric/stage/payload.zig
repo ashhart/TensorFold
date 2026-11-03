@@ -1,7 +1,7 @@
 //! The stage protocol's payload prefix (RFC #2005 section 6.4): 8 bytes naming the message and its version.
 const std = @import("std");
 
-pub const magic: u32 = 0x5446_5350; // "TFSP"
+pub const magic: u32 = 0x5053_4654; // "TFSP" in its little-endian bytes (54 46 53 50)
 pub const version: u16 = 1;
 pub const size = 8;
 
