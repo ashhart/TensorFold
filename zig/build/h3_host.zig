@@ -20,6 +20,10 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = st }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
     const tool = b.addExecutable(.{ .name = "tf-h3-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_dit.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal } } }) });
     b.step("compile-h3-host", "Compile the actual H3 tool without compiling or executing shaders").dependOn(&tool.step);
+    const modulation = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/modulation.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = st }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
+    const rounding = b.addRunArtifact(b.addTest(.{ .root_module = modulation, .filters = &.{"modulation bf16:"} }));
+    b.step("test-h3-modulation-bf16", "H3's host bf16 rounding against the copy it replaced, no GPU").dependOn(&rounding.step);
+    test_step.dependOn(&rounding.step);
 }
 
 pub fn targets(b: *std.Build, cuda: *std.Build.Module, all: *std.Build.Step) void {
