@@ -51,7 +51,7 @@ pub const Options = struct {
     own_prefill: bool = true,
     /// the backbone layers to load and run (null: all; a gate runs a reference's prefix, e.g. 0-24)
     layers: ?[]const u32 = null,
-    /// the server's --prompt-cache-gib: the kept states' resident limit (session_budget.zig; null: the variables')
+    /// the server's --prompt-cache-gib on rank 0: every rank's resident limit (session_budget.zig)
     prompt_cache_gib: ?f64 = null,
 };
 
@@ -222,6 +222,9 @@ pub const Model = struct {
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
         try @import("session_protocol.zig").preflight(&m.session.plan);
+        var so = try sg.optionsFromEnv();
+        // rank 0's --prompt-cache-gib (or variable) on every rank: one resident limit, the same evictions
+        so.resident_bytes = try @import("session_budget.zig").agree(&m.session.plan, so.resident_bytes, o.prompt_cache_gib);
         m.cfg = try Config.read(gpa, io, pack_dir);
         // the release's FP8 blocks parse (Metal runs them); refused here, before any pack or launch on CUDA
         if (@import("cuda_format.zig").problem(&m.cfg)) |text| {
@@ -390,10 +393,6 @@ pub const Model = struct {
         m.f.engram = &m.host;
         if (world > 1) m.f.link = &m.session.plan;
         m.f.on_stop = .{ .ctx = &m.session, .run = announceStop };
-        var so = try sg.optionsFromEnv();
-        const budget = @import("session_budget.zig").resident(so.resident_bytes, o.prompt_cache_gib, world);
-        so.resident_bytes = budget.bytes;
-        if (budget.ignored) |why| if (!quiet) std.log.scoped(.dsv41).info("sessions: --prompt-cache-gib ignored: {s}", .{why.text()});
         const several_ok = m.slots == 1 or so.several;
         if (so.enabled and m.f.kv != null and !several_ok)
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: off with {d} live slots (TF_DSV41_SESSION_SLOTS=1 opens them over every slot; the session-slots check has not run on hardware)", .{m.slots});
