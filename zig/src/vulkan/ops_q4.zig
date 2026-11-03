@@ -89,7 +89,7 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
     return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
 }
 
-/// Rows of x one thread of qmm_q4_tile_rows computes; a prompt chunk of at least this many rows takes that image.
+/// Rows of x one thread of qmm_q4_tile_rows computes (it also takes two columns); a chunk this long takes that image.
 pub const tile_rows: u64 = 4;
 
 /// `project` over weights repacked by `tile`: one dispatch, so w must fit one binding and start 16-byte aligned.
@@ -103,7 +103,7 @@ pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scale
     const pipe = if (many) &o.qmm_q4_tile_rows else &o.qmm_q4_tile;
     try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
     const p = try q4Push(g.m, g.n, k);
-    const threads = if (many) try ops_mod.cast32((g.m + tile_rows - 1) / tile_rows * g.n) else p.count;
+    const threads = if (many) try ops_mod.cast32((g.m + tile_rows - 1) / tile_rows * ((g.n + 31) / 32 * 16)) else p.count;
     try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(threads, pipe.local[0]), timeout_ns);
 }
 

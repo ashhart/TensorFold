@@ -1,5 +1,5 @@
 #version 460
-// qmm_q4_tile with four rows of x a thread, so each weight is dequantized once for four outputs; same sums and order.
+// qmm_q4_tile with four rows of x and two columns (16 apart in a tile) a thread; each x is unpacked once for both columns.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
@@ -60,56 +60,99 @@ float bf16_value(uint16_t x) {
 void main() {
   uint groups_per_row = params.matrix_k / 64u;
   uint blocks = (params.matrix_m + 3u) / 4u;
-  uint total = blocks * params.matrix_n;
+  uint pairs = ((params.matrix_n + 31u) / 32u) * 16u;
+  uint total = blocks * pairs;
   uint stride = gl_NumWorkGroups.x * 256u;
   uint last_row = params.matrix_m - 1u;
   for (uint index = gl_GlobalInvocationID.x; index < total; index += stride) {
-    uint block = index / params.matrix_n;
-    uint column = index - block * params.matrix_n;
-    uint tile = column >> 5u;
-    uint lane = column & 31u;
-    uint w_base = tile * params.matrix_k + lane;
-    uint param_base = tile * (groups_per_row * 32u) + lane;
+    uint block = index / pairs;
+    uint within = index - block * pairs;
+    uint tile = within >> 4u;
+    uint lane = within & 15u;
+    uint col_a = tile * 32u + lane;
+    uint col_b = col_a + 16u;
+    uint wa = tile * params.matrix_k + lane;
+    uint wb = wa + 16u;
+    uint pa = tile * (groups_per_row * 32u) + lane;
+    uint pb = pa + 16u;
     uint row_vectors = params.matrix_k / 8u;
-    uint x0 = min(block * 4u, last_row) * row_vectors;
+    uint x0 = min(block * 4u + 0u, last_row) * row_vectors;
     uint x1 = min(block * 4u + 1u, last_row) * row_vectors;
     uint x2 = min(block * 4u + 2u, last_row) * row_vectors;
     uint x3 = min(block * 4u + 3u, last_row) * row_vectors;
-    float acc0 = 0.0;
-    float acc1 = 0.0;
-    float acc2 = 0.0;
-    float acc3 = 0.0;
+    float a0 = 0.0;
+    float b0 = 0.0;
+    float a1 = 0.0;
+    float b1 = 0.0;
+    float a2 = 0.0;
+    float b2 = 0.0;
+    float a3 = 0.0;
+    float b3 = 0.0;
     for (uint group = 0u; group < groups_per_row; ++group) {
-      float scale = bf16_value(scales.values[param_base + group * 32u]);
-      float bias = bf16_value(biases.values[param_base + group * 32u]);
+      float scale_a = bf16_value(scales.values[pa + group * 32u]);
+      float bias_a = bf16_value(biases.values[pa + group * 32u]);
+      float scale_b = bf16_value(scales.values[pb + group * 32u]);
+      float bias_b = bf16_value(biases.values[pb + group * 32u]);
       for (uint half_group = 0u; half_group < 2u; ++half_group) {
-        uvec4 w4 = input_w.values[w_base + (group * 2u + half_group) * 32u];
+        uvec4 wa4 = input_w.values[wa + (group * 2u + half_group) * 32u];
+        uvec4 wb4 = input_w.values[wb + (group * 2u + half_group) * 32u];
         for (uint t = 0u; t < 4u; ++t) {
-          uint word = w4[t];
+          uint worda = wa4[t];
+          uint wordb = wb4[t];
           uint at = group * 8u + half_group * 4u + t;
-          uvec4 xa = input_x.values[x0 + at];
-          uvec4 xb = input_x.values[x1 + at];
-          uvec4 xc = input_x.values[x2 + at];
-          uvec4 xd = input_x.values[x3 + at];
+          uvec4 x0v = input_x.values[x0 + at];
+          uvec4 x1v = input_x.values[x1 + at];
+          uvec4 x2v = input_x.values[x2 + at];
+          uvec4 x3v = input_x.values[x3 + at];
           for (uint pair = 0u; pair < 4u; ++pair) {
-            float low = scale * float((word >> (pair * 8u)) & 0xfu) + bias;
-            float high = scale * float((word >> (pair * 8u + 4u)) & 0xfu) + bias;
-            acc0 += uintBitsToFloat(xa[pair] << 16u) * low;
-            acc0 += uintBitsToFloat(xa[pair] & 0xffff0000u) * high;
-            acc1 += uintBitsToFloat(xb[pair] << 16u) * low;
-            acc1 += uintBitsToFloat(xb[pair] & 0xffff0000u) * high;
-            acc2 += uintBitsToFloat(xc[pair] << 16u) * low;
-            acc2 += uintBitsToFloat(xc[pair] & 0xffff0000u) * high;
-            acc3 += uintBitsToFloat(xd[pair] << 16u) * low;
-            acc3 += uintBitsToFloat(xd[pair] & 0xffff0000u) * high;
+            float lowa = scale_a * float((worda >> (pair * 8u)) & 0xfu) + bias_a;
+            float higha = scale_a * float((worda >> (pair * 8u + 4u)) & 0xfu) + bias_a;
+            float lowb = scale_b * float((wordb >> (pair * 8u)) & 0xfu) + bias_b;
+            float highb = scale_b * float((wordb >> (pair * 8u + 4u)) & 0xfu) + bias_b;
+            float l0 = uintBitsToFloat(x0v[pair] << 16u);
+            float h0 = uintBitsToFloat(x0v[pair] & 0xffff0000u);
+            a0 += l0 * lowa;
+            a0 += h0 * higha;
+            b0 += l0 * lowb;
+            b0 += h0 * highb;
+            float l1 = uintBitsToFloat(x1v[pair] << 16u);
+            float h1 = uintBitsToFloat(x1v[pair] & 0xffff0000u);
+            a1 += l1 * lowa;
+            a1 += h1 * higha;
+            b1 += l1 * lowb;
+            b1 += h1 * highb;
+            float l2 = uintBitsToFloat(x2v[pair] << 16u);
+            float h2 = uintBitsToFloat(x2v[pair] & 0xffff0000u);
+            a2 += l2 * lowa;
+            a2 += h2 * higha;
+            b2 += l2 * lowb;
+            b2 += h2 * highb;
+            float l3 = uintBitsToFloat(x3v[pair] << 16u);
+            float h3 = uintBitsToFloat(x3v[pair] & 0xffff0000u);
+            a3 += l3 * lowa;
+            a3 += h3 * higha;
+            b3 += l3 * lowb;
+            b3 += h3 * highb;
           }
         }
       }
     }
     uint row = block * 4u;
-    output_data.values[params.output_offset + row * params.matrix_n + column] = bf16_store(acc0);
-    if (row + 1u < params.matrix_m) output_data.values[params.output_offset + (row + 1u) * params.matrix_n + column] = bf16_store(acc1);
-    if (row + 2u < params.matrix_m) output_data.values[params.output_offset + (row + 2u) * params.matrix_n + column] = bf16_store(acc2);
-    if (row + 3u < params.matrix_m) output_data.values[params.output_offset + (row + 3u) * params.matrix_n + column] = bf16_store(acc3);
+    if (row + 0u < params.matrix_m) {
+      if (col_a < params.matrix_n) output_data.values[params.output_offset + (row + 0u) * params.matrix_n + col_a] = bf16_store(a0);
+      if (col_b < params.matrix_n) output_data.values[params.output_offset + (row + 0u) * params.matrix_n + col_b] = bf16_store(b0);
+    }
+    if (row + 1u < params.matrix_m) {
+      if (col_a < params.matrix_n) output_data.values[params.output_offset + (row + 1u) * params.matrix_n + col_a] = bf16_store(a1);
+      if (col_b < params.matrix_n) output_data.values[params.output_offset + (row + 1u) * params.matrix_n + col_b] = bf16_store(b1);
+    }
+    if (row + 2u < params.matrix_m) {
+      if (col_a < params.matrix_n) output_data.values[params.output_offset + (row + 2u) * params.matrix_n + col_a] = bf16_store(a2);
+      if (col_b < params.matrix_n) output_data.values[params.output_offset + (row + 2u) * params.matrix_n + col_b] = bf16_store(b2);
+    }
+    if (row + 3u < params.matrix_m) {
+      if (col_a < params.matrix_n) output_data.values[params.output_offset + (row + 3u) * params.matrix_n + col_a] = bf16_store(a3);
+      if (col_b < params.matrix_n) output_data.values[params.output_offset + (row + 3u) * params.matrix_n + col_b] = bf16_store(b3);
+    }
   }
 }
