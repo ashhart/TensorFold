@@ -1,6 +1,7 @@
 // MOSS-Image's glue on CUDA: moss_image.metal's kernels op for op, rounded where the publisher's torch code rounds.
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_moss {
 
@@ -9,11 +10,7 @@ typedef __nv_bfloat16 bf16;
 __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 __device__ __forceinline__ float ld(const bf16* p) { return __bfloat162float(*p); }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
+using tf_common::warp_sum;
 
 }  // namespace tf_moss
 
