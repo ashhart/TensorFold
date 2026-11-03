@@ -2,7 +2,9 @@
 const std = @import("std");
 const Record = @import("hip_records.zig").Record;
 
-pub const records = .{};
+pub const records = .{
+    @import("hip_records_glm_ocr.zig").records,
+};
 
 /// Every family's records as one array.
 pub const all = join: {
@@ -11,7 +13,8 @@ pub const all = join: {
     break :join joined[0..joined.len].*;
 };
 
-test "the shared HIP records stay main's; families only add theirs" {
+test "the HIP records stay main's; the family lists only regroup GLM-OCR's" {
     const every = @import("hip_records.zig").records;
-    try std.testing.expectEqual(@as(usize, 173), every.len - all.len);
+    try std.testing.expectEqual(@as(usize, 182), every.len); // main's records, GLM-OCR's 12 among them
+    try std.testing.expectEqual(@as(usize, 170), every.len - all.len);
 }
