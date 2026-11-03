@@ -79,7 +79,10 @@ test "Qwen4 CUDA open: real rotary allocation uploads frequency zero without the
     var backend: Gpu.Storage = .{ .driver = &d, .stream = C.Stream.borrowed(&d, null), .context = &context };
     const image: [8]u8 align(8) = @splat(1);
     const images: Gpu.Images = .{ .projection = &image, .hc_scalar = &image, .hc = &image, .gdn = &image, .attention = &image, .batch = &image, .ple = &image };
-    const expected = [_]u32{ 0x3f800000, 0x3f0ff59a, 0x3ea1e89b, 0x3e361887, 0x3dcccccd, 0x3d6655c3, 0x3d0186e2, 0x3c91ad39, 0x3c23d70a, 0x3bb8449c, 0x3b4f3e37, 0x3ae91528, 0x3a83126f, 0x3a136a16, 0x39a5cb5f, 0x393a7753 };
+    const expected = [_]u32{
+        0x3f800000, 0x3f0ff59a, 0x3ea1e89b, 0x3e361887, 0x3dcccccd, 0x3d6655c2, 0x3d0186e3, 0x3c91ad39,
+        0x3c23d70a, 0x3bb8449c, 0x3b4f3e38, 0x3ae91528, 0x3a83126f, 0x3a136a16, 0x39a5cb60, 0x393a7753,
+    };
     for ([_]usize{ 32, 64, 128, 0 }) |rotary| {
         c.rotary = rotary;
         const uploads = Trace.uploads;
