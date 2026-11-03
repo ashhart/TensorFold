@@ -120,6 +120,26 @@ test "edge pictures (zig/tests/fixtures/picture/edges.json) get 0.6.6's outcome,
     if (!jpeg) return error.SkipZigTest;
 }
 
+test "PNG tRNS keys compare their low bytes, except mode 1 keeps the whole key" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig/tests/fixtures/picture/trns.json", a, .limited(1 << 16));
+    const cases = (try std.json.parseFromSliceLeaky(struct { cases: []const Edge }, a, text, .{ .ignore_unknown_fields = true })).cases;
+    try std.testing.expectEqual(@as(usize, 5), cases.len);
+    for (cases) |c| {
+        errdefer std.debug.print("case {s}\n", .{c.name});
+        const b64 = std.base64.standard.Decoder;
+        const bytes = try a.alloc(u8, try b64.calcSizeForSlice(c.b64));
+        try b64.decode(bytes, c.b64);
+        var rgb = try picture.decode(std.testing.io, std.testing.allocator, bytes);
+        defer rgb.deinit(std.testing.allocator);
+        try std.testing.expectEqual(c.width, rgb.width);
+        try std.testing.expectEqual(c.height, rgb.height);
+        try std.testing.expectEqualStrings(c.rgb.?, &sha256(rgb.pixels));
+    }
+}
+
 /// WebP cases need the pinned libwebp: required if TENSORFOLD_LIBWEBP names one, else the test reports a skip.
 fn webpReady(a: std.mem.Allocator) !bool {
     const level = std.testing.log_level;
