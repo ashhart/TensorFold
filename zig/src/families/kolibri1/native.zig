@@ -101,6 +101,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n, be.prompt_rows);
     errdefer own.m.deinit();
     own.kb = try be.Kolibri.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    own.kb.copy_drafts = o.drafts;
     return .{
         .backend = own.kb.backend(),
         .facts = own.kb.facts(),

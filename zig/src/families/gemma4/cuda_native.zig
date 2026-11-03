@@ -157,6 +157,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_GEMMA4_GRAPHS"); // =0: every decode forward eager
     own.gb = try be.Gemma.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    own.gb.copy_drafts = o.drafts;
     errdefer own.gb.deinit();
     if (o.vision) |lim| {
         const v = try gpa.create(cv.Vision);
