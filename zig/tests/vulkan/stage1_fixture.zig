@@ -38,6 +38,10 @@ pub const cases = [_]Case{
     .{ .name = "m1 n16 k2048", .shape = .{ .rows = 1, .n = 16, .k = 2048 } },
     .{ .name = "m2 n16 k6144 offsets", .shape = .{ .rows = 2, .n = 16, .k = 6144 }, .at = .{ .x = 128, .w = 64, .scales = 256, .biases = 384, .out = 512 } },
     .{ .name = "m32 n2048 k6144", .shape = .{ .rows = 32, .n = 2048, .k = 6144 } },
+    .{ .name = "m1 n4096 k2048", .shape = .{ .rows = 1, .n = 4096, .k = 2048 } },
+    .{ .name = "m1 n6144 k2048", .shape = .{ .rows = 1, .n = 6144, .k = 2048 } },
+    .{ .name = "m1 n2048 k6144 offsets", .shape = .{ .rows = 1, .n = 2048, .k = 6144 }, .at = .{ .x = 128, .w = 64, .scales = 256, .biases = 384, .out = 512 } },
+    .{ .name = "m32 n6144 k2048", .shape = .{ .rows = 32, .n = 6144, .k = 2048 } },
     .{ .name = "m1 n140000 k2048 chunked on a 128 MiB range", .shape = .{ .rows = 1, .n = 140000, .k = 2048 }, .at = .{ .x = 128, .w = 64, .scales = 256, .biases = 384, .out = 512 } },
 };
 
