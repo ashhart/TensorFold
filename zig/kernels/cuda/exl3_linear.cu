@@ -101,16 +101,8 @@ __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[8 * lane_w
 }
 
 // Programmatic dependent launch: wait for the previous kernel's writes here (a no-op without it); trigger the next.
-__device__ __forceinline__ void pdl_wait() {
-#if __CUDA_ARCH__ >= 900
-    asm volatile("griddepcontrol.wait;\n" ::: "memory");
-#endif
-}
-__device__ __forceinline__ void pdl_trigger() {
-#if __CUDA_ARCH__ >= 900
-    asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");
-#endif
-}
+__device__ __forceinline__ void pdl_wait() { qmm_frag::grid_wait(); }
+__device__ __forceinline__ void pdl_trigger() { qmm_frag::grid_launch(); }
 
 // xh = fp16(((x * suh) @ H) / sqrt(128)): one warp per 128 columns, one block of 4 warps per 512.
 __device__ __forceinline__ void rot_in_body(const void* x, int x_dtype, const half* suh, half* xh, int kdim) {

@@ -16,17 +16,11 @@ struct WcArgs {
     int wk;
 };
 
-__device__ __forceinline__ void wc_cp16(void* dst, const void* src) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((uint32_t)__cvta_generic_to_shared(dst)), "l"(src));
-}
-__device__ __forceinline__ void wc_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+__device__ __forceinline__ void wc_cp16(void* dst, const void* src) { tf_common::cp16(dst, src); }
+__device__ __forceinline__ void wc_commit() { tf_common::cp_commit(); }
 template <int N_>
-__device__ __forceinline__ void wc_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N_)); }
-__device__ __forceinline__ void wc_ldsm4(uint32_t (&a)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
-                 : "r"((uint32_t)__cvta_generic_to_shared(p)));
-}
+__device__ __forceinline__ void wc_wait() { tf_common::cp_wait<N_>(); }
+__device__ __forceinline__ void wc_ldsm4(uint32_t (&a)[4], const void* p) { qmm_frag::ldmatrix4(a, p); }
 
 // A lane's words of one tile from shared memory (ldg_lane_words without the read-only cache).
 template <int K2>

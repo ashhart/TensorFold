@@ -36,6 +36,7 @@ def command(compiler, source, arch):
     """Use Clang's semantic parser only, with a fixed SDK declaration surface."""
     flags = [compiler, "-std=c++20", "-x", "cuda", "--cuda-device-only", "-nocudainc", "-nocudalib",
              "-fsyntax-only", "-ferror-limit=0", "-Wno-unknown-pragmas", "-I", str(HEADERS),
+             "-I", str(ROOT / "zig/kernels/cuda"),
              "-include", str(HEADERS / "cuda_runtime.h"), "-U__CUDA_ARCH__", f"-D__CUDA_ARCH__={arch}"]
     if arch >= 1200:
         flags += [f"-D__CUDA_ARCH_FEAT_SM{arch // 10}_ALL"]
