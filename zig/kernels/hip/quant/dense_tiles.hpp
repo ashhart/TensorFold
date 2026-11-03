@@ -6,6 +6,7 @@
 #include "quant/bf16_decoder.hpp"
 #include "tiles/epilogue.hpp"
 #include "tiles/gemm.hpp"
+#include "tiles/wmma12_gemm.hpp"
 
 namespace tf {
 namespace rocm {
@@ -19,6 +20,13 @@ __global__ void __launch_bounds__(256) dense_gemm_block(Affine a) {
     (void)a;
     __builtin_trap();
 #endif
+}
+
+// The same product on gfx12's WMMA tile: its own sum order (k order, 16 a step), so its own bound, not dot2's bytes.
+// A build without gfx12 WMMA keeps the symbol and traps.
+template <typename T, class G>
+__global__ void __launch_bounds__(G::Threads) dense_wmma12_gemm(Affine a) {
+    wmma12_gemm_tile<G, IdentityAct<T>, GemmOut<T>>(a);
 }
 
 }  // namespace rocm

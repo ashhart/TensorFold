@@ -4,6 +4,7 @@ const t = @import("types.zig");
 const quant = @import("core").quant;
 const launches = @import("../launches.zig");
 const affine_launch = @import("../launches/affine.zig");
+pub const DenseTile = @import("../launches/dense.zig").Tile;
 const registry = @import("core").registry;
 const Ops = @import("ops.zig").Ops;
 const counting = @import("../launches/util.zig").counting;
@@ -42,7 +43,7 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
                 if (m == 0 or x.kind != .bf16) return error.BadShape;
                 const kind: t.Kind = if (f32_out) .f32 else .bf16;
                 const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * kind.size()), .kind = kind };
-                try denseGemm(o, x, h.weight, out, m, proj.n, proj.k);
+                try denseGemm(o, .dot2, x, h.weight, out, m, proj.n, proj.k);
                 return out;
             },
             else => return error.BadShape,
@@ -374,12 +375,12 @@ pub fn denseRows(o: Ops, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, 
     try o.l.tf_dense_rows(p(x.ptr), @backingInt(x.kind), f(w), p(out.ptr), int(rows), int(n), int(k), o.stream);
 }
 
-/// x (rows, k) BF16 times BF16 weights [n, k] on the dot2 GEMM tile: `out` fp32, or BF16 rounded once.
-pub fn denseGemm(o: Ops, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, k: usize) Error!void {
+/// x (rows, k) BF16 times BF16 weights [n, k] on `tile`: `out` fp32, or BF16 rounded once.
+pub fn denseGemm(o: Ops, tile: DenseTile, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, k: usize) Error!void {
     if (x.kind != .bf16 or out.kind == .f16) return error.BadShape;
     const wide = out.kind == .f32;
-    if (o.l.dense.refusal(x.ptr, w, int(rows), int(n), int(k)) != null) return error.BadShape;
-    try o.l.dense.gemm(o.l.r, x.ptr, w, if (wide) out.ptr else 0, if (wide) 0 else out.ptr, int(rows), int(n), int(k), o.stream);
+    if (o.l.dense.refusal(tile, x.ptr, w, int(rows), int(n), int(k)) != null) return error.BadShape;
+    try o.l.dense.gemm(o.l.r, tile, x.ptr, w, if (wide) out.ptr else 0, if (wide) 0 else out.ptr, int(rows), int(n), int(k), o.stream);
 }
 
 /// The kernels' element kind of a dense weight's dtype.
