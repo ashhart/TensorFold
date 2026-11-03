@@ -154,7 +154,8 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     const t = (root.get("text_config") orelse parsed.value).object;
     for ([_]?std.json.Value{ t.get("tensorfold_activation_dtype"), root.get("tensorfold_activation_dtype") }) |maybe| if (maybe) |v| {
         if (v != .string or !std.mem.eql(u8, v.string, served_activation)) {
-            std.debug.print("config.json: tensorfold_activation_dtype = {s}: the native engine serves bfloat16 activations only\n", .{dtypeName(v)});
+            if (!@import("builtin").is_test) // the tests check the error; the line is for whoever starts the server
+                std.debug.print("config.json: tensorfold_activation_dtype = {s}: the native engine serves bfloat16 activations only\n", .{dtypeName(v)});
             return error.UnsupportedActivationDtype;
         }
     };
