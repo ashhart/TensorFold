@@ -102,9 +102,9 @@ fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, en
         defer o.arena.release(mark);
         const xs = at(x, start * s.hidden);
         const y = try o.project(at(attn, start * qw), l.o, rows, false);
-        try o.add(xs, y, xs, rows * s.hidden);
         const normed = try take(o, m.act, rows * s.hidden);
-        try o.rms(xs, l.post_norm, normed, rows, s.hidden, @floatCast(s.eps));
+        // the residual add and the post-attention norm in one launch, with add-then-rms's bits
+        try o.residualRms(xs, y, l.post_norm, normed, rows, s.hidden, @floatCast(s.eps));
         if (taps) |tp| try copyRows(o, normed, at(.{ .ptr = tp.post, .kind = m.act }, start * s.hidden), rows * s.hidden);
         const gate = try o.project(normed, l.gate, rows, false);
         const up = try o.project(normed, l.up, rows, false);
