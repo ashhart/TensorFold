@@ -46,3 +46,7 @@ test {
 test {
     _ = @import("issue1205_test.zig");
 }
+
+test {
+    _ = @import("session_budget.zig");
+}

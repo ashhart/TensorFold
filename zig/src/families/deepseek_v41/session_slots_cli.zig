@@ -71,7 +71,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []cons
     const msg: usize = @intCast(try envInt("TF_DSV41_SESSION_SLOTS_MSG", 48));
     var rng = std.Random.DefaultPrng.init(try envInt("TF_DSV41_SESSION_SLOTS_SEED", 4141));
     const drafts = if (std.c.getenv("TF_DSV41_DRAFTS")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else false;
-    const s = try se.Served.open(gpa, io, pack, assets, drafts, null);
+    const s = try se.Served.open(gpa, io, pack, assets, drafts, null, null);
     defer se.Served.close(s);
     const eng = s.engine();
     const ss = s.m.sessions;
