@@ -34,6 +34,11 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 test "Draft frames: the actual drafter advertises batched holds" {
     var d: q.draft.Draft = undefined;
+    var target: q.engine.Engine = undefined;
+    target.g.hidden = 256; // the drafter's facts read the target's shape: this small one keeps its copy match
+    target.g.layers = 1;
+    target.g.experts = 0;
+    d.e = &target;
     d.projection_role = .proposal;
     d.frame_streams = 128;
     d.scratch_one = 0;
