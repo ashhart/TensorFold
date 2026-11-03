@@ -1,8 +1,9 @@
 # Dense BF16 Qwen3.5 prompt-score qualification
 
-Partial receipt for #1136 and draft PR #2020. The complete strict CUDA suite,
-served performance/lifecycle, cold-prefill, existing-format and memory receipts
-are still pending. These files establish only the checks stated below.
+Partial receipt for #1136 and draft PR #2020. The complete strict CUDA run
+finished with exit 1 because of launch-limit problems. Served performance,
+lifecycle, cold-prefill, existing-format and memory receipts are still pending.
+These files establish only the checks stated below.
 
 ## Source and environment
 
@@ -62,3 +63,28 @@ python3 tools/zig/qwen35_scores_fp64.py MODEL captures --revision fc05daec18b0a7
 See the [recipe](../../recipes/qwen35-bf16-scoring.md) for build commands,
 precision contracts, intentional refusals and the remaining readiness gates.
 No throughput improvement or external-provider comparison is established here.
+
+## Complete CUDA contract
+
+[cuda-contract.log](cuda-contract.log) retains the complete run, and
+[cuda-contract.json](cuda-contract.json) identifies its binary, verdict and known findings.
+The required command was run without a diagnostic subset or disabled gate:
+
+```text
+SUMMARY 550 kernels: 550 pass gates 1-4, 0 fail, 6 known findings; 365 controls: 365 red as planted, 0 missed; 342 limit problems; gates 4013421 ms, limits 726300 ms
+exit: 1
+```
+
+All four new function records pass on the live sm_120 device. Six pre-existing
+NaN findings reproduce: Qwen BF16/FP8 paged and contiguous attention, plus GLM
+scores/index scores. No known entry or numerical tolerance was added to hide a
+failure. The 342 limit problems comprise 188 registry problems and 154 live
+record/device mismatches. This is a failed full contract, not a clean pass.
+
+[limits-comparison.json](limits-comparison.json) records a separate parent and
+candidate five-SM asset audit: both exit 1 with 637 problems and identical
+639-line diagnostic multisets (including the two final failure lines). All 20
+new function/SM records are current. This isolates no new asset-audit diagnostic;
+it does not establish a parent full/live-only run, which was not run. Existing
+record declarations are unchanged apart from appending the four new records.
+Launch-limit catalog cleanup or a maintainer resolution remains a readiness gap.
