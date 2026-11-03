@@ -63,7 +63,7 @@ pub fn generate(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []
     defer arena.deinit();
     const a = arena.allocator();
     const text = try std.Io.Dir.cwd().readFileAlloc(io, trace, a, .limited(1 << 30));
-    const s = try se.Served.open(gpa, io, pack, assets, drafts(), null);
+    const s = try se.Served.open(gpa, io, pack, assets, drafts(), null, null);
     defer se.Served.close(s);
     const eng = s.engine();
     const Keyed = struct { seed: u64, temperature: f64, top_k: u32, top_p: f64, min_p: f64 = 0 };

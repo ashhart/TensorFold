@@ -100,7 +100,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []cons
     }
     const n = lines.items.len;
     if (n == 0 or n > 16) return error.BadTrace;
-    const s = try se.Served.open(gpa, io, pack, assets, true, null);
+    const s = try se.Served.open(gpa, io, pack, assets, true, null, null);
     defer se.Served.close(s);
     if (s.m.slot_pass == null) return error.SlotDraftsOff; // TF_DSV41_SLOTS > 1 and TF_DSV41_SLOT_DRAFTS=1
     const eng = s.engine();
