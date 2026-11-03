@@ -1,5 +1,6 @@
 //! Spark-X2.5/2.6 (spark2_5) admission: the 4B's geometry exactly, MLX affine widths, its RoPE per layer kind.
 const std = @import("std");
+const rope_freq = @import("core").rope_freq;
 
 pub const vocab = 131072;
 pub const head_dim = 256;
@@ -76,15 +77,7 @@ pub fn full(index: usize) bool {
 pub fn inverseFrequencies(is_full: bool, out: []f32) void {
     const rot: usize = if (is_full) full_rotated else head_dim;
     const theta = if (is_full) full_theta else sliding_theta;
-    for (out, 0..) |*f, i| {
-        if (2 * i >= rot) {
-            f.* = 0;
-            continue;
-        }
-        const e: f32 = @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(rot));
-        const p: f32 = @floatCast(std.math.pow(f64, theta, e));
-        f.* = 1.0 / p;
-    }
+    rope_freq.proportional(theta, rot, rot / 2, out);
 }
 
 fn object(v: std.json.Value) Error!std.json.ObjectMap {
@@ -242,6 +235,26 @@ test "other layouts are refused by name" {
         defer gpa.free(bytes);
         try std.testing.expect(!std.mem.eql(u8, bytes, fixture));
         try std.testing.expectError(c[2], parse(gpa, bytes));
+    }
+}
+
+test "the RoPE table is transformers' fp32 words, 0 past the rotated dims" {
+    var out: [head_dim / 2]f32 = undefined;
+    var old: [head_dim / 2]f32 = undefined;
+    for ([_]bool{ false, true }) |is_full| {
+        inverseFrequencies(is_full, &out);
+        const rot: usize = if (is_full) full_rotated else head_dim;
+        const theta = if (is_full) full_theta else sliding_theta;
+        for (&old, 0..) |*f, i| {
+            if (2 * i >= rot) {
+                f.* = 0;
+                continue;
+            }
+            const e: f32 = @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(rot));
+            const p: f32 = @floatCast(std.math.pow(f64, theta, e));
+            f.* = 1.0 / p;
+        }
+        try std.testing.expectEqualSlices(f32, &old, &out);
     }
 }
 

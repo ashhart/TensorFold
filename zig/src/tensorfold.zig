@@ -107,6 +107,8 @@ pub const shared_kv = @import("core/shared_kv.zig");
 
 pub const kv_pool = @import("core/kv_pool.zig");
 
+pub const rope_freq = @import("core/rope_freq.zig");
+
 pub const shared_attention = @import("core/shared_attention.zig");
 
 pub const tile_qmm = @import("core/tile_qmm.zig");

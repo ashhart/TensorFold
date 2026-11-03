@@ -89,3 +89,12 @@ test "planted: the fp32-pow form misses transformers' words for theta 1e7 over 6
     try std.testing.expectEqual(@as(usize, 15), differ);
     try std.testing.expectEqual(@as(u32, 5), most);
 }
+
+test "the GLM vision copy's form E words (theta 1e4, dim 32) are the helper's" {
+    var out: [16]f32 = undefined;
+    inverseFrequencies(10000.0, 32, &out);
+    for (out, 0..) |got, k| {
+        const old: f32 = 1.0 / @as(f32, @floatCast(std.math.pow(f64, 10000.0, @as(f64, @floatFromInt(2 * k)) / 32.0)));
+        try std.testing.expectEqual(old, got);
+    }
+}
