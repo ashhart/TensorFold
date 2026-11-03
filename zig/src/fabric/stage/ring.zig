@@ -2,6 +2,7 @@
 const std = @import("std");
 const net = @import("net.zig");
 const frame = @import("frame.zig");
+const secret = @import("secret.zig");
 
 pub const Peer = struct { host: []const u8, port: u16 };
 
@@ -12,13 +13,15 @@ pub const Options = struct {
     peers: []const Peer,
     /// The checkpoint's and layout's fingerprint: a neighbour with another one is refused.
     fingerprint: [32]u8,
+    /// The ring's shared key (secret.zig): each link proves it both ways before any frame.
+    key: secret.Key,
     /// How long the ring may take to form, and each later send or receive by default.
     timeout_ns: u64 = 60 * std.time.ns_per_s,
     /// The largest payload a frame may carry (a prompt chunk's rows, a plan).
     max_bytes: u64 = 256 << 20,
 };
 
-pub const Error = net.Error || frame.Error || error{ BadRing, NotNeighbour, OtherWorld, OtherFingerprint, OutOfOrder, WrongKind, Stopped, Broken };
+pub const Error = net.Error || frame.Error || secret.Error || error{ BadRing, NotNeighbour, OtherWorld, OtherFingerprint, BadSecret, OutOfOrder, WrongKind, Stopped, Broken };
 
 const hello_bytes = 40; // rank, world, fingerprint
 
@@ -41,7 +44,7 @@ pub const Ring = struct {
         return net.listen(o.peers[o.rank].host, o.peers[o.rank].port);
     }
 
-    /// Connects to the next rank, accepts the one before, and checks both ends agree on the ring (closes `listener`).
+    /// Connects to the next rank, accepts the one before; both ends check the ring and the key (closes `listener`).
     pub fn join(o: Options, listener: net.Fd) Error!Ring {
         defer net.close(listener);
         try check(o);
@@ -62,6 +65,7 @@ pub const Ring = struct {
         if (std.mem.readInt(u32, theirs[4..8], .little) != o.world) return error.OtherWorld;
         if (std.mem.readInt(u32, theirs[0..4], .little) != (o.rank + o.world - 1) % o.world) return error.NotNeighbour;
         if (!std.mem.eql(u8, theirs[8..40], &o.fingerprint)) return error.OtherFingerprint;
+        try prove(o, next, prev, deadline);
         return r;
     }
 
@@ -118,6 +122,28 @@ pub const Ring = struct {
         return h;
     }
 };
+
+/// Each link's mutual proof of the key: nonces both ways, then each end's HMAC over them; the key never crosses.
+fn prove(o: Options, next: net.Fd, prev: net.Fd, deadline: u64) Error!void {
+    const mine_n = try secret.nonce();
+    const mine_p = try secret.nonce();
+    try net.sendAll(next, &mine_n, deadline);
+    try net.sendAll(prev, &mine_p, deadline);
+    var their_n: secret.Nonce = undefined;
+    var their_p: secret.Nonce = undefined;
+    try net.recvExact(next, &their_n, deadline);
+    try net.recvExact(prev, &their_p, deadline);
+    const out_n = secret.proof(&o.key, .connector, o.rank, o.world, &o.fingerprint, &their_n, &mine_n);
+    const out_p = secret.proof(&o.key, .acceptor, o.rank, o.world, &o.fingerprint, &their_p, &mine_p);
+    try net.sendAll(next, &out_n, deadline);
+    try net.sendAll(prev, &out_p, deadline);
+    var got: secret.Proof = undefined;
+    try net.recvExact(prev, &got, deadline);
+    const before = (o.rank + o.world - 1) % o.world;
+    if (!secret.same(&got, &secret.proof(&o.key, .connector, before, o.world, &o.fingerprint, &mine_p, &their_p))) return error.BadSecret;
+    try net.recvExact(next, &got, deadline);
+    if (!secret.same(&got, &secret.proof(&o.key, .acceptor, (o.rank + 1) % o.world, o.world, &o.fingerprint, &mine_n, &their_n))) return error.BadSecret;
+}
 
 fn check(o: Options) Error!void {
     if (o.world < 2 or o.rank >= o.world or o.peers.len != o.world) return error.BadRing;

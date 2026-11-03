@@ -3,6 +3,7 @@ pub const net = @import("net.zig");
 pub const frame = @import("frame.zig");
 pub const ring = @import("ring.zig");
 pub const config = @import("config.zig");
+pub const secret = @import("secret.zig");
 
 pub const Ring = ring.Ring;
 pub const Options = ring.Options;
@@ -13,4 +14,5 @@ test {
     _ = frame;
     _ = ring;
     _ = config;
+    _ = secret;
 }
