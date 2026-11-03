@@ -134,6 +134,10 @@ fn share32(gpa: std.mem.Allocator, pending: []const [3]formats.Pending, cut: Cut
                 if (!@import("builtin").is_test) std.log.err("layers.{d}.mlp.experts.{d}.{s}: not the layer's csf0_v1 shape", .{ cut.index, cut.first + e, proj });
                 return error.BadNvfp4;
             }
+            if (p.csf0.matrix.pastFinite(p.csf0.k)) |r| { // every row, so every rank refuses the same checkpoint
+                if (!@import("builtin").is_test) std.log.err("layers.{d}.mlp.experts.{d}.{s}: row {d}'s csf0_v1 base and offset pass 0x7e, e4m3's largest finite", .{ cut.index, cut.first + e, proj, r });
+                return error.BadNvfp4;
+            }
             l.* = p.csf0;
         }
         // gate and up: the rank's rows; down: every row, the rank's columns
@@ -214,7 +218,7 @@ test "a csf0_v1 layer's rank is packed as its stored parts cut, by any number of
         const codes = try a.alloc(u8, n * k / 2);
         rng.bytes(codes);
         const bases = try a.alloc(u8, n);
-        rng.bytes(bases);
+        for (bases) |*b| b.* = rng.uintLessThan(u8, 0x70); // base + 15 stays finite
         const offsets = try a.alloc(u8, n * (k / 64));
         rng.bytes(offsets);
         p.* = .{ .csf0 = .{ .n = n, .k = k, .matrix = .{ .codes = codes, .bases = bases, .offsets = offsets }, .global = 0.25 + @as(f32, @floatFromInt(m)) } };
@@ -261,6 +265,41 @@ test "a csf0_v1 layer's rank is packed as its stored parts cut, by any number of
     try std.testing.expectError(error.BadNvfp4, wordsOf(true, 0, 96, d));
     try std.testing.expectError(error.BadNvfp4, wordsOf(true, 32, 64, d));
     try std.testing.expectEqual(@as(usize, X.bytes(1, 96, d, 2) / 4), (try wordsOf(false, 32, 96, d))[0]);
+}
+
+test "a csf0_v1 row whose base and offset pass 0x7e is refused, outside the rank's rows too; 0x7e itself packs" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const inter = 128; // this rank holds rows [0, 64)
+    const d = 64;
+    var bases: [3][]u8 = undefined;
+    var offsets: [3][]u8 = undefined;
+    var pending: [1][3]formats.Pending = undefined;
+    for (&pending[0], &bases, &offsets, 0..) |*p, *b, *o, m| {
+        const n: usize = if (m < 2) inter else d;
+        const k: usize = if (m < 2) d else inter;
+        b.* = try a.alloc(u8, n);
+        @memset(b.*, 0x40);
+        o.* = try a.alloc(u8, n * (k / 64));
+        @memset(o.*, 0x21);
+        const codes = try a.alloc(u8, n * k / 2);
+        @memset(codes, 0x22);
+        p.* = .{ .csf0 = .{ .n = n, .k = k, .matrix = .{ .codes = codes, .bases = b.*, .offsets = o.* }, .global = 1 } };
+    }
+    const cut: Cut = .{ .index = 5, .d = d, .ni = 64, .lo = 0, .per = inter * d / 16 };
+    const w = try wordsOf(true, cut.lo, cut.ni, d);
+    const got = try a.alloc(u32, w[0] + w[1] + 3);
+    const out = layout(got, 1, w[0], w[1]);
+    bases[2][7] = 0x6f;
+    offsets[2][7 * 2 + 1] = 0xf0;
+    try pack(gpa, &pending, cut, out, 1);
+    bases[2][7] = 0x70;
+    try std.testing.expectError(error.BadNvfp4, pack(gpa, &pending, cut, out, 1));
+    bases[2][7] = 0x40;
+    bases[0][100] = 0x7f; // gate's row 100: another rank's, with offsets of 1 and 2
+    try std.testing.expectError(error.BadNvfp4, pack(gpa, &pending, cut, out, 1));
 }
 
 test "packers pack the same bytes as the loader's one thread, whole or a piece at a time through the mapped staging" {
