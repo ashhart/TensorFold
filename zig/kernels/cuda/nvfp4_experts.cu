@@ -325,11 +325,7 @@ __device__ __forceinline__ uint32_t e4m3x2(uint32_t x) {
 }
 
 // a * b in bf16 pairs; exact for e2m1 codes times e4m3 scales (six significant bits at most).
-__device__ __forceinline__ uint32_t mul2(uint32_t a, uint32_t b) {
-  uint32_t r;
-  asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(a), "r"(b), "r"(0x80008000u));
-  return r;
-}
+using tf_common::mul2;
 
 // mma from zero (C = 0): the same sums as the decode form's zeroed p[4], no register moves.
 __device__ __forceinline__ void mma_z(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,

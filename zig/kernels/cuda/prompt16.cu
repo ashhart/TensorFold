@@ -17,19 +17,9 @@ constexpr int GS = 64;
 
 using tf_common::fp4pair;
 
-__device__ __forceinline__ uint32_t fp8pair(uint32_t w, uint32_t unit) {
-    const uint32_t x = (w & 0xFFu) | ((w & 0xFF00u) << 8);
-    const uint32_t t = ((x & 0x007F007Fu) << 4) | ((x & 0x00800080u) << 8);
-    uint32_t r;
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(unit), "r"(0x80008000u));
-    return r;
-}
 
-__device__ __forceinline__ uint32_t mul2(uint32_t a, uint32_t b) {
-    uint32_t r;
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(a), "r"(b), "r"(0x80008000u));
-    return r;
-}
+
+using tf_common::mul2;
 
 __device__ __forceinline__ uint32_t comp(const uint4& v, int c) { return c == 0 ? v.x : c == 1 ? v.y : c == 2 ? v.z : v.w; }
 
@@ -117,7 +107,7 @@ __global__ void __launch_bounds__(WM * WN * 32) prompt_kernel(
                 const uint32_t b4 = *reinterpret_cast<const uint32_t*>(ps + (jj >> 3) * 256 + col * 4);
 #pragma unroll
                 for (int blk = 0; blk < 4; ++blk)
-                    sv[j][blk] = fp8pair(((b4 >> (8 * blk)) & 0xFFu) * 0x101u, 0x7B807B80u);
+                    sv[j][blk] = tf_common::fp8pair_unit(((b4 >> (8 * blk)) & 0xFFu) * 0x101u, 0x7B807B80u);
             } else {
                 wq[j] = reinterpret_cast<const uint4*>(pw)[jj * 32 + lane];
                 if constexpr (MODE == MXFP8) {
@@ -149,8 +139,8 @@ __global__ void __launch_bounds__(WM * WN * 32) prompt_kernel(
                 } else {
                     const uint32_t word = comp(wq[j], kt);
                     const uint32_t unit = MODE == MXFP8 ? sv[j][kt >> 1] : 0x7B807B80u;
-                    b0 = fp8pair(word & 0xFFFFu, unit);
-                    b1 = fp8pair(word >> 16, unit);
+                    b0 = tf_common::fp8pair_unit(word & 0xFFFFu, unit);
+                    b1 = tf_common::fp8pair_unit(word >> 16, unit);
                 }
 #pragma unroll
                 for (int i = 0; i < T::MT; ++i) mma(acc[i][j], a[i], b0, b1);
@@ -343,7 +333,7 @@ __global__ void __launch_bounds__(WM * WN * 32, 1) prompt_lean(
                     wq[j] = make_uint4(u.x, u.y, 0u, 0u);
                     const uint32_t b4 = *reinterpret_cast<const uint32_t*>(ps + (jj >> 3) * 256 + col * 4);
                     // fp8pair is lane-wise: two blocks a call, each half then copied to both (sv as prompt_kernel's)
-                    const uint32_t s01 = fp8pair(b4, 0x7B807B80u), s23 = fp8pair(b4 >> 16, 0x7B807B80u);
+                    const uint32_t s01 = tf_common::fp8pair_unit(b4, 0x7B807B80u), s23 = tf_common::fp8pair_unit(b4 >> 16, 0x7B807B80u);
                     sv[j][0] = prmt(s01, 0u, 0x1010u);
                     sv[j][1] = prmt(s01, 0u, 0x3232u);
                     sv[j][2] = prmt(s23, 0u, 0x1010u);
@@ -370,8 +360,8 @@ __global__ void __launch_bounds__(WM * WN * 32, 1) prompt_lean(
                         b1 = mul2(b1, sv[j][kt]);
                     } else {
                         const uint32_t word = comp(wq[j], kt);
-                        b0 = fp8pair(word & 0xFFFFu, 0x7B807B80u);
-                        b1 = fp8pair(word >> 16, 0x7B807B80u);
+                        b0 = tf_common::fp8pair_unit(word & 0xFFFFu, 0x7B807B80u);
+                        b1 = tf_common::fp8pair_unit(word >> 16, 0x7B807B80u);
                     }
 #pragma unroll
                     for (int i = 0; i < T::MT; ++i) mma(acc[i][j], a[i], b0, b1);
