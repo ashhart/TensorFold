@@ -81,6 +81,7 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     defer staging.deinit();
     var ops = try vk.ops.Ops.init(&dev, .{
         .qmm_bf16 = &ops_shaders.qmm_bf16,
+        .qmm_q4_vec4 = &ops_shaders.qmm_q4_vec4,
         .dequant_bf16 = &ops_shaders.dequant_bf16,
         .gather_u32 = &ops_shaders.gather_u32,
         .gather_u16 = &ops_shaders.gather_u16,
