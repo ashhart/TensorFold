@@ -5,6 +5,8 @@ import { supportedBenchmarkReceiptVersion } from './version'
 
 export const BENCHMARK_SUITE_SHA = '9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be'
 export const BENCHMARK_RECEIPT_MAX_BYTES = 1024 * 1024
+export type BenchmarkFormFactor = 'Mac mini' | 'Mac Studio' | 'MacBook Pro' | 'MacBook Air' | 'iMac' | 'Mac Pro'
+export type ParsedBenchmarkReceipt = ModelBenchmarkReceipt & { hardware: ModelBenchmarkReceipt['hardware'] & { form_factor?: BenchmarkFormFactor | null } }
 const SAMPLE_KEYS = ['fixture_id', 'temperature', 'repeat', 'seed', 'status', 'prompt_tokens', 'completion_tokens', 'cached_tokens', 'delivery_seconds', 'delivery_tps', 'ttft_seconds', 'end_to_end_seconds', 'server_decode_tps', 'server_decode_seconds', 'prefill_seconds', 'token_sha', 'error_code']
 const ERROR_CODES = new Set(['http_error', 'connection_error', 'timeout', 'cancelled', 'server_error', 'invalid_stream', 'truncated_stream', 'missing_usage', 'invalid_usage', 'empty_output', 'unexpected_finish', 'token_count_mismatch', 'unmeasured_delivery'])
 function invalid(): never { throw new Error('The local benchmark receipt is invalid or contains unsupported fields.') }
@@ -20,7 +22,7 @@ function number(value: unknown, nullable = true, integer = false, max = 1e15): v
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max || integer && !Number.isSafeInteger(value)) invalid()
 }
 function digest(value: unknown, sizes = [64]): void { if (value !== null && (typeof value !== 'string' || !sizes.includes(value.length) || !/^[a-f0-9]+$/.test(value))) invalid() }
-export function parseBenchmarkReceipt(raw: string, expected?: { model: string; serial: boolean; engineVersion?: string }, now = Date.now()): ModelBenchmarkReceipt {
+export function parseBenchmarkReceipt(raw: string, expected?: { model: string; serial: boolean; engineVersion?: string }, now = Date.now()): ParsedBenchmarkReceipt {
   if (Buffer.byteLength(raw) > BENCHMARK_RECEIPT_MAX_BYTES) invalid()
   let value: any
   try { value = strictBenchmarkJson(raw) } catch { invalid() }
@@ -41,7 +43,9 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
   digest(model.revision, [40, 64]); digest(model.config_sha256); digest(model.tokenizer_sha256)
   text(model.family, true); text(model.quantization, true)
   const hardware = value.hardware
-  object(hardware, ['cpu_model', 'system_memory_bytes', 'memory_type', 'gpus', 'gpu_count', 'source'])
+  const hasFormFactor = hardware != null && Object.hasOwn(hardware, 'form_factor')
+  object(hardware, ['cpu_model', 'system_memory_bytes', 'memory_type', 'gpus', 'gpu_count', 'source', ...(hasFormFactor ? ['form_factor'] : [])])
+  if (hasFormFactor && hardware.form_factor !== null && !['Mac mini', 'Mac Studio', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Pro'].includes(hardware.form_factor)) invalid()
   text(hardware.cpu_model, true); number(hardware.system_memory_bytes, true, true); number(hardware.gpu_count, true, true, 256)
   if (!['unified', 'dedicated', 'unknown'].includes(hardware.memory_type) || !['detected', 'partial', 'unavailable'].includes(hardware.source) || !Array.isArray(hardware.gpus) || hardware.gpus.length > 256) invalid()
   for (const gpu of hardware.gpus) { object(gpu, ['name', 'memory_bytes', 'cores']); text(gpu.name); number(gpu.memory_bytes, true, true); number(gpu.cores, true, true, 100_000) }
@@ -70,7 +74,7 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
     if (sample.status === 'ok' && (sample.completion_tokens !== 256 || sample.delivery_tps === null || sample.error_code !== null)) invalid()
     if (sample.status === 'early_eos' && (sample.completion_tokens === null || sample.completion_tokens >= 256)) invalid()
   }
-  return value as ModelBenchmarkReceipt
+  return value as ParsedBenchmarkReceipt
 }
 function spread(values: (number | null)[], complete: boolean): ModelBenchmarkSpread | null {
   if (!complete || values.some(value => value === null)) return null

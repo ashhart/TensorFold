@@ -4,9 +4,10 @@ import { syntheticBenchmarkReceipt } from './fixtures'
 import type { SavedModelBenchmark } from './storage'
 import type { BenchmarkProcessResult } from './process'
 import { BENCHMARK_ENGINE_VERSION } from './version'
+import { parseBenchmarkReceipt, type BenchmarkFormFactor } from './receipt'
 
 const input = { id: 'benchmark_synthetic_0001', model: 'example-org/synthetic-model' }
-function fixture() {
+function fixture(formFactor?: BenchmarkFormFactor | null) {
   let records: SavedModelBenchmark[] = []
   let valid = true; let missing = false; let saveFails = false; let listFails = false; let restoreFails = false
   let pauses = 0; let restores = 0; let releases = 0; let processes = 0; let cleanups = 0
@@ -18,7 +19,12 @@ function fixture() {
     reserve: async () => ({ previousModel: 'example-org/prior-model', pause: async () => { pauses++ }, restore: async () => { restores++; if (restoreFails) throw new Error('/private/operator/restore') }, release: () => { releases++ } }),
     workspace: async () => ({ directory: '/private/synthetic-workspace', receiptPath: '/private/synthetic-workspace/receipt.json', remove: async () => { cleanups++ } }),
     process: () => { processes++; return { done: new Promise<BenchmarkProcessResult>(resolve => { finish = resolve }), cancel: () => finish({ code: 130, cancelled: true, overflow: false, failed: false }) } },
-    readReceipt: async () => missing ? null : syntheticBenchmarkReceipt(input.model),
+    readReceipt: async () => {
+      if (missing) return null
+      const receipt = syntheticBenchmarkReceipt(input.model)
+      if (formFactor !== undefined) Object.assign(receipt.hardware, { form_factor: formFactor })
+      return receipt
+    },
     store,
   }
   const controller = new ModelBenchmarks(deps)
@@ -29,6 +35,15 @@ async function running(f: ReturnType<typeof fixture>) {
   throw new Error('Synthetic benchmark did not reach running')
 }
 const normal = fixture()
+for (const family of [null, 'Mac mini', 'Mac Studio', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Pro'] as const) {
+  const f = fixture(family)
+  await f.controller.start(input); await running(f); f.finish(); await f.controller.settle()
+  assert.equal((await f.controller.snapshot())?.state, 'complete', 'A known Mac family cannot break a finished local benchmark')
+  assert.equal(Reflect.get((await f.controller.snapshot())!.metadata!.hardware, 'form_factor'), family)
+  assert.equal(parseBenchmarkReceipt(JSON.stringify(await f.controller.receiptForExport(input.id))).hardware.form_factor, family)
+  const reopened = new ModelBenchmarks(f.deps)
+  assert.equal(parseBenchmarkReceipt(JSON.stringify(await reopened.receiptForExport(input.id))).hardware.form_factor, family, 'Saved controller history retains validated product families')
+}
 const first = await normal.controller.start(input)
 assert.equal(first.state, 'preparing')
 await assert.rejects(normal.controller.start({ ...input, id: 'benchmark_synthetic_0002' }), /current local benchmark/)
