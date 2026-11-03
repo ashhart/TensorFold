@@ -66,3 +66,12 @@ test "BF16 prompt contract: moved registration set binds stable contexts and kee
         try std.testing.expect(tile.prompt == &set.prompt);
     }
 }
+
+test "BF16 prompt contract: callback storage survives the registration call" {
+    var tile: Tile = .{
+        .product = .{ .rig = undefined, .lane = undefined, .mode = .bf16, .clusters = false },
+        .prompt = undefined,
+    };
+    const registered = tile.kernel();
+    try std.testing.expect(registered.vt == &Tile.callbacks);
+}
