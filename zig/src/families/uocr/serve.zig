@@ -152,7 +152,8 @@ pub const Model = struct {
         const m = cast(ptr);
         if (m.stream != null) return error.UocrBusy;
         const ids = stream.prompt();
-        if (ids.len == 0 or ids.len + stream.max_new + 1 > m.decoder.cap) return error.UocrPromptTooLong;
+        // the prompt's rows, then a row for every reply token fed back: all but the last, which ends the reply
+        if (ids.len == 0 or ids.len + @max(stream.max_new, 1) - 1 > m.decoder.cap) return error.UocrPromptTooLong;
         var arena: std.heap.ArenaAllocator = .init(m.gpa);
         defer arena.deinit();
         const rows = try m.encodeImages(arena.allocator(), stream.images);
