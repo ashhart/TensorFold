@@ -109,15 +109,19 @@ test "a queue answered while the host closes runs the started score and fails th
     for (asks[1..]) |ask| try std.testing.expect(ask.failed and ask.done);
 }
 
-/// The fake backend's decision: branch b's label i scores trunk.len + branch.len + i; empty labels fail.
+/// The fake decision: branch b's label i scores trunk.len + branch.len + i; no labels is refused, no trunk fails.
 const Decider = struct {
     var calls: usize = 0;
     var engine_thread: ?std.Thread.Id = null;
 
-    fn decide(_: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) anyerror!void {
+    fn decide(_: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, problem: *[]const u8) anyerror!void {
         calls += 1;
         engine_thread = std.Thread.getCurrentId();
-        if (labels.len == 0) return error.EmptyLabels;
+        if (labels.len == 0) {
+            problem.* = "no labels to score";
+            return error.Refused;
+        }
+        if (trunk.len == 0) return error.DeviceLost;
         var at: usize = 0;
         for (branches, counts) |b, n| {
             for (logits[at..][0..n], 0..) |*v, i| v.* = @floatFromInt(trunk.len + b.len + i);
@@ -153,7 +157,7 @@ test "a backend with score and decide gets Engine.decide; score alone keeps the 
     try std.testing.expect(host.engine().vtable.score == null and host.engine().vtable.decide == null);
 }
 
-test "a decision runs on the engine thread: each branch's logits, the tokens read; failures and pictures refused" {
+test "a decision runs on the engine thread: each branch's logits, the tokens read; refusals keep their reason" {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
     defer cfg.deinit(gpa);
@@ -173,12 +177,16 @@ test "a decision runs on the engine thread: each branch's logits, the tokens rea
     try std.testing.expectEqualSlices(f64, &.{ 4, 5, 5 }, &logits);
     try std.testing.expectEqual(@as(usize, 6), d.read);
     try std.testing.expect(Decider.engine_thread.? != std.Thread.getCurrentId());
+    // the backend's refusal is the client's error with the backend's reason; any other error is the engine's failure
     var empty: api.Decision = .{ .trunk = &.{1}, .branches = &.{&.{2}}, .counts = &.{0} };
-    try std.testing.expectError(error.Failed, engine.decide(&empty));
+    try std.testing.expectError(error.Refused, engine.decide(&empty));
+    try std.testing.expectEqualStrings("no labels to score", empty.problem);
+    var lost: api.Decision = .{ .trunk = &.{}, .branches = &.{&.{2}}, .counts = &.{1}, .labels = &.{3}, .logits = logits[0..1] };
+    try std.testing.expectError(error.Failed, engine.decide(&lost));
     var pictured: api.Decision = .{ .trunk = &.{1}, .pictures = &.{"data:image/png;base64,"}, .branches = &.{&.{2}}, .counts = &.{1}, .labels = &.{3}, .logits = logits[0..1] };
     try std.testing.expectError(error.Refused, engine.decide(&pictured));
     try std.testing.expect(std.mem.indexOf(u8, pictured.problem, "text only") != null);
-    try std.testing.expectEqual(@as(usize, 2), Decider.calls);
+    try std.testing.expectEqual(@as(usize, 3), Decider.calls);
     host.stop();
     try std.testing.expectError(error.Failed, engine.decide(&d));
 }

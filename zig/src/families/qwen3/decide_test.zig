@@ -67,7 +67,8 @@ test "Qwen3-Reranker decide: packed branches give each prompt's scoreLabels logi
     defer p.deinit();
     p.heads = qwen3.score.Heads.of(&e.m, t.io, dir);
     const packed_logits = try a.alloc(f64, labels.items.len);
-    try qwen3.prompt.Prompt.decideLabels(&p, trunk, branches, counts, labels.items, packed_logits);
+    var problem: []const u8 = "";
+    try qwen3.prompt.Prompt.decideLabels(&p, trunk, branches, counts, labels.items, packed_logits, &problem);
     var at: usize = 0;
     for (prompts.items, counts) |prompt, n| {
         const alone = try a.alloc(f64, n);
@@ -122,7 +123,13 @@ test "Qwen3-Reranker decide: every scored reference case, the windows' too, pack
     defer p.deinit();
     p.heads = qwen3.score.Heads.of(&e.m, t.io, dir);
     const packed_logits = try a.alloc(f64, labels.len);
-    try qwen3.prompt.Prompt.decideLabels(&p, trunk, branches, counts, labels, packed_logits);
+    var problem: []const u8 = "";
+    try qwen3.prompt.Prompt.decideLabels(&p, trunk, branches, counts, labels, packed_logits, &problem);
+    // an empty branch is the client's error: refused with its reason before any GPU work
+    var empty = [_][]const u32{&.{}};
+    const refused = qwen3.prompt.Prompt.decideLabels(&p, trunk, &empty, counts[0..1], labels[0..2], packed_logits[0..2], &problem);
+    try t.expectError(error.Refused, refused);
+    try t.expectEqualStrings(qwen3.score.problemOf(error.BadPrompt), problem);
     var tokens: usize = 0;
     for (prompts.items, 0..) |prompt, i| {
         var alone: [2]f64 = undefined;
