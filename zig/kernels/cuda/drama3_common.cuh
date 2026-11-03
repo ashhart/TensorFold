@@ -79,7 +79,7 @@ __device__ __forceinline__ float dot8(uint4 a, uint4 b) {
 }
 
 using tf_common::sigmoidf_;
-__device__ __forceinline__ float siluf_(float x) { return x / (1.f + expf(-x)); }
+__device__ __forceinline__ float siluf_(float x) { return tf_common::silu(x); }
 using tf_common::softplusf_;
 
 __device__ __forceinline__ bool is_semantic(int tok, int sem_begin, int sem_end) {
