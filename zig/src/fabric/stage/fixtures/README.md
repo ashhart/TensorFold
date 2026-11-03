@@ -5,8 +5,8 @@ Metal stage decodes each file and must take the good ones and refuse each bad on
 `fixtures_test.zig` re-encodes every file and compares bytes, and runs `fixtures.judge` on each. To rewrite them after
 a deliberate format change: `TF_STAGE_FIXTURES_OUT=$PWD/zig/src/fabric/stage/fixtures zig build test-stage`.
 
-Everything is little-endian. Every protocol payload starts with an 8-byte prefix: magic `0x54465350` as a u32
-(bytes `50 53 46 54`), u16 version 1, u8 message (1 describe, 2 ready, 3 plan), u8 reserved 0. Rows payloads have
+Everything is little-endian. Every protocol payload starts with an 8-byte prefix: magic `0x50534654` as a u32
+(bytes `54 46 53 50`, "TFSP"), u16 version 1, u8 message (1 describe, 2 ready, 3 plan), u8 reserved 0. Rows payloads have
 no prefix: they are raw rows after the 32-byte frame header of `frame.zig`.
 
 ## The fixtures' model and placement
