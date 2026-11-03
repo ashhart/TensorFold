@@ -13,6 +13,10 @@ pub const Commands = struct {
     pool: c.VkCommandPool,
     cmd: c.VkCommandBuffer,
     fence: c.VkFence,
+    /// A command buffer is begun and holds the dispatches and copies recorded since the last submission.
+    recording: bool = false,
+    /// Dispatches in the open command buffer; Pipeline.run submits when it reaches half a batch.
+    pending: u32 = 0,
 
     pub fn init(dev: *const Device) Error!Commands {
         const api = &dev.api;
@@ -45,21 +49,27 @@ pub const Commands = struct {
         self.* = undefined;
     }
 
-    /// The command buffer, reset and begun for one submission.
+    /// The open command buffer; begun (and reset) only when nothing recorded earlier still waits for a submission.
     pub fn begin(self: *Commands) Error!c.VkCommandBuffer {
+        if (self.recording) return self.cmd;
         try check(self.dev.api.vkResetCommandBuffer(self.cmd, 0));
         const info: c.VkCommandBufferBeginInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
         try check(self.dev.api.vkBeginCommandBuffer(self.cmd, &info));
+        self.recording = true;
         return self.cmd;
     }
 
-    /// Finite fence wait; Timeout/InFlight require orExit to avoid freeing resources the GPU may still use.
+    /// Submits everything recorded since the last submission (nothing, if nothing is open); the fence wait is finite.
+    /// Timeout/InFlight require orExit to avoid freeing resources the GPU may still use.
     pub fn submit(self: *Commands, timeout_ns: u64) Error!void {
+        if (!self.recording) return;
         const api = &self.dev.api;
         try check(api.vkEndCommandBuffer(self.cmd));
+        self.recording = false;
+        self.pending = 0;
         const info: c.VkSubmitInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .commandBufferCount = 1,
