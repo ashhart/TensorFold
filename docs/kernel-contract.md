@@ -14,6 +14,10 @@ whether the launch fits every chip we serve.
 The test of a kernel fills a `contract.spec.Spec` and hands the harness a few hooks (`contract.gates.VTable`, or
 `gates.hooks(T)` for a test type with `prepare`, `run`, `count` and `reference`).
 
+`runAll` calls each kernel's optional `VTable.release` before moving to the next kernel, including after a failed
+gate or planted control. `gates.hooks(T)` supplies `rig.reset()` for value or pointer rigs with a `reset` method.
+Direct `one` callers remain responsible for cleanup.
+
 - Its float64 reference: the kernel's own formula in float64. The input families in `zig/src/core/contract/` cover the
   common cases: `affine` (MLX's affine-quantized projections), `dense` (dots against dequantized weights, in K
   slices) and `rows` (RMS norm, softmax, sums, dots, maxima). Each builds inputs for every gate, computes the reference
