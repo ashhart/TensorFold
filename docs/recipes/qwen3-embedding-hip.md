@@ -21,12 +21,15 @@ product sums in fp32. The head comes from the sentence-transformers folder:
 `Normalize` makes every full-width vector unit length. A folder without
 `1_Pooling` is refused.
 
-On gfx12 the BF16 projections run on the WMMA tile under the default
-`matrix=auto` (and `matrix=on`); `--policy matrix=off` keeps the dot2 tile
-and its bits, and other chips run dot2. The two tiles sum in different
+On gfx12 the BF16 projections can run on a WMMA tile, opt-in with
+`--policy matrix=on`. The default `matrix=auto`, `matrix=off` and every other
+chip run the dot2 tile and keep its bits. The two tiles sum in different
 orders: on Qwen3-8B's layer-0 projections WMMA's fp32 sums sit 8 to 41
 times further from float64 than dot2's, while the BF16 outputs the engine
 writes are as close (`TF_QWEN3_*` GPU checks below, `projection_test.zig`).
+A less exact default output needs an opt-in, so WMMA is not the default.
+gfx1200 builds the same tile but is unmeasured: no run, and no gate 5
+record (the records cover gfx1201).
 
 ## Build and serve
 
@@ -94,7 +97,14 @@ TF_QWEN3_EMBED_DIR=MODEL_DIRECTORY TF_QWEN3_EMBED_REF=ref32.json TF_QWEN3_EMBED_
 
 The GPU checks take `TF_QWEN3_MATRIX=auto|off|on` to run either tile.
 
-Results on the R9700 (ROCm 10.1); the distance rows are dot2 (`matrix=off`), the WMMA rows `matrix=auto`:
+The WMMA rows below come from a server started with the WMMA tile:
+
+```sh
+zig-out/native-hip/bin/tensorfold-native serve MODEL_DIRECTORY \
+  --name Qwen3-Embedding-8B --host 127.0.0.1 --port 8090 --policy matrix=on
+```
+
+Results on the R9700 (ROCm 10.1); the distance rows are dot2 (the default), the WMMA rows `matrix=on`:
 
 | Check | Result |
 | --- | --- |
@@ -111,5 +121,5 @@ Results on the R9700 (ROCm 10.1); the distance rows are dot2 (`matrix=off`), the
 | WMMA: card 2 x 2 scores, worst difference to the card | 0.0024 (dot2: 0.0014) |
 | Layer-0 projections against float64, BF16 out (WMMA / dot2) | 1.0000 in every class (q, k, v, o, gate, up, down) |
 | `hip-kernel-test` and `hip-kernel-contract`, WMMA tile (both geometries, fp32 and BF16 out) | gates 1 to 4 pass, fp32 worst 1.4% of its bound (depth k plus k 2^-126); gate 5 records current, gfx1201 only |
-| 100 short inputs in one request / one short query, cold | WMMA 0.985 s / 40.5 ms; dot2 2.470 s / 75.1 ms; SGLang 0.841 s / 38.4 ms on the same card |
+| 100 short inputs in one request / one short query, cold | WMMA (`matrix=on`) 0.985 s / 40.5 ms; dot2 (default) 2.470 s / 75.1 ms; SGLang 0.841 s / 38.4 ms on the same card |
 | Load | 4 s from the page cache |
