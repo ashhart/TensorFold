@@ -216,23 +216,9 @@ namespace tf_norms {
 constexpr int VNT = 256;
 constexpr int VEC_MOST = 4; // 8,192 wide
 
-__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
-    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float2 t = __bfloat1622float2(h[i]);
-        f[2 * i] = t.x;
-        f[2 * i + 1] = t.y;
-    }
-}
+using tf_common::unpack8;
 
-__device__ __forceinline__ uint4 pack8(const float* f) {
-    uint4 u;
-    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
-    return u;
-}
+using tf_common::pack8;
 
 __device__ __forceinline__ void load8f(const float* p, float* f) {
     const float4 a = reinterpret_cast<const float4*>(p)[0];
@@ -358,17 +344,7 @@ __device__ __forceinline__ void load8w(const float* p, float* f) { load8f(p, f);
 __device__ __forceinline__ void load8w(const __nv_bfloat16* p, float* f) { unpack8(*reinterpret_cast<const uint4*>(p), f); }
 
 // A thread's 8 stored outputs summed in order, then the group's 8 lanes in a fixed tree (every lane of the warp calls).
-__device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
-    float f[8];
-    unpack8(packed, f);
-    float s = 0.f;
-    if (live)
-#pragma unroll
-        for (int i = 0; i < 8; ++i) s = __fadd_rn(s, f[i]);
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 4));
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 2));
-    return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
-}
+using tf_common::group_sum8;
 
 // h = bf16(x + r) (r null: h = x), y = bf16(rms(h) * w), xs y's 64-value sums; width % 64, 16-byte loads.
 template <typename WT>
@@ -562,3 +538,4 @@ extern "C" __global__ void __launch_bounds__(tf_rms_strided::LT) tf_moe_add_rms_
 }
 
 #include "rms_tiles.cuh"
+#include "common/reduce.cuh"
