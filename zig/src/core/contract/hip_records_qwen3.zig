@@ -1,4 +1,4 @@
-//! Gate 5 for the BF16 dense GEMM: gfx1030's FP16 build keeps only its trap body, so the record does not serve it.
+//! Gate 5 for qwen3's tf_heads_rows and BF16 dense GEMM; the GEMM does not serve gfx1030 (only a trap body there).
 const std = @import("std");
 const limits = @import("limits.zig");
 const hip_records = @import("hip_records.zig");
@@ -7,6 +7,15 @@ const Record = hip_records.Record;
 const check = hip_records.check;
 
 pub const records = [_]Record{
+    .{
+        .launch = .{ .name = "attention tf_heads_rows", .symbol = "tf_heads_rows", .image = "ops", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 28, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 30, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
     .{
         .launch = .{ .name = "dense gemm dense_gemm_block<DotBF16, 8>", .symbol = "_ZN2tf4rocm16dense_gemm_blockINS0_7DotBF16ELi8EEEvNS0_6AffineE", .image = "affine_tiles", .threads = 256 },
         .usage = .{
