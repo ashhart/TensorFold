@@ -91,6 +91,7 @@ test "rerank: the checkpoint's template and tokenizer give the oracle's ids, the
         docs[0] = c.get("document").?;
         try body.put(a, "documents", .{ .array = docs });
         if (c.get("instruct").? != .null) try body.put(a, "instruct", c.get("instruct").?);
+        try body.put(a, "max_length", c.get("tokens").?); // the reference prompts whole: no cut
         try body.put(a, "return_prompt_token_ids", .{ .bool = true });
         var cx: errors.Cx = .{ .a = a };
         const calls = echo.seen.items.len;
