@@ -15,6 +15,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - XPU's dense 27B takes its kernel sizes from one shared `shape.h`, with 8-head prompt attention, and its SPIR-V images stay byte-identical (#1425, thanks @tolewis).
 
+- PNG pictures with a `tRNS` key past 255, or a 16-bit key, now decode with Pillow's transparency: grayscale and RGB keys compare their low byte with the decoded sample. Pictures without such a key decode as before, and 1-bit grayscale keeps its whole-key rule.
+
 - GLM on CUDA at TP>1: the DFlash2 drafter reads complete prompt taps on every rank (it read stale residual rows under the split prompt reduce), so acceptance is back to the gathered level with every reply unchanged (#1623, thanks @BadAd84).
 
 - dots.mocr on HIP: the publisher's BF16 `dots-studio/dots.mocr` OCR checkpoint is served natively, with its own template, tokenizer, image processor and EOS ids, token-exact against its model card (#1938, part of #1927, thanks @laudney).
