@@ -51,6 +51,8 @@ pub const Options = struct {
     own_prefill: bool = true,
     /// the backbone layers to load and run (null: all; a gate runs a reference's prefix, e.g. 0-24)
     layers: ?[]const u32 = null,
+    /// the server's --prompt-cache-gib: the kept states' resident limit (session_budget.zig; null: the variables')
+    prompt_cache_gib: ?f64 = null,
 };
 
 /// TF_DSV41_LAYERS=<lo>-<hi>: load and run only that backbone prefix (a reference prefix's model; null: every layer)
@@ -388,7 +390,10 @@ pub const Model = struct {
         m.f.engram = &m.host;
         if (world > 1) m.f.link = &m.session.plan;
         m.f.on_stop = .{ .ctx = &m.session, .run = announceStop };
-        const so = try sg.optionsFromEnv();
+        var so = try sg.optionsFromEnv();
+        const budget = @import("session_budget.zig").resident(so.resident_bytes, o.prompt_cache_gib, world);
+        so.resident_bytes = budget.bytes;
+        if (budget.ignored) |why| if (!quiet) std.log.scoped(.dsv41).info("sessions: --prompt-cache-gib ignored: {s}", .{why.text()});
         const several_ok = m.slots == 1 or so.several;
         if (so.enabled and m.f.kv != null and !several_ok)
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: off with {d} live slots (TF_DSV41_SESSION_SLOTS=1 opens them over every slot; the session-slots check has not run on hardware)", .{m.slots});
