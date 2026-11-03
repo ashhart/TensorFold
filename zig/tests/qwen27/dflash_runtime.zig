@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     var runner = try q.decode_round.Runner.init(a, target, 1, 256);
     defer runner.deinit();
     runner.capture_taps = true;
-    runner.taps.ids = .{ 0, 1, 2, 3, 4 };
+    runner.taps.ids = .{ 0, 1, 2, 3, 4, 0, 0, 0 };
     const draft = try draft_graph.create(a, target);
     defer draft.deinit();
     const eager = try draft_graph.create(a, target);

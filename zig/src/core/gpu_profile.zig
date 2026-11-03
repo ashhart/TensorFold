@@ -1,7 +1,7 @@
 //! Diagnostic class timings split command buffers, wait for each span and keep ordinary encoders when disabled.
 const std = @import("std");
 const mtl = @import("metal");
-pub const Class = enum { dense, norm, xsum, embedding, copy, activation, gdn_prepare, gdn_scan, gdn_gate, state_publish, attention_prepare, attention, drafter };
+pub const Class = enum { dense, norm, xsum, embedding, copy, activation, gdn_prepare, gdn_scan, gdn_gate, state_publish, attention_prepare, attention, drafter, route, experts };
 pub const Shape = struct { n: usize = 0, k: usize = 0, sk: usize = 0, bits: u8 = 0, calls: u64 = 0, gpu_seconds: f64 = 0 };
 /// The rounds between reports that TF_Q27_PROFILE=1 asks for.
 pub const default_every: u64 = 64;
