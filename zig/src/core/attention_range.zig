@@ -1,6 +1,6 @@
 //! A head's attention in float64 at Metal's rounding points (the output's), and the range window_rows.cu's fp32 allows.
 const std = @import("std");
-const bfr = @import("bf16_round.zig");
+const bfr = @import("bf16_round");
 
 const u: f64 = 0x1p-24;
 

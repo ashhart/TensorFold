@@ -1,6 +1,6 @@
 //! nGPT rows in float64 (Dory's L2 norms and slerp residual), as ranges over an fp32 run at bf16 rounding points.
 const std = @import("std");
-const bf = @import("bf16_round.zig");
+const bf = @import("bf16_round");
 
 /// A value's least and largest ends; NaN ends for a NaN.
 pub const Iv = [2]f64;
