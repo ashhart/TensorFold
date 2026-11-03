@@ -2,6 +2,7 @@
 
 pub const abi = @import("abi.zig");
 pub const Driver = @import("driver.zig").Driver;
+pub const priority_copies = @import("priority_copies.zig");
 pub const copy_source = @import("copy_source.zig");
 pub const completion = @import("completion.zig");
 pub const paging_test_device = if (@import("builtin").is_test) @import("paging_test_device.zig") else struct {};
@@ -75,6 +76,7 @@ pub const pack = @import("pack.zig");
 pub const graph_cache = @import("graph_cache.zig");
 
 test {
+    _ = priority_copies;
     _ = nccl;
     _ = @import("p2p_nvml.zig");
     _ = @import("p2p_probe.zig");

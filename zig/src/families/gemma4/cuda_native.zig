@@ -126,6 +126,7 @@ fn positions(context: usize) usize {
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    const priority_copies = try cuda.priority_copies.read("TF_GEMMA4_COPIES", o.drafts);
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound;
     // TF_KV_SHARE keeps prompts as the pool's pages, so it pages too; otherwise the default, unless turned off
@@ -157,7 +158,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_GEMMA4_GRAPHS"); // =0: every decode forward eager
     own.gb = try be.Gemma.init(gpa, ctx.d, &own.m, &own.k, own.s);
-    own.gb.copy_drafts = o.drafts;
+    own.gb.priority_copies = priority_copies;
     errdefer own.gb.deinit();
     if (o.vision) |lim| {
         const v = try gpa.create(cv.Vision);
