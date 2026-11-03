@@ -263,6 +263,10 @@ fn hasDpas(device: []const u8) bool {
 fn lfm3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, xpu: *std.Build.Module) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm3/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("xpu", xpu);
+    const core = xpu.import_table.get("core") orelse @panic("lfm3Module: the xpu module imports core");
+    const wf = b.addWriteFiles();
+    const rope = wf.add("rope_freq.zig", "const r = @import(\"core\").rope_freq;\npub const inverseFrequencies = r.inverseFrequencies;\npub const proportional = r.proportional;\n");
+    m.addImport("rope_freq", b.createModule(.{ .root_source_file = rope, .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} }));
     return m;
 }
 
