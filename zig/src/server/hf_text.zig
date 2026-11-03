@@ -65,8 +65,9 @@ pub const HfText = struct {
         // each request renders its chat up to three times, and a chat's earlier messages come back every turn
         t.tok.memo = try tokenizer.Memo.create(gpa, 64 << 20);
         const config = readJson(io, a, dir, "tokenizer_config.json");
-        // transformers' Qwen3.5 tokenizer splits words with the regex this field publishes, not tokenizer.json's
-        if (config == .object) if (config.object.get("pretokenize_regex")) |re| {
+        // a Clef checkpoint's tokenizer splits words with the regex this field publishes, not tokenizer.json's
+        const clef = if (std.fs.path.join(a, &.{ dir, "joint_head_config.json" })) |head| if (std.Io.Dir.cwd().access(io, head, .{})) |_| true else |_| false else |_| false;
+        if (clef and config == .object) if (config.object.get("pretokenize_regex")) |re| {
             if (re != .string or re.string.len == 0) {
                 problem.* = "tokenizer_config.json pretokenize_regex is not a non-empty string";
                 return error.Load;
@@ -497,7 +498,7 @@ test "explicit template overrides checkpoint templates including tool prompts an
     try std.testing.expectError(error.Template, empty.text().render(a, messages, .{}, &problem));
 }
 
-test "pretokenize_regex: tokenizer_config.json's field replaces tokenizer.json's Split, and one that fails refuses the load" {
+test "pretokenize_regex: a Clef checkpoint's field replaces tokenizer.json's Split, one that fails refuses; others ignore it" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -514,6 +515,13 @@ test "pretokenize_regex: tokenizer_config.json's field replaces tokenizer.json's
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     var problem: []const u8 = "";
     const word = "e\u{301}te\u{301}";
+    for ([_][]const u8{ "{\"pretokenize_regex\": \"[\\\\p{L}\\\\p{M}]+\"}", "{\"pretokenize_regex\": 3}" }) |field| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data = field });
+        const t = try HfText.load(gpa, io, dir, null, a, &problem); // no joint head: the field is not this loader's
+        defer t.deinit();
+        try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 0, 1 }, try t.text().encode(a, word, false));
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "joint_head_config.json", .data = "{}" });
     const cases = [_]struct { []const u8, []const u32 }{
         .{ "{}", &.{ 0, 1, 2, 0, 1 } }, // no field: tokenizer.json's \p{L}+ splits at each mark
         .{ "{\"pretokenize_regex\": \"[\\\\p{L}\\\\p{M}]+\"}", &.{5} },
