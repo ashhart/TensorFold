@@ -205,6 +205,8 @@ test "runtime library: PDFium discovery refuses bare loader names and uses only 
     const Fake = struct {
         var override: ?[:0]const u8 = null;
         var only: []const u8 = "";
+        var restricted: usize = 0;
+        pub const windows = true;
         pub fn getenv(_: [*:0]const u8) ?[:0]const u8 {
             return override;
         }
@@ -213,11 +215,16 @@ test "runtime library: PDFium discovery refuses bare loader names and uses only 
                 if (std.mem.eql(u8, path, only)) return .{};
                 return error.FileNotFound;
             }
+            pub fn openRestricted(path: []const u8) !@This() {
+                restricted += 1;
+                return open(path);
+            }
             pub fn close(_: *@This()) void {}
         };
     };
     Fake.override = null;
     Fake.only = s.names[0];
+    Fake.restricted = 0;
     try std.testing.expect(!libs.found(s, std.testing.allocator, Fake, "/opt/tensorfold/bin"));
     const local_path = try std.fs.path.join(std.testing.allocator, &.{ "/opt/tensorfold/bin", "..", "lib", s.names[0] });
     defer std.testing.allocator.free(local_path);
@@ -226,4 +233,9 @@ test "runtime library: PDFium discovery refuses bare loader names and uses only 
     Fake.override = "/custom/libpdfium";
     Fake.only = "/custom/libpdfium";
     try std.testing.expect(libs.found(s, std.testing.allocator, Fake, null));
+    try std.testing.expectEqual(@as(usize, 4), Fake.restricted);
+    Fake.override = null;
+    Fake.only = libs.spec(.jpeg).names[0];
+    try std.testing.expect(libs.found(libs.spec(.jpeg), std.testing.allocator, Fake, null));
+    try std.testing.expectEqual(@as(usize, 4), Fake.restricted);
 }
