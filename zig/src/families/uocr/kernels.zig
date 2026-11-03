@@ -39,6 +39,9 @@ pub const names = [_][]const u8{
     "ud_gather",
     "ud_scatter",
     "ud_moe_combine",
+    "ud_matvec",
+    "ud_expert_gu",
+    "ud_expert_down",
 };
 const tower_count = 6;
 const decoder_first = tower_count + 13;

@@ -389,3 +389,91 @@ struct UdAttend {
   const ulong i = ulong(row) * 1280 + at.x;
   y[i] = bfloat(ud_bf(s) + float(shared[i]));
 }
+
+struct UdMv {
+  uint n;  // output rows
+  uint k;  // input width, a multiple of 8
+};
+
+// One token's projection y[n] = bf16(W[n, :] . x) with fp32 sums: 4 rows a simdgroup, 8 simdgroups a group.
+[[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_matvec(
+    const device bfloat* x [[buffer(0)]], const device bfloat* W [[buffer(1)]], device bfloat* y [[buffer(2)]],
+    constant UdMv& p [[buffer(3)]], uint tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint row0 = (tg * 8 + sg) * 4;
+  if (row0 >= p.n) return;
+  float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint k = lane * 8; k < p.k; k += 256) {
+    const float4 x0 = float4(*(const device bfloat4*)(x + k)), x1 = float4(*(const device bfloat4*)(x + k + 4));
+    for (uint r = 0; r < 4; r++) {
+      if (row0 + r >= p.n) break;
+      const device bfloat* w = W + ulong(row0 + r) * p.k + k;
+      acc[r] += dot(x0, float4(*(const device bfloat4*)w)) + dot(x1, float4(*(const device bfloat4*)(w + 4)));
+    }
+  }
+  for (uint r = 0; r < 4; r++) {
+    const float s = simd_sum(acc[r]);
+    if (lane == 0 && row0 + r < p.n) y[row0 + r] = bfloat(s);
+  }
+}
+
+// An expert's three projections, [F, 1280], [F, 1280] and [1280, F] as stored.
+struct UdExpert {
+  const device bfloat* gate;
+  const device bfloat* up;
+  const device bfloat* down;
+};
+
+struct UdExpertArgs {
+  uint ffn;  // the expert's width F
+};
+
+// One token's routed experts, first half: for slot s (threadgroup row y) and its expert ids[s],
+// act[s][j] = bf16(bf16(silu(bf16(gate_j . x))) * bf16(up_j . x)), 4 rows a simdgroup.
+[[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_expert_gu(
+    const device bfloat* x [[buffer(0)]], const device UdExpert* tab [[buffer(1)]], const device uint* ids [[buffer(2)]],
+    device bfloat* act [[buffer(3)]], constant UdExpertArgs& p [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint s = tg.y;
+  const UdExpert e = tab[ids[s]];
+  const uint row0 = (tg.x * 8 + sg) * 4;
+  if (row0 >= p.ffn) return;
+  float g[4] = {0.0f, 0.0f, 0.0f, 0.0f}, u[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint k = lane * 8; k < 1280; k += 256) {
+    const float4 x0 = float4(*(const device bfloat4*)(x + k)), x1 = float4(*(const device bfloat4*)(x + k + 4));
+    for (uint r = 0; r < 4; r++) {
+      const device bfloat* wg = e.gate + ulong(row0 + r) * 1280 + k;
+      const device bfloat* wu = e.up + ulong(row0 + r) * 1280 + k;
+      g[r] += dot(x0, float4(*(const device bfloat4*)wg)) + dot(x1, float4(*(const device bfloat4*)(wg + 4)));
+      u[r] += dot(x0, float4(*(const device bfloat4*)wu)) + dot(x1, float4(*(const device bfloat4*)(wu + 4)));
+    }
+  }
+  for (uint r = 0; r < 4; r++) {
+    const float gs = ud_bf(simd_sum(g[r])), us = ud_bf(simd_sum(u[r]));
+    if (lane == 0) act[s * p.ffn + row0 + r] = bfloat(ud_bf(gs / (1.0f + metal::precise::exp(-gs))) * us);
+  }
+}
+
+// The second half: slots[s][i] = bf16(down_i . act[s]) for slot s's expert, 4 rows a simdgroup.
+[[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_expert_down(
+    const device bfloat* act [[buffer(0)]], const device UdExpert* tab [[buffer(1)]], const device uint* ids [[buffer(2)]],
+    device bfloat* slots [[buffer(3)]], constant UdExpertArgs& p [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint s = tg.y;
+  const UdExpert e = tab[ids[s]];
+  const uint row0 = (tg.x * 8 + sg) * 4;
+  if (row0 >= 1280) return;
+  const device bfloat* a = act + s * p.ffn;
+  float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint k = lane * 8; k < p.ffn; k += 256) {
+    const float4 a0 = float4(*(const device bfloat4*)(a + k)), a1 = float4(*(const device bfloat4*)(a + k + 4));
+    for (uint r = 0; r < 4; r++) {
+      const device bfloat* w = e.down + ulong(row0 + r) * p.ffn + k;
+      acc[r] += dot(a0, float4(*(const device bfloat4*)w)) + dot(a1, float4(*(const device bfloat4*)(w + 4)));
+    }
+  }
+  for (uint r = 0; r < 4; r++) {
+    const float v = simd_sum(acc[r]);
+    if (lane == 0) slots[s * 1280 + row0 + r] = bfloat(v);
+  }
+}

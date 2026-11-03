@@ -18,6 +18,9 @@ const UdRope = extern struct { heads: u32, stride: u32 };
 const UdBlocks = extern struct { first: u32, scale: f32 };
 const UdRoute = extern struct { nblk: u32, complete: u32, scale: f32, idx_scale: f32, floor_: f32, round_bias: u32 };
 const UdAttend = extern struct { width: u32, scale: f32, local: u32 };
+const UdMv = extern struct { n: u32, k: u32 };
+const UdExpert = extern struct { gate: u64, up: u64, down: u64 };
+const UdExpertArgs = extern struct { ffn: u32 };
 
 /// One sequence's caches and the scratch for a forward of up to `rows` tokens.
 pub const Decoder = struct {
@@ -32,6 +35,10 @@ pub const Decoder = struct {
     caches: mtl.Buffer,
     blocks: mtl.Buffer,
     consts: mtl.Buffer,
+    /// Each routed layer's 64 experts as GPU pointers (gate, up, down), for decode's on-GPU routing, and the
+    /// buffers those pointers reach (made resident on each encoder).
+    experts: mtl.Buffer,
+    weight_bufs: std.ArrayList(mtl.Buffer) = .empty,
     scratch: Scratch,
     /// For checks: each layer's output rows are copied here after a forward's layer (one slice a layer).
     trace: ?[][]u16 = null,
@@ -44,7 +51,7 @@ pub const Decoder = struct {
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, k: *const ks.Kernels, w: *const wts.Weights, cap: usize, rows: usize) !Decoder {
         if (cap == 0 or cap > cfg.max_context or rows == 0 or rows > cap) return error.DecoderSize;
         const cap_b = std.mem.alignForward(usize, cap, B);
-        var d: Decoder = .{ .gpa = gpa, .queue = queue, .k = k, .w = w, .cap = cap_b, .rows = rows, .caches = undefined, .blocks = undefined, .consts = undefined, .scratch = undefined };
+        var d: Decoder = .{ .gpa = gpa, .queue = queue, .k = k, .w = w, .cap = cap_b, .rows = rows, .caches = undefined, .blocks = undefined, .consts = undefined, .experts = undefined, .scratch = undefined };
         d.caches = try device.buffer(cacheBytes(cap_b), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer d.caches.deinit();
         d.blocks = try device.buffer(2 * (cap_b / B) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -53,12 +60,26 @@ pub const Decoder = struct {
         errdefer d.consts.deinit();
         const inv = cfg.invTok();
         @memcpy(@as([*]f32, @ptrCast(@alignCast(d.consts.contents())))[0..inv.len], &inv);
+        d.experts = try device.buffer(cfg.layers * cfg.experts * @sizeOf(UdExpert), mtl.ResourceOptions.shared);
+        errdefer d.experts.deinit();
+        errdefer d.weight_bufs.deinit(gpa);
+        const tab = @as([*]UdExpert, @ptrCast(@alignCast(d.experts.contents())))[0 .. cfg.layers * cfg.experts];
+        for (w.layers, 0..) |L, l| for (L.experts, 0..) |ex, x| {
+            tab[l * cfg.experts + x] = .{ .gate = address(ex.gate), .up = address(ex.up), .down = address(ex.down) };
+            for ([_]Ref{ ex.gate, ex.up, ex.down }) |r| {
+                for (d.weight_bufs.items) |b| {
+                    if (b.id == r.buf.id) break;
+                } else try d.weight_bufs.append(gpa, r.buf);
+            }
+        };
         d.scratch = try Scratch.make(device, rows);
         return d;
     }
 
     pub fn deinit(d: *Decoder) void {
         d.scratch.buf.deinit();
+        d.weight_bufs.deinit(d.gpa);
+        d.experts.deinit();
         d.consts.deinit();
         d.blocks.deinit();
         d.caches.deinit();
@@ -143,7 +164,7 @@ pub const Decoder = struct {
         const s = d.scratch;
         const e = d.encoder();
         rmsNorm(e, d.k, s.at(.x).at(row * H * 2), d.w.norm, s.at(.h), 1);
-        d.k.linear(e, s.at(.h), d.w.head, s.at(.logits), 1, cfg.vocab, H);
+        lin(e, d.k, s.at(.h), d.w.head, s.at(.logits), 1, cfg.vocab, H);
         try d.flush();
         return halves(s.at(.logits), cfg.vocab);
     }
@@ -157,8 +178,10 @@ pub const Decoder = struct {
         if (d.enc) |e| return e;
         const cb = d.queue.commandBuffer();
         d.cb = cb;
-        d.enc = cb.compute(.serial);
-        return d.enc.?;
+        const e = cb.compute(.serial);
+        for (d.weight_bufs.items) |b| e.useResource(b, mtl.ResourceUsage.read);
+        d.enc = e;
+        return e;
     }
 
     fn flush(d: *Decoder) !void {
@@ -187,16 +210,16 @@ pub const Decoder = struct {
             const e = d.encoder();
             rmsNorm(e, k, s.at(.x), L.in_norm, s.at(.h), n);
             const krows = d.kc(l).at(start * H * 2);
-            k.linear(e, s.at(.h), L.q, s.at(.q), n, H, H);
-            k.linear(e, s.at(.h), L.k, krows, n, H, H);
-            k.linear(e, s.at(.h), L.v, d.vc(l).at(start * H * 2), n, H, H);
+            lin(e, k, s.at(.h), L.q, s.at(.q), n, H, H);
+            lin(e, k, s.at(.h), L.k, krows, n, H, H);
+            lin(e, k, s.at(.h), L.v, d.vc(l).at(start * H * 2), n, H, H);
             for ([_]Ref{ s.at(.q), krows }) |t| {
                 ks.Kernels.bind(e, k.get("ud_rope"), &.{ t, s.at(.tok), s.at(.page), d.invTok() }, UdRope{ .heads = cfg.heads, .stride = H });
                 e.dispatchThreads(mtl.Size.of(cfg.head_dim, cfg.heads, n), mtl.Size.of(cfg.head_dim, 1, 1));
             }
             // the router's index q and k, the newly complete blocks' summary keys, and each query's reads
-            k.linear(e, s.at(.h), L.router.q, s.at(.rq), n, D, H);
-            k.linear(e, s.at(.h), L.router.k, s.at(.rk), n, D, H);
+            lin(e, k, s.at(.h), L.router.q, s.at(.rq), n, D, H);
+            lin(e, k, s.at(.h), L.router.k, s.at(.rk), n, D, H);
             for ([_][3]Ref{ .{ s.at(.rq), L.router.q_norm, s.at(.iq) }, .{ s.at(.rk), L.router.k_norm, d.idxK(l).at(start * D * 4) } }) |r| {
                 ks.Kernels.bind(e, k.get("ud_router_norm"), &.{ r[0], r[1], s.at(.tok), s.at(.page), d.invTok(), r[2] }, {});
                 e.dispatchGroups(mtl.Size.of(n, 1, 1), mtl.Size.of(D, 1, 1));
@@ -216,14 +239,14 @@ pub const Decoder = struct {
             e.dispatchGroups(mtl.Size.of(n, 1, 1), mtl.Size.of(32, 1, 1));
             ks.Kernels.bind(e, k.get("ud_attend"), &.{ s.at(.q), d.kc(l), d.vc(l), s.at(.sel), s.at(.bias), s.at(.qpos), s.at(.att) }, UdAttend{ .width = H, .scale = scale, .local = cfg.local });
             e.dispatchGroups(mtl.Size.of(n, cfg.heads, 1), mtl.Size.of(32, 1, 1));
-            k.linear(e, s.at(.att), L.o, s.at(.tmp), n, H, H);
+            lin(e, k, s.at(.att), L.o, s.at(.tmp), n, H, H);
             if (d.trace_parts) |tp| {
                 try d.flush();
                 @memcpy(tp[0][l][0 .. n * H], halves(s.at(.tmp), n * H));
             }
             add(d.encoder(), k, s.at(.x), s.at(.tmp), s.at(.x), n * H);
             rmsNorm(d.encoder(), k, s.at(.x), L.post_norm, s.at(.h), n);
-            if (L.gate) |gate| try d.moe(L, gate, n) else mlp(d.encoder(), k, L.ffn, s.at(.h), s.at(.g), s.at(.u), s.at(.act), s.at(.tmp), n, cfg.dense_ffn);
+            if (L.gate) |gate| try d.moe(L, l, gate, n) else mlp(d.encoder(), k, L.ffn, s.at(.h), s.at(.g), s.at(.u), s.at(.act), s.at(.tmp), n, cfg.dense_ffn);
             if (d.trace_parts) |tp| {
                 try d.flush();
                 @memcpy(tp[1][l][0 .. n * H], halves(s.at(.tmp), n * H));
@@ -239,12 +262,25 @@ pub const Decoder = struct {
 
     /// The routed layer's FFN into `.tmp`: the gate on the GPU, the experts' row lists here, then the shared expert,
     /// each expert on its gathered rows, and the combine in gate order.
-    fn moe(d: *Decoder, L: wts.Layer, gate: Ref, n: usize) !void {
+    fn moe(d: *Decoder, L: wts.Layer, l: usize, gate: Ref, n: usize) !void {
         const s = d.scratch;
         const k = d.k;
         var e = d.encoder();
         ks.Kernels.bind(e, k.get("ud_moe_gate"), &.{ s.at(.h), gate, s.at(.ids), s.at(.wts) }, {});
         e.dispatchGroups(mtl.Size.of(n, 1, 1), mtl.Size.of(cfg.experts, 1, 1));
+        if (n == 1) {
+            // one token: its experts straight from the gate's ids, no wait on the host
+            const tab = Ref{ .buf = d.experts, .off = l * cfg.experts * @sizeOf(UdExpert) };
+            const args = UdExpertArgs{ .ffn = cfg.expert_ffn };
+            ks.Kernels.bind(e, k.get("ud_expert_gu"), &.{ s.at(.h), tab, s.at(.ids), s.at(.act) }, args);
+            e.dispatchGroups(mtl.Size.of(cfg.expert_ffn / 32, slots, 1), mtl.Size.of(256, 1, 1));
+            ks.Kernels.bind(e, k.get("ud_expert_down"), &.{ s.at(.act), tab, s.at(.ids), s.at(.slots) }, args);
+            e.dispatchGroups(mtl.Size.of(H / 32, slots, 1), mtl.Size.of(256, 1, 1));
+            mlp(e, k, L.ffn, s.at(.h), s.at(.g), s.at(.u), s.at(.xg), s.at(.shared), 1, cfg.shared_ffn);
+            ks.Kernels.bind(e, k.get("ud_moe_combine"), &.{ s.at(.slots), s.at(.wts), s.at(.shared), s.at(.tmp) }, {});
+            e.dispatchThreads(mtl.Size.of(H, 1, 1), mtl.Size.of(256, 1, 1));
+            return;
+        }
         try d.flush();
         const ids = words(s.at(.ids), n * slots);
         var counts: [cfg.experts]usize = @splat(0);
@@ -276,13 +312,24 @@ pub const Decoder = struct {
     }
 };
 
+/// y [M, N] = bf16(x w^T): the tensor-unit GEMM for a prompt's rows, the matvec for one token's.
+fn lin(e: mtl.ComputeEncoder, k: *const ks.Kernels, x: Ref, w: Ref, y: Ref, M: usize, N: usize, K: usize) void {
+    if (M > 1) return k.linear(e, x, w, y, M, N, K);
+    ks.Kernels.bind(e, k.get("ud_matvec"), &.{ x, w, y }, UdMv{ .n = @intCast(N), .k = @intCast(K) });
+    e.dispatchGroups(mtl.Size.of((N + 31) / 32, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+fn address(r: Ref) u64 {
+    return r.buf.gpuAddress() + r.off;
+}
+
 /// down(bf16(silu(gate(x))) * up(x)) for `n` rows into `y`.
 fn mlp(e: mtl.ComputeEncoder, k: *const ks.Kernels, w: wts.Expert, x: Ref, g: Ref, u: Ref, act: Ref, y: Ref, n: usize, width: usize) void {
-    k.linear(e, x, w.gate, g, n, width, H);
-    k.linear(e, x, w.up, u, n, width, H);
+    lin(e, k, x, w.gate, g, n, width, H);
+    lin(e, k, x, w.up, u, n, width, H);
     ks.Kernels.bind(e, k.get("ud_silu_mul"), &.{ g, u, act }, @as(u32, @intCast(n * width)));
     e.dispatchThreads(mtl.Size.of(n * width, 1, 1), mtl.Size.of(256, 1, 1));
-    k.linear(e, act, w.down, y, n, H, width);
+    lin(e, k, act, w.down, y, n, H, width);
 }
 
 fn rmsNorm(e: mtl.ComputeEncoder, k: *const ks.Kernels, x: Ref, w: Ref, y: Ref, n: usize) void {
