@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const g = @import("benchmark_group.zig");
 const expect = std.testing.expect;
 
@@ -89,7 +90,13 @@ test "benchmark group: the loaded communicator supplies count and every peer bef
     try expect(group.calls == 1 and std.mem.indexOf(u8, bytes, "multi-node") != null);
 }
 
+/// `probe` names a node only on macOS and Linux, so a Metal handshake's own inventory is unranked anywhere else.
+fn probeNamesNode() bool {
+    return builtin.os.tag == .macos or builtin.os.tag == .linux;
+}
+
 test "benchmark group: Metal endpoint inventories and legacy HELLO peers preserve the serving handshake" {
+    if (!probeNamesNode()) return error.SkipZigTest;
     const Device = struct {
         pub fn name(_: @This()) [*:0]const u8 {
             return "Apple Test GPU";
@@ -132,6 +139,7 @@ test "benchmark group: Metal endpoint inventories and legacy HELLO peers preserv
 }
 
 test "benchmark group: a delayed Metal peer retains the startup wait without a new deadline" {
+    if (!probeNamesNode()) return error.SkipZigTest;
     const Clock = struct {
         var calls: std.atomic.Value(u32) = .init(0);
         var table: std.Io.VTable = undefined;
