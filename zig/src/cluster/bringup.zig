@@ -1,6 +1,4 @@
-//! Bringing a cluster up: every node's membership over its links until one settled view agrees on the plan's digest.
-//! `simulate` runs every node in this process on fake_net; `Live` is one node on the real clock over its own links;
-//! `onHost` opens this node's MCDMA endpoint and holds the cluster up over it.
+//! Bring-up until a settled view agrees on the plan: `simulate` on fake_net, `Live` in real time, `onHost` on MCDMA.
 const std = @import("std");
 const fabric = @import("fabric");
 const node = @import("node.zig");
@@ -104,8 +102,7 @@ pub const Live = struct {
         l.m.deinit();
     }
 
-    /// Until every node in `names` is in one settled view (the same epoch and view digest), all computed this plan,
-    /// and all said so: each marks itself planned once it sees agreement, so no node leaves before the others agree.
+    /// Until all `names` share a settled view and said they computed this plan; none leaves before the others agree.
     pub fn up(l: *Live) (Error || Allocator.Error || error{Corrupt})!Report {
         const start = words.nowNs();
         const n = l.names.len;
@@ -136,7 +133,7 @@ pub const Live = struct {
         }
     }
 
-    /// Keep the view alive for `for_ns` (null: until something happens); returns the first member lost or gone, else null.
+    /// Keep the view alive for `for_ns` (null: until something happens); the first member lost or gone, else null.
     pub fn watch(l: *Live, for_ns: ?u64) (Allocator.Error || error{Corrupt})!?Lost {
         const start = words.nowNs();
         while (true) {
@@ -180,8 +177,7 @@ pub const Live = struct {
         }
     }
 
-    /// A member that computed another plan from its cluster file fails now, by name, not at the settle time; once this
-    /// node's own plan went out, so the member finds the mismatch too (one that has since left counts).
+    /// A member with another plan fails by name at once (ours went out, so it sees the mismatch too); one gone counts.
     fn checkPlans(l: *Live) Error!void {
         const sent = l.plan_beat orelse return;
         if (l.m.me.counter <= sent) return;
@@ -243,8 +239,7 @@ pub const Diag = struct {
     buf: [256]u8 = undefined,
 };
 
-/// This node on a real host: open its MCDMA endpoint (connecting every link), bring the view up over it until every
-/// node agrees on `plan`, report it to `out`, hold, then say goodbye and close. A member found dead is MemberLost.
+/// This node on a real host: its MCDMA endpoint, agreement on `plan` (to `out`), a hold, a goodbye; dead is MemberLost.
 pub fn onHost(gpa: Allocator, s: mcdma_link.Spec, inv: node.Inventory, plan: u64, h: Host, out: *std.Io.Writer, diag: *Diag) !Outcome {
     const t0 = words.nowNs();
     const o = try mcdma_link.Open.init(gpa, s);

@@ -1,4 +1,4 @@
-//! A model's nodes as MCDMA ranks: ranks every node derives alike, this node's links and window, one endpoint and the cluster's link over it.
+//! A model's nodes as MCDMA ranks: ranks every node derives alike, this node's links and window, its endpoint and link.
 const std = @import("std");
 const builtin = @import("builtin");
 const fabric = @import("fabric");
@@ -19,15 +19,13 @@ pub const Sizes = struct {
     staging_bytes: usize = 1 << 20,
 };
 
-/// The Mac's MCDMA kext registers at most 64 memory regions per context (one context per port): a ConnectX window and
-/// every rank's staging in 4 MiB pieces, plus one region for the peer.
+/// A Mac's kext registers at most 64 regions per context (port): a window, each rank's 4 MiB staging pieces, the peer.
 pub const mac_regions = 64;
 pub const mac_piece: usize = 4 << 20;
 
 pub const Error = error{ NotARank, ListedTwice, TooManyRanks, NoLink, TooManyRegions, NoLibrary } || Allocator.Error;
 
-/// The model's ranks in an order every node derives from the file alone: the prefill nodes then the decode nodes, each
-/// as listed (disaggregated), or the model's node list (converged). The order of "nodes" in the file never matters.
+/// Ranks every node derives from the file: prefill then decode as listed (not "nodes"), or a converged model's nodes.
 pub fn ranks(a: Allocator, m: config.Model) Allocator.Error![]const []const u8 {
     if (m.mode == .converged) return m.nodes;
     const out = try a.alloc([]const u8, m.prefill.len + m.decode.len);
@@ -111,8 +109,7 @@ pub fn spec(a: Allocator, c: config.Config, m: config.Model, name: []const u8, o
     return .{ .names = names, .rank = rank, .library = library, .links = links, .layout = layout, .config = .{ .rank = rank, .ranks = n, .window_bytes = window, .staging_bytes = s.staging_bytes, .links = links, .timeout_ns = opts.timeout_ns, .connect_timeout_ns = opts.connect_timeout_ns } };
 }
 
-/// Every node of model `m` as it will check itself on its own host (a Metal node is a Mac), so a leader refuses what a
-/// node it starts would refuse: its links, library and window. Only each node can look for its library's file.
+/// Every node of `m` as it checks itself (Metal is a Mac), so a leader refuses what it would: links, library, window.
 pub fn specAll(a: Allocator, c: config.Config, m: config.Model, sizes: Sizes, why: *[]const u8) Error!void {
     for (try ranks(a, m)) |name| {
         const mac = if (c.find(name)) |i| c.nodes[i].backend == .metal else false;
@@ -120,9 +117,7 @@ pub fn specAll(a: Allocator, c: config.Config, m: config.Model, sizes: Sizes, wh
     }
 }
 
-/// The declared links among `names` as cables between their indices: the fake bring-up's wiring, from the same
-/// declarations the real nodes open. A CUDA host's probes report no Thunderbolt peers, so the probed topology never
-/// joins a Mac to a GB10. Each node's links take its ports in file order.
+/// Declared links among `names` as fake-wiring cables, ports in file order: probes never join a Mac to a GB10.
 pub fn cables(a: Allocator, c: config.Config, names: []const []const u8) ![]topology.Edge {
     const ports = try a.alloc(u8, names.len);
     defer a.free(ports);
@@ -155,7 +150,7 @@ fn anyConnectX(links: []const mcdma.Link) bool {
     return false;
 }
 
-/// The library is a file at its path (whether it is libmcdma-fabric ABI 1 is the endpoint's to find, as McdmaFabricUnavailable or WrongAbi).
+/// The library is a file at its path (whether it is ABI 1, the endpoint finds: McdmaFabricUnavailable or WrongAbi).
 pub fn findLibrary(io: std.Io, path: []const u8) !void {
     try std.Io.Dir.accessAbsolute(io, path, .{});
 }
@@ -168,8 +163,7 @@ pub fn libraryError(err: anyerror) bool {
     };
 }
 
-/// The disaggregated plan every node agrees on before any round: the model, its ranks and their roles, and every link
-/// between them (what both ends must read alike); each node computes it from the cluster file alone.
+/// The plan all nodes agree on before any round, from the file alone: the model, its ranks and roles, their links.
 pub fn planDigest(c: config.Config, m: config.Model, names: []const []const u8, sizes: Sizes) u64 {
     var h = std.hash.Wyhash.init(0x4d43_444d_4153_4b56);
     h.update(m.id);

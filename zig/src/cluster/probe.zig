@@ -1,5 +1,4 @@
-//! An inventory from the host's own tools. macOS: sysctl, system_profiler, ibv_devinfo -v, df -k.
-//! Linux: /proc/meminfo, nvidia-smi, ibv_devinfo -v, df -k, /etc/machine-id.
+//! An inventory from: macOS sysctl, system_profiler; Linux meminfo, nvidia-smi, machine-id; both ibv_devinfo -v, df -k.
 const std = @import("std");
 const node = @import("node.zig");
 
@@ -159,8 +158,7 @@ fn takeGid(d: *Device, key: []const u8, value: []const u8) void {
     }
 }
 
-/// `df -k`: the Available kilobytes of the row whose last field is `mount`.
-/// macOS prints nine columns; Linux prints six. Available is the fourth either way.
+/// `df -k`: Available kilobytes (4th of macOS's nine columns or Linux's six) in the row whose last field is `mount`.
 pub fn dfAvailable(text: []const u8, mount: []const u8) ?u64 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -242,8 +240,7 @@ pub fn meminfo(text: []const u8) MemInfo {
 
 pub const Nvidia = struct { name: Name = .{}, memory: u64 = 0, free: u64 = 0, cores: u32 = 0 };
 
-/// `nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits`.
-/// Memory columns are MiB. A GB10 prints `[N/A]` for both, which stays zero. An empty report leaves the fields zero.
+/// `nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits` (MiB); `[N/A]` or none is 0.
 pub fn nvidiaSmi(text: []const u8) Nvidia {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -277,9 +274,7 @@ pub const LinuxTexts = struct {
     mount: []const u8 = "/",
 };
 
-/// A Linux host's inventory. A GB10 is unified memory; any other CUDA card keeps its own VRAM.
-/// gpu_limit stays 0 when nvidia-smi did not answer, so the cluster file's gpu_limit_gb can fill it.
-/// A GB10 still at 0 after that fill is refused by name: its memory columns print [N/A].
+/// A Linux host's inventory; gpu_limit is 0 without nvidia-smi's memory, for gpu_limit_gb (a GB10 left 0 is refused).
 pub fn inventoryLinux(t: LinuxTexts) node.Inventory {
     const mem = meminfo(t.meminfo);
     const gpu = nvidiaSmi(t.nvidia);

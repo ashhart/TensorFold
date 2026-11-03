@@ -1,4 +1,4 @@
-//! A model's MCDMA ranks and each node's half of every link, from the cluster file alone; refusals by name before anything opens.
+//! A model's MCDMA ranks and each node's half of every link from the file alone; refusals by name before opening.
 const std = @import("std");
 const fabric = @import("fabric");
 const config = @import("config.zig");
