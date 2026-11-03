@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA loads its experts about 12% faster with the direct load: the next chunk is read while the current one packs, and the store switches shards without reopening them. Replies are unchanged (#1960). Thanks to @jschmied.
+
 - Gemma 4 on CUDA keeps its global layers' caches in pages of the core KV pool, every stream on pages, so with `TF_KV_SHARE` its prompts can be kept and resumed as pool pages; unset, tokens and speed are unchanged (#1619, part of #1657). Thanks to @jschmied.
 
 - TensorFold Starlight moves to its own repository, [ashhart/tf-starlight](https://github.com/ashhart/tf-starlight), with its history: it pins the TensorFold release it is tested with and checks the engine contract against that release in CI (#1972, fixes #1970).
