@@ -30,6 +30,7 @@ const rounds = @import("lane_rounds.zig");
 const scoring = @import("lane_host_score.zig");
 const lane_stream = @import("lane_stream.zig");
 const lane_halt = @import("lane_halt.zig");
+const lane_trace = @import("lane_trace.zig");
 
 pub const LaneHost = struct {
     gpa: Allocator,
@@ -91,6 +92,7 @@ pub const LaneHost = struct {
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
     capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
     kv: ?@import("kv_ledger.zig").Ledger = null, // Info.ledger's budget or the paged pool's (lane_host_ledger.zig)
+    trace: ?*lane_trace.Trace = null, // TF_LANE_TRACE=<file>, read once at start (unless set before); null: no trace
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -117,6 +119,12 @@ pub const LaneHost = struct {
 
     pub fn start(h: *LaneHost) !void {
         if (h.rounds != null and ledger.priced(h)) return error.LedgerWithRounds; // a planner admits past takeJob
+        // opened here, not at init: an owner failing before start leaks no file; a failed start closes it below
+        if (h.trace == null) h.trace = .fromEnv(h.gpa, h.io);
+        errdefer if (h.trace) |t| {
+            t.close();
+            h.trace = null;
+        };
         if (h.rounds != null and !h.core.backend.pieces()) return error.PiecesUnsupported; // a drafter wrapper runs whole prompts
         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
     }
@@ -140,6 +148,8 @@ pub const LaneHost = struct {
         h.live_tokens.deinit(h.gpa);
         h.pieces.deinit(h.gpa);
         h.finals.deinit(h.gpa);
+        if (h.trace) |t| t.close();
+        h.trace = null;
     }
 
     /// A drain's deadline: the round in flight completes on every rank, so the ranks stop at the same boundary.
@@ -195,6 +205,8 @@ pub const LaneHost = struct {
         if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
+        // written before the lock: a trace line never holds the host's mutex (a refused request's line stays alone)
+        if (h.trace) |t| t.line(.{ .t0_ns = job.submitted, .t1_ns = job.submitted, .kind = .submit, .id = id, .rows_to = request.prompt.len });
         h.mutex.lockUncancelable(h.io);
         defer h.unlock();
         const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
@@ -397,7 +409,7 @@ pub const LaneHost = struct {
         load.calling(h, job);
         h.core.addStreamCommitted(&job.stream, .{ .ptr = job, .call = firstCommitted }) catch |e| return h.failedPass(job, e);
         h.prefilled(job, began);
-        if (r.promptOnly()) return @import("lane_prompt_only.zig").complete(h, job);
+        if (r.promptOnly()) return @import("lane_prompt_only.zig").complete(h, job, null);
         _ = h.deliver(job);
         return true;
     }
@@ -415,9 +427,14 @@ pub const LaneHost = struct {
     pub fn fillAt(h: *LaneHost, at: usize) void {
         const job = h.filling.items[at];
         const first = !job.fill_began;
+        // the trace's line, from what the job holds before the call can end it; written last, after any completion
+        var line: lane_trace.Event = undefined;
+        if (h.trace) |t| line = .{ .t0_ns = t.now(), .t1_ns = 0, .kind = .fill, .id = job.id, .stream = job.seq, .rows_from = if (first) job.stream.cached else job.stream.fill_at.load(.monotonic) };
+        defer if (h.trace) |t| t.end(&line);
         job.fill_began = true;
         load.calling(h, job);
         const done = h.core.fillStreamCommitted(&job.stream, first, .{ .ptr = job, .call = firstCommitted }, fill.capRows(h)) catch |e| {
+            if (h.trace != null) line.failed(job.stream.fill_at.load(.monotonic));
             _ = switch (e) {
                 error.Cancelled => h.cancel(job),
                 error.LaneMemory => blk: {
@@ -429,11 +446,12 @@ pub const LaneHost = struct {
             return;
         };
         load.progress(h, job);
+        if (h.trace != null) line.rows_to = if (done) job.stream.prompt_len else job.stream.fill_at.load(.monotonic);
         if (!done) return;
         _ = h.filling.orderedRemove(at);
         h.prefilled(job, job.began);
         if (job.request.promptOnly()) {
-            _ = @import("lane_prompt_only.zig").complete(h, job);
+            _ = @import("lane_prompt_only.zig").complete(h, job, if (h.trace != null) &line.ok else null);
             return;
         }
         _ = h.deliver(job);
@@ -574,10 +592,13 @@ pub const LaneHost = struct {
             const timed = owed or h.srpt.on; // srpt samples every round's time and tokens
             const r0 = if (timed) std.Io.Clock.awake.now(h.io) else std.Io.Timestamp.zero;
             const before = if (h.srpt.on) @import("lane_host_srpt.zig").emittedTotal(h.core.live.items) else 0;
+            var round = if (h.trace) |t| lane_trace.Event.round(t, h.core.live.items.len) else undefined;
             h.core.step() catch |e| {
+                if (h.trace) |t| t.endFailed(&round);
                 ends.failRound(h, e);
                 continue;
             };
+            if (h.trace) |t| t.end(&round);
             if (timed) {
                 const ns: i64 = @intCast(r0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
                 if (owed) h.share.rounded(ns);
@@ -590,6 +611,7 @@ pub const LaneHost = struct {
 };
 
 test {
+    _ = @import("lane_trace.zig");
     _ = @import("lane_host_decode_share_test.zig");
     _ = @import("lane_host_srpt.zig");
 }

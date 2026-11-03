@@ -237,6 +237,7 @@ pub fn Backend(comptime F: type) type {
             if (comptime @hasDecl(F, "readoutPiece")) if (s.readout != null) {
                 try h.readoutPiece(lane, prompt, f.at, to, cancel);
                 f.at = to;
+                s.fill_at.store(@intCast(to), .monotonic); // a readout has no drafts, and HIP reports no fill: the trace's rows
                 _ = f.cut(to); // a cut passed keeps no state: a readout writes no snapshot
                 if (to < prompt.len) return false;
                 lane.fill = null;
