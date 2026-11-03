@@ -302,8 +302,8 @@ pub const Cache = struct {
         const g = e.g;
         const sg = self.seg(e, last.start, 0, last.rows);
         try recurrent.mark(self, false);
-        // the path's rows join the pending ones, or without a log (or with the switch off) land in the state now
-        const deferred = keepLate() and self.log.len > 0;
+        // the path's rows join the pending ones; without a log, with the switch off or past pend_cap they land now
+        const deferred = keepLate() and self.log.len > 0 and path.len <= pend_cap;
         if (!deferred) {
             try self.flush(e);
             try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
@@ -329,6 +329,13 @@ pub const Cache = struct {
             while (j + run < path.len and path[j + run] == path[j] + run) run += 1;
             const at: usize = @as(usize, @intCast(self.pend)) + j;
             const m: cuda.abi.Memcpy2D = .{ .src = log + path[j] * row_log, .src_pitch = g.logRowBytes(), .dst = base + at * g.deltas() * hb, .dst_pitch = hb, .width = hb, .height = run * g.deltas() };
+            // a copy past the log or the pending buffer is refused here, not by the driver mid-reply
+            const src_end = m.src - log + (m.height - 1) * m.src_pitch + m.width;
+            const dst_end = m.dst - base + (m.height - 1) * m.dst_pitch + m.width;
+            if (src_end > self.log.len or dst_end > self.pbuf.?.len) {
+                std.log.err("qwen3_5 pending keep: path {d} rows after {d} pending, path row {d} (window row {d}), run {d}: source end {d} of a {d}-byte log, destination end {d} of a {d}-byte buffer; head {d} bytes, log row {d}", .{ path.len, self.pend, j, path[j], run, src_end, self.log.len, dst_end, self.pbuf.?.len, hb, g.logRowBytes() });
+                return error.QwenPendingOutOfBounds;
+            }
             try e.d.check(e.d.api.cuMemcpy2DAsync_v2(&m, e.stream.handle), "cuMemcpy2DAsync");
             j += run;
         }
