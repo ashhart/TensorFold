@@ -31,7 +31,7 @@ const Lane = struct {
 };
 
 pub const Kolibri = struct {
-    copy_drafts: bool = true,
+    priority_copies: bool = false,
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     m: *fwd.Model,
@@ -102,7 +102,7 @@ pub const Kolibri = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Kolibri) lanes.Model {
-        return .{ .copy_drafts = x.copy_drafts, .root_copies = x.copy_drafts, .context_copies = x.copy_drafts, .copy_match = if (x.copy_drafts) 4 else 8, .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
+        return .{ .root_copies = x.priority_copies, .context_copies = x.priority_copies, .copy_match = if (x.priority_copies) 4 else 8, .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slots, round_rows)) };
     }
 
     fn envOff(name: [*:0]const u8) bool {

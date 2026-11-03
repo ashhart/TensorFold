@@ -76,6 +76,7 @@ fn positions(context: usize) !usize {
 
 /// The checkpoint, the shared kernels and every stream's caches.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    const priority_copies = try cuda.priority_copies.read("TF_KOLIBRI_COPIES", o.drafts);
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound; // before the weights load
     const context = try positions(o.context);
@@ -101,7 +102,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n, be.prompt_rows);
     errdefer own.m.deinit();
     own.kb = try be.Kolibri.init(gpa, ctx.d, &own.m, &own.k, own.s);
-    own.kb.copy_drafts = o.drafts;
+    own.kb.priority_copies = priority_copies;
     return .{
         .backend = own.kb.backend(),
         .facts = own.kb.facts(),
