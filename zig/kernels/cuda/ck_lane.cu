@@ -7,7 +7,6 @@
 
 #include "mma4.cuh"
 #include "common/qmm_frag.cuh"
-#include "common/vec.cuh"
 
 using namespace qmm_frag;
 using namespace mma4;
@@ -31,7 +30,7 @@ struct Tile {
     static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
 };
 
-using tf_common::unpack8;
+#include "common/unpack8_value.cuh"
 
 // x e4m3 [M, K] and w e4m3 [npad/64, K/64, 8, 32, 2, 8], both in the fragment order quant8 and the FP8 pack write.
 template <typename C, bool CLUSTER>
