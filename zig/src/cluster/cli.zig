@@ -38,7 +38,7 @@ pub fn wants(args: []const []const u8) bool {
     return false;
 }
 
-/// The exit code: 0 ok, 1 refused or invalid, 2 usage, 3 the MCDMA endpoints are not linked into this build.
+/// Exit: 0 ok; 1 refused, not planned or invalid; 2 usage; 3 MCDMA endpoints not linked.
 pub fn run(env_in: Env, args: []const []const u8) !u8 {
     var env = env_in;
     var saved: launch.Saved = undefined;
@@ -166,6 +166,7 @@ fn checkCmd(env: Env, args: []const []const u8, show_nodes: bool) !u8 {
         const invs = cli_model.inventories(src, c, m.nodes) catch |err| return reportErr(env, err);
         const pl = cli_model.planModel(src, m, invs) catch |err| {
             try env.out.print("not planned: {s}\n", .{@errorName(err)});
+            code = 1;
             continue;
         };
         try status.placement(env.out, &pl.p, pl.needs, pl.fits);
