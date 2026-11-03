@@ -52,12 +52,19 @@ pub const Kernels = struct {
     bf16: bool,
     /// The chip has gfx12's WMMA; elsewhere the WMMA symbol only traps.
     wmma12: bool,
+    /// The tile served products run on: WMMA on gfx12 unless the policy says matrix=off, else dot2.
+    serve: Tile = .dot2,
 
     /// `tiles` is dot2_tiles.hip's module, where every build keeps both symbols.
-    pub fn load(tiles: Module, bf16: bool, wmma12: bool) Error!Kernels {
+    pub fn load(tiles: Module, bf16: bool, wmma12: bool, matrix: affine.Matrix) Error!Kernels {
         var fns: [symbols.len]Function = undefined;
         for (&fns, symbols) |*f, name| f.* = try tiles.function(name);
-        return .{ .fns = fns, .bf16 = bf16, .wmma12 = wmma12 };
+        return .{ .fns = fns, .bf16 = bf16, .wmma12 = wmma12, .serve = serving(bf16, wmma12, matrix) };
+    }
+
+    /// matrix=auto and on serve gfx12's WMMA tile; off, and every chip without it, keeps dot2's bits.
+    pub fn serving(bf16: bool, wmma12: bool, matrix: affine.Matrix) Tile {
+        return if (bf16 and wmma12 and matrix != .off) .wmma12 else .dot2;
     }
 
     /// The product's refusal, or null: a BF16 build (gfx12 for WMMA), K in whole groups, 16-byte rows and bases.
@@ -146,4 +153,12 @@ test "WMMA products take their geometry by size; dot2 has one" {
     try std.testing.expectEqual(Shape.w12_small, shapeOf(.wmma12, narrow_rows, narrow_cols));
     try std.testing.expectEqual(Shape.w12_big, shapeOf(.wmma12, narrow_rows + 1, narrow_cols));
     try std.testing.expectEqual(Shape.w12_big, shapeOf(.wmma12, small_rows + 1, narrow_cols + 1));
+}
+
+test "gfx12 serves the WMMA tile unless matrix=off; other chips keep dot2" {
+    try std.testing.expectEqual(Tile.wmma12, Kernels.serving(true, true, .auto));
+    try std.testing.expectEqual(Tile.wmma12, Kernels.serving(true, true, .on));
+    try std.testing.expectEqual(Tile.dot2, Kernels.serving(true, true, .off));
+    try std.testing.expectEqual(Tile.dot2, Kernels.serving(true, false, .auto));
+    try std.testing.expectEqual(Tile.dot2, Kernels.serving(false, false, .on));
 }

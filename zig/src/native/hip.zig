@@ -44,11 +44,12 @@ fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: an
 }
 
 /// Why `matrix=on` cannot run on a GPU of `caps`, or null when its matrix-core tiles exist (gfx11's WMMA).
-fn matrixRefused(policy: hip.Policy, caps: hip.Caps) ?[]const u8 {
+fn matrixRefused(comptime F: type, policy: hip.Policy, caps: hip.Caps) ?[]const u8 {
     if (policy.matrix != .on) return null;
     return switch (caps.matrix) {
         .wmma11 => null,
-        .wmma12 => "the gfx12 matrix-core tiles (RDNA4's WMMA layout) are not implemented yet",
+        // a family whose products are all BF16 dense ones has gfx12 tiles; the MLX affine tiles have none yet
+        .wmma12 => if (@hasDecl(F, "matrix_wmma12") and F.matrix_wmma12) null else "the gfx12 matrix-core tiles (RDNA4's WMMA layout) are not implemented yet for this family",
         .none => "this GPU has no matrix cores",
     };
 }
@@ -118,7 +119,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     if (o.mtp_drafts) |n| policy.mtp.drafts = @intCast(n);
     if (o.mtp_confidence) |c| policy.mtp.confidence = c;
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
-    if (matrixRefused(policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
+    if (matrixRefused(F, policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
     const group: ?hip.collective.Group = if (o.tp > 1) try join(a, gpa, io, o, caps, &policy, problem) else null;
     errdefer if (group) |g| g.close(gpa);
     const policy_line = try std.fmt.allocPrint(gpa, "{f}", .{policy});
@@ -492,12 +493,17 @@ test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
 test "matrix=on runs only where the matrix-core tiles exist; auto runs everywhere" {
     var on: hip.Policy = .{};
     try on.apply("matrix=on");
-    try std.testing.expect(matrixRefused(on, hip.Caps.of("gfx1100").?) == null);
-    try std.testing.expect(matrixRefused(on, hip.Caps.of("gfx1151").?) == null);
-    try std.testing.expect(std.mem.indexOf(u8, matrixRefused(on, hip.Caps.of("gfx1201").?).?, "not implemented") != null);
-    try std.testing.expect(matrixRefused(on, hip.Caps.of("gfx1030").?) != null);
+    try std.testing.expect(matrixRefused(qwen35.native, on, hip.Caps.of("gfx1100").?) == null);
+    try std.testing.expect(matrixRefused(qwen35.native, on, hip.Caps.of("gfx1151").?) == null);
+    try std.testing.expect(std.mem.indexOf(u8, matrixRefused(qwen35.native, on, hip.Caps.of("gfx1201").?).?, "not implemented") != null);
+    // the families on MLX affine tiles keep the gfx12 refusal; qwen3's BF16 dense products have the WMMA tile
+    inline for (.{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native }) |F| try std.testing.expect(matrixRefused(F, on, hip.Caps.of("gfx1201").?) != null);
+    try std.testing.expect(matrixRefused(qwen3.native, on, hip.Caps.of("gfx1201").?) == null);
+    try std.testing.expect(matrixRefused(qwen3.native, on, hip.Caps.of("gfx1030").?) != null);
+    inline for (.{ qwen35.native, qwen3.native }) |F| try std.testing.expect(matrixRefused(F, on, hip.Caps.of("gfx1100").?) == null);
+    try std.testing.expect(matrixRefused(qwen35.native, on, hip.Caps.of("gfx1030").?) != null);
     const auto: hip.Policy = .{};
-    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1200", "gfx1201" }) |name| try std.testing.expect(matrixRefused(auto, hip.Caps.of(name).?) == null);
+    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1200", "gfx1201" }) |name| try std.testing.expect(matrixRefused(qwen35.native, auto, hip.Caps.of(name).?) == null);
 }
 
 test {

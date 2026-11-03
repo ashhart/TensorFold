@@ -43,7 +43,7 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
                 if (m == 0 or x.kind != .bf16) return error.BadShape;
                 const kind: t.Kind = if (f32_out) .f32 else .bf16;
                 const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * kind.size()), .kind = kind };
-                try denseGemm(o, .dot2, x, h.weight, out, m, proj.n, proj.k);
+                try denseGemm(o, o.l.dense.serve, x, h.weight, out, m, proj.n, proj.k);
                 return out;
             },
             else => return error.BadShape,
