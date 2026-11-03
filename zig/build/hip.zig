@@ -399,6 +399,7 @@ const groups = [_]Source{
     .{ .path = "flashnext/flashnext.hip" },
     .{ .path = "recurrence/mamba.hip" },
     .{ .path = "glm_ocr/pointwise.hip" },
+    .{ .path = "joint_schema/joint_schema.hip" },
 };
 
 /// What the group sources include, so an edit to one rebuilds them.

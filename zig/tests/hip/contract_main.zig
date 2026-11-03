@@ -32,6 +32,10 @@ const columns_k = @import("contract_columns.zig");
 const vision_k = @import("contract_vision.zig");
 const full_k = @import("contract_vision_attention.zig");
 const text_k = @import("contract_dense_text.zig");
+const js_rows_k = @import("contract_js_rows.zig");
+const js_spans_k = @import("contract_js_spans.zig");
+const js_point_k = @import("contract_js_point.zig");
+const js_heads_k = @import("contract_js_heads.zig");
 
 const g = core.contract.gates;
 
@@ -275,6 +279,24 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&text, std.enums.values(text_k.Which)) |*v, w| v.* = .init(a, &r, s, &l, w);
     defer for (&text) |*v| v.deinit();
     for (&text) |*v| try kernels.append(a, v.kernel());
+    const js = try hip.joint_schema.Fns.load(&l);
+    const js_which = comptime std.enums.values(js_rows_k.Which);
+    var js_rows: [js_which.len]js_rows_k.Row = undefined;
+    for (&js_rows, js_which) |*x, w| x.* = try .init(a, &r, s, js, ctl, w);
+    defer for (&js_rows) |*x| x.deinit();
+    for (&js_rows) |*x| try kernels.append(a, x.kernel());
+    var js_spans: [3]js_spans_k.Spans = undefined;
+    for (&js_spans, std.enums.values(js_spans_k.Which)) |*x, w| x.* = .init(a, &r, s, js, w);
+    defer for (&js_spans) |*x| x.deinit();
+    for (&js_spans) |*x| try kernels.append(a, x.kernel());
+    var js_points: [std.enums.values(js_point_k.Which).len]js_point_k.Point = undefined;
+    for (&js_points, std.enums.values(js_point_k.Which)) |*x, w| x.* = try .init(a, &r, s, js, ctl, w);
+    defer for (&js_points) |*x| x.deinit();
+    for (&js_points) |*x| try kernels.append(a, x.kernel());
+    var js_heads: [3]js_heads_k.Heads = undefined;
+    for (&js_heads, std.enums.values(js_heads_k.Which)) |*x, w| x.* = .init(a, &r, s, js, w);
+    defer for (&js_heads) |*x| x.deinit();
+    for (&js_heads) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
