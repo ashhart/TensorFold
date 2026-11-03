@@ -90,7 +90,7 @@ through the existing shared learner/server acceptance path. Round outputs exactl
 judging a fit. Compare the immutable base tensor bytes before/after, and reopen each backend's saved folder on the
 other. Assert that untaught streams read the original model even beside taught streams.
 
-The lead then runs each affected checkpoint/profile on a CUDA GPU and on pre-M5 and M5 Macs. Match binary/runtime,
+Each affected checkpoint and profile is then run on a CUDA GPU and on pre-M5 and M5 Macs. Match binary/runtime,
 model/tokenizer revisions, prompts, seeds, quantization and cache settings. Require empty-folder tokens and speed
 equal to the base, drafted/plain and concurrent/solo equality, every prompt cut, resume/restart and rejection cleanup.
 Measure learning time and peak host/device memory separately. No device, real-checkpoint or performance gate is
