@@ -1,5 +1,7 @@
 // Qwen3.5-2B uses half-split RoPE: head_dim 256, rotary_dim 64, theta 1e7; 8 query heads, 2 KV heads; scale 1/16.
+
 // fast_rope: -DUSE_BF16 -DASH_QWEN35 (no mid bf16 rounding); sdpa: -DBF16_IO -DSDPA_DIM=256 -DSDPA_ROWS; gate: none
+
 // zig/src/families/qwen3_5/forward.zig attention(); zig/kernels/metal/qwen3_5/{layout,attn_partial,attn_merge}.metal.
 const std = @import("std");
 const dispatch = @import("dispatch.zig");
