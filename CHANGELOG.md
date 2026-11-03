@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The XPU build makes one core module per device tree and passes it through the runtime, family and module builders, while the Nemotron XPU device binaries keep their own optimize level (#1918). Thanks to @jschmied.
+
 - On HIP, decode's softmax stats and partial sums load sixteen values ahead and fold them in the same order, with the same bits (#1961). Thanks to @AbrahamCete.
 
 - GLM's CUDA `TF_KV_PAGES` is read through the profile registry, and startup reports the selection it resolved; the value and where it is read are unchanged (#1959, part of #1660). Thanks to @garvrao80.
