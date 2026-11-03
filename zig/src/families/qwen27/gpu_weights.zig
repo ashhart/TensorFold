@@ -192,6 +192,7 @@ const Builder = struct {
             first += run.linear.n;
         }
         var fused = runs[0].linear;
+        fused.bytes = false;
         fused.n = first;
         fused.gn = 0;
         for (runs) |run| fused.gn += run.linear.gn;

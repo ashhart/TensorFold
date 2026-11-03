@@ -7,7 +7,9 @@ const lane = @import("core").lane_projection;
 
 pub const Ref = struct { buffer: mtl.Buffer, offset: usize = 0 };
 /// A device matrix; `runs` non-empty means fused members of different widths. `gn`: the checkpoint's rows (0 = `n`).
-pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{}, gn: usize = 0 };
+pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{}, gn: usize = 0, bytes: bool = false };
+// `bytes`: a 5-bit matrix's codes widened to a byte each, [n][k] in `words`; `pairs` as prepareLanes lays them.
+
 /// One product inside a mixed fused matrix, writing output columns [first, first + linear.n).
 pub const Run = struct { linear: Linear, first: u32 };
 /// Staged tensors: `gn` the part's rows when `weight.shape[0]` is a slice, `whole` its tensor's rows as a block.
@@ -58,7 +60,22 @@ fn splitFor(parts: []const Triple, k: usize) !Split {
     return .{ .slices = try split(tensorRows(parts[0]), k), .m5 = m5Split(splitRows(parts), k) };
 }
 
+/// 5-bit g64 matrices as byte codes (quant_gpu byteProduct) on tensor units when TF_Q27_FIVE_BYTES=1.
+fn bytesOn(device: mtl.Device, parts: []const Triple) bool {
+    if (!device.tensorUnits() or parts.len == 0) return false;
+    const v = std.c.getenv("TF_Q27_FIVE_BYTES") orelse return false;
+    if (!std.mem.eql(u8, std.mem.span(v), "1")) return false;
+    const k = parts[0].weight.shape[1] * 32 / 5;
+    var n: usize = 0;
+    for (parts) |p| {
+        if (p.bits != 5 or p.group != 64 or p.weight.dtype != .u32 or p.weight.shape[1] * 32 != k * 5) return false;
+        n += p.weight.shape[0];
+    }
+    return n % 32 == 0 and k % 64 == 0;
+}
+
 pub fn prepare(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), parts: []const Triple, tile: u32) !Linear {
+    if (tile == 32 and bytesOn(device, parts)) return prepareBytes(device, allocator, owned, parts, parts[0].weight.shape[1] * 32 / 5, tile);
     if (tile != 32 or parts.len == 0) return error.BadProjectionShape;
     const bits = parts[0].bits;
     const group = parts[0].group;
@@ -232,6 +249,70 @@ fn prepareLanes(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.Ar
 
 /// One member as stored: words [rows][k*bits/32], scales and biases [rows][k/group].
 pub const Member = struct { words: []const u32, scales: []const u16, biases: []const u16, rows: usize };
+
+/// A member's codes one byte each, [rows][k], from the low-bit-first stream.
+pub fn widenCodes(p: Member, k: usize, bits: usize, out: []u8) void {
+    const row_words = k * bits / 32;
+    const mask: u32 = (@as(u32, 1) << @intCast(bits)) - 1;
+    for (0..p.rows) |r| {
+        const src = p.words[r * row_words ..][0..row_words];
+        for (0..k) |i| {
+            const at = i * bits;
+            const shift: u5 = @intCast(at % 32);
+            var code: u32 = src[at / 32] >> shift;
+            if (@as(usize, shift) + bits > 32) code |= src[at / 32 + 1] << @intCast(32 - @as(u32, shift));
+            out[r * k + i] = @intCast(code & mask);
+        }
+    }
+}
+
+test "widenCodes reads the 5-bit stream across word edges" {
+    const k = 64;
+    var w5: [k * 5 / 32]u32 = @splat(0);
+    for (0..k) |i| {
+        const c: u32 = @intCast((i * 7) % 32);
+        const at = i * 5;
+        w5[at / 32] |= c << @intCast(at % 32);
+        if (at % 32 > 27) w5[at / 32 + 1] |= c >> @intCast(32 - at % 32);
+    }
+    var out: [k]u8 = undefined;
+    widenCodes(.{ .words = &w5, .scales = &.{0}, .biases = &.{0}, .rows = 1 }, k, 5, &out);
+    try std.testing.expectEqual(@as(u8, 0), out[0]);
+    try std.testing.expectEqual(@as(u8, 7), out[1]);
+    try std.testing.expectEqual(@as(u8, 14), out[2]);
+    try std.testing.expectEqual(@as(u8, 21), out[3]);
+    try std.testing.expectEqual(@as(u8, 28), out[4]);
+    try std.testing.expectEqual(@as(u8, 3), out[5]); // bits 25..29
+    try std.testing.expectEqual(@as(u8, 10), out[6]); // bits 30..34: across a word edge
+    try std.testing.expectEqual(@as(u8, 17), out[7]);
+}
+
+/// `parts` as byte codes [n][k] and lane metadata [k/group][n][scale, bias]: a `bytes` matrix.
+pub fn prepareBytes(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), parts: []const Triple, k: usize, tile: u32) !Linear {
+    var n: usize = 0;
+    for (parts) |p| n += p.weight.shape[0];
+    const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+    const group = parts[0].group;
+    const ng = k / group;
+    const w = try own(device, allocator, owned, n * k, options);
+    const sb = try own(device, allocator, owned, ng * n * 4, options);
+    const codes = w.slice(u8, n * k);
+    const meta = sb.slice(u16, ng * n * 2);
+    var base: usize = 0;
+    for (parts) |p| {
+        const rows = p.weight.shape[0];
+        widenCodes(.{ .words = p.weight.host(u32), .scales = p.scales.host(u16), .biases = p.biases.host(u16), .rows = rows }, k, p.bits, codes[base * k ..][0 .. rows * k]);
+        const scales = p.scales.host(u16);
+        const biases = p.biases.host(u16);
+        for (0..rows) |r| for (0..ng) |g| {
+            meta[(g * n + base + r) * 2] = scales[r * ng + g];
+            meta[(g * n + base + r) * 2 + 1] = biases[r * ng + g];
+        };
+        base += rows;
+    }
+    const key = try splitFor(parts, k);
+    return .{ .words = .{ .buffer = w }, .pairs = .{ .buffer = sb }, .n = @intCast(n), .k = @intCast(k), .tile = tile, .slices = key.slices, .bits = parts[0].bits, .group = @intCast(group), .gn = splitRows(parts), .bytes = true };
+}
 
 /// Copies a member's rows into lane_projection.weight_layout rows [base, base + rows), bytes unchanged.
 pub fn packTiles(p: Member, base: usize, n: usize, k: usize, bits: usize, group: usize, out_w: []u32, out_sb: []u16) void {

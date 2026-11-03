@@ -38,6 +38,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     if (resumed == 0) {
         if (d) |x| try x.reset() else try b.runner.reset(slot);
         try clearContext(b, slot);
+        try b.runner.admit(slot, @intCast(ids.len)); // a fresh pass: the slot takes its prompt's rows at once
     }
     s.cached = resumed;
     var at: usize = resumed;
@@ -358,7 +359,8 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
     defer added.deinit(b.gpa);
     try added.appendSlice(b.gpa, try b.runner.ensure(slot));
     if (context_missing) {
-        const x = try Context.init(b.gpa, b.draft.?.model, drafting);
+        const x = try Context.init(b.gpa, b.draft.?.model, drafting, b.runner.kv_step);
+        x.settle = .{ .ctx = b.runner, .slot = slot, .run = q.decode_round.Runner.settleOpaque };
         b.contexts[slot] = x;
         try x.buffers(&added, b.gpa);
     }
@@ -367,8 +369,12 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
 
 /// A drafter context's bytes: the taps ring, and K/V caches when the slot drafts.
 fn contextBytes(c: q.dflash.config.Config, drafting: bool) usize {
-    const ring = @as(usize, c.window) * c.tapWidth() * 2;
-    return ring + if (drafting) @as(usize, c.layers) * 2 * (@as(usize, c.window) + 16) * c.kvWidth() * 2 else 0;
+    const ring = @as(usize, c.span()) * c.ringWidth() * 2;
+    var caches: usize = 0;
+    if (drafting) for (0..c.layers) |i| {
+        caches += 2 * (@as(usize, c.layerWindow(i)) + 16) * c.kvWidth() * 2;
+    };
+    return ring + caches;
 }
 
 /// A free slot for a new stream, slot 0 (the drafter's) first.
@@ -392,10 +398,29 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     var live: usize = 0;
     for (b.owners[0..b.runner.slots]) |owner| live += @intFromBool(owner != null);
     if (live <= 1) b.runner.trimBefore();
+    b.give_back[slot] = b.runner.kv_step != null;
+    giveBack(b);
+}
+
+/// Free, unread slots give back grown K/V and rings without waiting; slot 0 keeps what a next turn resumes from.
+pub fn giveBack(b: *Metal) void {
+    for (0..b.runner.slots) |k| {
+        if (!b.give_back[k]) continue;
+        const slot: u32 = @intCast(k);
+        if (b.owners[k] != null) {
+            b.give_back[k] = false;
+            continue;
+        }
+        if ((slot == 0 and b.standing.tokens.len > 0) or b.runner.busy(slot)) continue;
+        b.give_back[k] = false;
+        b.runner.release(slot) catch |err| std.log.warn("qwen27: slot {d} keeps its K/V ({s})", .{ slot, @errorName(err) });
+        clearContext(b, slot) catch {};
+    }
 }
 
 /// A promote unbind left for later, once no round is pending: a stream still in slot 0 or none to move ends it.
 pub fn promoteDue(b: *Metal) void {
+    giveBack(b);
     if (!b.promote_due or b.round != null) return;
     b.promote_due = false;
     promote(b);

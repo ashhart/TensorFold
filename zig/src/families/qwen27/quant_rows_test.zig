@@ -1,4 +1,4 @@
-//! Prompt passes past 128 rows through raw mixed-width projections equal their rows decoded one at a time.
+//! Prompt passes through mixed-width and byte-code projections equal their rows decoded one at a time.
 const std = @import("std");
 const mtl = @import("metal");
 const checkpoint = @import("core").checkpoint_metal;
@@ -41,6 +41,11 @@ fn synth(device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), n: usize, bits: 
 
 /// One call over every row, then one call a row; both outputs' bytes must match.
 fn expectRowsEqual(device: mtl.Device, kern: *quant.Kernels, lin: projection.Linear) !void {
+    return expectPassesEqual(device, kern, lin, lin);
+}
+
+/// `whole_lin` over every row as a prompt pass, `lin` one decoded row a call; both outputs' bytes must match.
+fn expectPassesEqual(device: mtl.Device, kern: *quant.Kernels, whole_lin: projection.Linear, lin: projection.Linear) !void {
     const queue = try device.queue();
     defer queue.deinit();
     const n: usize = lin.n;
@@ -59,7 +64,7 @@ fn expectRowsEqual(device: mtl.Device, kern: *quant.Kernels, lin: projection.Lin
     var open = true;
     errdefer if (open) e.end(); // a refused call still ends its encoder
     kern.prompt = true;
-    try kern.quant(e, lin, .{ .buffer = x }, null, .{ .buffer = x }, .{ .buffer = whole }, rows);
+    try kern.quant(e, whole_lin, .{ .buffer = x }, null, .{ .buffer = x }, .{ .buffer = whole }, rows);
     kern.prompt = false;
     for (0..rows) |r| try kern.quant(e, lin, .{ .buffer = x, .offset = r * k * 2 }, null, .{ .buffer = x }, .{ .buffer = single, .offset = r * n * 2 }, 1);
     e.end();
@@ -119,4 +124,19 @@ test "a 300-row prompt pass through a 5-bit matrix on simd_qmm_bits tiles equals
     // Tensor units take a non-4-bit matrix of whole tiles on lane kernels, not this raw path.
     if (r.device.tensorUnits()) return error.SkipZigTest;
     try expectRowsEqual(r.device, &r.kern, try r.matrix(64, 5, 1));
+}
+
+test "5-bit byte codes give the lane kernel's bits, prompt rows and decoded rows" {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    var r = try Rig.init();
+    defer r.deinit();
+    // The byte product runs the tensor op on uint8 codes: chips with tensor units only.
+    if (!r.device.tensorUnits()) return error.SkipZigTest;
+    const t = try synth(r.device, &r.owned, 64, 5, 4);
+    const lanes = try projection.prepare(r.device, std.testing.allocator, &r.owned, &.{t}, 32);
+    const bytes = try projection.prepareBytes(r.device, std.testing.allocator, &r.owned, &.{t}, k, 32);
+    try std.testing.expect(bytes.bytes and !lanes.bytes);
+    try expectPassesEqual(r.device, &r.kern, bytes, lanes);
+    try expectPassesEqual(r.device, &r.kern, lanes, bytes);
 }

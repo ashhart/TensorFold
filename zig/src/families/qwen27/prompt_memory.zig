@@ -15,8 +15,21 @@ pub fn frameBytes(c: Config, rows: u32) usize {
     return buffers(frame.allocationSizes(c, rows)) + (if (rows > frame.small_rows) buffers(frame.decodeSizes(c, rows)) else 0);
 }
 
+/// A prompt row's tap bytes: `planes` raw planes, plus a fusing drafter's row-major copy, fc rows and fused row.
+pub fn tapRowBytes(hidden: usize, planes: usize, fused: bool) usize {
+    return (planes + if (fused) planes + 2 else 0) * hidden * 2;
+}
+test "qwen27 memory: an eight-tap fusing drafter's prompt taps cost what its planes and fusion buffers hold" {
+    try std.testing.expectEqual(@as(usize, 5 * 5120 * 2), tapRowBytes(5120, 5, false));
+    try std.testing.expectEqual(@as(usize, 18 * 4096 * 2), tapRowBytes(4096, 8, true));
+}
+
 /// Frame bytes already belong to the model; these are the runner's future bytes at its peak.
 pub fn runnerBytes(c: Config, context: u32, slots: u32, rows: u32, shared: bool, ring: usize) !usize {
+    return runnerBytesTaps(c, context, slots, rows, shared, ring, tapRowBytes(c.hidden, 5, false));
+}
+/// runnerBytes with the drafter's own tap row bytes (tapRowBytes).
+pub fn runnerBytesTaps(c: Config, context: u32, slots: u32, rows: u32, shared: bool, ring: usize, tap_row: usize) !usize {
     var attention: usize = 0;
     for (0..c.layers) |i| attention += @intFromBool(c.kind(i) == .attention);
     const linear = c.layers - attention;
@@ -27,7 +40,7 @@ pub fn runnerBytes(c: Config, context: u32, slots: u32, rows: u32, shared: bool,
     const kv = attention * @as(usize, slots) * buffers([_]usize{ @as(usize, context) * c.kvDim() * 2, @as(usize, context) * c.kvDim() * 2 });
     const bindings = attention * buffers([_]usize{ (planning.global_words + planning.max_streams * planning.stream_words) * 4, planning.max_streams * 16, rows * 16 });
     const before = if (slots > 1) buffers([_]usize{budget.state}) else 0;
-    const taps = buffers([_]usize{@as(usize, rows) * 5 * c.hidden * 2});
+    const taps = buffers([_]usize{@as(usize, rows) * tap_row});
     return kv + bindings + before + taps + buffers(scratch.sizes) + buffers(budget.allocationSizes()) + slots * (ring + (256 << 20));
 }
 
@@ -37,11 +50,12 @@ pub const Fit = struct {
     slots: u32,
     shared: bool,
     ring: usize = 0,
+    tap_row: usize = 0, // tapRowBytes for the drafter's taps; 0: five raw planes
     current_rows: u32,
     left: usize,
 
     pub fn cost(f: Fit, rows: u32, slots: u32) !usize {
-        return (try runnerBytes(f.config, f.context, slots, rows, f.shared, f.ring)) + (frameBytes(f.config, rows) -| frameBytes(f.config, f.current_rows));
+        return (try runnerBytesTaps(f.config, f.context, slots, rows, f.shared, f.ring, if (f.tap_row > 0) f.tap_row else tapRowBytes(f.config.hidden, 5, false))) + (frameBytes(f.config, rows) -| frameBytes(f.config, f.current_rows));
     }
 
     pub fn choose(f: Fit, requested: u32, explicit: bool) !u32 {
