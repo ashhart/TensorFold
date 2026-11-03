@@ -10,6 +10,7 @@ const NK = 16;
 const NV = 48;
 var HIDDEN: usize = 2560;
 var GROUP: usize = 32;
+var GATE: gt.Gate = .sigmoid;
 const EPS: f32 = 1e-6;
 const DK = gt.dk;
 const DV = gt.dv;
@@ -228,6 +229,7 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
     const layer: gt.Layer = .{
         .nk = NK,
         .nv = NV,
+        .gate = GATE,
         .hidden = HIDDEN,
         .eps = EPS,
         .conv_w = try r.dev(std.mem.sliceAsBytes(cw16)),
@@ -264,7 +266,7 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
         w.* = try start.elapsedMs(end);
         try start.record(r.s);
         try o.forward(layer, sc, p_d, hist_d, init_d, rows);
-        try o.normBack(p_d, layer.norm_w, sc, s, EPS);
+        try o.normBackGate(p_d, layer.norm_w, sc, s, EPS, GATE);
         try o.scanBack(sc, s);
         try o.qkBack(sc, s);
         try o.gatesBack(p_d, layer.a_log, layer.dt_bias, sc, s);
@@ -289,7 +291,7 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
         try ev[1].record(r.s);
         try o.scanFwd(init_d, sc, s);
         try ev[2].record(r.s);
-        try o.normBack(p_d, layer.norm_w, sc, s, EPS);
+        try o.normBackGate(p_d, layer.norm_w, sc, s, EPS, GATE);
         try ev[3].record(r.s);
         try o.scanBack(sc, s);
         try ev[4].record(r.s);
@@ -342,6 +344,7 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
         .norm_w = try widen(r.a, u16, nw16),
         .init = if (init) |x| try widen(r.a, f32, x) else null,
         .eps = EPS,
+        .silu = GATE == .silu,
     };
     const f = try ref.forward(r.a, d, in, true);
     ulps("act", g_act, f.act);
@@ -389,6 +392,7 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
         dq_sum[(row * NK + hk) * DK + e] = x;
         dk_sum[(row * NK + hk) * DK + e] = y;
     };
+    try @import("gdn_norm_control.zig").check(r.gpu, r.s, sc, s, p_d, layer.norm_w, EPS, g_dy, g_dproj, GATE == .silu);
     r.compare("dy (norm back)", rows, NV * DV, view(f32, g_dy, NV * DV, 0), view(f64, gr.dy, NV * DV, 0), tol_f32);
     r.compare("dz", rows, NV * DV, view(f32, g_dproj, P, C), view(f64, gr.dproj, P, C), tol_f32);
     r.compare("dq (chain)", rows, NK * DK, view(f64, dq_sum, NK * DK, 0), view(f64, gr.dq, NK * DK, 0), tol_f32);
@@ -415,12 +419,15 @@ pub fn run(gpu: Gpu) !void {
 pub fn runShape(gpu: Gpu, hidden: usize, group: usize) !void {
     const old_h = HIDDEN;
     const old_g = GROUP;
+    const old_gate = GATE;
     defer {
         HIDDEN = old_h;
         GROUP = old_g;
+        GATE = old_gate;
     }
     HIDDEN = hidden;
     GROUP = group;
+    GATE = .silu;
     return runCurrent(gpu);
 }
 fn runCurrent(gpu: Gpu) !void {
@@ -464,7 +471,7 @@ fn runCurrent(gpu: Gpu) !void {
             for (s0) |*v| v.* = r.uniform(-0.3, 0.3);
             const dout = try a.alloc(f64, d.rows * d.nv * d.dv);
             for (dout) |*v| v.* = r.uniform(-1, 1);
-            const in: ref.Inputs = .{ .p = p, .hist = hist, .conv_w = cw, .a_log = al, .dt_bias = db, .norm_w = nw, .init = s0, .eps = EPS };
+            const in: ref.Inputs = .{ .p = p, .hist = hist, .conv_w = cw, .a_log = al, .dt_bias = db, .norm_w = nw, .init = s0, .eps = EPS, .silu = GATE == .silu };
             const fd = try ref.finiteCheck(a, d, in, dout, r.rng, 120);
             const ok = fd.worst < 1e-5;
             if (!ok) r.bad += 1;
