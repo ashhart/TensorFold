@@ -292,3 +292,39 @@ test "the tower's processor settings: 672 x 672 at most, 576 tokens an image" {
     try std.testing.expectEqual(@as(u32, 2304), max_patches);
     try std.testing.expectEqual(@as(u64, 672 * 672), image_config.max_pixels);
 }
+
+test "the f64 axial table against core's words: 10 of 13 differ, first at 2" {
+    // vision.zig:261's expression; the site's f64 frequency rounded to fp32, core's words beside it.
+    const site_words = [13]u32{
+        0x3f800000, 0x3efc1a50, 0x3e7843d1, 0x3df47c47, 0x3d70c377, 0x3ced1929, 0x3c697d23, 0x3be5ef2f,
+        0x3b626f15, 0x3adefc9f, 0x3a5b9798, 0x39d83fcc, 0x3954f508,
+    };
+    const core_words = [13]u32{
+        0x3f800000, 0x3efc1a50, 0x3e7843d0, 0x3df47c46, 0x3d70c376, 0x3ced1928, 0x3c697d22, 0x3be5ef2c,
+        0x3b626f12, 0x3adefc9d, 0x3a5b9797, 0x39d83fcc, 0x3954f507,
+    };
+    var site: [freqs]f32 = undefined;
+    var words: [freqs]f32 = undefined;
+    for (&site, 0..) |*f, i| {
+        const frac = @as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(2 * freqs));
+        f.* = @floatCast(1.0 / std.math.pow(f64, theta, frac));
+    }
+    core.rope_freq.inverseFrequencies(theta, 2 * freqs, &words);
+    var differ: usize = 0;
+    var first: ?usize = null;
+    var max_ulp: u32 = 0;
+    for (site, words, 0..) |s, c, i| {
+        try std.testing.expectEqual(site_words[i], @as(u32, @bitCast(s)));
+        try std.testing.expectEqual(core_words[i], @as(u32, @bitCast(c)));
+        const a: u32 = @bitCast(s);
+        const b: u32 = @bitCast(c);
+        if (a != b) {
+            differ += 1;
+            if (first == null) first = i;
+            max_ulp = @max(max_ulp, if (a > b) a - b else b - a);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 10), differ);
+    try std.testing.expectEqual(@as(?usize, 2), first);
+    try std.testing.expectEqual(@as(u32, 3), max_ulp);
+}
