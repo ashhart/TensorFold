@@ -34,7 +34,7 @@ fn open(d: *const Dir, id: store.Identity, o: struct { cap: u64 = 64 << 20, read
     defer arena.deinit();
     var problem: []const u8 = "";
     const opts: store.Options = .{ .dir = d.path, .cap_bytes = o.cap, .read_only = o.read_only };
-    const s = (try Store.open(gpa, std.testing.io, id, opts, &problem, arena.allocator())) orelse error.TestRefused;
+    const s = (try Store.open(gpa, std.testing.io, id, opts, &problem, arena.allocator())) orelse return error.TestRefused;
     s.admission.floor = 0;
     return s;
 }
