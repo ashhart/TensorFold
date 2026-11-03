@@ -11,22 +11,13 @@ namespace tf_nvfp4_tile {
 constexpr int BLOCK4 = 36;
 constexpr int XBYTES_PER_TILE = 2 * 32 * 16;
 
-__device__ __forceinline__ void cp4(void* dst, const void* src) {
-  const uint32_t d = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
-  asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(d), "l"(src));
-}
+using tf_common::cp4;
 
 using tf_common::fp4pair;
 
 using tf_common::e4m3f;
 
-__device__ __forceinline__ void mma0(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
-                                     uint32_t b1) {
-  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-      "{%10, %10, %10, %10};\n"
-      : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(0.0f));
-}
+__device__ __forceinline__ void mma0(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) { qmm_frag::mma0(d, a0, a1, a2, a3, b0, b1); }
 
 template <int M>
 struct WStage {
