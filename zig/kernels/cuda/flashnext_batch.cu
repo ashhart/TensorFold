@@ -45,9 +45,9 @@ static __device__ __forceinline__ float bf(float x) { return __bfloat162float(__
 
 using tf_common::warp_sum;
 
-static __device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }
+using tf_common::sigmoidf_;
 
-static __device__ __forceinline__ float softplusf_(float x) { return x > 20.0f ? x : log1pf(expf(x)); }
+using tf_common::softplusf_;
 
 static __device__ __forceinline__ float conv_act(const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
                                                  const __nv_bfloat16* __restrict__ cw, int r, int c) {
@@ -544,3 +544,4 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr(const float* 
 
 // The prompt GDN block in one kernel a value head (front, chain, gated norm; their bits), no fp32 rows through memory.
 #include "flashnext_gdn_fused.cuh"
+#include "common/act.cuh"

@@ -15,7 +15,7 @@ using tf_common::pack8;
 using tf_common::group_sum8;
 
 // Exactly rounded division on purpose: the same bits on every GPU, where div.full and ex2.approx are not.
-__device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
+__device__ __forceinline__ float sigmoid(float x) { return tf_common::sigmoid_rn(x); }
 
 }  // namespace tf_act
 
@@ -157,6 +157,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_gelu_erf_rows(const __nv_bfl
 
 // Dory's nGPT activations (act_l2.cuh): a scaled sigmoid gate and a scaled SwiGLU, each row then L2-normed.
 #include "act_l2.cuh"
+#include "common/act.cuh"
 
 // out = bf16(l2(bf16(o * sigmoid(g * sg)))) over a row's n values (all heads), sg fp32 [n]: dory.py's output gate.
 extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_gate_l2_rows(const __nv_bfloat16* o, const __nv_bfloat16* g,
