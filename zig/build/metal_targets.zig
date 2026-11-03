@@ -28,6 +28,14 @@ pub fn mlxMetalStd(b: *std.Build) []const u8 {
     return "metal3.1";
 }
 
+/// Whether this Mac has the offline Metal compiler (Xcode's toolchain, not the Command Line Tools alone).
+fn hasMetalCompiler(b: *std.Build) bool {
+    b.graph.poisonCache(); // installing Xcode changes the answer
+    if (b.runFallible(&.{ "xcrun", "-sdk", "macosx", "-f", "metal" }, .{ .stderr_behavior = .ignore }) == .success) return true;
+    std.log.warn("skipping offline Metal shader checks: xcrun finds no metal compiler (install Xcode)", .{});
+    return false;
+}
+
 pub fn metallib(b: *std.Build, name: []const u8, sources: []const []const u8, flags: []const []const u8) std.Build.LazyPath {
     const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metallib", "-o" });
     const out = link.addOutputFileArg(b.fmt("{s}.metallib", .{name}));
@@ -181,6 +189,9 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
 pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, test_step: *std.Build.Step) void {
     const metal_std = b.option([]const u8, "metal-std", "Metal language version (default: MLX's for this macOS)") orelse mlxMetalStd(b);
+    // Without the offline compiler the test graph embeds empty metallibs; installs still need the real ones.
+    const shaders = hasMetalCompiler(b);
+    const no_shaders = b.addWriteFiles().add("no-shaders.metallib", "");
 
     // MLX's mx.fast.metal_kernel JIT: MTLCompileOptions mathMode safe, fp32 functions fast (the default), its...
     const mlx_flags = [_][]const u8{ b.fmt("-std={s}", .{metal_std}), "-fmetal-math-mode=safe", "-fmetal-math-fp32-functions=fast" };
@@ -196,7 +207,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
     const mods = metalEngineModules(b, target, optimize, draft_ids);
     const metal = mods.metal;
-    const kernels_mod = embedded(b, lib, "tensorfold.metallib");
+    const kernels_mod = embedded(b, if (shaders) lib else no_shaders, "tensorfold.metallib");
     counters_build.targets(b, target, optimize, metal, mods.sources, test_step);
 
     // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
@@ -209,8 +220,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
     });
     engines.addImport("living", mods.living);
-    @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
-    @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, test_step);
+    @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std, shaders);
+    @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, shaders, test_step);
 
     const programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
         .{ .name = "tf-metal-tests", .path = "zig/tests/gpu_tests.zig", .about = "GPU runtime tests" },
@@ -282,7 +293,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     // Nemotron's packed kernels, compiled offline and embedded: the runtime fallback when this macOS's compiler...
     const packed_lib = metallib(b, "nemotron_packed", &nemotron_packed, &mlx_flags);
     b.getInstallStep().dependOn(&b.addInstallFile(packed_lib, "lib/nemotron_packed.metallib").step);
-    sources.addImport("nemotron_packed_metallib", embedded(b, packed_lib, "nemotron_packed.metallib"));
+    sources.addImport("nemotron_packed_metallib", embedded(b, if (shaders) packed_lib else no_shaders, "nemotron_packed.metallib"));
     const engine = mods.engine;
     // FlashNext's CPU contracts, with the family module's imports so the replay graph type-checks
     const flash_host = b.addTest(.{ .root_module = b.createModule(.{
@@ -447,6 +458,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     flashnext_checks.targets(b, target, optimize, metal, engine);
 
     _ = nativeServer(b, target, optimize, metal, engine, mods.living, api, engines, build_options, test_step);
+    if (!shaders) b.top_level_steps.get("native").?.step.dependOn(&b.addFail("tensorfold-native embeds compiled Metal shaders: install Xcode").step);
 
     const cluster_metal = b.createModule(.{
         .root_source_file = b.path("zig/src/cluster/metal_sink.zig"),
@@ -569,7 +581,7 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = m.lanes }} });
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
     engines.addImport("living", m.living);
-    @import("drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b));
+    @import("drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b), true);
     engines.addImport("kimi_k3", kimiModule(b, target, .fast, m.metal, m.engine, m.lanes));
     engines.addImport("kimi_metallib", embedded(b, kimiMetallib(b, &flags), "kimi.metallib"));
     return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null);
