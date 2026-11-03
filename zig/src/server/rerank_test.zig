@@ -19,6 +19,11 @@ pub const Text = struct {
     loose: bool = false,
     moving: bool = false,
     merging: bool = false,
+    blank: bool = false, // a template that renders no tokens at all
+    /// From this many renders on, the template drifts (it reads the clock): "T:" for "S:", no query, or a longer tail.
+    drift_after: ?usize = null,
+    drift: enum { prefix, short, tail } = .prefix,
+    renders: usize = 0,
 
     fn model(self: *Text) model_text.Text {
         return .{ .ctx = self, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .encode_masked = encodeMasked, .added = added } };
@@ -77,10 +82,14 @@ pub const Text = struct {
 
     fn render(ctx: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
         const self: *Text = @ptrCast(@alignCast(ctx));
+        if (self.blank) return .{ .text = "" };
+        self.renders += 1;
+        const drifted = if (self.drift_after) |n| self.renders > n else false;
         var out: std.ArrayList(u8) = .empty;
         var last: usize = 0;
         var spans: std.ArrayList(model_text.Span) = .empty;
-        for ([_][2][]const u8{ .{ "system", "S:" }, .{ "query", "|Q:" }, .{ "document", "|D:" } }) |part| {
+        for ([_][2][]const u8{ .{ "system", if (drifted and self.drift == .prefix) "T:" else "S:" }, .{ "query", "|Q:" }, .{ "document", "|D:" } }) |part| {
+            if (drifted and self.drift == .short and std.mem.eql(u8, part[0], "query")) continue;
             try out.appendSlice(a, part[1]);
             for (messages.array) |m| if (std.mem.eql(u8, m.get("role").?.string, part[0])) {
                 const c = m.get("content").?.string;
@@ -91,6 +100,7 @@ pub const Text = struct {
         }
         if (self.merging) try out.append(a, 'X');
         try out.appendSlice(a, if (self.loose) "|A" ++ im_end else im_end ++ "|A");
+        if (drifted and self.drift == .tail) try out.appendSlice(a, "++");
         if (self.moving and last > 1) try out.append(a, '+');
         return .{ .text = out.items, .spans = spans.items };
     }
@@ -110,11 +120,11 @@ pub const Scorer = struct {
     table: []const struct { []const u8, f64, f64 } = &.{},
     prompts: std.ArrayList([]u8) = .empty,
 
-    fn engine(s: *Scorer) api.Engine {
+    pub fn engine(s: *Scorer) api.Engine {
         return .{ .ctx = s, .vtable = if (s.hook) &scored else &bare };
     }
 
-    fn of(ctx: *anyopaque) *Scorer {
+    pub fn of(ctx: *anyopaque) *Scorer {
         return @ptrCast(@alignCast(ctx));
     }
 
@@ -131,7 +141,7 @@ pub const Scorer = struct {
         return null;
     }
 
-    fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
+    pub fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) error{Failed}!f64 {
         const s = of(ctx);
         if (s.failing or mass or labels.len != 2 or labels[0] != 7 or labels[1] != 9) return error.Failed;
         const text = Text.decode(undefined, s.gpa, prompt) catch return error.Failed;
@@ -154,7 +164,7 @@ pub const Scorer = struct {
     }
 
     const bare: api.Engine.VTable = .{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory };
-    const scored: api.Engine.VTable = .{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .score = score };
+    pub const scored: api.Engine.VTable = .{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .score = score };
 };
 
 pub const Present = struct {

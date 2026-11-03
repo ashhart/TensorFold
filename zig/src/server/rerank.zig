@@ -90,32 +90,70 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value, gone: anytype) Failure!Value {
     var scratch = std.heap.ArenaAllocator.init(srv.gpa);
     defer scratch.deinit();
     var frame: ?Frame = null;
-    // every document fits the window before the first pass, so a refusal costs no GPU work
+    // every prompt checked before any GPU work; the trunk is the prefix all share, each keeping its last token
+    var first: []const u32 = &.{};
+    var trunk: usize = 0;
+    var tokens: usize = 0; // the prompts as scored: a template may render differently on another pass
     for (ask.documents, 0..) |doc, i| {
         if (gone.check()) return error.Cancelled;
         _ = scratch.reset(.retain_capacity);
-        _ = try ready(srv, cx, scratch.allocator(), ask, &frame, doc, i);
+        const ids = try ready(srv, cx, scratch.allocator(), ask, &frame, doc, i);
+        if (i == 0) {
+            first = try cx.a.dupe(u32, ids);
+            trunk = ids.len - 1;
+        } else trunk = @min(trunk, ids.len - 1, common(first, ids));
     }
     const scored = try cx.a.alloc(Scored, ask.documents.len);
-    var tokens: usize = 0;
-    for (ask.documents, scored, 0..) |doc, *row, i| {
+    const logits = try cx.a.alloc(f64, 2 * ask.documents.len);
+    if (srv.engine.vtable.decide != null) {
+        // one decision: the trunk once, each prompt's rest a branch (the request holds no prompt twice)
+        const branches = try cx.a.alloc([]const u32, ask.documents.len);
+        for (ask.documents, branches, 0..) |doc, *b, i| {
+            _ = scratch.reset(.retain_capacity);
+            const ids = try ready(srv, cx, scratch.allocator(), ask, &frame, doc, i);
+            // a template that reads the clock may render another prompt now: the trunk must still be its prefix
+            if (ids.len <= trunk or !std.mem.eql(u32, ids[0..trunk], first[0..trunk]))
+                return cx.fail(.request, "document {d}: the chat template rendered another prompt on its second pass", .{i});
+            tokens += ids.len;
+            b.* = try cx.a.dupe(u32, ids[trunk..]);
+        }
+        const counts = try cx.a.alloc(usize, ask.documents.len);
+        @memset(counts, 2);
+        const pairs = try cx.a.alloc(u32, 2 * ask.documents.len);
+        for (0..ask.documents.len) |i| pairs[2 * i ..][0..2].* = .{ labels.yes, labels.no };
+        if (gone.check()) return error.Cancelled;
+        var d: api.Decision = .{ .trunk = first[0..trunk], .branches = branches, .counts = counts, .labels = pairs, .logits = logits, .arena = cx.a };
+        srv.engine.decide(&d) catch |err| switch (err) {
+            error.Unsupported => return cx.refuse("this engine does not score labels"),
+            error.Refused => return cx.refuse(d.problem),
+            error.Failed => return failed(srv, cx),
+        };
+    } else for (ask.documents, 0..) |doc, i| {
         if (gone.check()) return error.Cancelled;
         _ = scratch.reset(.retain_capacity);
         const ids = try ready(srv, cx, scratch.allocator(), ask, &frame, doc, i);
         tokens += ids.len;
-        var logits: [2]f64 = undefined;
-        _ = srv.engine.score(ids, &.{ labels.yes, labels.no }, &logits, false) catch |err| switch (err) {
+        _ = srv.engine.score(ids, &.{ labels.yes, labels.no }, logits[2 * i ..][0..2], false) catch |err| switch (err) {
             error.Unsupported => return cx.refuse("this engine does not score labels"),
-            error.Failed => return if (healthy(srv))
-                cx.fail(.server, "rerank inference failed", .{})
-            else
-                cx.fail(.capacity, "the rerank engine is unavailable", .{}),
+            error.Failed => return failed(srv, cx),
         };
+    }
+    for (scored, 0..) |*row, i| {
+        const yes = logits[2 * i];
+        const no = logits[2 * i + 1];
         // a NaN or an infinity is no score, and would not even be JSON
-        if (!std.math.isFinite(logits[0]) or !std.math.isFinite(logits[1])) return cx.fail(.server, "rerank inference failed", .{});
-        row.* = .{ .score = 1.0 / (1.0 + @exp(logits[1] - logits[0])), .yes = logits[0], .no = logits[1] };
+        if (!std.math.isFinite(yes) or !std.math.isFinite(no)) return cx.fail(.server, "rerank inference failed", .{});
+        row.* = .{ .score = 1.0 / (1.0 + @exp(no - yes)), .yes = yes, .no = no };
     }
     return build(srv, cx, ask, &frame, scored, tokens);
+}
+
+/// A failed pass: a server error while the engine is healthy, else the engine is unavailable.
+fn failed(srv: *Server, cx: *Cx) errors.Refused {
+    return if (healthy(srv))
+        cx.fail(.server, "rerank inference failed", .{})
+    else
+        cx.fail(.capacity, "the rerank engine is unavailable", .{});
 }
 
 fn healthy(srv: *Server) bool {
@@ -316,6 +354,7 @@ fn common(x: []const u32, y: []const u32) usize {
 /// Document `i`'s prompt as scored: past max_length its content loses its last tokens, as the card's tokenizer cuts.
 fn ready(srv: *Server, cx: *Cx, a: Allocator, ask: Ask, frame: *?Frame, document: []const u8, i: usize) errors.Refused![]const u32 {
     const built = try prompt(srv, cx, a, ask, document);
+    if (built.ids.len == 0) return cx.fail(.request, "document {d}: the chat template renders no tokens", .{i});
     var ids = built.ids;
     const cap = ask.max_length;
     if (ids.len > cap) {
