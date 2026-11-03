@@ -136,6 +136,8 @@ fn release(ptr: *anyopaque) void {
 /// The engine for `dir` on `dev`, its head from the folder and its window from the memory budget.
 fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype, problem: *[]const u8) anyerror!Loaded {
     if (o.world > 1) return refuse(a, problem, "--tp {d}: Qwen3 dense checkpoints run on one HIP GPU", .{o.world});
+    // the BF16 weights run on the BF16 dot2 GEMM tile: gfx11 and gfx12, not an FP16 build (RDNA2)
+    if (dev.caps.act != .bf16) return refuse(a, problem, "Qwen3 dense checkpoints on HIP need a GPU with BF16 dot2 (gfx11 or gfx12); {s} runs FP16 activations", .{hip.kernels.arch});
     const head = try headOf(a, io, dir, problem);
     const e = Engine.load(gpa, io, dir, dev.index, dev.policy.choices()) catch |err|
         return refuse(a, problem, "the native HIP engine cannot load {s} ({s})", .{ dir, @errorName(err) });
