@@ -84,3 +84,19 @@ test "profile line: control bytes and overlong values stay bounded on a single l
     try std.testing.expect(line.len < 200);
     for (line) |byte| try std.testing.expect(byte >= 0x20 and byte <= 0x7e);
 }
+
+test "profile line: Nemotron paging reports exact off and all, independently of GLM's auto default" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "nemotron_h", "nemotron_h_omni" }) |family| {
+        for ([_][]const u8{ "0", "all" }) |raw| {
+            const expected = try std.fmt.allocPrint(a, "profile: stable; registered overrides: TF_KV_PAGES={s} (identical, env)", .{raw});
+            try std.testing.expectEqualStrings(expected, try format(a, .stable, family, "cuda", TestEnv{ .glm_pages = raw }));
+        }
+        for ([_]?[]const u8{ null, "", "1", "on", "off", "auto", "00", "+0", "false", "ALL", " all ", "0\n" }) |raw|
+            try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, family, "cuda", TestEnv{ .glm_pages = raw }));
+        for ([_][]const u8{ "mlx", "rocm", "xpu" }) |backend|
+            try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, family, backend, TestEnv{ .glm_pages = "0" }));
+    }
+}

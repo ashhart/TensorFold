@@ -218,8 +218,17 @@ fn closeCarveout(gpa: std.mem.Allocator, c: *cuda.Carveout) void {
 
 /// TF_KV_PAGES: 0 gives every stream a window at its prefill, as before the pool; all puts every stream on pages.
 fn paging() enum { off, on, all } {
-    const v = env("TF_KV_PAGES") orelse return .on;
+    const v = core.profile.get(.TF_KV_PAGES) orelse return .on;
     return if (std.mem.eql(u8, v, "0")) .off else if (std.mem.eql(u8, v, "all")) .all else .on;
+}
+
+test "Nemotron paging: registered lookup preserves the native reader's live environment policy" {
+    const raw = env("TF_KV_PAGES");
+    const expected: @TypeOf(paging()) = if (raw) |v|
+        (if (std.mem.eql(u8, v, "0")) .off else if (std.mem.eql(u8, v, "all")) .all else .on)
+    else
+        .on;
+    try std.testing.expectEqual(expected, paging());
 }
 
 fn env(name: [:0]const u8) ?[]const u8 {
