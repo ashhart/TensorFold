@@ -5,6 +5,7 @@ const ze = q.ze;
 const Dev = q.Dev;
 const Acts = q.Acts;
 const alloc = q.alloc;
+const bf16_round = @import("bf16_round");
 
 /// GDN layers measured (the attention layers are those with (i + 1) % 4 == 0).
 const GDN_ON = [_]usize{ 0, 1, 30, 62 };
@@ -88,10 +89,7 @@ fn bfToF32(x: u16) f32 {
     return @bitCast(@as(u32, x) << 16);
 }
 
-fn f32ToBf(x: f32) u16 {
-    const b: u32 = @bitCast(x);
-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16); // round to nearest even
-}
+const f32ToBf = bf16_round.bits; // round to nearest even
 
 fn bfOrdered(h: u16) i32 {
     return if (h & 0x8000 != 0) -@as(i32, h & 0x7fff) else @as(i32, h);
@@ -242,4 +240,17 @@ pub fn probe(d: *Dev, a: *Acts, state: *anyopaque, T: u32, layer: usize) !void {
         });
     }
     std.debug.print("fp64 ref: GDN layer {d} ({d} rows) in {d:.1} s\n", .{ layer, T, q.now() - t0 });
+}
+
+test "the GDN reference's f32ToBf is core's bits(): 0xffffffff gives a NaN, other words the plain + copy's bits" {
+    try std.testing.expect(std.math.isNan(bfToF32(f32ToBf(@bitCast(@as(u32, 0xffff_ffff))))));
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 19) |i| { // every bf16 value's tie and carry edges, then random words
+        const lo = [_]u32{ 0x7fff, 0x8000, 0x8001, 0xffff };
+        const w: u32 = if (i < 1 << 18) @as(u32, @intCast(i >> 2)) << 16 | lo[i & 3] else prng.random().int(u32);
+        const v: f32 = @bitCast(w);
+        if (std.math.isNan(v)) {
+            try std.testing.expect(std.math.isNan(bfToF32(f32ToBf(v))));
+        } else try std.testing.expectEqual(@as(u16, @intCast((w + 0x7fff + ((w >> 16) & 1)) >> 16)), f32ToBf(v));
+    }
 }
