@@ -48,7 +48,7 @@ pub fn metallib(b: *std.Build, metal_std: []const u8) std.Build.LazyPath {
     return out;
 }
 
-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, lib: std.Build.LazyPath, test_step: *std.Build.Step) void {
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, lib: std.Build.LazyPath, test_step: *std.Build.Step, no_compiler: ?*std.Build.Step) void {
     const bytes = embedded(b, lib, "drama3.metallib");
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -80,6 +80,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     });
     const exe = b.addExecutable(.{ .name = "drama3-generate", .root_module = tool });
     b.installArtifact(exe);
-    b.step("drama3-generate", "Fish Audio Drama 3 text to speech on Metal").dependOn(&b.addInstallArtifact(exe, .{}).step);
+    const generate = b.step("drama3-generate", "Fish Audio Drama 3 text to speech on Metal");
+    generate.dependOn(&b.addInstallArtifact(exe, .{}).step);
+    if (no_compiler) |fail| generate.dependOn(fail);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family })).step);
 }
