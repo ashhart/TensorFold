@@ -39,6 +39,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the GLM CUDA recipe says what `TF_GLM_CHUNK_SOLO` gains at TP=3 with `TF_GLM_ROCE_MULTI` (a little under half of its gain without it) (#1996). Thanks to @Bizuayeu.
 - DeepSeek-V4.1 on CUDA reads `--prompt-cache-gib` as the kept states' resident limit (0: none kept) unless `TF_DSV41_SESSION_RESIDENT_GIB` is set, which wins; with TP > 1 the variable is still needed on every rank (#1625).
 - DeepSeek-V4.1 on CUDA reads `--prompt-cache-gib` as the kept states' resident limit on every rank (0: none resident in RAM; with `TF_DSV41_SESSION_DISK` an evicted chat is parked on disk): with TP > 1 rank 0 sends its limit to the other ranks at startup. A set `TF_DSV41_SESSION_RESIDENT_GIB` wins on rank 0; set on another rank, it must equal rank 0's limit or every rank refuses to start (#1625).
+- Eight remaining host BF16 roundings in test oracles (GLM's Metal checks and CUDA FP8 KV reference, Nemotron's training scan, LFM2's DSpark taps, Flash Next's HIP kernel tests) and the XPU FP64 GDN reference use core's shared conversion, so a negative NaN gives a NaN instead of overflowing in Debug builds; every other non-NaN input gives the same bits. No kernel or served path changes (part of #1863).
 
 - Living Weights on Qwen4 dense, step 1: the QSA backward pass on the host, checked against a binary64 reference; nothing served changes (#2021, part of #1804).
 
