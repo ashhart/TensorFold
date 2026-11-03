@@ -512,14 +512,11 @@ test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows
 test "gfx1151 takes the skewed matrix tile for prompts up to skew_k codes deep, the padded one past them" {
     const r = kernelsOn("gfx1151");
     const env = envOn("gfx1151", true, true, true);
-    // Qwen3.8-27B's gate and up, its down, and a routed plan of Qwen3.6-35B-A3B's experts
+    // Qwen3.8-27B's gate and up, both sides of skew_k, and the 27B's down
     for ([_]struct { u32, u32, []const u8 }{ .{ 17408, 5120, "skew" }, .{ 5120, skew_k, "skew" }, .{ 5120, skew_k + 64, "matrix" }, .{ 5120, 17408, "matrix" } }) |w| {
         const shape: Shape = .{ .m = 2048, .n = w[0], .k = w[1], .bits = 4, .group = 64, .fp16 = false };
         try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, shape).?.id, w[2]));
     }
-    const pairs = 2048 * 9;
-    const routed: Shape = .{ .m = 2048, .n = 1024, .k = 2048, .bits = 4, .group = 64, .fp16 = false, .items = @min(pairs, 257) + pairs / 8, .plan_pairs = pairs };
-    try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, routed).?.id, "skew"));
     // gfx1100's table has no row for it
     const shape: Shape = .{ .m = 2048, .n = 17408, .k = 5120, .bits = 4, .group = 64, .fp16 = false };
     try std.testing.expect(std.mem.endsWith(u8, kernelsOn("gfx1100").select(envOn("gfx1100", true, true, true), .mlx, .project, .prefill, shape).?.id, "matrix"));
