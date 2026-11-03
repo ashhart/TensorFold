@@ -13,6 +13,18 @@ pub fn readers() !usize {
     };
 }
 
+/// New CUDA ports stay opt-in until their checkpoint and topology have device memory/load receipts.
+pub fn optInCount(value: ?[]const u8) !usize {
+    return if (value) |v| readerCount(v) else 0;
+}
+
+pub fn optInReaders() !usize {
+    return optInCount(if (std.c.getenv("TF_LOAD_PREFETCH")) |v| std.mem.span(v) else null) catch |err| {
+        if (!@import("builtin").is_test) std.log.err("TF_LOAD_PREFETCH: expected 0 to {d} reader threads", .{prefetch.max_readers});
+        return err;
+    };
+}
+
 const Work = struct {
     gpa: std.mem.Allocator,
     io: std.Io,

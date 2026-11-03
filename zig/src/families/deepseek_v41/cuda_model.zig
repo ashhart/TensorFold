@@ -251,7 +251,7 @@ pub const Model = struct {
         var t_build: i96 = 0;
         var t_upload: i96 = 0;
         const t_load = std.Io.Clock.awake.now(io).toNanoseconds();
-        const readers = try @import("core").checkpoint_read_ahead.readers();
+        const readers = try @import("core").checkpoint_read_ahead.optInReaders();
         for (m.pl.layers, 0..) |*l, i| {
             var reading: @import("core").checkpoint_read_ahead.Scope = .{};
             defer reading.deinit();
