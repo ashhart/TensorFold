@@ -71,12 +71,17 @@ fn gibs(bytes: usize) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
-/// Why `dir` cannot be served: a bf16 Qwen3.5 checkpoint is a decision backbone, served only with its joint head.
+/// Why `dir` cannot be served: BF16 Qwen3.5 serves only with its joint head, and the head only on the BF16 weights.
 fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]const u8 {
     // a config that does not read is the loader's to report
     var c = config.Config.read(gpa, io, dir) catch return null;
     defer c.deinit();
-    if (c.quant != .bf16 or joint.present(io, a, dir)) return null;
+    const head = joint.present(io, a, dir);
+    if (c.quant != .bf16 and head) {
+        const what = "the joint schema head needs the BF16 checkpoint";
+        return std.fmt.allocPrint(a, "{s}: {s} is quantized ({t})", .{ what, dir, c.quant }) catch what;
+    }
+    if (c.quant != .bf16 or head) return null;
     const what = "BF16 Qwen3.5 serves as a decision backbone only";
     return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
 }
@@ -376,7 +381,7 @@ fn followRank(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     try w.follow(dev.group.?.link());
 }
 
-test "a bf16 checkpoint without a joint head is refused as decision-only; with one, or an MLX one, it loads" {
+test "a bf16 checkpoint without a joint head is refused as decision-only, an MLX one with a head too; others load" {
     const io = std.testing.io;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -410,7 +415,11 @@ test "a bf16 checkpoint without a joint head is refused as decision-only; with o
     }
     const mlx = try std.mem.replaceOwned(u8, a, text, "\"tie_word_embeddings\": false,", "\"tie_word_embeddings\": false, \"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"},");
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
-    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
+    // a quantized checkpoint that ships the head would open as a text model: refused by name instead
+    const quantized = decisionOnly(a, std.testing.allocator, io, dir).?;
+    try std.testing.expect(std.mem.startsWith(u8, quantized, "the joint schema head needs the BF16 checkpoint: "));
+    try tmp.dir.deleteFile(io, "joint_head_config.json");
+    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null); // without it, a text model
 }
 
 test "capability audit: HIP Qwen format names cover the admitted affine widths" {
