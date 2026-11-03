@@ -66,8 +66,7 @@ pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len
                 .full => |f| try attention(o, m, f, caches, index, normed, rows, pos0 + start),
                 .linear => |l| try linear(o, m, l, caches, index, normed, rows),
             };
-            try residual(o, m, xs, y, rows * s.hidden);
-            try o.rms(xs, post_norm, normed, rows, s.hidden, @floatCast(s.eps));
+            try reduce.residualNorm(o, m.tp, xs, y, post_norm, normed, rows, s.hidden, @floatCast(s.eps));
             const z = try mlpRows(o, m, mlp, normed, rows, true);
             try residual(o, m, xs, z, rows * s.hidden);
         }
