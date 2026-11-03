@@ -38,6 +38,7 @@ const text_k = @import("contract_dense_text.zig");
 const vl_k = @import("contract_vl.zig");
 const pos_k = @import("contract_vl_position.zig");
 const sparse_k = @import("contract_sparse_lanes.zig");
+const skew_k = @import("contract_wmma_skew.zig");
 
 const g = core.contract.gates;
 
@@ -334,6 +335,10 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var sparse = sparse_k.SparseLanes.init(a, &r, s, &l);
     defer sparse.deinit();
     try kernels.append(a, sparse.kernel());
+    var skews: [skew_k.cases.len]skew_k.Skew = undefined;
+    for (&skews, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    defer for (&skews) |*x| x.deinit();
+    if (matrix) for (&skews) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
