@@ -40,7 +40,7 @@ pub const Gdn = struct {
         const mem = arena.allocator();
         var text = try once(mem, source, "constexpr int NK = 16, NV = 48, DK = 128, DV = 128, TAPS = 4;", "constexpr int DK = 128, DV = 128, TAPS = 4;");
         text = try once(mem, text, "flashnext_gdn_chain(", "qwen4_gdn_chain(");
-        text = try once(mem, text, "static __device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f + expf(-x)); }", "static __device__ __forceinline__ float sigmoidf_(float x) { const float e = expf(-fabsf(x)); return (x < 0 ? e : 1.0f) / (1.0f + e); }\nstatic __device__ __forceinline__ float siluf_(float x) { const float e = expf(-fabsf(x)); return (x < 0 ? x * e : x) / (1.0f + e); }");
+        text = try once(mem, text, "using tf_common::sigmoidf_;", "static __device__ __forceinline__ float sigmoidf_(float x) { const float e = expf(-fabsf(x)); return (x < 0 ? e : 1.0f) / (1.0f + e); }\nstatic __device__ __forceinline__ float siluf_(float x) { const float e = expf(-fabsf(x)); return (x < 0 ? x * e : x) / (1.0f + e); }");
         text = try once(mem, text, "const __nv_bfloat16* __restrict__ cw,", "const void* __restrict__ cw,");
         text = try once(mem, text, "const __nv_bfloat16* __restrict__ norm_w,", "const void* __restrict__ norm_w,");
         text = try once(mem, text, "float* __restrict__ state_out) {", "float* __restrict__ state_out, int NK, int NV, int gate, int weight_flags, unsigned long long STATE_STRIDE) {");
