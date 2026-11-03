@@ -92,6 +92,30 @@ window into its history as it reads it, so the commit and publication kernels go
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
 
+## GGUF host adapter
+
+`families/qwen27/gguf.zig` prepares the dense family's GGUF metadata and tensor identities on the host (#1920).
+It accepts the qwen35 schema (or qwen3 keys with the same required hybrid metadata), uses core's typed views,
+and checks the fixed DeltaNet/attention geometry and layer schedule. Unknown computation keys, conflicting
+patterns, missing tensors, wrong shapes and unsupported quantization are refused by key or tensor identity.
+
+`Adapter.open` borrows the GGUF byte image and owns its index, destination names and compact affine arrays until
+`deinit`. FP32 coefficient tables and group-16/32 layouts remain intact. Dense F32/F16/BF16 tensors borrow their
+original bytes. GGUF matrices reverse dimension labels only; the convolution is reshaped without a transpose.
+The host fixture checks every repacked value against independent source decoding for all ten core formats.
+Core's documented signed-zero cancellation exception still applies; this does not extend its exactness claim.
+
+Destination names are identities for future native loading, not ready-to-serve tensors. The `ssm_a` entry has an
+explicit negative-exponential-decay role: its bytes are not relabelled as a usable logarithmic `A_log`. GDN head
+ordering and norm conventions still need checkpoint qualification. No coefficient is narrowed or group merged.
+Existing Metal paths still need FP32 metadata and group-16 qualification, tokenizer/chat-template integration,
+prepared-cache integration and real-model token/performance gates. GGUF model arguments receive a coming-later
+refusal; the adapter does not enable end-to-end GGUF inference.
+
+```sh
+zig build test-qwen27-gguf-host test-gguf-host -j1 --summary all
+```
+
 The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
 engine. @nood-co1, @jkuepker and @Arminova worked on its CUDA path; see [credits](../credits.md).

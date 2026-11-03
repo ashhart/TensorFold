@@ -11,6 +11,7 @@ pub const Tensor = tensor.Tensor;
 pub const views = @import("gguf_views.zig");
 pub const affine = @import("gguf_repack.zig");
 pub const Entry = struct { key: []const u8, value: Value };
+pub const UnsupportedTensor = meta.UnsupportedTensor;
 
 const Header = struct { tensors: usize, metadata: usize, data: usize, alignment: usize };
 fn prefix(c: *meta.Cursor) !Header {
@@ -54,8 +55,9 @@ fn metadataCeiling(c: *meta.Cursor) void {
     c.ceiling = c.pos + @min(c.limits.metadata_bytes, c.bytes.len - c.pos);
 }
 /// The entire serialized index and every tensor range are checked before allocating an index or array.
-fn validate(bytes: []const u8, limits: Limits) !Header {
+fn validate(bytes: []const u8, limits: Limits, unsupported: ?*UnsupportedTensor) !Header {
     var c = cursor(bytes, limits);
+    c.unsupported = unsupported;
     var h = try prefix(&c);
     metadataCeiling(&c);
     for (0..h.metadata) |_| try alignEntry(try entry(&c), &h);
@@ -79,7 +81,12 @@ pub const Document = struct {
     alignment: usize,
 
     pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) !Document {
-        const h = try validate(bytes, limits);
+        return parseDiagnosed(gpa, bytes, limits, null);
+    }
+    /// Optional unsupported-type details borrow the input and survive a refused parse without allocation.
+    pub fn parseDiagnosed(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits, unsupported: ?*UnsupportedTensor) !Document {
+        if (unsupported) |p| p.* = .{};
+        const h = try validate(bytes, limits, unsupported);
         const metadata = try gpa.alloc(Entry, h.metadata);
         errdefer gpa.free(metadata);
         const tensors = try gpa.alloc(Tensor, h.tensors);
@@ -89,6 +96,7 @@ pub const Document = struct {
         var names: std.StringHashMapUnmanaged(usize) = .empty;
         errdefer names.deinit(gpa);
         var c = cursor(bytes, limits);
+        c.unsupported = unsupported;
         _ = try prefix(&c);
         for (metadata, 0..) |*m, i| {
             m.* = try entry(&c);
