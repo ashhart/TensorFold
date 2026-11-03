@@ -153,6 +153,39 @@ fn checkReferences(ref: std.json.Value, bar: std.json.Value) !void {
     };
 }
 
+/// The SHA256 of a file, as lowercase hex.
+fn fileSha256(io: std.Io, path: []const u8) ![64]u8 {
+    const f = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer f.close(io);
+    const size = (try f.stat(io)).size;
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    var buf: [1 << 22]u8 = undefined;
+    var at: u64 = 0;
+    while (at < size) {
+        const n = try f.readPositionalAll(io, buf[0..@intCast(@min(buf.len, size - at))], at);
+        if (n == 0) return error.ShortRead;
+        h.update(buf[0..n]);
+        at += n;
+    }
+    return std.fmt.bytesToHex(h.finalResult(), .lower);
+}
+
+/// The references' pinned files are the checkpoint the test loads: each one's SHA256, and every indexed shard pinned.
+fn checkFiles(a: std.mem.Allocator, io: std.Io, dir: []const u8, pins: std.json.Value) !void {
+    for ([_][]const u8{ "checkpoint", "weights" }) |key| {
+        const files = pins.object.get(key).?.object;
+        for (files.keys(), files.values()) |name, hash| {
+            const got = try fileSha256(io, try std.fs.path.join(a, &.{ dir, name }));
+            try holds(std.mem.eql(u8, &got, hash.string));
+        }
+    }
+    const index = try readJson(a, try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" }));
+    const shards = index.object.get("weight_map").?.object;
+    const weights = pins.object.get("weights").?.object;
+    for (shards.values()) |file| try holds(file == .string and weights.get(file.string) != null);
+    try holds(pins.object.get("checkpoint").?.object.get("model.safetensors.index.json") != null);
+}
+
 fn jsonEqual(p: std.json.Value, q: std.json.Value) bool {
     if (std.meta.activeTag(p) != std.meta.activeTag(q)) return false;
     return switch (p) {
@@ -200,6 +233,25 @@ test "Qwen3-Embedding references: a bar of other inputs, an unpinned one or a no
     }
 }
 
+test "Qwen3-Embedding references: pins that do not hash to the checkpoint's files are refused, whoever made both" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "s.safetensors", .data = "weights" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\": {\"x\": \"s.safetensors\"}}" });
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    const shard = try fileSha256(t.io, try std.fs.path.join(a, &.{ dir, "s.safetensors" }));
+    const index = try fileSha256(t.io, try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" }));
+    const good = try std.fmt.allocPrint(a, "{{\"checkpoint\": {{\"model.safetensors.index.json\": \"{s}\"}}, \"weights\": {{\"s.safetensors\": \"{s}\"}}}}", .{ &index, &shard });
+    try checkFiles(a, t.io, dir, try std.json.parseFromSliceLeaky(std.json.Value, a, good, .{}));
+    const wrong = try std.mem.replaceOwned(u8, a, good, &shard, "0000000000000000000000000000000000000000000000000000000000000000");
+    try t.expect(std.meta.isError(checkFiles(a, t.io, dir, try std.json.parseFromSliceLeaky(std.json.Value, a, wrong, .{}))));
+    const unpinned = try std.fmt.allocPrint(a, "{{\"checkpoint\": {{\"model.safetensors.index.json\": \"{s}\"}}, \"weights\": {{}}}}", .{&index});
+    try t.expect(std.meta.isError(checkFiles(a, t.io, dir, try std.json.parseFromSliceLeaky(std.json.Value, a, unpinned, .{}))));
+}
+
 test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit within the BF16 bar of the fp32 vectors" {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -208,6 +260,7 @@ test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit withi
     const ref = try readJson(a, try env(a, "TF_QWEN3_EMBED_REF") orelse return error.SkipZigTest);
     const bar = try readJson(a, try env(a, "TF_QWEN3_EMBED_BAR") orelse return error.SkipZigTest);
     try checkReferences(ref, bar);
+    try checkFiles(a, t.io, dir, ref.object.get("pins").?);
     var g: Gpu = undefined;
     try g.open(4 << 30);
     defer g.close();
