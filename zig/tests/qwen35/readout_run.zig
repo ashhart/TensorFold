@@ -1,4 +1,4 @@
-//! `readout <model dir> [--len N] [--cut N] [--streams K]`: gate 2a's rows through a fake readout that copies them.
+//! `readout <model dir> [--len N] [--cut N] [--streams K]`: gate 2a rows via a fake readout (--cut 0: serving rule).
 
 const std = @import("std");
 const hip = @import("hip");
@@ -139,11 +139,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         const value = try std.fmt.parseInt(usize, args[i + 1], 10);
         if (std.mem.eql(u8, args[i], "--len")) len = value else if (std.mem.eql(u8, args[i], "--cut")) cut = value else if (std.mem.eql(u8, args[i], "--streams")) n = @min(value, 8) else return error.UnknownOption;
     }
-    if (i != args.len or cut == 0 or len == 0) return error.UnknownOption; // the gate's pieces need a fixed cut
+    if (i != args.len or len == 0) return error.UnknownOption;
+    const piece = if (cut == 0) qwen35.prefix.chunk else cut; // 0: the serving rule, which pins a readout to the chunk
     const ids = try ids_file.synthetic(gpa, len);
     defer gpa.free(ids);
     const policy = (try @import("group.zig").resolve("", 0)).policy;
-    const e = try Engine.open(gpa, io, args[0], .{ .capacity = len + 64, .streams = n, .batch_rows = 16 * n, .cut_rows = cut, .policy = policy });
+    const e = try Engine.open(gpa, io, args[0], .{ .capacity = len + 64, .streams = n + 1, .batch_rows = 16 * (n + 1), .cut_rows = cut, .policy = policy });
     defer e.deinit();
     // the copier outlives the backend: `h.deinit` closes any lane's readout state it still holds
     var copier: Copier = .{ .gpa = gpa, .driver = &e.driver, .width = e.model().spec.hidden * e.model().act.size(), .len = len };
@@ -155,21 +156,31 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     h.cuts = &cuts;
     try h.useReadout(copier.readout());
     try together(gpa, h, ids, 1, false); // copy 0: the reference
-    try together(gpa, h, ids, n, false); // copies 1 ..= n
+    // copies 1 ..= n beside a stream past its prompt: it decodes, so a plain prompt's pieces would shorten
+    const b = Hip.backend(h);
+    var talker = try lanes.Stream.init(gpa, .{ .id = "talker", .prompt = ids[0..@min(64, len)], .max_new = 4 });
+    defer talker.deinit(gpa);
+    var talking = true;
+    defer if (talking) b.vtable.release(b.ptr, &talker);
+    while (!try b.vtable.prefill_step.?(b.ptr, &talker, 0)) {}
+    try together(gpa, h, ids, n, false);
+    b.vtable.release(b.ptr, &talker);
+    talking = false;
     try together(gpa, h, ids, 1, true); // abandoned after its first piece
     try together(gpa, h, ids, 1, false); // the readout after it
     const copies = copier.copies.items;
     const ref = copies[0];
-    std.debug.print("readout gate 2a: {d} rows x {d} bytes, cut {d}, pieces {any}\n", .{ len, copier.width, cut, ref.pieces.items });
+    const rule = if (cut == 0) "the serving rule" else "a test cut";
+    std.debug.print("readout gate 2a: {d} rows x {d} bytes, {s}, piece {d}, pieces {any}\n", .{ len, copier.width, rule, piece, ref.pieces.items });
     var failed = false;
     if (copies.len != n + 3) return error.ReadoutsNotOpened;
-    const pieces = (len + cut - 1) / cut;
-    if (!covers(ref, len, cut, pieces) or !covers(copies[n + 1], len, cut, 1)) {
-        std.debug.print("FAIL the pieces consumed do not cover the prompt from row 0 at cut {d}\n", .{cut});
+    const pieces = (len + piece - 1) / piece;
+    if (!covers(ref, len, piece, pieces) or !covers(copies[n + 1], len, piece, 1)) {
+        std.debug.print("FAIL the pieces consumed do not cover the prompt from row 0 at piece {d}\n", .{piece});
         failed = true;
     }
     for (copies[1 .. n + 1], 1..) |c, k| if (!same(ref, c)) {
-        std.debug.print("FAIL readout {d} of {d} together differs from the one alone\n", .{ k, n });
+        std.debug.print("FAIL readout {d} of {d} together beside a decoding stream differs from the one alone\n", .{ k, n });
         failed = true;
     };
     if (!same(ref, copies[n + 2])) {
@@ -178,5 +189,5 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     }
     const hash = std.hash.Wyhash.hash(0, ref.rows);
     if (failed) return error.RowsDiffer;
-    std.debug.print("PASS 1 vs {d} together and after a cancel: rows byte-identical (wyhash {x}), {d} cuts recorded\n", .{ n, hash, cuts.items.len });
+    std.debug.print("PASS 1 vs {d} together beside a decoding stream and after a cancel, {s}: rows byte-identical (wyhash {x}), {d} cuts recorded\n", .{ n, rule, hash, cuts.items.len });
 }

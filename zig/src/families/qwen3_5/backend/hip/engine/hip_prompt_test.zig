@@ -309,6 +309,7 @@ test "a test's cut rows fix every piece end, which the recorder lists" {
     defer cuts.deinit(T.allocator);
     h.cuts = &cuts;
     var lane: source.Lane = undefined;
+    lane.readout = null; // a plain prompt: reach reads only this
     var at: usize = 0;
     while (at < 1000) at = try h.reach(&lane, at, 1000);
     try T.expectEqualSlices(u32, &.{ 300, 600, 900, 1000 }, cuts.items);
@@ -316,6 +317,31 @@ test "a test's cut rows fix every piece end, which the recorder lists" {
     cuts.clearRetainingCapacity();
     _ = try h.reach(&lane, 0, 5000);
     try T.expectEqualSlices(u32, &.{prefix.chunk}, cuts.items); // no stream decodes: the chunk rule
+}
+
+test "a readout's piece stays the chunk while another lane decodes; a plain prompt's takes the fill rows" {
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{};
+    var h: source.Hip = undefined;
+    h.gpa = T.allocator;
+    h.e = &e;
+    h.cuts = null;
+    h.streams = .init(T.allocator);
+    defer h.streams.deinit();
+    var plain: source.Lane = undefined; // reach reads a lane's readout only
+    plain.readout = null;
+    var reader: source.Lane = undefined;
+    var state: u8 = 0;
+    reader.readout = @ptrCast(&state);
+    try T.expectEqual(prefix.chunk, try h.reach(&reader, 0, 5000)); // nothing decodes
+    var talking: source.Lane = undefined;
+    talking.fill = null; // past its prompt: it decodes
+    var key: lanes.Stream = undefined;
+    try h.streams.map.put(T.allocator, &key, &talking);
+    try T.expect(e.o.policy.fill_rows != prefix.chunk);
+    try T.expectEqual(@as(usize, e.o.policy.fill_rows), try h.reach(&plain, 0, 5000));
+    try T.expectEqual(prefix.chunk, try h.reach(&reader, 0, 5000));
+    try T.expectEqual(2 * prefix.chunk, try h.reach(&reader, prefix.chunk, 5000));
 }
 
 test "every piece of a readout, the last too, goes to its readout with no projection, draw or kept cut" {
