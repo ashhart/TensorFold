@@ -104,6 +104,66 @@ fn cosine(x: []const f64, y: []const f64) f64 {
 const embed_revision = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af";
 const transformers_tree = "b08cead6d1b841ef9723106a81a92ec37d67aff3e43a198e56b7dc76538d377b";
 
+/// One fidelity input as the oracle's INPUTS pins it: tokens, SHA256 of the UTF-8 text, SHA256 of the IDs as LE u32.
+const InputPin = struct { tokens: usize, text: *const [64]u8, ids: *const [64]u8 };
+
+/// The card's 4 inputs, then 5 long inputs of 2K to 32K tokens cut from pinned files.
+const embed_inputs = [_]InputPin{
+    .{ .tokens = 27, .text = "b11f8d3ae64c3c7029275c5d8d82172ef31a9a354223c12845b61047a0c972e8", .ids = "3c1537f6fc0a496f2b68c1aaa38484d8a82030338ae52bbd955b45b50c9efc24" },
+    .{ .tokens = 23, .text = "bd6e4e8bb1b5c2e15db6003175c53f084690aeb6c09b34f1808161ef3353d524", .ids = "a08f60368f1da49a05dd929f406c503bcd0864ee464f25807866753bffe3062c" },
+    .{ .tokens = 8, .text = "b6d0a6ed3a94d5e532ae83127502407102e51342d1db011caf4c5b9808a1e131", .ids = "c1e33d8973efc767e95f15a7b31af3c68eccc5ca89e0c2648f5337fec3c8f2c6" },
+    .{ .tokens = 31, .text = "ba5bd6b5de9d9f827336e76d982b5dbae8aa3cc075c115f57405ba370bba8dbc", .ids = "4bd9685251a5e3587a645c0bf96dbc76ca70998073523b5537a1513c15f4c8ea" },
+    .{ .tokens = 2044, .text = "f60c57fd5911f2c10704c555aef3a6e38543afa78604385ad5d8dde87050e0ff", .ids = "e10c109c63916e2cacd0143d8295fa5fa449c9eb09b7d3126405bfec9a6c9d92" },
+    .{ .tokens = 4043, .text = "93c6978d85521f7b15d47dfedd386b72f063fd25ea5ada5ccf38fefdc88e7766", .ids = "a87db7cfe361a40e15c9b209796f6260bfb74017bc1e897e6e5be3d1a557cdbf" },
+    .{ .tokens = 8177, .text = "3f5c76527fb4d032b31c827e5ec4d171a9feb94e7ab2ab96341028b1dd412505", .ids = "17c5b8a1cb0f288b40b9810549881b901eea58c83edb6e6d1b89ac1beab603eb" },
+    .{ .tokens = 16383, .text = "c0a043846083a03ec205a34af84d7b1053a8d1a4ea4f3d3c028bb4c048ef1366", .ids = "528fda3905d2fc0340f8d5ca34f4bd91703613d76b40e5ac0835fab641acf173" },
+    .{ .tokens = 32759, .text = "009256a9df975a6f67e5984760078c1dbcb0bd0b9aefbce0bdb8373ebd386dd7", .ids = "1dfcec470654b993960be543f8e84c461bc28d743aa5a50ee63bd81a9b8e15a8" },
+};
+
+/// Refuses references whose texts and token IDs are not exactly the pinned inputs, in order.
+fn checkInputs(ref: std.json.Value, pins: []const InputPin) !void {
+    const texts = ref.object.get("texts") orelse return error.IncompleteReference;
+    const ids = ref.object.get("ids") orelse return error.IncompleteReference;
+    try holds(texts == .array and ids == .array and texts.array.items.len == pins.len and ids.array.items.len == pins.len);
+    for (texts.array.items, ids.array.items, pins) |x, one, pin| {
+        try holds(x == .string and one == .array and one.array.items.len == pin.tokens);
+        var h = std.crypto.hash.sha2.Sha256.init(.{});
+        for (one.array.items) |id| {
+            try holds(id == .integer and id.integer >= 0 and id.integer <= std.math.maxInt(u32));
+            var le: [4]u8 = undefined;
+            std.mem.writeInt(u32, &le, @intCast(id.integer), .little);
+            h.update(&le);
+        }
+        try holds(std.mem.eql(u8, &std.fmt.bytesToHex(h.finalResult(), .lower), pin.ids));
+        var th: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(x.string, &th, .{});
+        try holds(std.mem.eql(u8, &std.fmt.bytesToHex(th, .lower), pin.text));
+    }
+}
+
+test "Qwen3-Embedding references: inputs other than the pinned ones are refused" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // "a" and the IDs [1, 2] (bytes 01 00 00 00 02 00 00 00)
+    const pin = [_]InputPin{.{ .tokens = 2, .text = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb", .ids = "34fb5c825de7ca4aea6e712f19d439c1da0c92c37b423936c5f618545ca4fa1f" }};
+    const parse = struct {
+        fn of(al: std.mem.Allocator, body: []const u8) !std.json.Value {
+            return std.json.parseFromSliceLeaky(std.json.Value, al, body, .{});
+        }
+    }.of;
+    try checkInputs(try parse(a, "{\"texts\": [\"a\"], \"ids\": [[1, 2]]}"), &pin);
+    for ([_][]const u8{
+        "{\"texts\": [\"b\"], \"ids\": [[1, 2]]}",
+        "{\"texts\": [\"a\"], \"ids\": [[1, 3]]}",
+        "{\"texts\": [\"a\"], \"ids\": [[1]]}",
+        "{\"texts\": [\"a\", \"a\"], \"ids\": [[1, 2], [1, 2]]}",
+        "{\"texts\": [\"a\"], \"ids\": [[1, -2]]}",
+        "{\"texts\": [\"a\"]}",
+    }) |body| try t.expect(std.meta.isError(checkInputs(try parse(a, body), &pin)));
+    try t.expectEqual(@as(usize, 9), embed_inputs.len);
+}
+
 fn text(v: std.json.Value, key: []const u8) ?[]const u8 {
     const x = (if (v == .object) v.object.get(key) else null) orelse return null;
     return if (x == .string) x.string else null;
@@ -252,7 +312,35 @@ test "Qwen3-Embedding references: pins that do not hash to the checkpoint's file
     try t.expect(std.meta.isError(checkFiles(a, t.io, dir, try std.json.parseFromSliceLeaky(std.json.Value, a, unpinned, .{}))));
 }
 
-test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit within the BF16 bar of the fp32 vectors" {
+/// The oracle's requests: consecutive inputs, at most 128 and `window` tokens in all (`ids` lengths in order).
+fn groupEnds(a: std.mem.Allocator, lengths: []const usize, window: usize) ![]usize {
+    var out: std.ArrayList(usize) = .empty;
+    var used: usize = 0;
+    var count: usize = 0;
+    for (lengths, 0..) |n, i| {
+        if (n > window) return error.InputPastWindow;
+        if (count > 0 and (used + n > window or count == 128)) {
+            try out.append(a, i);
+            used = 0;
+            count = 0;
+        }
+        used += n;
+        count += 1;
+    }
+    try out.append(a, lengths.len);
+    return out.items;
+}
+
+test "Qwen3-Embedding: the GPU test batches inputs as the oracle's check does" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try t.expectEqualSlices(usize, &.{ 2, 3, 4 }, try groupEnds(a, &.{ 3, 5, 9, 1 }, 9));
+    try t.expectEqualSlices(usize, &.{ 1, 3 }, try groupEnds(a, &.{ 4, 2, 2 }, 4));
+    try t.expectError(error.InputPastWindow, groupEnds(a, &.{10}, 9));
+}
+
+test "Qwen3-Embedding: the card's and the long inputs batched equal them alone, within the BF16 bar of fp32" {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -260,32 +348,31 @@ test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit withi
     const ref = try readJson(a, try env(a, "TF_QWEN3_EMBED_REF") orelse return error.SkipZigTest);
     const bar = try readJson(a, try env(a, "TF_QWEN3_EMBED_BAR") orelse return error.SkipZigTest);
     try checkReferences(ref, bar);
+    try checkInputs(ref, &embed_inputs);
     try checkFiles(a, t.io, dir, ref.object.get("pins").?);
     var g: Gpu = undefined;
     try g.open(4 << 30);
     defer g.close();
-    // the card's 2 queries and 2 documents in both references, each vector full width, before any GPU work
+    // the card's 2 queries and 2 documents, then 5 long inputs of 2K to 32K tokens, each vector full width
     const inputs = ref.object.get("ids").?.array.items;
     const refs = ref.object.get("vectors").?.array.items;
     const bars = bar.object.get("vectors").?.array.items;
-    try t.expectEqual(@as(usize, 4), inputs.len);
-    try t.expectEqual(@as(usize, 4), refs.len);
-    try t.expectEqual(@as(usize, 4), bars.len);
-    for (inputs) |one| try t.expect(one.array.items.len > 0);
+    try t.expectEqual(@as(usize, 9), inputs.len);
+    try t.expectEqual(inputs.len, refs.len);
+    try t.expectEqual(inputs.len, bars.len);
+    const lengths = try a.alloc(usize, inputs.len);
+    for (inputs, lengths) |one, *n| {
+        try t.expect(one.array.items.len > 0);
+        n.* = one.array.items.len;
+    }
+    try t.expect(lengths[inputs.len - 1] > 16384);
+    const window = 32768;
     var m = try qwen3.Model.load(gpa, t.io, &g.r, dir);
     defer m.deinit();
     for (refs, bars) |r, b| {
         try t.expectEqual(m.spec.hidden, r.array.items.len);
         try t.expectEqual(m.spec.hidden, b.array.items.len);
     }
-    var ids: std.ArrayList(i32) = .empty;
-    const ends = try a.alloc(u32, inputs.len);
-    for (inputs, ends) |one, *e| {
-        try ids.appendSlice(a, try idsOf(a, one));
-        e.* = @intCast(ids.items.len);
-    }
-    const batch = try g.lastRows(&m, ids.items, ends);
-    defer gpa.free(batch);
     const hidden = m.spec.hidden;
     var bar_worst: f64 = 0;
     for (bars, refs) |b, r| {
@@ -299,21 +386,34 @@ test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit withi
     }
     try t.expect(std.math.isFinite(bar_worst));
     const limit = @min(0.001, 2 * bar_worst);
-    var begin: u32 = 0;
-    for (ends, 0..) |e, i| {
-        const alone = try g.lastRows(&m, ids.items[begin..e], &.{e - begin});
-        defer gpa.free(alone);
-        try t.expectEqualSlices(u16, batch[i * hidden ..][0..hidden], alone);
-        const got = try a.alloc(f64, hidden);
-        const want = try a.alloc(f64, hidden);
-        for (batch[i * hidden ..][0..hidden], refs[i].array.items, got, want) |bits, r, *p, *q| {
-            p.* = widen(bits);
-            q.* = number(r);
+    var first: usize = 0;
+    for (try groupEnds(a, lengths, window)) |last| {
+        defer first = last;
+        var ids: std.ArrayList(i32) = .empty;
+        const ends = try a.alloc(u32, last - first);
+        for (inputs[first..last], ends) |one, *e| {
+            try ids.appendSlice(a, try idsOf(a, one));
+            e.* = @intCast(ids.items.len);
         }
-        const distance = 1 - cosine(got, want);
-        std.debug.print("embedding input {d}: cosine distance {e:.3} (limit {e:.3})\n", .{ i, distance, limit });
-        try t.expect(std.math.isFinite(distance) and distance <= limit);
-        begin = e;
+        const batch = try g.lastRows(&m, ids.items, ends);
+        defer gpa.free(batch);
+        var begin: u32 = 0;
+        for (ends, 0..) |e, j| {
+            defer begin = e;
+            const i = first + j;
+            const alone = try g.lastRows(&m, ids.items[begin..e], &.{e - begin});
+            defer gpa.free(alone);
+            try t.expectEqualSlices(u16, batch[j * hidden ..][0..hidden], alone);
+            const got = try a.alloc(f64, hidden);
+            const want = try a.alloc(f64, hidden);
+            for (batch[j * hidden ..][0..hidden], refs[i].array.items, got, want) |bits, r, *p, *q| {
+                p.* = widen(bits);
+                q.* = number(r);
+            }
+            const distance = 1 - cosine(got, want);
+            std.debug.print("embedding input {d} ({d} tokens): cosine distance {e:.3} (limit {e:.3})\n", .{ i, e - begin, distance, limit });
+            try t.expect(std.math.isFinite(distance) and distance <= limit);
+        }
     }
 }
 
