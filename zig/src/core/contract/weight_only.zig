@@ -5,7 +5,7 @@ const quant = @import("../quant/quant.zig");
 pub const Control = enum(u3) { production, nan, repeat, tail, sums };
 pub const Variant = struct { format: wo.Format, group: c_int = 64, scale_kind: wo.Scale = .bf16 };
 pub const variants = blk: {
-    var out: [21]Variant = undefined;
+    var out: [22]Variant = undefined;
     out[0] = .{ .format = .bf16 };
     out[1] = .{ .format = .fp8 };
     out[2] = .{ .format = .nvfp4 };
@@ -14,8 +14,10 @@ pub const variants = blk: {
         out[i] = .{ .format = format, .group = group, .scale_kind = kind };
         i += 1;
     };
+    out[i] = .{ .format = .mlx8, .group = 16, .scale_kind = .f32 };
     break :blk out;
 };
+pub const cuda_variants = variants[0..21];
 fn meta(bytes: []u8, i: usize, value: f32, kind: wo.Scale) void {
     switch (kind) {
         .bf16 => put(bytes, i, value),
@@ -37,7 +39,7 @@ pub const Fixture = struct {
     scales: []u8,
     biases: []u8,
     pub fn init(a: std.mem.Allocator, p: wo.Params, fill: anytype, seed: u64) !Fixture {
-        const sizes = try wo.validate(p);
+        const sizes = try wo.validateMetal(p);
         const x = try a.alloc(u16, sizes.x / 2);
         const weight = try a.alloc(u8, sizes.weight);
         const scales = try a.alloc(u8, sizes.scales);
@@ -155,6 +157,9 @@ pub fn Case(comptime contract: type, comptime B: type) type {
             // The longest path across groups32/64/128: per-lane FMAs, shuffle adds, totals and dequantization.
             return (shape.k + 31) / 32 + 10;
         }
+        fn depth16(shape: c.Shape) usize {
+            return (shape.k + 15) / 16 + 10;
+        }
         a: std.mem.Allocator,
         rig: B.Rig,
         backend: B,
@@ -188,7 +193,7 @@ pub fn Case(comptime contract: type, comptime B: type) type {
                 .name = label,
                 .accum = .f32,
                 .out = .bf16,
-                .depth = depth,
+                .depth = if (self.group == 16) depth16 else depth,
                 .tiles = .{ .{ .size = 8 }, .{ .size = 4 }, .{ .size = @max(64, step), .step = step, .min = step } },
                 .served = comptime blk: {
                     var shapes: [served.len]c.Shape = undefined;
@@ -243,4 +248,10 @@ pub fn Case(comptime contract: type, comptime B: type) type {
             }
         }
     };
+}
+
+test "weight-only CUDA keeps its original formats while group16 remains Metal-only" {
+    try std.testing.expectEqual(@as(usize, 21), cuda_variants.len);
+    for (cuda_variants) |v| try std.testing.expect(v.group != 16);
+    try std.testing.expectEqual(@as(c_int, 16), variants[variants.len - 1].group);
 }

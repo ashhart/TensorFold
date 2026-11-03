@@ -15,10 +15,16 @@ pub const Params = extern struct {
 };
 pub const Sizes = struct { x: usize, weight: usize, scales: usize, biases: usize, out: usize };
 pub fn validate(p: Params) !Sizes {
+    return admitted(p, false);
+}
+pub fn validateMetal(p: Params) !Sizes {
+    return admitted(p, true);
+}
+fn admitted(p: Params, comptime metal: bool) !Sizes {
     if (p.rows < 1 or p.rows > 128 or p.n < 1 or p.k < 1 or p.reserved0 != 0 or p.reserved1 != 0) return error.WeightOnlyShape;
     if (!std.math.isFinite(p.global_scale)) return error.WeightOnlyScale;
     switch (p.format) {
-        .mlx4, .mlx8 => if ((p.group != 32 and p.group != 64 and p.group != 128) or @mod(p.k, p.group) != 0) return error.WeightOnlyGroup,
+        .mlx4, .mlx8 => if ((p.group != 32 and p.group != 64 and p.group != 128 and !(metal and p.group == 16 and p.format == .mlx8 and p.scale_kind == .f32)) or @mod(p.k, p.group) != 0) return error.WeightOnlyGroup,
         .nvfp4 => if (@mod(p.k, 16) != 0 or p.group != 64) return error.WeightOnlyGroup,
         .bf16, .fp8 => if (p.group != 64) return error.WeightOnlyGroup,
     }
@@ -50,7 +56,12 @@ fn overlap(a: Range, b: Range) bool {
     return if (a.address <= b.address) b.address - a.address < a.len else a.address - b.address < b.len;
 }
 pub fn buffers(p: Params, x: Range, w: Range, s: Range, b: Range, out: Range) !void {
-    const sizes = try validate(p);
+    return bufferRanges(try validate(p), x, w, s, b, out);
+}
+pub fn buffersMetal(p: Params, x: Range, w: Range, s: Range, b: Range, out: Range) !void {
+    return bufferRanges(try validateMetal(p), x, w, s, b, out);
+}
+fn bufferRanges(sizes: Sizes, x: Range, w: Range, s: Range, b: Range, out: Range) !void {
     const ranges = [_]Range{ x, w, s, b, out };
     const needed = [_]usize{ sizes.x, sizes.weight, sizes.scales, sizes.biases, sizes.out };
     for (ranges, needed) |range, bytes| {
@@ -59,4 +70,28 @@ pub fn buffers(p: Params, x: Range, w: Range, s: Range, b: Range, out: Range) !v
     }
     if (x.address % 2 != 0 or out.address % 2 != 0) return error.WeightOnlyAlignment;
     for (ranges[0..4]) |input| if (overlap(out, input)) return error.WeightOnlyAlias;
+}
+test "weight-only: sixteen-element groups are Metal-only, with lossless eight-bit codes and F32 metadata" {
+    var p: Params = .{ .rows = 1, .n = 4, .k = 128, .format = .mlx8, .group = 16, .scale_kind = .f32 };
+    try std.testing.expectError(error.WeightOnlyGroup, validate(p));
+    const size = try validateMetal(p);
+    try std.testing.expectEqual(@as(usize, 512), size.weight);
+    try std.testing.expectEqual(@as(usize, 128), size.scales);
+    p.scale_kind = .bf16;
+    try std.testing.expectError(error.WeightOnlyGroup, validateMetal(p));
+    p.scale_kind = .f16;
+    try std.testing.expectError(error.WeightOnlyGroup, validateMetal(p));
+    p.scale_kind = .f32;
+    p.format = .mlx4;
+    try std.testing.expectError(error.WeightOnlyGroup, validateMetal(p));
+}
+test "weight-only: only the Metal buffer boundary admits group16" {
+    const p: Params = .{ .rows = 1, .n = 4, .k = 128, .format = .mlx8, .group = 16, .scale_kind = .f32 };
+    const x: Range = .{ .address = 1024, .len = 256 };
+    const w: Range = .{ .address = 2048, .len = 512 };
+    const s: Range = .{ .address = 3072, .len = 128 };
+    const b: Range = .{ .address = 4096, .len = 128 };
+    const y: Range = .{ .address = 5120, .len = 8 };
+    try std.testing.expectError(error.WeightOnlyGroup, buffers(p, x, w, s, b, y));
+    try buffersMetal(p, x, w, s, b, y);
 }

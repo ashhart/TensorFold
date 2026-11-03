@@ -13,6 +13,7 @@ const Add = extern struct { rows: u32, width: u32 };
 pub const Gather = extern struct { rows: u32, width: u32, capacity: u32, planes: u32 };
 
 pub const Kernels = struct {
+    gain: abi.Float = .bf16,
     embed: mtl.Pipeline,
     head: mtl.Pipeline,
     slice: mtl.Pipeline,
@@ -75,7 +76,7 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
-        const a = abi.Head{ .width = width, .rows = rows, .stride = width, .activation = .bf16, .gain = .bf16, .eps = eps };
+        const a = abi.Head{ .width = width, .rows = rows, .stride = width, .activation = .bf16, .gain = k.gain, .eps = eps };
         e.setPipeline(k.head);
         bind(e, .{ x, weight });
         e.setValue(a, 2);

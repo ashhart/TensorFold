@@ -144,19 +144,37 @@ pub const Document = struct {
         return views.tokenizer(d);
     }
 };
+/// File diagnostics own their tensor name because refused mappings are immediately released.
+pub const FileProblem = struct {
+    name: ?[]u8 = null,
+    kind: u32 = 0,
+    pub fn deinit(p: *FileProblem, a: std.mem.Allocator) void {
+        if (p.name) |name| a.free(name);
+        p.* = .{};
+    }
+};
 pub const File = struct {
     file: std.Io.File,
     map: std.Io.File.MemoryMap,
     document: Document,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, path: []const u8, limits: Limits) !File {
+        return openDiagnosed(gpa, io, path, limits, null);
+    }
+    pub fn openDiagnosed(gpa: std.mem.Allocator, io: std.Io, path: []const u8, limits: Limits, problem: ?*FileProblem) !File {
         const file = try std.Io.Dir.cwd().openFile(io, path, .{});
         errdefer file.close(io);
         const len = std.math.cast(usize, try file.length(io)) orelse return error.GgufFileTooLarge;
         if (len < 24) return error.TruncatedInput;
         var map = try std.Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
         errdefer map.destroy(io);
-        var doc = try Document.parse(gpa, map.memory, limits);
+        var unsupported: UnsupportedTensor = .{};
+        var doc = Document.parseDiagnosed(gpa, map.memory, limits, &unsupported) catch |err| {
+            if (problem) |p| if (err == error.UnsupportedTensorType) {
+                p.* = .{ .name = try gpa.dupe(u8, unsupported.name), .kind = unsupported.kind };
+            };
+            return err;
+        };
         errdefer doc.deinit();
         if (try file.length(io) != len) return error.GgufFileChanged;
         return .{ .file = file, .map = map, .document = doc };

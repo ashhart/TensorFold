@@ -7,7 +7,8 @@ const lane = @import("core").lane_projection;
 
 pub const Ref = struct { buffer: mtl.Buffer, offset: usize = 0 };
 /// A device matrix; `runs` non-empty means fused members of different widths. `gn`: the checkpoint's rows (0 = `n`).
-pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{}, gn: usize = 0 };
+pub const Exact = struct { params: @import("core").weight_only.Params, words: Ref, scales: Ref, biases: Ref };
+pub const Linear = struct { gguf: ?Exact = null, words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{}, gn: usize = 0 };
 /// One product inside a mixed fused matrix, writing output columns [first, first + linear.n).
 pub const Run = struct { linear: Linear, first: u32 };
 /// Staged tensors: `gn` the part's rows when `weight.shape[0]` is a slice, `whole` its tensor's rows as a block.

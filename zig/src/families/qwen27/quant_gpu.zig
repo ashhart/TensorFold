@@ -40,6 +40,7 @@ test "only prompt chunks past 128 rows take the long key" {
 
 pub const Kernels = struct {
     allocator: std.mem.Allocator,
+    gguf: ?@import("gguf_ops.zig").Kernels = null,
     residency: ?mtl.ResidencySet.Follow = null,
     device: mtl.Device,
     profiler: ?*profile.Trace = null,
@@ -75,6 +76,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        if (k.gguf) |*ops| ops.deinit();
         k.setResident(null);
         if (k.row_pipelines) |*pipelines| pipelines.deinit();
         if (k.simd) |*pipelines| pipelines.deinit();
@@ -144,6 +146,10 @@ pub const Kernels = struct {
     }
 
     fn quantImpl(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
+        if (k.gguf) |*ops| {
+            if (skip != 0 or cut[1] != 0) return error.BadGgufProjection;
+            return ops.quant(input_encoder, p, x, y, rows);
+        }
         if (p.runs.len > 0) return k.quantRuns(input_encoder, p, x, xs, dims, y, rows, skip, cut);
         return k.quantOne(input_encoder, p, x, xs, dims, y, rows, skip, cut);
     }
@@ -193,7 +199,7 @@ pub const Kernels = struct {
 
     /// Compiles at load the decode-row pipeline a later `quant` of `p` takes (for shapes no target layer uses).
     pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
-        if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
+        if (p.gguf != null or p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
         // decoded rows never take the long key (longKey needs prompt rows)
         _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false);
     }
@@ -375,6 +381,7 @@ pub const Kernels = struct {
     }
 
     pub fn norm(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32) !void {
+        if (k.gguf) |*ops| return ops.norm(input_encoder, h, residual, weight, combined, out, width, rows, eps.buffer.slice(f32, 1)[0]);
         var span = profile.begin(k.profiler, input_encoder, .norm);
         errdefer span.cancel();
         const e = span.encoder;

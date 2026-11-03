@@ -81,7 +81,7 @@ pub const Stages = struct {
         if (s.rows == 0 or s.rows > m.frame.capacity or lane.k != 0) return error.BadFrameRows;
         s.hidden = m.frame.get(.hidden);
         s.residual = m.frame.get(.residual);
-        try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
+        if (m.kernels.gguf) |*ops| try ops.embedding(lane.enc, m.glue.embed, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows) else try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
         lane.enc.barrier();
         if (s.images) |rows| {
             m.glue.imageRows(lane.enc, s.hidden, rows, m.frame.get(.takes), @intCast(m.config.hidden), s.rows);

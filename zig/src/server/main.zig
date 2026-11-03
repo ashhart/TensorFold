@@ -118,12 +118,13 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.silence.refusal(model_type) orelse args.redraw.refusal(model_type)) |why| return fail(why);
     // the model folder held while this process reads it, so a rollback refuses it: exclusive with --slide, else shared
     var unheld: []const u8 = "";
-    const held = api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {
+    const gguf = @import("gguf_path.zig").isFile(io, dir);
+    const held = if (gguf) null else api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {
         error.OutOfMemory => |x| return x,
         else => return fail(unheld),
     };
     defer if (held) |h| h.release();
-    if (held == null) log.line("{s}", .{unheld});
+    if (held == null and !gguf) log.line("{s}", .{unheld});
     if (args.rank > 0) { // a rank above 0 serves no HTTP and loads no text: it runs rank 0's steps
         if (!try engines.follow(a, gpa, io, dir, model_type, args, &problem)) return fail(problem);
         return 0;
@@ -200,6 +201,7 @@ fn fail(message: []const u8) u8 {
 }
 
 fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) ![]const u8 {
+    if (@import("gguf_path.zig").isFile(io, dir)) return "qwen3_5";
     const bytes = (try @import("checkpoint_config").read(a, io, dir, problem)) orelse return "unknown";
     const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return "unknown";
     if (doc != .object) return "unknown";

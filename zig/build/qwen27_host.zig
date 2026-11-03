@@ -77,6 +77,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     inline for (.{ "config_test.zig", "weights_test.zig", "checkpoint.zig", "projection.zig", "affine.zig", "geometry_test.zig" }) |file| tryNames(b, &dense_names, @embedFile("../src/families/qwen27/" ++ file));
     tryNames(b, &dense_names, @embedFile("../src/families/qwen3_5/config.zig"));
     b.step("test-qwen-dense-geometry-host", "Dense config and full-size packed headers without shaders or a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = dense_names.items })).step);
+    b.step("test-qwen27-gguf-bindings-host", "GGUF F32 attention gains and native defaults without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"GGUF attention:"} })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const minimax = b.createModule(.{ .root_source_file = b.path("zig/src/native/minimax_m3.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
