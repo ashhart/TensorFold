@@ -24,13 +24,13 @@ PASS nonfinite vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: 64 non-fini
 PASS repeat vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
 PASS shapes vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: 15 shapes within the float64 bound (worst 0.987 of the bound), 0 edges refused by the kernel
 PASS sums vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: exact sums at k 6144, where fp16 sums would miss by 5756x and bf16 by 256x
-PASS nonfinite vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows a thread: 64 non-finite and 16 finite outputs match the float64 classes
-PASS repeat vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows a thread: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
-PASS shapes vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows a thread: 15 shapes within the float64 bound (worst 0.986 of the bound), 0 edges refused by the kernel
-PASS sums vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows a thread: exact sums at k 6144, where fp16 sums would miss by 6498x and bf16 by 256x
+PASS nonfinite vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread: 64 non-finite and 16 finite outputs match the float64 classes
+PASS repeat vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread: 15 shapes within the float64 bound (worst 0.989 of the bound), 0 edges refused by the kernel
+PASS sums vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread: exact sums at k 6144, where fp16 sums would miss by 4463x and bf16 by 256x
 FAIL nonfinite control: qmm fmax drops NaN: 1 of 5 outputs differ in class; first at 0: finite where float64 gives nan
 CONTROL control: qmm fmax drops NaN: red at nonfinite, as planted
-FAIL repeat control: atomic add row sum: 4 of 4 repeats differ from the first run's bytes, first at byte 4
+FAIL repeat control: atomic add row sum: 4 of 4 repeats differ from the first run's bytes, first at byte 0
 CONTROL control: atomic add row sum: red at repeat, as planted
 FAIL repeat control: row sum scribbles input: 4 of 4 repeats differ from the first run's bytes, first at byte 0
 CONTROL control: row sum scribbles input: red at repeat, as planted
@@ -42,4 +42,4 @@ FAIL repeat control: qmm writes its weights: a run changed its inputs
 CONTROL control: qmm writes its weights: red at repeat, as planted
 FAIL repeat control: qmm writes its biases: a run changed its inputs
 CONTROL control: qmm writes its biases: red at repeat, as planted
-SUMMARY Apple M1 (G13G B1) 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 caught, 0 missed; 0 limit failures; gates 37794 ms
+SUMMARY Apple M1 (G13G B1) 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 caught, 0 missed; 0 limit failures; gates 37368 ms
