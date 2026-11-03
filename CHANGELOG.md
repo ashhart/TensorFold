@@ -2,7 +2,11 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
-## Unreleased
+## 1.2.2
+
+- CUDA lanes: Gemma 4, MiniMax M3, Kolibri-1, Spark 2.5 and Dory can verify root and context copies as Nemotron does, opt-in: set `TF_GEMMA4_COPIES`, `TF_MINIMAX_COPIES`, `TF_KOLIBRI_COPIES`, `TF_SPARK_COPIES` or `TF_DORY_COPIES` to 1. Replies equal `"draft": false`, and unset is the old policy (#2022, part of #1910).
+
+- The dense Qwen3.5 Metal loader takes its shape from the checkpoint's config rather than the 27B's fixed geometry, checked against the 27B, 9B and 2B with identical tokens (#1817).
 
 - Living Weights on Gemma 4, step 1: the prepared-attention backward on the host, checked against an independent reference; nothing served changes (#2032, part of #1803).
 
