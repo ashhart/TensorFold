@@ -8,6 +8,12 @@ struct LwParams { unsigned u[16]; float f[4]; };
 LW_INLINE float lw_sig(float x) { const float e=LW_EXP(-LW_ABS(x)); return (x<0?e:1.0f)/(1.0f+e); }
 LW_INLINE float lw_silu(float x) { return x*lw_sig(x); }
 LW_INLINE float lw_dsilu(float x) { const float s=lw_sig(x); return s*(1.0f+x*(1.0f-s)); }
+LW_INLINE float lw_gelu(float x) { return 0.5f*x*(1.0f+LW_TANH(0.7978845608028654f*(x+0.044715f*x*x*x))); }
+LW_INLINE float lw_dgelu(float x) {
+    if(LW_ABS(x)>12.0f)return x>0?1.0f:0.0f;
+    const float t=LW_TANH(0.7978845608028654f*(x+0.044715f*x*x*x));
+    return 0.5f*(1.0f+t)+0.5f*x*(1.0f-t*t)*0.7978845608028654f*(1.0f+0.134145f*x*x);
+}
 LW_INLINE float lw_read(LW_DEV const unsigned char* p, unsigned i) { return LW_BITS_FLOAT(unsigned(((LW_DEV const unsigned short*)p)[i])<<16); }
 LW_INLINE float lw_round(float x) {
     const unsigned bits=LW_FLOAT_BITS(x);
@@ -147,10 +153,11 @@ LW_INLINE void lw_rows(unsigned op,unsigned id,LwParams p,
             if(op==13)LW_ACC(p,back,lw_float(b,2*cap*dim+neuron*dim+i)*lw_float(c,row*dim+i));
         }
         const float scale=neuron>=p.u[3]?p.f[0]:1.0f;
-        if(op==10)lw_put(p,x,id,scale*lw_silu(gate)*up,false);
+        const float activation=p.u[12]?lw_gelu(gate):lw_silu(gate);
+        if(op==10)lw_put(p,x,id,scale*activation*up,false);
         else {
-            lw_put(p,x,2*id,scale*back*lw_dsilu(gate)*up,false);
-            lw_put(p,x,2*id+1,scale*back*lw_silu(gate),false);
+            lw_put(p,x,2*id,scale*back*(p.u[12]?lw_dgelu(gate):lw_dsilu(gate))*up,false);
+            lw_put(p,x,2*id+1,scale*back*activation,false);
         }
     } else if(op==11 || op==12) {
         const unsigned dim=p.u[1],neurons=p.u[2],cap=p.u[4],row=id/dim,col=id%dim;

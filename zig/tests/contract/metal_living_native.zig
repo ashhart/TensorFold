@@ -20,7 +20,7 @@ fn Group(comptime spec: type) type {
             }
         }
         pub fn launch(b: *@This(), r: *Rig, f: anytype) !void {
-            for (b.views[8..]) |view| @memset(view.buffer.contents()[view.offset..][0..view.len], 0);
+            for (b.views[8..]) |view| @memset(view.buffer.contents()[view.offset..][0..view.len], if (spec == tf.living_gemma) 0x7b else 0);
             const pass = r.begin();
             b.kernels.encode(pass.e, f.raw.op, f.raw.p, b.views) catch |err| {
                 try r.finish(pass);
@@ -43,9 +43,10 @@ fn Group(comptime spec: type) type {
             group.* = .{ .a = a };
             errdefer group.cleanup();
             for (std.enums.values(tf.living_rows.Control)) |control| for (std.enums.values(spec.Op), spec.names) |op, name| for (0..2) |variant| {
-                if (variant == 1 and !(spec == tf.living_gdn and op == .readout)) continue;
+                if (variant == 1 and !(spec == tf.living_gdn and op == .readout) and !(spec == tf.living_rows and std.mem.startsWith(u8, name, "tf_lw_pocket_")) and spec != tf.living_qsa) continue;
+                if (spec == tf.living_gemma and op == .zero and control == .nan) continue;
                 if (control == .sums and !F.learning_contract_data.reduces(spec, op)) continue;
-                const label = try std.fmt.allocPrint(a, "metal living-native {s}{s}{s}", .{ name, tf.living_rows.suffixes[@backingInt(control)], if (variant == 1) " sigmoid" else "" });
+                const label = try std.fmt.allocPrint(a, "metal living-native {s}{s}{s}", .{ name, tf.living_rows.suffixes[@backingInt(control)], if (variant == 1) (if (spec == tf.living_gdn) " sigmoid" else if (spec == tf.living_rows) " geglu" else " gemma") else "" });
                 if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) {
                     a.free(label);
                     continue;
@@ -54,7 +55,8 @@ fn Group(comptime spec: type) type {
                 const index = @backingInt(control);
                 if (group.kernels[index] == null) group.kernels[index] = try K.loadTest(a, device, control);
                 const c = &group.cases[group.made];
-                c.* = .{ .a = a, .backend = .{ .kernels = &group.kernels[index].? }, .rig = .{ .base = .{ .a = a, .device = device, .queue = queue } }, .op = op, .control = control, .sigmoid = variant == 1, .label = label };
+                c.* = .{ .a = a, .backend = .{ .kernels = &group.kernels[index].? }, .rig = .{ .base = .{ .a = a, .device = device, .queue = queue } }, .op = op, .control = control, .sigmoid = variant == 1 and spec == tf.living_gdn, .geglu = variant == 1 and spec == tf.living_rows, .gemma_attention = variant == 1 and spec == tf.living_qsa, .label = label };
+                if (spec == tf.living_qsa and variant == 1) c.useGemmaAttention();
                 try out.append(a, c.kernel());
                 group.made += 1;
             };
@@ -76,3 +78,27 @@ fn Group(comptime spec: type) type {
 pub const Rows = Group(tf.living_rows);
 pub const Gdn = Group(tf.living_gdn);
 pub const Qsa = Group(tf.living_qsa);
+pub const Gemma = Group(tf.living_gemma);
+
+pub const Suite = struct {
+    rows: *Rows,
+    gdn: *Gdn,
+    qsa: *Qsa,
+    gemma: *Gemma,
+    pub fn create(a: std.mem.Allocator, device: metal.Device, queue: metal.Queue, out: *std.ArrayList(contract.gates.Kernel), only: ?[]const u8) !Suite {
+        const rows = try Rows.create(a, device, queue, out, only);
+        errdefer rows.destroy();
+        const gdn = try Gdn.create(a, device, queue, out, only);
+        errdefer gdn.destroy();
+        const qsa = try Qsa.create(a, device, queue, out, only);
+        errdefer qsa.destroy();
+        const gemma = try Gemma.create(a, device, queue, out, only);
+        return .{ .rows = rows, .gdn = gdn, .qsa = qsa, .gemma = gemma };
+    }
+    pub fn destroy(s: Suite) void {
+        s.gemma.destroy();
+        s.qsa.destroy();
+        s.gdn.destroy();
+        s.rows.destroy();
+    }
+};

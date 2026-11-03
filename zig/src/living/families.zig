@@ -78,7 +78,20 @@ pub const qwen4_text: Family = blk: {
     break :blk f;
 };
 
-pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5, qwen4, qwen4_text };
+/// Gemma 4's dense MLP adds GeGLU neurons before its post-feedforward normalization.
+pub const gemma4: Family = blk: {
+    var f = qwen3_5;
+    f.model_type = "gemma4";
+    f.neuron.act = .geglu;
+    break :blk f;
+};
+pub const gemma4_unified: Family = blk: {
+    var f = gemma4;
+    f.model_type = "gemma4_unified";
+    break :blk f;
+};
+
+pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5, qwen4, qwen4_text, gemma4, gemma4_unified };
 
 /// The family of a checkpoint's top-level model_type, or null.
 pub fn byModelType(model_type: []const u8) ?Family {

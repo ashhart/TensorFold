@@ -7,6 +7,8 @@ const g = tf.gemma4;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
+const Slide = g.learning_slide.Slide(g.learning_metal.Owner);
+const Adapter = @import("slide_adapter.zig").Adapter(Slide);
 const Resident = @import("resident.zig").Resident;
 
 /// The context a stream gets without --context: attention's per-call scratch grows with it (pass --context for more).
@@ -29,6 +31,10 @@ const Host = struct {
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
     host: api.LaneHost,
+    retained_next: ?*Host = null,
+    learning: ?*g.learning_metal.Owner = null,
+    slide: ?Adapter = null,
+    learn_bytes: u64 = 0,
     cache: ?api.prompt_cache.Store = null, // kept prompt states (--prompt-cache-gib 0: none)
     /// The image wrapper's tokens (--vision): begin, image, end, and each image's rows between the first and last.
     markers: [3]u32 = .{ 255999, 258880, 258882 },
@@ -36,6 +42,18 @@ const Host = struct {
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        waitClose(h) catch {
+            Guard.keep(h);
+            return;
+        };
+        finish(h);
+    }
+    fn waitClose(h: *Host) !void {
+        if (h.learning) |l| try l.prepareClose();
+    }
+    fn finish(h: *Host) void {
+        if (h.slide) |*s| s.deinit();
+        if (h.learning) |l| l.close() catch return;
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         if (h.wrap) |*w| w.deinit();
@@ -49,7 +67,10 @@ const Host = struct {
     }
 };
 
+const Guard = @import("close_guard.zig").Queue(Host, Host.waitClose, Host.finish);
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    Guard.recover();
     if (try o.slideRefusal(a, "Macs")) |why| {
         problem.* = why;
         return null;
@@ -65,6 +86,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
 
 /// The host, or error.Refused once `problem` says why; either error path releases what was made before it.
 fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !*Host {
+    if (o.slide) try g.learning_profile.check(try g.config.Config.read(gpa, io, o.dir));
     const model = g.Model.load(gpa, io, o.dir) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load this checkpoint ({s}): it serves Gemma 4 31B and 12B as MLX affine 2-6 or 8 bits in groups of 64, uniform or per module", .{@errorName(err)});
         return error.Refused;
@@ -85,12 +107,34 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
+    h.retained_next = null;
+    h.learning = null;
+    h.slide = null;
+    h.learn_bytes = 0;
     h.gpa = gpa;
     h.io = io;
     h.model = model;
     h.markers = .{ 255999, 258880, 258882 };
     h.metal = try g.backend.Metal.init(gpa, io, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
+    if (o.slide or model.config.learned != 0) {
+        const s = g.learning_profile.Shape.from(&model.config);
+        const pockets = 2 * 3 * 64 * s.hidden * 4 * (s.layers + 1) + 512 * 64 * 4;
+        var bytes: u64 = pockets;
+        if (o.slide) {
+            const p = try g.learning_buffers.Plan(g.learning_metal.Owner.Runtime.Backend).make(s, 256);
+            bytes += p.bytes + try p.hostBytes() + g.state.cacheBytes(model.config.geo, 256) + g.state.scratchBytes(model.config.geo, 256);
+        }
+        if (bytes > metal_admit.room(model.device)) {
+            problem.* = "--slide: the Gemma 4 native trainer and pocket budget does not fit beside the model";
+            return error.Refused;
+        }
+        h.learn_bytes = bytes;
+        h.learning = try g.learning_metal.Owner.open(gpa, model, o.dir, bytes);
+        if (o.slide) h.slide = Adapter.init(gpa, io, Slide.Model{ .e = h.learning.?, .pockets = &h.learning.?.r.pockets, .dir = h.learning.?.dir, .trainer = h.learning.? });
+    }
+    errdefer if (h.slide) |*s| s.deinit();
+    errdefer if (h.learning) |l| l.close() catch {};
     try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
     h.draft = null;
     h.assist = null;
@@ -120,7 +164,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     const drafter: ?lanes.drafter.Drafter = if (h.draft) |d| d.drafter() else if (h.assist) |d| d.drafter() else null;
     if (drafter) |d| h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d);
     errdefer if (h.wrap) |*w| w.deinit();
-    const served = try metal_admit.streams(a, "gemma4", g.state.cacheBytes(model.config.geo, @intCast(window)), metal_admit.room(model.device), o, @intCast(window), problem) orelse return error.Refused;
+    const served = try metal_admit.streams(a, "gemma4", g.state.cacheBytes(model.config.geo, @intCast(window)), metal_admit.room(model.device) -| h.learn_bytes, o, @intCast(window), problem) orelse return error.Refused;
     h.metal.options.streams = @max(served, 2);
     const facts = if (h.wrap) |*w| w.facts(h.metal.facts()) else h.metal.facts();
     h.config = try lanes.Config.init(gpa, facts, g.state.max_rows, g.state.max_rows - 1);
@@ -130,6 +174,10 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     errdefer h.core.deinit();
     const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = g.image_steps.decoderProblem } else null;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .decode_share = o.decode_share, .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = drafter.?.kind, .name = o.drafter_name orelse draft_dir orelse "" } else null }, .structures = true, .vision = vis });
+    if (h.slide) |*s| {
+        h.host.learner = s.hook();
+        h.host.info_.slide_conversations = s.learner.readsConversations();
+    }
     h.cache = null;
     try enableCache(h, a, o, served, @intCast(window), problem);
     errdefer if (h.cache) |*store| store.deinit();
@@ -172,7 +220,7 @@ const Snaps = struct {
 /// Prompt reuse in what 70% of RAM leaves beside the streams' caches (16 GiB by default), at planned chunk starts.
 fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, served: u32, window: usize, problem: *[]const u8) !void {
     const later = @as(u64, @max(served, 2)) * g.state.cacheBytes(h.model.config.geo, window);
-    const room = h.model.device.maxWorkingSet() -| h.model.device.allocated() -| (8 << 30) -| later;
+    const room = h.model.device.maxWorkingSet() -| h.model.device.allocated() -| (8 << 30) -| later -| h.learn_bytes;
     var why: []const u8 = "";
     const plan = cache_fit.budgetBeside(o.prompt_cache_gib, o.prompt_cache_over_cap, room, later, a, &why, "") catch |err| switch (err) {
         error.CacheOverCap => {

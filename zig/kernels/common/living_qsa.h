@@ -7,6 +7,14 @@ LW_INLINE unsigned lw_qsa_count(LW_DEV const unsigned char* counts,LW_DEV const 
 LW_INLINE unsigned lw_qsa_key(LW_DEV const unsigned char* ids,LW_DEV const unsigned char* sparse,LwParams p,unsigned row,unsigned j) {
     return ((LW_DEV const int*)sparse)[row]?unsigned(((LW_DEV const int*)ids)[row*p.u[4]+j]):j;
 }
+LW_INLINE float lw_qsa_offset(float x,unsigned mode) {
+    if(!mode)return 0.0f;
+    const float hi=lw_round(x);
+    return hi+(mode==2?lw_round(x-hi):0.0f)-x;
+}
+LW_INLINE bool lw_qsa_tile(unsigned j,unsigned start,LwParams p) {
+    return p.u[5]!=2 || (j/32)%p.u[6]==(start/32)%p.u[6];
+}
 LW_INLINE void lw_qsa(unsigned op,unsigned id,LwParams p,
     LW_DEV const unsigned char* a,LW_DEV const unsigned char* b,LW_DEV const unsigned char* c,
     LW_DEV const unsigned char* d,LW_DEV const unsigned char* e,LW_DEV const unsigned char* f,
@@ -36,11 +44,12 @@ LW_INLINE void lw_qsa(unsigned op,unsigned id,LwParams p,
         for(unsigned start=0;start<n;start+=32) {
             float tilemax=-LW_INFINITY;
             for(unsigned j=(start/512)*512;j<n && j<start+32;j++) {
+                if(!lw_qsa_tile(j,start,p))continue;
                 const unsigned key=lw_qsa_key(c,e,p,row,j);const float s=lw_float(a,base+key);if(s>tilemax)tilemax=s;
             }
             for(unsigned j=start;j<n && j<start+32;j++) {
                 const unsigned key=lw_qsa_key(c,e,p,row,j);const float score=lw_float(a,base+key);
-                const float exponent=LW_EXP(score-tilemax),offset=p.u[5]?lw_round(exponent)-exponent:0.0f;
+                const float exponent=LW_EXP(score-tilemax),offset=lw_qsa_offset(exponent,p.u[5]);
                 const float weight=(LW_EXP(score-maximum)+offset*LW_EXP(tilemax-maximum))/total;
                 lw_put(p,x,base+key,weight,false);
             }
@@ -54,11 +63,12 @@ LW_INLINE void lw_qsa(unsigned op,unsigned id,LwParams p,
         if(p.u[5])for(unsigned start=0;start<n;start+=32) {
             float tilemax=-LW_INFINITY,extra=0;unsigned winner=0;
             for(unsigned j=(start/512)*512;j<n && j<start+32;j++) {
+                if(!lw_qsa_tile(j,start,p))continue;
                 const unsigned key=lw_qsa_key(c,e,p,row,j);const float s=lw_float(a,base+key);if(s>tilemax){tilemax=s;winner=key;}
             }
             for(unsigned j=start;j<n && j<start+32;j++) {
                 const unsigned key=lw_qsa_key(c,e,p,row,j);const float v=LW_EXP(lw_float(a,base+key)-tilemax);
-                LW_ACC(p,extra,(lw_round(v)-v)*lw_float(b,base+key));
+                LW_ACC(p,extra,lw_qsa_offset(v,p.u[5])*lw_float(b,base+key));
             }
             lw_put(p,y,base+winner,extra*LW_EXP(tilemax-maximum)/total,true);
         }

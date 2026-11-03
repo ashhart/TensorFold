@@ -31,13 +31,15 @@ fn exec(x: Ctx, argv: []const []const u8) !void {
 fn library(x: Ctx, source: []const u8) ![]const u8 {
     var h = std.hash.Wyhash.init(0);
     h.update(source);
+    const precise = std.mem.indexOf(u8, source, "TF_LIVING_GEMMA") != null;
+    if (precise) h.update("precise-fp32");
     const stem = try std.fmt.allocPrint(x.a, "{s}/src_{x}", .{ x.dir, h.final() });
     const lib = try std.fmt.allocPrint(x.a, "{s}.metallib", .{stem});
     if (std.Io.Dir.cwd().access(x.io, lib, .{})) |_| return lib else |_| {}
     const src = try std.fmt.allocPrint(x.a, "{s}.metal", .{stem});
     const air = try std.fmt.allocPrint(x.a, "{s}.air", .{stem});
     try std.Io.Dir.cwd().writeFile(x.io, .{ .sub_path = src, .data = source });
-    try exec(x, &.{ "xcrun", "-sdk", "macosx", "metal", std_flag(), "-fmetal-math-mode=safe", "-fmetal-math-fp32-functions=fast", "-c", src, "-o", air });
+    try exec(x, &.{ "xcrun", "-sdk", "macosx", "metal", std_flag(), "-fmetal-math-mode=safe", if (precise) "-fmetal-math-fp32-functions=precise" else "-fmetal-math-fp32-functions=fast", "-c", src, "-o", air });
     try exec(x, &.{ "xcrun", "-sdk", "macosx", "metallib", air, "-o", lib });
     return lib;
 }

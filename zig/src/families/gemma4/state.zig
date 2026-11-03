@@ -25,6 +25,7 @@ pub const Cache = struct {
     geo: cfg.Geometry,
     capacity: usize,
     len: usize = 0,
+    untaught: bool = false,
     /// The cache length the last verify started from (keep rolls back to it plus the kept rows).
     from: usize = 0,
     /// The last row's logits, bf16 [vocab]: the prompt's (first) or a one-token round's (queue).
@@ -186,3 +187,15 @@ pub const Scratch = struct {
         }
     }
 };
+
+/// Exact requested lengths of Scratch.init, before a device's allocation rounding.
+pub fn scratchBytes(geo: cfg.Geometry, capacity: usize) u64 {
+    const r = prompt_rows;
+    const d = geo.hidden;
+    const qd = geo.queryWidth();
+    const kv = geo.kvWidth();
+    const slots = geo.query_heads * max_rows * @max(capacity / 256 + 2, (cfg.window + max_rows) / 128 + 2);
+    return r * 8 + r * (qd + 2 * kv) * 2 + r * (2 * qd + 2 * kv) * 2 + r * 8 * d * 2 +
+        r * 3 * geo.intermediate * 2 + slots * (8 + cfg.global_dim * 4) + r * cfg.vocab * 2 +
+        r * (geo.intermediate / 64) * 4 + r * 8 + r * (2 + 2 * meta_ints) * 4;
+}

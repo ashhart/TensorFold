@@ -27,3 +27,11 @@ pub const hc_pointwise_metal_adapter = @import("src/core/hc_pointwise_metal_impl
 pub const hc_pointwise_contract = @import("src/core/contract/hc_pointwise.zig");
 
 pub const attention_ref = @import("src/core/attention_ref.zig");
+
+pub const living_rows_cuda = @import("src/core/living_rows_cuda.zig");
+pub const living_rows_metal = @import("src/core/living_rows_metal.zig");
+
+pub const living_gemma = @import("src/core/living_gemma.zig");
+
+pub const dense_storage_cuda = @import("src/core/dense_storage_cuda.zig");
+pub const dense_storage_metal = @import("src/core/dense_storage_metal.zig");

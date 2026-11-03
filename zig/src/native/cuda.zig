@@ -81,6 +81,8 @@ pub const Host = struct {
     kv_count: ?*@import("core").kv_pool.Pool = null, // the paged pool the lane host's ledger admits (#1943)
     kv_plan: ?@import("cuda_ledger.zig").Plan = null, // the KV ledger's budget and cost, read by the lane host
     prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: the family's prompts as its pool's pages (no `store` then)
+    before_close: ?*const fn (*anyopaque) anyerror!void = null,
+    retained_next: ?*Host = null,
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
@@ -187,6 +189,7 @@ const record = @import("cuda_record.zig");
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = platform.optional_libraries.atBoundary();
     defer report.deinit();
+    @import("cuda_host_close.zig").recover(Host);
     if (o.fsrRefusal("cuda")) |why| {
         problem.* = why;
         return null;
@@ -194,6 +197,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     if (refusals.backend(o)) |why| {
         problem.* = why;
+        return null;
+    }
+    if (o.slide and (std.mem.eql(u8, o.model_type, "gemma4") or std.mem.eql(u8, o.model_type, "gemma4_unified"))) {
+        problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
         return null;
     }
     if (o.slide and (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))) {
@@ -399,7 +406,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
+    h.* = .{ .before_close = if (@hasDecl(F, "prepareClose")) F.prepareClose else null, .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
     h.readiness(F);
     h.kv_plan = counted.ledger;
     const held = served.stream_bytes * (streams -| free);
@@ -572,7 +579,7 @@ test "Save recovery: real native close drains the dense trainer before any child
 
 test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
-    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "lfm2_vl", "glm5_next", "gemma4", "qwen4", "qwen4_text", "fish_omni" });
+    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "lfm2_vl", "glm5_next", "gemma4", "gemma4_unified", "qwen4", "qwen4_text", "fish_omni" });
 }
 
 test {

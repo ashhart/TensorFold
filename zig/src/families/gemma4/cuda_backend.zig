@@ -11,7 +11,6 @@ const be = lanes.backend;
 const Stream = lanes.Stream;
 pub const shared = @import("cuda_shared.zig");
 const Pick = cuda.tree_round.Pick;
-
 /// Prompt rows a step takes: the forward's chunk grid, from position 0.
 pub const prompt_rows = fwd.prompt_rows;
 /// Window rows a round takes over every stream.
@@ -322,6 +321,7 @@ pub const Gemma = struct {
 
     /// The kept state's position, restored into the slot (0: none, or not this prompt's).
     pub fn resumeAt(x: *Gemma, s: *Stream, l: *const Lane, len: usize) usize {
+        if (s.untaught) return 0;
         const saved = s.reuse.saved orelse return 0;
         const k: *const snap.Saved = @ptrCast(@alignCast(saved));
         // a drafter that keeps context resumes only a state that carries it
@@ -362,7 +362,7 @@ pub const Gemma = struct {
             off += im.tokens;
         }
         const done = end == p.len;
-        try x.run(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end], .images = injects[0..n] }}, true, end - at - 1, @intFromBool(done));
+        try x.run(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end], .untaught = s.untaught, .images = injects[0..n] }}, true, end - at - 1, @intFromBool(done));
         l.tap = .{ .row = 0, .start = at, .rows = end - at, .gen = x.gen };
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(end), .monotonic);
@@ -449,7 +449,7 @@ pub const Gemma = struct {
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
         try shared.reach(x, l, l.len + 1);
-        try x.run(&.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
+        try x.run(&.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t}, .untaught = s.untaught }}, false, 0, 1);
         l.tap = .{ .row = 0, .start = l.len, .rows = 1, .gen = x.gen };
         l.len += 1;
         const h = x.next;
@@ -481,7 +481,7 @@ pub const Gemma = struct {
             try l.rows.appendSlice(x.gpa, w.tokens);
             for (w.positions, 0..) |pos, r| if (pos != l.base + r + 1) return error.PositionMismatch;
             try shared.reach(x, l, l.base + l.rows.items.len);
-            c.* = .{ .slot = l.slot, .p0 = l.base, .tokens = l.rows.items };
+            c.* = .{ .slot = l.slot, .p0 = l.base, .tokens = l.rows.items, .untaught = w.stream.untaught };
             total += l.rows.items.len;
         }
         if (total > round_rows) return error.RoundTooWide;

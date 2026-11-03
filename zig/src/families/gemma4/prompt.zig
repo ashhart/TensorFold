@@ -7,6 +7,7 @@ const kernels = @import("kernels.zig");
 const affine_mm = @import("affine_mm.zig");
 const lane = @import("../../core/lane_projection.zig");
 const Model = @import("model.zig").Model;
+const learning = @import("learning_metal_hooks.zig");
 const fwd = @import("forward.zig");
 
 const Ref = lane.Ref;
@@ -115,6 +116,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
     const geo = m.config.geo;
     const ks = &m.kernels.sliding;
     const w = &m.weights;
+    try learning.one(m, c, rows);
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
     const r32: u32 = @intCast(rows);
@@ -235,6 +237,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         mm(m, e, l.mlx[6], s.act, s.y, 0, geo.hidden, rows);
     }
     if (!st.glue) return;
+    try learning.dense(m, e, i, s.n_mlp, s.y, rows);
     e.setPipeline(kd.dense_tail);
     bind(e, &.{ s.hn, s.y }, 0);
     e.setBuffer(l.post_feedforward.buf, l.post_feedforward.off, 2);

@@ -46,6 +46,14 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     backward.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 QSA backward:"} })).step);
     const stress = b.step("test-qwen4-learning-stress-host", "Native learner accumulator witnesses in every simulated order");
     stress.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 learning stress:"} })).step);
+    const gm = b.createModule(.{ .root_source_file = b.path("zig/gemma4_learning_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "living", .module = family.import_table.get("living").? } } });
+    @import("qwen4_learning_host.zig").wire(b, gm);
+    const gr = b.createModule(.{ .root_source_file = b.path("zig/gemma4_raw_direction_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "living", .module = family.import_table.get("living").? } } });
+    @import("qwen4_learning_host.zig").wire(b, gr);
+    b.step("diagnose-gemma4-raw-gradient-host", "Unqualified raw BF16 rule-v2 panel; retain all cells separately").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gr })).step);
+    const gm_run = b.addRunArtifact(b.addTest(.{ .root_module = gm, .filters = &.{"Gemma4 learning:"} }));
+    b.step("test-gemma4-learning-host", "Gemma native training scalar bodies and recording owner without devices").dependOn(&gm_run.step);
+    parent.dependOn(&gm_run.step);
     const learning = b.step("test-qwen4-learning-host", "Native dense learner ownership, admission and recording-device contracts");
     learning.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 learning:"} })).step);
     const device_host = b.step("test-qwen4-device-host", "The full native device gate under numeric host instruments and refusal controls");

@@ -74,6 +74,7 @@ pub const Model = struct {
     fuse: bool = true,
     /// The image input, once loadVision read it (serve --vision).
     vision: ?Tower = null,
+    learning: ?@import("learning_hook.zig").Hook(mtl.Buffer, mtl.ComputeEncoder) = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const m = try gpa.create(Model);
@@ -83,9 +84,11 @@ pub const Model = struct {
         m.tap_of = @splat(-1);
         m.taps = 0;
         m.vision = null;
+        m.learning = null;
         m.mm = @splat(null);
         m.config = try cfg.Config.read(gpa, io, dir);
         try m.config.requireDense();
+        if (m.config.learned != 0) try @import("learning_profile.zig").check(m.config);
         m.projections = .{ .geo = m.config.geo };
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
@@ -98,7 +101,7 @@ pub const Model = struct {
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "language_model.");
-        m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config.geo, &m.config.widths);
+        m.weights = if (m.config.learned == 0) try weights.load(gpa, m.device, &m.checkpoint, m.config.geo, &m.config.widths) else try weights.loadLearned(gpa, m.device, &m.checkpoint, m.config);
         errdefer m.weights.deinit(gpa);
         m.kernels = try kernels.Kernels.init(gpa, m.device, m.config.geo, m.weights.embed_bits);
         errdefer m.kernels.deinit();

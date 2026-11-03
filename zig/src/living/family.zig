@@ -2,7 +2,7 @@
 const std = @import("std");
 
 /// What a pocket neuron does with its input x: relu(u x)^2 (Nemotron), or silu(g x) (w x) (a SwiGLU shared expert).
-pub const Activation = enum { relu2, swiglu };
+pub const Activation = enum { relu2, swiglu, geglu };
 
 /// A pocket neuron's kind: its activation, whether a per-row gate scales its expert's output, and its input fit.
 pub const Neuron = struct {
@@ -18,7 +18,7 @@ pub const Neuron = struct {
     pub fn inputs(n: Neuron) usize {
         return switch (n.act) {
             .relu2 => 1,
-            .swiglu => 2,
+            .swiglu, .geglu => 2,
         };
     }
 };
@@ -101,7 +101,7 @@ pub const Family = struct {
         if (f.names.inputs.len != f.neuron.inputs()) return error.BadFamily;
         if (f.quant.bits == 0 or f.quant.bits > 32 or 32 % f.quant.bits != 0 or f.quant.group == 0 or f.neurons == 0 or f.neurons % f.quant.group != 0) return error.BadFamily;
         if (!std.math.isFinite(f.neuron.margin) or f.neuron.margin <= 0) return error.BadFamily;
-        if (f.neuron.act == .swiglu and !wholePowerOfTwo(f.neuron.sharp)) return error.BadFamily;
+        if (f.neuron.inputs() == 2 and !wholePowerOfTwo(f.neuron.sharp)) return error.BadFamily;
     }
 };
 

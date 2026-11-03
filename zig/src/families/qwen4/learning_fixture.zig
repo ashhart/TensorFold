@@ -3,6 +3,7 @@ const std = @import("std");
 const core = @import("core");
 const rows = core.living_rows;
 const a = std.testing.allocator;
+extern fn tf_living_gemma_cpu(c_uint, rows.Params, [*][*]u8) void;
 extern fn tf_living_rows_cpu(c_uint, rows.Params, [*][*]u8) void;
 extern fn tf_living_gdn_cpu(c_uint, rows.Params, [*][*]u8) void;
 extern fn tf_living_qsa_cpu(c_uint, rows.Params, [*][*]u8) void;
@@ -39,7 +40,7 @@ pub fn Case(comptime spec: type) type {
                 p.* = v.ptr;
             }
             try spec.validate(c.op, c.p, ranges);
-            if (spec == core.living_rows) tf_living_rows_cpu(@intCast(@backingInt(c.op)), c.p, &ptrs) else if (spec == core.living_gdn) tf_living_gdn_cpu(@intCast(@backingInt(c.op)), c.p, &ptrs) else tf_living_qsa_cpu(@intCast(@backingInt(c.op)), c.p, &ptrs);
+            if (spec == core.living_rows) tf_living_rows_cpu(@intCast(@backingInt(c.op)), c.p, &ptrs) else if (spec == core.living_gdn) tf_living_gdn_cpu(@intCast(@backingInt(c.op)), c.p, &ptrs) else if (spec == core.living_qsa) tf_living_qsa_cpu(@intCast(@backingInt(c.op)), c.p, &ptrs) else tf_living_gemma_cpu(@intCast(@backingInt(c.op)), c.p, &ptrs);
         }
         pub fn put(c: *Self, at: usize, bytes: []const u8) !void {
             try std.testing.expect(c.data[at].len >= bytes.len);

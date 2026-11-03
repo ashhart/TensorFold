@@ -64,7 +64,7 @@ test "Qwen4 learning: every stored namespace and config scope has one shared Swi
     };
     try std.testing.expect(living.families.byModelType("qwen4") != null);
     try std.testing.expect(living.families.byModelType("qwen4_text") != null);
-    try std.testing.expect(living.families.byModelType("gemma4") == null);
+    try std.testing.expect(living.families.byModelType("lfm2") == null);
 }
 
 test "Qwen4 learning: serving formats do not imply a writable format and each MLP override is checked" {

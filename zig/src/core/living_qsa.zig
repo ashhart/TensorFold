@@ -18,7 +18,7 @@ pub fn needs(op: Op, p: Params) !rows.Needs {
     const dim: usize = p.u[3];
     const ids: usize = p.u[4];
     if (r == 0 or r > 512 or h == 0 or kv == 0 or h % kv != 0 or dim == 0 or dim > 512 or ids == 0 or
-        p.u[5] > 1 or !std.math.isFinite(p.f[0]) or p.f[0] <= 0) return error.LivingQsaShape;
+        p.u[5] > 2 or (p.u[5] == 2 and (dim < 128 or dim % 128 != 0 or p.u[6] != dim / 128)) or !std.math.isFinite(p.f[0]) or p.f[0] <= 0) return error.LivingQsaShape;
     const query = try mul(&.{ r, h, dim, 2 });
     const key = try mul(&.{ r, kv, dim, 2 });
     const selected = try mul(&.{ r, ids, 4 });

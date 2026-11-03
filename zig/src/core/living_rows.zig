@@ -117,6 +117,7 @@ pub fn needs(op: Op, p: Params) !Needs {
             n.bytes[8] = try mul(&.{ r, stride, 4 });
         },
         .pocket_act, .pocket_add, .pocket_back, .pocket_coeff => {
+            if (p.u[12] > 1) return error.LivingRowsShape;
             if (s == 0 or s > 64 or p.u[4] != 64) return error.LivingRowsShape;
             n.bytes[1] = try mul(&.{ 3, 64, w, 4 });
             if (op == .pocket_act or op == .pocket_coeff) {

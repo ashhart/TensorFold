@@ -7,6 +7,14 @@ pub const Kind = enum(u32) { f32, bf16, integer };
 pub const Value = extern struct { value: f64, err: f64, depth: u32, pending: ?*anyopaque };
 extern fn tf_living_reference(c_uint, c_uint, rows.Params, [*][*]u8, [*]const u32, [*]const u32, [*][*]Value, c_uint, c_uint) bool;
 pub fn kind(comptime spec: type, op: spec.Op, p: rows.Params, index: usize) Kind {
+    if (spec == core.living_gemma) return switch (op) {
+        .copy => .bf16,
+        .zero, .move, .rope => .f32,
+        .rms => if (index < 2) .bf16 else .f32,
+        .geglu => if (index < 2) .bf16 else .f32,
+        .softcap => if (index == 0) .bf16 else .f32,
+        .scale => if (index == 1) .bf16 else .f32,
+    };
     if (spec == core.living_rows) return switch (op) {
         .linear => if (index == 1) (if (p.u[3] == 1) .integer else .bf16) else if (index == 2 or index == 3) .bf16 else .f32,
         .rms => if (index == 0) .bf16 else .f32,
@@ -42,6 +50,25 @@ pub fn kind(comptime spec: type, op: spec.Op, p: rows.Params, index: usize) Kind
 pub fn params(comptime spec: type, op: spec.Op, count: usize, width: usize) rows.Params {
     var p: rows.Params = .{};
     p.u[0] = @intCast(count);
+    if (spec == core.living_gemma) {
+        p.u[1] = @intCast(width);
+        p.f[0] = 1;
+        switch (op) {
+            .rms => {
+                p.u[2] = 1;
+                p.u[3] = 1;
+                p.f[0] = 1e-6;
+            },
+            .softcap => {
+                p.f[0] = 30;
+            },
+            .rope => {
+                p.u[2] = @intCast(width);
+            },
+            else => {},
+        }
+        return p;
+    }
     if (spec == core.living_rows) {
         p.u[1] = @intCast(width);
         p.u[2] = 2;
@@ -87,6 +114,7 @@ pub fn reduces(comptime spec: type, op: spec.Op) bool {
         .hc_act, .hc_mix, .swiglu, .nudge, .gate => false,
         else => true,
     };
+    if (spec == core.living_gemma) return op == .rms;
     if (spec == core.living_gdn) return op != .gates;
     return true;
 }
@@ -169,6 +197,16 @@ pub fn Fixture(comptime spec: type) type {
             f.raw.deinit();
         }
         pub fn stress(f: *Self) void {
+            if (spec == core.living_gemma and f.raw.op == .rms) {
+                f.raw.p.f[0] = 3;
+                @memset(std.mem.bytesAsSlice(u16, f.raw.data[0]), 0x3f80);
+                @memset(std.mem.bytesAsSlice(u16, f.raw.data[1]), 0x3f80);
+                @memset(f.raw.floats(2), 0);
+                for (0..f.counts[2]) |i| if (i % f.raw.p.u[1] < 3) {
+                    f.raw.floats(2)[i] = ([_]f32{ 65537, 65536, -131072 })[i % f.raw.p.u[1]];
+                };
+            }
+
             if (spec == core.living_rows) switch (f.raw.op) {
                 .linear => {
                     for (0..f.counts[0]) |i| f.raw.floats(0)[i] = ([_]f32{ 65537, 65536, -131072, 0 })[i % f.raw.p.u[1] % 4];
@@ -227,7 +265,7 @@ pub fn Fixture(comptime spec: type) type {
             for (f.raw.data, &ptrs) |bytes, *ptr| ptr.* = bytes.ptr;
             var outputs: [3][*]Value = undefined;
             for (f.values, &outputs) |value, *ptr| ptr.* = value.ptr;
-            const tag = if (spec == core.living_rows) 0 else if (spec == core.living_gdn) 1 else 2;
+            const tag = if (spec == core.living_rows) 0 else if (spec == core.living_gdn) 1 else if (spec == core.living_qsa) 2 else 3;
             if (!tf_living_reference(tag, @intCast(@backingInt(f.raw.op)), f.raw.p, &ptrs, &f.kinds, &f.counts, &outputs, 0, 0)) return error.OutOfMemory;
         }
         pub fn simulate(f: *Self, acc: core.contract.spec.Accum, order: core.contract.gates.Order, out: []f64) !void {
@@ -242,7 +280,7 @@ pub fn Fixture(comptime spec: type) type {
             for (f.raw.data, &ptrs) |bytes, *ptr| ptr.* = bytes.ptr;
             var outputs: [3][*]Value = undefined;
             for (temp, &outputs) |v, *ptr| ptr.* = v.ptr;
-            const tag = if (spec == core.living_rows) 0 else if (spec == core.living_gdn) 1 else 2;
+            const tag = if (spec == core.living_rows) 0 else if (spec == core.living_gdn) 1 else if (spec == core.living_qsa) 2 else 3;
             const mode: c_uint = switch (acc) {
                 .none => 0,
                 .f32 => 1,
@@ -255,6 +293,10 @@ pub fn Fixture(comptime spec: type) type {
                 out[at] = v.value;
                 at += 1;
             };
+        }
+        pub fn input(f: *const Self, i: usize, j: usize) f64 {
+            if (f.kinds[i] == @backingInt(Kind.bf16)) return @as(f32, @bitCast(@as(u32, std.mem.readInt(u16, f.raw.data[i][j * 2 ..][0..2], .little)) << 16));
+            return @as(f32, @bitCast(std.mem.readInt(u32, f.raw.data[i][j * 4 ..][0..4], .little)));
         }
         pub fn output(f: *Self, index: usize, cell: usize) f64 {
             return if (f.kinds[index] == @backingInt(Kind.bf16)) @as(f32, @bitCast(@as(u32, std.mem.readInt(u16, f.raw.data[index][cell * 2 ..][0..2], .little)) << 16)) else f.raw.floats(index)[cell];

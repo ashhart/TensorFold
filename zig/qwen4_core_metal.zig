@@ -18,3 +18,11 @@ pub const hc_pointwise_metal_adapter = owner.hc_pointwise_metal_adapter;
 
 pub const contract = @import("contract");
 pub const attention_ref = owner.attention_ref;
+
+pub const living_rows_cuda = owner.living_rows_cuda;
+pub const living_rows_metal = owner.living_rows_metal;
+
+pub const living_gemma = owner.living_gemma;
+
+pub const dense_storage_cuda = owner.dense_storage_cuda;
+pub const dense_storage_metal = owner.dense_storage_metal;

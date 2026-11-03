@@ -148,3 +148,11 @@ pub const hc_pointwise = @import("hc_pointwise.zig");
 pub const hc_pointwise_cuda_adapter = @import("hc_pointwise_cuda_impl.zig").Adapter;
 pub const hc_pointwise_metal_adapter = @import("hc_pointwise_metal_impl.zig").Adapter;
 pub const hc_pointwise_contract = @import("contract/hc_pointwise.zig");
+
+pub const living_rows_cuda = @import("living_rows_cuda.zig");
+pub const living_rows_metal = @import("living_rows_metal.zig");
+
+pub const living_gemma = @import("living_gemma.zig");
+
+pub const dense_storage_cuda = @import("dense_storage_cuda.zig");
+pub const dense_storage_metal = @import("dense_storage_metal.zig");

@@ -84,3 +84,5 @@ static LwReference lw_bf_ref(LwReference a){a=a.resolved();
 }
 static float lw_ref_bits(unsigned x){float v;memcpy(&v,&x,4);return v;}
 static unsigned lw_ref_float_bits(LwReference x){const float v=float(x.value);unsigned bits;memcpy(&bits,&v,4);return bits;}
+
+static LwReference lw_tanh(LwReference a){a=a.resolved();const double v=tanh(a.value);return lw_interval(v,a.error+4*lw_u,a.depth+4);}

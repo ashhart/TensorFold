@@ -211,13 +211,21 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
     return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
+fn precisePipeline(device: mtl.Device, source: []const u8, name: []const u8) !mtl.Pipeline {
+    var options = mtl.CompileOptions.mlx();
+    options.math_functions = .precise;
+    const lib = try mtl.Library.fromSource(device, source, options);
+    defer lib.deinit();
+    return mtl.Pipeline.init(device, lib, name, false);
+}
+
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
     if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
         const full = std.mem.indexOf(u8, l.here, tf.frags.precision.define) != null;
         std.debug.print("PRECISION limits {s}: shared P x V library {s}\n", .{ l.decl.name, if (full) "fp32" else "legacy" });
     }
-    const p = rig_.pipeline(device, l.here, l.function) catch |err| {
+    const p = (if (std.mem.startsWith(u8, l.function, "tf_lw_g4_")) precisePipeline(device, l.here, l.function) else rig_.pipeline(device, l.here, l.function)) catch |err| {
         std.debug.print("{s} {s}: no pipeline on this GPU ({t})\n", .{ if (control) "RED " else "FAIL", l.decl.name, err });
         return 1;
     };

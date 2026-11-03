@@ -8,6 +8,7 @@ pub fn metal(a: std.mem.Allocator, comptime spec: type) ![]u8 {
     const end = std.mem.indexOf(u8, text, "// TF_LIVING_BODY") orelse return error.LivingSource;
     if (spec == core.living_gdn) return std.mem.concat(a, u8, &.{ text[0..end], body, "\n", @embedFile("../../../kernels/common/living_gdn.h"), "\n", @embedFile("../../../kernels/metal/core/living_gdn.metal") });
     if (spec == core.living_qsa) return std.mem.concat(a, u8, &.{ text[0..end], body, "\n", @embedFile("../../../kernels/common/living_qsa.h"), "\n", @embedFile("../../../kernels/metal/core/living_qsa.metal") });
+    if (spec == core.living_gemma) return std.mem.concat(a, u8, &.{ text[0..end], body, "\n", @embedFile("../../../kernels/common/living_gemma.h"), "\n", @embedFile("../../../kernels/metal/core/living_gemma.metal") });
     @compileError("unknown native learner spec");
 }
 pub fn controlled(a: std.mem.Allocator, comptime spec: type, controls: bool) ![]u8 {
@@ -17,6 +18,6 @@ pub fn controlled(a: std.mem.Allocator, comptime spec: type, controls: bool) ![]
     return std.mem.concat(a, u8, &.{ "#define TF_LW_CONTROLS 1\n", text });
 }
 pub fn named(a: std.mem.Allocator, name: []const u8) ![]u8 {
-    inline for (.{ core.living_rows, core.living_gdn, core.living_qsa }, .{ "rows", "gdn", "qsa" }) |spec, label| if (std.mem.startsWith(u8, name, "living-native " ++ label ++ " ")) return controlled(a, spec, std.mem.indexOf(u8, name, "_bad_") != null);
+    inline for (.{ core.living_rows, core.living_gdn, core.living_qsa, core.living_gemma }, .{ "rows", "gdn", "qsa", "gemma" }) |spec, label| if (std.mem.startsWith(u8, name, "living-native " ++ label ++ " ")) return controlled(a, spec, std.mem.indexOf(u8, name, "_bad_") != null);
     return error.UnknownLivingNativeLaunch;
 }

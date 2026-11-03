@@ -5,6 +5,7 @@
 #define LW_INLINE __device__ __forceinline__
 #define LW_BITS_FLOAT(x) __uint_as_float(x)
 #define LW_FLOAT_BITS(x) __float_as_uint(x)
+#define LW_TANH(x) tanhf(x)
 #define LW_EXP(x) expf(x)
 #define LW_ABS(x) fabsf(x)
 #define LW_SQRT(x) sqrtf(x)

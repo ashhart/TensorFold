@@ -4,6 +4,7 @@ using namespace metal;
 #define LW_INLINE inline
 #define LW_BITS_FLOAT(x) as_type<float>(x)
 #define LW_FLOAT_BITS(x) as_type<uint>(x)
+#define LW_TANH(x) metal::precise::tanh(x)
 #define LW_EXP(x) metal::exp(x)
 #define LW_ABS(x) metal::abs(x)
 #define LW_SQRT(x) metal::sqrt(x)

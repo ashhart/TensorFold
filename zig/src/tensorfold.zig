@@ -151,3 +151,11 @@ pub const hc_pointwise_metal_adapter = @import("core/hc_pointwise_metal_impl.zig
 pub const hc_pointwise_contract = @import("core/contract/hc_pointwise.zig");
 
 pub const attention_ref = @import("core/attention_ref.zig");
+
+pub const living_rows_cuda = @import("core/living_rows_cuda.zig");
+pub const living_rows_metal = @import("core/living_rows_metal.zig");
+
+pub const living_gemma = @import("core/living_gemma.zig");
+
+pub const dense_storage_cuda = @import("core/dense_storage_cuda.zig");
+pub const dense_storage_metal = @import("core/dense_storage_metal.zig");

@@ -1,4 +1,8 @@
 //! Gemma 4 dense on Metal: config admission and the decode glue around the core lane projections.
+pub const learning_metal = @import("learning_metal.zig");
+pub const learning_slide = @import("learning_slide.zig");
+pub const learning_profile = @import("learning_profile.zig");
+pub const learning_buffers = @import("learning_buffers.zig");
 pub const config = @import("config.zig");
 pub const kernels = @import("kernels.zig");
 pub const weights = @import("weights.zig");

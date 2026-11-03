@@ -8,9 +8,10 @@ const a = std.testing.allocator;
 const Params = core.living_rows.Params;
 extern fn tf_living_rows_cpu(c_uint, Params, [*][*]u8) void;
 extern fn tf_living_gdn_cpu(c_uint, Params, [*][*]u8) void;
+extern fn tf_living_gemma_cpu(c_uint, Params, [*][*]u8) void;
 extern fn tf_living_qsa_cpu(c_uint, Params, [*][*]u8) void;
 fn id(name: []const u8) ?usize {
-    inline for (.{ core.living_rows, core.living_gdn, core.living_qsa }, 0..) |spec, kind| {
+    inline for (.{ core.living_rows, core.living_gdn, core.living_qsa, core.living_gemma }, 0..) |spec, kind| {
         for (spec.names, 0..) |symbol, op| if (std.mem.eql(u8, name, symbol)) return kind * 100 + op;
     }
     return null;
@@ -20,6 +21,7 @@ fn run(symbol: usize, p: Params, ptrs: *[11][*]u8) void {
         0 => tf_living_rows_cpu(@intCast(symbol % 100), p, ptrs),
         1 => tf_living_gdn_cpu(@intCast(symbol % 100), p, ptrs),
         2 => tf_living_qsa_cpu(@intCast(symbol % 100), p, ptrs),
+        3 => tf_living_gemma_cpu(@intCast(symbol % 100), p, ptrs),
         else => unreachable,
     }
 }
@@ -147,6 +149,7 @@ fn driver() cu.Driver {
     return d;
 }
 fn params(comptime spec: type, op: spec.Op) Params {
+    if (spec == core.living_gemma) return F.learning_contract_data.params(spec, op, 2, 64);
     var p: Params = .{};
     if (spec == core.living_rows) {
         p.u[0] = 2;
@@ -236,7 +239,7 @@ fn check(comptime spec: type, kind: usize) !void {
     try std.testing.expectEqual(kept_m, M.live);
 }
 test "Living native launch: every row GDN and QSA ABI, context refusal and partial owner cleanup" {
-    inline for (.{ core.living_rows, core.living_gdn, core.living_qsa }, 0..) |spec, kind| try check(spec, kind);
+    inline for (.{ core.living_rows, core.living_gdn, core.living_qsa, core.living_gemma }, 0..) |spec, kind| try check(spec, kind);
     try std.testing.expectEqual(@as(usize, 0), M.live);
     try std.testing.expectEqual(@as(usize, 0), Trace.live);
 }
