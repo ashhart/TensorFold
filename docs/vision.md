@@ -294,10 +294,11 @@ With `--vision --vision-pdf`, user messages and tool results also accept inline 
 - **Images only, no text layer:** each page is rendered at 144 DPI (bounded to 2,048 pixels a side and 3.6 megapixels)
   and passed to the vision tower as a JPEG image (bounded by the 10 MiB per-image and 20 MiB per-request encoded byte
   limits). No PDF text layer is extracted.
-- **Child-process isolation and deadline:** on POSIX (`Linux` and `macOS`), each PDF renders in a forked worker process
-  with `setrlimit` CPU, core, file-size, data, and (on Linux) 1 GiB address-space growth limits, progressive-rendering
-  pause checks (`IFSDK_PAUSE`), and a 10-second wall-clock deadline over a pipe (`SIGKILL` on timeout), under a
-  serializing lock so one PDF renders at a time and the OS reclaims PDFium's heap after each document.
+- **Resource and crash isolation:** on POSIX (`Linux` and `macOS`), each PDF renders in a forked worker process that
+  closes inherited descriptors past standard streams except its result pipe, sets `setrlimit` CPU, core, file-size, and
+  (on Linux) 1 GiB address-space growth limits, checks progressive-rendering pauses (`IFSDK_PAUSE`), and enforces a
+  10-second wall-clock deadline (`SIGKILL` on timeout) under a serializing lock so one PDF renders at a time and the OS
+  reclaims PDFium's heap after each document.
 
 ### Nemotron 3.5 Super VL on CUDA
 

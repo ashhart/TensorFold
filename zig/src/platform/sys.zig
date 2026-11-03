@@ -1,4 +1,4 @@
-//! The OS as TensorFold calls it, imported as `sys`: `c` is std.c or win_c.zig, `DynLib` is std.DynLib or WinDynLib.
+//! The OS as TensorFold calls it, imported as `sys`: `c` is std.c or win_c.zig, `DynLib` is std.DynLib or LoadLibraryW.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -42,6 +42,7 @@ pub fn libraryOf(symbol: *const anyopaque, buf: []u8) ?[]const u8 {
 extern "kernel32" fn GetModuleHandleExA(flags: u32, name: ?[*]const u8, module: *?*anyopaque) callconv(.winapi) c_int;
 extern "kernel32" fn GetModuleFileNameA(module: ?*anyopaque, name: [*]u8, size: u32) callconv(.winapi) u32;
 extern "kernel32" fn GetFullPathNameW(name: [*:0]const u16, len: u32, buf: [*]u16, part: ?*?[*:0]u16) callconv(.winapi) u32;
+extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn LoadLibraryExW(name: [*:0]const u16, file: ?*anyopaque, flags: u32) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn FreeLibrary(module: *anyopaque) callconv(.winapi) c_int;
@@ -54,11 +55,21 @@ const WinDynLib = struct {
     pub fn open(path: []const u8) Error!WinDynLib {
         return .{ .module = try @import("windows_library.zig").open(Kernel, path) };
     }
+    pub fn openRestricted(path: []const u8) Error!WinDynLib {
+        return .{ .module = try @import("windows_library.zig").open(RestrictedKernel, path) };
+    }
     const Kernel = struct {
         pub const Handle = *anyopaque;
         pub fn fullPath(path: [:0]const u16, out: []u16) usize {
             return GetFullPathNameW(path.ptr, @intCast(out.len), out.ptr, null);
         }
+        pub fn load(path: [:0]const u16) ?Handle {
+            return LoadLibraryW(path.ptr);
+        }
+    };
+    const RestrictedKernel = struct {
+        pub const Handle = *anyopaque;
+        pub const fullPath = Kernel.fullPath;
         pub fn load(path: [:0]const u16) ?Handle {
             // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | APPLICATION_DIR | SYSTEM32: excludes the working directory.
             const flags: u32 = if (std.mem.indexOfScalar(u16, path, '\\') != null) 0x00000100 | 0x00000200 | 0x00000800 else 0x00000200 | 0x00000800;

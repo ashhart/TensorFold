@@ -113,17 +113,23 @@ pub fn probe(a: std.mem.Allocator, io: std.Io, comptime Sys: type) ![]Status {
     return out;
 }
 
+fn openOne(s: Spec, comptime Sys: type, path: []const u8) ?@typeInfo(@typeInfo(@TypeOf(Sys.DynLib.open)).@"fn".return_type.?).error_union.payload {
+    const is_win = if (@hasDecl(Sys, "windows")) Sys.windows else win;
+    if (is_win and s.id == .pdfium and @hasDecl(Sys.DynLib, "openRestricted")) return Sys.DynLib.openRestricted(path) catch null;
+    return Sys.DynLib.open(path) catch null;
+}
+
 pub fn open(s: Spec, a: std.mem.Allocator, comptime Sys: type, exe: ?[]const u8) ?@typeInfo(@typeInfo(@TypeOf(Sys.DynLib.open)).@"fn".return_type.?).error_union.payload {
     if (builtin.os.tag == .linux and s.id == .video) return video_library.open(a, Sys, exe);
     if (s.env) |name| if (Sys.getenv(name)) |value| {
         if (value.len == 0 and s.id != .mcdma_rpc) return null;
-        if (value.len > 0) return Sys.DynLib.open(value) catch null;
+        if (value.len > 0) return openOne(s, Sys, value);
     };
     if (s.local) if (exe) |dir| for (s.names) |name| {
         for ([_][]const []const u8{ &.{ dir, "..", "lib", name }, &.{ dir, name } }) |parts| {
             const path = std.fs.path.join(a, parts) catch continue;
             defer a.free(path);
-            if (Sys.DynLib.open(path)) |dl| return dl else |_| {}
+            if (openOne(s, Sys, path)) |dl| return dl;
         }
     };
     if (s.id == .pdfium) return null;
