@@ -40,6 +40,13 @@ pub const Recipes = struct {
         }
     }
 
+    /// Whether a declared module's recipe is `recipe`.
+    pub fn has(self: *const Recipes, recipe: Recipe) bool {
+        var it = self.modules.valueIterator();
+        while (it.next()) |r| if (r.* == recipe) return true;
+        return false;
+    }
+
     pub fn deinit(self: *Recipes) void {
         self.arena.deinit();
     }

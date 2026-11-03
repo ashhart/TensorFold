@@ -141,7 +141,8 @@ pub const Engine = struct {
         const spans = try gpa.alloc(shard.Span, world);
         errdefer gpa.free(spans);
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
-        var m = try fw.Modules.load(d, ctx);
+        const block32 = !exl3.isExl3(gpa, text) and try @import("cuda_experts.zig").wantsBlock32(gpa, text);
+        var m = try fw.Modules.load(d, ctx, block32);
         errdefer m.deinit();
         var pieces = try fw.Pieces.init(d, o.settings.pieces);
         errdefer pieces.deinit();

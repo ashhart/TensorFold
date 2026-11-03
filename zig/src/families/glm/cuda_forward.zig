@@ -51,7 +51,8 @@ pub const Modules = struct {
     quant: quant.Kernels,
     q4: q4.Kernels,
 
-    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context) !Modules {
+    /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too (experts.wantsBlock32).
+    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: bool) !Modules {
         const k = cuda.kernels;
         var m: Modules = undefined;
         var n: usize = 0;
@@ -65,7 +66,7 @@ pub const Modules = struct {
         m.prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer m.prompt.unload();
         m.kda = try kda.Kernels.load(m.mods[0]);
-        m.experts = try experts.Kernels.load(d, m.mods[2], @intCast(try ctx.attribute(.multiprocessor_count)));
+        m.experts = try experts.Kernels.load(d, m.mods[2], @intCast(try ctx.attribute(.multiprocessor_count)), block32);
         errdefer m.experts.unload();
         m.copy_rows = try m.mods[1].function("tf_glm_copy_rows");
         m.put_slot = try m.mods[1].function("tf_glm_put_slot");
