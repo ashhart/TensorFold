@@ -52,8 +52,7 @@ WEIGHTS = {
 VERSION = "5.22.1"
 # tree_sha256 of the whole installed Transformers package, so the shared modeling and tokenizer code is pinned too.
 TRANSFORMERS_TREE = "b08cead6d1b841ef9723106a81a92ec37d67aff3e43a198e56b7dc76538d377b"
-# The Qwen3 model, configuration and tokenizer code the card's example runs, and the files the long inputs are cut
-# from (package-relative).
+# The Qwen3 code the card's example runs, and the files the long inputs are cut from (package-relative).
 LIBRARY = {
     "models/qwen3/modeling_qwen3.py": "63a6213c15d6fb04e58a1c64fd05a4cdfb49476443fbeef524f0e0486043824b",
     "models/qwen3/configuration_qwen3.py": "49d9ccd0f29ccd977b93dba2004f84b867891b3d0509b71fd8ba3ed01054e64d",
@@ -62,8 +61,7 @@ LIBRARY = {
     "generation/utils.py": "966f70ba83d94c9ce07b21150be49ff84b24eadbf9c47de052a1fb0f8ba38679",
     "modeling_utils.py": "251aaae7733affbb7cdb5aa05a84157c46cac02518d868898cd6d6282cc14571",
 }
-# Long inputs: (most tokens with the closing <|endoftext|>, where the file is pinned, file). Each is the file's longest
-# prefix of whole lines within that many tokens, so the 32K one fits a 32,768-token window.
+# Long inputs (most tokens with the closing <|endoftext|>, pin record, file): see long_texts.
 LONG = [
     (2048, "checkpoint", "LICENSE"),
     (4096, "checkpoint", "README.md"),
@@ -71,8 +69,7 @@ LONG = [
     (16384, "library", "generation/utils.py"),
     (32768, "library", "modeling_utils.py"),
 ]
-# Every fidelity input, in order (the card's 4, then LONG): its tokens, the SHA256 of its UTF-8 text and the SHA256 of
-# its token IDs as little-endian uint32. A reference whose inputs differ is refused, whatever its pin record says.
+# Every input in order (the card's 4, then LONG) as fingerprint() gives it; check_inputs refuses any other.
 INPUTS = [
     (27, "b11f8d3ae64c3c7029275c5d8d82172ef31a9a354223c12845b61047a0c972e8", "3c1537f6fc0a496f2b68c1aaa38484d8a82030338ae52bbd955b45b50c9efc24"),
     (23, "bd6e4e8bb1b5c2e15db6003175c53f084690aeb6c09b34f1808161ef3353d524", "a08f60368f1da49a05dd929f406c503bcd0864ee464f25807866753bffe3062c"),
@@ -106,7 +103,7 @@ def card_texts() -> list:
 
 
 def long_texts(model: Path, package: Path, count) -> list:
-    """Each LONG file's longest prefix of whole lines whose token count (as `count` gives it) is within its bound."""
+    """Each LONG file's longest whole-line prefix whose `count` (with the closing <|endoftext|>) is within its bound."""
     roots = {"checkpoint": model, "library": package}
     out = []
     for most, where, name in LONG:
