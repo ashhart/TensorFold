@@ -64,15 +64,35 @@ fn q4Push(m: u64, n: u64, k: u64) Error!params.Params {
     };
 }
 
+/// Which qmm image a dispatch runs: `scalar` is qmm.comp, `vec4` is qmm_q4_vec4.comp (same arithmetic, 16-byte loads).
+pub const Qmm = enum { scalar, vec4 };
+
+// vec4 loads uvec4 from x and w: both windows must start 16-byte aligned (k % 64 keeps strides and ranges aligned).
+pub fn qmmVariant(x: View, w: View) Qmm {
+    return if (x.byte_offset % 16 == 0 and w.byte_offset % 16 == 0) .vec4 else .scalar;
+}
+
+fn qmmPipeline(o: *Ops, force: ?Qmm, x: View, w: View) Error!*dispatch.Pipeline {
+    const fit = qmmVariant(x, w);
+    const want = force orelse fit;
+    if (want == .vec4 and fit == .scalar) return error.Misaligned;
+    return if (want == .vec4) &o.qmm_q4_vec4 else &o.qmm_bf16;
+}
+
 // Q4 projection out[m,n] = x[m,k] . dequant(w,scales,biases)[n,k]; scratch + copy_general above maxStorageBufferRange.
 pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, scratch: *Arena, timeout_ns: u64) Error!void {
+    return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
+}
+
+/// `project` with the qmm image forced (null picks by alignment); a forced vec4 over unaligned windows is refused.
+pub fn projectAs(o: *Ops, force: ?Qmm, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, scratch: *Arena, timeout_ns: u64) Error!void {
     const g = try projectGeometry(out, x, w, scales, biases, k);
     const limits = o.dev.properties.limits;
     const lim = Limits{ .max_range = limits.maxStorageBufferRange, .alignment = limits.minStorageBufferOffsetAlignment };
     if (x.byteLen() > lim.max_range or out.byteLen() > lim.max_range) return error.TooLarge;
     const rows = try chunkRows(lim, k, g.n);
     if (rows == 0) {
-        const pipe = &o.qmm_bf16;
+        const pipe = try qmmPipeline(o, force, x, w);
         try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
         const p = try q4Push(g.m, g.n, k);
         try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
@@ -90,7 +110,7 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
         const s_chunk = try scales.slice(first * row_groups, chunk * row_groups);
         const b_chunk = try biases.slice(first * row_groups, chunk * row_groups);
         const block_chunk = try block.slice(0, g.m * chunk);
-        const pipe = &o.qmm_bf16;
+        const pipe = try qmmPipeline(o, force, x, w_chunk);
         try pipe.bind(&.{ x.bind(), w_chunk.bind(), s_chunk.bind(), b_chunk.bind(), block_chunk.bind() });
         const p = try q4Push(g.m, chunk, k);
         try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
@@ -185,6 +205,20 @@ test "project geometry derives m and n and refuses torn or wrong-kind views" {
     try testing.expectError(error.Invalid, projectGeometry(out, f32x, w, scales, biases, 128));
     const torn = try View.init(&buf, .u32, 2048, 100 * 16 + 1);
     try testing.expectError(error.Invalid, projectGeometry(out, x, torn, scales, biases, 128));
+}
+
+test "the vec4 qmm image is chosen only when every vector load is 16-byte aligned" {
+    const dev: @import("device.zig").Device = undefined;
+    const buf = @import("memory.zig").Buffer{ .dev = &dev, .handle = null, .memory = null, .len = 1 << 20, .kind = .device, .mapped = null, .coherent = false };
+    const w = try View.init(&buf, .u32, 2048, 100 * 16);
+    const x = try View.init(&buf, .bf16, 64, 3 * 128);
+    try testing.expectEqual(Qmm.vec4, qmmVariant(x, w));
+    // 4-byte windows are legal views, but a uvec4 load through them would be misaligned.
+    try testing.expectEqual(Qmm.scalar, qmmVariant(try View.init(&buf, .bf16, 68, 3 * 128), w));
+    try testing.expectEqual(Qmm.scalar, qmmVariant(try View.init(&buf, .bf16, 72, 3 * 128), w));
+    try testing.expectEqual(Qmm.scalar, qmmVariant(x, try View.init(&buf, .u32, 2052, 100 * 16)));
+    try testing.expectEqual(Qmm.scalar, qmmVariant(x, try View.init(&buf, .u32, 2056, 100 * 16)));
+    try testing.expectEqual(Qmm.vec4, qmmVariant(try View.init(&buf, .bf16, 16, 3 * 128), try View.init(&buf, .u32, 32, 100 * 16)));
 }
 
 test "embedding geometry derives rows and tokens and refuses torn tables" {
