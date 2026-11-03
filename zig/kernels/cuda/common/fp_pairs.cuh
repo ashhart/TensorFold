@@ -33,4 +33,12 @@ __device__ __forceinline__ uint32_t mul2(uint32_t a, uint32_t b) {
     return r;
 }
 
+__device__ __forceinline__ uint32_t fp8pair_unit(uint32_t w, uint32_t unit) {
+    const uint32_t x = (w & 0xFFu) | ((w & 0xFF00u) << 8);
+    const uint32_t t = ((x & 0x007F007Fu) << 4) | ((x & 0x00800080u) << 8);
+    uint32_t r;
+    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(unit), "r"(0x80008000u));
+    return r;
+}
+
 }  // namespace tf_common

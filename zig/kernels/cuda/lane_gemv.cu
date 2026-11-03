@@ -19,16 +19,7 @@ struct Part {
 };
 
 // Below sm_90, t * 1 - 128 in one fma: exact for t = 128 + nibble, so every arch gets sub's bits.
-__device__ __forceinline__ uint32_t pairm(uint32_t w, int s, uint32_t mask) {
-    const uint32_t t = ((w >> s) & mask) | 0x43004300u;
-    uint32_t r;
-#if __CUDA_ARCH__ >= 900
-    asm("sub.rn.bf16x2 %0, %1, %2;\n" : "=r"(r) : "r"(t), "r"(0x43004300u));
-#else
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
-#endif
-    return r;
-}
+using qmm_frag::pairm;
 
 template <int GS, int BN, int STAGES>
 using GemvTile = LaneTile<GS, 16, BN, 1, 4, STAGES>;
