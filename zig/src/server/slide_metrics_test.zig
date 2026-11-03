@@ -269,3 +269,25 @@ test "Slide metrics: supplied wordings read by training cannot earn held-out rec
     const r = try metrics.measure(srv, &cx, p, id, Stays{});
     try t.expect(!r.complete and r.refused != null);
 }
+
+test "Slide metrics: receipt decoding preserves saved values defaults and exact integer limits" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var report: schema.Report = .{ .lessons = 4294967295, .gate = true, .refused = "kept out" };
+    report.plain[1].recall_asked = 4294967295;
+    report.plain[1].recall_passed = 4294967294;
+    const encoded = try store.value(a, report);
+    const decoded = try store.decode(schema.Report, a, encoded);
+    try t.expectEqualStrings(try std.json.Stringify.valueAlloc(a, report, .{}), try std.json.Stringify.valueAlloc(a, decoded, .{}));
+    const defaults = try store.decode(schema.Report, a, (try json.parse(a, "{}")).ok);
+    try t.expectEqualStrings(try std.json.Stringify.valueAlloc(a, schema.Report{}, .{}), try std.json.Stringify.valueAlloc(a, defaults, .{}));
+    const base: schema.Baseline = .{ .panel_sha256 = "panel", .profile = "profile", .replies = &.{.{ .content = "answer", .sha256 = "hash" }} };
+    const again = try store.decode(schema.Baseline, a, try store.value(a, base));
+    try t.expectEqualStrings(base.replies[0].content, again.replies[0].content);
+    const exponent = try store.decode(schema.Report, a, (try json.parse(a, "{\"lessons\":1e1}")).ok);
+    try t.expectEqual(@as(u32, 10), exponent.lessons);
+    for ([_][]const u8{ "{\"lessons\":4294967296}", "{\"lessons\":-1}", "{\"lessons\":1.5}", "{\"gate\":1}", "{\"unknown\":0}", "{\"plain\":[]}", "{\"rows\":[{}]}" }) |text|
+        try t.expectError(error.InvalidMetricReceipt, store.decode(schema.Report, a, (try json.parse(a, text)).ok));
+    try t.expectError(error.InvalidMetricReceipt, store.decode(schema.Baseline, a, (try json.parse(a, "{}")).ok));
+}
