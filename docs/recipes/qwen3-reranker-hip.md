@@ -18,7 +18,11 @@ folder with `1_LogitScore/config.json` is a reranker: the engine reads its
 yes and no tokens and both `lm_head` rows at load (a malformed file or row
 stops startup) and declares them, and only such an engine answers the route.
 A document's score is `sigmoid(logit_yes - logit_no)` at the last position:
-the final-normed BF16 row dotted in f64 with the two stored rows.
+the final-normed BF16 row dotted in f64 with the two stored rows. A request's
+documents go to the engine as one decision (their shared prefix once, each
+document's rest a branch), packed into as few prompt passes as the window
+and 128 prompts a pass allow; each score has the bits of its document scored
+alone.
 
 ## Build and serve
 
@@ -88,4 +92,4 @@ Results on the R9700 (ROCm 10.1):
 | 4 requests at once against one at a time | byte-equal |
 | A client that leaves mid-request | the next request equals its earlier answer |
 | Device memory, peak | 16.4 GB (32,768 window), 16.7 GB (40,960) |
-| 16 documents of ~260 tokens, cold, one request | 3.22 s (SGLang 0.53 s on the same card); the dot2 GEMM tile, gfx12 WMMA is the follow-up |
+| 16 documents of ~260 tokens, cold, one request | 2.69 s on the dot2 tile, 1.00 s with gfx12's WMMA tile (#2034); SGLang 0.53 s on the same card |
