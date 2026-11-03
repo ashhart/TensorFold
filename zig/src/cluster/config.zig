@@ -30,12 +30,11 @@ pub const Node = struct {
     root: ?[]const u8 = null,
     /// libmcdma-fabric on this node: an absolute path (MCDMA's library is loaded from no other place).
     library: ?[]const u8 = null,
-    /// This node's tensorfold, an absolute path, for the launch over ssh (whose non-interactive PATH holds only the
-    /// system directories); null runs `tensorfold` from that PATH.
+    /// This node's tensorfold by absolute path (ssh's PATH has only system directories); null: `tensorfold` from PATH.
     bin: ?[]const u8 = null,
 };
 
-/// One end of an MCDMA link: its node, RDMA device, meeting interface and the other end's address, exchange port, GID index.
+/// One end of an MCDMA link: its node, RDMA device, meeting interface and peer address, exchange port, GID index.
 pub const End = struct {
     node: []const u8,
     /// One device, or Thunderbolt members joined with "+".
@@ -53,7 +52,7 @@ pub const End = struct {
     }
 };
 
-/// An MCDMA link, declared once: both ends read the same name, kind and path MTU, and each end's peer port is the other's port.
+/// An MCDMA link, declared once: both ends read one name, kind and path MTU; each end's peer port is the other's port.
 pub const Link = struct {
     name: []const u8,
     /// null takes whichever kind connects; .tb5 or .cx5 refuses the other.
@@ -380,7 +379,7 @@ pub fn validate(c: Config, probs: *Problems) void {
     for (c.models) |m| checkModel(c, m, probs);
 }
 
-/// A link as MCDMA's endpoint will check it (mcdma.zig's validate and memberCount, tp_settings' reading), so it fails here by name first.
+/// A link as MCDMA's endpoint checks it (mcdma.zig's validate, memberCount, tp_settings), failing here by name first.
 fn checkLink(c: Config, l: Link, i: usize, probs: *Problems) void {
     const name = l.name;
     if (!validName(name)) probs.add("links[{d}].name: 1-20 characters of [A-Za-z0-9_-] (both ends give MCDMA this name)", .{i});
@@ -440,7 +439,7 @@ fn checkModel(c: Config, m: Model, probs: *Problems) void {
     const members = m.nodes;
     for (members) |n| if (c.find(n) == null) probs.add("models.{s}.nodes: \"{s}\" is not a node", .{ m.id, n });
     for (m.paths) |p| if (c.find(p[0]) == null) probs.add("models.{s}.path: \"{s}\" is not a node", .{ m.id, p[0] });
-    // the nodes that load the model: a disaggregated model's prefill and decode lists ("nodes" may default to every node)
+    // the nodes that load the model: a disaggregated model's prefill and decode ("nodes" may default to every node)
     const loading: []const []const []const u8 = if (m.mode == .disaggregated) &.{ m.prefill, m.decode } else &.{members};
     if (m.path == null and m.paths.len > 0) for (loading) |list| for (list) |n| {
         if (m.pathFor(n) == null) probs.add("models.{s}.path: no path for node {s}", .{ m.id, n });

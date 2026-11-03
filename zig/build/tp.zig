@@ -12,7 +12,7 @@ fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     return cuda;
 }
 
-/// verbs.zig as its own module. A compilation that also builds fabric.zig must pass this same module in, because a file can belong to only one module.
+/// verbs.zig as its own module; a compilation that also builds fabric.zig passes this one in (a file has one module).
 pub fn verbsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/fabric/verbs.zig"), .target = target, .optimize = optimize, .link_libc = true });
 }

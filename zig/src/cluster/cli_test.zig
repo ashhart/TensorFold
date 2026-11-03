@@ -123,7 +123,7 @@ test "a disaggregated model on fake hosts: no tensor-parallel group across its t
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    // s1 is a Mac (macOS probes); s2 a GB10, probed with Linux tools: meminfo, nvidia-smi, a ConnectX-7's ibv_devinfo -v
+    // s1 is a Mac (macOS probes); s2 a GB10 on Linux tools: meminfo, nvidia-smi, a ConnectX-7's ibv_devinfo -v
     try fixtures.writeHosts(io, a, tmp.dir, &.{"s1"}, &fixtures.mesh4);
     try tmp.dir.createDirPath(io, "s2");
     const gb10 = [_][2][]const u8{

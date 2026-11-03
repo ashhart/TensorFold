@@ -81,8 +81,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "cuda", cuda }, .{ "core", mods.core }, .{ "lanes", mods.lanes }, .{ "nemotron", mods.nemotron }, .{ "dory", native.engines.import_table.get("dory").? } }) |m| cli.addImport(m[0], m[1]);
     cli.addOptions("build_options", build_options);
     cli.addImport("checkpoint_cli", checkpointCli(b, target, optimize, strip, native.engines, mods.core));
-    // Cluster commands (node, serve --cluster) on a GB10, against this target's core, lanes and fabric.
-    // canon and verbs are the engine's modules: one file, one module, in this binary.
+    // Cluster commands (node, serve --cluster) on a GB10; canon and verbs are the engine's (one file, one module).
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
     fabric.addImport("verbs", native.verbs);
     const cluster = b.createModule(.{

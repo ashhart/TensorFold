@@ -11,7 +11,7 @@ pub fn glmCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     return glmCudaShared(b, target, optimize, cuda, core, lanes, heat, api, canonModule(b, target, optimize), @import("tp.zig").verbsModule(b, target, optimize));
 }
 
-/// GLM with canon and verbs modules the caller already owns, so cluster and fabric in the same binary are not a second root of those files.
+/// GLM with the caller's canon and verbs modules, so cluster and fabric in one binary do not root those files twice.
 pub fn glmCudaShared(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, heat: *std.Build.Module, api: *std.Build.Module, canon: *std.Build.Module, verbs: *std.Build.Module) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);

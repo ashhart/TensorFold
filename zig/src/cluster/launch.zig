@@ -106,8 +106,7 @@ fn probeOut(a: Allocator, r: Runner, c: config.Config, n: config.Node, local: bo
     return out.stdout;
 }
 
-/// One node's inventory from its tools' output, over ssh (or locally when `local`).
-/// A CUDA node is read with Linux tools so a GB10 does not fail the macOS probes.
+/// One node's inventory from its tools over ssh (or locally when `local`); a CUDA node with Linux tools, not macOS's.
 pub fn inventory(a: Allocator, r: Runner, c: config.Config, n: config.Node, local: bool) !node.Inventory {
     if (n.backend == .cuda) {
         var inv = probe.inventoryLinux(.{
@@ -157,9 +156,7 @@ pub fn discover(a: Allocator, r: Runner, c: config.Config) !struct { config: con
     return .{ .config = out, .inventories = invs };
 }
 
-/// The remote command that starts this node's agent detached (`bin`: its tensorfold), with the leader's cluster.json written beside it.
-/// Only the node goes to the background, with stdin, stdout and stderr all off ssh's channel: a background `&` after the
-/// && chain would hold ssh's stdout open, and ssh (and serve's launch with it) would wait until the node exited.
+/// The command that writes cluster.json and starts `bin` node detached, its stdio off ssh, so ssh returns at once.
 pub fn nodeCommand(a: Allocator, json: []const u8, bin: []const u8, name: []const u8, leader: []const u8, model: []const u8) ![]const u8 {
     const b64 = try a.alloc(u8, std.base64.standard.Encoder.calcSize(json.len));
     _ = std.base64.standard.Encoder.encode(b64, json);
