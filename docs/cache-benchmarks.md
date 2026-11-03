@@ -19,6 +19,13 @@ Completed streams with no nonempty text or reasoning also have no output or toke
 claims positive completion tokens or the server supplies a token hash. Usage and completion remain recorded.
 Missing counts/timings remain null, and failed or insufficiently streamed replies do not enter decode rates.
 
+Tool-call-only replies (`delta.tool_calls` without nonempty text or reasoning) are also outside this
+qualification: their fingerprints remain null and the cache client exits 1, including when cache assertions pass.
+Tool names, IDs and argument fragments do not contribute to `output_sha256` or text-chunk latency measurements.
+A mixed reply with text or reasoning can qualify under the usual checks, but its output fingerprint covers only
+that text and reasoning; matching output fingerprints do not establish matching tool calls or arguments.
+Use text/reasoning-producing replies for these cache receipts. Tool-call correctness needs a separate check.
+
 ## First, repeated and concurrent requests
 
 The standard-library-only cache client runs one first request, identical repeated requests, then a
@@ -103,6 +110,6 @@ each request against its own prompt's solo and `"draft": false` runs. `--prompts
 python3 -m unittest discover -s tools/tests -p 'test_bench*.py' -v
 ```
 
-Tests exercise usage validation, missing hashes, errors, incomplete/empty SSE, Unicode chunking,
+Tests exercise usage validation, missing hashes, errors, incomplete/empty/tool-call-only SSE, Unicode chunking,
 concurrent request ordering, assertion failures, receipt allowlisting, and a real loopback HTTP server.
 They do not load weights or substitute for checkpoint/device performance and exactness gates.
