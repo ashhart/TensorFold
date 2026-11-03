@@ -157,7 +157,7 @@ pub fn check(gpa: std.mem.Allocator, text: []const u8) !void {
     }
 }
 
-test "the release's geometry is admitted and a changed one is refused with its reason" {
+test "uocr: the release's geometry is admitted and a changed one is refused with its reason" {
     const good =
         \\{"model_type":"unlimited-ocr","hidden_size":1280,"num_hidden_layers":12,"num_attention_heads":10,
         \\"num_key_value_heads":10,"intermediate_size":6848,"moe_intermediate_size":896,"n_routed_experts":64,

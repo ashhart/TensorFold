@@ -87,7 +87,7 @@ pub fn linearTable(src: []const u16, len: usize, channels: usize, to: usize, out
     }
 }
 
-test "a same-size resize keeps every value, and a constant grid stays constant when it shrinks" {
+test "uocr: a same-size resize keeps every value, and a constant grid stays constant when it shrinks" {
     const a = std.testing.allocator;
     var grid: [4 * 4 * 2]u16 = undefined;
     for (&grid, 0..) |*g, i| g.* = bf16(@floatFromInt(i));

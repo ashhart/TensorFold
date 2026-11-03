@@ -53,7 +53,7 @@ pub fn verdict(ours: Match, reference: Match, rounded: Match) Verdict {
     return .{ .pass = cosine_err <= cosine_limit and ours.worst_row <= row_limit, .cosine_err = cosine_err, .cosine_limit = cosine_limit, .row = ours.worst_row, .row_at = ours.worst_at, .row_limit = row_limit };
 }
 
-test "a run equal to float32 passes, and one twice as far as the reference fails" {
+test "uocr: a run equal to float32 passes, and one twice as far as the reference fails" {
     const exact = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     const near = [_]f32{ 1.01, 2, 3, 4, 5, 6, 7, 8 };
     const far = [_]f32{ 1.5, 2, 3, 4, 5, 6, 7, 8 };

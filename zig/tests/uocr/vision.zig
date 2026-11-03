@@ -7,12 +7,13 @@ const cfg = uo.config;
 const gate = uo.gate;
 
 const usage =
-    \\tf-uocr-vision MODEL_DIR DUMP_BF16 DUMP_F32
+    \\tf-uocr-vision MODEL_DIR DUMP_BF16 DUMP_F32 [PAGE]
     \\MODEL_DIR is the baidu/Unlimited-OCR-2 folder. The dumps (ref_dump.py) hold, for every encoder call i, its pixels
     \\pixels{i} [views, 3, size, size] and the reference's SAM (sam{i}), CLIP (clip{i}) and projector (projector{i})
     \\outputs, from torch bf16 and from float32 on the same bf16 pixels. Each view is encoded here from the bf16 dump's
     \\pixels; each stage must be as close to float32 as twice torch bf16's (or bf16 rounding's) cosine error and worst
-    \\row. The views are then encoded again and must repeat byte for byte.
+    \\row. The views are then encoded again and must repeat byte for byte. With PAGE (the image the dump was made
+    \\from), the views are made here from it instead, and must equal the dump's pixels bit for bit first.
 ;
 
 fn floats(a: std.mem.Allocator, f: *const tf.safetensors.File, name: []const u8) ![]f32 {
@@ -51,7 +52,7 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(a);
-    if (args.len != 4) {
+    if (args.len != 4 and args.len != 5) {
         std.debug.print("{s}\n", .{usage});
         return 2;
     }
@@ -78,6 +79,16 @@ pub fn main(init: std.process.Init) !u8 {
     defer enc.deinit();
     std.debug.print("{s}: loaded in {d:.1} s\n", .{ device.name(), mtl.clock.seconds() - t0 });
 
+    var mine: ?uo.preprocess.Views = null;
+    if (args.len == 5) {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, args[4], a, .limited(64 << 20));
+        var page = try uo.preprocess.decode(io, a, bytes);
+        const gundam = bf.get("pixels1") != null;
+        mine = try uo.preprocess.views(a, page.rgb, page.width, page.height, gundam);
+        page.deinit(a);
+        std.debug.print("page {s}: {d} x {d}, {s}, tiles {d} x {d}\n", .{ args[4], page.width, page.height, if (gundam) "gundam" else "base", mine.?.across, mine.?.down });
+    }
+
     var all_pass = true;
     var repeat_same = true;
     var call: usize = 0;
@@ -102,7 +113,14 @@ pub fn main(init: std.process.Init) !u8 {
         const sam = try a.alloc(u16, n * cfg.net3_width);
         const clip = try a.alloc(u16, (n + 1) * cfg.clip_width);
         for (0..views) |vi| {
-            const px = std.mem.bytesAsSlice(u16, pix.bytes)[vi * 3 * size * size ..][0 .. 3 * size * size];
+            const dumped: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, pix.bytes)[vi * 3 * size * size ..][0 .. 3 * size * size]);
+            const px = if (mine) |m| (if (size == cfg.base_size) m.global else m.tile(vi)) else dumped;
+            if (mine != null) {
+                var differ: usize = 0;
+                for (px, dumped) |x, y| differ += @intFromBool(x != y);
+                std.debug.print(" view {d}: pixels {d} of {d} differ from the dump's\n", .{ vi, differ, px.len });
+                all_pass = all_pass and differ == 0;
+            }
             const t = mtl.clock.seconds();
             try enc.encode(size, @alignCast(px), out, .{ .sam = sam, .clip = clip });
             const dt = mtl.clock.seconds() - t;

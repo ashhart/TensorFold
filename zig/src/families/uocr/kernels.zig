@@ -107,7 +107,7 @@ pub const Kernels = struct {
     }
 };
 
-test "every Unlimited-OCR-2 pipeline compiles and loads on this GPU" {
+test "uocr: every Unlimited-OCR-2 pipeline compiles and loads on this GPU" {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = mtl.Device.init() catch return error.SkipZigTest;

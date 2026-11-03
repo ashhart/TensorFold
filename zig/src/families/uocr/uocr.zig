@@ -5,3 +5,8 @@ pub const kernels = @import("kernels.zig");
 pub const vision = @import("vision.zig");
 pub const resize = @import("resize.zig");
 pub const gate = @import("gate.zig");
+pub const preprocess = @import("preprocess.zig");
+
+test {
+    @import("std").testing.refAllDecls(@This());
+}
