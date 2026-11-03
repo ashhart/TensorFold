@@ -34,9 +34,11 @@ def projection_reference(args, meta, meta_file, stem, index, np, torch, safe_ope
     ratios = error / bound
     passed = bool(torch.isfinite(native).all() and torch.isfinite(reference).all() and (error <= bound).all())
     worst = int(ratios.argmax())
+    absolute = int(error.argmax())
     return {"capture": meta_file.name, "phase": meta["phase"], "projection": key, "rows": rows,
             "passed": passed, "worst_absolute": float(error.max()), "worst_bound_ratio": float(ratios.max()),
-            "worst_row": worst // width, "worst_column": worst % width}
+            "worst_bound_row": worst // width, "worst_bound_column": worst % width,
+            "worst_absolute_row": absolute // width, "worst_absolute_column": absolute % width}
 
 
 def main():
@@ -113,16 +115,27 @@ def main():
             top_ok = top_ok and bool(np.array_equal(stats[:, 22:42], top_values))
             ratio = lp_error / lp_bound
             worst = int(ratio.argmax())
+            head_absolute = int(dot_error.argmax())
+            head_ratio = int((dot_error / dot_bound).argmax())
+            lp_absolute = int(lp_error.argmax())
             native_best, ref_best = native.argmax(1), ref.argmax(1)
             top_ref = torch.topk(ref, 2, dim=1).values
+            differences = [{"row": r, "native_token": int(native_best[r]), "fp64_token": int(ref_best[r]),
+                            "fp64_margin": float(top_ref[r, 0] - top_ref[r, 1])}
+                           for r in range(rows) if native_best[r] != ref_best[r]]
             result = {"capture": meta_file.name, "phase": meta["phase"], "rows": rows,
                       "finite": finite, "head_bound_passed": dot_ok, "reduction_bound_passed": red_ok,
                       "logprob_bound_passed": lp_ok, "selected_exact": selected_ok, "top_exact": top_ok,
                       "rank_exact": rank_ok, "worst_head_absolute": float(dot_error.max()),
                       "worst_head_bound_ratio": float((dot_error / dot_bound).max()),
+                      "worst_head_absolute_row": head_absolute // vocab, "worst_head_absolute_token": head_absolute % vocab,
+                      "worst_head_bound_row": head_ratio // vocab, "worst_head_bound_token": head_ratio % vocab,
+                      "worst_reduction_absolute": float(red_error.max()), "worst_reduction_row": int(red_error.argmax()),
+                      "worst_reduction_bound_ratio": float((red_error / red_bound).max()),
                       "worst_logprob_absolute": float(lp_error.max()), "worst_logprob_bound_ratio": float(ratio.max()),
-                      "worst_row": worst // vocab, "worst_token": worst % vocab,
-                      "argmax_differences": int((native_best != ref_best).sum()),
+                      "worst_logprob_bound_row": worst // vocab, "worst_logprob_bound_token": worst % vocab,
+                      "worst_logprob_absolute_row": lp_absolute // vocab, "worst_logprob_absolute_token": lp_absolute % vocab,
+                      "argmax_differences": len(differences), "argmax_difference_rows": differences,
                       "fp64_top_margins": (top_ref[:, 0] - top_ref[:, 1]).cpu().tolist()}
             passed &= all((finite, dot_ok, red_ok, lp_ok, selected_ok, top_ok, rank_ok))
             records.append(result)
