@@ -4,6 +4,8 @@
 #include <cuda_bf16.h>
 #include <math_constants.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
+#include "common/act.cuh"
 
 namespace tf_mm3 {
 
@@ -14,19 +16,11 @@ __device__ __forceinline__ float ld(const bf16* p) { return __bfloat162float(*p)
 __device__ __forceinline__ void st(bf16* p, float v) { *p = __float2bfloat16_rn(v); }
 
 // torch's sigmoid of an fp32 value, 1 / (1 + e^-x) on either side.
-__device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
+__device__ __forceinline__ float sigmoid(float x) { return tf_common::sigmoidf_(x); }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
+using tf_common::warp_sum;
 
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-  for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-  return v;
-}
+using tf_common::warp_max;
 
 // A block of 1024 threads sums `v` over its warps; every thread gets the total (two syncs).
 __device__ __forceinline__ float block_sum(float v, float* part) {
