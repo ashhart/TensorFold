@@ -153,7 +153,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         return;
     }
     // a reranker's template reads query and document roles only: every other route would score or write nonsense
-    if (srv.rerank != null and (is_text or is_embedding)) {
+    if (srv.info.rerank != null and (is_text or is_embedding)) {
         discardBody(conn, a);
         conn.sendJson(400, "{\"error\":{\"message\":\"this model is a reranker: use POST /v1/rerank\",\"type\":\"invalid_request_error\"}}");
         return;

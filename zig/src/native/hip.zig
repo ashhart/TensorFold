@@ -312,7 +312,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
     errdefer h.core.deinit();
     const what = Serves.of(loaded, r.options.window);
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (r.dev.group) |g| @intCast(g.world) else 1, .lanes = @intCast(loaded.streams), .context_window = @intCast(what.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = what.text_generation, .text_generation = what.text_generation, .embeddings = what.embeddings, .decides = what.decides, .vision = visionOffer(loaded), .reasoning = reasoning(F) });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (r.dev.group) |g| @intCast(g.world) else 1, .lanes = @intCast(loaded.streams), .context_window = @intCast(what.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = what.text_generation, .text_generation = what.text_generation, .embeddings = what.embeddings, .decides = what.decides, .rerank = what.rerank, .vision = visionOffer(loaded), .reasoning = reasoning(F) });
     h.host.memory = .{ .read = readMemory };
     if (@hasField(@TypeOf(loaded), "cache")) {
         h.host.cache = loaded.cache;
@@ -329,6 +329,7 @@ const Serves = struct {
     text_generation: bool = true,
     embeddings: ?api.EmbeddingInfo = null,
     decides: bool = false,
+    rerank: ?api.Rerank = null,
     window: usize,
 
     fn of(loaded: anytype, asked: usize) Serves {
@@ -337,6 +338,7 @@ const Serves = struct {
         if (@hasField(L, "text_generation")) s.text_generation = loaded.text_generation;
         if (@hasField(L, "embeddings")) s.embeddings = loaded.embeddings;
         if (@hasField(L, "decides")) s.decides = loaded.decides;
+        if (@hasField(L, "rerank")) s.rerank = loaded.rerank;
         if (@hasField(L, "window")) if (loaded.window) |w| {
             s.window = w;
         };
@@ -526,8 +528,10 @@ test "a family's Loaded names what it serves; one without the fields generates t
     try std.testing.expect(!e.text_generation and e.embeddings.?.dimensions == 8 and e.window == 2048);
     const Unsized = struct { window: ?usize };
     try std.testing.expectEqual(@as(usize, 32768), Serves.of(Unsized{ .window = null }, 32768).window);
-    const Rerank = struct { text_generation: bool, decides: bool, window: ?usize };
-    const r = Serves.of(Rerank{ .text_generation = false, .decides = true, .window = 32768 }, 40960);
+    const Rerank = struct { text_generation: bool, decides: bool, rerank: ?api.Rerank, window: ?usize };
+    const r = Serves.of(Rerank{ .text_generation = false, .decides = true, .rerank = .{ .yes = 9693, .no = 2152 }, .window = 32768 }, 40960);
     try std.testing.expect(!r.text_generation and r.decides and r.embeddings == null and r.window == 32768);
+    try std.testing.expectEqual(@as(u32, 9693), r.rerank.?.yes);
+    try std.testing.expect(p.rerank == null and e.rerank == null);
     try std.testing.expect(!p.decides and !e.decides);
 }

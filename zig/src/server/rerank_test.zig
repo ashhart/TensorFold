@@ -147,7 +147,7 @@ const Present = struct {
 
 fn serve(text: *Text, s: *Scorer) !*Server {
     const srv = try Server.init(t.allocator, t.io, s.engine(), text.model(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
-    srv.rerank = .{ .yes = 7, .no = 9 };
+    srv.info.rerank = .{ .yes = 7, .no = 9 };
     return srv;
 }
 
@@ -332,14 +332,14 @@ test "rerank: no labels, no hook, a failed pass and a stopping engine each fail 
     const a = arena.allocator();
     const body = (try json.parse(a, "{\"query\": \"q\", \"documents\": [\"d\"]}")).ok;
     const Want = struct { []const u8, u16 };
-    const cases = [_]struct { ?@import("rerank_labels.zig").Rerank, bool, bool, bool, Want }{
+    const cases = [_]struct { ?api.Rerank, bool, bool, bool, Want }{
         .{ null, true, false, true, .{ "this model is not a reranker", 400 } },
         .{ .{ .yes = 7, .no = 9 }, false, false, true, .{ "this engine does not score labels", 400 } },
         .{ .{ .yes = 7, .no = 9 }, true, true, true, .{ "rerank inference failed", 500 } },
         .{ .{ .yes = 7, .no = 9 }, true, true, false, .{ "the rerank engine is unavailable", 503 } },
     };
     for (cases) |case| {
-        srv.rerank = case[0];
+        srv.info.rerank = case[0];
         s.hook = case[1];
         srv.engine = s.engine();
         s.failing = case[2];
@@ -450,23 +450,26 @@ test "rerank: a reranker server sends every other engine route to /v1/rerank and
     }
 }
 
-test "rerank: Server.init reads the labels from the checkpoint directory it serves" {
+test "rerank: the engine declares a reranker; a 1_LogitScore file in the served folder alone makes none" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    const dir = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try std.Io.Dir.cwd().createDirPath(t.io, try std.fs.path.join(arena.allocator(), &.{ dir, "1_LogitScore" }));
+    const a = arena.allocator();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.Io.Dir.cwd().createDirPath(t.io, try std.fs.path.join(a, &.{ dir, "1_LogitScore" }));
     try tmp.dir.writeFile(t.io, .{ .sub_path = "1_LogitScore/config.json", .data = "{\"true_token_id\": 7, \"false_token_id\": 9}" });
     var text: Text = .{};
     var s: Scorer = .{ .gpa = t.allocator };
     defer s.deinit();
     const srv = try Server.init(t.allocator, t.io, s.engine(), text.model(), .{ .served_name = "m", .model_ids = &.{"m"}, .model_dir = dir }, null);
     defer srv.deinit();
-    try t.expectEqual(@as(u32, 7), srv.rerank.?.yes);
-    try t.expectEqual(@as(u32, 9), srv.rerank.?.no);
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "1_LogitScore/config.json", .data = "{\"true_token_id\": 7, \"false_token_id\": 400}" });
-    try t.expectError(error.InvalidRerankLabels, Server.init(t.allocator, t.io, s.engine(), text.model(), .{ .served_name = "m", .model_ids = &.{"m"}, .model_dir = dir }, null));
+    try t.expectEqual(@as(?api.Rerank, null), srv.info.rerank);
+    const body = (try json.parse(a, "{\"query\": \"q\", \"documents\": [\"d\"]}")).ok;
+    var cx: errors.Cx = .{ .a = a };
+    try t.expectError(error.Refused, rerank.reply(srv, &cx, body, Present{}));
+    try t.expectEqualStrings("this model is not a reranker", cx.message);
+    try t.expectEqual(@as(usize, 0), s.prompts.items.len);
 }
 
 test "rerank: a NaN or an infinite logit is a failed pass, never a 200 with invalid JSON" {

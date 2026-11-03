@@ -42,6 +42,8 @@ pub const Loaded = struct {
     window: ?usize = null,
     /// A reranker: the engine scores labels (the score hook) and serves no embeddings.
     decides: bool = false,
+    /// The reranker's label tokens, from `1_LogitScore/config.json`.
+    rerank: ?api.Rerank = null,
 };
 
 pub const Refused = error{Refused};
@@ -55,8 +57,8 @@ fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: an
 pub const Head = union(enum) {
     /// sentence-transformers last-token pooling, unit-normed when modules.json lists Normalize.
     embedding: struct { normalize: bool },
-    /// A reranker: `1_LogitScore` names the yes and no tokens its last row's logits score (the server reads them).
-    rerank,
+    /// A reranker: `1_LogitScore` names the yes and no tokens its last row's logits score.
+    rerank: api.Rerank,
 };
 
 const pooling_modes = [_][]const u8{
@@ -66,7 +68,7 @@ const pooling_modes = [_][]const u8{
 
 /// The head from `1_Pooling/config.json` and `modules.json`, or a refusal naming what the folder lacks.
 pub fn headOf(a: Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) (Refused || Allocator.Error)!Head {
-    if (try readJson(a, io, dir, "1_LogitScore/config.json", problem) != null) return .rerank;
+    if (try readJson(a, io, dir, "1_LogitScore/config.json", problem)) |v| return .{ .rerank = try labelsOf(a, v, problem) };
     const pooling = try readJson(a, io, dir, "1_Pooling/config.json", problem) orelse return refuse(
         a,
         problem,
@@ -90,6 +92,21 @@ pub fn headOf(a: Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) (
         }
     }
     return .{ .embedding = .{ .normalize = normalize } };
+}
+
+/// The yes and no tokens `1_LogitScore/config.json` names (the vocabulary bound is checked once the config is read).
+fn labelsOf(a: Allocator, v: std.json.Value, problem: *[]const u8) (Refused || Allocator.Error)!api.Rerank {
+    const name = "1_LogitScore/config.json";
+    if (v != .object) return refuse(a, problem, "{s} is not a JSON object", .{name});
+    var ids: [2]u32 = undefined;
+    for ([_][]const u8{ "true_token_id", "false_token_id" }, &ids) |key, *id| {
+        const x = v.object.get(key) orelse return refuse(a, problem, "{s} has no {s}", .{ name, key });
+        if (x != .integer or x.integer < 0 or x.integer > std.math.maxInt(u32))
+            return refuse(a, problem, "{s}: {s} is not a token id", .{ name, key });
+        id.* = @intCast(x.integer);
+    }
+    if (ids[0] == ids[1]) return refuse(a, problem, "{s} names token {d} for both answers", .{ name, ids[0] });
+    return .{ .yes = ids[0], .no = ids[1] };
 }
 
 /// The folder's JSON file `name`, null when it is absent; unreadable or malformed JSON is refused.
@@ -167,19 +184,29 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, dev: hip.Device, dir: []
         .embedding => |h| h.normalize,
         .rerank => false,
     };
+    const labels: ?api.Rerank = switch (head) {
+        .embedding => null,
+        .rerank => |l| l,
+    };
+    if (labels) |l| if (l.yes >= e.m.spec.vocab or l.no >= e.m.spec.vocab)
+        return refuse(a, problem, "1_LogitScore/config.json: tokens {d} and {d} are not both in this {d}-token vocabulary", .{ l.yes, l.no, e.m.spec.vocab });
     const kept = try gpa.dupe(u8, dir);
     errdefer gpa.free(kept);
     own.* = .{ .gpa = gpa, .e = e, .p = prompt.Prompt.init(gpa, e, normalize), .startup = undefined, .dir = kept };
-    if (head == .rerank) {
+    errdefer own.p.deinit();
+    if (labels) |l| {
         own.p.heads = score.Heads.of(&e.m, io, own.dir);
         own.p.table.score = prompt.Prompt.scoreLabels;
+        // both label rows read at load: a bad head fails startup, and the first request reads nothing
+        for ([_]u32{ l.yes, l.no }) |id| _ = own.p.heads.?.row(gpa, id) catch |err|
+            return refuse(a, problem, "the native HIP engine cannot read lm_head row {d} ({s})", .{ id, @errorName(err) });
     }
     const shrunk: []const u8 = if (window < o.window) " (shrunk from the asked window to fit the budget)" else "";
     own.startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}: qwen3 {s}, model {d:.2} GiB; {d}-token passes{s}, {d:.2} GiB scratch, of {d:.1} GiB left after a {d:.1} GiB reserve; {s}", .{
         hip.kernels.arch, dev.index, if (head == .rerank) "reranker" else "embedding", gibs(e.weights), window, shrunk, gibs(e.scratchBytes(window) catch 0), gibs(room), gibs(pool.reserve),
         switch (head) {
             .embedding => |h| if (h.normalize) "vectors unit-normed" else "vectors as pooled",
-            .rerank => "label scores from lm_head rows on the host",
+            .rerank => "label scores from lm_head rows read at load, on the host",
         },
     });
     const spec = e.m.spec;
@@ -195,6 +222,7 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, dev: hip.Device, dir: []
         .embeddings = if (head == .rerank) null else .{ .dimensions = @intCast(spec.hidden), .vocabulary = @intCast(spec.vocab), .max_batch_tokens = @intCast(window), .max_inputs = @intCast(engine.max_inputs), .mrl_min = @min(32, @as(u32, @intCast(spec.hidden))) },
         .window = window,
         .decides = head == .rerank,
+        .rerank = labels,
     };
 }
 
@@ -266,12 +294,27 @@ test "a 1_LogitScore folder declares the reranker head, before any pooling, and 
     var problem: []const u8 = "";
     try tmp.dir.createDirPath(io, "1_LogitScore");
     try tmp.dir.writeFile(io, .{ .sub_path = "1_LogitScore/config.json", .data = "{\"true_token_id\": 9693, \"false_token_id\": 2152}" });
-    try std.testing.expect(try headOf(a, io, dir, &problem) == .rerank);
+    const labels = (try headOf(a, io, dir, &problem)).rerank;
+    try std.testing.expectEqual(api.Rerank{ .yes = 9693, .no = 2152 }, labels);
     // the reranker's folder also carries no pooling; one that did would still be a reranker by its scores
     try tmp.dir.createDirPath(io, "1_Pooling");
     try tmp.dir.writeFile(io, .{ .sub_path = "1_Pooling/config.json", .data = "{\"pooling_mode_lasttoken\": true}" });
     try std.testing.expect(try headOf(a, io, dir, &problem) == .rerank);
-    try tmp.dir.writeFile(io, .{ .sub_path = "1_LogitScore/config.json", .data = "{not json" });
-    try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
-    try std.testing.expect(std.mem.indexOf(u8, problem, "1_LogitScore/config.json") != null);
+    const bad = [_][]const u8{
+        "{not json",
+        "[9693, 2152]",
+        "{\"false_token_id\": 2152}",
+        "{\"true_token_id\": 9693}",
+        "{\"true_token_id\": \"9693\", \"false_token_id\": 2152}",
+        "{\"true_token_id\": 9693.5, \"false_token_id\": 2152}",
+        "{\"true_token_id\": -1, \"false_token_id\": 2152}",
+        "{\"true_token_id\": 4294967296, \"false_token_id\": 2152}",
+        "{\"true_token_id\": 2152, \"false_token_id\": 2152}",
+    };
+    for (bad) |text| {
+        problem = "";
+        try tmp.dir.writeFile(io, .{ .sub_path = "1_LogitScore/config.json", .data = text });
+        try std.testing.expectError(error.Refused, headOf(a, io, dir, &problem));
+        try std.testing.expect(std.mem.indexOf(u8, problem, "1_LogitScore/config.json") != null);
+    }
 }

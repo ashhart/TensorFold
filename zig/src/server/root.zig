@@ -116,7 +116,6 @@ test {
     _ = @import("decisions_test.zig");
     _ = @import("systemone.zig");
     _ = @import("systemone_test.zig");
-    _ = @import("rerank_labels.zig");
     _ = @import("rerank_test.zig");
     _ = @import("rerank_ids_test.zig");
     _ = @import("slide_context_test.zig");
