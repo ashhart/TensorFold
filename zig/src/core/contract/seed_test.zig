@@ -4,6 +4,11 @@ const g = @import("gates.zig");
 const c = @import("contract.zig");
 const Probe = struct {
     seed: u64 = 0,
+    released: usize = 0,
+    fn release(p: *anyopaque) void {
+        const self: *Probe = @ptrCast(@alignCast(p));
+        self.released += 1;
+    }
     fn prepare(p: *anyopaque, _: c.Shape, _: g.Fill, s: u64) anyerror!bool {
         const self: *Probe = @ptrCast(@alignCast(p));
         self.seed = s;
@@ -31,7 +36,7 @@ const Probe = struct {
         return 0;
     }
     fn kernel(p: *Probe, name: []const u8) g.Kernel {
-        return .{ .spec = .{ .name = name, .accum = .none, .out = .raw, .depth = depth, .served = &.{.{ .rows = 1, .n = 1, .k = 1 }}, .tiles = .{ .{}, .{}, .{} } }, .ctx = p, .vt = &.{ .prepare = prepare, .run = run, .output = bytes, .inputs = bytes, .intact = intact, .overlap = overlap, .count = count, .reference = reference } };
+        return .{ .spec = .{ .name = name, .accum = .none, .out = .raw, .depth = depth, .served = &.{.{ .rows = 1, .n = 1, .k = 1 }}, .tiles = .{ .{}, .{}, .{} } }, .ctx = p, .vt = &.{ .prepare = prepare, .run = run, .output = bytes, .inputs = bytes, .intact = intact, .overlap = overlap, .count = count, .reference = reference, .release = release } };
     }
 };
 test "contract seed: an inserted kernel cannot change another named fixture's seed" {
@@ -46,4 +51,16 @@ test "contract seed: an inserted kernel cannot change another named fixture's se
     try g.runAll(std.testing.allocator, &.{ inserted.kernel("new fixture"), target.kernel("unchanged fixture") }, 0x6b63, &tally);
     try std.testing.expectEqual(before, target.seed);
     try std.testing.expect(inserted.seed != target.seed);
+}
+
+test "contract release: each kernel's buffers are freed once its gates are done" {
+    const was = g.quiet;
+    g.quiet = true;
+    defer g.quiet = was;
+    var a: Probe = .{};
+    var b: Probe = .{};
+    var tally: g.Tally = .{};
+    try g.runAll(std.testing.allocator, &.{ a.kernel("first"), b.kernel("second") }, 0x6b63, &tally);
+    try std.testing.expectEqual(@as(usize, 1), a.released);
+    try std.testing.expectEqual(@as(usize, 1), b.released);
 }
