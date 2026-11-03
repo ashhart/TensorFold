@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- `TF_LOAD_PREFETCH`: Gemma 4 and Qwen 3.5 on CUDA read each layer ahead while the current one uploads, so the 27B loads about a third faster on a GB10. Replies are unchanged, and `TF_LOAD_PREFETCH=0` is the old path (#1928). Thanks to @jschmied.
+
 - Flash Next on CUDA loads its experts about 12% faster with the direct load: the next chunk is read while the current one packs, and the store switches shards without reopening them. Replies are unchanged (#1960). Thanks to @jschmied.
 
 - Gemma 4 on CUDA keeps its global layers' caches in pages of the core KV pool, every stream on pages, so with `TF_KV_SHARE` its prompts can be kept and resumed as pool pages; unset, tokens and speed are unchanged (#1619, part of #1657). Thanks to @jschmied.
