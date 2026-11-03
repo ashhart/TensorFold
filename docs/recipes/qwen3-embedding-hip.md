@@ -55,7 +55,13 @@ must append 151643 itself.
 
 The oracle runs the model card's Transformers example in a venv with
 Transformers 5.22.1. It refuses a snapshot or a Transformers install whose
-files differ from its pins before any model code runs:
+files differ from its pins before any model code runs. Its fidelity set is
+the card's 4 inputs and 5 long inputs of 2,044 to 32,759 tokens, each the
+longest whole-line prefix of a pinned file within 2K, 4K, 8K, 16K or 32K
+tokens (the card's `LICENSE` and `README.md`, three Transformers sources);
+every input's text and token IDs are pinned by SHA256. The card's inputs run
+as the card runs them, one padded batch; each long input runs alone. The
+fp32 reference takes about 20 minutes on 32 CPU cores:
 
 ```sh
 python3 tools/zig/oracle_qwen3_embedding.py sources --model MODEL_DIRECTORY
@@ -64,11 +70,15 @@ python3 tools/zig/oracle_qwen3_embedding.py ref --model MODEL_DIRECTORY --dtype 
 python3 tools/zig/oracle_qwen3_embedding.py check --ref ref32.json --bar ref16.json --url http://127.0.0.1:8090
 ```
 
-`check` passes when every vector lies within `min(0.001, 2 x transformers
-BF16's worst distance)` of the fp32 vector (distance = 1 - cosine), has unit
-norm, is the same fp32 bytes alone, in a batch and from token IDs, and the
-card's 2 x 2 scores are within 0.01. The same gate runs on the GPU without
-a server:
+`check` sends the inputs in requests that fit the server's window (the card's
+and the 2K to 16K inputs together, the 32K one alone). It passes when every
+vector lies within `min(0.001, 2 x transformers BF16's worst distance)` of
+the fp32 vector (distance = 1 - cosine), has unit norm, is the same fp32
+bytes alone, in a batch and from token IDs, and the card's 2 x 2 scores are
+within 0.01. At MRL widths 32, 1024 and 4096 (`dimensions`) every vector
+must have unit norm and lie within the same bound, taken at that width, of
+the fp32 vector cropped and renormalized. The full-width gate runs on the
+GPU without a server too:
 
 ```sh
 TF_QWEN3_EMBED_DIR=MODEL_DIRECTORY TF_QWEN3_EMBED_REF=ref32.json TF_QWEN3_EMBED_BAR=ref16.json \
@@ -79,9 +89,12 @@ Results on the R9700 (ROCm 10.1):
 
 | Check | Result |
 | --- | --- |
-| Card example, distance to fp32 (4 inputs) | 1.32e-4, 9.30e-5, 7.76e-5, 9.27e-5 (limit 2.26e-4; transformers BF16: 1.13e-4) |
+| Card example, distance to fp32 (4 inputs) | 1.32e-4, 9.30e-5, 7.76e-5, 9.27e-5 |
+| Long inputs, distance to fp32 (2,044, 4,043, 8,177, 16,383, 32,759 tokens) | 1.16e-4, 5.24e-5, 7.00e-5, 9.90e-5, 9.22e-5 |
+| Full-width limit (2 x transformers BF16's worst, 1.57e-4) | 3.14e-4 |
+| MRL width 32, 1024, 4096: worst distance (limit) | 7.92e-5 (3.77e-4), 1.18e-4 (3.25e-4), 1.32e-4 (3.14e-4) |
 | Card 2 x 2 scores | [[0.7479, 0.0759], [0.0886, 0.6324]] (card: [[0.7493, 0.0751], [0.0880, 0.6318]]) |
-| Batch, alone and token-ID vectors | identical fp32 bytes |
+| Batch, alone and token-ID vectors (all 9 inputs) | identical fp32 bytes |
 | `hip-kernel-test`, `dense_gemm_block` | fp32 within the dot2 chain's bound against float64; BF16 out is the fp32 sum rounded once |
 | `hip-kernel-contract` | dense GEMM (fp32 and BF16 out) and `tf_heads_rows` pass gates 1 to 4; their gate 5 records are current (gfx1030 does not serve the dense GEMM) |
 | Load | 4 s from the page cache |
