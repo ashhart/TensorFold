@@ -102,6 +102,11 @@ fn round(gate: bool, drift: bool, miss: bool) !void {
     const refused = gate and (drift or miss);
     try t.expectEqual(!refused, result.recalled[0]);
     try t.expectEqual(!refused, m.inner.live[0]);
+    if (!gate) {
+        try t.expectEqual(@as(?json.Value, null), srv.slide.find(id).?.evaluation);
+        try t.expectEqual(@as(?json.Value, null), srv.slide.drift_base);
+        return;
+    }
     const report = try store.decode(schema.Report, cx.a, srv.slide.find(id).?.evaluation.?);
     try t.expectEqual(@as(u32, 115), report.plain[0].checked);
     try t.expectEqual(@as(u32, if (drift) 3 else 0), report.plain[0].meaning_changed);

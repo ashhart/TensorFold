@@ -151,14 +151,15 @@ pub fn measure(srv: *Server, cx: *Cx, plan: teach.Plan, id: u32, gone: anytype) 
     return r;
 }
 
-/// A failed measurement is visible; it refuses only when the opt-in gate is enabled.
+/// Only the opt-in gate measures; a failed measurement is recorded and refuses the candidate.
 pub fn candidate(srv: *Server, cx: *Cx, plan: teach.Plan, id: u32, gone: anytype) ?[]const u8 {
+    if (!srv.config.slide_drift_gate) return null;
     const measured = measure(srv, cx, plan, id, gone) catch |err| Report{
         .status = @errorName(err),
         .gate = srv.config.slide_drift_gate,
         .complete = false,
         .refused = "the fixed panel could not be measured",
     };
-    srv.slide.evaluated(id, measured) catch return if (srv.config.slide_drift_gate) "the fixed panel receipt could not be saved" else null;
-    return if (srv.config.slide_drift_gate) measured.refused else null;
+    srv.slide.evaluated(id, measured) catch return "the fixed panel receipt could not be saved";
+    return measured.refused;
 }
