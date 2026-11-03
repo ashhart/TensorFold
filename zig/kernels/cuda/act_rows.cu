@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 namespace tf_act {
 
@@ -157,7 +158,6 @@ extern "C" __global__ void __launch_bounds__(NT) tf_gelu_erf_rows(const __nv_bfl
 
 // Dory's nGPT activations (act_l2.cuh): a scaled sigmoid gate and a scaled SwiGLU, each row then L2-normed.
 #include "act_l2.cuh"
-#include "common/act.cuh"
 
 // out = bf16(l2(bf16(o * sigmoid(g * sg)))) over a row's n values (all heads), sg fp32 [n]: dory.py's output gate.
 extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_gate_l2_rows(const __nv_bfloat16* o, const __nv_bfloat16* g,

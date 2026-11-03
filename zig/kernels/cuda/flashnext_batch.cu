@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 // out[i] = the sum of the sk slices' part[s][i] in order, rounded once (qmm.cu's reduce_kernel): bf16 if out_bf16.
 extern "C" __global__ void fn_sum_slices(const float* __restrict__ part, void* __restrict__ out, int out_bf16,
@@ -544,4 +545,3 @@ extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr(const float* 
 
 // The prompt GDN block in one kernel a value head (front, chain, gated norm; their bits), no fp32 rows through memory.
 #include "flashnext_gdn_fused.cuh"
-#include "common/act.cuh"
