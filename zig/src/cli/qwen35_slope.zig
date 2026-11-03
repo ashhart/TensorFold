@@ -25,12 +25,16 @@ pub const Residual = struct {
     trimmed_rms: f64,
     width: usize,
 
+    pub fn normStep(r: Residual, fraction: f64) f64 {
+        return fraction * r.norm;
+    }
+
     pub fn step(r: Residual, fraction: f64) f64 {
         return fraction * r.trimmed_rms * @sqrt(@as(f64, @floatFromInt(r.width)));
     }
 };
 
-/// Remove the largest ceil(width/100) magnitudes; preserve the ordinary row's norm scale.
+/// Remove the largest ceil(width/100) magnitudes to report a separate robust perturbation scale.
 pub fn residual(values: []const u16, scratch: []f64) !Residual {
     if (values.len < 2 or scratch.len < values.len) return error.BadResidual;
     var sum: f64 = 0;
@@ -76,6 +80,8 @@ test "directional slope: a sink changes the reported norm but not the trimmed st
     const sink = try residual(&row, &scratch);
     try std.testing.expectEqual(plain.step(0.002), sink.step(0.002));
     try std.testing.expect(sink.norm > 1000 * plain.norm);
+    try std.testing.expect(sink.normStep(0.002) > 1000 * plain.normStep(0.002));
+    try std.testing.expectApproxEqAbs(0.002 * sink.norm, sink.normStep(0.002), 1e-12);
     try std.testing.expectEqual(@as(f64, 65536), sink.largest);
     row[10] = 0x7fc0;
     try std.testing.expectError(error.BadResidual, residual(&row, &scratch));

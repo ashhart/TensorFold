@@ -65,8 +65,10 @@ fn cell(t: *Trainer, sq: train.Seq, layer: usize, row: usize) !void {
     const residual = try diagnostic.residual(t.residual(layer + 1, row), &scratch);
     std.debug.print("RESULT residual layer {d} row {d}: norm {e:.8}, largest {e:.8}, trimmed_rms {e:.8}, gradient {e:.8}\n", .{ layer, row, residual.norm, residual.largest, residual.trimmed_rms, length });
     var slopes: [4]f64 = undefined;
-    for ([_]f64{ 0.001, 0.002, 0.004, 0.008 }, &slopes) |fraction, *fd|
+    for ([_]f64{ 0.001, 0.002, 0.004, 0.008 }, &slopes) |fraction, *fd| {
+        std.debug.print("RESULT step layer {d} row {d}: fraction {e:.8}, norm_h {e:.8}, trimmed_h {e:.8}\n", .{ layer, row, fraction, residual.normStep(fraction), residual.step(fraction) });
         fd.* = try slope(t, sq, layer, &dir, residual.step(fraction));
+    }
     var errors: [3]f64 = undefined;
     for (&errors, 1..) |*relative, i| {
         relative.* = @abs(slopes[i] - length) / length;
@@ -121,6 +123,6 @@ pub fn main(init: std.process.Init) !u8 {
     };
     std.debug.print("RESULT {d} owned directional checks, {d} failures\n", .{ checks, failures });
     if (failures != 0) return error.GradientMismatch;
-    std.debug.print("PASS every configured acceptance step within the original bound\n", .{});
+    std.debug.print("PASS configured trimmed-scale directional checks at relative-error threshold 0.15\n", .{});
     return 0;
 }
