@@ -211,28 +211,49 @@ fn sameOrigin(first: []const u8, next: []const u8) bool {
     return std.ascii.eqlIgnoreCase(from_host, to_host);
 }
 
-/// `url` with `.` and `..` path segments removed, so a relative link names the page it points at.
+/// Drops the last path segment and the slash before it. An empty output stays empty.
+fn popSegment(out: *std.ArrayList(u8), floor: usize) void {
+    if (out.items.len <= floor) return;
+    if (out.items[out.items.len - 1] != '/') while (out.items.len > floor and out.items[out.items.len - 1] != '/') out.shrinkRetainingCapacity(out.items.len - 1);
+    if (out.items.len > floor) out.shrinkRetainingCapacity(out.items.len - 1);
+}
+
+/// `url` with `.` and `..` path segments removed. Empty segments stay, so a trailing slash does too.
 fn withoutDots(a: Allocator, url: []const u8) Allocator.Error![]const u8 {
     const scheme_end = std.mem.indexOf(u8, url, "://") orelse return a.dupe(u8, url);
     const path_start = std.mem.indexOfAnyPos(u8, url, scheme_end + 3, "/?#") orelse return a.dupe(u8, url);
     if (url[path_start] != '/') return a.dupe(u8, url);
     const path_end = std.mem.indexOfAnyPos(u8, url, path_start, "?#") orelse url.len;
-    var segs: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.splitScalar(u8, url[path_start..path_end], '/');
-    while (it.next()) |s| {
-        if (s.len == 0 or std.mem.eql(u8, s, ".")) continue;
-        if (std.mem.eql(u8, s, "..")) {
-            if (segs.items.len > 0) _ = segs.pop(); // a dot segment never climbs above the host
-            continue;
-        }
-        try segs.append(a, s);
-    }
+    const path = url[path_start..path_end];
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(a, url[0..path_start]);
-    if (segs.items.len == 0) try out.append(a, '/');
-    for (segs.items) |s| {
-        try out.append(a, '/');
-        try out.appendSlice(a, s);
+    const floor = out.items.len;
+    var i: usize = 0;
+    while (i < path.len) {
+        if (std.mem.startsWith(u8, path[i..], "../")) {
+            i += 3;
+        } else if (std.mem.startsWith(u8, path[i..], "./")) {
+            i += 2;
+        } else if (std.mem.startsWith(u8, path[i..], "/../")) {
+            popSegment(&out, floor); // a dot segment never climbs above the host
+            i += 3;
+        } else if (std.mem.startsWith(u8, path[i..], "/..") and i + 3 == path.len) {
+            popSegment(&out, floor);
+            try out.append(a, '/');
+            i = path.len;
+        } else if (std.mem.startsWith(u8, path[i..], "/./")) {
+            i += 2;
+        } else if (std.mem.startsWith(u8, path[i..], "/.") and i + 2 == path.len) {
+            try out.append(a, '/');
+            i = path.len;
+        } else if (std.mem.eql(u8, path[i..], ".") or std.mem.eql(u8, path[i..], "..")) {
+            i = path.len;
+        } else {
+            const start = i;
+            if (path[i] == '/') i += 1;
+            while (i < path.len and path[i] != '/') i += 1; // an empty segment is a slash of its own
+            try out.appendSlice(a, path[start..i]);
+        }
     }
     try out.appendSlice(a, url[path_end..]);
     return out.items;
@@ -302,6 +323,10 @@ test "a relative link's dot segments resolve against the page" {
     try std.testing.expectEqualStrings("https://a.org/api", try resolveUrl(a, "https://a.org/docs/intro", "../api"));
     try std.testing.expectEqualStrings("https://a.org/docs/sib", try resolveUrl(a, "https://a.org/docs/intro", "./sib"));
     try std.testing.expectEqualStrings("https://a.org/etc/passwd", try resolveUrl(a, "https://a.org/docs/intro", "../../etc/passwd"));
+    try std.testing.expectEqualStrings("https://a.org/docs/", try resolveUrl(a, "https://a.org/docs/intro", "/docs/"));
+    try std.testing.expectEqualStrings("https://a.org/a//b", try resolveUrl(a, "https://a.org/", "/a//b"));
+    try std.testing.expectEqualStrings("https://web.archive.org/web/2020/https://x.org/a", try resolveUrl(a, "https://a.org/docs", "https://web.archive.org/web/2020/https://x.org/a"));
+    try std.testing.expectEqualStrings("https://a.org/docs/", try resolveUrl(a, "https://a.org/docs", "/docs/"));
 }
 
 test "request lines stay plain and URLs carry no more than an address" {
