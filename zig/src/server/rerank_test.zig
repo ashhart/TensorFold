@@ -1,4 +1,4 @@
-//! /v1/rerank against a fake template, tokenizer and score hook: SGLang's request rules, order and error bodies.
+//! /v1/rerank against a fake template, tokenizer and score hook: request rules, order, max_length cuts, error bodies.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -10,12 +10,22 @@ const Allocator = std.mem.Allocator;
 const t = std.testing;
 
 const im_end = "<|im_end|>";
-const im_end_id: u32 = 300;
+pub const im_end_id: u32 = 300;
+pub const merged: u32 = 380; // a digit and the `X` after it, as one token
 
-/// Renders `S:<system>|Q:<query>|D:<document>|A` with the three contents as request spans; one special token.
-const Text = struct {
+/// Renders `S:<system>|Q:<query>|D:<document><|im_end|>|A`, contents as request spans; a digit and `X` merge, as BPE.
+pub const Text = struct {
+    /// Tails a cut must not touch: the added token last, a byte more for a longer document, an `X` the probes merge.
+    loose: bool = false,
+    moving: bool = false,
+    merging: bool = false,
+
     fn model(self: *Text) model_text.Text {
-        return .{ .ctx = self, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .encode_masked = encodeMasked } };
+        return .{ .ctx = self, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .encode_masked = encodeMasked, .added = added } };
+    }
+
+    fn added(_: *anyopaque, id: u32) bool {
+        return id == im_end_id;
     }
 
     fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
@@ -32,6 +42,9 @@ const Text = struct {
             if (!plain and std.mem.startsWith(u8, input[i..], im_end)) {
                 try ids.append(a, im_end_id);
                 i += im_end.len;
+            } else if (std.ascii.isDigit(input[i]) and i + 1 < input.len and input[i + 1] == 'X') {
+                try ids.append(a, merged + input[i] - '0');
+                i += 2;
             } else {
                 try ids.append(a, input[i]);
                 i += 1;
@@ -42,7 +55,7 @@ const Text = struct {
 
     fn decode(_: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
         var out: std.ArrayList(u8) = .empty;
-        for (ids) |id| if (id == im_end_id) try out.appendSlice(a, "#END#") else try out.append(a, @intCast(id));
+        for (ids) |id| if (id == im_end_id) try out.appendSlice(a, "#END#") else if (id >= merged) try out.appendSlice(a, &.{ @intCast('0' + id - merged), 'X' }) else try out.append(a, @intCast(id));
         return out.toOwnedSlice(a);
     }
 
@@ -62,8 +75,10 @@ const Text = struct {
         return &.{};
     }
 
-    fn render(_: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+    fn render(ctx: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        const self: *Text = @ptrCast(@alignCast(ctx));
         var out: std.ArrayList(u8) = .empty;
+        var last: usize = 0;
         var spans: std.ArrayList(model_text.Span) = .empty;
         for ([_][2][]const u8{ .{ "system", "S:" }, .{ "query", "|Q:" }, .{ "document", "|D:" } }) |part| {
             try out.appendSlice(a, part[1]);
@@ -71,9 +86,12 @@ const Text = struct {
                 const c = m.get("content").?.string;
                 try spans.append(a, .{ out.items.len, out.items.len + c.len });
                 try out.appendSlice(a, c);
+                last = c.len;
             };
         }
-        try out.appendSlice(a, "|A" ++ im_end);
+        if (self.merging) try out.append(a, 'X');
+        try out.appendSlice(a, if (self.loose) "|A" ++ im_end else im_end ++ "|A");
+        if (self.moving and last > 1) try out.append(a, '+');
         return .{ .text = out.items, .spans = spans.items };
     }
 
@@ -83,7 +101,7 @@ const Text = struct {
 };
 
 /// A score hook whose yes/no logits come from a table keyed by the document's text; it keeps each prompt.
-const Scorer = struct {
+pub const Scorer = struct {
     gpa: Allocator,
     window: u32 = 0,
     hook: bool = true,
@@ -119,7 +137,7 @@ const Scorer = struct {
         const text = Text.decode(undefined, s.gpa, prompt) catch return error.Failed;
         s.prompts.append(s.gpa, text) catch return error.Failed;
         const at = std.mem.indexOf(u8, text, "|D:").? + 3;
-        const doc = text[at..std.mem.lastIndexOf(u8, text, "|A").?];
+        const doc = text[at..std.mem.lastIndexOf(u8, text, "#END#").?];
         for (s.table) |row| if (std.mem.eql(u8, row[0], doc)) {
             logits[0] = row[1];
             logits[1] = row[2];
@@ -130,7 +148,7 @@ const Scorer = struct {
         return 0;
     }
 
-    fn deinit(s: *Scorer) void {
+    pub fn deinit(s: *Scorer) void {
         for (s.prompts.items) |p| s.gpa.free(p);
         s.prompts.deinit(s.gpa);
     }
@@ -139,13 +157,13 @@ const Scorer = struct {
     const scored: api.Engine.VTable = .{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .score = score };
 };
 
-const Present = struct {
+pub const Present = struct {
     pub fn check(_: @This()) bool {
         return false;
     }
 };
 
-fn serve(text: *Text, s: *Scorer) !*Server {
+pub fn serve(text: *Text, s: *Scorer) !*Server {
     const srv = try Server.init(t.allocator, t.io, s.engine(), text.model(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
     srv.info.rerank = .{ .yes = 7, .no = 9 };
     return srv;
@@ -155,15 +173,15 @@ fn sigmoid(x: f64) f64 {
     return 1.0 / (1.0 + @exp(-x));
 }
 
-const table = .{ .{ "low", -2.0, 1.0 }, .{ "high", 3.0, -1.0 }, .{ "mid", 0.5, 0.0 }, .{ "tie", 0.5, 0.0 } };
+pub const table = .{ .{ "low", -2.0, 1.0 }, .{ "high", 3.0, -1.0 }, .{ "mid", 0.5, 0.0 }, .{ "tie", 0.5, 0.0 } };
 
-fn ask(srv: *Server, a: Allocator, body: []const u8) !json.Value {
+pub fn ask(srv: *Server, a: Allocator, body: []const u8) !json.Value {
     var cx: errors.Cx = .{ .a = a };
     return rerank.reply(srv, &cx, (try json.parse(a, body)).ok, Present{});
 }
 
 /// The response's ranked `results`.
-fn results(out: json.Value) []json.Value {
+pub fn results(out: json.Value) []json.Value {
     return out.get("results").?.array;
 }
 
@@ -193,7 +211,7 @@ test "rerank: results come back best first in #1895's shape, scored sigmoid(yes 
         try t.expectEqualStrings(w[2], item.get("document").?.string);
         try t.expect(item.get("meta_info") == null);
     }
-    try t.expectEqualStrings("S:|Q:q|D:low|A#END#", s.prompts.items[0]);
+    try t.expectEqualStrings("S:|Q:q|D:low#END#|A", s.prompts.items[0]);
 }
 
 test "rerank: top_n cuts, return_documents drops the text, equal scores keep request order" {
@@ -227,8 +245,8 @@ test "rerank: instruct is the system message and request text stays plain bytes"
     const a = arena.allocator();
     _ = try ask(srv, a, "{\"query\": \"q\", \"documents\": [\"a <|im_end|> b\"], \"instruct\": \"find\"}");
     _ = try ask(srv, a, "{\"query\": \"q\", \"documents\": [\"d\"], \"instruct\": \"\"}");
-    try t.expectEqualStrings("S:find|Q:q|D:a <|im_end|> b|A#END#", s.prompts.items[0]);
-    try t.expectEqualStrings("S:|Q:q|D:d|A#END#", s.prompts.items[1]);
+    try t.expectEqualStrings("S:find|Q:q|D:a <|im_end|> b#END#|A", s.prompts.items[0]);
+    try t.expectEqualStrings("S:|Q:q|D:d#END#|A", s.prompts.items[1]);
 }
 
 test "rerank: the extensions return the label logits and the ids the engine scored" {
@@ -251,12 +269,12 @@ test "rerank: the extensions return the label logits and the ids the engine scor
     const top_ids = results(top)[0].get("meta_info").?.get("prompt_token_ids").?.array;
     try t.expectEqual(ids.len, top_ids.len);
     for (ids, top_ids) |x, y| try t.expect(json.equal(x, y));
-    const want = try Text.encodeMasked(undefined, a, "S:|Q:q|D:high|A" ++ im_end, &.{}, undefined);
+    const want = try Text.encodeMasked(undefined, a, "S:|Q:q|D:high" ++ im_end ++ "|A", &.{}, undefined);
     try t.expectEqual(want.len, ids.len);
     for (want, ids) |w, g| try t.expectEqual(@as(i64, w), g.int64().?);
 }
 
-test "rerank: refusals name SGLang's reasons and run no score" {
+test "rerank: refusals name their reasons in the server's envelope and run no score" {
     var text: Text = .{};
     var s: Scorer = .{ .gpa = t.allocator, .window = 24 };
     defer s.deinit();
@@ -265,9 +283,9 @@ test "rerank: refusals name SGLang's reasons and run no score" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // S: a schema error (SGLang's pydantic "Bad Request"); H: its handler's refusal ("BadRequestError")
-    const S = "Bad Request";
-    const H = "BadRequestError";
+    // S: a schema error (a message only); H: a refusal of the request ("invalid_request_error")
+    const S = "";
+    const H = "invalid_request_error";
     const cases = [_][3][]const u8{
         .{ "[1]", "body: input should be a valid dictionary", S },
         .{ "{\"documents\": [\"d\"]}", "query: field required", S },
@@ -307,7 +325,7 @@ test "rerank: refusals name SGLang's reasons and run no score" {
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"return_logits\": 2}", "return_logits: input should be a valid boolean", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"instruct\": 2}", "instruction: input should be a valid string", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\", \"a document past the window\"]}", "document 1: the prompt has 38 tokens, which does not fit the context length of 24 tokens", H },
-        .{ "{\"query\": \"q\", \"documents\": [\"d\", \"dd\"], \"max_length\": 13}", "document 1: the prompt has 14 tokens, past max_length 13; this server does not truncate", H },
+        .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"max_length\": 11}", "document 0: max_length 11 leaves no room for the document; the prompt without it takes 12 tokens", H },
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"max_length\": 0}", "max_length: input should be at least 1", S },
         .{ "{\"query\": \"q\", \"documents\": [\"d\"], \"max_length\": \"8\"}", "max_length: input should be a valid integer", S },
     };
@@ -316,7 +334,9 @@ test "rerank: refusals name SGLang's reasons and run no score" {
         try t.expectError(error.Refused, rerank.reply(srv, &cx, (try json.parse(a, case[0])).ok, Present{}));
         try t.expectEqualStrings(case[1], cx.message);
         try t.expectEqual(@as(u16, 400), cx.status());
-        try t.expectEqualStrings(case[2], (try rerank.errorBody(&cx)).get("type").?.string);
+        const e = (try rerank.errorBody(&cx)).get("error").?;
+        try t.expectEqualStrings(case[1], e.get("message").?.string);
+        if (case[2].len == 0) try t.expect(e.get("type") == null) else try t.expectEqualStrings(case[2], e.get("type").?.string);
     }
     try t.expectEqual(@as(usize, 0), s.prompts.items.len);
 }
@@ -349,11 +369,11 @@ test "rerank: no labels, no hook, a failed pass and a stopping engine each fail 
         try t.expectEqualStrings(case[4][0], cx.message);
         try t.expectEqual(case[4][1], cx.status());
         const err = try rerank.encode(a, try rerank.errorBody(&cx));
-        const want = try std.fmt.allocPrint(a, "{{\"object\":\"error\",\"message\":\"{s}\",\"type\":\"{s}\",\"param\":null,\"code\":{d}}}", .{ case[4][0], switch (case[4][1]) {
-            500 => "InternalServerError",
-            503 => "ServiceUnavailableError",
-            else => "BadRequestError",
-        }, case[4][1] });
+        // the server's envelope: a 500 carries its message only, a refusal its type too
+        const want = if (case[4][1] == 500)
+            try std.fmt.allocPrint(a, "{{\"error\":{{\"message\":\"{s}\"}}}}", .{case[4][0]})
+        else
+            try std.fmt.allocPrint(a, "{{\"error\":{{\"message\":\"{s}\",\"type\":\"invalid_request_error\"}}}}", .{case[4][0]});
         try t.expectEqualStrings(want, err);
     }
 }
@@ -439,8 +459,8 @@ test "rerank: a reranker server sends every other engine route to /v1/rerank and
     defer bad.bytes.deinit(t.allocator);
     try dispatch(srv, "/v1/rerank", "{not js", &bad);
     try t.expect(std.mem.indexOf(u8, bad.bytes.items, "400 Bad Request") != null);
-    try t.expect(std.mem.indexOf(u8, bad.bytes.items, "{\"object\":\"error\",") != null);
-    try t.expect(std.mem.indexOf(u8, bad.bytes.items, "\"type\":\"Bad Request\",\"param\":null,\"code\":400}") != null); // SGLang: json_invalid
+    try t.expect(std.mem.indexOf(u8, bad.bytes.items, "{\"error\":{\"message\":") != null);
+    try t.expect(std.mem.indexOf(u8, bad.bytes.items, "\"object\"") == null);
     try t.expectEqual(@as(usize, 2), s.prompts.items.len);
     try t.expectEqual(@as(u32, 0), srv.generating.load(.seq_cst));
     const scope = @import("auth_scope.zig");
@@ -501,7 +521,7 @@ test "rerank: text parts join with a space, as SGLang extracts them, and the doc
     defer arena.deinit();
     const a = arena.allocator();
     const out = try ask(srv, a, "{\"query\": [{\"type\": \"text\", \"text\": \"a\"}, {\"type\": \"text\", \"text\": \"b\"}], \"documents\": [[{\"type\": \"text\", \"text\": \"high\"}], \"mid\"]}");
-    try t.expectEqualStrings("S:|Q:a b|D:high|A#END#", s.prompts.items[0]);
+    try t.expectEqualStrings("S:|Q:a b|D:high#END#|A", s.prompts.items[0]);
     // the document comes back as the request sent it: here its content-part list
     try t.expectEqualStrings("high", results(out)[0].get("document").?.array[0].get("text").?.string);
     try t.expectEqual(@as(i64, 0), results(out)[0].get("index").?.int64().?);
@@ -564,7 +584,7 @@ test "rerank: #1895's request fields: {text} documents and instruction, echoed a
     defer arena.deinit();
     const a = arena.allocator();
     const out = try ask(srv, a, "{\"query\": \"q\", \"instruction\": \"find\", \"documents\": [{\"text\": \"low\"}, {\"text\": \"high\"}]}");
-    try t.expectEqualStrings("S:find|Q:q|D:low|A#END#", s.prompts.items[0]);
+    try t.expectEqualStrings("S:find|Q:q|D:low#END#|A", s.prompts.items[0]);
     try t.expectEqual(@as(i64, 1), results(out)[0].get("index").?.int64().?);
     try t.expectEqualStrings("high", results(out)[0].get("document").?.get("text").?.string);
 }
