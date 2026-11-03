@@ -60,3 +60,6 @@ Hashing synchronizes and reads back the producing stream at every layer. Traced 
 batched windows; the startup line distinguishes requested graphs from effective use. This can hide a timing race
 and has unmeasured overhead. Check traced/untraced tokens separately; equal traced runs do not qualify graph replay,
 cache resume, RoCE ordering or a checkpoint. Keep both ranks' logs and exact request/output IDs with the receipts.
+
+Compare hashes on and off with `TF_DSV41_GRAPHS=0` in both arms, and keep a separate graphs-on arm without hashes.
+The eager hash path cannot reproduce a failure confined to graph replay.
