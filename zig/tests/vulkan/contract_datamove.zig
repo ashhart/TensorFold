@@ -7,123 +7,17 @@ const fx = @import("stage1_fixture.zig");
 const c = contract.spec;
 const g = contract.gates;
 
-/// Guard bytes on both sides of every rig payload (the largest minStorageBufferOffsetAlignment).
-pub const guard = 256;
-const pattern = 0xa5;
-
-// Each call uploads inputs, poisons outputs with 0xff, and guards every payload.
-pub const Rig = struct {
-    a: std.mem.Allocator,
-    dev: *const vk.Device,
-    cmds: *vk.Commands,
-    staging: vk.Buffer,
-    timeout_ns: u64,
-    slots: std.ArrayList(Slot) = .empty,
-    seen: std.ArrayList(u8) = .empty,
-    outs: std.ArrayList(u8) = .empty,
-
-    const Kind = enum { input, output };
-    const Slot = struct { buf: vk.Buffer, len: usize, kind: Kind };
-
-    pub fn deinit(r: *Rig) void {
-        r.reset();
-        r.slots.deinit(r.a);
-        r.seen.deinit(r.a);
-        r.outs.deinit(r.a);
-    }
-
-    pub fn reset(r: *Rig) void {
-        for (r.slots.items) |*s| s.buf.deinit();
-        r.slots.clearRetainingCapacity();
-    }
-
-    fn slot(r: *Rig, data: ?[]const u8, len: usize, kind: Kind) !usize {
-        const all = try r.a.alloc(u8, len + 2 * guard);
-        defer r.a.free(all);
-        @memset(all, pattern);
-        if (data) |d| {
-            @memcpy(all[guard..][0..len], d);
-        } else {
-            @memset(all[guard..][0..len], 0xff); // an output element no launch writes reads as NaN
-        }
-        var b = try vk.Buffer.init(r.dev, .device, all.len);
-        errdefer b.deinit();
-        try vk.upload(r.cmds, b, 0, r.staging, all, r.timeout_ns);
-        try r.slots.append(r.a, .{ .buf = b, .len = len, .kind = kind });
-        return r.slots.items.len - 1;
-    }
-
-    pub fn input(r: *Rig, data: []const u8) !usize {
-        return r.slot(data, data.len, .input);
-    }
-
-    /// An output of `len` bytes, all 0xff until the launch writes it.
-    pub fn output(r: *Rig, len: usize) !usize {
-        return r.slot(null, len, .output);
-    }
-
-    /// The payload of slot `i` as a typed view for a binding; call between prepare and the next prepare.
-    pub fn view(r: *Rig, i: usize, kind: vk.tensor.Kind, elements: usize) !vk.tensor.View {
-        const s = &r.slots.items[i];
-        return vk.tensor.View.init(&s.buf, kind, guard, elements);
-    }
-
-    fn gatherBytes(r: *Rig, kind: Kind, out: *std.ArrayList(u8), whole: bool) ![]const u8 {
-        out.clearRetainingCapacity();
-        for (r.slots.items) |s| if (s.kind == kind or whole) {
-            const at = out.items.len;
-            const n = if (whole) s.len + 2 * guard else s.len;
-            try out.resize(r.a, at + n);
-            try vk.download(r.cmds, s.buf, if (whole) 0 else guard, r.staging, out.items[at..][0..n], r.timeout_ns);
-        };
-        return out.items;
-    }
-
-    pub fn outputBytes(r: *Rig) ![]const u8 {
-        return r.gatherBytes(.output, &r.outs, false);
-    }
-
-    pub fn inputBytes(r: *Rig) ![]const u8 {
-        return r.gatherBytes(.input, &r.seen, false);
-    }
-
-    /// Every guard of every buffer still holds its pattern.
-    pub fn intact(r: *Rig) !bool {
-        const all = try r.gatherBytes(.input, &r.seen, true);
-        var at: usize = 0;
-        for (r.slots.items) |s| {
-            for (all[at..][0..guard]) |v| if (v != pattern) return false;
-            for (all[at + guard + s.len ..][0..guard]) |v| if (v != pattern) return false;
-            at += s.len + 2 * guard;
-        }
-        return true;
-    }
-
-    /// Every payload is its own buffer, so no output range overlaps an input range.
-    pub fn overlap(r: *Rig) bool {
-        _ = r;
-        return false;
-    }
-};
+const rig = @import("contract_datamove_rig.zig");
+const Rig = rig.Rig;
+const read16 = rig.read16;
+const write16 = rig.write16;
+const read32 = rig.read32;
+const write32 = rig.write32;
+const buf = rig.buf;
+pub const guard = rig.guard;
 
 fn none(_: c.Shape) usize {
     return 0;
-}
-
-fn read16(bytes: []const u8, i: usize) u16 {
-    return std.mem.readInt(u16, bytes[2 * i ..][0..2], .little);
-}
-
-fn write16(bytes: []u8, i: usize, bits: u16) void {
-    std.mem.writeInt(u16, bytes[2 * i ..][0..2], bits, .little);
-}
-
-fn read32(bytes: []const u8, i: usize) u32 {
-    return std.mem.readInt(u32, bytes[4 * i ..][0..4], .little);
-}
-
-fn write32(bytes: []u8, i: usize, bits: u32) void {
-    std.mem.writeInt(u32, bytes[4 * i ..][0..4], bits, .little);
 }
 
 /// The contract's gather id scheme: [0] out of range, [1] == [2] (a repeated row), 0, then cycling rows.
@@ -152,10 +46,6 @@ fn randomBf16(rng: std.Random) u16 {
     const exp: u16 = 14 + rng.uintLessThan(u8, 113);
     const mant: u16 = rng.int(u7);
     return sign << 15 | exp << 7 | mant;
-}
-
-fn buf(msg: *[160]u8, comptime fmt: []const u8, args: anytype) ?[]const u8 {
-    return std.fmt.bufPrint(msg, fmt, args) catch "message too long";
 }
 
 // Casts use contract RNE for f32 -> bf16 (NaNs keep class) and exact bf16 -> f32 widening; both match reference bytes.
