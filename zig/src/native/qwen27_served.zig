@@ -303,7 +303,19 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         why.* = try drafterRefusal(a, dir, d, err);
         return err;
     };
-    const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
+    const gguf = dir.len >= 5 and std.ascii.eqlIgnoreCase(dir[dir.len - 5 ..], ".gguf") and blk: {
+        const stat = std.Io.Dir.cwd().statFile(io, dir, .{}) catch break :blk false;
+        break :blk stat.kind == .file;
+    };
+    if (gguf and (o.drafter != null or o.vision != null or o.learn != null)) {
+        why.* = "GGUF: --drafter, --vision and disk prompt learning are not qualified for this source";
+        return error.UnsupportedGgufOption;
+    }
+    var gguf_problem: q.gguf.Problem = .{};
+    const model = if (gguf) q.model.Model.loadGguf(gpa, io, dir, 128, &gguf_problem) catch |err| {
+        if (gguf_problem.message().len != 0) why.* = try a.dupe(u8, gguf_problem.message());
+        return err;
+    } else try q.model.Model.loadDeferred(gpa, io, dir, 128);
     errdefer model.deinit();
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken

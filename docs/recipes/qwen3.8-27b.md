@@ -95,7 +95,7 @@ window into its history as it reads it, so the commit and publication kernels go
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
 
-## GGUF host adapter
+## GGUF on Metal
 
 `families/qwen27/gguf.zig` prepares the dense family's GGUF metadata and tensor identities on the host (#1920).
 It accepts the observed qwen35 architecture, refuses the unproven qwen3 alias, uses core's typed views
@@ -113,21 +113,51 @@ original bytes. GGUF matrices reverse dimension labels only; the convolution is 
 The host fixture checks every repacked value against independent source decoding for all ten core formats.
 Core's documented signed-zero cancellation exception still applies; this does not extend its exactness claim.
 
-Destination names are identities for future native loading, not ready-to-serve tensors. The `ssm_a` entry has an
-explicit negative-exponential-decay role: its bytes are not relabelled as a usable logarithmic `A_log`. GDN head
-ordering still needs checkpoint qualification. No coefficient is narrowed or group merged.
+The native GGUF loader copies repeat-major DeltaNet value heads to the engine's key-major head order.
+It moves QKV's value rows, Z/A/B rows, output columns, convolution taps, decay and time bias together;
+Q/K rows and attention Q/gate rows retain their order. Packed codes and FP32 coefficient bits stay intact.
+The `ssm_a` role is negative exponential decay: the loader explicitly computes `log(-ssm_a)` for the existing
+DeltaNet kernel's logarithmic input. It refuses nonfinite or nonnegative decay values.
 
 The final, input, post-attention, gated-linear, Q and K norm tensors carry the explicit `rms_gain` role.
 Sixteen values per class from both GGUF variants match the supplied MLX BF16 gains after rounding to BF16.
 Both checkpoints therefore store effective multiplicative gains here: the adapter neither adds nor subtracts one.
 It preserves the GGUF F32 values, including the bits beyond the MLX BF16 representation. The paired sample fixture
 checks all 96 values and the borrowed byte identities; this comparison does not qualify the remaining weights.
-Existing Metal paths still need FP32 metadata and group-16 qualification, tokenizer/chat-template integration,
-prepared-cache integration and real-model token/performance gates. GGUF model arguments receive a coming-later
-refusal; the adapter does not enable end-to-end GGUF inference.
+Serve a Q4_K_M or Q8_0 file directly, or a directory containing exactly one GGUF file and no `config.json`:
 
 ```sh
-zig build test-qwen27-gguf-host test-gguf-host -j1 --summary all
+tensorfold-native serve model.gguf --no-drafts
+tensorfold-native serve gguf-directory --no-drafts
+```
+
+Other source quantizations and missing tokenizer keys are refused by name. Text comes from the GGUF vocabulary,
+merges, token kinds, BOS/EOS settings and chat template; no tokenizer sidecar is read. The supported `qwen35`
+pre-tokenizer selects NFC and the family's byte-level BPE splitting rule. Native checkpoint directories retain
+their existing loader and operators. GGUF currently refuses `--drafter`, `--vision`, `--slide`, tensor parallelism,
+`--speed-up` and disk prompt learning.
+
+FP32 coefficient tables feed the existing shared weight-only projection. Six-bit codes are widened losslessly
+to eight-bit codes in groups of 16; four- and eight-bit groups of 32 stay intact. Existing kernels handle embedding,
+activation narrowing, norms and fused output copies. No shader source or entry point changes.
+
+`tf-qwen27-gguf-check MODEL.gguf` checks the first layer's eight matrix classes against core's independent block
+decoder, including every decoded weight bit and every fixed-input binary64 projection row after layout conversion.
+On a Mac, `tf-qwen27-gguf-reference MODEL.gguf CASES.json` decodes original source weights independently and runs
+binary64 CPU arithmetic with the family's BF16 activation rounding points. Its three cases contain `id`,
+`prompt_ids` from `/tokenize` and `device_tokens` from greedy serving with `return_token_ids`; it compares eight
+tokens per case. The CPU reference retains source head order and does not use native repacks or layout helpers.
+Its decoded F32 cache is capped at 112 GiB, so run it separately from the server on a machine with sufficient RAM.
+On M3 Ultra, the observed Q4_K_M file matches all 24 CPU reference tokens across three fixed prompts
+(21, 25 and 24 rendered tokens), each served greedily for 32 tokens with thinking and drafts off and EOS ignored.
+Observed startup/physical process footprint at context 1,024, one stream and prompt cache off: Q4_K_M 61.99 s /
+27.63 GiB; Q8_0 79.33 s / 35.78 GiB. File-cache state was uncontrolled and the files had been read before.
+The comparison uses the same decoded GGUF weights; equality with a separately quantized MLX checkpoint is not claimed.
+Additional chips, drafted operation and feature combinations require their own checkpoint receipts.
+
+```sh
+zig build test-qwen27-gguf-host test-gguf-host test-gguf-text-host test-qwen27-gguf-bindings-host -j1
+zig build tf-qwen27-gguf-check tf-qwen27-gguf-reference test-qwen27-gguf-reference-host -j1
 ```
 
 ## MLX

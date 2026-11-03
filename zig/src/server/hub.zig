@@ -23,7 +23,14 @@ pub fn isDir(io: std.Io, path: []const u8) bool {
 pub fn resolve(a: Allocator, io: std.Io, environ: ?*const std.process.Environ.Map, model: []const u8, problem: *[]const u8) !?[]const u8 {
     const home = if (environ) |e| e.get("HOME") orelse e.get("USERPROFILE") orelse "" else ""; // Windows sets USERPROFILE
     const expanded = if (std.mem.startsWith(u8, model, "~/")) try std.fs.path.join(a, &.{ home, model[2..] }) else model;
-    if (isDir(io, expanded)) return expanded;
+    if (isDir(io, expanded)) {
+        const file = @import("gguf_path.zig").inDirectory(a, io, expanded, problem) catch |err| switch (err) {
+            error.AmbiguousGguf => return null,
+            else => return err,
+        };
+        return file orelse expanded;
+    }
+    if (@import("gguf_path.zig").isFile(io, expanded)) return expanded;
     if (@import("gguf_refusal.zig").forPath(expanded)) |why| {
         problem.* = why;
         return null;
@@ -72,4 +79,8 @@ test "repo ids" {
     try std.testing.expect(isRepoId("TensorFold/Qwen3.8-27B-MLX-4bit"));
     try std.testing.expect(!isRepoId("/models/x") and !isRepoId("a/b/c") and !isRepoId("plain"));
     try std.testing.expectEqualStrings("x", servedName("", "/models/x/", "/models/x/"));
+}
+
+test {
+    _ = @import("gguf_path.zig");
 }

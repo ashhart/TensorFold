@@ -175,4 +175,5 @@ test "Qwen27 GGUF: transposed source rows and a full-attention gate of the wrong
 
 test {
     _ = @import("gguf_real_test.zig");
+    _ = @import("gguf_projection_test.zig");
 }

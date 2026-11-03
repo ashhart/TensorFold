@@ -72,8 +72,15 @@ const Writer = struct {
     }
 };
 pub fn image(a: std.mem.Allocator, kind: g.TensorKind, arch: []const u8) ![]u8 {
+    return imageWithType(a, kind, arch, null);
+}
+pub fn servingImage(a: std.mem.Allocator, kind: g.TensorKind, arch: []const u8, file_type: u32) ![]u8 {
+    return imageWithType(a, kind, arch, file_type);
+}
+fn imageWithType(a: std.mem.Allocator, kind: g.TensorKind, arch: []const u8, file_type: ?u32) ![]u8 {
     var w: Writer = .{};
     w.kv("general.architecture", .{ .string = arch });
+    if (file_type) |f| w.kv("general.file_type", .{ .uint32 = f });
     const ints = .{ .{ "block_count", 4 }, .{ "context_length", 262144 }, .{ "embedding_length", 256 }, .{ "feed_forward_length", 256 }, .{ "attention.head_count", 1 }, .{ "attention.head_count_kv", 1 }, .{ "attention.key_length", 256 }, .{ "attention.value_length", 256 }, .{ "rope.dimension_count", 64 }, .{ "ssm.conv_kernel", 4 }, .{ "ssm.state_size", 128 }, .{ "ssm.group_count", 1 }, .{ "ssm.time_step_rank", 16 }, .{ "ssm.inner_size", 2048 }, .{ "full_attention_interval", 4 } };
     inline for (ints) |entry| {
         var buf: [128]u8 = undefined;

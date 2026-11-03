@@ -28,10 +28,10 @@ const Backend = struct {
     }
 };
 pub const Case = common.Case(core.contract, Backend);
-pub const count = common.variants.len * std.enums.values(common.Control).len;
+pub const count = common.cuda_variants.len * std.enums.values(common.Control).len;
 pub fn collect(a: std.mem.Allocator, gpu: @import("check.zig").Gpu, stream: cuda.Stream, kernels: *api.Kernels, cases: *[count]Case, out: *std.ArrayList(core.contract.gates.Kernel)) !void {
     var i: usize = 0;
-    for (common.variants) |variant| for (std.enums.values(common.Control)) |control| {
+    for (common.cuda_variants) |variant| for (std.enums.values(common.Control)) |control| {
         cases[i] = .{ .a = a, .rig = .{ .gpu = gpu, .s = stream }, .backend = .{ .kernels = kernels }, .format = variant.format, .group = variant.group, .scale_kind = variant.scale_kind, .control = control };
         i += 1;
     };

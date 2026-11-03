@@ -116,6 +116,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-nemotron-window-host", "Nemotron advertised capacity and unchanged chat admission without devices").dependOn(&windows.step);
     b.step("test-thinking-request-host", "Client refusals and internal note and lesson requests without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking request:"} })).step);
     b.step("test-thinking-benchmark-host", "Benchmark thinking capability and request bodies without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking benchmark:"} })).step);
+    const gguf_text = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "GGUF text:", "GGUF path" } }));
+    b.step("test-gguf-text-host", "GGUF tokenizer/template data and local source selection without a GPU").dependOn(&gguf_text.step);
     const deepseek = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"DeepSeek chat:"} }));
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);

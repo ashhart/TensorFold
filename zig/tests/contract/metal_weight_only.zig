@@ -17,7 +17,7 @@ const Backend = struct {
             const ref = try r.input(bytes);
             b.views[i] = .{ .buffer = ref.buf, .offset = ref.off, .len = bytes.len };
         }
-        const size = (try tf.weight_only.validate(f.p)).out;
+        const size = (try tf.weight_only.validateMetal(f.p)).out;
         const ref = try r.output(size);
         b.views[4] = .{ .buffer = ref.buf, .offset = ref.off, .len = size };
     }

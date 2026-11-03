@@ -1,5 +1,7 @@
 //! Qwen's view of shared checkpoint contracts and native tensor storage.
 pub const checkpoint = @import("src/core/checkpoint.zig");
+pub const weight_only = @import("src/core/weight_only.zig");
+pub const weight_only_metal_adapter = @import("src/core/weight_only_metal_impl.zig").Adapter;
 pub const gguf = @import("src/core/gguf.zig");
 pub const checkpoint_metal = @import("src/core/checkpoint_metal.zig");
 pub const safetensors = @import("src/core/safetensors.zig");

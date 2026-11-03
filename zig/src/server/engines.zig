@@ -47,6 +47,18 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         problem.* = why;
         return null;
     }
+    if (@import("gguf_path.zig").isFile(io, dir)) {
+        var metal = false;
+        for (native.backends) |name| metal = metal or std.mem.eql(u8, name, "metal");
+        if (!metal) {
+            problem.* = "GGUF: this source is supported by the Metal qwen27 engine only";
+            return null;
+        }
+        if (args.slide or args.tp != 1 or args.speed_up != null) {
+            problem.* = "GGUF: --slide, --tp and --speed-up are not qualified for this source";
+            return null;
+        }
+    }
     if (args.idle_unload > 0) {
         const world = if (std.c.getenv("TF_GLM_WORLD")) |value| std.mem.span(value) else null;
         if (@import("idle_unload_policy.zig").refusal(native.backends, model_type, args.idle_unload, world, args.tp)) |why| {

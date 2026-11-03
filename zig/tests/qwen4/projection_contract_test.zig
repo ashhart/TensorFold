@@ -16,7 +16,7 @@ const Backend = struct {
         b.views[1] = try r.add(f.weight, f.weight.len);
         b.views[2] = try r.add(f.scales, f.scales.len);
         b.views[3] = try r.add(f.biases, f.biases.len);
-        b.views[4] = try r.add(null, (try wo.validate(f.p)).out);
+        b.views[4] = try r.add(null, (try wo.validateMetal(f.p)).out);
     }
     pub fn launch(b: *Backend, _: *HostRig, p: wo.Params, control: fixture.Control, repetition: c_int) !void {
         tf_weight_only_cpu(@ptrCast(@alignCast(b.views[0].ptr)), b.views[1].ptr, b.views[2].ptr, b.views[3].ptr, @ptrCast(@alignCast(b.views[4].ptr)), p, @intCast(@backingInt(control)), repetition);
