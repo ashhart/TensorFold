@@ -199,7 +199,7 @@ pub fn ownWords(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
         if (text[i] == '<' and i + 1 < text.len and std.ascii.isAlphabetic(text[i + 1])) {
             var j = i + 1;
             while (j < text.len and isNameByte(text[j])) j += 1;
-            if (j < text.len and (text[j] == '>' or text[j] == ' ')) if (closers.getPtr(text[i + 1 .. j])) |c| {
+            if (j < text.len and (text[j] == '>' or text[j] == ' ')) if (closersFor(&closers, text[i + 1 .. j])) |c| {
                 while (c.next < c.at.items.len and c.at.items[c.next] < j) c.next += 1; // openers only move forward
                 if (c.next < c.at.items.len) {
                     i = c.at.items[c.next] + (j - i) + 2; // past `</name>`
@@ -222,6 +222,14 @@ fn isNameByte(c: u8) bool {
 
 /// Where a name's closers start, in order, and the first one an opener has not yet passed.
 const Closers = struct { at: std.ArrayList(usize) = .empty, next: usize = 0 };
+
+/// The closers of `name`, matching a tag whose letters differ.
+fn closersFor(map: *std.StringHashMapUnmanaged(Closers), name: []const u8) ?*Closers {
+    if (map.getPtr(name)) |c| return c;
+    var it = map.iterator();
+    while (it.next()) |e| if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) return e.value_ptr; // </Memories> closes <memories>
+    return null;
+}
 
 /// Every `</name>` in `text`, found in one pass so that no opener rescans the rest of it.
 fn closersOf(a: Allocator, text: []const u8) Allocator.Error!std.StringHashMapUnmanaged(Closers) {
@@ -368,6 +376,8 @@ test "harness context and transform asks do not read as research" {
     defer arena.deinit();
     const own = try ownWords(arena.allocator(), "<memories>\nCurrent time: 13:52 UTC\n</memories>\nReply with five words. <b>bold</b> stays a<b");
     try std.testing.expectEqualStrings("Reply with five words.  stays a<b", own);
+    const cased = try ownWords(arena.allocator(), "<Memories>\nlatest release\n</memories>\nSay hello");
+    try std.testing.expectEqualStrings("Say hello", cased);
     try std.testing.expect(isUtility("Compress into one routing hint of at most 12 words: WHEN to use"));
     try std.testing.expect(isUtility("Generate a short title for this conversation"));
     try std.testing.expect(!isUtility("Fix the failing test in src/app.py and explain why it failed"));
