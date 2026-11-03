@@ -9,8 +9,9 @@ requested storage, with the shared runtime reserve. Unused source-file padding i
 `info` prints the base text load and cold pack budgets separately; these are conservative plans, not measured fit results.
 A 128 GB Mac may not hold the complete load even when the weight files fit.
 Use a smaller quantization or raise the OS wired limit where supported; fewer streams or a shorter context reduce
-additional session storage. Native Metal does not implement `--ple-on-ssd` yet. CUDA also serves the 4-bit checkpoint
-([Flash Next on CUDA](flash-next-cuda.md)), and HIP serves it and two oQ checkpoints on a Strix Halo iGPU
+additional session storage. Native Metal's `--ple-on-ssd` leaves the n-gram tables in the checkpoint and reads their
+rows from SSD in batches ([Exact Fluid Subgraph Residency](fluid-subgraph-residency.md)). CUDA also serves the 4-bit
+checkpoint ([Flash Next on CUDA](flash-next-cuda.md)), and HIP serves it and two oQ checkpoints on a Strix Halo iGPU
 ([native HIP](#native-hip-on-a-strix-halo-igpu)).
 
 ```bash
