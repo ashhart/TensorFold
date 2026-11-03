@@ -206,6 +206,20 @@ def cosine(a, b) -> float:
     return dot / math.sqrt(sum(x * x for x in a) * sum(y * y for y in b))
 
 
+def check_vectors(name: str, made: dict, count: int) -> int:
+    """The reference's width, after checking it holds `count` finite, nonzero vectors of one width."""
+    vectors = made.get("vectors")
+    if not isinstance(vectors, list) or len(vectors) != count or not vectors:
+        raise SystemExit(f"FAIL: {name} does not hold {count} vectors")
+    width = len(vectors[0])
+    for i, v in enumerate(vectors):
+        if len(v) != width or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in v):
+            raise SystemExit(f"FAIL: {name} vector {i} is not {width} finite values")
+        if sum(x * x for x in v) == 0:
+            raise SystemExit(f"FAIL: {name} vector {i} is zero")
+    return width
+
+
 def check(args) -> None:
     ref = json.load(open(args.ref))
     bar = json.load(open(args.bar))
@@ -214,8 +228,13 @@ def check(args) -> None:
     check_pins("--ref", ref)
     check_pins("--bar", bar)
     texts = ref["texts"]
-    n, width = len(texts), len(ref["vectors"][0])
+    n = len(texts)
+    width = check_vectors("--ref", ref, n)
+    if check_vectors("--bar", bar, n) != width or ref.get("ids") != bar.get("ids"):
+        raise SystemExit("FAIL: --ref and --bar differ in width or token ids")
     bar_worst = max(1 - cosine(b, r) for b, r in zip(bar["vectors"], ref["vectors"]))
+    if not math.isfinite(bar_worst):
+        raise SystemExit("FAIL: the bar's distance is not finite")
     limit = min(args.max_distance, args.bar_factor * bar_worst)
     print(f"bar: transformers bf16 worst distance {bar_worst:.2e}; limit {limit:.2e}")
     enc = {"encoding_format": "base64"}
@@ -229,7 +248,7 @@ def check(args) -> None:
         norm = math.sqrt(sum(x * x for x in v))
         same, by_ids = batch[i] == alone[i], batch[i] == ids[i]
         print(f"input {i}: distance {dist:.2e}, norm {norm:.6f}, batch == alone {same}, ids == text {by_ids}")
-        ok &= dist <= limit and same and by_ids and abs(norm - 1) < 1e-4
+        ok &= math.isfinite(dist) and dist <= limit and same and by_ids and abs(norm - 1) < 1e-4
     vs = [floats(b) for b in batch]
     scores = [[sum(x * y for x, y in zip(vs[q], vs[2 + d])) for d in range(2)] for q in range(2)]
     worst = max(abs(scores[q][d] - CARD_SCORES[q][d]) for q in range(2) for d in range(2))
