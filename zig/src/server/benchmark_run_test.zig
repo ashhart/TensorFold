@@ -330,7 +330,7 @@ const two_ranks =
     \\"cores":null}],"gpu_count":1,"source":"partial"}}
 ;
 
-test "an attached run copies an accepted server manifest into its receipt and is not called unranked" {
+test "an attached run keeps legacy manifest metadata but saves an unranked receipt" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -346,11 +346,11 @@ test "an attached run copies an accepted server manifest into its receipt and is
     defer f.stop();
     const out = try r.path("run.json");
     try std.testing.expectEqual(@as(u8, 0), try r.command(try cli.runArgs(&r, try f.url(a, ""), out)));
-    try std.testing.expect(r.has("Receipt saved") and !r.has("unranked") and f.count() == 5);
+    try std.testing.expect(r.has("Receipt saved") and r.has("unranked") and f.count() == 5);
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
     const settings = v.get("settings").?;
-    try std.testing.expect(!settings.get("managed").?.bool and settings.get("rank_count").?.int64() == 2);
+    try std.testing.expect(!settings.get("managed").?.bool and settings.get("rank_count").? == .null);
     try std.testing.expectEqualStrings("9.8.7", v.get("runtime").?.get("tensorfold_version").?.string);
     try std.testing.expectEqualStrings("partial", v.get("hardware").?.get("source").?.string);
     try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", v.get("model").?.get("revision").?.string);

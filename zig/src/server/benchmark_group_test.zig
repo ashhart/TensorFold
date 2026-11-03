@@ -169,6 +169,43 @@ test "benchmark group: both managed and attached CLI runs copy the loaded server
     }
 }
 
+test "benchmark group: managed and attached CLI runs drop legacy hints without loaded topology" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |managed| for ([_]u8{ 1, 2 }) |hint| {
+        const backend = if (managed) server.buildBackend() else "cuda";
+        const doc = try document(a, hint, backend);
+        _ = doc.object.swapRemove("group");
+        const bytes = try json.stringify(a, doc, .{});
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var r = try cli.Run.init(a, &tmp);
+        try r.env.put("TF_NEMOTRON_WORLD", "8");
+        try r.env.put("TF_BENCHMARK_RANK_COUNT", "1");
+        const f = try fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
+            .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"status\":\"ok\",\"warming\":false}")}) },
+            .{ .method = "GET", .path = "/v1/models", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"data\":[{\"id\":\".tensorfold-benchmark\"}]}")}) },
+            .{ .method = "GET", .path = "/v1/benchmark/manifest", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", bytes)}) },
+            .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, false, 4, 15)}) },
+            .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, true, 4, 15)}) },
+        }));
+        defer f.stop();
+        const out = try r.path("run.json");
+        const args = if (managed) blk: {
+            r.self_exe = try cli.standIn(&r, f.port);
+            break :blk try a.dupe([]const u8, &.{ try r.path("private-checkpoint"), "--tokens", "4", "--reps", "1", "--temperatures", "0", "--output", out });
+        } else try cli.runArgs(&r, try f.url(a, ""), out);
+        try std.testing.expectEqual(@as(u8, 0), try r.command(args));
+        var why: []const u8 = "";
+        const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &why)).?;
+        try std.testing.expect(v.get("settings").?.get("rank_count").? == .null);
+        try std.testing.expect(v.get("group") == null);
+        if (!managed) try std.testing.expect(r.has("unranked"));
+        try std.testing.expect(v.get("runtime").?.get("backend").?.str() != null);
+    };
+}
+
 test "benchmark group: the unload lifetime lock copies inventory before a parked engine frees it" {
     var h: @import("idle_unload_test.zig").Harness = .{};
     defer h.deinit();

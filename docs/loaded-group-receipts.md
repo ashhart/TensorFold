@@ -1,6 +1,6 @@
 # Loaded groups in community-v2
 
-A benchmark measures the group's serving endpoint. Rank count and machine count differ: several ranks can use one node. Managed and attached runs both read `GET /v1/benchmark/manifest` after the server loads. They copy its accepted inventory, never a client rank flag or `TF_NEMOTRON_WORLD` / `TF_BENCHMARK_RANK_COUNT` hint. Missing or invalid inventories stay unranked. Start followers separately and attach to the serving rank when measuring an existing group.
+A benchmark measures the group's serving endpoint. Rank count and machine count differ: several ranks can use one node. Managed and attached runs both read `GET /v1/benchmark/manifest` after the server loads. They copy its accepted inventory, never a client rank flag or `TF_NEMOTRON_WORLD` / `TF_BENCHMARK_RANK_COUNT` hint. Missing or invalid inventories stay unranked. Legacy manifests can still supply model and hardware metadata, but their rank hints are not copied into new receipts. Start followers separately and attach to the serving rank when measuring an existing group.
 
 A new v2 receipt may add a root `group` object. The workload suite ID and digest stay unchanged; the topology is an additional comparison dimension, not a new prompt or token budget. V1 retains exactly its previous fields, canonical bytes and rank limit of 1, 2 or null. Legacy v2 receipts without `group` keep that same bound. New grouped v2 receipts accept 1 through 8 loaded ranks; a larger count without a complete group refuses.
 
