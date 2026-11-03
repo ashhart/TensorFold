@@ -1,13 +1,11 @@
-//! A request's prompt and its positions as the publisher's code lays them out: the ids, each token's page2d rotary
-//! coordinates, the page-aware router's page ids, and the decode state machines that carry both on.
+//! A request's ids, page2d rotary coordinates and router page ids as the publisher lays them out, and their decode.
 const std = @import("std");
 const cfg = @import("config.zig");
 
 /// The prompt's tokens and what the decoder needs per position and per 32-key block.
 pub const Prompt = struct {
     ids: []u32,
-    /// Rotary coordinates: the running count within a page, and the page (1-based for a page's marker and image,
-    /// 0 for BOS and the instruction).
+    /// Rotary coordinates: the count within a page, and the page (1-based; 0 for BOS and the instruction).
     tok: []u32,
     page: []u32,
     /// The router's 0-based query page (-1: none) and image page of each image token (-1 elsewhere).
@@ -57,8 +55,7 @@ pub fn build(a: std.mem.Allocator, image_tokens: []const usize, instruction: []c
     return positions(a, try ids.toOwnedSlice(a));
 }
 
-/// The positions of a prompt's ids (taking ownership of `ids`), as _build_page_rope_pos and the page-aware
-/// candidate builder compute them.
+/// The positions of a prompt's ids (owning `ids`), as _build_page_rope_pos and the page-aware candidates compute them.
 pub fn positions(a: std.mem.Allocator, ids: []u32) !Prompt {
     const n = ids.len;
     var p: Prompt = .{ .ids = ids, .tok = try a.alloc(u32, n), .page = try a.alloc(u32, n), .qpage = try a.alloc(i32, n), .image_page = try a.alloc(i32, n), .pf_cnt = &.{}, .n_pg = 1, .pages = 0 };

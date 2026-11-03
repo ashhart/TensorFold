@@ -1,5 +1,4 @@
-//! The publisher's generation loop: PageCountGuard over the logits (EOS barred until the reply has as many <PAGE>
-//! markers as the prompt, then forced; a page held to 20,000 tokens), greedy argmax, EOS not emitted.
+//! The publisher's generation: greedy under PageCountGuard (EOS only after every page's marker, 20,000 tokens a page).
 const std = @import("std");
 const cfg = @import("config.zig");
 const prompt_mod = @import("prompt.zig");

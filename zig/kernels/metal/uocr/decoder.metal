@@ -1,6 +1,4 @@
-// Unlimited-OCR-2's decoder steps: page2d rotary, the DASH router (block keys, ranking, entmax bias), its sparse
-// attention, and the MoE's gate and combine, each rounded where the publisher's torch code rounds; the projections
-// run on gemm_nax beside these.
+// Unlimited-OCR-2's decoder steps (rotary, DASH router, sparse attention, MoE gate), rounded where torch rounds.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -56,8 +54,7 @@ inline float ud_angle(constant float* inv_tok, uint tok, uint page, uint i) {
   return j < 63 ? float(tok) * inv_tok[j] : float(page % 2);
 }
 
-// x * cos + rotate_half(x) * sin over 128-wide heads, every product and the sum rounded to bf16 (torch's bf16 ops);
-// cos and sin are bf16 (the rotary's output dtype).
+// x cos + rotate_half(x) sin over 128-wide heads with bf16 cos and sin, every product and sum rounded to bf16.
 inline bfloat ud_rotate(const device bfloat* h, uint d, float ang) {
   const float c = ud_bf(metal::precise::cos(ang)), s = ud_bf(metal::precise::sin(ang));
   const float rh = d < 64 ? -float(h[d + 64]) : float(h[d - 64]);
@@ -80,8 +77,7 @@ struct UdRope {
   h[d] = out;
 }
 
-// The router's index q or k: Gemma RMSNorm (fp32, clamped, times 1 + w, clamped, bf16), the same rotary in bf16,
-// then fp32. One 128-thread group a row; y rows are 128 floats.
+// The router's index q or k: Gemma RMSNorm in fp32 with clamps, bf16 rotary, then fp32 (128 threads a row).
 [[max_total_threads_per_threadgroup(128)]] [[kernel]] void ud_router_norm(
     const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]], const device uint* tok [[buffer(2)]],
     const device uint* page [[buffer(3)]], constant float* inv_tok [[buffer(4)]], device float* y [[buffer(5)]],
@@ -109,8 +105,7 @@ struct UdBlocks {
   float scale; // 1 / sqrt(128)
 };
 
-// A complete block's summary key: softmax over its 32 keys of clamp(k . head_cls / sqrt(128)), then the weighted
-// sum of the keys, in fp32 (one 32-thread group a block, one key a thread).
+// A block's summary key: fp32 softmax over its 32 keys of clamp(k . head_cls / sqrt(128)), then their weighted sum.
 [[max_total_threads_per_threadgroup(32)]] [[kernel]] void ud_block_keys(
     const device float* idx_k [[buffer(0)]], const device bfloat* head_cls [[buffer(1)]], device float* kbar [[buffer(2)]],
     constant UdBlocks& p [[buffer(3)]], uint g [[threadgroup_position_in_grid]], uint j [[thread_position_in_threadgroup]]) {
@@ -141,10 +136,7 @@ struct UdRoute {
   uint round_bias;  // 1: the bias as the prefill's bf16 mask carries it
 };
 
-// One query's remote reads (a simdgroup a query): block scores against the summary keys, the page-aware candidate
-// blocks (a block holding an image token of the query's page, any block when the query has no page or none
-// holds one; remote blocks only, all of them when that leaves none), the top 16 by score, entmax-1.5 over them, and
-// the first 12 with bias log(max(prior, floor)) - their mean. sel[q][s] = -1 marks an unread slot.
+// A query's remote blocks: page-aware candidates by summary-key score, top 16, entmax-1.5, 12 kept with log biases.
 [[max_total_threads_per_threadgroup(32)]] [[kernel]] void ud_route(
     const device float* idx_q [[buffer(0)]], const device float* kbar [[buffer(1)]], const device int* bmin [[buffer(2)]],
     const device int* bmax [[buffer(3)]], const device int* qpage [[buffer(4)]], const device uint* qpos [[buffer(5)]],
@@ -251,9 +243,7 @@ struct UdAttend {
   uint local;    // the local window (128 keys)
 };
 
-// One query row and head (a group of 8 simdgroups): softmax over the local keys p-127..p (no bias) and the
-// selected blocks' keys before the window (their bias), fp32 scores and weights, out = sum(p v) / sum(p) rounded to
-// bf16. The keys are split across the simdgroups, each scoring one key at a time across its lanes.
+// A query row and head over 8 simdgroups: fp32 softmax over the local window and the selected blocks, out in bf16.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_attend(
     const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]], const device bfloat* vc [[buffer(2)]],
     const device int* sel [[buffer(3)]], const device float* bias [[buffer(4)]], const device uint* qpos [[buffer(5)]],
@@ -351,8 +341,7 @@ struct UdAttend {
   if (i < n) y[i] = bfloat(float(a[i]) + float(b[i]));
 }
 
-// The MoE gate for one row (a 64-thread group): fp32 logits of x against the gate's 64 rows, softmax, and the 6
-// largest scores (descending; ties to the lower expert) as ids and weights, not renormalized.
+// The MoE gate for one row: fp32 logits over 64 experts, softmax, the top 6 (ties to the lower), not renormalized.
 [[max_total_threads_per_threadgroup(64)]] [[kernel]] void ud_moe_gate(
     const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]], device uint* ids [[buffer(2)]],
     device float* wts [[buffer(3)]], uint row [[threadgroup_position_in_grid]], uint e [[thread_position_in_threadgroup]],
@@ -457,8 +446,7 @@ struct UdExpertArgs {
   uint ffn;  // the expert's width F
 };
 
-// One token's routed experts, first half: for slot s (threadgroup row y) and its expert ids[s],
-// act[s][j] = bf16(bf16(silu(bf16(gate_j . x))) * bf16(up_j . x)), 4 rows a simdgroup.
+// One token's routed experts, first half: act[s][j] = bf16(silu(gate_j . x)) * bf16(up_j . x) rounded to bf16.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_expert_gu(
     const device bfloat* x [[buffer(0)]], const device UdExpert* tab [[buffer(1)]], const device uint* ids [[buffer(2)]],
     device bfloat* act [[buffer(3)]], constant UdExpertArgs& p [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],

@@ -1,4 +1,4 @@
-//! The encoder's tables for a 640 tile, resized as the publisher's torch code resizes them: fp32 math, one bf16 rounding.
+//! The encoder's tables for a 640 tile, resized as the publisher's torch code does: fp32 math, one bf16 rounding.
 const std = @import("std");
 
 pub fn bf16(v: f32) u16 {
@@ -20,8 +20,7 @@ fn cubic(x0: f32) f32 {
     return 0.0;
 }
 
-/// One output position's taps along a dimension of `in` resized to `out` (antialiased, align_corners=False), with
-/// torch's mixed widths: its `+ 0.5` literals are double, so the centre and the filter's argument round from double.
+/// One output's antialiased taps along a dimension, with torch's mixed widths (its `+ 0.5` literals are double).
 const Taps = struct {
     first: usize,
     count: usize,
@@ -49,8 +48,7 @@ const Taps = struct {
     }
 };
 
-/// A [side, side, C] bf16 grid (positions by rows, channels last) to [to, to, C], bicubic with antialias, in fp32:
-/// the width first, then the height, each tap a fused multiply-add as torch's arm64 build does, then one rounding to bf16.
+/// A [side, side, C] bf16 grid to [to, to, C], antialiased bicubic in fp32 with fused taps, width then height.
 pub fn bicubicGrid(a: std.mem.Allocator, src: []const u16, side: usize, channels: usize, to: usize, out: []u16) !void {
     std.debug.assert(src.len == side * side * channels and out.len == to * to * channels);
     const mid = try a.alloc(f32, side * to * channels);

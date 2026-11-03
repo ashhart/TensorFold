@@ -1,4 +1,4 @@
-//! Unlimited-OCR-2's tensors, bf16 as the release stores them, into shared Metal buffers; every tensor is accounted for.
+//! Unlimited-OCR-2's tensors, bf16 as stored, in shared Metal buffers; every tensor is accounted for.
 const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
@@ -111,8 +111,7 @@ const Taker = struct {
     }
 };
 
-/// Copies of the tensors the release stores 8 bytes off a 16-byte boundary (its second shard's data starts there), each
-/// 256-aligned in one buffer the checkpoint owns: the tensor-unit kernels read 16-byte fragments.
+/// 256-aligned copies of the tensors stored 8 bytes off a 16-byte boundary (the tensor units read 16-byte fragments).
 fn realign(c: *ck.Checkpoint, device: mtl.Device) !void {
     var total: usize = 0;
     var it = c.tensors.valueIterator();
@@ -136,8 +135,7 @@ fn realign(c: *ck.Checkpoint, device: mtl.Device) !void {
     }
 }
 
-/// The tensors this family never reads: the unused indexer (its router replaces it at inference), CLIP's own patch
-/// embedding (SAM's map stands in for it) and CLIP's stored position ids.
+/// Tensors this family never reads: the unused indexer, CLIP's own patch embedding and its position ids.
 fn unused(name: []const u8) bool {
     return std.mem.indexOf(u8, name, ".self_attn.indexer.") != null or
         std.mem.eql(u8, name, "model.vision_model.embeddings.patch_embedding.weight") or

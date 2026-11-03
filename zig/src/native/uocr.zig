@@ -1,5 +1,4 @@
-//! Unlimited-OCR-2 on Metal served by the lane host: page images in, the publisher's greedy reply out, one request
-//! at a time.
+//! Unlimited-OCR-2 on Metal served by the lane host: page images in, the greedy reply out, one request at a time.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");

@@ -1,5 +1,4 @@
-//! Unlimited-OCR-2's Metal kernels under the contract: the tower's and decoder's rows, the data moves, attention, the
-//! router and MoE gate, and the one-token projections. Each group is a file of its own (metal_uocr_*.zig).
+//! Unlimited-OCR-2's Metal kernels under the contract, one file per group (metal_uocr_*.zig).
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -30,8 +29,7 @@ pub fn pipeline(device: mtl.Device, which: Library, name: []const u8) !mtl.Pipel
     return mtl.Pipeline.init(device, lib, name, false);
 }
 
-/// The served widths (the release's config): the decoder's residual, heads and head width, the router's width, the
-/// experts and their widths, the dense layer's; the tower's SAM and CLIP widths.
+/// The served widths (the release's config): decoder residual, heads, head width, router, experts, dense; SAM, CLIP.
 pub const hidden = 1280;
 pub const heads = 10;
 pub const head_dim = 128;

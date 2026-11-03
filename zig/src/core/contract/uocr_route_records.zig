@@ -1,5 +1,4 @@
-//! Unlimited-OCR-2's route launches (zig/tests/contract/metal_uocr_route.zig), as decoder.zig dispatches them;
-//! m1/m2 from the M1 and M2 compiles (each the source's own max_total_threads_per_threadgroup).
+//! Unlimited-OCR-2 route launches (tests/contract/metal_uocr_route.zig); m1/m2 from the M1 and M2 compiles.
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
     // one 32-thread group a block: wts[32]

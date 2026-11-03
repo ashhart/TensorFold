@@ -1,5 +1,4 @@
-//! tf-uocr-decode: a page through Unlimited-OCR-2 end to end against a reference dump: the prompt's ids, the
-//! embeddings, every layer's prefill rows gated against float32, the first logits, then the greedy reply.
+//! tf-uocr-decode: a page end to end against a reference dump: ids, embeddings, every layer, logits, the greedy reply.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

@@ -1,6 +1,4 @@
-//! Unlimited-OCR-2's one-token projections under the contract (decoder.metal): `ud_matvec` at every projection the
-//! decoder serves, and the routed experts' `ud_expert_gu` and `ud_expert_down`, which reach each slot's expert through
-//! a table of GPU pointers (the weight buffers made resident with useResource, as the engine does).
+//! Unlimited-OCR-2's one-token projections under the contract: ud_matvec, and ud_expert_gu/down via an expert table.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -39,9 +37,7 @@ fn stressRow(rng: std.Random, x: []u16) void {
     }
 }
 
-/// Gate 4's weight row: integers, the second half their negatives, so a row's sum is that of its first 8 weights,
-/// which are in [1, 6]; the rest are in [1, 128], so even a lane's 1/32 of a 896-wide row climbs past fp16's exact
-/// integers, and a whole 6848-wide row stays under 2^24 (3424 x 32 x 128) in any order.
+/// Gate 4's weight row: integers, second half negated, so a row sums to its first 8 (in [1, 6]); exact under 2^24.
 fn stressWeights(w: []u16, salt: usize) void {
     const h = w.len / 2;
     for (0..h) |i| {
@@ -87,7 +83,7 @@ fn build(a: std.mem.Allocator, device: mtl.Device, func: []const u8, edit: ?[2][
     return mtl.Pipeline.init(device, lib, func, false);
 }
 
-// --- ud_matvec: y[n] = bf16(W[n, :] . x), one token a launch ----------------------------------------------------------
+// --- ud_matvec: y[n] = bf16(W[n, :] . x), one token a launch ---
 
 pub const Matvec = struct {
     pub const Variant = enum { plain, short_k, half_sums };
@@ -225,7 +221,7 @@ pub const Matvec = struct {
     }
 };
 
-// --- ud_expert_gu and ud_expert_down: one token's routed experts through the expert table ------------------------------
+// --- ud_expert_gu and ud_expert_down: one token's routed experts through the expert table ---
 
 /// A value's spread through fp32 steps and bf16 rounding points.
 const Range = struct {
@@ -251,8 +247,7 @@ const Range = struct {
     }
 };
 
-// Metal's bounds under the engine's options (fast math on; the kernel's own precise::exp): exp 4 ulps, fast division
-// 2.5, the add correctly rounded.
+// Metal's bounds under the engine's options: exp 4 ulps, fast division 2.5, the add correctly rounded.
 const exp_ulps = 4;
 const div_ulps = 2.5;
 
@@ -279,8 +274,7 @@ fn siluOver(lo: f64, hi: f64) Range {
     return r;
 }
 
-/// How many experts the table holds (a layer's), how many of them the slots use, and each slot's pick among those:
-/// four distinct experts at six slots, two of them picked twice (slots 1 and 3, 0 and 5); three, one twice, at four.
+/// The table's expert count, how many the slots use, and each slot's pick (some experts picked twice).
 const table_len = uocr.experts;
 const distinct = 4;
 const pick = [8]usize{ 0, 1, 2, 1, 3, 0, 2, 3 };
@@ -308,8 +302,7 @@ pub const Experts = struct {
         return v != .down and v != .down_slot0;
     }
 
-    /// gu: rows are slots, n the expert's width F, k the residual (1280 in the kernel); down: rows are slots, n the
-    /// residual (1280 in the kernel), k the width F.
+    /// gu: rows slots, n the width F, k the residual; down: rows slots, n the residual, k the width F.
     pub fn spec(v: Variant) c.Spec {
         const gu = up(v);
         return .{
@@ -421,9 +414,7 @@ pub const Experts = struct {
         return true;
     }
 
-    /// gu (slots on experts 0 1 2 1 3 0): NaN in expert 0's gate row 0, +Inf in expert 1's up row 1, -Inf in expert
-    /// 2's gate row 2 (SiLU's NaN), both infinities in expert 3's up row 3 and +Inf in its gate row 4. down: act slots
-    /// 1-4 hold NaN, +Inf, -Inf and both; expert 0's down row 7 a NaN, which slots 0 and 5 meet.
+    /// Gate 1's plants: NaN/Inf in gu's gate and up rows of experts 0-3; down: NaN/Inf act slots and expert 0's row 7.
     fn plant(t: *Experts) void {
         const n = t.shape.n;
         const k = t.shape.k;
@@ -491,8 +482,7 @@ pub const Experts = struct {
         }
     }
 
-    /// gu's range: each sum within gamma(depth) of its terms (exact on gate 4's integers), rounded to bf16, SiLU's fp32
-    /// steps over every gate between, bf16, times the up's bf16 (exact in fp32), bf16.
+    /// gu's range: each sum within gamma(depth), bf16, SiLU's fp32 steps, bf16, times the up's bf16, bf16.
     fn range(t: *const Experts, i: usize) Range {
         var ends: [2]Range = undefined;
         for (&ends, 0..) |*r, m| {

@@ -1,6 +1,4 @@
-//! Unlimited-OCR-2 served by the lane host: one stream at a time, pages in as images, the publisher's greedy reply
-//! under its page guard. A page is prepared on the HTTP thread (decode, letterbox, tiles); the tower, the prompt pass
-//! and every decode step run on the lane thread.
+//! Unlimited-OCR-2 on the lane host: one stream, pages prepared on the HTTP thread, tower and decode on the lane's.
 const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");
@@ -82,9 +80,7 @@ pub const Model = struct {
         m.gpa.destroy(m);
     }
 
-    /// One page for the tower: gundam tiles plus the global view when they fit `max_tokens` (the publisher's server
-    /// default), else the global view alone (base mode). The views go as their bf16 values widened to f32, the
-    /// global view first; gh x gw is the tile grid (1 x 1: base).
+    /// One page's views as f32-widened bf16 (global first): gundam tiles when they fit `max_tokens`, else base.
     pub fn prepare(m: *Model, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !Prepared {
         if (max_tokens < basePageTokens()) return error.ImageTooSmall;
         var page = try preprocess.decode(m.io, a, bytes);

@@ -567,7 +567,6 @@ const paging = @import("paging_pending.zig");
 test {
     _ = paging;
     _ = @import("minimax_records.zig");
-    _ = @import("uocr_records.zig");
     _ = @import("nemotron_ssd_records.zig");
 }
 /// The Metal collector keeps measured slots and the restored vision declarations.

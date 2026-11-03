@@ -1,5 +1,4 @@
-//! A page to the encoder's views, as the publisher's processor makes them: Pillow's letterbox to the 1024 global view
-//! (ImageOps.pad, gray 127), and in gundam mode Pillow's resize to a grid of 640 tiles, each normalized to bf16.
+//! A page to the encoder's views as the publisher's processor makes them: the 1024 letterbox, gundam's 640 tiles.
 const std = @import("std");
 const picture = @import("../../core/picture/picture.zig");
 const resample = picture.resample;
@@ -41,8 +40,7 @@ pub const Views = struct {
     }
 };
 
-/// RGB rows from decoded samples as Pillow's convert('RGB') gives them: alpha dropped, never composited, and the
-/// stored orientation kept (the publisher's `infer` applies no EXIF transpose).
+/// RGB rows as Pillow's convert('RGB') gives them: alpha dropped, never composited, no EXIF transpose.
 pub fn rgbOf(a: std.mem.Allocator, s: picture.Samples) ![]u8 {
     const out = try a.alloc(u8, s.width * s.height * 3);
     for (0..s.width * s.height) |i| @memcpy(out[i * 3 ..][0..3], s.data[i * s.channels ..][0..3]);
@@ -89,8 +87,7 @@ fn normalize(rgb: []const u8, side: usize, out: []u16) void {
     };
 }
 
-/// The tile grid (across, down) dynamic_preprocess picks: the candidates in the order Python's set and stable sort
-/// leave them, the closest aspect ratio first met, and on an exact tie the later one when the page is big enough.
+/// The tile grid dynamic_preprocess picks: its candidate order, the closest aspect ratio, ties to the later one.
 pub fn grid(width: usize, height: usize) [2]usize {
     const aspect = @as(f64, @floatFromInt(width)) / @as(f64, @floatFromInt(height));
     const area: f64 = @floatFromInt(width * height);
@@ -161,8 +158,7 @@ test "uocr: Python's rounding, the tile grids the publisher's code picks, and th
     try std.testing.expectEqual(@as(usize, 2), roundEven(2.5));
     try std.testing.expectEqual(@as(usize, 4), roundEven(3.5));
     try std.testing.expectEqual(@as(usize, 724), roundEven(724.0775));
-    // find_closest_aspect_ratio's answers in the reference: A4 at 150 dpi both ways, a square (a tie: the last
-    // equal ratio), a wide strip, a page just over 640
+    // find_closest_aspect_ratio's reference answers: A4 at 150 dpi both ways, a square tie, a strip, just over 640
     try std.testing.expectEqual([2]usize{ 2, 3 }, grid(1240, 1754));
     try std.testing.expectEqual([2]usize{ 4, 3 }, grid(1754, 1240));
     try std.testing.expectEqual([2]usize{ 4, 4 }, grid(2000, 2000));

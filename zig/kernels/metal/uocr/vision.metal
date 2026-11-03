@@ -1,5 +1,4 @@
-// Unlimited-OCR-2's image encoder steps (SAM ViT-B, its neck, CLIP-L), each rounded to bf16 where the publisher's
-// torch code rounds; the projections run on core_qwen_vision's tensor-unit GEMM beside these.
+// Unlimited-OCR-2's image encoder steps (SAM ViT-B, its neck, CLIP-L), rounded to bf16 where torch rounds.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -26,8 +25,7 @@ struct UvConv {
   uint in_h, in_w, channels, k, stride, pad, out_h, out_w, chw;
 };
 
-// Convolution patches: row (oy, ox) of [out_h * out_w, channels * k * k] in the weight's (c, ky, kx) order, zero
-// outside the input. The input is [channels, h, w] (pixels, chw = 1) or [h, w, channels] (feature maps).
+// Convolution patches in the weight's (c, ky, kx) order, zero outside the input ([c, h, w] or [h, w, c] input).
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void uv_im2col(
     const device bfloat* x [[buffer(0)]], device bfloat* y [[buffer(1)]], constant UvConv& p [[buffer(2)]],
     uint2 at [[thread_position_in_grid]]) {
@@ -85,8 +83,7 @@ struct UvNorm {
   for (uint i = t; i < p.width; i += n) yr[i] = bfloat((float(xr[i]) - mean) * inv * float(w[i]) + float(b[i]));
 }
 
-// SAM's LayerNorm2d over a position's channels, op by op in bf16 as its module computes it in the input's dtype:
-// u = mean(x); s = mean((x - u)^2); x = (x - u) / sqrt(s + eps); w * x + b, every step rounded.
+// SAM's LayerNorm2d over a position's channels, op by op in bf16 as the module computes it, every step rounded.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void uv_layer_norm2d(
     const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]], const device bfloat* b [[buffer(2)]],
     device bfloat* y [[buffer(3)]], constant UvNorm& p [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
@@ -185,8 +182,7 @@ struct UvRel {
   uint groups, side, heads, width;
 };
 
-// SAM's decomposed relative positions: rel_h[h, g, q, kh] = q . Rh[qh - kh + side - 1] and rel_w likewise over kw,
-// with q unscaled from the qkv rows [groups x side^2, 3 x width], each sum rounded to bf16 (the einsums' outputs).
+// SAM's decomposed relative positions: rel_h and rel_w from unscaled q against Rh and Rw, each sum in bf16.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void uv_rel_pos(
     const device bfloat* qkv [[buffer(0)]], const device bfloat* tab_h [[buffer(1)]],
     const device bfloat* tab_w [[buffer(2)]], device bfloat* rel_h [[buffer(3)]], device bfloat* rel_w [[buffer(4)]],
@@ -210,8 +206,7 @@ struct UvAttn {
   float scale;
 };
 
-// o [groups x len, width] = softmax(q k^T scale + bias) v within each group, a simdgroup a query row and head:
-// fp32 scores, the bias bf16(rel_h + rel_w) as the module's bf16 mask, exp weights rounded to bf16 before p v.
+// Softmax(q k^T scale + bias) v per group, a simdgroup a row and head: fp32 scores, bf16 bias and weights.
 [[max_total_threads_per_threadgroup(32)]] [[kernel]] void uv_attention(
     const device bfloat* qkv [[buffer(0)]], const device bfloat* rel_h [[buffer(1)]],
     const device bfloat* rel_w [[buffer(2)]], device bfloat* o [[buffer(3)]], constant UvAttn& p [[buffer(4)]],

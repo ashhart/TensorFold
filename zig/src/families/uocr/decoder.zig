@@ -1,5 +1,4 @@
-//! Unlimited-OCR-2's decoder on Metal: 12 layers of page2d-rotary MHA under DASH's block-sparse reads (a 128-key
-//! local window plus 12 routed 32-key blocks) and a 64-expert MoE, over bf16 caches in the model's precision.
+//! Unlimited-OCR-2's decoder on Metal: page2d-rotary attention under DASH's sparse reads, a 64-expert MoE, bf16 caches.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -35,8 +34,7 @@ pub const Decoder = struct {
     caches: mtl.Buffer,
     blocks: mtl.Buffer,
     consts: mtl.Buffer,
-    /// Each routed layer's 64 experts as GPU pointers (gate, up, down), for decode's on-GPU routing, and the
-    /// buffers those pointers reach (made resident on each encoder).
+    /// Each routed layer's experts as GPU pointers (gate, up, down) for decode's routing, and the buffers they reach.
     experts: mtl.Buffer,
     weight_bufs: std.ArrayList(mtl.Buffer) = .empty,
     scratch: Scratch,
@@ -112,8 +110,7 @@ pub const Decoder = struct {
         return .{ .buf = d.consts, .off = 0 };
     }
 
-    /// The prompt's prefill: its embeddings with the image rows spliced in at its image tokens, then every layer.
-    /// `image_rows` holds one 1280-wide bf16 row per image token, in order.
+    /// The prompt's prefill: its embeddings with `image_rows` (a bf16 row an image token) spliced in, then the layers.
     pub fn prefill(d: *Decoder, p: prompt_mod.Prompt, image_rows: []const u16) !void {
         const n = p.len();
         if (n > d.cap) return error.PromptTooLong;
@@ -272,8 +269,7 @@ pub const Decoder = struct {
         }
     }
 
-    /// The routed layer's FFN into `.tmp`: the gate on the GPU, the experts' row lists here, then the shared expert,
-    /// each expert on its gathered rows, and the combine in gate order.
+    /// The routed layer's FFN into `.tmp`: GPU gate, experts on their gathered rows, the shared expert, the combine.
     fn moe(d: *Decoder, L: wts.Layer, l: usize, gate: Ref, n: usize, vec: bool) !void {
         const s = d.scratch;
         const k = d.k;
@@ -324,9 +320,7 @@ pub const Decoder = struct {
     }
 };
 
-/// y [M, N] = bf16(x w^T): the tensor-unit GEMM for a prompt's rows, the matvec for one token's.
-/// A prompt's rows always take the GEMM, so a row's bits never depend on how many rows share its pass (an expert's
-/// rows in a chunk); `vec` (decode's single token) takes the matvec.
+/// y = bf16(x w^T): prompt rows always take the GEMM (bits independent of the cut), `vec` (one token) the matvec.
 fn lin(e: mtl.ComputeEncoder, k: *const ks.Kernels, x: Ref, w: Ref, y: Ref, M: usize, N: usize, K: usize, vec: bool) void {
     if (!vec) return k.linear(e, x, w, y, M, N, K);
     std.debug.assert(M == 1);

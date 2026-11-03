@@ -1,5 +1,4 @@
-//! Unlimited-OCR-2's image encoder on Metal: a view's pixels through SAM ViT-B, its neck and CLIP-L to the projector's
-//! rows, one view (the 1024 global view or a 640 tile) a pass.
+//! Unlimited-OCR-2's image encoder on Metal: SAM ViT-B, its neck and CLIP-L to the projector's rows, a view a pass.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -35,8 +34,7 @@ pub const Encoder = struct {
     k: *const ks.Kernels,
     w: *const wts.Weights,
     scratch: Scratch,
-    /// A 640 tile's tables: SAM's positions [40, 40, 768], CLIP's [101, 1024], and the global blocks' relative
-    /// positions [79, 64] (h then w, block by block).
+    /// A 640 tile's tables: SAM's positions, CLIP's, and the global blocks' relative positions (h then w).
     tile: mtl.Buffer,
 
     /// An encoder on `queue` (the caller's, which outlives it).
@@ -53,7 +51,7 @@ pub const Encoder = struct {
         e.scratch.buf.deinit();
     }
 
-    /// The projector's rows [side^2, 1280] bf16 for one view's normalized pixels [3, size, size] bf16 (size 1024 or 640).
+    /// The projector's rows [side^2, 1280] bf16 for one view's normalized pixels [3, size, size] bf16.
     pub fn encode(e: *Encoder, size: usize, pixels: []const u16, out: []u16, taps: Taps) !void {
         if (size != cfg.base_size and size != cfg.tile_size) return error.ViewSize;
         const v = View.of(size);
@@ -165,9 +163,7 @@ pub const Encoder = struct {
     }
 };
 
-/// A page's image-token rows [tokens, 1280] in the publisher's order: with tiles, the tiles' rows first (10 per tile
-/// row, running across every tile of that row, each followed by the newline row), then the global view's 16 rows of
-/// 16 with their newlines, then the separator. `tiles` holds `across` x `down` tiles' 100 rows each, row-major.
+/// A page's image-token rows in the publisher's order: tile rows with newlines, the global view's, the separator.
 pub fn layout(w: *const wts.Weights, global: []const u16, tiles: []const u16, across: usize, down: usize, out: []u16) void {
     const newline = halves(w.newline, H);
     var at: usize = 0;
