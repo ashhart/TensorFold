@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdint.h>
+#include "norms_tail.cuh"
 
 namespace tf_norms {
 
@@ -234,17 +235,7 @@ __device__ __forceinline__ void store8f(float* p, const float* f) {
 // 1 / sqrt(sum / width + eps), IEEE division and square root, over a VNT-thread block: warp trees, then the 8 warps'.
 template <bool ONCE = false>
 __device__ __forceinline__ float inv_rms_v(float part, int width, float eps) {
-    __shared__ float warps[VNT / 32];
-    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-    if ((threadIdx.x & 31) == 0) warps[threadIdx.x >> 5] = part;
-    __syncthreads();
-    // every warp folds the warps' sums in the same tree, so each holds the same total: no broadcast
-    float s = (threadIdx.x & 31) < VNT / 32 ? warps[threadIdx.x & 31] : 0.f;
-    for (int m = 4; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
-    s = __shfl_sync(0xFFFFFFFFu, s, 0);
-    const float r = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
-    if constexpr (!ONCE) __syncthreads(); // `warps` is reused by a second norm in the same block
-    return r;
+    return tf_rms_tail::inv_rms<ONCE>(part, width, eps);
 }
 
 }  // namespace tf_norms
@@ -481,7 +472,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_256(const __
 }
 
 // The bf16 residual's tails (norms_tail.cuh): a norm on the branch before the add, a bf16 scalar on the sum.
-#include "norms_tail.cuh"
 
 // h = bf16(r + bf16(rms(x) wb)) [* sc], y = bf16(rms(h) w), xs y's 64-value sums: each norm rounded once.
 extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_add_rms_rows_bf16h_tail(
