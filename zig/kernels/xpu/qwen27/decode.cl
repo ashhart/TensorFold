@@ -228,26 +228,27 @@ KERNEL(16) void exl3_gemv(global const ushort *TR, global const half *X, global 
   }
 }
 
-// The prompt attention kernels hold the 6 query heads of a K/V head (3 groups of 2): the 27B's GQA only.
-#if Q27_GQA == 6
+// The prompt attention kernels hold the Q27_GQA query heads of a K/V head (groups of 2), one QK subgroup for each
+// half of a group's 128-key block: GQA 6 (the 27B) or 8 (Sage-A1.5) for attn_prompt, 6 only for attn_prompt8.
+#if Q27_GQA == 6 || Q27_GQA == 8
 // Prompt attention (FlashAttention-2 on bf16 DPAS), causal, 256-wide heads; fixed key order, so a row's bits ignore T.
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
 __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(128, 1, 1)))
 kernel void attn_prompt(global const ushort *Q, global const ushort *KC, global const ushort *VC, global ushort *O,
                         int p0, int T, float scale) {
-  local ushort P[6 * 8 * 128];                         // A tiles: (tile of 8 queries, 16 keys), r × 16 + lane
-  local float MX[3][2][16], SM[3][2][16], A[48];
+  local ushort P[Q27_GQA * 8 * 128];                         // A tiles: (tile of 8 queries, 16 keys), r × 16 + lane
+  local float MX[Q27_GQA / 2][2][16], SM[Q27_GQA / 2][2][16], A[Q27_GQA * 8];
   const int t0 = get_group_id(0) * 8, hk = get_group_id(1), sg = get_sub_group_id(), lane = get_sub_group_local_id();
   const int nkeys = p0 + min(t0 + 7, T - 1) + 1;
-  const bool qk = sg < 6;
+  const bool qk = sg < Q27_GQA;
   const int g = sg / 2, kh = sg % 2;
-  const int tq = lane % 8, hq = 2 * g + lane / 8;      // the lane's query: token t0 + tq, head 6 hk + hq
+  const int tq = lane % 8, hq = 2 * g + lane / 8;      // the lane's query: token t0 + tq, head Q27_GQA hk + hq
   const int qpos = p0 + t0 + tq;
   const bool qok = t0 + tq < T;
-  global const uint *qrow = (global const uint *)(Q + ((long)(t0 + tq) * 24 + hk * 6 + hq) * 256);
+  global const uint *qrow = (global const uint *)(Q + ((long)(t0 + tq) * Q27_AQ + hk * Q27_GQA + hq) * 256);
   const float sl = scale * M_LOG2E_F;
-  float8 o[6][2];
-  for (int i = 0; i < 6; i++) o[i][0] = o[i][1] = 0.0f;
+  float8 o[Q27_GQA][2];
+  for (int i = 0; i < Q27_GQA; i++) o[i][0] = o[i][1] = 0.0f;
   float m = -INFINITY, l = 0.0f;
   for (int k0 = 0; k0 < nkeys; k0 += 128) {
     if (qk) {
@@ -259,7 +260,7 @@ kernel void attn_prompt(global const ushort *Q, global const ushort *KC, global 
         __attribute__((opencl_unroll_hint))
         for (int h2 = 0; h2 < 2; h2++) {
           ushort ka[32];                               // 32 keys × 16 dimensions: 4 A tiles of 8 keys
-          intel_sub_group_2d_block_read_16b_32r16x1c((global void *)(KC + hk * 256), 256 * 2, nkeys, 4 * 256 * 2,
+          intel_sub_group_2d_block_read_16b_32r16x1c((global void *)(KC + hk * 256), 256 * 2, nkeys, Q27_AKV * 256 * 2,
                                                      (int2)(ds * 16, kb + h2 * 32), ka);
           __attribute__((opencl_unroll_hint))
           for (int b = 0; b < 4; b++) {
@@ -303,7 +304,7 @@ kernel void attn_prompt(global const ushort *Q, global const ushort *KC, global 
       barrier(CLK_LOCAL_MEM_FENCE);
     }
     __attribute__((opencl_unroll_hint))
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < Q27_GQA; i++)
       __attribute__((opencl_unroll_hint))
       for (int r = 0; r < 8; r++) {
         const float al = A[i * 8 + r];
@@ -312,17 +313,17 @@ kernel void attn_prompt(global const ushort *Q, global const ushort *KC, global 
       }
     for (int c = 0; c < 8; c++) {
       if (k0 + c * 16 >= nkeys) break;
-      short8 pa[6];
+      short8 pa[Q27_GQA];
       __attribute__((opencl_unroll_hint))
-      for (int i = 0; i < 6; i++) pa[i] = as_short8(intel_sub_group_block_read_us8(P + (i * 8 + c) * 128));
+      for (int i = 0; i < Q27_GQA; i++) pa[i] = as_short8(intel_sub_group_block_read_us8(P + (i * 8 + c) * 128));
       __attribute__((opencl_unroll_hint))
       for (int dt = 0; dt < 2; dt++) {
         uint8 vw;
         intel_sub_group_2d_block_read_transform_16b_16r16x1c((global void *)(VC + hk * 256), 256 * 2, nkeys,
-                                                             4 * 256 * 2, (int2)((sg * 2 + dt) * 16, k0 + c * 16),
+                                                             Q27_AKV * 256 * 2, (int2)((sg * 2 + dt) * 16, k0 + c * 16),
                                                              (private uint *)&vw);
         __attribute__((opencl_unroll_hint))
-        for (int i = 0; i < 6; i++) o[i][dt] = intel_sub_group_bf16_bf16_matrix_mad_k16(pa[i], as_int8(vw), o[i][dt]);
+        for (int i = 0; i < Q27_GQA; i++) o[i][dt] = intel_sub_group_bf16_bf16_matrix_mad_k16(pa[i], as_int8(vw), o[i][dt]);
       }
     }
   }
@@ -330,17 +331,20 @@ kernel void attn_prompt(global const ushort *Q, global const ushort *KC, global 
   if (qk && kh == 0) A[hq * 8 + tq] = 1.0f / l;
   barrier(CLK_LOCAL_MEM_FENCE);
   __attribute__((opencl_unroll_hint))
-  for (int i = 0; i < 6; i++)
+  for (int i = 0; i < Q27_GQA; i++)
     __attribute__((opencl_unroll_hint))
     for (int r = 0; r < 8; r++) {
       if (t0 + r >= T) break;
       const float inv = A[i * 8 + r];
-      global ushort *dst = O + ((long)(t0 + r) * 24 + hk * 6 + i) * 256 + sg * 32 + lane;
+      global ushort *dst = O + ((long)(t0 + r) * Q27_AQ + hk * Q27_GQA + i) * 256 + sg * 32 + lane;
       dst[0] = f2bf(o[i][0][r] * inv);
       dst[16] = f2bf(o[i][1][r] * inv);
     }
 }
 
+#endif // Q27_GQA == 6 || Q27_GQA == 8
+
+#if Q27_GQA == 6
 // Prompt attention over the int8 cache: same partitioning as attn_prompt, int8 DPAS for S and fp16 for O += P*V.
 __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(128, 1, 1)))
 kernel void attn_prompt8(global const ushort *Q, global const char *KC, global const char *VC, global ushort *O,
