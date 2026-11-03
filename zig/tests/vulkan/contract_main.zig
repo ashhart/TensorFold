@@ -91,6 +91,15 @@ pub fn main(init: std.process.Init) !u8 {
     var writes_b = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_b);
     defer writes_b.deinit();
     writes_b.corrupt = 3;
+    // Planted gate 3 control on the rows image: the rows past its last four-row block are never computed.
+    var p_skip = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_q4_tile_rows, layout);
+    defer p_skip.deinit();
+    var skips_tail = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_skip);
+    defer skips_tail.deinit();
+    skips_tail.tiled = true;
+    skips_tail.rows_per_thread = 4;
+    skips_tail.columns_per_thread = 2;
+    skips_tail.skip_tail = true;
     var controls = [_]fx.Control{
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fmax, .qmm_fmax),
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_atomic, .atomic_sum),
@@ -99,7 +108,7 @@ pub fn main(init: std.process.Init) !u8 {
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fp16, .fp16_accum),
     };
     defer for (&controls) |*control| control.deinit();
-    var kernels: [11]g.Kernel = undefined;
+    var kernels: [12]g.Kernel = undefined;
     kernels[0] = fixture.kernel();
     kernels[1] = vec4_fixture.kernel();
     kernels[2] = tile_fixture.kernel();
@@ -107,6 +116,7 @@ pub fn main(init: std.process.Init) !u8 {
     for (&controls, 4..) |*control, i| kernels[i] = control.kernel();
     kernels[9] = writes_w.kernel();
     kernels[10] = writes_b.kernel();
+    kernels[11] = skips_tail.kernel();
     const start = std.Io.Clock.awake.now(init.io);
     tally.controls += gate5_controls;
     tally.caught += gate5_controls;
