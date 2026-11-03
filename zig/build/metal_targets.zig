@@ -491,8 +491,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const lfm2_dspark = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"lfm2 dspark:"} }));
     b.step("test-lfm2-dspark", "LFM2's taps for a drafter: the tap kernel on this Mac's GPU").dependOn(&lfm2_dspark.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes })).step);
-    // the fake fabric maps its windows with mmap: the Macs' RDMA, not Windows
-    // verbs.zig is its own module, so a fabric-rooted test does not run it.
+    // the fake fabric maps windows with mmap (the Macs' RDMA, not Windows); verbs is its own module, with its own root
     if (target.result.os.tag != .windows) {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
         const verbs_tests = b.addRunArtifact(b.addTest(.{ .root_module = @import("tp.zig").verbsModule(b, target, optimize) }));

@@ -1,5 +1,4 @@
-//! The cluster's bring-up over mcdma.Endpoint on MCDMA's stub verbs (TF_MCDMA_FABRIC_STUB): a Mac node and a GB10 node in
-//! one process, each from the same cluster file to its own endpoint, an agreed plan and view, a hold and a goodbye.
+//! Bring-up on mcdma.Endpoint's stub verbs: a Mac and a GB10 node in one process agree on plan and view, hold, leave.
 const std = @import("std");
 const sys = @import("sys");
 const fabric = @import("fabric");

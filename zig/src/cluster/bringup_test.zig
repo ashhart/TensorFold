@@ -1,5 +1,4 @@
-//! One node's bring-up on the real clock, two ranks on the fabric's in-process endpoints (each on its own thread):
-//! agreement on the plan and view, a goodbye, a plan that differs, a stopped peer, a peer that never comes, a wrong peer.
+//! Real-clock bring-up of two in-process ranks: agreement, goodbye, plan mismatch, stopped, absent, wrong peer.
 const std = @import("std");
 const fabric = @import("fabric");
 const node = @import("node.zig");

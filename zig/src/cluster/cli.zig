@@ -42,8 +42,7 @@ pub fn wants(args: []const []const u8) bool {
     return false;
 }
 
-/// The exit code: 0 ok, 1 refused, not planned, invalid or a failed bring-up, 2 usage, 3 MCDMA's library not found (no "library" for
-/// a node, none at this node's path, or not libmcdma-fabric ABI 1).
+/// Exit: 0 ok, 1 refused, not planned, invalid or failed, 2 usage, 3 no MCDMA library (undeclared, absent, not ABI 1).
 pub fn run(env_in: Env, args: []const []const u8) !u8 {
     var env = env_in;
     var saved: launch.Saved = undefined;
@@ -98,8 +97,7 @@ const Flags = struct { values: []const []const u8, switches: []const []const u8 
 const serve_flags: Flags = .{ .values = &.{ "--cluster", "--leader", "--hold", "--model-config", "--model-files", "--probes" }, .switches = &.{ "--dry-run", "--probe" }, .positionals = 1 };
 const node_flags: Flags = .{ .values = &.{ "--name", "--cluster", "--leader", "--model", "--probes" } };
 
-/// Refuse, by name, a flag `cmd` does not take, a missing value and a stray argument, before anything is read or opened
-/// (an unknown flag used to be ignored: `node --dry-run` opened the real endpoint and waited for its peer).
+/// Refuse by name a flag `cmd` does not take, a missing value or a stray argument, before anything is read or opened.
 fn known(env: Env, cmd: []const u8, args: []const []const u8, f: Flags) !bool {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -267,8 +265,7 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
         try refuseConverged(env, m);
         return if (dry) 0 else 1;
     }
-    // on real hosts everything that can refuse does so before any node is started: every node's links, library and
-    // window as that node will check them, then this one's library file
+    // real hosts refuse before any node starts: every node's links, library and window, then this node's library file
     if (!fake) {
         var why: []const u8 = "";
         mcdma_link.specAll(env.a, c, m, .{}, &why) catch |err| {
@@ -378,7 +375,7 @@ fn prepare(env: Env, c: config.Config, m: config.Model, name: []const u8) !union
     return .{ .ok = .{ .spec = s, .plan = mcdma_link.planDigest(c, m, s.names, .{}) } };
 }
 
-/// What this node will open: its rank among the model's, each link with its ports, GID, path MTU and kind, the window, the plan.
+/// What this node will open: its rank, each link's ports, GID, path MTU and kind, the window, the plan.
 fn describe(env: Env, c: config.Config, p: Prepared) !void {
     const s = p.spec;
     try env.out.print("{s}: rank {d} of {d} (", .{ s.names[s.rank], s.rank, s.names.len });
@@ -389,8 +386,7 @@ fn describe(env: Env, c: config.Config, p: Prepared) !void {
 
 /// Bring this node up over MCDMA and hold: `hold_ns`, then goodbye (serve), or null until a node says goodbye (node).
 fn hostRun(env: Env, p: Prepared, probed: node.Inventory, hold_ns: ?u64) !u8 {
-    // membership knows a node by its name in the file (unique there, and known to every node), not by its probed
-    // hardware id, which two nodes on one host would share
+    // membership knows a node by its unique name in the file, not its probed hardware id, which nodes on a host share
     var inv = probed;
     inv.id = node.idFrom(p.spec.names[p.spec.rank]);
     inv.name = .of(p.spec.names[p.spec.rank]);
