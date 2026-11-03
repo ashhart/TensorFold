@@ -1,7 +1,6 @@
 //! Loaded topology receipts, client provenance, and unchanged community-v1 bytes on host fixtures.
 const std = @import("std");
 const json = @import("json");
-const core = @import("core");
 const receipt = @import("benchmark_receipt.zig");
 const receipts = @import("benchmark_receipt_test.zig");
 const check = @import("benchmark_check.zig");
@@ -12,17 +11,7 @@ const server = @import("benchmark_server.zig");
 const Value = json.Value;
 const now_ms = 1767225660000;
 
-pub fn topology(a: std.mem.Allocator, world: u32, multi: bool) !Value {
-    var all: [8]core.benchmark_group.Wire = undefined;
-    for (all[0..world], 0..) |*w, i| {
-        w.* = .{ .rank = @intCast(i), .world = world, .memory = 128 << 30, .gpu_memory = 120 << 30, .device_known = 1 };
-        w.node[0] = if (multi) @intCast(i + 1) else 1;
-        w.device[0] = @intCast(i + 1);
-        @memcpy(w.cpu[0..11], "Example CPU");
-        @memcpy(w.gpu[0..11], "Example GPU");
-    }
-    return (try json.parse(a, (try core.benchmark_group.assemble(a, all[0..world])).?)).ok;
-}
+pub const topology = @import("benchmark_group_fixture.zig").topology;
 
 pub fn document(a: std.mem.Allocator, world: u32, backend: []const u8) !Value {
     const g = try topology(a, world, true);
