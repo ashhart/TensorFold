@@ -580,7 +580,7 @@ test "a greedy pick under a grammar: the first largest allowed token, refusals b
     try std.testing.expectError(error.NonFiniteLogits, pickAllowed(&row, &mask));
 }
 
-test "zero grant: Gemma CUDA assistant and DFlash preserve tokens through a long shared skip" {
+test "zero grant and shared head costs: Gemma CUDA assistant and DFlash keep tokens and costed copy grants" {
     var m: fwd.Model = undefined;
     m.slots = 16;
     m.paged = false;
@@ -588,14 +588,5 @@ test "zero grant: Gemma CUDA assistant and DFlash preserve tokens through a long
     b.m = &m;
     b.priority_copies = true;
     try lanes.shared_draft_check.check(b.facts(), true);
-}
-
-test "shared head costs: Gemma CUDA assistant and DFlash retain costed copy grants" {
-    var m: fwd.Model = undefined;
-    m.slots = 16;
-    m.paged = false;
-    var b: Gemma = undefined;
-    b.m = &m;
-    b.priority_copies = true;
     try @import("cuda_head_cost_test.zig").check(b.facts());
 }
