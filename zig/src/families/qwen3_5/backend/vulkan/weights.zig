@@ -19,13 +19,13 @@ pub const Error = loader.table.Error || pinned.Error || vk.runtime.Error ||
 const prefix = loader.checkpoint.prefix;
 
 // A `Quant` stores packed affine words, per-group scales and biases, plus row/column geometry checked by qmm.
-// `tiled` marks words, scales and biases repacked by `vk.tile` for the tiled qmm image.
 pub const Quant = struct {
     w: View,
     scales: View,
     biases: View,
     n: u64,
     k: u64,
+    /// Words, scales and biases are repacked by `vk.tile` for the tiled qmm image.
     tiled: bool = false,
 };
 
