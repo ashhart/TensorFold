@@ -60,6 +60,16 @@ pub const qwen3_5: Family = .{
     .quant = .{ .bits = 4, .group = 64 },
     .keys = .{ .scope = "text_config", .width = "intermediate_size" },
     .experts = .every,
+    .widths = .{
+        .embedding = "language_model.model.embed_tokens",
+        .head = "language_model.lm_head",
+        .mixer = "",
+        .aliases = &.{ "model.language_model.", "language_model.", "text_model.", "model." },
+        .pattern = .{ .types = "layer_types", .linear = "linear_attention", .attention = "full_attention", .interval = "full_attention_interval", .default_interval = 4 },
+        .common = &.{ "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj" },
+        .mamba = &.{ "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.in_proj_b", "linear_attn.in_proj_a", "linear_attn.out_proj" },
+        .attention = &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj" },
+    },
 };
 
 pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5 };

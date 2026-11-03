@@ -53,12 +53,23 @@ pub const Keys = struct {
 /// Which layers have a shared expert: those a layer pattern marks MoE, or every layer.
 pub const Experts = enum { pattern, every };
 
+/// A dense family's mixer kinds are independent of the layers where its learnable MLP sits.
+pub const WidthPattern = struct {
+    types: []const u8,
+    linear: []const u8,
+    attention: []const u8,
+    interval: []const u8,
+    default_interval: usize,
+};
+
 /// Quantized matrices read by a native family, in its loader's admission order.
 pub const Widths = struct {
     embedding: []const u8,
     head: []const u8,
     mixer: []const u8,
     aliases: []const []const u8 = &.{},
+    pattern: ?WidthPattern = null,
+    common: []const []const u8 = &.{},
     residuals: []const []const u8 = &.{},
     mamba: []const []const u8 = &.{},
     attention: []const []const u8 = &.{},

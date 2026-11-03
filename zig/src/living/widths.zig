@@ -15,22 +15,50 @@ pub fn other(a: std.mem.Allocator, f: Family, root: std.json.ObjectMap) !?Mismat
     const global = try width(q, .{ .bits = 0, .group = 64 });
     if (global.bits == 0 or global.group == 0) return error.BadConfig;
     if (try matrix(a, f, q, global, names.embedding, false)) |m| return m;
-    const kinds = try families.kinds(a, f, o);
-    for (kinds, 0..) |kind, i| {
+    const layer_kinds = try kinds(a, f, o);
+    for (layer_kinds, 0..) |kind, i| {
         const members = switch (kind) {
             'M' => names.mamba,
             '*' => names.attention,
             'E' => names.expert,
             else => return error.BadConfig,
         };
-        for (members) |member| {
+        for ([_][]const []const u8{ members, names.common }) |list| for (list) |member| {
             const path = try std.fmt.allocPrint(a, "{s}{d}.{s}{s}", .{ f.names.layers, i, names.mixer, member });
             var residual = false;
             for (names.residuals) |r| residual = residual or std.mem.eql(u8, member, r);
             if (try matrix(a, f, q, global, path, residual)) |m| return m;
-        }
+        };
     }
     return matrix(a, f, q, global, names.head, false);
+}
+
+fn kinds(a: std.mem.Allocator, f: Family, o: std.json.ObjectMap) ![]const u8 {
+    const p = f.widths.?.pattern orelse return families.kinds(a, f, o);
+    const count = families.intField(o, f.keys.layers) orelse return error.BadConfig;
+    const out = try a.alloc(u8, count);
+    errdefer a.free(out);
+    if (o.get(p.types)) |v| {
+        if (v != .array or v.array.items.len != count) return error.BadConfig;
+        for (v.array.items, out) |v_, *kind| {
+            if (v_ != .string) return error.BadConfig;
+            kind.* = if (std.mem.eql(u8, v_.string, p.linear)) 'M' else if (std.mem.eql(u8, v_.string, p.attention)) '*' else return error.BadConfig;
+        }
+    } else {
+        const interval = if (o.get(p.interval) != null) families.intField(o, p.interval) orelse return error.BadConfig else p.default_interval;
+        if (interval == 0) return error.BadConfig;
+        for (out, 0..) |*kind, i| kind.* = if ((i + 1) % interval == 0) '*' else 'M';
+    }
+    return out;
+}
+
+fn canonical(f: Family, name: []const u8) []const u8 {
+    var path = name;
+    if (std.mem.endsWith(u8, path, ".weight")) path = path[0 .. path.len - ".weight".len];
+    for (f.widths.?.aliases) |alias| if (std.mem.startsWith(u8, path, alias)) {
+        path = path[alias.len..];
+    };
+    return path;
 }
 
 fn quantBlock(o: std.json.ObjectMap) ?std.json.ObjectMap {
@@ -50,12 +78,7 @@ fn matrix(a: std.mem.Allocator, f: Family, q: std.json.ObjectMap, global: Quant,
     var got = global;
     var it = q.iterator();
     while (it.next()) |entry| {
-        var path = entry.key_ptr.*;
-        for (f.widths.?.aliases) |alias| if (std.mem.startsWith(u8, path, alias)) {
-            path = path[alias.len..];
-            break;
-        };
-        if (!std.mem.eql(u8, path, name)) continue;
+        if (!std.mem.eql(u8, canonical(f, entry.key_ptr.*), canonical(f, name))) continue;
         const v = entry.value_ptr.*;
         got = switch (v) {
             .bool => if (v.bool) global else if (residual) f.quant else return error.BadConfig,
@@ -91,4 +114,8 @@ test "Metal learner: effective widths use the descriptor, module defaults and se
     // A module dict inherits affine defaults, rather than the checkpoint's global width.
     try q.put(a, changed.widths.?.head, .{ .object = .{} });
     try std.testing.expectError(error.BadConfig, other(a, changed, root));
+}
+
+test {
+    _ = @import("widths_qwen_test.zig");
 }
