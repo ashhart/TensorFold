@@ -186,8 +186,9 @@ test "the residual and the norm in one launch write the bytes of tf_add (or tf_a
     defer t.close();
     var rng: rig.Rng = .{ .state = 0xADD5 };
     var cases: usize = 0;
+    // Nemotron's widths, and Qwen 3.5's 2048 and 5120 (its prompt's residual and post-mixer norm)
     for ([_]c_int{ 1, 2 }) |kind| for ([_]usize{ 1, 3, 17, 64 }) |rows| for (
-        [_]usize{ 1032, 2688, 4096, 8192 },
+        [_]usize{ 1032, 2048, 2688, 4096, 5120, 8192 },
     ) |width| {
         for ([_]bool{ false, true }) |wide| for ([_]bool{ false, true }) |specials| {
             try rig.expect(
