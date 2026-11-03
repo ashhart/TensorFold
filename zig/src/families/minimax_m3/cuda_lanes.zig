@@ -36,7 +36,7 @@ const Lane = struct {
 };
 
 pub const Lanes = struct {
-    copy_drafts: bool = true,
+    priority_copies: bool = false,
     x: follow.Leader,
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -88,10 +88,9 @@ pub const Lanes = struct {
     pub fn facts(self: *const Lanes) lanes.Model {
         const head = self.x.e.drafter != null;
         return .{
-            .copy_drafts = self.copy_drafts,
-            .root_copies = self.copy_drafts,
-            .context_copies = self.copy_drafts,
-            .copy_match = if (self.copy_drafts) 4 else 8,
+            .root_copies = self.priority_copies,
+            .context_copies = self.priority_copies,
+            .copy_match = if (self.priority_copies) 4 else 8,
             .exact_width = max_rows,
             .gpu_tokens = false,
             .mtp = head,

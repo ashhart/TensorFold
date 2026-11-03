@@ -3,7 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const a = std.testing.allocator;
 const be = lanes.backend;
-const Family = enum { gemma4, spark25, kolibri1, minimax, minimax_head };
+const Family = enum { gemma4, spark25, kolibri1, dory, minimax, minimax_head };
 fn facts(family: Family, enabled: bool) lanes.Model {
     switch (family) {
         .gemma4 => {
@@ -13,7 +13,7 @@ fn facts(family: Family, enabled: bool) lanes.Model {
             m.slots = 8;
             var b: f.backend.Gemma = undefined;
             b.m = &m;
-            b.copy_drafts = enabled;
+            b.priority_copies = enabled;
             return b.facts();
         },
         .spark25 => {
@@ -23,7 +23,17 @@ fn facts(family: Family, enabled: bool) lanes.Model {
             m.slots = 8;
             var b: f.backend.Spark = undefined;
             b.m = &m;
-            b.copy_drafts = enabled;
+            b.priority_copies = enabled;
+            return b.facts();
+        },
+        .dory => {
+            const f = @import("dory");
+            var m: f.cuda_model.Model = undefined;
+            m.paged = false;
+            m.slots = 8;
+            var b: f.cuda_backend.Dory = undefined;
+            b.m = &m;
+            b.priority_copies = enabled;
             return b.facts();
         },
         .kolibri1 => {
@@ -32,7 +42,7 @@ fn facts(family: Family, enabled: bool) lanes.Model {
             m.slots = 8;
             var b: f.backend.Kolibri = undefined;
             b.m = &m;
-            b.copy_drafts = enabled;
+            b.priority_copies = enabled;
             return b.facts();
         },
         .minimax, .minimax_head => {
@@ -41,36 +51,49 @@ fn facts(family: Family, enabled: bool) lanes.Model {
             e.drafter = if (family == .minimax_head) @ptrFromInt(16) else null;
             var b: f.lanes.Lanes = undefined;
             b.x.e = &e;
-            b.copy_drafts = enabled;
+            b.priority_copies = enabled;
             return b.facts();
         },
     }
 }
 const families = std.enums.values(Family);
 
-fn old(m: lanes.Model) lanes.Model {
-    var out = m;
-    out.root_copies = false;
-    out.context_copies = false;
-    out.copy_match = 8;
-    return out;
+// Literal main facts for eight slots; independent of the candidate adapters' facts.
+fn mainFacts(family: Family) lanes.Model {
+    if (family == .minimax or family == .minimax_head) {
+        const head = family == .minimax_head;
+        return .{ .exact_width = 16, .gpu_tokens = false, .mtp = head, .speculate = head, .speculate_early = false, .drafts = if (head) 7 else 0, .draft_streams = head, .mtp_step_ms = if (head) 1.5 else 0, .window_costs = if (head) &main_window_costs else &.{}, .shared_costs = if (head) &main_shared_costs else &.{}, .hidden_rows = true, .batch_rows = 32, .max_streams = 16 };
+    }
+    return .{ .exact_width = 16, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = if (family == .kolibri1) 64 else 128, .max_streams = 8 };
 }
+const main_ms = [_]f64{ 54.5, 64.4, 74.1, 84.1, 94.6, 102.6, 108.5, 114.2, 120.8, 124.9, 130.1, 136.2, 140.6, 145.2, 149.7, 152.7, 166.2, 173.4, 175.9, 182.2, 188.6, 195.5, 199.6, 203.1, 207.6, 211.8, 213.4, 215.3, 223.2, 224.9, 226.0, 244.8 };
+fn mainCosts(comptime n: usize) [n]lanes.config.Cost {
+    var costs: [n]lanes.config.Cost = undefined;
+    for (&costs, main_ms[0..n], 0..) |*c, ms, i| c.* = .{ .width = i + 1, .ms = ms };
+    return costs;
+}
+const main_window_costs = mainCosts(16);
+const main_shared_costs = mainCosts(32);
 
-test "CUDA lane copies: actual family facts gate copies and retain the drafts-off model" {
-    for (families) |family| for ([_]bool{ false, true }) |on| {
-        const m = facts(family, on);
-        var cfg = try lanes.Config.init(a, m, m.exact_width, m.exact_width - 1);
-        defer cfg.deinit(a);
-        try std.testing.expectEqual(on, cfg.root_copies);
-        try std.testing.expectEqual(on, cfg.context_copies);
-        try std.testing.expectEqual(@as(i64, if (on) 4 else 8), cfg.enter_match);
-        if (on) try std.testing.expect(cfg.max_copy > 1) else {
-            try std.testing.expectEqual(@as(i64, 0), cfg.max_copy);
-            try std.testing.expectEqualDeep(old(m), m);
+test "CUDA lane copies: default and serving drafts off keep literal main facts" {
+    for (families) |family| {
+        const main = mainFacts(family);
+        try std.testing.expectEqualDeep(main, facts(family, false));
+        try std.testing.expect(main.copy_drafts and !main.root_copies and !main.context_copies);
+        for ([_]bool{ false, true }) |on| {
+            const m = facts(family, on);
+            var cfg = try lanes.Config.init(a, m, m.exact_width, m.exact_width - 1);
+            defer cfg.deinit(a);
+            try std.testing.expectEqual(on, cfg.root_copies);
+            try std.testing.expectEqual(on, cfg.context_copies);
+            try std.testing.expectEqual(@as(i64, if (on) 4 else 8), cfg.enter_match);
+            try std.testing.expectEqual(@as(u32, 15), cfg.max_copy);
+            for ([_]?[]const u8{ null, "0", "1" }) |value| {
+                const off = try @import("cuda").priority_copies.enabled(false, value);
+                try std.testing.expectEqualDeep(main, facts(family, off));
+            }
         }
-    };
-    const plain = facts(.minimax, true);
-    try std.testing.expect(plain.root_copies and plain.context_copies and !plain.mtp);
+    }
 }
 
 const Copy = struct {
@@ -192,7 +215,9 @@ test "CUDA lane copies: real core copies equal plain tokens solo shared sampled 
     for (families) |family| for ([_]bool{ false, true }) |sampled| for ([_]bool{ false, true }) |restored| for ([_]bool{ false, true }) |breaks| {
         const m = facts(family, true);
         const plain = try run(m, 1, sampled, false, breaks, restored);
-        const disabled = try run(facts(family, false), 1, sampled, true, breaks, restored);
+        var no_copies = mainFacts(family);
+        no_copies.copy_drafts = false;
+        const disabled = try run(no_copies, 1, sampled, true, breaks, restored);
         try std.testing.expectEqualSlices(u32, &plain.tokens[0], &disabled.tokens[0]);
         try std.testing.expectEqual(@as(usize, 0), disabled.stats.copied);
         for ([_]usize{ 1, 8 }) |count| {
@@ -204,7 +229,7 @@ test "CUDA lane copies: real core copies equal plain tokens solo shared sampled 
                 if (count == 1) try std.testing.expect(got.stats.rejected > 0);
                 if (m.mtp) try std.testing.expect(got.stats.heads > 0);
             }
-            const before = try run(old(m), count, sampled, false, breaks, restored);
+            const before = try run(mainFacts(family), count, sampled, false, breaks, restored);
             const after = try run(m, count, sampled, false, breaks, restored);
             try std.testing.expectEqualDeep(before, after);
         }

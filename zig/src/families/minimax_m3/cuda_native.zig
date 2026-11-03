@@ -142,6 +142,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 }
 
 fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place) !Loaded {
+    const priority_copies = try cuda.priority_copies.read("TF_MINIMAX_COPIES", o.drafts);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = undefined, .lanes = undefined, .place = p };
@@ -217,7 +218,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     }
     if (own.link) |*l| l.asleep = cuda.tp_watch.open();
     own.lanes = .{ .x = .{ .e = own.e, .link = if (own.link) |*l| l else null } };
-    own.lanes.copy_drafts = o.drafts;
+    own.lanes.priority_copies = priority_copies;
     return .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
