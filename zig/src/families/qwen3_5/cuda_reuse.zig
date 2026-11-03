@@ -135,6 +135,34 @@ const Runs = struct {
     }
 };
 
+/// Whether a cache's keys and values go a page a copy: bf16 pages, whose pieces lie back to back a page's rows apart.
+fn wholePages(cache: *const Cache, l: Layout) bool {
+    return cache.paged != null and l.format == .bf16 and l.at > 0;
+}
+
+/// Every bf16 piece's rows from `at`'s pages, one 2D copy a page (`tokens` rows apart there, `at` apart in `copy`).
+fn pageCopies(e: *Engine, cache: *const Cache, l: Layout, copy: *const Copy, off: usize, way: enum { save, restore }) !void {
+    const pg = cache.paged.?;
+    const row = head_dim * 2;
+    const page_bytes = (Layout{ .g = l.g, .format = l.format, .cap = pg.tokens, .at = pg.tokens }).kvBytes();
+    const pieces = l.count() - 1;
+    var p: usize = 0;
+    while (p * pg.tokens < l.at) : (p += 1) {
+        const rows = @min(pg.tokens, l.at - p * pg.tokens);
+        const dev = pg.base + pg.ids[p] * page_bytes;
+        const o = off + p * pg.tokens * row;
+        // the kept side: device memory on an integrated GPU (copy.dev), else the pinned host copy
+        const kept: cuda.abi.DevicePtr = if (copy.dev) |b| b.ptr + o else 0;
+        const host: ?*u8 = if (copy.dev == null) &copy.host.bytes.ptr[o] else null;
+        const kind: c_int = @intCast(if (copy.dev == null) cuda.abi.memory_type_host else cuda.abi.memory_type_device);
+        const m: cuda.abi.Memcpy2D = switch (way) {
+            .save => .{ .src = dev, .src_pitch = pg.tokens * row, .dst_type = kind, .dst_host = host, .dst = kept, .dst_pitch = l.at * row, .width = rows * row, .height = pieces },
+            .restore => .{ .src_type = kind, .src_host = host, .src = kept, .src_pitch = l.at * row, .dst = dev, .dst_pitch = pg.tokens * row, .width = rows * row, .height = pieces },
+        };
+        try e.d.check(e.d.api.cuMemcpy2DAsync_v2(&m, e.stream.handle), "cuMemcpy2DAsync");
+    }
+}
+
 /// Whether a request's images match a kept state's: the same identities at the same rows, for every image before `at`.
 pub fn sameImages(kept: []const Seen, request: []const Seen, at: usize) bool {
     var n: usize = 0;
@@ -198,6 +226,10 @@ pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen, devic
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
+        if (i == 1 and wholePages(cache, l)) {
+            try pageCopies(e, cache, l, copy, off, .save);
+            break;
+        }
         var it = Runs.of(cache, l, i, p);
         while (it.next()) |r| {
             const s, const o = .{ e.stream.handle, off + r.at };
@@ -248,6 +280,10 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
+        if (i == 1 and wholePages(cache, l)) {
+            try pageCopies(e, cache, l, copy, off, .restore);
+            break;
+        }
         var it = Runs.of(cache, l, i, p);
         while (it.next()) |r| {
             const s, const o = .{ e.stream.handle, off + r.at };
