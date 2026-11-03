@@ -31,17 +31,21 @@ export interface ApprovalMenuProps {
   onSetApproval: (mode: ApprovalMode) => void
   /** External provider selected: it only plans, so approvals don't apply. */
   planningOnly?: boolean
+  onChooseModel?: () => void
+  modelPickerDisabled?: boolean
+  modelPickerOpen?: boolean
 }
 
 const PLANNING_ONLY_REASON = 'External models only plan: no tools, no file access. Pick a local model to choose approvals.'
 
-export function ApprovalMenu({ approvalMode, onSetApproval, planningOnly }: ApprovalMenuProps) {
+export function ApprovalMenu({ approvalMode, onSetApproval, planningOnly, onChooseModel, modelPickerDisabled, modelPickerOpen }: ApprovalMenuProps) {
   const tx = useAuthoredText()
   const approval = APPROVAL.find((a) => a.value === approvalMode)!
   if (planningOnly) return (
-    <button disabled aria-disabled title={tx("External models only plan: no tools, no file access. Pick a local model to choose approvals.")} className="inline-flex h-8 cursor-default items-center gap-1.5 rounded-full px-2.5 text-[13px] text-ink-3">
+    <button type="button" disabled={modelPickerDisabled || !onChooseModel} onClick={onChooseModel} aria-haspopup="dialog" aria-expanded={modelPickerOpen ?? false} title={modelPickerDisabled ? tx("Stop the current run before changing its model") : tx("External models only plan: no tools, no file access. Pick a local model to choose approvals.")} className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-55">
       <Icon name="shield" size={16} className="text-ink-4" />
       <span className="whitespace-nowrap">{tx("Planning only")}</span>
+      <Icon name="chevronDown" size={14} className="text-ink-3" />
     </button>
   )
   return (

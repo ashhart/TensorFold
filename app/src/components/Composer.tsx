@@ -255,6 +255,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
       : null
   const localOnly = !!policyProject?.localOnly || !!thread?.phoneLocalOnly || !!thread?.googleLocalOnly
   const pickerProviders = allowedProviders(settings.providers, policyProject)
+  const [modelPickerScope, setModelPickerScope] = useState<'all' | 'local' | null>(null)
   const [remoteBrowseOpen, setRemoteBrowseOpen] = useState(false)
   const [remoteBrowse, setRemoteBrowse] = useState<RemoteDirectoryListResult | null>(null)
   const [remoteBrowseBusy, setRemoteBrowseBusy] = useState(false)
@@ -359,6 +360,8 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
 
   const st = thread ? status[thread.id] : undefined
   const busy = st != null && ['thinking', 'streaming', 'tool', 'awaiting'].includes(st)
+  const modelPickerDisabled = busy || submitting || !!thread?.bot
+  useEffect(() => { setModelPickerScope(null) }, [thread?.id, mode, modelPickerDisabled])
   const botPreset = thread?.bot ? settings.agentPresets.find((preset) => preset.id === thread.bot!.presetId) : null
   const recoveryBlocked = !!thread?.runRecovery && (!thread.runRecovery.canStartNewRun && !busy || thread.runRecovery.retry === 'requires_review' && thread.runRecoveryReviewedId !== thread.runRecovery.runId)
   const botBlocked = !!thread?.bot && (!botPreset || !!botPreset.paused || !!botPreset.archivedAt)
@@ -1200,7 +1203,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
               </Menu>
 
               {!isChat && (
-                <ApprovalMenu approvalMode={settings.approvalMode} onSetApproval={setApproval} planningOnly={!!provider && isExternalProvider(provider)} />
+                <ApprovalMenu approvalMode={settings.approvalMode} onSetApproval={setApproval} planningOnly={!!provider && isExternalProvider(provider)} onChooseModel={() => setModelPickerScope('local')} modelPickerDisabled={modelPickerDisabled} modelPickerOpen={!modelPickerDisabled && modelPickerScope !== null} />
               )}
 
               {/* A task needs a folder: keep a small way to pick one in sight. */}
@@ -1248,7 +1251,10 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
                   requirements={taskRequirements}
                   pickerProviders={pickerProviders}
                   recentModels={recentModels}
-                  disabled={busy || submitting || !!thread?.bot}
+                  disabled={modelPickerDisabled}
+                  open={!modelPickerDisabled && modelPickerScope !== null}
+                  onOpenChange={(open) => setModelPickerScope(open ? 'all' : null)}
+                  initialScope={modelPickerScope ?? 'all'}
                   usageSnapshot={usageSnapshot}
                   usageSummary={usageSummary}
                   rateLimitStatus={rateLimitStatus}
