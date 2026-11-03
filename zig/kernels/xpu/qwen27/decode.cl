@@ -1,5 +1,6 @@
 // Qwen3.8-27B decode kernels on Intel Xe2: serial GDN (a few tokens) and attention over the cache.
 #pragma OPENCL FP_CONTRACT OFF
+#include "shape.h"
 
 #define KERNEL(N) __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(N, 1, 1))) kernel
 
@@ -18,8 +19,8 @@ static inline ushort f2bf(float f) {
 KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global const ushort *V, global const float *G,
                          global const float *BETA, global const float *S, global float *SO, global ushort *Y, int T,
                          global const int *ROWS, global const int *TREE, global float *SL, global const ulong *MT) {
-  // MT (if non-null): several streams, grid (16, 48, rows); a window's first row starts from its stream's state.
-  const int vb = get_group_id(0), h = get_group_id(1), lane = get_sub_group_local_id(), kh = h / 3;
+  // MT (if non-null): several streams, grid (16, Q27_GV, rows); a window's first row starts from its stream's state.
+  const int vb = get_group_id(0), h = get_group_id(1), lane = get_sub_group_local_id(), kh = h / Q27_GVK;
   int t0 = 0;
   if (MT) {
     t0 = get_group_id(2);
@@ -36,16 +37,16 @@ KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global 
     if (TREE && DEPTH(t) > 0 && LOAD(t)) {              // the parent's state, from its slot
       const int par = ANC(t, DEPTH(t) - 1);
       for (int r = 0; r < 8; r++)
-        for (int i = 0; i < 8; i++) s[r][i] = SL[(((long)par * 48 + h) * 128 + vb * 8 + r) * 128 + i * 16 + lane];
+        for (int i = 0; i < 8; i++) s[r][i] = SL[(((long)par * Q27_GV + h) * 128 + vb * 8 + r) * 128 + i * 16 + lane];
     } else if (TREE && DEPTH(t) == 0)
       for (int r = 0; r < 8; r++)
         for (int i = 0; i < 8; i++) s[r][i] = S[((long)h * 128 + vb * 8 + r) * 128 + i * 16 + lane];
     float q[8], k[8];
     for (int i = 0; i < 8; i++) {
-      q[i] = bf2f(Q[((long)row * 16 + kh) * 128 + i * 16 + lane]);
-      k[i] = bf2f(K[((long)row * 16 + kh) * 128 + i * 16 + lane]);
+      q[i] = bf2f(Q[((long)row * Q27_GK + kh) * 128 + i * 16 + lane]);
+      k[i] = bf2f(K[((long)row * Q27_GK + kh) * 128 + i * 16 + lane]);
     }
-    const float g = G[(long)row * 48 + h], beta = BETA[(long)row * 48 + h];
+    const float g = G[(long)row * Q27_GV + h], beta = BETA[(long)row * Q27_GV + h];
     for (int r = 0; r < 8; r++) {
       float mem = 0.0f;
       for (int i = 0; i < 8; i++) {
@@ -53,31 +54,33 @@ KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global 
         mem += s[r][i] * k[i];
       }
       mem = sub_group_reduce_add(mem);
-      const float u = (bf2f(V[((long)row * 48 + h) * 128 + vb * 8 + r]) - mem) * beta;
+      const float u = (bf2f(V[((long)row * Q27_GV + h) * 128 + vb * 8 + r]) - mem) * beta;
       float y = 0.0f;
       for (int i = 0; i < 8; i++) {
         s[r][i] += k[i] * u;
         y += s[r][i] * q[i];
       }
       y = sub_group_reduce_add(y);
-      if (lane == 0) Y[((long)t * 48 + h) * 128 + vb * 8 + r] = f2bf(y);
+      if (lane == 0) Y[((long)t * Q27_GV + h) * 128 + vb * 8 + r] = f2bf(y);
     }
     if (TREE && SAVE(t))
       for (int r = 0; r < 8; r++)
-        for (int i = 0; i < 8; i++) SL[(((long)t * 48 + h) * 128 + vb * 8 + r) * 128 + i * 16 + lane] = s[r][i];
+        for (int i = 0; i < 8; i++) SL[(((long)t * Q27_GV + h) * 128 + vb * 8 + r) * 128 + i * 16 + lane] = s[r][i];
   }
   if (!TREE)
     for (int r = 0; r < 8; r++)
       for (int i = 0; i < 8; i++) SO[((long)h * 128 + vb * 8 + r) * 128 + i * 16 + lane] = s[r][i];
 }
 
-// Decode attention by key slices: one subgroup per (slice, K/V head, row) handles 6 query heads; partials PM, PL, PO.
+// Decode attention by key slices: one subgroup per (slice, K/V head and query part, row) handles Q27_QPG query heads
+// (27B: 6, all of the K/V head's); partials PM, PL, PO. Grid (slices, Q27_AKV * Q27_QPARTS, rows).
 #define SPLIT 32
 KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
                             global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
                             global const ulong *MT, global const int *POS, int cap) {
   // MT (if non-null): several streams, one row each; with TREE, tree windows; cap > 0: int8 cache (256 bytes per row).
-  const int sp = get_group_id(0), hk = get_group_id(1), t = get_group_id(2), lane = get_sub_group_local_id();
+  const int sp = get_group_id(0), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(2), lane = get_sub_group_local_id();
+  const int qh0 = hk * Q27_GQA + (get_group_id(1) % Q27_QPARTS) * Q27_QPG; // the first query head held
   int base = p0, wf = 0;
   if (MT) {
     KC = (global const ushort *)MT[t * 8];
@@ -86,10 +89,10 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
     base = TREE ? POS[wf] : 0x7fffffff;
   }
   const int last = MT ? POS[t] : p0 + DEPTH(t), j0 = sp * SPLIT, j1 = min(j0 + SPLIT, last + 1);
-  float q[6][16], o[6][16], m[6], l[6];
-  for (int a = 0; a < 6; a++) {
+  float q[Q27_QPG][16], o[Q27_QPG][16], m[Q27_QPG], l[Q27_QPG];
+  for (int a = 0; a < Q27_QPG; a++) {
     for (int i = 0; i < 16; i++) {
-      q[a][i] = bf2f(Q[((long)t * 24 + hk * 6 + a) * 256 + i * 16 + lane]);
+      q[a][i] = bf2f(Q[((long)t * Q27_AQ + qh0 + a) * 256 + i * 16 + lane]);
       o[a][i] = 0.0f;
     }
     m[a] = -INFINITY;
@@ -99,24 +102,24 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
     const long kr = j < base ? j : base + ANC(t, j - base) - wf; // cache row of key j
     float kv[16];
     if (cap) {
-      const global char *k8 = (const global char *)KC + (kr * 4 + hk) * 256;
-      const float ks = ((const global float *)((const global char *)KC + (long)cap * 1024))[kr * 4 + hk];
+      const global char *k8 = (const global char *)KC + (kr * Q27_AKV + hk) * 256;
+      const float ks = ((const global float *)((const global char *)KC + (long)cap * Q27_KVROW))[kr * Q27_AKV + hk];
       for (int i = 0; i < 16; i++) kv[i] = (float)k8[i * 16 + lane] * ks;
     } else
-      for (int i = 0; i < 16; i++) kv[i] = bf2f(KC[(kr * 4 + hk) * 256 + i * 16 + lane]);
-    float sc[6];
-    for (int a = 0; a < 6; a++) {
+      for (int i = 0; i < 16; i++) kv[i] = bf2f(KC[(kr * Q27_AKV + hk) * 256 + i * 16 + lane]);
+    float sc[Q27_QPG];
+    for (int a = 0; a < Q27_QPG; a++) {
       float d = 0.0f;
       for (int i = 0; i < 16; i++) d += q[a][i] * kv[i];
       sc[a] = sub_group_reduce_add(d) * scale;
     }
     if (cap) {
-      const global char *v8 = (const global char *)VC + (kr * 4 + hk) * 256;
-      const float vs = ((const global float *)((const global char *)VC + (long)cap * 1024))[kr * 4 + hk];
+      const global char *v8 = (const global char *)VC + (kr * Q27_AKV + hk) * 256;
+      const float vs = ((const global float *)((const global char *)VC + (long)cap * Q27_KVROW))[kr * Q27_AKV + hk];
       for (int i = 0; i < 16; i++) kv[i] = (float)v8[i * 16 + lane] * vs;
     } else
-      for (int i = 0; i < 16; i++) kv[i] = bf2f(VC[(kr * 4 + hk) * 256 + i * 16 + lane]);
-    for (int a = 0; a < 6; a++) {
+      for (int i = 0; i < 16; i++) kv[i] = bf2f(VC[(kr * Q27_AKV + hk) * 256 + i * 16 + lane]);
+    for (int a = 0; a < Q27_QPG; a++) {
       const float mn = fmax(m[a], sc[a]);
       const float al = exp(m[a] - mn), p = exp(sc[a] - mn);
       l[a] = l[a] * al + p;
@@ -124,8 +127,8 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
       m[a] = mn;
     }
   }
-  for (int a = 0; a < 6; a++) {
-    const long base = ((long)t * 24 + hk * 6 + a) * NS + sp;
+  for (int a = 0; a < Q27_QPG; a++) {
+    const long base = ((long)t * Q27_AQ + qh0 + a) * NS + sp;
     if (lane == 0) {
       PM[base] = m[a];
       PL[base] = l[a];
@@ -134,12 +137,12 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
   }
 }
 
-// Merge of the slices, in order: O bf16 [T, 24, 256]. One subgroup per (head, row).
+// Merge of the slices, in order: O bf16 [T, Q27_AQ, 256]. One subgroup per (head, row).
 KERNEL(16) void attn_merge(global const float *PM, global const float *PL, global const float *PO, global ushort *O,
                            int p0, int NS, global const int *TREE, global const int *POS) {
   const int hh = get_group_id(0), t = get_group_id(1), lane = get_sub_group_local_id();
   const int used = (POS ? POS[t] : p0 + DEPTH(t)) / SPLIT + 1; // non-empty slices of row t
-  const long base = ((long)t * 24 + hh) * NS;
+  const long base = ((long)t * Q27_AQ + hh) * NS;
   float m = -INFINITY;
   for (int s = 0; s < used; s++) m = fmax(m, PM[base + s]);
   float l = 0.0f, o[16];
@@ -149,14 +152,14 @@ KERNEL(16) void attn_merge(global const float *PM, global const float *PL, globa
     l += PL[base + s] * w;
     for (int i = 0; i < 16; i++) o[i] += PO[(base + s) * 256 + i * 16 + lane] * w;
   }
-  for (int i = 0; i < 16; i++) O[((long)t * 24 + hh) * 256 + i * 16 + lane] = f2bf(o[i] / l);
+  for (int i = 0; i < 16; i++) O[((long)t * Q27_AQ + hh) * 256 + i * 16 + lane] = f2bf(o[i] / l);
 }
 
 // Commit of a kept path: its K, V rows move to positions p0 + depth in depth order, never overwriting an unread row.
 KERNEL(16) void kv_move(global ushort *KC, global ushort *VC, int p0, global const int *PATH, int n, int cap) {
   const int hk = get_group_id(0), lane = get_sub_group_local_id();
   for (int d = 0; d < n; d++) {
-    const long src = ((long)(p0 + PATH[d]) * 4 + hk) * 256, dst = ((long)(p0 + d) * 4 + hk) * 256;
+    const long src = ((long)(p0 + PATH[d]) * Q27_AKV + hk) * 256, dst = ((long)(p0 + d) * Q27_AKV + hk) * 256;
     if (src == dst) continue;
     if (cap) {                                         // int8: 256 bytes (16 per lane) and the scale
       global uint *k = (global uint *)KC, *v = (global uint *)VC;
@@ -165,8 +168,8 @@ KERNEL(16) void kv_move(global ushort *KC, global ushort *VC, int p0, global con
         v[dst / 4 + i * 16 + lane] = v[src / 4 + i * 16 + lane];
       }
       if (lane == 0) {
-        global float *ks = (global float *)((global char *)KC + (long)cap * 1024),
-                     *vs = (global float *)((global char *)VC + (long)cap * 1024);
+        global float *ks = (global float *)((global char *)KC + (long)cap * Q27_KVROW),
+                     *vs = (global float *)((global char *)VC + (long)cap * Q27_KVROW);
         ks[dst / 256] = ks[src / 256];
         vs[dst / 256] = vs[src / 256];
       }
@@ -225,6 +228,8 @@ KERNEL(16) void exl3_gemv(global const ushort *TR, global const half *X, global 
   }
 }
 
+// The prompt attention kernels hold the 6 query heads of a K/V head (3 groups of 2): the 27B's GQA only.
+#if Q27_GQA == 6
 // Prompt attention (FlashAttention-2 on bf16 DPAS), causal, 256-wide heads; fixed key order, so a row's bits ignore T.
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
 __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(128, 1, 1)))
@@ -490,3 +495,4 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       dst[16] = f2bf(o[i][1][r] * inv);
     }
 }
+#endif // Q27_GQA == 6
