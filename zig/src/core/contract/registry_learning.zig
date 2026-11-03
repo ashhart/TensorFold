@@ -6,7 +6,6 @@ pub const gradient_pending = @import("gradient_pending.zig").records;
 pub const qwen_learning_pending = @import("qwen_learning_pending.zig").records;
 /// The learning, paging and changed attention launches nvcc 13.2 compiles differently, from every SM's image.
 pub const cuda_132 = [_]registry.Override{
-    .{ .name = "gdn_train tf_gdn_norm_back threads 128", .usage = .{ .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 24, .static = 644, .bound = 128 }, .{ .regs = 24, .static = 644, .bound = 128 } } },
     .{ .name = "gdn_train tf_gdn_qk_back threads 128", .usage = .{ .{ .regs = 32, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 } } },
     .{ .name = "gdn_train tf_gdn_conv_back threads 256", .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 } } },
     .{ .name = "train_q4 tf_q4_experts_nt threads 64", .usage = .{ .{ .regs = 72, .static = 10816, .bound = 64 }, .{ .regs = 91, .static = 10816, .bound = 64 }, .{ .regs = 91, .static = 10816, .bound = 64 }, .{ .regs = 78, .static = 10816, .bound = 64 }, .{ .regs = 78, .static = 10816, .bound = 64 } } },
@@ -39,13 +38,26 @@ pub const cuda_132 = [_]registry.Override{
     .{ .name = "27B tf_train_rms_back", .usage = .{ .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 39, .static = 128, .bound = 256 }, .{ .regs = 39, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 } } },
     .{ .name = "27B tf_q27_pocket_grad", .usage = .{ .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 } } },
     .{ .name = "27B tf_attn_prep_back", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
-    .{ .name = "27B tf_gdn_norm_back", .usage = .{ .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 24, .static = 644, .bound = 128 }, .{ .regs = 24, .static = 644, .bound = 128 } } },
     .{ .name = "27B tf_gdn_qk_back", .usage = .{ .{ .regs = 32, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 } } },
     .{ .name = "27B tf_gdn_conv_back", .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 } } },
 };
 
-test "train launch records: every learning launch fits every SM by its measured record" {
-    for (gradient_pending) |record| try std.testing.expectEqual(@as(usize, 0), try registry.checkCuda(std.testing.allocator, &.{record}, true));
+test "train launch records: measured learning launches fit and changed GDN receipts remain pending" {
+    for (gradient_pending) |record| {
+        const pending = std.mem.eql(u8, record.launch.symbol, "tf_gdn_norm_back") or
+            std.mem.eql(u8, record.launch.symbol, "tf_ctl_gdn_norm_back_sigmoid");
+        try std.testing.expectEqual(@as(usize, if (pending) 5 else 0), try registry.checkCuda(std.testing.allocator, &.{record}, true));
+    }
+}
+
+test "train launch records: changed GDN mode cannot inherit an old compiler receipt" {
+    for (gradient_pending ++ qwen_learning_pending) |record| {
+        if (!std.mem.eql(u8, record.launch.symbol, "tf_gdn_norm_back") and
+            !std.mem.eql(u8, record.launch.symbol, "tf_ctl_gdn_norm_back_sigmoid")) continue;
+        for ([_]?@import("limits.zig").Nvcc{ null, .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 3 } }) |release| {
+            for (registry.usageFor(record, release)) |usage| try std.testing.expectEqual(@as(u32, 0), usage.regs);
+        }
+    }
 }
 
 test {

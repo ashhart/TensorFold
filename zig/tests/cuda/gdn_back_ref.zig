@@ -42,6 +42,7 @@ pub const Inputs = struct {
     norm_w: []const f64,
     init: ?[]const f64,
     eps: f64,
+    silu: bool = false,
 };
 
 pub const Fwd = struct {
@@ -118,8 +119,8 @@ fn qk(d: Dims, act: []const f64, q: []f64, k: []f64) void {
     };
 }
 
-/// One head's bf16(bf16(y rms) w) in the GPU's own fp32 steps, so the rounded forward point is the GPU's bit for bit.
-fn normedRounded(y: []const f64, w: []const f64, eps: f64, out: []f64) void {
+/// One head at the selected family's RMS rounding points, in the GPU's fp32 steps.
+fn normedRounded(y: []const f64, w: []const f64, eps: f64, silu: bool, out: []f64) void {
     var lanes: [32]f32 = undefined;
     for (&lanes, 0..) |*l, lane| {
         var ss: f32 = 0;
@@ -137,14 +138,14 @@ fn normedRounded(y: []const f64, w: []const f64, eps: f64, out: []f64) void {
     }
     const rinv: f32 = 1.0 / @sqrt(lanes[0] / @as(f32, @floatFromInt(y.len)) + @as(f32, @floatCast(eps)));
     for (out, y, w) |*x, v, wv| {
-        const n = bf16Value(bf16Bits(@as(f32, @floatCast(v)) * rinv));
+        const n = if (silu) @as(f32, @floatCast(v)) * rinv else bf16Value(bf16Bits(@as(f32, @floatCast(v)) * rinv));
         x.* = bf16Value(bf16Bits(n * @as(f32, @floatCast(wv))));
     }
 }
 
 /// yn of one head: the rounded forward's (normedRounded), else y rms(y) w in float64.
-fn normed(y: []const f64, w: []const f64, eps: f64, round: bool, out: []f64) void {
-    if (round) return normedRounded(y, w, eps, out);
+fn normed(y: []const f64, w: []const f64, eps: f64, round: bool, silu: bool, out: []f64) void {
+    if (round) return normedRounded(y, w, eps, silu, out);
     var ss: f64 = 0;
     for (y) |v| ss += v * v;
     const rinv = 1 / @sqrt(ss / @as(f64, @floatFromInt(y.len)) + eps);
@@ -215,10 +216,10 @@ pub fn forwardFrom(a: std.mem.Allocator, d: Dims, in: Inputs, act: []f64, betas:
     const yn = try a.alloc(f64, d.dv);
     defer a.free(yn);
     for (0..d.rows) |r| for (0..d.nv) |h| {
-        normed(f.y[(r * d.nv + h) * d.dv ..][0..d.dv], in.norm_w, in.eps, round, yn);
+        normed(f.y[(r * d.nv + h) * d.dv ..][0..d.dv], in.norm_w, in.eps, round, in.silu, yn);
         for (0..d.dv) |j| {
             const z = in.p[r * P + d.zAt() + h * d.dv + j];
-            const o = yn[j] * sigmoid(z);
+            const o = yn[j] * (if (in.silu) z * sigmoid(z) else sigmoid(z));
             f.out[(r * d.nv + h) * d.dv + j] = if (round) bfRound(o) else o;
         }
     };
@@ -257,13 +258,14 @@ pub fn backward(a: std.mem.Allocator, d: Dims, in: Inputs, act: []const f64, bet
         defer a.free(dn);
         const yn = try a.alloc(f64, d.dv);
         defer a.free(yn);
-        normed(yr, in.norm_w, in.eps, round, yn);
+        normed(yr, in.norm_w, in.eps, round, in.silu, yn);
         for (0..d.dv) |j| {
             const zc = r * P + d.zAt() + h * d.dv + j;
-            const sg = sigmoid(in.p[zc]);
+            const z = in.p[zc];
+            const sg = sigmoid(z);
             const go = dout[(r * d.nv + h) * d.dv + j];
-            gr.dproj[zc] = go * yn[j] * sg * (1 - sg);
-            dn[j] = go * sg * in.norm_w[j];
+            gr.dproj[zc] = go * yn[j] * (if (in.silu) sg * (1 + z * (1 - sg)) else sg * (1 - sg));
+            dn[j] = go * (if (in.silu) z * sg else sg) * in.norm_w[j];
             dot += yr[j] * dn[j];
         }
         for (0..d.dv) |j| gr.dy[(r * d.nv + h) * d.dv + j] = rinv * dn[j] - rinv * rinv * rinv * yr[j] * dot / @as(f64, @floatFromInt(d.dv));

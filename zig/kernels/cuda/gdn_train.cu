@@ -165,7 +165,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_gdn_scan_fwd(const bf16* __
 extern "C" __global__ void __launch_bounds__(128) tf_gdn_norm_back(const bf16* __restrict__ y, const bf16* __restrict__ P,
                                                                    const bf16* __restrict__ norm_w, const float* __restrict__ dout,
                                                                    float* __restrict__ dy, float* __restrict__ dproj, GdnShape s,
-                                                                   float eps) {
+                                                                   float eps, int gate) {
     const int r = blockIdx.x, h = blockIdx.y, t = threadIdx.x, warp = t >> 5, lane = t & 31;
     __shared__ float ys[DV], scratch[32];
     __shared__ float rinv;
@@ -181,11 +181,17 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_norm_back(const bf16* _
     }
     __syncthreads();
     const float w = f32(norm_w[t]), yv = ys[t], ri = rinv;
-    const float yn = bf(bf(yv * ri) * w);
+    const float yn = gate == 0 ? bf(bf(yv * ri) * w) : bf(w * (yv * ri));
     const size_t zc = (size_t)r * s.proj + s.conv + h * DV + t;
-    const float sg = sigmoidf_(f32(P[zc])), d = dout[row + t];
-    dproj[zc] = d * yn * sg * (1.0f - sg);
-    const float dn = d * sg * w;
+    const float z = f32(P[zc]), sg = sigmoidf_(z), d = dout[row + t];
+    float dn;
+    if (gate == 0) {
+        dproj[zc] = d * yn * sg * (1.0f - sg);
+        dn = d * sg * w;
+    } else {
+        dproj[zc] = d * yn * sg * (1.0f + z * (1.0f - sg));
+        dn = d * (z * sg) * w;
+    }
     const float dot = block_sum_tree(yv * dn, scratch, 4);
     dy[row + t] = ri * dn - ri * ri * ri * yv * dot / (float)DV;
 }
@@ -408,3 +414,5 @@ extern "C" __global__ void tf_gdn_dequant(const unsigned* __restrict__ w, const 
     const unsigned qv = (w[i / 8] >> (4 * (i % 8))) & 0xfu;
     out[i] = b16(f32(scales[i / group]) * (float)qv + f32(biases[i / group]));
 }
+
+#include "gdn_train_legacy.cuh"

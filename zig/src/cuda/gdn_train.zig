@@ -1,4 +1,4 @@
-//! Flash Next's Gated DeltaNet backward for Living Weights (gdn_train.cu).
+//! Shared Gated DeltaNet backward for Living Weights, with each family's output gate (gdn_train.cu).
 const std = @import("std");
 const driver = @import("driver.zig");
 const module = @import("module.zig");
@@ -15,6 +15,7 @@ const Args = launch_.Args;
 pub const dk = 128;
 pub const dv = 128;
 pub const taps = 4;
+pub const Gate = enum(c_int) { sigmoid = 0, silu = 1 };
 /// Chain rows between state checkpoints (gdn_train.cu's CK): 4 keeps the replay area.
 pub const ck = 4;
 /// Blocks of 256 threads a value head's chain runs in, each 32 of its state rows (gdn_train.cu's SPLIT).
@@ -51,6 +52,7 @@ pub const Layer = struct {
     a_log: u64,
     dt_bias: u64,
     norm_w: u64,
+    gate: Gate = .sigmoid,
     in_proj: Q4, // [qkv | z | b | a] x hidden
     out_proj: Q4, // hidden x nv dv
 };
@@ -212,10 +214,15 @@ pub const Ops = struct {
 
     /// dout back through the gated RMS norm: dy, and dz into dproj.
     pub fn normBack(o: Ops, p: u64, norm_w: u64, sc: Scratch, s: Shape, eps: f32) !void {
+        return o.normBackGate(p, norm_w, sc, s, eps, .sigmoid);
+    }
+
+    pub fn normBackGate(o: Ops, p: u64, norm_w: u64, sc: Scratch, s: Shape, eps: f32, gate: Gate) !void {
         var a: Args = .{};
         for ([_]u64{ sc.y, p, norm_w, sc.dout, sc.dy, sc.dproj }) |v| a.add(v);
         a.add(s);
         a.add(eps);
+        a.add(@backingInt(gate));
         try o.go("tf_gdn_norm_back", .{ u(@intCast(s.rows)), u(@intCast(s.nv)), 1 }, 128, &a);
     }
 
@@ -301,7 +308,7 @@ pub const Ops = struct {
         const s = Shape.init(rows, l.nk, l.nv);
         try o.forward(l, sc, p, hist, init, rows);
         try o.product(gy, l.out_proj, sc.dout, rows, sc, false);
-        try o.normBack(p, l.norm_w, sc, s, l.eps);
+        try o.normBackGate(p, l.norm_w, sc, s, l.eps, l.gate);
         try o.scanBack(sc, s);
         try o.qkBack(sc, s);
         try o.gatesBack(p, l.a_log, l.dt_bias, sc, s);
@@ -326,7 +333,7 @@ pub const Ops = struct {
             one.dout = w.dout + r.at * l.nv * dv * 4;
             one.dproj = w.dproj + r.at * proj * 4;
             try o.forward(l, one, r.p, r.hist, r.init, r.rows);
-            try o.normBack(r.p, l.norm_w, one, s, l.eps);
+            try o.normBackGate(r.p, l.norm_w, one, s, l.eps, l.gate);
             try o.scanBack(one, s); // replay the whole causal prefix; all following reads are initialized
             try o.qkBack(one, s);
             try o.gatesBack(r.p, l.a_log, l.dt_bias, one, s);
@@ -380,4 +387,8 @@ test "Trainer admission: one shared GDN descriptor accepts both group sizes and 
     layer.nk = 16;
     layer.out_proj.group = 63;
     try std.testing.expectError(error.BadGdnShape, validate(layer, 512));
+}
+
+test {
+    _ = @import("gdn_gate_launch_test.zig");
 }
