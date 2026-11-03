@@ -82,9 +82,9 @@ pub fn main(init: std.process.Init) !u8 {
     var mine: ?uo.preprocess.Views = null;
     if (args.len == 5) {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, args[4], a, .limited(64 << 20));
-        var page = try uo.preprocess.decode(io, a, bytes);
+        var page = try uo.pages.decode(io, a, bytes);
         const gundam = bf.get("pixels1") != null;
-        mine = try uo.preprocess.views(a, page.rgb, page.width, page.height, gundam);
+        mine = try uo.pages.views(a, page.rgb, page.width, page.height, gundam);
         page.deinit(a);
         std.debug.print("page {s}: {d} x {d}, {s}, tiles {d} x {d}\n", .{ args[4], page.width, page.height, if (gundam) "gundam" else "base", mine.?.across, mine.?.down });
     }

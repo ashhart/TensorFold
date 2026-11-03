@@ -9,6 +9,7 @@ const wts = @import("weights.zig");
 const ks = @import("kernels.zig");
 const vision = @import("vision.zig");
 const preprocess = @import("preprocess.zig");
+const pages = preprocess.With(picture);
 const prompt_mod = @import("prompt.zig");
 const decoder_mod = @import("decoder.zig");
 const generate = @import("generate.zig");
@@ -83,12 +84,12 @@ pub const Model = struct {
     /// One page's views as f32-widened bf16 (global first): gundam tiles when they fit `max_tokens`, else base.
     pub fn prepare(m: *Model, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !Prepared {
         if (max_tokens < basePageTokens()) return error.ImageTooSmall;
-        var page = try preprocess.decode(m.io, a, bytes);
+        var page = try pages.decode(m.io, a, bytes);
         defer page.deinit(a);
-        var v = try preprocess.views(a, page.rgb, page.width, page.height, true);
+        var v = try pages.views(a, page.rgb, page.width, page.height, true);
         if (v.tokens() > max_tokens) {
             v.deinit(a);
-            v = try preprocess.views(a, page.rgb, page.width, page.height, false);
+            v = try pages.views(a, page.rgb, page.width, page.height, false);
         }
         defer v.deinit(a);
         const pixels = try a.alloc(f32, v.global.len + v.tiles.len);

@@ -104,8 +104,8 @@ pub fn main(init: std.process.Init) !u8 {
     var t_enc: f64 = 0;
     while (paths.next()) |path| {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20));
-        var page = try uo.preprocess.decode(io, a, bytes);
-        const views = try uo.preprocess.views(a, page.rgb, page.width, page.height, gundam);
+        var page = try uo.pages.decode(io, a, bytes);
+        const views = try uo.pages.views(a, page.rgb, page.width, page.height, gundam);
         const t0 = mtl.clock.seconds();
         const g = cfg.side(cfg.base_size);
         const t = cfg.side(cfg.tile_size);

@@ -26,8 +26,8 @@ pub fn backend(o: api.Open) ?[]const u8 {
     if (o.learn != null and !o.learn_conversations) return "--learn learns shared prompt prefixes on Macs only; CUDA keeps conversation states on disk with --learn-conversations: serve with it, or without --learn, --learn-dir or --learn-gib";
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
-    // Fish and Qwen4 open outside family(), so their --tp is refused here
-    if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
+    // Fish, Qwen4 and Unlimited-OCR-2 open outside family(), so their --tp is refused here
+    if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text") or std.mem.eql(u8, o.model_type, "unlimited-ocr"))
         if (unranked(o)) |why| return why;
     return null;
 }
