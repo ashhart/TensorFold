@@ -12,18 +12,25 @@ const planning = q.attention_plan;
 
 const D = 256;
 
-/// The head counts main runs: the 27B's 24 query heads over 4, and its rank of a two-Mac split (12 over 2, #1433).
-pub const Heads = enum { q27b, rank };
+/// Geometry.check's shapes: the 27B (24 over 4), its two-Mac rank (12 over 2), GQA16 (32 over 2), the 9B (16 over 4).
+pub const Heads = enum { q27b, rank, gqa16, q9b };
 
 pub fn geometry(h: Heads, shared: bool) planning.Geometry {
     return switch (h) {
         .q27b => .{ .heads = 24, .kv_heads = 4, .shared_prefix = shared },
         .rank => .{ .heads = 12, .kv_heads = 2, .shared_prefix = shared },
+        .gqa16 => .{ .heads = 32, .kv_heads = 2, .shared_prefix = shared },
+        .q9b => .{ .heads = 16, .kv_heads = 4, .shared_prefix = shared },
     };
 }
 
 pub fn label(h: Heads) []const u8 {
-    return if (h == .q27b) "27B" else "27B rank";
+    return switch (h) {
+        .q27b => "27B",
+        .rank => "27B rank",
+        .gqa16 => "GQA16",
+        .q9b => "9B",
+    };
 }
 
 /// A planted control's edit to the shipped source; `from` must occur exactly `count` times.
@@ -41,7 +48,7 @@ pub fn source(a: std.mem.Allocator, tensor: bool, edit: ?Edit) ![]u8 {
 /// Rounds of the round's rows, query heads and the first stream's cached keys (past 16 rows, streams of 16).
 pub fn served(comptime h: Heads) []const c.Shape {
     const n: usize = comptime geometry(h, false).heads;
-    // both head counts are GQA6, so the same rows reach the same tiles: 3 and 6 rows fork at 64 and 65 cached keys
+    // at GQA6 3 and 6 rows fork at 64 and 65 cached keys; io copies per KV head, so every group takes the same rounds
     return comptime &.{ .{ .rows = 1, .n = n, .k = 2 }, .{ .rows = 3, .n = n, .k = 64 }, .{ .rows = 6, .n = n, .k = 64 }, .{ .rows = 3, .n = n, .k = 65 }, .{ .rows = 6, .n = n, .k = 65 }, .{ .rows = 16, .n = n, .k = 2046 }, .{ .rows = 16, .n = n, .k = 2047 }, .{ .rows = 128, .n = n, .k = 510 }, .{ .rows = 128, .n = n, .k = 511 }, .{ .rows = 1, .n = n, .k = 8191 }, .{ .rows = 11, .n = n, .k = 8190 }, .{ .rows = 14, .n = n, .k = 8191 } };
 }
 
