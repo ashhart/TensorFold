@@ -518,7 +518,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8) !void {
     const a = arena.allocator();
     const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(1 << 24));
     const c = try glm.config.parse(a, text);
-    var m = try glm.forward.Modules.load(gpu.d, gpu.ctx);
+    var m = try glm.forward.Modules.load(gpu.d, gpu.ctx, try glm.experts.wantsBlock32(a, text));
     defer m.deinit();
     var stream = try cuda.Stream.init(gpu.d, false);
     defer stream.deinit();
