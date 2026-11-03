@@ -95,8 +95,8 @@ pub const kp_tiles = [_]KpTile{
 /// The GEMM tiles of the m >= 64 products: `gemm` (the default) or the reference `block`.
 pub const Tile = enum { gemm, block };
 
-/// Which GEMM tile of the 128-row family a launch runs: the matrix cores, the dot2 tile, or the reference tile.
-pub const BlockKind = enum { matrix, gemm, block };
+/// Which 128-row GEMM tile a launch runs: matrix cores (padded or skewed rows), the dot2 tile, or the reference tile.
+pub const BlockKind = enum { matrix, skew, gemm, block };
 
 pub const Kernels = struct {
     /// Whether block shape `tier` can take `m` rows: a tile that does not loop over its rows holds rb * r of them.
@@ -128,6 +128,7 @@ pub const Kernels = struct {
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
+    wmma_skew: [bit_widths.len]Function,
     item: @import("matrix_item.zig").Functions,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
@@ -168,6 +169,7 @@ pub const Kernels = struct {
         inline for (bit_widths, 0..) |bits, b| {
             k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
             if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
+            if (k.matrix) k.wmma_skew[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_skewILi{d}EEEvNS0_6AffineE", .{bits}));
             if (k.matrix) k.item[b] = try @import("matrix_item.zig").load(m, bits);
             k.gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_gemm_blockINS0_{s}ELi{d}E{s}EEvNS0_6AffineE", .{ dot, bits, shape }));
             inline for (kp_tiles, 0..) |t, i| {
@@ -431,6 +433,7 @@ pub const Kernels = struct {
         try args.add(a);
         const f = switch (kind) {
             .matrix => k.wmma_gemm[b],
+            .skew => k.wmma_skew[b],
             .gemm => k.gemm[b],
             .block => k.block[b],
         };
