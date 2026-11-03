@@ -100,7 +100,11 @@ const Check = struct {
     }
 
     fn hardware(c: *Check, h: Value) Bad!void {
-        try c.need(exact(h, &hardware_keys), "hardware must hold exactly its fields");
+        const keys: []const []const u8 = if (h.get("form_factor") != null) &(hardware_keys ++ .{"form_factor"}) else &hardware_keys;
+        try c.need(exact(h, keys), "hardware must hold exactly its fields");
+        if (h.get("form_factor")) |f| {
+            try c.need(f == .null or f == .string and @import("benchmark_form_factor.zig").FormFactor.fromLabel(f.string) != null, "hardware.form_factor must be a known Mac family or null");
+        }
         try c.need(text(h.get("cpu_model").?, name, true), "hardware.cpu_model must be a plain name or null");
         try c.need(num(h.get("system_memory_bytes").?, .{ .nullable = true, .integer = true }), "hardware.system_memory_bytes must be a byte count or null");
         const count = h.get("gpu_count").?;

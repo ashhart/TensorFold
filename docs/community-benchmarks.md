@@ -17,6 +17,14 @@ Results are saved locally in `~/.tensorfold/benchmarks/RUN_ID.json`; `--output F
 
 [The Grill](https://github.com/plotarmordev/thegrill) is a separate third-party tool that reports whether a serving change measured faster, slower or inconclusive.
 
+Managed receipts can also include `hardware.form_factor`: `Mac mini`, `Mac Studio`, `MacBook Pro`,
+`MacBook Air`, `iMac` or `Mac Pro`. On macOS a fixed lookup of documented Apple silicon products derives
+this coarse family on the device; the product identifier itself is never recorded. An unlisted product,
+a failed probe, Linux or Windows leaves the value unknown. Unknown values omit the optional field,
+preserving existing receipt bytes; readers also accept explicit null. Both community-v1 and community-v2
+receipts without the field remain valid. Attached runs use only an optional family attested in the server's
+manifest, never the client's product family. The benchmark board's display is a separate change.
+
 ## Commands
 
 ```sh

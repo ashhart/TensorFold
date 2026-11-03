@@ -23,6 +23,7 @@ pub const Gpu = struct { name: []const u8, memory_bytes: ?u64 = null, cores: ?u6
 
 pub const Hardware = struct {
     cpu_model: ?[]const u8 = null,
+    form_factor: ?@import("benchmark_form_factor.zig").FormFactor = null,
     system_memory_bytes: ?u64 = null,
     memory_type: []const u8 = "unknown",
     gpus: []const Gpu = &.{},
@@ -104,6 +105,7 @@ pub fn value(a: Allocator, run_id: []const u8, created_at: []const u8, model: Mo
     try top.put("runtime", r.value());
     const h = try Builder.init(a);
     try h.str("cpu_model", hardware.cpu_model);
+    if (hardware.form_factor) |f| try h.str("form_factor", f.label());
     try h.int("system_memory_bytes", hardware.system_memory_bytes);
     try h.str("memory_type", hardware.memory_type);
     const gpus = try a.alloc(Value, hardware.gpus.len);

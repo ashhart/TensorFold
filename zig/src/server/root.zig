@@ -185,6 +185,7 @@ test {
 
 test {
     _ = @import("slide_retention_test.zig");
+    _ = @import("benchmark_form_factor_test.zig");
 }
 
 test {
