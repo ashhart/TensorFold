@@ -20,6 +20,7 @@ const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
 const dense_k = @import("contract_dense.zig");
+const dense12_k = @import("contract_dense_wmma12.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
 const kit = @import("contract_kit.zig");
@@ -165,6 +166,13 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     if (l.dense.bf16) {
         for (&dense) |*d| try kernels.append(a, d.kernel());
     } else std.debug.print("N/A  hip dense_gemm_block: not served on this FP16 build\n", .{});
+    var dense12: [4]dense12_k.DenseWmma12 = undefined;
+    for (&dense12, [_]bool{ true, false, true, false }, 0..) |*d, fp32_out, i| d.* = .init(a, &r, s, &l, fp32_out, if (i < 2) .w12_small else .w12_big);
+    defer for (&dense12) |*d| d.deinit();
+    // the WMMA dense tile serves gfx12 only; elsewhere its symbol keeps a trap body
+    if (l.dense.wmma12) {
+        for (&dense12) |*d| try kernels.append(a, d.kernel());
+    } else std.debug.print("N/A  hip dense_wmma12_gemm: not served off gfx12\n", .{});
     var gates: [3]gate_k.Gate = undefined;
     for (&gates, std.enums.values(gate_k.Which)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&gates) |*m| m.deinit();
