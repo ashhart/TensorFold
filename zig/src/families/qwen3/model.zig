@@ -96,7 +96,7 @@ const Table = struct {
     }
 };
 
-fn readSpec(gpa: Allocator, io: std.Io, dir: []const u8) !config.Spec {
+pub fn readSpec(gpa: Allocator, io: std.Io, dir: []const u8) !config.Spec {
     const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
@@ -155,6 +155,27 @@ fn layerKey(buf: *[128]u8, i: usize, rest: []const u8) ![]const u8 {
 fn refuse(key: []const u8, why: []const u8) error{UnexpectedTensor} {
     std.log.err("{s} {s}", .{ key, why });
     return error.UnexpectedTensor;
+}
+
+/// `name` (e.g. "layers.0.mlp.up_proj.weight") as this checkpoint stores it: under `model.` for the reranker's save.
+pub fn scopedKey(gpa: Allocator, io: std.Io, dir: []const u8, name: []const u8) ![]u8 {
+    var ck = try Checkpoint.openModel(gpa, io, dir);
+    defer ck.close();
+    return std.mem.concat(gpa, u8, &.{ scopeOf(&ck), name });
+}
+
+/// The 1-D tensor `key` (named as stored) as fp32 host values.
+pub fn readVector(gpa: Allocator, io: std.Io, dir: []const u8, key: []const u8) ![]f32 {
+    var ck = try Checkpoint.openModel(gpa, io, dir);
+    defer ck.close();
+    const t = try ck.get(key);
+    if (t.rank != 1) return refuse(key, "is not a vector");
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const wide = try quant.convert.float32(scratch.allocator(), t);
+    const out = try gpa.alloc(f32, t.shape[0]);
+    for (out, 0..) |*x, j| x.* = @bitCast(std.mem.readInt(u32, wide.bytes[4 * j ..][0..4], .little));
+    return out;
 }
 
 /// Rows `rows` of the 2-D tensor `key` (named as stored, no prefix) as fp32 host values, row after row.

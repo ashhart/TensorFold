@@ -47,13 +47,26 @@ pub fn lastRows(ops: Ops, m: *const model.Model, ids: u64, ends: []const u32, ou
     for (m.layers) |*layer| {
         const mark = o.arena.mark();
         defer o.arena.release(mark);
-        try layerRows(o, m, layer, x, ends, total, longest);
+        try layerRows(o, m, layer, x, ends, total, longest, null);
     }
     for (ends, 0..) |e, i| try o.rms(at(x, (e - 1) * s.hidden), m.final_norm, at(out, i * s.hidden), 1, s.hidden, @floatCast(s.eps));
 }
 
+/// Device copies of a layer's projection inputs, row-major: input-normed, attention, post-normed and silu(gate) * up.
+pub const Taps = struct { normed: u64, attn: u64, post: u64, act: u64 };
+
+/// One input's rows through the embedding and layer 0, its projections' inputs copied into `taps` (the GEMM checks).
+pub fn layerInputs(ops: Ops, m: *const model.Model, ids: u64, total: u32, taps: Taps) Error!void {
+    var o = ops;
+    o.prefill = true;
+    if (total == 0 or total > SPAN) return error.BadShape;
+    const x = try take(o, m.act, total * m.spec.hidden);
+    try o.embedRows(m.embed, ids, total, x);
+    try layerRows(o, m, &m.layers[0], x, &.{total}, total, total, taps);
+}
+
 /// One decoder layer over every row: norms, projections and MLP in SPAN blocks, attention input by input.
-fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, ends: []const u32, total: usize, longest: usize) Error!void {
+fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, ends: []const u32, total: usize, longest: usize, taps: ?Taps) Error!void {
     const s = m.spec;
     const hd = s.head_dim;
     const qw = s.heads * hd;
@@ -68,6 +81,7 @@ fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, en
         defer o.arena.release(mark);
         const normed = try take(o, m.act, rows * s.hidden);
         try o.rms(at(x, start * s.hidden), l.input_norm, normed, rows, s.hidden, @floatCast(s.eps));
+        if (taps) |tp| try copyRows(o, normed, at(.{ .ptr = tp.normed, .kind = m.act }, start * s.hidden), rows * s.hidden);
         try copyRows(o, try o.project(normed, l.q, rows, false), at(q, start * qw), rows * qw);
         try copyRows(o, try o.project(normed, l.k, rows, false), at(k, start * kvw), rows * kvw);
         try copyRows(o, try o.project(normed, l.v, rows, false), at(v, start * kvw), rows * kvw);
@@ -80,6 +94,7 @@ fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, en
         defer a = b;
         try attention(o, m, l, q, k, v, attn, cache, a, b);
     }
+    if (taps) |tp| try copyRows(o, attn, .{ .ptr = tp.attn, .kind = m.act }, total * qw);
     start = 0;
     while (start < total) : (start += SPAN) {
         const rows = @min(SPAN, total - start);
@@ -90,10 +105,12 @@ fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, en
         try o.add(xs, y, xs, rows * s.hidden);
         const normed = try take(o, m.act, rows * s.hidden);
         try o.rms(xs, l.post_norm, normed, rows, s.hidden, @floatCast(s.eps));
+        if (taps) |tp| try copyRows(o, normed, at(.{ .ptr = tp.post, .kind = m.act }, start * s.hidden), rows * s.hidden);
         const gate = try o.project(normed, l.gate, rows, false);
         const up = try o.project(normed, l.up, rows, false);
         const act = try take(o, m.act, rows * s.inter);
         try o.siluMul(gate, up, act, rows * s.inter);
+        if (taps) |tp| try copyRows(o, act, at(.{ .ptr = tp.act, .kind = m.act }, start * s.inter), rows * s.inter);
         const z = try o.project(act, l.down, rows, false);
         try o.add(xs, z, xs, rows * s.hidden);
     }
