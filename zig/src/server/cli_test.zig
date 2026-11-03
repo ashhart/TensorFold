@@ -283,6 +283,8 @@ test "parse and capabilities share the table" {
     try std.testing.expectEqualStrings("notes", on.compact_memory.?);
     try std.testing.expectEqualStrings("graph.json", (try parse(a, &.{ "m", "--slide-graph", "graph.json" }, &u)).slide_graph.?);
     try std.testing.expect((try parse(a, &.{ "m", "--slide" }, &u)).slide);
+    try std.testing.expect((try parse(a, &.{ "m", "--slide", "--slide-drift-gate" }, &u)).slide_drift_gate);
+    try std.testing.expect(!(try parse(a, &.{"m"}, &u)).slide_drift_gate);
     try std.testing.expect((try parse(a, &.{ "m", "--cortheon" }, &u)).cortheon and !(try parse(a, &.{"m"}, &u)).cortheon);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"--cortheon\": {}") != null);
     try std.testing.expectEqual(@as(?f64, 0.5), (try parse(a, &.{ "m", "--compact-at", "0.5" }, &u)).compact_fraction);
