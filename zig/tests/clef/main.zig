@@ -4,10 +4,11 @@ const std = @import("std");
 /// No per-thread alternate signal stack: its thread-local leaves HIP's threads too little stack to start.
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 
-const usage = "usage: tf-clef-test tiny <scratch dir>\n";
+const usage = "usage: tf-clef-test tiny <scratch dir> | head <model dir> <cases dir> <out dir> [--piece N|whole]\n";
 
 const commands = [_]struct { name: []const u8, run: *const fn (std.mem.Allocator, std.Io, []const [:0]const u8) anyerror!void }{
     .{ .name = "tiny", .run = @import("tiny_run.zig").run },
+    .{ .name = "head", .run = @import("head_run.zig").run },
 };
 
 pub fn main(init: std.process.Init) !u8 {
