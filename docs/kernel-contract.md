@@ -278,6 +278,10 @@ HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
 and the exact sums of gate 4.
 
+On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out) against
+its depth-k bound. Its control, the same tile summing each 16-deep step in BF16 (`tf_ctl_wmma12_bf16_sum`), goes red
+at gate 4.
+
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
 CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: the latent write and the pooled keys

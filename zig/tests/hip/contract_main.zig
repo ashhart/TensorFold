@@ -166,11 +166,12 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     if (l.dense.bf16) {
         for (&dense) |*d| try kernels.append(a, d.kernel());
     } else std.debug.print("N/A  hip dense_gemm_block: not served on this FP16 build\n", .{});
-    var dense12: [4]dense12_k.DenseWmma12 = undefined;
-    for (&dense12, [_]bool{ true, false, true, false }, 0..) |*d, fp32_out, i| d.* = .init(a, &r, s, &l, fp32_out, if (i < 2) .w12_small else .w12_big);
+    var dense12: [5]dense12_k.DenseWmma12 = undefined;
+    for (&dense12, [_]bool{ true, false, true, false, true }, 0..) |*d, fp32_out, i| d.* = .init(a, &r, s, &l, fp32_out, if (i < 2 or i == 4) .w12_small else .w12_big);
     defer for (&dense12) |*d| d.deinit();
-    // the WMMA dense tile serves gfx12 only; elsewhere its symbol keeps a trap body
+    // the WMMA dense tile serves gfx12 only; elsewhere its symbol, and its control's, keep a trap body
     if (l.dense.wmma12) {
+        dense12[4].planted = try ctl.function("tf_ctl_wmma12_bf16_sum");
         for (&dense12) |*d| try kernels.append(a, d.kernel());
     } else std.debug.print("N/A  hip dense_wmma12_gemm: not served off gfx12\n", .{});
     var gates: [3]gate_k.Gate = undefined;

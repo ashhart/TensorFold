@@ -29,10 +29,10 @@ const served = [_]c.Shape{
 };
 
 /// One geometry's registration: every served shape runs on it, its own block's edges included.
-pub fn spec(wide: bool, geo: Shape) c.Spec {
+pub fn spec(wide: bool, geo: Shape, planted: bool) c.Spec {
     const small = geo == .w12_small;
     return .{
-        .name = switch (geo) {
+        .name = if (planted) "control: WMMA dense tile summed in bf16" else switch (geo) {
             .w12_small => if (wide) "hip dense_wmma12_gemm<W12Small> (bf16 weights, fp32 out)" else "hip dense_wmma12_gemm<W12Small> (bf16 weights, bf16 out)",
             else => if (wide) "hip dense_wmma12_gemm<W12Big> (bf16 weights, fp32 out)" else "hip dense_wmma12_gemm<W12Big> (bf16 weights, bf16 out)",
         },
@@ -51,6 +51,8 @@ pub const DenseWmma12 = struct {
     wide: bool,
     /// The block geometry every shape runs on (both give equal bytes; each is gated on its own).
     geo: Shape,
+    /// The planted control (tf_ctl_wmma12_bf16_sum, the small block's arguments) in place of the served kernel.
+    planted: ?hip.Function = null,
     d: ?Dense = null,
     x: u64 = 0,
     w: u64 = 0,
@@ -66,7 +68,8 @@ pub const DenseWmma12 = struct {
     }
 
     pub fn kernel(self: *DenseWmma12) g.Kernel {
-        return .{ .spec = spec(self.wide, self.geo), .ctx = self, .vt = &vt };
+        const sums: ?g.Gate = if (self.planted) |_| .sums else null;
+        return .{ .spec = spec(self.wide, self.geo, self.planted != null), .ctx = self, .vt = &vt, .control = sums };
     }
 
     const vt = g.hooks(DenseWmma12);
@@ -107,7 +110,13 @@ pub const DenseWmma12 = struct {
         const s = self.d.?.shape;
         const out32: u64 = if (self.wide) self.out else 0;
         const out16: u64 = if (self.wide) 0 else self.out;
-        try self.l.dense.gemmOn(self.l.r, .wmma12, self.geo, self.x, self.w, out32, out16, @intCast(s.rows), @intCast(s.n), @intCast(s.k), self.rig.s.handle);
+        const m: c_int = @intCast(s.rows);
+        const n: c_int = @intCast(s.n);
+        const k: c_int = @intCast(s.k);
+        const h = self.rig.s.handle;
+        if (self.planted) |f| {
+            try self.l.dense.gemmWith(self.l.r, f, self.geo, self.x, self.w, out32, out16, m, n, k, h);
+        } else try self.l.dense.gemmOn(self.l.r, .wmma12, self.geo, self.x, self.w, out32, out16, m, n, k, h);
         try self.rig.s.synchronize();
     }
 
