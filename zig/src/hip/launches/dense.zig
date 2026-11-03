@@ -67,6 +67,11 @@ pub const Kernels = struct {
         try hl.launch(k.tile, .{ .grid = .{ .x = cdiv(n), .y = cdiv(m) }, .block = .{ .x = 256 } }, .{ .r = r, .handle = s }, &args);
     }
 
+    /// The longest rounding chain of an output: a group's 64 dot2s (two roundings each at most), one add a group.
+    pub fn chain(k: usize) usize {
+        return 2 * (@as(usize, @intCast(group)) / 2) + k / @as(usize, @intCast(group)) + 2;
+    }
+
     fn cdiv(v: c_int) c_uint {
         return @intCast(@divTrunc(v + side - 1, side));
     }

@@ -58,8 +58,7 @@ test "dense GEMM: BF16 weights against float64, fp32 within the dot2 chain's bou
         defer gpa.free(g32);
         const g16 = try rig.download(u16, y16);
         defer gpa.free(g16);
-        // a group's 64 dot2s (two roundings each at most), then one add a group: the longest rounding chain of a sum
-        const depth: f64 = 128 + @as(f64, @floatFromInt(c.k / 128)) + 2;
+        const depth: f64 = @floatFromInt(@import("../launches/dense.zig").Kernels.chain(c.k));
         var worst: f64 = 0;
         for (0..c.m) |r| for (0..c.n) |j| {
             var want: f64 = 0;

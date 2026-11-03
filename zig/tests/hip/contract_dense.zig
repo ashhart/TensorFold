@@ -9,9 +9,9 @@ const c = contract.spec;
 const g = contract.gates;
 const Dense = contract.dense.Dense;
 
-/// A group's 64 dot2s in one fp32 chain, then one add a group of 128 into the accumulator.
+/// The kernel's own chain (launches/dense.zig): a group's dot2s, then one add a group into the accumulator.
 fn depth(s: c.Shape) usize {
-    return s.k / 2 + s.k / 128 + 2;
+    return @FieldType(hip.Launcher, "dense").chain(s.k);
 }
 
 /// Qwen3-8B's projections as float64 runs them: 2,048-row passes, 12,288-wide gate/up, K to 12,288, both tile edges.
