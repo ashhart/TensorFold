@@ -91,7 +91,7 @@ fn sendErr(conn: *Conn, cx: *Cx) void {
 
 /// The ranked documents, or the refusal; `gone` says the client left (checked before each document's pass).
 pub fn reply(srv: *Server, cx: *Cx, body: Value, gone: anytype) Failure!Value {
-    const labels = srv.rerank orelse return cx.refuse("this model is not a reranker");
+    const labels = srv.info.rerank orelse return cx.refuse("this model is not a reranker");
     const ask = try parse(cx, body);
     // each prompt is built in a scratch arena and dropped: a small body of many documents keeps no ids alive
     var scratch = std.heap.ArenaAllocator.init(srv.gpa);
