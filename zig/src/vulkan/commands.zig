@@ -62,7 +62,7 @@ pub const Commands = struct {
         return self.cmd;
     }
 
-    /// Submits what is recorded (nothing if nothing is open), with a finite fence wait; Timeout and InFlight need orExit.
+    /// Submits what is recorded (nothing if none), waiting on a finite fence; Timeout and InFlight need orExit.
     pub fn submit(self: *Commands, timeout_ns: u64) Error!void {
         if (!self.recording) return;
         const api = &self.dev.api;
