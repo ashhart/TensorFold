@@ -417,3 +417,50 @@ test "a Qwen2 slow tokenizer writes an added token id as a JSON integer" {
         try std.testing.expectError(error.InvalidAddedTokenId, qwen2_slow.converted(std.testing.io, a, dir));
     }
 }
+
+/// A BPE over raw characters (no byte level) whose one merge chain spans a combining mark: the split shows in the ids.
+const marks_json =
+    \\{"pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"\\p{L}+"},"behavior":"Isolated","invert":false}]},
+    \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
+    \\  "vocab":{"e":0,"\u0301":1,"t":2,"e\u0301":3,"te\u0301":4,"e\u0301te\u0301":5},"merges":["e \u0301","t e\u0301","e\u0301 te\u0301"]}}
+;
+
+test "pretokenize_regex: a Split override keeps a combining mark in its word; a bad pattern is refused" {
+    const a = std.testing.allocator;
+    var t = try parse(a, marks_json);
+    defer t.deinit();
+    const word = "e\u{301}te\u{301}"; // été with decomposed accents
+    const split = try t.encode(a, word);
+    defer a.free(split);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2, 0, 1 }, split); // \p{L}+ cuts at each mark
+    try t.overrideSplit("[\\p{L}\\p{M}]+");
+    const whole = try t.encode(a, word);
+    defer a.free(whole);
+    try std.testing.expectEqualSlices(u32, &.{5}, whole);
+    try std.testing.expect(std.meta.isError(t.overrideSplit("[\\p{L}")));
+    var bare = try parse(a, "{\"model\":{\"type\":\"BPE\",\"vocab\":{\"a\":0},\"merges\":[]}}");
+    defer bare.deinit();
+    try std.testing.expectError(error.NoSplitRegex, bare.overrideSplit("a+"));
+}
+
+test "pretokenize_regex: an override after encodes forgets the memo's ids from the old split" {
+    const a = std.testing.allocator;
+    var t = try parse(a, marks_json);
+    defer t.deinit();
+    t.memo = try Memo.create(a, 1 << 20);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..300) |_| try text.appendSlice(a, "e\u{301}te\u{301}");
+    for (0..2) |_| a.free(try t.encode(a, text.items)); // the second encode takes the kept ids
+    try std.testing.expect(t.memo.?.hits > 0);
+    try t.overrideSplit("[\\p{L}\\p{M}]+");
+    const after = try t.encode(a, text.items);
+    defer a.free(after);
+    var fresh = try parse(a, marks_json);
+    defer fresh.deinit();
+    try fresh.overrideSplit("[\\p{L}\\p{M}]+");
+    const want = try fresh.encode(a, text.items);
+    defer a.free(want);
+    try std.testing.expectEqualSlices(u32, want, after);
+    try std.testing.expect(after.len < 300 * 5);
+}
