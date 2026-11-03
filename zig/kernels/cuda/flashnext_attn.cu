@@ -18,20 +18,9 @@ constexpr int HD = 256;  // head width the attention tiles are built for
 constexpr int QR = 16;   // query heads a KV head's tile holds (G <= 16, the rest zero)
 
 // A block's fixed-order sum: each warp's butterfly, then the warps' sums in warp order.
-__device__ __forceinline__ float block_sum(float v, float* scratch) {
-    v = warp_sum(v);
-    const int warps = blockDim.x >> 5;
-    if ((threadIdx.x & 31) == 0) scratch[threadIdx.x >> 5] = v;
-    __syncthreads();
-    float total = 0.0f;
-    for (int w = 0; w < warps; ++w) total = __fadd_rn(total, scratch[w]);
-    __syncthreads();
-    return total;
-}
+using tf_common::block_sum_serial;
 
-__device__ __forceinline__ float inv_rms(float ss, int width, float eps) {
-    return __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ss, static_cast<float>(width)), eps)));
-}
+__device__ __forceinline__ float inv_rms(float ss, int n, float eps) { return tf_common::rms_scale(ss, n, eps); }
 
 // Rotate-half RoPE over the first 2 * half features at `pos`: cos and sin of the fp32 angle (full range reduction).
 __device__ __forceinline__ float rope(float xn, float xpn, int d, int half, int pos, const float* __restrict__ inv) {
@@ -85,7 +74,7 @@ __device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restric
     const long long src = row + (head < NQ ? head * 2 * HD : (head < NQ + NKV ? NQ * 2 * HD + (head - NQ) * HD : NQ * 2 * HD + 2 * NKV * HD + (head - NQ - NKV) * IHD));
     const float* w = head < NQ ? QW : (head < NQ + NKV ? KW : IW);
     const float x = live ? bf(P[src + d]) : 0.0f;
-    const float rinv = inv_rms(block_sum(__fmul_rn(x, x), scratch), width, eps);
+    const float rinv = inv_rms(block_sum_serial(__fmul_rn(x, x), scratch), width, eps);
     if (!live) return;
     const int p = partner(d, HALF);
     const float xn = rbf(__fmul_rn(__fmul_rn(x, rinv), w[d]));
@@ -178,7 +167,7 @@ __device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* __restrict
     for (int k = 1; k < RATIO; ++k) acc = __fadd_rn(acc, bf(keys[(first + k) * DI + d]));
     const float x = rbf(__fdiv_rn(acc, static_cast<float>(RATIO)));
     xs[d] = x;
-    const float rinv = inv_rms(block_sum(__fmul_rn(x, x), scratch), DI, eps);
+    const float rinv = inv_rms(block_sum_serial(__fmul_rn(x, x), scratch), DI, eps);
     const int p = partner(d, HALF);
     const float xn = rbf(__fmul_rn(__fmul_rn(x, rinv), W[d]));
     const float xpn = rbf(__fmul_rn(__fmul_rn(xs[p], rinv), W[p]));
