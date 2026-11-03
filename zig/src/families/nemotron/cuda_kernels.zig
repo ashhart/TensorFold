@@ -186,6 +186,7 @@ pub const Kernels = struct {
         errdefer lane.unload();
         var gemm = try cuda.nvfp4.Prompt.load(k.d);
         errdefer gemm.unload();
+        try gemm.enableBf16();
         var experts = try cuda.experts.Nvfp4Experts.load(k.d, sms);
         errdefer experts.unload();
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
@@ -308,7 +309,7 @@ pub const Ops = struct {
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
     pub fn linear(o: Ops) cuda.qlinear.Linear {
         const m = if (o.k.modelopt) |*x| x else null;
-        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null, .ck = if (o.k.ck) |*x| x else null, .ck_rows = o.ck8, .ggml = if (o.k.ggml) |*g| g else null };
+        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null, .bf16_prompt = true, .ck = if (o.k.ck) |*x| x else null, .ck_rows = o.ck8, .ggml = if (o.k.ggml) |*g| g else null };
     }
 
     /// Every grouped-expert format the kernels loaded (cuda/experts.zig).
