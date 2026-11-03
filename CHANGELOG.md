@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The Metal vision towers' shard reader and the cluster planner's checkpoint reader check a safetensors header's length with core's `headerSize` before reading it, so a malformed or oversized header is refused before any large allocation (#1872).
+
 - `serve --prompt-cache-disk DIR` is a shorter spelling of `--learn-conversations --learn-dir DIR`, with the same limits, spill and start-up line; giving it together with either legacy flag is refused (#1908). Thanks to @garvrao80.
 
 - HIP gate-5 launch records are re-derived with ROCm 10.1's hipcc, now the one reference toolchain; record values only, no kernel or serving change (#1979). Thanks to @laudney.
