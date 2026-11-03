@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kolibri-1 on CUDA keeps its full layers' caches in pages of the core KV pool, the same way, with identical tokens when the store is off (#1620, part of #1657). Thanks to @jschmied.
+
 - Qwen 3.5 on CUDA: the mixers' and the dense MLP's scratch rows share one region, freeing 0.46 GiB on the 27B with the same tokens and speed (#1476). Thanks to @diwakergupta.
 
 - The kernel contract checks Qwen3.8-27B's attention_io pack, append and keep at the other two head shapes the family admits, GQA16 (32 query heads over 2) and the 9B's 16 over 4 (#2063). Thanks to @cshintov.
