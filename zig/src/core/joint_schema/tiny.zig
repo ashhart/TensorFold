@@ -7,6 +7,8 @@ pub const cfg: Config = .{ .hidden_size = 128, .width = 32, .routing_layers = 2,
 pub const vocab = 40;
 pub const rows = 48;
 pub const zero_token_row = 29;
+/// tools/clef_head_golden.py's outputs for this head: FP64 and torch BF16 logits, and the near-zero cases.
+pub const fixture = @embedFile("fixtures/clef_tiny.json");
 
 /// SplitMix64's output for state x.
 pub fn splitmix64(x: u64) u64 {
