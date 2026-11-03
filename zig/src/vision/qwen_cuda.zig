@@ -432,11 +432,7 @@ fn bf16(v: f32) u16 {
 
 /// The axial rotary's frequencies: 1 / 10000 ** (i / (head_dim / 2)) for even i, in fp32 as torch computes them.
 pub fn invFreq(out: []f32, head_dim: usize) void {
-    const dim: f32 = @floatFromInt(head_dim / 2);
-    for (out, 0..) |*f, j| {
-        const e: f32 = @as(f32, @floatFromInt(2 * j)) / dim;
-        f.* = 1.0 / std.math.pow(f32, 10000.0, e);
-    }
+    core.rope_freq.inverseFrequencies(10000.0, head_dim / 2, out);
 }
 
 /// One image's patches in merge order: each one's (row, column) for the rotary and 4 bilinear taps into the 48x48 grid.

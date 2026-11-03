@@ -2,6 +2,7 @@
 const std = @import("std");
 const cfg = @import("cuda_config.zig");
 const dfl = @import("cuda_dflash.zig");
+const core = @import("core");
 
 const stock =
     \\{"architectures":["DFlashDraftModel"],"dflash_config":{"mask_token_id":4,"target_layer_ids":[1,12,23,35,46,57]},"block_size":16,
@@ -22,4 +23,24 @@ test "a zero, negative or oversized count is a bad config, not a trap" {
     try refused("\"num_attention_heads\":64", "\"num_attention_heads\":9223372036854775807");
     try refused("\"sliding_window\":2048", "\"sliding_window\":0");
     try refused("\"mask_token_id\":4", "\"mask_token_id\":-4");
+}
+
+test "the drafter's table: old f64 form against core's helper, 25 of 64 words differ" {
+    const dim = 128;
+    var old: [dim / 2]f32 = undefined;
+    var new: [dim / 2]f32 = undefined;
+    for (&old, 0..) |*f, i| f.* = @floatCast(1.0 / std.math.pow(f64, 1e6, 2.0 * @as(f64, @floatFromInt(i)) / dim));
+    core.rope_freq.inverseFrequencies(1e6, dim, &new);
+    var differ: usize = 0;
+    var max_ulp: u32 = 0;
+    for (old, new) |o, n| {
+        const bo: u32 = @bitCast(o);
+        const bn: u32 = @bitCast(n);
+        if (bo != bn) {
+            differ += 1;
+            max_ulp = @max(max_ulp, if (bo > bn) bo - bn else bn - bo);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 25), differ);
+    try std.testing.expectEqual(@as(u32, 1), max_ulp);
 }

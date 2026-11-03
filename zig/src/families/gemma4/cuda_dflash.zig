@@ -194,7 +194,7 @@ pub const Drafter = struct {
         const kw = c.kv_heads * dim;
         const r = @max(rows_most, absorb_most);
         var inv: [dim / 2]f32 = undefined;
-        for (&inv, 0..) |*f, i| f.* = @floatCast(1.0 / std.math.pow(f64, c.theta, 2.0 * @as(f64, @floatFromInt(i)) / dim));
+        core.rope_freq.inverseFrequencies(c.theta, dim, &inv);
         x.x = .{
             .inv = try x.alloc(dim / 2 * 4),
             .ids = try x.alloc(rows_most * 4),
