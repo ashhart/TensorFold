@@ -8,6 +8,7 @@ const Server = @import("../server.zig").Server;
 const Turn = @import("cortheon.zig").Turn;
 const memory = @import("memory.zig");
 const tools = @import("tools.zig");
+const seen_url = @import("seen.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -135,6 +136,14 @@ pub fn fallback(a: Allocator, goal: []const u8) Allocator.Error![]const []const 
     return &.{};
 }
 
+fn samePage(a: Allocator, left: []const u8, right: []const u8) bool {
+    if (std.mem.eql(u8, left, right)) return true;
+    const x = seen_url.normal(a, left) catch return false;
+    const y = seen_url.normal(a, right) catch return false;
+    if (x == null or y == null) return false;
+    return std.mem.eql(u8, x.?, y.?);
+}
+
 fn hostOf(url: []const u8) []const u8 {
     const start = if (std.mem.indexOf(u8, url, "://")) |s| s + 3 else 0;
     const end = std.mem.indexOfAnyPos(u8, url, start, "/?#:") orelse url.len;
@@ -153,7 +162,7 @@ pub fn pick(a: Allocator, found: []const []const []const u8) Allocator.Error![]c
             const host = hostOf(u);
             var skip = false;
             for (unreadable) |h| skip = skip or std.ascii.eqlIgnoreCase(host, h) or std.ascii.endsWithIgnoreCase(host, h[0..]) and host.len > h.len and host[host.len - h.len - 1] == '.';
-            for (out.items) |seen| skip = skip or std.mem.eql(u8, seen, u);
+            for (out.items) |seen| skip = skip or samePage(a, seen, u); // host case, a trailing slash and a fragment are one page
             if (!skip) try out.append(a, u);
         }
     }
@@ -324,4 +333,16 @@ test "pages are picked by rank across queries, without repeats or video hosts" {
     try std.testing.expectEqualStrings("https://a.org/1", got[0]);
     try std.testing.expectEqualStrings("https://c.org/2", got[1]);
     try std.testing.expectEqualStrings("https://b.org/1", got[2]);
+}
+
+test "a page is read once when only its host case, slash or fragment differs" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const q1 = [_][]const u8{ "https://a.org/1", "https://A.org/1/", "https://a.org/1#notes" };
+    const q2 = [_][]const u8{"https://b.org/2"};
+    const got = try pick(a, &.{ &q1, &q2 });
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("https://a.org/1", got[0]);
+    try std.testing.expectEqualStrings("https://b.org/2", got[1]);
 }
