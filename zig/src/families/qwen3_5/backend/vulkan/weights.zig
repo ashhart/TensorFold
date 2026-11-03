@@ -162,13 +162,12 @@ const Builder = struct {
 
     /// Uploads go through staging; `View` pads words; `Builder.deinit` owns slots after `keep`.
     fn tensor(b: *Builder, t: Tensor) !View {
-        return b.tensorBytes(t, t.bytes);
+        return b.tensorBytes(t, t.bytes, @intCast(t.numel()));
     }
 
-    /// The tensor's dtype and element count with `bytes` (the same length) as its device contents.
-    fn tensorBytes(b: *Builder, t: Tensor, bytes: []const u8) !View {
+    /// The tensor's dtype with `bytes` as its device contents, viewed as `elements` of that dtype.
+    fn tensorBytes(b: *Builder, t: Tensor, bytes: []const u8, elements: u64) !View {
         const kind = kindOf(t.dtype) orelse return error.UnsupportedModel;
-        const elements: u64 = @intCast(t.numel());
         const ptr = try b.gpa.create(Buffer);
         ptr.* = Buffer.init(b.dev, .device, bytes.len) catch |e| {
             b.gpa.destroy(ptr);
@@ -201,20 +200,20 @@ const Builder = struct {
         return .{ .w = w, .scales = scales, .biases = biases, .n = n, .k = k };
     }
 
-    // Tiled when whole tiles fit, the words fit one binding, and the arena alignment keeps x 16-byte aligned.
+    // Tiled when k fills whole groups, the padded words fit one binding, and the arena keeps x 16-byte aligned.
     fn tilable(b: *const Builder, n: usize, k: usize) bool {
         const limits = b.dev.properties.limits;
-        return vk.tile.fits(n, k) and n * k / 2 <= limits.maxStorageBufferRange and limits.minStorageBufferOffsetAlignment % 16 == 0;
+        return vk.tile.fits(n, k) and vk.tile.padded(n) * k / 2 <= limits.maxStorageBufferRange and limits.minStorageBufferOffsetAlignment % 16 == 0;
     }
 
-    // One tensor of a tiled projection: checked like `raw`, then repacked on the host into 32-column tiles.
+    // One tensor of a tiled projection: checked like `raw`, then repacked on the host into zero-padded 32-column tiles.
     fn repacked(b: *Builder, name: []const u8, dt: loader.table.DType, shape: []const usize, n: usize, k: usize, words: bool) !View {
         const t = try b.named(name);
         try expectTensor(name, t, dt, shape);
-        const moved = try b.gpa.alloc(u8, t.bytes.len);
+        const moved = try b.gpa.alloc(u8, vk.tile.padded(n) * k / @as(usize, if (words) 2 else 32));
         defer b.gpa.free(moved);
         if (words) vk.tile.tileWords(moved, t.bytes, n, k) else vk.tile.tileParams(moved, t.bytes, n, k);
-        return b.tensorBytes(t, moved);
+        return b.tensorBytes(t, moved, moved.len / @as(usize, if (words) 4 else 2));
     }
 
     // As `quant`, tiled when `tilable`; the rows layout otherwise.
@@ -329,7 +328,7 @@ pub const Model = struct {
         var layers: std.ArrayList(Layer) = .empty;
         errdefer layers.deinit(gpa);
 
-        // The head is tiled; tied, it is a second upload of the embedding table, which gathers rows and stays row layout.
+        // The head is tiled; tied, it is a second upload of the embedding table (the embedding keeps its row layout).
         const head: ?Quant = if (!b.tilable(pinned.vocab, pinned.hidden))
             (if (cfg.tied) null else try b.quant("language_model.lm_head", pinned.vocab, pinned.hidden))
         else
