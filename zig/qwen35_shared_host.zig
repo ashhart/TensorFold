@@ -51,7 +51,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     e.kv8 = false;
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
     const f: cuda.Function = .{ .d = d, .handle = @ptrFromInt(1) };
-    e.keeps = .{ .apply = f, .conv = f, .compact = f };
+    e.keeps = .{ .apply = f, .apply_pend = f, .conv = f, .compact = f };
     return e;
 }
 fn buffer(d: *cuda.Driver, data: []u8) cuda.DeviceBuffer {
@@ -115,7 +115,7 @@ test "Shared verification: empty multi-row keep preserves the root and completed
     cache.advanced(128, false);
     try std.testing.expect(cache.last == null);
     try std.testing.expectEqual(@as(usize, 136), cache.len);
-    try std.testing.expectEqual(@as(usize, 2) * e.g.stateBytes() + e.g.kvBytes(256, false) + e.g.logBytes(64), e.streamBytes(256));
+    try std.testing.expectEqual(@as(usize, 2) * e.g.stateBytes() + e.g.kvBytes(256, false) + e.g.logBytes(64) + q.cache.pendBytes(e.g), e.streamBytes(256));
 }
 
 const Owners = struct {
