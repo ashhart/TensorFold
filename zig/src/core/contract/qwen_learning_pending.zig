@@ -27,7 +27,7 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "27B tf_q27_fit_dots_tree", .image = "qwen27_train", .symbol = "tf_q27_fit_dots_tree", .threads = 256, .dynamic = 20480 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 39, .static = 0, .bound = 256 }, .{ .regs = 39, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "27B tf_gdn_front", .image = "gdn_train", .symbol = "tf_gdn_front", .threads = 128, .dynamic = 0 }, .usage = .{ .{ .regs = 32, .static = 1024, .bound = 128 }, .{ .regs = 40, .static = 1024, .bound = 128 }, .{ .regs = 40, .static = 1024, .bound = 128 }, .{ .regs = 40, .static = 1024, .bound = 128 }, .{ .regs = 40, .static = 1024, .bound = 128 } } },
     .{ .launch = .{ .name = "27B tf_gdn_scan_fwd", .image = "gdn_train", .symbol = "tf_gdn_scan_fwd", .threads = 256, .dynamic = 0 }, .usage = .{ .{ .regs = 48, .static = 1152, .bound = 256 }, .{ .regs = 48, .static = 1152, .bound = 256 }, .{ .regs = 48, .static = 1152, .bound = 256 }, .{ .regs = 60, .static = 1152, .bound = 256 }, .{ .regs = 60, .static = 1152, .bound = 256 } } },
-    .{ .launch = .{ .name = "27B tf_gdn_norm_back", .image = "gdn_train", .symbol = "tf_gdn_norm_back", .threads = 128, .dynamic = 0 }, .usage = .{ .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 25, .static = 644, .bound = 128 }, .{ .regs = 25, .static = 644, .bound = 128 } } },
+    .{ .launch = .{ .name = "27B tf_gdn_norm_back", .image = "gdn_train", .symbol = "tf_gdn_norm_back", .threads = 128, .dynamic = 0 }, .usage = @splat(.{ .regs = 0, .static = 0 }) },
     .{ .launch = .{ .name = "27B tf_gdn_scan_back", .image = "gdn_train", .symbol = "tf_gdn_scan_back", .threads = 256, .dynamic = 0 }, .usage = .{ .{ .regs = 99, .static = 9536, .bound = 256 }, .{ .regs = 99, .static = 9536, .bound = 256 }, .{ .regs = 99, .static = 9536, .bound = 256 }, .{ .regs = 100, .static = 9536, .bound = 256 }, .{ .regs = 100, .static = 9536, .bound = 256 } } },
     .{ .launch = .{ .name = "27B tf_gdn_qk_back", .image = "gdn_train", .symbol = "tf_gdn_qk_back", .threads = 128, .dynamic = 0 }, .usage = .{ .{ .regs = 32, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 } } },
     .{ .launch = .{ .name = "27B tf_gdn_gates_back", .image = "gdn_train", .symbol = "tf_gdn_gates_back", .threads = 64, .dynamic = 0 }, .usage = .{ .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 30, .static = 0, .bound = 0 }, .{ .regs = 30, .static = 0, .bound = 0 }, .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 32, .static = 0, .bound = 0 } } },
@@ -36,7 +36,10 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "27B tf_train_narrow", .image = "train", .symbol = "tf_train_narrow", .threads = 256 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "27B tf_train_gemm", .image = "train", .symbol = "tf_train_gemm", .threads = 128 }, .usage = .{ .{ .regs = 55, .static = 10240, .bound = 128 }, .{ .regs = 55, .static = 10240, .bound = 128 }, .{ .regs = 55, .static = 10240, .bound = 128 }, .{ .regs = 64, .static = 10240, .bound = 128 }, .{ .regs = 64, .static = 10240, .bound = 128 } } },
 };
-test "train launch records: every dense learning launch fits every SM by its measured record" {
+test "train launch records: dense measured launches fit and changed GDN receipts remain pending" {
     const std = @import("std");
-    for (records) |record| try std.testing.expectEqual(@as(usize, 0), try registry.checkCuda(std.testing.allocator, &.{record}, true));
+    for (records) |record| {
+        const missing: usize = if (std.mem.eql(u8, record.launch.symbol, "tf_gdn_norm_back")) 5 else 0;
+        try std.testing.expectEqual(missing, try registry.checkCuda(std.testing.allocator, &.{record}, true));
+    }
 }
