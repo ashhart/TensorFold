@@ -11,6 +11,7 @@ const serve = @import("hip_serve");
 const glm_ocr = @import("glm_ocr");
 const qwen3 = @import("qwen3");
 const dots = @import("dots_mocr");
+const fam = @import("hip_families.zig");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
@@ -23,12 +24,7 @@ pub const backends: []const []const u8 = &.{"hip"};
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 /// The serve flags past the common ones this backend takes (server/cli.zig lists and parses them).
 pub const serves: []const []const u8 = &.{ "--tp", "--policy", "--mtp-drafts", "--mtp-confidence", "--checkpoint-slots", "--backend=rocm" };
-pub const families: []const api.Family = blk: {
-    var out: [registry.len]api.Family = undefined;
-    for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
-    const final = out;
-    break :blk &final;
-};
+pub const families: []const api.Family = fam.list(registry);
 
 /// The GPU family gate entries name ("rdna2" for gfx103x, "rdna3" for gfx11 / gfx12); null without a usable GPU.
 pub fn chip(a: Allocator) ?[]const u8 {
@@ -206,16 +202,8 @@ fn reasoning(comptime F: type) bool {
     return if (@hasDecl(F, "reasoning")) F.reasoning else true;
 }
 
-/// The family's refusal of --slide or --mtp-confidence, when it names one.
-fn flagRefused(comptime F: type, o: api.Open) ?[]const u8 {
-    if (o.tp != 1 and @hasDecl(F, "tp_refusal")) return F.tp_refusal;
-    if (o.mtp_drafts) |n| if (n > 0 and @hasDecl(F, "mtp_refusal")) return F.mtp_refusal;
-    if (@hasDecl(F, "refusal")) if (F.refusal(o)) |why| return why;
-    if (o.rope_yarn != null) return "--rope-yarn: the native HIP engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
-    if (o.slide and @hasDecl(F, "slide_refusal")) return F.slide_refusal;
-    if (o.mtp_confidence != null and @hasDecl(F, "confidence_refusal")) return F.confidence_refusal;
-    return null;
-}
+/// The family's refusals before it loads or joins a group (hip_families.zig).
+const flagRefused = fam.refused;
 
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
@@ -247,13 +235,9 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return .{ .active = u.device, .cache = 0, .peak = u.peak };
 }
 
-fn visionOffer(loaded: anytype) ?api.Vision {
-    return if (@hasField(@TypeOf(loaded), "vision")) loaded.vision else null;
-}
-
-test "HIP optional family offers: image metadata comes from the loaded owner" {
-    try std.testing.expect(visionOffer(.{}) == null);
-    try std.testing.expect(visionOffer(.{ .vision = @as(?api.Vision, null) }) == null);
+test "HIP optional family offers: image metadata comes from the loaded owner's offer" {
+    try std.testing.expect(fam.offerOf(.{}).vision == null);
+    try std.testing.expect(fam.offerOf(.{ .offer = serve.Offer{} }).vision == null);
     const Stub = struct {
         fn prepare(_: *anyopaque, _: Allocator, _: []const u8, _: u32) !api.PreparedImage {
             return error.Unused;
@@ -261,7 +245,7 @@ test "HIP optional family offers: image metadata comes from the loaded owner" {
     };
     var owner: u8 = 0;
     const v: api.Vision = .{ .ctx = &owner, .prepare = Stub.prepare, .image_token = 9, .image_tokens = 6144, .max_images = 2 };
-    const offered = visionOffer(.{ .vision = @as(?api.Vision, v) }).?;
+    const offered = fam.offerOf(.{ .offer = serve.Offer{ .vision = v } }).vision.?;
     try std.testing.expectEqual(v.ctx, offered.ctx);
     try std.testing.expectEqual(v.image_token, offered.image_token);
     try std.testing.expectEqual(v.image_tokens, offered.image_tokens);
@@ -280,7 +264,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     inline for (registry) |F| {
-        if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
+        if (fam.reads(F, o.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
     problem.* = try std.fmt.allocPrint(a, "the native HIP engine has no backend for {s} checkpoints yet; serve with --engine python", .{o.model_type});
     return null;
@@ -303,6 +287,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         else => |x| return x,
     };
     errdefer loaded.deinit(loaded.ctx);
+    const offer = fam.offerOf(loaded);
+    if (fam.textOnly(o, offer))
+        std.debug.print("[tensorfold] --vision: the HIP engine has no image tower for {s}; serving text only, and image requests are refused\n", .{o.model_type});
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
@@ -316,13 +303,32 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
     errdefer h.core.deinit();
     const what = Serves.of(loaded, r.options.window);
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (r.dev.group) |g| @intCast(g.world) else 1, .lanes = @intCast(loaded.streams), .context_window = @intCast(what.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = what.text_generation, .text_generation = what.text_generation, .embeddings = what.embeddings, .decides = what.decides, .rerank = what.rerank, .readouts = what.readouts, .vision = visionOffer(loaded), .reasoning = reasoning(F) });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{
+        .benchmark_ranks = if (r.dev.group) |g| @intCast(g.world) else 1,
+        .lanes = @intCast(loaded.streams),
+        .context_window = @intCast(what.window),
+        .prefill_step = F.prefill_step,
+        .decode_share = o.decode_share,
+        .policy = offer.policy orelse h.policy_line,
+        .startup = loaded.startup,
+        .structures = what.text_generation and loaded.backend.vtable.first_masked != null,
+        .text_generation = what.text_generation,
+        .embeddings = what.embeddings,
+        .decides = what.decides,
+        .rerank = what.rerank,
+        .readouts = what.readouts,
+        .penalties = loaded.backend.penalties,
+        .reasoning = reasoning(F),
+        .vision = offer.vision,
+        .prompt_cache = offer.cache != null,
+        .prompt_cache_capacity = offer.cache_capacity,
+        .warm_turns = offer.warm_turns,
+        .thinking_budget = offer.thinking_budget orelse true,
+    });
+    h.host.cache = offer.cache;
+    h.host.frame_key = offer.frame_key;
+    h.host.on_thread = offer.on_thread;
     h.host.memory = .{ .read = readMemory };
-    if (@hasField(@TypeOf(loaded), "cache")) {
-        h.host.cache = loaded.cache;
-        h.host.info_.prompt_cache = loaded.cache != null;
-        h.host.info_.prompt_cache_capacity = loaded.cache_capacity;
-    }
     if (@hasDecl(F, "attach")) F.attach(h.family, &h.host, o);
     try h.host.start();
     served = true;
@@ -366,7 +372,7 @@ pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
         return false;
     }
     inline for (registry) |F| {
-        if (std.mem.eql(u8, o.model_type, F.model_type)) {
+        if (fam.reads(F, o.model_type)) {
             if (flagRefused(F, o)) |why| {
                 problem.* = why;
                 return false;
@@ -392,6 +398,19 @@ test "a HIP family declares replies without reasoning with `pub const reasoning 
     try std.testing.expect(!reasoning(struct {
         pub const reasoning = false;
     }));
+}
+
+test "the text families carry no offer, so the host gives them the empty one; GLM-OCR offers through its Loaded" {
+    inline for (.{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native }) |F| {
+        const Loaded = @typeInfo(@typeInfo(@TypeOf(F.open)).@"fn".return_type.?).error_union.payload;
+        try std.testing.expect(!@hasField(Loaded, "offer"));
+    }
+    try std.testing.expect(@FieldType(glm_ocr.native.Loaded, "offer") == serve.Offer);
+    inline for (.{ "vision", "cache", "cache_capacity" }) |old| try std.testing.expect(!@hasField(glm_ocr.native.Loaded, old));
+}
+
+test {
+    _ = fam;
 }
 
 test "every registered family is listed for capabilities" {
@@ -425,7 +444,9 @@ test "Nemotron refuses --slide and --mtp-confidence on HIP before it loads, and 
 
 test "a one-GPU family refuses --tp before the group forms; the others are not refused for it" {
     const OneGpu = struct {
-        pub const tp_refusal = "--tp: one GPU only";
+        pub fn refusal(o: api.Open) ?[]const u8 {
+            return if (o.tp != 1) "--tp: one GPU only" else null;
+        }
     };
     try std.testing.expectEqualStrings("--tp: one GPU only", flagRefused(OneGpu, .{ .dir = "d", .model_type = "m", .tp = 2 }).?);
     try std.testing.expect(flagRefused(OneGpu, .{ .dir = "d", .model_type = "m" }) == null);

@@ -23,8 +23,11 @@ pub const confidence_refusal = "--mtp-confidence: Qwen3 dense checkpoints have n
 pub const reasoning = false;
 /// Every product is a BF16 dense one, which gfx12's WMMA tile runs: matrix=on is admitted on gfx12.
 pub const matrix_wmma12 = true;
-/// Checked by native/hip.zig before any rank joins a group.
 pub const tp_refusal = "--tp: Qwen3 dense checkpoints run on one HIP GPU; serve with --tp 1";
+/// Checked by native/hip.zig before any rank joins a group (hip_families.refused).
+pub fn refusal(o: api.Open) ?[]const u8 {
+    return if (o.tp != 1) tp_refusal else null;
+}
 pub const open = openEngine;
 pub const follow = followRank;
 
