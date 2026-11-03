@@ -70,6 +70,20 @@ class Comparison(unittest.TestCase):
         self.assertEqual(sum(r['status']=='unstable' for r in rows),5)
 
 class Catalog(unittest.TestCase):
+    def test_explicit_image_scope_keeps_all_reached_by_default(self):
+        reached=['ck_experts','ck_lane','other']
+        self.assertEqual(compare.image_scope(reached,None),reached)
+        self.assertEqual(compare.image_scope(reached,'ck_lane,ck_experts'),['ck_experts','ck_lane'])
+
+    def test_explicit_scope_refuses_unknown_or_unreached_images(self):
+        with self.assertRaisesRegex(ValueError,'not reached'):
+            compare.image_scope(['ck_lane'],'ck_experts')
+
+    def test_explicit_scope_refuses_empty_or_duplicate_names(self):
+        for requested in ('','ck_lane,','ck_lane,ck_lane'):
+            with self.assertRaisesRegex(ValueError,'distinct, nonempty'):
+                compare.image_scope(['ck_lane'],requested)
+
     def tree(self,root):
         (root/'zig/build').mkdir(parents=True)
         (root/'zig/kernels/cuda').mkdir(parents=True)
