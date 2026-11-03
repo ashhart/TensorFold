@@ -189,6 +189,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM on CUDA at TP=3 can pack the fused KDA input to an even width with `TF_GLM_KDA_PAD=1`, carried in the fingerprint every rank agrees on; unset, the engine is unchanged (#1545). Thanks to @BadAd84.
 
+- CUDA loaders can use `TF_LOAD_PREFETCH` for checked read-ahead on Nemotron, Bolt, GLM, MiniMax M3, Kolibri1, Spark2.5 and DeepSeek-V4.1. Upload and existing release order stay unchanged; disabled adapters start no reader, and failed reads name their source (#2003). This extends @jschmied's #1928 mechanism.
 - Seven host BF16 conversions on load and inference paths (the XPU loader, the CUDA vision towers, Gemma 4's assistant weights, Step5's vision, DeepSeek's DSpark and Flash Next's PLE scale) round through core's shared conversion, so a negative NaN no longer overflows in Debug builds; every finite value gives the same bits (#1954, part of #1863). Thanks to @jschmied.
 
 - Qwen 3.5 on CUDA rounds its host-side weight copies (norm weights, EXL3 norms and vectors, drafter scales and biases) with core's bf16 rounding, so a NaN weight stays NaN instead of becoming a finite value at load; every other value is bit-identical (#1986, part of #1863).
