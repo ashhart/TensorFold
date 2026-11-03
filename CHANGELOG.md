@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal, part one: its kernels, the decoder over every layer, Engram, prompt chunks and DSpark drafts, each checked against float64 references (#1710-#1719). Serving it on Metal follows with #1720-#1722. Thanks to @gilby.
+
 - Docs: the cache benchmark receipts say which tool-call content they count (#1999). Thanks to @garvrao80.
 
 - `zig build test-info-config` runs info's issue-934 test again: it was built from the CUDA CLI root, which never reached it (#2006). Thanks to @jishnuvenugopal.
