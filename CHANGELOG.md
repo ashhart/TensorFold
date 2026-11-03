@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The Nemotron XPU loader and the XPU safetensors reader read shard headers through core, so a malformed or oversized header is refused before anything is read (#1919). Thanks to @jschmied.
+
 - Windows: a cost-cache read that lands mid-replace is counted as a miss (safe: the window is priced again), so its concurrency test no longer flakes (#2001).
 
 - GLM on CUDA with TF_GLM_KV_SHARE no longer reports a balanced idle KV pool as (UNEVEN) at close; nothing else changes (#1993). Thanks to @Bizuayeu.
