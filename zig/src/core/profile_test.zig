@@ -15,7 +15,7 @@ test "stable profile: live lookup is exactly the legacy libc lookup for every re
     }
 }
 
-test "stable profile: registry covers its switches once, scopes metadata and never supplies a default" {
+test "stable profile: registry scopes metadata and never supplies a default" {
     for (p.entries) |e| {
         try t.expectEqual(e.id, p.entry(e.id).id);
         try t.expect(e.name().len > 0 and e.families.len > 0 and e.effect.len > 0 and e.evidence.len > 0);
@@ -28,6 +28,37 @@ test "stable profile: registry covers its switches once, scopes metadata and nev
     }
     try t.expectEqual(p.Class.debug, p.entry(.TF_QWEN_KV_PAGES_ALL).class);
     try t.expectEqual(p.Class.experimental, p.entry(.TF_FLASHNEXT_KV_PAGES).class);
+}
+
+test "stable profile: shared paging variable has disjoint GLM and Nemotron reporting policies" {
+    var glm: usize = 0;
+    var nemotron: usize = 0;
+    var omni: usize = 0;
+    for (p.entries) |e| {
+        if (e.id != .TF_KV_PAGES) continue;
+        if (e.applies("glm5_next", "cuda")) {
+            glm += 1;
+            try t.expectEqual(p.Syntax.auto, e.syntax);
+            try t.expect(e.differs("on"));
+            try t.expect(e.differs("off"));
+            try t.expect(!e.differs("auto"));
+        }
+        if (e.applies("nemotron_h", "cuda")) {
+            nemotron += 1;
+            try t.expectEqual(@as(usize, 2), e.report_values.?.len);
+            try t.expectEqualStrings("0", e.report_values.?[0]);
+            try t.expectEqualStrings("all", e.report_values.?[1]);
+            for ([_][]const u8{ "0", "all" }) |raw| try t.expect(e.differs(raw));
+            for ([_][]const u8{ "", "on", "off", "1", "auto", "00", "+0", "ALL", "false", " all ", "0\n" }) |raw|
+                try t.expect(!e.differs(raw));
+        }
+        if (e.applies("nemotron_h_omni", "cuda")) omni += 1;
+        try t.expectEqual(p.Class.identical, e.class);
+        try t.expect(e.stable == null);
+    }
+    try t.expectEqual(@as(usize, 1), glm);
+    try t.expectEqual(@as(usize, 1), nemotron);
+    try t.expectEqual(@as(usize, 1), omni);
 }
 
 test "stable profile: explicit off, empty, malformed and ordinary values are returned without coercion" {
