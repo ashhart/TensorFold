@@ -53,6 +53,13 @@ pub fn main(init: std.process.Init) !u8 {
     var vec4_fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &vec4_pipeline);
     defer vec4_fixture.deinit();
     vec4_fixture.name = "vulkan qmm_q4_vec4 affine q4 g64 transposed";
+    var tile_pipeline = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_q4_tile, layout);
+    defer tile_pipeline.deinit();
+    if (!std.mem.eql(u32, &tile_pipeline.local, &.{ fx.local_size_x, 1, 1 })) return error.LocalSizeMismatch;
+    var tile_fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &tile_pipeline);
+    defer tile_fixture.deinit();
+    tile_fixture.name = "vulkan qmm_q4_tile affine q4 g64 transposed tiled 32";
+    tile_fixture.tiled = true;
     const control_layout: vk.dispatch.Layout = .{ .bindings = 3, .push_bytes = 8, .writes = 1 << 2 };
     var p_fmax = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_fmax, control_layout);
     defer p_fmax.deinit();
@@ -83,12 +90,13 @@ pub fn main(init: std.process.Init) !u8 {
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fp16, .fp16_accum),
     };
     defer for (&controls) |*control| control.deinit();
-    var kernels: [9]g.Kernel = undefined;
+    var kernels: [10]g.Kernel = undefined;
     kernels[0] = fixture.kernel();
     kernels[1] = vec4_fixture.kernel();
-    for (&controls, 2..) |*control, i| kernels[i] = control.kernel();
-    kernels[7] = writes_w.kernel();
-    kernels[8] = writes_b.kernel();
+    kernels[2] = tile_fixture.kernel();
+    for (&controls, 3..) |*control, i| kernels[i] = control.kernel();
+    kernels[8] = writes_w.kernel();
+    kernels[9] = writes_b.kernel();
     const start = std.Io.Clock.awake.now(init.io);
     tally.controls += gate5_controls;
     tally.caught += gate5_controls;
