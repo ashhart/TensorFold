@@ -31,6 +31,8 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     host.addImport("core", core);
     host.addImport("tokenizer", tokenizer);
     host.addImport("drama3", drama);
+    // native/metal_slide.zig imports living: the engine module's own (a file belongs to one module)
+    host.addImport("living", engine.import_table.get("living") orelse @panic("the engine has no living import"));
     const root = b.createModule(.{ .root_source_file = b.path("zig/residency_native_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "host", .module = host }} });
     const object = b.addObject(.{ .name = "metal-residency-native", .root_module = root });
     _ = object.getEmittedBin();
