@@ -65,9 +65,10 @@ pub fn main(init: std.process.Init) !u8 {
     if (!std.mem.eql(u32, &rows_pipeline.local, &.{ fx.local_size_x, 1, 1 })) return error.LocalSizeMismatch;
     var rows_fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &rows_pipeline);
     defer rows_fixture.deinit();
-    rows_fixture.name = "vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows a thread";
+    rows_fixture.name = "vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread";
     rows_fixture.tiled = true;
     rows_fixture.rows_per_thread = 4;
+    rows_fixture.columns_per_thread = 2;
     const control_layout: vk.dispatch.Layout = .{ .bindings = 3, .push_bytes = 8, .writes = 1 << 2 };
     var p_fmax = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_fmax, control_layout);
     defer p_fmax.deinit();
