@@ -252,6 +252,11 @@ unsplit K, `linear_wc`'s tiles); a host test sweeps K and N to 16384 through `ex
 form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 sum would overflow on a constant-weight
 stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
 swapped scales, a swapped suh.
+CUDA also checks Nemotron 3.5 Transcribe's audio encoders (`nemo_audio.cu`): the ASR encoder's q/k LayerNorm with
+RoPE on 64 of 128 channels and the Sortformer's RoPE alone (each output within float64's bound at its three bf16
+points), attention over a window's valid keys (core/attention_range.zig's range, P as bf16), and the Sortformer head's
+im2col, padding and relu rows, exact (five controls: a one-pass variance, a key short of the window, a padding row read
+or kept, and a relu by `fmaxf`).
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 HIP also checks the 64-row prompt attention tile (`prefill.hip`): `tf_fa_paged_bf16` and `tf_fa_paged_f16` over a
 permuted page table at the 27B's, the 35B-A3B's and Nemotron's head counts, each output within attention_ref's float64
@@ -285,6 +290,10 @@ CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair 
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
+CUDA also checks the bf16 experts (`experts_bf16.cu`, a checkpoint's own bf16 weights: Nemotron 3.5 Transcribe's routed
+and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and prompt forms, against float64 (two controls:
+the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
+decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
 CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the living-weights learner adds beside the
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
