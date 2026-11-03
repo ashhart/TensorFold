@@ -74,7 +74,7 @@ test "a server's manifest names the checkpoint a managed run records: the snapsh
     const dir = try checkpoint(a, root, &.{ "models--example--model", "snapshots", revision }, config);
     const managed = try model.describe(a, std.testing.io, "example/model", dir, false, &families, null);
     var env: std.process.Environ.Map = .init(a);
-    const doc = try manifest.serveDocument(a, std.testing.io, &env, "9.8.7", "rocm", dir);
+    const doc = try manifest.serveDocument(a, std.testing.io, &env, "9.8.7", "rocm", dir, .{ .ranks = 1 });
     const attached = (try manifest.parse(a, try json.stringify(a, doc, .{}), "rocm")).?;
     try std.testing.expectEqualStrings(managed.revision.?, attached.revision.?);
     try std.testing.expectEqualStrings(managed.config_sha256.?, attached.config_sha256.?);
@@ -96,7 +96,7 @@ test "a HIP or Metal server's manifest names the receipt's backend, so an attach
     var env: std.process.Environ.Map = .init(a);
     for ([_][2][]const u8{ .{ "hip", "rocm" }, .{ "metal", "mlx" }, .{ "cuda", "cuda" } }) |pair| {
         try std.testing.expectEqualStrings(pair[1], manifest.receiptBackend(pair[0]));
-        const doc = try manifest.serveDocument(a, std.testing.io, &env, "9.8.7", pair[0], "");
+        const doc = try manifest.serveDocument(a, std.testing.io, &env, "9.8.7", pair[0], "", .{ .ranks = 1 });
         try std.testing.expectEqualStrings(pair[1], doc.get("runtime").?.get("backend").?.string);
         const facts = (try manifest.parse(a, try json.stringify(a, doc, .{}), pair[1])).?;
         try std.testing.expectEqualStrings(pair[1], facts.runtime.backend);

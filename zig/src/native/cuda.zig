@@ -466,7 +466,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
     h.kv = kv_pages.watchOf(F, loaded, paged);
+    const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
     try h.serve(io, served.facts, loaded.rows, .{
+        .benchmark_ranks = bench.ranks,
+        .benchmark_group = bench.group,
         .lanes = streams,
         .draft_sources = .{ .drafter = served.source },
         .context_window = @intCast(window),

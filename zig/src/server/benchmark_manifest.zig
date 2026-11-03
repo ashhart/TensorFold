@@ -5,6 +5,7 @@ const check = @import("benchmark_check.zig");
 const receipt = @import("benchmark_receipt.zig");
 const host = @import("benchmark_host.zig");
 const stream = @import("benchmark_stream.zig");
+const api = @import("engine_api");
 const model_facts = @import("benchmark_model.zig");
 const Allocator = std.mem.Allocator;
 const Value = json.Value;
@@ -18,6 +19,7 @@ pub const Facts = struct {
     family: ?[]const u8 = null,
     quantization: ?[]const u8 = null,
     rank_count: ?u8 = null,
+    group: ?Value = null,
 };
 
 fn hexText(s: []const u8, lengths: []const usize) bool {
@@ -66,8 +68,16 @@ pub fn parse(a: Allocator, bytes: []const u8, backend: []const u8) Allocator.Err
     if (root.get("rank_count")) |r| {
         if (r != .null) {
             const n = r.int64() orelse return null;
-            if (n != 1 and n != 2) return null;
+            if (n < 1 or n > (if (root.get("group") != null) @as(i64, 8) else 2)) return null;
             rank_count = @intCast(n);
+        }
+    }
+    var topology: ?Value = null;
+    if (root.get("group")) |g| {
+        if (g == .null) rank_count = null else {
+            var why: []const u8 = "";
+            if (!check.group(g, rank_count, &why)) return null;
+            topology = g;
         }
     }
     const model_v = root.get("model") orelse return null;
@@ -107,6 +117,7 @@ pub fn parse(a: Allocator, bytes: []const u8, backend: []const u8) Allocator.Err
         .family = family,
         .quantization = quant,
         .rank_count = rank_count,
+        .group = topology,
     };
 }
 
@@ -174,13 +185,6 @@ fn fileSha(a: Allocator, io: std.Io, path: []const u8) ?[]const u8 {
     return hexDigest(a, bytes) catch null;
 }
 
-fn rankFromEnv(env: *const std.process.Environ.Map) ?u8 {
-    const raw = env.get("TF_NEMOTRON_WORLD") orelse env.get("TF_BENCHMARK_RANK_COUNT") orelse return null;
-    const n = std.fmt.parseInt(u8, raw, 10) catch return null;
-    if (n != 1 and n != 2) return null;
-    return n;
-}
-
 fn revisionFromEnv(env: *const std.process.Environ.Map) ?[]const u8 {
     const raw = env.get("TF_CHECKPOINT_REVISION") orelse return null;
     if (!hexText(raw, &.{ 40, 64 })) return null;
@@ -203,12 +207,12 @@ pub fn receiptBackend(engine: []const u8) []const u8 {
 }
 
 /// The document a running server can attest, under the receipt's backend name. Hardware is this process's own probe.
-pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, version: []const u8, engine: []const u8, model_dir: []const u8) !Value {
+pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, version: []const u8, engine: []const u8, model_dir: []const u8, loaded: api.Benchmark) !Value {
     const backend = receiptBackend(engine);
     const probe = host.detect(a, io, env, backend);
     const top = try json.newObject(a);
     try top.put(a, "schema_version", try json.intValue(a, @as(u8, 1)));
-    if (rankFromEnv(env)) |n| try top.put(a, "rank_count", try json.intValue(a, n));
+    try top.put(a, "rank_count", if (loaded.ranks) |n| if (n > 0 and n <= 8) try json.intValue(a, n) else .null else .null);
     const runtime = try json.newObject(a);
     try runtime.put(a, "tensorfold_version", .{ .string = if (version.len > 0) version else "unknown" });
     try runtime.put(a, "backend", .{ .string = backend });
@@ -223,24 +227,35 @@ pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.M
         if (model_facts.tokenizerHash(a, io, model_dir)) |h| try model.put(a, "tokenizer_sha256", .{ .string = h });
     }
     try top.put(a, "model", .{ .object = model });
-    const hardware = try json.newObject(a);
-    const hw = probe.hardware;
-    if (hw.cpu_model) |c| try hardware.put(a, "cpu_model", .{ .string = c });
-    if (hw.system_memory_bytes) |n| try hardware.put(a, "system_memory_bytes", try json.intValue(a, n));
-    try hardware.put(a, "memory_type", .{ .string = hw.memory_type });
-    const gpus = try a.alloc(Value, hw.gpus.len);
-    for (hw.gpus, gpus) |g, *slot| {
-        const one = try json.newObject(a);
-        try one.put(a, "name", .{ .string = g.name });
-        if (g.memory_bytes) |n| try one.put(a, "memory_bytes", try json.intValue(a, n)) else try one.put(a, "memory_bytes", .null);
-        if (g.cores) |n| try one.put(a, "cores", try json.intValue(a, n)) else try one.put(a, "cores", .null);
-        slot.* = .{ .object = one };
+    const hw = try receipt.hardwareValue(a, probe.hardware);
+    try top.put(a, "hardware", hw);
+    var topology: Value = .null;
+    if (loaded.group) |bytes| {
+        const parsed = try json.parse(a, bytes);
+        if (parsed == .ok) topology = parsed.ok;
+    } else if (loaded.ranks == 1 and probe.hardware.gpus.len > 0) {
+        topology = try single(a, hw);
     }
-    try hardware.put(a, "gpus", .{ .array = gpus });
-    try hardware.put(a, "gpu_count", if (hw.gpus.len > 0) try json.intValue(a, hw.gpus.len) else .null);
-    try hardware.put(a, "source", .{ .string = hw.source });
-    try top.put(a, "hardware", .{ .object = hardware });
+    var why: []const u8 = "";
+    const count: ?u8 = if (loaded.ranks) |n| if (n > 0 and n <= 8) @intCast(n) else null else null;
+    if (topology != .null and !check.group(topology, count, &why)) topology = .null;
+    try top.put(a, "group", topology);
+    if (topology != .null) try top.put(a, "hardware", topology.get("nodes").?.array[0].get("hardware").?);
     return .{ .object = top };
+}
+
+fn single(a: Allocator, hardware: Value) !Value {
+    const node = try json.newObject(a);
+    try node.put(a, "id", try json.intValue(a, @as(u8, 0)));
+    try node.put(a, "ranks", .{ .array = try a.dupe(Value, &.{try json.intValue(a, @as(u8, 0))}) });
+    try node.put(a, "hardware", hardware);
+    const g = try json.newObject(a);
+    try g.put(a, "schema_version", try json.intValue(a, @as(u8, 1)));
+    try g.put(a, "source", .{ .string = "loaded-group" });
+    try g.put(a, "rank_count", try json.intValue(a, @as(u8, 1)));
+    try g.put(a, "category", .{ .string = "single-node" });
+    try g.put(a, "nodes", .{ .array = try a.dupe(Value, &.{.{ .object = node }}) });
+    return .{ .object = g };
 }
 
 fn builtinTagIsMacos() bool {
