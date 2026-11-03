@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "client_source_sha256": "e7186f50a3e3e9645a18fc33f68d7a86eb0b5be4355e1a24b30c21ed3e120714",
+  "checks": [
+    {
+      "check": "reference_cache_off",
+      "passed": true,
+      "reference": {
+        "token_ids": [
+          13,
+          271,
+          248068,
+          271,
+          248069,
+          271,
+          6479,
+          44896
+        ],
+        "score_sha256": "46c305a756cbddf88041a6e9a02a120fc59347282dfb077ede76a592f096d28a",
+        "cached_tokens": 0
+      }
+    },
+    {
+      "check": "execution_error",
+      "passed": false,
+      "error_class": "HTTPError"
+    }
+  ],
+  "passed": false
+}
