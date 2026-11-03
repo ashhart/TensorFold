@@ -65,6 +65,17 @@ pub const HfText = struct {
         // each request renders its chat up to three times, and a chat's earlier messages come back every turn
         t.tok.memo = try tokenizer.Memo.create(gpa, 64 << 20);
         const config = readJson(io, a, dir, "tokenizer_config.json");
+        // transformers' Qwen3.5 tokenizer splits words with the regex this field publishes, not tokenizer.json's
+        if (config == .object) if (config.object.get("pretokenize_regex")) |re| {
+            if (re != .string or re.string.len == 0) {
+                problem.* = "tokenizer_config.json pretokenize_regex is not a non-empty string";
+                return error.Load;
+            }
+            t.tok.overrideSplit(re.string) catch |e| {
+                problem.* = try std.fmt.allocPrint(pa, "tokenizer_config.json pretokenize_regex cannot replace the Split pattern ({s})", .{@errorName(e)});
+                return error.Load;
+            };
+        };
         const model_config = readEosJson(io, a, dir, "config.json", 64 << 20) catch |e| {
             problem.* = try std.fmt.allocPrint(pa, "cannot read config.json EOS ({s})", .{@errorName(e)});
             return error.Load;
@@ -484,6 +495,44 @@ test "explicit template overrides checkpoint templates including tool prompts an
     const empty = try HfText.load(gpa, io, dir, path, a, &problem);
     defer empty.deinit();
     try std.testing.expectError(error.Template, empty.text().render(a, messages, .{}, &problem));
+}
+
+test "pretokenize_regex: tokenizer_config.json's field replaces tokenizer.json's Split, and one that fails refuses the load" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // a BPE over raw characters whose merges span a combining mark: the split shows in the ids
+    try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data =
+        \\{"pre_tokenizer":{"type":"Split","pattern":{"Regex":"\\p{L}+"},"behavior":"Isolated","invert":false},
+        \\ "model":{"type":"BPE","vocab":{"e":0,"\u0301":1,"t":2,"e\u0301":3,"te\u0301":4,"e\u0301te\u0301":5},
+        \\  "merges":["e \u0301","t e\u0301","e\u0301 te\u0301"]}}
+    });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var problem: []const u8 = "";
+    const word = "e\u{301}te\u{301}";
+    const cases = [_]struct { []const u8, []const u32 }{
+        .{ "{}", &.{ 0, 1, 2, 0, 1 } }, // no field: tokenizer.json's \p{L}+ splits at each mark
+        .{ "{\"pretokenize_regex\": \"[\\\\p{L}\\\\p{M}]+\"}", &.{5} },
+    };
+    for (cases) |c| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data = c[0] });
+        const t = try HfText.load(gpa, io, dir, null, a, &problem);
+        defer t.deinit();
+        try std.testing.expectEqualSlices(u32, c[1], try t.text().encode(a, word, false));
+    }
+    for ([_][]const u8{ "{\"pretokenize_regex\": \"[\\\\p{L}\"}", "{\"pretokenize_regex\": 3}", "{\"pretokenize_regex\": \"\"}" }) |bad| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data = bad });
+        // a load that wrongly succeeds is closed before the test fails, so nothing it holds outlives the test
+        if (HfText.load(gpa, io, dir, null, a, &problem)) |loaded| {
+            loaded.deinit();
+            return error.TestUnexpectedResult;
+        } else |e| try std.testing.expectEqual(error.Load, e);
+        try std.testing.expect(std.mem.indexOf(u8, problem, "pretokenize_regex") != null);
+    }
 }
 
 test "GLM-5.3 gives its template clear_thinking: earlier reasoning kept unless TF_GLM_CLEAR_THINKING=1" {

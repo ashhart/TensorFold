@@ -44,17 +44,10 @@ const Real = struct {
     }
 };
 
-/// tokenizer.json with its first pre-tokenizer Regex replaced by tokenizer_config.json's `pretokenize_regex`.
-fn withConfigRegex(a: Allocator, file: []const u8, config: []const u8) ![]const u8 {
+/// tokenizer_config.json's `pretokenize_regex`, as HfText.load applies it over tokenizer.json's Split.
+fn configRegex(a: Allocator, config: []const u8) ![]const u8 {
     const cfg = try std.json.parseFromSliceLeaky(std.json.Value, a, config, .{});
-    const regex = (cfg.object.get("pretokenize_regex") orelse return error.NoRegex).string;
-    const pre = std.mem.indexOf(u8, file, "\"pre_tokenizer\"") orelse return error.NoRegex;
-    const key = std.mem.indexOfPos(u8, file, pre, "\"Regex\"") orelse return error.NoRegex;
-    const open = std.mem.indexOfScalarPos(u8, file, key + 7, '"') orelse return error.NoRegex;
-    var end = open + 1;
-    while (file[end] != '"') end += if (file[end] == '\\') 2 else 1;
-    const quoted = try std.json.Stringify.valueAlloc(a, regex, .{});
-    return std.mem.concat(a, u8, &.{ file[0..open], quoted, file[end + 1 ..] });
+    return (cfg.object.get("pretokenize_regex") orelse return error.NoRegex).string;
 }
 
 /// How many pinned records the tokenizer reproduces: ids, spans, option ids and types all equal.
@@ -105,8 +98,9 @@ test "Clef: the encoder gives the reference's ids and spans with the checkpoint'
     }.f;
     const file = try read(a, dir, "tokenizer.json");
     const config = try read(a, dir, "tokenizer_config.json");
-    var real: Real = .{ .tok = try tokenizer.parse(std.testing.allocator, try withConfigRegex(a, file, config)) };
+    var real: Real = .{ .tok = try tokenizer.parse(std.testing.allocator, file) };
     defer real.tok.deinit();
+    try real.tok.overrideSplit(try configRegex(a, config));
     const same = try matching(a, &real, cases, true);
     var plain: Real = .{ .tok = try tokenizer.parse(std.testing.allocator, file) };
     defer plain.tok.deinit();

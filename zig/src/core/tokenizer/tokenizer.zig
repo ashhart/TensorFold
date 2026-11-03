@@ -3,6 +3,7 @@ const std = @import("std");
 pub const kimi_tiktoken = @import("tiktoken.zig");
 pub const unicode = @import("unicode.zig");
 const steps = @import("steps.zig");
+const regex = @import("regex.zig");
 const models = @import("model.zig");
 const qwen2_slow = @import("qwen2_slow.zig");
 const Allocator = std.mem.Allocator;
@@ -151,6 +152,19 @@ pub const Tokenizer = struct {
             t.allocator.destroy(arena);
         }
         t.* = undefined;
+    }
+
+    /// New Split regex, empty memo; call before the tokenizer is shared: an encode in flight keeps the old memo.
+    pub fn overrideSplit(t: *Tokenizer, pattern: []const u8) !void {
+        const pre = if (t.pre_tokenizer) |*p| p else return error.NoSplitRegex;
+        const split = firstSplit(pre) orelse return error.NoSplitRegex;
+        split.pattern = .{ .regex = try regex.Regex.compile(t.arena.?.allocator(), pattern) };
+        if (t.memo) |m| {
+            const gpa = m.gpa;
+            const cap = m.cap;
+            m.destroy();
+            t.memo = Memo.create(gpa, cap) catch null; // without a memo every encode tokenizes, which is only slower
+        }
     }
 
     /// Id of a token written out whole, such as a chat template's special token.
@@ -548,4 +562,14 @@ test {
     _ = @import("tokenizer_test.zig");
     _ = @import("masked_test.zig");
     _ = @import("unicode_nfkc_test.zig");
+}
+
+/// The first Split whose pattern is a regex, in a pre-tokenizer or its sequence.
+fn firstSplit(p: *steps.PreTokenizer) ?*@FieldType(steps.PreTokenizer, "split") {
+    switch (p.*) {
+        .split => |*s| return if (s.pattern == .regex) s else null,
+        .sequence => |list| for (@constCast(list)) |*q| if (firstSplit(q)) |s| return s,
+        else => {},
+    }
+    return null;
 }
