@@ -170,7 +170,8 @@ pub const Decoder = struct {
     }
 
     /// The hidden rows after the last forward (the residual stream past layer 11), for checks.
-    pub fn hidden(d: *Decoder, n: usize) []const u16 {
+    pub fn hidden(d: *Decoder, n: usize) ![]const u16 {
+        try d.flush();
         return halves(d.scratch.at(.x), n * H);
     }
 
@@ -238,7 +239,7 @@ pub const Decoder = struct {
             });
             e.dispatchGroups(mtl.Size.of(n, 1, 1), mtl.Size.of(32, 1, 1));
             ks.Kernels.bind(e, k.get("ud_attend"), &.{ s.at(.q), d.kc(l), d.vc(l), s.at(.sel), s.at(.bias), s.at(.qpos), s.at(.att) }, UdAttend{ .width = H, .scale = scale, .local = cfg.local });
-            e.dispatchGroups(mtl.Size.of(n, cfg.heads, 1), mtl.Size.of(32, 1, 1));
+            e.dispatchGroups(mtl.Size.of(n, cfg.heads, 1), mtl.Size.of(256, 1, 1));
             lin(e, k, s.at(.att), L.o, s.at(.tmp), n, H, H);
             if (d.trace_parts) |tp| {
                 try d.flush();
@@ -257,7 +258,6 @@ pub const Decoder = struct {
                 @memcpy(t[l][0 .. n * H], halves(s.at(.x), n * H));
             }
         }
-        try d.flush();
     }
 
     /// The routed layer's FFN into `.tmp`: the gate on the GPU, the experts' row lists here, then the shared expert,

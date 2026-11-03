@@ -251,59 +251,88 @@ struct UdAttend {
   uint local;    // the local window (128 keys)
 };
 
-// One query row and head (a simdgroup): softmax over the local keys p-127..p (no bias) and the selected blocks' keys
-// before the window (their bias), fp32 scores and weights, out = sum(p v) / sum(p) rounded to bf16.
-[[max_total_threads_per_threadgroup(32)]] [[kernel]] void ud_attend(
+// One query row and head (a group of 8 simdgroups): softmax over the local keys p-127..p (no bias) and the
+// selected blocks' keys before the window (their bias), fp32 scores and weights, out = sum(p v) / sum(p) rounded to
+// bf16. The keys are split across the simdgroups, each scoring one key at a time across its lanes.
+[[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_attend(
     const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]], const device bfloat* vc [[buffer(2)]],
     const device int* sel [[buffer(3)]], const device float* bias [[buffer(4)]], const device uint* qpos [[buffer(5)]],
     device bfloat* o [[buffer(6)]], constant UdAttend& p [[buffer(7)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint t [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float score[512];
   threadgroup uint key[512];
+  threadgroup uint seg_first[13], seg_start[14];
+  threadgroup float seg_bias[13];
+  threadgroup float part_max[8], part_sum[8];
+  threadgroup float4 part_acc[8][32];
   const uint row = tg.x, h = tg.y;
   const uint pos = qpos[row];
   const uint lo = pos + 1 > p.local ? pos + 1 - p.local : 0;
-  const device bfloat* qr = q + ulong(row) * p.width + h * 128;
-  const float4 qv = float4(qr[lane * 4], qr[lane * 4 + 1], qr[lane * 4 + 2], qr[lane * 4 + 3]);
-  uint n = 0;
-  float m = -INFINITY;
-  // remote blocks first, then the window; a block key inside the window is the window's
-  for (uint s = 0; s <= 12; s++) {
-    uint first, last;
-    float b = 0.0f;
-    if (s < 12) {
-      const int c = sel[row * 12 + s];
-      if (c < 0) continue;
-      first = uint(c) * 32;
-      last = min(first + 32, lo);
-      b = bias[row * 12 + s];
-    } else {
-      first = lo;
-      last = pos + 1;
-    }
-    for (uint j = first; j < last; j++) {
-      const device bfloat* kr = kc + ulong(j) * p.width + h * 128 + lane * 4;
-      const float part = qv.x * float(kr[0]) + qv.y * float(kr[1]) + qv.z * float(kr[2]) + qv.w * float(kr[3]);
-      const float sc = simd_sum(part) * p.scale + b;
-      if (lane == 0) {
-        score[n] = sc;
-        key[n] = j;
+  // the key list: remote blocks first, then the window; a block key inside the window is the window's
+  if (t == 0) {
+    uint n = 0;
+    for (uint s = 0; s <= 12; s++) {
+      uint first = 0, last = 0;
+      float b = 0.0f;
+      if (s < 12) {
+        const int c = sel[row * 12 + s];
+        if (c >= 0) {
+          first = uint(c) * 32;
+          last = max(first, min(first + 32, lo));
+          b = bias[row * 12 + s];
+        }
+      } else {
+        first = lo;
+        last = pos + 1;
       }
-      m = max(m, sc);
-      n++;
+      seg_first[s] = first;
+      seg_start[s] = n;
+      seg_bias[s] = b;
+      n += last - first;
     }
+    seg_start[13] = n;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint n = seg_start[13];
+  const device bfloat* qr = q + ulong(row) * p.width + h * 128;
+  const float4 qv = float4(*(const device bfloat4*)(qr + lane * 4));
+  float m = -INFINITY;
+  uint s = 0;
+  for (uint i = sg; i < n; i += 8) {
+    while (i >= seg_start[s + 1]) s++;
+    const uint j = seg_first[s] + (i - seg_start[s]);
+    const float4 kv = float4(*(const device bfloat4*)(kc + ulong(j) * p.width + h * 128 + lane * 4));
+    const float sc = simd_sum(dot(qv, kv)) * p.scale + seg_bias[s];
+    if (lane == 0) {
+      score[i] = sc;
+      key[i] = j;
+    }
+    m = max(m, sc);
+  }
+  if (lane == 0) part_max[sg] = m;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  m = part_max[0];
+  for (uint g = 1; g < 8; g++) m = max(m, part_max[g]);
   float4 acc = 0.0f;
   float total = 0.0f;
-  for (uint i = 0; i < n; i++) {
+  for (uint i = sg; i < n; i += 8) {
     const float e = metal::precise::exp(score[i] - m);
     total += e;
-    const device bfloat* vr = vc + ulong(key[i]) * p.width + h * 128 + lane * 4;
-    acc += e * float4(float(vr[0]), float(vr[1]), float(vr[2]), float(vr[3]));
+    acc += e * float4(*(const device bfloat4*)(vc + ulong(key[i]) * p.width + h * 128 + lane * 4));
+  }
+  part_acc[sg][lane] = acc;
+  if (lane == 0) part_sum[sg] = total;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg != 0) return;
+  float4 sum = part_acc[0][lane];
+  float tot = part_sum[0];
+  for (uint g = 1; g < 8; g++) {
+    sum += part_acc[g][lane];
+    tot += part_sum[g];
   }
   device bfloat* out = o + ulong(row) * p.width + h * 128 + lane * 4;
-  for (uint d = 0; d < 4; d++) out[d] = bfloat(acc[d] / total);
+  for (uint d = 0; d < 4; d++) out[d] = bfloat(sum[d] / tot);
 }
 
 // y = bf16(bf16(silu(g)) * u): the MLP's act_fn(gate) * up in bf16.
