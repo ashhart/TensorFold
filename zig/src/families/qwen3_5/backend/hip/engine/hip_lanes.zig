@@ -322,9 +322,9 @@ pub const Hip = struct {
         return lane;
     }
 
-    /// Where the chunk from `at` ends: a cut anywhere on 64 rows gives the same bits; decoding streams wait less.
-    pub fn reach(h: *Hip, _: *Lane, at: usize, limit: usize) !usize {
-        const rows = if (h.e.o.cut_rows > 0) h.e.o.cut_rows else if (h.decoding()) h.e.o.policy.fill_rows else prefix.chunk;
+    /// Where the chunk from `at` ends: decoding streams wait less; a readout keeps the chunk (rocBLAS bits by rows).
+    pub fn reach(h: *Hip, lane: *Lane, at: usize, limit: usize) !usize {
+        const rows = if (h.e.o.cut_rows > 0) h.e.o.cut_rows else if (lane.readout == null and h.decoding()) h.e.o.policy.fill_rows else prefix.chunk;
         const end = prefix.chunkEnd(at, limit, rows);
         if (h.cuts) |c| try c.append(h.gpa, @intCast(end));
         return end;
