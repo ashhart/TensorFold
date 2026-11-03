@@ -73,10 +73,7 @@ fn name(buf: []u8, comptime fmt: []const u8, args: anytype) ![]const u8 {
     return std.fmt.bufPrint(buf, fmt, args);
 }
 
-fn bf16Of(x: f32) u16 {
-    const u: u32 = @bitCast(x);
-    return @intCast((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
-}
+const bf16Of = core.bf16_round.bits;
 
 /// f16 values (as stored) to bf16, round to nearest even.
 fn f16Rows(gpa: std.mem.Allocator, bytes: []const u8) ![]u16 {
@@ -317,4 +314,32 @@ pub fn load(e: *Engine, ck: *core.Checkpoint) !void {
     var s: Sink = .{ .e = e, .measure = false };
     try all(&s, ck);
     try e.stream.synchronize();
+}
+
+test "Qwen EXL3 norm and widened bf16: today's bits on every zero, subnormal, infinity and tie; a NaN stays NaN" {
+    const old = struct {
+        /// bf16Of as it was spelled before it was core's bits(): the oracle for every non-NaN input.
+        fn wrapped(x: f32) u16 {
+            const u: u32 = @bitCast(x);
+            return @intCast((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = bf16Of(v);
+            if (!std.math.isNan(v)) return std.testing.expectEqual(wrapped(v), h);
+            try std.testing.expect(std.math.isNan(core.bf16_round.value(h)));
+            try std.testing.expectEqual(u >> 31, h >> 15);
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+    try std.testing.expectEqual(@as(u16, 0x8000), old.wrapped(@bitCast(@as(u32, 0x7fff8001)))); // the old copy's -0
+    try std.testing.expectEqual(@as(u16, 0x0000), old.wrapped(@bitCast(@as(u32, 0xffff8001)))); // and its +0
+    for ([_]u32{ 0x7fff8001, 0xffff8001, 0x7fc00000, 0xffffffff, 0x7f800001, 0xff800001, 0x7fbfffff, 0xffa00000 }) |u| try old.kept(u);
 }
