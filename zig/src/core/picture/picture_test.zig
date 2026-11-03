@@ -33,11 +33,13 @@ fn payload(arena: std.mem.Allocator, url: []const u8) !?[]u8 {
     return out;
 }
 
-/// JPEG cases need the pinned library: required when TENSORFOLD_LIBTURBOJPEG names one, skipped when none loads.
+/// JPEG cases need the pinned library: required if TENSORFOLD_LIBTURBOJPEG names one, else the test reports a skip.
 fn jpegReady(a: std.mem.Allocator) !bool {
+    const level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = level;
     if (picture.jpeg.available(std.testing.io, a)) return true;
     if (@import("sys").getenv(picture.jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
-    std.debug.print("libjpeg-turbo {s} not found: JPEG pixel cases skipped\n", .{picture.jpeg.pinned});
     return false;
 }
 
@@ -73,6 +75,7 @@ test "every picture 0.6.6 decoded decodes to the same RGB bytes, and its refusal
         checked[0] += 1;
     }
     try std.testing.expect(checked[0] >= @as(usize, if (jpeg) 29 else 19) and checked[1] >= 4);
+    if (!jpeg) return error.SkipZigTest;
 }
 
 const Edge = struct { name: []const u8, b64: []const u8, width: usize = 0, height: usize = 0, rgb: ?[]const u8 = null, problem: ?[]const u8 = null };
@@ -114,13 +117,16 @@ test "edge pictures (zig/tests/fixtures/picture/edges.json) get 0.6.6's outcome,
         checked += 1;
     }
     try std.testing.expect(checked >= @as(usize, if (jpeg) 76 else 50));
+    if (!jpeg) return error.SkipZigTest;
 }
 
-/// WebP cases need the pinned libwebp: required when TENSORFOLD_LIBWEBP names one, skipped when none loads.
+/// WebP cases need the pinned libwebp: required if TENSORFOLD_LIBWEBP names one, else the test reports a skip.
 fn webpReady(a: std.mem.Allocator) !bool {
+    const level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = level;
     if (picture.webp.available(std.testing.io, a)) return true;
     if (@import("sys").getenv(picture.webp.env) != null) return error.PinnedLibraryDidNotLoad;
-    std.debug.print("libwebp {s} not found: WebP pixel cases skipped\n", .{picture.webp.pinned});
     return false;
 }
 
@@ -152,6 +158,7 @@ test "WebP pictures (zig/tests/fixtures/picture/webp.json) decode to Pillow's RG
         checked += 1;
     }
     try std.testing.expect(checked >= @as(usize, if (ready) 8 else 2)); // without the library: the files refused before it loads
+    if (!ready) return error.SkipZigTest;
 }
 
 test "damaged and cut pictures are refused or decoded, never trapped" {
@@ -187,6 +194,7 @@ test "damaged and cut pictures are refused or decoded, never trapped" {
         }
     }
     try std.testing.expect(outcomes[0] > 0 and outcomes[1] > 0);
+    if (!jpeg) return error.SkipZigTest;
 }
 
 /// Each whole chunk's CRC rewritten, so a damaged body reaches the decoder past its checksum.

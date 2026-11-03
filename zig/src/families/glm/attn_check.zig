@@ -4,6 +4,11 @@ const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
 
+/// TF_TEST_RECEIPTS=1 prints each check's measured error; the bounds are checked either way.
+fn receipts() bool {
+    return std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
+}
+
 const H = 64;
 const RANK = 512;
 const WIDTH = 2051; // the row kernel's list width (index_topk + kpool - 1)
@@ -133,8 +138,10 @@ fn sparseCheck(comptime heads: usize) !void {
         }
     };
     const share = @as(f64, @floatFromInt(same)) / @as(f64, @floatFromInt(ROWS * heads * RANK));
-    std.debug.print("sparse attention ({d} heads): {d:.2}% of outputs equal the row kernel's, at most {d:.2} bf16 steps apart\n", .{ heads, share * 100, worst });
-    try std.testing.expect(share > 0.99 and worst <= 2);
+    const held = share > 0.99 and worst <= 2;
+    if (!held or receipts()) std.debug.print("sparse attention ({d} heads): {d:.2}% of outputs equal " ++
+        "the row kernel's, at most {d:.2} bf16 steps apart\n", .{ heads, share * 100, worst });
+    try std.testing.expect(held);
 
     // a row at position p reads only its first p + 1 entries: keys listed after them change no bits
     for ([_]usize{ 30, 2047 }) |pos| {
@@ -251,6 +258,8 @@ test "the MLA absorb on the tensor units: the row kernel's values within bf16 ro
         }
     };
     const share = @as(f64, @floatFromInt(same)) / @as(f64, @floatFromInt(M * H * LATENT));
-    std.debug.print("absorb on the tensor units: {d:.2}% of outputs equal the row kernel's, at most {d:.2} bf16 steps apart\n", .{ share * 100, worst });
-    try std.testing.expect(share > 0.99 and worst <= 2);
+    const held = share > 0.99 and worst <= 2;
+    if (!held or receipts()) std.debug.print("absorb on the tensor units: {d:.2}% of outputs equal " ++
+        "the row kernel's, at most {d:.2} bf16 steps apart\n", .{ share * 100, worst });
+    try std.testing.expect(held);
 }

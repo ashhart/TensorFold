@@ -25,11 +25,13 @@ test "Qwen4 node capture: copies precede reuse and one wrong bit identifies the 
         .{ .name = "second", .position = 1, .kind = .bf16, .values = &.{ 3, 4 } },
     };
     const oracle: capture.Oracle = .{ .nodes = &nodes };
-    const summary = try cap.report(oracle, false);
+    const summary = try cap.report(oracle, .nothing);
     try std.testing.expectEqual(@as(usize, 1), summary.different);
     try std.testing.expectEqual(@as(usize, 4), summary.checked);
     try std.testing.expect(summary.first[0] == null);
     try std.testing.expectEqual(@as(?usize, 1), summary.first[1]);
+    try std.testing.expectEqual(@as(usize, 1), summary.values[1]);
     try std.testing.expectError(error.Qwen4TraceShape, sink.emit(sink.ctx, "bad", input, 0, 33, 1, .bf16, 0));
-    try std.testing.expectError(error.Qwen4TraceMissing, cap.report(.{ .nodes = &(nodes ++ [_]capture.Node{.{ .name = "missing", .position = 0, .kind = .bf16, .values = &.{1} }}) }, false));
+    const missing = nodes ++ [_]capture.Node{.{ .name = "missing", .position = 0, .kind = .bf16, .values = &.{1} }};
+    try std.testing.expectError(error.Qwen4TraceMissing, cap.report(.{ .nodes = &missing }, .nothing));
 }

@@ -82,6 +82,9 @@ fn number(o: std.json.ObjectMap, name: []const u8) !f64 {
 }
 
 test "only the released text encoder's geometry passes" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const a = std.testing.allocator;
     var types: std.ArrayList(u8) = .empty;
     defer types.deinit(a);

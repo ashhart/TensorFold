@@ -3,6 +3,11 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 
+/// TF_TEST_RECEIPTS=1 prints each check's measured error; the bounds are checked either way.
+fn receipts() bool {
+    return std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
+}
+
 fn kernel(comptime key: []const u8) sources.glm.Kernel {
     for (sources.glm.all) |k| if (std.mem.eql(u8, key, k.key)) return k;
     unreachable;
@@ -285,7 +290,7 @@ const Kda = struct {
             const expected = bf(activation(row, (i % (3 * k.w)) / k.w, (i % k.w) / 128, i % 128));
             try std.testing.expectEqual(expected, v);
         }
-        std.debug.print(
+        if (receipts()) std.debug.print(
             "KDA heads={d} rows={d}: worst {d:.4} bf16 steps, state {d:.9}\n",
             .{ k.h, rows, worst_y, worst_state },
         );

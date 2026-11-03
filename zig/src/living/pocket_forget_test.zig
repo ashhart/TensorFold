@@ -348,6 +348,9 @@ fn expectLive(before: *const Device, now: *const Device) !void {
 }
 
 test "an allocation or an upload that fails anywhere in a delete leaves the pocket and the forward as they were" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var t = trainer();
     // each allocation of the delete in turn fails (the pocket's, the rounding's among them), until it goes through
     var failures: usize = 0;
@@ -416,6 +419,9 @@ test "an allocation or an upload that fails anywhere in a delete leaves the pock
 }
 
 test "a put-back the device stops taking after one layer is cut keeps its snapshot, refuses, and lands once it can" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var t = trainer();
     const h = try std.testing.allocator.create(Device);
     defer std.testing.allocator.destroy(h);

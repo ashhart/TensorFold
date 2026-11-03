@@ -6,7 +6,15 @@ pub const Node = struct { name: []const u8, position: usize, kind: tap.Kind, val
 pub const Oracle = struct { nodes: []const Node };
 pub const cuda_reference = @embedFile("fixtures/native-cuda-nodes.json");
 pub const reference = @embedFile("fixtures/native-metal-nodes.json");
-pub const Summary = struct { different: usize = 0, checked: usize = 0, first: [32]?usize = @splat(null) };
+/// `values`: how many values differ in each row's first differing node.
+pub const Summary = struct {
+    different: usize = 0,
+    checked: usize = 0,
+    first: [32]?usize = @splat(null),
+    values: [32]usize = @splat(0),
+};
+/// What a report prints: nothing, each row's first differing node, or every node's values too.
+pub const Say = enum { nothing, first, nodes };
 pub fn Capture(comptime B: type, comptime read: anytype) type {
     return struct {
         const Self = @This();
@@ -39,7 +47,8 @@ pub fn Capture(comptime B: type, comptime read: anytype) type {
             }
             s.entries.deinit(s.a);
         }
-        pub fn report(s: *Self, oracle: Oracle, verbose: bool) !Summary {
+        pub fn report(s: *Self, oracle: Oracle, say: Say) !Summary {
+            const verbose = say == .nodes;
             try s.backend.drain();
             const seen = try s.a.alloc(bool, oracle.nodes.len);
             defer s.a.free(seen);
@@ -87,7 +96,10 @@ pub fn Capture(comptime B: type, comptime read: anytype) type {
                     summary.different += different;
                     if (different != 0 and summary.first[pos] == null) {
                         summary.first[pos] = index;
-                        std.debug.print("QWEN4_FIRST_DIFFERENCE row={d} name={s} values={d}\n", .{ pos, entry.name, different });
+                        summary.values[pos] = different;
+                        if (say != .nothing) std.debug.print("QWEN4_FIRST_DIFFERENCE row={d} name={s} values={d}\n", .{
+                            pos, entry.name, different,
+                        });
                     }
                 }
             }

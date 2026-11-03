@@ -6,6 +6,9 @@ const fixture = @import("codec_fixture");
 const env = @import("sys").env;
 
 test "codec diagnostics: loadable, missing, wrong and incomplete libraries reflect actual decoder admission" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const a = std.testing.allocator;
     const path = try a.dupeSentinel(u8, fixture.library, 0);
     defer a.free(path);

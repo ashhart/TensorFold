@@ -68,8 +68,9 @@ fn stress(kind: ref.Kind) !void {
                 const allow = @max(@abs(w - l), @abs(h - w)) + 1e-30;
                 worst = @max(worst, if (!std.math.isFinite(v)) std.math.inf(f64) else @abs(v - w) / allow);
             }
-            std.debug.print("TOWER_SUM {t} {t} {t} worst={e}\n", .{ kind, acc, order, worst });
-            try std.testing.expect(if (acc == .f32) worst <= 1 else worst >= 100);
+            const held = if (acc == .f32) worst <= 1 else worst >= 100;
+            if (!held) std.debug.print("TOWER_SUM {t} {t} {t} worst={e}\n", .{ kind, acc, order, worst });
+            try std.testing.expect(held);
         }
     }
 }

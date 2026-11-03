@@ -457,22 +457,31 @@ const ProcessTest = struct {
     extern "c" fn fork() c_int;
     extern "c" fn socketpair(c_int, c_int, c_int, *[2]c_int) c_int;
     extern "c" fn kill(c_int, c_int) c_int;
+    const child = @import("tp_watch_child.zig");
     fn check(mode: u8) !void {
         var pair: [2]c_int = undefined;
         if (socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketFailed;
+        const err = child.open() catch |e| {
+            for (pair) |fd| _ = posix.system.close(fd);
+            return e;
+        };
+        defer _ = posix.system.close(err[0]);
         const pid = fork();
         if (pid < 0) {
             _ = posix.system.close(pair[0]);
             _ = posix.system.close(pair[1]);
+            _ = posix.system.close(err[1]);
             return error.ForkFailed;
         }
         if (pid == 0) {
             _ = posix.system.close(pair[1]);
+            _ = child.dup2(err[1], 2);
             ending.store(mode == 2, .release);
             watch(pair[0], 0);
             std.c._exit(0);
         }
         _ = posix.system.close(pair[0]);
+        _ = posix.system.close(err[1]);
         last_pid = pid;
         last_fd = pair[1];
         last_reaped = false;
@@ -503,6 +512,8 @@ const ProcessTest = struct {
                 last_reaped = true;
                 try std.testing.expectEqual(@as(c_int, 0), status & 0x7f);
                 try std.testing.expectEqual(@as(c_int, if (mode == 2) 0 else 1), (status >> 8) & 0xff);
+                var buf: [512]u8 = undefined;
+                try std.testing.expectEqualStrings(child.said(mode), child.drain(err[0], &buf));
                 return;
             }
             std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};

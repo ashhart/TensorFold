@@ -112,5 +112,4 @@ test "vision markers: plain vocabulary entries cannot become image or video mark
     script.vision = valid;
     script.vision.image_token = std.math.maxInt(u32);
     try t.expectError(error.InvalidVisionMarkers, Server.init(a, t.io, script.engine(), text, .{ .served_name = "fixture", .model_ids = &.{"fixture"}, .keep_warm_s = 0 }, null));
-    std.debug.print("VISION_MARKERS all 8 fields refuse plain vocabulary; unflagged additions pass\n", .{});
 }

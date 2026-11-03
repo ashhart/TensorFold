@@ -6,10 +6,16 @@ const jpeg = @import("src/core/picture/jpeg.zig");
 const webp = @import("src/core/picture/webp.zig");
 
 test "runtime library: missing CUDA vision dependency retains its identity" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     try std.testing.expectError(error.CublasLtUnavailable, lt.Library.openPath("/__tf_missing_runtime__/libcublasLt.so.13"));
 }
 
 test "runtime library: missing CUDA rank dependency retains its identity" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     try std.testing.expectError(error.NcclUnavailable, nccl.Library.openPath("/__tf_missing_runtime__/libnccl.so.2"));
 }
 
@@ -21,6 +27,9 @@ test "runtime library: missing media refusals name the actual loader soname" {
 }
 
 test "runtime library: missing RoCE dependency retains its identity" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     try std.testing.expectError(error.VerbsUnavailable, @import("src/fabric/verbs.zig").Verbs.open("/__tf_missing_runtime__/libibverbs.so.1"));
 }
 
@@ -86,6 +95,9 @@ test "runtime library: discovery uses overrides and retains found libraries with
 const words = @import("src/fabric/words.zig");
 const fixtures = @import("rpc_fixtures");
 test "runtime library: a loadable RPC helper missing each required export keeps the dependency identity" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     for ([_][:0]const u8{ (fixtures.abi ++ ""), (fixtures.wait ++ ""), (fixtures.store ++ "") }) |path| {
         try std.testing.expectError(error.McdmaRpcUnavailable, words.Library.openPath(path));
     }

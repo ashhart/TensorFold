@@ -47,6 +47,9 @@ const Box = struct {
 };
 
 test "a failed round ends the request it held; the queued request and a later one run" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7); // every round verifies
     defer cfg.deinit(gpa);
@@ -155,6 +158,9 @@ test "cancel during prefill delivers its paused peer's migration failure after r
 }
 
 test "a failed shared keep reaps an already finished stream before freeing its job" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true, .streams_exact = true, .max_streams = 2 }, 8, 7);
     defer cfg.deinit(gpa);
