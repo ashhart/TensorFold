@@ -68,11 +68,16 @@ fn content(cx: *Cx, c: ?Value) errors.Refused!Value {
                 if (part.get("file_id")) |v| try f.put(a, "file_id", v);
                 break :blk f;
             };
-            if ((Value{ .object = inner }).strField("url") orelse (Value{ .object = inner }).strField("file_url")) |u| {
+            const iv: Value = .{ .object = inner };
+            if (iv.get("file_id") != null and iv.get("file_data") == null and iv.get("data") == null and iv.get("url") == null and iv.get("file_url") == null)
+                return cx.refuse("file parts require inline file_data (base64 or data:application/pdf;base64,...); file_id is not supported");
+            if (iv.strField("url") orelse iv.strField("file_url")) |u| {
                 const trimmed = std.mem.trim(u8, u, " \t\r\n");
                 if (trimmed.len > 0 and !std.ascii.startsWithIgnoreCase(trimmed, "data:"))
                     return cx.refuse("URLs are not accepted for PDF inputs; send inline base64 or a data:application/pdf;base64,... URL");
             }
+            if ((iv.strField("file_data") orelse iv.strField("data") orelse iv.strField("url") orelse iv.strField("file_url")) == null)
+                return cx.fail(.request, "content parts of type {s} are not supported: send input_text or input_image", .{try pyrepr.repr(a, kind)});
             const p = try json.newObject(a);
             try p.put(a, "type", .{ .string = "file" });
             try p.put(a, "file", .{ .object = inner });

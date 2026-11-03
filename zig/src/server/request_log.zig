@@ -23,6 +23,14 @@ fn redact(a: Allocator, v: Value) Allocator.Error!Value {
                 try copy.put(a, "image_url", .{ .object = url });
                 return .{ .object = copy };
             }
+            if (v.typeIs("file")) {
+                const copy = try json.copyObject(a, o);
+                const file_obj = try json.newObject(a);
+                if (v.get("file")) |f| if (f == .object) if (f.get("filename")) |fn_val| try file_obj.put(a, "filename", fn_val);
+                try file_obj.put(a, "file_data", .{ .string = "<redacted>" });
+                try copy.put(a, "file", .{ .object = file_obj });
+                return .{ .object = copy };
+            }
             const out = try json.newObject(a);
             for (o.keys(), o.values()) |k, item| try out.put(a, k, try redact(a, item));
             return .{ .object = out };
@@ -71,7 +79,8 @@ test "the request log is created owner-only and keeps image URLs out" {
     try part.put(a, "type", .{ .string = "image_url" });
     try part.put(a, "image_url", .{ .object = url });
     const body = try json.newObject(a);
-    try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{.{ .object = part }}) });
+    const file = (try json.parse(a, "{\"type\": \"file\", \"file\": {\"filename\": \"a.pdf\", \"file_data\": \"JVBERi1zZWNyZXQ=\"}}")).ok;
+    try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{ .{ .object = part }, file }) });
     append(a, path, .{ .object = body });
     if (comptime @import("builtin").os.tag != .windows) { // Windows files have no mode bits
         const st = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{}); // Linux's libc has no stat for std.c
@@ -80,6 +89,7 @@ test "the request log is created owner-only and keeps image URLs out" {
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 16));
     try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "example.test") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "JVBERi1zZWNyZXQ=") == null and std.mem.indexOf(u8, text, "a.pdf") != null);
 }
 
 test "appends from several threads keep every line whole" {
