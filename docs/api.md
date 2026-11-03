@@ -164,16 +164,17 @@ Messages, speech, decision, System One and embedding requests with HTTP 400 "thi
 | `instruction` | The task the model card's prompt states; default "Given a web search query, retrieve relevant passages that answer the query". SGLang's `instruct` is read when `instruction` is absent |
 | `top_n` | Return the best `top_n` results only; default all |
 | `return_documents` | Echo each document as sent; default `true` |
-| `max_length` | The most tokens one prompt may take; a longer prompt returns HTTP 400 and is never cut |
+| `max_length` | The most tokens one prompt may take; default 8192, the model card's. A longer prompt keeps the template whole and loses the end of its content (the document's last tokens), as the card's tokenizer cuts it; a cap that would leave no token of the document returns HTTP 400 |
 | `return_logits`, `return_prompt_token_ids` | Add `meta_info` with `logit_yes` and `logit_no`, or the prompt's token ids, to each result; default `false` |
 
 Each document's prompt is the model card's template, token for token, with the query, the document and the
 instruction as plain text (text that spells a special token stays text). The score is
 `sigmoid(logit_yes - logit_no)` from the last position's label logits. The response is
 `{"results": [{"index", "relevance_score", "document"}], "usage": {"total_tokens"}}`, best first, ties in input order;
-`total_tokens` counts every prompt's tokens. Every prompt is checked against the context window and `max_length`
-before the first is scored, so a refused request costs no GPU work. An image or video part returns HTTP 400. Errors
-use SGLang's body: `{"object": "error", "message", "type", "param": null, "code"}`.
+`total_tokens` counts every prompt's tokens as scored, after any cut. Every prompt is cut and checked against the
+context window before the first is scored, so a refused request costs no GPU work; a prompt past the window (with a
+`max_length` above it) returns HTTP 400 with `code` `context_length_exceeded`. An image or video part returns HTTP
+400. Errors use the server's envelope, as on every route: `{"error": {"message", "type"}}`.
 
 ## Living Weights
 
