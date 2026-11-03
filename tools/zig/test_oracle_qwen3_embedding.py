@@ -32,6 +32,14 @@ class PinRecord(unittest.TestCase):
         with self.assertRaises(SystemExit):
             oracle.check_pins("--ref", {})
 
+    def test_a_reference_with_a_nonfinite_zero_or_ragged_vector_is_refused(self):
+        good = {"vectors": [[0.6, 0.8], [1.0, 0.0]]}
+        self.assertEqual(2, oracle.check_vectors("--bar", good, 2))
+        for vectors in ([[float("nan"), 1.0], [1.0, 0.0]], [[0.0, 0.0], [1.0, 0.0]], [[0.6, 0.8], [1.0]],
+                        [[0.6, 0.8]], [[float("inf"), 0.0], [1.0, 0.0]]):
+            with self.assertRaises(SystemExit):
+                oracle.check_vectors("--bar", {"vectors": vectors}, 2)
+
     def test_pins_are_checked_before_torch_or_transformers_is_imported(self):
         body = inspect.getsource(oracle.reference)
         self.assertLess(body.index("pinned(args.model)"), body.index("import torch"))

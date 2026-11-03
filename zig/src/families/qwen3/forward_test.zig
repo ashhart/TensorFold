@@ -100,6 +100,77 @@ fn cosine(x: []const f64, y: []const f64) f64 {
     return xy / @sqrt(xx * yy);
 }
 
+/// The pins tools/zig/oracle_qwen3_embedding.py writes into each reference: the checkpoint and the Transformers tree.
+const embed_revision = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af";
+const transformers_tree = "b08cead6d1b841ef9723106a81a92ec37d67aff3e43a198e56b7dc76538d377b";
+
+fn text(v: std.json.Value, key: []const u8) ?[]const u8 {
+    const x = (if (v == .object) v.object.get(key) else null) orelse return null;
+    return if (x == .string) x.string else null;
+}
+
+/// Refuses, before any GPU work, references that are not the fp32 target and BF16 bar of the same pinned inputs.
+fn checkReferences(ref: std.json.Value, bar: std.json.Value) !void {
+    try t.expectEqualStrings("float32", text(ref, "dtype") orelse "");
+    try t.expectEqualStrings("bfloat16", text(bar, "dtype") orelse "");
+    for ([_]std.json.Value{ ref, bar }) |r| {
+        const pins = r.object.get("pins") orelse return error.UnpinnedReference;
+        try t.expectEqualStrings(embed_revision, text(pins, "revision") orelse "");
+        try t.expectEqualStrings(transformers_tree, text(pins, "transformers_tree") orelse "");
+    }
+    for ([_][]const u8{ "texts", "ids" }) |key| {
+        const x = ref.object.get(key) orelse return error.IncompleteReference;
+        const y = bar.object.get(key) orelse return error.IncompleteReference;
+        try t.expect(std.meta.activeTag(x) == .array and std.meta.activeTag(y) == .array and x.array.items.len == y.array.items.len);
+        for (x.array.items, y.array.items) |p, q| try t.expect(jsonEqual(p, q));
+    }
+    for ([_]std.json.Value{ ref, bar }) |r| for (r.object.get("vectors").?.array.items) |v| {
+        var square: f64 = 0;
+        for (v.array.items) |x| {
+            const f = number(x);
+            try t.expect(std.math.isFinite(f));
+            square += f * f;
+        }
+        try t.expect(square > 0);
+    };
+}
+
+fn jsonEqual(p: std.json.Value, q: std.json.Value) bool {
+    if (std.meta.activeTag(p) != std.meta.activeTag(q)) return false;
+    return switch (p) {
+        .string => |x| std.mem.eql(u8, x, q.string),
+        .integer => |x| x == q.integer,
+        .array => |x| x.items.len == q.array.items.len and for (x.items, q.array.items) |a, b| {
+            if (!jsonEqual(a, b)) break false;
+        } else true,
+        else => false,
+    };
+}
+
+test "Qwen3-Embedding references: a bar of other inputs, an unpinned one or a non-finite vector is refused" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const good =
+        \\{"dtype": "float32", "pins": {"revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+        \\ "transformers_tree": "b08cead6d1b841ef9723106a81a92ec37d67aff3e43a198e56b7dc76538d377b"},
+        \\ "texts": ["a"], "ids": [[1, 2]], "vectors": [[0.6, 0.8]]}
+    ;
+    const ref = try std.json.parseFromSliceLeaky(std.json.Value, a, good, .{});
+    const bar_text = try std.mem.replaceOwned(u8, a, good, "float32", "bfloat16");
+    try checkReferences(ref, try std.json.parseFromSliceLeaky(std.json.Value, a, bar_text, .{}));
+    const bad = [_][2][]const u8{
+        .{ "[[1, 2]]", "[[1, 3]]" },
+        .{ "\"texts\": [\"a\"]", "\"texts\": [\"b\"]" },
+        .{ "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af", "0000000000000000000000000000000000000000" },
+        .{ "[[0.6, 0.8]]", "[[0.0, 0.0]]" },
+    };
+    for (bad) |swap| {
+        const other = try std.mem.replaceOwned(u8, a, bar_text, swap[0], swap[1]);
+        try t.expect(std.meta.isError(checkReferences(ref, try std.json.parseFromSliceLeaky(std.json.Value, a, other, .{}))));
+    }
+}
+
 test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit within the BF16 bar of the fp32 vectors" {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -107,6 +178,7 @@ test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit withi
     const dir = try env(a, "TF_QWEN3_EMBED_DIR") orelse return error.SkipZigTest;
     const ref = try readJson(a, try env(a, "TF_QWEN3_EMBED_REF") orelse return error.SkipZigTest);
     const bar = try readJson(a, try env(a, "TF_QWEN3_EMBED_BAR") orelse return error.SkipZigTest);
+    try checkReferences(ref, bar);
     var g: Gpu = undefined;
     try g.open(4 << 30);
     defer g.close();
@@ -143,6 +215,7 @@ test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit withi
         }
         bar_worst = @max(bar_worst, 1 - cosine(bv, rv));
     }
+    try t.expect(std.math.isFinite(bar_worst));
     const limit = @min(0.001, 2 * bar_worst);
     var begin: u32 = 0;
     for (ends, 0..) |e, i| {
@@ -157,7 +230,7 @@ test "Qwen3-Embedding: the card's inputs batched equal them alone, and sit withi
         }
         const distance = 1 - cosine(got, want);
         std.debug.print("embedding input {d}: cosine distance {e:.3} (limit {e:.3})\n", .{ i, distance, limit });
-        try t.expect(distance <= limit);
+        try t.expect(std.math.isFinite(distance) and distance <= limit);
         begin = e;
     }
 }
