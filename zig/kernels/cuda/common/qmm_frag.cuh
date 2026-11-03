@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include "fp_pairs.cuh"
+#include "cp_async.cuh"
 
 namespace qmm_frag {
 
@@ -24,38 +25,22 @@ struct LaneTile {
     static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
 };
 
-__device__ __forceinline__ uint32_t smem(const void* p) {
-    return static_cast<uint32_t>(__cvta_generic_to_shared(p));
-}
+using tf_common::smem;
 
-__device__ __forceinline__ void cp16(void* dst, const void* src) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(smem(dst)), "l"(src));
-}
+using tf_common::cp16;
 
-__device__ __forceinline__ void cp16z(void* dst, const void* src, bool read) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(smem(dst)), "l"(src), "r"(read ? 16 : 0));
-}
+using tf_common::cp16z;
 
-__device__ __forceinline__ void cp8(void* dst, const void* src) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"(smem(dst)), "l"(src));
-}
+using tf_common::cp8;
 
-__device__ __forceinline__ void cp4(void* dst, const void* src) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(smem(dst)), "l"(src));
-}
+using tf_common::cp4;
 
-__device__ __forceinline__ uint4 ld_nc(const uint4* p) {
-    uint4 r;
-    asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-                 : "l"(p));
-    return r;
-}
+using tf_common::ld_nc;
 
-__device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;\n" ::); }
+__device__ __forceinline__ void commit() { tf_common::cp_commit(); }
 
 template <int N>
-__device__ __forceinline__ void wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+__device__ __forceinline__ void wait() { tf_common::cp_wait<N>(); }
 
 __device__ __forceinline__ void ldmatrix4(uint32_t (&r)[4], const void* p) {
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
@@ -121,5 +106,69 @@ __device__ __forceinline__ int2 tile_of(int b, int M, int N, int BM, int BN, int
 
 template <int CHUNKS>
 __device__ __forceinline__ int swz(int r, int c) { return c ^ (r % CHUNKS); }
+
+__device__ __forceinline__ void ldmatrix4(uint32_t* r, unsigned a) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+               : "r"(a));
+}
+
+__device__ __forceinline__ void ldmatrix2(uint32_t* r, unsigned a) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(a));
+}
+
+__device__ __forceinline__ void ldmatrix4t(uint32_t* r, unsigned a) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+               : "r"(a));
+}
+
+__device__ __forceinline__ void mma(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+    asm(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+        "{%0, %1, %2, %3};\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+
+__device__ __forceinline__ void mma0(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+    const float z = 0.0f;
+    asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+        "{%10, %10, %10, %10};\n"
+        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(z));
+}
+
+__device__ __forceinline__ void mma_v(float* c, const uint32_t* a, const uint32_t* b) {
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+      "{%0, %1, %2, %3};"
+      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
+__device__ __forceinline__ void mma_f16(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+  asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+__device__ __forceinline__ void mma_f16_v(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+                 "{%0,%1,%2,%3};\n"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
+__device__ __forceinline__ uint32_t pairm(uint32_t w, int s, uint32_t mask) {
+    const uint32_t t = ((w >> s) & mask) | 0x43004300u;
+    uint32_t r;
+#if __CUDA_ARCH__ >= 900
+    asm("sub.rn.bf16x2 %0, %1, %2;\n" : "=r"(r) : "r"(t), "r"(0x43004300u));
+#else
+    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
+#endif
+    return r;
+}
 
 } // namespace qmm_frag
