@@ -54,7 +54,7 @@ pub const Guard = struct {
 pub fn greedy(d: *decoder_mod.Decoder, p: prompt_mod.Prompt, max_new: usize, out: *std.ArrayList(u32), a: std.mem.Allocator, ctx: anytype, comptime on_token: fn (@TypeOf(ctx), u32) void) !void {
     var guard = Guard.init(p);
     var st = prompt_mod.Step.init(p);
-    var lg = try d.logits(p.len() - 1);
+    var lg = try d.logits();
     while (out.items.len < max_new and d.len + 1 < cfg.max_context) {
         const id = guard.pick(lg);
         if (id == cfg.eos) break;
@@ -64,7 +64,7 @@ pub fn greedy(d: *decoder_mod.Decoder, p: prompt_mod.Prompt, max_new: usize, out
         if (out.items.len == max_new) break;
         const c = st.next(id);
         try d.step(id, c.tok, c.page, c.qpage);
-        lg = try d.logits(0);
+        lg = try d.logits();
     }
 }
 

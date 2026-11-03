@@ -9,13 +9,15 @@ const gate = uo.gate;
 const H = cfg.hidden;
 
 const usage =
-    \\tf-uocr-decode MODEL_DIR PAGE[,PAGE...] DUMP_BF16 DUMP_F32 [--their-embeds]
+    \\tf-uocr-decode MODEL_DIR PAGE[,PAGE...] DUMP_BF16 DUMP_F32 [--their-embeds] [--chunk ROWS]
     \\The dumps are ref_dump.py's for the pages (DUMP.json beside each .safetensors holds the prompt ids and the greedy
     \\reply). The page is preprocessed and encoded here (gundam when the dump encoded tiles), the prompt must match
     \\the dump's ids, every layer's prefill rows must be as close to float32 as twice torch bf16's distance, and the
     \\reply is generated greedily for as many tokens as the bf16 reference's, reporting where it first differs from
     \\each reference. --their-embeds feeds the bf16 dump's embeddings to the decoder in place of this encoder's, so
     \\the layers and the reply measure the decoder alone (each layer is then also compared with torch bf16's).
+    \\--chunk ROWS prefills again in chunks of ROWS rows and requires the first logits and the whole reply to equal
+    \\the one-pass prefill's bit for bit.
 ;
 
 fn floats(a: std.mem.Allocator, f: *const tf.safetensors.File, name: []const u8) ![]f32 {
@@ -57,8 +59,19 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(a);
-    const their = args.len == 6 and std.mem.eql(u8, args[5], "--their-embeds");
-    if (args.len != 5 and !their) {
+    var their = false;
+    var chunk: ?usize = null;
+    var ai: usize = 5;
+    while (ai < args.len) : (ai += 1) {
+        if (std.mem.eql(u8, args[ai], "--their-embeds")) {
+            their = true;
+        } else if (std.mem.eql(u8, args[ai], "--chunk") and ai + 1 < args.len) {
+            ai += 1;
+            chunk = std.fmt.parseInt(usize, args[ai], 10) catch null;
+            if (chunk == null or chunk.? == 0) break;
+        } else break;
+    }
+    if (args.len < 5 or ai < args.len) {
         std.debug.print("{s}\n", .{usage});
         return 2;
     }
@@ -183,13 +196,14 @@ pub fn main(init: std.process.Init) !u8 {
 
     // the first logits, then the reply
     {
-        const lg = try dec.logits(n - 1);
+        const lg = try dec.logits();
         const theirs = (try floats(a, &bf, "logits"))[0..cfg.vocab];
         const exact = (try floats(a, &ex, "logits"))[0..cfg.vocab];
         const v = gate.verdict(gate.match(try widen(a, lg), exact, cfg.vocab), gate.match(theirs, exact, cfg.vocab), try gate.rounding(a, exact, cfg.vocab));
         std.debug.print("first logits: rel err {d:.4} of {d:.4}: {s}\n", .{ v.row, v.row_limit, if (v.pass) "pass" else "FAIL" });
         all_pass = all_pass and v.pass;
     }
+    const first_logits = try a.dupe(u16, try dec.logits());
     var gen: std.ArrayList(u32) = .empty;
     const t2 = mtl.clock.seconds();
     try uo.generate.greedy(&dec, p, ref_bf.gen.len, &gen, a, {}, noop);
@@ -204,6 +218,20 @@ pub fn main(init: std.process.Init) !u8 {
     const bf_fp = firstDiff(ref_bf.gen, ref_ex.gen[0..@min(ref_ex.gen.len, ref_bf.gen.len)]);
     std.debug.print("  (torch bf16 vs fp32: first differs at {?d})\n", .{bf_fp});
     std.debug.print("ids {any}\n", .{gen.items});
+    if (chunk) |c| {
+        dec.deinit();
+        dec = try uo.decoder.Decoder.init(gpa, device, queue, &k, &w, n + max_new + 1, @min(c, n));
+        const t3 = mtl.clock.seconds();
+        try dec.prefill(p, rows);
+        const lg = try dec.logits();
+        const t_chunked = mtl.clock.seconds() - t3;
+        const same_logits = std.mem.eql(u16, lg, first_logits);
+        var again: std.ArrayList(u32) = .empty;
+        try uo.generate.greedy(&dec, p, ref_bf.gen.len, &again, a, {}, noop);
+        const same_reply = std.mem.eql(u32, again.items, gen.items);
+        std.debug.print("chunks of {d} rows ({d:.3} s): first logits {s}, reply {s}\n", .{ c, t_chunked, if (same_logits) "bit-identical" else "DIFFER", if (same_reply) "identical" else "DIFFERS" });
+        all_pass = all_pass and same_logits and same_reply;
+    }
     std.debug.print("{s}\n", .{if (all_pass) "PASS" else "FAIL"});
     return if (all_pass) 0 else 1;
 }
