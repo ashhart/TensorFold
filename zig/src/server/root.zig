@@ -119,6 +119,7 @@ test {
     _ = @import("rerank_test.zig");
     _ = @import("rerank_ids_test.zig");
     _ = @import("rerank_cut_test.zig");
+    _ = @import("rerank_decide_test.zig");
     _ = @import("slide_context_test.zig");
     // both run over Unix socket pairs
     if (comptime @import("builtin").os.tag != .windows) {
