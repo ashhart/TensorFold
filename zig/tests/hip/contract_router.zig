@@ -29,10 +29,14 @@ pub fn spec(k: kit.Kind) c.Spec {
         .replaces = if (k == .bf16) "tf_router_decode_bf16" else "tf_router_decode_f16",
         // a round's rows: 16 a block of row groups, and a lane's group of four over the hidden width
         .tiles = .{ .{ .size = 16 }, .{}, .{ .size = 128, .step = 4, .min = 4 } },
+        // Flash Next's router (512 experts and the shared gate, hidden 2560), then Qwen 3.6-35B-A3B's (256 and the gate, 2048)
         .served = &.{
             .{ .rows = 16, .n = 513, .k = 2560 },
             .{ .rows = 4, .n = 513, .k = 2560 },
             .{ .rows = 1, .n = 513, .k = 2560 },
+            .{ .rows = 16, .n = 257, .k = 2048 },
+            .{ .rows = 4, .n = 257, .k = 2048 },
+            .{ .rows = 1, .n = 257, .k = 2048 },
         },
     };
 }
