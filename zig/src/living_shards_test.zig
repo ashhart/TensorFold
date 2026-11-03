@@ -1,6 +1,7 @@
 //! Living Weights' pocket in each family's own shards, rooted here so the tests reach the core's shard files by path.
 const std = @import("std");
 const living = @import("living");
+pub const dense_pocket = @import("core/dense_pocket.zig");
 const host4 = @import("core/affine4_host.zig");
 
 test {

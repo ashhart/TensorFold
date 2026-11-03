@@ -204,3 +204,22 @@ test "qwen27 learning: row metadata is identical without the nine Round allocati
     try std.testing.expectError(error.BadRoundPlan, row.view(std.testing.failing_allocator, 1, 0, 513, 513, 4, 8, 32));
     try std.testing.expectError(error.BadTokenId, row.view(std.testing.failing_allocator, 32, 0, 0, 513, 4, 8, 32));
 }
+
+test {
+    _ = @import("train_scalars.zig");
+}
+
+test "qwen27 learning: server admission keeps the 9B and pair shapes out of the unqualified learner" {
+    var c: config.Config = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 248320, .heads = 24, .kv_heads = 4, .head_dim = 256, .k_heads = 16, .v_heads = 48, .dk = 128, .dv = 128, .conv_kernel = 4, .eps = 1e-6, .rope_dims = 64, .rope_theta = 10000000 };
+    for (0..c.layers) |l| c.kinds[l] = if (l % 4 == 3) .attention else .linear;
+    const admits = @import("train_admission.zig").supported;
+    try std.testing.expect(admits(c));
+    c.hidden = 4096;
+    try std.testing.expect(!admits(c));
+    c.hidden = 5120;
+    c.ranks = 2;
+    try std.testing.expect(!admits(c));
+    c.ranks = 1;
+    c.kinds[3] = .linear;
+    try std.testing.expect(!admits(c));
+}

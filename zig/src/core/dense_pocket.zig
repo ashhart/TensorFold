@@ -7,8 +7,16 @@ pub fn base(a: std.mem.Allocator, bytes: []const u8, rows: usize, stride: usize,
     if (stride == 0 or kept > stride or rows == 0 or bytes.len % stride != 0 or bytes.len / stride < rows)
         return error.UnexpectedTensor;
     const out = try a.alloc(u8, rows * kept);
-    for (0..rows) |row| @memcpy(out[row * kept ..][0..kept], bytes[row * stride ..][0..kept]);
+    try copyBase(bytes, rows, stride, kept, out);
     return out;
+}
+
+/// Copy complete base groups into distinct storage, leaving each widened row's pocket tail out.
+pub fn copyBase(bytes: []const u8, rows: usize, stride: usize, kept: usize, out: []u8) !void {
+    if (stride == 0 or kept > stride or rows == 0 or bytes.len % stride != 0 or bytes.len / stride < rows)
+        return error.UnexpectedTensor;
+    if (out.len != rows * kept) return error.UnexpectedTensor;
+    for (0..rows) |row| @memcpy(out[row * kept ..][0..kept], bytes[row * stride ..][0..kept]);
 }
 fn value(ts: anytype, width: usize, row: usize, col: usize) f32 {
     const w = std.mem.readInt(u32, ts[0].bytes[(row * width + col) / 8 * 4 ..][0..4], .little);

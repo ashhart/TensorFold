@@ -59,29 +59,7 @@ const Host = struct {
         return 0;
     }
     pub fn pocketSaveSwiglu(m: Ctx, a: std.mem.Allocator, io: std.Io, layers: []const usize, neurons: usize, gate: []f32, up: []f32, down: []f32) !usize {
-        // The native loader accepts both public namespaces. Keep the folder's names and config key scope as stored.
-        var ck = try core.Checkpoint.openModel(a, io, m.dir);
-        defer ck.close();
-        const scoped = ck.has("language_model.model.layers.0.mlp.gate_proj.weight");
-        const path = try std.fs.path.join(a, &.{ m.dir, "config.json" });
-        defer a.free(path);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
-        defer a.free(text);
-        var doc = try std.json.parseFromSlice(std.json.Value, a, text, .{});
-        defer doc.deinit();
-        if (doc.value != .object) return error.BadConfig;
-        const wrapped = doc.value.object.contains("text_config");
-        inline for (.{ false, true }) |scope| inline for (.{ false, true }) |wrap| {
-            if (scoped == scope and wrapped == wrap) return living.shards.Io(core).writePending(a, io, m.dir, storedFamily(scope, wrap), Host.layout(m), layers, neurons, &.{ gate, up }, down);
-        };
-        unreachable;
+        return @import("pocket_storage.zig").save(a, io, m.dir, Host.layout(m), layers, neurons, gate, up, down);
     }
 };
 pub const Learner = lessons.Learner(Host);
-
-fn storedFamily(comptime scoped: bool, comptime wrapped: bool) living.family.Family {
-    var f = family;
-    if (!scoped) f.names.layers = "model.layers.";
-    if (!wrapped) f.keys.scope = null;
-    return f;
-}

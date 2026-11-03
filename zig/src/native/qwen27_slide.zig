@@ -23,6 +23,9 @@ pub const Bridge = struct {
         a.free(b.dir);
         a.destroy(b);
     }
+    pub fn conversations(b: *const Bridge) bool {
+        return b.adapter.learner.readsConversations();
+    }
     pub fn hook(b: *Bridge) api.Learner {
         return .{ .ctx = b, .begin = begin, .step = step, .abort = abort };
     }
@@ -50,6 +53,19 @@ pub const Bridge = struct {
 
 /// Check links before mapping weights or creating a Metal device.
 pub fn refused(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) !bool {
+    const path = try std.fs.path.join(a, &.{ dir, "config.json" });
+    defer a.free(path);
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
+    defer a.free(text);
+    const config = try q.config.parse(a, text, null);
+    if (!q.train_admission.supported(config)) {
+        problem.* = "--slide on this Metal engine requires the dense Qwen3.8-27B geometry";
+        return true;
+    }
+    if (try @import("metal_slide.zig").slideWidths(a, io, dir, q.slide.family)) |why| {
+        problem.* = why;
+        return true;
+    }
     if (try @import("slide_adapter.zig").refusal(@import("tensorfold").shard_edit, a, io, dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
         problem.* = why;
         return true;

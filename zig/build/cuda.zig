@@ -253,6 +253,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-living-host", "Family-neutral learner, saved form and commit gate on host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.living })).step);
     const shard_tests = b.createModule(.{ .root_source_file = b.path("zig/src/living_shards_test.zig"), .target = host, .optimize = .debug, .link_libc = true });
     shard_tests.addImport("living", mods.living);
+    shard_tests.addImport("core", shard_tests);
     b.step("test-living-shards-host", "Quantized save and reopen through actual shard writer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shard_tests })).step);
     const writeback_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/contract_flashnext_writeback.zig"),
@@ -502,6 +503,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     // Living Weights: the family-neutral learner, then the pocket in each family's shards over the core's shard files
     const living_run = b.addRunArtifact(b.addTest(.{ .root_module = mods.living }));
     const shards = b.createModule(.{ .root_source_file = b.path("zig/src/living_shards_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "living", .module = mods.living }} });
+    shards.addImport("core", shards);
     const shards_run = b.addRunArtifact(b.addTest(.{ .root_module = shards }));
     step.dependOn(&living_run.step);
     step.dependOn(&shards_run.step);

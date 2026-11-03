@@ -266,10 +266,7 @@ pub const Runner = struct {
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
         if (r.model.pockets) |*pockets| {
-            pockets.selected = .{ .all = false };
-            for (round.slots, round.firsts, round.windows) |slot, first, window| {
-                if (!r.untaught[slot]) try pockets.selected.add(first, window.parents.len);
-            }
+            pockets.selected = try @import("pocket_rows.zig").Selection.windows(round.slots, round.firsts, round.windows, &r.untaught);
         }
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks };
         r.last_gpu_seconds = (if (schedule.commitEvery(r.learning_rows) == 0)

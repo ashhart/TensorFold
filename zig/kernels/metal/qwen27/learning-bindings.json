@@ -1,7 +1,10 @@
 {
   "gdn_train": {
     "source": "zig/kernels/cuda/gdn_train.cu",
-    "sha256": "b8c251fbb91a966ac108fc232facdbd167111f02c8acf7d4939c70738efe3be4",
+    "sha256": "7778b3e03065cdf26285af0990b5a0dffcfb51bc3ffc1bd2547c044c4c806ca8",
+    "dependencies": {
+      "zig/kernels/cuda/common/act.cuh": "46ac1df9631e99f1987b2b522022b1e37e1294ed0808ac095b992bfeb913b59f"
+    },
     "kernels": [
       {
         "name": "tf_gdn_norm_back",
@@ -220,7 +223,11 @@
   },
   "attn_train": {
     "source": "zig/kernels/cuda/attn_train.cu",
-    "sha256": "f0f151455dee6e1c9afcece6da397211e31d5831ae5361c5e3c4028cf53146e4",
+    "sha256": "8e26df47c2c573c846f270ed61f452b621486f4c131fde1162aa9eb1a56d4042",
+    "dependencies": {
+      "zig/kernels/cuda/attn_back.cuh": "f9f7f3666999cbf25e086ca04e4e2380e3c76ad371297c1936eed8f957395fe8",
+      "zig/kernels/cuda/common/act.cuh": "46ac1df9631e99f1987b2b522022b1e37e1294ed0808ac095b992bfeb913b59f"
+    },
     "kernels": [
       {
         "name": "tf_attn_q",

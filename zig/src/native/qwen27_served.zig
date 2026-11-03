@@ -436,6 +436,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (o.slide) |dir| {
         h.slide = try @import("qwen27_slide.zig").Bridge.init(h, io, dir);
         h.host.learner = h.slide.?.hook();
+        h.host.info_.slide_conversations = h.slide.?.conversations();
     }
     errdefer if (h.slide) |learner| learner.deinit();
     try h.host.start();

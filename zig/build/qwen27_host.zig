@@ -1,6 +1,7 @@
 //! Host regressions use no shaders, model or GPU execution.
 const std = @import("std");
 pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
+    @import("qwen27_living_host.zig").tests(b);
     const real_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
     const recording = b.createModule(.{ .root_source_file = b.path("zig/qwen27_quant_metal.zig"), .target = b.graph.host, .imports = &.{.{ .name = "real_metal", .module = real_metal }} });
     const quant_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
@@ -80,6 +81,8 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     pocketProbe(b, metal);
     const learner = b.addExecutable(.{ .name = "tf-qwen27-learning", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27/learning.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } }) });
     b.step("tf-qwen27-learning", "Build native forward/trainer identity and gradient checks without running a GPU").dependOn(&b.addInstallArtifact(learner, .{}).step);
+    const untaught = b.addExecutable(.{ .name = "tf-qwen27-untaught", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27/untaught.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } }) });
+    b.step("tf-qwen27-untaught", "Build sequential full-model untaught logit comparison without running it").dependOn(&b.addInstallArtifact(untaught, .{}).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });

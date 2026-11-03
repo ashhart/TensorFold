@@ -128,9 +128,12 @@ pub fn weights(t: anytype, io: std.Io) !void {
     t.head = try r.q4("lm_head", g.vocab, g.hidden);
 }
 fn widen(t: anytype, tensor: wts.Tensor) !to.Ref {
-    const raw = tensor.host(u16);
-    const floats = try t.gpa.alloc(f32, raw.len);
+    const dtype: @import("train_scalars.zig").Kind = switch (tensor.dtype) {
+        .bf16 => .bf16,
+        .f32 => .f32,
+        else => return error.UnsupportedLearningScalar,
+    };
+    const floats = try @import("train_scalars.zig").values(t.gpa, dtype, tensor.host(u8));
     defer t.gpa.free(floats);
-    for (floats, raw) |*v, b| v.* = @bitCast(@as(u32, b) << 16);
     return t.bytes(std.mem.sliceAsBytes(floats));
 }

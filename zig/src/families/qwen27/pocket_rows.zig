@@ -7,8 +7,19 @@ pub const Selection = struct {
     count: usize = 0,
     all: bool = true,
 
+    pub fn windows(slots: []const u32, firsts: []const u32, spans: anytype, untaught: []const bool) !Selection {
+        if (slots.len != firsts.len or slots.len != spans.len) return error.BadPocketRows;
+        var selected: Selection = .{ .all = false };
+        for (slots, firsts, spans) |slot, first, span| {
+            if (slot >= untaught.len) return error.BadPocketRows;
+            if (!untaught[slot]) try selected.add(first, span.parents.len);
+        }
+        return selected;
+    }
+
     pub fn add(s: *Selection, first: usize, count: usize) !void {
         if (count == 0) return;
+        _ = std.math.add(usize, first, count) catch return error.BadPocketRows;
         if (s.count > 0) {
             const last = &s.ranges[s.count - 1];
             if (last.first + last.count == first) {

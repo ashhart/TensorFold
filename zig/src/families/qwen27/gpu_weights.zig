@@ -134,7 +134,7 @@ const Builder = struct {
                         return err;
                     };
                     const bytes = item.host(u8);
-                    for (0..p.n) |row| @memcpy(buffer.slice(u8, p.n * kept)[row * kept ..][0..kept], bytes[row * stride ..][0..kept]);
+                    try @import("core").dense_pocket.copyBase(bytes, p.n, stride, kept, buffer.slice(u8, p.n * kept));
                     item.buffer = buffer;
                     item.offset = 0;
                 }

@@ -4,8 +4,8 @@ The Metal engine uses the existing Qwen dense family description, pocket fitter,
 transaction and affine4 shard writer. It accepts the same 64-neuron SwiGLU pocket as CUDA. The original MLP codes,
 scales and biases remain unchanged. Empty layers launch no pocket kernel, and untaught streams skip every pocket.
 
-The trainer is implemented and checked on synthetic weights. Real-checkpoint lesson retention, restart, concurrent,
-resumed and drafted/plain checks remain required before calling this backend qualified for learning.
+The trainer is implemented with host checks and synthetic device fixtures. Fresh device execution, real-checkpoint
+retention, restart, concurrent, resumed and drafted/plain checks are required before calling it qualified for learning.
 
 ## Forward and backward
 
@@ -17,7 +17,7 @@ shared pocket checks read.
 
 The Metal backward differentiates its own forward. Its DeltaNet rounds the convolution before SiLU, rounds the
 sigmoid and activation, uses RMS-normalized Q/K with BF16 scales, rounds softplus and applies an output SiLU gate.
-The CUDA trainer's sigmoid output gate and normalization cannot be copied unchanged. BF16 nodes use straight-through
+These gate and normalization derivatives follow this backend's forward. BF16 nodes use straight-through
 input gradients. Reductions and transposed affine products accumulate in FP32; no FP32 operand is fed to an M5 MMA.
 Attention differentiates its gate from the probability product, rather than reconstructing context from a rounded
 gated BF16 row. The independent reference uses binary64, including central differences of the stated smooth nodes.
@@ -34,7 +34,9 @@ Build-only and host checks, without a GPU:
 
 ```sh
 zig build tf-qwen27-learning check-qwen27-speed-host test-qwen27-learning-host \
-  test-qwen27-slide-flags-host test-qwen27-pocket-host test-kernel-contract -Dcpu=apple_m1
+  test-qwen27-slide-flags-host test-qwen27-pocket-host test-qwen27-living-host \
+  tf-qwen27-pocket tf-qwen27-untaught test-kernel-contract -Dcpu=apple_m1
+python3 tools/zig/metal_learning_sources.py --check
 ```
 
 Run GPU checks only when the project's GPU queue permits them. The standalone test creates a small synthetic folder:
@@ -55,7 +57,7 @@ The native fixture is also reached through the Metal contract runner's `qwen27 l
 launch has a source-derived thread ceiling and a registered limits source. Bounded fixtures are not the complete
 contract receipt; run the full Metal contract, its controls and the supported-chip limits before qualification.
 
-The lead's real-model cells must use fresh writable copies, the unchanged CUDA lesson gate, original-folder hashes,
+Real-model cells must use fresh writable copies, the unchanged CUDA lesson gate, original-folder hashes,
 held-out wordings and unrelated prompts. Check taught-folder restart with and without `--slide`, drafted/plain,
 concurrent/solo, resumed/fresh and untaught output equality. Record trainer time and peak memory separately from
 ordinary serving speed. The transposed-gradient implementation keeps full FP32 arithmetic; whole-checkpoint
@@ -91,3 +93,57 @@ zig-out/bin/qwen27-learning-affine . --reorder-control
 The last command must fail. It reverses each output-column accumulation in the production source copy. The normal
 check compares every output byte to the frozen scalar kernel, including partial row tiles, zero/nonfinite gradients, add/replace,
 five repeats, unchanged inputs and guard bytes. These device checks and full-model timing remain required.
+
+## Full-checkpoint receipt runner
+
+`tools/zig/qwen27_living_ab.py` runs one owned server at a time on disposable, non-linked checkpoint copies.
+Reserve the GPU exclusively for the entire invocation. It binds only loopback, uses a private temporary API key,
+retains every request, response, token array, timing, refusal and process exit, and verifies the original files again.
+A protocol fake checks the runner on the host; that fake executes no model arithmetic.
+
+Build the base binary from the pinned main and the candidate from this branch with identical settings.
+Build the three device checkers above from the candidate. Supply a public prompt panel with at least four prompts,
+including prose, code and a long prompt spanning multiple prompt chunks. The JSON panel is an array of strings
+and must include a 2049-to-8192-token prompt after tokenization.
+The default panel includes a long calibration prompt; all rendered cases must fit 8192 tokens.
+Use the same context, parallelism, cache setting and qualified drafter in both arms. The runner requires nonzero
+proposed and accepted drafts for each panel and each temperature; a draft flag alone cannot pass.
+
+```sh
+python3 tools/zig/qwen27_living_ab.py \
+  --base-binary BASE_BINARY --candidate-binary CANDIDATE_BINARY \
+  --backend metal --checkpoint ORIGINAL_CHECKPOINT --checkpoint-revision CHECKPOINT_REVISION \
+  --hardware 'GPU and RAM class' --runtime 'OS and runtime versions' \
+  --pocket-binary zig-out/bin/tf-qwen27-pocket \
+  --learning-binary zig-out/bin/tf-qwen27-learning \
+  --untaught-binary zig-out/bin/tf-qwen27-untaught \
+  --panel PUBLIC_PANEL.json --tokens 256 --reps 3 --output NEW_RECEIPT_DIRECTORY
+```
+
+Pass additional shared server arguments as a JSON argv array through `--server-args`; include the context,
+parallelism, disabled prompt cache and qualified drafter settings. The default context is 8192 with four slots and
+no prompt retention. Choose an adequate admitted context for the supplied panel. No host limits are raised.
+The runner alternates main and candidate with `--slide` off, then checks an empty `--slide` folder, teaches a fixed
+access-word fact, checks two held-out questions greedy and sampled, and requires unchanged unrelated token arrays.
+It checks drafted/plain and concurrent/solo equality before and after teaching, after restart and after deletion.
+It deletes through the existing endpoint, rolls the copy back through the existing CLI, and requires original subject
+and unrelated token arrays again. All-vocabulary BF16 logit hashes compare up to 512 teacher-forced rows per case.
+Full-prompt state and final logit hashes compare 128-row and native-capacity chunks. Both use untaught streams and
+load models sequentially. The small device fixtures run only after the servers have closed.
+
+The default speed bound is zero slowdown in every cell's median HTTP wall time over three alternating repetitions.
+Raw runtime counters are retained separately. Predeclare any measurement-noise allowance with `--max-slowdown-pct`
+before running; a relaxed allowance must not be presented as the exact-speed gate. Run the full panel separately on
+M3 Ultra and M5 Ultra. Record peak physical/device memory and full lesson time from the retained logs separately.
+These receipts do not establish unmeasured prompt lengths, resumed state, cancellation or peer configurations.
+
+For portability, first run the same command on CUDA, omitting the three Metal device binaries and using CUDA binaries
+and hardware/runtime labels. A producer invocation without `--from-other` deliberately exits incomplete after keeping
+`portable-model/`; it cannot claim the two-way gate. Transfer that serving copy to the Metal test machine and pass
+`--from-other CUDA_PORTABLE_MODEL`. Then run CUDA with `--from-other METAL_PORTABLE_MODEL`. Preserve both receipts.
+Imported folders are served without learning or rollback; their historical backup metadata is not a portable undo log.
+A complete receipt requires the other backend's folder, held-out recall, actual drafting and all equality checks.
+A refusal, missing counters, failed checker or incomplete portability cell cannot become a passing summary.
+
+No real-checkpoint retention, speed or whole-model numerical qualification is implied by these commands.
+The shared lesson acceptance checks and directional error limit remain unchanged.

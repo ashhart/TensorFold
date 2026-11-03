@@ -51,14 +51,15 @@ struct Context {
 inline float f32(bf16 v) { return float(v); }
 inline bf16 b16(float v) { return bfloat(v); }
 
-inline float sigm(float v) { return 1.0f / (1.0f + precise::exp(-v)); }
+inline float sigmoidf_(float x) { return 1.0f / (1.0f + precise::exp(-x)); }
 
 inline void rope_cs(int pos, const device float* inv, int i, thread float& c, thread float& s) {
     const float ang = (float)pos * inv[i];
     c = precise::cos(ang), s = precise::sin(ang);
 }
-  void tf_attn_q(const device bf16* qkv, const device float* dout, device float* probs, device float* dscores,
-                                                              device float* dq, Heads a, const device bf16* pk, const device bf16* pv) {
+  void tf_attn_q(
+    const device bf16* qkv, const device float* dout, device float* probs, device float* dscores, device float* dq, Heads a, const device bf16* pk,
+    const device bf16* pv) {
 
     threadgroup float* qi = shared + 0;
     threadgroup float* gi = shared + 256;
@@ -123,22 +124,21 @@ inline void rope_cs(int pos, const device float* inv, int i, thread float& c, th
     }
 
   }
-  void tf_attn_gate_back(const device float* dgated, const device bf16* gated, const device bf16* pq, device float* dout, device float* dpq,
-                                                int heads, int dim) {
+  void tf_attn_gate_back(
+    const device float* dgated, const device bf16* gated, const device bf16* pq, device float* dout, device float* dpq, int heads, int dim) {
 
     const int c = blockIdx.x * 256 + threadIdx.x, r = blockIdx.y, qw = heads * dim;
     if (c >= qw) return;
     const int h = c / dim, d = c % dim;
     const size_t at = (size_t)r * 2 * qw + h * 2 * dim + dim + d;
-    const float sg = sigm(f32(pq[at])), g = dgated[(size_t)r * qw + c];
+    const float sg = sigmoidf_(f32(pq[at])), g = dgated[(size_t)r * qw + c];
     dout[(size_t)r * qw + c] = g * sg;
     dpq[at] = 0.0f;
 
   }
-  void tf_attn_prep_back(const device bf16* pq, const device bf16* pk, const device float* qscale,
-                                                                      const device float* kscale, const device float* inv, int pos0,
-                                                                      const device float* dq, const device float* dk, device float* dpq, device float* dpk,
-                                                                      int heads, int kv_heads, int dim, int rope_half, float eps) {
+  void tf_attn_prep_back(
+    const device bf16* pq, const device bf16* pk, const device float* qscale, const device float* kscale, const device float* inv, int pos0,
+    const device float* dq, const device float* dk, device float* dpq, device float* dpk, int heads, int kv_heads, int dim, int rope_half, float eps) {
 
     threadgroup float* go = shared + 0;
     threadgroup float* scratch = shared + 256;

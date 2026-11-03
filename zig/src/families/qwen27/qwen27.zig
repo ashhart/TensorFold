@@ -5,6 +5,7 @@ pub const slide = @import("slide.zig");
 pub const train_memory = @import("train_memory.zig");
 pub const dflash = @import("dflash/root.zig");
 pub const config = @import("config.zig");
+pub const train_admission = @import("train_admission.zig");
 pub const affine = @import("affine.zig");
 pub const widths = @import("widths.zig");
 pub const checkpoint = @import("checkpoint.zig");

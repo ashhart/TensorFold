@@ -556,7 +556,7 @@ test "prompt precision: Metal refuses int8 before any model or family-specific l
 
 test "slide admission: Metal entry points refuse before checkpoint or device access" {
     const check = @import("slide_open_test.zig").check;
-    for (families) |f| if (!std.mem.eql(u8, f.model_type, "nemotron_h")) try check(open, "Macs", &.{f.model_type});
+    for (families) |f| if (!std.mem.eql(u8, f.model_type, "nemotron_h") and !std.mem.eql(u8, f.model_type, "qwen3_5")) try check(open, "Macs", &.{f.model_type});
     try check(@import("qwen35.zig").open, "Macs", &.{"qwen3_5"});
     try check(@import("gemma4.zig").open, "Macs", &.{"gemma4"});
     try check(@import("lfm2_moe.zig").open, "Macs", &.{"lfm2_moe"});

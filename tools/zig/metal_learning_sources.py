@@ -1,4 +1,5 @@
 """Emit Metal wrappers around the owned CUDA learner algebra; no model or compiler is invoked."""
+import argparse
 import hashlib
 import json
 import re
@@ -138,13 +139,40 @@ def native_policy(text, stem):
     return text
 
 
+def owned_source(stem):
+    folder = ROOT/'zig/kernels/cuda'
+    path = folder/f'{stem}.cu'
+    original = path.read_text()
+    text = original
+    dependencies = {}
+    if stem == 'attn_train':
+        header = folder/'attn_back.cuh'
+        shared = header.read_text()
+        dependencies[str(header.relative_to(ROOT))] = hashlib.sha256(shared.encode()).hexdigest()
+        text = text.replace('#include "attn_back.cuh"', shared)
+        text = re.sub(r'^#define TF_ATTN_BACK.*$', '', text, flags=re.M)
+        text = re.sub(r'TF_ATTN_BACK\((\w+)\)', r'tf_attn_\1', text)
+    header = folder/'common/act.cuh'
+    helpers = header.read_text()
+    dependencies[str(header.relative_to(ROOT))] = hashlib.sha256(helpers.encode()).hexdigest()
+    for name in ('sigmoidf_', 'softplusf_', 'silu_grad'):
+        token = f'using tf_common::{name};'
+        if token in text:
+            found = re.search(r'__device__ __forceinline__ float '+name+r'\([^)]*\)\s*\{', helpers)
+            assert found, name
+            definition = helpers[found.start():close_brace(helpers, found.end()-1)]
+            text = text.replace(token, definition)
+    return original, text, dependencies
+
+
 def emit(stem):
     path = ROOT/'zig/kernels/cuda'/f'{stem}.cu'
-    original = path.read_text()
-    native = re.sub(r'\bhalf\b', 'rope_half', native_policy(original, stem))
-    bounds = {name: int(bound) for bound, name in re.findall(r'__launch_bounds__\(\s*(\d+)[^)]*\)\s*(\w+)', original)}
+    original, owned, dependencies = owned_source(stem)
+    native = re.sub(r'\bhalf\b', 'rope_half', native_policy(owned, stem))
+    bounds = {name: int(bound) for bound, name in re.findall(r'__launch_bounds__\(\s*(\d+)[^)]*\)\s*(\w+)', native)}
     text = re.sub(r'//[^\n]*', '', native.replace('namespace {', '').replace('}  // namespace', ''))
     text = re.sub(r'^#include.*$', '', text, flags=re.M)
+    text = re.sub(r'^#pragma once.*$', '', text, flags=re.M)
     text = re.sub(r'typedef __nv_bfloat16 bf16;', '', text)
     text = re.sub(r'using tf_common::\w+;', '', text)
     text = re.sub(r'__launch_bounds__\([^)]*\)', '', text)
@@ -204,20 +232,30 @@ def emit(stem):
     tail = 'using tf_metal_learn::Context;\n'+'\n'.join(wrappers)+'\n'
     out = re.sub(r'\n\s*\n\s*\n', '\n\n', out)
     out = '\n'.join(line.rstrip() for line in out.splitlines()) + '\n'
-    return out, tail, dict(source=str(path.relative_to(ROOT)),sha256=hashlib.sha256(original.encode()).hexdigest(),kernels=metadata)
+    return out, tail, dict(source=str(path.relative_to(ROOT)),sha256=hashlib.sha256(original.encode()).hexdigest(),dependencies=dependencies,kernels=metadata)
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check', action='store_true', help='Refuse stale generated files without changing them')
+    args = parser.parse_args()
     manifests = {}
+    files = {}
     for source in ['gdn_train','attn_train']:
         text, tail, meta = emit(source)
         destination = ROOT/'zig/kernels/metal/qwen27'/f'{source}.metal'
-        destination.write_text(f'#include "{source}_impl.h"\n#include "{source}_entries.h"\n')
-        destination.with_name(source+'_entries.h').write_text(tail)
-        destination.with_name(source+'_impl.h').write_text(text)
+        files[destination] = f'#include "{source}_impl.h"\n#include "{source}_entries.h"\n'
+        files[destination.with_name(source+'_entries.h')] = tail
+        files[destination.with_name(source+'_impl.h')] = text
         manifests[source] = meta
-        print(destination.relative_to(ROOT), len(text.splitlines()), 'implementation lines,', len(tail.splitlines()), 'wrapper lines')
-    (ROOT/'zig/kernels/metal/qwen27/learning-bindings.json').write_text(json.dumps(manifests,indent=2)+'\n')
+    files[ROOT/'zig/kernels/metal/qwen27/learning-bindings.json'] = json.dumps(manifests,indent=2)+'\n'
+    for path, content in files.items():
+        if args.check:
+            if path.read_text() != content:
+                parser.exit(1, 'stale generated source: '+str(path.relative_to(ROOT))+'\n')
+        else:
+            path.write_text(content)
+        print(path.relative_to(ROOT), 'checked' if args.check else 'generated')
 
 
 if __name__ == '__main__':
