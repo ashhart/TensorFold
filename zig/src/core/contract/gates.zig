@@ -55,6 +55,10 @@ pub const VTable = struct {
 
 /// The VTable of a test type T: its prepare, run, count and reference, its `rig`'s bytes, and the optional hooks.
 pub fn hooks(comptime T: type) VTable {
+    const Rig = switch (@typeInfo(@FieldType(T, "rig"))) {
+        .pointer => |p| p.child,
+        else => @FieldType(T, "rig"),
+    };
     const H = struct {
         fn of(ctx: *anyopaque) *T {
             return @ptrCast(@alignCast(ctx));
@@ -116,7 +120,7 @@ pub fn hooks(comptime T: type) VTable {
         .simulate = if (@hasDecl(T, "simulate")) H.simulate else null,
         .check = if (@hasDecl(T, "check")) H.check else null,
         .replaced = if (@hasDecl(T, "replaced")) H.replaced else null,
-        .release = if (@hasDecl(@FieldType(T, "rig"), "reset")) H.release else null,
+        .release = if (@hasDecl(Rig, "reset")) H.release else null,
     };
 }
 
