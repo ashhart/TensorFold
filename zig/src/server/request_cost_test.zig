@@ -56,7 +56,7 @@ test "request provenance: 400 KiB and 1000 spellings have bounded mask work and 
     const hf = try HfText.load(a, t.io, fixture.path, null, a, &problem);
     defer hf.deinit();
     try t.expectEqual(@as(usize, 1000), hf.tok.added.len);
-    const receipts = t.environ.getPosix("TF_TEST_RECEIPTS") != null;
+    const receipts = if (@import("builtin").os.tag == .windows) false else t.environ.getPosix("TF_TEST_RECEIPTS") != null;
     const input = try a.alloc(u8, 400 * 1024);
     for ([_]bool{ false, true }) |one_spelling| {
         @memset(input, 'a');
