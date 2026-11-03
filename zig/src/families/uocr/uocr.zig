@@ -9,6 +9,7 @@ pub const preprocess = @import("preprocess.zig");
 pub const prompt = @import("prompt.zig");
 pub const decoder = @import("decoder.zig");
 pub const generate = @import("generate.zig");
+pub const serve = @import("serve.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
