@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api");
 const Engine = @import("engine.zig").Engine;
+const engine_max_inputs = @import("engine.zig").max_inputs;
 const score = @import("score.zig");
 
 const be = lanes.backend;
@@ -56,6 +57,22 @@ pub const Prompt = struct {
         try e.run(ids, &.{@intCast(ids.len)}, row);
         try score.labelLogits(p.gpa, heads, row, labels, logits);
         return 0;
+    }
+
+    /// The decide hook: branches packed into few runs; a last row keeps its prompt's bits, so scoreLabels's logits.
+    pub fn decideLabels(ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64) anyerror!void {
+        const p = of(ptr);
+        const heads = if (p.heads) |*h| h else return error.NoScoreHead;
+        const e = p.engine;
+        try score.checkDecision(trunk, branches, counts, labels, logits, e.window, e.m.spec.vocab, heads.count);
+        const Runner = struct {
+            e: *Engine,
+            hidden: usize,
+            pub fn run(r: @This(), tokens: []const u32, ends: []const u32, rows: []f32) !void {
+                try r.e.run(tokens, ends, rows);
+            }
+        };
+        try score.decidePacked(p.gpa, Runner{ .e = e, .hidden = e.m.spec.hidden }, heads, trunk, branches, counts, labels, logits, e.window, engine_max_inputs);
     }
 
     /// The backend over this engine; heads add their hooks to `table` before it serves.

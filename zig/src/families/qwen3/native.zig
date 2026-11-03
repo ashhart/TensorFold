@@ -199,6 +199,7 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, dev: hip.Device, dir: []
     if (labels) |l| {
         own.p.heads = score.Heads.of(&e.m, io, own.dir);
         own.p.table.score = prompt.Prompt.scoreLabels;
+        own.p.table.decide = prompt.Prompt.decideLabels;
         // both label rows read at load: a bad head fails startup, and the first request reads nothing
         for ([_]u32{ l.yes, l.no }) |id| _ = own.p.heads.?.row(gpa, id) catch |err|
             return refuse(a, problem, "the native HIP engine cannot read lm_head row {d} ({s})", .{ id, @errorName(err) });

@@ -509,4 +509,5 @@ test "Qwen3-Reranker: each case's yes - no logit from lastRows and lm_head rows 
 
 test {
     _ = @import("projection_test.zig");
+    _ = @import("decide_test.zig");
 }
