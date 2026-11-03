@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, server: *std.Build.Module, core: *std.Build.Module, living: *std.Build.Module, api: *std.Build.Module, nemotron: *std.Build.Module, all: *std.Build.Step) void {
+    b.step("test-pocket-audit-host", "Read-only pocket audit probes, witnesses and CLI on the host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "pocket audit", "audit request:", "audit CLI:", "audit probe bank:", "audit endpoint:" } })).step);
     const options = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_options.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = api }} });
     b.step("test-pocket-options-host", "Native firing-count flags without device or model access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = options, .filters = &.{"fact usage:"} })).step);
     const products = b.addRunArtifact(b.addTest(.{ .root_module = nemotron, .filters = &.{"pocket usage:"} }));
