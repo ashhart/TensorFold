@@ -27,6 +27,7 @@ const x3ldEpi = pk.x3ldEpi;
 
 /// The knobs onto a forward before its buffer plan, on every rank; R1 is read where the forward is made (`r1`).
 pub fn apply(f: *Forward, a: std.mem.Allocator, io: std.Io, rank: u32) !void {
+    try @import("layer_hash_forward.zig").attach(f, io, env("TF_DSV41_LAYER_HASH"), rank);
     f.opts.kv_norm_store = kvNormStore(&env);
     f.opts.router_group_rot = routerGroupRot(&env);
     f.opts.x3ld_epi = try x3ldEpi(&env);

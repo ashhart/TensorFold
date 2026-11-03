@@ -16,6 +16,8 @@ pub fn addImportsAt(b: *std.Build, m: *std.Build.Module, target: std.Build.Resol
     m.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} }));
 }
 pub fn steps(b: *std.Build) void {
+    const diagnostics = @import("dsv41_cuda.zig").module(b, b.graph.host, "layer_hash_test.zig", false);
+    b.step("test-dsv41-layer-hash-host", "DeepSeek serving arm, per-layer receipt and off-path checks without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = diagnostics })).step);
     const source = @import("dsv41_cuda.zig").module(b, b.graph.host, "serve_engine.zig", false);
     b.step("test-draft-dsv41-host", "DeepSeek draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source, .filters = &.{"draft sources:"} })).step);
     inline for (.{ false, true }) |cross| {
@@ -32,7 +34,11 @@ pub fn steps(b: *std.Build) void {
             const sampler = b.addExecutable(.{ .name = "tf-dsv41-samp", .root_module = @import("dsv41_cuda.zig").module(b, target, "sampling_check.zig", true) });
             _ = sampler.getEmittedBin();
             b.step("compile-dsv41-sampler", "Emit the actual Linux sampler check, never execute").dependOn(&sampler.step);
-        } else b.step("test-dsv41-device-host", "Host checks of actual row and device plans, no device work").dependOn(&b.addRunArtifact(tests).step);
+        } else {
+            b.step("test-dsv41-device-host", "Host checks of actual row and device plans, no device work").dependOn(&b.addRunArtifact(tests).step);
+            const selected = b.addTest(.{ .root_module = root, .filters = &.{ "layer hash:", "Draft state:", "row mode:", "session protocol:", "restore identity:" } });
+            b.step("test-dsv41-diagnostic-integration-host", "DeepSeek trace, row and session integration without the full AOT enumeration").dependOn(&b.addRunArtifact(selected).step);
+        }
     }
     inline for (.{ false, true }) |cross| {
         const target = if (cross) b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }) else b.graph.host;

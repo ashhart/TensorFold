@@ -62,6 +62,8 @@ pub const Batch = struct {
     n: u32 = 0,
     R: u32 = 0,
     current: []const calls.Call = &.{},
+    hash_mix: []const rowtab.Seg = &.{},
+    hash_ids: []const u32 = &.{},
     marked: bool = false, // TF_DSV41_DRAFT_OVERLAP: the last window recorded the taps mark; ingests may wait on it
     /// the calls of `current` the graph body issues (TF_DSV41_ROUND_GRAPH's `split`: the head's, then the tail's)
     span: [2]usize = .{ 0, 0 },
@@ -93,7 +95,8 @@ pub const Batch = struct {
         errdefer if (assembled) b.deinit() else gpa.destroy(b);
         const r = f.runner;
         // graphs as the one-slot forward's default (served: on unless TF_DSV41_GRAPHS=0; the gates' drivers: off)
-        const s = try graphs.Settings.fromEnvOr(f.graphs_default);
+        var s = try graphs.Settings.fromEnvOr(f.graphs_default);
+        if (f.layer_hash != null) s.on = false;
         var tab = try Table.init(r.d, cap);
         errdefer if (!assembled) tab.deinit();
         const pend = try gpa.alloc(?Pend, ss.n);
@@ -259,6 +262,14 @@ pub const Batch = struct {
         b.n = n;
         b.R = R;
         b.current = cs;
+        if (f.layer_hash != null) {
+            b.hash_mix = mix;
+            b.hash_ids = ids;
+        }
+        defer {
+            b.hash_mix = &.{};
+            b.hash_ids = &.{};
+        }
         // the forward's glue reads a pending window (its rows); the row path's own steps are handled here
         f.slot = .{ .pending = .{ .start = 0, .n = R } };
         defer f.slot = .{};
