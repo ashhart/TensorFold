@@ -14,6 +14,7 @@ const Error = dispatch.Error;
 /// The compiled shader images Ops runs; every field is a real SPIR-V image of the named variant.
 pub const Shaders = struct {
     qmm_bf16: []align(4) const u8,
+    qmm_q4_vec4: []align(4) const u8,
     dequant_bf16: []align(4) const u8,
     gather_u32: []align(4) const u8,
     gather_u16: []align(4) const u8,
@@ -74,6 +75,7 @@ pub fn dequantPlan(out_elements: u64, w_elements: u64, scales_elements: u64, bia
 pub const Ops = struct {
     dev: *const Device,
     qmm_bf16: dispatch.Pipeline,
+    qmm_q4_vec4: dispatch.Pipeline,
     dequant_bf16: dispatch.Pipeline,
     gather_u32: dispatch.Pipeline,
     gather_u16: dispatch.Pipeline,
@@ -84,12 +86,13 @@ pub const Ops = struct {
     /// Read-only stand-in for declared bindings a kernel never touches (cast 1, copy 1 and 3).
     dummy: Buffer,
 
-    /// Builds the eight pipelines; the device must have been opened with storage16 and int16 for the bf16 paths.
+    /// Builds the nine pipelines; the device must have been opened with storage16 and int16 for the bf16 paths.
     pub fn init(dev: *const Device, shaders: Shaders) Error!Ops {
         if (!dev.features.storage16 or !dev.features.int16) return error.MissingFeature;
         var o: Ops = .{
             .dev = dev,
             .qmm_bf16 = undefined,
+            .qmm_q4_vec4 = undefined,
             .dequant_bf16 = undefined,
             .gather_u32 = undefined,
             .gather_u16 = undefined,
@@ -102,6 +105,8 @@ pub const Ops = struct {
         errdefer o.dummy.deinit();
         o.qmm_bf16 = try dispatch.Pipeline.init(dev, shaders.qmm_bf16, .{ .bindings = 5, .push_bytes = params.push_bytes, .writes = 1 << 4 });
         errdefer o.qmm_bf16.deinit();
+        o.qmm_q4_vec4 = try dispatch.Pipeline.init(dev, shaders.qmm_q4_vec4, .{ .bindings = 5, .push_bytes = params.push_bytes, .writes = 1 << 4 });
+        errdefer o.qmm_q4_vec4.deinit();
         o.dequant_bf16 = try dispatch.Pipeline.init(dev, shaders.dequant_bf16, .{ .bindings = 4, .push_bytes = params.push_bytes, .writes = 1 << 3 });
         errdefer o.dequant_bf16.deinit();
         o.gather_u32 = try dispatch.Pipeline.init(dev, shaders.gather_u32, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 2 });
@@ -121,6 +126,7 @@ pub const Ops = struct {
     /// Destroys the pipelines and the dummy; call only after the last submission using them returned success.
     pub fn deinit(o: *Ops) void {
         o.qmm_bf16.deinit();
+        o.qmm_q4_vec4.deinit();
         o.dequant_bf16.deinit();
         o.gather_u32.deinit();
         o.gather_u16.deinit();
