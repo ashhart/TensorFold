@@ -20,6 +20,8 @@ pub fn Ops(comptime G: type) type {
         trace: ?@import("node_trace.zig").Sink(B) = null,
         trace_layer: ?usize = null,
         trace_scope: []const u8 = "",
+        learning: ?@import("learning_hook.zig").Hook(G) = null,
+        dense_input: ?Tensor = null,
         fn note(o: *Self, layer: ?usize, scope: []const u8, node: []const u8, x: Tensor) !void {
             const sink = o.trace orelse return;
             var buffer: [192]u8 = undefined;
@@ -112,6 +114,7 @@ pub fn Ops(comptime G: type) type {
         }
         pub fn denseProject(o: *Self, layer: usize, p: graph.Projection, x: Tensor) !Tensor {
             const d = o.model.layers[layer].dense;
+            if (p == .gate) o.dense_input = x;
             const out = try o.project(switch (p) {
                 .gate => d.gate,
                 .value => d.up,
@@ -119,6 +122,10 @@ pub fn Ops(comptime G: type) type {
                 else => return error.Qwen4ProjectionRole,
             }, x);
             try o.note(layer, "mlp", if (p == .value) "up" else @tagName(p), out);
+            if (p == .output) if (o.learning) |hook| {
+                try hook.dense(hook.ctx, o.gpu, layer, o.dense_input orelse return error.Qwen4LearningInput, out);
+                try o.note(layer, "mlp", "pocket_output", out);
+            };
             return out;
         }
         pub fn swiglu(o: *Self, gate: Tensor, up: Tensor) !Tensor {

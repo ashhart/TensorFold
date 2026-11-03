@@ -9,7 +9,6 @@ pub fn refusal(o: anytype) ?[]const u8 {
     if (o.prompt_int8) return "Qwen4: --prompt-precision int8 is unsupported; activations stay bf16";
     if (o.precision) |p| if (p != .full) return "Qwen4: --precision checkpoint is unsupported; use full for bf16 activations";
     if (o.drafter != null or o.mtp_drafts != null or o.mtp_confidence != null) return "Qwen4: --drafter and --mtp-* need a published dense draft-head schema";
-    if (o.slide) return "Qwen4: --slide is unsupported";
     if (o.learn != null or o.learn_conversations) return "Qwen4: --learn and --learn-conversations are unsupported";
     if (o.recall or o.record != null) return "Qwen4: --recall and --record are unsupported";
     if (o.speed_up != null or o.policy.len != 0) return "Qwen4: --speed-up and --policy are unsupported";
@@ -24,11 +23,13 @@ pub fn Host(comptime P: type, comptime Api: type, comptime L: type) type {
     const D = P.Drawer;
     const A = @import("lanes_adapter.zig").Adapter(E, D, L);
     const Hooks = @import("lane_snapshots.zig").Hooks(A, Api.prompt_cache);
+    const Learning = if (@hasDecl(P, "Learning")) P.Learning else void;
     return struct {
         const Self = @This();
         a: std.mem.Allocator,
         p: ?*P = null,
         e: ?*E = null,
+        learning: if (Learning != void) ?*Learning else void = if (Learning != void) null else {},
         d: D = undefined,
         adapter: A = undefined,
         hooks: Hooks = undefined,
@@ -93,22 +94,27 @@ pub fn Host(comptime P: type, comptime Api: type, comptime L: type) type {
             if (cache > room) return error.Qwen4PathDoesNotFit;
             var digest: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(text, &digest, .{});
+            const training = if (comptime Learning != void) (if (o.slide or c.learned != 0) try Learning.bytes(a, &c, cap, o.slide) else @as(u64, 0)) else @as(u64, 0);
             var streams: usize = o.lanes;
             while (streams > 0) : (streams -= 1) {
                 const rows = @min(@as(usize, 128), streams * 16);
                 const draw = try D.bytes(c.vocab, rows, streams);
-                if (draw > room - cache) {
+                if (draw > room - cache or training > room - cache - draw) {
                     if (o.lanes_fixed) return error.Qwen4PathDoesNotFit;
                     continue;
                 }
-                const options: @import("native_admission.zig").Options = .{ .capacity = cap, .window = 16, .streams = streams, .budget = room - cache - draw, .config_digest = digest };
+                const options: @import("native_admission.zig").Options = .{ .capacity = cap, .window = 16, .streams = streams, .budget = room - cache - draw - training, .config_digest = digest, .learning = o.slide };
                 h.e = E.open(a, io, o.dir, &platform.storage, options, p, platform.loader()) catch |err| {
                     if (err == error.Qwen4PathDoesNotFit and !o.lanes_fixed) continue;
                     return err;
                 };
+                h.e.?.o.budget += training;
                 break;
             }
             const e = h.e orelse return error.Qwen4PathDoesNotFit;
+            if (comptime Learning != void) {
+                if (o.slide or e.c.learned != 0) h.learning = try Learning.open(a, io, e, o.dir, o.slide);
+            } else if (o.slide or e.c.learned != 0) return error.Qwen4LearningUnavailable;
             h.d = try platform.drawer(a, e.c.vocab, e.plan.rows, e.o.streams);
             h.drawer_ready = true;
             h.adapter = try A.init(a, e, &h.d);
@@ -127,6 +133,9 @@ pub fn Host(comptime P: type, comptime Api: type, comptime L: type) type {
             var state = e.slots[0].state;
             state.pos = 1;
             h.host = Api.LaneHost.init(a, io, &h.core, .{ .name = "qwen4", .lanes = @intCast(e.o.streams), .context_window = @intCast(cap), .structures = true, .prefill_step = 16, .prompt_cache = cache > 0, .warm_turns = cache > 0, .plain_only = !o.drafts, .prompt_cache_capacity = .{ .budget_bytes = cache, .minimum_state_bytes = try A.Snap.charge(&state) }, .policy = "Qwen4 dense, stored weights with bf16 activations" });
+            if (comptime Learning != void) if (h.learning) |owner| {
+                h.host.learner = owner.hook();
+            };
             h.host.health = .{ .ctx = h, .read = healthy };
             h.host.explain = .{ .ctx = h, .text = explain };
             h.host.cache = if (cache > 0) &h.store else null;
@@ -185,6 +194,10 @@ pub fn Host(comptime P: type, comptime Api: type, comptime L: type) type {
                 h.d.deinitDrained();
                 h.drawer_ready = false;
             }
+            if (comptime Learning != void) if (h.learning) |owner| {
+                try owner.close();
+                h.learning = null;
+            };
             if (h.e) |e| {
                 try e.close();
                 h.e = null;

@@ -18,7 +18,7 @@ pub fn check(c: *const cfg.Config, backend: Backend, p: *cfg.Problem) !qsa.Geome
     }
     return g;
 }
-pub const Options = struct { capacity: usize, window: usize = 16, streams: usize = 1, budget: u64, config_digest: ?[32]u8 = null };
+pub const Options = struct { capacity: usize, window: usize = 16, streams: usize = 1, budget: u64, config_digest: ?[32]u8 = null, learning: bool = false };
 pub const Plan = struct {
     rows: usize,
     scratch: usize,
