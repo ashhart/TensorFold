@@ -238,6 +238,7 @@ pub fn follow(f: *Forward) !void {
 /// One of the leader's operations (follow); true: `stop`.
 fn followOp(f: *Forward, msg: []const i64, ids: *std.ArrayList(u32), prompt: *std.ArrayList(u32), picks: *std.ArrayList(u32)) !bool {
     switch (msg[0]) {
+        @import("layer_hash.zig").op_request => try @import("layer_hash_forward.zig").follow(f, msg),
         op_window => {
             const n: usize = @intCast(msg[1]);
             ids.clearRetainingCapacity();

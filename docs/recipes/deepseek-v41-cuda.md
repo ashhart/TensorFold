@@ -36,3 +36,30 @@ zig build dsv41-serve -Doptimize=ReleaseSafe -Dnvcc=/usr/local/cuda/bin/nvcc -Dd
 This installs rank zero's `tensorfold-dsv41` and the follower tool `tf-dsv41`. The runtime reads
 `TF_DSV41_ASSETS/{rope.bin,engram-token-map.bin,aot/}`. Compile-only targets use inert synthetic images and
 cannot produce a serving qualification receipt. Keep generated images and compiler caches outside source control.
+
+
+## Repeat-divergence diagnostics
+
+Every rank logs one JSON `serving arm` line at boot. It lists all explicitly set `TF_DSV41_*`, `TF_TP_*`,
+`NCCL_*`, `TF_ROCE`, `TF_COMM_BACKEND` and `CUDA_VISIBLE_DEVICES` values, plus the effective gather/HCA count,
+graphs, memory floor, adaptive rows, prompt rows, slots, draft availability and session cache.
+
+Set `TF_DSV41_LAYER_HASH=PREFIX` on every rank to retain the existing per-layer trace hashes.
+Use that setting when generating AOT needs too; the CPU planner emits the traced variants without opening a hash file.
+Each process creates a new `PREFIX.rankN.jsonl` file and refuses an existing file. Use a fresh prefix per run.
+Unset or empty attaches no writer and adds no trace launches, device copies or synchronizations.
+
+JSONL version 1 starts with a header. Request records carry a sequence, slot and SHA-256 of the full prompt's
+little-endian u32 token IDs. Layer records add the logical window, phase (`prefill`, `replay`, `decode`), start,
+rows, row offset, columns, layer, window-token SHA-256 and SHA-256 of the post-only BF16 streams.
+Rank zero shares request metadata over the plan link before executing it. Sequence zero marks boot/calibration.
+Mixed windows are recorded per slot; padding is excluded. Compare the same rank, request and window shape across runs.
+A resumed prompt omits cached-prefix layers, so missing records alone do not show an arithmetic mismatch.
+
+Hashing synchronizes and reads back the producing stream at every layer. Traced programs run eagerly, including
+batched windows; the startup line distinguishes requested graphs from effective use. This can hide a timing race
+and has unmeasured overhead. Check traced/untraced tokens separately; equal traced runs do not qualify graph replay,
+cache resume, RoCE ordering or a checkpoint. Keep both ranks' logs and exact request/output IDs with the receipts.
+
+Compare hashes on and off with `TF_DSV41_GRAPHS=0` in both arms, and keep a separate graphs-on arm without hashes.
+The eager hash path cannot reproduce a failure confined to graph replay.

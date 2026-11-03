@@ -59,6 +59,9 @@ pub fn sendBuffer(f: *Forward, r: *run.Runner, bytes: usize) !u64 {
 pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!void {
     const f: *Forward = @ptrCast(@alignCast(ctx));
     const step = c.name["glue.".len..];
+    if (std.mem.eql(u8, step, "trace")) {
+        return @import("layer_hash_forward.zig").trace(f, r, c, if (f.quiet) .prefill else .decode);
+    }
     if (std.mem.startsWith(u8, step, "kx_")) return (f.kv orelse return error.GlueNotBuilt).glue(r, c, step);
     const s = r.stream.handle;
     const k = r.kernels.others(r.stream);
@@ -144,17 +147,6 @@ pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!vo
     if (std.mem.eql(u8, step, "engram_rows")) {
         if (g) |gr| return f.engramGathered(gr, r, c);
         return f.engramRows(r, c);
-    }
-    if (std.mem.eql(u8, step, "trace")) {
-        const map = f.trace orelse return;
-        const t = c.args[0].arg.t;
-        const host = try f.gpa.alloc(u8, 2 * numel(t));
-        defer f.gpa.free(host);
-        try r.stream.synchronize();
-        try cuda.DeviceBuffer.download(.{ .d = r.d, .ptr = try r.tensorAddr(t), .len = host.len }, 0, host);
-        var sha: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(host, &sha, .{});
-        return map.put(f.gpa, @intCast(c.args[1].arg.i), std.fmt.bytesToHex(sha, .lower));
     }
     return glueMissing(step);
 }

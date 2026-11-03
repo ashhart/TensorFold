@@ -434,6 +434,7 @@ pub const Model = struct {
         if (m.dev_arena) |x| x.endBoot(m.tcfg.rank); // TF_DSV41_ARENA=pack: boot's buffers in, the rest as before
         // the boot check on the boot's own figures: what it took, the dip below idle, the hard floor
         if (m.boot_check) |b| try kvs.afterBoot(b);
+        try @import("serve_arm.zig").log(m, a);
         try comm.barrier();
     }
 
@@ -442,6 +443,7 @@ pub const Model = struct {
         std.log.scoped(.dsv41).info("slots: {d} live, row windows of up to {d} rows, sessions {s}", .{ m.slots, cap, if (m.sessions != null) "on (every slot)" else "off" });
         const ss = try slots_mod.SlotSet.init(m.gpa, &m.f, m.slots);
         errdefer ss.deinit();
+        if (m.f.layer_hash != null) ss.hash_slot = &m.f.hash_slot;
         try ss.bindBases(bp);
         m.slot_set = ss;
         m.rows = try batch.Batch.init(m.gpa, &m.f, ss, cap);

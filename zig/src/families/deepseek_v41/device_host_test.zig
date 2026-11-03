@@ -1,5 +1,6 @@
 const std = @import("std");
 test {
+    _ = @import("layer_hash_test.zig");
     _ = @import("staging_owner_test.zig");
     _ = @import("cuda_model.zig");
     if (@import("builtin").os.tag == .linux) inline for (.{ @import("cuda_model.zig").Model, @import("serve_engine.zig").Served, @import("serve_cli.zig") }) |m| std.testing.refAllDecls(m);

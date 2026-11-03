@@ -178,6 +178,11 @@ pub fn glueOne(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!v
     const f: *Forward = @ptrCast(@alignCast(ctx));
     const st = pf.state(f);
     const step = c.name["glue.".len..];
+    if (std.mem.eql(u8, step, "trace")) {
+        const L: u32 = @intCast(c.args[1].arg.i);
+        const replay = st.mode == .replay and L >= try @import("ced.zig").decoderStart(f.cfg);
+        return @import("layer_hash_forward.zig").trace(f, r, c, if (replay) .replay else .prefill);
+    }
     const k = r.kernels.others(r.stream);
     const x = c.args;
     const eql = std.mem.eql;

@@ -13,7 +13,6 @@ const triton_call = @import("triton_call.zig");
 const Config = @import("config.zig").Config;
 const ced = @import("ced.zig");
 const kvs = @import("cuda_kv.zig");
-
 pub const Param = struct { name: []const u8, constexpr: bool, nospec: bool, noalign: bool };
 pub const Fn = struct { function: []const u8, params: []Param };
 pub const Sigs = std.json.ArrayHashMap([]Fn);
@@ -180,6 +179,7 @@ pub const Served = struct {
     pub fn fromEnv() !Served {
         const knobs = @import("serve_knobs.zig");
         var o: block.Options = .{ .world = @intCast(try envInt("TF_TP_WORLD", 2)), .rank = @intCast(try envInt("TF_TP_RANK", 0)), .r1 = knobs.r1(&knobs.env) };
+        o.trace = knobs.env("TF_DSV41_LAYER_HASH") != null;
         if (std.c.getenv("TF_DSV41_EXPERT_TOPP")) |v| o.expert_topp = try std.fmt.parseFloat(f64, std.mem.span(v));
         o.limit = try envInt("TF_DSV41_CONTEXT", o.limit);
         o.rope_rows = o.limit + 2048;
