@@ -217,6 +217,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     }
     if (own.link) |*l| l.asleep = cuda.tp_watch.open();
     own.lanes = .{ .x = .{ .e = own.e, .link = if (own.link) |*l| l else null } };
+    own.lanes.copy_drafts = o.drafts;
     return .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
