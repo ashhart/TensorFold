@@ -84,9 +84,7 @@ __device__ __forceinline__ uint32_t rope_word(uint32_t w, const float* csr, int 
     return *reinterpret_cast<const uint32_t*>(&b);
 }
 
-__device__ __forceinline__ void cp16(uint32_t dst, const void* src, bool ok) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" :: "r"(dst), "l"(src), "r"(ok ? 16 : 0));
-}
+__device__ __forceinline__ void cp16(uint32_t dst, const void* src, bool ok) { tf_common::cp16z(dst, src, ok); }
 __device__ __forceinline__ void cl_arrive() { asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory"); }
 __device__ __forceinline__ void cl_wait() { asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory"); }
 __device__ __forceinline__ uint32_t cl_rank() {
