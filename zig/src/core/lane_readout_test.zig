@@ -15,7 +15,7 @@ const Reader = struct {
     firsts: usize = 0,
     finishes: usize = 0,
     releases: usize = 0,
-    mode: enum { normal, fail, infinite, partial, blocked } = .normal,
+    mode: enum { normal, fail, infinite, partial, blocked, fail_piece } = .normal,
     hold: enum { none, inside, between } = .none, // where piece `hold_at` waits for `gate`
     hold_at: usize = 1,
     gate: std.atomic.Value(bool) = .init(true),
@@ -50,6 +50,7 @@ const Reader = struct {
         r.steps[at] = s.prompt()[0];
         r.step_count += 1;
         if (r.hold == .inside and at == r.hold_at) r.wait();
+        if (r.mode == .fail_piece and at == r.hold_at) return error.InjectedPieceFailure;
         const done = try r.base.stepped().vtable.prefill_step.?(ptr, s, max_rows);
         if (r.hold == .between and at + 1 == r.hold_at) r.wait();
         return done;
@@ -422,4 +423,151 @@ test "readout lane: a repeated readout with the prompt cache on reuses and keeps
     try std.testing.expectEqual(@as(u64, 0), store.counts.kept);
     try std.testing.expectEqual(@as(usize, 0), store.entries.items.len);
     try std.testing.expectEqual(@as(usize, 2), r.releases);
+}
+
+test "readout lane: TF_LANE_TRACE's lines give each request's submit, pieces in row order and completion" {
+    var r: Reader = .{}; // three pieces a prompt
+    defer r.base.deinit();
+    var rig: Rig = undefined;
+    try rig.init(&r, 2);
+    defer rig.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/trace.jsonl", .{tmp.sub_path});
+    defer a.free(path);
+    rig.host.trace = try @import("lane_trace.zig").Trace.open(a, io, path);
+    try rig.host.start();
+    var stopped = false;
+    defer if (!stopped) rig.host.stop(); // an early error still joins the worker before the rig goes
+
+    const tail: [24]u32 = @splat(1);
+    const long = prompt ++ tail;
+    var logits: [2][3]u16 = undefined;
+    const specs = [_]readout.Spec{ specFor(&logits[0]), specFor(&logits[1]) };
+    const requests = [_]api.Request{ ask(&specs[0], &long), ask(&specs[1], &prompt) };
+    var boxes: [2]Box = .{ .{}, .{} };
+    for (&requests, &boxes, 1..) |*q, *box, id| try rig.host.engine().submit(id, q, .{ .ctx = box, .event = Box.event });
+    for (&boxes) |*box| try std.testing.expectEqual(api.Reason.length, try box.wait());
+    rig.host.stop(); // closes the trace
+    stopped = true;
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+    defer a.free(text);
+    const Line = struct { t0_ns: i64, t1_ns: i64, kind: []const u8, id: u64, stream: u64, rows_from: usize, rows_to: usize, ok: bool };
+    var submits: [2]usize = @splat(0);
+    var reached: [2]usize = @splat(0); // each request's pieces must run in order, each from where the last ended
+    var pieces: [2]usize = @splat(0);
+    var completes: [2]usize = @splat(0);
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const parsed = try std.json.parseFromSlice(Line, a, raw, .{});
+        defer parsed.deinit();
+        const l = parsed.value;
+        try std.testing.expect(l.t1_ns >= l.t0_ns and l.ok);
+        if (std.mem.eql(u8, l.kind, "round")) continue;
+        const k = l.id - 1;
+        const len = requests[k].prompt.len;
+        if (std.mem.eql(u8, l.kind, "submit")) {
+            submits[k] += 1;
+            try std.testing.expectEqual(len, l.rows_to);
+        } else if (std.mem.eql(u8, l.kind, "fill")) {
+            try std.testing.expectEqual(reached[k], l.rows_from);
+            try std.testing.expect(l.rows_to > l.rows_from and l.rows_to <= len);
+            reached[k] = l.rows_to;
+            pieces[k] += 1;
+        } else if (std.mem.eql(u8, l.kind, "complete")) {
+            completes[k] += 1; // inside the last piece's call, so its line, ending first, comes first
+            try std.testing.expectEqual(len, l.rows_to);
+        } else return error.UnknownTraceKind;
+    }
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1 }, &submits);
+    try std.testing.expectEqualSlices(usize, &.{ 3, 3 }, &pieces);
+    try std.testing.expectEqualSlices(usize, &.{ long.len, prompt.len }, &reached);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1 }, &completes);
+}
+
+test "readout lane: a piece that fails is traced with ok false and the rows filled before it" {
+    var r: Reader = .{ .mode = .fail_piece, .hold_at = 1 }; // three pieces; the second fails
+    defer r.base.deinit();
+    var rig: Rig = undefined;
+    try rig.init(&r, 2);
+    defer rig.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/trace.jsonl", .{tmp.sub_path});
+    defer a.free(path);
+    rig.host.trace = try @import("lane_trace.zig").Trace.open(a, io, path);
+    try rig.host.start();
+    var stopped = false;
+    defer if (!stopped) rig.host.stop();
+    const tail: [24]u32 = @splat(1);
+    const long = prompt ++ tail;
+    var logits: [3]u16 = undefined;
+    const s = specFor(&logits);
+    const request = ask(&s, &long);
+    var box: Box = .{};
+    try rig.host.engine().submit(1, &request, .{ .ctx = &box, .event = Box.event });
+    try std.testing.expectEqual(api.Reason.failed, try box.wait());
+    rig.host.stop();
+    stopped = true;
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+    defer a.free(text);
+    const Line = struct { t0_ns: i64, t1_ns: i64, kind: []const u8, id: u64, stream: u64, rows_from: usize, rows_to: usize, ok: bool };
+    var fills: [2]Line = undefined;
+    var n: usize = 0;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const parsed = try std.json.parseFromSliceLeaky(Line, a, raw, .{});
+        if (!std.mem.eql(u8, parsed.kind, "fill")) continue;
+        try std.testing.expect(n < fills.len);
+        fills[n] = parsed;
+        n += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expect(fills[0].ok and fills[0].rows_from == 0 and fills[0].rows_to > 0);
+    // the failed call filled nothing past the first piece: its rows end where they began, not at the prompt's end
+    try std.testing.expect(!fills[1].ok and fills[1].rows_from == fills[0].rows_to and fills[1].rows_to == fills[0].rows_to);
+}
+
+test "readout lane: a completion that fails marks its line and the call holding it ok false" {
+    var r: Reader = .{ .mode = .fail }; // every piece fills; the head's finish fails
+    defer r.base.deinit();
+    var rig: Rig = undefined;
+    try rig.init(&r, 2);
+    defer rig.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/trace.jsonl", .{tmp.sub_path});
+    defer a.free(path);
+    rig.host.trace = try @import("lane_trace.zig").Trace.open(a, io, path);
+    try rig.host.start();
+    var stopped = false;
+    defer if (!stopped) rig.host.stop();
+    const tail: [24]u32 = @splat(1);
+    const long = prompt ++ tail;
+    var logits: [3]u16 = undefined;
+    const s = specFor(&logits);
+    const request = ask(&s, &long);
+    var box: Box = .{};
+    try rig.host.engine().submit(1, &request, .{ .ctx = &box, .event = Box.event });
+    try std.testing.expectEqual(api.Reason.failed, try box.wait());
+    rig.host.stop();
+    stopped = true;
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+    defer a.free(text);
+    const Line = struct { t0_ns: i64, t1_ns: i64, kind: []const u8, id: u64, stream: u64, rows_from: usize, rows_to: usize, ok: bool };
+    var fills: [3]bool = undefined;
+    var n: usize = 0;
+    var complete: ?bool = null;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const parsed = try std.json.parseFromSliceLeaky(Line, a, raw, .{});
+        if (std.mem.eql(u8, parsed.kind, "complete")) complete = parsed.ok;
+        if (!std.mem.eql(u8, parsed.kind, "fill")) continue;
+        try std.testing.expect(n < fills.len);
+        fills[n] = parsed.ok;
+        n += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualSlices(bool, &.{ true, true, false }, &fills);
+    try std.testing.expectEqual(@as(?bool, false), complete);
 }

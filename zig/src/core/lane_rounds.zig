@@ -162,10 +162,14 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     }
     if (h.core.activeCount() > 0) {
         did = true;
+        const lt = @import("lane_trace.zig");
+        var traced = if (h.trace) |t| lt.Event.round(t, h.core.live.items.len) else undefined;
         h.core.step() catch |e| {
+            if (h.trace) |t| t.endFailed(&traced);
             ends.failRound(h, e);
             return true;
         };
+        if (h.trace) |t| t.end(&traced);
     }
     if (!join and h.finals.items.len > 0) {
         did = true;
