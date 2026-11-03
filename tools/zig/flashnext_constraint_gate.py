@@ -86,7 +86,7 @@ def serve(binary, model, parallel, context, cache, output, label):
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     command = [str(Path(binary).resolve()), "serve", model, "--name", "gate", "--host", "127.0.0.1",
-               "--port", str(port), "--backend", "metal", "--parallel", str(parallel), "--context", str(context),
+               "--port", str(port), "--backend", "mlx", "--parallel", str(parallel), "--context", str(context),
                "--prompt-cache-gib", str(cache), "--no-thinking"]
     base = f"http://127.0.0.1:{port}"
     # Logs stay local and may contain the operator's model/cache paths; never copy them into a public receipt.
