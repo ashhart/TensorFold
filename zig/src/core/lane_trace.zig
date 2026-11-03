@@ -15,6 +15,11 @@ pub const Event = struct {
     rows_to: usize = 0,
     ok: bool = true, // false: the call, round or completion failed (its rows: what was filled before the failure)
 
+    /// A prompt call of request `id` (admission `stream`) begun now at row `from`.
+    pub fn fill(t: *const Trace, id: u64, stream: u64, from: usize) Event {
+        return .{ .t0_ns = t.now(), .t1_ns = 0, .kind = .fill, .id = id, .stream = stream, .rows_from = from };
+    }
+
     /// A round begun now over `live` streams (its width read before the step can retire any).
     pub fn round(t: *const Trace, live: usize) Event {
         return .{ .t0_ns = t.now(), .t1_ns = 0, .kind = .round, .stream = live, .rows_to = live };
@@ -27,14 +32,25 @@ pub const Event = struct {
     }
 };
 
+/// `slot`'s trace from TF_LANE_TRACE, unless one is set already (a test's).
+pub fn openInto(slot: *?*Trace, gpa: std.mem.Allocator, io: std.Io) void {
+    if (slot.* == null) slot.* = .fromEnv(gpa, io);
+}
+
+/// `slot`'s trace closed, if it has one.
+pub fn drop(slot: *?*Trace) void {
+    if (slot.*) |t| t.close();
+    slot.* = null;
+}
+
 /// The open trace; the lane host owns it from `fromEnv` to `close`.
 pub const Trace = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
-    fd: c_int,
+    file: std.Io.File,
     broken: std.atomic.Value(bool) = .init(false), // a write failed: no more lines, so no line is ever partial
 
-    /// The file TF_LANE_TRACE names, opened once (truncated, append-only), or null when unset, empty or unopenable.
+    /// The file TF_LANE_TRACE names, opened once (truncated), or null when unset, empty or unopenable.
     pub fn fromEnv(gpa: std.mem.Allocator, io: std.Io) ?*Trace {
         const path = std.mem.span(std.c.getenv("TF_LANE_TRACE") orelse return null);
         if (path.len == 0) return null;
@@ -45,18 +61,15 @@ pub const Trace = struct {
     }
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !*Trace {
-        const z = try gpa.dupeSentinel(u8, path, 0);
-        defer gpa.free(z);
-        const fd = std.c.open(z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .APPEND = true }, @as(std.c.mode_t, 0o644));
-        if (fd < 0) return error.TraceOpenFailed;
-        errdefer _ = std.c.close(fd);
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        errdefer file.close(io);
         const t = try gpa.create(Trace);
-        t.* = .{ .gpa = gpa, .io = io, .fd = fd };
+        t.* = .{ .gpa = gpa, .io = io, .file = file };
         return t;
     }
 
     pub fn close(t: *Trace) void {
-        _ = std.c.close(t.fd);
+        t.file.close(t.io);
         t.gpa.destroy(t);
     }
 
@@ -76,12 +89,12 @@ pub const Trace = struct {
         t.end(e);
     }
 
-    /// One line in one write to an append-only file (no lock); a short write stops the trace with one warning.
+    /// One line in one streaming write (no lock: the OS keeps a shared offset whole); a short write stops the trace.
     pub fn line(t: *Trace, e: Event) void {
         if (t.broken.load(.monotonic)) return;
         var buf: [208]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{{\"t0_ns\":{d},\"t1_ns\":{d},\"kind\":\"{t}\",\"id\":{d},\"stream\":{d},\"rows_from\":{d},\"rows_to\":{d},\"ok\":{}}}\n", .{ e.t0_ns, e.t1_ns, e.kind, e.id, e.stream, e.rows_from, e.rows_to, e.ok }) catch return;
-        const n = std.c.write(t.fd, text.ptr, text.len);
+        const n = t.file.writeStreaming(t.io, &.{}, &.{text}, 1) catch 0;
         if (n == text.len) return;
         if (!t.broken.swap(true, .monotonic)) std.log.warn("TF_LANE_TRACE: a write gave {d} of {d} bytes; the trace stops here", .{ n, text.len });
     }

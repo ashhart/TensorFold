@@ -120,11 +120,8 @@ pub const LaneHost = struct {
     pub fn start(h: *LaneHost) !void {
         if (h.rounds != null and ledger.priced(h)) return error.LedgerWithRounds; // a planner admits past takeJob
         // opened here, not at init: an owner failing before start leaks no file; a failed start closes it below
-        if (h.trace == null) h.trace = .fromEnv(h.gpa, h.io);
-        errdefer if (h.trace) |t| {
-            t.close();
-            h.trace = null;
-        };
+        lane_trace.openInto(&h.trace, h.gpa, h.io);
+        errdefer lane_trace.drop(&h.trace);
         if (h.rounds != null and !h.core.backend.pieces()) return error.PiecesUnsupported; // a drafter wrapper runs whole prompts
         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
     }
@@ -148,8 +145,7 @@ pub const LaneHost = struct {
         h.live_tokens.deinit(h.gpa);
         h.pieces.deinit(h.gpa);
         h.finals.deinit(h.gpa);
-        if (h.trace) |t| t.close();
-        h.trace = null;
+        lane_trace.drop(&h.trace);
     }
 
     /// A drain's deadline: the round in flight completes on every rank, so the ranks stop at the same boundary.
@@ -428,8 +424,7 @@ pub const LaneHost = struct {
         const job = h.filling.items[at];
         const first = !job.fill_began;
         // the trace's line, from what the job holds before the call can end it; written last, after any completion
-        var line: lane_trace.Event = undefined;
-        if (h.trace) |t| line = .{ .t0_ns = t.now(), .t1_ns = 0, .kind = .fill, .id = job.id, .stream = job.seq, .rows_from = if (first) job.stream.cached else job.stream.fill_at.load(.monotonic) };
+        var line: lane_trace.Event = if (h.trace) |t| .fill(t, job.id, job.seq, if (first) job.stream.cached else job.stream.fill_at.load(.monotonic)) else undefined;
         defer if (h.trace) |t| t.end(&line);
         job.fill_began = true;
         load.calling(h, job);
