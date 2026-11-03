@@ -7,7 +7,6 @@
 #include "mma4.cuh"
 #include "nvfp4q.cuh"
 #include "common/qmm_frag.cuh"
-#include "common/vec.cuh"
 
 namespace tf_ck4 {
 
@@ -19,7 +18,7 @@ __device__ __forceinline__ float relu(float v) { return v < 0.0f ? 0.0f : v; }
 // The larger, or a NaN when either is (fmaxf drops it): a block holding a NaN gets a NaN scale.
 __device__ __forceinline__ float max_nan(float a, float b) { return (a > b || a != a) ? a : b; }
 
-using tf_common::unpack8;
+#include "common/unpack8_value.cuh"
 
 }  // namespace tf_ck4
 

@@ -31,6 +31,18 @@ def select(trees,catalogs):
     return picked,sorted(changed)
 
 
+def image_scope(reached,requested):
+    if requested is None:
+        return reached
+    names=requested.split(',')
+    if any(not name for name in names) or len(set(names))!=len(names):
+        raise ValueError('image scope must contain distinct, nonempty image names')
+    unknown=set(names)-set(reached)
+    if unknown:
+        raise ValueError('image scope is not reached by this change: '+', '.join(sorted(unknown)))
+    return sorted(names)
+
+
 def parsed(text,image):
     if text.startswith('BUILD FAIL'):
         raise RuntimeError(text)
@@ -180,6 +192,7 @@ def main(argv=None):
     parser.add_argument('--nvcc',default=sid.NVCC)
     parser.add_argument('--cuobjdump',default=sid.CUOBJDUMP)
     parser.add_argument('--cache-guard')
+    parser.add_argument('--images',help='Comma-separated reached images; qualifies only this explicit scope')
     parser.add_argument('--plan-only',action='store_true')
     parser.add_argument('--generate-only',action='store_true')
     parser.add_argument('--no-controls',action='store_true',help='diagnostic only, exit 2 after matching images')
@@ -205,8 +218,11 @@ def main(argv=None):
         report['compiled_sources']={tag:sources.manifest(tree) for tag,tree in trees.items()}
         catalogs={tag:sid.catalog(tree) for tag,tree in trees.items()}
         report['torch_flags']={tag:catalogs[tag][0] for tag in trees}
-        images,changed=select(trees,catalogs)
+        reached,changed=select(trees,catalogs)
+        images=image_scope(reached,args.images)
         report.update(images=images,changed_files=changed,
+                      all_reached_images=reached,omitted_images=sorted(set(reached)-set(images)),
+                      comparison_scope='explicit images' if args.images is not None else 'all reached images',
                       catalogs={tag:{name:catalogs[tag][1][name] for name in images} for tag in trees},
                       function_scope='Every emitted cuobjdump Function on every supported SM, including outlined helpers and controls')
         if args.plan_only or args.generate_only:
@@ -224,7 +240,8 @@ def main(argv=None):
         if not args.no_controls:
             report['controls']=controls(args,trees,catalogs,heads,output)
         report['qualified']=not(args.no_controls or args.no_recheck)
-        print('SUMMARY '+('PASS' if report['qualified'] else 'UNQUALIFIED')+f' images={len(images)} functions={len(rows)}')
+        print('SUMMARY '+('PASS' if report['qualified'] else 'UNQUALIFIED')+f' images={len(images)} functions={len(rows)}'
+              +' scope='+('explicit' if args.images is not None else 'all-reached'))
         return 0 if report['qualified'] else 2
     except Exception as error:
         report['error']=str(error)
