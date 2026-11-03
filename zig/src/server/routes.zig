@@ -7,6 +7,7 @@ const json = @import("json");
 const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");
 const auth = @import("auth.zig");
+const auth_scope = @import("auth_scope.zig");
 const openai = @import("openai.zig");
 const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
@@ -34,9 +35,11 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const path = auth.routePath(conn.path);
     const delete_body = std.mem.eql(u8, m, "DELETE") and
         (std.mem.eql(u8, path, "/v1/slide/facts") or std.mem.startsWith(u8, path, fact_path));
-    if (!std.mem.eql(u8, m, "POST") and !delete_body and !consumeBody(conn, a)) return;
+    // SGLang takes its rerank route by PUT as well as POST: the same handler, admission and key scope
+    const put_rerank = std.mem.eql(u8, m, "PUT") and auth_scope.putRoute(path);
+    if (!std.mem.eql(u8, m, "POST") and !put_rerank and !delete_body and !consumeBody(conn, a)) return;
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);
-    if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);
+    if (std.mem.eql(u8, m, "POST") or put_rerank) return post(srv, conn, a);
     if (std.mem.eql(u8, m, "DELETE")) {
         const route = auth.routePath(conn.path);
         if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.forget(srv, conn, a);
