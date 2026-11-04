@@ -240,7 +240,7 @@ pub const Decoder = struct {
             try k.run("router_norm", s, .{ n, 1, 1 }, 128, .{ sc.at(.rk), L.router.k_norm.dev, sc.at(.tok), sc.at(.page), inv, dec.idxK(l) + start * D * 4 });
             if (done_after > done_before)
                 try k.run("block_keys", s, .{ done_after - done_before, 1, 1 }, 32, .{ dec.idxK(l), L.router.head_cls.dev, dec.kbar(l), done_before, 1.0 / @sqrt(@as(f32, D)) });
-            try k.run("route", s, .{ n, 1, 1 }, 32, .{ sc.at(.iq), dec.kbar(l), dec.bmin(), dec.bmax(), sc.at(.qpage), sc.at(.qpos), sc.at(.sel), sc.at(.bias), nblk, done_after, 1.0 / @sqrt(@as(f32, D)), cfg.router_scale, cfg.router_floor, @as(c_int, @intFromBool(prefill_rows)) });
+            try k.run("route", s, .{ n, 1, 1 }, 256, .{ sc.at(.iq), dec.kbar(l), dec.bmin(), dec.bmax(), sc.at(.qpage), sc.at(.qpos), sc.at(.sel), sc.at(.bias), nblk, done_after, 1.0 / @sqrt(@as(f32, D)), cfg.router_scale, cfg.router_floor, @as(c_int, @intFromBool(prefill_rows)) });
             try k.run("attend", s, .{ n, cfg.heads, 1 }, 256, .{ sc.at(.q), dec.kc(l), dec.vc(l), sc.at(.sel), sc.at(.bias), sc.at(.qpos), sc.at(.att), H, scale, cfg.local });
             try dec.lin(sc.at(.att), L.o, sc.at(.tmp), n, H, H, vec);
             try dec.add(sc.at(.x), sc.at(.tmp), sc.at(.x), n * H);

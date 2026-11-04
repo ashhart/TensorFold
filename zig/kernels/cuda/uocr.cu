@@ -425,72 +425,125 @@ extern "C" __global__ void __launch_bounds__(32) tf_uocr_block_keys(const float*
   }
 }
 
-// One query's remote reads (a warp a query): block scores against the summary keys, the page-aware candidate
-// blocks, the top 16 by score, entmax-1.5 over them, and the first 12 with bias log(max(prior, floor)) - their mean.
-// sel[q][s] = -1 marks an unread slot (ud_route's arithmetic). At most 4,096 blocks.
-extern "C" __global__ void __launch_bounds__(32) tf_uocr_route(const float* __restrict__ idx_q, const float* __restrict__ kbar,
-                                                               const int* __restrict__ bmin, const int* __restrict__ bmax,
-                                                               const int* __restrict__ qpage, const unsigned* __restrict__ qpos,
-                                                               int* __restrict__ sel, float* __restrict__ bias, int nblk,
-                                                               int complete, float scale, float idx_scale, float floor_,
-                                                               int round_bias) {
+// One query's remote reads (a 256-thread block a query): block scores against the summary keys, the page-aware
+// candidate blocks, the top 16 by score (ties to the lower block), entmax-1.5 over them, and the first 12 with bias
+// log(max(prior, floor)) - their mean. sel[q][s] = -1 marks an unread slot (ud_route's arithmetic; every block's
+// score is the same sequential sum, so the picks do not depend on how the blocks are spread over threads). At most
+// 4,096 blocks.
+#define UR_THREADS 256
+extern "C" __global__ void __launch_bounds__(UR_THREADS) tf_uocr_route(const float* __restrict__ idx_q, const float* __restrict__ kbar,
+                                                                       const int* __restrict__ bmin, const int* __restrict__ bmax,
+                                                                       const int* __restrict__ qpage, const unsigned* __restrict__ qpos,
+                                                                       int* __restrict__ sel, float* __restrict__ bias, int nblk,
+                                                                       int complete, float scale, float idx_scale, float floor_,
+                                                                       int round_bias) {
   __shared__ float x[4096];
   __shared__ unsigned char cand[4096];
-  const int q = blockIdx.x, lane = threadIdx.x;
-  const float* iq = idx_q + (size_t)q * 128;
+  __shared__ float iq[128];
+  __shared__ float xv[16];
+  __shared__ int xi[16];
+  const int q = blockIdx.x, t = threadIdx.x, lane = t & 31, w = t >> 5;
+  if (t < 128) iq[t] = idx_q[(size_t)q * 128 + t];
   const int qp = qpage[q];
   const int last_remote = (int)(qpos[q] / 32) - 4;
   bool any_page = false;
-  if (qp >= 0) {
-    for (int c = lane; c < nblk; c += 32) any_page = any_page || (bmin[c] >= 0 && bmin[c] <= qp && qp <= bmax[c]);
-    any_page = __any_sync(0xffffffffu, any_page);
-  }
+  if (qp >= 0)
+    for (int c = t; c < nblk; c += UR_THREADS) any_page = any_page || (bmin[c] >= 0 && bmin[c] <= qp && qp <= bmax[c]);
+  any_page = __syncthreads_or(any_page);
   bool any_cand = false;
-  for (int c = lane; c < nblk; c += 32) {
+  for (int c = t; c < nblk; c += UR_THREADS) {
     const bool remote = c <= last_remote && c < complete;
     const bool allow = !any_page || (bmin[c] >= 0 && bmin[c] <= qp && qp <= bmax[c]);
     float z = UD_NEG;
     if (remote) {
-      const float* kb = kbar + (size_t)c * 128;
+      const float4* kb = reinterpret_cast<const float4*>(kbar + (size_t)c * 128);
       float s = 0.0f;
-      for (int d = 0; d < 128; d++) s += iq[d] * kb[d];
+#pragma unroll 8
+      for (int d = 0; d < 32; d++) {
+        const float4 k4 = kb[d];
+        s += iq[4 * d] * k4.x;
+        s += iq[4 * d + 1] * k4.y;
+        s += iq[4 * d + 2] * k4.z;
+        s += iq[4 * d + 3] * k4.w;
+      }
       z = clampf(s * scale, -UD_CLAMP, UD_CLAMP);
     }
-    x[c] = z;
-    cand[c] = (unsigned char)(remote ? (allow ? 2 : 1) : 0);
     any_cand = any_cand || (remote && allow);
+    cand[c] = (unsigned char)(remote ? (allow ? 2 : 1) : 0);
+    x[c] = z;
   }
-  any_cand = __any_sync(0xffffffffu, any_cand);
-  __syncwarp();
-  for (int c = lane; c < nblk; c += 32) {
+  any_cand = __syncthreads_or(any_cand);
+  for (int c = t; c < nblk; c += UR_THREADS) {
     const bool is = any_cand ? cand[c] == 2 : cand[c] >= 1;
     cand[c] = (unsigned char)is;
     float v = is ? x[c] * idx_scale : UD_ENTMAX_NEG;
     if (!isfinite(v)) v = UD_ENTMAX_NEG;
     x[c] = v;
   }
-  __syncwarp();
-  // the top M by value, ties to the lower block
+  __syncthreads();
+  // the top M by value, ties to the lower block: each warp's own top M among its blocks (c mod 256 in its 32), a
+  // round a pick, the pick's owner striking it; then warp 0 merges the 8 lists the same way. The block's top M is
+  // within the union of the warps' (one order: value, then the lower block).
   const int M = max(1, min(16, nblk));
-  float xv[16];
-  int xi[16];
+  __shared__ float lv[UR_THREADS / 32][16];
+  __shared__ int li[UR_THREADS / 32][16];
   for (int r = 0; r < M; r++) {
     float best = -INFINITY;
     int at = 0x7fffffff;
-    for (int c = lane; c < nblk; c += 32) {
-      bool taken = false;
-      for (int t = 0; t < r; t++) taken = taken || xi[t] == c;
-      if (!taken && (x[c] > best || (x[c] == best && c < at))) {
+    for (int c = t; c < nblk; c += UR_THREADS)
+      if (x[c] != -INFINITY && (x[c] > best || (x[c] == best && c < at))) {
         best = x[c];
         at = c;
       }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      const float ov = __shfl_xor_sync(0xffffffffu, best, o);
+      const int oi = __shfl_xor_sync(0xffffffffu, at, o);
+      if (ov > best || (ov == best && oi < at)) {
+        best = ov;
+        at = oi;
+      }
     }
-    const float top = warp_max(best);
-    const int idx = warp_min_int(best == top ? at : 0x7fffffff);
-    xv[r] = top;
-    xi[r] = idx;
+    if (at != 0x7fffffff && (at & 31) == lane) x[at] = -INFINITY;  // its owner: c mod 32 is the lane
+    if (lane == 0) {
+      lv[w][r] = best;
+      li[w][r] = at;
+    }
+    __syncwarp();
   }
-  if (lane != 0) return;
+  __syncthreads();
+  if (w != 0) return;
+  for (int r = 0; r < M; r++) {
+    float best = -INFINITY;
+    int at = 0x7fffffff, slot = -1;
+    for (int e = lane; e < (UR_THREADS / 32) * M; e += 32) {
+      const float v = lv[e / M][e % M];
+      const int i = li[e / M][e % M];
+      if (i != 0x7fffffff && (v > best || (v == best && i < at))) {
+        best = v;
+        at = i;
+        slot = e;
+      }
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      const float ov = __shfl_xor_sync(0xffffffffu, best, o);
+      const int oi = __shfl_xor_sync(0xffffffffu, at, o);
+      const int os = __shfl_xor_sync(0xffffffffu, slot, o);
+      if (ov > best || (ov == best && oi < at)) {
+        best = ov;
+        at = oi;
+        slot = os;
+      }
+    }
+    if (lane == 0) {
+      xv[r] = best;
+      xi[r] = at;
+      li[slot / M][slot % M] = 0x7fffffff;
+    }
+    __syncwarp();
+  }
+  if (t != 0) return;
   // entmax-1.5 over the M values (already in descending order)
   const float mx = xv[0];
   float X[16], tau[16];
