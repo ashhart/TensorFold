@@ -7,6 +7,7 @@ const request = @import("embedding_request.zig");
 const response = @import("embedding_response.zig");
 const openai = @import("openai.zig");
 const http_body = @import("http_body.zig");
+const wait = @import("wait_reason.zig");
 const Conn = @import("http_conn.zig").Conn;
 const Server = @import("server.zig").Server;
 pub const Failure = errors.Refused || error{Cancelled};
@@ -29,8 +30,8 @@ pub fn reply(srv: *Server, cx: *errors.Cx, body: json.Value, gone: anytype) Fail
     if (gone.check()) return error.Cancelled;
     const ended = @import("prompt_only_wait.zig").run(srv.engine, srv.io, id, &ask, gone) catch |err| return switch (err) {
         error.InvalidRequest, error.InvalidSpans => cx.refuse("the embedding request does not match the model"),
-        error.Busy, error.Closed, error.Stale => cx.fail(.capacity, "the embedding engine is unavailable", .{}),
-        error.MemoryPressure => cx.fail(.capacity, "{s}", .{api.pressure_message}),
+        error.Busy, error.Closed, error.Stale => cx.wait(wait.engine_unavailable, "the embedding engine is unavailable", .{}),
+        error.MemoryPressure => cx.wait(wait.memory_pressure, "{s}", .{api.pressure_message}),
     };
     switch (ended) {
         .cancelled => return error.Cancelled,

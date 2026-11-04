@@ -26,6 +26,8 @@ pub const Cx = struct {
     a: Allocator,
     kind: Kind = .request,
     message: []const u8 = "",
+    /// The bounded wait code a retryable refusal carries (wait_reason.zig); null on a request refusal.
+    code: ?[]const u8 = null,
     /// The request's ``chat_template_kwargs.clear_thinking``, over the server's (GLM-5.3 templates only).
     clear_thinking: ?bool = null,
     /// The request controls a native prompt renderer must retain in every prefix probe.
@@ -41,6 +43,12 @@ pub const Cx = struct {
         cx.kind = .request;
         cx.message = message;
         return error.Refused;
+    }
+
+    /// A capacity refusal that names its wait: the engine had no room, so the request can be sent again.
+    pub fn wait(cx: *Cx, code: []const u8, comptime fmt: []const u8, args: anytype) Refused {
+        cx.code = code;
+        return cx.fail(.capacity, fmt, args);
     }
 
     pub fn other(cx: *Cx, message: []const u8) Refused {

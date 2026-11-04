@@ -13,6 +13,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA with KV pages: `--prompt-cache-gib N` now keeps N GiB before the pool sets aside windows past the engine's own, so a named cache is no longer cut to almost nothing at some room sizes. A command that already names N splits memory differently after an upgrade; unset, the order is unchanged. The startup line counts the windows the pages hold (#2220). Thanks to @Bizuayeu, and to @MiaAI-Lab for finding it.
 
 - llama `--drafter`: a probe stays armed until a round verifies its drafts, so a request that once stood the drafter aside gets drafting back; replies don't change (#2169, closes #2168). Thanks to @BobClawblaw.
+- Every retryable 503 on the OpenAI-shaped inference routes names its wait in a fixed `code` (`server_restarting`, `engine_loading`, `engine_reload_failed`, `engine_busy`, `engine_unavailable`, `memory_pressure`); a parked model's reload was reported as `server_restarting` with the drain's message and now answers `engine_loading` or `engine_reload_failed` with the model's own words, while capacity refusals gain the code and keep their status, message and absent `Retry-After`. The drain's body bytes, every status code and every other message are unchanged, and the Messages routes' Anthropic envelope has no code field (#2135). Thanks to @devopsfortunato.
 
 - GLM on CUDA: `TF_GLM_COPIES=1` adds opt-in context copies, verified and priced with the same row costs as drafts. Off by default; tokens are unchanged (#2146).
 

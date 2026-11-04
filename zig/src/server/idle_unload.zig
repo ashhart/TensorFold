@@ -5,6 +5,7 @@ const cli = @import("cli.zig");
 const log = @import("log.zig");
 const engines = @import("engines.zig");
 const server_mod = @import("server.zig");
+const wait_reason = @import("wait_reason.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -215,7 +216,7 @@ pub fn reload(m: *Manager, srv: *server_mod.Server, reply: Allocator, problem_ou
     }
     if (m.state == .resident) return m.mutex.unlock(m.io);
     if (m.state != .unloaded) {
-        problem_out.* = "the engine is still unloading; send the request again";
+        problem_out.* = wait_reason.unloading_problem;
         m.mutex.unlock(m.io);
         return error.ReloadFailed; // the route returns the retry reason with Retry-After
     }
