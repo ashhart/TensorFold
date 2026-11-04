@@ -35,12 +35,13 @@ pub const ActRows = struct {
     swiglu_l2_fn: Function,
     head_gate_fn: Function,
     gelu_erf_fn: Function,
+    ple_fn: Function,
 
     pub fn load(d: *const Driver) !ActRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.act_rows);
         errdefer mod.unload();
-        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round"), .softcap_fn = try mod.function("tf_softcap_rows"), .gate_l2_fn = try mod.function("tf_gate_l2_rows"), .swiglu_l2_fn = try mod.function("tf_swiglu_l2_rows"), .head_gate_fn = try mod.function("tf_head_gate_rows"), .gelu_erf_fn = try mod.function("tf_gelu_erf_rows") };
+        return .{ .mod = mod, .swiglu_fn = try mod.function("tf_swiglu_rows"), .gate_fn = try mod.function("tf_gate_rows"), .sums_fn = try mod.function("tf_group_sums_rows"), .dconv_fn = try mod.function("tf_dconv_rows"), .geglu_fn = try mod.function("tf_geglu_rows"), .swiglu_round_fn = try mod.function("tf_swiglu_rows_round"), .softcap_fn = try mod.function("tf_softcap_rows"), .gate_l2_fn = try mod.function("tf_gate_l2_rows"), .swiglu_l2_fn = try mod.function("tf_swiglu_l2_rows"), .head_gate_fn = try mod.function("tf_head_gate_rows"), .gelu_erf_fn = try mod.function("tf_gelu_erf_rows"), .ple_fn = try mod.function("tf_ple_rows") };
     }
 
     /// out = bf16(bf16(gelu_erf(gate)) * up) as PyTorch's exact GELU then the product, rows as swiglu's; xs: sums.
@@ -97,6 +98,20 @@ pub const ActRows = struct {
         const t = launch_.rowThreads(rows, threads, 128);
         try launch_.launch(f, .{ .grid = grid(rows, n, t), .block = .{ .x = t } }, s, &a);
     }
+
+    /// Gemma 4 E-series per-layer inputs: out [rows, parts 256] from projected p and table rows t (packed alike).
+    pub fn ple(g: *const ActRows, s: Stream, p: u64, t: u64, w: u64, out: u64, rows: usize, parts: usize, c: Ple) !void {
+        if (parts == 0 or rows * parts * 256 > std.math.maxInt(i32) or !aligned(&.{ p, t, out }, &.{})) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        for ([_]u64{ p, t, w, out }) |v| a.add(v);
+        a.add(@as(i32, @intCast(parts)));
+        for ([_]f32{ c.scale, c.token, c.mix, c.eps }) |v| a.add(v);
+        try launch_.launch(g.ple_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(parts), .z = 1 }, .block = .{ .x = 64 } }, s, &a);
+    }
+
+    /// tf_ple_rows's scalars, each a bf16 value as MLX multiplies by it, and the norm's epsilon.
+    pub const Ple = struct { scale: f32, token: f32, mix: f32, eps: f32 };
 
     /// out [rows, n] = bf16(cap * tanh(x / cap)) in MLX's bf16 steps (x / cap and tanh rounded); out may be x.
     pub fn softcap(g: *const ActRows, s: Stream, x: u64, out: u64, rows: usize, n: usize, cap: f32) !void {
