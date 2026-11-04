@@ -23,10 +23,16 @@ pub const heads = [_]at_.Heads{ .q27b, .gqa16, .q9b };
 /// decode: a round's trees and chains as decode_round.zig plans them; prompt: one chain through the prompt kernel.
 pub const Which = enum { decode, prompt };
 
-pub const Reg = struct { heads: at_.Heads, which: Which, units: bool = true };
+/// `control`: values that aren't finite go to P V as they are, so a row's 0 for a key it must not see gives NaN.
+pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false };
 
-/// A row that must not see a key gives it probability 0, and 0 times an infinite value in P V is NaN.
-const masked_inf = c.Known{ .gate = .nonfinite, .finding = "a row that must not see a key gives it probability 0, and 0 times an infinite value in P V gives NaN where float64 gives the row's own value" };
+/// The control's edit on this chip's kernel: before M5 prompts take attention_prompt_sg, decode rows the tail.
+fn controlEdit(w: Which, tensor: bool) ?at_.Edit {
+    return switch (w) {
+        .prompt => if (tensor) .{ .from = "? 0x8000 : 0;", .to = "? 0 : 0;" } else .{ .from = "? 0x80008000u : 0u;", .to = "? 0u : 0u;" },
+        .decode => if (tensor) .{ .from = "const bool masked = q27_nonfinite(", .to = "const bool masked = false && q27_nonfinite(" } else null,
+    };
+}
 
 /// The error is no single sum's, so `mag` carries the call's whole first-order budget in units of one fp32 rounding.
 fn oneRounding(_: c.Shape) usize {
@@ -54,17 +60,25 @@ pub fn served(comptime h: at_.Heads, comptime w: Which) []const c.Shape {
 }
 
 fn nameOf(comptime r: Reg) []const u8 {
-    return std.fmt.comptimePrint("metal qwen27 attention {s} {s}", .{ comptime at_.label(r.heads), if (r.which == .decode) "decode rows" else "prompt rows" });
+    const what = if (r.which == .decode) "decode rows" else "prompt rows";
+    if (r.control) return std.fmt.comptimePrint("control: qwen27 attention {s} {s} with non-finite values unmasked", .{ comptime at_.label(r.heads), what });
+    return std.fmt.comptimePrint("metal qwen27 attention {s} {s}", .{ comptime at_.label(r.heads), what });
 }
 
 /// fp32 scores and sums, half probabilities into P V, the gate's bf16 sigmoid; `mids`: bf16(o) and bf16(sigmoid).
 pub fn spec(r: Reg) c.Spec {
-    const known = r.which == .prompt or r.units;
     return switch (r.heads) {
         inline else => |h| switch (r.which) {
-            inline else => |w| .{ .name = nameOf(.{ .heads = h, .which = w }), .accum = .f32, .depth = oneRounding, .ops = 8, .mids = 2, .out = .bf16, .known = if (known) masked_inf else null, .tiles = .{ .{ .size = 16 }, .{}, .{ .size = 512 } }, .served = served(h, w) },
+            inline else => |w| switch (r.control) {
+                inline else => |k| .{ .name = nameOf(.{ .heads = h, .which = w, .control = k }), .accum = .f32, .depth = oneRounding, .ops = 8, .mids = 2, .out = .bf16, .tiles = .{ .{ .size = 16 }, .{}, .{ .size = 512 } }, .served = served(h, w) },
+            },
         },
     };
+}
+
+/// Whether this chip has the control: decode rows before M5 run the tail kernel, whose round sees every key it reads.
+pub fn hasControl(w: Which, tensor: bool) bool {
+    return controlEdit(w, tensor) != null;
 }
 
 fn bf(x: u16) f64 {
@@ -92,7 +106,13 @@ pub const Attn = struct {
         const tensor = device.tensorUnits();
         if (!tensor) try q.simd_attention.check(device, queue);
         const gm = at_.geometry(r.heads, tensor);
-        const text = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads);
+        const body = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads);
+        defer a.free(body);
+        const text = if (!r.control) try a.dupe(u8, body) else edit: {
+            const e = controlEdit(r.which, tensor) orelse return error.ControlEdit;
+            if (std.mem.count(u8, body, e.from) != 1) return error.ControlEdit;
+            break :edit try std.mem.replaceOwned(u8, a, body, e.from, e.to);
+        };
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
@@ -116,7 +136,7 @@ pub const Attn = struct {
     }
 
     pub fn kernel(t: *Attn) g.Kernel {
-        return .{ .spec = spec(t.reg), .ctx = t, .vt = &vt };
+        return .{ .spec = spec(t.reg), .ctx = t, .vt = &vt, .control = if (t.reg.control) .nonfinite else null };
     }
 
     const vt = g.hooks(Attn);
