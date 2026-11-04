@@ -85,6 +85,8 @@ pub const Loaded = struct {
     all_on_pages: bool = false,
     /// TF_QWEN_KV_PAGES_ALL=1: the engine's own stream takes pages too, a window of them set aside by the plan.
     engine_paged: bool = false,
+    /// An integrated GPU: kept states in device memory on the host budget (Target.device), the startup line says so.
+    device_snaps: bool = false,
 };
 
 pub fn cacheBytes(e: *const E.Engine, cap: usize, test_tokens: usize) !usize {
@@ -175,6 +177,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .reserve = reserve,
         .vision = v,
         .target = &l.target,
+        .device_snaps = l.target.device,
         .layout = if (page_tokens > 0) pages_mod.layout(e, o.context, page_tokens, 0, 0) else null,
         .own_prompt_cache = share_snaps > 0,
         .all_on_pages = page_tokens > 0 and share_snaps > 0 and !engine_paged, // the engine's window idle
