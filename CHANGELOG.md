@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the Flash Next recipe says native Metal takes `--ple-on-ssd`, which reads per-layer embedding rows from the SSD in batches (#2068). Thanks to @swbiggart.
+
 - The cluster planner gives a dense model's rounds zero expert cost instead of dividing zero by zero, so its decode and combined round times are finite (#2070). Thanks to @swbiggart.
 
 - Qwen 3.5 on CUDA: a kept path longer than the 48-row pending buffer is kept at once instead of overrunning it, which fixes the occasional INVALID_VALUE on deferred keeps (#1982). Thanks to @jrb-ai.
