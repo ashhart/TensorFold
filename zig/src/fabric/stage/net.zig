@@ -35,6 +35,12 @@ fn tune(fd: Fd) void {
     _ = c.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPCNT, &cnt, @sizeOf(c_int));
 }
 
+/// A link never blocks in send or recv: macOS ignores MSG_DONTWAIT on a blocking socket, so a stalled peer hung a send.
+fn nonBlocking(fd: Fd) bool {
+    const flags = c.fcntl(fd, posix.F.GETFL);
+    return flags >= 0 and c.fcntl(fd, posix.F.SETFL, flags | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true }))) >= 0;
+}
+
 fn closeOnExec(fd: Fd) void {
     _ = c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
 }
@@ -84,6 +90,10 @@ pub fn accept(fd: Fd, deadline: u64) Error!Fd {
         const conn = c.accept(fd, null, null);
         if (conn >= 0) {
             closeOnExec(conn);
+            if (!nonBlocking(conn)) {
+                _ = c.close(conn);
+                return error.SocketFailed;
+            }
             tune(conn);
             return conn;
         }
@@ -108,11 +118,9 @@ pub fn connect(host: []const u8, to: u16, deadline: u64) Error!Fd {
     }
 }
 
+/// Connects without blocking; the socket stays non-blocking for `sendAll` and `recvExact`.
 fn connectBefore(fd: Fd, address: *const posix.sockaddr, len: posix.socklen_t, deadline: u64) bool {
-    const flags = c.fcntl(fd, posix.F.GETFL);
-    if (flags < 0) return false;
-    if (c.fcntl(fd, posix.F.SETFL, flags | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true }))) < 0) return false;
-    defer _ = c.fcntl(fd, posix.F.SETFL, flags);
+    if (!nonBlocking(fd)) return false;
     const rc = c.connect(fd, address, len);
     if (rc == 0) return true;
     if (posix.errno(rc) != .INPROGRESS) return false;
