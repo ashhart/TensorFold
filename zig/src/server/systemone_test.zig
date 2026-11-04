@@ -283,3 +283,21 @@ pub const refused = [_][2][]const u8{
     .{ "{\"state\": \"x\", \"videos\": [\"v\"], \"questions\": {}}", "videos are not supported" },
     .{ "{\"state\": [{\"role\": \"user\", \"content\": [{\"type\": \"input_audio\"}]}], \"questions\": {\"q\": {\"type\": \"noul\", \"instructions\": \"i\"}}}", "input_audio is not supported: a decision state takes images" },
 };
+
+test "capability audit: decision context errors keep the code on System One too" {
+    var text: Text = .{};
+    var head: Head = .{ .gpa = std.testing.allocator, .window = 8, .hooks = .score };
+    defer head.prompts.deinit(std.testing.allocator);
+    const srv = try serve(&text, &head);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const body = try @import("context_http_fixture.zig").call(srv, arena.allocator(), systemone.post, answered[0].body);
+    const err = body.get("error").?;
+    const code = err.get("code") orelse return error.MissingContextLengthCode;
+    try std.testing.expectEqualStrings("context_length_exceeded", code.string);
+    try std.testing.expectEqualStrings("invalid_request_error", err.get("type").?.string);
+    try std.testing.expect(err.get("param").? == .null);
+    try std.testing.expectEqualStrings("a decision sequence exceeds the 8-token context", err.get("message").?.string);
+    try std.testing.expectEqual(@as(usize, 0), head.prompts.items.len);
+}
