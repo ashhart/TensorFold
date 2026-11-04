@@ -27,18 +27,18 @@ pub fn Namespace(comptime Tri: type) type {
     return struct {
         pub const model_type = "qwen4_exp";
         pub const tp_draft_snapshots = false;
-        pub const formats: []const []const u8 = &.{ "mlx-q4g32", "modelopt-mixed" };
+        pub const formats: []const []const u8 = &.{ "mlx-q4g32", "modelopt-mixed", @import("exl3/pack/cuda_exl3_config.zig").format };
         // the model's window: past 2,048 keys the block indexer picks each row's 512 best blocks of 4 (cuda_batch.zig)
         pub const default_context: i64 = @intCast(prompt.max_tokens);
         // a prompt runs on the batched pass in chunks of this many rows, one a prefill_step: no staggered segments
         pub const max_segments: u32 = 1;
         pub const prompt_rows: u32 = @intCast(prompt.batch.default_chunk);
         /// The prompt cache's copies of a stream's state (cuda_snap.zig), called with `Loaded.target`.
-        pub const snap_bytes = snaps.bytes;
+        pub const snap_bytes = copies.bytes;
         pub const snap_repeat_min: u32 = 16;
-        pub const snap_save = snaps.save;
-        pub const snap_restore = snaps.restore;
-        pub const snap_drop = snaps.drop;
+        pub const snap_save = copies.save;
+        pub const snap_restore = copies.restore;
+        pub const snap_drop = copies.drop;
         pub const kept_disk = @import("cuda_disk.zig").Kept(@This()); // their disk image, as qwen3_5 declares its own
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
         pub const window_rows = kvl.window_rows;
@@ -60,7 +60,9 @@ pub fn Namespace(comptime Tri: type) type {
             pub const min_gap: u32 = 256;
             pub const min_prompt: u32 = 512;
         };
-        pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551, one_stream: bool = false };
+
+        pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551, one_stream: bool = false };
+        pub const preallocates_lanes = false;
         /// Living Weights' learner (--slide): lessons put neurons in each layer's pocket beside its shared expert.
         pub const slide = slide_mod.Slide(Tri);
         /// The first file a lesson would rewrite through a link, or null: a teaching copy may hard-link the others.
@@ -82,6 +84,10 @@ pub fn Namespace(comptime Tri: type) type {
             stream_bytes: usize,
             /// Every stream allocates its own sequence; none rides on the engine's.
             free_streams: u32 = 0,
+            /// Kept prompt states in pinned host memory (cuda_snap.on_host): the native host budgets them there.
+            host_snaps: bool = false,
+            /// The prefill step when the prompt arithmetic depends on the chunk cuts (EXL3): states keep on its starts
+            snap_grid: u32 = 0,
             ctx: *anyopaque,
             deinit: *const fn (*anyopaque) void,
             lone: ?LoneRun = null,
@@ -150,7 +156,7 @@ pub fn Namespace(comptime Tri: type) type {
         const seq_parts = @import("cuda_seq_parts.zig");
 
         const Ops = mtp.Ops(Tri);
-        const snaps = @import("cuda_lanes_snap.zig").Snaps(Cuda);
+        const copies = @import("cuda_lanes_snap.zig").Copies(of);
 
         pub const Cuda = struct {
             gpa: std.mem.Allocator,
@@ -159,6 +165,8 @@ pub fn Namespace(comptime Tri: type) type {
             vision: ?*@import("cuda_images.zig").Vision = null,
             ranks: ?*ranks.Session = null,
             head: ?*mtp.Head = null,
+            profile: ?@import("exl3/offload/cuda_exl3_frequency_state.zig").State = null,
+            profile_counts: ?@import("exl3/offload/cuda_exl3_frequency.zig").Counts = null,
             depth: usize = mtp.default_depth,
             depth_greedy: usize = mtp.default_depth_greedy,
             confidence: f64 = mtp.default_confidence,
@@ -347,6 +355,9 @@ pub fn Namespace(comptime Tri: type) type {
                 };
                 const last = stop == ids.len;
                 self.engine.ngram.warmAhead(ids, stop, @min(ids.len, stop + rows));
+                const previous_telemetry_phase = self.engine.telemetry.forward_phase;
+                self.engine.telemetry.forward_phase = .prefill;
+                defer self.engine.telemetry.forward_phase = previous_telemetry_phase;
                 if (l.draft) |*d| {
                     try self.ops().prefillChunk(&l.seq, d, ids, at, stop);
                 } else if (self.ranks) |r| {
@@ -380,6 +391,7 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn release(p: *anyopaque) void {
             const own: *Cuda = @ptrCast(@alignCast(p));
             cuda.completion.drain(own.engine.driver, own.stream, "flashnext: release did not drain");
+            if (own.profile) |*profile| profile.save(own);
             var it = own.lanes.valueIterator();
             while (it.next()) |l| dropLane(own, l);
             own.lanes.deinit(own.gpa);
@@ -394,6 +406,7 @@ pub fn Namespace(comptime Tri: type) type {
             if (own.set) |*x| x.deinit();
             own.glue.deinit();
             own.stream.deinit();
+            if (own.profile) |*profile| profile.deinit();
             own.gpa.destroy(own);
         }
 
@@ -580,21 +593,9 @@ pub fn Namespace(comptime Tri: type) type {
 
         test {
             _ = @import("cuda_images_test.zig").Cases(Cuda, Cuda.open, dropLane);
-            _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snaps.restore, dropLane);
-            _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
+            _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, copies.restore, dropLane);
+            _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane, open);
             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
-        }
-
-        test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {
-            const env = @import("sys").env;
-            // every driver entry point undefined: the refusal must come before the first call
-            var driver: cuda.Driver = undefined;
-            const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
-            for ([_]struct { [*:0]const u8, [*:0]const u8, anyerror }{ .{ "TF_FLASHNEXT_CHUNK", "0", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "16385", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK", "4k", error.BadChunk }, .{ "TF_FLASHNEXT_CHUNK_SOLO", "1024", error.BadChunk }, .{ "TF_FLASHNEXT_LOAD_THREADS", "0", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "33", error.BadLoadThreads }, .{ "TF_FLASHNEXT_LOAD_THREADS", "8x", error.BadLoadThreads } }) |bad| {
-                _ = env.setenv(bad[0], bad[1], 1);
-                defer _ = env.unsetenv(bad[0]);
-                try std.testing.expectError(bad[2], open(std.testing.allocator, std.testing.io, &ctx, "no-such-checkpoint", null, .{ .context = 4096, .drafts = true }));
-            }
         }
     };
 }

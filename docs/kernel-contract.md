@@ -266,6 +266,10 @@ unsplit K, `linear_wc`'s tiles); a host test sweeps K and N to 16384 through `ex
 form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 sum would overflow on a constant-weight
 stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
 swapped scales, a swapped suh.
+Flash Next EXL3's canonical expert reduction starts in the one-rank slice: `fn_exl3_leaf_tree` and
+`fn_exl3_leaf_finish` register in `contract_flashnext_exl3_canon.zig`, against the host fp32 tree bit for bit and
+float64's exceptional classes. The controls flatten the tree, drop NaNs, write an input or use bf16 adds; each
+must fail its intended gate. Independent host references compare the canonical order with exact products and fp64.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 HIP also checks the 64-row prompt attention tile (`prefill.hip`): `tf_fa_paged_bf16` and `tf_fa_paged_f16` over a
 permuted page table at the 27B's, the 35B-A3B's and Nemotron's head counts, each output within attention_ref's float64
@@ -353,6 +357,14 @@ shared memory, the device's limits and the planted controls are checked the same
 A restored 13.0 receipt can arrive after the later compiler sets. Such records mark `later_pending` so 13.0 and
 13.1 use their base usage, while 13.2 and later keep their independently measured or pending selection.
 A missing later receipt remains pending; a 13.0 measurement never substitutes for it.
+Flash Next's EXL3 launch (`flashnext_exl3_pending.zig`) carries only an nvcc 13.4 receipt: it stays pending under
+13.0 to 13.3 and takes its 13.4 usage from `cuda_134`, which `pending_132.lookup` serves for that release.
+That launch, `fn_exl3_split_f16`, also runs gates 1 to 4 on the CUDA runner (`contract_flashnext_exl3.zig`): an fp16
+row splits into bf16 hi = bf16(x) and lo = bf16(x - hi), every output's bits must equal float64's (NaN stays NaN; an
+infinity gives hi = Inf and lo = NaN), and the device's hi + lo must equal x for every finite pattern. Its shapes
+hold all 65,536 fp16 patterns and partial last blocks (n = 1,000 and 65,537). Three controls go red: one flushing NaN
+and Inf to zero (gate 1), one launching whole blocks only (gate 3, at every tail) and one writing hi over its input
+(gate 2). Gate 4 is N/A: it has no sums.
 
 Gemma 4 CUDA tower QKV norms and nine-term pooling register FP32 sums and BF16 outputs.
 Their contract keeps the exact FP32 mirror and adds independent FP64 ranges at the BF16 nodes.
