@@ -104,12 +104,16 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reason
     try m.put(a, "object", .{ .string = "model" });
     try m.put(a, "created", try json.intValue(a, created));
     try m.put(a, "owned_by", .{ .string = "tensorfold" });
+    const capabilities = try json.newObject(a);
+    inline for (@typeInfo(api.Info.Capability).@"enum".field_names) |name|
+        try capabilities.put(a, name, .{ .bool = info.capability(@field(api.Info.Capability, name)) });
+    try m.put(a, "capabilities", .{ .object = capabilities });
     const window = info.reported_context_window orelse info.context_window;
     if (window > 0) {
         try m.put(a, "context_length", try json.intValue(a, window));
         try m.put(a, "max_model_len", try json.intValue(a, window));
     }
-    if (info.reasoning) if (reasoning) |r| try m.put(a, "reasoning", r);
+    if (info.capability(.reasoning)) if (reasoning) |r| try m.put(a, "reasoning", r);
     return .{ .object = m };
 }
 
@@ -458,6 +462,45 @@ test "model discovery keeps an unquoted reasoning effort that the actual rendere
                 try std.testing.expectEqualStrings(expected, reason.get("default_effort").?.string);
             } else try std.testing.expect(reason.get("default_effort") == null);
             try std.testing.expect(reason.get("supported_efforts") == null);
+        }
+    }
+}
+
+test "model discovery exposes engine capability booleans for every served name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const info: api.Info = .{ .structures = true, .greedy_only = true, .logprobs = false, .penalties = false };
+    for ([_][]const u8{ "primary", "alias" }) |id| {
+        const entry = try modelValue(a, id, info, 0, null);
+        const flags = entry.get("capabilities") orelse return error.TestExpectedCapabilities;
+        try std.testing.expect(flags.get("structures").?.bool);
+        try std.testing.expect(flags.get("greedy_only").?.bool);
+        try std.testing.expect(!flags.get("logprobs").?.bool);
+        try std.testing.expect(!flags.get("penalties").?.bool);
+        try std.testing.expect(!flags.get("vision").?.bool);
+        inline for (@typeInfo(api.Info).@"struct".field_names) |name| if (@FieldType(api.Info, name) == bool) {
+            try std.testing.expectEqual(@field(info, name), flags.get(name).?.bool);
+        };
+    }
+}
+
+test "model discovery capability and logprob admission use one loaded flag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = (try json.parse(a, "{\"logprobs\":true}")).ok;
+    for ([_]bool{ false, true }) |supported| {
+        const info: api.Info = .{ .logprobs = supported };
+        const entry = try modelValue(a, "model", info, 0, null);
+        const published = entry.get("capabilities").?.get("logprobs").?.bool;
+        var cx: @import("errors.zig").Cx = .{ .a = a };
+        const got = @import("fields.zig").probabilityOptions(&cx, body, info.capability(.logprobs));
+        if (published) {
+            try std.testing.expectEqual(@as(?u8, 0), try got);
+        } else {
+            try std.testing.expectError(error.Refused, got);
+            try std.testing.expectEqual(@as(u16, 400), cx.status());
         }
     }
 }

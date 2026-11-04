@@ -225,6 +225,13 @@ pub const Info = struct {
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
     ledger: ?Ledger = null,
 
+    pub const Capability = @import("engine_capabilities.zig").Capability;
+
+    /// One loaded flag for both discovery and request checks; optional user features report presence.
+    pub inline fn capability(i: Info, comptime key: Capability) bool {
+        return @import("engine_capabilities.zig").read(i, key);
+    }
+
     /// What a lane engine's streams enforce themselves (core/lanes/stream.zig): loop guards and answer limits.
     pub fn ofLanes(i: Info) Info {
         var out = i;
@@ -592,4 +599,5 @@ pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("engine_api_test.zig");
+    _ = @import("engine_capabilities.zig");
 }
