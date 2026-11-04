@@ -496,10 +496,8 @@ const own_records = [_]Record{
 } ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records ++
     @import("hip_records_score.zig").records;
 
-pub const records = own_records ++ @import("hip_records_stream.zig").records ++
-    @import("hip_records_router.zig").records ++
-    @import("hip_records_glm_ocr.zig").records ++
-    @import("hip_records_item.zig").records;
+pub const records = own_records ++ @import("hip_records_stream.zig").records ++ @import("hip_records_router.zig").records ++
+    @import("hip_records_glm_ocr.zig").records ++ @import("hip_records_item.zig").records ++ @import("hip_records_qwen3.zig").records;
 
 /// Gate 5's planted HIP controls: a launch past its __launch_bounds__, and 72 KiB of LDS where a workgroup has 64.
 pub const controls = [_]Record{
@@ -540,7 +538,9 @@ pub fn check(a: std.mem.Allocator, list: []const Record, quiet: bool) !usize {
     defer out.deinit(a);
     var n: usize = 0;
     for (list) |r| for (limits.rdna, r.usage) |t, u| {
-        if (u.vgprs == 0) {
+        if (!u.served) {
+            if (!quiet) std.debug.print("N/A  {s} on {s}: not served there\n", .{ r.launch.name, t.name });
+        } else if (u.vgprs == 0) {
             try out.print(a, "{s} on {s}: no compiled usage recorded\n", .{ r.launch.name, t.name });
             n += 1;
         } else n += try limits.hip(r.launch, u, t, &out, a);
@@ -590,6 +590,10 @@ test "a control cannot fit or lack compiled usage on any one chip" {
             var missing = r;
             missing.usage[i].vgprs = 0;
             try std.testing.expectEqual(@as(usize, 1), try controlProblems(a, missing, true));
+            // a control is never excused as unserved
+            var unserved = r;
+            unserved.usage[i] = .{ .vgprs = 0, .served = false };
+            try std.testing.expectEqual(@as(usize, 1), try controlProblems(a, unserved, true));
         }
     }
 }

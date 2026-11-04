@@ -9,6 +9,7 @@ const Function = @import("module.zig").Function;
 const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
+const dense = @import("launches/dense.zig");
 
 const util = @import("launches/util.zig");
 
@@ -86,6 +87,8 @@ pub const Launcher = struct {
     wide: bool,
     /// The MLX affine products and the registry that picks their tiles.
     affine: affine.Kernels,
+    /// The BF16 dense GEMM (raw BF16 weights through the dot2 GEMM tile).
+    dense: dense.Kernels,
     /// Flash Next's kernels: its residual streams, n-gram rows, indexer and sparse attention.
     fnx: flashnext.Fns,
     /// Nemotron's Mamba-2 mixer kernels.
@@ -129,6 +132,7 @@ pub const Launcher = struct {
         silu_mul: Function,
         add: Function,
         attn_gate: Function,
+        heads_rows: Function,
         gnorm_silu: Function,
         copy_cols: Function,
         rope_prefill: Function,
@@ -203,6 +207,7 @@ pub const Launcher = struct {
             .silu_mul = try ops.function("tf_silu_mul"),
             .add = try ops.function("tf_add"),
             .attn_gate = try ops.function("tf_attn_gate"),
+            .heads_rows = try ops.function("tf_heads_rows"),
             .gnorm_silu = try ops.function("tf_gnorm_silu"),
             .copy_cols = try ops.function("tf_copy_cols"),
             .rope_prefill = try ops.function("tf_rope_prefill"),
@@ -291,7 +296,9 @@ pub const Launcher = struct {
         l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);
         const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
-        l.affine = try affine.Kernels.load(tiles, dot2, caps.Caps.of(kernels.arch) orelse return error.Invalid, choices.products);
+        const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;
+        l.affine = try affine.Kernels.load(tiles, dot2, chip, choices.products);
+        l.dense = try dense.Kernels.load(tiles, chip.act == .bf16);
         try l.affine.fillByteLut(r, dot2);
         l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
         return l;
@@ -325,6 +332,7 @@ pub const Launcher = struct {
     pub const tf_moe_route = moe.tf_moe_route;
     pub const tf_causal = attention.tf_causal;
     pub const tf_attn_gate = attention.tf_attn_gate;
+    pub const tf_heads_rows = attention.tf_heads_rows;
     pub const tf_kv_write = attention.tf_kv_write;
     pub const tf_kv_write_at = attention.tf_kv_write_at;
     pub const tf_argmax_rows = draw.tf_argmax_rows;

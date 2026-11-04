@@ -32,11 +32,13 @@ extern "C" __global__ void tf_embed_rows(const uint32_t* words, const void* scal
 }
 
 // The float gather: rows of an fp32 table (an embedding kept unquantized), written in the activation type.
-extern "C" __global__ void tf_embed_dense(const float* table, const int* ids, int n, int k, void* out, int out_kind) {
+// Rows `ids` of a float table stored as `table_kind` (fp32, or BF16 / FP16 as a checkpoint stores them).
+extern "C" __global__ void tf_embed_dense(const void* table, int table_kind, const int* ids, int n, int k, void* out,
+                                          int out_kind) {
     long long i = gid();
     if (i >= static_cast<long long>(n) * k) return;
     int r = static_cast<int>(i / k), c = static_cast<int>(i % k);
-    store(out, out_kind, i, table[static_cast<long long>(ids[r]) * k + c]);
+    store(out, out_kind, i, load(table, table_kind, static_cast<long long>(ids[r]) * k + c));
 }
 
 extern "C" __global__ void tf_cast(const void* src, int skind, void* dst, int dkind, long long n) {

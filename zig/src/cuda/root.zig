@@ -51,6 +51,7 @@ pub const act_rows = @import("act_rows.zig");
 pub const gdn_prep = @import("gdn_prep.zig");
 pub const qk_rows = @import("qk_rows.zig");
 pub const experts = @import("experts.zig");
+pub const experts32 = @import("experts32.zig");
 pub const experts_waves = @import("experts_waves.zig");
 pub const sample = @import("sample.zig");
 pub const rank_scatter = @import("rank_scatter.zig");
@@ -101,6 +102,7 @@ test {
     _ = @import("qk_rows.zig");
     _ = @import("exl3_candidate.zig");
     _ = @import("experts.zig");
+    _ = @import("experts32.zig");
     _ = @import("experts_waves.zig");
     _ = @import("sample.zig");
     _ = @import("roce.zig");

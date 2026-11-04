@@ -24,9 +24,9 @@ pub const Channel = struct {
     own: []const u8 = &.{},
     timeout_ns: u64 = 10 * std.time.ns_per_s,
 
-    /// Window bytes a channel of `n` ranks with `slot_bytes` slots takes (a page multiple).
+    /// Window bytes a channel of `n` ranks with `slot_bytes` slots takes (a `layout_align` multiple).
     pub fn bytes(n: u32, slot_bytes: usize) usize {
-        return std.mem.alignForward(usize, 2 * n * (8 + std.mem.alignForward(usize, slot_bytes, 64)), rdma.page);
+        return std.mem.alignForward(usize, 2 * n * (8 + std.mem.alignForward(usize, slot_bytes, 64)), rdma.layout_align);
     }
 
     pub fn init(ep: Rdma, base: usize, slot_bytes: usize) Channel {
@@ -188,7 +188,7 @@ pub const Pipe = struct {
     timeout_ns: u64 = 10 * std.time.ns_per_s,
 
     pub fn bytes(slot_bytes: usize) usize {
-        return std.mem.alignForward(usize, 64 + 2 * std.mem.alignForward(usize, slot_bytes, 64), rdma.page);
+        return std.mem.alignForward(usize, 64 + 2 * std.mem.alignForward(usize, slot_bytes, 64), rdma.layout_align);
     }
 
     /// Both ends pass the same `base`: the receiver's flags and slots and the sender's credit word live there.

@@ -242,7 +242,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.info.reasoning and reply_text.isChannel(srv.markers)), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.info.reasoning and reply_text.isChannel(srv.markers)), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -285,6 +285,7 @@ const Generation = struct {
     stops: reply_text.Stops,
     ignore_eos: bool,
     max_tokens: u32,
+    single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
@@ -497,7 +498,7 @@ const Generation = struct {
             const thought = g.streamed_reasoning.text.items;
             if (reasoning) |r| if (std.mem.startsWith(u8, r, thought) and r.len > thought.len)
                 try g.emit(sink, try deltaOf(a, "reasoning_content", r[thought.len..]));
-            const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason) else content;
+            const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason, g.single) else content;
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
             if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });

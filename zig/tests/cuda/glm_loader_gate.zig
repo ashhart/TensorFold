@@ -288,6 +288,7 @@ fn expertsMade(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, up: bool)
     if (i == c.layers and (try p.ck.get(try std.fmt.allocPrint(p.a, at ++ "gate_proj.weight", .{ i, 0 }))).dtype == .bf16) {
         return .{ .skip = "the GPU quantizer's, from the MTP layer's bf16 experts" };
     }
+    if (p.ck.has(try std.fmt.allocPrint(p.a, at ++ "gate_proj.weight_scale.csf0_bases", .{ i, 0 }))) return .{ .made = try @import("glm_loader_b32.zig").made(p, c, s, i, up) };
     const X = cuda.experts.Nvfp4Experts;
     const d: usize = c.hidden;
     const cut = s.moe;

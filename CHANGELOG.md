@@ -4,6 +4,18 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the GLM CUDA recipe gives `TF_GLM_OVERLAP_PIECES=8` beside `TF_GLM_CHUNK_SOLO` at TP=3 with `TF_GLM_ROCE_MULTI` (#2067). Thanks to @Bizuayeu.
+
+- Docs: the Flash Next recipe says native Metal takes `--ple-on-ssd`, which reads per-layer embedding rows from the SSD in batches (#2068). Thanks to @swbiggart.
+
+- The cluster planner gives a dense model's rounds zero expert cost instead of dividing zero by zero, so its decode and combined round times are finite (#2070). Thanks to @swbiggart.
+
+- Qwen 3.5 on CUDA: a kept path longer than the 48-row pending buffer is kept at once instead of overrunning it, which fixes the occasional INVALID_VALUE on deferred keeps (#1982). Thanks to @jrb-ai.
+
+- GLM-5.3-Flash on CUDA reads csf0_v1 checkpoints, whose NVFP4 routed experts carry their scales at block 32 as a base plus a 4-bit offset, saving about 13 GiB across a TP=2 pair with the same tokens; block-16 checkpoints are unchanged (#2041). Thanks to @Bizuayeu.
+
+- In one-call tool mode, a stream sends prose held after a hidden call envelope at the finish, so the streamed content equals the whole reply; other streams are unchanged (#2049). Thanks to @devopsfortunato.
+
 - GLM tool calls stream their arguments as the model writes them, as Qwen-style XML calls already do, and the joined pieces equal the whole reply's arguments (#2050). Thanks to @devopsfortunato.
 
 - Kolibri-1 on CUDA keeps its full layers' caches in pages of the core KV pool, the same way, with identical tokens when the store is off (#1620, part of #1657). Thanks to @jschmied.
@@ -27,6 +39,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Six host-test steps that had gone red on main pass again: their fixtures follow the code they test, and each fix was checked by planting the original break (#2024). Thanks to @jishnuvenugopal.
 
 - Dory on CUDA takes its RoPE tables from core's exact helper, so they match transformers' words (they moved by up to 5 ulp) (#2035, part of #1852).
+- fabric/mcdma: ConnectX (RoCE v2) links (#1957, step 1 of #1594). Thanks to @ThinkOffApp.
 
 ## 1.2.2
 
@@ -39,6 +52,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the GLM CUDA recipe says what `TF_GLM_CHUNK_SOLO` gains at TP=3 with `TF_GLM_ROCE_MULTI` (a little under half of its gain without it) (#1996). Thanks to @Bizuayeu.
 - DeepSeek-V4.1 on CUDA reads `--prompt-cache-gib` as the kept states' resident limit (0: none kept) unless `TF_DSV41_SESSION_RESIDENT_GIB` is set, which wins; with TP > 1 the variable is still needed on every rank (#1625).
 - DeepSeek-V4.1 on CUDA reads `--prompt-cache-gib` as the kept states' resident limit on every rank (0: none resident in RAM; with `TF_DSV41_SESSION_DISK` an evicted chat is parked on disk): with TP > 1 rank 0 sends its limit to the other ranks at startup. A set `TF_DSV41_SESSION_RESIDENT_GIB` wins on rank 0; set on another rank, it must equal rank 0's limit or every rank refuses to start (#1625).
+- The native HIP engine serves `Qwen/Qwen3-Embedding-8B` as Qwen publishes it (BF16) through `/v1/embeddings` on a Radeon AI PRO R9700 (gfx1201): BF16 dense weights stay BF16 on a new dot2 GEMM tile, inputs of up to 32,768 tokens batch to the same vectors as alone, and `dimensions` takes any MRL width from 32 to 4,096. Every family's `/v1/embeddings` now refuses a whitespace-only text as SGLang does, and names an input longer than the context with its token count (`context_length_exceeded`) before the batch limit; see [the API notes](docs/api.md#embeddings) (#1978, part of #1977). Thanks to @laudney.
+
 - Eight remaining host BF16 roundings in test oracles (GLM's Metal checks and CUDA FP8 KV reference, Nemotron's training scan, LFM2's DSpark taps, Flash Next's HIP kernel tests) and the XPU FP64 GDN reference use core's shared conversion, so a negative NaN gives a NaN instead of overflowing in Debug builds; every other non-NaN input gives the same bits. No kernel or served path changes (part of #1863).
 
 - Living Weights on Qwen4 dense, step 1: the QSA backward pass on the host, checked against a binary64 reference; nothing served changes (#2021, part of #1804).
@@ -259,6 +274,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-Flash-Next on CUDA: a loaded server drops its checkpoint from the page cache. On a GB10, whose GPU memory is the system's, about 36 GiB of cached shards had left under 1 GiB free, and long prompts slowed to about 0.73x from some point in a server's life until a restart; they now hold their speed, with the same tokens (fixes #1868).
 
 - Qwen3.8-Flash-Next on Macs, opt-in: `TENSORFOLD_PREFILL_POLICY=fcfs` serves long prompts that arrive together oldest first, in chunks of `TENSORFOLD_PREFILL_TOKENS` rows (default 2,048) between decode rounds, with the same tokens. With eight 14K-token prompts at once on an M3 Ultra, the last user's first token comes after 93.6 s instead of 326.9 s, and each chunk pauses the streams decoding beside it for about 1.7 s; unset, nothing changes (#1843). Thanks to @ivanfioravanti.
+- GLM-5.3-Flash on CUDA with `TF_GLM_KV_SHARE`: a prompt with images keeps and resumes its prompt state, matched on each image's content, so an agent session that resends a screenshot no longer prefills the whole conversation every turn; a changed image resumes only the text before it (fixes #1828).
 
 - Kernel contract (Metal): the M5's tensor units keep 10 mantissa bits of an fp32 `mma_16x32` operand, cut toward zero. The contract now states that cut for every kernel with an fp32 operand: Gemma 4's, Spark's, Flash Next's, Nemotron's and MiniMax's attention and Nemotron's SSD products. Each has a control that fails without it, and no output changes (#1748, part of #1546). Thanks to @BobClawblaw.
 

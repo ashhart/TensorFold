@@ -110,6 +110,14 @@ pub fn read(a: Allocator, t: anytype, key: []const u8) !Host {
     return types.refuse(key, "no weight format reads this tensor");
 }
 
+/// `read`, keeping a dense tensor stored in BF16 or FP16 in that dtype (every other format reads as `read` does).
+pub fn readStored(a: Allocator, t: anytype, key: []const u8) !Host {
+    inline for (read_order) |f| {
+        if (Module(f).matches(t, key)) return wrap(f, try if (f == .dense) dense.readStored(a, t, key) else Module(f).read(a, t, key));
+    }
+    return types.refuse(key, "no weight format reads this tensor");
+}
+
 /// A fused [embedding | hidden] projection as its two halves along K.
 pub fn halves(a: Allocator, h: Host) ![2]Host {
     switch (h) {
