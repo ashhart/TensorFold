@@ -9,3 +9,7 @@ export fn compiledGlm() usize {
 export fn compiledLfm() usize {
     return @intFromPtr(&tf.lfm2_moe.forward.run);
 }
+
+export fn compiledGlmOpen() usize {
+    return @intFromPtr(&tf.glm.engine.Engine.load);
+}

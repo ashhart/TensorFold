@@ -40,6 +40,14 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     runner.addImport("h3_kernels", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }));
     runner.addAnonymousImport("ling_metal", .{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") });
     runner.addAnonymousImport("ling_route", .{ .root_source_file = b.path("zig/src/families/ling/route.zig") });
+    const ordered_tool = b.addExecutable(.{ .name = "tf-glm-ordered-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_ordered_check.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("build-glm-ordered-check-host", "Build the model-free GLM arithmetic gate without shaders or GPU execution").dependOn(&b.addInstallArtifact(ordered_tool, .{}).step);
     const contract_root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_contract_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "runner", .module = runner }} });
     const contract_object = b.addObject(.{ .name = "gemma4-contract-compile", .root_module = contract_root });
     _ = contract_object.getEmittedBin();

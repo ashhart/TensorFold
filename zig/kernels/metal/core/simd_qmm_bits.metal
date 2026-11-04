@@ -2,8 +2,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// K inputs, N outputs, R rows, OUT's row pitch LD; one is 1.0 read at run time so the compiler can't fold the sums.
-struct TfSqwArgs { int K, N, R, LD; float one; };
+// K inputs, N outputs, R rows, pitches LD and LDX (0: K); one is 1.0 so the compiler cannot fold the sums.
+struct TfSqwArgs { int K, N, R, LD; float one; int LDX; };
 
 // The bf16 at index e (0..7) of 8 packed bf16, as fp32.
 inline float tf_sqw_bf8(uint4 v, int e) {
@@ -68,6 +68,7 @@ template <int BITS, int S, int NT, int RT>
                            uint3 tg [[threadgroup_position_in_grid]]) {
   const int K = a.K, N = a.N, R = a.R, LD = a.LD, G = K / 64, SGS = int(sgs);
   const float one = a.one;
+  const int LDX = a.LDX == 0 ? K : a.LDX;
   const int sg = int(sgi);
   const int qid = int(lane) / 4;
   const int fm = (qid & 4) + ((int(lane) / 2) % 4);
@@ -93,8 +94,8 @@ template <int BITS, int S, int NT, int RT>
       uint4 xa[RT], xb[RT];
       float xs0[RT], xs1[RT];
       for (int rt = 0; rt < RT; rt++) {
-        xa[rt] = X[size_t(xr0[rt]) * (K / 8) + 8 * g + fm];
-        xb[rt] = X[size_t(xr1[rt]) * (K / 8) + 8 * g + fm];
+        xa[rt] = X[size_t(xr0[rt]) * (LDX / 8) + 8 * g + fm];
+        xb[rt] = X[size_t(xr1[rt]) * (LDX / 8) + 8 * g + fm];
         float v = tf_sqw_sum8(xa[rt], one), u = tf_sqw_sum8(xb[rt], one);
         v = fma(simd_shuffle_xor(v, ushort(2)), one, v); u = fma(simd_shuffle_xor(u, ushort(2)), one, u);
         v = fma(simd_shuffle_xor(v, ushort(4)), one, v); u = fma(simd_shuffle_xor(u, ushort(4)), one, u);
@@ -192,6 +193,7 @@ template <int BITS, int S, int NR, int XB, int RS>
   threadgroup float xs[RS * XB * XP];
   const int K = a.K, N = a.N, LD = a.LD, G = K / 64, SGS = int(sgs);
   const float one = a.one;
+  const int LDX = a.LDX == 0 ? K : a.LDX;
   const int tid = int(sgi) * 32 + int(lane);
   const int c = int(lane) % S;
   const int n0 = (int(tg.x) * SGS + int(sgi)) * (SLOTS * NR) + int(lane) / S;
@@ -218,7 +220,7 @@ template <int BITS, int S, int NR, int XB, int RS>
     for (int idx = tid; idx < RS * nbk * 8; idx += SGS * 32) {
       const int r = RS == 1 ? 0 : idx / (nbk * 8);
       const int gl = (RS == 1 ? idx : idx - r * (nbk * 8)) / 8, j = idx % 8;
-      const uint4 v = X[size_t(r) * (K / 8) + 8 * (b0 + gl) + j];
+      const uint4 v = X[size_t(r) * (LDX / 8) + 8 * (b0 + gl) + j];
       threadgroup float* xr = xs + r * (XB * XP) + gl * XP;
       for (int e = 0; e < 8; e++) xr[8 * e + j] = BITS == 4 ? tf_sqw_bf8(v, e) * tf_sqw_pre(e) : BITS == 2 ? tf_sqw_bf8(v, e) * tf_sqw_pre2(e, j & 1) : tf_sqw_bf8(v, e);
       xr[64 + j] = tf_sqw_sum8(v, one);
