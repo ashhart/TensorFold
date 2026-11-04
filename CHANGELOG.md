@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Lane host: the paged KV pool's promises now count in the host's one ledger, with no change in behaviour (#2127). Thanks to @jschmied.
+
 - Qwen3.5 on HIP: the prompt conv writes q, k and v to their own rows, which drops 144 of the 27B's 160 column copies, with the same results (#2117). Thanks to @AbrahamCete.
 
 - README: the GLM-5.3-Flash Jammed XSFP4 row, and shorter FP4 rows that keep their links (#2114). Thanks to @Bizuayeu.
