@@ -18,6 +18,7 @@ pub const mamba = @import("mamba.zig");
 pub const Kind = types.Kind;
 pub const Error = types.Error;
 pub const Tensor = types.Tensor;
+pub const ConvSplit = recurrence.ConvSplit;
 pub const Affine = types.Affine;
 /// The gated norm's gate: SiLU or sigmoid.
 pub const Gate = norms.Gate;

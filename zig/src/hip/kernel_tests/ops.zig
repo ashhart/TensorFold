@@ -493,7 +493,7 @@ test "the linear attention's prompt conv and DeltaNet gates sit within 1e-5 of f
     defer out.free();
     var next = try t.alloc(kept * channels * 4);
     defer next.free();
-    try o.convPrefill(tensor(x, act(t)), at(w), at(state), at(out), at(next), len, channels, kernel);
+    try o.convPrefill(tensor(x, act(t)), at(w), at(state), at(out), at(next), len, channels, kernel, null);
     const count = 9;
     const heads = 32;
     const ha = try gpa.alloc(u16, count * heads);
