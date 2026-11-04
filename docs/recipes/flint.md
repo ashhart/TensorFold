@@ -11,6 +11,10 @@ renormalized) beside an always-on shared expert. Text in, text out, with reasoni
 The engine serves Recursive's own MLX export, `RecursiveSI/flint-int4`: affine 4-bit groups of 64 for the
 projections, the experts and the head, 8-bit for the embedding (22.6 GB on disk, 21.4 GiB resident).
 
+Licenses: Recursive publishes Flint's weights (`RecursiveSI/flint` and `RecursiveSI/flint-int4`) under Apache-2.0.
+The kernels round where Recursive's MLX engine does (`rec_mlx` in `recursive-oss/rec`, release v0.1.0 at e53663b2,
+Apache-2.0).
+
 ```bash
 hf download RecursiveSI/flint-int4 --revision 3b93f9053b530488405ae9fca51d4900d6ce21f0 --local-dir ~/models/flint-int4
 ```
