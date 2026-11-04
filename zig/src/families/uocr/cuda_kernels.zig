@@ -49,6 +49,15 @@ pub const Kernels = struct {
         k.mod.unload();
     }
 
+    /// `name`'s function replaced by `f` (the contract's planted controls run through the same launches).
+    pub fn swap(k: *Kernels, comptime name: []const u8, f: cuda.Function) !void {
+        inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, "tf_uocr_" ++ name)) {
+            k.f[i] = f;
+            return;
+        };
+        @compileError("no kernel tf_uocr_" ++ name);
+    }
+
     fn get(k: *const Kernels, comptime name: []const u8) cuda.Function {
         inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, "tf_uocr_" ++ name)) return k.f[i];
         @compileError("no kernel tf_uocr_" ++ name);
