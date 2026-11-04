@@ -1,6 +1,6 @@
-//! Native dense mixers keep source-derived Metal ceilings and nvcc 13.0 CUDA receipts only on sm_121.
+//! Native dense mixers keep source-derived Metal ceilings and nvcc 13.0 CUDA receipts on all five targets.
 const registry = @import("registry.zig");
-const receipts = @import("measurements/qwen4_130_sm121.zig");
+const receipts = @import("measurements/qwen4_130_all_sms.zig");
 const limits = @import("limits.zig");
 const suffixes = [_][]const u8{ "", "_bad_nan", "_bad_repeat", "_bad_tail", "_bad_sums" };
 pub const cuda = blk: {
