@@ -23,6 +23,7 @@
 - Environment, with the TensorFold commit, Zig and backend toolchain, machine and GPU, checkpoint and revision:
 - Paths and platforms the change reaches, which I ran and which I could not:
 - Exactness, from `tools/bench_concurrent.py --alone --serial` or `token_sha` against `"draft": false`:
+- Main against this branch, same machine and checkpoint, posted before asking for a run on our machines (or why you can't):
 - Decode speed before and after, from `tools/bench_openai.py`:
 - Prompt speed before and after: the cold first request's `ttft_s` from `tools/bench_cache.py --require-cold` on a long prompt, or "n/a" with the reason when the change cannot reach prompt processing:
 - Licence of any new weights or drafter, or "n/a":

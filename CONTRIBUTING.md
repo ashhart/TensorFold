@@ -102,6 +102,10 @@ Record 64k, 128k and the native window separately where the model/platform admit
 Compare against the previous release and the applicable standard server, such as `mlx_lm` or `vLLM`.
 When a difference is only a few percent, alternate before/after runs to separate it from temperature and load changes.
 
+Post main-against-your-branch numbers before asking us for a device run. A change that can reach inference needs them on whatever machine you have, on the same checkpoint and settings, with token hashes equal.
+We repeat a run on our own machines once your numbers are in and the review has no open asks, and we only run what your files can reach. If your numbers show a loss, please fix or explain it first.
+No suitable machine? Say so in the description and we'll work out what we can do; some chips we don't have, and there your numbers are the evidence.
+
 Memory receipts include peak physical process footprint and device/pinned allocations where the backend reports them.
 State the hardware RAM class and context; a budget on a larger host is not a measurement on a smaller machine.
 Use a single model process per test machine, the existing GPU lock and admission guard, and record load/cleanup boundaries.
