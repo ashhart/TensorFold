@@ -35,7 +35,7 @@ pub const takes_drafter = true;
 /// A request's pages hold one more forward past its prompt and reply (TF_QWEN_KV_PAGES).
 pub const window_rows: u32 = pages_mod.window_rows;
 
-/// Kept prompt states for the shared cache (cuda_reuse.zig), in pinned host memory, on the zero-anchored chunk grid.
+/// Kept prompt states for the shared cache (cuda_reuse.zig) on the host budget, on the zero-anchored chunk grid.
 pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
@@ -162,7 +162,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
     l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
-    l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
+    l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen, .device = try ctx.attribute(.integrated) != 0 };
     return .{
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
