@@ -100,7 +100,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held, .reports_fill = true } };
     }
 
     pub const facts = batch_costs.facts;
