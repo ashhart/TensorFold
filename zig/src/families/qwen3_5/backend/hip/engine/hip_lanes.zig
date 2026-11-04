@@ -199,8 +199,9 @@ pub const Hip = struct {
         return &h.e.drawer;
     }
 
-    /// The readouts later streams may ask for.
+    /// The readouts later streams may ask for; one rank only (a follower's final piece projects, `worker.zig`).
     pub fn useReadout(h: *Hip, r: Readout) !void {
+        if (h.e.o.world > 1) return error.ReadoutsNeedOneRank;
         h.readout = r;
     }
 
