@@ -39,9 +39,6 @@ pub const kept = [_]Kept{
         180, 184, 188, 191, 198, 202, 220, 231, 234, 237, 243, 249, 259, 265, 268, 279, 281, 288, 297, 299,
     } },
     .{ .class = "ultra", .why = "reasoning_effort ultra is refused: DeepSeek's endpoint takes it, but no record shows the budget it renders", .efforts = &.{ "ultra" } },
-    .{ .class = "T9", .why = "non-object call arguments: DeepSeek renders one arguments parameter with the raw text", .waits = 2141, .ids = &.{
-        292,
-    } },
     .{ .class = "T6", .why = "effort names: DeepSeek resolves minimal to thinking at 50 and xhigh to 75", .waits = 2141, .efforts = &.{ "minimal", "xhigh" } },
     .{ .class = "T4", .why = "a typed <｜deepseek_image｜> in request text: DeepSeek keeps it as written", .waits = 2141, .ids = &.{
         23, 28, 36, 55, 75, 91, 95, 100, 120, 122, 129, 207, 221, 226, 240, 244, 257, 264, 289, 298,

@@ -28,9 +28,10 @@ pub fn decideOf(srv: *const Server, ids: []const u32) u32 {
 
 pub const isTitle = messages_mod.isTitleRequest;
 
-/// The messages as this server's template reads them, with `media` its engine reads.
+/// The messages as this server's template reads them, with `media` its engine reads (DeepSeek-V4.1's reads arguments).
 pub fn templateMessages(srv: *Server, cx: *Cx, messages: Value, media: messages_mod.Media) errors.Refused!Value {
-    return messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, media));
+    const normalized = try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, media);
+    return if (media.dsv41) normalized else messages_mod.toolArguments(cx, normalized);
 }
 
 /// ``render_prompt_ids``: messages normalized for this template, rendered, and a dangling ``<think>`` closed.

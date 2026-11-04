@@ -276,6 +276,20 @@ fn argumentsOf(a: Allocator, raw: ?Value) Allocator.Error!*json.Object {
     return o;
 }
 
+/// DeepSeek's call arguments: the object a JSON text holds, else one ``arguments`` string with the text as sent.
+fn recipeArguments(a: Allocator, raw: ?Value) Allocator.Error!*json.Object {
+    const v = raw orelse Value.null;
+    if (v == .object) return v.object;
+    const sent = if (v == .string) v.string else try dumps(a, v);
+    switch (try json.parseText(a, sent)) {
+        .ok => |x| if (x == .object) return x.object,
+        .err => {},
+    }
+    const o = try json.newObject(a);
+    try o.put(a, "arguments", .{ .string = sent });
+    return o;
+}
+
 fn renderCalls(r: *R, calls: []const Value, recipe: bool) Error!void {
     try r.put("\n\n" ++ CALLS_OPEN ++ "\n");
     for (calls, 0..) |c, i| {
@@ -288,7 +302,7 @@ fn renderCalls(r: *R, calls: []const Value, recipe: bool) Error!void {
         try r.put("<" ++ DSML ++ " invoke name=\"");
         try r.request(name);
         try r.put("\">\n");
-        const args = try argumentsOf(r.a, fnv.get("arguments"));
+        const args = if (recipe) try recipeArguments(r.a, fnv.get("arguments")) else try argumentsOf(r.a, fnv.get("arguments"));
         for (args.keys(), args.values(), 0..) |k, v, j| {
             if (j > 0) try r.put("\n");
             try r.put("<" ++ DSML ++ " parameter name=\"");
