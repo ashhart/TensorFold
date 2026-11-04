@@ -60,6 +60,7 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-model-discovery-host", "Loaded context and reasoning offers for each model discovery entry").dependOn(&models.step);
     b.step("test-decision-context-host", "Decision context classification through actual HTTP errors").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: decision context", "prompt past the context", "System One" } })).step);
     b.step("test-capability-env-host", "Environment discovery subset and complete profile registry").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:" } })).step);
+    b.step("test-model-idle-host", "Model discovery and idle reload snapshots without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery waits", "idle", "model discovery" } })).step);
     const drafts = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"draft sources:"} }));
     b.step("test-draft-line-host", "Serving line draft provenance without devices").dependOn(&drafts.step);
     all.dependOn(&drafts.step);
