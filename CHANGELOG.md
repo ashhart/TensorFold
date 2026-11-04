@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- README: the GLM-5.3-Flash Jammed XSFP4 row, and shorter FP4 rows that keep their links (#2114). Thanks to @Bizuayeu.
+
 - Tests: the Qwen27 lanes' facts read a dense model's config, so `test-native` no longer crashes (#2122). Thanks to @BobClawblaw.
 
 - `tools/bench_fill.py` measures a long prompt filling beside a running reply, in both arrival orders, against each run alone, with every reply checked against its run alone (#2154).
