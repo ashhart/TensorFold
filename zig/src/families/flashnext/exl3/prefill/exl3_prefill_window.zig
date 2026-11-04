@@ -1,6 +1,12 @@
 const std = @import("std");
 
 pub const max_rows = 4096;
+pub const graph_entries = 112;
+
+pub fn graphBytes(exec: u64, template: u64, transient: u64) !u64 {
+    const retained = try std.math.mul(u64, graph_entries * 2, try std.math.add(u64, exec, template));
+    return std.math.add(u64, retained, try std.math.mul(u64, 2, transient));
+}
 
 pub fn enabled(value: ?[]const u8) bool {
     return if (value) |text| std.mem.eql(u8, text, "1") else false;
@@ -93,4 +99,6 @@ test "exl3: two chunk admission protects all existing reservations and rejects o
     try std.testing.expect(!admits(100, 101, 1));
     try std.testing.expect(!admits(100, 0, 0));
     try std.testing.expect(!admits(std.math.maxInt(u64), std.math.maxInt(u64), 1));
+    try std.testing.expectEqual(@as(u64, 288 << 20), try graphBytes(1 << 20, 0, 32 << 20));
+    try std.testing.expectError(error.Overflow, graphBytes(std.math.maxInt(u64), 0, 0));
 }
