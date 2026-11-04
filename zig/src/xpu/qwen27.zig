@@ -7,6 +7,7 @@ const fwd = @import("forward.zig");
 const loader = @import("load.zig");
 const multi = @import("runner_multi.zig");
 const slot_states = @import("slot_states.zig");
+const shape = @import("qwen27_config.zig");
 pub const limits = @import("limits.zig");
 const Prof = dev.Prof;
 const a8 = fwd.a8;
@@ -37,11 +38,11 @@ pub const Mode = fwd.Mode;
 
 pub const alloc = std.heap.c_allocator;
 
-// Qwen3.8-27B shape (checked against config.json at load).
-pub const D = 5120;
-pub const FF = 17408;
-pub const LAYERS = 64;
-pub const VOCAB = 248320;
+// Qwen3.8-27B shape and layer pattern, checked against config.json at load (qwen27_config.zig).
+pub const D = shape.hidden;
+pub const FF = shape.intermediate;
+pub const LAYERS = shape.layers;
+pub const VOCAB = shape.vocab;
 pub const MASK_WORDS = (VOCAB + 31) / 32; // a grammar row's bits (structured output), one a token
 /// The layers' quantization group (64: MLX affine, 128: GPTQ), set at load; the head and the drafter keep 64.
 pub var GS: u32 = 64;
@@ -71,9 +72,7 @@ pub const STASH = ST_P + 16 * GDN_IN * 2;
 /// Target layers whose hidden states feed the DFlash2 drafter (its config's target_layer_ids).
 pub const TAP_LAYERS = [5]usize{ 5, 19, 33, 47, 61 };
 
-pub fn isAttention(i: usize) bool {
-    return (i + 1) % 4 == 0;
-}
+pub const isAttention = shape.isAttention;
 
 /// XPU_DUMP=DIR: the first forward writes x (fp32 [T, D]) after each of the first four layers, for comparison.
 pub var dump_dir: ?[]const u8 = null;
@@ -195,6 +194,7 @@ pub const Runner = struct {
         if (std.c.getenv("XPU_DUMP_H")) |v| dump_h = open(v, 0o2101, @as(c_uint, 0o644)); // append
         if (std.c.getenv("XPU_CHUNK")) |v| CHUNK = try limits.chunk(std.mem.span(v));
         MAX_CTX = try limits.context(context);
+        try shape.admit(alloc, dir);
         {
             const marker = try std.fmt.allocPrintSentinel(alloc, "{s}/hadamard128", .{dir}, 0);
             defer alloc.free(marker);
