@@ -112,9 +112,19 @@ instead of a refusal looks like.
 | --- | --- | --- | --- |
 | No vector | 30/30 | 0/30 | 60/60 |
 | Vector at strength 1e-6 | 30/30 | 0/30 | 60/60 |
-| Our vector, last-row capture, layers 10-58, strength 1.0 | see the receipt | | |
+| Our vector, last-row capture, layers 10-58, strength 1.0 | 15/30 | 1/30 | 60/60 |
+| Our vector, last-row capture, layers 10-58, strength 1.25 | 21/30 | 6/30 | 60/60 |
 
 A strength of 1e-6 reproduces the baseline: the path is a no-op at zero.
+
+At strength 1.0 the vector halves the refusal rate and costs one benign refusal
+in thirty. The refusals it leaves are the ones a refusal direction does not
+carry: the question asked for a weapon and the model answered anyway.
+
+Past 1.0 the strength stops paying. At 1.25 the refusal rate climbs again and
+the benign refusals with it: the stream is losing more than the direction it
+was asked to lose, and the model starts refusing things it had agreed to. Read
+the replies, not the rate.
 
 The vector's strength has a ceiling. Past it the model stops answering: the
 residual stream loses more than the direction it was asked to lose. Take the
