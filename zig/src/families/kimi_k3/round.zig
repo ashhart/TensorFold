@@ -109,6 +109,7 @@ pub const Scratch = struct {
         var first: u32 = 0;
         for (segs, 0..) |g, j| {
             const st = state.streams[g.slot];
+            try state.cfg.checkEnd(st.pos, g.rows);
             if (!g.commit and g.rows > state.limits.log_rows) return error.WindowTooLarge;
             if (st.pos + g.rows > state.limits.max_ctx) return error.ContextFull;
             ks[j] = .{ .first = first, .rows = g.rows, .kept = st.kept, .flags = if (g.commit) kernels.seg_commit else 0, .slot = g.slot };

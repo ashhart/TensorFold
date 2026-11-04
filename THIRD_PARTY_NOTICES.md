@@ -1,5 +1,15 @@
 # Third-party notices
 
+## Kimi K3.1-Pro release fixtures
+
+The K3/K3.1 configuration fixtures in `zig/src/families/kimi_k3/fixtures/`
+come from Moonshot AI's model releases. The K3.1-Pro revision is
+`6d0a0202956796543364d666ab19c6ad1a494ee1`, Copyright (c) 2026 Moonshot AI.
+They retain the Kimi K3.1-Pro License in
+[`LICENSES/Kimi-K3.1-Pro.txt`](LICENSES/Kimi-K3.1-Pro.txt).
+This is the model's release license, including its additional conditions,
+not the TensorFold Apache-2.0 license.
+
 The GLM-OCR HIP operators in `zig/kernels/hip/glm_ocr/pointwise.hip`
 adapt reduction ordering and vectorized LayerNorm statistics from PyTorch
 revision `8514f05`, `aten/src/ATen/native/cuda/Reduce.cuh` and

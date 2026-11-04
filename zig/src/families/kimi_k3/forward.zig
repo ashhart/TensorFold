@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const weights = @import("weights.zig");
 const layer = @import("layer.zig");
 const Tensor = @import("store.zig").Tensor;
+const kernels = @import("kernels.zig");
 
 /// Layers whose output (the residual block's prefix sum) a drafter reads, one bf16 plane of rows each.
 pub const Taps = struct {
@@ -27,6 +28,7 @@ pub const Stage = struct {
     /// The round's rows through this stage; a later stage takes over prefix, delta and the block planes.
     pub fn encode(s: Stage, x: layer.Ctx, e: mtl.ComputeEncoder, taps: ?Taps) !void {
         const sc = x.sc;
+        if (x.c.dsa != null) for (sc.mrows.slice(kernels.MlaRow, sc.rows)) |r| try x.c.checkEnd(r.pos, 1);
         if (s.first == 0) x.k.embedRows(e, sc.ref("ids"), (s.embed orelse return error.NoEmbedding).ref, sc.ref("prefix"), sc.rows, x.c.hidden);
         for (s.first..s.last) |li| {
             const i: u32 = @intCast(li);
