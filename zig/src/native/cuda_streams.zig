@@ -31,13 +31,24 @@ pub const Budget = struct {
 /// The streams served, and the page plan and layout or the KV ledger plan when the family has one.
 pub const Count = struct { streams: u32, paged: ?kv_pages.Plan, layout: ?kv_pool.Layout, ledger: ?ledger.Plan = null };
 
+/// TF_KV_SHARE: the cache's part made pool pages, all of it unless the family keeps its states' rest elsewhere (GLM).
+pub fn keptPpm(comptime F: type, share: bool) u32 {
+    if (!share) return 0;
+    return if (@hasDecl(F, "share_kept_ppm")) F.share_kept_ppm else 1_000_000;
+}
+
+/// TF_KV_SHARE's store opens over a cache to make pages of, or for a family keeping its own copies (GLM) at any cache.
+pub fn opensStore(comptime F: type, share: bool, cache: u64) bool {
+    return share and (cache > 0 or keptPpm(F, true) == 0);
+}
+
 /// The family's streams in `b.room`; null with `problem` set when none fit or --parallel asks for more than fit.
 pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Budget, problem: *[]const u8) !?Count {
     const free = loaded.free_streams;
     const grow = budget.growRoom(b.room, !@hasField(F.Options, "lanes"));
     const wrapped = kv_pages.wrapped(F, loaded, free, b.stream_bytes, b.room);
     if (wrapped.layout) |l| {
-        const paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), if (b.share) 1_000_000 else 0) orelse return null;
+        const paged = try kv_pages.plan(F, a, l, wrapped.room, o, @intCast(b.window), problem, b.host_cache, kv_pages.enginePaged(loaded), keptPpm(F, b.share)) orelse return null;
         return .{ .streams = paged.lanes, .paged = paged, .layout = l };
     }
     // --parallel caps the streams; each request reserves its own bytes (a family that allocates per request)
@@ -71,4 +82,16 @@ pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Bu
         return null;
     };
     return .{ .streams = streams, .paged = null, .layout = null };
+}
+
+test "TF_KV_SHARE makes the whole cache pool pages and opens on a cache, unless the family keeps copies (GLM)" {
+    const Paged = struct {};
+    const Copies = struct {
+        pub const share_kept_ppm: u32 = 0;
+    };
+    try std.testing.expectEqual(@as(u32, 1_000_000), keptPpm(Paged, true));
+    try std.testing.expectEqual(@as(u32, 0), keptPpm(Copies, true));
+    try std.testing.expectEqual(@as(u32, 0), keptPpm(Paged, false));
+    try std.testing.expect(opensStore(Paged, true, 1) and !opensStore(Paged, true, 0) and !opensStore(Paged, false, 1));
+    try std.testing.expect(opensStore(Copies, true, 0) and !opensStore(Copies, false, 0));
 }

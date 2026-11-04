@@ -355,6 +355,7 @@ pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, taken: u64,
 
 test {
     _ = @import("cuda_cache_capacity_test.zig");
+    _ = @import("cuda_streams.zig");
 }
 
 test "KV admission: a refusal prices the running states beside the fixed part and KV page" {
