@@ -102,9 +102,9 @@ Record 64k, 128k and the native window separately where the model/platform admit
 Compare against the previous release and the applicable standard server, such as `mlx_lm` or `vLLM`.
 When a difference is only a few percent, alternate before/after runs to separate it from temperature and load changes.
 
-Post main-against-your-branch numbers before asking us for a device run. A change that can reach inference needs them on whatever machine you have, on the same checkpoint and settings, with token hashes equal.
-We repeat a run on our own machines once your numbers are in and the review has no open asks, and we only run what your files can reach. If your numbers show a loss, please fix or explain it first.
-No suitable machine? Say so in the description and we'll work out what we can do; some chips we don't have, and there your numbers are the evidence.
+Before asking us for a run on our machines, please post main-against-your-branch numbers if your change can reach inference (model and kernel code, the server's prompt and sampling code, build flags): same machine, checkpoint and settings, with token hashes equal on the default path. An opt-in that changes tokens says so and shows its proof.
+Once your numbers are in and there are no requested changes left, we repeat what your files can reach, where we have the hardware and checkpoint to do it. If your numbers show a loss, please fix it or show it's noise first.
+No machine to run on? Say so in the description: we review every PR either way, and we'll work out what we can do. If you have a chip we don't, your numbers are the evidence, so please post them.
 
 Memory receipts include peak physical process footprint and device/pinned allocations where the backend reports them.
 State the hardware RAM class and context; a budget on a larger host is not a measurement on a smaller machine.
