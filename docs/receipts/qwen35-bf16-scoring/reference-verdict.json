@@ -1,0 +1,45 @@
+{
+  "status": "failed",
+  "scope": "captured native rows, not a direct HTTP prompt-score comparison",
+  "policy": "both reference directions reported; maintainer acceptance remains outstanding",
+  "allowance": "existing native FP64 head box plus recorded subtraction slack; no hidden-state term",
+  "rows": 18,
+  "numerical_bound_passed": true,
+  "fp32_envelope_failures": 3,
+  "bf16_envelope_failures": 1,
+  "outside_rows": [
+    {
+      "capture": 10,
+      "phase": "prompt",
+      "fixture": 3,
+      "position": 255,
+      "native_to_fp32": 2.3814449310302734,
+      "bf16_to_fp32": 1.5509891510009766,
+      "existing_head_rounding_allowance": 0.0005161204072910023,
+      "fp32_envelope_passed": false,
+      "bf16_envelope_passed": true
+    },
+    {
+      "capture": 10,
+      "phase": "prompt",
+      "fixture": 3,
+      "position": 256,
+      "native_to_fp32": 0.00258636474609375,
+      "bf16_to_fp32": 0.00043487548828125,
+      "existing_head_rounding_allowance": 0.0005714825015808292,
+      "fp32_envelope_passed": false,
+      "bf16_envelope_passed": false
+    },
+    {
+      "capture": 13,
+      "phase": "decode",
+      "fixture": 3,
+      "position": 260,
+      "native_to_fp32": 0.0077800750732421875,
+      "bf16_to_fp32": 0.005237579345703125,
+      "existing_head_rounding_allowance": 0.000552657729442496,
+      "fp32_envelope_passed": false,
+      "bf16_envelope_passed": true
+    }
+  ]
+}

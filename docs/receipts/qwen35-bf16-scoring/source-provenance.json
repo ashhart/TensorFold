@@ -1,0 +1,13 @@
+{
+  "qualified_native_build": "327ef639fb7dbc355f44b4a5efc53209a3e06543",
+  "qualified_contract_source": "5332d97eb387af7e1a10433d77ee032a86bc631a",
+  "original_receipt_publication": "b651e8b411d62ece1d25fd33d4bbbc6edcbb6075",
+  "reviewed_rebased_head": "54f9459411254a7b04ca8efb8f90166b53bd9738",
+  "rebased_id_to_original_evidence_id": {
+    "612bca872b70461787e6d74480454391cb1dc4a2": "5332d97eb387af7e1a10433d77ee032a86bc631a",
+    "c5a3feefaa24315dd55600ff1490c10c5fb27036": "b0b5beb8db0856091798123cf62dcdfaec1e0445",
+    "ddb1f831724940801b7766a170c266a958141b18": "327ef639fb7dbc355f44b4a5efc53209a3e06543",
+    "43776dc9bee25be15187aef84a8205871dbcef5b": "284339b080b3af960822458158ab69a7bbaf6bd7"
+  },
+  "scope": "Rebased history does not rewrite measured binaries, test executions or hosted CI identities. Current rebased native build/device qualification is not established by the historical receipts. This follow-up changes only finite reference clients and documentation."
+}

@@ -1,7 +1,8 @@
 # Dense BF16 Qwen3.5 prompt-score qualification
 
-Draft qualification for #1136 and PR #2020. Native correctness, API, reference,
-retention and observed-cancellation checks passed for the configurations below.
+Draft qualification for #1136 and PR #2020. Historical native API, score-head
+reference, retention and observed-cancellation checks passed as scoped below.
+The Transformers BF16-distance comparison remains failed.
 The complete CUDA contract exits 1 with 342 launch-limit problems. BF16 prefill
 and four-stream throughput are substantially slower than the standard server.
 This receipt does not establish a performance-qualified serving format.
@@ -9,9 +10,11 @@ This receipt does not establish a performance-qualified serving format.
 ## Source and environment
 
 [manifest.json](manifest.json) identifies the source, stacked parent, native
-binary and artifact hashes. Production inference/kernel trees are unchanged
-from the build at `ddb1f831`; the final strict contract source is `612bca87`.
-Later changes add documentation, reports and finite qualification clients.
+binary and artifact hashes. These measurements bind the original build at
+`327ef639` and strict contract source at `5332d97e`.
+[Source provenance](source-provenance.json) distinguishes these actual tested
+identities from later rebased ancestry. The historical GPU results do not
+qualify a new native build from the rebased head.
 
 One NVIDIA RTX PRO 6000 Blackwell Max-Q workstation GPU, sm_120, rank 1,
 96 GB class and 300 W limit; Linux x86_64, driver 615.78.08, Zig 0.17.0,
@@ -33,10 +36,9 @@ unqualified here. Compiled five-SM images are not execution receipts for those c
 ## Dumps kept out of the tree
 
 The per-request dumps and the complete CUDA contract log are kept out of the
-tree; the files tracked here are summaries. I do not publish them: they are kept
-private with the author, and [asset.json](asset.json) pins every removed file's
-sha256 and byte count, and every member of the dumps tarball, so the tracked
-receipts stay auditable against what was removed.
+tree; [asset.json](asset.json) links their immutable public evidence assets and
+pins every file hash, byte count and archive member hash. The checkpoint and
+fixtures are public. Personal/infrastructure metadata was reviewed before upload.
 
 | file | sha256 | bytes |
 | --- | --- | ---: |
@@ -72,6 +74,16 @@ See the [recipe](../../recipes/qwen35-bf16-scoring.md) for capture/build command
 
 ## Independent transformers forward
 
+**Qualification remains failed.** The original experiment completed, but its
+measured BF16-distance envelope does not pass.
+[reference-verdict.json](reference-verdict.json) reports three rows outside the
+FP32-reference envelope and one outside the BF16-reference envelope, even with
+the existing native-head rounding allowance. The broader hidden-distance bound
+is a numerical diagnostic and does not replace this acceptance comparison.
+These are captured native rows, not a direct HTTP prompt-score comparison.
+The 4097-token fixture has no FP32 arm. Maintainer acceptance remains outstanding.
+
+
 [tools/zig/qwen35_transformers_reference.py](../../../tools/zig/qwen35_transformers_reference.py)
 runs the pinned checkpoint on CPU in two arms with the same token ids: the
 stored-BF16 model, and the same model with every decoder layer's stored
@@ -80,7 +92,7 @@ log are kept out of the tree with the dumps (their sha256 are in
 [asset.json](asset.json)); [transformers-comparison.json](transformers-comparison.json)
 is the tracked summary and holds the tables below. The script reads the pinned
 checkpoint, the tracked [fixtures.json](fixtures.json) and [api.json](api.json)
-receipts, a private FP64 reference record and the private capture tree; the
+receipts, an FP64 reference record and the finite native capture tree; the
 summary withholds the host name and every absolute runner path.
 
 Conditions: CPU only (`cuda_available: false`; no GPU was used), python 3.12.3,
@@ -332,10 +344,28 @@ are unchanged apart from appending the four new records.
 6870 tests with 46 skips; the final strict-fixture rerun passes with cached
 results distinguished. Plain build passes, lean has 424 inherited/zero new
 findings, and all six hosted no-GPU jobs plus format passed on `75843aed`.
-Publication-head CI is tracked separately on the PR.
+Historical hosted passes retain their actual original commit IDs. Both workflows
+on rebased head `54f94594` were cancelled. Publication-head CI is tracked on the PR.
 [Overlap evidence](overlap.json) retains newly reported conflicts inherited
 from the declared parent; ATC coverage is incomplete. Landing order needs
 maintainer coordination. The pinned main merge-tree check is clean.
+
+## Follow-up validation
+
+[followup-checks.json](followup-checks.json) records seven verdict/privacy tests
+on Python 3.11/3.14 and Linux Python 3.12, unchanged non-CLI executable ASTs,
+CPU head-byte/FP64-profile equality, and zero new lean problems (473 → 430).
+The forward tool now exits nonzero when the measured envelope fails, and its
+JSON output removes host names, local input paths and raw command-line paths.
+`complete` means the experiment completed; `qualification.status` is separate.
+The standalone verdict client can check the recorded result without weights:
+
+```sh
+python3 tools/zig/qwen35_reference_verdict.py docs/receipts/qwen35-bf16-scoring/transformers-comparison.json
+python3 tools/zig/test_qwen35_reference_verdict.py
+```
+
+The first command intentionally exits 1 for this failed comparison.
 
 ## Reproduce the finite clients
 

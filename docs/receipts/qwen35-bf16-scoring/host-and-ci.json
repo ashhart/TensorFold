@@ -1,6 +1,6 @@
 {
   "zig": "0.17.0",
-  "source_commit": "612bca872b70461787e6d74480454391cb1dc4a2",
+  "source_commit": "5332d97eb387af7e1a10433d77ee032a86bc631a",
   "full_unprivileged_linux_host": {
     "steps_pass": 551,
     "steps_total": 551,
@@ -27,7 +27,7 @@
     "new": 0
   },
   "hosted_ci": {
-    "head": "43776dc9bee25be15187aef84a8205871dbcef5b",
+    "head": "284339b080b3af960822458158ab69a7bbaf6bd7",
     "no_gpu_run": 41630994602,
     "no_gpu_jobs_pass": 6,
     "format_run": 41630994734,
@@ -42,5 +42,12 @@
     "linux_python": "3.14",
     "status": "passed"
   },
-  "scope": "production inference and kernel trees unchanged by receipt-only additions"
+  "scope": "production inference and kernel trees unchanged by receipt-only additions",
+  "publication_review": {
+    "head": "54f9459411254a7b04ca8efb8f90166b53bd9738",
+    "format_run": 41764090357,
+    "no_gpu_run": 41764090345,
+    "status": "both cancelled; not a hosted pass",
+    "scope": "Original successful runs above retain their original tested commit IDs."
+  }
 }

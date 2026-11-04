@@ -1,7 +1,7 @@
 {
   "schema": 2,
-  "kind": "qwen35-bf16-scoring-kept-out-of-tree",
-  "publication": "kept private by the author; not published",
+  "kind": "qwen35-bf16-scoring-linked-public-evidence",
+  "publication": "published: public-checkpoint evidence, with identifying metadata excluded",
   "files": {
     "qwen35-bf16-scoring-dumps-20261103.tar.gz": {
       "sha256": "d8f5763c8130ac5326ab5eb166999b3265152a897c731f4ed70768b5f64a29b7",
@@ -29,23 +29,35 @@
         "attempts/raw-edited-ids.json": "79504fb54462168e9d7b3d69548b02d299e822268ae940853d6e085f85cd8ada",
         "attempts/raw-no-history-edited.json": "3e7c6764d24070d3c569d719efce264341e2518ab2c1342772d436ea0ca1af2b",
         "attempts/raw-no-history-original.json": "d37135a6b3bc9036d7a5f2600306180933419ffba5b8b8de554534439c437932"
-      }
+      },
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/qwen35-bf16-scoring-dumps-20261103.tar.gz"
     },
     "qwen35-transformers-prompt-scores-20261103.json": {
       "sha256": "423d2d653a5e0c900ceca2e4f4d6fcbfe982f6c7a2e8a22f9a9ccb290f48a194",
-      "bytes": 5367360
+      "bytes": 5367360,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/qwen35-transformers-prompt-scores-20261103.json"
     },
     "qwen35-transformers-run-20261103.log": {
       "sha256": "6c826b51cc1725422d83cfb9a501a5264739eae1d3da5092490d50d61c67ea73",
-      "bytes": 4128
+      "bytes": 4128,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/qwen35-transformers-run-20261103.log"
     }
   },
   "publication_transforms": [
     "The transformers payload host field is redacted; all other environment identities are as recorded."
   ],
   "notes": [
-    "Every file here was removed from the tree in the revision that added this file; each sha256 and byte count is from its bytes at that commit.",
-    "The dumps tarball's member checksums are the pre-removal manifest entries for the 21 removed files; they are recorded here so a rebuild can be verified.",
-    "The transformers payload's host field is redacted; the full payload and run log are reproducible with tools/zig/qwen35_transformers_reference.py on the pinned checkpoint."
-  ]
+    "Every linked asset is pinned to an immutable fork commit. Source PR retains summaries only.",
+    "The original experiment completed; the measured BF16-distance qualification remains failed.",
+    "The broader hidden-distance diagnostic does not replace the requested comparison.",
+    "The original host field is redacted. Recorded paths use generic container mounts."
+  ],
+  "repository": "akol1/TensorFold",
+  "commit": "9d07324dc7920fcff03152ff48c8fcc0e408a425",
+  "checksum_url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/SHA256SUMS",
+  "privacy_review": {
+    "payload_files_reviewed": 23,
+    "scope": "All 21 archive members plus full Transformers payload and run log; JSON identifying fields and complete logs inspected. No personal emails, private user paths, internal hosts, IP/MAC addresses, credentials or client identifiers found. Generic container mount paths and public checkpoint metadata retained.",
+    "hashes": "published bytes match the recorded pre-publication hashes"
+  }
 }
