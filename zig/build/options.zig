@@ -10,6 +10,7 @@ pub const Cuda = struct {
     test_dump: bool,
     contract_controls: ?[]const u8,
     cuobjdump: ?[]const u8,
+    native_fp_decode: bool,
     flashnext_model: ?[]const u8,
     flashnext_kernels: ?[]const u8,
     flashnext_token: []const u8,
@@ -21,6 +22,7 @@ pub const Cuda = struct {
 /// The CUDA options for every target: a script that passes them where no CUDA step runs is not refused.
 pub fn cuda(b: *std.Build) Cuda {
     const sm_help = "SASS targets, comma separated (default 121; 80, 86, 89, 120 and 121 build)";
+    const native_help = "prompt16 FP4 and fp8_experts prompt tiles decode natively (PTX ISA 9.2: nvcc 13.2+, sm_120a+)";
     const strip_help = "No debug info in the CUDA executables: no build machine paths leave with them";
     return .{
         .nvcc = b.option([]const u8, "nvcc", "nvcc (or a wrapper) that builds the CUDA kernel fatbins"),
@@ -30,6 +32,7 @@ pub fn cuda(b: *std.Build) Cuda {
         .test_dump = b.option(bool, "cuda-test-dump", "Compile test-only CUDA byte records") orelse false,
         .contract_controls = b.option([]const u8, "contract-controls", "Compile-only controls image"),
         .cuobjdump = b.option([]const u8, "cuobjdump", "CUDA cuobjdump for the compiler's x3ld symbol gate"),
+        .native_fp_decode = b.option(bool, "native-fp-decode", native_help) orelse false,
         .flashnext_model = b.option([]const u8, "flashnext_model", "Flash Next checkpoint directory for the embedding check"),
         .flashnext_kernels = b.option([]const u8, "flashnext_kernels", "captured Triton pack for the embedding check"),
         .flashnext_token = b.option([]const u8, "flashnext_token", "token id for the embedding check") orelse "7",
