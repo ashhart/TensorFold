@@ -562,6 +562,7 @@ test {
     _ = @import("cuda_health_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");
+    _ = @import("uocr_cuda.zig");
     _ = kv_pages;
     _ = drafted;
     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
