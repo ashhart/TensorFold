@@ -1,7 +1,7 @@
 //! One constrained job on the ordinary shared lane host, joined before its borrowed backend or request can leave.
 const std = @import("std");
 const api = @import("engine_api");
-const lanes = @import("lanes");
+const lanes = @import("tensorfold").lanes;
 
 pub const Hooks = struct {
     sink: api.Sink,
