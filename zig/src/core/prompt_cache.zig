@@ -89,7 +89,7 @@ pub const Entry = struct {
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
-    intermediate: bool = false, // a ladder checkpoint under the history: kept across append turns, never superseded
+    intermediate: bool = false, // any kept state at a ladder position: retained across append turns, never superseded
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
     ext: std.ArrayList(*Entry) = .empty, // entries extending its tokens, born later (policy.link): `extended` reads them

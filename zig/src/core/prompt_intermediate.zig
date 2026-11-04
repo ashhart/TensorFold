@@ -2,6 +2,7 @@
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const modes = @import("cache_modes.zig");
+const interior = @import("prompt_interior.zig");
 const Allocator = std.mem.Allocator;
 
 /// Whether `at` belongs to the ladder: a power-of-two multiple of its spacing, under the prompt's history.
@@ -63,7 +64,7 @@ pub fn add(
     var slots: usize = required.items.len;
     for (required.items) |p| {
         var bytes = s.family.vtable.bytes(s.family.ptr, p);
-        for (s.entries.items) |e| if (same(e, prompt, p, s.rules.lookahead, spans)) {
+        for (s.entries.items) |e| if (interior.same(s, e, prompt, p, s.rules.lookahead, spans)) {
             bytes = @max(bytes, e.bytes);
             break;
         };
@@ -72,7 +73,7 @@ pub fn add(
     // Other in-flight restores cannot be evicted. The current restore has not been borrowed by lookup yet.
     for (s.entries.items) |e| if (e.borrowers > 0 or e == restored) {
         const included = for (required.items) |p| {
-            if (same(e, prompt, p, s.rules.lookahead, spans)) break true;
+            if (interior.same(s, e, prompt, p, s.rules.lookahead, spans)) break true;
         } else false;
         if (!included) {
             used +|= e.bytes;
@@ -100,10 +101,4 @@ pub fn add(
     const kept = try out.toOwnedSlice(a);
     a.free(marks);
     return kept;
-}
-
-fn same(e: *const pc.Entry, prompt: []const u32, at: u32, lookahead: u32, spans: []const modes.Span) bool {
-    return !e.expired and e.at == at and e.tokens.len == @as(usize, at) + lookahead and
-        e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and
-        modes.equal(e.decode_spans, spans, at);
 }
