@@ -16,11 +16,11 @@ struct Stack {
     }
 };
 // PAGED: POOLED is the arena's slot in page 0, a block's row in its page (fn_attn's Pg): one lookup a thread.
-template <int R, int HI, bool PAGED>
+template <int R, int HI, bool PAGED, typename G>
 __device__ __forceinline__ void scores_body(const __nv_bfloat16* __restrict__ IQ,
                                             const __nv_bfloat16* __restrict__ POOLED, const int* __restrict__ POS0,
                                             float* __restrict__ SC, int NB, int RATIO, int TOP, int rows,
-                                            const Pg& pg) {
+                                            const G& pg) {
     __shared__ float4 qs[R][HI][DI / 4];
     const int r0 = blockIdx.x * R, b = blockIdx.y * 256 + threadIdx.x;
     const int pos0 = POS0[0];
@@ -36,7 +36,7 @@ __device__ __forceinline__ void scores_body(const __nv_bfloat16* __restrict__ IQ
     __syncthreads();
     if (b >= cmax) return;
     Stack st[R][HI];
-    const __nv_bfloat16* kb = POOLED + (PAGED ? page_row(pg, b, pg.ptok / RATIO, DI) : static_cast<long long>(b) * DI);
+    const __nv_bfloat16* kb = POOLED + (PAGED ? ix_row(pg, b, pg.ptok / RATIO, DI) : static_cast<long long>(b) * DI);
 #pragma unroll
     for (int half = 0; half < 2; ++half) {
         float k[16][4];                                   // the 16 lanes l (bit 0 == half) a half's leaves read
