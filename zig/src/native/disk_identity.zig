@@ -93,3 +93,15 @@ fn field(h: *std.hash.Wyhash, bytes: []const u8) void {
     h.update(&len);
     h.update(bytes);
 }
+
+/// A persisted serving namespace extends its probe identity with the checkpoint at the current open.
+pub fn scoped(a: Allocator, io: std.Io, dir: []const u8, legacy: u64) !u64 {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var h = std.hash.Wyhash.init(0x70657273);
+    h.update("kept-checkpoint-v1");
+    h.update(std.mem.asBytes(&legacy));
+    try checkpoint(&h, arena.allocator(), io, dir);
+    try @import("sys").file_identity.current(&h, arena.allocator(), io);
+    return h.final();
+}
