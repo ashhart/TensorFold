@@ -419,8 +419,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const eos_policy = b.step("test-eos-policy-host", "Shared EOS, real HfText and HTTP policy without a GPU");
     eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"EOS policy:"} })).step);
     eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.tokenizer, .filters = &.{"EOS policy:"} })).step);
-    const eos_family = kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes);
-    eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = eos_family, .filters = &.{"EOS policy:"} })).step);
+    eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), .filters = &.{"EOS policy:"} })).step);
     b.step("test-dory-cli-host", "Dory CUDA loop option forwarding and invalid-value refusals").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"--device and --segments:"} })).step);
     b.step("test-dory-chat-host", "Dory chat template, EOS, reasoning split and qwen3_coder call on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Dory chat:"} })).step);
     b.step("test-embeddings-protocol-host", "Embedding request and response contracts without an admitted model or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"embeddings protocol:"} })).step);
