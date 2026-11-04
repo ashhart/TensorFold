@@ -134,6 +134,19 @@ See [image input](vision.md) for data URLs, public image URLs, limits and cache 
 The native binary refuses `--vision` for other models and answers their image parts with HTTP 400.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
+## Model capabilities
+
+Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
+It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
+thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
+warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
+embeddings, readouts and rerank fields report whether that user feature is present. Every field is a JSON boolean,
+including false, and no callback details or addresses are exposed.
+
+Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
+Flags describe the engine; request combinations, context, template and format constraints still apply.
+greedy_only and plain_only describe restrictions, and context_fitted says the context was limited to memory.
+
 ## Decisions
 
 `POST /v1/decisions` is served by Flash Next on one CUDA GPU, by LFM2 on CUDA and by Gemma 4 on XPU.

@@ -73,6 +73,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-effort-discovery-host", "Effective reasoning defaults and template effort discovery").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery", "model discovery", "effort" } })).step);
     const phases = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "queue phase", "render exposes", "render counts", "metrics name" } }));
     b.step("test-phase-metrics-host", "Off-by-default queue phase rendering and existing metric families").dependOn(&phases.step);
+    const offers = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "model discovery", "engine capability reader:" } }));
+    b.step("test-model-capabilities-host", "Per-model offers agree with the flags used for request refusals").dependOn(&offers.step);
     const drafts = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"draft sources:"} }));
     b.step("test-draft-line-host", "Serving line draft provenance without devices").dependOn(&drafts.step);
     all.dependOn(&drafts.step);
