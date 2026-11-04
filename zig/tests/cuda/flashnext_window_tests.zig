@@ -45,7 +45,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     var serial = try session.create(context);
     defer session.drop(&serial);
     try session.forward(flash.Tri, tri, &serial, ids.items, .{});
-    const base = try session.save(&serial);
+    const base = try session.save(&serial, null);
     defer session.dropSaved(base);
     const forced = [_]u32{ 37, 44, 102, 1, 320, 17, 19, 71, 99, 4, 80, 122, 7, 25, 61, 94 };
     const row_bytes = prompt.vocabulary * 2;
@@ -62,14 +62,14 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     const rows = try gpu.gpa.alloc(u8, expected.len);
     defer gpu.gpa.free(rows);
     for ([_]usize{ 1, 3, 7, 15, 16 }) |keep| {
-        try session.restore(&window, base);
+        try session.restore(&window, null, base);
         try session.verify(flash.Tri, tri, &window, &draft, &forced);
         try stream.synchronize();
         try e.driver.check(e.driver.api.cuMemcpyDtoH_v2(rows.ptr, draft.logits.ptr, rows.len), "cuMemcpyDtoH");
         try check.sameBytes("each two-rank window row equals its serial teacher-forced row", rows, expected);
         try session.keep(flash.Tri, tri, &window, &draft, keep);
         try check.expect(window.fed == ids.items.len + keep, "kept prefix position is exact", .{});
-        try session.restore(&serial, base);
+        try session.restore(&serial, null, base);
         for (forced[0..keep]) |token| try session.forward(flash.Tri, tri, &serial, &.{token}, .{});
         try check.expect(std.mem.eql(i64, &window.history, &serial.history), "kept host n-gram history matches serial", .{});
         try session.forward(flash.Tri, tri, &serial, &.{13}, .{});
