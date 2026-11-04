@@ -306,7 +306,7 @@ const Run = struct {
 
     fn usage(r: *Run, reply: *const chat.Reply) Allocator.Error!Value {
         const n: @import("usage.zig").Counts = .{ .prompt = reply.prompt_tokens, .cached = reply.cached_tokens, .completion = reply.completion_tokens, .reasoning = reply.reasoning_tokens };
-        return @import("usage.zig").of(r.a, n, r.is_chat and r.srv.dsv41); // DeepSeek's chat keys for its native V4.1
+        return @import("usage.zig").of(r.a, n, r.is_chat and r.srv.text.deepseek_recipe); // DeepSeek's chat keys for its native V4.1
     }
 
     /// ``response_extras``: exact_mode, the matched stop, the runtime and the draft counters.

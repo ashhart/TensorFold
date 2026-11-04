@@ -98,6 +98,8 @@ pub const Rendered = struct {
 pub const Text = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
+    /// The native DeepSeek-V4.1 encoder renders every chat, in DeepSeek's own Chat Completions message shapes.
+    deepseek_recipe: bool = false,
 
     pub const VTable = struct {
         /// Ids of ``text``, special-token text included as its token; ``add_special`` adds what the tokenizer prepends.

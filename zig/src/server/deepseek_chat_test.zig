@@ -244,6 +244,41 @@ test "DeepSeek chat: tool-only Jinja metadata survives the native default fallba
     try t.expect(srv.thinking_switch);
 }
 
+test "DeepSeek chat: DeepSeek's own shapes are one field, on only where the native V4.1 encoder renders every chat" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { kind: []const u8, file: []const u8 = "", data: []const u8 = "", on: bool };
+    for ([_]Case{
+        .{ .kind = "deepseek_v41", .on = true },
+        .{ .kind = "deepseek_v4", .on = false },
+        .{ .kind = "deepseek_v41", .file = "tokenizer_config.json", .data = "{\"chat_template\":{\"tool_use\":\"T{{ messages[0].content }}\"}}", .on = false },
+        .{ .kind = "deepseek_v41", .file = "chat_template.jinja", .data = "J{{ messages[0].content }}", .on = false },
+        .{ .kind = "other_family", .file = "chat_template.jinja", .data = "<tensorfold:deepseek-recipe>{{ messages[0].content }}", .on = false },
+    }) |c| {
+        var tmp = try fixture(a, c.kind);
+        defer tmp.deinit();
+        if (c.file.len > 0) try tmp.tmp.dir.writeFile(t.io, .{ .sub_path = c.file, .data = c.data });
+        var problem: []const u8 = "";
+        const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+        defer hf.deinit();
+        var script: Script = .{};
+        const srv = try @import("server.zig").Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .use_drafts = false }, null);
+        defer srv.deinit();
+        try t.expectEqual(c.on, hf.recipe);
+        try t.expectEqual(c.on, srv.media().dsv41);
+        var reply: Reply = .{};
+        var conn = try @import("http_conn.zig").Conn.init(a, -1, "fixture");
+        defer conn.deinit();
+        const body = try json.newObject(a);
+        try body.put(a, "model", .{ .string = "m" });
+        try body.put(a, "max_tokens", try json.intValue(a, 1));
+        try body.put(a, "messages", (try json.parseText(a, "[{\"role\":\"user\",\"content\":\"H\"},{\"role\":\"latest_reminder\",\"content\":\"R\"}]")).ok);
+        @import("openai.zig").run(srv, a, reply.out(), .{ .conn = &conn }, true, .{ .object = body });
+        try t.expectEqual(@as(u16, if (c.on) 200 else 400), reply.code);
+    }
+}
+
 test "DeepSeek chat: a native V4.1 reply's usage carries DeepSeek's cache hit and miss counts, V4's does not" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();

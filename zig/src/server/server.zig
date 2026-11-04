@@ -25,8 +25,6 @@ const slide_graph = @import("slide_graph.zig");
 const slide_lesson = @import("slide_lesson.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const idle_unload = @import("idle_unload.zig");
-const dsv41_chat = @import("dsv41_chat");
-const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -130,8 +128,6 @@ pub const Server = struct {
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
-    /// The native DeepSeek-V4.1 encoder renders this server's chats in DeepSeek's own message shapes.
-    dsv41: bool = false,
     markers: reply_text.Markers = reply_text.think_markers,
     close_id: ?u32 = null, // the close marker's own token, when the marker is one token
     chunks: chunk_plan.Plan = .{},
@@ -176,7 +172,7 @@ pub const Server = struct {
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {
         var m: @import("messages.zig").Media = .ofVision(srv.info.vision, srv.config.vision_pdf);
-        m.dsv41 = srv.dsv41;
+        m.dsv41 = srv.text.deepseek_recipe;
         return m;
     }
 
@@ -219,7 +215,6 @@ pub const Server = struct {
             std.mem.indexOf(u8, source, "thinking_mode") != null;
         srv.late_system = try lateSystem(a, text);
         srv.needs_user_after_tool = needsUserAfterTool(source);
-        srv.dsv41 = std.mem.indexOf(u8, source, dsv41.RECIPE_TAG) != null;
         if (srv.info.vision != null) {
             const template_images = templateImages(srv);
             if (!template_images) log.line("warning: --vision: the chat template writes no image placeholder for an image part, so image requests will fail; serve with --chat-template naming a template that has an image path", .{});
