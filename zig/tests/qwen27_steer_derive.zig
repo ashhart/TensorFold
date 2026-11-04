@@ -9,6 +9,8 @@ const glp = @import("glp");
 const help =
     \\tf-qwen27-steer-derive --model DIR --out FILE [--alpha 1.0] [--repo ID] [--revision REV] [--prompts N]
     \\                            [--capture mean|last] [--mask FRAC] [--layers FROM-TO]
+    \\                            [--name NAME] [--description TEXT] [--author NAME] [--license NAME]
+    \\                            [--model-hint HINT] [--effect TEXT]
     \\  Derives one control direction per layer from the model itself, then writes the GLP file.
     \\  The refusal set and the form-matched harmless set each run through the native forward.
     \\  --model DIR is the MLX checkpoint directory; --out FILE is the GLP file to write.
@@ -21,6 +23,8 @@ const help =
     \\  activations, and 0 is none at all.
     \\  --layers FROM-TO keeps only the layers in the window; it is every layer by default.
     \\  Layer 0 is not steerable, so the file holds the other layers.
+    \\  --name, --description, --author, --license, --model-hint and --effect are what the file
+    \\  says about itself: the keys a consumer reads before it reads the directions.
 ;
 
 const Hooks = struct {
@@ -130,6 +134,16 @@ fn stamp(io: std.Io, buf: *[32]u8) []const u8 {
     }) catch "unknown";
 }
 
+/// The UTC day of the derivation, as the file's created.
+fn day(io: std.Io, buf: *[16]u8) []const u8 {
+    const ns = std.Io.Clock.real.now(io).nanoseconds;
+    const secs: u64 = @intCast(@max(0, @divFloor(ns, std.time.ns_per_s)));
+    const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
+    const yd = es.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}", .{ yd.year, md.month.numeric(), md.day_index + 1 }) catch "unknown";
+}
+
 /// The window of layers the operator named, as "FROM-TO"; the first is never below one.
 fn parseLayers(value: []const u8, first: *u32, last: *u32) !void {
     const dash = std.mem.indexOfScalar(u8, value, '-') orelse return error.BadLayerWindow;
@@ -158,13 +172,14 @@ pub fn main(init: std.process.Init) !void {
     var first_layer: u32 = 1;
     var last_layer: u32 = std.math.maxInt(u32);
     var mask: f32 = 0;
+    var publication: glp.Publication = .{};
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const value = args[i];
-        if (std.mem.eql(u8, arg, "--model")) model_dir = value else if (std.mem.eql(u8, arg, "--out")) out_path = value else if (std.mem.eql(u8, arg, "--repo")) repo = value else if (std.mem.eql(u8, arg, "--revision")) revision = value else if (std.mem.eql(u8, arg, "--alpha")) alpha = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--prompts")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--capture")) site = if (std.mem.eql(u8, value, "last")) .last_row else if (std.mem.eql(u8, value, "mean")) .mean_rows else return error.UnknownOption else if (std.mem.eql(u8, arg, "--mask")) mask = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--layers")) try parseLayers(value, &first_layer, &last_layer) else return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--model")) model_dir = value else if (std.mem.eql(u8, arg, "--out")) out_path = value else if (std.mem.eql(u8, arg, "--repo")) repo = value else if (std.mem.eql(u8, arg, "--revision")) revision = value else if (std.mem.eql(u8, arg, "--alpha")) alpha = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--prompts")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--capture")) site = if (std.mem.eql(u8, value, "last")) .last_row else if (std.mem.eql(u8, value, "mean")) .mean_rows else return error.UnknownOption else if (std.mem.eql(u8, arg, "--mask")) mask = try std.fmt.parseFloat(f32, value) else if (std.mem.eql(u8, arg, "--layers")) try parseLayers(value, &first_layer, &last_layer) else if (std.mem.eql(u8, arg, "--name")) publication.name = value else if (std.mem.eql(u8, arg, "--description")) publication.description = value else if (std.mem.eql(u8, arg, "--author")) publication.author = value else if (std.mem.eql(u8, arg, "--license")) publication.license = value else if (std.mem.eql(u8, arg, "--model-hint")) publication.model_hint = value else if (std.mem.eql(u8, arg, "--effect")) publication.measured_effect = value else return error.UnknownOption;
     }
     if (model_dir == null or out_path == null) return error.BadOptions;
     if (mask < 0 or mask >= 1) return error.BadMaskFraction;
@@ -210,11 +225,14 @@ pub fn main(init: std.process.Init) !void {
     if (layers.items.len == 0) return error.NoDirections;
 
     var time_buf: [32]u8 = undefined;
+    var day_buf: [16]u8 = undefined;
     // The method the file names: a masked direction was made differently, and says so.
     const method = if (mask > 0)
         try std.fmt.allocPrint(a, "{s}_massive_activation_masked", .{site.methodName()})
     else
         site.methodName();
+    // The day the file was made, when the operator did not name one.
+    if (publication.created == null) publication.created = day(io, &day_buf);
     const bytes = try glp.write(init.gpa, .{
         .mode = .project,
         .alpha = alpha,
@@ -224,6 +242,7 @@ pub fn main(init: std.process.Init) !void {
         .base_revision = revision,
         .method = method,
         .contrast = derive.contrast,
+        .publication = publication,
         .layers = layers.items,
     });
     defer init.gpa.free(bytes);
@@ -263,6 +282,13 @@ pub fn main(init: std.process.Init) !void {
         .massive_ratio = worst_ratio,
         .massive_layer = worst_layer,
         .mask_recommended = recommended,
+        .name = publication.name,
+        .description = publication.description,
+        .author = publication.author,
+        .license = publication.license,
+        .model_hint = publication.model_hint,
+        .measured_effect = publication.measured_effect,
+        .created = publication.created,
         .bytes = bytes.len,
     }, .{});
     try std.Io.File.stdout().writeStreamingAll(io, receipt);

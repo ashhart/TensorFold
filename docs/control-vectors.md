@@ -144,6 +144,9 @@ the file. The prompts are the repository's own
 | `--layers FROM-TO` | Keep a window of layers; every layer by default. |
 | `--prompts N` | Use only the first N pairs of each set. |
 | `--alpha A` | The `glp.alpha_default` the file carries. |
+| `--name`, `--description`, `--author`, `--license` | What the file says about itself. |
+| `--model-hint HINT` | The model family a consumer matches against. |
+| `--effect TEXT` | What the strength does, as it was measured. |
 
 `--capture last` is the one that matters. The last row of a prompt carries the
 decision the model is about to make; the mean over every row is mostly the
@@ -375,6 +378,23 @@ The container is GGUF v3. The metadata follows the GLP standard:
 
 The tensors are `direction.N`, fp32, one per layer, each the width of the
 residual stream.
+
+The file also says what it is, for a consumer that reads the header before it
+reads the directions: `general.name`, `general.description`, `general.author`,
+`general.license`, `general.base_model.*` (the repo it came from), and
+`controlvector.model_hint` and `controlvector.layer_count`. The producer writes
+them when it is told to:
+
+```
+tf-qwen27-steer-derive --model DIR --out FILE \
+    --name "Qwen3.8-27B-refusal-cvec-per_layer-masked-L10-58-a1" \
+    --description "..." --author "TensorFold" --license "Apache-2.0" \
+    --model-hint "qwen3_5" --effect "alpha 0.5 to 3 is flat; at 4 the replies go empty"
+```
+
+`glp.created` is the day the file was written, and `glp.measured_effect` is what
+the strength does, as it was measured. A vector is published on its own, as a
+file; it is not committed to this repository, and the code that writes it is.
 
 ## The integration test
 

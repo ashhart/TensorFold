@@ -135,16 +135,16 @@ fn writeFixture(shape: Shape) ![]u8 {
 }
 
 /// A vector and the arena that holds its strings and layers.
-const Read = struct {
+pub const Read = struct {
     arena: std.heap.ArenaAllocator,
     vector: glp.Vector,
 
-    fn deinit(self: *Read) void {
+    pub fn deinit(self: *Read) void {
         self.arena.deinit();
     }
 };
 
-fn readOk(bytes: []const u8) !Read {
+pub fn readOk(bytes: []const u8) !Read {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     errdefer arena.deinit();
     var why: glp.Why = .{};
@@ -178,7 +178,7 @@ fn reason(bytes: []const u8) ![]const u8 {
 }
 
 /// A unit vector of a given width, pointing along one axis.
-fn unitDir(a: std.mem.Allocator, width: usize, axis: usize) ![]f32 {
+pub fn unitDir(a: std.mem.Allocator, width: usize, axis: usize) ![]f32 {
     const dir = try a.alloc(f32, width);
     for (dir) |*v| v.* = 0.0;
     dir[axis] = 1.0;
@@ -186,17 +186,17 @@ fn unitDir(a: std.mem.Allocator, width: usize, axis: usize) ![]f32 {
 }
 
 /// A container and the arena that holds its metadata.
-const Parsed = struct {
+pub const Parsed = struct {
     arena: std.heap.ArenaAllocator,
     file: gguf.File,
 
-    fn deinit(self: *Parsed) void {
+    pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
     }
 };
 
 /// The container a file holds, read with the generic reader.
-fn parseFile(a: std.mem.Allocator, bytes: []const u8) !Parsed {
+pub fn parseFile(a: std.mem.Allocator, bytes: []const u8) !Parsed {
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
     var problem: gguf.Problem = .{};
@@ -464,7 +464,7 @@ test "a written container is a version 3 file" {
     try std.testing.expectEqualStrings("GGUF", bytes[0..4]);
     try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, bytes[4..8], .little));
     try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, bytes[8..16], .little));
-    try std.testing.expectEqual(@as(u64, 15), std.mem.readInt(u64, bytes[16..24], .little));
+    try std.testing.expectEqual(@as(u64, 21), std.mem.readInt(u64, bytes[16..24], .little));
     try std.testing.expectEqual(@as(usize, 0), bytes.len % 32);
 }
 
