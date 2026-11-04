@@ -44,6 +44,20 @@ fn attnLanesOn() bool {
     return std.mem.eql(u8, std.mem.span(v), "1");
 }
 
+/// Refresh a graph round's pinned inputs and shared-attention table before capture or replay.
+pub fn prepareRound(pass: anytype, ids: []const u32) !void {
+    const s = pass.s;
+    try s.ready();
+    for (s.hostIds(ids.len), ids) |*out, token| out.* = @intCast(token);
+    const positions = s.hostPos(ids.len * 4);
+    @memset(positions, 0);
+    for (pass.lanes, 0..) |lane, i| {
+        positions[i * 4] = @intCast(lane.pos);
+        try pass.m.ngram.rows(lane.seq.history[0..], ids[i..][0..1], s.hostEmb(ids.len)[i * wt.dims ..][0..wt.dims], s.hostXs(ids.len)[i * (wt.dims / 32) ..][0 .. wt.dims / 32]);
+    }
+    if (useAttn(pass, ids.len)) fillAttn(pass);
+}
+
 fn cdiv(a: usize, b: usize) usize {
     return (a + b - 1) / b;
 }
@@ -78,8 +92,8 @@ pub fn useAttn(pass: anytype, n: usize) bool {
     return true;
 }
 
-/// Uploads the lane table attn reads: each attention layer's caches a lane, the lanes' positions and rows.
-pub fn stageAttn(pass: anytype) !void {
+/// Populate the lane table before a normal upload or graph replay.
+pub fn fillAttn(pass: anytype) void {
     const tab = pass.s.hostLanes();
     @memset(tab, 0);
     var row0: usize = 0;
@@ -88,7 +102,12 @@ pub fn stageAttn(pass: anytype) !void {
         putLane(tab, i, row0, l.pos, l.rows);
         row0 += l.rows;
     }
-    try pass.upload(pass.s.lanes_tab, tab);
+}
+
+/// Upload the current lane table (captured graphs read the same pinned host bytes at replay).
+pub fn stageAttn(pass: anytype) !void {
+    fillAttn(pass);
+    try pass.upload(pass.s.lanes_tab, pass.s.hostLanes());
 }
 
 /// The round's attention in one launch a kernel, the per-lane passes' programs over the round's rows.

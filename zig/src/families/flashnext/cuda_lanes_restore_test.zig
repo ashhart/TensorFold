@@ -56,6 +56,8 @@ pub fn run(comptime Cuda: type, comptime open: anytype, comptime restore: anytyp
     var driver = Device.driver();
     var stream: cuda.Stream = .{ .d = &driver, .handle = null };
     var engine: prompt.Engine = undefined;
+    engine.exl3_prefill = .{};
+    engine.exl3_chain = .{};
     engine.gpa = a;
     engine.driver = &driver;
     engine.stream = &stream;

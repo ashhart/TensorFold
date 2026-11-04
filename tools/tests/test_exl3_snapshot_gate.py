@@ -32,17 +32,20 @@ class Response:
 
 
 class SnapshotGateTests(unittest.TestCase):
-    def invoke(self, args, cached):
+    def invoke(self, args, cached, runtime_override=None):
         requests = []
 
         def open_request(request, timeout):
             body = json.loads(request.data)
             requests.append((request.full_url, body))
             digest = hashlib.sha256(json.dumps(body["messages"]).encode()).hexdigest()
+            runtime = {"token_sha256": digest}
+            if runtime_override is not None:
+                runtime = runtime_override
             return Response({
                 "usage": {"prompt_tokens": 80, "completion_tokens": 2,
                           "prompt_tokens_details": {"cached_tokens": cached}},
-                "tensorfold": {"token_sha256": digest},
+                "tensorfold": runtime,
             })
 
         output, errors = io.StringIO(), io.StringIO()
@@ -80,6 +83,17 @@ class SnapshotGateTests(unittest.TestCase):
             code, output, errors, _ = self.invoke(["--reference", str(reference)], 0)
             self.assertEqual(code, 1)
             self.assertIn("did not restore a cached prefix", errors)
+
+    def test_missing_or_inexact_full_digest_cannot_record_a_reference(self):
+        for runtime in ({"token_sha": "a" * 12}, {"token_sha256": "a" * 12},
+                        {"token_sha256": "z" * 64}, {"token_sha256": None}):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as directory:
+                reference = Path(directory) / "reference.json"
+                code, _, errors, _ = self.invoke(
+                    ["--record-reference", "--output", str(reference)], 0, runtime)
+                self.assertEqual(code, 1)
+                self.assertIn("missing full output token SHA256", errors)
+                self.assertFalse(reference.exists())
 
 
 if __name__ == "__main__":

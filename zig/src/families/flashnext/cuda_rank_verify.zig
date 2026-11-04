@@ -84,6 +84,21 @@ fn limitOf(s: *const Session) usize {
     return @min(mtp.round_rows, s.engine.chunk);
 }
 
+pub fn tokenIds(ids: []const u32) !void {
+    for (ids) |id| if (id >= wt.vocab) return error.InvalidToken;
+}
+
+pub fn sendWithTail(session: *Session, comptime Tri: type, tri: Tri, seq: *prompt.Seq, draft_state: *mtp.Draft, ids: []const u32, tail: ?prompt.batch.Hooks.OutputTail) !void {
+    if (tail != null and session.rank != 0) return error.UnsupportedRankOperation;
+    if (!session.drafting or ids.len == 0 or ids.len > mtp.max_rows or seq.fed + ids.len > seq.cap) return error.UnsupportedRankOperation;
+    try tokenIds(ids);
+    const header = try session.command(.{ .kind = .verify, .object = seq.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
+    errdefer session.poison();
+    const ops: mtp.Ops(Tri) = .{ .e = session.engine, .tri = tri, .h = undefined };
+    try ops.verifyWithTail(seq, draft_state, ids, tail);
+    try session.ack(header);
+}
+
 /// Rank 0: the frame to rank 1, the same pass here, then rank 1's ack; a failure after the send poisons the session.
 pub fn send(s: *Session, comptime Tri: type, tri: Tri, seqs: []const *prompt.Seq, ds: []const *mtp.Draft, idss: []const []const u32, out: u64) !void {
     if (!s.drafting or seqs.len == 0 or seqs.len > max_windows or seqs.len != ds.len or seqs.len != idss.len) return error.UnsupportedRankOperation;

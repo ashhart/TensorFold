@@ -20,6 +20,7 @@ pub const error_not_ready: Result = 600;
 
 pub const stream_non_blocking: c_uint = 1;
 pub const event_disable_timing: c_uint = 2;
+pub const event_wait_external: c_uint = 1;
 pub const host_alloc_portable: c_uint = 1;
 pub const host_alloc_devicemap: c_uint = 2;
 pub const host_register_devicemap: c_uint = 2;

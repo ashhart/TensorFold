@@ -51,6 +51,8 @@ pub fn run(gpu: check.Gpu, arguments: []const [:0]const u8) !void {
     for (0..20) |index| saved.decoder[7][start + index] = @intCast(100 + index);
     saved.decoder[7][(start + 256) % 512] = std.math.maxInt(u32);
     try profile.write(gpu.gpa, gpu.io, path, identity, &saved);
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
     const scales: flash.exl3_pool.Scales = .{ .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0 };
     for ([_]usize{ 10, 23 }, 0..) |capacity, restart| {
         const restored = try profile.read(gpu.gpa, gpu.io, path, identity);
@@ -69,6 +71,21 @@ pub fn run(gpu: check.Gpu, arguments: []const [:0]const u8) !void {
         try check.expect(heated == @min(capacity, 20), "frequency restart fills known local experts only", .{});
         try check.expect(std.mem.eql(u32, &before, &pool.counts[7]), "warming preserves observation counts", .{});
         try verify(gpu, &pool, heated);
+        var picks: [11]i32 = @splat(-1);
+        for (0..10) |index| picks[index] = @intCast(start + 19 - index);
+        var device_picks = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.asBytes(&picks));
+        defer device_picks.free();
+        var planner = try flash.exl3.dplan.DevPlan.init(gpu.gpa, gpu.d, &.{&pool});
+        defer planner.deinit();
+        try planner.toDevice(stream);
+        try planner.plan(stream, 0, device_picks.ptr, 1);
+        try planner.join(stream);
+        try planner.restore(stream, 0);
+        try planner.toHost();
+        for (0..20) |index| {
+            const expected = before[start + index] + @as(u32, @intFromBool(index >= 10));
+            try check.expect(pool.counts[7][start + index] == expected, "device learned count survives profile restart", .{});
+        }
         @memcpy(&saved.decoder[7], &pool.counts[7]);
         try profile.write(gpu.gpa, gpu.io, path, identity, &saved);
         std.debug.print("FREQUENCY rank={d} restart={d} capacity={d} warmed={d}\n", .{ rank, restart, capacity, heated });
@@ -78,5 +95,5 @@ pub fn run(gpu: check.Gpu, arguments: []const [:0]const u8) !void {
     if (profile.read(gpu.gpa, gpu.io, path, other_rank)) |_| return error.AcceptedForeignProfile else |failure| {
         try check.expect(failure == error.IdentityMismatch, "frequency rejects other TP rank", .{});
     }
-    check.pass("frequency disk restart, rank isolation and resized warm pools", .{});
+    check.pass("frequency disk restart, live device counts, rank isolation and resized warm pools", .{});
 }

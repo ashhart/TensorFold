@@ -9,6 +9,11 @@ pub const Parts = struct {
     drafts: std.ArrayList(cuda.DeviceBuffer) = .empty,
     const kept = 4;
 
+    /// A graph-recycled lane keeps its whole sequence and draft, not borrowed parts of them.
+    pub fn forLane(p: *const Parts, ranked: bool, pooled: bool) bool {
+        return p.on and !ranked and !pooled and !@import("exl3/offload/cuda_exl3_recycle.zig").enabled();
+    }
+
     pub fn take(list: *std.ArrayList(cuda.DeviceBuffer), d: *cuda.Driver, len: usize) !cuda.DeviceBuffer {
         while (list.pop()) |b| {
             if (b.len >= len) return b;
@@ -31,3 +36,16 @@ pub const Parts = struct {
         p.drafts.deinit(gpa);
     }
 };
+
+test "exl3: graph recycling and lane parts never own the same buffers" {
+    const graphs = @import("exl3/graph/cuda_exl3_graph.zig");
+    const previous = graphs.force;
+    defer graphs.force = previous;
+    const parts: Parts = .{ .on = true };
+    graphs.force = .off;
+    try std.testing.expect(parts.forLane(false, false));
+    try std.testing.expect(!parts.forLane(true, false));
+    try std.testing.expect(!parts.forLane(false, true));
+    graphs.force = .graph;
+    try std.testing.expect(!parts.forLane(false, false));
+}

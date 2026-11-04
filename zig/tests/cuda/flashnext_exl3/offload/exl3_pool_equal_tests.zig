@@ -1,4 +1,4 @@
-//! exl3-pool: gate 2, the pool against the resident experts.
+//! exl3-pool: gate 2 and 3, the pool against the resident experts and the graph replay.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -148,4 +148,85 @@ pub fn equalRun(gpu: Gpu, ex: *const exl3e.Experts, s: cuda.Stream, ld: *const L
     try check.expect(ps.evictions > 0 and ps.miss_slots > 0 and ps.hit_slots > 0 and split_rounds > 0, "a path was not exercised (evictions {d}, misses {d}, hits {d}, split {d})", .{ ps.evictions, ps.miss_slots, ps.hit_slots, split_rounds });
     if (prefetch_lines > 0) try check.expect(ps.prefetches > 0, "no prefetch happened", .{});
     check.pass("layer {d}, {d} lines: every round's runSlots/run output is byte-identical to the fully resident layer; {d} lines and 513 table entries match the checkpoint; staged bytes match the plans", .{ ld.layer, lines, lines_checked });
+}
+
+// ---------------------------------------------------------------------------------------------------- gate 3
+
+pub fn graphRun(gpu: Gpu, ex: *const exl3e.Experts, s: cuda.Stream, ld: *const LayerData) !void {
+    const gpa = gpu.gpa;
+    const lines = 10;
+    var pool = try fpool.Pool.init(gpa, gpu.io, gpu.d, ld.source(), ld.scales(), .{ .layer = @intCast(ld.layer), .lines = lines }, null);
+    defer pool.deinit();
+    var vp = try Io.init(gpu, pool.tables());
+    defer vp.free();
+    var vr = try Io.init(gpu, ld.res);
+    defer vr.free();
+    const z = Zipf.init(0xc0ffee + ld.layer, 0.6);
+    var prng = std.Random.DefaultPrng.init(0x96a9 + ld.layer);
+    const rng = prng.random();
+    var x: [dims]u16 = undefined;
+    var picks: [slots]i32 = undefined;
+    var wts: [slots]f32 = undefined;
+    var exec: ?cuda.graph.Exec = null;
+    defer if (exec) |*e| e.deinit();
+    var g: ?cuda.graph.Graph = null;
+    defer if (g) |*gg| gg.deinit();
+    var swaps: usize = 0;
+    var last: ?[]u8 = null;
+    defer if (last) |b| gpa.free(b);
+    var distinct: usize = 0;
+    const states = 8;
+    for (0..states) |si| {
+        genRound(&z, rng, 1, &x, &picks, &wts);
+        if (si == 5) for (picks[0..5], 0..) |*p, i| {
+            p.* = @intCast(pool.slots_tab[i]); // half the row from what the lines hold: a partial hit
+        };
+        try vp.set(&x, &picks, &wts);
+        try vr.set(&x, &picks, &wts);
+        const r = try pool.plan(&picks, 1);
+        try check.expect(!r.masked(), "one row must fit 10 lines", .{});
+        try pool.stage(r, 0, s);
+        swaps += r.n_copies;
+        const l = pool.tables();
+        if (exec == null) {
+            // capture once over the tables, with the outputs poisoned so a capture that ran shows up
+            try s.synchronize();
+            try vp.sbuf.fill8(0xff, s.handle);
+            try s.synchronize();
+            try cuda.graph.beginCapture(s, .thread_local);
+            try call(ex, s, l, vp, vp.picks.ptr, 1, false);
+            g = try cuda.graph.endCapture(s);
+            exec = try g.?.instantiate();
+            try exec.?.upload(s);
+            const still = try vp.y(gpa, 1);
+            defer gpa.free(still);
+            try check.expect(std.mem.allEqual(u8, still, 0xff), "capture executed the kernels", .{});
+            std.debug.print("  [graph] runSlots captured once: {d} nodes over the pool's fixed table addresses\n", .{try g.?.nodeCount()});
+        }
+        try vp.sbuf.fill8(0xff, s.handle);
+        try exec.?.launchOn(s);
+        try pool.release(r, 0, s);
+        try s.synchronize();
+        const yg = try vp.y(gpa, 1);
+        defer gpa.free(yg);
+        // eager over the same tables, then the fully resident layer
+        try vp.sbuf.fill8(0xff, s.handle);
+        try call(ex, s, l, vp, vp.picks.ptr, 1, false);
+        try call(ex, s, ld.res, vr, vr.picks.ptr, 1, false);
+        try s.synchronize();
+        const ye = try vp.y(gpa, 1);
+        defer gpa.free(ye);
+        const yr = try vr.y(gpa, 1);
+        defer gpa.free(yr);
+        try check.sameBytes("graph replay vs eager", yg, ye);
+        try check.sameBytes("graph replay vs fully resident", yg, yr);
+        if (last) |b| {
+            if (!std.mem.eql(u8, b, yg)) distinct += 1;
+            gpa.free(b);
+        }
+        last = try gpa.dupe(u8, yg);
+        std.debug.print("  [graph] state {d}: {d} lines swapped by H2D before the replay ({d} held); replay == eager == resident, {d} slot rows byte for byte\n", .{ si, r.n_copies, r.held, slots });
+    }
+    try check.expect(swaps > lines and distinct == states - 1, "the states did not exercise swaps ({d}) or distinct outputs ({d})", .{ swaps, distinct });
+    check.pass("layer {d}: one captured runSlots graph replayed {d} states after {d} line swaps (no recapture), byte-identical to eager and to the resident layer", .{ ld.layer, states, swaps });
 }

@@ -93,6 +93,8 @@ test "Flash Next completion: allocation refusals drain fills before every constr
         var d = Fake.init(deny, 0);
         var stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(325) };
         var e: prompt.Engine = undefined;
+        e.exl3_prefill = .{};
+        e.exl3_chain = .{};
         e.gpa = t.allocator;
         e.driver = &d;
         e.stream = &stream;
@@ -115,6 +117,8 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
         var d = Fake.init(0, fail_fill);
         var stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(326) };
         var e: prompt.Engine = undefined;
+        e.exl3_prefill = .{};
+        e.exl3_chain = .{};
         e.gpa = t.allocator;
         e.driver = &d;
         e.stream = &stream;
@@ -129,6 +133,8 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
     var d = Fake.init(0, 0);
     var stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(327) };
     var e: prompt.Engine = undefined;
+    e.exl3_prefill = .{};
+    e.exl3_chain = .{};
     e.gpa = t.allocator;
     e.driver = &d;
     e.stream = &stream;
