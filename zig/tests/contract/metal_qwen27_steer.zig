@@ -292,13 +292,19 @@ pub const Suite = struct {
         return pipe;
     }
 
-    /// Every probe's normalisation must be the plain norm kernel's normalisation of the row it projected.
-    pub fn normalisedRows(s: *Suite) !void {
+    /// Each probe at each served shape: the fused row's normalisation is the plain norm's, and the planted fault shows.
+    fn normalisedRows(s: *Suite, seed: u64) !void {
         const pipe = try s.normPipeline();
         const fault = try s.faultPipeline();
         for (s.probes.items) |p| {
-            try p.normalisedRowInvariant(pipe);
-            try p.normalisationFaultCaught(pipe, fault);
+            // Its own launches: the gates free a kernel's buffers once they are done with it.
+            defer p.rig.reset();
+            for (p.spec.served, 0..) |shape, i| {
+                if (!try p.prepare(shape, .random, seed +% i)) return error.RefusedServedShape;
+                try p.run();
+                try p.normalisedRowInvariant(pipe);
+                try p.normalisationFaultCaught(pipe, fault);
+            }
         }
         std.debug.print("PASS normalised: the fused kernel's row is the plain norm's row, element for element, and the planted fault shows\n", .{});
     }
@@ -313,7 +319,16 @@ pub const Suite = struct {
         return lib;
     }
 
-    pub fn add(s: *Suite, e: Entry) !void {
+    /// The entries `only` names, registered with the gates; with `gates`, the normalisation check runs here.
+    pub fn collect(s: *Suite, only: ?[]const u8, gates: bool, seed: u64) !void {
+        for (entries) |e| {
+            if (only) |o| if (std.mem.indexOf(u8, e.name, o) == null) continue;
+            try s.add(e);
+        }
+        if (gates and s.probes.items.len > 0) try s.normalisedRows(seed);
+    }
+
+    fn add(s: *Suite, e: Entry) !void {
         const lib = try s.library(e.variant);
         const pipe = try mtl.Pipeline.init(s.device, lib, symbol, false);
         errdefer pipe.deinit();
