@@ -94,10 +94,10 @@
     "note": "Published immutable public evidence links and verified checksums; summaries only in the source branch."
   },
   "reference_modules": {
-    "tools/zig/qwen35_reference_compare.py": "eefb291b263884cfbc5e24735ff5aa84c87cd81673c1c8867abc978864738274",
-    "tools/zig/qwen35_reference_fixture.py": "cdd5cbbe347dae97e21893645a76e16f7bc1b98b8610c3724fff570771992b56",
-    "tools/zig/qwen35_reference_forward.py": "e9f5cbbd176cc6e53f87da1a32aa1d95cd1f27a9db8d14d103d83bdb16846016",
-    "tools/zig/qwen35_reference_inputs.py": "9de576d0b0824063363c674798f5c3948e234ba7aa742ff902e202e7eb1cee1e",
+    "tools/zig/qwen35_reference_compare.py": "fd918c442874c011ce21166fcc57132d136832c90ac63bf50836851c9db03b14",
+    "tools/zig/qwen35_reference_fixture.py": "f4ea4b17bab9ec5c83c5c06084799bea2296f82e5c5b25c79968418960e88c96",
+    "tools/zig/qwen35_reference_forward.py": "5a71a50076c83500cd248232e632cff9c5be68bd1924a8840c5d113fec47f391",
+    "tools/zig/qwen35_reference_inputs.py": "f54759f00b14100e7ca40e1b0211a0440bda79463648cf81610ae987359dc55e",
     "tools/zig/qwen35_reference_verdict.py": "45eddfb4179d8157be0bb102a4ccaa33e734cfaaedeb23109796fbdb506c605d"
   }
 }

@@ -279,4 +279,3 @@ def compare_fp64_records(fp64, records):
     out["all_scalars_match_tolerance_1e-12"] = all(
         v <= 1e-12 for v in out["scalar_max_abs_diff"].values())
     return out
-
