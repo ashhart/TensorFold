@@ -114,7 +114,7 @@ test "a Linux unified pool counts the free pages parked on the per-CPU lists, at
     try t.expectEqual(@as(usize, 0), Fake.zone_probes);
 }
 
-test "the pool names the parked share it counted, for the start-up log line" {
+test "the pool names the parked share it counted, for the debug log line" {
     var driver: cuda.Driver = undefined;
     driver.api.cuDeviceGetAttribute = Fake.attribute;
     driver.api.cuMemGetInfo_v2 = Fake.memInfo;
