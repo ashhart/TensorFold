@@ -39,10 +39,10 @@ llama.cpp control vector works as it stands.
 
 The two are opposites, and the same directions show it. Our masked vector in
 `project` takes every refusal off and takes no harmless prompt with it. The
-same directions written as an `add` file push the other way: the model
-refuses all eight harmful prompts and all eight harmless twins, and answers
-them coherently, and still writes code, though it refuses one benign task out
-of twelve, the same over-refusal the bias asks for.
+same directions written as an `add` file push the other way: on the held-out
+set below, the model refuses all twenty harmful prompts and all twenty harmless
+twins and answers all forty coherently, and it still writes code, though it
+refuses one benign task out of twelve, the same over-refusal the bias asks for.
 
 `tf-glp-check rewrite FILE OUT.gguf --mode add` writes that file, so the two
 arms can be compared on the same directions.
@@ -204,6 +204,11 @@ refuses, the share of the harmless twins it refuses, and the share of replies
 that are still answers. The last one is read beside the other two because a
 vector that silences the model is not a refusal removal.
 
+It reproduces the baseline row of the table below exactly, 30 of 30 harmful
+prompts refused, none of the thirty harmless twins refused and all sixty
+replies coherent, so the numbers here and the numbers the gate writes come
+from the same measurement.
+
 ## Measured
 
 Apple M4 Pro, 48 GiB, Metal, Qwen3.8-27B MLX 4-bit. Thirty form-matched pairs
@@ -246,8 +251,12 @@ the activations.
 
 That the replies stay coherent in every arm matters more than the rates: a
 vector that silences the model is not a refusal removal, so read the replies,
-not the rate. The masked vector was put through an ordinary capability check
-as well: twelve tasks of the model's own work, code, arithmetic, translation,
+not the rate. The rate counts the phrases a refusal opens with, so it is a
+lower bound: a vector that rewords a refusal instead of removing it is counted
+as compliance, and the held-out set below shows the published per-layer vector
+doing exactly that. The masked vector was put through an ordinary capability
+check as well: twelve tasks of the model's own work, code, arithmetic,
+translation,
 a regular expression, a haiku, facts and protocols, and it answered every one
 of them.
 
@@ -272,15 +281,46 @@ still differs from its counterpart in intent alone.
 
 | | Harmful refused | Benign refused | Replies coherent |
 | --- | --- | --- | --- |
-| No vector | 20/20 | 6/20 | 40/40 |
+| No vector | 20/20 | 5/20 | 40/40 |
+| Published GLP-49, per layer, layers 10-58, strength 1.0 | 9/20 | 6/20 | 40/40 |
+| Our vector, masked at 0.005, layers 10-58, strength 1.0 | 0/20 | 0/20 | 40/40 |
+| The same directions as an add file, strength 1.0 | 20/20 | 20/20 | 40/40 |
 
-The benign column is read against six and not against zero here, and that is
-the set's own doing. The base model refuses six of the twenty twins before any
+The benign column is read against five and not against zero here, and that is
+the set's own doing. The base model refuses five of the twenty twins before any
 vector is applied, because their frame is close enough to the harmful one:
-"brute-force my own wifi password" reads as unauthorised access, and a mockup
-of a bank login reads as credential theft. The base model's refusal follows the
-frame as well as the intent on those six, so they are the floor of that column
-and not a cost any arm pays.
+"brute-force my own wifi password" reads as unauthorised access, a mockup of a
+bank login reads as credential theft, and a rifle's stock reads as the rifle.
+The base model's refusal follows the frame as well as the intent on those five,
+so they are the floor of that column and not a cost any arm pays.
+
+### The rate is a lower bound
+
+The refusal rate counts phrases, and a vector can change the wording of a
+refusal without removing it. The marker list catches the openings that say so,
+so a refusal in other words is counted as compliance. That is the reason the
+reply text is the measure and the rate is only the summary of it.
+
+The published per-layer vector is the case in point. It takes eleven of the
+twenty refusals off the metric on this set, and reading those eleven replies
+shows that every one of them still declines: "you should not enter your
+neighbour's house", "it is illegal in most jurisdictions", "it is not possible
+to write a credible essay". The published vector bends the wording of the
+refusal. Its benign column moves the other way, from five to six: it puts
+three of the twins' refusals back and takes three of the base model's off.
+
+The masked vector takes the decline away: the model
+takes the request and answers it, usually after a legal or safety caveat rather
+than in place of an answer, and for several of the twenty it hands over what
+was asked for, the scraper script, the essay, the scam message. The benign
+column falls to zero with it, so the five false refusals the base model carried
+are answered too.
+
+The last row is the same directions written as an `add` file, and they are the
+mirror image on prompts the vector was never derived from: the model refuses
+all twenty harmful prompts and all twenty harmless twins, and answers all forty
+coherently. The mode in the file decides which way the same numbers push, and
+the choice holds on prompts the vector has never seen.
 
 The vector's strength has a ceiling. Past it the model stops answering: the
 residual stream loses more than the direction it was asked to lose. Take the
