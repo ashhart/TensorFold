@@ -95,6 +95,7 @@ test {
     _ = @import("tool_cut_test.zig");
     _ = @import("tool_glm_stream_test.zig");
     _ = @import("tool_glm_messages_test.zig");
+    _ = @import("tool_dsml_stream_test.zig");
     _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("think_split_test.zig");
