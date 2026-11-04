@@ -39,18 +39,18 @@ test "stable profile: shared paging variable has disjoint GLM and Nemotron repor
         if (e.applies("glm5_next", "cuda")) {
             glm += 1;
             try t.expectEqual(p.Syntax.auto, e.syntax);
-            try t.expect(e.differs("on"));
-            try t.expect(e.differs("off"));
-            try t.expect(!e.differs("auto"));
+            try t.expect(e.differs("glm5_next", "on"));
+            try t.expect(e.differs("glm5_next", "off"));
+            try t.expect(!e.differs("glm5_next", "auto"));
         }
         if (e.applies("nemotron_h", "cuda")) {
             nemotron += 1;
             try t.expectEqual(@as(usize, 2), e.report_values.?.len);
             try t.expectEqualStrings("0", e.report_values.?[0]);
             try t.expectEqualStrings("all", e.report_values.?[1]);
-            for ([_][]const u8{ "0", "all" }) |raw| try t.expect(e.differs(raw));
+            for ([_][]const u8{ "0", "all" }) |raw| try t.expect(e.differs("nemotron_h", raw));
             for ([_][]const u8{ "", "on", "off", "1", "auto", "00", "+0", "ALL", "false", " all ", "0\n" }) |raw|
-                try t.expect(!e.differs(raw));
+                try t.expect(!e.differs("nemotron_h", raw));
         }
         if (e.applies("nemotron_h_omni", "cuda")) omni += 1;
         try t.expectEqual(p.Class.identical, e.class);
@@ -71,21 +71,21 @@ test "stable profile: explicit off, empty, malformed and ordinary values are ret
 
 test "stable profile: reporting follows the original count and exact-one flag semantics" {
     const count = p.entry(.TF_QWEN_KV_SHARE);
-    for ([_][]const u8{ "0", "00", "+0" }) |v| try t.expect(!count.differs(v));
-    for ([_][]const u8{ "1", "256", "", "-1", "not-a-count" }) |v| try t.expect(count.differs(v));
+    for ([_][]const u8{ "0", "00", "+0" }) |v| try t.expect(!count.differs("qwen3_5", v));
+    for ([_][]const u8{ "1", "256", "", "-1", "not-a-count" }) |v| try t.expect(count.differs("qwen3_5", v));
     const flag = p.entry(.TF_FLASHNEXT_KV_PAGES_ALL);
-    try t.expect(flag.differs("1"));
-    for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |v| try t.expect(!flag.differs(v));
+    try t.expect(flag.differs("qwen3_5", "1"));
+    for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |v| try t.expect(!flag.differs("qwen3_5", v));
 }
 
 test "stable profile: Qwen's page switches report a change from the family's paged default" {
     const pages = p.entry(.TF_QWEN_KV_PAGES);
-    for ([_][]const u8{ "256", "0256", "+256" }) |v| try t.expect(!pages.differs(v));
-    for ([_][]const u8{ "0", "128", "", "not-a-count" }) |v| try t.expect(pages.differs(v));
+    for ([_][]const u8{ "256", "0256", "+256" }) |v| try t.expect(!pages.differs("qwen3_5", v));
+    for ([_][]const u8{ "0", "128", "", "not-a-count" }) |v| try t.expect(pages.differs("qwen3_5", v));
     const all = p.entry(.TF_QWEN_KV_PAGES_ALL);
     try t.expectEqual(p.Syntax.off, all.syntax);
-    try t.expect(all.differs("0"));
-    for ([_][]const u8{ "1", "", "00", "false" }) |v| try t.expect(!all.differs(v));
+    try t.expect(all.differs("qwen3_5", "0"));
+    for ([_][]const u8{ "1", "", "00", "false" }) |v| try t.expect(!all.differs("qwen3_5", v));
 }
 
 test "stable profile: GLM paging registers automatic policy without supplying or coercing its value" {
@@ -95,9 +95,9 @@ test "stable profile: GLM paging registers automatic policy without supplying or
     try t.expect(e.applies("glm5_next", "cuda"));
     try t.expect(!e.applies("qwen3_5", "cuda"));
     try t.expect(!e.applies("glm5_next", "metal"));
-    try t.expect(!e.differs("auto"));
+    try t.expect(!e.differs("qwen3_5", "auto"));
     for ([_][]const u8{ "off", "0", "on", "1", "all", "", "AUTO", "false", " 0 " }) |raw|
-        try t.expect(e.differs(raw));
+        try t.expect(e.differs("qwen3_5", raw));
 }
 
 test "stable profile: the GLM host KV tier registers as an exact-one switch a family, off unless set" {
@@ -110,8 +110,8 @@ test "stable profile: the GLM host KV tier registers as an exact-one switch a fa
         try t.expect(!e.applies("glm5_next", "mlx"));
         try t.expectEqualStrings("#1795", e.evidence);
         try t.expect(p.resolve(.stable, id, null) == null);
-        try t.expect(e.differs("1"));
-        for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |raw| try t.expect(!e.differs(raw));
+        try t.expect(e.differs("glm5_next", "1"));
+        for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |raw| try t.expect(!e.differs("glm5_next", raw));
     }
 }
 
