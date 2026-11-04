@@ -340,6 +340,8 @@ fn testGeometry(layers: usize, attention_every: usize, kv_heads: usize) Geometry
     g.q_heads = 32;
     g.kv_heads = kv_heads;
     g.layers = layers;
+    g.first = 0; // one engine, not a pipeline stage
+    g.whole = 0;
     @memset(&g.linear, false);
     for (0..layers) |i| g.linear[i] = i % attention_every != attention_every - 1;
     return g;
