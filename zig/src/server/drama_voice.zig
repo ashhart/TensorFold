@@ -133,8 +133,7 @@ pub fn requestPrompt(cx: *Cx, tokenizer: text_mod.Text, sp: api.SpeechInfo, inpu
         error.OutOfMemory => error.OutOfMemory,
         else => cx.other("the tokenizer cannot encode this voice prompt"),
     };
-    if (made.frames.len > sp.max_prompt_tokens)
-        return cx.fail(.request, checks.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ made.frames.len, sp.max_prompt_tokens });
+    try @import("drama_admission.zig").check(cx, tokenizer, input, refs, made.frames.len, sp.max_prompt_tokens);
     return made;
 }
 
@@ -258,4 +257,22 @@ test "voices: real tokenizer rows equal the CLI path without server postprocessi
     const http_rows = try build(a, hf.text(), "A cloud.", &refs);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(cli_rows.frames), std.mem.sliceAsBytes(http_rows.frames));
     try std.testing.expectEqual(cli_rows.reference_rows, http_rows.reference_rows);
+    var cx: Cx = .{ .a = a };
+    const admitted: api.SpeechInfo = .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = 1, .max_prompt_tokens = @intCast(http_rows.frames.len) };
+    _ = try requestPrompt(&cx, hf.text(), admitted, "A cloud.", &refs);
+    var refused = admitted;
+    refused.max_prompt_tokens -= 1;
+    try std.testing.expectError(error.Refused, requestPrompt(&cx, hf.text(), refused, "A cloud.", &refs));
+    try std.testing.expectEqual(@as(u16, 400), cx.status());
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "assembled prompt rows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "acoustic references: 1 frames") != null);
+    const text_ids = try hf.text().encode(a, "A cloud.", false);
+    const expected_text = try std.fmt.allocPrint(a, "request text: {d} tokens", .{text_ids.len});
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, expected_text) != null);
+    try std.testing.expect(http_rows.reference_rows > codes.len);
+    try std.testing.expectError(error.Refused, @import("drama_admission.zig").check(&cx, hf.text(), "A cloud.", &.{}, 9, 8));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "acoustic references: 0 frames") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "9 assembled prompt rows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "limit of 8 assembled prompt rows") != null);
+    try @import("drama_admission.zig").check(&cx, hf.text(), "A cloud.", &.{}, 8, 8);
 }
