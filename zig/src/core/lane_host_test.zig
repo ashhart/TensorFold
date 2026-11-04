@@ -522,6 +522,11 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
             p.asked.store(prompt + max_tokens, .monotonic);
             return p.room.load(.monotonic);
         }
+        /// What the host asked about, once it has asked: a loaded machine asks late, so wait up to 5 s for it.
+        fn waitAsked(p: *@This()) u32 {
+            for (0..5000) |_| if (p.asked.load(.monotonic) != 0) break else std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            return p.asked.load(.monotonic);
+        }
     };
     var pool: Pool = .{};
     const admit: api.Admit = .{ .ctx = &pool, .fits = Pool.fits };
@@ -566,7 +571,7 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
     std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
     try std.testing.expectEqual(@as(usize, 0), b.state()[0]); // a lane is free, the pool is not: it waits
     try std.testing.expectEqual(@as(?Reason, null), b.state()[1]);
-    try std.testing.expectEqual(@as(u32, prompt.len + 4), pool.asked.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, prompt.len + 4), pool.waitAsked());
     e.cancel(1);
     try std.testing.expectEqual(Reason.cancelled, a.wait());
     try std.testing.expectEqual(Reason.length, b.wait()); // alone again: admitted
