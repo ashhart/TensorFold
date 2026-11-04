@@ -32,3 +32,21 @@ test "slide admission: XPU refuses every family before device access" {
     for (native.families) |f| try @import("slide_open_test.zig").check(native.open, "XPU", &.{f.model_type});
     try @import("slide_open_test.zig").check(@import("xpu_nem.zig").open, "XPU", &.{ "nemotron_h", "gemma4" });
 }
+
+test "capability audit: XPU unknown-model refusal names every listed family" {
+    const std = @import("std");
+    const native = @import("xpu.zig");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    try std.testing.expect(try native.open(a, std.testing.allocator, std.testing.io, .{ .dir = "does-not-exist", .model_type = "unknown-test-model" }, &problem) == null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, "unknown-test-model") != null);
+    for (native.families) |f| try std.testing.expect(std.mem.indexOf(u8, problem, f.model_type) != null);
+    if (@import("xpu_engine_options").gemma4) {
+        try std.testing.expect(std.mem.indexOf(u8, problem, "Gemma 4 E4B (gemma4, MLX 4/64)") != null);
+    } else {
+        try std.testing.expect(std.mem.indexOf(u8, problem, "Gemma 4 E4B need DPAS") != null);
+        try std.testing.expect(std.mem.indexOf(u8, problem, "(gemma4,") == null);
+    }
+}
