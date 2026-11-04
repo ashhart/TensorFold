@@ -119,13 +119,13 @@ reproduces the baseline exactly.
 - 66 new Zig tests: 26 in the container reader, 4 in the publication metadata, 13 in
   the serve surface, 4 in the family, 8 in the producer, 5 in the two prompt sets
   and 6 in the contract; 8 gate unit tests and 6 parity unit tests in Python.
-- `zig build test`: 584 steps succeeded, 8214 of 8259 tests passed and 45 skipped.
+- `zig build test`: 584 steps succeeded, 8412 of 8458 tests passed and 46 skipped.
 - CI: the format check, the code, the tests and the tools are green on Linux,
   Windows and macOS. The app's macOS packaging job is cancelled by the runner
   pool, four attempts across two runs, while the base tree's own runs are
   cancelled the same way in the same window; the job's four steps were run here
   under the job's own pins, and they pass.
-- The lean checker finds 425 problems on this branch against 425 on the base it
+- The lean checker finds 424 problems on this branch against 425 on the base it
   sits on, `8abd45089`: zero new.
 
 ## Not covered
