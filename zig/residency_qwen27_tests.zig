@@ -182,6 +182,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
             r.residency = null;
             r.failed = false;
             r.active = null;
+            r.reading = @splat(null);
             var offsets = [_]u32{1};
             r.offsets = &offsets;
             const budget = try Budget.init(try abi.Shape.init(model.config), 1, 1, 16);
@@ -197,6 +198,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
             defer r.taps.deinit();
             var back: Back = .{ .picks = try owned.take(), .kept = try owned.take() };
             var h: Host = .{ .gpa = a, .model = &model, .runner = r, .back = &back };
+            defer h.runner.settleSlot(0);
             var draft_model: runtime.Model = undefined;
             var draft: Draft = .{ .model = &draft_model };
             var vision: Vision = undefined;
