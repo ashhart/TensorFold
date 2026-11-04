@@ -524,15 +524,18 @@ pub fn main(init: std.process.Init) !u8 {
         }
         attn_rows.deinit(a);
     }
-    for (q27_rows_k.heads) |h| for (std.enums.values(q27_rows_k.Which)) |w| {
-        const r: q27_rows_k.Reg = .{ .heads = h, .which = w, .units = tensor };
+    var attn_regs: std.ArrayList(q27_rows_k.Reg) = .empty;
+    defer attn_regs.deinit(a);
+    for (q27_rows_k.heads) |h| for (std.enums.values(q27_rows_k.Which)) |w| try attn_regs.append(a, .{ .heads = h, .which = w });
+    for (std.enums.values(q27_rows_k.Which)) |w| if (q27_rows_k.hasControl(w, tensor)) try attn_regs.append(a, .{ .heads = .q27b, .which = w, .control = true });
+    for (attn_regs.items) |r| {
         if (!wanted(o, q27_rows_k.spec(r).name)) continue;
         const x = try a.create(q27_rows_k.Attn);
         errdefer a.destroy(x);
         x.* = try q27_rows_k.Attn.init(a, device, queue, r);
         try attn_rows.append(a, x);
         try kernels.append(a, x.kernel());
-    };
+    }
     var minimax: minimax_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer minimax.deinit();
     try minimax.collect(o.only);

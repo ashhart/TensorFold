@@ -19,6 +19,15 @@ inline q27b8 q27_frag(const device bfloat* p, int stride, short fm, short fn, in
   return q27b8(row + fm < limit ? *(const device vec<bfloat, 4>*)r0 : z, row + fm + 8 < limit ? *(const device vec<bfloat, 4>*)(r0 + 8 * stride) : z);
 }
 
+// A value fragment; under `mask` (0x8000, else 0) a value that isn't finite reads as a zero of its sign.
+template <bool EDGE>
+inline q27b8 q27_vfrag(const device bfloat* p, short fm, short fn, int row, int limit, ushort mask) {
+  vec<ushort, 8> x = as_type<vec<ushort, 8>>(q27_frag<EDGE>(p, PD, fm, fn, row, limit));
+  const vec<ushort, 8> inf = ((x & ushort(0x7F80)) + ushort(0x0080)) & mask;  // bit 15 where the exponent is all ones
+  x &= ~((inf >> 15) * ushort(0x7FFF));
+  return as_type<q27b8>(x);
+}
+
 // S[16][32] += Q[16][16] K[32][16]^T, fp32 sums.
 inline void q27_mma_s(thread q27f8& c0, thread q27f8& c1, q27b8 a, q27b8 b0, q27b8 b1) {
   constexpr auto d = matmul2d_descriptor(16, 32, 16, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
@@ -50,10 +59,36 @@ inline void q27_mma_o(thread q27f8& c0, thread q27f8& c1, q27h8 a, q27b8 b0, q27
 // Running state of one tile half: O over its 128 columns, and each row's max and sum (log2 domain).
 struct Q27PromptRun { q27f8 O[8]; float m0, m1, l0, l1; };
 
+// Adds the step's non-finite values (zeros in its P V) times P where a row sees the key; P passes through xs.
+template <bool EDGE>
+inline void q27_prompt_unmask(thread Q27PromptRun& r, q27h8 p0, q27h8 p1, int kt, int kend, const device bfloat* v,
+    threadgroup float (*xs)[32][16], ushort sg, ushort lane, short fm, short fn, int n0, int n1) {
+  _Pragma("clang loop unroll(full)")
+  for (int i = 0; i < 8; i++) { xs[sg][lane][i] = float(p0[i]); xs[sg][lane][8 + i] = float(p1[i]); }
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+  const int keys = EDGE ? min(PTK, kend - kt) : PTK;
+  for (int d = 0; d < keys; d++) {
+    const int b = d >> 4, g = (d >> 2) & 3, i = d & 3;
+    const ushort from = ((fm & 4) << 2) | ((g & 2) << 2) | ((fm & 3) << 1) | (g & 1);
+    const float pa = xs[sg][from][8 * b + i], pb = xs[sg][from][8 * b + 4 + i];
+    const int key = kt + d;
+    const device bfloat* row = v + (int64_t)key * PD + fn;
+    _Pragma("clang loop unroll(full)")
+    for (int j = 0; j < 8; j++)
+      for (int x = 0; x < 4; x++) {
+        const float val = float(row[16 * j + x]);
+        if (isfinite(val)) continue;
+        if (key < n0) r.O[j][x] += pa * val;
+        if (key < n1) r.O[j][4 + x] += pb * val;
+      }
+  }
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+}
+
 // One 32-key step at `kt`: S halves summed low first, masked by each row's key count, then softmax and O += PV.
 template <bool EDGE>
 inline void q27_prompt_step(thread Q27PromptRun& r, int kt, int kend, const device bfloat* q, const device bfloat* k, const device bfloat* v,
-    threadgroup float (*xs)[32][16], ushort sg, ushort lane, short fm, short fn, short h, int n0, int n1, float scale2) {
+    threadgroup float (*xs)[32][16], ushort sg, ushort lane, short fm, short fn, short h, int n0, int n1, float scale2, ushort mask) {
   q27f8 s0 = 0.0f, s1 = 0.0f;
   _Pragma("clang loop unroll_count(4)") // whole unrolling hoists every K load ahead of the products and runs slower
   for (int d = 0; d < 8; d++) q27_mma_s(s0, s1, q27_frag<false>(q + d * 16, PD, fm, fn, 0, 16), q27_frag<EDGE>(k + kt * PD + d * 16, PD, fm, fn, kt, kend), q27_frag<EDGE>(k + (kt + 16) * PD + d * 16, PD, fm, fn, kt + 16, kend));
@@ -101,9 +136,10 @@ inline void q27_prompt_step(thread Q27PromptRun& r, int kt, int kend, const devi
   for (int j = 0; j < 8; j++) for (int i = 0; i < 4; i++) { r.O[j][i] *= f0; r.O[j][4 + i] *= f1; }
   _Pragma("clang loop unroll(full)")
   for (int j = 0; j < 8; j += 2) {
-    q27_mma_o(r.O[j], r.O[j + 1], p0, q27_frag<EDGE>(v + kt * PD + j * 16, PD, fm, fn, kt, kend), q27_frag<EDGE>(v + kt * PD + (j + 1) * 16, PD, fm, fn, kt, kend));
-    q27_mma_o(r.O[j], r.O[j + 1], p1, q27_frag<EDGE>(v + (kt + 16) * PD + j * 16, PD, fm, fn, kt + 16, kend), q27_frag<EDGE>(v + (kt + 16) * PD + (j + 1) * 16, PD, fm, fn, kt + 16, kend));
+    q27_mma_o(r.O[j], r.O[j + 1], p0, q27_vfrag<EDGE>(v + kt * PD + j * 16, fm, fn, kt, kend, mask), q27_vfrag<EDGE>(v + kt * PD + (j + 1) * 16, fm, fn, kt, kend, mask));
+    q27_mma_o(r.O[j], r.O[j + 1], p1, q27_vfrag<EDGE>(v + (kt + 16) * PD + j * 16, fm, fn, kt + 16, kend, mask), q27_vfrag<EDGE>(v + (kt + 16) * PD + (j + 1) * 16, fm, fn, kt + 16, kend, mask));
   }
+  if (mask != 0) q27_prompt_unmask<EDGE>(r, p0, p1, kt, kend, v, xs, sg, lane, fm, fn, n0, n1);
 }
 
 // One chunk's partial per packed row: a simdgroup pair halves the head dim; only the last step reads bounded.
@@ -128,9 +164,12 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
   _Pragma("clang loop unroll(full)")
   for (int j = 0; j < 8; j++) r.O[j] = 0.0f;
   r.m0 = -INFINITY; r.m1 = -INFINITY; r.l0 = 0.0f; r.l1 = 0.0f;
+  // 0 times a non-finite value is NaN: if one sits past `seen` (fewest keys a live row sees), mask it and unmask after
+  const int seen = simd_min(min(n0 ? n0 : INT_MAX, n1 ? n1 : INT_MAX));
+  const ushort mask = q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x8000 : 0;
   int kt = kbeg;
-  for (; kt + PTK <= kend; kt += PTK) q27_prompt_step<false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2);
-  if (kt < kend) q27_prompt_step<true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2);
+  for (; kt + PTK <= kend; kt += PTK) q27_prompt_step<false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
+  if (kt < kend) q27_prompt_step<true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
   if (!live) return;
   const int64_t base = ((int64_t)hk * args.chunks + c) * args.rp + tile * 16;
   _Pragma("clang loop unroll(full)")
