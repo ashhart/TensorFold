@@ -32,6 +32,7 @@ pub const St = struct {
     len: u64 = 0, // rows the target holds (provisional after a window until keep)
     base: u64 = 0, // the last window's start
     first: u32 = 0, // the prompt's choice (for `first`)
+    first_row: lanes.logprob.Row = undefined,
     held: [max_block]u32 = undefined, // the last pass's drafts (the main chain)
     conf: [max_block]f64 = undefined,
     n: u32 = 0, // drafts held (0: none this round)
@@ -86,7 +87,7 @@ pub const Lanes = struct {
         return .{ .ptr = x, .vtable = if (pieces) &vtable_pieces else &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = heldTree, .release = release };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = heldTree, .release = release, .first_row = firstRow };
     /// a target that runs prompts in pieces (iface.Target begin / piece / finish): the round planner may use them
     const vtable_pieces: be.Backend.VTable = blk: {
         var v = vtable;
@@ -174,7 +175,7 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
-        st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
+        st.first = if (s.logprobs) |k| try x.target.scoredPrompt(slot, ids, s.sampling, ids.len, k, &st.first_row, false) else try x.target.prefill(slot, ids, s.sampling, ids.len);
         s.cached = @intCast(x.target.resumedRows(slot));
         st.len = ids.len;
         _ = x.scratch.reset(.retain_capacity);
@@ -250,7 +251,8 @@ pub const Lanes = struct {
         const st = try x.get(s);
         try x.settle();
         const ids = s.prompt();
-        return x.finished(st, ids, try x.target.finish(st.slot, ids, s.sampling, ids.len));
+        const pick = if (s.logprobs) |k| try x.target.scoredPrompt(st.slot, ids, s.sampling, ids.len, k, &st.first_row, true) else try x.target.finish(st.slot, ids, s.sampling, ids.len);
+        return x.finished(st, ids, pick);
     }
 
     /// `finish` without the last token's window (TF_DSV41_TAIL_JOIN); true when the target ran the row anyway.
@@ -276,6 +278,10 @@ pub const Lanes = struct {
         const rows = try x.scratch.allocator().alloc(u32, tr);
         for (rows, 0..) |*r, i| r.* = @intCast(i);
         try x.ingest(st, ids.len - tr, rows);
+    }
+
+    fn firstRow(ptr: *anyopaque, s: *Stream) anyerror!lanes.logprob.Row {
+        return (try self(ptr).get(s)).first_row;
     }
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
@@ -323,7 +329,7 @@ pub const Lanes = struct {
             @memcpy(tokens[1 .. 1 + w.held], st.held[0..w.held]);
             @memcpy(tokens[1 + w.held ..], w.tokens);
             const parents = w.parents; // each row's parent row (row 0: -1)
-            g.* = .{ .slot = st.slot, .start = st.len, .tokens = tokens, .parents = parents, .draws = w.positions, .sampling = w.stream.sampling };
+            g.* = .{ .slot = st.slot, .start = st.len, .tokens = tokens, .parents = parents, .draws = w.positions, .sampling = w.stream.sampling, .logprobs = w.stream.logprobs, .logrows = o.rows };
             c.* = o.sampled;
             @memcpy(o.drafts, tokens[1..]);
         }
