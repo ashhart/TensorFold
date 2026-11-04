@@ -28,8 +28,9 @@ calls need `libtfgrammar` beside the binary (release archives ship it; from sour
 
 - **Context.** 262,144 tokens, the checkpoint's window. Sliding layers keep a ring of their window and one prompt
   chunk; the 14 full layers keep every position, 28 KiB a token (7 GiB a stream at the full window).
-- **Memory.** Weights, scratch and every stream's caches stay under 75% of RAM, or `FLINT_LOAD_LIMIT_GB`; the prompt
-  cache takes what the streams leave, up to `--prompt-cache-gib`. On a Mac that serves other models, set both.
+- **Memory.** Weights, scratch and every stream's caches stay under 75% of RAM, or `FLINT_LOAD_LIMIT_GB` (GB, at most
+  the Mac's RAM, capped at the GPU's working set); the prompt cache takes what the streams leave, up to
+  `--prompt-cache-gib`. On a Mac that serves other models, set both.
 - **Streams.** `--parallel N` streams share each decode forward, each reply equal to its run alone.
 - **Prompt cache.** Kept states hold the full layers' keys and values and the sliding layers' last window; a resumed
   prompt gives the same reply as the same prompt sent fresh.
