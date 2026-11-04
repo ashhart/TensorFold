@@ -44,6 +44,7 @@ pub fn newSeqIn(e: *Engine, cap: usize, block: cuda.DeviceBuffer) !Seq {
     if (cap == 0 or cap > prompt.max_tokens) return error.UnexpectedTensor;
     _ = try prompt.seqBytesPaged(cap, 0);
     var seq: Seq = .{
+        .gen = @import("cuda_window_graph.zig").nextGen(),
         .stream = e.stream.*,
         .conv = &.{},
         .state = &.{},
