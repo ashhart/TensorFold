@@ -95,12 +95,12 @@ const Run = struct {
 };
 
 /// The options the next forwards read: the deep path on or off, its chunk, the cache's grid.
-fn setOptions(deep_on: bool, step: usize, grid: bool) void {
+fn setOptions(g: *Eng, deep_on: bool, step: usize, grid: bool) void {
     var o = xpre.optionsFromEnv();
     o.enabled = deep_on;
     o.rows = step;
     o.snap_grid = grid;
-    xpre.state.options = o;
+    g.e.exl3_prefill.options = o;
 }
 
 /// `ids` from `at.*` through the engine, one forward a segment as the server steps a prompt; the last keeps its logits.
@@ -108,9 +108,9 @@ fn feed(g: *Eng, ids: []const u32, at: *usize, plan: *Plan) !void {
     for (plan.len[0..plan.n], plan.deep[0..plan.n]) |rows, *deep| {
         const stop = at.* + rows;
         if (stop > ids.len) return error.UnexpectedTensor;
-        const before = xpre.state.stats.chunks;
+        const before = g.e.exl3_prefill.stats.chunks;
         try g.e.forward(flash.Tri, g.tri(), &g.seq, ids[at.*..stop], .{ .logits = if (stop == ids.len) .last else .none, .prompt = true });
-        deep.* = xpre.state.stats.chunks != before;
+        deep.* = g.e.exl3_prefill.stats.chunks != before;
         at.* = stop;
     }
 }
@@ -198,7 +198,7 @@ pub fn mixedRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
         all_equal = all_equal and eq_batched and eq_serial;
         cases += 1;
     };
-    xpre.state.options = null;
+    g.e.exl3_prefill.options = null;
     try check.expect(all_equal, "mixed deep and shallow segments equal the batched pass and forced serial decode", .{});
     check.pass("{d} mixed cuts at {d} step sizes equal the batched pass and forced serial decode in logits bytes and tokens", .{ cases, n_sizes });
 }
@@ -268,7 +268,7 @@ pub fn resumeRun(gpu: Gpu, dir: []const u8, rest: []const [:0]const u8) !void {
             cases += 1;
         }
     }
-    xpre.state.options = null;
+    g.e.exl3_prefill.options = null;
     try check.expect(all_equal, "a state kept at any row, resumed or continued, equals a fresh prompt", .{});
     check.pass("{d} states kept at any row (snap grid off) resume to a fresh prompt's logits bytes and tokens", .{cases});
 }

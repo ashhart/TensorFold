@@ -133,7 +133,7 @@ pub const Round = struct {
         return r.n_passes > 1;
     }
 
-    /// True when the round needs no copy at all (the experts need no upload).
+    /// True when the round needs no copy at all (a graph of the experts may replay straight away).
     pub fn allHits(r: *const Round) bool {
         return r.n_copies == 0;
     }
@@ -360,7 +360,7 @@ pub fn minLines(top_k: usize) usize {
     return top_k;
 }
 
-/// Lines a layer gets from `free` device bytes after `reserve` and `other` (KV, scratch: the family's budget)
+/// Lines a layer gets from `free` device bytes after `reserve` and `other` (KV, scratch, graphs: the family's budget)
 pub fn linesFor(free: u64, reserve: u64, other: u64, line_bytes: u64, layers: usize, min_lines: usize) error{PoolTooSmall}!usize {
     if (line_bytes == 0 or layers == 0) return error.PoolTooSmall;
     const spend = std.math.sub(u64, free, reserve +| other) catch return error.PoolTooSmall;
@@ -371,6 +371,7 @@ pub fn linesFor(free: u64, reserve: u64, other: u64, line_bytes: u64, layers: us
 
 test {
     _ = offload;
+    _ = @import("../graph/exl3_graph.zig");
 }
 
 // ------------------------------------------------------------------------------------------------ tests

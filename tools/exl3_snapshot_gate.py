@@ -4,6 +4,7 @@
 import argparse
 import concurrent.futures
 import json
+import re
 import threading
 import time
 import urllib.request
@@ -50,9 +51,9 @@ def main(argv=None):
             if usage["prompt_tokens"] < args.tokens or usage["completion_tokens"] != args.decode:
                 raise AssertionError(f"inexact token counts: {usage}")
             runtime = response["tensorfold"]
-            digest = runtime.get("token_sha256") or runtime["token_sha"]
-            if len(digest) < 12:
-                raise AssertionError("missing output token digest")
+            digest = runtime.get("token_sha256")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise AssertionError("missing full output token SHA256")
             return {
                 "sha": digest,
                 "cached_tokens": usage["prompt_tokens_details"]["cached_tokens"],

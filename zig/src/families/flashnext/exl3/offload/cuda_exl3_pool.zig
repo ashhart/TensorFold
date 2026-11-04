@@ -9,6 +9,7 @@ const telemetry = @import("../model/exl3_telemetry.zig");
 
 pub const offload = @import("exl3_offload.zig");
 pub const round = round_;
+pub const graph = @import("../graph/exl3_graph.zig");
 pub const Round = round_.Round;
 pub const linesFor = round_.linesFor;
 pub const shape = offload.shape;
@@ -59,6 +60,9 @@ pub fn passesFor(lines: usize) usize {
 }
 
 pub const Stats = struct {
+    cut_ns: u64 = 0,
+    plan_ns: u64 = 0,
+    blocks: u64 = 0,
     rounds: u64 = 0,
     passes: u64 = 0,
     hit_slots: u64 = 0,

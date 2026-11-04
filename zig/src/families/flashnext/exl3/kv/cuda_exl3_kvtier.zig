@@ -96,6 +96,7 @@ pub const LaneSel = struct {
     head_on: bool = false, // the MTP head has written (or will write) rows of this stream
     hw: usize = 0, // pages [0, hw) have been flushed once: their host rows are valid
     reset_pending: bool = true,
+    graph_staged: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, k: *const Kernels, cap: usize, npages: usize, slot_frames: usize, layers: usize, own: Own) !*LaneSel {
         const s = try gpa.create(LaneSel);
@@ -173,6 +174,7 @@ pub const LaneSel = struct {
 
     /// Layer `ai` writes [pos0, pos0 + n): a page leaves the window once every layer wrote it; a rewind brings it back.
     pub fn begin(s: *LaneSel, stream: cuda.Stream, ai: usize, pos0: usize, n: usize) !void {
+        if (s.graph_staged) return;
         if (ai >= s.layers) return;
         if (s.reset_pending) {
             // a new, resumed or restored stream: rows before pos0 are canonical in the host store

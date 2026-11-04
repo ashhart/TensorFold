@@ -3,8 +3,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 const g = @import("core").contract.gates;
-const tp_ = @import("contract_flashnext_exl3_tp.zig");
 const canon_ = @import("contract_flashnext_exl3_canon.zig");
+const dplan_ = @import("contract_flashnext_exl3_dplan.zig");
 const writeback = @import("contract_flashnext_writeback.zig");
 const kvt_ = @import("contract_flashnext_exl3_kvt.zig");
 const kvt_plan_ = @import("contract_flashnext_exl3_kvt_plan.zig");
@@ -26,7 +26,7 @@ comptime {
 pub const Suite = struct {
     a: std.mem.Allocator,
     writebacks: [3]writeback.Writeback,
-    masks: tp_.Masks,
+    set: dplan_.Set,
     canons: canon_.Canons,
     kvt: *kvt_.Group,
     prefill: *prefill_.Group,
@@ -47,9 +47,9 @@ pub const Suite = struct {
         }
         errdefer for (&self.writebacks) |*w| w.deinit();
         for (&self.writebacks) |*w| try kernels.append(a, w.kernel());
-        self.masks = try tp_.Masks.init(gpu, s);
-        errdefer self.masks.deinit();
-        try self.masks.add(a, kernels);
+        self.set = try dplan_.Set.init(gpu, s);
+        errdefer self.set.deinit();
+        try self.set.add(a, kernels);
         self.canons = try canon_.Canons.init(gpu, s, controls);
         errdefer self.canons.deinit();
         try self.canons.add(a, kernels);
@@ -75,7 +75,7 @@ pub const Suite = struct {
         self.prefill.destroy();
         self.canons.deinit();
         self.kvt.destroy();
-        self.masks.deinit();
+        self.set.deinit();
         for (&self.writebacks) |*w| w.deinit();
         self.a.destroy(self);
     }

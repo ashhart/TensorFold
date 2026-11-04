@@ -52,6 +52,7 @@ pub fn run(gpu: Gpu, rest: []const [:0]const u8) !void {
             try equal.equalRun(gpu, &ex, s, ld, 24, 4, 0x24 + layer);
             try equal.equalRun(gpu, &ex, s, ld, 64, 0, 0x64 + layer);
         }
+        if (all or std.mem.eql(u8, mode, "graph")) try equal.graphRun(gpu, &ex, s, ld);
         if (std.mem.eql(u8, mode, "bench")) try bench.benchRun(gpu, &ex, s, ld);
     }
 }
