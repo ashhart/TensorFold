@@ -19,6 +19,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - In one-call tool mode, a stream sends prose held after a hidden call envelope at the finish, so the streamed content equals the whole reply; other streams are unchanged (#2049). Thanks to @devopsfortunato.
 
 - GLM tool calls stream their arguments as the model writes them, as Qwen-style XML calls already do, and the joined pieces equal the whole reply's arguments (#2050). Thanks to @devopsfortunato.
+- HIP: Qwen 3.5 loads BF16 checkpoints with their Hugging Face tensor names and runs the BF16 projections through rocBLAS, the base for Clef-Flash. MLX checkpoints are unchanged (#2046). Thanks to @laudney.
 
 - Kolibri-1 on CUDA keeps its full layers' caches in pages of the core KV pool, the same way, with identical tokens when the store is off (#1620, part of #1657). Thanks to @jschmied.
 
