@@ -53,10 +53,6 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
     if (o.tp != 1 and !ranked) return no_ranks;
-    if (@hasDecl(F, "tp_draft_snapshots")) {
-        if (!F.tp_draft_snapshots and o.tp > 1 and o.drafts and (o.prompt_cache_gib orelse 1) > 0)
-            return "Flash Next tensor-rank MTP snapshots are unavailable: use --prompt-cache-gib 0 with --tp and drafting";
-    }
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
@@ -96,7 +92,7 @@ test "the CUDA server serves --tp, and Flash Next's two ranks pass family admiss
         if (std.mem.eql(u8, x, "--tp")) break true;
     } else false);
     const flashnext = @import("flashnext").native;
-    try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2, .prompt_cache_gib = 0 }) == null);
+    try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2 }) == null); // kept prompt states and drafts together
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
