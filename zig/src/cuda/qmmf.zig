@@ -71,9 +71,14 @@ pub fn plan(m: usize, n: usize, k: usize, clusters: bool) Plan {
     return planSlices(m, splitK(n, k), clusters);
 }
 
-/// plan() for a packed weight: its pinned K slices if any, else its shape's.
+/// A packed weight's K slices: its pinned ones if any, else its shape's. Every kernel that slices `w` takes these.
+pub fn slices(w: Weight) u32 {
+    return if (w.sk != 0) w.sk else splitK(w.n, w.k);
+}
+
+/// plan() for a packed weight, on slices(w).
 pub fn planFor(m: usize, w: Weight, clusters: bool) Plan {
-    return planSlices(m, if (w.sk != 0) w.sk else splitK(w.n, w.k), clusters);
+    return planSlices(m, slices(w), clusters);
 }
 
 fn planSlices(m: usize, sk: u32, clusters: bool) Plan {
@@ -326,6 +331,8 @@ test "a cut weight pinned to the whole weight's K slices plans as the whole one 
         try std.testing.expectEqual(plan(m, cut.n, cut.k, cl), planFor(m, cut, cl));
     };
     try std.testing.expect(planFor(1536, cut, false).sk != planFor(1536, kept, false).sk);
+    try std.testing.expectEqual(splitK(whole.n, whole.k), slices(kept)); // what the BF16 prompt tile folds, too
+    try std.testing.expectEqual(splitK(cut.n, cut.k), slices(cut));
     try std.testing.expectEqual(@as(u32, 4), (try pinned(cut, 4)).sk); // 40 groups: 10 a slice
     for ([_]u32{ 0, 3, 8, 16 }) |bad| try std.testing.expectError(error.BadSplit, pinned(cut, bad)); // 8: 5 a slice
 }
