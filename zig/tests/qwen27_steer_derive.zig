@@ -175,8 +175,8 @@ pub fn main(init: std.process.Init) !void {
     defer tok.deinit();
     var runner = try q.decode_round.Runner.init(init.gpa, m, 1, 512);
     defer runner.deinit();
-    // The slots run 0 to `layers`: one for the embedding and one for each block's output.
-    const sites = m.config.layers + 1;
+    // One slot per block: slot N holds the output of block N, the site a direction names.
+    const sites = m.config.layers;
     var capture = try derive.Capture.init(m.device, sites, m.config.hidden, m.frame.get(.dims).buffer, site);
     defer capture.deinit();
 
@@ -231,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
         .contrast = derive.contrast,
         .hook_point = glp.residual_site,
         .width = m.config.hidden,
-        .layers = sites - 1,
+        .layers = sites,
         .prompts = harmful.prompts,
         .capture = @tagName(site),
         .first_layer = first_layer,
