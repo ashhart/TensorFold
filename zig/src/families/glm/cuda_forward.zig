@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 const cfg = @import("config.zig");
 const weights = @import("cuda_weights.zig");
 const glue = @import("cuda_glue.zig");
-const kda = @import("cuda_kda.zig");
+const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
 const projection = @import("cuda_proj.zig");
 const latent = @import("cuda_latent.zig");
@@ -554,16 +554,17 @@ pub const Forward = struct {
                 for (st.cur) |x| if (x != cur) return error.KdaLayersOutOfStep;
                 if (keep < st.pending) {
                     const h = st.heads;
-                    var a: cuda.Args = .{};
-                    a.add(@as(c_int, @intCast(h)));
-                    a.add(st.recAt(cur, 0));
-                    a.add(@as(usize, st.rec_layer / 4));
-                    for ([_]u64{ st.save_k, st.save_v, st.save_g, st.save_b }) |x| a.add(x);
-                    a.add(@as(usize, window_rows * h * kda.dk));
-                    a.add(@as(usize, window_rows * h));
-                    a.add(@as(c_int, @intCast(keep)));
-                    a.add(st.recAt(1 - cur, 0));
-                    try cuda.launch.launch(f.m.kda.replay_layers, .{ .grid = .{ .x = @intCast(st.kda_layers * h) }, .block = .{ .x = 1024 } }, f.stream, &a);
+                    try kda.replayLayers(&f.m.kda, f.stream, .{
+                        .state_in = st.recAt(cur, 0),
+                        .state_stride = st.rec_layer / 4,
+                        .k = st.save_k,
+                        .v = st.save_v,
+                        .g = st.save_g,
+                        .b = st.save_b,
+                        .kv_stride = window_rows * h * kda.dk,
+                        .b_stride = window_rows * h,
+                        .state_out = st.recAt(1 - cur, 0),
+                    }, keep, h, st.kda_layers);
                 }
                 for (st.cur) |*x| x.* = 1 - x.*;
                 if (st.kda_layers > 0) try glue.convShift(f.set(), f.stream, st.conv, st.proj, keep, st.proj_layer, st.proj_row, st.kda_layers, st.conv_c);

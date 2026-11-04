@@ -49,6 +49,7 @@ pub const route_rows = @import("route_rows.zig");
 pub const vit = @import("vit.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const act_rows = @import("act_rows.zig");
+pub const kda = @import("kda.zig");
 pub const gdn_prep = @import("gdn_prep.zig");
 pub const qk_rows = @import("qk_rows.zig");
 pub const experts = @import("experts.zig");
@@ -85,6 +86,7 @@ test {
     _ = @import("p2p_nccl_log_test.zig");
     _ = @import("p2p_report_test.zig");
     _ = exl3_grouped;
+    _ = kda;
     _ = gdn_train;
     _ = train_q4;
     _ = train_attn;

@@ -24,7 +24,7 @@ fn addProj(l: *std.ArrayList(Lin), gpa: std.mem.Allocator, p: *projection.Proj, 
 }
 
 fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !void {
-    const kd = @import("cuda_kda.zig").dk;
+    const kd = cuda.kda.dk;
     switch (l.mixer) {
         .kda => |*x| {
             const n = x.heads * kd;
@@ -79,7 +79,7 @@ fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@impor
     const np = x.matWidth();
     if (np == x.width()) return; // already aligned, or the pad is off
     // a split stack's MXFP8 [q | k | v] keeps its width (3 * heads * dk, aligned); its bf16 rest carries the pad
-    const fa: usize = if (x.proj == .split) 3 * x.heads * @import("cuda_kda.zig").dk else 0;
+    const fa: usize = if (x.proj == .split) 3 * x.heads * cuda.kda.dk else 0;
     const src = switch (x.proj) {
         .bf16 => |ptr| ptr,
         .split => |sp| sp.rest,
