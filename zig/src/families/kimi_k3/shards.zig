@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const store = @import("store.zig");
 const header = @import("shard_header.zig");
 const st = @import("safetensors");
+const config = @import("config.zig");
 
 const Entry = header.Entry;
 const File = struct { path: [:0]const u8, map: ?mtl.MappedFile = null, buffer: ?mtl.Buffer = null, entries: std.StringHashMapUnmanaged(Entry) = .empty };
@@ -15,15 +16,18 @@ pub const Shards = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     device: mtl.Device,
+    cfg: config.Config = .{},
     files: std.ArrayList(File) = .empty,
     /// Our short name to the index of the file that holds it, from model.safetensors.index.json.
     where: std.StringHashMapUnmanaged(u32) = .empty,
 
-    /// Read `dir`'s index only; files are mapped as their tensors are asked for.
+    /// Read `dir`'s config and index; files are mapped as their tensors are asked for.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8) !Shards {
         var s = Shards{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa), .device = device };
         errdefer s.deinit();
         const a = s.arena.allocator();
+        const cfg_text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(16 << 20));
+        s.cfg = try config.parse(a, cfg_text);
         const index = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" }), a, .limited(st.index.max_bytes));
         const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, index, .{});
         const map = try st.index.weightMap(parsed);
@@ -41,6 +45,13 @@ pub const Shards = struct {
                 slot.value_ptr.* = gop.value_ptr.*;
             }
         }
+        if (s.cfg.dsa != null) for (0..s.cfg.layers) |li| {
+            if (s.cfg.kind(@intCast(li)) != .mla) continue;
+            for ([_][]const u8{ "wq_b.weight", "wk.weight", "k_norm.weight", "k_norm.bias", "weights_proj.weight" }) |part| {
+                const name = try std.fmt.allocPrint(a, "layers.{d}.self_attn.indexer.{s}", .{ li, part });
+                if (!s.where.contains(name)) return error.MissingK31Indexer;
+            }
+        };
         return s;
     }
 

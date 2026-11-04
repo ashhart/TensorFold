@@ -22,6 +22,7 @@ pub const State = struct {
 
     /// Caches for `layers` (a subset for tests) and `heads` local KDA heads; every slot starts empty.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, cfg: Config, limits: Limits, layers: []const u32, heads: u32) !State {
+        try cfg.checkEnd(0, limits.max_ctx);
         var s = State{ .gpa = gpa, .cfg = cfg, .limits = limits, .heads = heads, .kda = try gpa.alloc(?KdaArena, cfg.layers), .mla = try gpa.alloc(?mtl.Buffer, cfg.layers), .streams = try gpa.alloc(Stream, limits.slots) };
         @memset(s.kda, null);
         @memset(s.mla, null);

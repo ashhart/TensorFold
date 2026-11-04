@@ -42,8 +42,8 @@ fn scratchBuffers(sc: *const k3.round.Scratch, out: *std.ArrayList(mtl.Buffer), 
 }
 
 /// Layer i through the schedule three ways, compared bit for bit; mixed rows and an expert decode go to `dir`.
-fn checkLayer(g: *Gpu, gpa: std.mem.Allocator, io: std.Io, i: u32, dir: []const u8, model: ?*k3.shards.Shards) !void {
-    const cfg = k3.config.Config{};
+fn checkLayer(g: *Gpu, gpa: std.mem.Allocator, io: std.Io, i: u32, dir: []const u8, model: ?*k3.shards.Shards, cfg: k3.config.Config) !void {
+    if (i >= cfg.layers) return error.BadLayer;
     var own = synth.Synth{ .gpa = gpa, .device = g.device, .queue = g.queue, .k = &g.k };
     defer own.deinit();
     const src: Src = if (model) |m| .{ .shards = m } else .{ .synth = &own };
@@ -124,8 +124,7 @@ fn dequant(g: *Gpu, gpa: std.mem.Allocator, io: std.Io, src: k3.store.Source, i:
 }
 
 /// Output residual, final norm and LM head on 8 rows, with greedy tokens; embedding rows checked here.
-fn checkHead(g: *Gpu, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, model: ?*k3.shards.Shards) !void {
-    const cfg = k3.config.Config{};
+fn checkHead(g: *Gpu, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, model: ?*k3.shards.Shards, cfg: k3.config.Config) !void {
     var own = synth.Synth{ .gpa = gpa, .device = g.device, .queue = g.queue, .k = &g.k };
     defer own.deinit();
     const src: Src = if (model) |m| .{ .shards = m } else .{ .synth = &own };
@@ -190,27 +189,46 @@ fn headInputs(sc: *k3.round.Scratch, cfg: *const k3.config.Config, rows: u32) vo
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var args = try init.minimal.args.toSlice(init.arena.allocator());
+    var cfg = k3.config.Config{};
+    var model_dir: ?[]const u8 = null;
+    var config_path: ?[]const u8 = null;
+    var at: usize = 1;
+    while (at + 1 < args.len) : (at += 2) {
+        if (std.mem.eql(u8, args[at], "--model")) {
+            model_dir = args[at + 1];
+        } else if (std.mem.eql(u8, args[at], "--config")) {
+            config_path = args[at + 1];
+        } else break;
+    }
+    if (model_dir) |d| {
+        if (config_path != null) return error.ConflictingConfig;
+        config_path = try std.fs.path.join(init.arena.allocator(), &.{ d, "config.json" });
+    }
+    if (config_path) |p| {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, p, init.arena.allocator(), .limited(16 << 20));
+        cfg = try k3.config.parse(gpa, bytes);
+    }
+    args = args[at - 1 ..];
     var model: ?*k3.shards.Shards = null;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var g = try Gpu.init();
     defer g.deinit();
     var shards: k3.shards.Shards = undefined;
-    if (args.len > 2 and std.mem.eql(u8, args[1], "--model")) {
-        shards = try k3.shards.Shards.open(gpa, init.io, g.device, args[2]);
+    if (model_dir) |d| {
+        shards = try k3.shards.Shards.open(gpa, init.io, g.device, d);
         model = &shards;
-        args = args[2..];
     }
     defer if (model) |m| m.deinit();
     if (args.len < 3) {
-        std.debug.print("usage: tf-k3-check [--model K3_DIR] OUT_DIR (LAYER | head)...\n", .{});
+        std.debug.print("usage: tf-k3-check [--model DIR | --config FILE] OUT_DIR (LAYER | head)...\n", .{});
         std.process.exit(2);
     }
     std.debug.print("device: {s}; weights: {s}\n", .{ g.device.name(), if (model != null) "checkpoint" else "synthetic" });
     try std.Io.Dir.cwd().createDirPath(init.io, args[1]);
     for (args[2..]) |a| {
         if (std.mem.eql(u8, a, "head")) {
-            try checkHead(&g, gpa, init.io, args[1], model);
-        } else try checkLayer(&g, gpa, init.io, try std.fmt.parseInt(u32, a, 10), args[1], model);
+            try checkHead(&g, gpa, init.io, args[1], model, cfg);
+        } else try checkLayer(&g, gpa, init.io, try std.fmt.parseInt(u32, a, 10), args[1], model, cfg);
     }
 }

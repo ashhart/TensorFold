@@ -32,6 +32,10 @@ def shape_of(c: ref.Config, name: str):
         rows, cols = (c.latent, c.moe_inter) if m.group(1) == "w2" else (c.moe_inter, c.latent)
         return (rows, cols // 2) if m.group(2) == "packed" else (rows, cols // 32)
     table = [
+        (r"indexer\.wq_b\.weight$", (32 * 128, c.q_lora)),
+        (r"indexer\.wk\.weight$", (128, H)),
+        (r"indexer\.k_norm\.(weight|bias)$", (128,)),
+        (r"indexer\.weights_proj\.weight$", (32, H)),
         (r"(input_layernorm|post_attention_layernorm|self_attention_res_norm|mlp_res_norm)\.weight$", (H,)),
         (r"res_proj\.weight$", (1, H)), (r"self_attn\.[qkvg]_proj\.weight$", None), (r"self_attn\.o_proj\.weight$", None),
         (r"f_a_proj\.weight$", (c.kda_dim, H)), (r"f_b_proj\.weight$", (W, c.kda_dim)),
@@ -196,8 +200,11 @@ def main() -> int:
     ap.add_argument("out", help="tf-k3-check's output folder")
     ap.add_argument("--rounds", type=int, default=4, help="last schedule round to check (MoE layers default 1)")
     ap.add_argument("--model", help="the checkpoint tf-k3-check read (else synthetic weights)")
+    ap.add_argument("--k31", action="store_true", help="the capped K3.1 all-visible MLA inference, not a model reference")
     a = ap.parse_args()
-    cfg = ref.Config()
+    cfg = ref.Config(dsa=a.k31)
+    if a.k31:
+        print("K3.1 capped all-visible MLA inference; no real-model reference")
     model = Checkpoint(Path(a.model)) if a.model else None
     ok = True
     for d in sorted(Path(a.out).glob("layer*")):
