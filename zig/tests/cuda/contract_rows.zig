@@ -115,6 +115,10 @@ pub const Row = struct {
         if (f32w) r.eps = 1e-6;
         self.r = r;
         r.fill(fill, seed);
+        // Integer squares scaled by 256 stay exactly summable in FP32 while overflowing FP16 even at GDN width 128.
+        if (f32w and fill == .stress) for (r.x) |*value| {
+            value.* = c.toBf16(c.fromBf16(value.*) * 16);
+        };
         if (self.which == .rms_tree) {
             const h = try a.alloc(f16, r.x.len);
             defer a.free(h);
