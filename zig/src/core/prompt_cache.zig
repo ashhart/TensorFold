@@ -79,6 +79,7 @@ pub const Entry = struct {
     image_frame: u32 = 0, // the family frame can affect text rows before the first image
     images: []images.Identity = &.{}, // exact image identities through the keyed prefix, including lookahead
     tokens: []u32, // the state's tokens and `lookahead` more
+    prefix_hash: u64 = 0, // prompt_cache_index.prefixHash of `tokens`: a lookup compares it before the tokens
     decode_spans: []modes.Span = &.{}, // canonical row arithmetic through at, excluding lookahead
     at: u32,
     saved: Saved,
@@ -115,6 +116,7 @@ pub const Store = struct {
     by_position: std.ArrayList(*Entry) = .empty, // nonowning, longest first; equal positions retain insertion order
     counts: Counts = .{},
     shared_keys: std.ArrayList(u64) = .empty, // the tokens of recently planned shared cuts, hashed (at most SHARED_KEYS)
+    hashes: std.ArrayList(u64) = .empty, // the last lookup's prompt prefix hashes, reused
     imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
     disk: ?*rows.Rows = null, // --learn-conversations: every kept state written behind to disk, read back where it pays
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
@@ -137,6 +139,7 @@ pub const Store = struct {
         s.entries.deinit(s.gpa);
         s.by_position.deinit(s.gpa);
         s.shared_keys.deinit(s.gpa);
+        s.hashes.deinit(s.gpa);
         s.repeat_log.deinit(s.gpa);
         s.held = 0;
     }

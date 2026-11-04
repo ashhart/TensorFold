@@ -408,6 +408,66 @@ test "snapshot index: forked conversations on full stores resume and evict as th
     try std.testing.expect(hits > 500 and evicted > 1000); // resumes and evictions were exercised
 }
 
+test "snapshot index: the hash prefilter picks the scan's winner on a long shared prefix" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a2 = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = pc.Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 1 << 40);
+    defer s.deinit();
+    const len: usize = 4096;
+    const prompt = try a2.alloc(u32, len + 1);
+    for (prompt, 0..) |*t, i| t.* = @intCast(1 + i * 7 % 997);
+    for (0..256) |i| try keep(&s, &f, prompt, @intCast(1 + i * ((len - 2) / 256)), &.{});
+    // the same conversation with an earlier turn edited: the scan visits every longer state, the hash skips them
+    const edited = try a2.dupe(u32, prompt[0 .. len + 1]);
+    edited[len / 2] ^= 1;
+    try std.testing.expect(s.find(edited, &.{}, &.{}) != null);
+    try std.testing.expect(oracle.find(&s, edited, &.{}, &.{}) == s.find(edited, &.{}, &.{}));
+    // a shorter prefix of the same conversation resumes the longest state under it
+    const short = try a2.dupe(u32, prompt[0 .. len / 4]);
+    try std.testing.expect(s.find(short, &.{}, &.{}) != null);
+    try std.testing.expect(oracle.find(&s, short, &.{}, &.{}) == s.find(short, &.{}, &.{}));
+    // another conversation: no state matches, and the hash path misses where the scan does
+    const other = try a2.dupe(u32, prompt[0 .. len + 1]);
+    other[0] ^= 1;
+    try std.testing.expect(oracle.find(&s, other, &.{}, &.{}) == null);
+    try std.testing.expect(s.find(other, &.{}, &.{}) == null);
+}
+
+test "snapshot index: lookup cost at 16, 64, 256 and 1,024 entries" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const len: usize = 8192; // one long conversation's prompt
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a2 = arena.allocator();
+    const prompt = try a2.alloc(u32, len + 2);
+    for (prompt, 0..) |*t, i| t.* = @intCast(1 + i * 7 % 997);
+    const edited = try a2.dupe(u32, prompt[0 .. len + 1]);
+    edited[len / 2] ^= 1; // an earlier turn edited in the middle: every longer state is scanned up to it
+    const other = try a2.dupe(u32, prompt[0 .. len + 1]);
+    other[0] ^= 1; // another conversation: every state's last token matches, the scan fails at its first token
+    for ([_]usize{ 16, 64, 256, 1024 }) |n| {
+        var f: Fake = .{ .gpa = gpa };
+        var s = pc.Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 1 << 40);
+        defer s.deinit();
+        for (0..n) |i| {
+            const at: u32 = @intCast(1 + i * ((len - 2) / n));
+            try keep(&s, &f, prompt, at, &.{});
+        }
+        const t0 = std.Io.Clock.awake.now(io);
+        const late = s.find(edited, &.{}, &.{});
+        const late_ns = t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
+        const t1 = std.Io.Clock.awake.now(io);
+        const miss = s.find(other, &.{}, &.{});
+        const miss_ns = t1.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
+        std.debug.print("snapshot index: {d} entries, {d}-token prompt: late hit {d} ns (kept {d}), miss {d} ns\n", .{ n, len, late_ns, if (late) |e| e.at else 0, miss_ns });
+        try std.testing.expect(late != null and miss == null);
+    }
+}
+
 test {
     _ = @import("prompt_cache_index_persistence_test.zig");
 }
