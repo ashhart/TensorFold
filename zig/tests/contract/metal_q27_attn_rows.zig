@@ -160,7 +160,9 @@ pub const Attn = struct {
         t.rig.reset();
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        t.rd = at_.Round.init(shape, t.reg.which == .prompt, t.reg.which == .decode, rng);
+        // on an M5 gate 1's decode round is a chain: only a chain's prefix kernel reads keys that a row must not see
+        const trees = t.reg.which == .decode and !(t.tensor and fill == .nonfinite);
+        t.rd = at_.Round.init(shape, t.reg.which == .prompt, trees, rng);
         const r = &t.rd;
         t.q_in = try t.a.alloc(u16, r.rows * nh * D);
         t.gate_in = try t.a.alloc(u16, r.rows * nh * 2 * D);
@@ -188,6 +190,7 @@ pub const Attn = struct {
         }
         t.refs[4] = try t.rig.output(r.rows * nh * D * 2);
         t.st = try at_.State.init(t.a, t.rig.device, r, gm, t.caches[0..r.streams]);
+        if (t.tensor and t.reg.which == .decode and fill == .nonfinite and !t.st.?.plan.fused) return error.PlantedRoundMissesPrefix;
         return true;
     }
 
