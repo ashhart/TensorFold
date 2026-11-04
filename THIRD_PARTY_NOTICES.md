@@ -231,6 +231,11 @@ unmodified `encoding/encoding_dsv4.py` of
 The MTP layer that engine drafts with comes from that checkpoint's last shard (MIT), converted by
 `families/deepseek_v4/convert.py`. The native engine has no DeepSeek-V4 family and ships none of these files.
 
+`zig/src/families/deepseek_v41/fixtures/dsrecipe/cases.jsonl.gz` holds the DeepSeek-V4.1 prompt text that DeepSeek's
+deepseek-recipe encoder rendered for 328 request cases, which `zig/src/server/deepseek_recipe_test.zig` compares with the
+server's own rendering (`tools/zig/dsrecipe_fixture.py` packs it). deepseek-recipe is under the MIT License, Copyright (c)
+2026 DeepSeek; its license text is beside the fixture. No recipe code is included or run.
+
 `zig/kernels/cuda/ggml_iq2xxs_tables.cuh` holds [ggml](https://github.com/ggml-org/ggml)'s IQ2_XXS grid and sign
 tables as `ggml-common.h` defines them, MIT License, Copyright (c) 2023-2026 The ggml authors (the license text is
 below); `tools/zig/bolt_ggml.py` reads them from that file. The IQ2_XXS and Q8_0 kernels that use them for Nemotron 3.5
