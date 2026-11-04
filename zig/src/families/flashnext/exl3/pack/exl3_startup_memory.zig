@@ -12,13 +12,14 @@ pub const Reservation = struct {
 pub const Ledger = struct {
     persistent: u64,
     scratch: u64,
+    deep_prefill: u64,
     pool_scratch: u64,
     expert_pools: u64,
     reservation: Reservation,
 
     pub fn total(self: Ledger) !u64 {
         var bytes = try self.reservation.total();
-        inline for (.{ self.persistent, self.scratch, self.pool_scratch, self.expert_pools }) |part| bytes = try std.math.add(u64, bytes, part);
+        inline for (.{ self.persistent, self.scratch, self.deep_prefill, self.pool_scratch, self.expert_pools }) |part| bytes = try std.math.add(u64, bytes, part);
         return bytes;
     }
 };
@@ -56,8 +57,8 @@ test "startup accounting fails closed on overflow and underfunded explicit pools
 }
 
 test "ledger includes all allocations after the pool checkpoint" {
-    const ledger: Ledger = .{ .persistent = 100, .scratch = 20, .pool_scratch = 40, .expert_pools = 50, .reservation = .{ .stream_bytes = 10, .streams = 8 } };
-    try std.testing.expectEqual(@as(u64, 290), try ledger.total());
+    const ledger: Ledger = .{ .persistent = 100, .scratch = 20, .deep_prefill = 30, .pool_scratch = 40, .expert_pools = 50, .reservation = .{ .stream_bytes = 10, .streams = 8 } };
+    try std.testing.expectEqual(@as(u64, 320), try ledger.total());
 }
 
 test "pool setup may consume its allocator margin but not lane or server reservations" {

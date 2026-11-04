@@ -3,6 +3,19 @@ const cuda = @import("cuda");
 const pool = @import("../offload/cuda_exl3_pool.zig");
 const telemetry = @import("exl3_telemetry.zig");
 
+test "exl3: ring demand counts routed pick appearances separately from per-chunk expert requests and speculative copies" {
+    var stats: @import("../prefill/cuda_exl3_prefill_ring.zig").Stats = .{};
+    stats.observeDemand(true, 17);
+    stats.observeDemand(false, 31);
+    stats.observeDemand(false, 0);
+    try std.testing.expectEqual(@as(u64, 17), stats.hit_picks);
+    try std.testing.expectEqual(@as(u64, 31), stats.miss_picks);
+    try std.testing.expectEqual(@as(u64, 1), stats.hit_expert_requests);
+    try std.testing.expectEqual(@as(u64, 1), stats.miss_expert_requests);
+    try std.testing.expectEqual(@as(u64, 0), stats.copies);
+    try std.testing.expectEqual(@as(u64, 0), stats.dma_requested_bytes);
+}
+
 test "exl3: aggregate telemetry finds attached pools deduplicates MTP aliases and separates committed device plans" {
     var resident: pool.Pool = undefined;
     resident.lines.pinned_bank = null;
