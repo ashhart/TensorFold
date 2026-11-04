@@ -63,7 +63,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         if (prebuilt) |dir| {
             image.* = b.graph.cwdRelativePath(b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{k.name}) }));
         } else if (nvcc) |tool| {
-            image.* = fatbin(b, tool, version.?, k, sms);
+            image.* = fatbin(b, tool, version.?, catalog.nativeFp(b.allocator, k, opts.native_fp_decode), sms);
         }
         if (image.*) |file| fatbin_step.dependOn(&b.addInstallFile(file, b.fmt("fatbin/{s}.fatbin", .{k.name})).step);
     }
