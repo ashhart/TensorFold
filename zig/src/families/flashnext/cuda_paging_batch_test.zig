@@ -121,12 +121,14 @@ test "paged grouped prompts: every current attention route receives the sequence
     s.part = 0x1300000000;
     var lw: Layer = undefined;
     lw.proj.native = null;
+    lw.proj.exl3 = null;
     lw.proj.w.ptr = 0x1000;
     lw.proj.s.ptr = 0x2000;
     lw.proj.b.ptr = 0x3000;
     lw.proj.k = 7680;
     lw.proj.n = 13952;
     lw.out.native = null;
+    lw.out.exl3 = null;
     lw.out.w.ptr = 0x4000;
     lw.out.s.ptr = 0x5000;
     lw.out.b.ptr = 0x6000;
