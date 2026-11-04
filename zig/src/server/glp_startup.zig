@@ -6,6 +6,13 @@ const api = @import("engine_api");
 const glp = api.glp;
 const log = @import("log.zig");
 const cfg = @import("checkpoint_config");
+const cli_flag = @import("cli_flag.zig");
+
+/// The flags the control vector adds to the server's own.
+pub const flags = [_]cli_flag.Flag{
+    .{ .name = "--glp", .native = true },
+    .{ .name = "--glp-alpha", .native = true },
+};
 
 /// The model type of the family that takes a control vector: Qwen3.8-27B.
 const steer_type = "qwen3_5";
