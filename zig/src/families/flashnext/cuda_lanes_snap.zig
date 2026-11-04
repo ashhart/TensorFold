@@ -69,7 +69,7 @@ pub fn Copies(comptime of: anytype) type {
                 return x;
             };
             if (l.seq.fed != at) return error.NotAtMark;
-
+            if (l.draft) |*d| try self.ops().flushStash(d); // the head's deferred rounds are part of its rows
             // pending DeltaNet rows into the states first: a snapshot holds them as they stand
             if (l.draft) |*d| try self.ops().flushLate(&l.seq, d);
             if (self.ranks) |r| return try r.save(&l.seq, if (l.draft) |*d| d else null);

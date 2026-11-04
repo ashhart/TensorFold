@@ -43,6 +43,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the sessions-writes mixed load holds its pool to one slot's capacity, so it exercises spills to the tier (#2731). Thanks to @garvrao80.
 
+- Flash Next EXL3 with offloaded experts and an MTP head uses completed-round token rates to choose plain or drafted rounds, with bounded probes; other formats retain their existing draft policy (#1446).
+
 - Flash Next EXL3 selects host planning, eager device planning or CUDA graph replay with `TF_FLASHNEXT_EXL3_GRAPH=0`, `eager` or `1`. Engine teardown clears its capture-failure history without retiring another engine's graphs or retries. Its graph qualification runner propagates prefill configuration refusals (#1445).
 
 - The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501). Thanks to @BlivionIaG.
@@ -741,6 +743,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Model discovery keeps `reasoning.default_effort` for templates that consume `reasoning_effort` as free text, even when they name no quoted effort levels. It omits the default when the template does not mention that input. Rendering and request behavior are unchanged.
 
 - `--profile stable`'s registry covers GLM's host KV tier: `TF_GLM_KV_HOST` and `TF_GLM_KV_HOST_SHARED` are now rows in the table, with [#1795](https://github.com/ashhart/TensorFold/pull/1795)'s identical tokens at TP=2, and their readers resolve through the registry. A switch looked up by name now goes through `core.profile.lookup`, which serves registered names from the table and every other name from the environment as before. Stable supplies no value, so nothing is enabled or changed by default (#1660).
+
 
 
 - LFM3-1.7B runs on Intel GPUs through XPU, Iris Xe first (#1696). Thanks to @jschmied.
