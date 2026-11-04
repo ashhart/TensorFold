@@ -1,6 +1,7 @@
 //! A Qwen3.5 hybrid's widths (2B, 27B) as the CUDA engine reads them from config.json; what qwen35.cu fixes is checked.
 const std = @import("std");
 const core = @import("core");
+const layer_pattern = @import("qwen35_layers");
 const cuda_rope = @import("cuda_rope.zig");
 
 pub const max_layers = 128;
@@ -326,12 +327,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         }
     }
     if (g.v_heads % g.k_heads != 0 or g.q_heads % g.kv_heads != 0 or g.q_heads > max_query_heads) return error.UnsupportedQwenGeometry;
-    const types = t.get("layer_types") orelse return error.UnsupportedQwenGeometry;
-    if (types != .array or types.array.items.len != g.layers) return error.UnsupportedQwenGeometry;
-    for (types.array.items, 0..) |kind, i| {
-        if (kind != .string) return error.UnsupportedQwenGeometry;
-        if (std.mem.eql(u8, kind.string, "linear_attention")) g.linear[i] = true else if (!std.mem.eql(u8, kind.string, "full_attention")) return error.UnsupportedQwenGeometry;
-    }
+    var full: [max_layers]bool = undefined;
+    try layer_pattern.read(full[0..g.layers], t);
+    for (g.linear[0..g.layers], full[0..g.layers]) |*l, f| l.* = !f;
     if (modelopt) {
         if (g.pocket > 0) return error.UnsupportedLearningFormat;
         g.kinds = try @import("cuda_modelopt.zig").kinds(gpa, bytes, g);
