@@ -37,10 +37,73 @@ fn pipeline(a: std.mem.Allocator, device: mtl.Device, sliding: bool, e: ?fl.Edit
     return rig_.pipeline(device, src, "fl_prompt_attention");
 }
 
-/// mma scores, fp32 SCALE * log2e, fast exp2, 64-key blocks; P x V takes fp32 P on bf16 V: P's error counted as bf16.
+/// P x V's fp32 P enters the tensor units cut to 10 mantissa bits (measured on M5: truncated): under 2^-10 of each p.
+const p_rel = 0x1p-10;
+
+/// mma scores, fp32 SCALE * log2e, fast exp2, 64-key blocks; P x V takes fp32 P, as the GPU keeps it, on bf16 V.
 fn form(n: usize) ar.Form {
     const blocks: f64 = @floatFromInt(n / 64 + 2);
-    return .{ .score = @as(f64, @floatFromInt(dh / 16)) * ar.mma_step + 2, .fast_exp = true, .chunk_exp = false, .p_rel = 0x1p-8, .num = ar.mma_step * 4 + blocks + 2, .den = blocks + 8, .score_round = 4 };
+    return .{ .score = @as(f64, @floatFromInt(dh / 16)) * ar.mma_step + 2, .fast_exp = true, .chunk_exp = false, .p_rel = p_rel, .num = ar.mma_step * 4 + blocks + 2, .den = blocks + 8, .score_round = 4 };
+}
+
+/// The P x V operand's fp32 left side times an identity: what the GPU keeps of each value.
+const operand_source =
+    \\#include "../nax.h"
+    \\using namespace tfp;
+    \\[[kernel]] void fl_operand(const device float* A [[buffer(0)]], const device bfloat* E [[buffer(1)]],
+    \\    device float* C [[buffer(2)]], uint lane [[thread_index_in_simdgroup]]) {
+    \\  const short2 home = frag_home(ushort(lane));
+    \\  frag<float> a;
+    \\  frag<bfloat> e0, e1;
+    \\  frag_get(a, A, 16, 0, 0, home);
+    \\  frag_get(e0, E, 32, 0, 0, home);
+    \\  frag_get(e1, E, 32, 0, 16, home);
+    \\  frag<float> c0 = frag<float>(0), c1 = frag<float>(0);
+    \\  mma_16x32<false, false>(c0, c1, a, e0, e1);
+    \\  frag_put(c0, C, 32, 0, 0, home);
+    \\  frag_put(c1, C, 32, 0, 16, home);
+    \\}
+;
+
+/// The largest relative error of 256 fp32 probabilities (all 23 mantissa bits random) through the P x V op.
+fn operandError(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !f64 {
+    const body = try tf.frags.source(device, a, operand_source);
+    defer a.free(body);
+    const pipe = try rig_.pipeline(device, body, "fl_operand");
+    defer pipe.deinit();
+    const ab = try device.buffer(256 * 4, mtl.ResourceOptions.shared);
+    defer ab.deinit();
+    const eb = try device.buffer(16 * 32 * 2, mtl.ResourceOptions.shared);
+    defer eb.deinit();
+    const cb_ = try device.buffer(16 * 32 * 4, mtl.ResourceOptions.shared);
+    defer cb_.deinit();
+    var prng = std.Random.DefaultPrng.init(0x1177);
+    const want = ab.slice(f32, 256);
+    for (want) |*x| x.* = @bitCast(@as(u32, prng.random().intRangeAtMost(u32, 0x33800000, 0x3f7fffff))); // 2^-24 to below 1
+    const e = eb.slice(u16, 16 * 32);
+    @memset(e, 0);
+    for (0..16) |i| e[i * 32 + i] = 0x3f80;
+    const cmd = queue.commandBuffer();
+    const enc = cmd.compute(.serial);
+    enc.setPipeline(pipe);
+    enc.setBuffer(ab, 0, 0);
+    enc.setBuffer(eb, 0, 1);
+    enc.setBuffer(cb_, 0, 2);
+    enc.dispatchThreads(mtl.Size.of(32, 1, 1), mtl.Size.of(32, 1, 1));
+    enc.end();
+    cmd.commit();
+    cmd.wait();
+    if (cmd.failure()) |msg| {
+        std.log.err("flint prompt: the operand check failed: {s}", .{msg});
+        return error.GpuFailed;
+    }
+    const got = cb_.slice(f32, 16 * 32);
+    var worst: f64 = 0;
+    for (0..16) |r| for (0..16) |col| {
+        const w: f64 = want[r * 16 + col];
+        worst = @max(worst, @abs(@as(f64, got[r * 32 + col]) - w) / w);
+    };
+    return worst;
 }
 
 fn depth(_: c.Shape) usize {
@@ -90,6 +153,12 @@ pub const Prompt = struct {
     }
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Case) !Prompt {
+        // the range's p_rel is this GPU's: a GPU that keeps less of P fails here, not as a wide range
+        const kept = try operandError(a, device, queue);
+        if (kept >= p_rel) {
+            std.log.err("flint prompt: P x V keeps fp32 P to {e} relative here, past the range's {e}", .{ kept, p_rel });
+            return error.OperandPrecision;
+        }
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try pipeline(a, device, v.sliding, if (v.fault) no_sink else null), .v = v };
     }
     fn free(t: *Prompt) void {
