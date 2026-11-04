@@ -89,3 +89,28 @@ test "stable profile: GLM paging registers automatic policy without supplying or
     for ([_][]const u8{ "off", "0", "on", "1", "all", "", "AUTO", "false", " 0 " }) |raw|
         try t.expect(e.differs(raw));
 }
+
+test "stable profile: the GLM host KV tier registers as an exact-one switch a family, off unless set" {
+    inline for (.{ .TF_GLM_KV_HOST, .TF_GLM_KV_HOST_SHARED }) |id| {
+        const e = p.entry(id);
+        try t.expectEqual(p.Class.identical, e.class);
+        try t.expectEqual(p.Syntax.one, e.syntax);
+        try t.expect(e.applies("glm5_next", "cuda"));
+        try t.expect(!e.applies("qwen3_5", "cuda"));
+        try t.expect(!e.applies("glm5_next", "mlx"));
+        try t.expectEqualStrings("#1795", e.evidence);
+        try t.expect(p.resolve(.stable, id, null) == null);
+        try t.expect(e.differs("1"));
+        for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |raw| try t.expect(!e.differs(raw));
+    }
+}
+
+test "stable profile: a runtime name lookup covers the registry and leaves every other name to libc" {
+    try t.expectEqual(p.Switch.TF_GLM_KV_HOST, p.registered("TF_GLM_KV_HOST").?);
+    try t.expectEqual(p.Switch.TF_QWEN_KV_PAGES, p.registered("TF_QWEN_KV_PAGES").?);
+    for ([_][]const u8{ "TF_GLM_KV_HOST_GIB", "TF_UNREGISTERED_FIXTURE", "", "tf_glm_kv_host" }) |name|
+        try t.expect(p.registered(name) == null);
+    // An unset variable is null through both paths, so an unregistered name keeps the reader's old default.
+    try t.expect(p.lookup("TF_PROFILE_FIXTURE_UNSET") == null);
+    inline for (p.entries) |e| try t.expectEqual(p.get(e.id), p.lookup(e.name()));
+}

@@ -151,9 +151,9 @@ pub const Settings = struct {
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
 
-/// The process environment's value of `name` (null when unset).
+/// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
-    return std.mem.span(std.c.getenv(name) orelse return null);
+    return @import("profile").lookup(name);
 }
 
 /// What every rank must agree on, as bytes the communicator carries.
