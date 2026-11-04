@@ -63,7 +63,7 @@ test "CUDA load cache: Qwen EXL3 shares the backbone checkpoint owner" {
     try scope(qwen ++ "cuda_engine.zig", "init", "ck");
 }
 test "CUDA load cache: Gemma backbone, vision and both draft loaders" {
-    try scope(gemma ++ "cuda_weights.zig", "load", "ck");
+    try scope(gemma ++ "cuda_weights.zig", "loadConfig", "ck"); // load and loadESeries share it
     try scope(gemma ++ "cuda_assistant_weights.zig", "load", "ck");
     try scope(gemma ++ "cuda_dflash.zig", "load", "ck");
 }
