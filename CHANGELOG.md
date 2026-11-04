@@ -21,6 +21,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on a Mac without tensor units learns what a shared round's row costs on that chip instead of pricing it from an M5 Ultra's table, so an M3 Ultra stops over-drafting with several requests at once: about 14% more at four streams when drafts land often, with the same tokens (measured on 40 of the 45 layers).
 
 - LFM3-1.7B runs on Intel GPUs through XPU, Iris Xe first. Thanks @jschmied.
+- HIP Qwen3.5 and Qwen3.5-MoE capability lists no longer offer BF16, which these text servers refuse as decision-only (#2139).
+
 - MiniMax-M3 on Metal refuses logprobs with an external drafter before prefill; plain decoding keeps logprobs (#2139).
 
 - Qwen3.5 decode on HIP reads the BF16 router rows the model already holds, with the same tokens. Thanks @AbrahamCete.
