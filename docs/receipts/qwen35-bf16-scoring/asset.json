@@ -1,7 +1,7 @@
 {
-  "schema": 2,
+  "schema": 3,
   "kind": "qwen35-bf16-scoring-linked-public-evidence",
-  "publication": "published: public-checkpoint evidence, with identifying metadata excluded",
+  "publication": "Published public-checkpoint evidence; private identifying metadata excluded.",
   "files": {
     "qwen35-bf16-scoring-dumps-20261103.tar.gz": {
       "sha256": "d8f5763c8130ac5326ab5eb166999b3265152a897c731f4ed70768b5f64a29b7",
@@ -41,23 +41,61 @@
       "sha256": "6c826b51cc1725422d83cfb9a501a5264739eae1d3da5092490d50d61c67ea73",
       "bytes": 4128,
       "url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/qwen35-transformers-run-20261103.log"
+    },
+    "qwen35-bf16-readiness-20261104.tar.gz": {
+      "sha256": "30ed8623f861f32bc8ba0d134e245b34d9faaa1c5173092c135975defd06ac51",
+      "bytes": 37610554,
+      "members": 387,
+      "member_manifest": {
+        "file": "qwen35-bf16-readiness-20261104.manifest.json",
+        "section": "current",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.manifest.json",
+        "sha256": "a54bbe46eec749f21f8842491fe208cbf9aeb3af3a0a3038c641b92b37e35ae6"
+      },
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.tar.gz"
+    },
+    "qwen35-historical-receipts-20261104.tar.gz": {
+      "sha256": "ccda986558edd769735f6d4d7a9e48cc54b104fe87c70a47f8fd275dd7b485f4",
+      "bytes": 65491,
+      "members": 53,
+      "member_manifest": {
+        "file": "qwen35-bf16-readiness-20261104.manifest.json",
+        "section": "historical_receipts",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.manifest.json",
+        "sha256": "a54bbe46eec749f21f8842491fe208cbf9aeb3af3a0a3038c641b92b37e35ae6"
+      },
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-historical-receipts-20261104.tar.gz"
+    },
+    "qwen35-bf16-readiness-20261104.manifest.json": {
+      "sha256": "a54bbe46eec749f21f8842491fe208cbf9aeb3af3a0a3038c641b92b37e35ae6",
+      "bytes": 80585,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.manifest.json"
     }
   },
   "publication_transforms": [
-    "The transformers payload host field is redacted; all other environment identities are as recorded."
+    "Reference identifying fields use generic placeholders.",
+    "Generated benchmark prose samples omitted; client interval origins normalized per repetition. Durations, rates, token/output hashes and failed numerical diagnostics are retained.",
+    "Tar/gzip owner names, IDs, timestamps and source filenames removed from archive headers."
   ],
   "notes": [
-    "Every linked asset is pinned to an immutable fork commit. Source PR retains summaries only.",
-    "The original experiment completed; the measured BF16-distance qualification remains failed.",
-    "The broader hidden-distance diagnostic does not replace the requested comparison.",
-    "The original host field is redacted. Recorded paths use generic container mounts."
+    "Every linked asset is pinned to an immutable fork commit. Source PR retains summaries and reproduction inputs; full per-request/capture results and logs are external.",
+    "Current same-weight FP64 and complete CUDA receipts retain the actual source and distinct initial/retry runner hashes.",
+    "The direct served comparison is complete and strict measured-distance diagnostics fail in both directions; no broader bound substitutes for them.",
+    "No model-equivalence, production or performance qualification claim. Historical failed/superseded evidence remains unchanged."
   ],
   "repository": "akol1/TensorFold",
-  "commit": "9d07324dc7920fcff03152ff48c8fcc0e408a425",
-  "checksum_url": "https://raw.githubusercontent.com/akol1/TensorFold/9d07324dc7920fcff03152ff48c8fcc0e408a425/SHA256SUMS",
+  "checksum_url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/SHA256SUMS",
   "privacy_review": {
     "payload_files_reviewed": 23,
     "scope": "All 21 archive members plus full Transformers payload and run log; JSON identifying fields and complete logs inspected. No personal emails, private user paths, internal hosts, IP/MAC addresses, credentials or client identifiers found. Generic container mount paths and public checkpoint metadata retained.",
     "hashes": "published bytes match the recorded pre-publication hashes"
+  },
+  "latest_commit": "164be6e57dae9124893e27d8d1ac8a1be7d03f1c",
+  "historical_commit": "9d07324dc7920fcff03152ff48c8fcc0e408a425",
+  "current_privacy_review": {
+    "text_and_metadata_sensitive_pattern_findings": 0,
+    "numeric_tensor_files": 186,
+    "scope": "Complete current publication payload and archive headers; approved public GitHub aliases retained. Original tensor bytes derive from checksum-verified public Qwen weights and public fixtures. Historical copies outside this publication are outside this review.",
+    "transformations": "Generated prose samples omitted; client interval origins normalized; no metric, token hash or failing numerical diagnostic is replaced."
   }
 }
