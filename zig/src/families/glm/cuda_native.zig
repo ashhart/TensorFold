@@ -162,26 +162,6 @@ const Owned = struct {
 
 const env = @import("sys").env;
 
-/// Every peer's send/recv connected now, before the weights fill memory (connected on first use, ibv_reg_mr can fail).
-fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
-    const bytes = 4 << 20; // a prompt piece's exchange: every channel a large send/recv takes
-    var buf = try cuda.DeviceBuffer.alloc(d, 2 * bytes * g.world);
-    defer buf.free();
-    var s = try cuda.Stream.init(d, false);
-    defer s.deinit();
-    try g.lib.check(g.lib.api.ncclGroupStart(), "ncclGroupStart");
-    const posted: anyerror!void = post: {
-        for (0..g.world) |peer| if (peer != g.rank) {
-            g.send(s, buf.ptr + peer * bytes, bytes, peer) catch |err| break :post err;
-            g.recv(s, buf.ptr + (g.world + peer) * bytes, bytes, peer) catch |err| break :post err;
-        };
-        break :post {};
-    };
-    try g.lib.check(g.lib.api.ncclGroupEnd(), "ncclGroupEnd"); // the group closes on every path
-    try posted;
-    try s.synchronize();
-}
-
 /// TF_ROCE_MAX_KB in KiB, bounded by the RDMA scatter/gather length before any allocation.
 pub fn roceBytes(text: ?[]const u8) !usize {
     const v = text orelse return 4096 << 10;
@@ -260,7 +240,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
     own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
     errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
-    if (p.world > 1) try warmPeers(ctx.d, &own.group);
+    if (p.world > 1) try @import("cuda_warm_peers.zig").warm(ctx.d, &own.group, set.ring);
     cuda.p2p_report.afterInit(&diag, .{ .lib = &own.group.lib, .comm = comm, .d = ctx.d, .later = true });
     const cap = capacity(o.context);
     own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = o.vision, .drafter = o.drafter != null });
