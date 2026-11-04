@@ -26,6 +26,7 @@ pub const gpu_frame = @import("gpu_frame.zig");
 pub const model = @import("model.zig");
 pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
+pub const kv_grow = @import("kv_grow.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
 pub const prompt_glue = @import("prompt_glue.zig");
 pub const prompt_gpu = @import("prompt_gpu.zig");

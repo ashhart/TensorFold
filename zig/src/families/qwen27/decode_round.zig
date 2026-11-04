@@ -17,6 +17,11 @@ const Round = @import("round_plan.zig").Round;
 const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
+const kv_grow = @import("kv_grow.zig");
+const kv_slots = @import("kv_slots.zig");
+
+/// The host's hook for buffers a slot's K/V growth made.
+pub const Grown = struct { ctx: *anyopaque, added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void };
 
 /// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
 pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
@@ -43,6 +48,10 @@ pub const Runner = struct {
     slots: u32,
     ready: u32, // slots [0, ready) have their K/V rows; a later slot takes its own when first used (ensure)
     capacity: u32,
+    /// TF_Q27_KV_GROW: slots hold the rows their streams reached, grown by this step; null: the whole context.
+    kv_step: ?u32 = null,
+    /// A grown slot's new buffers, for the host's residency set (committed now, as a new slot's are).
+    grown: ?Grown = null,
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
@@ -72,6 +81,11 @@ pub const Runner = struct {
 
     /// A runner of `slots` whose first `ready` take their K/V rows now, the rest when first used (ensure).
     pub fn initReady(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32) !Runner {
+        return initGrow(a, m, slots, capacity, ready, null);
+    }
+
+    /// initReady whose slots start at `kv_step` rows and grow as their streams do (reserve); null: the whole context.
+    pub fn initGrow(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, kv_step: ?u32) !Runner {
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
         const geometry = try attn.planning.Geometry.fromConfig(m.config, m.device.tensorUnits());
         const linear_index = try a.alloc(u32, m.config.layers);
@@ -130,14 +144,15 @@ pub const Runner = struct {
             for (owned.items) |b| b.deinit();
             owned.deinit(a);
         }
+        const first = if (kv_step) |s| kv_grow.first(s, capacity) else capacity;
         for (0..na) |layer| for (0..ready) |slot| {
-            caches[layer * slots + slot] = try slotCache(a, m, &owned, capacity);
+            caches[layer * slots + slot] = try slotCache(a, m, &owned, first);
         };
         const offsets = try a.alloc(u32, slots);
         errdefer a.free(offsets);
         @memset(offsets, 0);
         const taps = try Taps.init(m.device, m.frame.capacity, @intCast(m.config.hidden));
-        return .{ .allocator = a, .model = m, .geometry = geometry, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity };
+        return .{ .allocator = a, .model = m, .geometry = geometry, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity, .kv_step = kv_step };
     }
 
     /// One slot's K/V rows across the attention layers.
@@ -155,10 +170,48 @@ pub const Runner = struct {
             r.owned.shrinkRetainingCapacity(first);
         }
         const layers = r.caches.len / r.slots;
-        for (0..layers) |layer| r.caches[layer * r.slots + slot] = try slotCache(r.allocator, r.model, &r.owned, r.capacity);
+        const rows = if (r.kv_step) |s| kv_grow.first(s, r.capacity) else r.capacity;
+        for (0..layers) |layer| r.caches[layer * r.slots + slot] = try slotCache(r.allocator, r.model, &r.owned, rows);
         r.ready += 1;
         if (r.residency) |f| for (r.owned.items[first..]) |b| f.join(f.ctx, b);
         return r.owned.items[first..];
+    }
+
+    /// The K/V rows slot `slot` holds now: the fewest any attention layer holds.
+    pub fn heldRows(r: *const Runner, slot: u32) u32 {
+        var rows: u32 = std.math.maxInt(u32);
+        for (0..r.caches.len / r.slots) |layer| rows = @min(rows, r.caches[layer * r.slots + slot].capacity);
+        return rows;
+    }
+
+    /// Slot `slot` holds `need` K/V rows, grown layer by layer (kv_slots.zig).
+    pub fn reserve(r: *Runner, slot: u32, need: u32) !void {
+        return kv_slots.reserve(r, slot, need);
+    }
+
+    /// Slot `slot` back to its first rows once it is free and unread (kv_slots.zig).
+    pub fn release(r: *Runner, slot: u32) !void {
+        return kv_slots.release(r, slot);
+    }
+
+    /// Emptied slot `slot` holds the rows a prompt of `need` tokens fills, without a copy (kv_slots.zig).
+    pub fn admit(r: *Runner, slot: u32, need: u32) !void {
+        return kv_slots.admit(r, slot, need);
+    }
+
+    /// Whether a blit still reads slot `slot` (without waiting for it).
+    pub fn busy(r: *const Runner, slot: u32) bool {
+        const cb = r.reading[slot] orelse return false;
+        return switch (cb.status()) {
+            .completed, .@"error" => false,
+            else => true,
+        };
+    }
+
+    /// settleSlot for a hook that holds the runner as an opaque pointer (a drafter context's ring).
+    pub fn settleOpaque(ctx: *anyopaque, slot: u32) void {
+        const r: *Runner = @ptrCast(@alignCast(ctx));
+        r.settleSlot(slot);
     }
 
     /// The K/V buffers of the ready slots (for a residency set).
@@ -221,6 +274,7 @@ pub const Runner = struct {
         // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
         if (r.tail != null and r.reduce != null) return error.TailOnRank;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
+        for (round.slots, round.windows) |slot, window| try r.reserve(slot, window.start + @as(u32, @intCast(window.parents.len)));
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
         @memset(paths, &.{});
@@ -442,7 +496,8 @@ pub const Runner = struct {
     fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
         var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
-        for (round.windows, 0..) |window, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.capacity };
+        // each slot's held rows: the kernels' head stride (equal to the context unless K/V grows as used)
+        for (round.windows, round.slots, 0..) |window, slot, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.heldRows(slot) };
         return attn.Plan.init(r.allocator, windows[0..round.windows.len], r.geometry);
     }
 
