@@ -85,8 +85,10 @@ pub const Ring = struct {
     /// Round `round`'s frame of `kind` from the rank before into `out`; its header, the payload at `out[0..bytes]`.
     pub fn recv(r: *Ring, kind: frame.Kind, round: u64, out: []u8) Error!frame.Header {
         if (r.broken) return error.Broken;
-        errdefer r.broken = true;
-        const h = try r.take(kind, round, out, net.nowNs() + r.timeout_ns);
+        const h = r.take(kind, round, out, net.nowNs() + r.timeout_ns) catch |err| {
+            r.broken = err != error.Stopped; // a stop is a whole frame: this rank may pass it on
+            return err;
+        };
         r.received = round;
         return h;
     }
