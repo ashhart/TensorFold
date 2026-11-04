@@ -123,7 +123,7 @@ pub const Generation = struct {
         }
         answer = try tool_lfm2.dsml(g.a, answer, g.tools, false); // the answer only, so a call the reasoning mentions is not made
         const shown = if (g.calls != null) try reply_text.hideInto(g.a, &g.hidden, answer, false, true, reply_text.openersOf(g.srv.markers)) else answer;
-        const vis = reply_text.heldBack(if (g.srv.info.reasoning) reply_text.streamingVisible(shown) else shown, g.calls != null);
+        const vis = reply_text.heldBack(if (g.srv.info.capability(.reasoning)) reply_text.streamingVisible(shown) else shown, g.calls != null);
         const copied = @intFromPtr(vis.ptr) >= @intFromPtr(g.hidden.items.ptr) and @intFromPtr(vis.ptr) <= @intFromPtr(g.hidden.items.ptr) + g.hidden.items.len;
         const delta = g.streamed.after(vis, !copied);
         if (delta.len > 0) {
@@ -248,7 +248,7 @@ pub const Generation = struct {
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;
             content = split.answer;
-        } else if (g.srv.info.reasoning) {
+        } else if (g.srv.info.capability(.reasoning)) {
             const h = reply_text.parseHarmony(text);
             content = h.content;
             reasoning = h.reasoning;
