@@ -100,8 +100,15 @@ On an Intel GPU host, `zig build -Dxpu-contract=true xpu-kernel-contract-objects
 every registered XPU kernel and the controls to zebins, and `xpu-kernel-contract-limits` checks each record against the
 BMG card's row, no GPU needed. Level Zero does not report a kernel's GRF mode, so the record states it, and the audit
 fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contract limits DIR` runs that audit on a
-directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc. The XPU device
-runner, gates 1 to 4, comes in a second pull request.
+directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc.
+
+On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `tf-xpu-contract-run` with the zebins
+linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over nine registrations of the Qwen3.8-27B glue's
+`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax` and `embed`, the five planted controls, and gate 5
+live: the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
+native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
+id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
+another host made with the commands the receipt records.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
@@ -117,7 +124,8 @@ The program exits 1 on any failed gate, any control that stayed green, or any li
    `--offline` (Metal) or `kernel-contract-limits`
    (CUDA: nvcc 13.0's in `cuda`, and each later release's set where that release compiles it differently); a HIP
    kernel's go to `hip_records.zig`, filled from `hip-kernel-contract-limits`, and an XPU kernel's to
-   `xpu_records.zig`, filled from `xpu-kernel-contract-limits`.
+   `xpu_records.zig`, filled from `xpu-kernel-contract-limits`. Its test type goes in `zig/tests/xpu/contract_*.zig`
+   and, where it needs a planted control, `zig/kernels/xpu/contract_gate_controls.cl`.
 4. Post the `SUMMARY` lines from each backend you ran in the pull request, and say which chips you could not run.
 
 A replacement kernel names the kernel it replaces and gives `replaced`, which runs that kernel on the same inputs.
