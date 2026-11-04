@@ -127,6 +127,15 @@ starts a rank. These switches tune it:
 | `TF_FLASHNEXT_EXL3_ROUTED` | host | `device` keeps every routed expert on the device. |
 | `TF_FLASHNEXT_EXL3_ARCH` | unset | `unqualified` serves on a device that is not sm_120, without a claim. |
 | `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | `0` | `1` keeps the MTP layer's experts on the device instead of a pool (one rank). |
+| `TF_FLASHNEXT_EXL3_PREFILL` | on | `0` turns the deep-chunk prefill path off. |
+| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | 8,192 | Rows of a deep chunk; also what the server reserves at load. |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING` | on | `0` stops streaming the coming layers' experts into one ring of the pools' lines. |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | 1 | Layers ahead the ring prefetches. |
+| `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | on | `0` (two ranks) stops overlapping the all-reduce with a chunk's compute. |
+| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH` | `0` | Experimental: `1` (two ranks) reduces the weighted branch in fp32, written back with unit weights. |
+| `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | `0` | Experimental: `1` (two ranks, ring) runs a second deep chunk beside the first when memory admits it. |
+| `TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID` | on | Diagnostics only: `0` keeps prompt-cache states at any row instead of on the serving step's starts, to test that a resumed prompt equals a fresh one. |
+| `TF_FLASHNEXT_PROFILE` | `0` | Diagnostics only: `1` times the ranks' combine, all-reduce and place of a deep chunk, with a wait each. |
 | `TF_FLASHNEXT_PLE_READ` | `map` | `pread` reads the n-gram embedding rows by positional read. |
 | `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | Whether kept prompt-cache states live in pinned host memory. |
 | `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |

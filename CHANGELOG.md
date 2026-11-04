@@ -81,6 +81,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA resource checks use measured NVCC 13.4 register counts for paged Flash Next preparation, retaining earlier compiler receipts and unchanged launch bounds.
 
+- EXL3 deep prefill uses decode-exact prompt tiles and retains empty-sibling additions in TP prefill reductions, matching the canonical tree's zero signs (#1443).
+
 - EXL3's mapped n-gram table participates in upstream's opt-in read-ahead once per file, and teardown joins the worker before unmapping.
 
 - CUDA EXL3 Flash Next adds expert-parallel TP and MTP drafts, preserving the first slice's canonical expert reduction order (#1442).
