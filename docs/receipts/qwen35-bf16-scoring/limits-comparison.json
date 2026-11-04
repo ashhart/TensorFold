@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "parent_commit": "b0b5beb8db0856091798123cf62dcdfaec1e0445",
-  "candidate_commit": "5332d97eb387af7e1a10433d77ee032a86bc631a",
+  "parent_commit": "c5a3feefaa24315dd55600ff1490c10c5fb27036",
+  "candidate_commit": "612bca872b70461787e6d74480454391cb1dc4a2",
   "command": "zig-out/bin/tf-cuda-test kernel-contract-limits FATBINS",
   "parent_exit": 1,
   "candidate_exit": 1,

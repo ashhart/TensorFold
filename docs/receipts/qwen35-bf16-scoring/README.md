@@ -10,7 +10,7 @@ This receipt does not establish a performance-qualified serving format.
 
 [manifest.json](manifest.json) identifies the source, stacked parent, native
 binary and artifact hashes. Production inference/kernel trees are unchanged
-from the build at `327ef639`; the final strict contract source is `5332d97e`.
+from the build at `ddb1f831`; the final strict contract source is `612bca87`.
 Later changes add documentation, reports and finite qualification clients.
 
 One NVIDIA RTX PRO 6000 Blackwell Max-Q workstation GPU, sm_120, rank 1,
@@ -29,6 +29,25 @@ No private checkpoint, request fixture, new weights or drafter is distributed.
 Vision, int8 prompts and learning are refused for the new format. Multiple ranks,
 other physical chips/backends, FP8 KV and optional grammar/tool generation are
 unqualified here. Compiled five-SM images are not execution receipts for those chips.
+
+## Dumps kept out of the tree
+
+The per-request dumps and the complete CUDA contract log are kept out of the
+tree; the files tracked here are summaries. I do not publish them: they are kept
+private with the author, and [asset.json](asset.json) pins every removed file's
+sha256 and byte count, and every member of the dumps tarball, so the tracked
+receipts stay auditable against what was removed.
+
+| file | sha256 | bytes |
+| --- | --- | ---: |
+| `qwen35-bf16-scoring-dumps-20261103.tar.gz` | `d8f5763c8130ac5326ab5eb166999b3265152a897c731f4ed70768b5f64a29b7` | 376,782 |
+| `qwen35-transformers-prompt-scores-20261103.json` | `423d2d653a5e0c900ceca2e4f4d6fcbfe982f6c7a2e8a22f9a9ccb290f48a194` | 5,367,360 |
+| `qwen35-transformers-run-20261103.log` | `6c826b51cc1725422d83cfb9a501a5264739eae1d3da5092490d50d61c67ea73` | 4,128 |
+
+The tarball unpacks to 3,258,590 bytes and holds `cuda-contract.txt`, the
+`cold/ids-*.json` and `cold/request-*.json` replay bodies, the six per-request
+concurrency dumps and `attempts/`. The recipe sections below keep every command
+that produced them; the summary receipts stay here.
 
 ## Native API and independent reference
 
@@ -50,6 +69,95 @@ BF16 normalized rows. It is not a full-model FP64 forward. Projection captures
 use deterministic synthetic BF16 rows against actual checkpoint matrices;
 they do not establish layer-by-layer whole-model fidelity. No tolerance was widened.
 See the [recipe](../../recipes/qwen35-bf16-scoring.md) for capture/build commands.
+
+## Independent transformers forward
+
+[tools/zig/qwen35_transformers_reference.py](../../../tools/zig/qwen35_transformers_reference.py)
+runs the pinned checkpoint on CPU in two arms with the same token ids: the
+stored-BF16 model, and the same model with every decoder layer's stored
+parameters and buffers promoted to FP32 for its forward. The full payload and run
+log are kept out of the tree with the dumps (their sha256 are in
+[asset.json](asset.json)); [transformers-comparison.json](transformers-comparison.json)
+is the tracked summary and holds the tables below. The script reads the pinned
+checkpoint, the tracked [fixtures.json](fixtures.json) and [api.json](api.json)
+receipts, a private FP64 reference record and the private capture tree; the
+summary withholds the host name and every absolute runner path.
+
+Conditions: CPU only (`cuda_available: false`; no GPU was used), python 3.12.3,
+torch 2.15.0+cu132, transformers 5.22.1, accelerate 1.15.0, safetensors 0.8.0,
+numpy 2.5.4, 16 threads, peak RSS 53.0 GB, wall 224 s. Captures were recorded with
+torch 2.13.0a0+9186a08b2c.nv26.07 and CUDA 13.3. Checkpoint `Qwen/Qwen3.5-27B` at
+`fc05daec18b0a78c049392ed2e771dde82bdf654`, 11 BF16 safetensors shards (55,563,022,432 weight bytes, 1,199 weight-map entries),
+config sha256 `f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c`,
+eager attention, 27,356,728,560 parameters.
+
+Method: each scored entry is `logit - logsumexp` over the full 248,320-token
+vocabulary in float32, position 0 is null as served, no KV cache is reused, and
+the first five served greedy continuation tokens are teacher-forced per fixture.
+The BF16 arm's hidden states are bitwise equal to a plain library `model.forward`
+(max abs diff 0.0), and extending a prompt by the five served continuation tokens
+is bitwise inert (0.0 over 257 rows). Promotion is exact, so the two arms differ
+only in activation and accumulation precision; the FP32 arm is not a trained FP32 checkpoint and no
+FP32-partial-sum arithmetic is claimed (see #1468). The 4097-id fixture has no
+FP32 arm.
+
+**A. transformers BF16 vs transformers FP32, same ids** (fixture 0 has 1 id and 0
+scored rows)
+
+| fixture | ids | rows | max abs dlogprob | mean abs dlogprob | max abs dlogit | argmax agree | rank agree |
+|---|---|---|---|---|---|---|---|
+| 1 | 32 | 31 | 0.0577 | 0.00704 | 0.2688 | 31/31 | 28/31 |
+| 2 | 129 | 128 | 0.0280 | 0.00112 | 0.1239 | 128/128 | 127/128 |
+| 3 | 257 | 256 | **4.035** | 0.0978 | 9.029 | 249/256 | 233/256 |
+| 4 | 4097 | 4096 | bf16 only | - | - | - | - |
+| all | | 415 | 4.035 | 0.0612 | 9.029 | 408/415 | 388/415 |
+
+The distance is not uniformly small: the worst logprob row is fixture 3,
+position 216, token 6761 (BF16 -0.605836 vs FP32 -4.641201, argmax disagrees),
+and 16-position block maxima rise from 0.025 at the prompt start to 4.04 over
+positions 208-223. This is transformers' own BF16 distance from FP32, not a
+serving error.
+
+**B. served captures vs both arms.** 15 captures, 18 rows: the last two scored
+prompt rows `[L-2, L-1]` then decode rows `[L+1, L+4]`, verified by exact row
+pick before comparison; no nearest-row search. `bound` is
+`native_vs_fp64_box + tf_bf16_vs_fp64_box + |dh·W_t| + max_v|dh·W_v| +
+rounding_slack`, where `dh` is the captured-vs-reference BF16 hidden difference
+added through the output projection `|dh·W_t|` and the worst-case rows of `dh·W_v`
+here. The bound holds on 18/18 rows, the max ratio is 0.169451 and the max bound
+is 15.8293. The receipt-style form that omits `dh` (`native_box + D + slack`)
+fails 1/18 (row 13: `|native - tf_bf16|` = 0.003021 against a 0.001006 bound) and
+is kept only as a diagnostic.
+
+| # | cap | phase | fx | pos | tok | native | tf-bf16 | tf-fp32 | abs(n-16) | bound | ratio |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 0 | prompt | 1 | 30 | 321 | -0.003733 | -0.003702 | -0.003771 | 0.000031 | 0.1861 | 0.0002 |
+| 1 | 0 | prompt | 1 | 31 | 7890 | -0.003687 | -0.003553 | -0.003576 | 0.000134 | 0.7516 | 0.0002 |
+| 2 | 1 | decode | 1 | 33 | 271 | -0.367115 | -0.363819 | -0.371754 | 0.003296 | 0.1433 | 0.0230 |
+| 3 | 2 | decode | 1 | 34 | 248068 | -0.291004 | -0.273081 | -0.293707 | 0.017923 | 0.2104 | 0.0852 |
+| 4 | 3 | decode | 1 | 35 | 271 | -0.564259 | -0.561222 | -0.568481 | 0.003036 | 0.2216 | 0.0137 |
+| 5 | 4 | decode | 1 | 36 | 248069 | -0.000017 | -0.000019 | -0.000017 | 0.000002 | 0.3554 | 0.0000 |
+| 6 | 5 | prompt | 2 | 127 | 220 | -0.000072 | -0.000074 | -0.000074 | 0.000002 | 0.1599 | 0.0000 |
+| 7 | 5 | prompt | 2 | 128 | 15 | -0.000443 | -0.000509 | -0.000500 | 0.000067 | 1.9843 | 0.0000 |
+| 8 | 6 | decode | 2 | 130 | 220 | -0.000240 | -0.000227 | -0.000206 | 0.000013 | 1.0871 | 0.0000 |
+| 9 | 7 | decode | 2 | 131 | 16 | -0.000046 | -0.000044 | -0.000051 | 0.000002 | 0.3920 | 0.0000 |
+| 10 | 8 | decode | 2 | 132 | 198 | -0.000561 | -0.000582 | -0.000559 | 0.000021 | 0.1732 | 0.0001 |
+| 11 | 9 | decode | 2 | 133 | 262 | -0.000084 | -0.000086 | -0.000082 | 0.000002 | 0.1481 | 0.0000 |
+| 12 | 10 | prompt | 3 | 255 | 814 | -6.881475 | -6.051020 | -4.500031 | **0.830456** | 4.9008 | 0.1695 |
+| 13 | 10 | prompt | 3 | 256 | 20139 | -0.003700 | -0.000679 | -0.001114 | 0.003021 | 14.9119 | 0.0002 |
+| 14 | 11 | decode | 3 | 258 | 5979 | -0.000961 | -0.000662 | -0.000826 | 0.000299 | 5.2837 | 0.0001 |
+| 15 | 12 | decode | 3 | 259 | 44896 | -0.000786 | -0.000896 | -0.003065 | 0.000111 | 11.3577 | 0.0000 |
+| 16 | 13 | decode | 3 | 260 | 5533 | -0.008688 | -0.006145 | -0.000908 | 0.002542 | 14.7874 | 0.0002 |
+| 17 | 14 | decode | 3 | 261 | 264 | -0.006615 | -0.007076 | -0.002056 | 0.000462 | 15.8293 | 0.0000 |
+
+Max `|native - tf_bf16|` is 0.830456 (row 12, prompt, fixture 3, position 255,
+token 814); the other 17 rows are at most 0.0179.
+
+Limits: the FP32 arm is float32 arithmetic over promoted stored BF16 values; no
+whole-model FP32 copy is materialised. The 4097-id fixture has no FP32 arm and no
+capture resolves to it. Prompts spanning more than one 4096-row chunk are not
+exercised. The payload's `host` field is redacted; all other environment
+identities are as recorded.
 
 ## Served measurements
 
@@ -80,8 +188,9 @@ cell is homogeneous; it does not represent a mixed production workload.
 
 Native sampled C1 code/chat: 20.2/29.3 tok/s; sampled C4 aggregate: 8.7/9.0.
 Raw reports retain TTFT, decode, end-to-end throughput, makespan, ITL and round-gap
-figures: [native decode](native-decode.json), [native concurrency](native-concurrent.json),
-[standard decode](standard/sglang-decode.json), [standard concurrency](standard/sglang-concurrent.json).
+figures: [native decode](native-decode.json) and [standard
+decode](standard/sglang-decode.json); the two per-request concurrency dumps are kept out of
+the tree like the other per-request dumps (checksums in [asset.json](asset.json)).
 Decode excludes the first token; C4 aggregate uses the common batch decode span.
 End-to-end throughput is a separate field. These are descriptive medians over
 three repetitions, not a statistical significance claim. ITL p95 is not request
@@ -144,7 +253,8 @@ the source increments it only after the engine finishes with `cancelled`.
 Each subsequent scoring request reproduces the original full reply IDs and FP32
 score hash. Earlier unobserved disconnect-recovery checks remain separately scoped.
 
-Failed fixture/harness attempts are retained under [attempts/](attempts/README.json).
+Failed fixture/harness attempts are kept out of the tree under `attempts/`
+(checksums in [asset.json](asset.json)).
 Raw completions declare no history and therefore did not retain a snapshot;
 the initial reuse assertion was wrong. The actual chat test satisfies reuse.
 The first observed-cancellation client used `/v1/stats` and received HTTP404;
@@ -196,8 +306,9 @@ No physical 32 GiB-host sizing or energy-cost claim follows from these figures.
 
 ## Complete CUDA contract and host checks
 
-[cuda-contract.txt](cuda-contract.txt) retains the complete run;
-[cuda-contract.json](cuda-contract.json) identifies its binary and verdict:
+[cuda-contract.json](cuda-contract.json) identifies its binary and verdict; the
+complete run log `cuda-contract.txt` is kept out of the tree (checksum in
+[asset.json](asset.json)); its verdict lines are:
 
 ```text
 SUMMARY 550 kernels: 550 pass gates 1-4, 0 fail, 6 known findings; 365 controls: 365 red as planted, 0 missed; 342 limit problems; gates 4013421 ms, limits 726300 ms
@@ -220,7 +331,7 @@ are unchanged apart from appending the four new records.
 [Host/CI evidence](host-and-ci.json): full unprivileged host execution passed
 6870 tests with 46 skips; the final strict-fixture rerun passes with cached
 results distinguished. Plain build passes, lean has 424 inherited/zero new
-findings, and all six hosted no-GPU jobs plus format passed on `284339b0`.
+findings, and all six hosted no-GPU jobs plus format passed on `75843aed`.
 Publication-head CI is tracked separately on the PR.
 [Overlap evidence](overlap.json) retains newly reported conflicts inherited
 from the declared parent; ATC coverage is incomplete. Landing order needs
@@ -239,10 +350,12 @@ python3 docs/receipts/qwen35-bf16-scoring/test_reproduce_cache.py
 ```
 
 For cold prefill, start context N+32/parallel-1/cache-0 before each call. The
-finite adapter uses the existing stream, timing and receipt implementations:
+finite adapter uses the existing stream, timing and receipt implementations;
+with the kept-out dumps tarball at hand, extract a replay body first:
 
 ```sh
-python3 docs/receipts/qwen35-bf16-scoring/reproduce-cold.py . docs/receipts/qwen35-bf16-scoring/cold/ids-65536.json cold.json
+tar -xzf qwen35-bf16-scoring-dumps-20261103.tar.gz cold/ids-65536.json
+python3 docs/receipts/qwen35-bf16-scoring/reproduce-cold.py . cold/ids-65536.json cold.json
 ```
 
 For observed cancellation, use a fresh context-8192/parallel-4/cache-0 native

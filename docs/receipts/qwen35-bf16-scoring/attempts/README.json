@@ -1,7 +1,0 @@
-{
-  "raw_no_history": "Both raw-completion reuse assertions failed (exit1) because raw inputs declare no conversation history and the planned native cache keeps no snapshot. The raw replies remain exact and cold. Actual chat retention/fresh equality is separately qualified.",
-  "raw_original_fixture": "../fixtures.json entry4, length4097",
-  "raw_edited_fixture": "raw-edited-ids.json",
-  "disconnect_first_attempt": "Reference scores passed; /v1/stats returned HTTP404. Native diagnostics route is /stats. Corrected source and observed-cancellation.json pass all seven checks. Original failure and pre-fix source retained.",
-  "earlier_kernel_attempts": "Earlier missing-H3 build and parent temporary-callback exit139 were superseded by the complete strict run in cuda-contract.txt; an interrupted intermediate run exited137. They are not qualification passes."
-}

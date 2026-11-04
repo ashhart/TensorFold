@@ -33,8 +33,8 @@ zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=80,86,89,120,121 -Dfatbins=zig-ou
 zig build native qwen35-score-reference -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=80,86,89,120,121 -Dfatbins=zig-out/fatbin -Doptimize=ReleaseFast
 ```
 
-Use the native binary's `serve --help` for startup flags. Keep the listener on loopback, use the existing GPU lock and
-admission guard, and run one model process at a time. For cache-off checks use `--prompt-cache-gib 0`.
+Use the native binary's `serve --help` for startup flags. Keep the listener on loopback and run under the existing GPU
+lock and admission guard, with one model process per test machine. For cache-off checks use `--prompt-cache-gib 0`.
 A `prompt_logprobs` request intentionally recomputes the full prompt and reports zero reused prefix tokens.
 The first prompt entry is null; each later entry scores that token from its preceding normalized hidden row.
 The 43-word GPU output layout is per row; it remains disjoint at rows 4, 5 and 128.
