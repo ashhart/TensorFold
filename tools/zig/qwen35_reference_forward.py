@@ -355,4 +355,3 @@ def bound_profile(hidden_f32, logits_f32, normalizer_f32, picks, W, chunk=4096):
         },
     }
     return out
-

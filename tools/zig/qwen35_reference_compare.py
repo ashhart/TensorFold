@@ -373,4 +373,3 @@ def run_native_comparison(model, fixtures, cont, tf_cache, args, captures_select
     if d_fails:
         log("B: %d measured deltas outside their own bound: %s" % (len(d_fails), d_fails))
     return payload
-
