@@ -8,7 +8,7 @@ producer derives such a direction from the model's own activations.
 
 - Apple M4 Pro (`applegpu_g16`), macOS 26.5.1 (25F80), 48 GiB of RAM, Metal.
 - Zig 0.17.0, the version the repository pins.
-- TensorFold 1.1.8, branch `feature/glp-steering`, rebased onto the upstream `main`
+- TensorFold 1.2.0, branch `feature/glp-steering`, rebased onto the upstream `main`
   at `7b65d604d`.
 - Checkpoint `TensorFold/Qwen3.8-27B-MLX-4bit` at
   `22d8d538154e0e5b6f8dcb1fcc74a60a0798104c`, MLX 4-bit.
@@ -23,7 +23,8 @@ producer derives such a direction from the model's own activations.
   reports 701 for this checkpoint.
 - The producer takes 17.7 s and 18.4 s on two runs on this machine, and a
   re-derivation from the same checkpoint and the same prompt set is
-  byte-identical.
+  byte-identical. On the rebased tree it takes 13.9 s and writes the same
+  directions again: the digest over them is the same `9a50f716`.
 - Published as `BlivionIaG/Qwen3.8-27B-refusal-cvec-GLP-49`, file
   `Qwen3.8-27B-refusal-cvec-GLP-49-L10-58-a1.gguf`, file sha256
   `fb0fc832305b37db0af64295c8fa6f6d3e26a7719904199a7488959aec524a2d`, directions
@@ -65,6 +66,13 @@ five of the twenty twins on its own. The refusal rate is a lower bound, because
 it counts phrases and a vector can bend the wording of a refusal without
 removing it. Reading the replies is what settles it.
 
+The same vector, re-stamped for the identical weights published under
+`mlx-community/Qwen3.8-27B-4bit` at `10c35caa`, gives the same numbers on the
+derivation set: the base model refuses 30 of 30 harmful prompts and 0 of 30
+benign ones, the masked vector refuses 0 of 30 harmful and 0 of 30 benign, and
+all 60 replies are coherent in both arms. The re-stamp moves the name the file
+carries and nothing else; the directions are the same bytes.
+
 The strength is flat from 0.5 to 3; at 4 the replies go empty. A strength of 1e-6
 reproduces the baseline exactly.
 
@@ -85,13 +93,17 @@ reproduces the baseline exactly.
 
   ```
   PASS nonfinite qwen27 steer project: 20480 non-finite and 5120 finite outputs match the float64 classes
-  PASS repeat    qwen27 steer project: five runs byte-identical (10240 bytes), inputs and guards untouched, no overlap
-  PASS shapes    qwen27 steer project: 4 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
-  PASS sums      qwen27 steer project: exact sums at k 5120, where fp16 sums would miss by infx and bf16 by 267x
-  PASS nonfinite/repeat/shapes qwen27 steer add (sums: N/A, declares none sums)
-  CONTROL qwen27 steer project nan control:  red at nonfinite, as planted
+  PASS repeat qwen27 steer project: five runs byte-identical (10240 bytes), inputs and guards untouched, no overlap
+  PASS shapes qwen27 steer project: 4 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+  PASS sums qwen27 steer project: exact sums at k 5120, where fp16 sums would miss by infx and bf16 by 267x
+  PASS nonfinite qwen27 steer add: 5 non-finite and 25595 finite outputs match the float64 classes
+  PASS repeat qwen27 steer add: five runs byte-identical (10240 bytes), inputs and guards untouched, no overlap
+  PASS shapes qwen27 steer add: 4 shapes within the float64 bound (worst 0.996 of the bound), 0 edges refused by the kernel
+  N/A  sums qwen27 steer add: declares none sums
+  CONTROL qwen27 steer project nan control: red at nonfinite, as planted
   CONTROL qwen27 steer project sums control: red at sums, as planted
   PASS normalised: the fused kernel's row is the plain norm's row, element for element, and the planted fault shows
+  PASS limits here qwen27 norm steer custom_kernel_q27_norm_steer_…: 320 threads launched, the pipeline takes 1024; 80 threadgroup bytes and 0 set (declared at most 80, the GPU's most 32768)
   SUMMARY 2 kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems
   ```
 
@@ -119,7 +131,7 @@ reproduces the baseline exactly.
 - 66 new Zig tests: 26 in the container reader, 4 in the publication metadata, 13 in
   the serve surface, 4 in the family, 8 in the producer, 5 in the two prompt sets
   and 6 in the contract; 8 gate unit tests and 6 parity unit tests in Python.
-- `zig build test`: 584 steps succeeded, 8412 of 8458 tests passed and 46 skipped.
+- `zig build test`: 603 steps succeeded, 9250 of 9305 tests passed and 55 skipped.
 - CI: the format check, the code, the tests and the tools are green on Linux,
   Windows and macOS. The app's macOS packaging job is cancelled by the runner
   pool, four attempts across two runs, while the base tree's own runs are
