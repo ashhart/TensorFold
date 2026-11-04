@@ -400,7 +400,35 @@ Under pressure only admission and kept states change: every request served retur
 
 `TENSORFOLD_PRESSURE_CACHE_PERCENT=N` sets the soft watermark to N% of the prompt cache budget (default 50; 0 sheds every state not being restored).
 `TENSORFOLD_MEMORY_PRESSURE=0` (or `off`) disables the governor.
-Flash Next's single-reply driver (`--parallel 1` or `auto`) does not read pressure yet, and Linux and Windows builds never do.
+Flash Next's single-reply driver (`--parallel 1` or `auto`) does not read pressure yet, and Windows builds do not.
+
+### Experimental Linux memory pressure
+
+On Linux, `TENSORFOLD_MEMORY_PRESSURE=1` (or `on`) opts the shared lane host into the same governor and cache
+watermark. Unset keeps it off until device qualification. The reader samples `/proc/pressure/memory` and
+`/proc/meminfo` without allocating; both must be available and valid at startup. It reads at most four times a
+second, raises the level immediately and waits five seconds of lower readings before easing it.
+
+The proposed thresholds use PSI's `avg10` percentages and MemAvailable as a share of MemTotal:
+
+| Level | Any of these readings |
+| --- | --- |
+| Warning | MemAvailable at most 10%; PSI some at least 10%; PSI full at least 1% |
+| Critical | MemAvailable at most 5%; PSI full at least 10% |
+
+Critical takes precedence. MemFree and the size of the file cache do not enter this reading, so a healthy reclaimable
+page cache alone does not shed states. Unknown or malformed data follows the existing source contract: no reading,
+counted as normal by the governor. Windows is unchanged. The 503 message refers to the system on every platform.
+
+Only optional states managed by the shared lane host are shed. Borrowed states remain protected. Family-owned
+caches and a backend's independent driver need their own qualification; this does not coordinate pressure across
+TP hosts or replace the pre-load page-cache release/admission checks used on GB10 (#1857, #1868).
+
+`zig build test-memory-pressure-host` checks planted proc files, thresholds, invalid/oversized input, the existing
+hysteresis, protected state, cache shedding, admission and resumed/fresh equality on an instrumented target.
+No Linux device, memory-hog or whole-checkpoint receipt is claimed. Keep the Linux opt-in off until a GB10 run
+shows shedding, recovery without oscillation and exact drafted/plain, resumed/fresh and concurrent/solo replies
+at unchanged checkpoint precision (#2129).
 
 
 ## Access, context and updates
