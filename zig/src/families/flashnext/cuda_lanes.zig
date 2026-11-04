@@ -219,13 +219,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .first_masked = firstMaskedFn,
                 };
                 const ranked_table = comptime @import("cuda_score.zig").withoutScore(scoring_table);
-                return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .first_before_draft = firstEarly(), .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
-            }
-
-            /// A drafted stream's first token is sent before its first drafts are asked (core/lanes/open_first.zig).
-            fn firstEarly() bool {
-                const v = std.c.getenv("TF_FLASHNEXT_FIRST_EARLY") orelse return true;
-                return !std.mem.eql(u8, std.mem.span(v), "0");
+                return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .first_before_draft = mtp.firstEarly(), .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 
             /// With the head: chains of up to 16 rows cut by its confidence, copies of up to 32; else one-row rounds.

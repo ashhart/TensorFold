@@ -34,6 +34,12 @@ pub const default_depth: usize = 6;
 /// A greedy stream's chain at most (TF_FLASHNEXT_DRAFTS_GREEDY): greedy drafts land more often, so a deeper chain pays.
 pub const default_depth_greedy: usize = 8;
 
+/// A drafted stream's first token is sent before its first drafts are asked (core/lanes/open_first.zig).
+pub fn firstEarly() bool {
+    const v = std.c.getenv("TF_FLASHNEXT_FIRST_EARLY") orelse return true;
+    return !std.mem.eql(u8, std.mem.span(v), "0");
+}
+
 /// The chain a stream drafts at most: `greedy` for greedy streams (no sampling or temperature 0), else `depth`.
 pub fn depthFor(sm: ?Sampling, depth: usize, greedy: usize) usize {
     return if (isSampled(sm)) depth else greedy;
