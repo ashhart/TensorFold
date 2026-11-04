@@ -353,3 +353,17 @@ test "every piece of a readout, the last too, goes to its readout with no projec
     try route.vtable.readout_finish.?(fake_ptr(&fake), &s, &logits);
     try T.expectEqual(@as(?[]u16, &logits), fake.finished);
 }
+
+test "readouts are refused under tensor parallelism and reported on one rank" {
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{ .world = 2 };
+    var h: source.Hip = undefined;
+    h.e = &e;
+    h.readout = null;
+    const r: source.Readout = .{ .ctx = undefined, .info = .{ .max_rows = 16384, .max_questions = 64, .max_options = 1024 }, .vtable = undefined };
+    try T.expectError(error.ReadoutsNeedOneRank, h.useReadout(r));
+    try T.expect(h.readouts() == null);
+    e.o.world = 1;
+    try h.useReadout(r);
+    try T.expectEqual(@as(u32, 16384), h.readouts().?.max_rows);
+}
