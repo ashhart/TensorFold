@@ -54,9 +54,11 @@ test "every captured verify shape keys its own graph: a shape after another neve
     defer keys.deinit(gpa);
     var distinct: std.AutoHashMapUnmanaged(Shape, void) = .empty;
     defer distinct.deinit(gpa);
+    const variants = [_]u8{ 1, 2, 4, 8, 16 }; // every slot count a window's register peak gives
+    for (1..Round.most_window + 1) |peak| try std.testing.expect(std.mem.indexOfScalar(u8, &variants, @intCast(Round.variant(peak))) != null);
     for (1..Round.most_verify + 1) |rows| for (1..@min(rows, Round.max_segs) + 1) |segments| for ([_]bool{ false, true }) |taps| {
-        for (1..Round.most_window + 1) |peak| for (0..8) |bits| {
-            var s = Shape.init(rows, segments, true, taps, @intCast(Round.variant(peak)));
+        for (variants) |slots| for (0..8) |bits| {
+            var s = Shape.init(rows, segments, true, taps, slots);
             s.hidden = bits & 1 != 0;
             s.paged = bits & 2 != 0;
             s.mt2 = bits & 4 != 0;
