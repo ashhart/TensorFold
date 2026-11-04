@@ -187,7 +187,12 @@ fn shareRoom(h: *const Host, why: *[]const u8) !u64 {
 /// Room left beside the weights and an 8 GiB margin.
 fn room(model: *const q.model.Model) usize {
     const dev = model.device;
-    return q.prompt_memory.room(dev.maxWorkingSet(), dev.allocated(), if (std.c.getenv("TF_QWEN27_WORKING_SET_BYTES")) |v| std.mem.span(v) else null) catch 0;
+    return q.prompt_memory.room(dev.maxWorkingSet(), dev.allocated(), cap()) catch 0;
+}
+
+/// TF_QWEN27_WORKING_SET_BYTES: a development cap on the device's reported working set.
+fn cap() ?[]const u8 {
+    return if (std.c.getenv("TF_QWEN27_WORKING_SET_BYTES")) |v| std.mem.span(v) else null;
 }
 
 /// Whether a new slot's `bytes` fit in `free`, once kept prompt states (never the one `restoring`) give theirs back.
@@ -344,7 +349,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const row_policy = q.prompt_rows;
     const rows = @max(window, try fit_prompt.choose(row_policy.requested(model.device.generation(), model.config.moe(), value), row_policy.override(value) != null));
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
-        why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams and {d}-row prompt scratch at a {d}-token context; {d:.1} GiB remains beside the weights and an 8 GiB margin: lower --parallel or --context", .{ o.streams, cache_fit.gibs(try fit_prompt.cost(rows, @max(o.streams, 1))), rows, capacity, cache_fit.gibs(fit_prompt.left) });
+        const dev = model.device;
+        const ram: ?usize = if (cache_fit.ram()) |r| @intCast(r) else null;
+        const tail = memory.advice(dev.maxWorkingSet(), dev.allocated(), cap(), try fit_prompt.cost(rows, 1), ram);
+        why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams and {d}-row prompt scratch at a {d}-token context; {d:.1} GiB remains beside the weights and an 8 GiB margin{f}", .{ o.streams, cache_fit.gibs(try fit_prompt.cost(rows, @max(o.streams, 1))), rows, capacity, cache_fit.gibs(fit_prompt.left), tail });
         return err;
     };
     if (model.frame.capacity != rows) {

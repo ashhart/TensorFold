@@ -33,7 +33,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const pass = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_pass_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
     b.step("test-qwen27-pass-host", "Count actual draft scratch allocations without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pass, .filters = &.{"qwen27 pass:"} })).step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_memory_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
-    b.step("test-qwen27-memory-host", "Prompt scratch and working-set fit without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory, .filters = &.{"qwen27 memory:"} })).step);
+    const memory_run = b.addRunArtifact(b.addTest(.{ .root_module = memory, .filters = &.{"qwen27 memory:"} }));
+    test_step.dependOn(&memory_run.step);
+    b.step("test-qwen27-memory-host", "Prompt scratch and working-set fit without a GPU").dependOn(&memory_run.step);
     const sources = b.createModule(.{ .root_source_file = b.addWriteFiles().add("qwen27-fake-source.zig", "pub const core_deltanet = \"\";\n"), .target = b.graph.host });
     const delta = b.createModule(.{ .root_source_file = b.path("zig/src/core/deltanet_kernels.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = fake }} });
     delta.addImport("kernel_sources", sources);
