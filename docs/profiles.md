@@ -71,8 +71,8 @@ The serving process prints its profile and applicable registered overrides, for 
 When no applicable registered setting differs from its default, it prints `registered overrides: none`. This is
 explicitly the registry's coverage, not an assertion that the whole environment is at defaults. Settings for another
 model type/backend and arbitrary environment variables are omitted. A count equal to what the family takes when it is
-unset (zero, or 256 for `TF_QWEN_KV_PAGES`) and a disabled exact-one flag do not count as changes; `TF_QWEN_KV_PAGES_ALL`
-is on unless it is exactly `0`, so only `0` is reported. Dependency checks still determine whether a configured switch
+unset (zero, or 256 for `TF_QWEN_KV_PAGES` on a dense Qwen; zero on a MoE) and a disabled exact-one flag do not count as
+changes; `TF_QWEN_KV_PAGES_ALL` takes `1` (as unset) or `0`, so only `0` is reported. Dependency checks still determine whether a configured switch
 can be used.
 
 For GLM CUDA, `TF_KV_PAGES` uses the registry's `auto` syntax: unset or exactly `auto` leaves the family's automatic choice,
