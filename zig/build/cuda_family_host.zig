@@ -6,6 +6,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const bf16 = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"BF16 scoring:"} }));
     b.step("test-qwen35-bf16-host", "Plain BF16 scoring admission and native row contracts without devices").dependOn(&bf16.step);
     step.dependOn(&bf16.step);
+    const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
+    b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
+    @import("load_prefetch_host.zig").tests(b, mods.core, step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen stepped prefill:"} }));
@@ -32,6 +35,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const formats_run = b.addRunArtifact(b.addTest(.{ .root_module = formats, .filters = &.{"format coexistence:"} }));
     b.step("test-qwen35-formats-host", "MLX, ModelOpt and EXL3 admission and actual embedding dispatch without devices").dependOn(&formats_run.step);
     step.dependOn(&formats_run.step);
+    const layers = b.createModule(.{ .root_source_file = b.path("zig/qwen35_layers_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen_vision", .module = mods.qwen_vision } } });
+    const layers_run = b.addRunArtifact(b.addTest(.{ .root_module = layers, .filters = &.{"qwen35 layers:"} }));
+    b.step("test-qwen35-layers-host", "Qwen3.5's layer pattern through every backend's config entry point without devices").dependOn(&layers_run.step);
+    step.dependOn(&layers_run.step);
     @import("glm_contract_host.zig").host(b, cuda, mods.core, step);
     @import("dory.zig").host(b, @import("dory.zig").module(b, host, .debug, cuda, mods.core, mods.lanes), step);
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));
@@ -148,6 +155,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
 
 pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {
     const family_copies = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA lane copies:"} }));
-    b.step("test-family-copies-host", "Actual Gemma, MiniMax, Spark, Kolibri and Dory copy policies through the lane core").dependOn(&family_copies.step);
+    b.step("test-family-copies-host", "Actual CUDA family copy policies through the lane core").dependOn(&family_copies.step);
+    b.step("test-glm-copies-host", "GLM copy facts, confidence and costs through the production lane core").dependOn(&family_copies.step);
     step.dependOn(&family_copies.step);
 }

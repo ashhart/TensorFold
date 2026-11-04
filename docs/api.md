@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -148,6 +148,34 @@ question id, and `usage.completion_tokens` 0. `probabilities` are a softmax over
 For decisions, `chat_template_kwargs` may be omitted, null, or an object containing only
 `enable_thinking: false`; other types, keys, or thinking values return HTTP 400.
 
+## Rerank
+
+`POST /v1/rerank` (also `/rerank`, and by `PUT` as SGLang takes it) scores each document against a query with a
+reranker checkpoint. The native HIP engine serves `Qwen/Qwen3-Reranker-8B`: the engine declares the reranker and
+its label tokens (`1_LogitScore/config.json`), and its startup line says `qwen3 reranker`. Every other server answers
+the route with HTTP 400 "this model is not a reranker", and a reranker server answers chat, completion, Responses,
+Messages, speech, decision, System One and embedding requests with HTTP 400 "this model is a reranker: use POST
+/v1/rerank".
+
+| Field | Meaning |
+| --- | --- |
+| `query` | The query: a string, a `{"text": ...}` object, or a list of text parts |
+| `documents` | One or more documents, each in the same forms as `query` |
+| `instruction` | The task the model card's prompt states; default "Given a web search query, retrieve relevant passages that answer the query". SGLang's `instruct` is read when `instruction` is absent |
+| `top_n` | Return the best `top_n` results only; default all |
+| `return_documents` | Echo each document as sent; default `true` |
+| `max_length` | The most tokens one prompt may take; default 8192, the model card's. A longer prompt keeps the template whole and loses the end of its content (the document's last tokens), as the card's tokenizer cuts it; a cap that would leave no token of the document returns HTTP 400 |
+| `return_logits`, `return_prompt_token_ids` | Add `meta_info` with `logit_yes` and `logit_no`, or the prompt's token ids, to each result; default `false` |
+
+Each document's prompt is the model card's template, token for token, with the query, the document and the
+instruction as plain text (text that spells a special token stays text). The score is
+`sigmoid(logit_yes - logit_no)` from the last position's label logits. The response is
+`{"results": [{"index", "relevance_score", "document"}], "usage": {"total_tokens"}}`, best first, ties in input order;
+`total_tokens` counts every prompt's tokens as scored, after any cut. Every prompt is cut and checked against the
+context window before the first is scored, so a refused request costs no GPU work; a prompt past the window (with a
+`max_length` above it) returns HTTP 400 with `code` `context_length_exceeded`. An image or video part returns HTTP
+400. Errors use the server's envelope, as on every route: `{"error": {"message", "type"}}`.
+
 ## Living Weights
 
 With `--slide`, the native server learns facts into the served weights. [Living Weights](living-weights.md) explains
@@ -242,7 +270,9 @@ the flag is the reply's share, and the prompt owes its complement: it also offer
 prompt's chunks to families that declare chunk-independent prompt arithmetic. That offer is gated per family
 behind device token-hash qualification; every native family is gated out today, so no native server caps chunk
 rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
-the prompt's share of a fill step's wall time, time only, never smaller chunks. `TENSORFOLD_PREFILL_ORDER=srpt`
+the prompt's share of a fill step's wall time, time only, never smaller chunks. Flash Next's shared sessions on a Mac
+without tensor units are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
+from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets running replies with less estimated work left than a filling long prompt take rounds first, the prompt keeping
 at least 10% of the time. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal and
 hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
@@ -399,7 +429,7 @@ top-level field wins. An unnamed level maps to the nearest level the template na
 the higher one. GLM-5.3 lists `low`, `high` and `max`, so `max` stays `max`, `medium` is heard as `high`
 and `minimal` as `low`. Qwen3.8 lists `low`, `medium` and `xhigh`, so `high` and `max` are heard as `xhigh`.
 `xhigh` stays `xhigh`. GLM-5.3 renders `xhigh` and `max` as Max. A template that names no level hears `max` as
-`xhigh`. `--reasoning-effort` uses the same rule. An omitted effort, with no startup flag, stays
+`xhigh`. `--reasoning-effort` accepts `minimal`, `low`, `medium`, `high`, `xhigh` and `max` and uses the same rule; use `--no-thinking` for the CLI off switch. An omitted effort, with no startup flag, stays
 the template's own default. An explicit `chat_template_kwargs.enable_thinking` takes
 precedence. A request without an effort gets `--reasoning-effort` when the server was started with one; otherwise
 the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is `xhigh`, which adds an instruction
@@ -693,6 +723,9 @@ conversations that share a long system prompt and tools store those rows once. A
 it takes less time than prefilling the tokens it covers, measured on this machine. Every piece read is checked against
 its hash; a damaged file is deleted, with the states that need it, and the turn prefills instead. A read-back state
 gives the same reply, token for token, as the state it was written from and as a fresh prompt pass.
+
+If startup runs out of memory while reading state metadata or planning its blocks, opening the store fails and
+valid state files remain on disk for a later retry. An allocation failure does not count as a damaged file.
 
 While other streams run, a queued request whose state is on disk has it read on an I/O thread into memory, with the
 same checks, and waits in the queue meanwhile; the engine thread then only copies it into place, so the other streams

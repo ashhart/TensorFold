@@ -107,3 +107,29 @@ test "check plans K3 from its config and Hub file list and names the raise a low
     try std.testing.expectEqual(@as(u8, 3), serve.code);
     try std.testing.expect(has(serve.err, "MCDMA endpoints") and has(serve.out, "node-d"));
 }
+
+test "check, status and serve fail when a model cannot be planned" {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "cluster.json", .data = studios });
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.json", .data = "{\"model_type\":\"unsupported\",\"hidden_size\":128,\"num_hidden_layers\":1}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "files.tsv", .data = "model.safetensors\t1024\n" });
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const file = try std.fs.path.join(a, &.{ root, "cluster.json" });
+    const shape = try std.fs.path.join(a, &.{ root, "model.json" });
+    const files = try std.fs.path.join(a, &.{ root, "files.tsv" });
+    const serve = try run(a, &.{ "serve", "kimi-k3", "--cluster", file, "--model-config", shape, "--dry-run" });
+    try std.testing.expect(has(serve.out, "not planned: FileListNeeded"));
+    try std.testing.expectEqual(@as(u8, 1), serve.code);
+    for ([_][]const u8{ "check", "status" }) |command| {
+        const missing = try run(a, &.{ "cluster", command, "--cluster", file, "--model-config", shape });
+        try std.testing.expect(has(missing.out, "not planned: FileListNeeded"));
+        try std.testing.expectEqual(@as(u8, 1), missing.code);
+        const unsupported = try run(a, &.{ "cluster", command, "--cluster", file, "--model-config", shape, "--model-files", files });
+        try std.testing.expect(has(unsupported.out, "not planned: EstimateUnsupported"));
+        try std.testing.expectEqual(@as(u8, 1), unsupported.code);
+    }
+}

@@ -32,6 +32,13 @@ pub fn watchOf(comptime F: type, loaded: anytype, paged: ?Plan) Watch {
     return .{ .mode = .paged, .src = src };
 }
 
+/// The pool whose promises the lane host's ledger admits: the watched one, or the one a family names (`ledgerPool`).
+pub fn ledgerPool(comptime F: type, loaded: anytype) ?*kv_pool.Pool {
+    if (comptime @hasDecl(F, "kvPool")) if (F.kvPool(loaded.ctx)) |src| return src.pool;
+    if (comptime @hasDecl(F, "ledgerPool")) return F.ledgerPool(loaded.ctx);
+    return null;
+}
+
 /// The lane host's capacity source and the pool's first census, before the engine thread owns the pool.
 pub fn install(w: *Watch, lane: *api.LaneHost) void {
     const mode = w.mode orelse return;
@@ -139,7 +146,7 @@ pub fn placeHost(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, a
 fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, stream_bytes: u64) bool {
     const want = budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    if (layout(loaded)) |l| return kv_pool.holds(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = enginePaged(loaded) });
+    if (layout(loaded)) |l| return kv_pool.holds(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = enginePaged(loaded), .asked = o.prompt_cache_gib != null });
     const n = budget.admit(room, stream_bytes, loaded.free_streams, o.lanes, o.lanes_fixed) catch return false;
     return room -| stream_bytes * (n -| loaded.free_streams) >= want;
 }
@@ -148,7 +155,7 @@ fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, 
 pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32) !?Plan {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
     const want = if (host_mode) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
-    return kv_pool.plan(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm }) catch |e| {
+    return kv_pool.plan(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm, .asked = o.prompt_cache_gib != null }) catch |e| {
         problem.* = switch (e) {
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
@@ -190,7 +197,8 @@ pub fn store(comptime F: type, s: *api.prompt_cache.Store, target: anytype, k: K
 
 /// The startup line's streams and cache.
 pub fn text(comptime F: type, a: Allocator, stream_bytes: u64, l: ?kv_pool.Layout, paged: ?Plan, engine_paged: bool, all_on_pages: bool, window: u64, k: Kept, kv8: bool) ![2][]const u8 {
-    const shape = if (paged) |p| (if (all_on_pages) try std.fmt.allocPrint(a, "all {d} on {d} pages of {d} rows ({d:.2} GiB) as they need them, the engine's own window idle, {d:.0} MiB fixed each", .{ p.lanes, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else if (engine_paged) try std.fmt.allocPrint(a, "the engine's own and {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them (enough for one at a {d}-token window), {d:.0} MiB fixed each", .{ p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), window, @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else try std.fmt.allocPrint(a, "the engine's own at a {d}-token window ({d:.2} GiB, in the model's), {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them, {d:.0} MiB fixed each", .{ window, toGib(stream_bytes), p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) })) else try std.fmt.allocPrint(a, "{d:.2} GiB each at a {d}-token window{s}", .{ toGib(stream_bytes), window, if (kv8) " (fp8 caches)" else "" });
+    const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0; // the plan's windows: window + rows
+    const shape = if (paged) |p| (if (all_on_pages) try std.fmt.allocPrint(a, "all {d} on {d} pages of {d} rows ({d:.2} GiB) as they need them, the engine's own window idle, {d:.0} MiB fixed each", .{ p.lanes, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else if (engine_paged) try std.fmt.allocPrint(a, "the engine's own and {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them (enough for {d} at a {d}-token window), {d:.0} MiB fixed each", .{ p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), p.pages / l.?.pages(window + rows), window, @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else try std.fmt.allocPrint(a, "the engine's own at a {d}-token window ({d:.2} GiB, in the model's), {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them, {d:.0} MiB fixed each", .{ window, toGib(stream_bytes), p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) })) else try std.fmt.allocPrint(a, "{d:.2} GiB each at a {d}-token window{s}", .{ toGib(stream_bytes), window, if (kv8) " (fp8 caches)" else "" });
     const placed = comptime @hasDecl(F, "snap_place"); // the startup line says where its prompt states went, and why
     const cache = if (k.copied == 0) ", no prompt cache" else if (k.host) try std.fmt.allocPrint(a, ", {s}a {d:.1} GiB prompt cache in host memory with {d:.0} MiB of device staging", .{ if (placed) "prompt states on host, the cache doesn't fit on the card: " else "", toGib(k.copied), @as(f64, @floatFromInt(k.snap_bytes)) / (1 << 20) }) else if (comptime @hasDecl(F, "snap_slots")) try std.fmt.allocPrint(a, ", {s}a prompt cache of {d} snapshot slots ({d:.1} GiB) and {d:.1} GiB of copied rows", .{ if (placed) "prompt states on device: " else "", k.snaps, toGib(k.snaps * k.snap_bytes), toGib(k.copied) }) else try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(k.copied)});
     return .{ shape, cache };
@@ -286,16 +294,21 @@ test "kv pages: an engine whose own rows are pages plans a window of them first,
     try std.testing.expectEqual(@as(?Plan, null), try plan(Owned, a, l, floor - 1, o, 8192, &problem, false, true, 0));
     try std.testing.expect(std.mem.indexOf(u8, problem, "8192-token window") != null);
     const shown = (try text(Owned, a, 180 << 20, l, p, true, false, 8192, .{ .snaps = 0, .copied = 4 << 30, .snap_bytes = 0 }, false))[0];
-    try std.testing.expectEqualStrings("the engine's own and 3 more taking 68 pages of 512 rows (0.42 GiB) as they need them (enough for one at a 8192-token window), 180 MiB fixed each", shown);
+    try std.testing.expectEqualStrings("the engine's own and 3 more taking 68 pages of 512 rows (0.42 GiB) as they need them (enough for 4 at a 8192-token window), 180 MiB fixed each", shown);
     // TF_QWEN_KV_SHARE: every stream on the pool's pages, the engine's window idle
     const all = (try text(Owned, a, 180 << 20, l, p, false, true, 8192, .{ .snaps = 0, .copied = 4 << 30, .snap_bytes = 0 }, false))[0];
     try std.testing.expectEqualStrings("all 4 on 68 pages of 512 rows (0.42 GiB) as they need them, the engine's own window idle, 180 MiB fixed each", all);
     try std.testing.expect(allOnPages(.{ .all_on_pages = true }) and !allOnPages(.{ .layout = @as(?kv_pool.Layout, l) }));
-    // the asked cache holds past the four windows' pages this room holds and a fixed part each, not a byte less
-    const room = 4 * floor + 3 * (180 << 20) + (4 << 30);
+    // the unasked cache holds past the four windows' pages this room holds and a fixed part each, not a byte less
+    const room = 4 * floor + 3 * (180 << 20) + (16 << 30);
     const loaded = .{ .layout = @as(?kv_pool.Layout, l), .engine_paged = true, .free_streams = @as(u32, 1) };
-    try std.testing.expect(fits(Owned, loaded, o, room, 8192, 0));
-    try std.testing.expect(!fits(Owned, loaded, o, room - 1, 8192, 0));
+    const unasked: api.Open = .{ .dir = "", .model_type = "g", .lanes = 4 };
+    try std.testing.expect(fits(Owned, loaded, unasked, room, 8192, 0));
+    try std.testing.expect(!fits(Owned, loaded, unasked, room - 1, 8192, 0));
+    // an asked cache holds past the engine's own window and a fixed part and page for each other one, not a byte less
+    const each = (180 << 20) + l.pageBytes();
+    try std.testing.expect(fits(Owned, loaded, o, floor + 3 * each + (4 << 30), 8192, 0));
+    try std.testing.expect(!fits(Owned, loaded, o, floor + 3 * each + (4 << 30) - 1, 8192, 0));
 }
 test "kv merge: host armed-state staging is reserved once before planning the page pool" {
     const loaded = .{ .host_snaps = true, .snap_bytes = @as(u64, 8 << 20) };
@@ -331,10 +344,13 @@ pub fn capacity(comptime F: type, loaded: anytype, k: Kept, window: u64) ?api.Pr
     return .{ .budget_bytes = k.copied, .minimum_state_bytes = minimum };
 }
 
-pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, comptime log: type) void {
+/// `taken`: the cache bytes the page plan's windows past the engine's own took first (Plan.taken; 0 without pages).
+pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, taken: u64, comptime log: type) void {
     const c = facts orelse return;
     if (disabled or c.budget_bytes >= c.minimum_state_bytes) return;
-    log.warn("GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); lower --context or --parallel, or TENSORFOLD_MEMORY_RESERVE_GIB, to make room (--prompt-cache-gib only caps the budget the weights and streams leave)", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
+    const short = "GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); ";
+    if (taken > 0) return log.warn(short ++ "the KV pool's windows past the engine's own took {d:.3} GiB of it first, and --prompt-cache-gib N keeps N GiB before them", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes), toGib(taken) });
+    log.warn(short ++ "lower --context or --parallel, or TENSORFOLD_MEMORY_RESERVE_GIB, to make room (--prompt-cache-gib only caps the budget the weights and streams leave)", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
 }
 
 test {

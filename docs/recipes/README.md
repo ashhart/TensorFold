@@ -7,6 +7,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 
 | Family | Recipe |
 | --- | --- |
+| dots.mocr | [Native HIP OCR, BF16, one GPU](dots-mocr-hip.md) |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
@@ -69,6 +70,8 @@ when the tokenizer exposes those markers. Chunks skip resume points less than 25
 previous start and otherwise end at the first eligible point or after 2,048 tokens. Without recognized
 markers, chunks use the 2,048-token grid. Rewriting earlier template text can invalidate reuse.
 The chunk scheme and kernel/runtime identity must match before a stored prefix can be reused.
+
+For CUDA checkpoint loading, see [load-time prefetch](cuda-load-prefetch.md).
 
 ## Measurements
 

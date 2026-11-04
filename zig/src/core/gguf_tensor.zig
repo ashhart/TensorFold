@@ -65,7 +65,11 @@ pub const Tensor = struct {
             if (dim.* == 0) return error.ZeroTensorDimension;
             n = std.math.mul(u64, n, dim.*) catch return error.TensorShapeOverflow;
         }
-        out.kind = std.enums.fromInt(Kind, try c.int(u32)) orelse return error.UnsupportedTensorType;
+        const kind = try c.int(u32);
+        out.kind = std.enums.fromInt(Kind, kind) orelse {
+            if (c.unsupported) |problem| problem.* = .{ .name = name, .kind = kind };
+            return error.UnsupportedTensorType;
+        };
         const layout = out.kind.block();
         if (out.shape[0] % layout.values != 0) return error.InvalidBlockShape;
         const bytes = std.math.mul(u64, n / layout.values, layout.bytes) catch return error.TensorShapeOverflow;

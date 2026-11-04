@@ -14,6 +14,7 @@ test "CUDA lane resources distinguish recorded launches from missing receipts" {
         try std.testing.expect(r.launch.threads > 0);
         var missing: usize = 0;
         for (limits.sms, r.usage) |sm, usage| {
+            if (targetDecision(r, sm, usage) != .applicable) continue;
             if (usage.regs == 0) missing += 1 else {
                 var text: std.ArrayList(u8) = .empty;
                 defer text.deinit(std.testing.allocator);
@@ -58,4 +59,16 @@ test "Dory resources qualify all five measured SMs and preserve pending later co
         for ([_]limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqual(none, registry.usageFor(r, version));
     }
+}
+
+test "targeted CUDA launches still refuse every missing applicable receipt" {
+    var record: registry.CudaRecord = .{
+        .launch = .{ .name = "targeted fixture", .symbol = "tf_targeted_fixture", .image = "fixture", .threads = 128, .min_sm = 120 },
+        .usage = none,
+    };
+    try std.testing.expectEqual(@as(usize, 2), try checkCuda(std.testing.allocator, &.{record}, true));
+    record.usage[3] = .{ .regs = 32, .static = 0, .bound = 128 };
+    try std.testing.expectEqual(@as(usize, 1), try checkCuda(std.testing.allocator, &.{record}, true));
+    record.usage[4] = record.usage[3];
+    try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{record}, true));
 }

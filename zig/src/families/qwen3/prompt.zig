@@ -3,6 +3,8 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api");
 const Engine = @import("engine.zig").Engine;
+const engine_max_inputs = @import("engine.zig").max_inputs;
+const score = @import("score.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -18,6 +20,8 @@ pub const Prompt = struct {
     normalize: bool,
     /// Each stream's pooled fp32 rows, from its prompt pass to its release.
     slots: std.AutoHashMapUnmanaged(*Stream, []f32) = .empty,
+    /// The reranker's head rows, when the checkpoint scores labels (`scoreLabels` is then in `table`).
+    heads: ?score.Heads = null,
     table: be.Backend.VTable = .{
         .embedding = embedding,
         .prefill = prefill,
@@ -39,6 +43,39 @@ pub const Prompt = struct {
         var it = p.slots.valueIterator();
         while (it.next()) |rows| p.gpa.free(rows.*);
         p.slots.deinit(p.gpa);
+        if (p.heads) |*h| h.deinit(p.gpa);
+    }
+
+    /// The score hook: one prompt's last row through the engine, its label logits in f64; no mass.
+    pub fn scoreLabels(ptr: *anyopaque, ids: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 {
+        const p = of(ptr);
+        const heads = if (p.heads) |*h| h else return error.NoScoreHead;
+        const e = p.engine;
+        try score.check(ids, labels, logits, mass, e.window, e.m.spec.vocab, heads.count);
+        const row = try p.gpa.alloc(f32, e.m.spec.hidden);
+        defer p.gpa.free(row);
+        try e.run(ids, &.{@intCast(ids.len)}, row);
+        try score.labelLogits(p.gpa, heads, row, labels, logits);
+        return 0;
+    }
+
+    /// The decide hook: branches packed into few runs; a last row keeps its prompt's bits, so scoreLabels's logits.
+    pub fn decideLabels(ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, problem: *[]const u8) anyerror!void {
+        const p = of(ptr);
+        const heads = if (p.heads) |*h| h else return error.NoScoreHead;
+        const e = p.engine;
+        score.checkDecision(trunk, branches, counts, labels, logits, e.window, e.m.spec.vocab, heads.count) catch |err| {
+            problem.* = score.problemOf(err);
+            return error.Refused;
+        };
+        const Runner = struct {
+            e: *Engine,
+            hidden: usize,
+            pub fn run(r: @This(), tokens: []const u32, ends: []const u32, rows: []f32) !void {
+                try r.e.run(tokens, ends, rows);
+            }
+        };
+        try score.decidePacked(p.gpa, Runner{ .e = e, .hidden = e.m.spec.hidden }, heads, trunk, branches, counts, labels, logits, e.window, engine_max_inputs);
     }
 
     /// The backend over this engine; heads add their hooks to `table` before it serves.

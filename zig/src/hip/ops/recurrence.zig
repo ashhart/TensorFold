@@ -8,9 +8,16 @@ const p = t.p;
 const f = t.f;
 const int = t.int;
 
-pub fn convPrefill(o: Ops, x: Tensor, weight: u64, state: ?u64, out: u64, new_state: u64, len: usize, channels: usize, kernel: usize) Error!void {
+/// Where convPrefill writes the k and v channels when `out` takes only the first `key_width` (q) of each row.
+pub const ConvSplit = struct { k: u64, v: u64, key_width: usize };
+
+pub fn convPrefill(o: Ops, x: Tensor, weight: u64, state: ?u64, out: u64, new_state: u64, len: usize, channels: usize, kernel: usize, split: ?ConvSplit) Error!void {
     if (kernel < 1 or kernel > 8) return error.BadShape;
-    try o.l.tf_conv_prefill(p(x.ptr), @backingInt(x.kind), f(weight), if (state) |s| f(s) else null, f(out), f(new_state), int(len), int(channels), int(kernel), o.stream);
+    if (split) |sp| if (sp.key_width == 0 or 2 * sp.key_width >= channels) return error.BadShape;
+    const k_out = if (split) |sp| f(sp.k) else null;
+    const v_out = if (split) |sp| f(sp.v) else null;
+    const key_width = if (split) |sp| int(sp.key_width) else 0;
+    try o.l.tf_conv_prefill(p(x.ptr), @backingInt(x.kind), f(weight), if (state) |s| f(s) else null, f(out), f(new_state), int(len), int(channels), int(kernel), k_out, v_out, key_width, o.stream);
 }
 
 pub fn convDecode(o: Ops, x: u64, weight: u64, state: u64, y: u64, channels: usize, kernel: usize) Error!void {

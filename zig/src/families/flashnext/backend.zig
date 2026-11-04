@@ -18,6 +18,7 @@ const think = @import("think.zig");
 const batch_costs = @import("batch_costs.zig");
 const grammar = @import("grammar.zig");
 const fill = @import("prefill.zig");
+pub const decodeShare = fill.shareOf;
 const prompt_gpu = @import("prefill_metal.zig");
 const RoundTimes = @import("round_times.zig").RoundTimes;
 const batch_settle = @import("batch_settle.zig");
@@ -33,6 +34,7 @@ pub const Backend = struct {
     sessions: []Session,
     by: std.AutoHashMapUnmanaged(*Stream, usize) = .empty,
     filling: std.AutoHashMapUnmanaged(*Stream, fill.State) = .empty,
+    fill_grows: bool = false, // a prompt's steps beside decoders grow once it has waited (fill.besideRows)
     hidden: Buf,
     window_count: u64 = 0,
     shared_count: u64 = 0,

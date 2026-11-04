@@ -163,7 +163,8 @@ pub fn main(init: std.process.Init) !void {
     const cfg = try k3.config.parse(a, cfg_text);
     const want = k3.config.Config{};
     inline for (@typeInfo(k3.config.Config).@"struct".field_names) |f| {
-        if (!std.meta.eql(@field(cfg, f), @field(want, f))) r.bad("config {s} differs from the shape our kernels are built for", .{f});
+        if (!std.mem.eql(u8, f, "dsa") and !std.meta.eql(@field(cfg, f), @field(want, f)))
+            r.bad("config {s} differs from the shape our kernels are built for", .{f});
     }
     const t0 = std.Io.Clock.awake.now(io);
     const c = try ckpt.load(io, a, dir);

@@ -132,6 +132,8 @@ pub const Engine = struct {
         e.trace = platform.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
         try latent.place(&e.c);
+        var load_cache = @import("core").checkpoint.cache.Load.begin(io, e.c.world > 1);
+        defer load_cache.deinit();
         if (e.c.rank > 0) return error.RankServesExperts; // ranks past 0 run cuda_worker.serve, not an engine
         e.c.ck = try @import("cuda_latent_ck.zig").wanted(ctx, e.c, opts.precision);
         if (e.c.world > 1 and opts.segments > 1) return error.SegmentsNeedOneRank; // one stream keeps the jobs in order
@@ -220,8 +222,8 @@ pub const Engine = struct {
         try e.setSampling(opts.sampling);
         if (content) |x| { // every rank loaded, with the same bytes, before the first job
             content = null;
-            try cuda.tp_watch.ready(io, try x.finish());
-        }
+            try load_cache.finishAfter(.{ io, try x.finish() }, cuda.tp_watch.ready);
+        } else load_cache.finish();
         if (opts.graphs) try e.capture(mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});

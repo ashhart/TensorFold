@@ -200,6 +200,8 @@ pub const Pool = struct {
         x.run = run;
         try p.mapStates(&x.seq);
         try p.e.clearSeq(&x.seq, cap);
+        // a new generation each open: every lane's caches share the arena's address, so the graph keys need it
+        x.seq.gen = @import("cuda_window_graph.zig").nextGen();
         x.used = true;
         return x.seq;
     }

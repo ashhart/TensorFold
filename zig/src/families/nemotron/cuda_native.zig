@@ -90,6 +90,12 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.lanes.fits(prompt, max_tokens);
 }
 
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.pages) |pg| &pg.pool else null;
+}
+
 /// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
 pub fn linked(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
     return core.shard_edit.linked(arena, io, dir);
@@ -216,10 +222,36 @@ fn closeCarveout(gpa: std.mem.Allocator, c: *cuda.Carveout) void {
     gpa.destroy(c);
 }
 
+const Paging = enum { off, on, all };
+
 /// TF_KV_PAGES: 0 gives every stream a window at its prefill, as before the pool; all puts every stream on pages.
-fn paging() enum { off, on, all } {
-    const v = env("TF_KV_PAGES") orelse return .on;
+fn paging() Paging {
+    return pagingOf(core.profile.get(.TF_KV_PAGES));
+}
+
+fn pagingOf(raw: ?[]const u8) Paging {
+    const v = raw orelse return .on;
     return if (std.mem.eql(u8, v, "0")) .off else if (std.mem.eql(u8, v, "all")) .all else .on;
+}
+
+test "Nemotron paging: raw values preserve the original default-on expression" {
+    const values = [_]?[]const u8{ null, "", "0", "all", "on", "off", "auto", "1", "00", "+0", "false", "ALL", " all ", "0\n", "-1", "256" };
+    for (values) |raw| {
+        const expected: Paging = if (raw) |v|
+            (if (std.mem.eql(u8, v, "0")) .off else if (std.mem.eql(u8, v, "all")) .all else .on)
+        else
+            .on;
+        try std.testing.expectEqual(expected, pagingOf(raw));
+    }
+}
+
+test "Nemotron paging: registered lookup preserves the native reader's live environment policy" {
+    const raw = env("TF_KV_PAGES");
+    const expected: @TypeOf(paging()) = if (raw) |v|
+        (if (std.mem.eql(u8, v, "0")) .off else if (std.mem.eql(u8, v, "all")) .all else .on)
+    else
+        .on;
+    try std.testing.expectEqual(expected, paging());
 }
 
 fn env(name: [:0]const u8) ?[]const u8 {

@@ -54,6 +54,9 @@ fn send(conn: *Conn, kind: []const u8, body: []const u8) void {
 }
 
 pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
+    const audit = @import("slide_audit.zig");
+    const opts = audit.options(conn.path) catch return refuse(conn, a, 400, "invalid audit options");
+    if (opts) |o| return audit.serve(srv, conn, a, o);
     const body = srv.slide.render(a, folder(srv)) catch return refuse(conn, a, 500, "out of memory");
     conn.sendJson(200, body);
 }
@@ -239,7 +242,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
             if (routed == teach.reroutes) {
                 _ = run(srv, a, &.{ .drop = true }, 0);
                 srv.slide.placed(id, &.{});
-                out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: it kept answering questions about something else";
+                out.why = std.fmt.allocPrint(a, "taken out: sub-check took failed: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: sub-check took failed: it kept answering questions about something else";
                 @memset(out.recalled, false);
                 return out;
             }
@@ -263,7 +266,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
             _ = run(srv, a, &.{ .undo = true }, 0);
             srv.slide.placed(id, &.{});
             @memset(out.recalled, false); // the undo took the whole fact out: nothing of it is kept
-            out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
+            out.why = std.fmt.allocPrint(a, "round {d} taken back: sub-check damage failed: {s}", .{ round + 1, why }) catch why;
             return out;
         }
         @memcpy(out.recalled, verdict.recalled);

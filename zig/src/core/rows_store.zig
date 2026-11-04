@@ -124,7 +124,7 @@ pub const Rows = struct {
         errdefer r.deinit();
         try makePath(gpa, r.dir);
         try r.scan();
-        r.settle();
+        try r.settle();
         r.stamp();
         r.sync_writes = o.sync_writes or (if (platform.c.getenv("TENSORFOLD_ROWS_SYNC")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false);
         r.staging_bytes = o.staging_bytes;
@@ -429,7 +429,8 @@ pub const Rows = struct {
                 const bytes = dirs.fileBytes(p) catch continue;
                 try r.blocks.put(r.gpa, n, .{ .bytes = bytes });
             } else if (std.mem.endsWith(u8, name, ".st")) {
-                r.readState(p) catch {
+                r.readState(p) catch |err| {
+                    if (err == error.OutOfMemory) return err;
                     _ = platform.c.unlink(p);
                 };
             }
@@ -462,7 +463,7 @@ pub const Rows = struct {
     }
 
     /// Each state's blocks counted; a state missing one, or that its family cannot lay out, goes; then idle blocks.
-    fn settle(r: *Rows) void {
+    fn settle(r: *Rows) !void {
         var i: usize = 0;
         while (i < r.states.items.len) {
             const s = &r.states.items[i];
@@ -470,7 +471,7 @@ pub const Rows = struct {
             defer wants.deinit(r.gpa);
             const whole = if (r.wantsOf(r.gpa, s, &wants)) |_| for (wants.items) |w| {
                 if (!r.blocks.contains(chain.stem(w.name))) break false;
-            } else true else |_| false;
+            } else true else |err| if (err == error.OutOfMemory) return err else false;
             if (!whole) {
                 var gone = r.states.orderedRemove(i);
                 unlinkName(r.dir, gone.name, ".st");

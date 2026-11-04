@@ -1,5 +1,13 @@
 # Third-party notices
 
+## Kimi K3 and K3.1-Pro release fixtures
+
+The configuration fixtures in `zig/src/families/kimi_k3/fixtures/` are Moonshot AI's release files, Copyright (c) 2026
+Moonshot AI. `k3-config.json` comes from Kimi K3 at revision `f831ab66814297da540d832a5235f8e904f29d06`, under the
+[Kimi K3 License](LICENSES/Kimi-K3.txt). `k31-config.json` comes from Kimi K3.1 Pro at revision
+`6d0a0202956796543364d666ab19c6ad1a494ee1`, under the [Kimi K3.1-Pro License](LICENSES/Kimi-K3.1-Pro.txt). These are
+the models' release licenses, including their additional conditions, not the TensorFold Apache-2.0 license.
+
 The GLM-OCR HIP operators in `zig/kernels/hip/glm_ocr/pointwise.hip`
 adapt reduction ordering and vectorized LayerNorm statistics from PyTorch
 revision `8514f05`, `aten/src/ATen/native/cuda/Reduce.cuh` and
@@ -271,6 +279,18 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 `--cortheon` (`zig/src/server/cortheon/`) adapts [Cortheon](https://github.com/ashhart/Cortheon)'s task-classification word lists,
 its stage sequences and their purposes, its rules for when a task needs outside sources, and its instruction-filter patterns,
 rewritten in Zig. MIT License, Copyright (c) 2026 Cortheon contributors; the license text is below.
+
+## Model release and library code these files follow
+
+These follow a model's release code or a library's model code for their math, rounding or resizing. Each is written for TensorFold; the file named is the reference.
+
+- `tools/lfm3/ref64.py` and `zig/kernels/xpu/lfm3.cl`: `modeling_lfm3.py` in [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B). Copyright Liquid AI, LFM Open License v1.0; see [the license text](LICENSES/LFM-Open-1.0.txt).
+- `zig/kernels/metal/minimax_m3/glue.metal`: the rounding points of `modeling_minimax_m3_vl.py` in [transformers](https://github.com/huggingface/transformers).
+- `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
+- `zig/src/core/picture/patches.zig`: `smart_resize`, `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; `patches_test.zig` checks it against them.
+- `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
+
+transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
 
 ## MIT License text
 

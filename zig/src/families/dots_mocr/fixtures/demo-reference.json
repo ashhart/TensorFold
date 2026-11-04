@@ -1,0 +1,28 @@
+{
+  "checkpoint_revision": "e539fbb52280393adc081b289ec597430a0f9031",
+  "example_revision": "23f3e5612fb8066d4034d5ecfc8f33a9243533eb",
+  "image_sha256": "90345584ccc2c4a883779e5d47693276e8cf3fe752700af4f03b3142ab46cfa2",
+  "pixel_sha256": "f37fc73c4091ccb39d305a505c888df1ec344c7463714059f9391d0569991487",
+  "grid": [
+    1,
+    160,
+    122
+  ],
+  "shape": [
+    19520,
+    588
+  ],
+  "versions": {
+    "transformers": "4.57.6",
+    "pillow": "12.2.0",
+    "qwen-vl-utils": "0.0.10"
+  },
+  "complete_example": {
+    "prompt_tokens": 5096,
+    "output_tokens": 4634,
+    "eos_token": 151673,
+    "max_new_tokens": 24000,
+    "output_ids_sha256_u32_le": "25ea393e611c83c59d6a4d2a51c3f6a8c9edcac39e529fc0cb13f3f36af29303",
+    "native_greedy_ids_identical": true
+  }
+}

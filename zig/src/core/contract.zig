@@ -28,6 +28,7 @@ test {
     _ = @import("contract/nemotron_experts_records.zig");
     _ = @import("contract/moss_image_records.zig");
     _ = @import("contract/metal_pair_records.zig");
+    _ = @import("contract/affine_gather_records.zig");
     _ = spec;
     _ = gates;
     _ = rows;
@@ -41,6 +42,7 @@ test {
     _ = hsaco;
     _ = hip_records;
     _ = @import("contract/hip_records_qwen3.zig");
+    _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");
 }
 

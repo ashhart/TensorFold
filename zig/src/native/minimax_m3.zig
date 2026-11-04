@@ -126,7 +126,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.markers = .{ fl.vision.image_start, model.config.image_token, fl.vision.image_end };
     // the template writes the image token alone: the server adds start and end around each image's rows
     const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true, .vision = vis });
+    h.host = api.LaneHost.init(gpa, io, &h.core, servedInfo(h, o.lanes, @intCast(window), vis));
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -234,4 +234,25 @@ test "minimax_m3 host: cache callback with no configured cache leaves no state t
     h.cache = null;
     fitCache(&h, 0, null, &.{});
     try std.testing.expect(h.cache == null);
+}
+
+fn servedInfo(h: *const Host, streams: u32, window: u32, vision: ?api.Vision) api.Info {
+    return .{ .lanes = streams, .context_window = window, .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = h.wrap == null, .vision = vision };
+}
+
+test "MiniMax capabilities: logprobs match the actual plain or external-draft backend" {
+    var metal: fl.backend.Metal = undefined;
+    var h: Host = undefined;
+    h.wrap = null;
+    const plain = servedInfo(&h, 2, 1024, null);
+    try std.testing.expect(metal.backend().vtable.first_row != null);
+    try std.testing.expect(plain.logprobs and plain.structures);
+    h.wrap = .{ .gpa = std.testing.allocator, .target = metal.backend(), .drafter = .{ .ptr = &metal, .vtable = undefined } };
+    const wrapped = h.wrap.?.backend();
+    const drafted = servedInfo(&h, 2, 1024, null);
+    try std.testing.expect(wrapped.vtable.first_row == null);
+    try std.testing.expectEqual(wrapped.vtable.first_row != null, drafted.logprobs);
+    try std.testing.expect(drafted.structures and wrapped.vtable.first_masked != null);
+    try std.testing.expectEqual(plain.context_window, drafted.context_window);
+    try std.testing.expectEqual(plain.prefill_step, drafted.prefill_step);
 }

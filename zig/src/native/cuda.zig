@@ -78,6 +78,7 @@ pub const Host = struct {
     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
     store: ?*api.prompt_cache.Store = null, // kept Nemotron states; null when the budget is 0
     kv: kv_pages.Watch = .{}, // what the load ledger hears of the KV pool (cuda_kv_pool.zig)
+    kv_count: ?*@import("core").kv_pool.Pool = null, // the paged pool the lane host's ledger admits (#1943)
     kv_plan: ?@import("cuda_ledger.zig").Plan = null, // the KV ledger's budget and cost, read by the lane host
     prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: the family's prompts as its pool's pages (no `store` then)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
@@ -140,12 +141,15 @@ pub const Host = struct {
         if (h.learn != null) h.host.learner = h.learner();
         kv_pages.install(&h.kv, &h.host); // the pool's first census, before the engine thread owns the pool
         errdefer kv_pages.unwatch(&h.kv); // a host that never starts leaves the pool reporting to no one
+        if (h.kv_count) |p| h.host.countPool(p);
+        errdefer h.host.uncountPool();
         try h.host.start();
     }
     /// The family's learner, each call made with the context current on the lane thread.
     fn learner(h: *Host) api.Learner {
         return .{
             .ctx = h,
+            .read_only_audit = h.learn.?.read_only_audit,
             .begin = struct {
                 fn f(p: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
                     const l = bind(p).learn.?;
@@ -466,6 +470,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
     h.kv = kv_pages.watchOf(F, loaded, paged);
+    h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
     const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
     try h.serve(io, served.facts, loaded.rows, .{
         .benchmark_ranks = bench.ranks,
@@ -489,7 +494,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .slide_conversations = conversations,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
-    kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0, std.log);
+    kv_pages.warnCapacity(cache_capacity, o.keep == 0 or o.prompt_cache_gib == 0, if (paged) |p| p.taken else 0, std.log);
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
         h.follow_fn = f;
         return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt, .follow = Host.followFamily };
@@ -558,6 +563,7 @@ test {
     _ = kv_pages;
     _ = drafted;
     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter
+    _ = @import("cuda_disk_identity_test.zig");
 }
 test "Learner ownership: actual native close drains Nemotron before any source, trainer or parent free" {
     try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, false);

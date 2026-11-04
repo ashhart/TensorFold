@@ -1,6 +1,8 @@
 //! Load-only checkpoint pages leave Linux's cache after their last read; runtime sources keep their own policy.
 const std = @import("std");
 const Io = std.Io;
+pub const Load = @import("checkpoint_drop.zig").Load;
+pub const range = @import("checkpoint_drop.zig").range;
 
 /// Deferred in the checkpoint's owning load scope, after all users of its borrowed bytes.
 pub fn close(ck: anytype) void {
@@ -10,8 +12,7 @@ pub fn close(ck: anytype) void {
 
 /// A completed positional read needs no mapping release. Advice is best effort and never changes file bytes.
 pub fn drop(file: Io.File) void {
-    if (@import("builtin").os.tag != .linux) return;
-    _ = std.os.linux.fadvise(file.handle, 0, 0, std.os.linux.POSIX_FADV.DONTNEED);
+    @import("checkpoint_drop.zig").drop(file);
 }
 
 /// Only the pack's explicit load sources, including nested index paths; no recursive directory sweep.

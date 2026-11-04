@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "experts.cuh"
+#include "common/cp_async.cuh"
 #include "common/fp_pairs.cuh"
 
 namespace tf_nvfp4_experts32 {
@@ -14,8 +15,7 @@ constexpr int BASE4 = 2;   // a column block opens with each matrix's 32 row bas
 
 using tf_common::ld_nc;
 using tf_common::ld_nc2;
-__device__ __forceinline__ uint32_t ld_nc1(const void* p) { return tf_common::ld_nc32(p); }
-
+using tf_common::ld_nc32;
 using tf_common::fp4pair;
 
 using tf_common::e4m3f;
@@ -34,7 +34,7 @@ __device__ __forceinline__ void load_stage(Stage<M>& st, const uint4* blk, int g
 #pragma unroll
   for (int m = 0; m < M; ++m) {
     st.w[m] = ld_nc(b + m * PAIR4 + odd * 32 + lane);
-    st.s[m] = ld_nc1(reinterpret_cast<const uint32_t*>(b + m * PAIR4 + 64 + odd) + t);
+    st.s[m] = ld_nc32(reinterpret_cast<const uint32_t*>(b + m * PAIR4 + 64 + odd) + t);
   }
   const uint2 zero = make_uint2(0u, 0u);
   const int k0 = g * 32 + 4 * t;

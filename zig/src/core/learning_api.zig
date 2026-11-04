@@ -1,5 +1,6 @@
 const Example = @import("engine_api.zig").Example;
 pub const LearnRequest = struct {
+    audit: ?*const @import("pocket_audit.zig").Request = null,
     train: []const Example = &.{},
     think: []const Example = &.{}, // the facts' answers with thinking on, learned beside `train` (one of each a step)
     held: []const Example = &.{},
@@ -50,6 +51,7 @@ pub const LearnError = error{ Closed, Busy, Unsupported };
 /// A family's learner, which LaneHost steps one bounded unit at a time while no stream decodes.
 pub const Learner = struct {
     ctx: *anyopaque,
+    read_only_audit: bool = false,
     /// Start a job; its events, `done` last, go to `sink` from later steps.
     begin: *const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) anyerror!void,
     /// One unit of the job: `changed` when weights moved (kept prompt states are then dropped), `done` when it ended.

@@ -92,6 +92,12 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.db.admits(prompt, max_tokens);
 }
 
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.db.pool) |*pool| pool else null;
+}
+
 /// The checkpoint at its loop count, the shared kernels and every stream's caches.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     const priority_copies = try cuda.priority_copies.read("TF_DORY_COPIES", o.drafts);

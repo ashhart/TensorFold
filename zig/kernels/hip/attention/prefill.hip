@@ -91,8 +91,8 @@ __device__ __forceinline__ P row_lane(P x, unsigned sel) {
     return __builtin_bit_cast(P, __builtin_amdgcn_permlane16(w, w, sel, sel, false, false));
 }
 
-// q rounds to the cache type once into LDS, p stays in registers; with PAGED, k and v are pools and a key tile a page.
-template <typename Cache, bool PAGED>
+// q rounds to the cache type once into LDS, p stays in registers; PAGED: pooled k, v; !CAUSAL: rows see every key.
+template <typename Cache, bool PAGED, bool CAUSAL = true>
 __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k, const Cache* __restrict__ v,
                         float* __restrict__ out, int qlen, int span, int heads, int kv_heads, int d, float scale,
                         int q_pos0, long long k_sb, long long k_sh, long long k_ss, long long v_sb, long long v_sh,
@@ -112,7 +112,7 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
     const int tid = threadIdx.x;
     int q_hi = qlen - q0;
     if (q_hi > kRows) q_hi = kRows;
-    int max_vis = q_pos0 + q0 + q_hi;
+    int max_vis = CAUSAL ? q_pos0 + q0 + q_hi : span;
     if (max_vis > span) max_vis = span;
     const int kv = head / (heads / kv_heads);
     const float* qrows = q + ((static_cast<long long>(batch) * heads + head) * qlen + q0) * d;
@@ -144,7 +144,7 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
         for (int m = 0; m < 16; ++m) o[i][m] = 0.f;
 
     // a tile ending by full_end is in range and visible to every stored row, so FULL drops its guards and masks
-    int full_end = q_pos0 + q0 + 1;
+    int full_end = CAUSAL ? q_pos0 + q0 + 1 : span;
     if (full_end > span) full_end = span;
     // the first key row of the tile at k0 (on page `pg` when paged) in the keys' and the values' storage
     const auto ktile_at = [&](int k0, unsigned pg) __attribute__((always_inline)) {
@@ -224,16 +224,19 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
             const int row = sr + 16 * i;
-            int vis = q_pos0 + q0 + row + 1;
+            int vis = CAUSAL ? q_pos0 + q0 + row + 1 : span;
             if (vis > span) vis = span;
             float tile_max = -INFINITY;
+            int nan_row = 0; // !CAUSAL: a NaN score makes its row NaN, as in Torch
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
                 acc[i][j] = (FULL || (row < q_hi && k0 + 4 * sk + j < vis)) ? acc[i][j] * scale : -INFINITY;
+                if constexpr (!CAUSAL) nan_row |= isnan(acc[i][j]);
                 tile_max = fmaxf(tile_max, acc[i][j]);
             }
             tile_max = row_max16(tile_max);
-            const float next_m = fmaxf(m_run[i], tile_max);
+            if constexpr (!CAUSAL) nan_row = row_max16(nan_row ? 1.f : 0.f) > 0.f;
+            const float next_m = nan_row ? NAN : fmaxf(m_run[i], tile_max);
             const float alpha = next_m == -INFINITY ? 1.f : expf(m_run[i] - next_m);
             float p[4], sum = 0.f;
 #pragma unroll
@@ -325,6 +328,15 @@ tf_fa_wide_bf16(const float* q, const hip_bfloat16* k, const hip_bfloat16* v, fl
                 long long k_ss, long long v_sb, long long v_sh, long long v_ss) {
     fa_dot2<hip_bfloat16, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, k_sb, k_sh, k_ss, v_sb,
                                  v_sh, v_ss, nullptr, 0);
+}
+
+// Full attention for one image. The strides and signature match the contiguous causal tile.
+extern "C" __global__ void __launch_bounds__(kThreads, 1)
+tf_fa_full_bf16(const float* q, const hip_bfloat16* k, const hip_bfloat16* v, float* out, int qlen, int span,
+                int heads, int kv_heads, int d, float scale, int q_pos0, long long k_sb, long long k_sh,
+                long long k_ss, long long v_sb, long long v_sh, long long v_ss) {
+    fa_dot2<hip_bfloat16, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, k_sb,
+                                      k_sh, k_ss, v_sb, v_sh, v_ss, nullptr, 0);
 }
 
 // The same tile over a stream's pages: `k` and `v` are a layer's pools, `table` the stream's page ids.

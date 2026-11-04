@@ -34,7 +34,7 @@ def problems(path: Path) -> list[str]:
     """Every rule break in one file, as 'path:line: reason'."""
     if generator_output(path):
         return []
-    lines = path.read_text(errors="replace").splitlines()
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     rel, found = path.relative_to(ROOT), []
     if len(lines) > MAX_LINES and path.name not in GENERATED:
         found.append(f"{rel}: {len(lines)} lines (split past {MAX_LINES})")

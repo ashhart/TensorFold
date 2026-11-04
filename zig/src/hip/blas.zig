@@ -15,11 +15,30 @@ const Api = struct {
     rocblas_gemm_ex: *const fn (Handle, c_int, c_int, c_int, c_int, c_int, Const, Const, c_int, c_int, Const, c_int, c_int, Const, Const, c_int, c_int, Ptr, c_int, c_int, c_int, c_int, i32, u32) callconv(.c) c_int,
 };
 
+/// The workspace calls, which only the BF16 path makes: looked up when it first sets a workspace, never at `open`.
+pub const WorkspaceApi = struct {
+    rocblas_set_workspace: *const fn (Handle, Ptr, usize) callconv(.c) c_int,
+    rocblas_get_device_memory_size: *const fn (Handle, *usize) callconv(.c) c_int,
+    rocblas_is_managing_device_memory: *const fn (Handle) callconv(.c) bool,
+};
+
+/// Every call of `WorkspaceApi` from `lib` (anything with DynLib's `lookup`), or the name of the first one it lacks.
+pub fn resolveWorkspace(lib: anytype, out: *WorkspaceApi) ?[]const u8 {
+    const info = @typeInfo(WorkspaceApi).@"struct";
+    inline for (info.field_names, info.field_types) |field, T| @field(out, field) = lib.lookup(T, field) orelse return field;
+    return null;
+}
+
+/// A handle's workspace: rocBLAS's own default size, which every product it serves runs within.
+pub const workspace_bytes: usize = 32 << 20;
+
 pub const Blas = struct {
     lib: platform.DynLib,
     api: Api,
     handle: Handle,
     stream: Stream,
+    /// The workspace calls once a workspace was set (null: never asked for).
+    ws: ?WorkspaceApi = null,
 
     /// The handle and all its calls belong to this device context and one nonblocking stream.
     pub fn open(stream: Stream) Error!Blas {
@@ -39,6 +58,33 @@ pub const Blas = struct {
             return .{ .lib = lib, .api = api, .handle = handle, .stream = stream };
         }
         return platform.optional_libraries.unavailable(.rocblas);
+    }
+
+    /// The workspace calls, looked up on first use; a rocBLAS without one is refused by the call's name.
+    fn workspaceApi(b: *Blas) Error!WorkspaceApi {
+        if (b.ws) |w| return w;
+        var w: WorkspaceApi = undefined;
+        if (resolveWorkspace(&b.lib, &w)) |name| {
+            std.log.err("this rocBLAS has no {s}, which the BF16 projections' planned workspace needs", .{name});
+            return error.MissingSymbol;
+        }
+        b.ws = w;
+        return w;
+    }
+
+    /// rocBLAS works in `bytes` at `ptr` (the caller's planned buffer) and frees its default: it allocates no more.
+    pub fn useWorkspace(b: *Blas, ptr: u64, bytes: usize) Error!void {
+        if (ptr == 0 or bytes == 0) return error.Invalid;
+        const w = try b.workspaceApi();
+        try check(w.rocblas_set_workspace(b.handle, @ptrFromInt(ptr), bytes));
+    }
+
+    /// The device bytes the handle works in, and whether rocBLAS allocated them (false: the caller's workspace).
+    pub fn workspace(b: *Blas) Error!struct { bytes: usize, managed: bool } {
+        const w = try b.workspaceApi();
+        var bytes: usize = 0;
+        try check(w.rocblas_get_device_memory_size(b.handle, &bytes));
+        return .{ .bytes = bytes, .managed = w.rocblas_is_managing_device_memory(b.handle) };
     }
 
     pub fn close(b: *Blas) void {
@@ -134,4 +180,24 @@ test "HIP BLAS: BLAS refuses impossible geometry and output aliases before libra
     try std.testing.expectError(error.Invalid, b.project(100, 200, 102, 2, 2, 2));
     try std.testing.expectError(error.Invalid, b.project(100, 200, 202, 2, 2, 2));
     try std.testing.expectError(error.Invalid, b.project(std.math.maxInt(u64) - 1, 100, 200, 1, 1, 2));
+    try std.testing.expectError(error.Invalid, b.useWorkspace(0, workspace_bytes));
+    try std.testing.expectError(error.Invalid, b.useWorkspace(256, 0));
+}
+
+test "HIP BLAS: the workspace calls resolve together, and the first one missing is named" {
+    const Fake = struct {
+        missing: ?[]const u8,
+        fn dummy() callconv(.c) void {}
+        pub fn lookup(f: *const @This(), comptime T: type, name: [:0]const u8) ?T {
+            if (f.missing) |m| if (std.mem.eql(u8, m, name)) return null;
+            return @ptrCast(&dummy);
+        }
+    };
+    var w: WorkspaceApi = undefined;
+    try std.testing.expect(resolveWorkspace(&Fake{ .missing = null }, &w) == null);
+    inline for (@typeInfo(WorkspaceApi).@"struct".field_names) |name| {
+        try std.testing.expectEqualStrings(name, resolveWorkspace(&Fake{ .missing = name }, &w).?);
+        // `open` resolves the product calls only, so a loader that sets no workspace never needs these
+        try std.testing.expect(!@hasField(Api, name));
+    }
 }

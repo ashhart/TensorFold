@@ -25,12 +25,12 @@ const Masks = @import("../../core/grammar_mask.zig").Masks;
 const be = lanes.backend;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 const ring = 1 << 16;
-
+pub const limits = @import("limits.zig");
 /// A lone stream's window rows at most, and a shared round's.
-pub const max_window = 16;
+pub const max_window = limits.max_window;
 
 /// A stream's tree window's rows at most (its lanes).
-pub const max_lanes = 64;
+pub const max_lanes = limits.max_lanes;
 
 /// Prompt chunks this short take the decode kernels, longer ones the prefill kernels (Python's fused_rows).
 pub const fused_rows = 16;
@@ -242,7 +242,7 @@ pub const Metal = struct {
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         const ids = s.prompt();
-        if (ids.len == 0 or ids.len + s.max_new + max_window > self.o.capacity) return error.PromptTooLong;
+        try limits.check(ids.len, s.max_new, self.o.capacity);
         if (s.isCancelled()) return error.Cancelled;
         const rows_needed = @min(self.o.capacity, ids.len + s.max_new + max_lanes + 1); // the reply and a widest window past it
         try self.drain();

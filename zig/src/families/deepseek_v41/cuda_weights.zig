@@ -142,7 +142,7 @@ pub fn load(w: *Weights, d: *const cuda.Driver, io: std.Io, cfg: *const @import(
     try admitPlan(io, cfg, pack, plan);
     var b: named.Builder = .{ .gpa = w.gpa, .io = io, .pack = pack };
     defer b.deinit();
-    try b.all(plan, cfg.o_groups);
+    try @import("cuda_load_prefetch.zig").all(&b, plan, cfg, try @import("core").checkpoint_read_ahead.optInReaders());
     try w.upload(d, &b);
     @import("core").checkpoint.cache.files(io, pack.dir, pack.files.items);
 }

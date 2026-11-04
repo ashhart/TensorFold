@@ -53,6 +53,7 @@ pub const Backend = struct {
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
     pub fn facts(b: *const Backend) lanes.Model {
         return .{
+            .learn_row_costs = b.sl.e.ep == null and !b.sl.e.device.tensorUnits(), // the table is an M5 Ultra's: others pay more
             .allocate_shared_drafts = b.sl.e.hasMtp(),
             .limit_shared_drafts = b.sl.e.hasMtp(),
             .exact_width = st.max_rows,

@@ -26,6 +26,8 @@ const Q4 = wt.Q4;
 const HcW = wt.HcW;
 const max_chain = mtp.max_chain;
 const max_rows = mtp.max_rows;
+/// best: [max_rows, 4] fp32 best values, then [max_rows, topk_max] bf16 candidates and i32 columns (cuda_mtp_draw.zig).
+pub const best_bytes: usize = max_rows * 16 + max_rows * @import("cuda_mtp_draw.zig").topk_max * 6;
 const conv_bytes = mtp.conv_bytes;
 const proj_bytes = mtp.proj_bytes;
 
@@ -45,6 +47,8 @@ pub const Chain = struct {
 
 /// A sequence's head cache and the buffers a window needs: its rows' scores and streams, and what it rolls back to.
 pub const Draft = struct {
+    /// Its graphs' keys (cuda_window_graph.nextGen).
+    gen: u64 = 0,
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").View = null,
     gpa: std.mem.Allocator,
@@ -100,7 +104,7 @@ pub const Draft = struct {
     /// Device bytes `init(cap, draft_n, rows)` allocates.
     pub fn bytes(cap: usize, draft_n: usize, rows: usize) usize {
         const log = if (late()) logBytes() else 0;
-        return cap * (2 * prompt.kv_row_bytes + index_dim * 2) + prompt.pooledBytes(cap) + @max(rows, max_rows) * wide * 2 + wide * 2 + max_rows * vocab * 2 + draft_n * 2 + max_rows * 16 + saved_bytes + linear_n * state_n * 4 + log;
+        return cap * (2 * prompt.kv_row_bytes + index_dim * 2) + prompt.pooledBytes(cap) + @max(rows, max_rows) * wide * 2 + wide * 2 + max_rows * vocab * 2 + draft_n * 2 + best_bytes + saved_bytes + linear_n * state_n * 4 + log;
     }
 
     /// Drafting streams keep a partly kept window's DeltaNet rows pending (set at load; TF_FLASHNEXT_KEEP_LATE=0: off).
@@ -134,7 +138,7 @@ pub const Draft = struct {
 
     /// A head cache of `cap` entries; `rows` the widest prompt chunk whose streams it keeps.
     pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize) !Draft {
-        var d: Draft = .{ .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
         d.kc = try cuda.DeviceBuffer.alloc(driver, cap * kv_heads * head_dim * 2);
         errdefer d.kc.free();
         d.vc = try cuda.DeviceBuffer.alloc(driver, cap * kv_heads * head_dim * 2);
@@ -151,7 +155,7 @@ pub const Draft = struct {
         errdefer d.logits.free();
         d.dlogits = try cuda.DeviceBuffer.alloc(driver, draft_n * 2);
         errdefer d.dlogits.free();
-        d.best = try cuda.DeviceBuffer.alloc(driver, max_rows * 16);
+        d.best = try cuda.DeviceBuffer.alloc(driver, best_bytes);
         errdefer d.best.free();
         d.saved = try cuda.DeviceBuffer.alloc(driver, saved_bytes);
         errdefer d.saved.free();
@@ -174,7 +178,7 @@ pub const Draft = struct {
         const a = std.mem.alignForward;
         const rows_cap = @max(rows, max_rows);
         var n: usize = 0;
-        for ([_]usize{ rows_cap * wide * 2, wide * 2, max_rows * vocab * 2, draft_n * 2, max_rows * 16, saved_bytes, if (late()) logBytes() else 0 }) |x| n += a(usize, x, 256);
+        for ([_]usize{ rows_cap * wide * 2, wide * 2, max_rows * vocab * 2, draft_n * 2, best_bytes, saved_bytes, if (late()) logBytes() else 0 }) |x| n += a(usize, x, 256);
         return n + linear_n * a(usize, state_n * 4, 256);
     }
 
@@ -182,7 +186,7 @@ pub const Draft = struct {
     pub fn initParts(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize, block: cuda.DeviceBuffer) !Draft {
         const bytes_in = partsBytes(draft_n, rows);
         if (block.len < bytes_in) return error.FlashNextRunTooShort;
-        var d: Draft = .{ .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .spare = undefined, .host = undefined };
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .spare = undefined, .host = undefined };
         d.kc = try cuda.DeviceBuffer.alloc(driver, cap * kv_heads * head_dim * 2);
         errdefer d.kc.free();
         d.vc = try cuda.DeviceBuffer.alloc(driver, cap * kv_heads * head_dim * 2);
@@ -203,7 +207,7 @@ pub const Draft = struct {
         d.out = Carve.take(driver, &at, wide * 2);
         d.logits = Carve.take(driver, &at, max_rows * vocab * 2);
         d.dlogits = Carve.take(driver, &at, draft_n * 2);
-        d.best = Carve.take(driver, &at, max_rows * 16);
+        d.best = Carve.take(driver, &at, best_bytes);
         d.saved = Carve.take(driver, &at, saved_bytes);
         if (late()) d.log = Carve.take(driver, &at, logBytes());
         for (&d.spare) |*b| b.* = Carve.take(driver, &at, state_n * 4);
@@ -253,12 +257,12 @@ pub const Draft = struct {
             }
         };
         const head = wt.attn_n;
-        var d: Draft = .{ .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
         d.streams = Carve.take(driver, &at, d.rows_cap * wide * 2);
         d.out = Carve.take(driver, &at, wide * 2);
         d.logits = Carve.take(driver, &at, max_rows * vocab * 2);
         d.dlogits = Carve.take(driver, &at, draft_n * 2);
-        d.best = Carve.take(driver, &at, max_rows * 16);
+        d.best = Carve.take(driver, &at, best_bytes);
         d.saved = Carve.take(driver, &at, saved_bytes);
         if (late()) d.log = Carve.take(driver, &at, logBytes());
         for (&d.spare) |*b| b.* = Carve.take(driver, &at, state_n * 4);

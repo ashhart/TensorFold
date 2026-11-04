@@ -2,9 +2,20 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const fwd = @import("forward.zig");
+const Blob = @import("core").kv_prompts.Blob;
 
-/// A kept state: the keys of positions [0, at) of full layers, then the window's last keys of each sliding layer.
-pub const Saved = struct { at: u32, buf: cuda.DeviceBuffer };
+/// A kept state: full layers' keys [from, at), then each sliding layer's window; [0, from) is the store's pages.
+pub const Saved = struct {
+    at: u32,
+    from: u32 = 0,
+    blob: []u32 = &.{}, // the copied rows in pages the store holds (TF_KV_SHARE), else in `buf`
+    buf: ?cuda.DeviceBuffer = null,
+
+    fn copyTo(k: *const Saved, m: *const fwd.Model, s: cuda.Stream, out: bool) Copy {
+        if (k.blob.len > 0) return .{ .m = m, .s = s, .blob = .{ .ids = k.blob, .chunk = chunk(m), .regions = regions(m) }, .out = out };
+        return .{ .m = m, .s = s, .buf = k.buf.?.ptr, .out = out };
+    }
+};
 
 /// Positions a sliding layer keeps at `at`: the next row reads (at - window, at], so window - 1 before it.
 fn tail(m: *const fwd.Model, at: usize) usize {
@@ -15,21 +26,22 @@ fn rowBytes(m: *const fwd.Model) usize {
     return m.c.kv_heads * m.c.head_dim * 2;
 }
 
-/// Bytes a state at `at` takes.
-pub fn bytes(m: *const fwd.Model, at: usize) u64 {
+/// Bytes a state at `at` copies, its full layers' positions below `from` held as pages.
+pub fn bytes(m: *const fwd.Model, at: usize, from: usize) u64 {
     var n: usize = 0;
-    for (m.c.full[0..m.c.layers]) |full| n += 2 * (if (full) at else tail(m, at));
+    for (m.c.full[0..m.c.layers]) |full| n += 2 * (if (full) at - from else tail(m, at));
     return n * rowBytes(m);
 }
 
-/// Each layer's cache, K then V, and positions [first, at) of `slot`: one copy a run of ring rows, in order.
-fn each(m: *const fwd.Model, slot: usize, at: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
+/// Each layer's cache, K then V, and positions [first, at) of `slot` (full: from `from`), one copy a run, in order.
+fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
+    if (from > 0 and (!m.paged or from % fwd.page_tokens != 0 or from > at)) return error.KeptPagesUnpaged;
     const rb = rowBytes(m);
     var off: usize = 0;
     for (0..m.c.layers) |i| for ([_][]u64{ m.k, m.v }) |cache| {
         const full = m.c.full[i];
         if (full and m.paged) { // pages: p in page p / page_tokens of the slot's row, a copy a run within one
-            var p: usize = 0;
+            var p: usize = from;
             while (p < at) {
                 const into = p % fwd.page_tokens;
                 const run = @min(at - p, fwd.page_tokens - into);
@@ -53,35 +65,75 @@ fn each(m: *const fwd.Model, slot: usize, at: usize, ctx: anytype, comptime f: f
     };
 }
 
-const Copy = struct { d: *const cuda.Driver, s: cuda.Stream, buf: u64, out: bool };
+const Copy = struct { m: *const fwd.Model, s: cuda.Stream, buf: u64 = 0, blob: ?Blob = null, out: bool };
 
 fn copy(c: Copy, dev: u64, off: usize, len: usize) anyerror!void {
-    const src = if (c.out) dev else c.buf + off;
-    const dst = if (c.out) c.buf + off else dev;
-    try c.d.check(c.d.api.cuMemcpyDtoDAsync_v2(dst, src, len, c.s.handle), "cuMemcpyDtoDAsync");
+    if (c.blob) |b| return b.each(off, len, Piece{ .c = c, .dev = dev }, Piece.copy);
+    try move(c, dev, c.buf + off, len);
 }
 
-/// Copy `slot`'s state at `at` into new storage, queued on `s` behind the chunk that ends there.
-pub fn save(gpa: std.mem.Allocator, m: *const fwd.Model, s: cuda.Stream, slot: usize, at: u32) !*Saved {
+fn move(c: Copy, dev: u64, kept: u64, len: u64) !void {
+    const src = if (c.out) dev else kept;
+    const dst = if (c.out) kept else dev;
+    try c.m.d.check(c.m.d.api.cuMemcpyDtoDAsync_v2(dst, src, len, c.s.handle), "cuMemcpyDtoDAsync");
+}
+
+/// A run's piece in one blob chunk: region r is full layer r / 2's K (even) or V (odd) region, page id's rows there.
+const Piece = struct {
+    c: Copy,
+    dev: u64,
+    fn copy(p: Piece, region: usize, id: u32, within: u64, from: u64, n: u64) anyerror!void {
+        const i = fullLayer(p.c.m, region / 2);
+        const base = (if (region % 2 == 0) p.c.m.k else p.c.m.v)[i];
+        try move(p.c, p.dev + from, base + id * chunk(p.c.m) + within, n);
+    }
+};
+
+/// The bytes a page holds in one full layer's K or V region.
+fn chunk(m: *const fwd.Model) u64 {
+    return m.pageElems() * 2;
+}
+
+fn regions(m: *const fwd.Model) usize {
+    return @intCast(m.pageBytes() / chunk(m));
+}
+
+fn fullLayer(m: *const fwd.Model, j: usize) usize {
+    var n: usize = 0;
+    for (0..m.c.layers) |i| if (m.c.full[i]) {
+        if (n == j) return i;
+        n += 1;
+    };
+    unreachable;
+}
+
+/// Pages a state at `at` (full layers from `from`) takes when its copied rows are kept in pool pages.
+pub fn blobPages(m: *const fwd.Model, at: usize, from: usize) usize {
+    return Blob.pagesFor(bytes(m, at, from), chunk(m), regions(m));
+}
+
+/// Copy `slot`'s state at `at` (full layers from `from`) to new storage or `blob`'s pages, queued after its chunk.
+pub fn save(gpa: std.mem.Allocator, m: *const fwd.Model, s: cuda.Stream, slot: usize, at: u32, from: u32, blob: []u32) !*Saved {
     if (at == 0 or at > m.context) return error.NotAtMark;
     const k = try gpa.create(Saved);
     errdefer gpa.destroy(k);
-    k.* = .{ .at = at, .buf = try cuda.DeviceBuffer.alloc(m.d, bytes(m, at)) };
-    errdefer k.buf.free();
-    try each(m, slot, at, Copy{ .d = m.d, .s = s, .buf = k.buf.ptr, .out = true }, copy);
+    k.* = .{ .at = at, .from = from, .blob = blob };
+    if (blob.len == 0) k.buf = try cuda.DeviceBuffer.alloc(m.d, @max(1, bytes(m, at, from)));
+    errdefer if (k.buf) |*b| b.free();
+    try each(m, slot, at, from, k.copyTo(m, s, true), copy);
     return k;
 }
 
 /// Make `slot`'s caches hold `k`'s state, queued on `s` before the next chunk.
 pub fn restore(m: *const fwd.Model, s: cuda.Stream, slot: usize, k: *const Saved) !void {
     if (k.at > m.context) return error.PastContext;
-    try each(m, slot, k.at, Copy{ .d = m.d, .s = s, .buf = k.buf.ptr, .out = false }, copy);
+    try each(m, slot, k.at, k.from, k.copyTo(m, s, false), copy);
 }
 
 /// Free a state once the stream's queued copies of it are done.
 pub fn drop(gpa: std.mem.Allocator, s: cuda.Stream, k: *Saved) void {
     s.synchronize() catch {};
-    k.buf.free();
+    if (k.buf) |*b| b.free();
     gpa.destroy(k);
 }
 
@@ -108,10 +160,10 @@ test "a state holds full layers' positions and each sliding ring's window, wrapp
     m.k = &k;
     m.v = &v;
     const rb = 256;
-    try testing.expectEqual(@as(u64, 2 * (4 + 10) * rb), bytes(&m, 10));
+    try testing.expectEqual(@as(u64, 2 * (4 + 10) * rb), bytes(&m, 10, 0));
     var runs: std.ArrayList([3]usize) = .empty;
     defer runs.deinit(testing.allocator);
-    try each(&m, 1, 10, Count{ .runs = &runs }, Count.add);
+    try each(&m, 1, 10, 0, Count{ .runs = &runs }, Count.add);
     // sliding K: positions 6..9 at ring rows 6, 7 then 0, 1 of slot 1; then V; then full K and V, positions 0..9
     const want = [_][3]usize{
         .{ (1 << 20) + (8 + 6) * rb, 0, 2 * rb },      .{ (1 << 20) + 8 * rb, 2 * rb, 2 * rb },
@@ -141,10 +193,16 @@ test "a paged state takes a full layer's positions through the slot's pages, a r
     const at = pt + 7; // page 5 whole, then 7 rows of page 1
     var runs: std.ArrayList([3]usize) = .empty;
     defer runs.deinit(testing.allocator);
-    try each(&m, 1, at, Count{ .runs = &runs }, Count.add);
+    try each(&m, 1, at, 0, Count{ .runs = &runs }, Count.add);
     try testing.expectEqual(@as(usize, 2 * 1 + 2 * 2), runs.items.len); // sliding K and V: one run each
     const kr = runs.items[2..4];
     try testing.expectEqual([3]usize{ (2 << 30) + 5 * pt * rb, 8 * rb, pt * rb }, kr[0]);
     try testing.expectEqual([3]usize{ (2 << 30) + 1 * pt * rb, 8 * rb + pt * rb, 7 * rb }, kr[1]);
-    try testing.expectEqual([3]usize{ (4 << 30) + 1 * pt * rb, bytes(&m, at) - 7 * rb, 7 * rb }, runs.items[5]);
+    try testing.expectEqual([3]usize{ (4 << 30) + 1 * pt * rb, bytes(&m, at, 0) - 7 * rb, 7 * rb }, runs.items[5]);
+    runs.clearRetainingCapacity(); // page 5 held by reference: only page 1's 7 rows are copied
+    try each(&m, 1, at, pt, Count{ .runs = &runs }, Count.add);
+    try testing.expectEqual(@as(usize, 2 * 1 + 2), runs.items.len);
+    try testing.expectEqual([3]usize{ (2 << 30) + 1 * pt * rb, runs.items[2][1], 7 * rb }, runs.items[2]);
+    try testing.expectEqual(bytes(&m, at, pt), runs.items[3][1] + runs.items[3][2]);
+    try testing.expectError(error.KeptPagesUnpaged, each(&m, 1, at, pt + 1, Count{ .runs = &runs }, Count.add));
 }

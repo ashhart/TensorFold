@@ -216,9 +216,13 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, tools: Tools, dir: []const u8, c
     defer core.checkpoint.cache.close(&ck);
     var L: Loader = .{ .gpa = gpa, .t = tools, .w = &w, .ck = &ck };
     w.layers = try gpa.alloc(Layer, layers.len);
+    const readers = try core.checkpoint_read_ahead.optInReaders();
     for (layers, w.layers) |i, *l| {
+        var reading = try @import("cuda_load_prefetch.zig").begin(&ck, i, readers);
+        defer reading.deinit();
         if (i >= c.layers) return error.BadLayer;
         l.* = try L.layer(i);
+        _ = try reading.check();
         ck.release(); // the pages read so far, before they crowd the device's allocations
     }
     const embed = try L.expect(prefix ++ "model.embed_tokens.weight", .{}, .bf16, &.{ c.vocab, c.hidden });

@@ -8,6 +8,9 @@ pub const prefix = @import("prefix.zig");
 pub const backend = @import("backend.zig");
 pub const costs = @import("costs.zig");
 pub const Options = @import("options.zig").Options;
+pub const Offer = @import("offer.zig").Offer;
+pub const vision = @import("vision.zig");
+pub const cancel = @import("cancel.zig");
 
 test {
     _ = draw;
@@ -19,4 +22,7 @@ test {
     _ = backend;
     _ = costs;
     _ = @import("options.zig");
+    _ = @import("offer.zig");
+    _ = vision;
+    _ = cancel;
 }

@@ -75,15 +75,16 @@ pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
+    const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
     const data = try a.alloc(Value, srv.config.model_ids.len);
-    const thinks = srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0;
+    const thinks = srv.info.reasoning and (srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0);
     const reasoning: ?Value = if (thinks)
         try reasoningValue(a, srv.config.enable_thinking, srv.thinking_switch, srv.effortFor(null), srv.effort_levels)
     else
         null;
     for (srv.config.model_ids, data) |id, *slot| {
-        slot.* = try modelValue(a, id, srv.info, created, reasoning);
+        slot.* = try modelValue(a, id, info, created, reasoning);
     }
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
@@ -98,11 +99,12 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reason
     try m.put(a, "object", .{ .string = "model" });
     try m.put(a, "created", try json.intValue(a, created));
     try m.put(a, "owned_by", .{ .string = "tensorfold" });
-    if (info.context_window > 0) {
-        try m.put(a, "context_length", try json.intValue(a, info.context_window));
-        try m.put(a, "max_model_len", try json.intValue(a, info.context_window));
+    const window = info.reported_context_window orelse info.context_window;
+    if (window > 0) {
+        try m.put(a, "context_length", try json.intValue(a, window));
+        try m.put(a, "max_model_len", try json.intValue(a, window));
     }
-    if (reasoning) |r| try m.put(a, "reasoning", r);
+    if (info.reasoning) if (reasoning) |r| try m.put(a, "reasoning", r);
     return .{ .object = m };
 }
 
@@ -371,4 +373,29 @@ test "stats snapshot's memory carries a configured limit and omits none" {
     const without = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .peak = 9 }, 0, 0, 0, 0, 0);
     // no limit configured: the key stays out
     try std.testing.expect(without.object.get("memory").?.object.get("limit") == null);
+}
+
+test "model discovery respects the loaded engine's reasoning refusal despite template markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const template = try reasoningValue(a, true, true, "low", &.{ "low", "high" });
+    for ([_][]const u8{ "ocr", "scorer", "alias" }) |id| {
+        const loaded = try modelValue(a, id, .{ .reasoning = false }, 0, template);
+        try std.testing.expect(loaded.get("reasoning") == null);
+    }
+    const text = try modelValue(a, "text", .{ .reasoning = true }, 0, template);
+    try std.testing.expect(text.get("reasoning").?.get("default_enabled").?.bool);
+}
+
+test "Nemotron window: model discovery reports the real fallback" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var info: api.Info = .{};
+    info.reported_context_window = @import("nemotron_limits").reported(0, @import("nemotron_limits").positions(0));
+    const value = try modelValue(arena.allocator(), "model", info, 0, null);
+    try std.testing.expect(value.get("context_length") != null);
+    try std.testing.expectEqual(@as(i64, 262193), value.get("context_length").?.int64().?);
+    try std.testing.expectEqual(value.get("context_length").?.int64(), value.get("max_model_len").?.int64());
+    try std.testing.expectEqual(@as(u32, 0), info.context_window);
 }

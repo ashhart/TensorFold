@@ -89,6 +89,17 @@ pub fn askIn(srv: *Server, cx: *Cx, before: []const [2][]const u8, user: []const
     return chat.generate(srv, cx, prepared, null, gone);
 }
 
+/// A stable seed for a lesson's extra wordings: the system and user text apart, so a run repeats.
+fn lessonSeed(system: ?[]const u8, user: []const u8) u64 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    if (system) |s| h.update(s);
+    h.update("\x00");
+    h.update(user);
+    var digest: [32]u8 = undefined;
+    h.final(&digest);
+    return std.mem.readInt(u64, digest[0..8], .little);
+}
+
 /// One greedy reply as `ask` gives it, from the model as shipped (no lesson acts): a lesson's writer hears none.
 pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
     return askBaseAt(srv, cx, system, user, max_tokens, 0, gone);
@@ -103,6 +114,8 @@ pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, m
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = false });
     try fields.put(a, "temperature", .{ .float = temperature });
+    // Extra wordings repeat: seeded from the lesson's text, unless --prompt-seed's own seed is on.
+    if (!srv.config.prompt_seed) try fields.put(a, "seed", try json.intValue(a, lessonSeed(system, user)));
     var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = temperature }, gone);
     prepared.request.decide = null;
     prepared.request.untaught = true;

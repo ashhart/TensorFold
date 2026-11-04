@@ -13,6 +13,17 @@ pub const Matrix = struct {
     codes: []const u8, // [n, k/2], NVFP4's
     bases: []const u8, // [n] e4m3: a scale every 32 inputs is its row's base plus its group's offset
     offsets: []const u8, // [n, k/64] 4 bits: group g in byte g/2 of its row, an even group's in the low nibble
+
+    /// The first row whose base plus an offset passes 0x7e, e4m3's largest finite: its scale would be NaN or negative.
+    pub fn pastFinite(m: Matrix, k: usize) ?usize {
+        const pairs = k / 64;
+        for (m.bases, 0..) |b, r| {
+            var top: u8 = 0;
+            for (m.offsets[r * pairs ..][0..pairs]) |o| top = @max(top, o & 0xF, o >> 4);
+            if (@as(u16, b) + top > 0x7e) return r;
+        }
+        return null;
+    }
 };
 
 pub const Nvfp4b32Experts = struct {

@@ -30,9 +30,14 @@ pub fn spec(k: kit.Kind) c.Spec {
         // a round's rows: 16 a block of row groups, and a lane's group of four over the hidden width
         .tiles = .{ .{ .size = 16 }, .{}, .{ .size = 128, .step = 4, .min = 4 } },
         .served = &.{
+            // Flash Next's router: 512 experts and the shared gate, hidden 2560
             .{ .rows = 16, .n = 513, .k = 2560 },
             .{ .rows = 4, .n = 513, .k = 2560 },
             .{ .rows = 1, .n = 513, .k = 2560 },
+            // Qwen 3.6-35B-A3B's router: 256 experts and the shared gate, hidden 2048
+            .{ .rows = 16, .n = 257, .k = 2048 },
+            .{ .rows = 4, .n = 257, .k = 2048 },
+            .{ .rows = 1, .n = 257, .k = 2048 },
         },
     };
 }

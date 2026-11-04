@@ -50,6 +50,9 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn fits(p: *anyopaque, rows: u32, max_tokens: u32) bool {
             return of(p).kv.fits(rows, max_tokens);
         }
+        pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool { // what the host's ledger counts (#1943)
+            return if (of(p).kv.pool) |x| &x.pool else null;
+        }
         /// The pass ignores its cuts, so states keep at any token; the MTP head reads one token on (lookahead 1).
         pub const cache_rules = struct {
             pub const lookahead: u32 = 1;
@@ -157,6 +160,7 @@ pub fn Namespace(comptime Tri: type) type {
             ranks: ?*ranks.Session = null,
             head: ?*mtp.Head = null,
             depth: usize = mtp.default_depth,
+            depth_greedy: usize = mtp.default_depth_greedy,
             confidence: f64 = mtp.default_confidence,
             /// A captured Triton set (TENSORFOLD_CUDA_KERNELS) for comparison, else null: our own glue.
             set: ?cuda.aot.Set = null,
@@ -218,7 +222,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .first_masked = firstMaskedFn,
                 };
                 const ranked_table = comptime @import("cuda_score.zig").withoutScore(scoring_table);
-                return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
+                return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .first_before_draft = mtp.firstEarly(), .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 
             /// With the head: chains of up to 16 rows cut by its confidence, copies of up to 32; else one-row rounds.
@@ -231,7 +235,7 @@ pub fn Namespace(comptime Tri: type) type {
                     .mtp = drafting,
                     .speculate = drafting,
                     .speculate_early = false,
-                    .drafts = if (drafting) @intCast(self.depth) else 0,
+                    .drafts = if (drafting) @intCast(@max(self.depth, self.depth_greedy)) else 0,
                     .draft_probabilities = drafting,
                     .streams_exact = true,
                     .hidden_rows = true,
@@ -531,7 +535,7 @@ pub fn Namespace(comptime Tri: type) type {
                 if (r.position != l.seq.fed + 1) return error.PositionMismatch;
                 // the window's rows past the cache's room cannot run: fewer drafts there
                 const room = l.seq.cap - l.seq.fed - 1;
-                const count = @min(@min(r.depth, self.depth), room);
+                const count = @min(@min(r.depth, mtp.depthFor(r.stream.sampling, self.depth, self.depth_greedy)), room);
                 if (r.rows) |path| {
                     for (path, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
                     if (r.follow.len < path.len) return error.PositionMismatch;
@@ -551,12 +555,16 @@ pub fn Namespace(comptime Tri: type) type {
             return .{ .count = @intCast(l.chain.n), .tokens = try gpa.dupe(u32, l.chain.slice()) };
         }
 
-        /// Each held draft's temperature-1 probability under the head.
+        /// Each held draft's chain chance under the head (windows.nodeChances): p1 * ... * pj at temperature 1.
         fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
             const self = of(ptr);
             const l = try self.lane(s);
             if (l.draft == null or out.len > l.chain.n) return false;
-            @memcpy(out, l.chain.probs[0..out.len]);
+            var chance: f64 = 1;
+            for (out, l.chain.probs[0..out.len]) |*o, p| {
+                chance *= p;
+                o.* = chance;
+            }
             return true;
         }
 

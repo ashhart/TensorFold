@@ -12,6 +12,7 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 
 /// What a backend reports about its loaded model: the attributes the Python engine reads at setup.
 pub const Model = struct {
+    learn_row_costs: bool = false, // shared_costs came from another machine: learn what a row costs here
     allocate_shared_drafts: bool = false, // reserve useful shared head rows before a proposal pass
     limit_shared_drafts: bool = false, // retain the cost rule's depth cap before reserving shared rows
     root_copies: bool = false, // verified context copies precede head drafts and skip their proposal pass
@@ -174,6 +175,7 @@ pub const Config = struct {
             .mtp_step_ms = m.mtp_step_ms,
             .k = .{
                 .depth_rate = if (m.depth_rate > 0) m.depth_rate else (Constants{}).depth_rate,
+                .learn_rows = m.learn_row_costs,
                 .draft_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).draft_slack,
                 .grant_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).grant_slack,
                 .short_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).short_slack,
