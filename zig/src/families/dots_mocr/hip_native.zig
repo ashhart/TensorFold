@@ -42,12 +42,13 @@ pub const Loaded = struct {
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
     startup: []const u8,
+    /// Its prompt cache (none when the budget or the slots are zero), images under --vision, and its host settings.
+    offer: serve.Offer,
 };
 
 const Owner = struct {
     e: *engine.Engine,
     back: *backend_.Backend,
-    vision: ?api.Vision,
     startup: []const u8,
 
     fn close(ptr: *anyopaque) void {
@@ -60,15 +61,11 @@ const Owner = struct {
     }
 };
 
-pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype, problem: *[]const u8) !Loaded {
-    return openVision(a, gpa, io, dev, dir, o, null, problem);
-}
-
-pub fn openVision(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype, vision: ?api.VisionOpen, problem: *[]const u8) !Loaded {
+pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: serve.Options, problem: *[]const u8) !Loaded {
     if (policyRefusal(dev.policy)) |why| return refuse(a, problem, "{s}", .{why});
     const c = cfg.Config.read(a, io, dir) catch |err| return refuse(a, problem, "dots.mocr config refused: {s}", .{@errorName(err)});
-    const image_tokens: usize = if (vision) |v| (if (v.image_tokens_set) v.image_tokens else 14400) else 0;
-    if (vision) |v| if (image_tokens == 0 or v.max_images == 0) return refuse(a, problem, "dots.mocr image limits must be positive", .{});
+    const image_tokens: usize = if (o.vision) |v| (if (v.image_tokens_set) v.image_tokens else 14400) else 0;
+    if (o.vision) |v| if (image_tokens == 0 or v.max_images == 0) return refuse(a, problem, "dots.mocr image limits must be positive", .{});
     const rows = engine.plan.max_window;
     const drawer = serve.draw.Drawer.deviceBytes(rows);
     const e = engine.Engine.load(gpa, io, dir, dev.index, .{
@@ -87,8 +84,9 @@ pub fn openVision(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev:
     const own = try gpa.create(Owner);
     errdefer gpa.destroy(own);
     const startup = try std.fmt.allocPrint(gpa, "dots.mocr BF16: {d} lanes, context {d}, scratch {d} bytes, prompt-cache budget {d} bytes", .{ e.p.streams, e.p.window, e.p.scratch_bytes, e.p.cache_bytes });
-    own.* = .{ .e = e, .back = back, .startup = startup, .vision = null };
-    if (vision) |v| own.vision = .{
+    own.* = .{ .e = e, .back = back, .startup = startup };
+    const cached = back.store.budget > 0 and back.store.most > 0;
+    const vision: ?api.Vision = if (o.vision) |v| .{
         .ctx = own,
         .prepare = prepare,
         .image_token = c.image_token,
@@ -96,21 +94,17 @@ pub fn openVision(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev:
         .part_type = "image",
         .image_tokens = @intCast(image_tokens),
         .max_images = v.max_images,
-    };
-    return .{ .backend = back.backend(), .facts = .{ .exact_width = @intCast(rows), .drafts = 0, .mtp = false, .copy_drafts = true, .streams_exact = true }, .rows = @intCast(e.p.rows), .streams = e.p.streams, .ctx = own, .deinit = Owner.close, .startup = startup };
-}
-
-pub fn attach(ptr: *anyopaque, host: *api.LaneHost, _: api.Open) void {
-    const own: *Owner = @ptrCast(@alignCast(ptr));
-    host.cache = &own.back.store;
-    host.info_.prompt_cache = own.back.store.budget > 0 and own.back.store.most > 0;
-    host.info_.warm_turns = host.info_.prompt_cache;
-    host.info_.prompt_cache_capacity = .{ .budget_bytes = own.e.p.cache_bytes, .minimum_state_bytes = (text.Cache.bytes(own.e.c, @min(own.e.p.window, engine.plan.prompt_rows)) catch 0) + @as(u64, own.e.c.vocab) * 2 };
-    host.info_.vision = own.vision;
-    host.info_.policy = policy_line;
-    host.info_.thinking_budget = false;
-    host.frame_key = frameKey;
-    host.on_thread = .{ .ctx = own.e, .run = bind };
+    } else null;
+    return .{ .backend = back.backend(), .facts = .{ .exact_width = @intCast(rows), .drafts = 0, .mtp = false, .copy_drafts = true, .streams_exact = true }, .rows = @intCast(e.p.rows), .streams = e.p.streams, .ctx = own, .deinit = Owner.close, .startup = startup, .offer = .{
+        .vision = vision,
+        .cache = if (cached) &back.store else null,
+        .cache_capacity = .{ .budget_bytes = e.p.cache_bytes, .minimum_state_bytes = (text.Cache.bytes(e.c, @min(e.p.window, engine.plan.prompt_rows)) catch 0) + @as(u64, e.c.vocab) * 2 },
+        .warm_turns = cached,
+        .frame_key = frameKey,
+        .thinking_budget = false,
+        .on_thread = .{ .ctx = e, .run = bind },
+        .policy = policy_line,
+    } };
 }
 
 fn bind(ptr: *anyopaque) anyerror!void {
