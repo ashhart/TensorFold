@@ -276,7 +276,7 @@ test "a hook point this reader does not apply at is refused" {
 }
 
 test "layer zero is not steerable" {
-    const bytes = try writeFixture(.{ .layers = &.{0, 11} });
+    const bytes = try writeFixture(.{ .layers = &.{ 0, 11 } });
     defer std.testing.allocator.free(bytes);
     try refused(bytes);
 }

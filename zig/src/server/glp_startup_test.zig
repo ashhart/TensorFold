@@ -1,6 +1,7 @@
 //! The control vector's serve checks: the file, the reader, the family and the line that reports what is in force.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const glp = @import("engine_api").glp;
 const serve = @import("glp_startup.zig");
 const log = @import("log.zig");
@@ -9,6 +10,9 @@ const io = std.testing.io;
 
 /// The width Qwen3.8-27B has; a vector that steers it is this wide.
 const width = 5120;
+
+/// Whether this platform's engine steers: only the Metal engine does, and only on a Mac.
+const steers = builtin.os.tag == .macos;
 
 /// The lines the server printed, for the report the operator reads.
 const Sink = struct {
@@ -110,13 +114,12 @@ test "the strength must be finite and above 0" {
     try std.testing.expect(serve.strength("abc") == null);
 }
 
-test "a good vector is accepted and the line says what is in force" {
+test "the line says what is in force" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .alpha = 0.5, .base_model = "TensorFold/Qwen3.8-27B-MLX-4bit", .base_revision = "8f2c1d4e", .layers = &.{} }, null);
     defer f.tmp.cleanup();
-    try std.testing.expect((try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?)) == null);
     var sink: Sink = .{ .a = a };
     log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
     defer log.Test.sink = null;
@@ -131,12 +134,32 @@ test "a good vector is accepted and the line says what is in force" {
     try std.testing.expect(std.mem.indexOf(u8, line, "verified") != null);
 }
 
+test "a good vector is accepted where the engine steers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .alpha = 0.5, .base_model = "TensorFold/Qwen3.8-27B-MLX-4bit", .base_revision = "8f2c1d4e", .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?);
+    if (steers) {
+        try std.testing.expect(why == null);
+        return;
+    }
+    // Only the Metal engine steers, so on this platform the same file is refused by name.
+    try std.testing.expect(why != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.?, "Metal") != null);
+}
+
 test "the operator's strength is the one in force" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .alpha = 0.5, .layers = &.{} }, 0.25);
     defer f.tmp.cleanup();
+    if (!steers) {
+        try std.testing.expectError(error.GlpRefused, serve.engine(a, f.model, "qwen3_5", "auto", f.g));
+        return;
+    }
     const g = (try serve.engine(a, f.model, "qwen3_5", "auto", f.g)).?;
     try std.testing.expectEqual(@as(f32, 0.25), g.alpha);
     try std.testing.expectEqual(@as(usize, 2), g.vector.layers.len);
@@ -185,17 +208,32 @@ test "the CUDA engine does not steer" {
     try std.testing.expect(std.mem.indexOf(u8, why, "Metal") != null);
 }
 
-test "a vector derived at another site is reported, not refused" {
+test "a vector derived at another site is reported" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .derived_at = "ffn_out_pre_residual", .layers = &.{} }, null);
     defer f.tmp.cleanup();
-    try std.testing.expect((try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?)) == null);
     var sink: Sink = .{ .a = a };
     log.Test.sink = .{ .ctx = @ptrCast(&sink), .call = capture };
     defer log.Test.sink = null;
     serve.report(a, f.g.?);
     try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "warning:") != null);
     try std.testing.expect(std.mem.indexOf(u8, sink.list.items, "ffn_out_pre_residual") != null);
+}
+
+test "a vector derived at another site is not refused where the engine steers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .derived_at = "ffn_out_pre_residual", .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?);
+    if (steers) {
+        try std.testing.expect(why == null);
+        return;
+    }
+    // The site's warning is not the refusal here; the engine is.
+    try std.testing.expect(why != null);
+    try std.testing.expect(std.mem.indexOf(u8, why.?, "Metal") != null);
 }

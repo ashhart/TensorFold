@@ -38,6 +38,6 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Buil
     b.step("tf-qwen27-steer-derive", "Derive the control vectors from the model itself and write the GLP file").dependOn(&b.addInstallArtifact(tool, .{}).step);
 
     // The prompt sets as JSON: a measurement tool reads the sets from here, not from the source.
-    const prompts_tool = b.addExecutable(.{ .name = "tf-qwen27-steer-prompts", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27_steer_prompts.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "qwen27", .module = family } } }) });
+    const prompts_tool = b.addExecutable(.{ .name = "tf-qwen27-steer-prompts", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen27_steer_prompts.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "qwen27", .module = family }} }) });
     b.step("tf-qwen27-steer-prompts", "Print the repository's own contrast prompt sets as JSON").dependOn(&b.addInstallArtifact(prompts_tool, .{}).step);
 }
