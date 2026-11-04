@@ -14,10 +14,10 @@ pub const records = [_]Record{
     .{
         .launch = skew_tile,
         .usage = .{
-            .{ .vgprs = 1, .sgprs = 1, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 230, .sgprs = 50, .lds = 39936, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 230, .sgprs = 50, .lds = 39936, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 1, .sgprs = 1, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 217, .sgprs = 58, .lds = 39936, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 217, .sgprs = 58, .lds = 39936, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 0, .served = false },
         },
     },
 };
