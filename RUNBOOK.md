@@ -406,15 +406,16 @@ watermark. Unset keeps it off until device qualification. The reader samples `/p
 `/proc/meminfo` without allocating; both must be available and valid at startup. It reads at most four times a
 second, raises the level immediately and waits five seconds of lower readings before easing it.
 
-The proposed thresholds use PSI's `avg10` percentages and MemAvailable as a share of MemTotal:
+The proposed thresholds use PSI's `avg10` stall percentages:
 
 | Level | Any of these readings |
 | --- | --- |
-| Warning | MemAvailable at most 10%; PSI some at least 10%; PSI full at least 1% |
-| Critical | MemAvailable at most 5%; PSI full at least 10% |
+| Warning | PSI some at least 10%; PSI full at least 1% |
+| Critical | PSI full at least 10% |
 
-Critical takes precedence. MemFree and the size of the file cache do not enter this reading, so a healthy reclaimable
-page cache alone does not shed states. Unknown or malformed data follows the existing source contract: no reading,
+Critical takes precedence. MemAvailable is diagnostic and does not set the level. A normally budgeted unified-memory
+server can have a small available margin without reclaim stalls. The OS reader has no engine-specific planned margin,
+so it uses PSI rather than guessing a floor from total RAM. MemFree and file-cache size do not set the level either. Unknown or malformed data follows the existing source contract: no reading,
 counted as normal by the governor. Windows is unchanged. The 503 message refers to the system on every platform.
 
 Only optional states managed by the shared lane host are shed. Borrowed states remain protected. Family-owned
