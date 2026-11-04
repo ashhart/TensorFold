@@ -29,6 +29,7 @@ pub const readout = @import("readout.zig");
 pub const events = @import("events.zig");
 pub const windows = @import("windows.zig");
 pub const shared_drafts = @import("shared_drafts.zig");
+pub const row_cost = @import("row_cost.zig");
 pub const trail = @import("trail.zig");
 pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
