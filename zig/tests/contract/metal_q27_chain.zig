@@ -47,7 +47,7 @@ pub fn spec(r: Reg) c.Spec {
 
 pub fn source(a: std.mem.Allocator, tensor: bool, baseline: bool, control: bool, heads: common.Heads) ![]u8 {
     const src = q.runtime_sources;
-    const body = if (baseline) try std.mem.concat(a, u8, &.{ src.glue, @embedFile("q27_tail_baseline.metal"), src.attention_io, src.attention_prompt }) else try std.mem.concat(a, u8, &.{ src.glue, src.attention_mpp, src.attention_io, src.attention_prompt });
+    const body = if (baseline) try std.mem.concat(a, u8, &.{ src.glue, @embedFile("q27_tail_baseline.metal"), src.attention_io, src.attention_prompt, if (tensor) "" else src.attention_prompt_sg }) else try std.mem.concat(a, u8, &.{ src.glue, src.attention_mpp, src.attention_io, src.attention_prompt, if (tensor) "" else src.attention_prompt_sg });
     defer a.free(body);
     const rewritten = if (tensor) try a.dupe(u8, body) else try q.simd_attention.rewrite(a, body);
     defer a.free(rewritten);
@@ -114,8 +114,9 @@ pub const Case = struct {
         t.baseline = &.{};
     }
     pub fn kernel(t: *Case) g.Kernel {
-        return .{ .spec = spec(t.reg), .ctx = t, .vt = &g.hooks(Case), .control = if (t.reg.control) .shapes else null };
+        return .{ .spec = spec(t.reg), .ctx = t, .vt = &vt, .control = if (t.reg.control) .shapes else null };
     }
+    const vt = g.hooks(Case);
     fn gm(t: *Case) planning.Geometry {
         return common.geometry(t.reg.heads, false);
     }
@@ -134,6 +135,7 @@ pub const Case = struct {
     pub fn prepare(t: *Case, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         const gm_ = t.gm();
         if (shape.rows == 0 or shape.rows > 2048 or shape.n != gm_.heads or shape.k > 8193) return false;
+        if (t.op.prompt == null or t.old.prompt == null) return error.Qwen27ChainPromptUnavailable;
         t.release();
         t.rig.reset();
         t.shape = shape;
