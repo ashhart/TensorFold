@@ -218,8 +218,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.m = m;
     h.resident = null;
     const step = prefillStep(h.m.device);
-    const capacity: usize = @intCast(if (window > 0) window else 1 << 18);
-    const positions = capacity + nemotron.backend.max_lanes + 1;
+    const positions = nemotron.backend.limits.positions(@intCast(@max(window, 0)));
     const mamba = nemotron.state.Pool;
     const per_stream = nemotron.state.Cache.bytes(m.config, positions, o.drafts and m.weights.mtp != null);
     const left = metal_admit.room(m.device) -| mamba.bytes(m.config, 3, 2); // the pool's spare slots and two replay ids
@@ -250,7 +249,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.clock = .{ .b = h.metal, .wall = .{ .io = io } };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(@max(window, 0)), .prefill_step = step, .decode_share = o.decode_share, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(@max(window, 0)), .reported_context_window = if (window > 0) null else nemotron.backend.limits.reported(0, positions), .prefill_step = step, .decode_share = o.decode_share, .structures = true });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.round = .{ .depth = 8 };
     h.cache = null;
