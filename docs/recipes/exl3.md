@@ -8,7 +8,8 @@ GLM-5.3-Flash.
 
 - The native engine has the format and a reference decoder in core (`zig/src/core/exl3_format.zig`, @akol1, #496),
   and Metal has a standalone EXL3 projection (`zig/src/core/exl3_projection.zig`, @akol1, #681). Flash Next serves an
-  EXL3 pack on CUDA (sm_120, one rank; see [its recipe](flash-next-cuda.md#exl3-checkpoints)); no other model does.
+  EXL3 pack on CUDA (sm_120, one rank or two; see [its recipe](flash-next-cuda.md#exl3-checkpoints)); no other model
+  does.
 - CUDA projections and routed experts on this format are in review (#740, #741, #806). A model needs them and a loader
   for its EXL3 tensors before it can serve a checkpoint; the 27B on CUDA is the first planned.
 - The Python engine served EXL3 on CUDA from 0.3.6 to 0.6.6 through the module @vcruz305 wrote (#42): every codebook,

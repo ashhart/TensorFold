@@ -210,7 +210,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return null;
 }
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (refusals.family(F, o)) |why| {
+    if (refusals.open(F, gpa, io, o)) |why| {
         problem.* = why;
         return null;
     }
