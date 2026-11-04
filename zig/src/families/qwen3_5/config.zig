@@ -549,3 +549,18 @@ test "the Python loader's refusals" {
     defer a.free(moe);
     try std.testing.expectError(error.InvalidMoe, geometry(try textTower(try declared(arena.allocator(), moe)), 4, 64));
 }
+
+test "Metal 2B format scope: the geometry takes only affine q4g64 from the family union" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+    const compact = try std.json.Stringify.valueAlloc(a, doc.value, .{});
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |g| {
+        const widened = try std.mem.replaceOwned(u8, a, compact, "\"bits\":4", try std.fmt.allocPrint(a, "\"bits\":{d}", .{bits}));
+        const changed = try std.mem.replaceOwned(u8, a, widened, "\"group_size\":64", try std.fmt.allocPrint(a, "\"group_size\":{d}", .{g}));
+        if (bits == 4 and g == 64) {
+            _ = try parse(a, changed);
+        } else try std.testing.expectError(error.UnsupportedQwenQuantization, parse(a, changed));
+    };
+}
