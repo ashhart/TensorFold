@@ -139,8 +139,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const nem = nemotronModules(b, target, optimize, ocloc, device, dpas, ze_mod, core, lanes);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "xpu", .module = nem.xpu }, .{ .name = "nemotron_xpu", .module = nem.nemotron } } });
-    // the Qwen3.8-27B runner and Gemma 4 E4B (DPAS, nGEN) only with DPAS: a Gen12LP server serves Nemotron
+    const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "xpu", .module = nem.xpu }, .{ .name = "nemotron_xpu", .module = nem.nemotron }, .{ .name = "lfm3_xpu", .module = lfm3Module(b, target, optimize, nem.xpu) }, .{ .name = "lfm3_image", .module = lfm3Image(b, target, optimize, core) } } });
+    // the Qwen3.8-27B runner and Gemma 4 E4B (DPAS, nGEN) only with DPAS: a Gen12LP server serves Nemotron and LFM3
     const engine_options = b.addOptions();
     engine_options.addOption(bool, "qwen27", dpas);
     engine_options.addOption(bool, "gemma4", dpas);
@@ -195,6 +195,14 @@ const kernels = [_]Kernel{
     .{ .name = "nem_prow", .options = cl3 },
     .{ .name = "nem_prow_gen12", .src = "nem_prow", .options = cl3 ++ " -DPO=4" },
     .{ .name = "nem_attn_dec", .options = cl3 },
+    .{ .name = "lfm3", .options = cl3 },
+    .{ .name = "lfm3_mv", .options = cl3 },
+    .{ .name = "attn_g32", .src = "attn", .options = cl3 ++ " -DQG=32" },
+    .{ .name = "nem_prow_g32", .src = "nem_prow", .options = cl3 ++ " -DQG=32" },
+    .{ .name = "nem_prow_gen12_g32", .src = "nem_prow", .options = cl3 ++ " -DPO=4 -DQG=32" },
+    .{ .name = "lfm3_mv_g32", .src = "lfm3_mv", .options = cl3 ++ " -DQG=32" },
+    .{ .name = "lfm3_q8", .options = cl3 },
+    .{ .name = "lfm3_vit", .options = cl3 },
 };
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).
@@ -257,9 +265,35 @@ fn hasDpas(device: []const u8) bool {
     return true;
 }
 
+/// #1502's families/lfm3/image.zig, its relative core imports read as `core`'s (one module a file in a program).
+fn lfm3Image(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
+    const file = b.root.join(b.allocator, "zig/src/families/lfm3/image.zig") catch @panic("OOM");
+    const src = file.root_dir.handle.readFileAlloc(b.graph.io, file.sub_path, b.allocator, .limited(1 << 20)) catch @panic("zig/src/families/lfm3/image.zig");
+    for ([_][]const u8{ "@import(\"../../core/picture/picture.zig\")", "@import(\"../../core/qwen_vl/geometry.zig\")" }) |imp|
+        if (std.mem.count(u8, src, imp) != 1) @panic("families/lfm3/image.zig: its core imports changed");
+    var text = std.mem.replaceOwned(u8, b.allocator, src, "@import(\"../../core/picture/picture.zig\")", "@import(\"core\").picture") catch @panic("OOM");
+    text = std.mem.replaceOwned(u8, b.allocator, text, "@import(\"../../core/qwen_vl/geometry.zig\")", "@import(\"core\").qwen_vl.geometry") catch @panic("OOM");
+    const wf = b.addWriteFiles();
+    _ = wf.add("image.zig", text);
+    const root = wf.add("lfm3_image.zig", "pub const image = @import(\"image.zig\");\n");
+    const m = b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+    return m;
+}
+
+/// LFM3's forward and engine on the runtime module `xpu`.
+fn lfm3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, xpu: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm3/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("xpu", xpu);
+    const core = xpu.import_table.get("core") orelse @panic("lfm3Module: the xpu module imports core");
+    const wf = b.addWriteFiles();
+    const rope = wf.add("rope_freq.zig", "const r = @import(\"core\").rope_freq;\npub const inverseFrequencies = r.inverseFrequencies;\npub const proportional = r.proportional;\n");
+    m.addImport("rope_freq", b.createModule(.{ .root_source_file = rope, .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} }));
+    return m;
+}
+
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory",
+    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams", "lfm3_chunks", "lfm3_pgemm", "lfm3_q32", "lfm3_vit", "lfm3_tower", "lfm3_vl", "lfm3_vl_logits",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
@@ -276,11 +310,15 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     runner.addImport("nemotron_xpu", mods.nemotron);
     b.installArtifact(b.addExecutable(.{ .name = "tf-xpu-test", .root_module = runner }));
     const tests_step = b.step("xpu-tests", "Build the standalone Intel GPU op and model tests (tf-xpu-<name>-test)");
+    const lfm3 = lfm3Module(b, target, optimize, xpu);
+    const image = lfm3Image(b, target, optimize, mods.core);
     for (test_programs) |name| {
         const mod = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/xpu/{s}.zig", .{name})), .target = target, .optimize = optimize, .link_libc = true });
         mod.addImport("xpu", xpu);
         mod.addImport("core", mods.core);
         mod.addImport("nemotron_xpu", mods.nemotron);
+        mod.addImport("lfm3_xpu", lfm3);
+        mod.addImport("lfm3_image", image);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = b.fmt("tf-xpu-{s}-test", .{name}), .root_module = mod }), .{}).step);
     }
 }

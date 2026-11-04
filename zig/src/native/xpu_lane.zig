@@ -293,6 +293,8 @@ pub fn Xpu(comptime S: type) type {
                 } else s.reuse_failed = true;
             }
             if (at == 0) try e.reset();
+            if (comptime @hasDecl(S.Engine, "pictures")) try e.pictures(s.images, at); // their rows replace image tokens'
+            defer if (comptime @hasDecl(S.Engine, "pictures")) e.clearPictures();
             var next: usize = 0;
             while (at < ids.len) {
                 if (s.isCancelled()) return error.Cancelled;
