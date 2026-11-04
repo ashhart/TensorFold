@@ -15,6 +15,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the Qwen27 lanes' facts read a dense model's config, so `test-native` no longer crashes (#2122). Thanks to @BobClawblaw.
 
 - `tools/bench_fill.py` measures a long prompt filling beside a running reply, in both arrival orders, against each run alone, with every reply checked against its run alone (#2154).
+- DeepSeek-V4 and V4.1 tool calls stream their arguments as they are written, from the first parameter's end, like GLM and XML calls; a call whose first parameter is the long one still arrives when that parameter closes (#1975).
+
 - The XPU unknown-model error names Gemma 4 E4B when the build includes its DPAS engine.
 
 - The Qwen3.5-2B recipe says which of the family's listed formats load at its geometry: only `mlx-q4g64` (#2139).
