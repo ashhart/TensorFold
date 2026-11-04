@@ -520,3 +520,58 @@ pub fn run(gpu: Gpu, rest: []const [:0]const u8) !void {
     try experts(&b, &ex, &pack, a, rng, 17, 1, 0);
     check.pass("exl3-pack: v1.1.0 EXL3 operators ran on the pack's shapes (see the error and timing lines)", .{});
 }
+
+/// nccl-lat <rank> <id file>: two processes, one GPU each; fp32 all-reduce (sum) latency at a few sizes, cudaEvent
+pub fn ncclLatency(gpu: Gpu, rest: []const [:0]const u8) !void {
+    if (rest.len < 2) return error.MissingArgument;
+    const rank = try std.fmt.parseInt(c_int, rest[0], 10);
+    const id_path = rest[1];
+    var lib = try cuda.nccl.Library.open();
+    defer lib.close();
+    var id: cuda.nccl.UniqueId = undefined;
+    if (rank == 0) {
+        try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId");
+        const hex = std.fmt.bytesToHex(id.internal, .lower);
+        try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = id_path, .data = &hex });
+    } else {
+        var hex: [256]u8 = undefined;
+        var tries: usize = 0;
+        while (true) : (tries += 1) {
+            const got = std.Io.Dir.cwd().readFile(gpu.io, id_path, &hex) catch {
+                if (tries > 200) return error.NoUniqueId;
+                try std.Io.sleep(gpu.io, .fromMilliseconds(50), .awake);
+                continue;
+            };
+            if (got.len == 256) break;
+            if (tries > 200) return error.NoUniqueId;
+            try std.Io.sleep(gpu.io, .fromMilliseconds(50), .awake);
+        }
+        _ = try std.fmt.hexToBytes(&id.internal, &hex);
+    }
+    var comm: cuda.nccl.Comm = null;
+    try lib.check(lib.api.ncclCommInitRank(&comm, 2, id, rank), "ncclCommInitRank");
+    defer _ = lib.api.ncclCommDestroy(comm);
+    var s = try cuda.Stream.init(gpu.d, true);
+    defer s.deinit();
+    var ev0 = try cuda.Event.init(gpu.d, true);
+    defer ev0.deinit();
+    var ev1 = try cuda.Event.init(gpu.d, true);
+    defer ev1.deinit();
+    const sizes = [_]usize{ 2560, 11 * 2560, 4 * 11 * 2560, 16 * 11 * 2560, 512 * 2560, 4096 * 2560 };
+    var buf = try cuda.DeviceBuffer.alloc(gpu.d, sizes[sizes.len - 1] * 4);
+    defer buf.free();
+    try buf.fill8(0, s.handle);
+    for (sizes) |count| {
+        for (0..10) |_| try lib.check(lib.api.ncclAllReduce(buf.ptr, buf.ptr, count, .f32, .sum, comm, s.handle), "ncclAllReduce");
+        try s.synchronize();
+        var best: f64 = std.math.inf(f64);
+        for (0..5) |_| {
+            try ev0.record(s);
+            for (0..100) |_| try lib.check(lib.api.ncclAllReduce(buf.ptr, buf.ptr, count, .f32, .sum, comm, s.handle), "ncclAllReduce");
+            try ev1.record(s);
+            try ev1.synchronize();
+            best = @min(best, @as(f64, try ev0.elapsedMs(ev1)) / 100.0);
+        }
+        if (rank == 0) std.debug.print("RESULT nccl all-reduce f32 {d:>9} values ({d:>9} bytes): {d:.4} ms\n", .{ count, count * 4, best });
+    }
+}

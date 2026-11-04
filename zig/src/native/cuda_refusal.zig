@@ -10,6 +10,7 @@ const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_ty
 pub fn backend(o: api.Open) ?[]const u8 {
     if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))
         return deepseek_release_message;
+    if (o.tp != 1 and o.tp != 2) return "--tp: the CUDA engine runs one or two ranks (one process a GPU): serve --tp 1 or --tp 2";
     if (o.mtp_drafts) |n| if (n > nemotron.native.max_drafts) return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
     if (std.mem.eql(u8, o.model_type, glm_model_type)) {
@@ -55,6 +56,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
     if (o.tp != 1 and !ranked) return no_ranks;
+
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 only on CUDA: serve this model without it";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
@@ -172,6 +174,15 @@ test "the Qwen3.5 options carry the rank flags, and an unset master stays null" 
     try std.testing.expectEqual(@as(usize, 0), opts.rank);
     try std.testing.expect(opts.master == null);
     try std.testing.expectEqual(@as(u16, 29551), opts.master_port);
+}
+
+test "--tp is served on CUDA for two ranks of a ranked family (Flash Next) only; 4 and 8 stay refused" {
+    const flashnext = @import("flashnext").native;
+    for ([_]u32{ 4, 8 }) |tp| try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = flashnext.model_type, .tp = tp }) orelse "", "--tp: the CUDA engine runs one or two ranks");
+    for ([_]u32{ 1, 2 }) |tp| try std.testing.expect(backend(.{ .dir = "d", .model_type = flashnext.model_type, .tp = tp }) == null);
+    try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2, .rank = 1, .drafts = false }) == null);
+    // a family without rank options (Nemotron) still refuses --tp 2 at its admission
+    try std.testing.expectStringStartsWith(family(nemotron.native, .{ .dir = "d", .model_type = nemotron.native.model_type, .tp = 2 }) orelse "", "this CUDA family has no tensor-parallel ranks");
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {

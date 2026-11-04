@@ -1,21 +1,22 @@
 const std = @import("std");
 const prompt = @import("../../cuda_prompt.zig");
+const load = @import("../../cuda_prompt_load.zig");
 const pool = @import("../offload/cuda_exl3_pool.zig");
 const pass = @import("cuda_exl3_pass.zig");
 const weights = @import("../../cuda_prompt_wt.zig");
 pub const counters = @import("exl3_telemetry.zig");
 pub const Completion = enum { all_rank_consumers_joined };
 
-pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine, sequences: []const *prompt.Seq, rank: counters.Rank, completion: Completion) !counters.Snapshot {
+pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine, mtp: ?*const load.Layer, sequences: []const *prompt.Seq, rank: counters.Rank, completion: Completion) !counters.Snapshot {
     _ = completion;
     try rank.validate();
     var hash = std.hash.Wyhash.init(@intFromPtr(engine));
     var totals: counters.Experts = .{};
-    var attached: [weights.layers_n]*@import("../pack/cuda_exl3_load.zig").Experts = undefined;
-    const attached_count = pass.offloadedPools(engine.layers[0..engine.n_layers], &attached);
+    var attached: [weights.layers_n + 1]*@import("../pack/cuda_exl3_load.zig").Experts = undefined;
+    const attached_count = pass.offloadedPools(engine.layers[0..engine.n_layers], mtp, &attached);
     var layers: []counters.LayerSample = if (engine.telemetry.layers_enabled) try allocator.alloc(counters.LayerSample, attached_count) else @constCast(&.{});
     errdefer allocator.free(layers);
-    var seen: [weights.layers_n]*pool.Pool = undefined;
+    var seen: [weights.layers_n + 1]*pool.Pool = undefined;
     var seen_count: usize = 0;
     for (attached[0..attached_count]) |experts| {
         const resident = experts.pool orelse continue;
@@ -63,9 +64,10 @@ pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine
         };
         try counters.add(counters.Experts, &totals, contribution);
         if (engine.telemetry.layers_enabled) {
-            var layer_sample: counters.LayerSample = .{ .owner = resident.telemetry_id, .kind = .decoder, .layer = 0, .lines = resident.opt.lines, .counts = counters.LayerCounts.fromExperts(contribution) };
+            var layer_sample: counters.LayerSample = .{ .owner = resident.telemetry_id, .kind = .mtp, .layer = 0, .lines = resident.opt.lines, .counts = counters.LayerCounts.fromExperts(contribution) };
             for (engine.layers[0..engine.n_layers], 0..) |layer, decoder_index| if (layer.exl3) |decoder| {
                 if (decoder.pool == resident) {
+                    layer_sample.kind = .decoder;
                     layer_sample.layer = decoder_index;
                     break;
                 }
