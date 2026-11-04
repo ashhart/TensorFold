@@ -38,9 +38,10 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const t_params = e.tables.ptr + params_at;
     const geo = e.geo;
     const group = g.q_heads / g.kv_heads;
+    if (shape.part == .head) return finish(e, total, heads, shape.hidden); // a stage's head over the ring's rows
 
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkStart(e);
-    try e.embed(t_ids, e.h, total, t_params);
+    if (g.embeds) try e.embed(t_ids, e.h, total, t_params); // a later stage's h and r came over the ring
     // the producers of the out, o and down inputs write their group sums; a prompt GEMM past 16 rows needs none
     const sums: u64 = if (prompt and total > 16) 0 else e.xs;
     // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
@@ -49,7 +50,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     var di: usize = 0;
     var ai: c_int = 0;
     for (e.layers, 0..) |l, i| {
-        try e.norm(i != 0, l.input_norm, total);
+        try e.norm(g.first + i != 0, l.input_norm, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
@@ -118,7 +119,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
-    try finish(e, total, heads, shape.hidden);
+    if (shape.part == .whole) try finish(e, total, heads, shape.hidden);
 }
 
 /// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.

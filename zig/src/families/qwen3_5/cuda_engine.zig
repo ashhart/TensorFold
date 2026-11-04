@@ -14,6 +14,7 @@ const modelopt = @import("cuda_modelopt.zig");
 const x3w = @import("cuda_exl3_weights.zig");
 const hosted = @import("cuda_host_embed.zig");
 pub const recurrent = @import("cuda_recurrent.zig");
+pub const stage_fwd = @import("cuda_stage_forward.zig");
 
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
@@ -159,6 +160,9 @@ pub const Engine = struct {
     n_taps: usize = 0,
     /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
     features: u64 = 0,
+    /// A pipeline stage's ring (null: one engine, or a stage warming up) and its boundary rows in host memory.
+    hop: ?stage_fwd.Hop = null,
+    boundary: ?cuda.HostBuffer = null,
 
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
@@ -174,9 +178,16 @@ pub const Engine = struct {
     const tables_len = Round.bytes;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit) !*Engine {
+        return initStage(gpa, io, ctx, dir, kv8, fit, null);
+    }
+
+    /// One engine, or with `span` a pipeline stage holding only its layers' weights and state (RFC #2005).
+    pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, span: ?stage_fwd.Span) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
-        const g = try Geometry.read(gpa, io, dir);
+        const whole = try Geometry.read(gpa, io, dir);
+        if (span) |sp| if (sp.heads != (sp.first == 0)) return error.StageHeadOffRankZero; // v1 is a ring
+        const g = if (span) |sp| try whole.stage(sp.first, sp.end, sp.heads) else whole;
         const d = ctx.d;
         const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
         errdefer gpa.destroy(e);
@@ -206,8 +217,12 @@ pub const Engine = struct {
         e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
         e.n_taps = 0;
         e.features = 0;
+        e.hop = null;
+        e.boundary = null;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
+        if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, max_rows));
+        errdefer if (e.boundary) |*b| b.free();
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
         defer core.checkpoint.cache.close(&ck);
         e.arena = try hosted.arena(e, io, ctx, &ck, fit);
@@ -299,6 +314,7 @@ pub const Engine = struct {
         e.staged.free();
         e.tables.free();
         hosted.release(e);
+        if (e.boundary) |*b| b.free();
         e.gpa.free(e.layers);
         e.gpa.free(e.dir);
         e.affine.deinit();
@@ -322,6 +338,7 @@ pub const Engine = struct {
 
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
     pub fn setTaps(e: *Engine, taps: []const u32) !void {
+        if (e.g.whole != 0 and taps.len > 0) return error.StageTaps; // v1 stages serve no drafter
         if (taps.len > e.taps.len) return error.TooManyTaps;
         for (taps) |t| if (t >= e.g.layers) return error.BadTap;
         @memcpy(e.taps[0..taps.len], taps);
@@ -367,8 +384,12 @@ pub const Engine = struct {
         e.pm = try t.alloc(most_verify * g.q_heads * max_chunks * 4);
         e.pl = try t.alloc(most_verify * g.q_heads * max_chunks * 4);
         e.po = try t.alloc(most_verify * g.q_heads * max_chunks * head_dim * 4);
-        e.logits = try t.alloc(most_verify * g.vocab * 2);
         if (g.moe()) e.routed = try routed.Scratch.carve(t, g, R);
+        e.logits = 0;
+        e.amax = 0;
+        e.picks = 0;
+        if (!g.heads) return total; // a stage without the head keeps no logits
+        e.logits = try t.alloc(most_verify * g.vocab * 2);
         e.amax = try t.alloc(most_verify * argmaxSlices(g.vocab) * 8);
         e.picks = try t.alloc(most_verify * cuda.sample.Draws.row_scratch);
         return total;
@@ -444,8 +465,6 @@ pub const Engine = struct {
         const total = ids.len;
         const record = keep != .last;
         const heads: usize = if (record) total else 1;
-        // the prompt GEMM only for prompt chunks: a window's rows keep the bits of one-row steps
-        const prompt = !record;
         // the tables
         const st = e.staged.bytes;
         @memcpy(std.mem.bytesAsSlice(u32, st[ids_at..][0 .. total * 4]), ids);
@@ -497,35 +516,14 @@ pub const Engine = struct {
         shape.hidden = keep == .hidden;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
         if (e.learning != null or e.pockets.any()) {
-            var exact = shape;
-            exact.total = @intCast(total);
-            exact.nseg = @intCast(parts.len);
-            e.features = if (images) |im| im.features else 0;
-            defer e.features = 0;
-            try e.body(exact);
-        } else if (prompt) {
-            // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length's graph would pay the stall
-            e.features = if (images) |im| im.features else 0;
-            defer e.features = 0;
-            try e.body(shape);
-        } else {
-            const gop = try e.graphs.getOrPut(e.gpa, shape.key());
-            if (!gop.found_existing) {
-                errdefer _ = e.graphs.remove(shape.key());
-                // captured, nothing runs: the replay below is this shape's first run
-                try cuda.graph.beginCapture(e.stream, .thread_local);
-                e.body(shape) catch |err| {
-                    var broken = cuda.graph.endCapture(e.stream) catch return err;
-                    broken.deinit();
-                    return err;
-                };
-                var captured = try cuda.graph.endCapture(e.stream);
-                defer captured.deinit();
-                gop.value_ptr.* = try captured.instantiate();
-            }
-            try gop.value_ptr.launchOn(e.stream);
+            shape.total = @intCast(total);
+            shape.nseg = @intCast(parts.len); // the exact path: uncaptured at the live counts
         }
+        e.features = if (images) |im| im.features else 0;
+        defer e.features = 0;
+        if (g.whole == 0) try e.launchShape(shape) else try stage_fwd.run(e, shape, total);
         for (parts) |p| p.cache.advanced(p.rows, record);
+        if (!g.heads) return recurrent.completed(e); // a stage without the head: no logits to keep
         if (keep == .draws or keep == .logits) try e.penalties.apply(e.d, &e.draws, e.stream, e.logits, g.vocab) else e.penalties.clear();
         switch (keep) {
             .hidden => try e.stream.synchronize(), // mapped layer inputs are ready before the learner reads them
@@ -556,6 +554,9 @@ pub const Engine = struct {
     }
 
     pub const Shape = @import("cuda_shapes.zig").Shape;
+
+    /// One shape's launches: uncaptured for a prompt chunk or the exact path, else its captured graph replayed.
+    pub const launchShape = @import("cuda_shapes.zig").launch;
 
     /// The same scan selected by body, exposed for host launch-contract fixtures.
     pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {

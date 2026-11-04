@@ -55,6 +55,7 @@ test {
 
 test {
     _ = @import("cuda_wide.zig");
+    _ = @import("cuda_weights.zig");
 }
 
 pub const train_ops = @import("cuda_train_ops.zig");
