@@ -117,6 +117,12 @@ pub fn namedBackground(config: Config, f: Value) bool {
     return false;
 }
 
+/// Name the compiled structure with the client's own field when its route carried one (a borrowed static literal).
+pub fn nameStructure(format: ?[]const u8, request: *api.Request) void {
+    const name = format orelse return;
+    if (request.structure) |*st| st.field = name;
+}
+
 pub const Server = struct {
     gpa: Allocator,
     io: std.Io,

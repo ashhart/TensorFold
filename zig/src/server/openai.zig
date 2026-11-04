@@ -119,11 +119,11 @@ const Plan = struct {
 
 /// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
 pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
-    return (try plan(srv, cx, true, raw)).input;
+    return (try plan(srv, cx, true, raw, null)).input;
 }
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
-fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
+fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them
@@ -131,7 +131,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     const exact_bytes = asked and srv.info.logprobs and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
-    var input: chat.Input = .{ .fields = undefined };
+    var input: chat.Input = .{ .fields = undefined, .format = format };
     if (is_chat) {
         input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
         input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
@@ -230,13 +230,18 @@ fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
 
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
 pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value) void {
+    runNamed(srv, a, out, gone, is_chat, raw, null);
+}
+
+/// ``run`` for a route whose client named the grammar field (Responses' text.format, Messages' output_config.format).
+pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
     var cx: Cx = .{ .a = a };
-    var p = plan(srv, &cx, is_chat, raw) catch |e| {
+    var p = plan(srv, &cx, is_chat, raw, format) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
         logRefused(id, cx.message);
-        const body = (if (cx.kind == .other) errorOther(a, cx.message) else errorBody(a, &cx, field)) catch return;
+        const body = errorBody(a, &cx, field) catch return;
         out.vt.reply(out.ctx, cx.status(), wrapError(a, body) catch return);
         return;
     };
@@ -250,12 +255,6 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
 fn logRefused(id: []const u8, message: []const u8) void {
     var buf: [1400]u8 = undefined;
     log.line("{s}", .{log.refused(&buf, id, message)});
-}
-
-fn errorOther(a: Allocator, message: []const u8) Allocator.Error!Value {
-    const o = try json.newObject(a);
-    try o.put(a, "message", .{ .string = message });
-    return .{ .object = o };
 }
 
 const Run = struct {
@@ -336,7 +335,7 @@ const Run = struct {
     fn fail(r: *Run, cx: *const Cx, field: []const u8) void {
         const a = r.a;
         const kind_ok = cx.kind != .other and cx.kind != .server;
-        const body = (if (kind_ok) errorBody(a, cx, field) else errorOther(a, cx.message)) catch return;
+        const body = errorBody(a, cx, field) catch return;
         r.out.vt.reply(r.out.ctx, if (kind_ok) cx.status() else 500, wrapError(a, body) catch return);
     }
 
