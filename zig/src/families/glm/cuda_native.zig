@@ -18,7 +18,7 @@ const prefix_mod = @import("cuda_prefix.zig");
 const kv = @import("core").kv_pool;
 
 pub const model_type = "glm5_next";
-pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "modelopt-mixed" };
+pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "modelopt-mixed", "exl3" };
 // cc-defer: a fixed window; the Python family sizes it from free memory (capacity.admit), port that when serving needs
 pub const default_context: i64 = 8192;
 pub const max_segments: u32 = 1;
