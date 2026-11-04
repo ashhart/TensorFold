@@ -13,12 +13,12 @@ test "a file that names itself carries what it said, and the model it came from"
         .base_model = "TensorFold/Qwen3.8-27B-MLX-4bit",
         .base_revision = "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c",
         .publication = .{
-            .name = "Qwen3.8-27B-refusal-cvec-per_layer-L10-58-a1",
-            .description = "A projective refusal-ablation control vector.",
+            .name = "Qwen3.8-27B-sample-cvec-per_layer-L10-58-a1",
+            .description = "A sample control vector.",
             .author = "TensorFold",
             .license = "MIT",
             .model_hint = "qwen3_5",
-            .measured_effect = "alpha 0.5 to 3 is flat; alpha 4 empties the replies",
+            .measured_effect = "alpha 0.5 to 3 is flat",
             .created = "2026-10-27",
         },
         .layers = &layers,
@@ -27,18 +27,18 @@ test "a file that names itself carries what it said, and the model it came from"
     var read = try t.readOk(bytes);
     defer read.deinit();
     const p = read.vector.publication;
-    try std.testing.expectEqualStrings("Qwen3.8-27B-refusal-cvec-per_layer-L10-58-a1", p.name.?);
-    try std.testing.expectEqualStrings("A projective refusal-ablation control vector.", p.description.?);
+    try std.testing.expectEqualStrings("Qwen3.8-27B-sample-cvec-per_layer-L10-58-a1", p.name.?);
+    try std.testing.expectEqualStrings("A sample control vector.", p.description.?);
     try std.testing.expectEqualStrings("TensorFold", p.author.?);
     try std.testing.expectEqualStrings("MIT", p.license.?);
     try std.testing.expectEqualStrings("qwen3_5", p.model_hint.?);
-    try std.testing.expectEqualStrings("alpha 0.5 to 3 is flat; alpha 4 empties the replies", p.measured_effect.?);
+    try std.testing.expectEqualStrings("alpha 0.5 to 3 is flat", p.measured_effect.?);
     try std.testing.expectEqualStrings("2026-10-27", p.created.?);
 
     // The container itself carries the keys a consumer reads, not only the reader.
     var parsed = try t.parseFile(a, bytes);
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("Qwen3.8-27B-refusal-cvec-per_layer-L10-58-a1", parsed.file.str("general.name").?);
+    try std.testing.expectEqualStrings("Qwen3.8-27B-sample-cvec-per_layer-L10-58-a1", parsed.file.str("general.name").?);
     try std.testing.expectEqualStrings("TensorFold", parsed.file.str("general.author").?);
     try std.testing.expectEqualStrings("qwen3_5", parsed.file.str("controlvector.model_hint").?);
     try std.testing.expectEqual(@as(u64, 1), parsed.file.num("controlvector.layer_count").?);

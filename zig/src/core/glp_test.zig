@@ -223,7 +223,7 @@ fn writeSample(a: std.mem.Allocator) ![]u8 {
         .base_model = "Qwen/Qwen3.8-27B",
         .base_revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
         .method = "difference_of_means_per_layer",
-        .contrast = "diverse_harmful_vs_form_matched_harmless_unpaired",
+        .contrast = "matched_prompts_unpaired",
         .layers = &layers,
     });
 }
@@ -370,7 +370,7 @@ test "a written vector reads back with every field intact" {
     try std.testing.expectEqualStrings("Qwen/Qwen3.8-27B", v.base_model);
     try std.testing.expectEqualStrings("1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0", v.base_revision);
     try std.testing.expectEqualStrings("difference_of_means_per_layer", v.method);
-    try std.testing.expectEqualStrings("diverse_harmful_vs_form_matched_harmless_unpaired", v.contrast);
+    try std.testing.expectEqualStrings("matched_prompts_unpaired", v.contrast);
     try std.testing.expectEqual(@as(usize, 8), v.width);
     try std.testing.expectEqual(@as(usize, 2), v.layers.len);
     try std.testing.expectEqual(@as(u32, 10), v.layers[0].id);
