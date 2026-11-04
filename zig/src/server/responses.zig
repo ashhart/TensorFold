@@ -190,7 +190,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     for (t.echo.keys(), t.echo.values()) |k, v| base.put(a, k, v) catch return;
     var reply: Reply = .{ .srv = srv, .a = a, .conn = conn, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = &cx };
     var out: Wire = .{ .reply = &reply };
-    openai.run(srv, a, out.out(), .{ .conn = conn }, true, t.chat);
+    openai.runNamed(srv, a, out.out(), .{ .conn = conn }, true, t.chat, t.format);
     if (out.opened or conn.broken) return;
     const status = out.status orelse return;
     if (status != 200) return routes.sendValue(conn, a, status, out.payload);
