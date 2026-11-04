@@ -1,0 +1,395 @@
+// Frozen from zig/kernels/metal/qwen27/attention_mpp.metal at f23603801e5b9bef9a40dd72ba7b783c8e15bda2.
+
+#include <metal_stdlib>
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace metal;
+using namespace mpp::tensor_ops;
+#ifndef Q27_G
+#define Q27_G 6
+#define Q27_KVH 4
+#endif
+constant constexpr int G = Q27_G, KVH = Q27_KVH, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12, NW = 4;
+struct Q27AttnReadPtrs { device const bfloat* keys; device const bfloat* values; };
+
+
+template <int SG>
+kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]],
+    constant float* scale [[buffer(2)]], device const int* meta [[buffer(3)]], device const int* tile_stream [[buffer(4)]],
+    device float* PO [[buffer(5)]], device float* PM [[buffer(6)]], device float* PL [[buffer(7)]], device const int* nodes [[buffer(8)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], ushort thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+    ushort simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
+  const ushort lane = thread_index_in_simdgroup;
+  const ushort sg = simdgroup_index_in_threadgroup;
+  const int tile = int(threadgroup_position_in_grid.z) * SG + (sg >> 1);
+  const bool hi = sg & 1;
+  const uint hk = threadgroup_position_in_grid.x;
+  const uint c = threadgroup_position_in_grid.y;
+  const int NCH = meta[1], SGA = meta[2];
+  const int st = tile < SGA ? tile_stream[tile] : 0;
+  const int L = meta[MG + st * MS + 9], NQ = meta[MG + st * MS + 2], S0 = meta[MG + st * MS + 4];
+  const int lt = tile - meta[MG + st * MS + 3];
+  const int RP = 16 * SGA;
+  const short qid = lane >> 2;
+  const short fm = (qid & 4) | ((lane >> 1) & 3);
+  const short fn = ((qid & 2) | (lane & 1)) * 4;
+  const int r0 = tile * 16 + fm, r1 = r0 + 8;
+  const int q0 = lt * 16 + fm, q1 = q0 + 8;
+
+  const int n0 = (q0 < G * NQ) ? min(L, S0 + q0 / G + 1) : 0;
+  const int n1 = (q1 < G * NQ) ? min(L, S0 + q1 / G + 1) : 0;
+  threadgroup half Ps[16 * TK];
+  threadgroup half* myP = Ps;
+  if (tile >= SGA || int(c) >= meta[MG + st * MS + 1]) return;
+
+  const device int* own = nodes + NW * meta[MG + st * MS + 6];
+  const int ck0 = own[NW * (min(q0, G * NQ - 1) / G) + 2], ck1 = own[NW * (min(q1, G * NQ - 1) / G) + 2];
+  const int wa = simd_min(min(ck0, ck1)), wb = simd_max(max(ck0, ck1));
+  const device bfloat* Kb = caches[st].keys;
+  const device bfloat* Vb = caches[st].values;
+  tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tQ((device bfloat*)Qp + (int64_t)hk * RP * D, dextents<int32_t, 2>(D, RP));
+  tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tK((device bfloat*)Kb + (int64_t)hk * meta[MG + st * MS + 7], dextents<int32_t, 2>(D, L), array<int32_t, 2>({1, D}));
+  tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tV((device bfloat*)Vb + (int64_t)hk * meta[MG + st * MS + 8], dextents<int32_t, 2>(D, L), array<int32_t, 2>({1, D}));
+  tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline> tP(myP, dextents<int32_t, 2>(TK, 16));
+  constexpr auto dS = matmul2d_descriptor(16, TK, D, false, true, false, matmul2d_descriptor::mode::multiply);
+  constexpr auto dO = matmul2d_descriptor(16, 128, TK, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+  matmul2d<dS, execution_simdgroup> opS;
+  matmul2d<dO, execution_simdgroup> opO;
+  auto aQ = tQ.slice(0, tile * 16);
+  auto bV0 = tV.slice(0, 0);
+  auto O = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(bV0), float>();
+  for (int i = 0; i < 64; i++) O[i] = 0.0f;
+  float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
+
+  for (int w = wa;; w = wb) {
+  const int e0 = ck0 == w ? n0 : 0, e1 = ck1 == w ? n1 : 0;
+  const int kbeg = int(c) * w;
+  const int kend = min(kbeg + w, L);
+  for (int kt = kbeg; kt < kend; kt += TK) {
+    auto bK = tK.slice(0, kt);
+    auto S = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), float>();
+    opS.run(aQ, bK, S);
+    float s[TK / 2];
+    for (int i = 0; i < TK / 2; i++) {
+      const int key = kt + (i >> 3) * 16 + fn + (i & 3);
+      s[i] = key < ((i & 4) ? e1 : e0) ? S[i] * scale[0] : -INFINITY;
+    }
+    float x0 = -INFINITY, x1 = -INFINITY;
+    for (int i = 0; i < TK / 2; i++) { if (i & 4) x1 = max(x1, s[i]); else x0 = max(x0, s[i]); }
+    x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
+    x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
+    const float nm0 = max(m0, x0), nm1 = max(m1, x1);
+    const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp(m0 - nm0);
+    const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp(m1 - nm1);
+    float p[TK / 2];
+    for (int i = 0; i < TK / 2; i++) p[i] = (s[i] == -INFINITY) ? 0.0f : fast::exp(s[i] - ((i & 4) ? nm1 : nm0));
+    float y0 = 0.0f, y1 = 0.0f;
+    for (int b = 0; b < TK / 16; b++) {
+      y0 += (p[b * 8] + p[b * 8 + 1]) + (p[b * 8 + 2] + p[b * 8 + 3]);
+      y1 += (p[b * 8 + 4] + p[b * 8 + 5]) + (p[b * 8 + 6] + p[b * 8 + 7]);
+    }
+    y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
+    y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
+    if (x0 != -INFINITY) { l0 = l0 * f0 + y0; m0 = nm0; }
+    if (x1 != -INFINITY) { l1 = l1 * f1 + y1; m1 = nm1; }
+    auto Pc = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), half>();
+    for (int i = 0; i < TK / 2; i++) Pc[i] = half(p[i]);
+    auto Pin = opO.template get_left_input_cooperative_tensor<half, bfloat, float>(Pc);
+    for (int i = 0; i < 64; i++) O[i] *= (i & 4) ? f1 : f0;
+    auto bV = tV.slice(hi ? 128 : 0, kt);
+    opO.run(Pin, bV, O);
+  }
+  if (w == wb) break;
+  }
+  const int64_t base = ((int64_t)hk * NCH + c) * RP;
+
+  for (int q = 0; q < 16; q++) {
+    if ((q & 1) ? q1 >= G * NQ : q0 >= G * NQ) continue;
+    device float* dst = PO + (base + tile * 16 + fm + (q & 1) * 8) * D + (hi ? 128 : 0) + (q >> 1) * 16 + fn;
+    *(device float4*)dst = float4(O[4 * q], O[4 * q + 1], O[4 * q + 2], O[4 * q + 3]);
+  }
+  if (!hi && (lane & 9) == 0) {
+    if (q0 < G * NQ) { PM[base + r0] = m0; PL[base + r0] = l0; }
+    if (q1 < G * NQ) { PM[base + r1] = m1; PL[base + r1] = l1; }
+  }
+}
+#define Q27_PREFIX(SG) template [[host_name("q27_attn_prefix_" #SG)]] kernel void q27_attn_prefix<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant float*, device const int*, device const int*, device float*, device float*, device float*, device const int*, uint3, ushort, ushort);
+Q27_PREFIX(1)
+Q27_PREFIX(2)
+Q27_PREFIX(3)
+Q27_PREFIX(4)
+Q27_PREFIX(5)
+Q27_PREFIX(6)
+Q27_PREFIX(7)
+Q27_PREFIX(8)
+Q27_PREFIX(9)
+Q27_PREFIX(10)
+Q27_PREFIX(11)
+Q27_PREFIX(12)
+Q27_PREFIX(13)
+Q27_PREFIX(14)
+Q27_PREFIX(15)
+Q27_PREFIX(16)
+
+kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]],
+    constant float* scale [[buffer(2)]], device const int* meta [[buffer(3)]], device const int* paths [[buffer(4)]], device const int* nodes [[buffer(5)]],
+    device const float* POA [[buffer(6)]], device const float* PMA [[buffer(7)]], device const float* PLA [[buffer(8)]],
+    device float* PO [[buffer(9)]], device float* PM [[buffer(10)]], device float* PL [[buffer(11)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], ushort thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+    ushort sg [[simdgroup_index_in_threadgroup]], ushort tid [[thread_index_in_threadgroup]]) {
+
+  const ushort lane = thread_index_in_simdgroup;
+  const uint hk = threadgroup_position_in_grid.x;
+  const uint cb = threadgroup_position_in_grid.y;
+  const uint node = threadgroup_position_in_grid.z;
+  const int NCB = meta[3], W = meta[4], RPA = meta[5], CA = meta[6];
+  const int st = nodes[NW * node + 1];
+  const int P = meta[MG + st * MS + 4], PT = meta[MG + st * MS + 0], CK = nodes[NW * node + 2];
+  if (int(cb) >= meta[MG + st * MS + 5]) return;
+  const int la = meta[MG + st * MS + 3] * 16 + (int(node) - meta[MG + st * MS + 6]) * G;
+  const int depth = nodes[NW * node];
+  const device bfloat* Kb = caches[st].keys;
+  const device bfloat* Vb = caches[st].values;
+  const int nmax = P + depth + 1;
+  const short qid = lane >> 2;
+  const short fm = (qid & 4) | ((lane >> 1) & 3);
+  const short fn = ((qid & 2) | (lane & 1)) * 4;
+  const int r0 = fm, r1 = fm + 8;
+  const int n0 = r0 < G ? nmax : 0;
+  const int n1 = r1 < G ? nmax : 0;
+  threadgroup half myP[16 * TK];
+  threadgroup bfloat KV[32 * D];
+  const device bfloat* kbase = (const device bfloat*)Kb + (int64_t)hk * meta[MG + st * MS + 7];
+  const device bfloat* vbase = (const device bfloat*)Vb + (int64_t)hk * meta[MG + st * MS + 8];
+  const int64_t kstep = D, vstep = D;
+  tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tQ((device bfloat*)QB + ((int64_t)hk * W + node) * 16 * D, dextents<int32_t, 2>(D, 16));
+  tensor<threadgroup bfloat, dextents<int32_t, 2>, tensor_inline> tK32(KV, dextents<int32_t, 2>(D, 32));
+  tensor<threadgroup bfloat, dextents<int32_t, 2>, tensor_inline> tVh(KV, dextents<int32_t, 2>(128, TK));
+  tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline> tP(myP, dextents<int32_t, 2>(TK, 16));
+  constexpr auto dS = matmul2d_descriptor(16, 32, D, false, true, false, matmul2d_descriptor::mode::multiply);
+  constexpr auto dO = matmul2d_descriptor(16, 128, TK, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+  matmul2d<dS, execution_simdgroup> opS;
+  matmul2d<dO, execution_simdgroup> opO;
+  auto Olo = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(tVh), float>();
+  auto Ohi = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(tVh), float>();
+  for (int i = 0; i < 64; i++) { Olo[i] = 0.0f; Ohi[i] = 0.0f; }
+  float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
+  const int c0 = PT / CK;
+  const int c = c0 + int(cb);
+  const int kbeg = max(c * CK, PT);
+  const int kend = min((c + 1) * CK, nmax);
+  if (sg == 0 && cb == 0 && PT > c0 * CK) {
+    const int64_t baseA = ((int64_t)hk * CA + c0) * RPA + la;
+    for (int q = 0; q < 16; q++) {
+      const int row = fm + (q & 1) * 8;
+      if (row >= G) continue;
+      const auto src = POA + (baseA + row) * D + (q >> 1) * 16 + fn;
+      for (int j = 0; j < 4; j++) { Olo[4 * q + j] = src[j]; Ohi[4 * q + j] = src[128 + j]; }
+    }
+    if (r0 < G) { m0 = PMA[baseA + r0]; l0 = PLA[baseA + r0]; }
+    if (r1 < G) { m1 = PMA[baseA + r1]; l1 = PLA[baseA + r1]; }
+  }
+  for (int kt = kbeg; kt < kend; kt += TK) {
+    float sraw[TK / 2];
+    for (int h = 0; h < TK / 32; h++) {
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint e = tid; e < 32 * D / 8; e += 128) {
+        const int row = int(e) / (D / 8), col = (int(e) % (D / 8)) * 8;
+        const int q = kt + h * 32 + row;
+        int phys = -1;
+        if (q < P) phys = q;
+        else if (q < nmax) phys = P + paths[node * MAXD + (q - P)];
+        ((threadgroup vec<bfloat, 8>*)KV)[e] = phys >= 0 ? *(const device vec<bfloat, 8>*)(kbase + phys * kstep + col) : vec<bfloat, 8>(0);
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (sg == 0) {
+        auto S = opS.template get_destination_cooperative_tensor<decltype(tQ), decltype(tK32), float>();
+        opS.run(tQ, tK32, S);
+        for (int i = 0; i < 16; i++) sraw[h * 16 + i] = S[i];
+      }
+    }
+    if (sg == 0) {
+    float s[TK / 2];
+    for (int i = 0; i < TK / 2; i++) {
+      const int key = kt + (i >> 3) * 16 + fn + (i & 3);
+      s[i] = key < ((i & 4) ? n1 : n0) ? sraw[i] * scale[0] : -INFINITY;
+    }
+    float x0 = -INFINITY, x1 = -INFINITY;
+    for (int i = 0; i < TK / 2; i++) { if (i & 4) x1 = max(x1, s[i]); else x0 = max(x0, s[i]); }
+    x0 = max(x0, simd_shuffle_xor(x0, 1)); x0 = max(x0, simd_shuffle_xor(x0, 8));
+    x1 = max(x1, simd_shuffle_xor(x1, 1)); x1 = max(x1, simd_shuffle_xor(x1, 8));
+    const float nm0 = max(m0, x0), nm1 = max(m1, x1);
+    const float f0 = (x0 == -INFINITY) ? 1.0f : fast::exp(m0 - nm0);
+    const float f1 = (x1 == -INFINITY) ? 1.0f : fast::exp(m1 - nm1);
+    float p[TK / 2];
+    for (int i = 0; i < TK / 2; i++) p[i] = (s[i] == -INFINITY) ? 0.0f : fast::exp(s[i] - ((i & 4) ? nm1 : nm0));
+    float y0 = 0.0f, y1 = 0.0f;
+    for (int b = 0; b < TK / 16; b++) {
+      y0 += (p[b * 8] + p[b * 8 + 1]) + (p[b * 8 + 2] + p[b * 8 + 3]);
+      y1 += (p[b * 8 + 4] + p[b * 8 + 5]) + (p[b * 8 + 6] + p[b * 8 + 7]);
+    }
+    y0 += simd_shuffle_xor(y0, 1); y0 += simd_shuffle_xor(y0, 8);
+    y1 += simd_shuffle_xor(y1, 1); y1 += simd_shuffle_xor(y1, 8);
+    if (x0 != -INFINITY) { l0 = l0 * f0 + y0; m0 = nm0; }
+    if (x1 != -INFINITY) { l1 = l1 * f1 + y1; m1 = nm1; }
+    for (int f = 0; f < TK / 16; f++)
+      for (int i = 0; i < 4; i++) {
+        myP[fm * TK + f * 16 + fn + i] = half(p[f * 8 + i]);
+        myP[(fm + 8) * TK + f * 16 + fn + i] = half(p[f * 8 + 4 + i]);
+      }
+    for (int i = 0; i < 64; i++) { const float f = (i & 4) ? f1 : f0; Olo[i] *= f; Ohi[i] *= f; }
+    }
+    for (int hv = 0; hv < 2; hv++) {
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      for (uint e = tid; e < TK * 128 / 8; e += 128) {
+        const int row = int(e) / 16, col = hv * 128 + (int(e) % 16) * 8;
+        const int q = kt + row;
+        int phys = -1;
+        if (q < P) phys = q;
+        else if (q < nmax) phys = P + paths[node * MAXD + (q - P)];
+        ((threadgroup vec<bfloat, 8>*)KV)[e] = phys >= 0 ? *(const device vec<bfloat, 8>*)(vbase + phys * vstep + col) : vec<bfloat, 8>(0);
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (sg == 0) {
+        if (hv == 0) opO.run(tP, tVh, Olo);
+        else opO.run(tP, tVh, Ohi);
+      }
+    }
+  }
+  if (sg != 0) return;
+  const int64_t base = (((int64_t)hk * NCB + cb) * W + node) * 16;
+  for (int q = 0; q < 16; q++) {
+    device float* dst = PO + (base + fm + (q & 1) * 8) * D + (q >> 1) * 16 + fn;
+    *(device float4*)dst = float4(Olo[4 * q], Olo[4 * q + 1], Olo[4 * q + 2], Olo[4 * q + 3]);
+    *(device float4*)(dst + 128) = float4(Ohi[4 * q], Ohi[4 * q + 1], Ohi[4 * q + 2], Ohi[4 * q + 3]);
+  }
+  if ((lane & 9) == 0) {
+    PM[base + r0] = m0; PL[base + r0] = l0;
+    PM[base + r1] = m1; PL[base + r1] = l1;
+  }
+}
+
+
+kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const float* PMA [[buffer(1)]], device const float* PLA [[buffer(2)]],
+    device const float* POB [[buffer(3)]], device const float* PMB [[buffer(4)]], device const float* PLB [[buffer(5)]],
+    device const int* meta [[buffer(6)]], device const int* nodes [[buffer(7)]], device bfloat* OUT [[buffer(8)]],
+    device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]], constant uint& heads [[buffer(11)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
+  const uint lane = thread_index_in_simdgroup;
+  const uint hk = threadgroup_position_in_grid.x;
+  const uint r = threadgroup_position_in_grid.y;
+  const int NCB = meta[3], W = meta[4], RPA = meta[5], CA = meta[6];
+  const int st = nodes[NW * (int(r) / G) + 1];
+  const int NCBS = meta[MG + st * MS + 5];
+  const int ra = meta[MG + st * MS + 3] * 16 + (int(r) / G - meta[MG + st * MS + 6]) * G + int(r) % G;
+  const int CT = nodes[NW * (int(r) / G) + 3];
+  constexpr int DP = D / 32, MB = 8;
+  const int node = r / G, g = r % G;
+  float m = -INFINITY, l = 0.0f, o[DP];
+  for (int i = 0; i < DP; i++) o[i] = 0.0f;
+  for (int c0 = 0; c0 < CT; c0 += MB) {
+    float mcs[MB], lcs[MB];
+    float4 lo[MB], hi[MB];
+    for (int j = 0; j < MB; j++) {
+      const int64_t row = ((int64_t)hk * CA + min(c0 + j, CT - 1)) * RPA + ra;
+      mcs[j] = PMA[row];
+      lcs[j] = PLA[row];
+      lo[j] = *(device const float4*)(POA + row * D + lane * DP);
+      hi[j] = *(device const float4*)(POA + row * D + lane * DP + 4);
+    }
+    for (int j = 0; j < MB; j++) {
+      if (c0 + j >= CT) break;
+      const float mc = mcs[j];
+      if (mc == -INFINITY) continue;
+      const float lc = lcs[j];
+      const float nm = max(m, mc);
+      const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
+      l = l * f1 + lc * f2;
+      for (int i = 0; i < 4; i++) o[i] = o[i] * f1 + lo[j][i] * f2;
+      for (int i = 0; i < 4; i++) o[4 + i] = o[4 + i] * f1 + hi[j][i] * f2;
+      m = nm;
+    }
+  }
+  for (int c = 0; c < NCBS; c++) {
+    const int64_t row = (((int64_t)hk * NCB + c) * W + node) * 16 + g;
+    const float mc = PMB[row];
+    if (mc == -INFINITY) continue;
+    const float lc = PLB[row];
+    const float nm = max(m, mc);
+    const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
+    l = l * f1 + lc * f2;
+    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + POB[row * D + lane * DP + i] * f2;
+    m = nm;
+  }
+  const int h = hk * G + g;
+  for (int i = 0; i < DP; i++) {
+    const int64_t index = ((int64_t)node * (int64_t)heads + h) * D + lane * DP + i;
+    const bfloat v = static_cast<bfloat>(o[i] / l);
+    if (gated) {
+      const float gate = float(QG[((int64_t)node * (int64_t)heads + h) * 2 * D + D + lane * DP + i]);
+      OUT[index] = static_cast<bfloat>(float(v) * q27_round(1.0f / (1.0f + exp(-gate)), 0));
+    } else OUT[index] = v;
+  }
+}
+
+
+kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device const float* PMA [[buffer(1)]], device const float* PLA [[buffer(2)]],
+    device const float* POB [[buffer(3)]], device const float* PMB [[buffer(4)]], device const float* PLB [[buffer(5)]],
+    device const int* meta [[buffer(6)]], device const int* nodes [[buffer(7)]], device bfloat* OUT [[buffer(8)]],
+    device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
+  const uint lane = thread_index_in_simdgroup;
+  const uint hk = threadgroup_position_in_grid.x;
+  const uint r = threadgroup_position_in_grid.y;
+  const int NCB = meta[3], W = meta[4], RPA = meta[5], CA = meta[6];
+  const int st = nodes[NW * (int(r) / G) + 1];
+  const int NCBS = meta[MG + st * MS + 5];
+  const int ra = meta[MG + st * MS + 3] * 16 + (int(r) / G - meta[MG + st * MS + 6]) * G + int(r) % G;
+  const int CT = nodes[NW * (int(r) / G) + 3];
+  constexpr int DP = D / 32, MB = 8;
+  const int node = r / G, g = r % G;
+  float m = -INFINITY, l = 0.0f, o[DP];
+  for (int i = 0; i < DP; i++) o[i] = 0.0f;
+  for (int c0 = 0; c0 < CT; c0 += MB) {
+    float mcs[MB], lcs[MB];
+    float4 lo[MB], hi[MB];
+    for (int j = 0; j < MB; j++) {
+      const int64_t row = ((int64_t)hk * CA + min(c0 + j, CT - 1)) * RPA + ra;
+      mcs[j] = PMA[row];
+      lcs[j] = PLA[row];
+      lo[j] = *(device const float4*)(POA + row * D + lane * DP);
+      hi[j] = *(device const float4*)(POA + row * D + lane * DP + 4);
+    }
+    for (int j = 0; j < MB; j++) {
+      if (c0 + j >= CT) break;
+      const float mc = mcs[j];
+      if (mc == -INFINITY) continue;
+      const float lc = lcs[j];
+      const float nm = max(m, mc);
+      const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
+      l = l * f1 + lc * f2;
+      for (int i = 0; i < 4; i++) o[i] = o[i] * f1 + lo[j][i] * f2;
+      for (int i = 0; i < 4; i++) o[4 + i] = o[4 + i] * f1 + hi[j][i] * f2;
+      m = nm;
+    }
+  }
+  for (int c = 0; c < NCBS; c++) {
+    const int64_t row = (((int64_t)hk * NCB + c) * W + node) * 16 + g;
+    const float mc = PMB[row];
+    if (mc == -INFINITY) continue;
+    const float lc = PLB[row];
+    const float nm = max(m, mc);
+    const float f1 = fast::exp(m - nm), f2 = fast::exp(mc - nm);
+    l = l * f1 + lc * f2;
+    for (int i = 0; i < DP; i++) o[i] = o[i] * f1 + POB[row * D + lane * DP + i] * f2;
+    m = nm;
+  }
+  const int h = hk * G + g;
+  for (int i = 0; i < DP; i++) {
+    const int64_t index = ((int64_t)node * (G * KVH) + h) * D + lane * DP + i;
+    const bfloat v = static_cast<bfloat>(o[i] / l);
+    if (gated) {
+      const float gate = float(QG[((int64_t)node * (G * KVH) + h) * 2 * D + D + lane * DP + i]);
+      OUT[index] = static_cast<bfloat>(float(v) * q27_round(1.0f / (1.0f + exp(-gate)), 0));
+    } else OUT[index] = v;
+  }
+}

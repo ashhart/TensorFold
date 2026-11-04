@@ -19,6 +19,10 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const allocated = b.createModule(.{ .root_source_file = b.path("zig/qwen27_allocation_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = pricing_lanes }} });
     const window_step = b.step("test-qwen27-window-host", "Device width, copied trees and counted zero-grant drafting without shaders");
     for ([_]*std.Build.Module{ window, taps, allocated }) |m| window_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    const chain_ref = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/q27_chain_ref.zig"), .target = b.graph.host, .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }} });
+    const chain_run = b.addRunArtifact(b.addTest(.{ .root_module = chain_ref }));
+    test_step.dependOn(&chain_run.step);
+    b.step("test-qwen27-chain-reference-host", "FP64 chain attention and reduced-sum witness without a GPU").dependOn(&chain_run.step);
     const rows = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_rows_test.zig"), .target = b.graph.host });
     b.step("test-qwen27-prompt-rows-host", "Device-aware prompt rows beside owned decoding streams without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rows, .filters = &.{"qwen27 rows:"} })).step);
     const ane_policy = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/ane_policy.zig"), .target = b.graph.host });
@@ -51,6 +55,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     var names: std.ArrayList([]const u8) = .empty;
     tryNames(b, &names, @embedFile("../src/families/qwen27/gdn_test.zig"));
     tryNames(b, &names, @embedFile("../src/families/qwen27/attention_plan.zig"));
+    tryNames(b, &names, @embedFile("../src/families/qwen27/attention_chain_test.zig"));
     const plans = b.addRunArtifact(b.addTest(.{ .root_module = keep_module, .filters = names.items }));
     plans.has_side_effects = true;
     b.step("test-qwen27-plans-host", "Shared GDN and attention plans with no shaders or GPU").dependOn(&plans.step);

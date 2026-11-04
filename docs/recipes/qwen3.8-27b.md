@@ -64,6 +64,12 @@ Larger or unbounded cuts keep the general draw. Sampling time has its own pass-p
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
 default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
+Qwen3.8-27B's pre-M5 GQA6 prompt chains follow the admitted frame, up to 2,048 rows, using the
+one-row tail's key chunks, half probabilities and merge. Branching and mixed-stream rounds retain 128 rows.
+The older simdgroup prompt kernel uses different probability and tile arithmetic, so this path uses the tail at
+short widths too. The M5 path and other attention geometries keep their existing selection.
+Host planning and address checks pass; Metal byte replacement, checkpoint equality and timing remain to qualify.
+No speedup over an earlier release is claimed. A larger frame must still fit the existing admission budget.
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
 Admission counts both banks.
 `TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 16 to 2,048. Each chunk takes at most 512 rows beside

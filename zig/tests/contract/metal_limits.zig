@@ -31,6 +31,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "qwen27-chain ")) {
+        const chain = @import("metal_q27_chain.zig");
+        const h: @import("metal_q27_attn.zig").Heads = if (has(d.name, " rank ")) .rank else .q27b;
+        return .{ .decl = d, .function = fun, .here = try chain.source(a, device.tensorUnits(), false, false, h), .pre_m5 = try chain.source(a, false, false, false, h) };
+    }
     if (std.mem.startsWith(u8, d.name, "attention pv ")) {
         const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
         const probe = @import("metal_attention_pv.zig");

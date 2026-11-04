@@ -239,7 +239,7 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
         const int q = kt + h * 32 + row;
         int phys = -1;
         if (q < P) phys = q;
-        else if (q < nmax) phys = P + paths[node * MAXD + (q - P)];
+        else if (q < nmax) phys = meta[MG + st * MS + 10] ? q : P + paths[node * MAXD + (q - P)];
         ((threadgroup vec<bfloat, 8>*)KV)[e] = phys >= 0 ? *(const device vec<bfloat, 8>*)(kbase + phys * kstep + col) : vec<bfloat, 8>(0);
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -287,7 +287,7 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
         const int q = kt + row;
         int phys = -1;
         if (q < P) phys = q;
-        else if (q < nmax) phys = P + paths[node * MAXD + (q - P)];
+        else if (q < nmax) phys = meta[MG + st * MS + 10] ? q : P + paths[node * MAXD + (q - P)];
         ((threadgroup vec<bfloat, 8>*)KV)[e] = phys >= 0 ? *(const device vec<bfloat, 8>*)(vbase + phys * vstep + col) : vec<bfloat, 8>(0);
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);

@@ -52,7 +52,7 @@ pub const Geometry = struct {
         if (g.heads / g.kv_heads != 6 and !one_mac) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
-        return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
+        return @min(requested, @as(u32, if (g.fuse_chain and (g.shared_prefix or g.group() == 6)) chain_rows else max_rows));
     }
 
     pub fn group(g: Geometry) u32 {
@@ -83,12 +83,15 @@ pub const Plan = struct {
         var tile_count: u32 = 0;
         var ca_max: u32 = 0;
         var cb_max: u32 = 0;
-        var fused = geometry.shared_prefix and geometry.fuse_chain;
+        var chains = geometry.fuse_chain;
         for (windows) |w| for (w.parents, 0..) |p, r| if (r > 0 and p != @as(i32, @intCast(r)) - 1) {
-            fused = false;
+            chains = false;
         };
+        const fused = geometry.shared_prefix and chains;
+        const wide_tail = !geometry.shared_prefix and geometry.group() == 6 and chains and windows.len == 1;
+        const row_limit: usize = if (fused or wide_tail) chain_rows else max_rows;
         for (windows, 0..) |w, st| {
-            if (w.parents.len == 0 or w.parents.len > @as(usize, if (fused) chain_rows else max_rows) or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
+            if (w.parents.len == 0 or w.parents.len > row_limit or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
             if (w.parents[0] != -1) return error.AttentionParents;
             var depths: [chain_rows]u32 = undefined;
             for (w.parents, 0..) |p, r| {
@@ -118,13 +121,14 @@ pub const Plan = struct {
             meta[at + 7] = @intCast(w.capacity * geometry.dim);
             meta[at + 8] = meta[at + 7];
             meta[at + 9] = @intCast(limit);
-            // words 10 and 11 are spare: a row's chunk and the prefix chunks it merges are its node words 2 and 3
+            // Long non-prefix chains address their own keys by position; trees retain the bounded ancestor map.
+            meta[at + 10] = @intFromBool(wide_tail and w.parents.len > path_width);
             row_count = try std.math.add(u32, row_count, @intCast(w.parents.len));
             tile_count += count;
             ca_max = @max(ca_max, ca);
             cb_max = @max(cb_max, cb);
         }
-        if (row_count > @as(u32, if (fused) chain_rows else max_rows)) return error.AttentionRows;
+        if (row_count > row_limit) return error.AttentionRows;
         meta[0] = @intCast(windows.len);
         meta[1] = @intCast(ca_max);
         meta[2] = @intCast(tile_count);
@@ -184,6 +188,7 @@ pub const Plan = struct {
         const depth: u32 = @intCast(p.nodes[node * node_words]);
         if (logical < start) return logical;
         if (logical > start + depth) return null;
+        if (p.meta[global_words + stream * stream_words + 10] != 0) return logical;
         return start + @as(u32, @intCast(p.paths[node * path_width + logical - start]));
     }
     pub fn workspaceBytes(p: Plan) !usize {
@@ -205,7 +210,10 @@ pub const Plan = struct {
             if (path.len > 0) {
                 const last = path[path.len - 1];
                 if (last >= width or p.nodes[(first + last) * node_words] + 1 != path.len) return error.AttentionKeep;
-                for (path, 0..) |r, depth| if (r >= width or p.paths[(first + last) * path_width + depth] != r) return error.AttentionKeep;
+                const chain = p.meta[at + 10] != 0;
+                for (path, 0..) |r, depth| {
+                    if (r >= width or (if (chain) @as(i32, @intCast(depth)) else p.paths[(first + last) * path_width + depth]) != r) return error.AttentionKeep;
+                }
             }
             count += path.len;
         }
@@ -520,4 +528,8 @@ test "target attention reads every config dimension without widening kernel qual
     c.head_dim = 256;
     c.rope_dims = 32;
     try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+}
+
+test {
+    _ = @import("attention_chain_test.zig");
 }

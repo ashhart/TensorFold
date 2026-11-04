@@ -334,7 +334,7 @@ pub const Attention = struct {
         bind(e, .{ q, scratch.get(.q_rows), scratch.get(.qa) });
         e.setValue(args, 3);
         e.dispatchThreads(mtl.Size.of(g.dim, args.packed_rows, g.kv_heads), mtl.Size.of(32, 4, 1));
-        if (prompt and a.prompt != null and (plan.geometry.shared_prefix or !a.units) and plan.streams == 1) {
+        if (prompt and a.prompt != null and (plan.geometry.shared_prefix or (!a.units and g.group() != 6)) and plan.streams == 1) {
             e.barrier();
             try a.promptRows(e, scratch, binding, plan, out, split);
             if (raw_gate) |gate| {

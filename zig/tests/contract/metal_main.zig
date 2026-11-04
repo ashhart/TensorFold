@@ -493,6 +493,9 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_unroll.deinit();
     try nemotron_unroll.collect(o.only);
+    var q27_chains: @import("metal_q27_chain.zig").Suite = .{};
+    defer q27_chains.deinit(a);
+    try q27_chains.collect(a, device, queue, &kernels, o.only);
     // qwen27 attention_io at the 27B's head counts on one Mac (24 over 4) and on a rank of two (12 over 2)
     var ios: std.ArrayList(*io_k.Io) = .empty;
     defer {
