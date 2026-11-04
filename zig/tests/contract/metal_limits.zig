@@ -217,6 +217,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
         if (!assemble) return undefined;
         text = @import("h3_kernels").source;
+    } else if (std.mem.startsWith(u8, d.name, "glm ordered kda ")) {
+        text = comptime tf.glm.kernels.generatedSource("kda_rows") ++ sources.glm_kda_prompt;
     } else if (std.mem.startsWith(u8, d.name, "glm gather ") or std.mem.startsWith(u8, d.name, "glm rows ")) {
         if (!assemble) return undefined;
         text = tf.glm.wide.gather_source;
