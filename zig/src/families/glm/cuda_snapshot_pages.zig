@@ -2,14 +2,12 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const kv = @import("core").kv_pool;
+const walk = @import("core").state_walk;
 const Plan = @import("cuda_snapshot_layout.zig").Plan;
 
-pub const page: usize = 2 << 20;
+pub const page = walk.page;
 pub const Lease = kv.Lease;
-
-pub fn rounded(bytes: usize) !usize {
-    return (try std.math.add(usize, bytes, page - 1)) & ~(page - 1);
-}
+pub const rounded = walk.rounded;
 
 /// TF_GLM_HOST_CACHE=1: kept states in pinned host memory, not on the device; every rank must be given the same value.
 pub fn onHost() !bool {
@@ -74,36 +72,29 @@ pub const Pool = struct {
     }
 
     pub fn take(p: *Pool, bytes: usize) !Lease {
-        const n = (try rounded(bytes)) / page;
-        if (n == 0 or n > p.pages.available()) return error.NoSnapshotRoom;
-        var lease: Lease = .{};
-        errdefer p.pages.finish(&lease);
-        try p.pages.promise(&lease, n);
-        try p.pages.cover(&lease, n, null);
-        return lease;
+        return walk.lease(&p.pages, bytes);
     }
 
     pub fn give(p: *Pool, lease: *Lease) void {
         p.pages.finish(lease);
     }
 
+    /// The plan's parts to (`into`) or from the lease's pages, queued on `stream`: the core walk, a copy a piece.
     pub fn move(p: *const Pool, stream: cuda.Stream, lease: *const Lease, plan: *const Plan, into: bool) !void {
         if (plan.len > lease.ids.items.len * page) return error.SnapshotSize;
         const arena = p.arena orelse return error.NoSnapshotRoom;
-        const base = arena.ptr();
-        const d = arena.driver();
-        var off: usize = 0;
-        for (plan.parts[0..plan.count]) |part| {
-            var done: usize = 0;
-            while (done < part.len) {
-                const at = off + done;
-                const target = base + @as(u64, lease.ids.items[at / page]) * page + at % page;
-                const live = plan.piece(part, done);
-                const n = @min(live.len, page - at % page);
-                try d.check(d.api.cuMemcpyDtoDAsync_v2(if (into) target else live.live, if (into) live.live else target, n, stream.handle), "cuMemcpyDtoDAsync");
-                done += n;
-            }
-            off += part.len;
-        }
+        const kept: walk.Kept = .{ .ids = lease.ids.items, .base = arena.ptr() };
+        const c: Copy = .{ .d = arena.driver(), .s = stream, .into = into };
+        try walk.Device.each(plan.parts[0..plan.count], plan.ids, kept, c, Copy.run);
+    }
+};
+
+const Copy = struct {
+    d: *const cuda.Driver,
+    s: cuda.Stream,
+    into: bool,
+    fn run(c: Copy, live: u64, kept: u64, n: usize) anyerror!void {
+        const dst, const src = if (c.into) .{ kept, live } else .{ live, kept };
+        try c.d.check(c.d.api.cuMemcpyDtoDAsync_v2(dst, src, n, c.s.handle), "cuMemcpyDtoDAsync");
     }
 };
