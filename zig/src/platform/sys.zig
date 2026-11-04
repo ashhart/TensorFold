@@ -90,3 +90,5 @@ const WinDynLib = struct {
         return @ptrCast(@alignCast(p));
     }
 };
+
+pub const file_identity = @import("file_identity.zig");

@@ -48,6 +48,16 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-glm-disk-charge-host", "Actual GLM snapshot save/read byte accounting without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"GLM disk charge:"} })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     @import("disk_identity_host.zig").metal(b, metal, engine, api);
+    const identity_root = b.createModule(.{ .root_source_file = b.path("zig/persistence_identity_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api } } });
+    const identity_filter = b.option([]const u8, "persistence-identity-filter", "One persisted-state identity regression");
+    const identity_run = b.addRunArtifact(b.addTest(.{ .root_module = identity_root, .filters = if (identity_filter) |f| &.{f} else &.{"persistence identity:"} }));
+    identity_run.has_side_effects = true;
+    if (b.top_level_steps.get("test")) |all| all.step.dependOn(&identity_run.step);
+    b.step("test-persistence-identity-host", "Actual checkpoint producers and safe stale namespace misses without a GPU").dependOn(&identity_run.step);
+    const persistence_root = b.createModule(.{ .root_source_file = b.path("zig/flashnext_persistence_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    const persistence_object = b.addObject(.{ .name = "persistence-host-compile", .root_module = persistence_root });
+    _ = persistence_object.getEmittedBin();
+    b.step("compile-persistence-host", "Compile actual GLM and both Flash Next disk-store startup paths without devices").dependOn(&persistence_object.step);
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/gemma4.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_host_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "host", .module = host }, .{ .name = "tensorfold", .module = engine } } });
     const object = b.addObject(.{ .name = "gemma4-host-compile", .root_module = root });
