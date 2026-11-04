@@ -39,9 +39,6 @@ pub const kept = [_]Kept{
         198, 202, 220, 231, 234, 243, 259, 265, 268, 279, 281, 288, 297, 299,
     } },
     .{ .class = "ultra", .why = "reasoning_effort ultra is refused: DeepSeek's endpoint takes it, but no record shows the budget it renders", .efforts = &.{ "ultra" } },
-    .{ .class = "T7", .why = "an assistant turn after another, or opening the conversation: DeepSeek opens it with its own marker", .waits = 2141, .ids = &.{
-        109, 207, 226, 295,
-    } },
     .{ .class = "R1", .why = "a latest_reminder message is refused; DeepSeek's endpoint takes it", .waits = 2141, .ids = &.{
         2, 3, 42, 54, 72, 84, 91, 106, 107, 125, 191, 221, 225, 237, 240, 241, 242, 249, 273, 283, 300, 306, 309,
         318, 319, 320,
@@ -51,9 +48,9 @@ pub const kept = [_]Kept{
     } },
     .{ .class = "T6", .why = "effort names: DeepSeek resolves minimal to thinking at 50 and xhigh to 75", .waits = 2141, .efforts = &.{ "minimal", "xhigh" } },
     .{ .class = "T4", .why = "a typed <｜deepseek_image｜> in request text: DeepSeek keeps it as written", .waits = 2141, .ids = &.{
-        23, 28, 36, 55, 75, 95, 100, 120, 122, 129, 244, 257, 264, 289, 298,
+        23, 28, 36, 55, 75, 95, 100, 120, 122, 129, 207, 226, 244, 257, 264, 289, 298,
     } },
     .{ .class = "T2", .why = "a conversation ending in an assistant turn: DeepSeek appends the generation prompt", .waits = 2141, .ids = &.{
-        0, 1, 17, 58, 59, 124, 165, 256,
+        0, 1, 17, 58, 59, 109, 124, 165, 256, 295,
     } },
 };

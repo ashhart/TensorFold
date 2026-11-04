@@ -414,6 +414,7 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
         last = idx;
     };
     const thinking = o.thinking;
+    var opened = false; // an <｜Assistant｜> marker written for the next assistant turn
     try r.put(BOS);
     for (msgs, 0..) |m, idx| {
         if (idx == 0 and (thinking or m.role == .system)) try r.put(SYSTEM);
@@ -453,6 +454,11 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
             .assistant => {
                 // DeepSeek's: an earlier turn's reasoning only with the tool prompt (or drop_thinking off)
                 const shows = if (o.recipe) thinking and !drop and idx > 0 else thinking and (!drop or after_last);
+                if (o.recipe and !opened) { // a turn no user turn opened opens itself, as DeepSeek's every turn does
+                    try r.put(ASSISTANT);
+                    try r.put(if (shows) THINK_OPEN else THINK_END);
+                }
+                opened = false;
                 if (shows) {
                     try r.request(m.reasoning orelse "");
                     try r.put(THINK_END);
@@ -467,6 +473,7 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
         if (next) |n| if (n != .assistant and n != .latest_reminder) continue;
         if (next == null and !o.add_generation_prompt and m.role != .assistant) continue;
         if (m.role == .user or (m.role == .system and idx > 0)) {
+            opened = true;
             try r.put(ASSISTANT);
             const open = if (o.recipe and next == .assistant) thinking and !drop else thinking and (!drop or last == null or idx >= last.?);
             try r.put(if (open) THINK_OPEN else THINK_END);
