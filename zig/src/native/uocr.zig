@@ -47,7 +47,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = fl.serve.Model.load(gpa, io, o.dir, @intCast(context)) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "the native Unlimited-OCR-2 engine cannot load this checkpoint ({s})", .{@errorName(err)});
+        problem.* = if (err == error.NoTensorUnits) "Unlimited-OCR-2 needs an M5-class GPU (tensor units)" else try std.fmt.allocPrint(a, "the native Unlimited-OCR-2 engine cannot load this checkpoint ({s})", .{@errorName(err)});
         return null;
     };
     errdefer model.deinit();
