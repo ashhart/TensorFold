@@ -81,6 +81,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA resource checks use measured NVCC 13.4 register counts for paged Flash Next preparation, retaining earlier compiler receipts and unchanged launch bounds.
 
+- EXL3's mapped n-gram table participates in upstream's opt-in read-ahead once per file, and teardown joins the worker before unmapping.
+
 - Flash Next's first CUDA EXL3 slice uses the canonical fp32 expert tree, so adding tensor parallelism preserves its one-rank reduction order (#1441, #1442). Other formats are unchanged.
 
 - Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks.
