@@ -68,10 +68,19 @@ pub const Budget = struct {
     engine_paged: bool = false,
     /// Parts per million of the cache that kept states hold as pool pages (TF_KV_SHARE): made pages past the windows.
     kept_ppm: u32 = 0,
+    /// --prompt-cache-gib named the cache: it comes before every window but the engine's own, which take the rest.
+    asked: bool = false,
 };
 
 /// The streams served, the cache's slots and copied-KV bytes, and the pages left for the streams.
-pub const Plan = struct { lanes: u32, snaps: usize, copied: u64, pages: usize, kept: u64 = 0 }; // kept: the cache bytes made pages
+pub const Plan = struct {
+    lanes: u32,
+    snaps: usize,
+    copied: u64,
+    pages: usize,
+    kept: u64 = 0, // the cache bytes made pages
+    taken: u64 = 0, // the cache bytes the windows past the engine's own took before it (0 when it was asked)
+};
 
 /// The prompt cache's split: slots for its snapshots, the rest for their copied KV rows (no slot: no cache).
 pub fn split(cache: u64, snap_bytes: u64, named: ?usize) struct { snaps: usize, copied: u64 } {
@@ -90,12 +99,13 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const fit = @min(extra, left / each);
     if (fit < extra and b.fixed) return error.TooMany;
     left -= fit * l.fixed_bytes;
-    const cache = @min(b.cache, left -| held(l, b, fit));
+    const cache = @min(b.cache, left -| held(l, b, fit, windows(l, b) - 1));
+    const taken = @min(b.cache, left -| held(l, b, fit, 0)) - cache; // what the windows past the engine's own took
     const kept = cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
     const c = split(cache - kept, l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
     const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);
-    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept };
+    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept, .taken = taken };
 }
 
 /// Whether `b.cache` fits whole in what `plan` leaves it: the room past the engine and a fixed part and page a stream.
@@ -105,17 +115,17 @@ pub fn holds(l: Layout, b: Budget) bool {
     const left = b.room - b.engine - own;
     const each = l.fixed_bytes + (1 + l.runPages()) * l.pageBytes();
     const fit = @min(@as(u64, b.lanes - 1), left / each);
-    return left -| (fit * l.fixed_bytes + held(l, b, fit)) >= b.cache;
+    return left -| (fit * l.fixed_bytes + held(l, b, fit, windows(l, b) - 1)) >= b.cache;
 }
 
-/// The pages the cache leaves the other streams: a page and a run each, or the windows the room would hold if more.
-fn held(l: Layout, b: Budget, fit: u64) u64 {
-    return @max(fit * (1 + l.runPages()), (windows(l, b) - 1) * l.pages(b.window)) * l.pageBytes();
+/// The pages the cache leaves the other streams: a page and a run each, or `more` windows if those are more.
+fn held(l: Layout, b: Budget, fit: u64, more: u64) u64 {
+    return @max(fit * (1 + l.runPages()), more * l.pages(b.window)) * l.pageBytes();
 }
 
-/// Streams a window each would serve in this room, the engine's own among them (1 unless its rows are pages).
+/// Windows set aside before the cache, the engine's own among them: as many as the room holds when its rows are pages.
 fn windows(l: Layout, b: Budget) u64 {
-    if (!b.engine_paged or b.window == 0) return 1;
+    if (!b.engine_paged or b.window == 0 or b.asked) return 1; // an asked cache comes before all but the engine's own
     const own = ownPages(l, b);
     return @min(b.lanes, 1 + (b.room - own) / (own + l.fixed_bytes));
 }

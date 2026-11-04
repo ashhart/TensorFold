@@ -130,6 +130,43 @@ test "the engine's own sequence on pages: the windows the room would hold come b
     try expectEqual(room3 - 2 * 2049 * page - 7 * 131 * mib, t.copied);
 }
 
+test "the engine's own sequence on pages: an asked cache comes before every window but the engine's own" {
+    const g: u64 = 1 << 30;
+    // GLM-5.3-Flash on CUDA at TP=3 with a drafter (291 MiB fixed), a 1M window, four streams: the room holds three
+    const tp3: kv.Layout = .{ .fixed_bytes = 291 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const page = tp3.pageBytes();
+    const long: u64 = 1_048_576 + 8;
+    const room = 40 * g;
+    // unasked, the three windows come first and leave the cache 0.88 GiB of its 16
+    const unasked = try kv.plan(tp3, .{ .room = room, .engine = 0, .lanes = 4, .cache = 16 * g, .window = long, .engine_paged = true });
+    try expectEqual(@as(usize, 3 * 2049), unasked.pages);
+    try expectEqual(room - 3 * 2049 * page - 3 * 291 * mib, unasked.copied);
+    try expectEqual(16 * g - unasked.copied, unasked.taken);
+    // asked, the cache comes after the engine's own window and a fixed part and page each; the pool takes the rest
+    const asked = try kv.plan(tp3, .{ .room = room, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true });
+    try expectEqual(@as(u32, 4), asked.lanes);
+    try expectEqual(4 * g, asked.copied);
+    try expectEqual(@as(u64, 0), asked.taken);
+    try expectEqual(@as(usize, @intCast((room - 3 * 291 * mib - 4 * g) / page)), asked.pages);
+    // TF_KV_SHARE: the cache is the pool's kept pages, so the pages are the same and the kept budget is the asked one
+    const shared = try kv.plan(tp3, .{ .room = room, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .kept_ppm = 1_000_000, .asked = true });
+    try expectEqual(4 * g, shared.kept);
+    try expectEqual((try kv.plan(tp3, .{ .room = room, .engine = 0, .lanes = 4, .cache = 16 * g, .window = long, .engine_paged = true, .kept_ppm = 1_000_000 })).pages, shared.pages);
+    // past the room every stream's fixed part and page take, an asked cache never falls as the room grows
+    var last: u64 = 0;
+    var r: u64 = 14 * g;
+    while (r <= 64 * g) : (r += 64 * mib) {
+        const p = try kv.plan(tp3, .{ .room = r, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true });
+        try expect(p.copied >= last);
+        last = p.copied;
+    }
+    // holds counts the same way: the asked cache whole past the window and a fixed part and page each, not a byte less
+    const edge = 2049 * page + 3 * (291 * mib + page) + 4 * g;
+    try expect(kv.holds(tp3, .{ .room = edge, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true }));
+    try expect(!kv.holds(tp3, .{ .room = edge - 1, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true }));
+    try expectEqual(4 * g, (try kv.plan(tp3, .{ .room = edge, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true })).copied);
+}
+
 test "a cache holds when the room past the engine and every stream's fixed part and page is at least its bytes" {
     const g: u64 = 1 << 30;
     const streams = 3 * (64 * mib + nemotron.pageBytes());
