@@ -62,6 +62,10 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 
 ## More ranks
 
+With `TF_GLM_PREFILL_REDUCE=ring`, the startup peer warm-up touches only each rank's next and previous neighbours,
+using the existing rank order. The default split and gather modes still warm every peer. This removes the eager
+opposite-peer warm-up; it does not add a switchless RoCE relay or qualify a four-node ring (#1971).
+
 `TF_GLM_WORLD=3` places a third rank the same way. From 1.1.2 the uneven KDA input projections of TP=3 (22, 21 and
 21 heads) run instead of being refused; TP=3 device qualification is pending
 ([#1067](https://github.com/ashhart/TensorFold/issues/1067)). How a prompt's rows reach the other ranks
