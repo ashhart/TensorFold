@@ -68,9 +68,10 @@ pub fn scratch(e: *E.Engine, mode: Mode) !usize {
     e.pm = try t.alloc(partials * 4);
     e.pl = try t.alloc(partials * 4);
     e.po = try t.alloc(partials * geometry.head_dim * 4);
-    e.logits = try t.alloc(E.most_verify * g.vocab * 2);
+    // a stage without the head keeps no logits
+    e.logits = if (g.heads) try t.alloc(E.most_verify * g.vocab * 2) else 0;
     if (g.moe()) e.routed = try routed.Scratch.carve(&t, g, R);
-    e.amax = try t.alloc(E.most_verify * E.argmaxSlices(g.vocab) * 8);
-    e.picks = try t.alloc(E.most_verify * cuda.sample.Draws.row_scratch);
+    e.amax = if (g.heads) try t.alloc(E.most_verify * E.argmaxSlices(g.vocab) * 8) else 0;
+    e.picks = if (g.heads) try t.alloc(E.most_verify * cuda.sample.Draws.row_scratch) else 0;
     return t.total;
 }
