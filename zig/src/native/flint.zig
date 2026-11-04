@@ -51,7 +51,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const scratch: u64 = fl.state.scratchBytes(c, fl.state.batch_rows) + fl.state.scratchBytes(c, fl.state.prompt_rows);
     const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
         model.deinit();
-        problem.* = "FLINT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+        problem.* = "FLINT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0 and at most this Mac's RAM, or unset it for 75% of RAM";
         return null;
     };
     const fits = fl.budget.longest(&model.config, budget, model.config.context);
