@@ -318,11 +318,22 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     gemma_native.addImport("ze", ze);
     gemma_native.addImport("xpu_gemma4_kernels", empty);
     sources.addImport("gemma4_xpu", gemma_native);
+    sources.addImport("lfm3_xpu", lfm3Module(b, b.graph.host, .debug, xpu));
     // the host test checks every family's admission, so it builds with both DPAS engines
     const source_options = b.addOptions();
     source_options.addOption(bool, "qwen27", true);
     source_options.addOption(bool, "gemma4", true);
     sources.addOptions("xpu_engine_options", source_options);
+    const inventory = b.step("test-xpu-refusal-host", "Unknown-model inventory with and without DPAS, without devices");
+    inventory.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"capability audit: XPU unknown-model"} })).step);
+    const no_dpas = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_xpu_test.zig"), .target = host, .link_libc = true });
+    var imports = sources.import_table.iterator();
+    while (imports.next()) |entry| no_dpas.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    const no_dpas_options = b.addOptions();
+    no_dpas_options.addOption(bool, "qwen27", false);
+    no_dpas_options.addOption(bool, "gemma4", false);
+    no_dpas.addOptions("xpu_engine_options", no_dpas_options);
+    inventory.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = no_dpas, .filters = &.{"capability audit: XPU unknown-model"} })).step);
     const source_tests = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"draft sources:"} }));
     b.step("test-slide-xpu-host", "Unsupported XPU learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"slide admission:"} })).step);
     // the Gemma 4 runner's shard header reader on core (gemma4/xpu_dev.zig), so its malformed inputs run
