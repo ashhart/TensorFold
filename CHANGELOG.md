@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3-1.7B runs on Intel GPUs through XPU, Iris Xe first. Thanks @jschmied.
+
 - Qwen3.5 decode on HIP reads the BF16 router rows the model already holds, with the same tokens. Thanks @AbrahamCete.
 
 - Qwen3.5 prompts on HIP run the residual add and post-mixer norm in one launch, with the same bytes. Thanks @AbrahamCete.
