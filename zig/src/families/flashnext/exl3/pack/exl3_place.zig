@@ -4,6 +4,7 @@ const std = @import("std");
 const scan = @import("exl3_scan.zig");
 const shape = @import("exl3_shape.zig");
 const cache = @import("../model/exl3_cache.zig");
+const tp = @import("../tp/exl3_tp.zig");
 
 pub const Home = enum {
     ngram_host, // PLE rows, page cache or SSD, never a VRAM alloc
@@ -186,8 +187,8 @@ test "a tensor name picks one home and the host banks stay off device" {
     try std.testing.expect(hostBank(.host));
 }
 
-/// Where the bytes live.
-pub const Stay = enum { vram_pinned, vram_learned, host, disk, skip };
+/// Where the bytes for this rank live.
+pub const Stay = enum { vram_pinned, vram_learned, host, disk, other_rank, skip };
 
 /// Integer after `.experts.`, or null when the name is not a routed expert.
 pub fn expertId(name: []const u8) ?u16 {
@@ -204,26 +205,31 @@ pub fn expertId(name: []const u8) ?u16 {
     return @intCast(n);
 }
 
-pub fn stay(which: Home, id: ?u16) error{IllegalCut}!Stay {
+pub fn stay(which: Home, id: ?u16, rank: usize, ranks: usize) error{ IllegalCut, RankOutOfRange }!Stay {
+    if (ranks != 1 and ranks != 2) return error.IllegalCut;
+    if (rank >= ranks) return error.RankOutOfRange;
     switch (which) {
         .ngram_host => return .disk,
         .vision_skip => return .skip,
         .routed_host => {
-            _ = id orelse return error.IllegalCut;
-            return .vram_learned;
+            const expert = id orelse return error.IllegalCut;
+            const span = try tp.range(.routed_set, rank, ranks);
+            if (@as(usize, expert) >= span.lo and @as(usize, expert) < span.hi) return .vram_learned;
+            return .other_rank;
         },
         .plain => return .host,
         .shared_resident, .resident, .centred_norm, .mtp_patch => return .vram_pinned,
     }
 }
 
-pub fn stayOf(t: Tensor) error{IllegalCut}!Stay {
-    return stay(home(t), expertId(t.name));
+pub fn stayOf(t: Tensor, rank: usize, ranks: usize) error{ IllegalCut, RankOutOfRange }!Stay {
+    return stay(home(t), expertId(t.name), rank, ranks);
 }
 
-test "the decode path stays pinned, the n-gram on disk, and the routed experts are learned" {
+test "tp 2 pins the decode path, leaves the n-gram on disk, and learns only this rank's experts" {
     const ngram = "model.language_model.layers.2.ple.ngram_embedding.shard_0.trellis";
-    try std.testing.expectEqual(Stay.disk, try stayOf(.{ .name = ngram, .rank = 2 }));
+    try std.testing.expectEqual(Stay.disk, try stayOf(.{ .name = ngram, .rank = 2 }, 0, 2));
+    try std.testing.expectEqual(Stay.disk, try stayOf(.{ .name = ngram, .rank = 2 }, 1, 2));
 
     const pinned = [_][]const u8{
         "model.layers.0.mlp.shared_expert.up_proj.trellis",
@@ -246,24 +252,25 @@ test "the decode path stays pinned, the n-gram on disk, and the routed experts a
     try std.testing.expectEqual(Stay.host, try stayOf(.{
         .name = "model.embed_tokens.weight",
         .rank = 2,
-    }));
-    try std.testing.expectEqual(Stay.host, try stayOf(.{ .name = "readme", .rank = 0 }));
+    }, 0, 2));
+    try std.testing.expectEqual(Stay.host, try stayOf(.{ .name = "readme", .rank = 0 }, 1, 2));
     for (pinned) |name| {
-        try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = name, .rank = 2 }));
+        try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = name, .rank = 2 }, 0, 2));
+        try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = name, .rank = 2 }, 1, 2));
     }
     try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{
         .name = "model.layers.0.self_attn.q_norm.weight",
         .rank = 1,
-    }));
+    }, 0, 2));
     try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{
         .name = "weight",
         .rank = 1,
         .file = "mtp_hyper_connection_mixer_patch.safetensors",
-    }));
+    }, 1, 2));
     try std.testing.expectEqual(Stay.skip, try stayOf(.{
         .name = "model.visual.blocks.0.weight",
         .rank = 1,
-    }));
+    }, 0, 2));
 
     try std.testing.expectEqual(@as(?u16, 0), expertId("model.layers.0.mlp.experts.0.up_proj.trellis"));
     try std.testing.expectEqual(@as(?u16, 255), expertId("model.layers.0.mlp.experts.255.down_proj.trellis"));
@@ -272,10 +279,15 @@ test "the decode path stays pinned, the n-gram on disk, and the routed experts a
 
     const low = "model.layers.0.mlp.experts.0.up_proj.trellis";
     const high = "model.layers.0.mlp.experts.400.up_proj.trellis";
-    try std.testing.expectEqual(Stay.vram_learned, try stayOf(.{ .name = low, .rank = 3 }));
-    try std.testing.expectEqual(Stay.vram_learned, try stayOf(.{ .name = high, .rank = 3 }));
+    try std.testing.expectEqual(Stay.vram_learned, try stayOf(.{ .name = low, .rank = 3 }, 0, 2));
+    try std.testing.expectEqual(Stay.other_rank, try stayOf(.{ .name = low, .rank = 3 }, 1, 2));
+    try std.testing.expectEqual(Stay.other_rank, try stayOf(.{ .name = high, .rank = 3 }, 0, 2));
+    try std.testing.expectEqual(Stay.vram_learned, try stayOf(.{ .name = high, .rank = 3 }, 1, 2));
+    try std.testing.expectEqual(Stay.vram_learned, try stayOf(.{ .name = high, .rank = 3 }, 0, 1));
 
-    try std.testing.expectError(error.IllegalCut, stay(.routed_host, null));
+    try std.testing.expectError(error.IllegalCut, stayOf(.{ .name = low, .rank = 3 }, 0, 4));
+    try std.testing.expectError(error.RankOutOfRange, stayOf(.{ .name = low, .rank = 3 }, 2, 2));
+    try std.testing.expectError(error.IllegalCut, stay(.routed_host, null, 0, 2));
     try std.testing.expect(std.mem.indexOf(u8, "key_proj", "k_proj") == null);
     try std.testing.expect(std.mem.indexOf(u8, "value_proj", "v_proj") == null);
     try std.testing.expect(std.mem.indexOf(u8, "mlp.shared_expert_gate", "mlp.gate") == null);
@@ -289,21 +301,22 @@ test "mlp.gate, key_proj, and value_proj stay pinned, and so does mlp.router.wei
     const shared_gate = "model.layers.0.mlp.shared_expert_gate.weight";
     for ([_][]const u8{ gate, key, value, router }) |name| {
         try std.testing.expectEqual(Home.resident, home(.{ .name = name, .rank = 2 }));
-        try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = name, .rank = 2 }));
+        try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = name, .rank = 2 }, 0, 2));
+        try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = name, .rank = 2 }, 1, 2));
     }
     // `shared_expert` matches before the resident tokens. This is not the 2560×640 expert.
     try std.testing.expectEqual(Home.shared_resident, home(.{ .name = shared_gate, .rank = 2 }));
-    try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = shared_gate, .rank = 1 }));
+    try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = shared_gate, .rank = 1 }, 0, 2));
 
     const switch_gate = "model.layers.0.mlp.switch_mlp.gate_proj.weight";
     try std.testing.expectEqual(Home.plain, home(.{ .name = switch_gate, .rank = 2 }));
-    try std.testing.expectEqual(Stay.host, try stayOf(.{ .name = switch_gate, .rank = 2 }));
+    try std.testing.expectEqual(Stay.host, try stayOf(.{ .name = switch_gate, .rank = 2 }, 0, 2));
     try std.testing.expectEqual(Home.routed_host, home(.{
         .name = "model.layers.0.mlp.experts.0.gate_proj.trellis",
         .rank = 3,
     }));
     try std.testing.expectEqual(Home.plain, home(.{ .name = "mtp.fc_embedding.weight", .rank = 2 }));
-    try std.testing.expectEqual(Stay.host, try stayOf(.{ .name = "mtp.fc_embedding.weight", .rank = 2 }));
+    try std.testing.expectEqual(Stay.host, try stayOf(.{ .name = "mtp.fc_embedding.weight", .rank = 2 }, 0, 2));
     try std.testing.expectEqual(Home.resident, home(.{ .name = "language_model.mtp.fc_hidden.weight", .rank = 2 }));
-    try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = "language_model.mtp.fc_hidden.weight", .rank = 2 }));
+    try std.testing.expectEqual(Stay.vram_pinned, try stayOf(.{ .name = "language_model.mtp.fc_hidden.weight", .rank = 2 }, 0, 2));
 }

@@ -15,6 +15,7 @@ pub fn mode() !Mode {
 pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, artifact: *const core.proposal_vocab.Artifact, role: Mode) !wt.Q4 {
     const ids = artifact.ids();
     const affine = role == .affine4;
+    if (try @import("exl3/tp/cuda_exl3_mtp.zig").draft(a, d, store, ids, affine)) |q| return q;
     const tensor = try store.tensor("language_model.lm_head.weight");
     if (tensor.dtype == .bf16) {
         if (!tensor.is(.bf16, &.{ wt.vocab, wt.dims })) return error.UnexpectedTensor;

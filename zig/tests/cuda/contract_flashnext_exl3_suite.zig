@@ -3,12 +3,14 @@ const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 const g = @import("core").contract.gates;
+const tp_ = @import("contract_flashnext_exl3_tp.zig");
 const canon_ = @import("contract_flashnext_exl3_canon.zig");
 const writeback = @import("contract_flashnext_writeback.zig");
 
 pub const Suite = struct {
     a: std.mem.Allocator,
     writebacks: [3]writeback.Writeback,
+    masks: tp_.Masks,
     canons: canon_.Canons,
 
     pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, kernels: *std.ArrayList(g.Kernel), hc: cuda.Module, controls: cuda.Module) !*Suite {
@@ -25,6 +27,9 @@ pub const Suite = struct {
         }
         errdefer for (&self.writebacks) |*w| w.deinit();
         for (&self.writebacks) |*w| try kernels.append(a, w.kernel());
+        self.masks = try tp_.Masks.init(gpu, s);
+        errdefer self.masks.deinit();
+        try self.masks.add(a, kernels);
         self.canons = try canon_.Canons.init(gpu, s, controls);
         errdefer self.canons.deinit();
         try self.canons.add(a, kernels);
@@ -33,6 +38,7 @@ pub const Suite = struct {
 
     pub fn destroy(self: *Suite) void {
         self.canons.deinit();
+        self.masks.deinit();
         for (&self.writebacks) |*w| w.deinit();
         self.a.destroy(self);
     }
