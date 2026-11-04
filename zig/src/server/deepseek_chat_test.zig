@@ -152,14 +152,16 @@ const Script = struct {
 };
 const Reply = struct {
     code: u16 = 0,
+    body: json.Value = .null,
     fn out(r: *@This()) @import("openai.zig").Out {
         return .{ .ctx = r, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
     fn open(_: *anyopaque, _: usize) error{Closed}!void {}
     fn event(_: *anyopaque, _: ?json.Value) error{Closed}!void {}
-    fn reply(ctx: *anyopaque, code: u16, _: json.Value) void {
+    fn reply(ctx: *anyopaque, code: u16, body: json.Value) void {
         const r: *@This() = @ptrCast(@alignCast(ctx));
         r.code = code;
+        r.body = body;
     }
 };
 
@@ -240,4 +242,33 @@ test "DeepSeek chat: tool-only Jinja metadata survives the native default fallba
     defer srv.deinit();
     try t.expect(srv.needs_user_after_tool);
     try t.expect(srv.thinking_switch);
+}
+
+test "DeepSeek chat: a native V4.1 reply's usage carries DeepSeek's cache hit and miss counts, V4's does not" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "deepseek_v41", "deepseek_v4" }) |kind| {
+        var tmp = try fixture(a, kind);
+        defer tmp.deinit();
+        var problem: []const u8 = "";
+        const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+        defer hf.deinit();
+        var script: Script = .{};
+        const srv = try @import("server.zig").Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .use_drafts = false }, null);
+        defer srv.deinit();
+        var reply: Reply = .{};
+        var conn = try @import("http_conn.zig").Conn.init(a, -1, "fixture");
+        defer conn.deinit();
+        const body = try json.newObject(a);
+        try body.put(a, "model", .{ .string = "m" });
+        try body.put(a, "max_tokens", try json.intValue(a, 1));
+        try body.put(a, "messages", try tf.messages(a, "H"));
+        @import("openai.zig").run(srv, a, reply.out(), .{ .conn = &conn }, true, .{ .object = body });
+        try t.expectEqual(@as(u16, 200), reply.code);
+        const usage = reply.body.get("usage").?;
+        const hit = usage.get("prompt_cache_hit_tokens");
+        try t.expectEqual(std.mem.eql(u8, kind, "deepseek_v41"), hit != null);
+        if (hit) |h| try t.expectEqual(usage.get("prompt_tokens").?.int64().?, h.int64().? + usage.get("prompt_cache_miss_tokens").?.int64().?);
+    }
 }

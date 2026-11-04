@@ -305,18 +305,8 @@ const Run = struct {
     }
 
     fn usage(r: *Run, reply: *const chat.Reply) Allocator.Error!Value {
-        const a = r.a;
-        const o = try json.newObject(a);
-        try o.put(a, "prompt_tokens", try json.intValue(a, reply.prompt_tokens));
-        try o.put(a, "completion_tokens", try json.intValue(a, reply.completion_tokens));
-        try o.put(a, "total_tokens", try json.intValue(a, reply.prompt_tokens + reply.completion_tokens));
-        const cached = try json.newObject(a);
-        try cached.put(a, "cached_tokens", try json.intValue(a, reply.cached_tokens));
-        try o.put(a, "prompt_tokens_details", .{ .object = cached });
-        const thought = try json.newObject(a);
-        try thought.put(a, "reasoning_tokens", try json.intValue(a, reply.reasoning_tokens));
-        try o.put(a, "completion_tokens_details", .{ .object = thought });
-        return .{ .object = o };
+        const n: @import("usage.zig").Counts = .{ .prompt = reply.prompt_tokens, .cached = reply.cached_tokens, .completion = reply.completion_tokens, .reasoning = reply.reasoning_tokens };
+        return @import("usage.zig").of(r.a, n, r.is_chat and r.srv.dsv41); // DeepSeek's chat keys for its native V4.1
     }
 
     /// ``response_extras``: exact_mode, the matched stop, the runtime and the draft counters.
