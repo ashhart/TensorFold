@@ -451,7 +451,9 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
                 try r.request(m.content);
             },
             .assistant => {
-                if (thinking and (!drop or after_last)) {
+                // DeepSeek's: an earlier turn's reasoning only with the tool prompt (or drop_thinking off)
+                const shows = if (o.recipe) thinking and !drop and idx > 0 else thinking and (!drop or after_last);
+                if (shows) {
                     try r.request(m.reasoning orelse "");
                     try r.put(THINK_END);
                 }
@@ -466,7 +468,7 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
         if (next == null and !o.add_generation_prompt and m.role != .assistant) continue;
         if (m.role == .user or (m.role == .system and idx > 0)) {
             try r.put(ASSISTANT);
-            const open = thinking and (!drop or last == null or idx >= last.?);
+            const open = if (o.recipe and next == .assistant) thinking and !drop else thinking and (!drop or last == null or idx >= last.?);
             try r.put(if (open) THINK_OPEN else THINK_END);
         }
     }
