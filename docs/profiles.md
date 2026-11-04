@@ -31,6 +31,10 @@ requirements. The profile does not waive memory, page-size, tensor-parallel, dra
 tensorfold capabilities --json
 ```
 
+The top-level `env` array lists selected documented variables. It is not a complete inventory of runtime environment
+readers. `profiles.registered_switches` covers the profile registry in this build, including variables absent from
+`env`; it is also not an inventory of every family-specific runtime setting. Consult each family's recipe for those.
+
 The `profiles` object contains `default`, `available`, and `registered_switches`. Every row identifies its switch,
 backend, model types, class, effect, evidence link number, syntax, and stable fallback. A null fallback means the
 profile supplies no value. Registry metadata comes directly from the same table the readers use.

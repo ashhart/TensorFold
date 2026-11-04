@@ -1,4 +1,4 @@
-//! ``capabilities --json``: the engine's version, chip, backends and families, then the native flags and variables.
+//! ``capabilities --json``: engine facts, native flags and selected documented variables.
 const std = @import("std");
 const api = @import("engine_api");
 const cli = @import("cli.zig");
@@ -15,7 +15,7 @@ pub const Engines = struct {
     p2p: ?[]const u8 = null,
 };
 
-/// The native capabilities document: the table's native flags and the honoured variables.
+/// Native flags and selected supported variables; env is non-exhaustive, profiles lists registered switches.
 pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.print("{{\"schema\": 1, \"engine\": \"zig\", \"version\": \"{s}\", \"chip\": ", .{e.version});
     if (e.chip) |c| try w.print("\"{s}\"", .{c}) else try w.writeAll("null");
@@ -53,4 +53,25 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     }, .{}, w);
     if (e.p2p) |p| try w.print(", \"p2p\": {s}", .{p});
     try w.writeAll("}\n");
+}
+
+test "capability audit: environment list is a subset beside the complete profile registry" {
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try capabilities(&out.writer, .{ .version = "test" });
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    const env = parsed.value.object.get("env").?.array.items;
+    const entries = parsed.value.object.get("profiles").?.object.get("registered_switches").?.array.items;
+    try std.testing.expectEqual(api.profile.entries.len, entries.len);
+    var additional: usize = 0;
+    for (entries, api.profile.entries) |value, entry| {
+        const name = value.object.get("id").?.string;
+        try std.testing.expectEqualStrings(entry.name(), name);
+        const listed = for (env) |v| {
+            if (std.mem.eql(u8, name, v.string)) break true;
+        } else false;
+        if (!listed) additional += 1;
+    }
+    try std.testing.expect(additional > 0);
 }
