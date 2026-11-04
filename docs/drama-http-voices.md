@@ -25,6 +25,14 @@ Reference `text` is the exact transcript. Codes are frame-major signed integers,
 
 The loader enforces the family's reference count, transcript length, frame count and codebook ranges before serving. It also rejects empty references, structural prompt tokens, malformed speaker tags, oversized files and oversized catalogs. The assembled prompt must still fit the engine's advertised prompt budget. Reference rows go through the same family `prompt.build` used by the generation CLI; only the tokenizer interface is adapted.
 
+## Speech limits and discovery
+
+`GET /v1/models` includes a `speech` object only for a loaded speech engine. `max_assembled_prompt_rows` counts all backbone prompt rows, including wrappers, reference transcripts and acoustic reference codes. `max_generated_acoustic_frames` is the output budget, not a text-token limit. `sample_rate_hz` and `samples_per_acoustic_frame` describe the output geometry. `max_input_code_points` is the separate HTTP input-text policy; it is not a tokenizer or assembled-row budget.
+
+The existing `context_length` and `max_model_len` fields describe the combined positional window. Drama reserves one row: assembled prompt rows plus generated frames plus that reserved row must fit the context. Explicit `--max-frames` values are honored exactly or refused; only the omitted default retains its low-context clamp. The minimum prompt has two rows, so the largest possible explicit frame budget is `--context - 3`, before accounting for the actual request's prompt.
+
+An overlong assembled prompt is refused before engine submission. Its error reports the assembled-row limit, tokenized request text and acoustic reference-frame count separately. Request-text tokens exclude reference transcripts and structural wrappers; these still contribute to the assembled total. Discovery reports the loaded budgets, not a qualification of a larger model-config window. This change does not raise Drama's current context or prompt limits and does not add multi-Mac speech serving.
+
 ## Dialogue speakers
 
 Speech input and reference transcripts accept `<|speaker:N|>` with decimal IDs from `0` through `15`. Tags can change speakers within one request. Untagged text defaults to speaker 0; a leading tag after Unicode whitespace is preserved. Leading zeros, negative IDs, non-ASCII digits, incomplete tags and IDs above 15 are rejected.
