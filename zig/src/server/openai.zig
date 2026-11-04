@@ -91,10 +91,9 @@ pub fn errorBody(a: Allocator, cx: *const Cx, param: ?[]const u8) Allocator.Erro
     try o.put(a, "message", .{ .string = cx.message });
     if (cx.kind == .other or cx.kind == .server) return .{ .object = o };
     try o.put(a, "type", .{ .string = "invalid_request_error" });
-    if (cx.kind == .context_length) {
-        try o.put(a, "param", if (param) |p| .{ .string = p } else .null);
-        try o.put(a, "code", .{ .string = "context_length_exceeded" });
-    }
+    if (cx.kind == .context_length) try o.put(a, "param", if (param) |p| .{ .string = p } else .null);
+    const code: ?[]const u8 = cx.code orelse if (cx.kind == .context_length) "context_length_exceeded" else null;
+    if (code) |c| try o.put(a, "code", .{ .string = c });
     return .{ .object = o };
 }
 

@@ -24,6 +24,7 @@ const Server = @import("server.zig").Server;
 const idle_unload = @import("idle_unload.zig");
 const admission = @import("request_admission.zig");
 const log = @import("log.zig");
+const wait = @import("wait_reason.zig");
 const Conn = http_conn.Conn;
 const Allocator = std.mem.Allocator;
 
@@ -169,12 +170,12 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
             if (wake_problem.len > 0) {
                 discardBody(conn, a);
                 log.line("idle reload failed: {s}", .{wake_problem});
-                return draining(conn, is_anthropic); // the model is loading: 503 + Retry-After, the client retries
+                return waiting(conn, is_anthropic, wait.reloadReason(wake_problem));
             }
         } else |e| {
             discardBody(conn, a);
             log.line("idle reload failed: {s}", .{@errorName(e)});
-            return draining(conn, is_anthropic);
+            return waiting(conn, is_anthropic, wait.reload_failed);
         }
     }
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
@@ -212,15 +213,17 @@ pub var counted_hook: ?*const fn () void = null;
 
 /// Seconds a refused client is told to wait while the server drains for a restart (Retry-After).
 pub const retry_after_s = 30;
-pub const restarting = "server restarting: retry shortly";
+pub const restarting = wait.restarting.message;
 
 /// A request that arrives while a stop drains: 503, Retry-After, the API's own error shape; the connection closes.
 pub fn draining(conn: *Conn, anthropic_shape: bool) void {
-    const body = if (anthropic_shape)
-        "{\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"" ++ restarting ++ "\"}}"
-    else
-        "{\"error\": {\"message\": \"" ++ restarting ++ "\", \"type\": \"server_error\", \"param\": null, \"code\": \"server_restarting\"}}";
-    sendDraining(conn, body);
+    waiting(conn, anthropic_shape, wait.restarting);
+}
+
+/// A wait's 503 in the route's error shape: the code names why, and the client retries after Retry-After.
+pub fn waiting(conn: *Conn, anthropic_shape: bool, w: wait.Wait) void {
+    var buf: [512]u8 = undefined;
+    sendDraining(conn, if (anthropic_shape) wait.anthropicBody(&buf, w) else wait.body(&buf, w));
 }
 
 /// 503 with Retry-After and Connection: close, `body` as JSON.
