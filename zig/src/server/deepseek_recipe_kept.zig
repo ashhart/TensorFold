@@ -34,12 +34,11 @@ pub const kept = [_]Kept{
     .{ .class = "EFF", .why = "the prompt was rendered from our old resolution of this effort name; the effort test checks DeepSeek's", .ids = &.{
         303,
     } },
-    .{ .class = "ultra", .why = "reasoning_effort ultra is refused: DeepSeek's endpoint takes it, but no record shows the budget it renders", .efforts = &.{ "ultra" } },
-    .{ .class = "T1", .why = "the tool schema line: DeepSeek writes exactly name, description (empty if absent) and parameters", .waits = 2141, .ids = &.{
-        5, 6, 20, 29, 39, 46, 48, 49, 67, 69, 80, 83, 97, 101, 104, 105, 111, 112, 120, 130, 131, 133, 142, 153, 157,
-        169, 172, 178, 180, 184, 198, 202, 213, 220, 231, 234, 243, 260, 263, 265, 276, 279, 281, 288, 291, 292, 297,
-        299,
+    .{ .class = "NS", .why = "a tool's namespace: DeepSeek's Chat Completions ignores it (cases 6, 67, 97); this prompt flattens it", .ids = &.{
+        5, 20, 29, 39, 40, 46, 48, 69, 80, 83, 101, 104, 105, 112, 131, 133, 142, 145, 157, 169, 178, 180, 184, 188,
+        198, 202, 220, 231, 234, 243, 259, 265, 268, 279, 281, 288, 297, 299,
     } },
+    .{ .class = "ultra", .why = "reasoning_effort ultra is refused: DeepSeek's endpoint takes it, but no record shows the budget it renders", .efforts = &.{ "ultra" } },
     .{ .class = "T5", .why = "earlier reasoning: without tools DeepSeek drops every earlier turn's reasoning", .waits = 2141, .ids = &.{
         1, 17, 28, 58, 59, 109, 124, 207, 244, 264, 298,
     } },
@@ -51,13 +50,13 @@ pub const kept = [_]Kept{
         318, 319, 320,
     } },
     .{ .class = "T9", .why = "non-object call arguments: DeepSeek renders one arguments parameter with the raw text", .waits = 2141, .ids = &.{
-        188,
+        292,
     } },
     .{ .class = "T6", .why = "effort names: DeepSeek resolves minimal to thinking at 50 and xhigh to 75", .waits = 2141, .efforts = &.{ "minimal", "xhigh" } },
     .{ .class = "T4", .why = "a typed <｜deepseek_image｜> in request text: DeepSeek keeps it as written", .waits = 2141, .ids = &.{
-        23, 36, 55, 75, 95, 100, 122, 129, 257, 289,
+        23, 36, 55, 75, 95, 100, 120, 122, 129, 257, 289,
     } },
     .{ .class = "T2", .why = "a conversation ending in an assistant turn: DeepSeek appends the generation prompt", .waits = 2141, .ids = &.{
-        0, 145, 165, 256, 268,
+        0, 165, 256,
     } },
 };

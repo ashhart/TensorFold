@@ -206,10 +206,11 @@ fn qualifiedName(a: Allocator, fn_obj: Value, namespace: ?Value) Allocator.Error
 }
 
 /// The function definitions the system block lists, names qualified, in their own key order.
-fn toolFunction(r: *R, tool: Value) Error!Value {
+fn toolFunction(r: *R, tool: Value, recipe: bool) Error!Value {
     if (tool != .object) return r.refuse("tools must be a list of objects", .{});
     const inner = tool.get("function");
     const src = if (inner != null and inner.? == .object) inner.? else tool;
+    if (recipe) return recipeFunction(r, src);
     const fnv = try json.copyObject(r.a, src.object);
     if (tool.get("namespace")) |ns| if (ns != .null) try fnv.put(r.a, "namespace", ns);
     const ns = fnv.get("namespace");
@@ -225,6 +226,17 @@ fn toolFunction(r: *R, tool: Value) Error!Value {
     return .{ .object = fnv };
 }
 
+/// DeepSeek's Chat Completions schema line: exactly name, description ("" when absent) and parameters, no namespace.
+fn recipeFunction(r: *R, src: Value) Error!Value {
+    const raw = src.get("name") orelse return r.refuse("a tool has no name", .{});
+    const out = try json.newObject(r.a);
+    try out.put(r.a, "name", .{ .string = try scalarText(r.a, raw) orelse try dumps(r.a, raw) });
+    const description = src.get("description") orelse Value.null;
+    try out.put(r.a, "description", if (description == .null) .{ .string = "" } else description);
+    try out.put(r.a, "parameters", src.get("parameters") orelse .null);
+    return .{ .object = out };
+}
+
 const tools_head =
     "## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<" ++ DSML ++ " calls>\" block like the following:\n\n" ++
     "<" ++ DSML ++ " calls>\n<" ++ DSML ++ " invoke name=\"$TOOL_NAME\">\n<" ++ DSML ++ " parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</" ++ DSML ++ " parameter>\n...\n</" ++ DSML ++ " invoke>\n" ++
@@ -234,11 +246,11 @@ const tools_head =
     "Otherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n";
 const tools_tail = "\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n";
 
-fn renderTools(r: *R, tools: []const Value) Error!void {
+fn renderTools(r: *R, tools: []const Value, recipe: bool) Error!void {
     try r.put(tools_head);
     for (tools, 0..) |t, i| {
         if (i > 0) try r.put("\n");
-        try r.dumps(try toolFunction(r, t));
+        try r.dumps(try toolFunction(r, t, recipe));
     }
     try r.put(tools_tail);
 }
@@ -264,7 +276,7 @@ fn argumentsOf(a: Allocator, raw: ?Value) Allocator.Error!*json.Object {
     return o;
 }
 
-fn renderCalls(r: *R, calls: []const Value) Error!void {
+fn renderCalls(r: *R, calls: []const Value, recipe: bool) Error!void {
     try r.put("\n\n" ++ CALLS_OPEN ++ "\n");
     for (calls, 0..) |c, i| {
         if (i > 0) try r.put("\n");
@@ -272,7 +284,7 @@ fn renderCalls(r: *R, calls: []const Value) Error!void {
         const f = c.get("function");
         const fnv = if (f != null and f.? != .null) f.? else c;
         if (fnv != .object) return r.refuse("a tool call's function must be an object", .{});
-        const name = try qualifiedName(r.a, fnv, fnv.get("namespace")) orelse return r.refuse("a tool call has no name", .{});
+        const name = try qualifiedName(r.a, fnv, if (recipe) null else fnv.get("namespace")) orelse return r.refuse("a tool call has no name", .{});
         try r.put("<" ++ DSML ++ " invoke name=\"");
         try r.request(name);
         try r.put("\">\n");
@@ -418,7 +430,7 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
                 try r.request(m.content);
                 if (m.tools) {
                     try r.put("\n\n");
-                    try renderTools(&r, o.tools);
+                    try renderTools(&r, o.tools, o.recipe);
                 }
                 if (m.response_format) |rf| {
                     try r.put("\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n");
@@ -444,7 +456,7 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
                     try r.put(THINK_END);
                 }
                 try r.request(m.content);
-                if (m.calls.len > 0) try renderCalls(&r, m.calls);
+                if (m.calls.len > 0) try renderCalls(&r, m.calls, o.recipe);
                 try r.put(EOS);
             },
             .tool => unreachable, // merged into user turns
