@@ -39,7 +39,19 @@ pub fn leafTree(self: anytype, out: u64, start: usize, log: usize) !void {
     try cuda.launch.launch(self.k.leaf_tree, .{ .grid = .{ .x = @intCast(self.rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
 }
 
-/// Keep the canonical fp32 branch for writeback and any branch consumer.
+/// The pieces in `g` (piece i at i * stride floats) merged by `meta` into `out`.
+pub fn leafFinish(self: anytype, g: u64, out: u64, meta: u64, pieces: usize, stride: usize) !void {
+    var a: cuda.Args = .{};
+    a.add(g);
+    a.add(out);
+    a.add(meta);
+    a.add(batch.cint(pieces));
+    a.add(batch.cint(dims));
+    a.add(@as(i64, @intCast(stride)));
+    try cuda.launch.launch(self.k.leaf_finish, .{ .grid = .{ .x = @intCast(self.rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
+}
+
+/// moe_f32 holds the canonical branch: the write-back reads it and moeAdds keeps it.
 pub fn kept(self: anytype) void {
     self.canon_f32 = true;
     self.pending_f32 = true;

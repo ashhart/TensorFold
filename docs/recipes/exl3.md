@@ -8,8 +8,8 @@ GLM-5.3-Flash.
 
 - The native engine has the format and a reference decoder in core (`zig/src/core/exl3_format.zig`, @akol1, #496),
   and Metal has a standalone EXL3 projection (`zig/src/core/exl3_projection.zig`, @akol1, #681). On CUDA, `qwen3_5`
-  serves EXL3 packs of the Qwen3.5 models and of the dense Qwen3.8-27B ([using it](#using-it)). Flash Next serves an
-  EXL3 pack on CUDA (sm_120, one rank; see [its recipe](flash-next-cuda.md#exl3-checkpoints)).
+  serves EXL3 packs of the Qwen3.5 models and of the dense Qwen3.8-27B ([using it](#using-it)). Flash Next's one- and
+  two-rank CUDA integration is in review; see [its recipe](flash-next-cuda.md#exl3-checkpoints) for qualification scope.
 - CUDA's EXL3 operators, projections and grouped routed experts landed in 1.1.0 (#740, #741, #806, #837). On CUDA,
   GLM-5.3-Flash runs its routed experts through them and `qwen3_5` serves dense EXL3 packs. Another family needs a
   loader for its EXL3 tensors before it can serve a checkpoint.
