@@ -146,6 +146,7 @@ The debt grows after each step and falls after each decode round.
 A long prompt's next step runs only when no debt is owed or no stream can decode.
 At the default 1 no debt is recorded, so the only waiting is the ordinary turn-taking: the host runs at most one step of a long prompt each time it turns to it, and chunked prompts still interleave with the decoding streams' rounds.
 Lower values add that debt, finish the long prompt later and leave more time for decoding streams.
+Flash Next's shared sessions on a Mac without tensor units start from a reply share of 0.8 when neither this nor `--decode-share` is set: see [the API](docs/api.md).
 A prompt whose whole uncached pass is at most 512 rows runs outside the share as one call.
 The check compares the prompt's length with the cached state, not how far the fill has reached, so a long prompt whose last rows remain does not become exempt when its unfilled tail is small.
 

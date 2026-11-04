@@ -270,7 +270,9 @@ the flag is the reply's share, and the prompt owes its complement: it also offer
 prompt's chunks to families that declare chunk-independent prompt arithmetic. That offer is gated per family
 behind device token-hash qualification; every native family is gated out today, so no native server caps chunk
 rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
-the prompt's share of a fill step's wall time, time only, never smaller chunks. `TENSORFOLD_PREFILL_ORDER=srpt`
+the prompt's share of a fill step's wall time, time only, never smaller chunks. Flash Next's shared sessions on a Mac
+without tensor units are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
+from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets running replies with less estimated work left than a filling long prompt take rounds first, the prompt keeping
 at least 10% of the time. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal and
 hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
