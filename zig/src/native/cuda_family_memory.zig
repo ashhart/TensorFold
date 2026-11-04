@@ -18,7 +18,7 @@ const Sources = struct {
 pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const host_counts = budget.hostCounts(unified, windows);
+    const host_counts = budget.hostCounts(unified, windows, budget.wslPool(Host.env("TENSORFOLD_UNIFIED_HOST_COUNTS"), Host.env("WSL_DISTRO_NAME")));
     const text = if (host_counts) Host.procText(a, io, "/proc/meminfo") else null;
     defer if (text) |bytes| a.free(bytes);
     // read after MemAvailable, which the lists drain into: a page moving in between is missed, not counted twice
