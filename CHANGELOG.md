@@ -16,6 +16,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.5-MoE's prompt sorts its experts' rows in one threadgroup, a thread an expert, with the same order as the serial sort (#1799). Thanks to @BobClawblaw.
 - The lane core takes readout requests for decision prompts, read in pinned 1,024-row pieces, and a batched embedding request no longer hangs on a backend that prefills many prompts at once (#2047). Thanks to @laudney.
+- DeepSeek-V4.1 served natively, with no chat template of its own, renders chats as DeepSeek's own Chat Completions does: tools as name, description and parameters only (no `strict`, no namespace), every assistant turn's reasoning left out when no tools are offered, its own marker on every assistant turn, `latest_reminder` turns accepted and placed before the next turn (only the first of consecutive reminders, as DeepSeek keeps), non-object call arguments as one `arguments` string, text parts joined by a blank line, `minimal` thinking at 50 and `xhigh` at 75, a typed `<｜deepseek_image｜>` kept as written, and a generation prompt after a closing assistant turn; its usage adds `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens`. DeepSeek-V4 and other models are unchanged (#2141).
 
 - XPU's dense 27B takes its kernel sizes from one shared `shape.h`, with 8-head prompt attention, and its SPIR-V images stay byte-identical (#1425, thanks @tolewis).
 
