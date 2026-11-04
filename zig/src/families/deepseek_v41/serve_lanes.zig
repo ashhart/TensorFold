@@ -134,6 +134,7 @@ pub const Served = struct {
         s.core = lanes.Engine.init(gpa, &s.cfg, s.x.backend(), s.clock.clock());
         s.x.attach(&s.core);
         s.host = api.LaneHost.init(gpa, io, &s.core, .{ .name = backend.name, .lanes = backend.slots, .context_window = @intCast(window), .prefill_step = backend.prefill_step, .vision = backend.vision });
+        s.host.info_.logprobs = tgt.vtable.scored_prompt != null;
         s.host.info_.draft_sources = draftSources(dspark_on, s.cfg.max_copy > 0);
         // the lanes run on LaneHost's thread: a backend whose state is per thread binds it there
         s.host.on_thread = backend.on_thread;

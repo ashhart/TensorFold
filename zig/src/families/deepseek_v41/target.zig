@@ -12,11 +12,15 @@ const branches = @import("draft/branches.zig");
 const pk = @import("serve_knobs.zig");
 const ced = @import("ced.zig");
 const pf = @import("forward_prefill.zig");
+const lp = @import("logprob_gpu.zig");
+const LogRow = lanes.logprob.Row;
 
 pub const Error = error{ TreeWindow, Sampling, Slots, NotAChain, WindowRows };
 
 pub const GpuTarget = struct {
     f: *fwd.Forward,
+    prompt_row: ?*LogRow = null,
+    prompt_k: u8 = 0,
     /// rows a prefill window takes (the decode path's buckets; the forward plans buffers for them)
     prefill_rows: u32 = 16,
     /// a slot that already holds the prompt: prefill returns this choice without running the prompt again
@@ -61,7 +65,7 @@ pub const GpuTarget = struct {
         return .{ .ptr = t, .vtable = &vtable };
     }
 
-    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .release_checked = releaseChecked, .available = available, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm };
+    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .release_checked = releaseChecked, .available = available, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .scored_prompt = scoredPrompt };
 
     fn admit(p: *anyopaque, slot: u32, max_new: u64) void {
         const t = self_(p);
@@ -72,6 +76,14 @@ pub const GpuTarget = struct {
         return @ptrCast(@alignCast(p));
     }
 
+    fn scoredPrompt(p: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64, k: u8, row: *LogRow, finish_: bool) anyerror!u32 {
+        const t = self_(p);
+        t.prompt_row = row;
+        t.prompt_k = k;
+        defer t.prompt_row = null;
+        return if (finish_) finish(p, slot, ids, sampling, draw) else prefill(p, slot, ids, sampling, draw);
+    }
+
     fn prefill(p: *anyopaque, slot: u32, ids: []const u32, sampling: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self_(p);
         if (!available(p, slot)) return error.SlotUnavailable;
@@ -79,7 +91,10 @@ pub const GpuTarget = struct {
         _ = t.takeReplayed(slot);
         const keyed = try t.keyedOf(sampling);
         t.tree.clear();
-        if (t.resume_first) |first| if (t.f.slot.pos == ids.len and t.f.slot.pending == null) return first;
+        if (t.resume_first) |first| if (t.f.slot.pos == ids.len and t.f.slot.pending == null) {
+            if (t.prompt_row != null) return error.LogprobsNoHeadSnapshot;
+            return first;
+        };
         // the request's pool pages, then a saved entry that prefixes the prompt: the slot continues, the rest prefills
         const max_new: ?u64 = if (slot < t.max_new.len) t.max_new[slot] else null;
         if (slot < t.max_new.len) t.max_new[slot] = null;
@@ -106,7 +121,7 @@ pub const GpuTarget = struct {
             try t.handTaps(slot);
             var one: [1]u32 = undefined;
             var out = [_][]u32{&one};
-            try window(p, &.{.{ .slot = slot, .start = ids.len - sp.window, .tokens = ids[ids.len - sp.window ..], .parents = null, .draws = &.{draw}, .sampling = sampling }}, &out);
+            try window(p, &.{.{ .slot = slot, .start = ids.len - sp.window, .tokens = ids[ids.len - sp.window ..], .parents = null, .draws = &.{draw}, .sampling = sampling, .logprobs = if (t.prompt_row != null) t.prompt_k else null, .logrows = if (t.prompt_row) |v| @as([*]LogRow, @ptrCast(v))[0..1] else &.{} }}, &out);
             return one[0];
         }
         if (t.own_prefill) {
@@ -114,11 +129,12 @@ pub const GpuTarget = struct {
             try t.f.prefill(rest);
             const seg: usize = @import("forward_prefill.zig").segmentRows(t.f);
             const last = if (rest.len % seg == 0) seg else rest.len % seg;
-            if (keyed) |s| return t.pickOne(@intCast(last - 1), s, draw);
+            if (t.prompt_row != null) try lp.capture(t.f, @intCast(last - 1), 1);
+            if (keyed) |s| return t.promptPicked(try t.pickOne(@intCast(last - 1), s, draw));
             const picks = try t.f.gpa.alloc(u32, last);
             defer t.f.gpa.free(picks);
             try t.f.greedy(picks);
-            return picks[last - 1];
+            return t.promptPicked(picks[last - 1]);
         }
         var at_ = at;
         var choice: [1]u32 = .{0};
@@ -126,6 +142,7 @@ pub const GpuTarget = struct {
             const n = @min(@min(t.prefill_rows, t.max_rows), ids.len - at_);
             try t.f.window(ids[at_ .. at_ + n]);
             if (at_ + n == ids.len) {
+                if (t.prompt_row != null) try lp.capture(t.f, @intCast(n - 1), 1);
                 // the keyed choice after the prompt's last row: the last row's greedy pick, or its sampled one
                 if (keyed) |s| choice[0] = try t.pickOne(@intCast(n - 1), s, draw) else {
                     var rows: [64]u32 = undefined;
@@ -136,7 +153,12 @@ pub const GpuTarget = struct {
             try t.f.keep(@intCast(n - 1));
             at_ += n;
         }
-        return choice[0];
+        return t.promptPicked(choice[0]);
+    }
+
+    fn promptPicked(t: *GpuTarget, token: u32) !u32 {
+        if (t.prompt_row) |row| try lp.rows(t.f, 0, &.{token}, t.prompt_k, @as([*]LogRow, @ptrCast(row))[0..1]);
+        return token;
     }
 
     /// The pieces path's slot for an operation: activated (row mode), or the one slot.
@@ -206,7 +228,7 @@ pub const GpuTarget = struct {
         }
         var one: [1]u32 = undefined;
         var out = [_][]u32{&one};
-        try window(p, &.{.{ .slot = slot, .start = ids.len - 1, .tokens = ids[ids.len - 1 ..], .parents = null, .draws = &.{draw}, .sampling = sampling }}, &out);
+        try window(p, &.{.{ .slot = slot, .start = ids.len - 1, .tokens = ids[ids.len - 1 ..], .parents = null, .draws = &.{draw}, .sampling = sampling, .logprobs = if (t.prompt_row != null) t.prompt_k else null, .logrows = if (t.prompt_row) |v| @as([*]LogRow, @ptrCast(v))[0..1] else &.{} }}, &out);
         return one[0];
     }
 
@@ -283,6 +305,7 @@ pub const GpuTarget = struct {
         if (t.rows) |b| return b.targetWindow(segments, choices, t.sampler);
         if (segments.len != 1) return error.Slots;
         const s = segments[0];
+        if (s.logrows.len != (if (s.logprobs != null) s.tokens.len else @as(usize, 0))) return error.LogprobRow;
         if (s.slot != 0) return error.Slots;
         if (s.parents != null) return t.tree.window(.{ .ptr = t, .vtable = &chains }, s, choices[0]);
         t.tree.clear();
@@ -295,8 +318,9 @@ pub const GpuTarget = struct {
         if (s.start != t.f.slot.pos) return error.NotAChain;
         if (s.tokens.len > t.max_rows) return error.WindowRows;
         try t.f.window(s.tokens);
-        if (keyed) |smp| return t.sampler.?.choose(0, @intCast(s.tokens.len), smp, s.draws, choices[0][0..s.tokens.len]);
-        try t.f.greedy(choices[0][0..s.tokens.len]);
+        if (s.logprobs != null) try lp.capture(t.f, 0, s.tokens.len);
+        if (keyed) |smp| try t.sampler.?.choose(0, @intCast(s.tokens.len), smp, s.draws, choices[0][0..s.tokens.len]) else try t.f.greedy(choices[0][0..s.tokens.len]);
+        if (s.logprobs) |k| try lp.rows(t.f, 0, choices[0][0..s.tokens.len], k, s.logrows);
     }
 
     /// The slot's pending window (a chain window never kept), if any.
@@ -401,11 +425,16 @@ pub const GpuTarget = struct {
     }
 
     /// The tree resolver's chains: a chain window through `window` (its rules and refusals), dropped on every rank.
-    const chains: branches.Chains.VTable = .{ .run = chainRun, .drop = chainDrop };
+    const chains: branches.Chains.VTable = .{ .run = chainRun, .drop = chainDrop, .scored = chainScored };
 
     fn chainRun(p: *anyopaque, slot: u32, start: u64, tokens: []const u32, draws: []const u64, sampling: ?lanes.Sampling, out: []u32) anyerror!void {
         var one = [_][]u32{out};
         return window(p, &.{.{ .slot = slot, .start = start, .tokens = tokens, .parents = null, .draws = draws, .sampling = sampling }}, &one);
+    }
+
+    fn chainScored(p: *anyopaque, s: iface.Segment, out: []u32) anyerror!void {
+        var one = [_][]u32{out};
+        return window(p, &.{s}, &one);
     }
 
     fn chainDrop(p: *anyopaque, slot: u32) anyerror!void {

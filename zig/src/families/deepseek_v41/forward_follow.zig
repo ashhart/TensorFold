@@ -238,6 +238,10 @@ pub fn follow(f: *Forward) !void {
 /// One of the leader's operations (follow); true: `stop`.
 fn followOp(f: *Forward, msg: []const i64, ids: *std.ArrayList(u32), prompt: *std.ArrayList(u32), picks: *std.ArrayList(u32)) !bool {
     switch (msg[0]) {
+        @import("logprob_gpu.zig").op => {
+            if (msg.len != 3 or msg[1] < 0 or msg[1] > 4096 or msg[2] <= 0 or msg[2] > 4096) return error.BadPlan;
+            try @import("logprob_gpu.zig").capture(f, @intCast(msg[1]), @intCast(msg[2]));
+        },
         op_window => {
             const n: usize = @intCast(msg[1]);
             ids.clearRetainingCapacity();
