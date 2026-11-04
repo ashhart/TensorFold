@@ -49,6 +49,7 @@ pub fn addTo(
     if (m.import_table.get("engine_api")) |api| if (api.import_table.get("lanes")) |lanes| m.addImport("lanes", lanes);
     // a build whose engines learn hands the server their own living module; the rest read only its families
     if (m.import_table.get("living") == null) m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
+    m.addImport("nemotron_limits", b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/limits.zig"), .target = target, .optimize = optimize }));
     return j;
 }
 
@@ -80,6 +81,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const http = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"tool visibility HTTP:"} }));
     http.has_side_effects = true;
     b.step("test-tool-visibility-http-host", "Rejected tool envelopes survive actual chat JSON and SSE replies").dependOn(&http.step);
+    const windows = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "Nemotron window:", "model discovery", "thinking reserve" } }));
+    b.step("test-nemotron-window-host", "Nemotron advertised capacity and unchanged chat admission without devices").dependOn(&windows.step);
     const deepseek = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"DeepSeek chat:"} }));
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);

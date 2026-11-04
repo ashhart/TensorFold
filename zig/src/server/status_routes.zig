@@ -99,9 +99,10 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reason
     try m.put(a, "object", .{ .string = "model" });
     try m.put(a, "created", try json.intValue(a, created));
     try m.put(a, "owned_by", .{ .string = "tensorfold" });
-    if (info.context_window > 0) {
-        try m.put(a, "context_length", try json.intValue(a, info.context_window));
-        try m.put(a, "max_model_len", try json.intValue(a, info.context_window));
+    const window = info.reported_context_window orelse info.context_window;
+    if (window > 0) {
+        try m.put(a, "context_length", try json.intValue(a, window));
+        try m.put(a, "max_model_len", try json.intValue(a, window));
     }
     if (info.reasoning) if (reasoning) |r| try m.put(a, "reasoning", r);
     return .{ .object = m };
@@ -385,4 +386,14 @@ test "model discovery respects the loaded engine's reasoning refusal despite tem
     }
     const text = try modelValue(a, "text", .{ .reasoning = true }, 0, template);
     try std.testing.expect(text.get("reasoning").?.get("default_enabled").?.bool);
+test "Nemotron window: model discovery reports the real fallback" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var info: api.Info = .{};
+    if (@hasField(api.Info, "reported_context_window")) @field(info, "reported_context_window") = @import("nemotron_limits").reported(0, @import("nemotron_limits").positions(0));
+    const value = try modelValue(arena.allocator(), "model", info, 0, null);
+    try std.testing.expect(value.get("context_length") != null);
+    try std.testing.expectEqual(@as(i64, 262193), value.get("context_length").?.int64().?);
+    try std.testing.expectEqual(value.get("context_length").?.int64(), value.get("max_model_len").?.int64());
+    try std.testing.expectEqual(@as(u32, 0), info.context_window);
 }
