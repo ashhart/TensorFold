@@ -90,15 +90,16 @@ opposite-peer warm-up; it does not add a switchless RoCE relay or qualify a four
 A prompt runs in passes of 2,048 rows. Kept prompt states sit on that grid, and a stream decoding beside a prompt waits
 for each pass to end. A pass that takes more rows reads each routed expert's weights fewer times, so a lone prompt
 comes sooner. `TF_GLM_CHUNK_SOLO=4096` lets a pass take two of those chunks when no other stream is decoding as it
-starts. With one decoding, or with `prompt_logprobs` or image rows, the pass takes 2,048. A drafter's steps take one
-chunk, so `--drafter` beside it is refused at load.
+starts. With one decoding, or with `prompt_logprobs` or image rows, the pass takes 2,048. Beside `--drafter`, DFlash2
+reads a solo pass's taps whole and keeps the prompt's last 2,048 rows as before; its tap buffer holds 4,096 rows, 80 MiB
+more on each rank.
 
 The grid does not move, so warm turns resume where they do unset, and streams decoding beside a prompt see the same
 passes. Replies are the same bytes either way. Two costs remain:
 - A request that arrives during a solo pass waits for that pass to end before its own prompt runs. After that, the
   passes are short again.
-- The prompt buffers are sized for 4,096 rows for the whole run: 1.92 GiB more at TP=2 and 1.56 GiB at TP=3, which
-  comes out of the room for KV pages and the prompt cache. In the runs below, TP=2's default cache goes from 4.7 to
+- The prompt buffers are sized for 4,096 rows for the whole run: 1.92 GiB more at TP=2 and 1.56 GiB at TP=3 (and
+  DFlash2's 80 MiB), which comes out of the room for KV pages and the prompt cache. In the runs below, TP=2's default cache goes from 4.7 to
   2.8 GiB.
 
 | | TP=2 unset | TP=2 `=4096` | TP=3 unset | TP=3 `=4096` |
