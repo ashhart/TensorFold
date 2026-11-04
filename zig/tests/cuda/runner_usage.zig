@@ -141,6 +141,7 @@ pub const text =
     \\  exl3-prefill-contract     the prefill expert tiles alone through the contract (gates 1-4 and the control)
     \\  exl3-promptd-contract     the prompt tiles in decode's bytes (tf_exl3_promptd_*) alone through the contract
     \\  exl3-tppf-contract        the TP prefill's rotate, combine, finish and place launches alone through the contract
+    \\  exl3-kvt-contract         the host tier's kvt_plan, kvt_fetch and kvt_remap alone through the contract
     \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile

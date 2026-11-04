@@ -7,6 +7,24 @@ const E = @import("cuda_prompt.zig").Engine;
 const gpa = std.testing.allocator;
 const layout: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 64, .page_tokens = 16, .snap_bytes = 0, .run_bytes = 64 };
 
+const env = @import("sys").env;
+const SavedEnv = struct {
+    name: [:0]const u8,
+    value: ?[:0]u8,
+    fn take(name: [:0]const u8, value: [:0]const u8) !SavedEnv {
+        const old = if (std.c.getenv(name)) |v| try gpa.dupeSentinel(u8, std.mem.span(v), 0) else null;
+        errdefer if (old) |v| gpa.free(v);
+        try std.testing.expectEqual(@as(c_int, 0), env.setenv(name, value, 1));
+        return .{ .name = name, .value = old };
+    }
+    fn restore(s: SavedEnv) void {
+        if (s.value) |v| {
+            _ = env.setenv(s.name, v, 1);
+            gpa.free(v);
+        } else _ = env.unsetenv(s.name);
+    }
+};
+
 const Device = struct {
     const stream: cuda.abi.Stream = @ptrFromInt(17);
     var next: u64 = 0x10000;
@@ -20,6 +38,7 @@ const Device = struct {
     var live: usize = 0;
     var context_proofs: usize = 0;
     var wrong_stream: usize = 0;
+    var host_live: usize = 0;
     fn alloc(out: *u64, len: usize) callconv(.c) c_int {
         allocs += 1;
         if (allocs == fail_alloc) return cuda.abi.error_not_ready;
@@ -31,6 +50,15 @@ const Device = struct {
     fn free(_: u64) callconv(.c) c_int {
         if (pending) freed_pending += 1;
         live -= 1;
+        return 0;
+    }
+    fn hostAlloc(out: *?*anyopaque, _: usize, _: c_uint) callconv(.c) c_int {
+        out.* = @ptrFromInt(0x2000_0000);
+        host_live += 1;
+        return 0;
+    }
+    fn hostFree(_: ?*anyopaque) callconv(.c) c_int {
+        host_live -= 1;
         return 0;
     }
     fn fill(_: u64, _: u8, _: usize, s: cuda.abi.Stream) callconv(.c) c_int {
@@ -65,6 +93,7 @@ const Device = struct {
         live = 0;
         context_proofs = 0;
         wrong_stream = 0;
+        host_live = 0;
         var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
         d.api.cuMemAlloc_v2 = alloc;
         d.api.cuMemFree_v2 = free;
@@ -72,6 +101,8 @@ const Device = struct {
         d.api.cuMemsetD8_v2 = legacyFill;
         d.api.cuStreamSynchronize = wait;
         d.api.cuCtxSynchronize = context;
+        d.api.cuMemHostAlloc = hostAlloc;
+        d.api.cuMemFreeHost = hostFree;
         return d;
     }
     fn released() !void {
@@ -149,5 +180,33 @@ test "kv safety: Flash Next page IDs and arena size refuse before allocation" {
     oversized.token_bytes = std.math.maxInt(u64);
     try expectPoolError(error.Overflow, pages.Pool.init(gpa, &e, oversized, 64, null, 2, 8), &d, e.stream.*);
     try std.testing.expectEqual(@as(usize, 0), Device.allocs);
+    try Device.released();
+}
+
+test "kv safety: Flash Next host tier refuses non-EXL3 scratch before allocating" {
+    const saved = try SavedEnv.take("TF_FLASHNEXT_KV_HOST", "1");
+    defer saved.restore();
+    var d = Device.driver();
+    var e = engine(&d);
+    e.scratch_format = .classic;
+    try std.testing.expectError(error.FlashNextKvHostNeedsExl3, pages.Pool.init(std.testing.failing_allocator, &e, layout, 64, null, 1, 8));
+    try std.testing.expectEqual(@as(usize, 0), Device.allocs);
+    try std.testing.expectEqual(@as(usize, 0), Device.host_live);
+}
+
+test "kv safety: Flash Next host store is released when tier kernels fail to load" {
+    const host = try SavedEnv.take("TF_FLASHNEXT_KV_HOST", "4096");
+    defer host.restore();
+    const frames = try SavedEnv.take("TF_FLASHNEXT_KV_FRAMES", "256");
+    defer frames.restore();
+    const slots = try SavedEnv.take("TF_FLASHNEXT_KV_SLOTS", "1");
+    defer slots.restore();
+    var d = Device.driver();
+    var e = engine(&d);
+    e.scratch_format = .exl3;
+    e.collective = null;
+    defer finish(&d, e.stream.*);
+    try expectPoolError(error.BuiltWithoutKernels, pages.Pool.init(gpa, &e, layout, 64, null, 1, 8), &d, e.stream.*);
+    try std.testing.expectEqual(@as(usize, 0), Device.host_live);
     try Device.released();
 }

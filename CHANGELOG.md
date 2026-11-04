@@ -43,6 +43,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the sessions-writes mixed load holds its pool to one slot's capacity, so it exercises spills to the tier (#2731). Thanks to @garvrao80.
 
+- Flash Next's opt-in EXL3 host K/V tier admits the bounded device working set, frees the pinned store on failed kernel load, refuses non-EXL3 scratch before allocation, takes TP rank from its collective and rejects snapshot restoration while another lease pins its pages. The lane host's single ledger uses the active pool directly, without copying ownership (#1522).
+
 - EXL3 attention and MTP caches can use the existing core K/V page pool through opt-in `TF_FLASHNEXT_KV_PAGES`; paging remains off by default (#1444).
 
 - EXL3 prefill and profiling use registered settings and propagate malformed-value refusals. Unset row budgets remain 8192 general / 4096 server; `snap_grid` remains on pending off-grid restore qualification (#1443).
