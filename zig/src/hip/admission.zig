@@ -1,8 +1,12 @@
 //! What the HIP engine may serve: the CUDA path's memory rules (cuda_memory.zig) and the window and weights it reads.
 const std = @import("std");
+const builtin = @import("builtin");
 const memory = @import("cuda_memory");
 const Context = @import("context.zig").Context;
 const Allocator = std.mem.Allocator;
+
+/// Windows has no /proc/meminfo and no sysfs VRAM file; the driver's own count is the budget.
+const windows = builtin.os.tag == .windows;
 
 pub const MemInfo = memory.MemInfo;
 pub const Pool = memory.Pool;
@@ -51,13 +55,19 @@ pub fn budget(gpa: Allocator, io: std.Io, ctx: Context) !Pool {
     const integrated = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
     const own: MemInfo = .{ .total = card.total, .available = card.free };
-    const vram = if (integrated) vramBytes(gpa, io, ctx) else null;
-    const text = if (sourceOf(integrated, own, vram) == .host) procText(gpa, io, "/proc/meminfo") else null;
-    defer if (text) |t| gpa.free(t);
     const env: Env = .{
         .reserve = getenv("TENSORFOLD_MEMORY_RESERVE_GIB"),
         .limit = getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB"),
     };
+    if (windows) {
+        // WDDM reports the whole budget through the driver: no host text, no dedicated-VRAM file.
+        const p = try plan(false, own, null, null, env);
+        announce(p);
+        return p.pool;
+    }
+    const vram = if (integrated) vramBytes(gpa, io, ctx) else null;
+    const text = if (sourceOf(integrated, own, vram) == .host) procText(gpa, io, "/proc/meminfo") else null;
+    defer if (text) |t| gpa.free(t);
     const p = try plan(integrated, own, text, vram, env);
     announce(p);
     return p.pool;
