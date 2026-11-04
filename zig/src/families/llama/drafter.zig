@@ -354,6 +354,7 @@ pub const Request = struct {
     aside: u32 = 0, // rounds stood aside since the last drafted one
     gap: u32 = probe_every, // rounds stood aside before a probe drafts
     probing: bool = false, // the last drafts were a probe's: its gap doubles once a round verifies them
+    unverified: u8 = 0, // plain rounds since the probe armed: the look-ahead's is expected, a second disarms it
     copies: lanes.SuffixLookup = undefined, // the lane host's copy proposals from the stream's own context, asked first
     copied: bool = false, // the last proposal was the copies'
 
@@ -414,7 +415,8 @@ pub const Request = struct {
             r.aside += 1;
             return r.out.items;
         }
-        // a lone stream's lane core asks once to look ahead and again to verify: the probe stays armed until verified
+        // a lone stream's lane core asks once to look ahead and again to verify: the probe stays armed one plain round
+        if (probe and !r.probing) r.unverified = 0;
         r.probing = probe;
         // the cache keeps the context's prefix it agrees with (an earlier round's drafts past the context included)
         const shared = commonPrefix(slot.seen.items, context);
@@ -490,7 +492,16 @@ pub const Request = struct {
             r.copies.observe(rows -| 1, kept) catch {};
             return;
         }
-        if (rows < 2) return;
+        if (rows < 2) {
+            // nothing verified: a probe gets the one plain round of its look-ahead, then disarms with its gap doubled
+            if (!r.probing) return;
+            r.unverified += 1;
+            if (r.unverified < 2) return;
+            r.gap = @min(2 * r.gap, probe_most);
+            r.aside = 0;
+            r.probing = false;
+            return;
+        }
         // drafts were verified: the stand-aside count starts again, a probe's gap doubled
         r.gap = if (r.probing) @min(2 * r.gap, probe_most) else probe_every;
         r.aside = 0;
