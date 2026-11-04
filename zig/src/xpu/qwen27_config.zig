@@ -87,6 +87,7 @@ fn tmpPath(tmp: std.testing.TmpDir) ![]u8 {
 }
 
 test "admit: a folder without config.json, Hadamard-rotated or not, keeps the fixed every-fourth schedule unchecked" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // admit reads with std.c (XPU runs on Linux)
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmpPath(tmp);
@@ -98,6 +99,7 @@ test "admit: a folder without config.json, Hadamard-rotated or not, keeps the fi
 }
 
 test "admit: a config.json of the runner's shape and schedule is admitted" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // admit reads with std.c (XPU runs on Linux)
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmpPath(tmp);
@@ -111,6 +113,7 @@ test "admit: a config.json of the runner's shape and schedule is admitted" {
 }
 
 test "admit: a config.json of another shape or schedule is refused" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // admit reads with std.c (XPU runs on Linux)
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmpPath(tmp);
