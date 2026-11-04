@@ -369,6 +369,8 @@ The container is GGUF v3. The metadata follows the GLP standard:
 | `glp.mode` | `project` or `add`. |
 | `glp.rank` | 1. |
 | `glp.hook_point` | `residual_stream_post_layer`. |
+| `glp.derived_at` | The site the direction was captured at. It is a site, not a time: the format's own validator refuses a value that is not a hook name, and a file whose `derived_at` differs from its `hook_point` is a transferred vector, which is warned about. The producer writes the site it captured at, which is the site it applies at. |
+| `glp.created` | The day the file was written. |
 | `glp.alpha_default` | The strength the file applies with by default. |
 | `glp.method` | How the numbers were made, for example `difference_of_means_last_token_per_layer`. |
 | `glp.contrast` | What the two prompt sets contrast. |
@@ -413,6 +415,15 @@ The directions are reproducible: the producer writes the same ones from the same
 checkpoint and the same prompt set, and only the timestamps in the file differ.
 The digest is over the tensor bytes, so it is the same for every derivation of
 this vector, and it is the number to compare a file against.
+
+The reference implementation's own validator reads the published file and
+reports nothing wrong with it, the same as it reports for the published file
+this one is compared against:
+
+```
+captain-vector --validate Qwen3.8-27B-refusal-cvec-GLP-49-L10-58-a1.gguf
+  ...: 0 FAIL, 0 WARN
+```
 
 ## The integration test
 
