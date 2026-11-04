@@ -10,6 +10,33 @@ const gpa = std.testing.allocator;
 
 const page_bytes = 8;
 
+test "tier geometry: zero page bytes, partial host pages, zero frames and zero pages refuse before allocation" {
+    var host: [9]u8 = undefined;
+    const Case = struct { bytes: usize, frames: usize = 1, page: u64 = page_bytes };
+    for ([_]Case{
+        .{ .bytes = 8, .page = 0 },
+        .{ .bytes = 7 },
+        .{ .bytes = 9 },
+        .{ .bytes = 8, .frames = 0 },
+        .{ .bytes = 0 },
+    }) |c| {
+        var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+        var tier: Tier = undefined;
+        try std.testing.expectError(error.BadTierGeometry, tier.init(failing.allocator(), host[0..c.bytes], c.frames, c.page));
+        try expect(!failing.has_induced_failure);
+    }
+}
+
+test "tier geometry: one byte, one page and one frame is the smallest valid tier" {
+    var host = [_]u8{7};
+    var tier: Tier = undefined;
+    try tier.init(gpa, &host, 1, 1);
+    defer tier.deinit();
+    try expectEqual(@as(usize, 1), tier.pool.total());
+    try expectEqual(@as(usize, 1), tier.count());
+    try std.testing.expectEqualSlices(u8, &host, tier.host_page(0));
+}
+
 /// A tier of `pages` logical pages and `frames` frames over a host store and a fake device.
 const Rig = struct {
     host: []u8,
