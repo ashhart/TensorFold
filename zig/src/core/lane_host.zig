@@ -90,7 +90,7 @@ pub const LaneHost = struct {
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
     capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
-    kv: ?@import("kv_ledger.zig").Ledger = null, // Info.ledger's budget, under mutex (lane_host_ledger.zig); null: none
+    kv: ?@import("kv_ledger.zig").Ledger = null, // Info.ledger's budget or the paged pool's (lane_host_ledger.zig)
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -105,8 +105,18 @@ pub const LaneHost = struct {
         return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
     }
 
+    /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
+    pub fn countPool(h: *LaneHost, pool: anytype) void {
+        ledger.count(h, pool);
+    }
+
+    /// The pool counts on its own pages again (a host that never started).
+    pub fn uncountPool(h: *LaneHost) void {
+        ledger.uncount(h);
+    }
+
     pub fn start(h: *LaneHost) !void {
-        if (h.rounds != null and h.kv != null) return error.LedgerWithRounds; // a planner admits past takeJob's promise
+        if (h.rounds != null and ledger.priced(h)) return error.LedgerWithRounds; // a planner admits past takeJob
         if (h.rounds != null and !h.core.backend.pieces()) return error.PiecesUnsupported; // a drafter wrapper runs whole prompts
         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
     }
@@ -115,6 +125,7 @@ pub const LaneHost = struct {
     pub fn stop(h: *LaneHost) void {
         rows_host.drainThread(h);
         ledger.checkIdle(h); // the engine thread has ended every job
+        ledger.uncount(h); // a paged pool outlives the host: its own pages admit it again
         rows_host.close(h);
         @import("lane_host_fetch.zig").stop(h);
         scoring.close(h);
