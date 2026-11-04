@@ -16,6 +16,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     step.dependOn(&wiring.step);
 
     b.step("test-qwen35-request-starts-host", "Request-start and shared-KV startup refusal without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"request starts:"} })).step);
+    b.step("test-memory-pressure-host", "Shared memory-pressure governor, admission and cache shedding without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.api, .filters = &.{"memory pressure:"} })).step);
     b.step("test-qwen35-shapes-host", "Captured window buckets for one and 2-8 rows without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"one-row and 2-8-row"} })).step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
