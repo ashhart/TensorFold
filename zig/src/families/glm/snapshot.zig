@@ -5,6 +5,7 @@ const cfg = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Ref = @import("weights.zig").Ref;
+const walk = @import("../../core/state_walk.zig").Walk(Ref, Ref.at);
 
 /// One kept state: `at` prompt tokens of one stream, in one buffer (an id both Macs of a pair name it by).
 pub const Snap = struct {
@@ -56,32 +57,60 @@ fn words(x: *const fwd.Ctx, e: mtl.ComputeEncoder, src: Ref, dst: Ref, n: usize)
     e.dispatchThreads(mtl.Size.of(n / 4, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
+/// Copies between a part and the kept bytes at `snap` (`into`: to them), one dispatch a part: the core walk's hook.
+const Words = struct {
+    x: *const fwd.Ctx,
+    e: mtl.ComputeEncoder,
+    snap: Ref,
+    into: bool,
+    fn run(w: Words, live: Ref, kept: u64, n: usize) anyerror!void {
+        const k = w.snap.at(@intCast(kept));
+        if (w.into) words(w.x, w.e, live, k, n) else words(w.x, w.e, k, live, n);
+    }
+};
+
+/// An MLA layer's prefix at `at`: its keys, indexer keys, gates and pooled index rows.
+fn mlaParts(c: *const cfg.Config, C: *const st.Mla, at: u32, out: []walk.Part) usize {
+    const rows: usize = at;
+    out[0..4].* = .{
+        .{ .live = C.keys, .len = rows * c.kv_lora * 2 },
+        .{ .live = C.ik, .len = rows * c.i_dim * 2 },
+        .{ .live = C.ig, .len = rows * c.i_dim * 2 },
+        .{ .live = C.pool, .len = blocks(c, at) * c.i_dim * 2 },
+    };
+    return 4;
+}
+
 /// Copies between `s` and the snapshot (`into`: to it); resident: KDA states only, MLA prefixes from `home` if not `s`.
-pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, at: u32, into: bool, home: ?*st.State) void {
+pub fn copy(
+    x: *const fwd.Ctx,
+    e: mtl.ComputeEncoder,
+    s: *st.State,
+    snap: Ref,
+    at: u32,
+    into: bool,
+    home: ?*st.State,
+) !void {
     const c = x.c;
-    var off: usize = 0;
+    var parts: [2 * st.max_kda + 4 * st.max_mla]walk.Part = undefined;
+    var n: usize = 0;
     for (s.kda[0..c.countKind(.kda)]) |*L| { // the state the next chunk reads: the current slot's, restored into slot 0
-        const live = [2]Ref{ L.st[if (into) L.cur else 0], L.cs[if (into) L.cur else 0] };
-        for (live, [2]usize{ stBytes(c), csBytes(c) }) |r, n| {
-            if (into) words(x, e, r, snap.at(off), n) else words(x, e, snap.at(off), r, n);
-            off += n;
-        }
+        const i: usize = if (into) L.cur else 0;
+        parts[n..][0..2].* = .{ .{ .live = L.st[i], .len = stBytes(c) }, .{ .live = L.cs[i], .len = csBytes(c) } };
+        n += 2;
     }
-    for (s.mla[0..mlaCount(c)], 0..) |*C, mi| {
-        const parts = [4]Ref{ C.keys, C.ik, C.ig, C.pool };
-        const sizes = [4]usize{ @as(usize, at) * c.kv_lora * 2, @as(usize, at) * c.i_dim * 2, @as(usize, at) * c.i_dim * 2, blocks(c, at) * c.i_dim * 2 };
-        if (home) |h| {
-            if (into or h == s) continue;
-            const H = &h.mla[mi];
-            for ([4]Ref{ H.keys, H.ik, H.ig, H.pool }, parts, sizes) |src, r, n| words(x, e, src, r, n);
-            continue;
-        }
-        for (parts, sizes) |r, n| {
-            if (into) words(x, e, r, snap.at(off), n) else words(x, e, snap.at(off), r, n);
-            off += n;
-        }
-    }
-    std.debug.assert(off == bytes(c, at, home != null));
+    if (home == null) for (s.mla[0..mlaCount(c)]) |*C| {
+        n += mlaParts(c, C, at, parts[n..]);
+    };
+    try walk.each(parts[0..n], &.{}, .{}, Words{ .x = x, .e = e, .snap = snap, .into = into }, Words.run);
+    std.debug.assert(walk.total(parts[0..n]) == bytes(c, at, home != null));
+    if (home) |h| if (!into and h != s) for (s.mla[0..mlaCount(c)], h.mla[0..mlaCount(c)]) |*C, *H| {
+        var mine: [4]walk.Part = undefined;
+        var held: [4]walk.Part = undefined;
+        _ = mlaParts(c, C, at, &mine);
+        _ = mlaParts(c, H, at, &held);
+        for (held, mine) |src, r| words(x, e, src.live, r.live, r.len);
+    };
     if (into) return;
     for (s.kda[0..c.countKind(.kda)]) |*L| L.cur = 0;
     s.pos = at;
@@ -89,18 +118,15 @@ pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, a
 }
 
 /// A resident state made whole: KDA states from `old`, then MLA prefixes from `home` (its slot), in `whole`'s layout.
-pub fn spill(x: *const fwd.Ctx, e: mtl.ComputeEncoder, old: Ref, whole: Ref, at: u32, home: *st.State) void {
+pub fn spill(x: *const fwd.Ctx, e: mtl.ComputeEncoder, old: Ref, whole: Ref, at: u32, home: *st.State) !void {
     const c = x.c;
-    var off = bytes(c, at, true);
+    const off = bytes(c, at, true);
     words(x, e, old, whole, off);
-    for (home.mla[0..mlaCount(c)]) |*C| {
-        const sizes = [4]usize{ @as(usize, at) * c.kv_lora * 2, @as(usize, at) * c.i_dim * 2, @as(usize, at) * c.i_dim * 2, blocks(c, at) * c.i_dim * 2 };
-        for ([4]Ref{ C.keys, C.ik, C.ig, C.pool }, sizes) |src, n| {
-            words(x, e, src, whole.at(off), n);
-            off += n;
-        }
-    }
-    std.debug.assert(off == bytes(c, at, false));
+    var parts: [4 * st.max_mla]walk.Part = undefined;
+    var n: usize = 0;
+    for (home.mla[0..mlaCount(c)]) |*C| n += mlaParts(c, C, at, parts[n..]);
+    try walk.each(parts[0..n], &.{}, .{ .base = off }, Words{ .x = x, .e = e, .snap = whole, .into = true }, Words.run);
+    std.debug.assert(off + walk.total(parts[0..n]) == bytes(c, at, false));
 }
 
 /// A learned state's file for one rank of the pair: <dir>/<key>.r<rank>.bin.
