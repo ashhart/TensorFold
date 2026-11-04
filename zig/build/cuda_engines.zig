@@ -11,7 +11,7 @@ pub fn glmCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     m.addImport("lanes", lanes);
     m.addImport("heat", heat);
     m.addImport("tp", @import("tp.zig").module(b, target, optimize, cuda)); // over the engine's own cuda module
-    m.addImport("engine_api", api); // TF_GLM_KV_SHARE's prompt_radix store: family()'s, the server's
+    m.addImport("engine_api", api); // TF_KV_SHARE's prompt_radix store: family()'s, the server's
     return m;
 }
 

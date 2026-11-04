@@ -70,7 +70,7 @@ pub fn restore(e: anytype, id: u64) !void {
     try e.stream.synchronize();
 }
 
-/// The pages below `at` a page-sharing prompt cache holds (TF_GLM_KV_SHARE): a kept state's copy leaves them out.
+/// The pages below `at` the shared prompt store holds (TF_KV_SHARE): a kept state's copy leaves them out.
 fn heldPages(e: anytype, at: usize) usize {
     return if (e.share_pages) at / @import("cuda_state.zig").page_rows else 0;
 }
