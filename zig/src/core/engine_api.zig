@@ -166,8 +166,10 @@ pub const Info = struct {
     readouts: ?lanes.readout.Info = null, // non-null: the engine answers readout requests and nothing else
     speech: ?SpeechInfo = null,
     lanes: u32 = 1,
-    /// Prompt plus reply tokens one request may use (0: no limit).
+    /// Server preflight prompt-plus-reply limit (0: the engine owns admission).
     context_window: u32 = 0,
+    /// Discovery-only limit for an engine that keeps its existing prefill admission and error policy.
+    reported_context_window: ?u32 = null,
     context_fitted: bool = false,
     /// What the engine enforces; the server refuses requests that need more.
     call_gates: bool = false,
