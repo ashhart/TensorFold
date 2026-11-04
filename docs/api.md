@@ -229,6 +229,13 @@ more than that before the state returns 400. The route answers:
 
 A client that disconnects cancels its request.
 
+## Queue phase metrics
+
+With TENSORFOLD_PHASE_METRICS=1, native /metrics also exports tensorfold:request_queue_seconds and
+its request_queue_time_seconds alias, for measured waits from request submission to admission.
+Both use the fixed request-time histogram edges and have no request labels. An unset flag keeps these families
+absent and skips the queue observation; existing request metrics remain available. This option does not change replies.
+
 ## Living Weights
 
 With `--slide`, the native server learns facts into the served weights. [Living Weights](living-weights.md) explains

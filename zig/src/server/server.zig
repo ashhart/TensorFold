@@ -79,6 +79,8 @@ pub const Config = struct {
     prompt_seed: bool = false,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
+    /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
+    phase_metrics: bool = false,
     /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
     spark_stats: bool = false,
     /// Null keeps every reply identical to a server that has no compaction.
@@ -181,7 +183,7 @@ pub const Server = struct {
 
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
         const srv = try gpa.create(Server);
-        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
         if (srv.info.embeddings != null and srv.info.text_generation) return error.InvalidEmbeddingCapabilities;
         if (srv.info.readouts != null and (srv.info.text_generation or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
@@ -389,10 +391,11 @@ pub const Server = struct {
     }
 
     /// Counts one finished request for /metrics.
-    pub fn noteRequest(srv: *Server, prompt_len: usize, cached: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64) void {
+    pub fn noteRequest(srv: *Server, prompt_len: usize, cached: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64, queued: ?f64) void {
         const now = clock.nowNs(srv.io);
         const tpot = srv.metrics.tpotValue(first, last, generated);
         srv.metrics.note(srv.io, prompt_len, cached, generated, drafted, accepted, rounds, @max(0, clock.seconds(now - received)), if (first) |f| clock.seconds(f - received) else null, if (first) |f| @max(0, clock.seconds(now - f)) else null, prefill, tpot);
+        if (queued) |q| srv.metrics.noteQueue(srv.io, q);
     }
 
     /// Accepts connections until ``stop`` is set, each on its own thread.
@@ -543,4 +546,20 @@ fn templateImages(srv: *Server) bool {
 /// Templates requiring a user query gain a user turn after trailing tool results replace their last user turn.
 fn needsUserAfterTool(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "No user query found") != null;
+}
+
+test "queue phase: server notes measured waits only when explicitly enabled" {
+    const defaults: Config = .{ .served_name = "test", .model_ids = &.{"test"} };
+    try std.testing.expect(!defaults.phase_metrics);
+    for ([_]bool{ false, true }) |enabled| {
+        var srv: Server = undefined;
+        srv.io = std.testing.io;
+        srv.metrics = .{ .gpa = std.testing.allocator, .phases = enabled };
+        defer srv.metrics.deinit();
+        srv.noteRequest(10, 0, 3, 0, 0, 2, clock.nowNs(srv.io), null, null, 0.25, 0.3);
+        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), srv.metrics.queue.n);
+        srv.noteRequest(10, 0, 3, 0, 0, 2, clock.nowNs(srv.io), null, null, null, null);
+        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), srv.metrics.queue.n);
+        try std.testing.expectEqual(@as(u64, 6), srv.metrics.generation);
+    }
 }
