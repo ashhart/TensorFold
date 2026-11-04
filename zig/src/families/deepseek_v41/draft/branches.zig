@@ -19,6 +19,7 @@ pub const Chains = struct {
         run: *const fn (ptr: *anyopaque, slot: u32, start: u64, tokens: []const u32, draws: []const u64, sampling: ?lanes.Sampling, choices: []u32) anyerror!void,
         /// Drop the slot's pending chain window without committing a row (the slot stays at its start).
         drop: *const fn (ptr: *anyopaque, slot: u32) anyerror!void,
+        scored: ?*const fn (*anyopaque, iface.Segment, []u32) anyerror!void = null,
     };
 };
 
@@ -60,6 +61,8 @@ pub const Resolver = struct {
         var tok: [max_rows]u32 = undefined;
         var draws: [max_rows]u64 = undefined;
         var picks: [max_rows]u32 = undefined;
+        var scores: [max_rows]lanes.logprob.Row = undefined;
+        if (s.logrows.len != (if (s.logprobs != null) n else @as(usize, 0))) return error.LogprobRow;
         var held: usize = 0; // chain rows already on the path (re-run in front of a branch)
         var head: u8 = 0;
         var runs: usize = 0;
@@ -76,7 +79,11 @@ pub const Resolver = struct {
                 d.* = s.draws[row];
             }
             if (runs > 0) try ch.vtable.drop(ch.ptr, s.slot);
-            try ch.vtable.run(ch.ptr, s.slot, s.start, tok[0..m], draws[0..m], s.sampling, picks[0..m]);
+            if (s.logprobs) |k| {
+                const scored = ch.vtable.scored orelse return error.LogprobsUnsupported;
+                try scored(ch.ptr, .{ .slot = s.slot, .start = s.start, .tokens = tok[0..m], .draws = draws[0..m], .sampling = s.sampling, .parents = null, .logprobs = k, .logrows = scores[0..m] }, picks[0..m]);
+                for (r.rows[0..m], scores[0..m]) |row, score| s.logrows[row] = score;
+            } else try ch.vtable.run(ch.ptr, s.slot, s.start, tok[0..m], draws[0..m], s.sampling, picks[0..m]);
             runs += 1;
             r.stats.chains += 1;
             r.stats.rerun_rows += held;
