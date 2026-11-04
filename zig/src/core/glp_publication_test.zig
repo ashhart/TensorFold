@@ -38,15 +38,15 @@ test "a file that names itself carries what it said, and the model it came from"
     // The container itself carries the keys a consumer reads, not only the reader.
     var parsed = try t.parseFile(a, bytes);
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("Qwen3.8-27B-refusal-cvec-per_layer-L10-58-a1", t.text(&parsed.file, "general.name").?);
-    try std.testing.expectEqualStrings("TensorFold", t.text(&parsed.file, "general.author").?);
-    try std.testing.expectEqualStrings("qwen3_5", t.text(&parsed.file, "controlvector.model_hint").?);
-    try std.testing.expectEqual(@as(u64, 1), t.num(&parsed.file, "controlvector.layer_count").?);
-    try std.testing.expectEqual(@as(u64, 1), t.num(&parsed.file, "general.base_model.count").?);
-    try std.testing.expectEqualStrings("Qwen3.8-27B-MLX-4bit", t.text(&parsed.file, "general.base_model.0.name").?);
-    try std.testing.expectEqualStrings("TensorFold", t.text(&parsed.file, "general.base_model.0.organization").?);
-    try std.testing.expectEqualStrings("22d8d538154e0e5b6f8dcb1fcc74a60a0798104c", t.text(&parsed.file, "general.base_model.0.version").?);
-    try std.testing.expectEqualStrings("https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit", t.text(&parsed.file, "general.base_model.0.repo_url").?);
+    try std.testing.expectEqualStrings("Qwen3.8-27B-refusal-cvec-per_layer-L10-58-a1", parsed.file.str("general.name").?);
+    try std.testing.expectEqualStrings("TensorFold", parsed.file.str("general.author").?);
+    try std.testing.expectEqualStrings("qwen3_5", parsed.file.str("controlvector.model_hint").?);
+    try std.testing.expectEqual(@as(u64, 1), parsed.file.num("controlvector.layer_count").?);
+    try std.testing.expectEqual(@as(u64, 1), parsed.file.num("general.base_model.count").?);
+    try std.testing.expectEqualStrings("Qwen3.8-27B-MLX-4bit", parsed.file.str("general.base_model.0.name").?);
+    try std.testing.expectEqualStrings("TensorFold", parsed.file.str("general.base_model.0.organization").?);
+    try std.testing.expectEqualStrings("22d8d538154e0e5b6f8dcb1fcc74a60a0798104c", parsed.file.str("general.base_model.0.version").?);
+    try std.testing.expectEqualStrings("https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit", parsed.file.str("general.base_model.0.repo_url").?);
 }
 
 test "a vector written again keeps what the file said about itself" {
@@ -79,8 +79,8 @@ test "a file that names no model of its own keeps the base model out of the head
     defer a.free(bytes);
     var parsed = try t.parseFile(a, bytes);
     defer parsed.deinit();
-    try std.testing.expect(t.text(&parsed.file, "general.base_model.0.repo_url") == null);
-    try std.testing.expectEqual(@as(u64, 1), t.num(&parsed.file, "controlvector.layer_count").?);
+    try std.testing.expect(parsed.file.str("general.base_model.0.repo_url") == null);
+    try std.testing.expectEqual(@as(u64, 1), parsed.file.num("controlvector.layer_count").?);
 }
 
 test "a file that names no other site names the site it is applied at" {
@@ -93,7 +93,7 @@ test "a file that names no other site names the site it is applied at" {
     var parsed = try t.parseFile(a, bytes);
     defer parsed.deinit();
     // glp.derived_at is the site the direction was captured at, not a time.
-    try std.testing.expectEqualStrings("residual_stream_post_layer", t.text(&parsed.file, "glp.derived_at").?);
+    try std.testing.expectEqualStrings("residual_stream_post_layer", parsed.file.str("glp.derived_at").?);
     var read = try t.readOk(bytes);
     defer read.deinit();
     try std.testing.expect(!read.vector.transferred);

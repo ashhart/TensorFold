@@ -100,7 +100,7 @@ test "a file the reader refuses is refused with the reader's reason" {
     var g: ?serve.Vec = serve.withPath(null, path);
     const why = try refused(a, &g);
     try std.testing.expect(std.mem.indexOf(u8, why, "argument --glp:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, why, "not a GGUF v3 container") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "not a GGUF container") != null);
 }
 
 test "--glp-alpha without --glp is refused" {

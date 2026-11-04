@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const glp = @import("glp.zig");
-const gguf = @import("gguf.zig");
+const gguf = @import("glp_container.zig");
 
 /// What a container holds, so a test can bend one rule at a time.
 const Shape = struct {
@@ -87,7 +87,7 @@ fn writeFixture(shape: Shape) ![]u8 {
     var kv: Kv = Kv.init(a);
     defer kv.deinit();
     try kv.text("general.architecture", "controlvector");
-    try kv.number("general.alignment", 32);
+    try kv.text("general.alignment", "32");
     if (shape.mode) |m| try kv.text("glp.mode", m);
     if (shape.spec_version) |v| try kv.number("glp.spec_version", v);
     if (shape.rank) |v| try kv.number("glp.rank", v);
@@ -190,34 +190,20 @@ pub fn unitDir(a: std.mem.Allocator, width: usize, axis: usize) ![]f32 {
 /// A container and the arena that holds its metadata.
 pub const Parsed = struct {
     arena: std.heap.ArenaAllocator,
-    file: gguf.Document,
+    file: gguf.File,
 
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
     }
 };
 
-/// The container a file holds, read with the engine's own GGUF reader.
+/// The container a file holds, read with the generic reader.
 pub fn parseFile(a: std.mem.Allocator, bytes: []const u8) !Parsed {
     var arena = std.heap.ArenaAllocator.init(a);
     errdefer arena.deinit();
-    const doc = try gguf.Document.parse(arena.allocator(), bytes, .{});
-    return .{ .arena = arena, .file = doc };
-}
-
-/// A metadata value read as an unsigned count.
-pub fn num(doc: *const gguf.Document, key: []const u8) ?u64 {
-    const v = doc.get(key) orelse return null;
-    return v.unsigned() catch null;
-}
-
-/// A metadata value read as text.
-pub fn text(doc: *const gguf.Document, key: []const u8) ?[]const u8 {
-    const v = doc.get(key) orelse return null;
-    return switch (v) {
-        .string => |x| x,
-        else => null,
-    };
+    var problem: gguf.Problem = .{};
+    const file = try gguf.parse(arena.allocator(), bytes, &problem);
+    return .{ .arena = arena, .file = file };
 }
 
 /// The vector a producer writes for two layers, handed over in the order a caller would hold them.
@@ -385,9 +371,9 @@ test "a written vector's digest covers its tensor bytes" {
     defer a.free(bytes);
     var parsed = try parseFile(a, bytes);
     defer parsed.deinit();
-    const claimed = text(&parsed.file, "glp.content_sha256").?;
+    const claimed = parsed.file.str("glp.content_sha256").?;
     var h: std.crypto.hash.sha2.Sha256 = .init(.{});
-    for (parsed.file.tensors) |t| h.update(t.bytes);
+    for (parsed.file.tensors) |t| h.update(parsed.file.bytesOf(t).?);
     var sha: [32]u8 = undefined;
     h.final(&sha);
     const hex = std.fmt.bytesToHex(sha, .lower);
@@ -414,11 +400,11 @@ test "a written vector holds one direction tensor per layer" {
     try std.testing.expectEqual(@as(usize, 2), parsed.file.tensors.len);
     try std.testing.expectEqualStrings("direction.10", parsed.file.tensors[0].name);
     try std.testing.expectEqualStrings("direction.11", parsed.file.tensors[1].name);
-    try std.testing.expectEqual(@as(u64, 8), parsed.file.tensors[0].shape[0]);
-    try std.testing.expectEqual(gguf.TensorKind.f32, parsed.file.tensors[0].kind);
-    try std.testing.expectEqualStrings("10,11", text(&parsed.file, "glp.layer_ids_zero_based").?);
-    const first = parsed.file.tensors[0].bytes;
-    const second = parsed.file.tensors[1].bytes;
+    try std.testing.expectEqual(@as(u64, 8), parsed.file.tensors[0].dims[0]);
+    try std.testing.expectEqual(@as(u32, gguf.f32_type), parsed.file.tensors[0].kind);
+    try std.testing.expectEqualStrings("10,11", parsed.file.str("glp.layer_ids_zero_based").?);
+    const first = parsed.file.bytesOf(parsed.file.tensors[0]).?;
+    const second = parsed.file.bytesOf(parsed.file.tensors[1]).?;
     try std.testing.expectEqual(@as(usize, 32), first.len);
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1.0))), std.mem.readInt(u32, first[0..4], .little));
     try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 0.0))), std.mem.readInt(u32, first[4..8], .little));
@@ -519,6 +505,44 @@ test "a written container is a version 3 file" {
     try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, bytes[8..16], .little));
     try std.testing.expectEqual(@as(u64, 21), std.mem.readInt(u64, bytes[16..24], .little));
     try std.testing.expectEqual(@as(usize, 0), bytes.len % 32);
+}
+
+test "the container keeps every value type it is given" {
+    const a = std.testing.allocator;
+    const entries = [_]gguf.Entry{
+        .{ .key = "a.u8", .value = .{ .u8v = 7 } },
+        .{ .key = "a.i8", .value = .{ .i8v = -7 } },
+        .{ .key = "a.u16", .value = .{ .u16v = 1000 } },
+        .{ .key = "a.i16", .value = .{ .i16v = -1000 } },
+        .{ .key = "a.u32", .value = .{ .u32v = 100000 } },
+        .{ .key = "a.i32", .value = .{ .i32v = -100000 } },
+        .{ .key = "a.f32", .value = .{ .f32v = 0.5 } },
+        .{ .key = "a.bool", .value = .{ .boolv = true } },
+        .{ .key = "a.string", .value = .{ .string = "hello" } },
+        .{ .key = "a.array", .value = .{ .array = .{ .elem = .u32v, .items = &.{ .{ .u32v = 1 }, .{ .u32v = 2 } } } } },
+        .{ .key = "a.u64", .value = .{ .u64v = 1 << 40 } },
+        .{ .key = "a.i64", .value = .{ .i64v = -(1 << 40) } },
+        .{ .key = "a.f64", .value = .{ .f64v = 0.25 } },
+    };
+    const bytes = try gguf.write(a, &entries, &.{});
+    defer a.free(bytes);
+    var parsed = try parseFile(a, bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 13), parsed.file.entries.len);
+    try std.testing.expectEqual(@as(u8, 7), parsed.file.find("a.u8").?.u8v);
+    try std.testing.expectEqual(@as(i8, -7), parsed.file.find("a.i8").?.i8v);
+    try std.testing.expectEqual(@as(u16, 1000), parsed.file.find("a.u16").?.u16v);
+    try std.testing.expectEqual(@as(i16, -1000), parsed.file.find("a.i16").?.i16v);
+    try std.testing.expectEqual(@as(u32, 100000), parsed.file.find("a.u32").?.u32v);
+    try std.testing.expectEqual(@as(i32, -100000), parsed.file.find("a.i32").?.i32v);
+    try std.testing.expectEqual(@as(f32, 0.5), parsed.file.find("a.f32").?.f32v);
+    try std.testing.expectEqual(true, parsed.file.find("a.bool").?.boolv);
+    try std.testing.expectEqualStrings("hello", parsed.file.find("a.string").?.string);
+    try std.testing.expectEqual(@as(usize, 2), parsed.file.find("a.array").?.array.items.len);
+    try std.testing.expectEqual(@as(u32, 2), parsed.file.find("a.array").?.array.items[1].u32v);
+    try std.testing.expectEqual(@as(u64, 1 << 40), parsed.file.find("a.u64").?.u64v);
+    try std.testing.expectEqual(@as(i64, -(1 << 40)), parsed.file.find("a.i64").?.i64v);
+    try std.testing.expectEqual(@as(f64, 0.25), parsed.file.find("a.f64").?.f64v);
 }
 
 test "a conversion of the vector's model takes the vector" {
