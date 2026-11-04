@@ -77,3 +77,7 @@ test {
 test "Qwen pages default: the learner's and the prefix share's refusals stop before the weights load" {
     try @import("cuda_admit_test.zig").refusals();
 }
+
+test {
+    _ = @import("cuda_request_starts_test.zig");
+}
