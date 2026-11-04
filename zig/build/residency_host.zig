@@ -33,6 +33,8 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     host.addImport("drama3", drama);
     // native/metal_slide.zig imports living: the engine module's own (a file belongs to one module)
     host.addImport("living", engine.import_table.get("living") orelse @panic("the engine has no living import"));
+    @import("qwen4.zig").metalNative(b, b.graph.host, host);
+    b.step("test-metal-formats-host", "Actual Metal format offers with inert images and no device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{"Metal capabilities:"} })).step);
     const root = b.createModule(.{ .root_source_file = b.path("zig/residency_native_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "host", .module = host }} });
     const object = b.addObject(.{ .name = "metal-residency-native", .root_module = root });
     _ = object.getEmittedBin();

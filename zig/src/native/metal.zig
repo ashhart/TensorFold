@@ -40,7 +40,7 @@ const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g
 pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats },
-    .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} },
+    .{ .model_type = "fish_omni", .formats = &.{ "fp8-block128", "nvfp4" } },
     .{ .model_type = "nemotron_h", .formats = affine_widths },
     .{ .model_type = "qwen4_exp", .formats = affine_widths },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
@@ -563,4 +563,16 @@ test "slide admission: Metal entry points refuse before checkpoint or device acc
     try check(@import("spark25.zig").open, "Macs", &.{"spark2_5"});
     try check(@import("minimax_m3.zig").open, "Macs", &.{"minimax_m3_vl"});
     try check(openFlashNext, "Macs", &.{"qwen4_exp"});
+}
+
+test "Metal capabilities: fish_omni retains FP8 and includes its native NVFP4 expert format" {
+    var fp8 = false;
+    var nvfp4 = false;
+    for (families) |family| if (std.mem.eql(u8, family.model_type, "fish_omni")) {
+        for (family.formats) |format| {
+            fp8 = fp8 or std.mem.eql(u8, format, "fp8-block128");
+            nvfp4 = nvfp4 or std.mem.eql(u8, format, "nvfp4");
+        }
+    };
+    try std.testing.expect(fp8 and nvfp4);
 }
