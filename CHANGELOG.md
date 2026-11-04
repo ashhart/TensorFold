@@ -29,6 +29,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Unlimited-OCR-2 on native Metal (M5 GPUs): Baidu's BF16 release as published serves page images through `tensorfold-native serve --vision`. On the recipe's pages its transcribed text is identical to the release's own `infer` in torch bf16, while 10 of the 288 box coordinates in the replies differ (7 by 1, at most 10); one stream, greedy, up to 131,072 tokens (#2074).
 
+- Unlimited-OCR-2 on CUDA: the same release serves page images on NVIDIA GPUs through `tensorfold-native serve --vision`, with the Metal family's steps and cuBLASLt for the projections. Each GPU repeats its own replies byte for byte, but CUDA may part from Metal, and one GPU model from another, where the release's own `infer` has a near-tie, mostly in box coordinates: on the recipe's pages the transcribed text is identical to `infer` in torch bf16 on a GB10 in all six cases and on an RTX 5090 in five, the sixth one such near-tie; one stream, greedy (#2077).
+
 - Qwen3.5-MoE's prompt sorts its experts' rows in one threadgroup, a thread an expert, with the same order as the serial sort (#1799). Thanks to @BobClawblaw.
 - The lane core takes readout requests for decision prompts, read in pinned 1,024-row pieces, and a batched embedding request no longer hangs on a backend that prefills many prompts at once (#2047). Thanks to @laudney.
 
