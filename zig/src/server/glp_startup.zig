@@ -127,6 +127,11 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
     if (model.hidden) |hidden| glp.checkModel(vector, hidden, model.repo, &why) catch {
         return try std.fmt.allocPrint(a, "--glp: {s}", .{why.text()});
     };
+    if (model.layers) |layers| {
+        for (vector.layers) |l| {
+            if (l.id >= layers) return try std.fmt.allocPrint(a, "--glp: the vector steers layer {d} of a model with {d} layers: its deepest layer is {d}", .{ l.id, layers, layers - 1 });
+        }
+    }
     if (isGemma(model_type)) return "--glp: Gemma's terms of use forbid circumventing its safety filters, so a Gemma checkpoint is never steered: serve it without --glp";
     if (!std.mem.eql(u8, model_type, steer_type)) return try std.fmt.allocPrint(a, "--glp: {s} checkpoints are not steered: only Qwen3.8-27B takes a control vector", .{model_type});
     if (model.hidden) |hidden| if (hidden != steer_hidden) return "--glp: this checkpoint is not Qwen3.8-27B: only the 5120-wide one takes a control vector";
@@ -134,10 +139,12 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
     return null;
 }
 
-/// The checkpoint's hidden size and the repo it came from, as the vector's own check needs them.
+/// The checkpoint's hidden size, depth and the repo it came from, as the vector's own check needs them.
 const Model = struct {
     /// The model's hidden size, when its config names one.
     hidden: ?usize = null,
+    /// The model's number of blocks, when its config names one.
+    layers: ?usize = null,
     /// The repo id the checkpoint came from ("Org/Name"), empty when it is not a cache snapshot.
     repo: []const u8 = "",
 };
@@ -151,6 +158,9 @@ fn modelOf(a: std.mem.Allocator, dir: []const u8) Model {
     const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
     if (text.object.get("hidden_size")) |v| {
         if (v == .integer and v.integer > 0) m.hidden = @intCast(v.integer);
+    }
+    if (doc.object.get("num_hidden_layers")) |v| {
+        if (v == .integer and v.integer > 0) m.layers = @intCast(v.integer);
     }
     return m;
 }

@@ -11,6 +11,9 @@ const io = std.testing.io;
 /// The width Qwen3.8-27B has; a vector that steers it is this wide.
 const width = 5120;
 
+/// The depth Qwen3.8-27B has; its last block is layer 63.
+const depth = 64;
+
 /// Whether this platform's engine steers: only the Metal engine does, and only on a Mac.
 const steers = builtin.os.tag == .macos;
 
@@ -34,10 +37,14 @@ const Fixture = struct {
     g: ?serve.Vec,
 
     fn make(a: std.mem.Allocator, w: usize, hidden: usize, ids: []const u32, spec: glp.WriteSpec, alpha: ?f64) !Fixture {
+        return makeDepth(a, w, hidden, depth, ids, spec, alpha);
+    }
+
+    fn makeDepth(a: std.mem.Allocator, w: usize, hidden: usize, layers: usize, ids: []const u32, spec: glp.WriteSpec, alpha: ?f64) !Fixture {
         var tmp = std.testing.tmpDir(.{});
         errdefer tmp.cleanup();
         const model = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
-        const json = try std.fmt.allocPrint(a, "{{\"model_type\":\"qwen3_5\",\"hidden_size\":{d},\"text_config\":{{\"hidden_size\":{d}}}}}", .{ hidden, hidden });
+        const json = try std.fmt.allocPrint(a, "{{\"model_type\":\"qwen3_5\",\"hidden_size\":{d},\"num_hidden_layers\":{d},\"text_config\":{{\"hidden_size\":{d}}}}}", .{ hidden, layers, hidden });
         try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = json });
         const bytes = try vectorBytes(a, w, ids, spec);
         try tmp.dir.writeFile(io, .{ .sub_path = "vector.gguf", .data = bytes });
@@ -93,7 +100,7 @@ test "a file the reader refuses is refused with the reader's reason" {
     var g: ?serve.Vec = serve.withPath(null, path);
     const why = try refused(a, &g);
     try std.testing.expect(std.mem.indexOf(u8, why, "argument --glp:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, why, "not a GGUF container") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "not a GGUF v3 container") != null);
 }
 
 test "--glp-alpha without --glp is refused" {
@@ -196,6 +203,28 @@ test "a vector the model's width does not match is refused" {
     const why = (try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?)).?;
     try std.testing.expect(std.mem.indexOf(u8, why, "4096") != null);
     try std.testing.expect(std.mem.indexOf(u8, why, "5120") != null);
+}
+
+test "a vector that names a layer past the model's depth is refused before the model loads" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.makeDepth(a, width, width, 4, &.{ 1, 4 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = (try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "layer 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "4 layers") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "deepest layer is 3") != null);
+}
+
+test "a vector that stops at the model's deepest layer is accepted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.makeDepth(a, width, width, 4, &.{ 1, 3 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?);
+    if (steers) try std.testing.expect(why == null) else try std.testing.expect(why != null and std.mem.indexOf(u8, why.?, "Metal") != null);
 }
 
 test "the CUDA engine does not steer" {

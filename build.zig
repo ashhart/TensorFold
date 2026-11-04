@@ -99,7 +99,6 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/quant_geometry_host.zig").steps(b, test_step);
     @import("zig/build/stage.zig").steps(b, test_step);
     @import("zig/build/glp.zig").tests(b, test_step);
-    @import("zig/build/glp_derive.zig").add(b, target, draft_ids, test_step);
     @import("zig/build/glp_steer.zig").tests(b, test_step);
     @import("zig/build/glp_serve.zig").tests(b, test_step);
     @import("zig/build/steer.zig").tests(b, test_step);
