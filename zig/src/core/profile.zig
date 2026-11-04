@@ -12,6 +12,8 @@ pub const Switch = enum {
     TF_FLASHNEXT_KV_PAGES,
     TF_FLASHNEXT_KV_PAGES_ALL,
     TF_KV_PAGES,
+    TF_GLM_KV_HOST,
+    TF_GLM_KV_HOST_SHARED,
 };
 pub const Syntax = enum { count, one, auto };
 pub const Entry = struct {
@@ -62,6 +64,8 @@ pub const entries = [_]Entry{
     .{ .id = .TF_FLASHNEXT_KV_PAGES_ALL, .families = flash, .class = .debug, .syntax = .one, .effect = "Put every stream on pool pages for checks", .evidence = "#1660" },
     .{ .id = .TF_KV_PAGES, .families = &.{"glm5_next"}, .class = .identical, .syntax = .auto, .effect = "GLM KV pool pages; auto from two ranks with BF16, windows with FP8", .evidence = "#1322" },
     .{ .id = .TF_KV_PAGES, .families = &.{ "nemotron_h", "nemotron_h_omni" }, .class = .identical, .report_values = &.{ "0", "all" }, .effect = "Nemotron KV pool pages by default; exact 0 disables, exact all pages every stream", .evidence = "#781" },
+    .{ .id = .TF_GLM_KV_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
+    .{ .id = .TF_GLM_KV_HOST_SHARED, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
 };
 
 comptime {
@@ -98,8 +102,28 @@ pub fn resolve(profile: Profile, id: Switch, environment: ?[:0]const u8) ?[:0]co
 
 /// The only served profile is stable; no global setting or environment mutation is needed to select it.
 pub inline fn get(comptime id: Switch) ?[:0]const u8 {
+    return value(.stable, id);
+}
+
+/// One switch's value for a profile chosen at runtime: the same environment-first rule as `get`.
+pub fn value(profile: Profile, id: Switch) ?[:0]const u8 {
     const raw = std.c.getenv(entry(id).name());
-    return resolve(.stable, id, if (raw) |v| std.mem.span(v) else null);
+    return resolve(profile, id, if (raw) |v| std.mem.span(v) else null);
+}
+
+/// The registry row a switch's environment name belongs to; null for a name the table does not cover.
+pub fn registered(name: []const u8) ?Switch {
+    inline for (@typeInfo(Switch).@"enum".field_names, @typeInfo(Switch).@"enum".field_values) |n, v| {
+        if (std.mem.eql(u8, name, n)) return @fromBackingInt(@intCast(v));
+    }
+    return null;
+}
+
+/// A runtime name lookup: a registered switch resolves through the profile, any other name through libc as before.
+pub fn lookup(name: [:0]const u8) ?[:0]const u8 {
+    if (registered(name)) |id| return value(.stable, id);
+    const raw = std.c.getenv(name) orelse return null;
+    return std.mem.span(raw);
 }
 
 test {

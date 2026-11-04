@@ -4,17 +4,18 @@ const cuda = @import("cuda");
 const posix = std.posix;
 
 pub fn onHost() bool {
-    return set("TF_GLM_KV_HOST");
+    return enabled(.TF_GLM_KV_HOST);
 }
 
 /// TF_GLM_KV_HOST_SHARED=1: the ranks on this host share one copy of the pages (their latent rows are identical).
 pub fn shared() bool {
-    return set("TF_GLM_KV_HOST_SHARED");
+    return enabled(.TF_GLM_KV_HOST_SHARED);
 }
 
-fn set(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+/// An exact-one switch through the profile registry, which is the one reader of a registered name.
+fn enabled(comptime id: @import("profile").Switch) bool {
+    const v = @import("profile").get(id) orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 /// Host pages of `page` bytes for a `capacity`-row window: `gib` GiB of them, else one full window and 16.

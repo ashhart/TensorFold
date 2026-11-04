@@ -35,12 +35,17 @@ const TestEnv = struct {
     all: ?[]const u8 = null,
     share: ?[]const u8 = null,
     glm_pages: ?[]const u8 = null,
+    glm_host: ?[]const u8 = null,
+    glm_shared: ?[]const u8 = null,
     pub fn get(e: @This(), name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "TF_QWEN_KV_PAGES")) return e.qwen;
         if (std.mem.eql(u8, name, "TF_QWEN_KV_PAGES_ALL")) return e.all;
         if (std.mem.eql(u8, name, "TF_QWEN_KV_SHARE")) return e.share;
         if (std.mem.eql(u8, name, "TF_KV_PAGES")) return e.glm_pages;
+        if (std.mem.eql(u8, name, "TF_GLM_KV_HOST")) return e.glm_host;
+        if (std.mem.eql(u8, name, "TF_GLM_KV_HOST_SHARED")) return e.glm_shared;
         if (std.mem.eql(u8, name, "TF_GLM_KV_SHARE")) return null;
+        if (std.mem.eql(u8, name, "TF_KV_SHARE")) return null;
         return "fixture-secret-must-not-be-read";
     }
 };
@@ -70,6 +75,18 @@ test "profile line: GLM reports explicit page policies including off without tre
     }
     for ([_][2][]const u8{ .{ "qwen3_5", "cuda" }, .{ "glm5_next", "mlx" }, .{ "unknown", "cuda" } }) |scope|
         try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], TestEnv{ .glm_pages = "off" }));
+}
+
+test "profile line: the GLM host KV tier is reported for its own family and backend only" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: TF_GLM_KV_HOST=1 (identical, env)", try format(a, .stable, "glm5_next", "cuda", TestEnv{ .glm_host = "1" }));
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: TF_GLM_KV_HOST=1 (identical, env); TF_GLM_KV_HOST_SHARED=1 (identical, env)", try format(a, .stable, "glm5_next", "cuda", TestEnv{ .glm_host = "1", .glm_shared = "1" }));
+    for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |raw|
+        try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "glm5_next", "cuda", TestEnv{ .glm_host = raw, .glm_shared = raw }));
+    for ([_][2][]const u8{ .{ "qwen3_5", "cuda" }, .{ "gemma4", "cuda" }, .{ "glm5_next", "mlx" }, .{ "unknown", "cuda" } }) |scope|
+        try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], TestEnv{ .glm_host = "1", .glm_shared = "1" }));
 }
 
 test "profile line: control bytes and overlong values stay bounded on a single line" {
