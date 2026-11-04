@@ -6,6 +6,8 @@ const planning = @import("attention_plan.zig");
 const Budget = @import("gdn_pool.zig").Budget;
 
 const margin: usize = 8 << 30;
+/// RAM a suggested wired limit leaves outside the GPU for macOS and other processes.
+const floor: usize = 4 << 30;
 
 pub fn buffers(sizes: anytype) usize {
     var bytes: usize = 0;
@@ -76,11 +78,11 @@ pub fn room(real: usize, used: usize, cap: ?[]const u8) !usize {
     return (try workingSet(real, cap)) -| used -| margin;
 }
 
-/// The iogpu.wired_limit_mb that fits `need` bytes beside `used` and the margin; null when RAM cannot.
+/// The iogpu.wired_limit_mb that fits `need` beside `used` and the margin while leaving the floor; null if RAM cannot.
 pub fn wiredRaise(used: usize, need: usize, ram: usize) ?usize {
     const total = used +| need +| margin;
-    if (total > ram) return null;
-    return std.math.divCeil(usize, total, 1 << 20) catch unreachable;
+    const mb = std.math.divCeil(usize, total, 1 << 20) catch unreachable;
+    return if (mb *| (1 << 20) <= ram -| floor) mb else null;
 }
 
 /// The tail of a startup refusal: the one change that fits a stream beside the weights and the margin.
@@ -93,7 +95,7 @@ pub const Advice = union(enum) {
         switch (a) {
             .lower => try w.writeAll(": lower --parallel or --context"),
             .raise => |r| try w.print(": Metal lets this Mac use {d:.1} GiB; sudo sysctl iogpu.wired_limit_mb={d} raises that limit enough for one stream at this context until reboot (or lower --context)", .{ gibs(r.set), r.mb }),
-            .no_raise => |ram| if (ram) |bytes| try w.print(": no wired-limit raise fits one stream in this Mac's {d:.1} GiB of RAM: lower --context", .{gibs(bytes)}) else try w.writeAll(": no wired-limit raise is known to fit one stream: lower --context"),
+            .no_raise => |ram| if (ram) |bytes| try w.print(": no wired-limit raise fits one stream and leaves {d} GiB of this Mac's {d:.1} GiB of RAM to the system: lower --context", .{ floor >> 30, gibs(bytes) }) else try w.writeAll(": no wired-limit raise is known to fit one stream: lower --context"),
         }
     }
 };
