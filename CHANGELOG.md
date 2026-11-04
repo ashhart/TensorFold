@@ -114,6 +114,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `cluster check`, `cluster status` and `serve`'s preflight now exit 1 when a configured model cannot be planned (#2069).
 
+- Drama speech now refuses explicit `--max-frames = --context - 2` instead of silently trimming it to `--context - 3`. Overlong-prompt HTTP 400 messages separately name assembled prompt rows, request-text tokens and acoustic reference frames; supported context limits are unchanged (#2002).
+
 ## 1.2.2
 
 - CUDA lanes: Gemma 4, MiniMax M3, Kolibri-1, Spark 2.5 and Dory can verify root and context copies as Nemotron does, opt-in: set `TF_GEMMA4_COPIES`, `TF_MINIMAX_COPIES`, `TF_KOLIBRI_COPIES`, `TF_SPARK_COPIES` or `TF_DORY_COPIES` to 1. Replies equal `"draft": false`, and unset is the old policy (#2022, part of #1910).
