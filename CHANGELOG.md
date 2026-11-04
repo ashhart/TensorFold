@@ -77,6 +77,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - HIP Qwen3.5 and Qwen3.5-MoE no longer list BF16 in `capabilities`, since those servers refuse a BF16 checkpoint for chat (it can only score decisions) (#2139).
 
 - MiniMax-M3 on Metal refuses logprobs with an external drafter before prefill; plain decoding keeps logprobs (#2139).
+- CUDA GLM-5.3-Flash capabilities include the EXL3 format its loader already serves (#2139).
 
 - Model discovery omits reasoning for engines that disable it, including HIP OCR and scoring models, even when their template has thinking markers (#2139).
 
