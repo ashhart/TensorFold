@@ -412,6 +412,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Six remaining fp32-to-bf16 conversions use core's shared rounding: every non-NaN input gives the same bits, and a NaN now stays a NaN where it didn't before (#2052).
 
+- HIP builds and loads its runtime on Windows: `hipcc.exe` is preferred and `hipcc.bat` is found through `-Dhipcc`, `PATH` or `HIP_PATH`/`ROCM_PATH` and run through `cmd /c call`, `check-native-hip-host` compiles for the host OS instead of always `linux-gnu`, the runtime is loaded by its Windows names (`amdhip64.dll` and the versioned ones, `TENSORFOLD_HIP` overrides), the admission budget comes from the driver where `/proc/meminfo` and sysfs do not exist, the optional libraries use their Windows names (cuBLAS had been looking for `libcublas.so.13`), and the cooperative grid test runs plain where the driver reports no cooperative launch support (ROCm/HIP#3640).
+
 - cortheon keeps a source, link, page or query that differs only in spelling (a capital scheme, a query- or fragment-only link, a Windows path, a scheme-relative result), and resolves `.` and `..` without dropping empty path segments, so `/docs/` keeps its slash (#2036). Thanks to @ppardus.
 
 - The Recall tests set their own disk floor, so the full host suite passes on a machine with less than 4 GiB free. The 4 GiB floor itself is unchanged and has its own test (#2051).
