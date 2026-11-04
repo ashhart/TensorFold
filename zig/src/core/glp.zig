@@ -175,12 +175,17 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         if (i != layers.items.len) return refuse(why, "the file names {d} layers and holds {d}", .{ i, layers.items.len });
     }
 
+    // A direction is applied as it stands in both modes, so a NaN or an infinity is refused in either.
+    for (layers.items) |l| {
+        for (l.dir) |v| if (!std.math.isFinite(v)) return refuse(why, "layer {d}'s direction holds a value that is not finite", .{l.id});
+    }
+
     if (mode == .project) {
         for (layers.items) |l| {
             var sum: f64 = 0;
             for (l.dir) |v| sum += @as(f64, v) * @as(f64, v);
             const norm = @sqrt(sum);
-            if (!std.math.isFinite(norm) or @abs(norm - 1.0) > 1e-3) return refuse(why, "layer {d}'s direction has length {d:.4}; a projective direction must be a unit vector", .{ l.id, norm });
+            if (@abs(norm - 1.0) > 1e-3) return refuse(why, "layer {d}'s direction has length {d:.4}; a projective direction must be a unit vector", .{ l.id, norm });
         }
     }
 

@@ -52,6 +52,7 @@ The reader fails closed rather than guessing.
 | `glp.rank` is not 1 | The reader implements rank 1. |
 | `glp.spec_version` is not 1 | The reader implements version 1. |
 | A direction is not a unit vector | A projective direction has to be one. |
+| A direction holds a NaN or an infinity | The direction is applied as it stands in either mode, so every value has to be finite. |
 | The digest does not match the bytes | The file says one thing and holds another. |
 | One layer is named twice | `direction.5` and `direction.05` both parse as layer 5; a file has one direction per layer. |
 | A layer id is past the checkpoint's depth | The checkpoint's `num_hidden_layers` is read at startup, so the file is refused before the model loads. |
@@ -121,8 +122,8 @@ of its own.
 
 ## The file
 
-The container is GGUF v3, read by the engine's own GGUF reader. The metadata
-follows the GLP standard:
+The container is GGUF v3, read by `zig/src/core/glp_container.zig`, the GLP
+reader for the subset a vector needs. The metadata follows the GLP standard:
 
 | Key | Meaning |
 | --- | --- |

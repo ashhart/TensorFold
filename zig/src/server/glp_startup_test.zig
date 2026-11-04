@@ -217,6 +217,20 @@ test "a vector that names a layer past the model's depth is refused before the m
     try std.testing.expect(std.mem.indexOf(u8, why, "deepest layer is 3") != null);
 }
 
+test "a nested config's depth is read from text_config" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.makeDepth(a, width, width, 4, &.{ 1, 4 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    // The depth lives in text_config only, as a nested config carries it.
+    const json = try std.fmt.allocPrint(a, "{{\"model_type\":\"qwen3_5\",\"text_config\":{{\"hidden_size\":{d},\"num_hidden_layers\":4}}}}", .{width});
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = json });
+    const why = (try serve.refusal(a, f.model, "qwen3_5", "auto", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "layer 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "4 layers") != null);
+}
+
 test "a vector that stops at the model's deepest layer is accepted" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

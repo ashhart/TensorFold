@@ -159,7 +159,7 @@ fn modelOf(a: std.mem.Allocator, dir: []const u8) Model {
     if (text.object.get("hidden_size")) |v| {
         if (v == .integer and v.integer > 0) m.hidden = @intCast(v.integer);
     }
-    if (doc.object.get("num_hidden_layers")) |v| {
+    if (text.object.get("num_hidden_layers") orelse doc.object.get("num_hidden_layers")) |v| {
         if (v == .integer and v.integer > 0) m.layers = @intCast(v.integer);
     }
     return m;

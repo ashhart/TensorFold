@@ -15,6 +15,8 @@ const Shape = struct {
     layers: []const u32 = &.{ 10, 11 },
     width: usize = 8,
     unit: bool = true,
+    /// Every component's value, when a test needs one that is not finite.
+    value: ?f32 = null,
     digest: enum { correct, wrong, absent } = .correct,
     base_model: ?[]const u8 = "Qwen/Qwen3.8-27B",
     layer_ids_key: bool = true,
@@ -73,7 +75,7 @@ fn writeFixture(shape: Shape) ![]u8 {
     for (shape.layers) |_| {
         try offsets.append(a, payload.items.len);
         for (0..shape.width) |_| {
-            const v: f32 = if (shape.unit) 1.0 / @sqrt(@as(f32, @floatFromInt(shape.width))) else 0.25;
+            const v: f32 = shape.value orelse if (shape.unit) 1.0 / @sqrt(@as(f32, @floatFromInt(shape.width))) else 0.25;
             try payload.appendSlice(a, &std.mem.toBytes(@as(u32, @bitCast(v))));
         }
     }
@@ -287,6 +289,18 @@ test "a direction that is not a unit vector is refused" {
     const bytes = try writeFixture(.{ .unit = false });
     defer std.testing.allocator.free(bytes);
     try refused(bytes);
+}
+
+test "a direction that is not finite is refused in either mode" {
+    for ([_][]const u8{ "project", "add" }) |mode| {
+        for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }) |value| {
+            const bytes = try writeFixture(.{ .mode = mode, .value = value });
+            defer std.testing.allocator.free(bytes);
+            const why = try reason(bytes);
+            defer std.testing.allocator.free(why);
+            try std.testing.expect(std.mem.indexOf(u8, why, "not finite") != null);
+        }
+    }
 }
 
 test "a content digest that does not cover the vectors is refused" {
