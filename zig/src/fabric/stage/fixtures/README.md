@@ -17,7 +17,8 @@ no prefix: they are raw rows after the 32-byte frame header of `frame.zig`.
 - rank 0: CUDA, layers 0..4; rank 1: Metal, layers 4..8 (ranges are half-open: `first` up to, not including, `end`).
 
 The round in every plan and rows fixture: stream 3 open at 0 with 4 rows; stream 7 continue at 10 with 1 row,
-2 accepted; stream 9 resume from 32 at 32 with 2 rows; stream 12 close at 20; one chunk cut at row 4; 7 rows.
+2 accepted, generation 1; stream 9 resume from 32 at 32 with 2 rows, generation 2; stream 12 close at 20, generation 1;
+one chunk cut at row 4; 7 rows.
 
 ## Layouts
 
@@ -41,12 +42,15 @@ version text (`n_text` bytes, printable ASCII, 1..64):
 
 Dtypes: 1 bf16, 2 f16, 3 f32, 4 f8e4m3, 5 nvfp4 (KV only; not a row dtype).
 
-Ready (message 2), 16 bytes: prefix, rank u32, flags u32 (bit 0 loaded, bit 1 warm, others 0).
+Ready (message 2), 16 bytes: prefix, rank u32, flags u32 (bit 0 loaded; bit 1 warm, executable for the declared
+shapes, with no graph capture implied; others 0).
 
-Plan (message 3), 24 bytes, then 24 bytes a stream, then u32 cuts: prefix, streams u32, cuts u32, total rows u32
+Plan (message 3), 24 bytes, then 28 bytes a stream, then u32 cuts: prefix, streams u32, cuts u32, total rows u32
 (the streams' sum), reserved u32. A stream: id u32 (strictly ascending), op u8 (1 open, 2 continue, 3 close,
-4 cancel, 5 resume), 3 reserved bytes, first position u32, rows u32, accepted u32, resume point u32 (0 unless resume).
-Cuts are row offsets into the round's rows, strictly ascending, each in 1..rows-1. No streams: the keep-alive.
+4 cancel, 5 resume), 3 reserved bytes, first position u32, rows u32, accepted u32, resume point u32 (0 unless resume),
+state generation u32 (0 for open; a stage refuses a stream whose generation is not its slot's, `OtherGeneration`).
+Cuts are row offsets into the round's rows, strictly ascending, each in 1..rows-1. No streams: the keep-alive, sent
+whenever rank 0 has sent no plan for 2 s, mid-round too; it never changes a stream's state.
 
 Rows (frame kind 3): `planes` x `rows` x `hidden` values of the row dtype, plane-major, rows in plan order; then, when
 the draft width is not 0, `rows` x `draft_width` fp32 tap partial sums. The frame's rows field is the plan's total.
@@ -82,19 +86,20 @@ the draft width is not 0, `rows` x `draft_width` fp32 tap partial sums. The fram
 | `ready_bad_flags.bin` | 16 | flags 7 | `BadFlags` |
 | `ready_wrong_message.bin` | 16 | message byte 6 = 3 (plan) | `WrongMessage` |
 | `plan_keepalive.bin` | 24 | no streams, no cuts | taken |
-| `plan_round.bin` | 124 | the round below | taken |
-| `plan_bad_length.bin` | 120 | the round without its last 4 bytes | `BadLength` |
+| `plan_round.bin` | 140 | the round below | taken |
+| `plan_bad_length.bin` | 136 | the round without its last 4 bytes | `BadLength` |
 | `plan_bad_reserved.bin` | 24 | keep-alive, byte 20 = 1 | `BadReserved` |
-| `plan_too_many_streams.bin` | 144 | 5 streams (parallel is 4) | `TooManyStreams` |
-| `plan_unordered.bin` | 124 | the round, stream 1's id 2 (after 3) | `UnorderedStreams` |
-| `plan_bad_op.bin` | 124 | the round, stream 0's op byte = 6 | `BadOp` |
-| `plan_bad_open.bin` | 124 | the round, the open at position 5 | `BadOpen` |
-| `plan_bad_resume.bin` | 124 | the round, resume point 40 past first 32 | `BadResume` |
-| `plan_rows_on_close.bin` | 124 | the round, the close with 1 row | `RowsOnClose` |
-| `plan_past_context.bin` | 124 | the round, stream 1 at 64 + 1 row (context 64) | `PastContext` |
-| `plan_too_many_rows.bin` | 124 | the round with 9 rows (max rows 8) | `TooManyRows` |
-| `plan_bad_total.bin` | 124 | the round, total byte 16 = 6 (streams sum to 7) | `BadTotal` |
-| `plan_bad_cut.bin` | 124 | the round, cut at 7 (= its rows) | `BadCut` |
+| `plan_too_many_streams.bin` | 164 | 5 streams (parallel is 4) | `TooManyStreams` |
+| `plan_unordered.bin` | 140 | the round, stream 1's id 2 (after 3) | `UnorderedStreams` |
+| `plan_bad_op.bin` | 140 | the round, stream 0's op byte = 6 | `BadOp` |
+| `plan_bad_open.bin` | 140 | the round, the open at position 5 | `BadOpen` |
+| `plan_open_generation.bin` | 140 | the round, the open with generation 1 | `BadOpen` |
+| `plan_bad_resume.bin` | 140 | the round, resume point 40 past first 32 | `BadResume` |
+| `plan_rows_on_close.bin` | 140 | the round, the close with 1 row | `RowsOnClose` |
+| `plan_past_context.bin` | 140 | the round, stream 1 at 64 + 1 row (context 64) | `PastContext` |
+| `plan_too_many_rows.bin` | 140 | the round with 9 rows (max rows 8) | `TooManyRows` |
+| `plan_bad_total.bin` | 140 | the round, total byte 16 = 6 (streams sum to 7) | `BadTotal` |
+| `plan_bad_cut.bin` | 140 | the round, cut at 7 (= its rows) | `BadCut` |
 | `rows_round.bin` | 200 | frame header (rows 7, 168 bytes) + payload, byte i = (37 i + 11) mod 256 | taken |
 | `rows_other_count.bin` | 200 | header rows 6 | `OtherRowCount` |
 | `rows_other_bytes.bin` | 199 | header and payload 167 bytes | `OtherRowBytes` |

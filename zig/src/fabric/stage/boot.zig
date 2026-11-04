@@ -240,7 +240,7 @@ pub fn tightest(descs: []const Description) struct { kv_rows: u64, states: u32 }
     return .{ .kv_rows = kv, .states = st };
 }
 
-/// A stage's ready report: its range loaded, and warm (graphs captured); rank 0 serves once every stage is both.
+/// A stage's ready report: loaded, and warm (executable for its shapes); rank 0 serves once every stage is both.
 pub const Ready = struct {
     rank: u32,
     loaded: bool,

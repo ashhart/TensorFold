@@ -42,9 +42,9 @@ pub fn description(rank: u32) boot.Description {
 /// The round every plan and rows fixture is cut from: one stream of each op but cancel, 7 rows, a cut at row 4.
 pub const streams = [_]plan.Stream{
     .{ .id = 3, .op = .open, .first = 0, .rows = 4 },
-    .{ .id = 7, .op = .@"continue", .first = 10, .rows = 1, .accepted = 2 },
-    .{ .id = 9, .op = .@"resume", .first = 32, .rows = 2, .resume_at = 32 },
-    .{ .id = 12, .op = .close, .first = 20, .rows = 0 },
+    .{ .id = 7, .op = .@"continue", .first = 10, .rows = 1, .accepted = 2, .generation = 1 },
+    .{ .id = 9, .op = .@"resume", .first = 32, .rows = 2, .resume_at = 32, .generation = 2 },
+    .{ .id = 12, .op = .close, .first = 20, .rows = 0, .generation = 1 },
 };
 pub const cuts = [_]u32{4};
 
@@ -244,6 +244,11 @@ pub const all = [_]Fixture{
     fx("plan_bad_open", planWith(struct {
         fn f(s: *[streams.len]plan.Stream, _: *[cuts.len]u32) void {
             s[0].first = 5;
+        }
+    }.f), error.BadOpen),
+    fx("plan_open_generation", planWith(struct {
+        fn f(s: *[streams.len]plan.Stream, _: *[cuts.len]u32) void {
+            s[0].generation = 1;
         }
     }.f), error.BadOpen),
     fx("plan_bad_resume", planWith(struct {

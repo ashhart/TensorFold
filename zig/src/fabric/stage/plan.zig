@@ -9,7 +9,7 @@ const put32 = payload.put32;
 
 /// The plan's fixed part, and each stream's entry after it; the cuts (4 bytes each) follow the streams.
 pub const plan_fixed = 24;
-pub const stream_size = 24;
+pub const stream_size = 28;
 
 /// What a round does with a stream: start it, extend it, end it, drop it, or resume it from a kept prompt state.
 pub const Op = enum(u8) { open = 1, @"continue" = 2, close = 3, cancel = 4, @"resume" = 5 };
@@ -25,7 +25,14 @@ pub const Stream = struct {
     accepted: u32 = 0,
     /// For `resume`, the kept prompt state's position (at most `first`); 0 for every other op.
     resume_at: u32 = 0,
+    /// The slot's state generation (0 for `open`); a keep, a release or a restore advances it (see `sameGeneration`).
+    generation: u32 = 0,
 };
+
+/// A stage refuses a stream whose generation is not its slot's, so a missed rollback fails by name, not as wrong rows.
+pub fn sameGeneration(own: u32, s: Stream) error{OtherGeneration}!void {
+    if (s.generation != own) return error.OtherGeneration;
+}
 
 /// What a stage takes in one plan; from its shapes.
 pub const Limits = struct {
@@ -73,6 +80,7 @@ pub fn write(streams: []const Stream, cuts: []const u32, out: []u8) payload.Erro
         put32(p, at + 12, s.rows);
         put32(p, at + 16, s.accepted);
         put32(p, at + 20, s.resume_at);
+        put32(p, at + 24, s.generation);
         total +%= s.rows;
     }
     put32(p, 16, total);
@@ -106,6 +114,7 @@ pub const Plan = struct {
             .rows = get32(b, at + 12),
             .accepted = get32(b, at + 16),
             .resume_at = get32(b, at + 20),
+            .generation = get32(b, at + 24),
         };
     }
 
@@ -137,7 +146,7 @@ pub fn decode(p: []const u8, limits: Limits) Error!Plan {
         const s = plan.stream(i);
         if (i > 0 and s.id <= plan.stream(i - 1).id) return error.UnorderedStreams;
         switch (s.op) {
-            .open => if (s.first != 0 or s.accepted != 0) return error.BadOpen,
+            .open => if (s.first != 0 or s.accepted != 0 or s.generation != 0) return error.BadOpen,
             .close, .cancel => if (s.rows != 0) return error.RowsOnClose,
             .@"continue" => {},
             .@"resume" => if (s.resume_at == 0 or s.resume_at > s.first) return error.BadResume,
