@@ -233,10 +233,10 @@ const own_records = [_]Record{
             .threads = 256,
         },
         .usage = .{
-            .{ .vgprs = 23, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 23, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 23, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 23, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 21, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 21, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 21, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 21, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
     .{
@@ -441,10 +441,10 @@ const own_records = [_]Record{
             .threads = 256,
         },
         .usage = .{
-            .{ .vgprs = 24, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 24, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 24, .sgprs = 21, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
-            .{ .vgprs = 24, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 22, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 22, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 22, .sgprs = 22, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 22, .sgprs = 24, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
     .{
