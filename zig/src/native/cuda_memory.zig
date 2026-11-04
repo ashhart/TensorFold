@@ -174,9 +174,34 @@ pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     return @min(room -| streams, want);
 }
 
-/// Linux integrated devices use procfs; Windows retains the unified reserve but reads the CUDA pool.
-pub fn hostCounts(unified: bool, windows: bool) bool {
-    return unified and !windows;
+/// Linux integrated devices use procfs; Windows retains the unified reserve but reads the CUDA pool. So does Linux
+/// under WSL2 (`wsl_pool`): there the GPU's memory is the Windows driver's WDDM pool, apart from the RAM
+/// /proc/meminfo counts (an RTX Spark N1X: a 96 GiB carve-out beside about 30 GiB of WSL RAM, which refused a
+/// 72.8 GiB checkpoint the GPU holds).
+pub fn hostCounts(unified: bool, windows: bool, wsl_pool: bool) bool {
+    return unified and !windows and !wsl_pool;
+}
+
+/// Whether a Linux integrated device reads CUDA's pool: TENSORFOLD_UNIFIED_HOST_COUNTS=1 keeps procfs and =0 reads
+/// the pool; unset, WSL2 (WSL_DISTRO_NAME set) reads the pool.
+pub fn wslPool(override: ?[]const u8, wsl_distro: ?[]const u8) bool {
+    if (override) |v| return std.mem.eql(u8, v, "0");
+    return wsl_distro != null;
+}
+
+fn envText(name: [*:0]const u8) ?[]const u8 {
+    return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
+}
+
+test "integrated counts: procfs on Linux, the CUDA pool under WSL2 or when asked" {
+    try std.testing.expect(!wslPool(null, null)); // native Linux (a GB10): procfs
+    try std.testing.expect(wslPool(null, "Ubuntu")); // WSL2: the WDDM pool
+    try std.testing.expect(!wslPool("1", "Ubuntu")); // forced procfs
+    try std.testing.expect(wslPool("0", null)); // forced CUDA pool
+    try std.testing.expect(hostCounts(true, false, false));
+    try std.testing.expect(!hostCounts(true, false, true));
+    try std.testing.expect(!hostCounts(true, true, false));
+    try std.testing.expect(!hostCounts(false, false, false));
 }
 
 /// Integrated GPUs on Linux require validated /proc/meminfo counts; Windows and discrete devices use CUDA's counts.
@@ -294,7 +319,7 @@ test "memory limit refuses an oversized finite value and the rounded u64 boundar
 pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const host_counts = hostCounts(unified, @import("sys").windows);
+    const host_counts = hostCounts(unified, @import("sys").windows, wslPool(envText("TENSORFOLD_UNIFIED_HOST_COUNTS"), envText("WSL_DISTRO_NAME")));
     const text = if (host_counts) procText(a, io, "/proc/meminfo") else null;
     defer if (text) |bytes| a.free(bytes);
     const zones = if (host_counts) procText(a, io, "/proc/zoneinfo") else null;
