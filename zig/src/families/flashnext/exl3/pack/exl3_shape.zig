@@ -37,6 +37,7 @@ pub const codebook = "mul1";
 
 pub const tile: usize = 16;
 pub const hadamard: usize = 128;
+pub const tp_ranks: usize = 2;
 
 pub const linear_layers_per_cycle: usize = 3;
 pub const full_attention_interval: usize = 4;
@@ -56,11 +57,14 @@ pub fn kvOut() usize {
     return kv_heads * head_dim;
 }
 
-test "the published 3.05 shape is the one the budget is written against" {
+test "the published 3.05 shape is the one the cuts and the budget are written against" {
     try std.testing.expectEqual(@as(usize, 16), ngramHeadCount());
     try std.testing.expectEqual(@as(usize, 6144), qOut());
     try std.testing.expectEqual(@as(usize, 512), kvOut());
     try std.testing.expect(hidden % hadamard == 0);
     try std.testing.expect(expert_intermediate % hadamard == 0);
     try std.testing.expect(qOut() % hadamard == 0);
+    // Half of 640 is 320, which is not a Hadamard block. Column TP inside one expert is illegal.
+    try std.testing.expect(expert_intermediate / tp_ranks % hadamard != 0);
+    try std.testing.expect(hidden / tp_ranks % hadamard == 0);
 }

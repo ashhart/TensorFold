@@ -52,16 +52,16 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
         const value: f32 = @bitCast(@as(u32, std.mem.readInt(u16, first.logits[i * 2 ..][0..2], .little)) << 16);
         try check.expect(std.math.isFinite(value), "finite initial logits at {d}", .{i});
     }
-    const kept = try session.save(&first);
+    const kept = try session.save(&first, null);
     defer session.dropSaved(kept);
     const token = prompt.argmax(first.logits);
     try session.forward(flash.Tri, tri, &first, &.{token}, .{});
     const expected = try gpu.gpa.dupe(u8, first.logits);
     defer gpu.gpa.free(expected);
-    try session.restore(&first, kept);
+    try session.restore(&first, null, kept);
     try session.forward(flash.Tri, tri, &first, &.{token}, .{});
     try check.sameBytes("two-rank snapshot restore and replay", first.logits, expected);
-    try session.restore(&first, kept);
+    try session.restore(&first, null, kept);
     var second = try session.create(context);
     defer session.drop(&second);
     try session.forward(flash.Tri, tri, &second, ids.items, .{});

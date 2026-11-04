@@ -87,6 +87,8 @@ pub fn run(comptime Cuda: type, comptime open: anytype, comptime restore: anytyp
     self.stream = stream;
     self.ranks = &rank;
     self.head = if (drafting) &head else null;
+    self.exl3 = false;
+    self.kv = .{};
     self.lanes = .empty;
     self.parts = .{};
     defer self.lanes.deinit(a);

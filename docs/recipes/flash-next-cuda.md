@@ -112,8 +112,9 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 
 ## EXL3 checkpoints
 
-An EXL3 pack (see [EXL3 weights](exl3.md)) serves on one sm_120 rank with its routed experts in pinned host memory and
-a pool of expert lines a layer on the device. `tools/exl3_serve.sh` starts it. These switches tune it:
+An EXL3 pack (see [EXL3 weights](exl3.md)) serves on one sm_120 rank, or on two with expert parallel (`--tp 2`), with
+its routed experts in pinned host memory and a pool of expert lines a layer on the device. `tools/exl3_serve_tp2.sh`
+starts a rank. These switches tune it:
 
 | Name | Default | Effect |
 | --- | --- | --- |
@@ -125,11 +126,23 @@ a pool of expert lines a layer on the device. `tools/exl3_serve.sh` starts it. T
 | `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | `0` | `1` sizes the pools from the stored profile; ignored with `TF_FLASHNEXT_EXPERT_LINES`. |
 | `TF_FLASHNEXT_EXL3_ROUTED` | host | `device` keeps every routed expert on the device. |
 | `TF_FLASHNEXT_EXL3_ARCH` | unset | `unqualified` serves on a device that is not sm_120, without a claim. |
+| `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | `0` | `1` keeps the MTP layer's experts on the device instead of a pool (one rank). |
 | `TF_FLASHNEXT_PLE_READ` | `map` | `pread` reads the n-gram embedding rows by positional read. |
 | `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | Whether kept prompt-cache states live in pinned host memory. |
 | `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
 | `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY` | `0` | Diagnostics only: `1`, with the switch above, adds per-layer counters. |
 | `TENSORFOLD_BIN`, `TF_SRC` | built binary, the checkout | Diagnostics only: the binary `tools/exl3_*.sh` run and the checkout `tools/exl3_*.py` read their corpus from. |
+
+### TP integration scope
+
+Expert-parallel EXL3 placement and the collective spin override are EXL3-only; NVFP4 retains its existing
+expert placement and reduction. Three shared Flash Next changes also apply to NVFP4:
+
+- Rank forward frames carry a validated telemetry phase, which the follower uses to label its diagnostics.
+- MTP's `prompt_last` advances after every prompt chunk, including chunks that do not request logits, so the
+  first draft reads the last completed prompt row.
+- Snapshot-reuse warnings report invalid marks or missing head state for either format. NVFP4's existing
+  refusal of TP snapshots with drafts remains; EXL3 can retain the rank-0 head cache.
 
 ## What the core runs and what the family runs
 

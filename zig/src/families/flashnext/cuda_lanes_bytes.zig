@@ -15,7 +15,7 @@ pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u6
 pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
     if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
     const mode = try config.mode(gpa, io, dir);
-    if (mode == .exl3) return exl3_memory.placement(gpa, io, dir, world, rank);
+    if (mode == .exl3) return exl3_memory.placement(gpa, io, dir, world, rank, drafts);
     if (mode == .modelopt) {
         const main = try @import("cuda_rank_memory.zig").estimate(gpa, io, dir, world, rank);
         // Dense draft projections and vocabulary rows exceed the affine head's estimate.

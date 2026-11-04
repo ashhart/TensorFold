@@ -125,7 +125,7 @@ pub const LayerCounts = struct {
 
 pub const LayerSample = struct {
     owner: u64,
-    kind: enum { decoder },
+    kind: enum { decoder, mtp },
     layer: usize,
     lines: usize,
     counts: LayerCounts = .{},
