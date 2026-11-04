@@ -60,12 +60,21 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = try std.fmt.allocPrint(a, "--context {d}: Unlimited-OCR-2 runs to {d} tokens", .{ context, fl.config.max_context });
         return null;
     }
+    const h = start(a, gpa, io, o, vis_open, context, problem) catch |err| switch (err) {
+        error.Refused => return null,
+        else => return err,
+    };
+    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// The host, or error.Refused once `problem` says why; either error path releases what was made before it.
+fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, vis_open: api.VisionOpen, context: i64, problem: *[]const u8) !*Host {
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .io = io, .driver = undefined, .ctx = undefined, .model = undefined, .config = undefined, .clock = .{ .io = io }, .core = undefined, .host = undefined };
     h.driver = cuda.Driver.open() catch |err| {
         problem.* = try std.fmt.allocPrint(a, "no CUDA driver ({s})", .{@errorName(err)});
-        return null;
+        return error.Refused;
     };
     errdefer h.driver.close();
     h.ctx = try cuda.Context.init(&h.driver, 0);
@@ -73,7 +82,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     try h.ctx.makeCurrent();
     h.model = fl.serve.Model.load(gpa, io, &h.driver, o.dir, @intCast(context)) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the native Unlimited-OCR-2 engine cannot load this checkpoint ({s})", .{@errorName(err)});
-        return null;
+        return error.Refused;
     };
     errdefer h.model.deinit();
     std.log.info("unlimited-ocr: context {d} tokens, one request at a time, {d:.2} GiB of weights", .{ context, @as(f64, @floatFromInt(h.model.weights.bytes)) / (1 << 30) });
@@ -87,7 +96,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.host.on_thread = .{ .ctx = h, .run = Host.bind };
     h.host.memory = .{ .read = Host.memory };
     try h.host.start();
-    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+    return h;
 }
 
 /// Info.vision's prepare (on the HTTP thread, host work only): a page's views, gundam tiles when they fit.
