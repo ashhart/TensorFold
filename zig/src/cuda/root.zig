@@ -161,6 +161,7 @@ test {
     _ = @import("graph_registry.zig");
     _ = @import("graph_cache_regression_test.zig");
     _ = @import("graph_cache_ranks_test.zig");
+    _ = @import("graph_cache_shapes_test.zig");
     _ = exl3.block.dense;
     _ = exl3.block.experts;
     _ = exl3.block.lin2;
