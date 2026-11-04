@@ -1,5 +1,4 @@
-//! Unlimited-OCR-2 on CUDA served by the lane host: page images in, the publisher's greedy reply out, one request
-//! at a time (native/uocr.zig's host over the CUDA model).
+//! Unlimited-OCR-2 on CUDA through the lane host: page images in, the greedy reply out, one request at a time.
 const std = @import("std");
 const cuda = @import("cuda");
 const api = @import("engine_api");

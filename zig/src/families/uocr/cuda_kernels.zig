@@ -54,8 +54,7 @@ pub const Kernels = struct {
         @compileError("no kernel tf_uocr_" ++ name);
     }
 
-    /// Launches kernel `name` on `s` over `grid` blocks of `threads`, its arguments in order (u64 addresses, usize
-    /// as c_int, i64, f32, extern structs).
+    /// Launches `name` on `s`: `grid` blocks of `threads`, arguments in order (usize as c_int).
     pub fn run(k: *const Kernels, comptime name: []const u8, s: cuda.Stream, grid: [3]usize, threads: u32, args: anytype) !void {
         if (grid[0] == 0 or grid[1] == 0 or grid[2] == 0) return;
         var a: cuda.Args = .{};

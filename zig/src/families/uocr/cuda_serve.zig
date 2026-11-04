@@ -1,6 +1,4 @@
-//! Unlimited-OCR-2 on CUDA served by the lane host (serve.zig's model): one stream at a time, pages in as images,
-//! the publisher's greedy reply under its page guard. A page is prepared on the HTTP thread (decode, letterbox,
-//! tiles); the tower, the prompt pass and every decode step run on the lane thread with the context current.
+//! Unlimited-OCR-2 on CUDA through the lane host: one stream, pages in, the greedy reply under the page guard.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -40,8 +38,7 @@ pub fn basePageTokens() u32 {
     return @intCast(g * (g + 1) + 1);
 }
 
-/// Device bytes beside the weights for `context` tokens: the caches, and the encoder's and decoder's scratch (an
-/// estimate the open path checks against free memory).
+/// Cache bytes for `context` tokens beside the weights.
 pub fn cacheBytes(context: usize) usize {
     return decoder_mod.Decoder.cacheBytes(std.mem.alignForward(usize, context, cfg.block));
 }
@@ -95,8 +92,7 @@ pub const Model = struct {
         m.gpa.destroy(m);
     }
 
-    /// One page for the tower (serve.zig's prepare): gundam tiles plus the global view when they fit `max_tokens`,
-    /// else the global view alone. The views go as their bf16 values widened to f32, the global view first.
+    /// One page's views: gundam tiles and the global view when they fit `max_tokens`, else the global view alone.
     pub fn prepare(m: *Model, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !Prepared {
         if (max_tokens < basePageTokens()) return error.ImageTooSmall;
         var page = try pages.decode(m.io, a, bytes);

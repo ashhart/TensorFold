@@ -20,8 +20,7 @@ pub fn lfm2Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm2/lfm2.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
 }
 
-/// Unlimited-OCR-2 on CUDA: rooted at zig/src so it shares the Metal family's host files (config, preprocess,
-/// prompt, guard) and core/picture beside them.
+/// Unlimited-OCR-2 on CUDA, rooted at zig/src to share the Metal family's host files.
 pub fn uocrCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/uocr_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);

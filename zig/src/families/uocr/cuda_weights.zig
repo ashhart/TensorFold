@@ -1,6 +1,4 @@
-//! Unlimited-OCR-2's tensors on CUDA, bf16 as the release stores them, each 256-aligned in one device buffer; every
-//! tensor is accounted for (weights.zig's names and shapes). The few the host reads (position tables for a tile, the
-//! relative positions, the newline and separator rows) are kept as host copies; the mapped files are closed after.
+//! Unlimited-OCR-2's bf16 tensors in one device buffer, every one accounted for; a few kept on the host.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");

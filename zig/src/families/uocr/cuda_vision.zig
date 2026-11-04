@@ -1,5 +1,4 @@
-//! Unlimited-OCR-2's image encoder on CUDA: a view's pixels through SAM ViT-B, its neck and CLIP-L to the projector's
-//! rows, one view (the 1024 global view or a 640 tile) a pass; vision.zig's steps, cuBLASLt for the projections.
+//! Unlimited-OCR-2's image encoder on CUDA: SAM ViT-B, its neck and CLIP-L to the projector, a view a pass.
 const std = @import("std");
 const cuda = @import("cuda");
 const cfg = @import("config.zig");
@@ -33,8 +32,7 @@ pub const Encoder = struct {
     gemms: *cuda.vit.Gemms,
     w: *const wts.Weights,
     scratch: Scratch,
-    /// A 640 tile's tables: SAM's positions [40, 40, 768], CLIP's [101, 1024], and the global blocks' relative
-    /// positions [79, 64] (h then w, block by block).
+    /// A 640 tile's position tables and the global blocks' resized relative positions.
     tile: cuda.DeviceBuffer,
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, k: *const ks.Kernels, vk: *const cuda.vit.Kernels, gemms: *cuda.vit.Gemms, w: *const wts.Weights) !Encoder {
@@ -50,7 +48,7 @@ pub const Encoder = struct {
         e.scratch.buf.free();
     }
 
-    /// The projector's rows [side^2, 1280] bf16 for one view's normalized pixels [3, size, size] bf16 (size 1024 or 640).
+    /// The projector's rows [side^2, 1280] for one view's pixels [3, size, size] (size 1024 or 640).
     pub fn encode(e: *Encoder, size: usize, pixels: []const u16, out: []u16) !void {
         if (size != cfg.base_size and size != cfg.tile_size) return error.ViewSize;
         const v = View.of(size);
@@ -162,9 +160,7 @@ pub const Encoder = struct {
     }
 };
 
-/// A page's image-token rows [tokens, 1280] in the publisher's order (vision.layout's): with tiles, the tiles' rows
-/// first (10 per tile row, running across every tile of that row, each followed by the newline row), then the
-/// global view's 16 rows of 16 with their newlines, then the separator.
+/// A page's image-token rows in the publisher's order: tile rows with newlines, the global view's, the separator.
 pub fn layout(w: *const wts.Weights, global: []const u16, tiles: []const u16, across: usize, down: usize, out: []u16) void {
     const newline = w.newline.host;
     var at: usize = 0;
@@ -203,8 +199,7 @@ fn tileRelOffset(global_index: usize) usize {
     return clipPosOffset() + clip_bytes + global_index * 2 * tile_rel * cfg.sam_head_dim * 2;
 }
 
-/// A 640 tile's position tables and relative positions, resized from the release's on the host as its torch code
-/// does, then uploaded.
+/// A 640 tile's tables resized on the host as the torch code resizes them, then uploaded.
 fn tileTables(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const wts.Weights) !cuda.DeviceBuffer {
     const total = tileRelOffset(cfg.sam_global.len);
     const host = try gpa.alignedAlloc(u8, .@"16", total);
