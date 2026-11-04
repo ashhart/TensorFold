@@ -724,6 +724,9 @@ it takes less time than prefilling the tokens it covers, measured on this machin
 its hash; a damaged file is deleted, with the states that need it, and the turn prefills instead. A read-back state
 gives the same reply, token for token, as the state it was written from and as a fresh prompt pass.
 
+If startup runs out of memory while reading state metadata or planning its blocks, opening the store fails and
+valid state files remain on disk for a later retry. An allocation failure does not count as a damaged file.
+
 While other streams run, a queued request whose state is on disk has it read on an I/O thread into memory, with the
 same checks, and waits in the queue meanwhile; the engine thread then only copies it into place, so the other streams
 keep decoding through the read. A read that fails, or is not done within `TENSORFOLD_RESTORE_PREFETCH_MS` (30000 by
