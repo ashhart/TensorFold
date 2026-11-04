@@ -130,10 +130,10 @@ test "stage protocol: a plan of every op round-trips, and an empty plan is the k
     const lim: plan.Limits = .{ .streams = 8, .rows = 8, .context = 64 };
     const ops = [_]plan.Stream{
         .{ .id = 1, .op = .open, .first = 0, .rows = 3 },
-        .{ .id = 2, .op = .@"continue", .first = 9, .rows = 2, .accepted = 1 },
-        .{ .id = 4, .op = .close, .first = 11, .rows = 0, .accepted = 3 },
+        .{ .id = 2, .op = .@"continue", .first = 9, .rows = 2, .accepted = 1, .generation = 3 },
+        .{ .id = 4, .op = .close, .first = 11, .rows = 0, .accepted = 3, .generation = 1 },
         .{ .id = 8, .op = .cancel, .first = 5, .rows = 0 },
-        .{ .id = 0xffff_ffff, .op = .@"resume", .first = 60, .rows = 3, .resume_at = 48 },
+        .{ .id = 0xffff_ffff, .op = .@"resume", .first = 60, .rows = 3, .resume_at = 48, .generation = 0xffff_ffff },
     };
     const p = try plan.decode(try plan.encode(&ops, &.{ 3, 5 }, lim, &buf), lim);
     try t.expectEqual(@as(u32, 5), p.streams);
@@ -149,6 +149,17 @@ test "stage protocol: a plan of every op round-trips, and an empty plan is the k
     try t.expectError(error.UnorderedStreams, plan.encode(&two, &.{}, lim, &buf));
     try t.expectError(error.TooManyStreams, plan.encode(&(ops ++ ops), &.{}, lim, &buf));
     try t.expectError(error.NoRoom, plan.encode(&ops, &.{}, lim, buf[0 .. plan.planSize(5, 0) - 1]));
+}
+
+test "stage protocol: a stream's generation is its slot's own, or the stage refuses it by name" {
+    const s: plan.Stream = .{ .id = 2, .op = .@"continue", .first = 9, .rows = 2, .generation = 4 };
+    try plan.sameGeneration(4, s);
+    try t.expectError(error.OtherGeneration, plan.sameGeneration(3, s));
+    try t.expectError(error.OtherGeneration, plan.sameGeneration(5, s));
+    var buf: [plan.planSize(1, 0)]u8 = undefined;
+    const lim: plan.Limits = .{ .streams = 1, .rows = 8, .context = 64 };
+    const open: plan.Stream = .{ .id = 1, .op = .open, .first = 0, .rows = 1, .generation = 1 };
+    try t.expectError(error.BadOpen, plan.encode(&.{open}, &.{}, lim, &buf));
 }
 
 test "stage protocol: a count that claims more than the payload holds is refused before any read" {
