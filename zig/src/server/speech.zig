@@ -141,8 +141,7 @@ fn promptOf(srv: *Server, cx: *Cx, sp: api.SpeechInfo, input: []const u8) errors
         error.OutOfMemory => error.OutOfMemory,
         error.Template => cx.other("the tokenizer cannot encode this prompt"),
     };
-    if (prompt.len > sp.max_prompt_tokens)
-        return cx.fail(.request, drama_prompt.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ prompt.len, sp.max_prompt_tokens });
+    try @import("drama_admission.zig").check(cx, srv.text, input, &.{}, prompt.len, sp.max_prompt_tokens);
     return prompt;
 }
 
@@ -487,4 +486,5 @@ pub const Test = if (@import("builtin").is_test) struct {
 
 test {
     _ = @import("speech_audio_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("drama_admission_test.zig");
 }
