@@ -1,5 +1,6 @@
 //! One reason for every wait: the fixed code a client keys on, and the words it reads.
 const std = @import("std");
+const reasons = @import("engine_api").wait_reason;
 
 /// A retryable wait (HTTP 503 with Retry-After): the code clients key on and the message they read.
 pub const Wait = struct { code: []const u8, message: []const u8 };
@@ -15,9 +16,9 @@ pub const reload_failed: Wait = .{ .code = "engine_reload_failed", .message = "t
 pub const unloading_problem = "the engine is still unloading; send the request again";
 
 /// A retryable capacity refusal: the engine had no room for this request and it can be sent again.
-pub const engine_busy = "engine_busy";
-pub const engine_unavailable = "engine_unavailable";
-pub const memory_pressure = "memory_pressure";
+pub const engine_busy = reasons.waitCode(.engine_busy);
+pub const engine_unavailable = reasons.waitCode(.engine_unavailable);
+pub const memory_pressure = reasons.waitCode(.memory_pressure);
 
 /// Every server wait and capacity code, in one bounded set.
 pub const all = [_]Wait{ restarting, loading, reload_failed };

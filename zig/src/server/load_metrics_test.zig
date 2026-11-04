@@ -57,7 +57,13 @@ test "a live scrape shows each group once, beside the request counts metrics.zig
     defer out.deinit();
     var s = snapshot(false);
     s.http[@backingInt(ledger.RouteGroup.responses)] = 2;
-    s.requests = .{ .running = 3, .waiting = 2, .waiting_prompt_tokens = 9000, .filling_left = 512, .started = 40, .requeued = 1, .yields = 2 };
+    var waits: api.wait_reason.Waits = .{};
+    waits.note(.engine_busy);
+    waits.note(.pool_room);
+    var refused: api.wait_reason.Refusals = .{};
+    refused.note(.backend_prompt);
+    refused.note(.backend_prompt);
+    s.requests = .{ .running = 3, .waiting = 2, .waiting_prompt_tokens = 9000, .filling_left = 512, .started = 40, .requeued = 1, .yields = 2, .waiting_reasons = waits.counts, .refusals = refused };
     s.work = .{ .prefill_compute = 1000, .prefill_cache = 400, .decode = 300, .prefill_busy_ns = 1_500_000_000 };
     s.capacity = .{ .mode = .paged, .lanes_free = 1 };
     s.pool = .{ .capacity = 4096, .available = 1024, .reclaimable = 512, .promised = 256 };
@@ -70,6 +76,11 @@ test "a live scrape shows each group once, beside the request counts metrics.zig
         "tensorfold:engine_parked 0\n",
         "tensorfold:http_requests_active{route=\"responses\"} 2\n",
         "tensorfold:waiting_prompt_tokens 9000\n",
+        "tensorfold:requests_waiting_by_reason{reason=\"engine_busy\"} 1\n",
+        "tensorfold:requests_waiting_by_reason{reason=\"pool_room\"} 1\n",
+        "tensorfold:requests_waiting_by_reason{reason=\"kv_pool\"} 0\n",
+        "tensorfold:request_refusals_total{reason=\"backend_prompt\"} 2\n",
+        "tensorfold:request_refusals_total{reason=\"restore_refused\"} 0\n",
         "tensorfold:filling_prompt_tokens_left 512\n",
         "tensorfold:requests_started_total 40\n",
         "tensorfold:scheduler_tokens_total{mode=\"prefill_compute\"} 1000\n",
@@ -120,16 +131,21 @@ test "the /v1/load object carries every group a host fills, and only server valu
     const a = arena.allocator();
     var s = snapshot(false);
     s.http[@backingInt(ledger.RouteGroup.chat_completions)] = 3;
-    s.requests = .{ .running = 3, .waiting = 2, .waiting_prompt_tokens = 9000, .filling_left = 512, .started = 40, .requeued = 1, .yields = 2 };
+    var waits: api.wait_reason.Waits = .{};
+    waits.note(.engine_busy);
+    var refused: api.wait_reason.Refusals = .{};
+    refused.note(.backend_prompt);
+    s.requests = .{ .running = 3, .waiting = 2, .waiting_prompt_tokens = 9000, .filling_left = 512, .started = 40, .requeued = 1, .yields = 2, .waiting_reasons = waits.counts, .refusals = refused };
     s.work = .{ .prefill_compute = 1000, .prefill_cache = 400, .decode = 300, .prefill_busy_ns = 1_500_000 };
     s.capacity = .{ .mode = .paged, .lanes_free = 1 };
     s.pool = .{ .capacity = 4096, .available = 1024, .reclaimable = 512, .promised = 256, .run = false };
     const live = try loadBody(a, s);
     for ([_][]const u8{
-        "\"instance\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"", "\"parked\":false",               "\"chat_completions\":3",
-        "\"running\":3",                                     "\"waiting_prompt_tokens\":9000", "\"filling_prompt_tokens_left\":512",
-        "\"mode\":\"paged\"",                                "\"available_tokens\":1024",      "\"run_available\":false",
-        "\"prefill_compute\":1000",                          "\"busy_us\":{\"prefill\":1500}",
+        "\"instance\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",                                                                                                                        "\"parked\":false",               "\"chat_completions\":3",
+        "\"running\":3",                                                                                                                                                            "\"waiting_prompt_tokens\":9000", "\"filling_prompt_tokens_left\":512",
+        "\"mode\":\"paged\"",                                                                                                                                                       "\"available_tokens\":1024",      "\"run_available\":false",
+        "\"prefill_compute\":1000",                                                                                                                                                 "\"busy_us\":{\"prefill\":1500}", "\"waiting_by_reason\":{\"engine_busy\":1,\"prefix_cut\":0",
+        "\"refusals\":{\"engine_unavailable\":0,\"engine_busy\":0,\"invalid_request\":0,\"memory_pressure\":0,\"prompt_too_large\":0,\"lane_memory_alone\":0,\"backend_prompt\":1",
     }) |key| {
         if (!has(live, key)) std.debug.print("missing {s} in {s}\n", .{ key, live });
         try std.testing.expect(has(live, key));

@@ -39,7 +39,7 @@ test "a round planner: prompts in pieces between the other streams' decode round
                 p.waits += 1;
                 return .wait;
             };
-            p.seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
+            p.seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .{ .refuse = .backend };
             return .admit;
         }
         fn admitted(_: *anyopaque) anyerror!void {}
@@ -162,7 +162,7 @@ test "a failed piece run fails its requests alone: their finals of the same roun
         }
         fn beginAdmit(_: *anyopaque) void {}
         fn admit(ctx: *anyopaque, ask: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
-            self(ctx).seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
+            self(ctx).seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .{ .refuse = .backend };
             return .admit;
         }
         fn admitted(_: *anyopaque) anyerror!void {}
@@ -317,7 +317,7 @@ test "a failed piece fails its request alone: its final of the same round does n
         }
         fn beginAdmit(_: *anyopaque) void {}
         fn admit(ctx: *anyopaque, ask: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
-            self(ctx).seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
+            self(ctx).seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .{ .refuse = .backend };
             return .admit;
         }
         fn admitted(_: *anyopaque) anyerror!void {}

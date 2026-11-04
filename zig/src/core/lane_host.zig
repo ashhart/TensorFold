@@ -30,6 +30,7 @@ const rounds = @import("lane_rounds.zig");
 const scoring = @import("lane_host_score.zig");
 const lane_stream = @import("lane_stream.zig");
 const lane_halt = @import("lane_halt.zig");
+const reasons = @import("wait_reason.zig");
 
 pub const LaneHost = struct {
     gpa: Allocator,
@@ -91,6 +92,7 @@ pub const LaneHost = struct {
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
     capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
     kv: ?@import("kv_ledger.zig").Ledger = null, // Info.ledger's budget or the paged pool's (lane_host_ledger.zig)
+    refusals: reasons.Refusals = .{}, // refused requests by fixed reason, under mutex
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -191,26 +193,7 @@ pub const LaneHost = struct {
     }
 
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
-        const h = self(ctx);
-        if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
-        const job = h.gpa.create(Job) catch return error.Busy;
-        job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
-        h.mutex.lockUncancelable(h.io);
-        defer h.unlock();
-        const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
-        if (unavailable or h.stale or pressure.refuses(h)) {
-            h.gpa.destroy(job);
-            return if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
-        }
-        // foreground before background, each in arrival order (the Python job queue's priority)
-        var at = h.queued.items.len;
-        while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
-        h.queued.insert(h.gpa, at, job) catch {
-            h.gpa.destroy(job);
-            return error.Busy;
-        };
-        h.load.started += 1;
-        h.wake.signal(h.io);
+        return @import("lane_host_submit.zig").submit(self(ctx), id, request, sink);
     }
 
     fn cancelFn(ctx: *anyopaque, id: Id) void {
@@ -345,6 +328,7 @@ pub const LaneHost = struct {
             return .none;
         };
         if (ledger.never(h, h.queued.items[at])) { // past the whole budget alone: no release will ever make it fit
+            h.refusals.note(.prompt_too_large);
             const job = h.queued.orderedRemove(at);
             h.unlock();
             h.finish(job, .failed, ledger.too_big);
@@ -359,6 +343,7 @@ pub const LaneHost = struct {
         job.seq = h.admissions;
         h.admissions += 1;
         h.admitted.append(h.gpa, job) catch {
+            h.refusals.note(.engine_busy);
             h.unlock();
             h.finish(job, .failed, "out of memory");
             return .failed;
@@ -407,7 +392,10 @@ pub const LaneHost = struct {
         return switch (e) {
             error.Cancelled => h.cancel(job),
             error.LaneMemory => ends.requeue(h, job),
-            else => ends.dropFailed(h, job, e),
+            else => blk: {
+                h.refused(.backend_prompt);
+                break :blk ends.dropFailed(h, job, e);
+            },
         };
     }
 
@@ -490,6 +478,13 @@ pub const LaneHost = struct {
     pub fn words(h: *const LaneHost, e: anyerror) []const u8 {
         const x = h.explain orelse return @errorName(e);
         return x.text(x.ctx, e) orelse @errorName(e);
+    }
+
+    /// One refused request, by its fixed reason; the caller does not hold the lock.
+    pub fn refused(h: *LaneHost, why: reasons.Refusal) void {
+        h.lock();
+        defer h.unlock();
+        h.refusals.note(why);
     }
 
     pub fn drop(h: *LaneHost, job: *Job, message: []const u8) bool {

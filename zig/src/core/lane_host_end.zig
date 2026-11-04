@@ -65,6 +65,7 @@ pub fn deliverPending(h: *LaneHost) void {
 /// A round the backend failed: the failure hook hears the error and every admitted stream gets its name.
 pub fn failRound(h: *LaneHost, err: anyerror) void {
     failed(h, err);
+    h.refused(.backend_round);
     failAll(h, @errorName(err));
 }
 
@@ -123,7 +124,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
     if (waits) {
         h.load.requeued += 1;
         h.memory_lanes = others; // under the lock: a publish reads it
-    }
+    } else h.refusals.note(.lane_memory_alone);
     h.unlock();
     if (!waits) {
         h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);

@@ -34,7 +34,7 @@ test "more than sixteen planned pieces retain their job until its final" {
         }
         fn beginAdmit(_: *anyopaque) void {}
         fn admit(ctx: *anyopaque, ask: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
-            self(ctx).seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
+            self(ctx).seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .{ .refuse = .backend };
             return .admit;
         }
         fn admitted(_: *anyopaque) anyerror!void {}
@@ -166,7 +166,7 @@ test "failed repeated pieces drop their job once and skip its remaining batches"
         }
         fn beginAdmit(_: *anyopaque) void {}
         fn admit(ctx: *anyopaque, ask: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
-            self(ctx).seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
+            self(ctx).seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .{ .refuse = .backend };
             return .admit;
         }
         fn admitted(_: *anyopaque) anyerror!void {}
