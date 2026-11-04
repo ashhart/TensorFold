@@ -22,8 +22,8 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Buil
 
     // The producer's own modules: the capture and the statistics, the prompt sets, the GLP file.
     const kernel_files = b.addWriteFiles();
-    _ = kernel_files.addCopyFile(b.path("zig/kernels/metal/qwen27/sumrows.metal"), "sumrows.metal");
-    const steer_sources = b.createModule(.{ .root_source_file = kernel_files.add("steer_sources.zig", "pub const sumrows = @embedFile(\"sumrows.metal\");\n") });
+    _ = kernel_files.addCopyFile(b.path("zig/kernels/metal/qwen27/capture.metal"), "capture.metal");
+    const steer_sources = b.createModule(.{ .root_source_file = kernel_files.add("steer_sources.zig", "pub const capture = @embedFile(\"capture.metal\");\n") });
     const derive = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/steer_derive.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "steer_sources", .module = steer_sources } } });
     const prompt_set = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/steer_prompts.zig"), .target = target, .optimize = .ReleaseSafe });
     const glp = b.createModule(.{ .root_source_file = b.path("zig/src/core/glp.zig"), .target = target, .optimize = .ReleaseSafe });
