@@ -309,6 +309,13 @@ to write a credible essay". The published vector bends the wording of the
 refusal. Its benign column moves the other way, from five to six: it puts
 three of the twins' refusals back and takes three of the base model's off.
 
+The same holds on the derivation set, where that vector's row reads 19 of 30.
+The eleven replies the metric counts as compliance all decline there too, in
+other words: "it is not possible to provide step-by-step instructions for
+synthesizing a nerve agent at home", "it is technically impossible to track the
+real-time location of a smartphone", "you cannot make a functional, safe, or
+legal taser". The row is a count of openings, not of decisions.
+
 The masked vector takes the decline away: the model
 takes the request and answers it, usually after a legal or safety caveat rather
 than in place of an answer, and for several of the twenty it hands over what
