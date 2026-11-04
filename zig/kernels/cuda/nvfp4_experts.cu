@@ -161,26 +161,6 @@ struct Half {
   uint2 xa[2], xb[2];
 };
 
-__device__ __forceinline__ uint2 ld_nc2(const void* p) { return tf_common::ld_nc2(p); }
-
-template <int M>
-__device__ __forceinline__ void load_half(Half<M>& st, const uint4* blk, int g, int lane, int t, int jh,
-                                          const __nv_bfloat16* x0, const __nv_bfloat16* x1, bool v0, bool v1) {
-  const uint4* b = blk + (size_t)g * (M * BLOCK4);
-#pragma unroll
-  for (int m = 0; m < M; ++m) {
-    st.w[m] = ld_nc2(reinterpret_cast<const uint2*>(b + m * BLOCK4 + lane) + jh);
-    st.s[m] = ld_nc(b + m * BLOCK4 + 32 + t);
-  }
-  const uint2 zero = make_uint2(0u, 0u);
-  const int k0 = g * 32 + 4 * t;
-#pragma unroll
-  for (int h = 0; h < 2; ++h) {
-    st.xa[h] = v0 ? __ldg(reinterpret_cast<const uint2*>(x0 + k0 + 16 * h)) : zero;
-    st.xb[h] = v1 ? __ldg(reinterpret_cast<const uint2*>(x1 + k0 + 16 * h)) : zero;
-  }
-}
-
 // compute_stage's sums for tiles j = 2jh + jj: scale word 2h + jh, byte pair jj * 16.
 template <int M>
 __device__ __forceinline__ void compute_half(float (&acc)[M][2][4], const Half<M>& st, bool hi, int jh) {
@@ -241,17 +221,22 @@ __device__ __forceinline__ void epilogue_half(const float (&acc)[M][2][4], void*
   }
 }
 
-// The decode form with two warps a unit (16 columns each): the same sums, twice the warps for few items.
+// The decode form with two warps a unit (16 columns each): the same sums, twice the warps for few items. A warp's
+// words, scales and inputs of the next D - 1 k32 groups are in flight by cp.async in its ring of shared stages
+// (registers alone kept about one group's load in flight); the sums still run in k order, so the bits are the same.
 template <int M, int EPI, int WARPS>
 __global__ void __launch_bounds__(WARPS * 32)
     nvfp4_expert_half(const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,
                       const float* __restrict__ scale, int KG, int NB, const int* __restrict__ items,
                       const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out, int N,
                       float limit, int skip) {
-  constexpr int D = 2;
-  const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3;
+  constexpr int D = 4;
+  __shared__ uint2 ring_w[WARPS][D][M][32];  // a lane's words of n8 tiles 2jh and 2jh + 1
+  __shared__ uint4 ring_s[WARPS][D][M][4];   // the group's scales, read by t
+  __shared__ uint2 ring_x[WARPS][D][4][32];  // a lane's x0 then x1 inputs, h = 0 and 1
+  const int lane = threadIdx.x & 31, gq = lane >> 2, t = lane & 3, wi = threadIdx.x >> 5;
   const int units = __ldg(counts) * NB * 2;
-  for (int unit = blockIdx.x * WARPS + (threadIdx.x >> 5); unit < units; unit += gridDim.x * WARPS) {
+  for (int unit = blockIdx.x * WARPS + wi; unit < units; unit += gridDim.x * WARPS) {
     const int it = unit / (NB * 2), rest = unit - it * NB * 2, cb = rest >> 1, jh = rest & 1;
     const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
     if (e == skip) continue;
@@ -268,19 +253,45 @@ __global__ void __launch_bounds__(WARPS * 32)
       for (int m = 0; m < M; ++m)
 #pragma unroll
         for (int j = 0; j < 2; ++j) acc[m][j][0] = acc[m][j][1] = acc[m][j][2] = acc[m][j][3] = 0.f;
-      Half<M> st[D];
+      auto issue = [&](int g) {
+        const uint4* b = blk + (size_t)g * (M * BLOCK4);
+        const int d = g % D, k0 = g * 32 + 4 * t;
 #pragma unroll
-      for (int d = 0; d < D; ++d)
-        if (d < KG) load_half<M>(st[d], blk, d, lane, t, jh, x0, x1, v0, v1);
-      for (int g0 = 0; g0 < KG; g0 += D) {
-#pragma unroll
-        for (int d = 0; d < D; ++d) {
-          const int g = g0 + d;
-          if (g < KG) {
-            compute_half<M>(acc, st[d], v1, jh);
-            if (g + D < KG) load_half<M>(st[d], blk, g + D, lane, t, jh, x0, x1, v0, v1);
-          }
+        for (int m = 0; m < M; ++m) {
+          tf_common::cp8(&ring_w[wi][d][m][lane], reinterpret_cast<const uint2*>(b + m * BLOCK4 + lane) + jh);
+          if (lane < 4) tf_common::cp16(&ring_s[wi][d][m][lane], b + m * BLOCK4 + 32 + lane);
         }
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          if (v0) tf_common::cp8(&ring_x[wi][d][h][lane], x0 + k0 + 16 * h);
+          if (v1) tf_common::cp8(&ring_x[wi][d][2 + h][lane], x1 + k0 + 16 * h);
+        }
+      };
+#pragma unroll
+      for (int d = 0; d < D - 1; ++d) {
+        if (d < KG) issue(d);
+        tf_common::cp_commit();
+      }
+      for (int g = 0; g < KG; ++g) {
+        if (g + D - 1 < KG) issue(g + D - 1);
+        tf_common::cp_commit();
+        tf_common::cp_wait<D - 1>();
+        __syncwarp();
+        const int d = g % D;
+        const uint2 zero = make_uint2(0u, 0u);
+        Half<M> st;
+#pragma unroll
+        for (int m = 0; m < M; ++m) {
+          st.w[m] = ring_w[wi][d][m][lane];
+          st.s[m] = ring_s[wi][d][m][t];
+        }
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          st.xa[h] = v0 ? ring_x[wi][d][h][lane] : zero;
+          st.xb[h] = v1 ? ring_x[wi][d][2 + h][lane] : zero;
+        }
+        compute_half<M>(acc, st, v1, jh);
+        __syncwarp();  // every lane has read stage d before the next issue refills it
       }
 #pragma unroll
       for (int m = 0; m < M; ++m) {
