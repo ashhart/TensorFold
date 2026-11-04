@@ -1,4 +1,4 @@
-//! The GLP container's GGUF v3 subset, named apart; the format is the `weightless` project's (@msuiche).
+//! The GGUF v3 subset a GLP file uses; implements the GLP format defined by the `weightless` project (@msuiche).
 
 const std = @import("std");
 

@@ -1,4 +1,4 @@
-//! A GLP control vector: the GGUF GLP subset, read and written whole. The `weightless` project's (@msuiche), MIT.
+//! A GLP control vector, read and written; implements the GLP format defined by the `weightless` project (@msuiche).
 
 const std = @import("std");
 const gguf = @import("glp_container.zig");
