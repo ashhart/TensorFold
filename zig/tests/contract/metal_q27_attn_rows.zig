@@ -341,3 +341,36 @@ pub const Attn = struct {
         return t.outputs(acc, order, out, mag);
     }
 };
+
+/// Decode and prompt rows at one Mac's head counts, plus the controls this GPU's kernels have.
+pub const Suite = struct {
+    a: std.mem.Allocator,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    kernels: *std.ArrayList(g.Kernel),
+    attns: std.ArrayList(*Attn) = .empty,
+
+    pub fn collect(s: *Suite, only: ?[]const u8) !void {
+        const tensor = s.device.tensorUnits();
+        var regs: std.ArrayList(Reg) = .empty;
+        defer regs.deinit(s.a);
+        for (heads) |h| for (std.enums.values(Which)) |w| try regs.append(s.a, .{ .heads = h, .which = w });
+        for (std.enums.values(Which)) |w| if (hasControl(w, tensor)) try regs.append(s.a, .{ .heads = .q27b, .which = w, .control = true });
+        for (regs.items) |r| {
+            if (only) |o| if (std.mem.indexOf(u8, spec(r).name, o) == null) continue;
+            const x = try s.a.create(Attn);
+            errdefer s.a.destroy(x);
+            x.* = try Attn.init(s.a, s.device, s.queue, r);
+            try s.attns.append(s.a, x);
+            try s.kernels.append(s.a, x.kernel());
+        }
+    }
+
+    pub fn deinit(s: *Suite) void {
+        for (s.attns.items) |x| {
+            x.deinit();
+            s.a.destroy(x);
+        }
+        s.attns.deinit(s.a);
+    }
+};
