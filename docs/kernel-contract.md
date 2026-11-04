@@ -32,8 +32,9 @@ Direct `one` callers remain responsible for cleanup.
 - For gate 5, its launch in `zig/src/core/contract/registry.zig`: threads a group and threadgroup bytes (the source's,
   and any its encoder sets) on Metal, or symbol, image, threads a block, dynamic shared bytes and cluster width on CUDA,
   with the limits its compiles recorded. HIP launches are in `zig/src/core/contract/hip_records.zig`: symbol, code
-  object, threads a workgroup and dynamic LDS bytes. The seam's records are in `metal_pair_records.zig`, which
-  `registry.zig` concatenates.
+  object, threads a workgroup and dynamic LDS bytes. XPU launches are in `zig/src/core/contract/xpu_records.zig`:
+  symbol, image, work-group size, static SLM bytes, sub-group size and GRF mode, with the values ocloc's `.ze_info`
+  recorded for the card class. The seam's records are in `metal_pair_records.zig`, which `registry.zig` concatenates.
 
 ## The gates
 
@@ -95,6 +96,12 @@ record against them, no GPU needed; `hip-kernel-contract-objects` installs those
 Its `RECORD` lines are the values `hip_records.zig` holds for that hipcc. The records hold ROCm 10.1's hipcc (HIP 7.16),
 which ROCm 10.1 installs under `core/bin` of its root.
 
+On an Intel GPU host, `zig build -Dxpu-contract=true xpu-kernel-contract-objects -Docloc=... -Dxpu-device=bmg` compiles
+every registered XPU kernel and the controls to zebins, and `xpu-kernel-contract-limits` checks each record against the
+BMG card's row, no GPU needed. `tf-xpu-kernel-contract limits DIR` runs that audit on a directory another host built. The
+`RECORD` lines are the values `xpu_records.zig` holds for that ocloc. The XPU device runner, gates 1 to 4, comes in a
+second pull request.
+
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
 
@@ -108,7 +115,8 @@ The program exits 1 on any failed gate, any control that stayed green, or any li
 3. Add its launches to `registry.zig`, or to a records file it concatenates as the seam's are, and fill them from
    `--offline` (Metal) or `kernel-contract-limits`
    (CUDA: nvcc 13.0's in `cuda`, and each later release's set where that release compiles it differently); a HIP
-   kernel's go to `hip_records.zig`, filled from `hip-kernel-contract-limits`.
+   kernel's go to `hip_records.zig`, filled from `hip-kernel-contract-limits`, and an XPU kernel's to
+   `xpu_records.zig`, filled from `xpu-kernel-contract-limits`.
 4. Post the `SUMMARY` lines from each backend you ran in the pull request, and say which chips you could not run.
 
 A replacement kernel names the kernel it replaces and gives `replaced`, which runs that kernel on the same inputs.
