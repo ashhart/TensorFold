@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Qwen3.8-27B on Metal serves Q4_K_M and Q8_0 GGUF files using their metadata, tokenizer and chat template, exact FP32 affine tables and an explicit DeltaNet head-layout conversion (#1920).
+- Qwen3.8-27B on Metal serves Q4_K_M and Q8_0 GGUF files using their metadata, full stop set, tokenizer and chat template, exact FP32 affine tables and an explicit DeltaNet head-layout conversion; the text path matches the MLX assets on 834 varied strings. Every projection takes the generic weight-only kernel, so a Q4_K_M file decodes about 13 times slower than the MLX 4-bit checkpoint (3.8 against 48.7 tok/s at one stream on an M5 Ultra) (#2078, part of #1920).
 - CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
 
 - CUDA: dots.mocr's text decoder serves text prompts on a GB10 from the publisher's BF16 weights, on a new shared engine for dense GQA decoders (`zig/src/cuda_dense/`); `--vision`, prompt caching and fp8 caches are refused by name, and served CUDA checkpoints are unchanged (#2673, part of #1927). Thanks to @laudney.

@@ -9,6 +9,7 @@ pub const MetadataKind = meta.Kind;
 pub const TensorKind = tensor.Kind;
 pub const Tensor = tensor.Tensor;
 pub const views = @import("gguf_views.zig");
+pub const stops = @import("gguf_stops.zig");
 pub const affine = @import("gguf_repack.zig");
 pub const Entry = struct { key: []const u8, value: Value };
 pub const UnsupportedTensor = meta.UnsupportedTensor;
@@ -190,4 +191,5 @@ pub const File = struct {
 test {
     _ = @import("gguf_test.zig");
     _ = affine;
+    _ = stops;
 }

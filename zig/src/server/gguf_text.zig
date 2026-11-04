@@ -38,6 +38,12 @@ const Read = struct {
     }
 };
 const pattern = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+fn ordinaryAdded(text: []const u8) bool {
+    return std.StaticStringMap(void).initComptime(.{
+        .{ "<|fim_prefix|>", {} }, .{ "<|fim_middle|>", {} }, .{ "<|fim_suffix|>", {} },
+        .{ "<|fim_pad|>", {} },    .{ "<|repo_name|>", {} },  .{ "<|file_sep|>", {} },
+    }).has(text);
+}
 pub fn tokenizerJson(a: A, pa: A, doc: *const g.Document, problem: *[]const u8) ![]u8 {
     const r: Read = .{ .doc = doc, .a = pa, .problem = problem };
     if (!std.mem.eql(u8, try r.string("tokenizer.ggml.model"), "gpt2")) try r.fail("tokenizer.ggml.model", "only gpt2 BPE is supported");
@@ -54,8 +60,17 @@ pub fn tokenizerJson(a: A, pa: A, doc: *const g.Document, problem: *[]const u8) 
     try w.writeAll("},\"behavior\":\"Isolated\",\"invert\":false},{\"type\":\"ByteLevel\",\"add_prefix_space\":false,\"use_regex\":false}]},\"decoder\":{\"type\":\"ByteLevel\"},\"model\":{\"type\":\"BPE\",\"vocab\":{");
     var it = tokens.iterator();
     var id: usize = 0;
+    var vocabulary_types = types.iterator();
+    var first_vocabulary = true;
     while (try it.next()) |token| : (id += 1) {
-        if (id != 0) try w.writeByte(',');
+        const kind = (try vocabulary_types.next()).?.unsigned() catch {
+            try r.fail("tokenizer.ggml.token_type", "invalid token kind");
+            unreachable;
+        };
+        if (kind < 1 or kind > 6) try r.fail("tokenizer.ggml.token_type", "unsupported token kind");
+        if (kind == 5) continue;
+        if (!first_vocabulary) try w.writeByte(',');
+        first_vocabulary = false;
         try std.json.Stringify.value(token.string, .{}, w);
         try w.print(":{d}", .{id});
     }
@@ -82,7 +97,7 @@ pub fn tokenizerJson(a: A, pa: A, doc: *const g.Document, problem: *[]const u8) 
         first = false;
         try w.print("{{\"id\":{d},\"content\":", .{id});
         try std.json.Stringify.value(token.string, .{}, w);
-        try w.print(",\"special\":{s},\"normalized\":false,\"single_word\":false,\"lstrip\":false,\"rstrip\":false}}", .{if (kind == 3) "true" else "false"});
+        try w.print(",\"special\":{s},\"normalized\":false,\"single_word\":false,\"lstrip\":false,\"rstrip\":false}}", .{if (kind == 3 and !ordinaryAdded(token.string)) "true" else "false"});
     }
     try w.writeAll("]}");
     return out.toOwnedSlice();
@@ -109,14 +124,20 @@ pub fn load(comptime Text: type, gpa: A, io: std.Io, path: []const u8, override:
     t.tok = try tokenizer.parse(gpa, json);
     errdefer t.tok.deinit();
     const size = t.tok.id_to_token.tokens.items.len;
-    t.eos = try a.dupe(u32, &.{try r.id("tokenizer.ggml.eos_token_id", size)});
+    _ = try r.id("tokenizer.ggml.eos_token_id", size);
+    var stops: [8]u32 = undefined;
+    const stop_count = g.stops.read(doc, &.{"<|endoftext|>"}, &stops) catch |err| {
+        try r.fail("tokenizer.ggml stop set", @errorName(err));
+        unreachable;
+    };
+    t.eos = try a.dupe(u32, stops[0..stop_count]);
     const bos = try r.id("tokenizer.ggml.bos_token_id", size);
     const add_bos = try r.get("tokenizer.ggml.add_bos_token");
     if (add_bos != .boolean) try r.fail("tokenizer.ggml.add_bos_token", "expected bool");
     if (add_bos.boolean) t.prefix = try a.dupe(u32, &.{bos});
     if (doc.get("tokenizer.ggml.add_eos_token")) |v| {
         if (v != .boolean) try r.fail("tokenizer.ggml.add_eos_token", "expected bool");
-        if (v.boolean) t.suffix = try a.dupe(u32, t.eos);
+        if (v.boolean) t.suffix = try a.dupe(u32, t.eos[0..1]);
     }
     var specials: std.json.ObjectMap = .empty;
     try specials.put(a, "bos_token", .{ .string = t.tok.id_to_token.get(bos).? });

@@ -72,12 +72,15 @@ const Writer = struct {
     }
 };
 pub fn image(a: std.mem.Allocator, kind: g.TensorKind, arch: []const u8) ![]u8 {
-    return imageWithType(a, kind, arch, null);
+    return imageWithType(a, kind, arch, null, false);
 }
 pub fn servingImage(a: std.mem.Allocator, kind: g.TensorKind, arch: []const u8, file_type: u32) ![]u8 {
-    return imageWithType(a, kind, arch, file_type);
+    return imageWithType(a, kind, arch, file_type, false);
 }
-fn imageWithType(a: std.mem.Allocator, kind: g.TensorKind, arch: []const u8, file_type: ?u32) ![]u8 {
+pub fn stopImage(a: std.mem.Allocator) ![]u8 {
+    return imageWithType(a, .q4_k, "qwen35", null, true);
+}
+fn imageWithType(a: std.mem.Allocator, kind: g.TensorKind, arch: []const u8, file_type: ?u32, stops: bool) ![]u8 {
     var w: Writer = .{};
     w.kv("general.architecture", .{ .string = arch });
     if (file_type) |f| w.kv("general.file_type", .{ .uint32 = f });
@@ -95,7 +98,11 @@ fn imageWithType(a: std.mem.Allocator, kind: g.TensorKind, arch: []const u8, fil
     for ([_]u8{ 1, 1, 1, 0 }) |x| w.f.int(u8, x);
     w.kv("tokenizer.ggml.eos_token_id", .{ .uint32 = 2 });
     w.array("tokenizer.ggml.tokens", .string, 32);
-    for (0..32) |_| w.f.string("x");
+    for (0..32) |i| w.f.string(if (stops and i == 2) "<|im_end|>" else if (stops and i == 3) "<|endoftext|>" else "x");
+    if (stops) {
+        w.array("tokenizer.ggml.token_type", .int32, 32);
+        for (0..32) |i| w.f.int(i32, if (i == 2 or i == 3) 3 else 1);
+    }
     w.f.set(u64, 16, w.metadata);
     for (globals) |r| try w.tensor(null, r, kind);
     for (0..4) |l| {
