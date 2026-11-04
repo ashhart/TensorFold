@@ -4,8 +4,11 @@ const glp = @import("glp");
 
 const help =
     \\tf-glp-check read FILE OUT.json OUT.bin  the reader's view: the metadata, the layers and their numbers
-    \\tf-glp-check rewrite FILE OUT.gguf [--mode project|add]
+    \\tf-glp-check rewrite FILE OUT.gguf [--mode project|add] [--repo ID] [--revision REV]
     \\                                    the file again through this writer, in the mode named
+    \\
+    \\--repo and --revision re-stamp the checkpoint the file names, for weights published under another
+    \\name: the directions stay the same bytes, so only do it for a checkpoint with the same weights.
     \\
     \\The binary sidecar holds the directions in ascending layer order, each one's fp32 payload as it
     \\stands in the file, so another reader's numbers can be compared byte for byte.
@@ -30,6 +33,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, args[1], "rewrite")) {
         // The mode may be changed on the way out: the same directions, applied as a bias instead.
         var mode = vector.mode;
+        // The checkpoint the file names may be re-stamped: the same weights under another name.
+        var base_model = vector.base_model;
+        var base_revision = vector.base_revision;
         var i: usize = 4;
         while (i < args.len) : (i += 1) {
             if (std.mem.eql(u8, args[i], "--mode")) {
@@ -40,6 +46,14 @@ pub fn main(init: std.process.Init) !void {
                 } else if (std.mem.eql(u8, args[i], "project")) {
                     mode = .project;
                 } else return error.UnknownMode;
+            } else if (std.mem.eql(u8, args[i], "--repo")) {
+                i += 1;
+                if (i >= args.len) return error.MissingValue;
+                base_model = args[i];
+            } else if (std.mem.eql(u8, args[i], "--revision")) {
+                i += 1;
+                if (i >= args.len) return error.MissingValue;
+                base_revision = args[i];
             } else return error.UnknownOption;
         }
         const out = try glp.write(a, .{
@@ -47,8 +61,8 @@ pub fn main(init: std.process.Init) !void {
             .alpha = vector.alpha,
             .hook_point = vector.hook_point,
             .derived_at = vector.derived_at,
-            .base_model = vector.base_model,
-            .base_revision = vector.base_revision,
+            .base_model = base_model,
+            .base_revision = base_revision,
             .method = vector.method,
             .contrast = vector.contrast,
             .publication = vector.publication,
