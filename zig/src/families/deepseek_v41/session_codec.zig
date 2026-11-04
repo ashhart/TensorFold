@@ -32,11 +32,11 @@ pub fn validate(s: *const sg.Sessions, bs: []const Blob) !Metadata {
     const c = bytes[sg.Sessions.ced_at..];
     m.stash.from = std.mem.readInt(u64, c[0..8], .little);
     m.stash.hi = std.mem.readInt(u64, c[8..16], .little);
-    if (m.stash.from > m.stash.hi or m.stash.hi > pos or m.stash.hi - m.stash.from > ced.ring) return error.BadBlob;
+    if (m.stash.from > m.stash.hi or m.stash.hi > pos) return error.BadBlob;
     if (!s.measure.replay and (m.stash.from != 0 or m.stash.hi != 0)) return error.BadBlob;
     for (&m.stash.ids, 0..) |*t, i| t.* = std.mem.readInt(u32, c[16 + 4 * i ..][0..4], .little);
-    var at = m.stash.from;
+    var at = @max(m.stash.from, m.stash.hi -| ced.keep);
     while (at < m.stash.hi) : (at += 1) if (m.stash.ids[@intCast(at % ced.ring)] >= s.f.cfg.vocab) return error.BadBlob;
-    if (m.ds > pos or m.ds > s.measure.window or (!s.ds_rings and m.ds != 0)) return error.BadBlob;
+    if (m.ds > pos or m.ds > s.measure.window) return error.BadBlob;
     return m;
 }
