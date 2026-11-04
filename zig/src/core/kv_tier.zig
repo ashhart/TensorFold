@@ -55,6 +55,8 @@ pub const Tier = struct {
 
     /// In place (the pool's release hook points here): `host.len / page_bytes` logical pages, `frames` frames.
     pub fn init(t: *Tier, gpa: Allocator, host: []u8, frames: usize, page_bytes: u64) !void {
+        if (page_bytes == 0 or host.len % page_bytes != 0 or frames == 0 or host.len == 0)
+            return error.BadTierGeometry;
         const npages: usize = @intCast(host.len / page_bytes);
         var pool = try kv.Pool.init(gpa, npages, page_bytes);
         errdefer pool.deinit();
