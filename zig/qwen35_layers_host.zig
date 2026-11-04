@@ -267,7 +267,7 @@ test "qwen35 layers: real configs, each entry point admits the pattern its old r
             relaxed += @intFromBool(now == .pattern and was == .refused);
         }
     }
-    try t.expectEqual(@as(usize, 17), admitted); // the (config, backend) pairs admitted before and after
+    try t.expectEqual(@as(usize, 18), admitted); // (config, backend) pairs admitted, with HIP BF16 from #2046
     try t.expectEqual(@as(usize, 0), relaxed); // none of the repo's configs is one the table newly admits
 }
 
