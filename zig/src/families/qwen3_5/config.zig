@@ -1,5 +1,6 @@
 //! Admission for the Qwen3.5-2B MLX affine checkpoint: pinned geometry and formats, tied or untied head; other geometries require qualification.
 const std = @import("std");
+const layer_pattern = @import("qwen35_layers");
 
 pub const hidden = 2048;
 pub const vocab = 248320;
@@ -109,16 +110,12 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
         .{ "intermediate_size", intermediate },  .{ "linear_num_key_heads", linear_heads }, .{ "linear_num_value_heads", linear_heads },
         .{ "linear_key_head_dim", linear_dim },  .{ "linear_value_head_dim", linear_dim },  .{ "linear_conv_kernel_dim", conv_taps },
         .{ "num_attention_heads", query_heads }, .{ "num_key_value_heads", kv_heads },      .{ "head_dim", head_dim },
-        .{ "full_attention_interval", 4 },
     };
     inline for (dims) |d| if (try integer(text, d[0]) != d[1]) return error.UnsupportedQwenGeometry;
     if (try number(try field(text, "rms_norm_eps")) != 1e-6) return error.UnsupportedQwenConfig;
-    const types = try field(text, "layer_types");
-    if (types != .array or types.array.items.len != layers) return error.UnsupportedQwenGeometry;
-    for (types.array.items, 0..) |kind, i| {
-        if (kind != .string or !std.mem.eql(u8, kind.string, if (linear(i)) "linear_attention" else "full_attention"))
-            return error.UnsupportedQwenGeometry;
-    }
+    var full: [layers]bool = undefined;
+    try layer_pattern.read(&full, text);
+    for (full, 0..) |f, i| if (f == linear(i)) return error.UnsupportedQwenGeometry; // the 2B's schedule only
     const rope = try object(try field(text, "rope_parameters"));
     try string(rope, "rope_type", "default");
     checks.defaultRope(text, rope) catch return error.UnsupportedQwenRotary;
@@ -238,6 +235,7 @@ test "admit the affine 2B geometry and text rotary layout" {
         .{ "\"rope_theta\":10000000", "\"rope_theta\":100000", error.UnsupportedQwenRotary },
         .{ "\"mrope_section\":[11,11,10]", "\"mrope_section\":[16,8,8]", error.UnsupportedQwenRotary },
         .{ "\"max_position_embeddings\":262144", "\"max_position_embeddings\":524288", error.UnsupportedQwenConfig },
+        .{ "\"full_attention_interval\":4", "\"full_attention_interval\":2", error.LayerTypesContradictFullAttentionInterval },
         .{ "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":262144", error.UnsupportedQwenConfig },
     };
     inline for (changes) |change| {

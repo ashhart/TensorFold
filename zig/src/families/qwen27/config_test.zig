@@ -50,6 +50,22 @@ test "explicit layer types preserve their order" {
     try std.testing.expectEqualSlices(Kind, &.{ .attention, .linear, .attention, .linear }, c.kinds[0..4]);
 }
 
+test "null layer types read as absent, and an interval they contradict is refused by both names" {
+    const a = std.testing.allocator;
+    const absent = try edit(a, "layer_types", .null);
+    defer a.free(absent);
+    try std.testing.expectEqualSlices(Kind, &.{ .linear, .linear, .linear, .attention }, (try parse(a, absent, null)).kinds[0..4]);
+    var p = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+    defer p.deinit();
+    const types = try std.json.parseFromSlice(std.json.Value, a, "[\"linear_attention\",\"full_attention\",\"linear_attention\",\"full_attention\"]", .{});
+    defer types.deinit();
+    try p.value.object.put(p.arena.allocator(), "layer_types", types.value);
+    try p.value.object.put(p.arena.allocator(), "full_attention_interval", .{ .integer = 4 });
+    const both = try std.json.Stringify.valueAlloc(a, p.value, .{});
+    defer a.free(both);
+    try std.testing.expectError(error.LayerTypesContradictFullAttentionInterval, parse(a, both, null));
+}
+
 test "rope parameters preserve precision and section metadata" {
     const a = std.testing.allocator;
     const p = try std.json.parseFromSlice(std.json.Value, a, "{\"rope_theta\":1234567.25,\"partial_rotary_factor\":0.5,\"mrope_section\":[2,1,1]}", .{});
@@ -121,7 +137,7 @@ test "malformed layer and rope metadata fail" {
     const a = std.testing.allocator;
     const layers = try edit(a, "layer_types", .{ .bool = true });
     defer a.free(layers);
-    try std.testing.expectError(error.BadConfig, parse(a, layers, null));
+    try std.testing.expectError(error.BadLayerTypes, parse(a, layers, null));
     const rope = try edit(a, "partial_rotary_factor", .{ .float = 2 });
     defer a.free(rope);
     try std.testing.expectError(error.BadConfig, parse(a, rope, null));
