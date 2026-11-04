@@ -20,12 +20,12 @@ inline q27_sgb q27_sg_keys(const device bfloat* k, int key, int kend, short fm, 
 }
 
 // V's 8 keys by 8 dims from `key` in fp32 (exact), keys from `kend` zero; under `mask` a non-finite value reads as 0.
-template <bool EDGE>
+template <bool EDGE, bool MASKED>
 inline q27_sgf q27_sg_values(const device bfloat* v, int key, int kend, short fm, short fn, uint mask) {
   q27_sgf b;
   const int row = key + fm;  // this lane's elements: key fm, dims fn and fn + 1
   uint w = (!EDGE || row < kend) ? *(const device uint*)(v + (int64_t)row * PD + fn) : 0u;
-  w &= ~(((q27_inf2(w) & mask) >> 15) * 0x7FFFu);  // a non-finite half keeps its sign bit alone
+  if (MASKED) w &= ~(((q27_inf2(w) & mask) >> 15) * 0x7FFFu);  // a non-finite half keeps its sign bit alone
   b.thread_elements()[0] = as_type<float>(w << 16);
   b.thread_elements()[1] = as_type<float>(w & 0xFFFF0000u);
   return b;
@@ -58,7 +58,7 @@ inline void q27_sg_unmask(thread Q27SgRun& r, thread const q27_sgf (&P)[2][4], i
 }
 
 // One 32-key step at `kt`: S halves summed low first, masked by each row's key count, then softmax and O += PV.
-template <bool EDGE>
+template <bool EDGE, bool MASKED>
 inline void q27_sg_step(thread Q27SgRun& r, int kt, int kend, const device bfloat* q, const device bfloat* k, const device bfloat* v,
     threadgroup float (*xs)[32][16], ushort sg, ushort lane, short fm, short fn, short h, int n0, int n1, float scale2, uint mask) {
   q27_sgf S[2][4];
@@ -123,12 +123,12 @@ inline void q27_sg_step(thread Q27SgRun& r, int kt, int kend, const device bfloa
   for (int j = 0; j < 4; j++) {
     _Pragma("clang loop unroll(full)")
     for (int e = 0; e < 16; e++) {
-      const q27_sgf b = q27_sg_values<EDGE>(v + 8 * e, kt + 8 * j, kend, fm, fn, mask);
+      const q27_sgf b = q27_sg_values<EDGE, MASKED>(v + 8 * e, kt + 8 * j, kend, fm, fn, mask);
       simdgroup_multiply_accumulate(r.O[0][e], P[0][j], b, r.O[0][e]);
       simdgroup_multiply_accumulate(r.O[1][e], P[1][j], b, r.O[1][e]);
     }
   }
-  if (mask != 0) q27_sg_unmask<EDGE>(r, P, kt, kend, v, xs, sg, lane, fm, fn, n0, n1);
+  if (MASKED && mask != 0) q27_sg_unmask<EDGE>(r, P, kt, kend, v, xs, sg, lane, fm, fn, n0, n1);
 }
 
 // One chunk's partial per packed row, in attention_prompt.metal's layout for q27_attn_prompt_merge.
@@ -157,8 +157,9 @@ kernel void q27_attn_prompt_sg(device const bfloat* QA [[buffer(0)]], device con
   const int seen = simd_min(min(n0 ? n0 : INT_MAX, n1 ? n1 : INT_MAX));
   const uint mask = q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x80008000u : 0u;
   int kt = kbeg;
-  for (; kt + PTK <= kend; kt += PTK) q27_sg_step<false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
-  if (kt < kend) q27_sg_step<true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
+  const int seen_by_all = kbeg + max(min(seen, kend) - kbeg, 0) / PTK * PTK;  // steps below it: every live row sees all 32 keys
+  for (; kt < seen_by_all; kt += PTK) q27_sg_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
+  for (; kt < kend; kt += PTK) q27_sg_step<true, true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
   if (!live) return;
   const int64_t base = ((int64_t)hk * args.chunks + c) * args.rp + tile * 16;
   _Pragma("clang loop unroll(full)")
