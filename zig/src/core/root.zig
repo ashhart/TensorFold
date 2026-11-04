@@ -19,6 +19,7 @@ pub const direct_io = @import("direct_io.zig");
 pub const direct_gather = @import("direct_gather.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
 pub const draft_depth = @import("draft_depth.zig");
+pub const prompt_tail = @import("prompt_tail.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const recurrent_workspace = @import("recurrent_workspace.zig");
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
@@ -112,6 +113,7 @@ test {
     _ = direct_gather;
     _ = frame_rounds;
     _ = draft_depth;
+    _ = prompt_tail;
     _ = @import("copy_index.zig");
     _ = ids_json;
     _ = proposal_vocab;

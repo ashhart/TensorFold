@@ -178,7 +178,22 @@ fn bf(x: u16) f64 {
 }
 
 /// One layout's results: the rotated queries, the attention rows (the prompt tiles' too, with `Tc`), the caches.
-pub const Result = struct { q: []u8, out: []u8, prompt: []u8, after_rope: [2][]u8, after_keep: [2][]u8 };
+pub const Result = struct {
+    q: []u8,
+    out: []u8,
+    prompt: []u8,
+    /// the prompt rows from each stream's tail start alone (cuda_prompt.runFrom)
+    from: []u8,
+    /// the same with the start's keys planted uncounted (len kept): the control
+    shifted: []u8,
+    after_rope: [2][]u8,
+    after_keep: [2][]u8,
+};
+
+/// A stream's tail start in the fixture's window rows: a row no block width divides, the chunk's last third.
+pub fn tailFrom(rows: usize) usize {
+    return rows - (rows + 2) / 3;
+}
 
 const Fns = struct { rope: cuda.Function, partial: cuda.Function, merge: cuda.Function, compact: cuda.Function };
 /// The engine's attention kernels: short streams' rows in `partial`, long streams' in `rows`, a chunk's in `prompt`.
@@ -249,18 +264,25 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]co
     try cuda.launch.launch(fns.merge, .{ .grid = .{ .x = q_heads, .y = @intCast(m) }, .block = .{ .x = 32 } }, s, &args);
     // each stream's rows as one prompt chunk over its own cache (cuda_prompt.zig's launch): a slab's or a page's block
     const pout = try rig.output(m * q_heads * hd * 2);
-    if (tc) |t| for (0..2) |st| {
+    const fout = try rig.output(m * q_heads * hd * 2);
+    const sout = try rig.output(m * q_heads * hd * 2);
+    if (tc) |t| for (0..2) |st| for ([_][2]usize{ .{ 0, 0 }, .{ 1, 1 }, .{ 1, 0 } }) |mode| {
+        // mode: whole chunk, from the tail start (runFrom), from the tail start with its keys not counted (control)
+        const from: usize = if (mode[0] == 1) tailFrom(f.c.rows) else 0;
+        const at = (st * f.c.rows + from) * q_heads * hd * 2;
+        const dst: u64 = if (mode[0] == 0) pout else if (mode[1] == 1) fout else sout;
         const n: u64 = if (tables != null) f.c.ptok else f.cap;
         const keys = kv[st] + blockBytes(f.format, @intCast(n), 1);
         var pa: cuda.Args = .{};
-        pa.add(qn + st * f.c.rows * q_heads * hd * 2);
+        pa.add(qn + at);
         if (f.format == .fp8) {
             const values = keys + kv_heads * n * hd;
             const kscale = values + kv_heads * n * hd;
             inline for (.{ keys, values, kscale, kscale + kv_heads * n * 4 }) |x| pa.add(x);
         } else inline for (.{ keys, keys + kv_heads * n * hd * 2 }) |x| pa.add(x);
-        pa.add(pout + st * f.c.rows * q_heads * hd * 2);
-        inline for (.{ f.c.lens[st], f.c.rows, q_heads, kv_heads, group }) |v| pa.add(@as(c_int, @intCast(v)));
+        pa.add(dst + at);
+        const len = f.c.lens[st] + from * mode[1];
+        inline for (.{ len, f.c.rows - from, q_heads, kv_heads, group }) |v| pa.add(@as(c_int, @intCast(v)));
         pa.add(@as(f32, 1.0 / 16.0));
         pa.add(@as(c_int, @intCast(f.cap)));
         if (!t.whole) {
@@ -268,12 +290,15 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]co
             pa.add(@as(i64, @intCast(segs[st].ps)));
             pa.add(@as(c_int, if (segs[st].pt != 0) @intCast(f.c.ptok) else 1));
         }
-        try cuda.launch.launch(t.prompt, .{ .grid = .{ .x = @intCast((f.c.rows + 63) / 64), .y = kv_heads * (group / 2) }, .block = .{ .x = 256 }, .shared = prompt_shared }, s, &pa);
+        const grid: cuda.launch.Dim3 = .{ .x = @intCast((f.c.rows - from + 63) / 64), .y = kv_heads * (group / 2) };
+        try cuda.launch.launch(t.prompt, .{ .grid = grid, .block = .{ .x = 256 }, .shared = prompt_shared }, s, &pa);
     };
     var r: Result = undefined;
     r.q = try a.dupe(u8, try rig.bytes(qn, f.q.len * 2));
     r.out = try a.dupe(u8, try rig.bytes(out, m * q_heads * hd * 2));
     r.prompt = if (tc != null) try a.dupe(u8, try rig.bytes(pout, m * q_heads * hd * 2)) else &.{};
+    r.from = if (tc != null) try a.dupe(u8, try rig.bytes(fout, m * q_heads * hd * 2)) else &.{};
+    r.shifted = if (tc != null) try a.dupe(u8, try rig.bytes(sout, m * q_heads * hd * 2)) else &.{};
     try readCaches(&rig, a, f, tables, kv, &r.after_rope);
     // keep: stream 0's window rows 0, 2 and the last (a tree's path), moved down after its cache
     if (f.c.rows >= 3) {
@@ -389,6 +414,7 @@ pub fn run(gpu: check.Gpu) !void {
         }
         try whole.prompt.allowDynamicShared(prompt_shared);
         var red_tc = false;
+        var red_tail = false;
         var red_table = false;
         var red_bound = false;
         for (cases, 0..) |c, i| {
@@ -425,6 +451,22 @@ pub fn run(gpu: check.Gpu) !void {
             const flat_tc = try launch(gpu, s, flat_fns, f, null, null, a, 1, whole);
             try check.sameBytes("qwen35 whole: decode replaces page-aware entry", flat_tc.out, replaced.out);
             try check.sameBytes("qwen35 whole: prompt replaces page-aware entry", flat_tc.prompt, replaced.prompt);
+            for ([_]Result{ flat_tc, replaced }) |r| {
+                const from = tailFrom(c.rows);
+                const row = q_heads * hd * 2;
+                var moved = false;
+                for (0..2) |st| {
+                    const lo = (st * c.rows + from) * row;
+                    const span = r.prompt[lo .. (st + 1) * c.rows * row];
+                    try check.sameBytes("qwen35 prompt tail: rows from its start", r.from[lo..][0..span.len], span);
+                    moved = moved or !std.mem.eql(u8, r.shifted[lo..][0..span.len], span);
+                }
+                // a stress or non-finite fill can leave the rows alike either way; the control needs random keys
+                const planted = from > 0 and c.mode == .random;
+                red_tail = red_tail or planted;
+                const missed = "qwen35 prompt tail {t}: uncounted keys still gave the rows (control missed) at {any}";
+                if (planted) try check.expect(moved, missed, .{ format, c.lens });
+            }
             for (0..5) |rep| {
                 var repeat = std.heap.ArenaAllocator.init(gpu.gpa);
                 defer repeat.deinit();
@@ -457,7 +499,8 @@ pub fn run(gpu: check.Gpu) !void {
             try check.expect(caught, "qwen35 pages {t}: a planted attention row passed float64 (control missed)", .{format});
             std.debug.print("PASS qwen35 pages {t}: lens {any}, {d} rows a stream, {d}-position pages: paged == contiguous (queries, rows, stores, keep; tensor-core and prompt rows), repeats, float64 bound, guards\n", .{ format, c.lens, c.rows, c.ptok });
         }
-        try check.expect(red_table and red_bound and red_tc, "qwen35 pages {t}: a control never fired", .{format});
-        std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row)\n", .{format});
+        const red = red_table and red_bound and red_tc and red_tail;
+        try check.expect(red, "qwen35 pages {t}: a control never fired", .{format});
+        std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row, uncounted tail keys)\n", .{format});
     }
 }
