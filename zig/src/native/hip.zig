@@ -288,6 +288,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     errdefer loaded.deinit(loaded.ctx);
     const offer = fam.offerOf(loaded);
+    const text = fam.generates(offer);
     if (fam.textOnly(o, offer))
         std.debug.print("[tensorfold] --vision: the HIP engine has no image tower for {s}; serving text only, and image requests are refused\n", .{o.model_type});
     const h = try gpa.create(Host);
@@ -302,21 +303,20 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
     errdefer h.core.deinit();
-    const what = Serves.of(loaded, r.options.window);
     h.host = api.LaneHost.init(gpa, io, &h.core, .{
         .benchmark_ranks = if (r.dev.group) |g| @intCast(g.world) else 1,
         .lanes = @intCast(loaded.streams),
-        .context_window = @intCast(what.window),
+        .context_window = @intCast(offer.window orelse r.options.window),
         .prefill_step = F.prefill_step,
         .decode_share = o.decode_share,
         .policy = offer.policy orelse h.policy_line,
         .startup = loaded.startup,
-        .structures = what.text_generation and loaded.backend.vtable.first_masked != null,
-        .text_generation = what.text_generation,
-        .embeddings = what.embeddings,
-        .decides = what.decides,
-        .rerank = what.rerank,
-        .readouts = what.readouts,
+        .structures = text and loaded.backend.vtable.first_masked != null,
+        .text_generation = text,
+        .embeddings = offer.embeddings,
+        .decides = offer.decides,
+        .rerank = offer.rerank,
+        .readouts = offer.readouts,
         .penalties = loaded.backend.penalties,
         .reasoning = reasoning(F),
         .vision = offer.vision,
@@ -334,34 +334,6 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     served = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
-
-/// What a family's `Loaded` says it serves; a family that names none generates text in the window asked.
-const Serves = struct {
-    text_generation: bool = true,
-    embeddings: ?api.EmbeddingInfo = null,
-    decides: bool = false,
-    rerank: ?api.Rerank = null,
-    /// A family whose `Loaded` reports readouts answers them and generates nothing.
-    readouts: ?lanes.readout.Info = null,
-    window: usize,
-
-    fn of(loaded: anytype, asked: usize) Serves {
-        const L = @TypeOf(loaded);
-        var s: Serves = .{ .window = asked };
-        if (@hasField(L, "text_generation")) s.text_generation = loaded.text_generation;
-        if (@hasField(L, "embeddings")) s.embeddings = loaded.embeddings;
-        if (@hasField(L, "decides")) s.decides = loaded.decides;
-        if (@hasField(L, "rerank")) s.rerank = loaded.rerank;
-        if (@hasField(L, "readouts")) if (loaded.readouts) |info| {
-            s.readouts = info;
-            s.text_generation = false;
-        };
-        if (@hasField(L, "window")) if (loaded.window) |w| {
-            s.window = w;
-        };
-        return s;
-    }
-};
 
 /// A rank above 0: holds its share and runs rank 0's steps until rank 0 stops; false with `problem` if it cannot start.
 pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !bool {
@@ -400,13 +372,17 @@ test "a HIP family declares replies without reasoning with `pub const reasoning 
     }));
 }
 
-test "the text families carry no offer, so the host gives them the empty one; GLM-OCR offers through its Loaded" {
-    inline for (.{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native }) |F| {
+test "the text families carry no offer, so the host gives them the empty one; GLM-OCR and Qwen3 offer through their Loaded" {
+    inline for (.{ flashnext.native, nemotron.native }) |F| {
         const Loaded = @typeInfo(@typeInfo(@TypeOf(F.open)).@"fn".return_type.?).error_union.payload;
         try std.testing.expect(!@hasField(Loaded, "offer"));
     }
     try std.testing.expect(@FieldType(glm_ocr.native.Loaded, "offer") == serve.Offer);
     inline for (.{ "vision", "cache", "cache_capacity" }) |old| try std.testing.expect(!@hasField(glm_ocr.native.Loaded, old));
+    try std.testing.expect(@FieldType(qwen3.native.Loaded, "offer") == serve.Offer);
+    inline for (.{ "text_generation", "embeddings", "window", "decides", "rerank" }) |old| try std.testing.expect(!@hasField(qwen3.native.Loaded, old));
+    // Qwen3.5's readouts reach the Info through its offer (both of its model types share one Loaded)
+    try std.testing.expect(@FieldType(qwen35.native_engine.Loaded, "offer") == serve.Offer and !@hasField(qwen35.native_engine.Loaded, "readouts"));
 }
 
 test {
@@ -581,26 +557,15 @@ test "slide admission: HIP followers refuse before joining ranks" {
     }
 }
 
-test "a family's Loaded names what it serves; one without the fields generates text in the asked window" {
-    const Plain = struct { streams: usize };
-    const p = Serves.of(Plain{ .streams = 1 }, 4096);
-    try std.testing.expect(p.text_generation and p.embeddings == null and p.window == 4096);
-    const Embed = struct { text_generation: bool, embeddings: ?api.EmbeddingInfo, window: ?usize };
-    const e = Serves.of(Embed{ .text_generation = false, .embeddings = .{ .dimensions = 8, .vocabulary = 4, .max_batch_tokens = 2048 }, .window = 2048 }, 32768);
-    try std.testing.expect(!e.text_generation and e.embeddings.?.dimensions == 8 and e.window == 2048);
-    const Unsized = struct { window: ?usize };
-    try std.testing.expectEqual(@as(usize, 32768), Serves.of(Unsized{ .window = null }, 32768).window);
-    const Rerank = struct { text_generation: bool, decides: bool, rerank: ?api.Rerank, window: ?usize };
-    const r = Serves.of(Rerank{ .text_generation = false, .decides = true, .rerank = .{ .yes = 9693, .no = 2152 }, .window = 32768 }, 40960);
+test "a family's offer names what it serves; one without an offer generates text in the asked window" {
+    const p = fam.offerOf(.{ .streams = @as(usize, 1) });
+    try std.testing.expect(p.text_generation and p.embeddings == null and p.window == null and !p.decides and p.rerank == null);
+    const e = fam.offerOf(.{ .offer = serve.Offer{ .text_generation = false, .embeddings = .{ .dimensions = 8, .vocabulary = 4, .max_batch_tokens = 2048 }, .window = 2048 } });
+    try std.testing.expect(!e.text_generation and e.embeddings.?.dimensions == 8 and e.window == 2048 and e.rerank == null);
+    const r = fam.offerOf(.{ .offer = serve.Offer{ .text_generation = false, .decides = true, .rerank = .{ .yes = 9693, .no = 2152 }, .window = 32768 } });
     try std.testing.expect(!r.text_generation and r.decides and r.embeddings == null and r.window == 32768);
     try std.testing.expectEqual(@as(u32, 9693), r.rerank.?.yes);
-    try std.testing.expect(p.rerank == null and e.rerank == null);
-    try std.testing.expect(!p.decides and !e.decides);
-    const Readout = struct { readouts: ?lanes.readout.Info };
-    const d = Serves.of(Readout{ .readouts = .{ .max_rows = 16384, .max_questions = 64, .max_options = 1024 } }, 16384);
-    try std.testing.expect(!d.text_generation and d.embeddings == null and d.rerank == null);
+    const d = fam.offerOf(.{ .offer = serve.Offer{ .readouts = .{ .max_rows = 16384, .max_questions = 64, .max_options = 1024 } } });
+    try std.testing.expect(!fam.generates(d) and d.embeddings == null and d.rerank == null and fam.generates(p));
     try std.testing.expectEqual(@as(u32, 1024), d.readouts.?.max_options);
-    try std.testing.expect(Serves.of(Readout{ .readouts = null }, 4096).text_generation and p.readouts == null);
-    // Qwen3.5's `Loaded` must carry the field, or its readouts would never reach the Info
-    try std.testing.expect(@hasField(@typeInfo(@typeInfo(@TypeOf(qwen35.native.open)).@"fn".return_type.?).error_union.payload, "readouts"));
 }

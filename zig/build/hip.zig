@@ -325,6 +325,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "core", .module = core },
             .{ .name = "lanes", .module = lanes },
             .{ .name = "engine_api", .module = api },
+            .{ .name = "hip_serve", .module = serve },
         },
     });
     const dots = @import("dots_mocr.zig").hipModule(b, hip);

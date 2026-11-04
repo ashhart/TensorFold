@@ -47,6 +47,11 @@ pub fn offerOf(loaded: anytype) Offer {
     return if (comptime @hasField(@TypeOf(loaded), "offer")) loaded.offer else .{};
 }
 
+/// Whether the family generates text: its offer says so and it answers no readouts.
+pub fn generates(offer: Offer) bool {
+    return offer.text_generation and offer.readouts == null;
+}
+
 /// --vision asked of a model this family serves without images: it starts text-only and logs so.
 pub fn textOnly(o: api.Open, offer: Offer) bool {
     return o.vision != null and offer.vision == null;
@@ -84,6 +89,11 @@ test "a family's own refusal comes first; --vision alone refuses nothing" {
     try std.testing.expect(std.mem.startsWith(u8, refused(Plain, many).?, "--rope-yarn"));
     const seen: api.Open = .{ .dir = "d", .model_type = "plain", .vision = .{} };
     try std.testing.expect(refused(Plain, seen) == null and refused(Aliased, seen) == null);
+}
+
+test "a family that answers readouts generates no text" {
+    try std.testing.expect(generates(.{}) and !generates(.{ .text_generation = false }));
+    try std.testing.expect(!generates(.{ .readouts = .{ .max_rows = 16384, .max_questions = 64, .max_options = 1024 } }));
 }
 
 test "a Loaded without an offer gives the empty one; --vision with no offered images is text-only" {
