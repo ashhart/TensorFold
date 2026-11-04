@@ -52,12 +52,12 @@ as two requests at once:
 
 | Pages | Prompt tokens | Reply tokens | First token | Decode | Text vs reference | Box coordinates moved |
 |---|---:|---:|---:|---:|---|---:|
-| report-1 | 909 | 198 | 1.10 s | 260.6 tok/s | identical | 0 / 16 |
-| report-2 | 909 | 141 | 0.85 s | 248.7 tok/s | identical | 0 / 16 |
-| paper-1 | 909 | 543 | 0.81 s | 260.1 tok/s | identical | 5 / 44 (at most 10) |
-| paper-3 | 909 | 899 | 0.81 s | 259.4 tok/s | identical | 1 / 44 (1) |
-| paper-10 | 909 | 1,959 | 0.81 s | 247.7 tok/s | identical | 2 / 28 (1) |
-| all five as one document | 4,525 | 3,764 | 4.00 s | 223.7 tok/s | identical | 2 / 140 (1) |
+| report-1 | 909 | 198 | 1.16 s | 247.8 tok/s | identical | 0 / 16 |
+| report-2 | 909 | 141 | 0.82 s | 255.0 tok/s | identical | 0 / 16 |
+| paper-1 | 909 | 543 | 0.82 s | 222.1 tok/s | identical | 5 / 44 (at most 10) |
+| paper-3 | 909 | 899 | 0.91 s | 241.0 tok/s | identical | 1 / 44 (1) |
+| paper-10 | 909 | 1,959 | 0.82 s | 241.5 tok/s | identical | 2 / 28 (1) |
+| all five as one document | 4,525 | 3,764 | 3.93 s | 215.5 tok/s | identical | 2 / 140 (1) |
 
 The text matches the reference in every case; the only differences are box coordinates, mostly by one, where bf16
 sums taken in another order (CPU torch against Metal) tip a rounding. Repeats and concurrent requests give the same
