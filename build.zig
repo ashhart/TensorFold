@@ -233,6 +233,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/checkpoint_config.zig").wire(b);
     @import("zig/build/save_guard.zig").wire(b);
     @import("zig/build/bf16_round.zig").wire(b, test_step);
+    @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
 }
