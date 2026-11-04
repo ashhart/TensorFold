@@ -1,4 +1,4 @@
-//! The GGUF v3 subset a GLP control-vector container needs, named so it cannot collide with the engine's reader.
+//! The GLP container's GGUF v3 subset, named apart; the format is the `weightless` project's (@msuiche).
 
 const std = @import("std");
 
