@@ -78,6 +78,7 @@ pub const Host = struct {
     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
     store: ?*api.prompt_cache.Store = null, // kept Nemotron states; null when the budget is 0
     kv: kv_pages.Watch = .{}, // what the load ledger hears of the KV pool (cuda_kv_pool.zig)
+    kv_count: ?*@import("core").kv_pool.Pool = null, // the paged pool the lane host's ledger admits (#1943)
     kv_plan: ?@import("cuda_ledger.zig").Plan = null, // the KV ledger's budget and cost, read by the lane host
     prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: the family's prompts as its pool's pages (no `store` then)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
@@ -140,6 +141,8 @@ pub const Host = struct {
         if (h.learn != null) h.host.learner = h.learner();
         kv_pages.install(&h.kv, &h.host); // the pool's first census, before the engine thread owns the pool
         errdefer kv_pages.unwatch(&h.kv); // a host that never starts leaves the pool reporting to no one
+        if (h.kv_count) |p| h.host.countPool(p);
+        errdefer h.host.uncountPool();
         try h.host.start();
     }
     /// The family's learner, each call made with the context current on the lane thread.
@@ -467,6 +470,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     const admit: ?api.Admit = if (comptime !@hasDecl(F, "fits")) null else if (paged != null) .{ .ctx = loaded.ctx, .fits = F.fits } else null;
     h.kv = kv_pages.watchOf(F, loaded, paged);
+    h.kv_count = if (admit != null) kv_pages.ledgerPool(F, loaded) else null;
     const bench = if (@hasDecl(F, "benchmark")) F.benchmark(loaded.ctx) else api.Benchmark{ .ranks = 1 };
     try h.serve(io, served.facts, loaded.rows, .{
         .benchmark_ranks = bench.ranks,

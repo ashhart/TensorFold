@@ -143,6 +143,12 @@ pub const Reclaim = struct {
     call: *const fn (ctx: *anyopaque, want: usize) bool,
 };
 
+/// The lane host's ledger (core/kv_ledger.zig) that admits this pool's promises: the available pages `n` more need.
+pub const Gate = struct {
+    ctx: *const anyopaque,
+    want: *const fn (ctx: *const anyopaque, n: usize) usize,
+};
+
 /// Called after each outermost change to the pool's counts, on the thread that made it.
 pub const Notify = struct {
     ctx: *anyopaque,
@@ -169,6 +175,7 @@ pub const Pool = struct {
     page_bytes: u64,
     reclaim: ?Reclaim = null,
     notify: ?Notify = null,
+    ledger: ?Gate = null, // the lane host's ledger, the only test a promise passes; null: the pool's own pages
     depth: u8 = 0, // public changes in progress: the outermost one notifies, after nested calls and rollbacks
 
     pub fn init(gpa: Allocator, count: usize, page_bytes: u64) !Pool {
@@ -206,7 +213,18 @@ pub const Pool = struct {
 
     /// Whether `need` pages could be promised now, the store's idle pages counted.
     pub fn fits(p: *const Pool, need: usize) bool {
-        return p.available() + p.reclaimable() >= need;
+        return p.available() + p.reclaimable() >= p.want(need);
+    }
+
+    /// The available pages at which `n` more fit: the ledger's answer, or `n` on the pool's own pages.
+    fn want(p: *const Pool, n: usize) usize {
+        const g = p.ledger orelse return n;
+        return g.want(g.ctx, n);
+    }
+
+    /// A page's bytes as a ledger counts them: one at least, so a pool of empty pages still counts its pages.
+    pub fn unit(p: *const Pool) u64 {
+        return @max(p.page_bytes, 1);
     }
 
     /// The counts an idle server logs: promised 0, free + kept == total, no page leased.
@@ -274,11 +292,11 @@ pub const Pool = struct {
     pub fn promise(p: *Pool, l: *Lease, n: usize) error{LaneMemory}!void {
         p.enter();
         defer p.leave();
-        if (p.available() < n) if (p.reclaim) |r| {
-            _ = r.call(r.ctx, n);
+        if (p.available() < p.want(n)) if (p.reclaim) |r| {
+            _ = r.call(r.ctx, p.want(n));
         };
-        if (p.available() < n) return error.LaneMemory;
-        p.promised += n;
+        if (p.available() < p.want(n)) return error.LaneMemory;
+        p.promised += n; // a sub-count of the ledger's: it passed the ledger's test above, never a second one
         l.promised += n;
     }
 
@@ -286,10 +304,10 @@ pub const Pool = struct {
     pub fn hold(p: *Pool, out: []u32) bool {
         p.enter();
         defer p.leave();
-        if (p.available() < out.len) if (p.reclaim) |r| {
-            _ = r.call(r.ctx, out.len);
+        if (p.available() < p.want(out.len)) if (p.reclaim) |r| {
+            _ = r.call(r.ctx, p.want(out.len));
         };
-        if (p.available() < out.len) return false;
+        if (p.available() < p.want(out.len)) return false;
         for (out) |*id| {
             p.nfree -= 1;
             id.* = p.free[p.nfree];
