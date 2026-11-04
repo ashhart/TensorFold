@@ -146,7 +146,7 @@ pub fn placeHost(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, a
 fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, stream_bytes: u64) bool {
     const want = budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
-    if (layout(loaded)) |l| return kv_pool.holds(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = enginePaged(loaded) });
+    if (layout(loaded)) |l| return kv_pool.holds(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = enginePaged(loaded), .asked = o.prompt_cache_gib != null });
     const n = budget.admit(room, stream_bytes, loaded.free_streams, o.lanes, o.lanes_fixed) catch return false;
     return room -| stream_bytes * (n -| loaded.free_streams) >= want;
 }
@@ -155,7 +155,7 @@ fn fits(comptime F: type, loaded: anytype, o: api.Open, room: u64, window: u64, 
 pub fn plan(comptime F: type, a: Allocator, l: kv_pool.Layout, room: u64, o: api.Open, window: u64, problem: *[]const u8, host_mode: bool, engine_paged: bool, kept_ppm: u32) !?Plan {
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0;
     const want = if (host_mode) 0 else budget.cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
-    return kv_pool.plan(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm }) catch |e| {
+    return kv_pool.plan(l, .{ .room = room, .engine = 0, .lanes = o.lanes, .fixed = o.lanes_fixed, .cache = want, .snaps = named(o), .window = window + rows, .engine_paged = engine_paged, .kept_ppm = if (host_mode) 0 else kept_ppm, .asked = o.prompt_cache_gib != null }) catch |e| {
         problem.* = switch (e) {
             error.NoStream => if (engine_paged) try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream beside the model: one at a {d}-token window takes {d:.2} GiB of KV pages, and the budget leaves {d:.2} GiB", .{ window, toGib(l.pages(window + rows) * l.pageBytes()), toGib(room) }) else "the CUDA memory budget fits no stream beside the model",
             error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its other streams' fixed parts, state runs and a page each, and the CUDA memory budget leaves {d:.2} GiB: serve fewer, or free device memory", .{ o.lanes, toGib((o.lanes - 1) * (l.fixed_bytes + (1 + l.runPages()) * l.pageBytes())), toGib(room) }),
@@ -298,11 +298,16 @@ test "kv pages: an engine whose own rows are pages plans a window of them first,
     const all = (try text(Owned, a, 180 << 20, l, p, false, true, 8192, .{ .snaps = 0, .copied = 4 << 30, .snap_bytes = 0 }, false))[0];
     try std.testing.expectEqualStrings("all 4 on 68 pages of 512 rows (0.42 GiB) as they need them, the engine's own window idle, 180 MiB fixed each", all);
     try std.testing.expect(allOnPages(.{ .all_on_pages = true }) and !allOnPages(.{ .layout = @as(?kv_pool.Layout, l) }));
-    // the asked cache holds past the four windows' pages this room holds and a fixed part each, not a byte less
-    const room = 4 * floor + 3 * (180 << 20) + (4 << 30);
+    // the unasked cache holds past the four windows' pages this room holds and a fixed part each, not a byte less
+    const room = 4 * floor + 3 * (180 << 20) + (16 << 30);
     const loaded = .{ .layout = @as(?kv_pool.Layout, l), .engine_paged = true, .free_streams = @as(u32, 1) };
-    try std.testing.expect(fits(Owned, loaded, o, room, 8192, 0));
-    try std.testing.expect(!fits(Owned, loaded, o, room - 1, 8192, 0));
+    const unasked: api.Open = .{ .dir = "", .model_type = "g", .lanes = 4 };
+    try std.testing.expect(fits(Owned, loaded, unasked, room, 8192, 0));
+    try std.testing.expect(!fits(Owned, loaded, unasked, room - 1, 8192, 0));
+    // an asked cache holds past the engine's own window and a fixed part and page for each other one, not a byte less
+    const each = (180 << 20) + l.pageBytes();
+    try std.testing.expect(fits(Owned, loaded, o, floor + 3 * each + (4 << 30), 8192, 0));
+    try std.testing.expect(!fits(Owned, loaded, o, floor + 3 * each + (4 << 30) - 1, 8192, 0));
 }
 test "kv merge: host armed-state staging is reserved once before planning the page pool" {
     const loaded = .{ .host_snaps = true, .snap_bytes = @as(u64, 8 << 20) };
@@ -338,10 +343,13 @@ pub fn capacity(comptime F: type, loaded: anytype, k: Kept, window: u64) ?api.Pr
     return .{ .budget_bytes = k.copied, .minimum_state_bytes = minimum };
 }
 
-pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, comptime log: type) void {
+/// `taken`: the cache bytes the page plan's windows past the engine's own took first (Plan.taken; 0 without pages).
+pub fn warnCapacity(facts: ?api.PromptCacheCapacity, disabled: bool, taken: u64, comptime log: type) void {
     const c = facts orelse return;
     if (disabled or c.budget_bytes >= c.minimum_state_bytes) return;
-    log.warn("GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); lower --context or --parallel, or TENSORFOLD_MEMORY_RESERVE_GIB, to make room (--prompt-cache-gib only caps the budget the weights and streams leave)", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
+    const short = "GLM CUDA prompt cache budget {d} bytes ({d:.3} GiB) cannot keep one state: the minimum planned state needs {d} bytes ({d:.3} GiB); ";
+    if (taken > 0) return log.warn(short ++ "the KV pool's windows past the engine's own took {d:.3} GiB of it first, and --prompt-cache-gib N keeps N GiB before them", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes), toGib(taken) });
+    log.warn(short ++ "lower --context or --parallel, or TENSORFOLD_MEMORY_RESERVE_GIB, to make room (--prompt-cache-gib only caps the budget the weights and streams leave)", .{ c.budget_bytes, toGib(c.budget_bytes), c.minimum_state_bytes, toGib(c.minimum_state_bytes) });
 }
 
 test {
