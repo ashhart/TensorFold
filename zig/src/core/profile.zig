@@ -7,6 +7,7 @@ pub const Switch = enum {
     TF_QWEN_KV_PAGES,
     TF_QWEN_KV_PAGES_ALL,
     TF_QWEN_KV_SHARE,
+    TF_QWEN_REQUEST_STARTS,
     TF_KV_SHARE,
     TF_FLASHNEXT_KV_PAGES,
     TF_FLASHNEXT_KV_PAGES_ALL,
@@ -55,6 +56,7 @@ const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
 
 pub const entries = [_]Entry{
+    .{ .id = .TF_QWEN_REQUEST_STARTS, .families = qwen, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#1334; default-off, device qualification pending" },
     .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .one, .effect = "Put the engine's own stream on pages too", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_SHARE, .families = qwen, .class = .identical, .effect = "Keep prompt pages and bounded recurrent snapshots", .evidence = "#1357" },
