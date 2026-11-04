@@ -405,6 +405,7 @@ that writes it and the numbers that identify it, not the file.
 
 | | |
 | --- | --- |
+| Repository | [`BlivionIaG/Qwen3.8-27B-refusal-cvec-GLP-49`](https://huggingface.co/BlivionIaG/Qwen3.8-27B-refusal-cvec-GLP-49) |
 | File | `Qwen3.8-27B-refusal-cvec-GLP-49-L10-58-a1.gguf` |
 | Directions digest | `9a50f7160fa2f0a41e7fa868c791d372b0a374f9365cc98c25d52abe96ce9d8d` (`glp.content_sha256`) |
 | Layers | 10 to 58, zero-based, 49 of them |
@@ -424,6 +425,10 @@ this one is compared against:
 captain-vector --validate Qwen3.8-27B-refusal-cvec-GLP-49-L10-58-a1.gguf
   ...: 0 FAIL, 0 WARN
 ```
+
+The format, its reference implementation and that validator are Matt Suiche's,
+the `weightless` plugin; the published file this one is compared against is
+his too, and the card that ships with it says so.
 
 ## The integration test
 
