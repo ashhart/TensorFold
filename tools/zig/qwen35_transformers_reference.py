@@ -177,14 +177,10 @@ def main():
         res["model_load"]["class"], res["model_load"]["model_dtype"],
         res["model_load"]["parameter_count"], peak_rss_gb()))
 
-    # which fixtures are involved in the native comparison?  Every fixture is
-    # forwarded with the 5 teacher-forced continuation tokens the capture tool
-    # uses, so the decode captures can be placed; prompt rows are unaffected.
+    # Teacher-force five continuation IDs per fixture to place decode captures; causal prompt rows are unaffected.
     capmap = build_capture_map(fixtures, cont, logprob_caps)
     needed = sorted(set())
-    # provisional: resolve after forwards; extension needed for fixtures whose
-    # continuation appears among decode capture picks or whose tail appears in a
-    # prompt capture pick pair
+    # Resolve fixtures whose continuation or prompt tail occurs among native captures after the forwards.
     for item in capmap:
         for cand in item["candidates"]:
             needed.append(cand["fixture"])
