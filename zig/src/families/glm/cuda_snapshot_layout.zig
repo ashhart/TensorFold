@@ -6,8 +6,10 @@ const Config = @import("config.zig").Config;
 const cache = @import("cuda_dsa_block.zig");
 const sparse = @import("cuda_sparse.zig");
 
+const walk = @import("core").state_walk.Device;
+
 /// `len` bytes from `live`, or on a paged sequence's pages `span` bytes a page `page` bytes apart, from byte `from`.
-pub const Part = struct { live: u64, len: usize, span: usize = 0, page: u64 = 0, from: usize = 0 };
+pub const Part = walk.Part;
 pub const Plan = struct {
     parts: [5 * (@import("config.zig").max_layers + 1) + 2]Part = undefined,
     count: usize = 0,
@@ -74,10 +76,7 @@ pub const Plan = struct {
 
     /// Where a part's bytes from `done` on sit, as many as lie in a row there.
     pub fn piece(p: *const Plan, part: Part, done: usize) Part {
-        if (part.span == 0) return .{ .live = part.live + done, .len = part.len - done };
-        const at = part.from + done;
-        const off = at % part.span;
-        return .{ .live = part.live + @as(u64, p.ids[at / part.span]) * part.page + off, .len = @min(part.span - off, part.len - done) };
+        return walk.piece(p.ids, part, done);
     }
 
     fn add(p: *Plan, st: *const State, live: u64, len: usize) !void {
