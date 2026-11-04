@@ -70,8 +70,7 @@ Never leave a line blank or claim a check you did not run.
 - A changed reduction order or precision, and model fidelity, follow [exactness and precision](../../CONTRIBUTING.md#exactness-and-precision).
 - Keep same-engine equality separate from independent fidelity. An FP64 receipt does not waive a bit-identity gate.
 - Do not loosen a tolerance, add a known exemption or change a tie policy after seeing results.
-- Keep the checkpoint's published precision; an opt-in lossy weight or cache conversion still needs an agreed gate.
-- A change to output tokens on a default path needs proof and an opt-in.
+- TensorFold takes no lossy weight or cache formats, even opt-in, and no mode that changes output tokens, even opt-in. Output must stay token-equal to the serial reference.
 - State which platforms you ran and which you could not: Metal by chip (M1 to M5), CUDA by SM, HIP by gfx target, Windows, desktop or mobile app. A result on one chip does not qualify another; unrun is not passed.
 
 ## 5. Tests and checks
