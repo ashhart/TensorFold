@@ -143,6 +143,7 @@ pub const Engine = struct {
     /// Rows a lane's prompt pass takes while another stream decodes: TF_FLASHNEXT_CHUNK.
     busy_chunk: usize = batch.default_chunk,
     round_graph: round_graph.Cache = .{},
+    graphs: @import("cuda_window_graph.zig").Graphs = .{}, // drafted windows, draft-head pieces, rollbacks on one GPU
     image_factory: ?*@import("cuda_images.zig").Vision = null,
     collective: ?*@import("cuda_collective.zig").Collective = null,
     /// Each layer's Living Weights pocket, from a taught folder's shards or the learner: every pass adds it.
@@ -168,6 +169,7 @@ pub const Engine = struct {
         e.collective = null;
         e.image_factory = null;
         e.round_graph = .{};
+        e.graphs = .{};
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
         e.model_dir = try gpa.dupe(u8, model_dir);
         errdefer gpa.free(e.model_dir);
@@ -234,6 +236,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.round_graph.clear();
+        e.graphs.clear(e.gpa);
         e.pockets.deinit();
         if (e.batch_s) |*bs| bs.free(e.gpa);
         if (e.scores) |*b| b.free();
@@ -304,6 +307,7 @@ pub const Engine = struct {
         if (cap == 0 or cap > max_tokens) return error.UnexpectedTensor;
         _ = try seqBytesPaged(cap, if (paged) |p| p.tokens else 0);
         var seq: Seq = .{
+            .gen = @import("cuda_window_graph.zig").nextGen(),
             .stream = e.stream.*,
             .paged = paged,
             .conv = &.{},
@@ -362,6 +366,7 @@ pub const Engine = struct {
             if (b.len >= need) return b.ptr;
             try e.complete();
             e.round_graph.clear();
+            e.graphs.clear(e.gpa);
             b.free();
             e.scores = null;
         }
@@ -380,6 +385,7 @@ pub const Engine = struct {
             if (bs.cap >= rows) return bs;
             try e.complete();
             e.round_graph.clear();
+            e.graphs.clear(e.gpa);
             bs.free(e.gpa);
             e.batch_s = null;
         }
@@ -407,6 +413,7 @@ pub const Engine = struct {
             .seq = seq.view(scores),
             .hooks = hooks,
         };
+        if (try @import("cuda_prompt_windows.zig").forwardGraph(e, Tri, &p, seq, ids, hooks)) return;
         var at: usize = 0;
         while (at < ids.len) {
             const n = @min(s.cap, ids.len - at);
@@ -414,7 +421,7 @@ pub const Engine = struct {
             e.ngram.warmAhead(ids, at + n, @min(ids.len, at + n + s.cap));
             p.hooks.logits = if (last) hooks.logits else .none;
             p.hooks.streams = if (hooks.streams != 0) hooks.streams + at * wide * 2 else 0;
-            try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none) seq.logits else null);
+            try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none and hooks.host_logits) seq.logits else null);
             at += n;
         }
         if (hooks.logits == .none) try e.complete();
@@ -481,6 +488,7 @@ pub const Seq = struct {
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").State = null,
     rank_id: u64 = 0,
+    gen: u64 = 0, // its graphs' keys (cuda_window_graph.nextGen): unique among the engine's sequences
     conv: []cuda.DeviceBuffer,
     state: []cuda.DeviceBuffer,
     kc: []cuda.DeviceBuffer,
@@ -499,7 +507,7 @@ pub const Seq = struct {
 
     /// The caches a batched pass reads and leaves; `scores` the engine's block scores (Engine.reserveScores).
     pub fn view(s: *Seq, scores: u64) batch.SeqState {
-        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg() };
+        return .{ .gen = s.gen, .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg() };
     }
 
     /// The attention kernels' page argument (zero: contiguous caches).
