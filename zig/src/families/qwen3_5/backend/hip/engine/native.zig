@@ -14,8 +14,16 @@ const worker = @import("worker.zig");
 const hip_lanes = @import("hip_lanes.zig");
 const config = @import("../../../weights/config.zig");
 
-/// The MLX affine widths this native text server loads.
-const mlx_formats: []const []const u8 = &.{ "mlx-q2", "mlx-q3", "mlx-q4", "mlx-q5", "mlx-q6", "mlx-q8" };
+/// The MLX affine widths this native text server loads, each with its group size.
+const mlx_formats = blk: {
+    const widths = @import("core").quant.mlx.bit_widths;
+    var out: [widths.len * 3][]const u8 = undefined;
+    for (widths, 0..) |bits, i| for ([_]u16{ 32, 64, 128 }, 0..) |g, j| {
+        out[3 * i + j] = std.fmt.comptimePrint("mlx-q{d}g{d}", .{ bits, g });
+    };
+    const done = out;
+    break :blk &done;
+};
 
 /// The dense and the sparse checkpoints are two registry entries over one engine.
 pub fn Native(comptime type_name: []const u8) type {
@@ -332,4 +340,43 @@ test "a bf16 checkpoint is refused as decision-only, naming what it lacks; an ML
     const mlx = try std.mem.replaceOwned(u8, a, text, "\"tie_word_embeddings\": false,", "\"tie_word_embeddings\": false, \"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"},");
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
     try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
+}
+
+test "capability audit: HIP Qwen format names cover the admitted affine widths" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text =
+        \\{"model_type":"qwen3_5","tie_word_embeddings":false,
+        \\ "hidden_size":4096,"intermediate_size":12288,"num_hidden_layers":8,
+        \\ "num_attention_heads":16,"num_key_value_heads":4,"head_dim":256,
+        \\ "linear_num_key_heads":16,"linear_num_value_heads":32,"linear_key_head_dim":128,
+        \\ "linear_value_head_dim":128,"linear_conv_kernel_dim":4,"vocab_size":248320,
+        \\ "full_attention_interval":4,"eos_token_id":248044}
+    ;
+    inline for (.{ Native("qwen3_5"), Native("qwen3_5_moe") }) |F| {
+        for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |g| {
+            var doc = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+            try doc.object.put(a, "model_type", .{ .string = F.model_type });
+            var q: std.json.ObjectMap = .empty;
+            try q.put(a, "bits", .{ .integer = bits });
+            try q.put(a, "group_size", .{ .integer = g });
+            try doc.object.put(a, "quantization", .{ .object = q });
+            var parsed = try config.Config.parse(a, try std.json.Stringify.valueAlloc(a, doc, .{}), null);
+            defer parsed.deinit();
+            try std.testing.expectEqual(config.Width{ .bits = bits, .group = g }, try parsed.quant.width(""));
+            const matrix: hip.ops.Affine = .{ .words = 0, .scale = 0, .bias = 0, .tables = .bf16, .n = 4096, .k = 4096, .bits = bits, .group = g };
+            try matrix.check();
+            const name = try std.fmt.allocPrint(a, "mlx-q{d}g{d}", .{ bits, g });
+            const found = for (F.formats) |listed| {
+                if (std.mem.eql(u8, listed, name)) break true;
+            } else false;
+            try std.testing.expect(found);
+        };
+        var affine_count: usize = 0;
+        for (F.formats) |name| if (std.mem.startsWith(u8, name, "mlx-")) {
+            affine_count += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 18), affine_count);
+    }
 }
