@@ -26,7 +26,7 @@ Normal generation stops on both the model's end IDs and the tokenizer's chat-end
 The loader requires the 2B geometry and MLX affine 4-bit weights in groups of 64 with bf16 scales and
 biases. In `capabilities --json`, `families.qwen3_5` is a union across the 2B and 27B engines,
 not a promise that every listed format loads at every geometry. For this 2B geometry, only `mlx-q4g64`
-is admitted; the other listed widths belong to the 27B engine. The head is the packed input embedding when the checkpoint ties it, or the checkpoint's own
+is admitted; the other listed widths belong to the family's other engines. The head is the packed input embedding when the checkpoint ties it, or the checkpoint's own
 `language_model.lm_head` projection when it ships one; `config.json`'s `tie_word_embeddings` must
 agree with the tensors either way, and the head matmul reuses the embedding-shape pipeline either way.
 The vision tower is not loaded. Images, video, other model sizes and other quantization formats are outside
