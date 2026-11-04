@@ -99,6 +99,13 @@ pub fn stale(l: XpuLaunch, u: XpuUsage, t: Xe, out: *std.ArrayList(u8), a: std.m
     return n;
 }
 
+/// The record's GRF mode against the zebin's `grf_count`, which ocloc writes for every kernel; returns 0 or 1.
+pub fn grfBuilt(l: XpuLaunch, built: u32, t: Xe, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
+    if (built == 0) return note(out, a, "{s} on {s}: the zebin gives no grf_count for {s}", .{ l.name, t.name, l.symbol });
+    if (built == l.grf) return 0;
+    return note(out, a, "{s} on {s}: the record says {d} GRF, the zebin was built at {d}", .{ l.name, t.name, l.grf, built });
+}
+
 /// Every problem one launch has on one card from its declaration and compile; returns how many.
 pub fn xpu(l: XpuLaunch, u: XpuUsage, t: Xe, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
     var n = try fits(l, t, out, a);

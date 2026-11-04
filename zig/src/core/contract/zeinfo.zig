@@ -1,6 +1,7 @@
 //! Reads the kernels list of a zebin's .ze_info YAML: each kernel's work-group, SLM, sub-group and GRF mode.
 const std = @import("std");
 const limits = @import("xpu_limits.zig");
+const zebin = @import("zebin.zig");
 
 pub const Error = error{ BadZeInfo, OutOfMemory };
 
@@ -118,4 +119,25 @@ test "the kernels list is read and the misc list is not" {
 
 test "a kernel line without a name is refused" {
     try std.testing.expectError(error.BadZeInfo, kernels(std.testing.allocator, "kernels:\n  - symbol: x\n"));
+}
+
+test "a record cannot claim 128 GRF for a zebin built at 256" {
+    const a = std.testing.allocator;
+    const bytes = try zebin.build(a, sample);
+    defer a.free(bytes);
+    const info = try zebin.zeInfo(a, bytes);
+    defer a.free(info);
+    const list = try kernels(a, info);
+    defer a.free(list);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    const built = find(list, "add_rmsnorm_dec").?.grf;
+    var l = limits.XpuLaunch{ .name = "add_rmsnorm_dec", .symbol = "add_rmsnorm_dec", .image = "glue", .format = .native, .threads = .{ 512, 1, 1 }, .sub_group = 16, .grf = 256 };
+    try std.testing.expectEqual(@as(usize, 0), try limits.grfBuilt(l, built, limits.xe[0], &out, a));
+    l.grf = 128;
+    try std.testing.expectEqual(@as(usize, 1), try limits.grfBuilt(l, built, limits.xe[0], &out, a));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "the record says 128 GRF, the zebin was built at 256") != null);
+    const bare = try kernels(a, "kernels:\n  - name: k\n    execution_env:\n      simd_size: 16\n");
+    defer a.free(bare);
+    try std.testing.expectEqual(@as(usize, 1), try limits.grfBuilt(l, find(bare, "k").?.grf, limits.xe[0], &out, a));
 }

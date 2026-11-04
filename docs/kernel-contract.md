@@ -98,9 +98,10 @@ which ROCm 10.1 installs under `core/bin` of its root.
 
 On an Intel GPU host, `zig build -Dxpu-contract=true xpu-kernel-contract-objects -Docloc=... -Dxpu-device=bmg` compiles
 every registered XPU kernel and the controls to zebins, and `xpu-kernel-contract-limits` checks each record against the
-BMG card's row, no GPU needed. `tf-xpu-kernel-contract limits DIR` runs that audit on a directory another host built. The
-`RECORD` lines are the values `xpu_records.zig` holds for that ocloc. The XPU device runner, gates 1 to 4, comes in a
-second pull request.
+BMG card's row, no GPU needed. Level Zero does not report a kernel's GRF mode, so the record states it, and the audit
+fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contract limits DIR` runs that audit on a
+directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc. The XPU device
+runner, gates 1 to 4, comes in a second pull request.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
