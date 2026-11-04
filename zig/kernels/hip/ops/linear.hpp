@@ -10,11 +10,21 @@ namespace {
 constexpr int kConvRows = 16;   // rows a conv_prefill thread slides over
 constexpr int kConvTaps = 8;    // most taps it holds
 
+// With key_width, channels [0, kw), [kw, 2 kw) and the rest go to out, k_out and v_out, each its own contiguous rows.
 extern "C" __global__ void tf_conv_prefill(const void* x, int kind, const float* weight, const float* state, float* out,
-                                    float* new_state, int len, int channels, int kernel) {
+                                    float* new_state, int len, int channels, int kernel, float* k_out, float* v_out,
+                                    int key_width) {
     // a thread one channel over kConvRows rows, the window sliding in registers (each input read once)
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= channels) return;
+    float* dst = out;
+    int pitch = channels, col = c;
+    if (key_width > 0) {
+        const int part = c < key_width ? 0 : c < 2 * key_width ? 1 : 2;
+        dst = part == 0 ? out : part == 1 ? k_out : v_out;
+        pitch = part == 2 ? channels - 2 * key_width : key_width;
+        col = c - part * key_width;
+    }
     const int r0 = blockIdx.y * kConvRows;
     const int kept = kernel - 1;
     auto window = [&](int t) -> float {
@@ -34,7 +44,7 @@ extern "C" __global__ void tf_conv_prefill(const void* x, int kind, const float*
             float p = win[tap] * w[tap];
             acc = acc + p;
         }
-        out[static_cast<long long>(r) * channels + c] = silu(acc);
+        dst[static_cast<long long>(r) * pitch + col] = silu(acc);
         for (int tap = 0; tap + 1 < kernel; ++tap) win[tap] = win[tap + 1];
     }
 }
