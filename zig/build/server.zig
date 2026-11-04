@@ -69,6 +69,7 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-capability-env-host", "Environment discovery subset and complete profile registry").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:" } })).step);
     b.step("test-model-idle-host", "Model discovery and idle reload snapshots without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery waits", "idle", "model discovery" } })).step);
     b.step("test-effort-capabilities-host", "CLI effort choices and parsed defaults against request fields").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: effort", "parse and capabilities share the table" } })).step);
+    b.step("test-effort-discovery-host", "Effective reasoning defaults and template effort discovery").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery", "model discovery", "effort" } })).step);
     const drafts = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"draft sources:"} }));
     b.step("test-draft-line-host", "Serving line draft provenance without devices").dependOn(&drafts.step);
     all.dependOn(&drafts.step);
