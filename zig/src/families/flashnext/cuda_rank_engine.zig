@@ -227,7 +227,7 @@ pub const Session = struct {
 
     pub fn forward(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, ids: []const u32, hooks: prompt.batch.Hooks) !void {
         if (ids.len == 0 or ids.len > wire.max_payload / 4 or q.fed + ids.len > q.cap or hooks.keep != null or hooks.logits == .all) return error.UnsupportedRankOperation;
-        try tokenIds(ids);
+        try verify_rows.tokenIds(ids);
         const h = try s.command(.{ .kind = .forward, .object = q.rank_id, .arg = telemetry.forwardArg(s.engine.telemetry, q.fed), .bytes = @intCast(ids.len * 4), .flags = @backingInt(hooks.logits) }, std.mem.sliceAsBytes(ids));
         errdefer s.poison();
         try s.engine.forward(Tri, tri, q, ids, hooks);
@@ -236,7 +236,7 @@ pub const Session = struct {
 
     pub fn round(s: *Session, comptime Tri: type, tri: Tri, seqs: []const *prompt.Seq, ids: []const u32, out: u64) !void {
         if (seqs.len == 0 or seqs.len != ids.len or seqs.len > 32) return error.UnsupportedRankOperation;
-        try tokenIds(ids);
+        try verify_rows.tokenIds(ids);
         var raw: [32 * 12]u8 = undefined;
         for (seqs, ids, 0..) |q, token, i| {
             if (q.rank_id == 0 or q.fed >= q.cap) return error.UnexpectedTensor;
@@ -253,14 +253,10 @@ pub const Session = struct {
 
     /// Both ranks keep their own recurrent window; only the leader consumes draft scores and hidden rows.
     pub fn verify(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32) !void {
-        if (!s.drafting or ids.len == 0 or ids.len > mtp.max_rows or q.fed + ids.len > q.cap) return error.UnsupportedRankOperation;
-        try tokenIds(ids);
-        const h = try s.command(.{ .kind = .verify, .object = q.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
-        errdefer s.poison();
-        const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
-        try ops.verify(q, d, ids);
-        try s.ack(h);
+        return s.verifyWithTail(Tri, tri, q, d, ids, null);
     }
+
+    pub const verifyWithTail = verify_rows.sendWithTail;
 
     pub const verifyMany = verify_rows.send;
 
@@ -361,7 +357,7 @@ pub const Session = struct {
                 const ids = try s.gpa.alloc(u32, payload.len / 4);
                 defer s.gpa.free(ids);
                 for (ids, 0..) |*v, i| v.* = std.mem.readInt(u32, payload[i * 4 ..][0..4], .little);
-                try tokenIds(ids);
+                try verify_rows.tokenIds(ids);
                 const telemetry_scope = s.engine.telemetry.enter(try telemetry.phaseFromArg(h.arg));
                 defer telemetry_scope.restore();
                 try s.engine.forward(Tri, tri, q, ids, .{ .logits = @fromBackingInt(@intCast(h.flags)) });
@@ -384,7 +380,7 @@ pub const Session = struct {
                 var ids: [mtp.max_rows]u32 = undefined;
                 const n = payload.len / 4;
                 for (ids[0..n], 0..) |*id, i| id.* = std.mem.readInt(u32, payload[i * 4 ..][0..4], .little);
-                try tokenIds(ids[0..n]);
+                try verify_rows.tokenIds(ids[0..n]);
                 const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
                 try ops.verify(q, try s.window(q), ids[0..n]);
             },
@@ -399,6 +395,8 @@ pub const Session = struct {
             },
             .drop_seq => {
                 s.engine.round_graph.clear();
+                const sequence = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                if (sequence.paged != null) @import("exl3/graph/cuda_exl3_graph.zig").releaseDecodeSeq(sequence);
                 if (s.windows.fetchRemove(h.object)) |entry| {
                     var d = entry.value;
                     d.deinit();
@@ -437,10 +435,6 @@ pub const Session = struct {
     }
 };
 
-fn tokenIds(ids: []const u32) !void {
-    for (ids) |id| if (id >= wt.vocab) return error.InvalidToken;
-}
-
 fn roundPayload(payload: []const u8) !void {
     if (payload.len == 0 or payload.len % 12 != 0 or payload.len / 12 > 32) return error.BadRankFrame;
     var seen: [32]u64 = undefined;
@@ -449,7 +443,7 @@ fn roundPayload(payload: []const u8) !void {
         const token = std.mem.readInt(u32, payload[i * 12 + 8 ..][0..4], .little);
         if (id == 0) return error.BadRankFrame;
         for (seen[0..i]) |prior| if (prior == id) return error.DuplicateRankSequence;
-        try tokenIds(&.{token});
+        try verify_rows.tokenIds(&.{token});
         seen[i] = id;
     }
 }
@@ -552,7 +546,7 @@ test "round payload rejects duplicate owners and out-of-vocabulary tokens before
     std.mem.writeInt(u64, bytes[12..20], 10, .little);
     std.mem.writeInt(u32, bytes[20..24], wt.vocab, .little);
     try std.testing.expectError(error.InvalidToken, roundPayload(&bytes));
-    try std.testing.expectError(error.InvalidToken, tokenIds(&.{ 0, wt.vocab }));
+    try std.testing.expectError(error.InvalidToken, verify_rows.tokenIds(&.{ 0, wt.vocab }));
     try std.testing.expectError(error.BadRankFrame, roundPayload(bytes[0..13]));
 }
 

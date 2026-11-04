@@ -87,7 +87,6 @@ pub fn Namespace(comptime Tri: type) type {
             stream_bytes: usize,
             /// Every stream allocates its own sequence; none rides on the engine's.
             free_streams: u32 = 0,
-            /// Kept prompt states in pinned host memory (cuda_snap.on_host): the native host budgets them there.
             host_snaps: bool = false,
             snap_grid: u32 = 0, // EXL3 states keep on prefill chunk starts; other formats keep at any token.
             ctx: *anyopaque,
@@ -130,8 +129,9 @@ pub fn Namespace(comptime Tri: type) type {
 
         pub fn rankRoom(ptr: *anyopaque, local: u64) !u64 {
             const own = of(ptr);
-            if (own.ranks) |r| return if (own.exl3) @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, local, own.stream_bytes) else r.room(local);
-            return local;
+            const room = @import("exl3/pack/exl3_startup_memory.zig").laneRoom(local, own.graph_reservation);
+            if (own.ranks) |r| return if (own.exl3) @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, room, own.stream_bytes) else r.room(room);
+            return room;
         }
 
         /// A request this engine refuses, in words; with no engine (cuda.zig's open), a load it refuses.
@@ -186,6 +186,7 @@ pub fn Namespace(comptime Tri: type) type {
             /// An EXL3 pack: its ranks agree their room in streams of stream_bytes and keep drafting states.
             exl3: bool = false,
             stream_bytes: usize = 0,
+            graph_reservation: u64 = 0,
             /// --slide: the pocket's layout, from config.json at load.
             lay: living.Layout = undefined,
             kv: kvl.State = .{},
@@ -197,6 +198,7 @@ pub fn Namespace(comptime Tri: type) type {
             pub fn ops(self: *Cuda) Ops {
                 return .{ .e = self.engine, .tri = self.tri(), .h = self.head.?, .main = if (self.ranks != null) .{
                     .ptr = self,
+                    .rank = self.ranks.?.rank,
                     .forward = mainForward,
                     .verify = mainVerify,
                     .rollback = mainRollback,
@@ -208,9 +210,9 @@ pub fn Namespace(comptime Tri: type) type {
                 return self.ranks.?.forward(Tri, self.tri(), q, ids, hooks);
             }
 
-            fn mainVerify(ptr: *anyopaque, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32) anyerror!void {
+            fn mainVerify(ptr: *anyopaque, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32, tail: ?prompt.batch.Hooks.OutputTail) anyerror!void {
                 const self = of(ptr);
-                return self.ranks.?.verify(Tri, self.tri(), q, d, ids);
+                return self.ranks.?.verifyWithTail(Tri, self.tri(), q, d, ids, tail);
             }
 
             fn mainRollback(ptr: *anyopaque, q: *prompt.Seq, d: *mtp.Draft, keep: usize) anyerror!void {
@@ -301,11 +303,11 @@ pub fn Namespace(comptime Tri: type) type {
                     s.proposer = null;
                 }
                 // a window's rows past the reply's last token (its drafts) still need cache slots
-                const cap = @min(ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), prompt.max_tokens);
                 const from = self.kv.choose();
+                const cap = @import("exl3/offload/cuda_exl3_recycle.zig").capFor(from == .pool, ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), self.context + mtp.max_rows);
                 // a contiguous lane's fixed-size buffers from the parts kept from an earlier stream
                 var part_seq: ?cuda.DeviceBuffer = null;
-                if (self.parts.on and self.ranks == null and from != .pool) part_seq = Parts.take(&self.parts.seqs, self.engine.driver, seq_parts.seqPartsBytes(self.engine.heads)) catch null;
+                if (self.parts.forLane(self.ranks != null, from == .pool)) part_seq = Parts.take(&self.parts.seqs, self.engine.driver, seq_parts.seqPartsBytes(self.engine.heads)) catch null;
                 gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.createOn(cap, from) else if (from == .pool) self.kv.pool.?.open(cap) else if (part_seq) |b| seq_parts.newSeqIn(self.engine, cap, b) else self.engine.newSeq(cap)) catch |err| {
                     if (part_seq) |b| Parts.give(&self.parts.seqs, self.gpa, b);
                     self.lanes.removeByPtr(gop.key_ptr);
@@ -342,7 +344,6 @@ pub fn Namespace(comptime Tri: type) type {
                     return error.Cancelled;
                 }
                 const rows = @import("cuda_chunk.zig").passRows(&self.lanes, l, self.engine.chunk, self.engine.busy_chunk);
-                // EXL3 deep prefill
                 var stop = @min(ids.len, at + @import("exl3/prefill/cuda_exl3_prefill.zig").stepRows(self.engine, rows, if (l.draft) |*d| d.rows_cap else null));
                 for (s.reuse.marks) |m| if (m > at and m < stop) {
                     stop = m;
@@ -392,7 +393,9 @@ pub fn Namespace(comptime Tri: type) type {
             own.lanes.deinit(own.gpa);
             own.parts.deinit(own.gpa);
             own.engine.round_graph.clear();
+            @import("exl3/graph/cuda_exl3_graph.zig").releaseFor(own.engine);
             own.logits.free();
+            @import("exl3/model/cuda_exl3_chain.zig").releaseRuntime(&own.engine.exl3_chain);
             if (own.head) |h| h.deinit();
             if (own.vision) |v| v.deinit();
             if (own.ranks) |r| r.deinit();
@@ -407,6 +410,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         fn dropLane(self: *Cuda, l: *Lane) void {
             cuda.completion.drain(self.engine.driver, self.stream, "flashnext: a failed or closed lane did not drain");
+            if (l.seq.paged != null) @import("exl3/graph/cuda_exl3_graph.zig").releaseDecodeSeq(&l.seq);
             if (l.draft) |*d| d.deinit();
             if (self.ranks) |r| r.drop(&l.seq) else if (!self.kv.close(l.from, &l.seq)) l.seq.deinit(self.gpa);
             // the blocks after both: a state / spare swap may have left views of each in the other

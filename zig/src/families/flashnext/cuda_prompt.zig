@@ -135,6 +135,10 @@ pub const Engine = struct {
     graphs: @import("cuda_window_graph.zig").Graphs = .{}, // drafted windows, draft-head pieces, rollbacks on one GPU
     image_factory: ?*@import("cuda_images.zig").Vision = null,
     collective: ?*@import("cuda_collective.zig").Collective = null,
+    /// This engine's EXL3 device planner (cuda_exl3_dplan.zig): nothing of it is shared with another engine.
+    exl3_chain: @import("exl3/model/cuda_exl3_chain.zig").Runtime = .{},
+    exl3_prefill: @import("exl3/prefill/cuda_exl3_prefill_state.zig").Runtime = .{},
+    exl3_dplan: @import("exl3/dplan/cuda_exl3_dplan.zig").State = .{},
     telemetry: cache_telemetry.State = .{},
     /// Each layer's Living Weights pocket, from a taught folder's shards or the learner: every pass adds it.
     pockets: pocket.Pockets = .{},
@@ -163,6 +167,9 @@ pub const Engine = struct {
         e.exl3_lanes = false;
         e.head_local_rows = std.math.maxInt(usize);
         e.collective = null;
+        e.exl3_dplan = .{};
+        e.exl3_chain = .{};
+        e.exl3_prefill = .{ .options = @import("exl3/prefill/cuda_exl3_prefill_state.zig").optionsFromEnv() };
         e.image_factory = null;
         e.telemetry = cache_telemetry.State.fromEnv(rank, world);
         e.round_graph = .{};
@@ -236,7 +243,11 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
-        @import("exl3/prefill/cuda_exl3_prefill.zig").releaseFor(e);
+        @import("exl3/model/cuda_exl3_chain.zig").releaseRuntime(&e.exl3_chain);
+        @import("exl3/prefill/cuda_exl3_prefill.zig").releaseFor(&e.exl3_prefill, e);
+        @import("exl3/graph/cuda_exl3_graph.zig").releaseFor(e);
+        @import("exl3/dplan/cuda_exl3_dplan.zig").release(&e.exl3_dplan);
+        @import("exl3/offload/cuda_exl3_recycle.zig").drain(e);
         e.round_graph.clear();
         e.graphs.clear(e.gpa);
         e.pockets.deinit();
@@ -284,7 +295,7 @@ pub const Engine = struct {
     /// The resident weights a pass reads, with the taught layers' pockets.
     pub fn model(e: *Engine) batch.Model {
         const m = e.pockets.mask();
-        return .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .collective = e.collective, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram, .pocket = if (m != 0) .{ .ctx = e, .add = servePocket, .layers = m } else null };
+        return .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .collective = e.collective, .dplan = &e.exl3_dplan, .prefill = &e.exl3_prefill, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram, .pocket = if (m != 0) .{ .ctx = e, .add = servePocket, .layers = m } else null };
     }
 
     /// The weights a pass of streams that read the model as shipped reads (untaught): the pockets left out.
@@ -306,6 +317,9 @@ pub const Engine = struct {
         var paged = given;
         errdefer if (paged) |*p| p.deinit(e.gpa);
         e.round_graph.clear();
+        if (paged == null and cap != 0) {
+            if (try @import("exl3/offload/cuda_exl3_recycle.zig").takeSeq(e, cap)) |kept| return kept;
+        }
         if (cap == 0 or cap > max_tokens) return error.UnexpectedTensor;
         _ = try seqBytesPaged(cap, if (paged) |p| p.tokens else 0, e.heads);
         var seq: Seq = .{
@@ -324,6 +338,7 @@ pub const Engine = struct {
             .fed = 0,
             .logits = &.{},
             .cap = cap,
+            .recycle_owner = if (paged == null) e else null,
         };
         paged = null; // seq owns the pages from here
         // One rollback owns every published array, and drains before releasing any destination.
@@ -421,7 +436,9 @@ pub const Engine = struct {
             .seq = seq.view(scores),
             .hooks = hooks,
         };
-        if (try @import("cuda_prompt_windows.zig").forwardGraph(e, Tri, &p, seq, ids, hooks)) return;
+        if (e.layers[0].exl3 != null) {
+            if (try @import("exl3/graph/cuda_exl3_graph.zig").forward(e, &p, seq, ids)) return;
+        } else if (try @import("cuda_prompt_windows.zig").forwardGraph(e, Tri, &p, seq, ids, hooks)) return;
         var at: usize = 0;
         while (at < ids.len) {
             const n = @min(s.cap, ids.len - at);
@@ -483,7 +500,7 @@ pub const Engine = struct {
             if (q.paged != null) break true;
         } else false;
         // a captured round fixes the lanes' tables: paged streams run the plain pass
-        if (e.collective != null and round_graph.enabled() and !has_media and !has_paged and e.layers[0].dense_cut == null) {
+        if (try @import("exl3/graph/cuda_exl3_graph.zig").round(e, &p, seqs, ids, scores, out)) {} else if (e.collective != null and round_graph.enabled() and !has_media and !has_paged and e.layers[0].dense_cut == null) {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
@@ -498,6 +515,7 @@ pub const Engine = struct {
 
 /// One stream's caches. `fed` tokens have already gone through the model.
 pub const Seq = struct {
+    recycle_owner: ?*Engine = null,
     /// The owning compute stream; synthetic non-device fixtures may leave it absent.
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").State = null,

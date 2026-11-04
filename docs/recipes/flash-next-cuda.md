@@ -141,6 +141,8 @@ starts a rank. These switches tune it:
 | `TF_FLASHNEXT_KV_HOST` | unset | With `TF_FLASHNEXT_KV_PAGES`: MiB of pinned host RAM holding the K/V plane of every page; `0` is no host tier. Nonzero requires EXL3 scratch; other formats refuse before allocation with `FlashNextKvHostNeedsExl3`. |
 | `TF_FLASHNEXT_KV_FRAMES` | paged streams times their frame working set | With the host tier: cap the device frames of the K/V plane; fewer than one stream's required working set is refused. |
 | `TF_FLASHNEXT_KV_SLOTS` | 128 | With the host tier: frames lent to a stream, 64 four-row slots a frame for each attention layer. |
+| `TF_FLASHNEXT_EXL3_UNIFORM_LINES` | unset | Any value: with `TF_FLASHNEXT_EXPERT_LINES`, every rank holds exactly that many lines instead of using spare room. |
+| `TF_FLASHNEXT_EXL3_GRAPH`, `_GRAPH_ASYNC` | `0`, `1` | `GRAPH=0`: host planner; `eager`: device planner without graphs; `1`: device planner with graph replay. See [graph ownership and retries](../flash-next-exl3-graphs.md). |
 | `TF_FLASHNEXT_PLE_READ` | `map` | `pread` reads the n-gram embedding rows by positional read. |
 | `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | Whether kept prompt-cache states live in pinned host memory. |
 | `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
@@ -198,6 +200,7 @@ authors' text checks below compare drafted, concurrent and resumed replies with 
 Images, through the cuBLASLt tower, are not qualified that way yet. The glue kernels round to bf16 where
 the Python engine's do, with IEEE division and square root and a within-one-ulp exp; the router and the 4-bit
 hyper-connection dots run on mma tiles with K in ascending order.
+
 
 ## Checks
 

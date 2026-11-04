@@ -189,6 +189,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - In one-call tool mode, a stream sends prose held after a hidden call envelope at the finish, so the streamed content equals the whole reply; other streams are unchanged (#2049). Thanks to @devopsfortunato.
 
+- Flash Next EXL3 selects host planning, eager device planning or CUDA graph replay with `TF_FLASHNEXT_EXL3_GRAPH=0`, `eager` or `1`. Engine teardown clears its capture-failure history without retiring another engine's graphs or retries (#1445).
+
 - GLM tool calls stream their arguments as the model writes them, as Qwen-style XML calls already do, and the joined pieces equal the whole reply's arguments (#2050). Thanks to @devopsfortunato.
 - HIP: Qwen 3.5 loads BF16 checkpoints with their Hugging Face tensor names and runs the BF16 projections through rocBLAS, the base for Clef-Flash. MLX checkpoints are unchanged (#2046). Thanks to @laudney.
 

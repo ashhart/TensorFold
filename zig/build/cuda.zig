@@ -471,7 +471,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         golden_build.step(b, host, server_tests, native_modules.api, mods.tokenizer, template, native_modules.engines);
         @import("cortheon_fuzz.zig").add(b, host, native_modules.api, mods.tokenizer, template, mods.core);
     }
-    @import("exl3_host.zig").steps(b, mods.core, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), &.{ step, flash_contract });
+    @import("exl3_host.zig").steps(b, host, mods.core, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), &.{ step, flash_contract });
     // the tokenizer's own tests (memo, steps, regex, unicode) run here: no other test binary reaches them
     for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const selected = b.option([]const u8, "modelopt-host-filter", "One portable ModelOpt regression") orelse "modelopt host:";

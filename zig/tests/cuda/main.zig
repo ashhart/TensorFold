@@ -44,7 +44,6 @@ const exl3_tests = @import("exl3_tests.zig");
 const exl3_tp2_tests = @import("exl3_tp2_tests.zig");
 const exl3_plan_bench = @import("exl3_plan_bench.zig");
 const exl3_contract = @import("contract_exl3.zig");
-const exl3_candidate_tests = @import("exl3_candidate_tests.zig");
 const experts3_tests = @import("experts3_tests.zig");
 const moe_tests = @import("moe_tests.zig");
 const ck_tests = @import("ck_tests.zig");
@@ -105,12 +104,6 @@ const lane_half_tests = @import("lane_half_tests.zig");
 const flashnext_dense_hc_tests = @import("flashnext_dense_hc_tests.zig");
 const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
 const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
-const exl3_pack_tests = @import("flashnext_exl3/pack/exl3_pack_tests.zig");
-const exl3_prefill_tests = @import("flashnext_exl3/prefill/exl3_prefill_tests.zig");
-const flashnext_exl3_tests = @import("flashnext_exl3/model/flashnext_exl3_tests.zig");
-const flashnext_exl3_tp_tests = @import("flashnext_exl3/tp/flashnext_exl3_tp_tests.zig");
-const flashnext_exl3_engine_tests = @import("flashnext_exl3/model/flashnext_exl3_engine_tests.zig");
-const flashnext_exl3_tp_engine_tests = @import("flashnext_exl3/tp/flashnext_exl3_tp_engine_tests.zig");
 const ggml_tests = @import("ggml_tests.zig");
 const paged_tests = @import("paged_tests.zig");
 const glm_loader_gate = @import("glm_loader_gate.zig");
@@ -159,7 +152,13 @@ const usage =
     \\  flashnext-exl3 DIR names|norms|router [layers] [rows]|layer [layers]  Flash Next on an EXL3 pack vs float64
     \\  flashnext-exl3-tp RANK PORT DIR layer [layers]|sum|head|memory  EXL3 expert parallel on two ranks vs tp=1 and float64
     \\  flashnext-exl3-engine DIR tf|gen GOLDEN [LINES] | bench [LINES]  the family's Engine with the offload pool vs the reference golden
-    \\  flashnext-exl3-tpe RANK WORLD PORT DIR tf|gen GOLDEN DUMP | bench  the Engine at tp=1/2 with per-rank pools
+    \\  flashnext-exl3-tpe RANK 2 PORT DIR trace GOLDEN PREFIX [ROUNDS [SCHEDULE [REPEATS]]]
+    \\    graph-on TP2 v3; rounds/segment=1024, CSV zero-based prompt schedule=0, repeats=1
+    \\    sequential shared-pool workload, independent sequence/KV; not concurrent requests
+    \\    e.g. trace GOLDEN PREFIX 128 0,1,2 2; rejects schedules exceeding 1 MiB/pool
+    \\  flashnext-exl3-tpe 0 1 0 - policy FILES...             compare lifetime/LRU/frequency/bypass on expert demand
+    \\  flashnext-exl3-tpe RANK WORLD PORT DIR tf|gen GOLDEN DUMP | bench | hit FILES | graph  the Engine at tp=1/2 with per-rank pools
+    \\  flashnext-exl3-graph plan | RANK WORLD PORT DIR eq GOLDEN [STEPS] [MODES]  the pool planned on the device and decode graphs vs the host cut
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
     \\  flashnext-gdn-heads [BASELINE]  DeltaNet full/half bytes, optionally against a frozen flashnext_batch.fatbin
     \\  flashnext-tp-heads MODEL  each rank's cut in-projections and attention heads equal the whole layer's bytes
@@ -263,7 +262,7 @@ const usage =
     \\  exl3-prefill DIR mixed IDS N STEP[,STEP] [LINES]  prompt cut into deep and shallow segments vs the batched pass and serial decode: logits bytes, tokens
     \\  exl3-prefill DIR resume IDS N STEP[,STEP] CUT[,CUT] [LINES]  state kept at any row (snap grid off), resumed vs a fresh prompt; CUT<0: rows left
     \\  exl3-tpprefill RANK WORLD PORT DIR IDS NS ROWS CAP deep|both DUMP  EXL3 deep prefill at tp=1/2 vs the batched pass and tp=1
-    \\  exl3-pool DIR [equal|bench|hit FILES] [LAYERS]  Flash Next EXL3 expert offload pool on Experts' pointer tables vs fully resident
+    \\  exl3-pool DIR [equal|graph|bench|hit FILES] [LAYERS]  Flash Next EXL3 expert offload pool on Experts' pointer tables vs fully resident
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  exl3-prefill-contract     the prefill expert tiles alone through the contract (gates 1-4 and the control)
@@ -409,11 +408,12 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3-promptd-contract")) return @import("contract_flashnext_exl3_promptd.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "exl3-tppf-contract")) return @import("contract_flashnext_exl3_tppf.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "exl3-kvt-contract")) return @import("contract_flashnext_exl3_kvt.zig").run(gpu);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3")) return flashnext_exl3_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "flashnext-exl3")) return @import("flashnext_exl3/model/flashnext_exl3_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-kvtier")) return @import("flashnext_exl3/kv/exl3_kvtier_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3-tp")) return flashnext_exl3_tp_tests.run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3-engine")) return flashnext_exl3_engine_tests.run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "flashnext-exl3-tpe")) return flashnext_exl3_tp_engine_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "flashnext-exl3-tp")) return @import("flashnext_exl3/tp/flashnext_exl3_tp_tests.zig").run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "flashnext-exl3-engine")) return @import("flashnext_exl3/model/flashnext_exl3_engine_tests.zig").run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "flashnext-exl3-tpe")) return @import("flashnext_exl3/tp/flashnext_exl3_tp_engine_tests.zig").run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "flashnext-exl3-graph")) return @import("flashnext_exl3/graph/flashnext_exl3_graph_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "flashnext-pages")) return @import("contract_fn_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn-lanes")) return @import("contract_fn_attn_lanes.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-readout-cut")) return @import("flashnext_readout_cut.zig").run(gpu);
@@ -471,14 +471,14 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exlr8-bench")) return exlr8_tests.bench(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "home", if (rest.len > 2) try std.fmt.parseInt(u16, rest[2], 10) else 40, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 4);
     if (std.mem.eql(u8, cmd, "exl3")) return exl3_tests.run(gpu, if (rest.len > 0) rest[0] else "none");
-    if (std.mem.eql(u8, cmd, "exl3-pack")) return exl3_pack_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "exl3-pack")) return @import("flashnext_exl3/pack/exl3_pack_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-ple2")) return @import("flashnext_exl3/model/exl3_ple2_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-draft")) return @import("flashnext_exl3/tp/exl3_draft_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-pool")) return @import("flashnext_exl3/offload/exl3_pool_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-prefill")) return exl3_prefill_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "exl3-prefill")) return @import("flashnext_exl3/prefill/exl3_prefill_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-tpprefill")) return @import("flashnext_exl3/tp/exl3_tpprefill_tests.zig").run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "nccl-lat")) return exl3_pack_tests.ncclLatency(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-tiles")) return exl3_candidate_tests.run(gpu, if (rest.len > 0) rest[0] else null);
+    if (std.mem.eql(u8, cmd, "nccl-lat")) return @import("flashnext_exl3/pack/exl3_pack_tests.zig").ncclLatency(gpu, rest);
+    if (std.mem.eql(u8, cmd, "exl3-tiles")) return @import("exl3_candidate_tests.zig").run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-shapes")) return exl3_plan_bench.profileShapes(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-midm")) return exl3_plan_bench.midm(gpu);
     if (std.mem.eql(u8, cmd, "exl3-plans")) return exl3_plan_bench.run(gpu, if (rest.len > 0) rest[0] else null);
