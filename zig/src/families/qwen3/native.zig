@@ -3,6 +3,7 @@ const std = @import("std");
 const hip = @import("hip");
 const lanes = @import("lanes");
 const api = @import("engine_api");
+const serve = @import("hip_serve");
 const engine = @import("engine.zig");
 const prompt = @import("prompt.zig");
 const score = @import("score.zig");
@@ -31,7 +32,7 @@ pub fn refusal(o: api.Open) ?[]const u8 {
 pub const open = openEngine;
 pub const follow = followRank;
 
-/// What the server drives, as the other HIP families' `Loaded`, plus what this engine serves.
+/// What the server drives, as the other HIP families' `Loaded`; its offer says what this engine serves.
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
     facts: lanes.Model,
@@ -40,15 +41,8 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     streams: usize,
     startup: []const u8,
-    /// No chat or completions: the server refuses the generation routes.
-    text_generation: bool = false,
-    embeddings: ?api.EmbeddingInfo = null,
-    /// The window the engine was sized to (the asked one, or less where the budget shrank it).
-    window: ?usize = null,
-    /// A reranker: the engine scores labels (the score hook) and serves no embeddings.
-    decides: bool = false,
-    /// The reranker's label tokens, from `1_LogitScore/config.json`.
-    rerank: ?api.Rerank = null,
+    /// No text generation; embeddings or a reranker's labels; the window the budget sized (openEngine).
+    offer: serve.Offer,
 };
 
 pub const Refused = error{Refused};
@@ -224,11 +218,13 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, dev: hip.Device, dir: []
         .deinit = release,
         .streams = 1,
         .startup = own.startup,
-        .text_generation = false,
-        .embeddings = if (head == .rerank) null else .{ .dimensions = @intCast(spec.hidden), .vocabulary = @intCast(spec.vocab), .max_batch_tokens = @intCast(window), .max_inputs = @intCast(engine.max_inputs), .mrl_min = @min(32, @as(u32, @intCast(spec.hidden))) },
-        .window = window,
-        .decides = head == .rerank,
-        .rerank = labels,
+        .offer = .{
+            .text_generation = false,
+            .embeddings = if (head == .rerank) null else .{ .dimensions = @intCast(spec.hidden), .vocabulary = @intCast(spec.vocab), .max_batch_tokens = @intCast(window), .max_inputs = @intCast(engine.max_inputs), .mrl_min = @min(32, @as(u32, @intCast(spec.hidden))) },
+            .window = window,
+            .decides = head == .rerank,
+            .rerank = labels,
+        },
     };
 }
 
