@@ -29,6 +29,24 @@ At startup the server prints what is in force:
 The file is read once, before the model is loaded. A file the server cannot
 apply is refused and the server does not start.
 
+## The two modes
+
+A vector is applied either by taking the direction's component out of the
+residual stream (`project`) or by adding the direction to it as a bias
+(`add`). The file names which, and the reader applies what the file says. A
+file whose mode is missing is an `add` file, as the format specifies, so a
+llama.cpp control vector works as it stands.
+
+The two are opposites, and the same directions show it. Our masked vector in
+`project` takes every refusal off and takes no harmless prompt with it. The
+same directions written as an `add` file push the other way: the model
+refuses all eight harmful prompts and all eight harmless twins, and answers
+them coherently, and still writes code, though it refuses one benign task out
+of twelve, the same over-refusal the bias asks for.
+
+`tf-glp-check rewrite FILE OUT.gguf --mode add` writes that file, so the two
+arms can be compared on the same directions.
+
 ## What the server refuses
 
 The reader fails closed rather than guessing.
@@ -151,9 +169,11 @@ they held between 12% and 66% of the direction's length before the mask: two
 thirds of it at layer 58. That is a direction pointing at the massive
 activations rather than at the refusal.
 
-The producer reports the screen in its receipt, so the fraction is a decision
-the operator makes on the checkpoint in front of them rather than a habit
-carried from another one.
+The producer reports the screen in its receipt, with the fraction it
+recommends when the ratio stands out: a model that measures under 50 has no
+massive activations of its own, and one that measures above it wants the
+mask. The fraction is a decision the operator makes on the checkpoint in
+front of them rather than a habit carried from another one.
 ## Measured
 
 Apple M4 Pro, 48 GiB, Metal, Qwen3.8-27B MLX 4-bit. Thirty form-matched pairs

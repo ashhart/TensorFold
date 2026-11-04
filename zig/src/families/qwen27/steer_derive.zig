@@ -192,6 +192,12 @@ fn maskDims(peaks: Peaks, hidden: usize, frac: f32, order: []usize, masked: []bo
     for (order[0..k]) |i| masked[i] = true;
 }
 
+/// The peak-to-median ratio above which a model carries massive activations of its own.
+pub const massive_threshold = 50.0;
+
+/// The fraction a direction leaves out when the screen says the model carries massive activations.
+pub const mask_recommended = 0.005;
+
 /// The peak-to-median ratio of a layer's activations: how far the massive activations stand out.
 pub fn massiveRatio(harmful: Mean, harmless: Mean, id: usize, hidden: usize) f64 {
     const peaks = Peaks{ .harmful = harmful, .harmless = harmless, .base = id * hidden };

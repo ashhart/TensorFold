@@ -4,7 +4,8 @@ const glp = @import("glp");
 
 const help =
     \\tf-glp-check read FILE OUT.json OUT.bin  the reader's view: the metadata, the layers and their numbers
-    \\tf-glp-check rewrite FILE OUT.gguf       the file again through this writer
+    \\tf-glp-check rewrite FILE OUT.gguf [--mode project|add]
+    \\                                    the file again through this writer, in the mode named
     \\
     \\The binary sidecar holds the directions in ascending layer order, each one's fp32 payload as it
     \\stands in the file, so another reader's numbers can be compared byte for byte.
@@ -27,7 +28,31 @@ pub fn main(init: std.process.Init) !void {
         return error.BadVector;
     };
     if (std.mem.eql(u8, args[1], "rewrite")) {
-        const out = try glp.writeVector(a, vector);
+        // The mode may be changed on the way out: the same directions, applied as a bias instead.
+        var mode = vector.mode;
+        var i: usize = 4;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--mode")) {
+                i += 1;
+                if (i >= args.len) return error.MissingValue;
+                if (std.mem.eql(u8, args[i], "add")) {
+                    mode = .add;
+                } else if (std.mem.eql(u8, args[i], "project")) {
+                    mode = .project;
+                } else return error.UnknownMode;
+            } else return error.UnknownOption;
+        }
+        const out = try glp.write(a, .{
+            .mode = mode,
+            .alpha = vector.alpha,
+            .hook_point = vector.hook_point,
+            .derived_at = vector.derived_at,
+            .base_model = vector.base_model,
+            .base_revision = vector.base_revision,
+            .method = vector.method,
+            .contrast = vector.contrast,
+            .layers = vector.layers,
+        });
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = out });
         return;
     }
