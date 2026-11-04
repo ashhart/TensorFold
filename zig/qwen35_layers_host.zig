@@ -4,6 +4,8 @@ const metal27 = @import("src/families/qwen27/config.zig");
 const metal2b = @import("src/families/qwen3_5/config.zig");
 const hip = @import("src/families/qwen3_5/weights/config.zig");
 const cuda = @import("src/families/qwen3_5/cuda_geometry.zig");
+const xpu = @import("src/xpu/qwen27_config.zig");
+const layer_pattern = @import("qwen35_layers");
 const t = std.testing;
 
 const max_layers = 128;
@@ -22,9 +24,30 @@ const Outcome = union(enum) {
     fn same(x: Outcome, y: Outcome) bool {
         return x == .pattern and y == .pattern and std.mem.eql(bool, x.pattern.full[0..x.pattern.len], y.pattern.full[0..y.pattern.len]);
     }
+
+    /// Every `n`-th of `layers` layers full attention.
+    fn every(n: usize, layers: usize) Outcome {
+        var o: Outcome = .{ .pattern = .{ .len = layers } };
+        for (o.pattern.full[0..layers], 0..) |*f, i| f.* = layer_pattern.every(n, i);
+        return o;
+    }
+
+    /// The shared reader's pattern for `layers` layers of `tower`.
+    fn shared(tower: std.json.ObjectMap, layers: usize) Outcome {
+        var full: [max_layers]bool = undefined;
+        layer_pattern.read(full[0..layers], tower) catch |e| return .{ .refused = e };
+        return .of(full[0..layers]);
+    }
+
+    /// Whether this is a refusal of the layer keys themselves, by the shared reader.
+    fn byReader(o: Outcome) bool {
+        if (o != .refused) return false;
+        inline for (@typeInfo(layer_pattern.Error).error_set.error_names.?) |name| if (o.refused == @field(anyerror, name)) return true;
+        return false;
+    }
 };
 
-const Backend = enum { metal27, metal2b, hip, cuda };
+const Backend = enum { metal27, metal2b, hip, cuda, xpu };
 
 /// Each backend's config entry point on config.json's bytes, reduced to the pattern it admits.
 fn entry(b: Backend, json: []const u8) Outcome {
@@ -50,6 +73,10 @@ fn entry(b: Backend, json: []const u8) Outcome {
             for (g.linear[0..g.layers], full[0..g.layers]) |l, *f| f.* = !l;
             return .of(full[0..g.layers]);
         },
+        .xpu => {
+            xpu.check(t.allocator, json) catch |e| return .{ .refused = e };
+            return .every(4, xpu.layers);
+        },
     }
 }
 
@@ -60,12 +87,14 @@ const old = struct {
     }
 
     fn run(b: Backend, tower: std.json.ObjectMap, layers: usize) Outcome {
+        if (b == .xpu) return .every(4, 64); // xpu/qwen27.zig:74: `(i + 1) % 4` over 64 layers, config.json unread
         var full: [max_layers]bool = undefined;
         const got = switch (b) {
             .metal27 => metal27Rule(full[0..layers], tower),
             .metal2b => metal2bRule(full[0..layers], tower),
             .hip => hipRule(full[0..layers], tower),
             .cuda => cudaRule(full[0..layers], tower),
+            .xpu => unreachable,
         };
         got catch |e| return .{ .refused = e };
         return .of(full[0..layers]);
@@ -219,14 +248,104 @@ fn config(a: std.mem.Allocator, file: []const u8, text: []const u8) !?Real {
     return .{ .file = file, .json = try a.dupe(u8, text), .tower = tower, .layers = @intCast(n.integer) };
 }
 
-test "qwen35 layers: real configs, every backend's entry point admits exactly the pattern its old rule reads" {
+test "qwen35 layers: real configs, each entry point admits the pattern its old rule read, by the shared reader" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
-    for (try reals(arena.allocator())) |r| for (std.enums.values(Backend)) |b| {
-        const was = old.run(b, r.tower, r.layers);
-        const now = entry(b, r.json);
-        errdefer std.debug.print("{s} on {s}: old {any}, now {any}\n", .{ @tagName(b), r.file, was, now });
-        if (now == .pattern) try t.expect(Outcome.same(was, now));
-        if (was == .refused) try t.expect(now == .refused);
+    var admitted: usize = 0;
+    var relaxed: usize = 0;
+    for (try reals(arena.allocator())) |r| {
+        const read = Outcome.shared(r.tower, r.layers);
+        for (std.enums.values(Backend)) |b| {
+            const was = old.run(b, r.tower, r.layers);
+            const now = entry(b, r.json);
+            errdefer std.debug.print("{s} on {s}: old {any}, now {any}, shared {any}\n", .{ @tagName(b), r.file, was, now, read });
+            // what an entry point admits is the shared reader's pattern, and its old rule's when that rule read one
+            if (now == .pattern) try t.expect(Outcome.same(read, now) and (was == .refused or Outcome.same(was, now)));
+            // a config an old rule read reads the same, and no entry point now refuses it for its layer keys
+            if (was == .pattern and b != .xpu) try t.expect(Outcome.same(was, read) and !now.byReader());
+            admitted += @intFromBool(now == .pattern);
+            relaxed += @intFromBool(now == .pattern and was == .refused);
+        }
+    }
+    try t.expectEqual(@as(usize, 17), admitted); // the (config, backend) pairs admitted before and after
+    try t.expectEqual(@as(usize, 0), relaxed); // none of the repo's configs is one the table newly admits
+}
+
+/// `base` with `layers` layers (when given), an end id, and the layer keys of one row of the table.
+fn variant(a: std.mem.Allocator, base: []const u8, layers: ?usize, types: ?usize, null_types: bool, interval: ?[]const u8) ![]const u8 {
+    var doc = try std.json.parseFromSliceLeaky(std.json.Value, a, base, .{});
+    const tower = if (doc.object.getPtr("text_config")) |v| &v.object else &doc.object;
+    if (layers) |n| try tower.put(a, "num_hidden_layers", .{ .integer = @intCast(n) });
+    if (tower.get("eos_token_id") == null and doc.object.get("eos_token_id") == null) try tower.put(a, "eos_token_id", .{ .integer = 248044 });
+    const n: usize = @intCast(tower.get("num_hidden_layers").?.integer);
+    _ = tower.orderedRemove("layer_types");
+    _ = tower.orderedRemove("full_attention_interval");
+    if (null_types) try tower.put(a, "layer_types", .null);
+    if (types) |every| {
+        var list: std.json.Array = .init(a);
+        for (0..n) |i| try list.append(.{ .string = if (layer_pattern.every(every, i)) "full_attention" else "linear_attention" });
+        try tower.put(a, "layer_types", .{ .array = list });
+    }
+    if (interval) |v| try tower.put(a, "full_attention_interval", try std.json.parseFromSliceLeaky(std.json.Value, a, v, .{}));
+    return std.json.Stringify.valueAlloc(a, doc, .{});
+}
+
+/// The 2B's config.json, and the 27B widths' config at the 27B's 64 layers: between them every entry point admits one.
+fn bases(a: std.mem.Allocator) ![2][]const u8 {
+    var out: [2][]const u8 = undefined;
+    for (try reals(a)) |r| {
+        if (std.mem.endsWith(u8, r.file, "qwen3_5/config.zig") and r.layers == metal2b.layers) out[0] = r.json;
+        if (std.mem.endsWith(u8, r.file, "cuda_geometry.zig") and r.tower.get("hidden_size").?.integer == xpu.hidden) out[1] = try variant(a, r.json, xpu.layers, 4, false, null);
+    }
+    return out;
+}
+
+const Row = struct { name: []const u8, types: ?usize = null, null_types: bool = false, interval: ?[]const u8 = null, refused: ?anyerror = null };
+
+/// #1863's table, a case a row (three for its third): every backend reads each the same.
+const table = [_]Row{
+    .{ .name = "no layer_types, no interval: every fourth layer" },
+    .{ .name = "no layer_types, interval 4: every fourth layer", .interval = "4" },
+    .{ .name = "no layer_types, interval 0: the interval rule has none", .interval = "0", .refused = error.BadFullAttentionInterval },
+    .{ .name = "layer_types null: as absent", .null_types = true, .interval = "4" },
+    .{ .name = "layer_types, interval 0: layer_types", .types = 4, .interval = "0" },
+    .{ .name = "layer_types, interval null: layer_types", .types = 4, .interval = "null" },
+    .{ .name = "layer_types, interval false: layer_types", .types = 4, .interval = "false" },
+    .{ .name = "layer_types contradicting the interval: refused", .types = 4, .interval = "2", .refused = error.LayerTypesContradictFullAttentionInterval },
+};
+
+test "qwen35 layers: #1863's table, the same answer or refusal from every backend's entry point" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var took: std.EnumArray(Backend, usize) = .initFill(0);
+    for (try bases(a)) |base| for (std.enums.values(Backend)) |b| {
+        // the agreed case, layer_types every fourth and an interval of 4: a backend refusing it takes another model
+        const probe = entry(b, try variant(a, base, null, 4, false, "4"));
+        if (probe == .refused) {
+            try t.expect(!probe.byReader());
+            continue;
+        }
+        took.getPtr(b).* += 1;
+        for (table) |row| {
+            const got = entry(b, try variant(a, base, null, row.types, row.null_types, row.interval));
+            errdefer std.debug.print("{s}, {s}: {any}\n", .{ @tagName(b), row.name, got });
+            if (row.refused) |e| try t.expect(got == .refused and got.refused == e) else try t.expect(Outcome.same(got, .every(4, probe.pattern.len)));
+        }
     };
+    // the 2B: Metal's 2B engine, HIP and CUDA; the 27B: Metal's 27B engine, HIP, CUDA and XPU
+    for (std.enums.values(Backend)) |b| try t.expect(took.get(b) >= 1);
+    try t.expectEqual(@as(usize, 7), took.get(.metal27) + took.get(.metal2b) + took.get(.hip) + took.get(.cuda) + took.get(.xpu));
+}
+
+test "qwen35 layers: beside an unset interval, layer_types are read as written; fixed schedules refuse other ones" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const two = try bases(a);
+    for ([_][]const u8{ "0", "null", "false" }) |interval| for ([_]Backend{ .metal27, .hip, .cuda }) |b| {
+        try t.expect(Outcome.same(entry(b, try variant(a, two[1], null, 2, false, interval)), .every(2, xpu.layers)));
+    };
+    try t.expectEqual(Outcome{ .refused = error.UnsupportedLayerPattern }, entry(.xpu, try variant(a, two[1], null, 2, false, "null")));
+    try t.expectEqual(Outcome{ .refused = error.UnsupportedQwenGeometry }, entry(.metal2b, try variant(a, two[0], null, 2, false, "null")));
 }
