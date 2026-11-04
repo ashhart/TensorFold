@@ -36,7 +36,7 @@ test "the direction is the difference of the two sets' means, one unit long" {
     // Layer 0 differs by (2, 0); layer 1 by (0, 4).
     try harmful.addPrompt(&.{ 3, 0, 0, 4 }, 1);
     try harmless.addPrompt(&.{ 1, 0, 0, 0 }, 1);
-    var derived = try derive.derive(a, harmful, harmless, 2, 2);
+    var derived = try derive.derive(a, harmful, harmless, 2, 2, 0);
     defer derived.deinit(a);
     try std.testing.expectEqual(@as(usize, 2), derived.layers.len);
     try std.testing.expectEqual(@as(u32, 0), derived.layers[0].id);
@@ -61,7 +61,7 @@ test "a layer whose two means agree is dropped, not emitted as a zero vector" {
     // Layer 0 agrees, layer 1 differs, layer 2 agrees.
     try harmful.addPrompt(&.{ 1, 1, 5, 5, 7, 7 }, 1);
     try harmless.addPrompt(&.{ 1, 1, 2, 2, 7, 7 }, 1);
-    var derived = try derive.derive(a, harmful, harmless, 3, 2);
+    var derived = try derive.derive(a, harmful, harmless, 3, 2, 0);
     defer derived.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), derived.layers.len);
     try std.testing.expectEqual(@as(u32, 1), derived.layers[0].id);
@@ -70,6 +70,53 @@ test "a layer whose two means agree is dropped, not emitted as a zero vector" {
     try std.testing.expectApproxEqAbs(half, derived.layers[0].dir[0], 1e-6);
     try std.testing.expectApproxEqAbs(half, derived.layers[0].dir[1], 1e-6);
     try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, derived.dropped);
+}
+
+test "the dimensions the activations dominate are left out of the direction" {
+    const a = std.testing.allocator;
+    var harmful = try derive.Mean.init(a, 1, 4);
+    defer harmful.deinit(a);
+    var harmless = try derive.Mean.init(a, 1, 4);
+    defer harmless.deinit(a);
+    // The two sets differ by (1, 1, 1, 1), but the last dimension carries a hundred times the activation.
+    try harmful.addPrompt(&.{ 10, 10, 10, 1000 }, 1);
+    try harmless.addPrompt(&.{ 9, 9, 9, 900 }, 1);
+    var derived = try derive.derive(a, harmful, harmless, 1, 4, 0.25);
+    defer derived.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), derived.layers.len);
+    // The fourth dimension is masked out, so the direction is the diagonal of the three that are left.
+    const third = @as(f32, 1) / @sqrt(@as(f32, 3));
+    try std.testing.expectApproxEqAbs(third, derived.layers[0].dir[0], 1e-6);
+    try std.testing.expectApproxEqAbs(third, derived.layers[0].dir[1], 1e-6);
+    try std.testing.expectApproxEqAbs(third, derived.layers[0].dir[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), derived.layers[0].dir[3], 1e-6);
+}
+
+test "the peak a dimension carries is the largest any prompt gave it" {
+    const a = std.testing.allocator;
+    var set = try derive.Mean.init(a, 1, 2);
+    defer set.deinit(a);
+    try set.addPrompt(&.{ 3, -5 }, 1);
+    try set.addPrompt(&.{ -7, 2 }, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 7), set.peak[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 5), set.peak[1], 1e-6);
+}
+
+test "a mask of zero leaves the direction whole" {
+    const a = std.testing.allocator;
+    var harmful = try derive.Mean.init(a, 1, 4);
+    defer harmful.deinit(a);
+    var harmless = try derive.Mean.init(a, 1, 4);
+    defer harmless.deinit(a);
+    try harmful.addPrompt(&.{ 10, 10, 10, 1000 }, 1);
+    try harmless.addPrompt(&.{ 9, 9, 9, 900 }, 1);
+    var whole = try derive.derive(a, harmful, harmless, 1, 4, 0);
+    defer whole.deinit(a);
+    var masked = try derive.derive(a, harmful, harmless, 1, 4, 0.25);
+    defer masked.deinit(a);
+    // The unmasked direction has most of itself in the dimension the activations dominate.
+    try std.testing.expect(whole.layers[0].dir[3] > 0.9);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), masked.layers[0].dir[3], 1e-6);
 }
 
 test "the derived directions round-trip through the GLP file the producer writes" {
@@ -84,7 +131,7 @@ test "the derived directions round-trip through the GLP file the producer writes
     defer a.free(harmless_sums);
     try harmful.addPrompt(harmful_sums, 1);
     try harmless.addPrompt(harmless_sums, 1);
-    var derived = try derive.derive(a, harmful, harmless, 3, 8);
+    var derived = try derive.derive(a, harmful, harmless, 3, 8, 0);
     defer derived.deinit(a);
 
     // Layer 0 is not steerable, so the file holds the other layers only.
@@ -139,7 +186,7 @@ test "the producer's file at the 27B's width reads back the same directions" {
     defer a.free(harmless_sums);
     try harmful.addPrompt(harmful_sums, 1);
     try harmless.addPrompt(harmless_sums, 1);
-    var derived = try derive.derive(a, harmful, harmless, 2, hidden);
+    var derived = try derive.derive(a, harmful, harmless, 2, hidden, 0);
     defer derived.deinit(a);
 
     var layers: std.ArrayList(glp.Layer) = .empty;
