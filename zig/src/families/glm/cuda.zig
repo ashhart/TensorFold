@@ -9,7 +9,7 @@ pub const image_core = @import("image_core.zig");
 /// An image's bytes to the tower's patches, as the Metal family prepares them (core's decoder).
 pub const image = image_core.For(@import("core").picture);
 pub const glue = @import("cuda_glue.zig");
-pub const kda = @import("cuda_kda.zig");
+pub const kda = @import("cuda").kda;
 pub const b16 = @import("cuda_b16.zig");
 pub const latent = @import("cuda_latent.zig");
 pub const sparse = @import("cuda_sparse.zig");
