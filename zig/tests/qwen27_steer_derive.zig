@@ -5,7 +5,6 @@ const mtl = @import("metal");
 const core = @import("core");
 const derive = @import("steer_derive");
 const glp = @import("glp");
-const prompts = @import("steer_prompts");
 
 const help =
     \\tf-qwen27-steer-derive --model DIR --out FILE [--alpha 1.0] [--repo ID] [--revision REV] [--prompts N]
@@ -191,8 +190,8 @@ pub fn main(init: std.process.Init) !void {
     defer harmless.deinit(init.gpa);
     runner.model.kernels.prompt = true;
     defer runner.model.kernels.prompt = false;
-    const requests = try prompts.requests(a);
-    const others = try prompts.harmless(a);
+    const requests = try q.steer_prompts.requests(a);
+    const others = try q.steer_prompts.harmless(a);
     try captureSet(&runner, &capture, &tok, requests, &harmful, limit);
     try captureSet(&runner, &capture, &tok, others, &harmless, limit);
     if (harmful.prompts == 0 or harmless.prompts == 0) return error.NoPrompts;
