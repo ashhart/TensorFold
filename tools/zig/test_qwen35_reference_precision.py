@@ -4,11 +4,19 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-import torch
-from safetensors.torch import save_file
-from qwen35_reference_forward import restore_stored_fp32
+try:
+    import torch
+    from safetensors.torch import save_file
+except ModuleNotFoundError as error:
+    if error.name not in {"torch", "safetensors"}:
+        raise
+    torch = None
+
+if torch is not None:
+    from qwen35_reference_forward import restore_stored_fp32
 
 
+@unittest.skipIf(torch is None, "requires torch and safetensors for the CPU reference")
 class ReferencePrecisionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
