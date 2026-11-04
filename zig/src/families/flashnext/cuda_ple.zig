@@ -460,10 +460,12 @@ pub const Ngram = struct {
 
     fn warmMain(g: Ngram) void {
         var bytes: usize = 0;
-        for (0..g.hash.shards) |shard| switch (g.format) {
+        const shards = if (g.format == .exl3) 1 else g.hash.shards;
+        for (0..shards) |shard| switch (g.format) {
             .nvfp4 => bytes += advise(g.tables[shard].codes) + advise(g.tables[shard].scales),
             .mlx => bytes += advise(g.w[shard]) + advise(g.s[shard]) + advise(g.b[shard]),
             .fp8 => bytes += advise(g.tables8[shard].codes),
+            .exl3 => bytes += if (g.x3.?.file) |f| if (f.map.section != null) advise(f.map.memory) else 0 else 0,
         };
         std.debug.print("n-gram table: {d:.1} GiB read ahead into the page cache\n", .{@as(f64, @floatFromInt(bytes)) / (1 << 30)});
     }
