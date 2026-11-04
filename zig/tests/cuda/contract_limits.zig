@@ -103,7 +103,11 @@ fn keep(a: std.mem.Allocator, line: *std.ArrayList(u8), r: registry.CudaRecord, 
 }
 
 pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
-    const a = gpu.gpa;
+    return fatbinsHost(gpu.gpa, gpu.io, dir);
+}
+
+/// Inspect compiled images without opening a CUDA driver or creating a context.
+pub fn fatbinsHost(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     var n: usize = 0;
     var said: ?limits.Nvcc = null;
     for (registry.all_cuda ++ registry.cuda_controls) |r| {
@@ -117,7 +121,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         }
         const path = try std.fmt.allocPrint(a, "{s}/{s}.fatbin", .{ dir, r.launch.image });
         defer a.free(path);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, path, a, .limited(1 << 28));
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28));
         defer a.free(bytes);
         const imgs = try contract.cubin.images(a, bytes);
         defer contract.cubin.freeImages(a, imgs);

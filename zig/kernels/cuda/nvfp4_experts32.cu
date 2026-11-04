@@ -12,25 +12,9 @@ namespace tf_nvfp4_experts32 {
 constexpr int PAIR4 = 66;  // a matrix's two k32 groups: 32 uint4 of codes each, then each group's offsets, 1 uint4
 constexpr int BASE4 = 2;   // a column block opens with each matrix's 32 row bases: quad t's 8 bytes at [t][j][c]
 
-__device__ __forceinline__ uint4 ld_nc(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
-
-__device__ __forceinline__ uint2 ld_nc2(const void* p) {
-  uint2 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v2.u32 {%0, %1}, [%2];\n" : "=r"(r.x), "=r"(r.y) : "l"(p));
-  return r;
-}
-
-__device__ __forceinline__ uint32_t ld_nc1(const void* p) {
-  uint32_t r;
-  asm volatile("ld.global.nc.L1::no_allocate.u32 %0, [%1];\n" : "=r"(r) : "l"(p));
-  return r;
-}
+using tf_common::ld_nc;
+using tf_common::ld_nc2;
+__device__ __forceinline__ uint32_t ld_nc1(const void* p) { return tf_common::ld_nc32(p); }
 
 using tf_common::fp4pair;
 

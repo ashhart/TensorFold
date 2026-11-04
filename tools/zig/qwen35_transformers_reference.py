@@ -92,8 +92,16 @@ def main():
 
     res = {
         "schema": 1,
+        "complete": False,
+        "native_comparison": {},
+        "qualification": {"status": "not-run", "reason": "run-in-progress"},
         "kind": "transformers-forward-prompt-logprob-reference",
         "stage": args.stage,
+        "reference_source_sha256": {name: sha256_file(os.path.join(os.path.dirname(__file__), name))
+                                    for name in ("qwen35_transformers_reference.py",
+                                                 "qwen35_reference_inputs.py", "qwen35_reference_forward.py",
+                                                 "qwen35_reference_fixture.py", "qwen35_reference_compare.py",
+                                                 "qwen35_reference_verdict.py")},
         "generated_utc": now_iso(),
         "argv": sys.argv,
         "input_files": {

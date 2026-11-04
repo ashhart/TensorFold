@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import copy
 import math
+import json
+import os
+import struct
 import torch
 from qwen35_reference_inputs import (
     TWO_M150,
@@ -12,6 +15,41 @@ from qwen35_reference_inputs import (
     json_safe,
     log,
 )
+
+
+def restore_stored_fp32(model, model_dir):
+    """Preserve checkpoint FP32 tensors that Transformers auto-dtype would downcast."""
+    from safetensors import safe_open
+    with open(os.path.join(model_dir, "model.safetensors.index.json")) as stream:
+        weight_map = json.load(stream)["weight_map"]
+    state = model.state_dict(keep_vars=True)
+    restored = []
+    for shard in sorted(set(weight_map.values())):
+        path = os.path.join(model_dir, shard)
+        with open(path, "rb") as stream:
+            header = json.loads(stream.read(struct.unpack("<Q", stream.read(8))[0]))
+        keys = [key for key, meta in header.items()
+                if key != "__metadata__" and meta["dtype"] == "F32"]
+        if not keys:
+            continue
+        with safe_open(path, framework="pt", device="cpu") as tensors:
+            for key in keys:
+                if key not in state:
+                    raise ValueError("stored FP32 checkpoint tensor is absent from the reference model: " + key)
+                original = tensors.get_tensor(key)
+                if state[key].shape != original.shape:
+                    raise ValueError("stored FP32 checkpoint tensor shape mismatch: " + key)
+                prior = str(state[key].dtype)
+                changed = not torch.equal(state[key].detach().float(), original)
+                state[key].data = original.clone()
+                if state[key].dtype != torch.float32 or not torch.equal(state[key].detach(), original):
+                    raise ValueError("stored FP32 checkpoint tensor failed byte preservation: " + key)
+                restored.append({"key": key, "shape": list(original.shape), "prior_dtype": prior,
+                                 "auto_dtype_changed_values": changed})
+    return {"count": len(restored), "tensors": restored,
+            "all_stored_fp32_bytes_preserved": True,
+            "scope": "both precision arms use unchanged checkpoint values; BF16 projections remain BF16"}
+
 
 def load_model(model_dir, device_map_cpu=True):
     from transformers import Qwen3_5ForConditionalGeneration
@@ -23,6 +61,7 @@ def load_model(model_dir, device_map_cpu=True):
         output_loading_info=True,
         attn_implementation="eager",
     )
+    loading_info["stored_fp32_restore"] = restore_stored_fp32(model, model_dir)
     model.eval()
     return model, loading_info
 

@@ -2,7 +2,7 @@
 """Guard complete served/reference coverage and keep observed differences visible."""
 import copy
 import unittest
-from check_qwen35_served_reference import compare_rows, summarize
+from check_qwen35_served_reference import compare_rows, summarize, response_evidence
 
 
 class ServedReferenceTests(unittest.TestCase):
@@ -43,6 +43,15 @@ class ServedReferenceTests(unittest.TestCase):
         self.response["choices"][0]["prompt_logprobs"][0] = {}
         with self.assertRaises(ValueError):
             compare_rows(self.ids, self.response, self.ref)
+
+    def test_public_response_excludes_prose_ids_and_decoded_tokens(self):
+        self.response["id"] = "example-request"
+        self.response["choices"][0]["text"] = "example generated prose"
+        self.response["choices"][0]["prompt_logprobs"][1]["2"]["decoded_token"] = "example-token"
+        evidence = response_evidence(self.response)
+        self.assertNotIn("id", evidence)
+        self.assertNotIn("text", evidence["choices"][0])
+        self.assertEqual(evidence["choices"][0]["prompt_logprobs"][1]["2"], {"logprob": -1.2, "rank": 1})
 
     def test_single_token_has_no_scored_row(self):
         self.response["choices"][0]["prompt_logprobs"] = [None]

@@ -8,7 +8,7 @@ from pathlib import Path
 
 def evaluate_report(report):
     """Keep numerical diagnostics distinct from the measured BF16-distance envelope."""
-    comparison = report.get("native_comparison", {})
+    comparison = report.get("native_comparison") or {}
     rows = comparison.get("rows", [])
     failures = []
     checks = []

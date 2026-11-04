@@ -296,13 +296,20 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("{s}", .{usage});
         return 2;
     }
+    const cmd = args[1];
+    const rest = args[2..];
+    if (std.mem.eql(u8, cmd, "kernel-contract-limits")) {
+        @import("contract_limits.zig").fatbinsHost(init.gpa, init.io, try arg(rest, 0)) catch |err| {
+            std.debug.print("FAIL {s}: {t}\n", .{ cmd, err });
+            return 1;
+        };
+        return 0;
+    }
     var driver = try cuda.Driver.open();
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
     const gpu: check.Gpu = .{ .d = &driver, .ctx = &ctx, .gpa = init.gpa, .io = init.io };
-    const cmd = args[1];
-    const rest = args[2..];
 
     try dump.begin(init.gpa, cmd);
     run(gpu, cmd, rest) catch |e| {
