@@ -48,9 +48,7 @@ pub fn Namespace(comptime Tri: type) type {
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
         pub const window_rows = kvl.window_rows;
         pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
-            const own = of(p);
-            own.kv.pool = try kvl.Pool.init(own.gpa, own.engine, own.kv.layout.?, own.context, own.kv.head, streams, count);
-            own.kv.paged_only = kvl.pagedOnly() and streams > 0;
+            try kvl.attachTo(of(p), streams, count);
         }
         pub fn fits(p: *anyopaque, rows: u32, max_tokens: u32) bool {
             return of(p).kv.fits(rows, max_tokens);
@@ -308,7 +306,7 @@ pub fn Namespace(comptime Tri: type) type {
                 // a contiguous lane's fixed-size buffers from the parts kept from an earlier stream
                 var part_seq: ?cuda.DeviceBuffer = null;
                 if (self.parts.on and self.ranks == null and from != .pool) part_seq = Parts.take(&self.parts.seqs, self.engine.driver, seq_parts.seqPartsBytes()) catch null;
-                gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.create(cap) else if (from == .pool) self.kv.pool.?.open(cap) else if (part_seq) |b| seq_parts.newSeqIn(self.engine, cap, b) else self.engine.newSeq(cap)) catch |err| {
+                gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.createOn(cap, from) else if (from == .pool) self.kv.pool.?.open(cap) else if (part_seq) |b| seq_parts.newSeqIn(self.engine, cap, b) else self.engine.newSeq(cap)) catch |err| {
                     if (part_seq) |b| Parts.give(&self.parts.seqs, self.gpa, b);
                     self.lanes.removeByPtr(gop.key_ptr);
                     return err;
