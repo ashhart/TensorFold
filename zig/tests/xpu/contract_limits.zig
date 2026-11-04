@@ -83,12 +83,14 @@ pub fn objects(a: std.mem.Allocator, io: std.Io, dir: []const u8) !usize {
                 n += 1;
                 continue;
             };
+            const built = try limits.grfBuilt(rec.launch, u.grf, t, &out, a);
+            n += built;
             const fits = try limits.fits(rec.launch, t, &out, a);
             if (control and (u.grf == 0 or fits == 0)) n += 1;
             if (!control) red += fits;
             const current = std.meta.eql(u, rec.usage[i]);
             if (!current) n += 1;
-            const word = if (!current) "FAIL" else if (control) (if (u.grf != 0 and fits != 0) "RED " else "MISSED") else if (fits != 0) "FAIL" else "PASS";
+            const word = if (!current or built != 0) "FAIL" else if (control) (if (u.grf != 0 and fits != 0) "RED " else "MISSED") else if (fits != 0) "FAIL" else "PASS";
             const what = .{ u.threads[0], u.slm, u.sub_group, u.grf, u.spill, u.private, if (current) "current" else "stale" };
             const say = "{s} limits {s} {s}: {d} work-items, {d} SLM bytes, sub-group {d}, {d} GRF, {d} spill bytes, " ++
                 "{d} private bytes (record {s}){s}";
