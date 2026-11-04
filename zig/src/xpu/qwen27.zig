@@ -38,7 +38,7 @@ pub const Mode = fwd.Mode;
 
 pub const alloc = std.heap.c_allocator;
 
-// Qwen3.8-27B shape and layer pattern, checked against config.json at load (qwen27_config.zig).
+// Qwen3.8-27B shape and layer pattern, checked at load against config.json when there is one (qwen27_config.zig).
 pub const D = shape.hidden;
 pub const FF = shape.intermediate;
 pub const LAYERS = shape.layers;
