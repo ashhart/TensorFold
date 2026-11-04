@@ -176,10 +176,24 @@ pub fn attach(comptime F: type, a: Allocator, ctx: *anyopaque, paged: ?Plan, pro
 }
 
 /// The cache's snapshot slots and copied rows' bytes (`snaps` 0: a family without slots keeps its cache whole).
-pub const Kept = struct { snaps: usize, copied: u64, snap_bytes: u64, host: bool = false, most: usize = std.math.maxInt(usize) };
+pub const Kept = struct {
+    snaps: usize,
+    copied: u64,
+    snap_bytes: u64,
+    host: bool = false,
+    device: bool = false, // host budget, states in device memory: an integrated GPU's (`device_snaps`)
+    most: usize = std.math.maxInt(usize),
+};
 
 pub fn kept(comptime F: type, loaded: anytype, paged: ?Plan, o: api.Open, room: u64, held: u64, host_budget: u64, host_mode: bool) Kept {
-    if (host_mode) return .{ .snaps = 0, .copied = hostBudget(o, host_budget), .snap_bytes = stagingBytes(F, loaded, hostBudget(o, host_budget)), .host = true, .most = named(o) orelse std.math.maxInt(usize) };
+    if (host_mode) return .{
+        .snaps = 0,
+        .copied = hostBudget(o, host_budget),
+        .snap_bytes = stagingBytes(F, loaded, hostBudget(o, host_budget)),
+        .host = true,
+        .device = device(loaded, o),
+        .most = named(o) orelse std.math.maxInt(usize),
+    };
     // on pages the plan set the cache aside already; `held` counts every stream at a whole window
     if (comptime !@hasDecl(F, "snap_slots")) return .{ .snaps = 0, .copied = if (!@hasDecl(F, "snap_save")) 0 else if (paged) |p| p.copied + p.kept else budget.cacheBytes(o.prompt_cache_gib, room, held), .snap_bytes = 0 }; // kept: the store's budget, held as pool pages
     const b: u64 = loaded.snap_bytes;
@@ -200,6 +214,10 @@ pub fn text(comptime F: type, a: Allocator, stream_bytes: u64, l: ?kv_pool.Layou
     const rows: u64 = if (comptime @hasDecl(F, "window_rows")) F.window_rows else 0; // the plan's windows: window + rows
     const shape = if (paged) |p| (if (all_on_pages) try std.fmt.allocPrint(a, "all {d} on {d} pages of {d} rows ({d:.2} GiB) as they need them, the engine's own window idle, {d:.0} MiB fixed each", .{ p.lanes, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else if (engine_paged) try std.fmt.allocPrint(a, "the engine's own and {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them (enough for {d} at a {d}-token window), {d:.0} MiB fixed each", .{ p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), p.pages / l.?.pages(window + rows), window, @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) }) else try std.fmt.allocPrint(a, "the engine's own at a {d}-token window ({d:.2} GiB, in the model's), {d} more taking {d} pages of {d} rows ({d:.2} GiB) as they need them, {d:.0} MiB fixed each", .{ window, toGib(stream_bytes), p.lanes - 1, p.pages, l.?.page_tokens, toGib(p.pages * l.?.pageBytes()), @as(f64, @floatFromInt(l.?.fixed_bytes)) / (1 << 20) })) else try std.fmt.allocPrint(a, "{d:.2} GiB each at a {d}-token window{s}", .{ toGib(stream_bytes), window, if (kv8) " (fp8 caches)" else "" });
     const placed = comptime @hasDecl(F, "snap_place"); // the startup line says where its prompt states went, and why
+    if (k.copied > 0 and k.device) {
+        const line = ", a {d:.1} GiB prompt cache in device memory, budgeted as host memory";
+        return .{ shape, try std.fmt.allocPrint(a, line, .{toGib(k.copied)}) };
+    }
     const cache = if (k.copied == 0) ", no prompt cache" else if (k.host) try std.fmt.allocPrint(a, ", {s}a {d:.1} GiB prompt cache in host memory with {d:.0} MiB of device staging", .{ if (placed) "prompt states on host, the cache doesn't fit on the card: " else "", toGib(k.copied), @as(f64, @floatFromInt(k.snap_bytes)) / (1 << 20) }) else if (comptime @hasDecl(F, "snap_slots")) try std.fmt.allocPrint(a, ", {s}a prompt cache of {d} snapshot slots ({d:.1} GiB) and {d:.1} GiB of copied rows", .{ if (placed) "prompt states on device: " else "", k.snaps, toGib(k.snaps * k.snap_bytes), toGib(k.copied) }) else try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(k.copied)});
     return .{ shape, cache };
 }
@@ -221,6 +239,11 @@ pub fn host(comptime F: type, loaded: anytype) bool {
     if (comptime @hasField(@TypeOf(loaded), "host_snaps")) return loaded.host_snaps;
     return @hasDecl(F, "snap_host");
 }
+/// Kept states in device memory on the host's budget, unless --learn-conversations' disk tier reads them on the host.
+fn device(loaded: anytype, o: api.Open) bool {
+    if (comptime !@hasField(@TypeOf(loaded), "device_snaps")) return false;
+    return loaded.device_snaps and !(o.learn_conversations and o.learn != null);
+}
 pub fn stagingBytes(comptime F: type, loaded: anytype, host_budget: u64) u64 {
     if (comptime !@hasDecl(F, "snap_slots")) return 0;
     return if (host(F, loaded) and host_budget > 0) loaded.snap_bytes else 0;
@@ -236,6 +259,26 @@ test "kv merge: a host cache spends no device snapshot slots or copied-row budge
     const k = kept(Fixture, loaded, null, o, 256 << 20, 0, 1 << 30, host(Fixture, loaded));
     try std.testing.expectEqual(@as(usize, 0), k.snaps);
     try std.testing.expectEqual(@as(u64, 1 << 30), k.copied);
+    try std.testing.expect(!k.device);
+}
+test "kv merge: an integrated GPU's host-budget cache names device memory, unless the disk tier keeps it on the host" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const loaded = .{ .host_snaps = true, .device_snaps = true, .snap_bytes = @as(u64, 8 << 20) };
+    const o: api.Open = .{ .dir = "", .model_type = "q", .prompt_cache_gib = 8, .lanes = 4 };
+    const k = kept(Copies, loaded, null, o, 256 << 20, 0, 8 << 30, true);
+    try std.testing.expect(k.host and k.device);
+    const shown = (try text(Copies, a, 1 << 30, null, null, false, false, 70000, k, false))[1];
+    try std.testing.expectEqualStrings(", a 8.0 GiB prompt cache in device memory, budgeted as host memory", shown);
+    var learning = o;
+    learning.learn = "/s";
+    learning.learn_conversations = true;
+    const disk = kept(Copies, loaded, null, learning, 256 << 20, 0, 8 << 30, true);
+    try std.testing.expect(disk.host and !disk.device);
+    const host_line = (try text(Copies, a, 1 << 30, null, null, false, false, 70000, disk, false))[1];
+    const host_text = ", a 8.0 GiB prompt cache in host memory with 0 MiB of device staging";
+    try std.testing.expectEqualStrings(host_text, host_line);
 }
 const Placing = struct {
     pub const snap_slots = 1;
