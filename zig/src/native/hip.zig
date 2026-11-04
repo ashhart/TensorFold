@@ -281,8 +281,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var served = false;
     defer if (!served) r.deinit(gpa);
-    const result = if (@hasDecl(F, "openVision")) F.openVision(a, gpa, io, r.dev, o.dir, r.options, o.vision, problem) else F.open(a, gpa, io, r.dev, o.dir, r.options, problem);
-    const loaded = result catch |err| switch (err) {
+    const loaded = F.open(a, gpa, io, r.dev, o.dir, r.options, problem) catch |err| switch (err) {
         error.Refused => return null,
         else => |x| return x,
     };
@@ -329,7 +328,6 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.host.frame_key = offer.frame_key;
     h.host.on_thread = offer.on_thread;
     h.host.memory = .{ .read = readMemory };
-    if (@hasDecl(F, "attach")) F.attach(h.family, &h.host, o);
     try h.host.start();
     served = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
@@ -372,7 +370,7 @@ test "a HIP family declares replies without reasoning with `pub const reasoning 
     }));
 }
 
-test "the text families carry no offer, so the host gives them the empty one; GLM-OCR and Qwen3 offer through their Loaded" {
+test "the text families carry no offer, so the host gives them the empty one; GLM-OCR, Qwen3, Qwen3.5 and dots.mocr offer through their Loaded" {
     inline for (.{ flashnext.native, nemotron.native }) |F| {
         const Loaded = @typeInfo(@typeInfo(@TypeOf(F.open)).@"fn".return_type.?).error_union.payload;
         try std.testing.expect(!@hasField(Loaded, "offer"));
@@ -383,6 +381,8 @@ test "the text families carry no offer, so the host gives them the empty one; GL
     inline for (.{ "text_generation", "embeddings", "window", "decides", "rerank" }) |old| try std.testing.expect(!@hasField(qwen3.native.Loaded, old));
     // Qwen3.5's readouts reach the Info through its offer (both of its model types share one Loaded)
     try std.testing.expect(@FieldType(qwen35.native_engine.Loaded, "offer") == serve.Offer and !@hasField(qwen35.native_engine.Loaded, "readouts"));
+    try std.testing.expect(@FieldType(dots.native.Loaded, "offer") == serve.Offer);
+    try std.testing.expect(!@hasDecl(dots.native, "attach") and !@hasDecl(dots.native, "openVision"));
 }
 
 test {

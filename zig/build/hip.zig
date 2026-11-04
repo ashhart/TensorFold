@@ -211,7 +211,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "dots_mocr", .module = gpu.native.import_table.get("dots_mocr").? } },
+        .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "dots_mocr", .module = gpu.native.import_table.get("dots_mocr").? }, .{ .name = "hip_serve", .module = gpu.native.import_table.get("hip_serve").? } },
     }), .filters = &.{"dots HIP device owner:"} });
     b.step("build-dots-hip-owner-test", "Build real owner close and failure cleanup checks without GPU execution").dependOn(&b.addInstallArtifact(dots_owner, .{}).step);
     const native = server(b, target, gpu, build_options);
