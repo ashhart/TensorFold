@@ -177,7 +177,7 @@ pub const CodecOnly = struct {
     }
 
     pub fn weightBytes(o: *const CodecOnly) usize {
-        return o.c.weight_bytes;
+        return o.c.w.bytes;
     }
 
     pub fn setProbe(o: *CodecOnly, p: ?codec_.Probe) void {
