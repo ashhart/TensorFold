@@ -18,6 +18,7 @@ pub fn addImportsAt(b: *std.Build, m: *std.Build.Module, target: std.Build.Resol
 pub fn steps(b: *std.Build) void {
     const source = @import("dsv41_cuda.zig").module(b, b.graph.host, "serve_engine.zig", false);
     b.step("test-draft-dsv41-host", "DeepSeek draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source, .filters = &.{"draft sources:"} })).step);
+    b.step("test-dsv41-serve-host", "DeepSeek-V4.1 chat encoding, DSML and sampler goldens without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source.import_table.get("dsv41_serve").? })).step);
     inline for (.{ false, true }) |cross| {
         const target = if (cross) b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu }) else b.graph.host;
         const root = @import("dsv41_cuda.zig").module(b, target, "device_host_test.zig", cross);
