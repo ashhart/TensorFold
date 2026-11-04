@@ -351,6 +351,21 @@ CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the l
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
 relu by `fmaxf`, and the down launched one neuron short).
+CUDA also checks Flash Next's EXL3 host tier (`flashnext_exl3_kvtier.cu`: a layer's K/V in lent frames, a block cache
+over the host store). `kvt_fetch` is compared with a host model byte for byte over every lent frame (the NaN and
+infinities planted in the host rows arrive as stored, nothing else is written, entries of the list past the count are
+never read) and `kvt_remap` with its model over the key lists, counts and overflow flag, which it rewrites in place
+(a missing block, a flag already set and rows without a selection included). `kvt_plan` places each miss in whichever
+victim an atomic reaches first, so the harness reads an image of what does not depend on that: the counters, the blocks
+needed and missed, the marks and the multiset of stamps, which the host's LRU model gives exactly, then checks the
+placement is one an LRU may make (victims are the least recently used slots the call does not use, equally old ones in
+any order; evicted blocks are unmapped, hit slots are stamped, nothing else moves). Its calls start from a steady
+cache, every block a hit, a fresh one, heavy stamp ties, a wrapped clock, no selecting rows, and a flag left set, and at
+the smallest slot count the lists overflow. Gate 4 does not apply (integers only), and gate 1 plants garbage and the bit
+patterns of NaN and the infinities where the kernels never read. Three controls, red at gate 3: the table read one
+entry late, slot rows one block late, the window one block early. What it does not check: which miss takes which of
+several equally old slots, as that is the atomics' order, so a run of many calls is not compared byte for byte (the
+device test, `exl3-kvtier`, holds its misses within 5% of the model over 60 drifting calls).
 
 Metal also checks DeepSeek V4.1's CSA2 attention (`csa2_attn.metal`): decode rows (ring or linear windows) and prompt rows
 (16-key tiles at absolute positions), fp32 and bf16 out, against float64's softmax over the window, the selected rows and
@@ -391,7 +406,7 @@ shared memory, the device's limits and the planted controls are checked the same
 A restored 13.0 receipt can arrive after the later compiler sets. Such records mark `later_pending` so 13.0 and
 13.1 use their base usage, while 13.2 and later keep their independently measured or pending selection.
 A missing later receipt remains pending; a 13.0 measurement never substitutes for it.
-Flash Next's 13 EXL3 launches (`flashnext_exl3_pending.zig`) carry only an nvcc 13.4 receipt: they stay pending under
+Flash Next's 16 EXL3 launches (`flashnext_exl3_pending.zig`) carry only an nvcc 13.4 receipt: they stay pending under
 13.0 to 13.3 and take their 13.4 usage from `cuda_134`, which `pending_132.lookup` serves for that release.
 The first, `fn_exl3_split_f16`, also runs gates 1 to 4 on the CUDA runner (`contract_flashnext_exl3.zig`): an fp16
 row splits into bf16 hi = bf16(x) and lo = bf16(x - hi), every output's bits must equal float64's (NaN stays NaN; an

@@ -128,7 +128,7 @@ starts a rank. These switches tune it:
 | `TF_FLASHNEXT_EXL3_ARCH` | unset | `unqualified` serves on a device that is not sm_120, without a claim. |
 | `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | `0` | `1` keeps the MTP layer's experts on the device instead of a pool (one rank). |
 | `TF_FLASHNEXT_EXL3_PREFILL` | on | `0` turns the deep-chunk prefill path off. |
-| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | 8,192 | Rows of a deep chunk; also what the server reserves at load. |
+| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | 4,096 | Rows of a deep chunk; also what the server reserves at load. |
 | `TF_FLASHNEXT_EXL3_PREFILL_RING` | on | `0` stops streaming the coming layers' experts into one ring of the pools' lines. |
 | `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | 1 | Layers ahead the ring prefetches. |
 | `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | on | `0` (two ranks) stops overlapping the all-reduce with a chunk's compute. |
@@ -136,11 +136,25 @@ starts a rank. These switches tune it:
 | `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | `0` | Experimental: `1` (two ranks, ring) runs a second deep chunk beside the first when memory admits it. |
 | `TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID` | on | Diagnostics only: `0` keeps prompt-cache states at any row instead of on the serving step's starts, to test that a resumed prompt equals a fresh one. |
 | `TF_FLASHNEXT_PROFILE` | `0` | Diagnostics only: `1` times the ranks' combine, all-reduce and place of a deep chunk, with a wait each. |
+| `TF_FLASHNEXT_KV_PAGES` | unset | `n`: streams beside the first take their attention caches from one pool of `n`-position pages. |
+| `TF_FLASHNEXT_KV_PAGES_ALL` | unset | Diagnostics only: `1` puts every request on pool pages, including single-stream checks; without it the first stream keeps contiguous caches. |
+| `TF_FLASHNEXT_KV_HOST` | unset | With `TF_FLASHNEXT_KV_PAGES`: MiB of pinned host RAM holding the K/V plane of every page; `0` is no host tier. Nonzero requires EXL3 scratch; other formats refuse before allocation with `FlashNextKvHostNeedsExl3`. |
+| `TF_FLASHNEXT_KV_FRAMES` | paged streams times their frame working set | With the host tier: cap the device frames of the K/V plane; fewer than one stream's required working set is refused. |
+| `TF_FLASHNEXT_KV_SLOTS` | 128 | With the host tier: frames lent to a stream, 64 four-row slots a frame for each attention layer. |
 | `TF_FLASHNEXT_PLE_READ` | `map` | `pread` reads the n-gram embedding rows by positional read. |
 | `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | Whether kept prompt-cache states live in pinned host memory. |
 | `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
 | `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY` | `0` | Diagnostics only: `1`, with the switch above, adds per-layer counters. |
 | `TENSORFOLD_BIN`, `TF_SRC` | built binary, the checkout | Diagnostics only: the binary `tools/exl3_*.sh` run and the checkout `tools/exl3_*.py` read their corpus from. |
+
+Host-tier admission promises logical pages for the request separately from its bounded device-frame working set: the first
+pages, the current call and drafted window, the state run and the slot frames. It does not require the entire logical context
+to be device-resident. A request waits when its logical pages, frame promise or pool lane cannot fit; released leases restore
+admission. Leave `TF_FLASHNEXT_KV_FRAMES` unset for the backend's computed budget rather than guessing below that minimum.
+
+A failed tier-kernel load releases the pinned store and its tier metadata. Snapshot restore checks every resident page's
+pins before copying canonical rows: another lease's pin refuses the restore with `Pinned`, leaving rows and sequence state
+unchanged. After a successful copy, releasing pins and invalidating old frames must succeed; errors are not ignored.
 
 ### TP integration scope
 
