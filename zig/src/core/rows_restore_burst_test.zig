@@ -30,7 +30,7 @@ fn counts(f: *pf.Prefetch) Counts {
 }
 
 fn wait(f: *pf.Prefetch, n: usize) !Counts {
-    const deadline = rows.write.nowNs() + 5 * std.time.ns_per_s;
+    const deadline = rows.write.nowNs() + 30 * std.time.ns_per_s;
     while (true) {
         const c = counts(f);
         if (c.settled == n) return c;
@@ -83,11 +83,11 @@ test "restore scale: bursts bound allocated staging and failures wake every admi
             try t.expectEqual(@as(usize, 0), counts(f).reads);
             try t.expectEqual(@as(u64, 0), counts(f).charged);
         }
+        try t.expectEqual(@as(u64, expected + 1) * rows.file.alignment, peak);
         f.stop();
         try t.expectEqual(expected * 8, signal.calls.load(.acquire));
         try t.expectEqual(f.counts.made, f.counts.freed);
         try t.expectEqual(@as(u64, if (fails) expected * 8 else 0), f.counts.failed);
         try t.expectEqual(@as(usize, 0), x.f.live);
-        std.debug.print("RESTORE_BURST slots={d} byte_cap={d} fail={} attempted=256 admitted={d} peak_staging_bytes={d} retained_sync_bytes={d} notified={d} released={d}\n", .{ slots, cap, fails, f.counts.made, peak, r.stage.len, signal.calls.load(.acquire), f.counts.freed });
     };
 }

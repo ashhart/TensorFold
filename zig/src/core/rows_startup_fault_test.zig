@@ -22,11 +22,12 @@ test "restore scale: startup allocation failures preserve valid state files" {
         }
         try t.expectEqual(fa.allocated_bytes, fa.freed_bytes);
         const retained = try x.files();
-        if (fa.has_induced_failure) induced += 1;
+        if (fa.has_induced_failure) {
+            induced += 1;
+            try t.expect(failed);
+        }
         if (retained != 1) lost += 1;
-        std.debug.print("RESTORE_OOM index={d} induced={} returned_error={} retained={d}\n", .{ index, fa.has_induced_failure, failed, retained });
     }
-    std.debug.print("RESTORE_OOM induced={d} lost={d}\n", .{ induced, lost });
     try t.expect(induced > 0);
     try t.expectEqual(@as(usize, 0), lost);
 }

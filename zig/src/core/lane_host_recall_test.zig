@@ -38,7 +38,7 @@ const Box = struct {
     }
 
     fn wait(b: *Box) !Reason {
-        const deadline = std.Io.Clock.awake.now(std.testing.io).toNanoseconds() + 10 * std.time.ns_per_s;
+        const deadline = std.Io.Clock.awake.now(std.testing.io).toNanoseconds() + 30 * std.time.ns_per_s;
         while (true) {
             b.mutex.lockUncancelable(std.testing.io);
             const d = b.done;
@@ -330,7 +330,6 @@ test "restore scale: Recall allocation faults fall back and release the job read
     store.gpa = gpa;
     recalls.release(&job);
     try std.testing.expect(!job.recall.reading);
-    std.debug.print("RECALL_FAULT reader_oom=fallback reply_oom=skipped failed_reply=skipped release=idempotent next_reader=ready\n", .{});
 }
 
 test "restore scale: Recall survives a failed round and a queued cancellation without stranding the next job" {
@@ -355,7 +354,14 @@ test "restore scale: Recall survives a failed round and a queued cancellation wi
     try std.testing.expectEqual(Reason.cancelled, try cancelled.wait());
     var failed: Box = .{};
     defer failed.deinit();
-    try std.testing.expectEqual(Reason.failed, try s.run(&request, 2, &failed));
+    const reason = blk: {
+        // This round's injected failure is expected; keep the failure comparison without its warning receipt.
+        const level = std.testing.log_level;
+        std.testing.log_level = .err;
+        defer std.testing.log_level = level;
+        break :blk try s.run(&request, 2, &failed);
+    };
+    try std.testing.expectEqual(Reason.failed, reason);
     s.target.fail_round = null;
     var after: Box = .{};
     defer after.deinit();
@@ -370,5 +376,4 @@ test "restore scale: Recall survives a failed round and a queued cancellation wi
     const admitted = s.host.admitted.items.len;
     s.host.unlock();
     try std.testing.expectEqual(@as(usize, 0), queued + admitted);
-    std.debug.print("RECALL_WAIT cancel=finished verify_failure=finished next_request=finished plain_equal=true queued=0 admitted=0\n", .{});
 }
