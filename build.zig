@@ -238,6 +238,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
+    @import("zig/build/rerun_tests.zig").wire(b); // last: it marks the steps everything above declared
 }
 
 /// The native Metal server build is owned by the shared Metal target module.
