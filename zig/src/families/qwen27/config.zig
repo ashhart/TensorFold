@@ -1,5 +1,6 @@
 //! Dense Qwen text shapes, layer schedule, rotary metadata and ordered checkpoint EOS ids.
 const std = @import("std");
+const layer_pattern = @import("qwen35_layers");
 
 pub const Kind = enum { linear, attention };
 pub const max_layers = 128;
@@ -316,16 +317,9 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         if (v != .array or v.array.items.len != 3) return error.BadConfig;
         for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true);
     };
-    if (t.get("layer_types")) |v| {
-        if (v != .array or v.array.items.len != c.layers) return error.BadConfig;
-        for (v.array.items, 0..) |x, i| {
-            if (x != .string) return error.BadConfig;
-            c.kinds[i] = if (std.mem.eql(u8, x.string, "linear_attention")) .linear else if (std.mem.eql(u8, x.string, "full_attention")) .attention else return error.UnsupportedLayer;
-        }
-    } else {
-        const interval = if (t.get("full_attention_interval")) |v| try integer(v, false) else 4;
-        for (c.kinds[0..c.layers], 0..) |*k, i| k.* = if ((i + 1) % interval == 0) .attention else .linear;
-    }
+    var full: [max_layers]bool = undefined;
+    try layer_pattern.read(full[0..c.layers], t);
+    for (c.kinds[0..c.layers], full[0..c.layers]) |*k, f| k.* = if (f) .attention else .linear;
     if (root.get("eos_token_id") orelse t.get("eos_token_id")) |v| try eos(&c, v);
     if (generation) |text| {
         const gen = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
