@@ -134,7 +134,8 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         sms[i] = rule(mode, i);
         outs[i] = &chains[i];
     }
-    try ops.draftMany(ds[0..n], nexts_s[0..n], rows_s[0..n], counts[0..n], positions[0..n], sms[0..n], confidence, outs[0..n]);
+    const stops: [6]f64 = @splat(confidence);
+    try ops.draftMany(ds[0..n], nexts_s[0..n], rows_s[0..n], counts[0..n], positions[0..n], sms[0..n], stops[0..n], outs[0..n]);
     try stream.synchronize();
     for (widths, 0..) |_, i| {
         try check.expect(try sameLogits(gpu, &alone.drafts[i], &together.drafts[i]), "a shared head's logits equal its lone pass's", .{});

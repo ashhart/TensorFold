@@ -520,6 +520,7 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             if (self.head == null) return error.NoDraftHead;
             defer lanes_draft.depthLog(self, requests);
+            const rule = lanes_draft.rule(self, requests.len);
             // a shared round's chains: their heads in one pass a step (the drafts each would get alone)
             var batched: [mtp_ops.max_lanes]bool = @splat(false);
             if (lanes_draft.batchHeads() and requests.len > 1 and requests.len <= mtp_ops.max_lanes) try lanes_draft.batched(self, requests, &batched);
@@ -534,15 +535,14 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 if (r.position != l.seq.fed + 1) return error.PositionMismatch;
                 // the window's rows past the cache's room cannot run: fewer drafts there
-                const room = l.seq.cap - l.seq.fed - 1;
-                const count = @min(@min(r.depth, mtp.depthFor(r.stream.sampling, self.depth, self.depth_greedy)), room);
+                const count = @min(@min(r.depth, mtp.depthFor(r.stream.sampling, self.depth, rule.greedy)), l.seq.cap - l.seq.fed - 1);
                 if (r.rows) |path| {
                     for (path, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
                     if (r.follow.len < path.len) return error.PositionMismatch;
-                    try self.ops().draft(d, r.follow[0..path.len], d.streams.ptr, r.position, count, r.stream.sampling, self.confidence, &l.chain);
+                    try self.ops().draft(d, r.follow[0..path.len], d.streams.ptr, r.position, count, r.stream.sampling, lanes_draft.stopFor(self, rule, r.stream.sampling), &l.chain);
                 } else {
                     const first = self.value(r.first orelse return error.NoFirstToken);
-                    try self.ops().draft(d, &.{first}, d.prompt_last, r.position, count, r.stream.sampling, self.confidence, &l.chain);
+                    try self.ops().draft(d, &.{first}, d.prompt_last, r.position, count, r.stream.sampling, lanes_draft.stopFor(self, rule, r.stream.sampling), &l.chain);
                 }
             }
         }
