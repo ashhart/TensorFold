@@ -40,6 +40,7 @@ pub const Fake = struct {
     fail_write: bool = false,
     writes: usize = 0,
     fail_restore: bool = false,
+    refuse_at: ?u32 = null, // a test's restore refusal for the state kept at this position
     live: usize = 0,
     spare_bytes: u64 = 0,
     peer: ?*Peer = null, // speed-up mode's rank 1: it keeps the same states and drops them only when a request names them
@@ -176,6 +177,7 @@ pub const Fake = struct {
         const f = of(ptr);
         if (f.fail_restore) return error.CopyFailed;
         const st: *State = @ptrCast(@alignCast(saved));
+        if (f.refuse_at) |r| if (st.at == r) return error.CopyFailed;
         f.at, f.sum = .{ st.at, st.sum };
     }
     fn dropFn(ptr: *anyopaque, saved: Saved) void {
