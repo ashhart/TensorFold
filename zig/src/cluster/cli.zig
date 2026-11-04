@@ -258,13 +258,13 @@ fn serveCmd(env: Env, args: []const []const u8) !u8 {
         return 1;
     }
     const code = try checkCmd(env, args, false, m.id);
-    if (code != 0) return code;
     const fake = flag(args, "--probes") != null;
     const dry = has(args, "--dry-run");
     if (!fake and !disaggregated) {
         try refuseConverged(env, m);
-        return if (dry) 0 else 1;
+        return if (dry) code else 1;
     }
+    if (code != 0) return code;
     // real hosts refuse before any node starts: every node's links, library and window, then this node's library file
     if (!fake) {
         var why: []const u8 = "";
