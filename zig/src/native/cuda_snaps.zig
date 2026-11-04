@@ -27,6 +27,13 @@ pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
 
 /// The server's chunk step: a family whose cold passes cut at request starts gets message starts on its grid (0: none).
 pub fn requestStep(comptime F: type) u32 {
+    return requestStepFor(F, @import("profile").get(.TF_QWEN_REQUEST_STARTS));
+}
+
+/// Only exact 1 opts in; a family must also declare that its cold passes honor request starts.
+pub fn requestStepFor(comptime F: type, value: ?[]const u8) u32 {
+    const v = value orelse return 0;
+    if (!std.mem.eql(u8, v, "1")) return 0;
     return if (@hasDecl(F, "request_starts") and F.request_starts) F.snap_grid else 0;
 }
 
@@ -122,7 +129,35 @@ test "only a family whose passes cut at request starts asks the server for them"
         pub const snap_grid: u32 = 4096;
         pub const request_starts = true;
     };
-    try std.testing.expectEqual(@as(u32, 0), requestStep(Glm));
-    try std.testing.expectEqual(@as(u32, 0), requestStep(struct {}));
-    try std.testing.expectEqual(@as(u32, 4096), requestStep(Qwen));
+    try std.testing.expectEqual(@as(u32, 0), requestStepFor(Glm, "1"));
+    try std.testing.expectEqual(@as(u32, 0), requestStepFor(struct {}, "1"));
+    try std.testing.expectEqual(@as(u32, 4096), requestStepFor(Qwen, "1"));
+}
+
+test "request starts: unset keeps CUDA's main prefill contract" {
+    const Qwen = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = true;
+    };
+    try std.testing.expectEqual(@as(u32, 0), requestStep(Qwen));
+}
+
+test "request starts: opt in is explicit, eligible and independent of cache rules" {
+    const Qwen = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = true;
+    };
+    const Disabled = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = false;
+    };
+    for ([_]?[]const u8{ null, "", "0", "off", "on", "true", "2" }) |v| {
+        try std.testing.expectEqual(@as(u32, 0), requestStepFor(Qwen, v));
+    }
+    try std.testing.expectEqual(@as(u32, 4096), requestStepFor(Qwen, "1"));
+    try std.testing.expectEqual(@as(u32, 0), requestStepFor(Disabled, "1"));
+    const before = cacheRules(Qwen);
+    _ = requestStepFor(Qwen, "1");
+    try std.testing.expectEqualDeep(before, cacheRules(Qwen));
+    try std.testing.expectEqual(@import("profile").Class.arithmetic, @import("profile").entry(.TF_QWEN_REQUEST_STARTS).class);
 }
