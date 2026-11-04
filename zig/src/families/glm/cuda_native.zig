@@ -213,7 +213,6 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     defer load_cache.deinit();
     // TF_GLM_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
-    try @import("cuda_prompt_solo.zig").refuse(set.solo, o.drafter);
     if (@import("cuda_kv_host.zig").onHost() and !set.pages) return error.GlmKvHostNeedsPages;
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
@@ -457,7 +456,6 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadGlmKvShare => "TF_GLM_KV_SHARE: give how many states the prompt cache over the KV pages keeps, or 0 or unset for off",
         error.GlmShareNeedsPages => "TF_GLM_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
-        error.GlmSoloWithDrafter => "TF_GLM_CHUNK_SOLO=4096 holds buffers no pass uses beside --drafter: unset it, or leave out --drafter",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
@@ -506,14 +504,6 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
     }
     try std.testing.expect(explain(null, error.Fp8OnPages) != null);
     try std.testing.expect(explain(null, error.GlmKvHostNeedsPages) != null);
-}
-
-test "TF_GLM_CHUNK_SOLO=4096 beside --drafter is refused by name" {
-    const solo = @import("cuda_prompt_solo.zig");
-    try std.testing.expectError(error.GlmSoloWithDrafter, solo.refuse(true, "dflash2"));
-    try solo.refuse(true, null);
-    try solo.refuse(false, "dflash2");
-    try std.testing.expect(explain(null, error.GlmSoloWithDrafter) != null);
 }
 
 test "capacity keeps a verify window past the context and a multiple of 64" {
