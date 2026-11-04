@@ -261,10 +261,10 @@ pub const Store = struct {
                 s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
                 return .{ .from = at, .marks = l.marks };
             } else |err| {
-                // a refused state is dropped, then the next shorter kept state is tried before the pass from the start
+                // a refused state is dropped, then the next shorter RAM state is tried before the pass from the start
                 if (fresh_marks == null) fresh_marks = l.marks else a.free(l.marks);
                 s.resumedWithReason(e, prompt, err);
-                l = try s.lookupUser(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans);
+                l = try s.lookupUserAt(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans, false);
             }
         }
         const marks_ = fresh_marks orelse l.marks;
@@ -285,6 +285,11 @@ pub const Store = struct {
 
     /// `lookupRewind` with an explicit last-user end: history may also include later tool or assistant messages.
     pub fn lookupUser(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
+        return s.lookupUserAt(a, prompt, born, history_len, rewind_len, user_end, shared, starts, spans, true);
+    }
+
+    /// `lookupUser`; with `disk` false only RAM states (a retry after a refusal must not recall the refused one).
+    fn lookupUserAt(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, disk: bool) !Lookup {
         s.collectExpired();
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
         const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
@@ -295,7 +300,10 @@ pub const Store = struct {
         if (s.active_rewind_at > 0) if (s.keptNear(prompt, starts, spans, s.active_rewind_at)) |at| {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
-        const e = rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)));
+        const e = if (disk)
+            rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)))
+        else
+            s.find(prompt, starts, spans);
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
         const ordinary = if (s.active_rewind_at == 0)
