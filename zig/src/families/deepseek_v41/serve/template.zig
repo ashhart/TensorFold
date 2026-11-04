@@ -43,7 +43,12 @@ pub const Options = struct {
     response_format: ?Value = null,
     add_generation_prompt: bool = true,
     image: ?ImageHook = null,
+    /// DeepSeek's own Chat Completions rendering (deepseek-recipe); false: the release encoding.py's, as V4 keeps.
+    recipe: bool = false,
 };
+
+/// In the server's view of the native DeepSeek-V4.1 template: its chats take DeepSeek's own message shapes.
+pub const RECIPE_TAG = "<tensorfold:deepseek-recipe>";
 
 /// A refusal's message (HTTP 400), set when ``render`` returns error.Refused.
 pub const Problem = struct { message: []const u8 = "" };

@@ -17,41 +17,44 @@ fn fixture(a: std.mem.Allocator, kind: []const u8) !f.Fixture {
     return out;
 }
 
-test "DeepSeek chat: missing Jinja uses the committed encoding.py text goldens" {
+test "DeepSeek chat: missing Jinja uses the committed text goldens, V4.1's expected and V4's expected_v4" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var tmp = try fixture(a, "deepseek_v4");
-    defer tmp.deinit();
-    var problem: []const u8 = "";
-    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
-    defer hf.deinit();
     const lines = try std.Io.Dir.cwd().readFileAlloc(t.io, "zig/src/families/deepseek_v41/fixtures/serve/template.jsonl", a, .limited(4 << 20));
-    var it = std.mem.splitScalar(u8, lines, '\n');
-    var checked: usize = 0;
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        const c = (try json.parseText(a, line)).ok;
-        if (c.get("error").? != .null or !c.get("drop_thinking").?.bool or c.get("response_format").? != .null or c.get("image_text").? != .null) continue;
-        const thinking = c.get("thinking").?.bool;
-        var opts: @import("model_text.zig").RenderOptions = .{
-            .enable_thinking = thinking,
-            .add_generation_prompt = c.get("generation").?.bool,
-            .reasoning_effort = if (thinking) try json.stringify(a, c.get("budget").?, .{}) else null,
-        };
-        if (c.get("effort_field")) |effort| opts.reasoning_effort = switch (effort) {
-            .string, .int => |s| s,
-            else => unreachable,
-        };
-        if (c.get("tools")) |tools| if (tools == .array) {
-            opts.tools = tools;
-        };
-        const got = try hf.text().render(a, c.get("messages").?, opts, &problem);
-        try t.expectEqualStrings(c.get("expected").?.string, got.text);
-        checked += 1;
+    for ([_][]const u8{ "deepseek_v41", "deepseek_v4" }) |kind| {
+        var tmp = try fixture(a, kind);
+        defer tmp.deinit();
+        var problem: []const u8 = "";
+        const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+        defer hf.deinit();
+        const v4 = std.mem.eql(u8, kind, "deepseek_v4");
+        var it = std.mem.splitScalar(u8, lines, '\n');
+        var checked: usize = 0;
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            const c = (try json.parseText(a, line)).ok;
+            if (c.get("error").? != .null or !c.get("drop_thinking").?.bool or c.get("response_format").? != .null or c.get("image_text").? != .null) continue;
+            const thinking = c.get("thinking").?.bool;
+            var opts: @import("model_text.zig").RenderOptions = .{
+                .enable_thinking = thinking,
+                .add_generation_prompt = c.get("generation").?.bool,
+                .reasoning_effort = if (thinking) try json.stringify(a, c.get("budget").?, .{}) else null,
+            };
+            if (c.get("effort_field")) |effort| opts.reasoning_effort = switch (effort) {
+                .string, .int => |s| s,
+                else => unreachable,
+            };
+            if (c.get("tools")) |tools| if (tools == .array) {
+                opts.tools = tools;
+            };
+            const got = try hf.text().render(a, c.get("messages").?, opts, &problem);
+            const want = if (v4) c.get("expected_v4") orelse c.get("expected").? else c.get("expected").?;
+            try t.expectEqualStrings(want.string, got.text);
+            checked += 1;
+        }
+        try t.expectEqual(@as(usize, 178), checked);
     }
-    try t.expect(checked >= 20);
-    try t.expectEqual(@as(usize, 178), checked);
 }
 
 test "DeepSeek chat: native request control spellings stay masked and structural tokens stay trusted" {

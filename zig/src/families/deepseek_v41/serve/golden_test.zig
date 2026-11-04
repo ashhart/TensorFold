@@ -114,8 +114,59 @@ fn imageText(ctx: ?*anyopaque, _: json.Value) []const u8 {
     return s.*;
 }
 
-/// Each line of a gen_template.py golden rendered here: equal text, or a refusal where the reference refused.
-fn checkTemplates(lines: []const u8) !void {
+const Case = struct { got: template.Error![]u8, problem: template.Problem };
+
+/// One golden line rendered with its own flags: DeepSeek-V4.1's rendering (`recipe`), else V4's.
+fn renderCase(a: std.mem.Allocator, c: json.Value, recipe: bool, efforts: *usize) !Case {
+    const image_text = try a.create([]const u8);
+    image_text.* = "";
+    var opts: template.Options = .{
+        .thinking = c.get("thinking").?.bool,
+        .budget = template.budgetOf(c.get("budget").?) orelse 0,
+        .drop_thinking = c.get("drop_thinking").?.bool,
+        .add_generation_prompt = c.get("generation").?.bool,
+        .recipe = recipe,
+    };
+    if (c.get("effort_field")) |field| {
+        // the request's reasoning_effort resolved here, as the server resolves it; V4's must give the app's choice
+        const text: []const u8 = switch (field) {
+            .string, .int => |t| t,
+            else => unreachable,
+        };
+        const level = template.effortOf(text) orelse return error.TestUnexpectedRefusal;
+        opts.thinking = level != null;
+        opts.budget = level orelse 75;
+        if (!recipe) try testing.expectEqual(c.get("thinking").?.bool, opts.thinking);
+        efforts.* += @intFromBool(!recipe);
+    }
+    if (c.get("tools")) |t| if (t == .array) {
+        opts.tools = t.array;
+    };
+    if (c.get("response_format")) |rf| if (rf != .null) {
+        opts.response_format = rf;
+    };
+    if (c.get("image_text")) |t| if (t == .string) {
+        image_text.* = t.string;
+        opts.image = .{ .ctx = @ptrCast(image_text), .text = imageText };
+    };
+    var out: Case = .{ .got = undefined, .problem = .{} };
+    out.got = template.render(a, c.get("messages").?, opts, &out.problem);
+    return out;
+}
+
+fn report(case: usize, mode: []const u8, want: json.Value, c: json.Value, r: Case) void {
+    std.debug.print("template case {d} differs ({s}, {s})\n", .{ case, mode, if (want == .string) "want text" else c.get("error").?.string });
+    if (r.got) |g| {
+        if (want == .string) {
+            var k: usize = 0;
+            while (k < @min(g.len, want.string.len) and g[k] == want.string[k]) k += 1;
+            std.debug.print("  at byte {d}:\n  want {f}\n  got  {f}\n", .{ k, std.json.fmt(want.string[k..@min(want.string.len, k + 160)], .{}), std.json.fmt(g[k..@min(g.len, k + 160)], .{}) });
+        }
+    } else |_| std.debug.print("  refused: {s}\n", .{r.problem.message});
+}
+
+/// Each golden line: `expected` as DeepSeek-V4.1 renders it, `expected_v4` (else `expected`) as V4; `out` gets V4.1.s.
+fn checkTemplates(lines: []const u8, out: ?*std.Io.Writer) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var it = std.mem.splitScalar(u8, lines, '\n');
@@ -129,68 +180,36 @@ fn checkTemplates(lines: []const u8) !void {
         const a = arena.allocator();
         const c = (try json.parseText(a, line)).ok;
         cases += 1;
-        var image_text: []const u8 = "";
-        var opts: template.Options = .{
-            .thinking = c.get("thinking").?.bool,
-            .budget = template.budgetOf(c.get("budget").?) orelse 0,
-            .drop_thinking = c.get("drop_thinking").?.bool,
-            .add_generation_prompt = c.get("generation").?.bool,
-        };
-        if (c.get("effort_field")) |field| {
-            // the request's reasoning_effort resolved here, as the server resolves it, must give the app's choice
-            const text: []const u8 = switch (field) {
-                .string, .int => |t| t,
-                else => unreachable,
-            };
-            const level = template.effortOf(text) orelse return error.TestUnexpectedRefusal;
-            opts.thinking = level != null;
-            opts.budget = level orelse 75;
-            try testing.expectEqual(c.get("thinking").?.bool, opts.thinking);
-            efforts += 1;
-        }
-        if (c.get("tools")) |t| if (t == .array) {
-            opts.tools = t.array;
-        };
-        if (c.get("response_format")) |rf| if (rf != .null) {
-            opts.response_format = rf;
-        };
-        if (c.get("image_text")) |t| if (t == .string) {
-            image_text = t.string;
-            opts.image = .{ .ctx = @ptrCast(&image_text), .text = imageText };
-        };
-        var problem: template.Problem = .{};
-        const got = template.render(a, c.get("messages").?, opts, &problem);
-        const want = c.get("expected").?;
-        const ok = if (want == .string) (if (got) |g| std.mem.eql(u8, g, want.string) else |_| false) else (if (got) |_| false else |e| e == error.Refused);
         if (c.get("jinja")) |j| if (j == .string) {
             jinja += 1;
         };
-        if (!ok) {
+        for ([_]bool{ true, false }) |recipe| {
+            const r = try renderCase(a, c, recipe, &efforts);
+            const want = if (recipe) c.get("expected").? else c.get("expected_v4") orelse c.get("expected").?;
+            if (recipe) if (out) |w| try w.print("{f}\n", .{std.json.fmt(.{ .text = r.got catch null, .problem = r.problem.message }, .{})});
+            const ok = if (want == .string) (if (r.got) |g| std.mem.eql(u8, g, want.string) else |_| false) else (if (r.got) |_| false else |e| e == error.Refused);
+            if (ok) continue;
             bad += 1;
-            if (bad <= 3) {
-                std.debug.print("template case {d} differs ({s})\n", .{ cases - 1, if (want == .string) "want text" else c.get("error").?.string });
-                if (got) |g| {
-                    if (want == .string) {
-                        var k: usize = 0;
-                        while (k < @min(g.len, want.string.len) and g[k] == want.string[k]) k += 1;
-                        std.debug.print("  at byte {d}:\n  want {f}\n  got  {f}\n", .{ k, std.json.fmt(want.string[k..@min(want.string.len, k + 160)], .{}), std.json.fmt(g[k..@min(g.len, k + 160)], .{}) });
-                    }
-                } else |_| std.debug.print("  refused: {s}\n", .{problem.message});
-            }
+            if (bad <= 3) report(cases - 1, if (recipe) "DeepSeek-V4.1" else "DeepSeek-V4", want, c, r);
         }
     }
-    if (bad > 0 or env("TF_DSV41_GOLDEN") != null) std.debug.print("template golden: {d}/{d} equal to encoding.encode ({d} reasoning_effort values resolved as app.options does; {d} also the release chat_template.jinja's text)\n", .{ cases - bad, cases, efforts, jinja });
+    if (bad > 0 or env("TF_DSV41_GOLDEN") != null) std.debug.print("template golden: {d} differences in {d} cases, V4.1 and V4 ({d} reasoning_effort values resolved as app.options does; {d} also the release chat_template.jinja's text)\n", .{ bad, cases, efforts, jinja });
     try testing.expectEqual(@as(usize, 0), bad);
 }
 
-test "the chat encoding renders the committed conversations as the Python engine and the release template do" {
-    try checkTemplates(@import("dsv41_serve_fixtures").template);
+test "the chat encoding renders the committed conversations as DeepSeek-V4.1 and as V4" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const path = env("TF_DSV41_TEMPLATE_OUT"); // tools/zig/dsv41_template_golden.py rewrites the golden from it
+    const checked = checkTemplates(@import("dsv41_serve_fixtures").template, if (path != null) &out.writer else null);
+    if (path) |p| try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = p, .data = out.written() });
+    try checked;
 }
 
 test "the chat encoding renders the full generated set (TF_DSV41_GOLDEN/template.jsonl)" {
     const data = try readGolden(testing.allocator, "template.jsonl") orelse return error.SkipZigTest;
     defer testing.allocator.free(data);
-    try checkTemplates(data);
+    try checkTemplates(data, null);
 }
 
 const tools = @import("tools.zig");

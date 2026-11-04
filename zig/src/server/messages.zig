@@ -35,6 +35,8 @@ pub const Media = struct {
     pdfs: bool = false,
     image_type: []const u8 = "image_url", // the part type the template reads (Vision.part_type)
     max_images: u32 = 50,
+    /// The native DeepSeek-V4.1 encoder reads the messages (Server.dsv41): DeepSeek's own shapes reach it.
+    dsv41: bool = false,
 
     pub fn of(v: ?api.Vision) Media {
         return ofVision(v, false);

@@ -24,6 +24,7 @@ pub const HfText = struct {
     tok: tokenizer.Tokenizer,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    recipe: bool = false, // a native DeepSeek-V4.1 (not V4) checkpoint: DeepSeek's own Chat Completions rendering
     clear_thinking: ?bool = null, // GLM-5.3's, given to its template on every render (``glmClearThinking``)
     tool_source: []const u8 = "",
     compiled: ?template.Compiled = null,
@@ -59,6 +60,7 @@ pub const HfText = struct {
         if (model_config == .object) if (model_config.object.get("model_type")) |kind| {
             t.native_deepseek = template_override == null and kind == .string and
                 (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
+            t.recipe = t.native_deepseek and std.mem.eql(u8, kind.string, "deepseek_v41");
             if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) {
                 const value = if (std.c.getenv(clear_thinking_env)) |v| std.mem.span(v) else null;
                 t.clear_thinking = glmClearThinking(value) orelse {
@@ -322,12 +324,13 @@ pub const HfText = struct {
 
     fn sourceFn(ctx: *anyopaque) []const u8 {
         const t = self(ctx);
-        const source = if (t.native_deepseek and t.compiled == null) "enable_thinking thinking_mode reasoning_effort [\"none\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"] " ++ dsv41.BOS ++ dsv41.USER ++ dsv41.ASSISTANT ++ dsv41.CALLS_OPEN else t.source;
+        const native = "enable_thinking thinking_mode reasoning_effort [\"none\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \"max\"] " ++ dsv41.BOS ++ dsv41.USER ++ dsv41.ASSISTANT ++ dsv41.CALLS_OPEN;
+        const source = if (t.native_deepseek and t.compiled == null) (if (t.recipe and t.tool_compiled == null) native ++ " " ++ dsv41.RECIPE_TAG else native) else t.source;
         return if (t.tool_source.len > 0) std.mem.concat(t.arena.allocator(), u8, &.{ source, " ", t.tool_source }) catch source else source;
     }
 
-    fn renderDeepseek(_: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
-        var opts: dsv41.Options = .{ .thinking = options.enable_thinking, .add_generation_prompt = options.add_generation_prompt };
+    fn renderDeepseek(t: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
+        var opts: dsv41.Options = .{ .thinking = options.enable_thinking, .add_generation_prompt = options.add_generation_prompt, .recipe = t.recipe };
         if (options.tools) |tools| {
             if (tools != .array) {
                 problem.* = "tools must be a list";
