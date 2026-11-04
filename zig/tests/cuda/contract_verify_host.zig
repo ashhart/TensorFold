@@ -173,6 +173,7 @@ test "verify contract: the actual replacement producer really runs 32 separate o
     d.api.cuStreamSynchronize = Baseline.sync;
     d.api.cuMemcpyDtoH_v2 = Baseline.copy;
     var a: cuda.qlinear.Affine4Kernels = undefined;
+    a.mlp128 = false;
     a.pdl = false;
     a.split = null;
     a.group_fn = .{ .d = &d, .handle = @ptrFromInt(2) };
@@ -206,6 +207,7 @@ test "verify contract: both compiled device controls really truncate the new lau
     d.api.cuLaunchKernel = Baseline.launch;
     d.api.cuStreamSynchronize = Baseline.sync;
     var a: cuda.qlinear.Affine4Kernels = undefined;
+    a.mlp128 = false;
     a.pdl = false;
     a.verify_fn = .{ .d = &d, .handle = @ptrFromInt(2) };
     for ([_]mm.Kind{ .verify32_bits, .verify32_fp64 }) |kind| {
