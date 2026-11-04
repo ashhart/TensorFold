@@ -40,9 +40,12 @@ fn kinds(a: std.mem.Allocator, f: Family, o: std.json.ObjectMap) ![]const u8 {
     errdefer a.free(out);
     if (o.get(p.types)) |v| {
         if (v != .array or v.array.items.len != count) return error.BadConfig;
-        for (v.array.items, out) |v_, *kind| {
+        const interval: ?usize = if (o.get(p.interval) != null) families.intField(o, p.interval) orelse return error.ConflictingLayerPattern else null;
+        if (interval == 0) return error.ConflictingLayerPattern;
+        for (v.array.items, out, 0..) |v_, *kind, i| {
             if (v_ != .string) return error.BadConfig;
             kind.* = if (std.mem.eql(u8, v_.string, p.linear)) 'M' else if (std.mem.eql(u8, v_.string, p.attention)) '*' else return error.BadConfig;
+            if (interval) |n| if ((kind.* == '*') != ((i + 1) % n == 0)) return error.ConflictingLayerPattern;
         }
     } else {
         const interval = if (o.get(p.interval) != null) families.intField(o, p.interval) orelse return error.BadConfig else p.default_interval;

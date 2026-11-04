@@ -63,6 +63,12 @@ pub fn slideWidths(a: Allocator, io: std.Io, dir: []const u8, f: living.Family) 
     if (doc != .object) return null;
     const mismatch = living.widths.other(a, f, doc.object) catch |e| switch (e) {
         error.NoWidthDescription => return e,
+        error.ConflictingLayerPattern => {
+            const pattern = f.widths.?.pattern.?;
+            const scope = f.keys.scope orelse "";
+            const dot: []const u8 = if (scope.len == 0) "" else ".";
+            return try std.fmt.allocPrint(a, "--slide: {s}{s}{s} conflicts with {s}{s}{s}", .{ scope, dot, pattern.types, scope, dot, pattern.interval });
+        },
         else => return null,
     };
     const m = mismatch orelse return null;
@@ -83,4 +89,20 @@ test "Metal learner: a family's declarations register it, without a model-name a
     try std.testing.expect(!R.supports("missing"));
     try std.testing.expect(!R.supports("unknown"));
     try std.testing.expect(R.supports("future"));
+}
+
+test "Metal learner: conflicting dense mixer declarations are a named admission refusal" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = "{\"text_config\":{\"num_hidden_layers\":4,\"layer_types\":[\"linear_attention\",\"linear_attention\",\"linear_attention\",\"full_attention\"],\"full_attention_interval\":2},\"quantization\":{\"bits\":4,\"group_size\":64,\"mode\":\"affine\"}}";
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = bytes });
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    const why = try slideWidths(a, t.io, dir, living.families.qwen3_5);
+    try t.expect(why != null);
+    try t.expect(std.mem.indexOf(u8, why.?, "text_config.layer_types") != null);
+    try t.expect(std.mem.indexOf(u8, why.?, "text_config.full_attention_interval") != null);
 }

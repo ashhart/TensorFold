@@ -3,6 +3,7 @@ const std = @import("std");
 const t = std.testing;
 const widths = @import("widths.zig");
 const family = @import("families.zig").qwen3_5;
+// TensorFold/Qwen3.8-27B-MLX-4bit@70ae7fac63274ff2eac54152031433374cb80f2f (Hugging Face config.json).
 const config = @embedFile("testdata/qwen27-mlx-config.json");
 fn root(a: std.mem.Allocator) !std.json.ObjectMap {
     return (try std.json.parseFromSliceLeaky(std.json.Value, a, config, .{})).object;
@@ -67,19 +68,36 @@ test "Dense Qwen widths: MTP, vision and the other mixer kind are not served mat
     for ([_][]const u8{ "language_model.mtp.layers.0.mlp.gate_proj", "vision_tower.blocks.0.attn.qkv", "language_model.model.layers.0.self_attn.q_proj", "language_model.model.layers.3.linear_attn.in_proj_a", "language_model.model.layers.64.mlp.gate_proj" }) |name| try override(a, &doc, name, 8, 64);
     try t.expect((try widths.other(a, family, doc)) == null);
 }
-test "Dense Qwen widths: explicit layer types precede interval and missing types use the native default" {
+test "Dense Qwen widths: matching explicit declarations and native interval fallbacks keep served widths" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var doc = try root(a);
     const text = &doc.getPtr("text_config").?.object;
-    try text.put(a, "full_attention_interval", .{ .integer = 1 });
+    try text.put(a, "full_attention_interval", .{ .integer = 4 });
     try override(a, &doc, "language_model.model.layers.0.self_attn.q_proj", 8, 64);
     try t.expect((try widths.other(a, family, doc)) == null);
     try t.expect(text.swapRemove("layer_types"));
+    try t.expect((try widths.other(a, family, doc)) == null);
+    try text.put(a, "full_attention_interval", .{ .integer = 1 });
     try t.expectEqualStrings("language_model.model.layers.0.self_attn.q_proj", (try widths.other(a, family, doc)).?.name);
     try t.expect(text.swapRemove("full_attention_interval"));
     try t.expect((try widths.other(a, family, doc)) == null);
     try override(a, &doc, "language_model.model.layers.3.self_attn.o_proj", 4, 128);
     try t.expectEqualStrings("language_model.model.layers.3.self_attn.o_proj", (try widths.other(a, family, doc)).?.name);
+}
+
+test "Dense Qwen widths: explicit mixer kinds and a supplied interval must agree" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var doc = try root(a);
+    const text = &doc.getPtr("text_config").?.object;
+    try t.expect((try widths.other(a, family, doc)) == null);
+    for ([_]i64{ 1, 2, 3, 5, 0, -1 }) |n| {
+        try text.put(a, "full_attention_interval", .{ .integer = n });
+        try t.expectError(error.ConflictingLayerPattern, widths.other(a, family, doc));
+    }
+    try text.put(a, "full_attention_interval", .{ .string = "4" });
+    try t.expectError(error.ConflictingLayerPattern, widths.other(a, family, doc));
 }
