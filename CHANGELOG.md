@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 decode on HIP reads the BF16 router rows the model already holds, with the same tokens. Thanks @AbrahamCete.
+
 - Qwen3.5 prompts on HIP run the residual add and post-mixer norm in one launch, with the same bytes. Thanks @AbrahamCete.
 
 - GLM-5.3-Flash on CUDA loads block 32's image only for a `csf0_v1` checkpoint, and refuses a row past 0x7E by name on every rank. Thanks @Bizuayeu.
