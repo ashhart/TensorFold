@@ -106,6 +106,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             var text: std.ArrayList(u8) = .empty;
             var parts: std.ArrayList(Value) = .empty; // with images: text and image parts in order
             var has_image = false;
+            var texts: usize = 0;
             for (content.?.array) |part| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
                 // an image part, or one this normalization already wrote with the template's type (it runs twice)
@@ -139,6 +140,8 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                 if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
+                if (media.dsv41 and texts > 0) try text.appendSlice(cx.a, "\n\n"); // DeepSeek's blank line between parts
+                texts += 1;
                 try text.appendSlice(cx.a, t.string);
                 if (images) {
                     const tp = try json.newObject(cx.a);
@@ -389,4 +392,13 @@ test "a latest_reminder turn reaches DeepSeek-V4.1's own encoder only; other tem
     try std.testing.expectError(error.Refused, normalize(&cx, messages, "system", false));
     const out = try normalizeWith(&cx, messages, "system", false, .{ .dsv41 = true });
     try std.testing.expectEqualStrings("latest_reminder", out.array[1].get("role").?.string);
+}
+
+test "text parts join with a blank line for DeepSeek-V4.1's encoder and run on for other templates" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a, "[{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"a\"}, {\"type\": \"text\", \"text\": \"b\"}]}]")).ok;
+    try std.testing.expectEqualStrings("ab", (try normalize(&cx, messages, "system", false)).array[0].get("content").?.string);
+    try std.testing.expectEqualStrings("a\n\nb", (try normalizeWith(&cx, messages, "system", false, .{ .dsv41 = true })).array[0].get("content").?.string);
 }
