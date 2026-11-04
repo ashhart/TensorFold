@@ -39,7 +39,4 @@ pub const kept = [_]Kept{
         180, 184, 188, 191, 198, 202, 220, 231, 234, 237, 243, 249, 259, 265, 268, 279, 281, 288, 297, 299,
     } },
     .{ .class = "ultra", .why = "reasoning_effort ultra is refused: DeepSeek's endpoint takes it, but no record shows the budget it renders", .efforts = &.{ "ultra" } },
-    .{ .class = "T2", .why = "a conversation ending in an assistant turn: DeepSeek appends the generation prompt", .waits = 2141, .ids = &.{
-        0, 1, 2, 3, 17, 23, 28, 58, 59, 91, 109, 120, 124, 125, 165, 207, 221, 226, 240, 244, 256, 264, 295, 298,
-    } },
 };

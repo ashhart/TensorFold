@@ -497,7 +497,9 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
         // DeepSeek's reminder comes before the next turn's marker: its assistant turn opens itself
         if (next) |n| if (n != .assistant and (n != .latest_reminder or o.recipe)) continue;
         if (next == null and !o.add_generation_prompt and m.role != .assistant) continue;
-        if (m.role == .user or (m.role == .system and idx > 0) or (o.recipe and m.role == .latest_reminder and next == null)) {
+        // DeepSeek's prompt is always a request: a closing assistant turn is followed by the generation prompt too
+        const closes = o.recipe and next == null and o.add_generation_prompt and (m.role == .latest_reminder or m.role == .assistant);
+        if (m.role == .user or (m.role == .system and idx > 0) or closes) {
             opened = true;
             try r.put(ASSISTANT);
             const open = if (o.recipe and next == .assistant) thinking and !drop else thinking and (!drop or last == null or idx >= last.?);
