@@ -29,7 +29,7 @@ pub fn cut(r: pc.Rules, len: usize, from: u32, end: u32, user: u32, starts: []co
     return if (at > user and at > from and at < end and at <= limit) at else 0;
 }
 
-fn same(s: *const pc.Store, e: *const pc.Entry, prompt: []const u32, at: u32, lookahead: u32, spans: []const modes.Span) bool {
+pub fn same(s: *const pc.Store, e: *const pc.Entry, prompt: []const u32, at: u32, lookahead: u32, spans: []const modes.Span) bool {
     return !e.expired and e.at == at and e.tokens.len == @as(usize, at) + lookahead and
         e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and
         modes.equal(e.decode_spans, spans, at) and @import("cache_images.zig").matches(s, e);

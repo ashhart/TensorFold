@@ -1,6 +1,7 @@
 //! A CUDA family's prompt cache in the native server: rules, budget and copies from the family's `snap_*` decls.
 const std = @import("std");
 const api = @import("engine_api");
+const env = @import("sys").env;
 
 /// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet, snap_fork, snap_tail.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
@@ -135,6 +136,20 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
         try std.testing.expect(cacheRules(Tail).tail == on and passRules(Tail, 2048).tail == on);
     }
     try std.testing.expect(!cacheRules(Other).tail);
+}
+
+test "the ladder stays off unless TF_PROMPT_INTERMEDIATE is set" {
+    const Ladder = struct {
+        pub const snap_intermediate: u32 = 8192;
+        pub const snap_intermediate_most: u8 = 4;
+    };
+    _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    _ = env.setenv("TF_PROMPT_INTERMEDIATE", "0", 1);
+    defer _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    _ = env.setenv("TF_PROMPT_INTERMEDIATE", "1", 1);
+    try std.testing.expectEqual(@as(u32, 8192), passRules(Ladder, 512).intermediate);
 }
 
 test {
