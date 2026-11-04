@@ -255,7 +255,7 @@ pub fn spec(p: Params) c.Spec {
         .depth = if (sums) depthSums else depthNone,
         .ops = if (sums) 3 else 2,
         .out = .bf16,
-        .in_place = true,
+        .in_place = false,
         .tiles = .{
             .{ .size = 8, .step = 8, .min = 8 },
             .{ .size = hidden, .step = hidden, .min = hidden },
