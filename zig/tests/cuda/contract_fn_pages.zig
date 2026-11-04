@@ -28,8 +28,15 @@ const row_kv = kv_heads * head_dim;
 const slot_elems = 2 * row_kv + index_dim + index_dim / ratio;
 
 /// Two streams' cached positions, the rows each adds, positions a page, the slot the layer takes and slots a page.
-pub const Case = struct { lens: [2]usize, rows: usize, ptok: usize, slot: usize, slots: usize, image: ?media.Spec = null };
-pub const cases = [_]Case{
+pub const Case = struct { lens: [2]usize, rows: usize, ptok: usize, slot: usize, slots: usize, image: ?media.Spec = null, planes: bool = false };
+/// Every case twice: through one page table, and through the host tier's two planes (ips, ipt: the PgP launches).
+pub const cases = one_plane ++ two_planes();
+fn two_planes() [one_plane.len]Case {
+    var out = one_plane;
+    for (&out) |*c| c.planes = true;
+    return out;
+}
+const one_plane = [_]Case{
     .{ .lens = .{ 0, 3 }, .rows = 1, .ptok = 16, .slot = 1, .slots = 12 }, // a stream's first key
     .{ .lens = .{ 127, 128 }, .rows = 16, .ptok = 32, .slot = 1, .slots = 12 }, // a verify window over page edges
     .{ .lens = .{ 700, 33 }, .rows = 40, .ptok = 48, .slot = 0, .slots = 12 }, // a page no 512-key chunk divides
@@ -319,7 +326,14 @@ pub fn launch(gpu: check.Gpu, s: cuda.Stream, g: *const flash.Glue, select: cuda
             .pl = try rig.scratch(att_rows * nch * q_heads * 4),
             .ao = try rig.output(n * out_k * 2),
         };
-        if (given orelse placed) |t| pages[st] = .{ .pt = try rig.input(std.mem.sliceAsBytes(t[st])), .ps = @intCast(f.pageElems()), .ptok = @intCast(f.c.ptok) };
+        if (given orelse placed) |t| {
+            const table = try rig.input(std.mem.sliceAsBytes(t[st]));
+            pages[st] = .{ .pt = table, .ps = @intCast(f.pageElems()), .ptok = @intCast(f.c.ptok) };
+            if (f.c.planes) {
+                pages[st].ips = @intCast(f.pageElems());
+                pages[st].ipt = table;
+            }
+        }
     }
     var images: [2]?media.View = .{ null, null };
     if (f.image) |im| for (0..2) |st| {
@@ -465,7 +479,7 @@ test "paged media contract: prompt, verify and sparse rows cover image spans, pa
             for (spans) |span| crossing = crossing or span.at / c.ptok != (span.at + span.tokens() - 1) / c.ptok;
         }
     };
-    try std.testing.expectEqual(@as(usize, 6), count);
+    try std.testing.expectEqual(@as(usize, 12), count); // each of the six media cases through one plane and through two
     try std.testing.expect(crossing and suffix and sparse and fused and decode and partial);
     for (sizes) |present| try std.testing.expect(present);
 }

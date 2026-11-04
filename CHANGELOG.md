@@ -79,6 +79,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on HIP advises random access over the n-gram table's mapped tensors, so a gather's scattered single-row reads fault only their own pages instead of whole readahead windows: the first request after start decodes at 35.8 tok/s instead of 24.4, and a cold 7K-token prompt starts in 28.9 s instead of 48.4 s on a Strix Halo (gfx1151), with every reply token-equal (#1615, fixes #1602, thanks @gilby).
 
+- Flash Next's opt-in EXL3 host K/V tier admits the bounded device working set, frees the pinned store on failed kernel load, refuses non-EXL3 scratch before allocation, takes TP rank from its collective and rejects snapshot restoration while another lease pins its pages. The lane host's single ledger uses the active pool directly, without copying ownership (#1522).
+
 - CUDA resource checks use measured NVCC 13.4 register counts for paged Flash Next preparation, retaining earlier compiler receipts and unchanged launch bounds.
 
 - EXL3 attention and MTP caches can use the existing core K/V page pool through opt-in `TF_FLASHNEXT_KV_PAGES`; paging remains off by default (#1444).
