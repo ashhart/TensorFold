@@ -11,6 +11,7 @@ const tool_specs = @import("tool_specs.zig");
 const HfText = @import("hf_text.zig").HfText;
 const Server = @import("server.zig").Server;
 const kept = @import("deepseek_recipe_kept.zig").kept;
+const Kept = @import("deepseek_recipe_kept.zig").Kept;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 const t = std.testing;
@@ -162,20 +163,22 @@ pub fn agrees(want: Value, got: Outcome) bool {
     };
 }
 
-/// The kept class listing case `id`, or null.
-fn keptFor(id: usize) ?usize {
-    for (kept, 0..) |k, i| for (k.ids) |x| if (x == id) return i;
+/// An outcome's pin: the first 8 bytes (big-endian) of SHA-256 over "text" or "refused", a zero byte, its bytes.
+pub fn pinOf(got: Outcome) u64 {
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    h.update(@tagName(got));
+    h.update("\x00");
+    h.update(switch (got) {
+        inline else => |s| s,
+    });
+    const digest = h.finalResult();
+    return std.mem.readInt(u64, digest[0..8], .big);
+}
+
+/// The kept class listing case `id` and the pin it lists, or null.
+fn keptFor(id: usize) ?struct { Kept, u64 } {
+    for (kept) |k| for (k.cases) |c| if (c[0] == id) return .{ k, c[1] };
     return null;
-}
-
-fn className(i: usize) []const u8 {
-    for (kept, 0..) |k, j| if (j == i) return k.class;
-    unreachable;
-}
-
-fn waits(i: usize) ?u16 {
-    for (kept, 0..) |k, j| if (j == i) return k.waits;
-    unreachable;
 }
 
 fn show(id: usize, want: Value, got: Outcome) void {
@@ -211,19 +214,27 @@ fn run(report: ?*std.Io.Writer) !usize {
         const want = c.get("prompt").?;
         const id = cases;
         cases += 1;
-        if (report) |w| try w.print("{f}\n", .{std.json.fmt(.{ .id = id, .text = if (got == .text) got.text else null, .refused = if (got == .refused) got.refused else null }, .{})});
+        const pin = pinOf(got);
+        if (report) |w| try w.print("{f}\n", .{std.json.fmt(.{ .id = id, .text = if (got == .text) got.text else null, .refused = if (got == .refused) got.refused else null, .pin = try std.fmt.allocPrint(a, "0x{x:0>16}", .{pin}) }, .{})});
         const listed = keptFor(id);
         const chat_ok = c.get("chat_ok").? == .bool and c.get("chat_ok").?.bool;
         if (agrees(want, got)) {
             equal += 1;
-            if (listed) |k| {
+            if (listed) |l| {
                 bad += 1;
-                std.debug.print("case {d} now agrees: take it off kept class {s}\n", .{ id, className(k) });
+                std.debug.print("case {d} now agrees: take it off kept class {s}\n", .{ id, l[0].class });
             }
-        } else if (listed) |k| {
-            if (chat_ok and waits(k) == null) {
+        } else if (listed) |l| {
+            const k = l[0];
+            if (chat_ok and k.waits == null) {
                 bad += 1;
-                std.debug.print("case {d}: DeepSeek's endpoint takes it, so class {s} cannot keep it\n", .{ id, className(k) });
+                std.debug.print("case {d}: DeepSeek's endpoint takes it, so class {s} cannot keep it\n", .{ id, k.class });
+            } else if (k.refuses != (got == .refused)) {
+                bad += 1;
+                std.debug.print("case {d}: class {s} keeps a {s}, but the server {s} now\n", .{ id, k.class, if (k.refuses) "refusal" else "rendering", if (k.refuses) "renders it" else "refuses it" });
+            } else if (pin != l[1]) {
+                bad += 1;
+                std.debug.print("case {d} (class {s}): the server's {s} changed, pin 0x{x:0>16} now 0x{x:0>16}\n", .{ id, k.class, if (got == .refused) "refusal" else "text", l[1], pin });
             }
         } else {
             bad += 1;
@@ -290,9 +301,13 @@ test "DeepSeek recipe: every reasoning_effort DeepSeek's endpoint takes resolves
         if (!right) std.debug.print("reasoning_effort {s} (thinking by default {}): want {s}, got {f}\n", .{ name, c.get("default_thinking").?.bool, want orelse "thinking off", std.json.fmt(text[0..@min(text.len, 120)], .{}) });
     }
     try t.expectEqual(@as(usize, 14), checked);
-    // a kept name no record covers stays refused
-    const ultra = try effortProbe(a, served.srv, .{ .string = "ultra" }, .{ .bool = true });
-    try t.expect(keptEffort("ultra") == null or ultra == .refused);
+    // a kept refusal of a name no record covers stays refused
+    for (kept) |k| for (k.efforts) |name| if (k.refuses) {
+        const got = try effortProbe(a, served.srv, .{ .string = name }, .{ .bool = true });
+        if (got == .refused) continue;
+        bad += 1;
+        std.debug.print("reasoning_effort {s}: class {s} keeps a refusal, but the server renders it now\n", .{ name, k.class });
+    };
     try t.expectEqual(@as(usize, 0), bad);
 }
 
@@ -317,8 +332,10 @@ test "DeepSeek recipe: the fixture is whole, a case the recipe refuses has no pr
     try t.expectEqual(@as(usize, 78), chat);
     try t.expect(agrees(.null, .{ .refused = "x" }) and !agrees(.{ .string = "x" }, .{ .refused = "x" }));
     var seen: std.StaticBitSet(case_count) = .empty;
-    for (kept) |k| for (k.ids) |id| {
-        try t.expect(id < case_count and !seen.isSet(id));
-        seen.set(id);
+    for (kept) |k| for (k.cases) |c| {
+        try t.expect(c[0] < case_count and !seen.isSet(c[0]));
+        seen.set(c[0]);
     };
+    // a pin tells a refusal from a text with the same bytes
+    try t.expect(pinOf(.{ .text = "x" }) != pinOf(.{ .refused = "x" }));
 }
