@@ -34,6 +34,11 @@ pub const TAP_ROW: usize = taps_mod.layers.len * D * 2; // bytes of one row's ta
 /// Device bytes a stream's context ring takes (K and V of every layer).
 pub const ring_bytes: u64 = LAYERS * 2 * @as(u64, @intCast(WIN)) * KVW * 2;
 
+/// taps_prefill's rows: a prompt pass's taps whole (TF_GLM_CHUNK_SOLO: two chunks); an ingest keeps its window's.
+pub fn tapRows(prompt_rows: usize) usize {
+    return @max(MAX_CTX, prompt_rows);
+}
+
 /// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
 pub fn confidence() f64 {
     const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
@@ -109,6 +114,7 @@ pub const Drafter = struct {
     rank: usize,
     world: usize,
     temp: f64 = 1.0, // the selector's softmax temperature for the drafts' chances
+    tap_rows: usize = MAX_CTX, // taps_prefill's rows (tapRows of the engine's prompt buffers)
     scratch: cuda.DeviceBuffer = undefined,
     slots: std.ArrayList(Slot) = .empty,
     verifies: u64 = 0, // verifies so far: a slot's rows are still in taps_step while its v_step is the latest
@@ -307,10 +313,10 @@ pub const Drafter = struct {
     }
 };
 
-/// Prompt context retained in the window; row0 is only a tap-buffer offset, never a sequence position.
-pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, row0: usize) !?Run {
+/// Prompt context retained in the window; row0 is a tap-buffer offset, not a position; cap is that buffer's rows.
+pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, row0: usize, cap: usize) !?Run {
     if (start > len or rows > len - start) return error.BadPromptContext;
-    if (rows > MAX_CTX or row0 > MAX_CTX - rows) return error.DrafterContextTooWide;
+    if (rows > cap or row0 > cap - rows) return error.DrafterContextTooWide;
     const keep_from = len -| @as(usize, @intCast(WIN));
     if (start + rows <= keep_from) return null;
     const lo = keep_from -| start;
@@ -319,6 +325,6 @@ pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, ro
 
 pub fn ingestPrompt(dr: anytype, e: anytype, i: u32, start: usize, rows: usize, len: usize, row0: usize) !void {
     const s = try dr.slot(i);
-    const run = (try promptRun(s.ring.?.ptr, dr.taps_prefill, start, rows, len, row0)) orelse return;
+    const run = (try promptRun(s.ring.?.ptr, dr.taps_prefill, start, rows, len, row0, dr.tap_rows)) orelse return;
     try dr.ingest(e, &.{run});
 }
