@@ -274,12 +274,7 @@ pub const Family = struct {
 pub const Precision = enum { checkpoint, full };
 
 /// The control vector a serve applies to the residual stream (--glp).
-pub const Glp = struct {
-    /// The file's vector: one direction per layer, the mode and the checkpoint it was derived from.
-    vector: glp.Vector,
-    /// The strength in force: --glp-alpha, or the file's own alpha_default.
-    alpha: f32,
-};
+pub const Glp = glp.Glp;
 
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
