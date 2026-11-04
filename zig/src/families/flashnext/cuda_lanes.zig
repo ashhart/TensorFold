@@ -118,8 +118,7 @@ pub fn Namespace(comptime Tri: type) type {
         }
 
         pub fn healthy(ptr: *anyopaque) bool {
-            if (of(ptr).ranks) |r| return r.healthy();
-            return true;
+            return if (of(ptr).ranks) |r| r.healthy() else true;
         }
 
         pub fn benchmark(ptr: *anyopaque) struct { ranks: ?u32, group: ?[]const u8 } {
@@ -127,12 +126,7 @@ pub fn Namespace(comptime Tri: type) type {
             return .{ .ranks = if (r != null) 2 else 1, .group = if (r) |s| s.benchmark_group else null };
         }
 
-        pub fn rankRoom(ptr: *anyopaque, local: u64) !u64 {
-            const own = of(ptr);
-            const room = @import("exl3/pack/exl3_startup_memory.zig").laneRoom(local, own.graph_reservation);
-            if (own.ranks) |r| return if (own.exl3) @import("exl3/kv/cuda_exl3_kv.zig").rankRoom(r, room, own.stream_bytes) else r.room(room);
-            return room;
-        }
+        pub const rankRoom = @import("exl3/kv/cuda_exl3_kv.zig").RankRoom(of).call;
 
         /// A request this engine refuses, in words; with no engine (cuda.zig's open), a load it refuses.
         pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
@@ -244,6 +238,7 @@ pub fn Namespace(comptime Tri: type) type {
             /// With the head: chains of up to 16 rows cut by its confidence, copies of up to 32; else one-row rounds.
             pub fn facts(self: *const Cuda) lanes.Model {
                 const drafting = self.head != null;
+                const guarded = drafting and @import("exl3/model/cuda_exl3_pass.zig").offloaded(self.engine);
                 return .{
                     .exact_width = if (drafting) mtp.max_rows else 2,
                     .first_copy_rows = if (drafting) mtp.max_chain + 1 else 0,
@@ -259,6 +254,8 @@ pub fn Namespace(comptime Tri: type) type {
                     .max_streams = round_streams,
                     // a shared round's streams draft in one head pass a step (lanes_draft.batched)
                     .draft_streams = drafting and lanes_draft.batchHeads(),
+                    .plain_guard = guarded,
+                    .rate_guard = guarded,
                 };
             }
 
@@ -489,7 +486,7 @@ pub fn Namespace(comptime Tri: type) type {
                 if (w.held != 0 or w.parents != null) return error.HeldDraftsNotBuilt;
                 const l = try self.lane(w.stream);
                 const rows = w.rows();
-                if (l.draft != null) {
+                if (l.draft != null and !(try lanes_draft.plainRound(self, l, w))) {
                     if (rows > mtp.max_rows) return error.WindowTooWide;
                     for (w.positions, 0..) |p, r| if (p != l.seq.fed + 1 + r) return error.PositionMismatch;
                     row_ids[wi][0] = w.pending;
@@ -523,7 +520,7 @@ pub fn Namespace(comptime Tri: type) type {
                 if (path.len == 0 or path.len > w.rows()) return error.CannotRewind;
                 for (path, 0..) |r, i| if (r != i) return error.CannotRewind;
                 const l = try self.lane(w.stream);
-                if (l.draft) |*d| try self.ops().rollback(&l.seq, d, path.len) else if (path.len != w.rows()) return error.CannotRewind;
+                if (l.draft) |*d| try lanes_draft.rewind(self, &l.seq, d, path.len) else if (path.len != w.rows()) return error.CannotRewind;
             }
         }
 
@@ -538,10 +535,11 @@ pub fn Namespace(comptime Tri: type) type {
             for (requests, 0..) |r, ri| {
                 if (ri < batched.len and batched[ri]) continue;
                 if (r.lanes != null) return error.TreesNotBuilt;
+                if (try lanes_draft.deferred(self, r)) continue;
                 const l = try self.lane(r.stream);
                 const d = if (l.draft) |*x| x else return error.NoDraftHead;
                 // the window's kept rows: rollback is idempotent, so a later keep finds it done
-                if (r.rows) |path| try self.ops().rollback(&l.seq, d, path.len) else {
+                if (r.rows) |path| try lanes_draft.rewind(self, &l.seq, d, path.len) else {
                     if (d.open) try self.ops().rollback(&l.seq, d, d.rows);
                 }
                 if (r.position != l.seq.fed + 1) return error.PositionMismatch;

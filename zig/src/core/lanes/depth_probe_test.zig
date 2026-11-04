@@ -167,3 +167,26 @@ test "shared depth probe: every eighth grant adds at most one row and rotates st
     }
     for (seen) |s| try t.expect(s);
 }
+
+test "a copy ahead: one head draft beside it, or none when the head's drafts cost a pass of their own" {
+    const empty: @import("table.zig").Table = .{};
+    const Yes = struct {
+        fn copy(_: *anyopaque, _: *const depth.Who) bool {
+            return true;
+        }
+    };
+    var unused: u8 = 0;
+    const probe: depth.Probe = .{ .ptr = &unused, .copy = Yes.copy };
+    var st: ?depth.State = null;
+    defer if (st) |*x| x.deinit(std.testing.allocator);
+    const who: depth.Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false, .granted = 3 };
+    for ([_]bool{ false, true }) |first| {
+        var rule: depth.Rule = .{ .gpa = std.testing.allocator, .k = .{ .copy_first = first }, .prior = &.{0.8}, .most_drafts = 9, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = true, .granted_depth = true, .batch_rows = 32 };
+        defer rule.deinit();
+        try std.testing.expectEqual(@as(i64, @intFromBool(!first)), try rule.headDepth(&who, null, probe));
+        var out: [1]i64 = undefined;
+        var whos = [_]depth.Who{who};
+        try rule.budgets(&whos, probe, false, &out);
+        try std.testing.expectEqual(@as(i64, @intFromBool(!first)), out[0]);
+    }
+}

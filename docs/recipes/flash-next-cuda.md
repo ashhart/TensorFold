@@ -169,6 +169,17 @@ expert placement and reduction. Three shared Flash Next changes also apply to NV
 - Snapshot-reuse warnings report invalid marks or missing head state for either format. NVFP4's existing
   refusal of TP snapshots with drafts remains; EXL3 can retain the rank-0 head cache.
 
+### EXL3 plain-round guard
+
+Only an EXL3 pack with offloaded experts and an MTP head enables the core's plain-versus-drafted rate guard.
+Other Flash Next formats retain their existing draft policy. Each stream learns from completed-round tokens and
+times, excluding its first prefill-to-decode round. A shared round runs plain only when every stream prefers it;
+otherwise the streams draft together. Bounded probes let drafting recover after plain rounds have won.
+
+A plain round can omit the head's hidden rows until a probe needs them. Retained deferred head rows are flushed
+before drafting again or saving a snapshot. The core still owns verification and token draws; exact-head
+draft/plain, concurrent/solo and timing qualification is required before treating this path as validated.
+
 ## What the core runs and what the family runs
 
 The family plugs into the core's pieces and adds no scheduler:

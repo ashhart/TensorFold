@@ -138,3 +138,15 @@ pub fn rankRoom(r: anytype, local: u64, stream_bytes: usize) !u64 {
     const m = try r.room(q);
     return (m >> 16) * sb + ((m & 0xffff) * sb >> 16);
 }
+
+/// The lane's reserved budget, agreed in streams for EXL3 ranks and in bytes for other ranks.
+pub fn RankRoom(comptime of: anytype) type {
+    return struct {
+        pub fn call(ptr: *anyopaque, local: u64) !u64 {
+            const own = of(ptr);
+            const room = @import("../pack/exl3_startup_memory.zig").laneRoom(local, own.graph_reservation);
+            if (own.ranks) |r| return if (own.exl3) rankRoom(r, room, own.stream_bytes) else r.room(room);
+            return room;
+        }
+    };
+}
