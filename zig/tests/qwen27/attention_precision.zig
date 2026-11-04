@@ -102,6 +102,8 @@ pub fn main(init: std.process.Init) !void {
     var prompt = false;
     // --simd-prompt: the prompt chunks take the kernel chips before M5 run (attention_prompt_sg), here
     var simd_prompt = false;
+    // --plant: -Inf in a value of each case's last key; the rows before it must not see it, so they stay finite
+    var plant = false;
     var heads: u32 = 24;
     var kv_heads: u32 = 4;
     var i: usize = 1;
@@ -110,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--prompt")) prompt = true else if (std.mem.eql(u8, arg, "--simd-prompt")) {
             prompt = true;
             simd_prompt = true;
-        } else if (i + 1 < args.len and std.mem.eql(u8, arg, "--heads")) {
+        } else if (std.mem.eql(u8, arg, "--plant")) plant = true else if (i + 1 < args.len and std.mem.eql(u8, arg, "--heads")) {
             i += 1;
             heads = try std.fmt.parseInt(u32, args[i], 10);
         } else if (i + 1 < args.len and std.mem.eql(u8, arg, "--kv-heads")) {
@@ -169,6 +171,10 @@ pub fn main(init: std.process.Init) !void {
             if (pass == 0) {
                 for (query.slice(u16, c.rows * heads * dim)) |*x| x.* = rng.bf16(width);
             }
+            const planted = (c.start + c.rows - 1) * dim + 7; // KV head 0, dim 7
+            const kept = values.slice(u16, cache_bytes / 2)[planted];
+            if (plant and c.rows > 1) values.slice(u16, cache_bytes / 2)[planted] = 0xff80;
+            defer values.slice(u16, cache_bytes / 2)[planted] = kept;
             // the window's own key and value are the cache's rows at its positions, so appending them changes nothing
             for (0..c.rows) |r| for (0..kv_heads) |g| {
                 const at = (g * capacity + c.start + r) * dim;
@@ -191,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
                 return error.GpuFailed;
             }
             const got = out.slice(u16, c.rows * heads * dim);
-            for (0..c.rows) |r| {
+            for (0..c.rows - @intFromBool(plant and c.rows > 1)) |r| {
                 const position = c.start + @as(u32, @intCast(r));
                 const t = if (prompt) (if (pass == 0) &kernel else &tree) else if (position < split_at) &below else &from;
                 t.bytes.update(std.mem.sliceAsBytes(got[r * heads * dim ..][0 .. heads * dim]));
