@@ -24,6 +24,8 @@ pub const Request = struct {
     added: []Value,
     store: bool,
     stream: bool,
+    /// The client's own name for the grammar field when ``text.format`` asked for a structure; null for plain text.
+    format: ?[]const u8 = null,
 };
 
 fn kindOf(v: Value) ?Value {
@@ -339,7 +341,8 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     const reasoning: Value = if (reasoning_raw != null and reasoning_raw.?.truthy()) reasoning_raw.? else .{ .object = try json.newObject(a) };
     if (reasoning != .object) return cx.refuse("reasoning must be an object");
     if (reasoning.field("effort")) |e| try chat.put(a, "reasoning_effort", e);
-    if (try format(cx, body.get("text"))) |f| try chat.put(a, "response_format", f);
+    const rf = try format(cx, body.get("text"));
+    if (rf) |f| try chat.put(a, "response_format", f);
     const echo = try json.newObject(a);
     try echo.put(a, "instructions", instructions orelse .null);
     try echo.put(a, "max_output_tokens", body.get("max_output_tokens") orelse .null);
@@ -371,7 +374,7 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     try echo.put(a, "truncation", .{ .string = "disabled" });
     try echo.put(a, "user", body.get("user") orelse .null);
     try echo.put(a, "background", .{ .bool = false });
-    return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream") };
+    return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream"), .format = if (rf != null) "text.format" else null };
 }
 
 test "input_file refuses remote file_url" {
