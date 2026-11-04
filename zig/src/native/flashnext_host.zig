@@ -439,13 +439,13 @@ pub fn openConfigured(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]cons
     };
     const vis: ?*images.Vision = if (vision) |o| try images.open(gpa, io, eng, dir, o, a, why) else null;
     errdefer if (vis) |v| v.deinit();
-    const h = try openWarmed(gpa, io, eng, window, cache_gib, over_cap, learn, eng.r.load_limit, vis, a, why);
+    const h = try openWarmed(gpa, io, dir, eng, window, cache_gib, over_cap, learn, eng.r.load_limit, vis, a, why);
     h.shared_gdn_pipe = shared_gdn_pipe;
     return h;
 }
 
 /// Takes a warmed engine and its image tower, if any, without loading or warming; the caller keeps both on error.
-pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over_cap: bool, learn: ?Learn, limit: ?u64, vis: ?*images.Vision, a: Allocator, why: *[]const u8) !*Host {
+pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, window: i64, cache_gib: ?f64, over_cap: bool, learn: ?Learn, limit: ?u64, vis: ?*images.Vision, a: Allocator, why: *[]const u8) !*Host {
     const cache_plan = try cache_setup.cacheBudget(eng, cache_gib, over_cap, limit, a, why);
     const budget = cache_plan.budget_bytes;
     eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
@@ -472,9 +472,9 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
     if (learn) |l| if (l.conversations) {
-        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l);
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l);
     } else {
-        h.learned = try cache_setup.learnedStates(gpa, io, eng, l.root, l.cap);
+        h.learned = try cache_setup.learnedStates(gpa, io, dir, eng, l.root, l.cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;
     };
     errdefer if (h.learned) |*m| m.deinit();

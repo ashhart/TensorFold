@@ -97,12 +97,16 @@ pub fn identity(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u
 /// The identity's hash: the checkpoint, kernels, device, driver, a family's facts, then its probe's hash.
 pub fn identityOf(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, facts: []const u64, probed: u64, profile: disk_identity.Profile) !u64 {
     var h = std.hash.Wyhash.init(0x6375);
+    try @import("sys").file_identity.current(&h, a, io);
     try disk_identity.checkpoint(&h, a, io, dir);
     inline for (comptime std.meta.declarations(cuda.kernels)) |d| {
         const v = @field(cuda.kernels, d);
         if (comptime @TypeOf(v) == []const u8) h.update(v);
     }
-    if (kernels) |k| h.update(try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ k, "aot.json" }), a, .limited(1 << 26)));
+    if (kernels) |k| {
+        const captured = try cuda.aot.identity.hash(a, io, k);
+        h.update(std.mem.asBytes(&captured));
+    }
     var name_buf: [256]u8 = undefined;
     h.update(g.name(&name_buf) catch "GPU");
     const device = [_]u64{ try g.capability(), @intCast(try g.d.version()) };
