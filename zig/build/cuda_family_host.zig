@@ -41,6 +41,11 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));
     b.step("test-qwen35-attention-path-host", "Contiguous and paged CUDA attention selection and graph identity without devices").dependOn(&attention.step);
     step.dependOn(&attention.step);
+    const pages_filter = &.{"Qwen pages default:"};
+    const pages_default = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = pages_filter }));
+    const pages_about = "TF_QWEN_KV_PAGES and _ALL unset as on main, --parallel a cap only with pages";
+    b.step("test-qwen35-pages-default-host", pages_about).dependOn(&pages_default.step);
+    step.dependOn(&pages_default.step);
     const prompt_layout = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen prompt layout:"} }));
     b.step("test-qwen35-prompt-layout-host", "Actual whole and paged CUDA prompt ABI and stride calculations without devices").dependOn(&prompt_layout.step);
     step.dependOn(&prompt_layout.step);
