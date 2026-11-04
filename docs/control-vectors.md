@@ -396,6 +396,24 @@ tf-qwen27-steer-derive --model DIR --out FILE \
 the strength does, as it was measured. A vector is published on its own, as a
 file; it is not committed to this repository, and the code that writes it is.
 
+### The published file
+
+The vector is published as a file of its own, and this repository holds the code
+that writes it and the numbers that identify it, not the file.
+
+| | |
+| --- | --- |
+| File | `Qwen3.8-27B-refusal-cvec-GLP-49-L10-58-a1.gguf` |
+| Directions digest | `9a50f7160fa2f0a41e7fa868c791d372b0a374f9365cc98c25d52abe96ce9d8d` (`glp.content_sha256`) |
+| Layers | 10 to 58, zero-based, 49 of them |
+| Base model | `TensorFold/Qwen3.8-27B-MLX-4bit` at `22d8d538` |
+| Licence | Apache-2.0, the licence of the code that derived it |
+
+The directions are reproducible: the producer writes the same ones from the same
+checkpoint and the same prompt set, and only the timestamps in the file differ.
+The digest is over the tensor bytes, so it is the same for every derivation of
+this vector, and it is the number to compare a file against.
+
 ## The integration test
 
 A file that one implementation accepts has to mean the same thing to another.
