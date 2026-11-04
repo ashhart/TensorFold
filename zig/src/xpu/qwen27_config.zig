@@ -1,4 +1,4 @@
-//! The XPU runner's fixed Qwen3.8-27B shape and layer pattern, checked against the checkpoint's config.json at load.
+//! The XPU runner's fixed Qwen3.8-27B shape and layer pattern, checked at load against config.json when there is one.
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
 
@@ -31,12 +31,12 @@ pub fn check(gpa: std.mem.Allocator, json: []const u8) !void {
     for (full[0..layers], 0..) |f, i| if (f != isAttention(i)) return error.UnsupportedLayerPattern;
 }
 
-/// `check` of `dir`/config.json, read whole (at most 16 MiB).
+/// `check` of `dir`/config.json, read whole (at most 16 MiB); a folder without one keeps the fixed schedule unchecked.
 pub fn admit(gpa: std.mem.Allocator, dir: []const u8) !void {
     const path = try std.fmt.allocPrintSentinel(gpa, "{s}/config.json", .{dir}, 0);
     defer gpa.free(path);
     const fd = std.c.open(path.ptr, .{});
-    if (fd < 0) return error.MissingQwenConfig;
+    if (fd < 0) return if (std.c.errno(fd) == .NOENT) {} else error.ReadFailed;
     defer _ = std.c.close(fd);
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(gpa);
@@ -81,14 +81,48 @@ test "another shape or schedule is refused, and a contradiction by the shared re
     try t.expectError(error.BadQwenConfig, check(t.allocator, "[]"));
 }
 
-test "admit reads the folder's config.json; a folder without one is refused" {
+/// `tmp`'s path from the test's working directory.
+fn tmpPath(tmp: std.testing.TmpDir) ![]u8 {
+    return std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+}
+
+test "admit: a folder without config.json, Hadamard-rotated or not, keeps the fixed every-fourth schedule unchecked" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const dir = try tmpPath(tmp);
     defer t.allocator.free(dir);
-    try t.expectError(error.MissingQwenConfig, admit(t.allocator, dir));
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = config(types(4)) });
     try admit(t.allocator, dir);
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = config(types(2)) });
-    try t.expectError(error.UnsupportedLayerPattern, admit(t.allocator, dir));
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "hadamard128", .data = "" });
+    try admit(t.allocator, dir);
+    for (0..layers) |i| try t.expectEqual((i + 1) % 4 == 0, isAttention(i));
+}
+
+test "admit: a config.json of the runner's shape and schedule is admitted" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmpPath(tmp);
+    defer t.allocator.free(dir);
+    for ([_][]const u8{ config(""), config(types(4)), config(types(4) ++ ",\"full_attention_interval\":4") }) |json| {
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = json });
+        try admit(t.allocator, dir);
+    }
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "hadamard128", .data = "" });
+    try admit(t.allocator, dir);
+}
+
+test "admit: a config.json of another shape or schedule is refused" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmpPath(tmp);
+    defer t.allocator.free(dir);
+    const nine = "{\"text_config\":{\"hidden_size\":4096,\"intermediate_size\":12288,\"num_hidden_layers\":32,\"vocab_size\":248320}}";
+    for ([_]struct { []const u8, anyerror }{
+        .{ config(types(2)), error.UnsupportedLayerPattern },
+        .{ config(",\"full_attention_interval\":8"), error.UnsupportedLayerPattern },
+        .{ config(types(4) ++ ",\"full_attention_interval\":4.5"), error.BadFullAttentionInterval },
+        .{ nine, error.UnsupportedQwenShape },
+    }) |case| {
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = case[0] });
+        try t.expectError(case[1], admit(t.allocator, dir));
+    }
 }
