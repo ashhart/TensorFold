@@ -101,6 +101,12 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.kb.admits(prompt, max_tokens);
 }
 
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.kb.pool) |*pool| pool else null;
+}
+
 /// Physical positions include the verification reserve, in whole 1,024s; the served window is unchanged.
 fn positions(context: usize) !usize {
     return limits.capacity(context);

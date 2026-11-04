@@ -125,6 +125,12 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return pg.fits(prompt, max_tokens);
 }
 
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    return if (l.pages) |pg| &pg.pool else null;
+}
+
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;

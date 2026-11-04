@@ -32,6 +32,13 @@ pub fn watchOf(comptime F: type, loaded: anytype, paged: ?Plan) Watch {
     return .{ .mode = .paged, .src = src };
 }
 
+/// The pool whose promises the lane host's ledger admits: the watched one, or the one a family names (`ledgerPool`).
+pub fn ledgerPool(comptime F: type, loaded: anytype) ?*kv_pool.Pool {
+    if (comptime @hasDecl(F, "kvPool")) if (F.kvPool(loaded.ctx)) |src| return src.pool;
+    if (comptime @hasDecl(F, "ledgerPool")) return F.ledgerPool(loaded.ctx);
+    return null;
+}
+
 /// The lane host's capacity source and the pool's first census, before the engine thread owns the pool.
 pub fn install(w: *Watch, lane: *api.LaneHost) void {
     const mode = w.mode orelse return;

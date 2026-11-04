@@ -15,6 +15,7 @@ pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
+pub const kv_ledger = @import("kv_ledger.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;

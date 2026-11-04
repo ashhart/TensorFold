@@ -90,6 +90,12 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.lanes.fits(prompt, max_tokens);
 }
 
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.pages) |pg| &pg.pool else null;
+}
+
 /// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
 pub fn linked(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
     return core.shard_edit.linked(arena, io, dir);
