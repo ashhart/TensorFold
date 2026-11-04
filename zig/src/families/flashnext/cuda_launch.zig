@@ -26,8 +26,9 @@ pub const moe = @import("cuda_moe.zig");
 pub const attn = @import("cuda_attn.zig");
 pub const ple = @import("cuda_ple.zig");
 pub const ple_check = @import("cuda_ple_check.zig");
-/// An EXL3 pack's n-gram table (cuda_ple.Ngram's `.exl3` format)
+/// An EXL3 pack's n-gram table and draft head rows (cuda_ple.Ngram's `.exl3` format, cuda_mtp_load.draft's EXL3 branch)
 pub const exl3_ple = @import("exl3/model/cuda_exl3_ple.zig");
+pub const exl3_mtp = @import("exl3/tp/cuda_exl3_mtp.zig");
 /// The canonical expert reduction's host reference for the leaf-tree and finish contract kernels.
 pub const exl3_canon = @import("exl3/tp/exl3_canon.zig");
 pub const mix = @import("cuda_mix.zig");
@@ -480,6 +481,7 @@ test {
     _ = row_path;
     _ = @import("cuda_mtp_check.zig");
     _ = @import("cuda_draft_affine.zig");
+    _ = @import("exl3/tp/cuda_exl3_mtp.zig");
     _ = @import("cuda_head.zig");
     _ = @import("cuda_heads.zig");
     _ = @import("cuda_batch_kernels.zig");
@@ -490,7 +492,9 @@ test {
     _ = @import("living.zig");
 }
 
-test "exl3: dispatch host contracts" {
+test "exl3: greedy verification host contracts" {
+    _ = @import("cuda_mtp_ops.zig");
+    _ = @import("cuda_mtp_draft.zig");
     _ = @import("exl3/model/cuda_exl3_dispatch_test.zig");
 }
 

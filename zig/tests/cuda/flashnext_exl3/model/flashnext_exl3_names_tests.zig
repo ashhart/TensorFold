@@ -194,7 +194,8 @@ pub fn names(gpu: Gpu, dir: []const u8) !void {
     const gib = 1024.0 * 1024.0 * 1024.0;
     const on_host = try X.memory.deviceBytes(gpa, gpu.io, dir, .{});
     const resident = try X.memory.deviceBytes(gpa, gpu.io, dir, .{ .routed_on_host = false });
-    std.debug.print("  device bytes: {d:.2} GiB with routed experts on the host, {d:.2} GiB all resident\n", .{ @as(f64, @floatFromInt(on_host)) / gib, @as(f64, @floatFromInt(resident)) / gib });
+    const head = try X.memory.headBytes(gpa, gpu.io, dir, .{});
+    std.debug.print("  device bytes: {d:.2} GiB with routed experts on the host, {d:.2} GiB all resident; MTP head {d:.2} GiB (routed on the host)\n", .{ @as(f64, @floatFromInt(on_host)) / gib, @as(f64, @floatFromInt(resident)) / gib, @as(f64, @floatFromInt(head)) / gib });
     check.pass("names: every tensor the family reads resolves ({d}), nothing unclaimed but {d} vision tensors; {d} EXL3 matrices admitted; {d} F16 weights widened exactly", .{ n.claimed.count(), vision, n.matrices, n.widened });
 }
 

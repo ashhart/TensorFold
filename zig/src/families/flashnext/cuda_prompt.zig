@@ -119,6 +119,10 @@ pub const Engine = struct {
     /// The pass's scratch, grown to the widest chunk run.
     batch_s: ?batch.Scratch = null,
     scratch_format: @import("cuda_batch_state.zig").ScratchFormat = .classic,
+    /// The decoder's projections are EXL3's whatever the scratch format (cuda_exl3_kv.setup).
+    exl3_lanes: bool = false,
+    /// Local head staging bound for this engine, fixed before its first scratch allocation.
+    head_local_rows: usize = std.math.maxInt(usize),
     /// Block scores for the sparse rows of an attention block, grown to the longest sequence's need.
     scores: ?cuda.DeviceBuffer = null,
     /// Rows a batched chunk takes at most: TF_FLASHNEXT_CHUNK_SOLO if set, else TF_FLASHNEXT_CHUNK (cuda_chunk.zig).
@@ -156,6 +160,8 @@ pub const Engine = struct {
         e.stream = stream;
         e.n_layers = 0;
         e.scratch_format = .classic;
+        e.exl3_lanes = false;
+        e.head_local_rows = std.math.maxInt(usize);
         e.collective = null;
         e.image_factory = null;
         e.telemetry = cache_telemetry.State.fromEnv(rank, world);
@@ -390,7 +396,8 @@ pub const Engine = struct {
     /// The scratch's sizes for `rows`: the format, head_local's rows and whether the lane reduces through native_part.
     pub fn scratchSizes(e: *const Engine, rows: usize) @import("cuda_batch_state.zig").Sizes {
         const one = @import("cuda_batch_state.zig").head_rows_one;
-        return .{ .format = e.scratch_format, .head_rows = if (e.collective != null) @max(rows, one) else one, .lane_reduce = !e.batch_k.native_lane.clusters };
+        const classic = if (e.collective != null) @max(rows, one) else one;
+        return .{ .exl3_lanes = e.exl3_lanes, .format = e.scratch_format, .head_rows = @min(rows, @min(classic, e.head_local_rows)), .lane_reduce = !e.batch_k.native_lane.clusters };
     }
 
     /// The batched pass over `ids` from `seq.fed` in chunks of at most `chunk` rows; a window's hooks take one chunk.
