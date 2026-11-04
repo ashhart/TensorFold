@@ -25,7 +25,8 @@ Direct `one` callers remain responsible for cleanup.
 - Its served envelope: the shapes the engine calls it at, and for each dimension its tile, the step a valid size
   moves by and the least valid size.
 - Its accumulator (`f32` where a kernel sums) and the depth of its longest chain of roundings at a shape, plus any
-  fp32 operations after the sums (`ops`) and intermediate roundings to the output type (`mids`).
+  fp32 operations after the sums (`ops`), intermediate roundings to the output type (`mids`), and the precision it
+  stores at when that is narrower than the output's element (`store`: bf16 values in fp32 words).
 - Whether it may write in place. If it replaces another kernel, the kernel whose bits it must equal.
 - Its NaN rule: `propagate` (as float64 arithmetic on its formula does), or a stated rule the test checks itself
   (top-k, argmax, sampling and routing kernels state theirs).
