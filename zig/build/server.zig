@@ -73,6 +73,16 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
+    recipeConformance(b, server);
+}
+
+/// deepseek-recipe's prompt text against the server's render path; opt-in, outside `test`, while differences remain.
+fn recipeConformance(b: *std.Build, server: *std.Build.Module) void {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/server/deepseek_recipe_test.zig"), .target = server.resolved_target, .optimize = server.optimize, .link_libc = true });
+    for (server.import_table.keys(), server.import_table.values()) |name, module| m.addImport(name, module);
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"DeepSeek recipe:"} }));
+    run.has_side_effects = true;
+    b.step("test-dsrecipe-host", "DeepSeek-V4.1 prompts from deepseek-recipe through the server's render path").dependOn(&run.step);
 }
 
 /// The server tree's module rooted at `root` over no native engines: the fake server's, or a test among its sources.
