@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: with `TF_GLM_CHUNK_SOLO=4096` and `TF_GLM_ROCE_MULTI=1` both set and `TF_GLM_OVERLAP_PIECES` unset, a prompt chunk's exchanges go in 8 pieces instead of 3, so a cold prompt's first token comes about 5% sooner at TP=3 with the same tokens. Every other combination keeps 3, a set `TF_GLM_OVERLAP_PIECES` still wins, and rank 0 prints the count at startup (#2116).
+
 - GLM on CUDA at TP=2 with `TF_KV_PAGES=on` and `TF_GLM_KV_HOST=1`: a prompt chunk's MTP pass reads the pooled keys at the device stride, so a long first prompt no longer faults (#2173, fixes #2119). Thanks to @Bizuayeu.
 
 - HIP: the OCR families share one host protocol, with the same replies (#2040). Thanks to @laudney.
