@@ -77,7 +77,7 @@ pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
     const data = try a.alloc(Value, srv.config.model_ids.len);
-    const thinks = srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0;
+    const thinks = srv.info.reasoning and (srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0);
     const reasoning: ?Value = if (thinks)
         try reasoningValue(a, srv.config.enable_thinking, srv.thinking_switch, srv.effortFor(null), srv.effort_levels)
     else
@@ -102,7 +102,7 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reason
         try m.put(a, "context_length", try json.intValue(a, info.context_window));
         try m.put(a, "max_model_len", try json.intValue(a, info.context_window));
     }
-    if (reasoning) |r| try m.put(a, "reasoning", r);
+    if (info.reasoning) if (reasoning) |r| try m.put(a, "reasoning", r);
     return .{ .object = m };
 }
 
@@ -371,4 +371,17 @@ test "stats snapshot's memory carries a configured limit and omits none" {
     const without = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .peak = 9 }, 0, 0, 0, 0, 0);
     // no limit configured: the key stays out
     try std.testing.expect(without.object.get("memory").?.object.get("limit") == null);
+}
+
+test "model discovery respects the loaded engine's reasoning refusal despite template markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const template = try reasoningValue(a, true, true, "low", &.{ "low", "high" });
+    for ([_][]const u8{ "ocr", "scorer", "alias" }) |id| {
+        const loaded = try modelValue(a, id, .{ .reasoning = false }, 0, template);
+        try std.testing.expect(loaded.get("reasoning") == null);
+    }
+    const text = try modelValue(a, "text", .{ .reasoning = true }, 0, template);
+    try std.testing.expect(text.get("reasoning").?.get("default_enabled").?.bool);
 }
