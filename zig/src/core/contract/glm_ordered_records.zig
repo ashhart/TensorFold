@@ -1,4 +1,4 @@
-//! Ordered GLM launches; M1/M2 compiled limits are pending, never copied from the predecessor source.
+//! Ordered GLM launches with fixed KDA limits compiled for M1 and M2.
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 // SIMD calls adapt to reflected limits; fixed KDA launches are admitted only after their load-time limit checks.
@@ -159,15 +159,21 @@ pub const records = [_]M{
     .{ .name = "simd_qmm_bits ordered tf_sqw_scalar_q8_32_1_2", .threads = 256, .tg_memory = 19456, .adapts = true },
     .{ .name = "simd_qmm_bits ordered tf_sqw_scalar_q8_32_2_1", .threads = 256, .tg_memory = 9728, .adapts = true },
     .{ .name = "simd_qmm_bits ordered tf_sqw_scalar_q8_32_2_2", .threads = 256, .tg_memory = 19456, .adapts = true },
-    .{ .name = "glm ordered kda glm_kda_prep", .threads = 128, .tg_memory = 0 },
-    .{ .name = "glm ordered kda glm_kda_scan", .threads = 512, .tg_memory = 18496 },
-    .{ .name = "glm ordered kda glm_kda_post", .threads = 32, .tg_memory = 0 },
+    .{ .name = "glm ordered kda glm_kda_prep", .threads = 128, .tg_memory = 0, .m1 = 832, .m2 = 832 },
+    .{ .name = "glm ordered kda glm_kda_scan", .threads = 512, .tg_memory = 18496, .m1 = 832, .m2 = 832 },
+    .{ .name = "glm ordered kda glm_kda_post", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
 };
 
 test "ordered GLM records enumerate every warmed SIMD variant and the three fixed KDA launches" {
     try std.testing.expectEqual(@as(usize, 159), records.len);
     for (records) |r| {
-        try std.testing.expect(r.m1 == 0 and r.m2 == 0);
+        if (r.adapts) {
+            try std.testing.expect(r.m1 == 0 and r.m2 == 0);
+        } else {
+            const cap: u32 = if (std.mem.endsWith(u8, r.name, "glm_kda_post")) 1024 else 832;
+            try std.testing.expectEqual(cap, r.m1);
+            try std.testing.expectEqual(cap, r.m2);
+        }
         var count: usize = 0;
         for (@import("registry.zig").all_metal) |live| {
             count += @intFromBool(std.mem.eql(u8, live.name, r.name));
