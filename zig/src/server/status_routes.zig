@@ -75,6 +75,7 @@ pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
+    const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
     const data = try a.alloc(Value, srv.config.model_ids.len);
     const thinks = srv.info.reasoning and (srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0);
@@ -83,7 +84,7 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
     else
         null;
     for (srv.config.model_ids, data) |id, *slot| {
-        slot.* = try modelValue(a, id, srv.info, created, reasoning);
+        slot.* = try modelValue(a, id, info, created, reasoning);
     }
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
