@@ -43,6 +43,7 @@ pub fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     joint.addImport("cuda", cuda);
     joint.addImport("core", core);
     qwen35.addImport("cuda_joint_schema", joint);
+    qwen35.addImport("stage", @import("stage.zig").module(b, target, optimize));
     qwen35.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} })); // core's prompt-cache types, the server's engine_api
     const qwen_vision = qwenVisionModule(b, target, optimize, cuda, core, lanes);
     qwen35.addImport("qwen_vision", qwen_vision);
@@ -138,6 +139,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     q35.addImport("core", mods.core);
     q35.addImport("qwen35", mods.qwen35);
     q35.addImport("lanes", mods.lanes);
+    q35.addImport("stage", mods.qwen35.import_table.get("stage").?);
     const q35_install = b.addInstallArtifact(b.addExecutable(.{ .name = "tf-qwen35-cuda", .root_module = q35 }), .{});
     b.getInstallStep().dependOn(&q35_install.step);
     b.step("qwen35-cuda", "Build the Qwen CUDA forward and raw state receipt tool").dependOn(&q35_install.step);

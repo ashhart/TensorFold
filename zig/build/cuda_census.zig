@@ -2,7 +2,7 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda_target: std.Build.ResolvedTarget, check_cuda: *std.Build.Module, qwen35: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, flashnext: *std.Build.Module) void {
-    const rounds_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen35_cuda_main.zig"), .target = cuda_target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = check_cuda }, .{ .name = "qwen35", .module = qwen35 }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
+    const rounds_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen35_cuda_main.zig"), .target = cuda_target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = check_cuda }, .{ .name = "qwen35", .module = qwen35 }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "stage", .module = qwen35.import_table.get("stage").? } } });
     const rounds_compile = b.addObject(.{ .name = "qwen35-rounds-checker-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_rounds_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "tool", .module = rounds_tool }} }) });
     _ = rounds_compile.getEmittedBin();
     b.step("compile-qwen35-rounds-host", "Compile the real CUDA 64-row checker for Linux, no images or execution").dependOn(&rounds_compile.step);
