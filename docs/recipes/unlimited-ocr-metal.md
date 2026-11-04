@@ -32,7 +32,7 @@ reasoning block; the reply is always `content`.
   `--vision-image-tokens` the budget lets every page take gundam's widest grid (2,033 tokens a page).
 - **Decoding.** Greedy, under the publisher's page guard: the reply ends after the last page's text. A request
   without `max_tokens` may use all the room its pages leave in the context, as the publisher's `infer` does.
-- **Streams.** One request at a time; a second waits for the first.
+- **Streams.** One request at a time; a second waits for the first. A `--parallel` above 1 is refused.
 
 ## Memory
 

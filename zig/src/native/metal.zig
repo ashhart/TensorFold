@@ -426,6 +426,7 @@ test {
     _ = @import("qwen27_landing.zig");
     _ = spill;
     _ = @import("metal_link.zig");
+    _ = @import("uocr.zig");
 }
 
 /// GLM-5.3-Flash's caches hold this many tokens unless --context asks otherwise (its window is 1,048,576).

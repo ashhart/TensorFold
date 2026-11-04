@@ -31,6 +31,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = why;
         return null;
     }
+    if (o.lanes_fixed and o.lanes > 1) {
+        problem.* = "Unlimited-OCR-2 serves one stream: serve it without --parallel";
+        return null;
+    }
     const vis_open = o.vision orelse {
         problem.* = "Unlimited-OCR-2 reads page images: serve it with --vision";
         return null;
@@ -68,4 +72,16 @@ fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_to
     const h: *Host = @ptrCast(@alignCast(ctx));
     const p = try h.model.prepare(a, bytes, max_tokens);
     return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
+}
+
+test "Unlimited-OCR-2 refuses a named --parallel above one before reading the checkpoint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    const asked: api.Open = .{ .dir = "missing", .model_type = "unlimited-ocr", .lanes = 4, .lanes_fixed = true };
+    try std.testing.expectEqual(null, try open(arena.allocator(), std.testing.allocator, std.testing.io, asked, &problem));
+    try std.testing.expectEqualStrings("Unlimited-OCR-2 serves one stream: serve it without --parallel", problem);
+    const one: api.Open = .{ .dir = "missing", .model_type = "unlimited-ocr", .lanes = 1, .lanes_fixed = true };
+    try std.testing.expectEqual(null, try open(arena.allocator(), std.testing.allocator, std.testing.io, one, &problem));
+    try std.testing.expectEqualStrings("Unlimited-OCR-2 reads page images: serve it with --vision", problem);
 }
