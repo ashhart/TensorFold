@@ -179,7 +179,7 @@ const sources = .{
     .{ "src/families/qwen3_5/cuda_modelopt.zig", 1 },
     .{ "src/families/qwen3_5/cuda_quant_admission_test.zig", 1 },
     .{ "src/families/qwen3_5/pocket_shards_test.zig", 1 },
-    .{ "src/families/qwen27/config_test.zig", 1 },
+    .{ "src/families/qwen27/config_test.zig", 2 }, // with #1125's Ornith-1.5-122B (qwen3_5_moe)
     .{ "src/families/qwen27/weights_test.zig", 1 },
     .{ "qwen35_formats_host.zig", 1 },
 };
@@ -267,7 +267,7 @@ test "qwen35 layers: real configs, each entry point admits the pattern its old r
             relaxed += @intFromBool(now == .pattern and was == .refused);
         }
     }
-    try t.expectEqual(@as(usize, 18), admitted); // (config, backend) pairs admitted, with HIP BF16 from #2046
+    try t.expectEqual(@as(usize, 20), admitted); // (config, backend) pairs, with #2046's HIP BF16 and #1125's Ornith
     try t.expectEqual(@as(usize, 0), relaxed); // none of the repo's configs is one the table newly admits
 }
 
