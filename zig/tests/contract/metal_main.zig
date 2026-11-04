@@ -25,6 +25,7 @@ const pair_controls = @import("metal_pair_controls.zig");
 const minimax_k = @import("metal_minimax.zig");
 const attn_k = @import("metal_q27_attn.zig");
 const io_k = @import("metal_q27_attn_io.zig");
+const q27_rows_k = @import("metal_q27_attn_rows.zig");
 const q27_moe = @import("metal_qwen27_moe.zig");
 const q27_rows = @import("metal_qwen27_moe_rows.zig");
 
@@ -514,6 +515,24 @@ pub fn main(init: std.process.Init) !u8 {
         try ios.append(a, x);
         try kernels.append(a, x.kernel());
     }
+    // qwen27 attention's decode and prompt rows at one Mac's head counts; prompt rows wherever the prompt kernel builds
+    var attn_rows: std.ArrayList(*q27_rows_k.Attn) = .empty;
+    defer {
+        for (attn_rows.items) |x| {
+            x.deinit();
+            a.destroy(x);
+        }
+        attn_rows.deinit(a);
+    }
+    for (q27_rows_k.heads) |h| for (std.enums.values(q27_rows_k.Which)) |w| {
+        const r: q27_rows_k.Reg = .{ .heads = h, .which = w, .units = tensor };
+        if (!wanted(o, q27_rows_k.spec(r).name)) continue;
+        const x = try a.create(q27_rows_k.Attn);
+        errdefer a.destroy(x);
+        x.* = try q27_rows_k.Attn.init(a, device, queue, r);
+        try attn_rows.append(a, x);
+        try kernels.append(a, x.kernel());
+    };
     var minimax: minimax_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer minimax.deinit();
     try minimax.collect(o.only);
