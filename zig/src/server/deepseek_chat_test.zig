@@ -85,13 +85,16 @@ test "DeepSeek chat: native request control spellings stay masked and structural
         }
         try t.expect(at > 0);
     }
-    try t.expect(std.mem.indexOf(u8, rendered.text, "<\u{200b}｜deepseek_image｜>") != null);
+    // DeepSeek-V4.1 keeps a typed image marker as written: request provenance keeps it ordinary text
+    try t.expect(std.mem.indexOf(u8, rendered.text, "U <｜Assistant｜> <｜deepseek_image｜>") != null);
     const ids = try rendered.encode(hf.text(), a, &problem);
     const user = hf.text().tokenId("<｜User｜>").?;
+    const image = hf.text().tokenId("<｜deepseek_image｜>").?;
     var users: usize = 0;
-    for (ids) |id| if (id == user) {
-        users += 1;
-    };
+    for (ids) |id| {
+        users += @intFromBool(id == user);
+        try t.expect(id != image);
+    }
     // The initial user turn and merged tool-result turn, never the spellings inside data.
     try t.expectEqual(@as(usize, 2), users);
 }

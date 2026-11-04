@@ -104,6 +104,7 @@ const R = struct {
     out: std.ArrayList(u8) = .empty,
     spans: std.ArrayList([2]usize) = .empty,
     track: bool = false,
+    escape: bool = true, // a typed image marker in request text gets a zero-width space (DeepSeek's own keeps it)
 
     fn refuse(r: *R, comptime fmt: []const u8, args: anytype) Error {
         r.problem.message = try std.fmt.allocPrint(r.a, fmt, args);
@@ -116,7 +117,7 @@ const R = struct {
 
     fn request(r: *R, s: []const u8) Allocator.Error!void {
         // Images are unsupported here; preserve the established plain-text image escape.
-        const escaped = if (std.mem.indexOf(u8, s, IMAGE) != null) try std.mem.replaceOwned(u8, r.a, s, IMAGE, IMAGE_ESCAPED) else null;
+        const escaped = if (r.escape and std.mem.indexOf(u8, s, IMAGE) != null) try std.mem.replaceOwned(u8, r.a, s, IMAGE, IMAGE_ESCAPED) else null;
         defer if (escaped) |bytes| r.a.free(bytes);
         const plain = escaped orelse s;
         const start = r.out.items.len;
@@ -426,7 +427,7 @@ pub fn renderProvenance(a: Allocator, messages: Value, o: Options, problem: *Pro
 }
 
 fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, track: bool) Error!Rendered {
-    var r: R = .{ .a = a, .problem = problem, .track = track };
+    var r: R = .{ .a = a, .problem = problem, .track = track, .escape = !o.recipe };
     errdefer r.out.deinit(a);
     errdefer r.spans.deinit(a);
     if (o.budget < 1 or o.budget > 100) return r.refuse("reasoning_effort must be 1-100 or low / medium / high / max", .{});
