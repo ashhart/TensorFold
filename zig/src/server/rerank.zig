@@ -7,6 +7,7 @@ const openai = @import("openai.zig");
 const http_body = @import("http_body.zig");
 const reply_text = @import("reply_text.zig");
 const model_text = @import("model_text.zig");
+const wait = @import("wait_reason.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -153,7 +154,7 @@ fn failed(srv: *Server, cx: *Cx) errors.Refused {
     return if (healthy(srv))
         cx.fail(.server, "rerank inference failed", .{})
     else
-        cx.fail(.capacity, "the rerank engine is unavailable", .{});
+        cx.wait(wait.engine_unavailable, "the rerank engine is unavailable", .{});
 }
 
 fn healthy(srv: *Server) bool {

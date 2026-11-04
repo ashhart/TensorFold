@@ -685,6 +685,21 @@ spent rate; with more than 128 keys starting requests within one refill, a furth
 `admission_accepted_total` and `admission_rejected_total` with a fixed `reason` label (`global_limit`, `key_limit`,
 `principal_capacity`, `rate_limit`). With none set, nothing is counted and the replies and metrics are as before.
 
+### Waits
+
+A retryable refusal on an inference route answers 503 and names its wait in the OpenAI-shaped body's `code`, from one fixed set:
+
+| Code | Meaning |
+| --- | --- |
+| `server_restarting` | The server is draining for a restart; the answer carries `Retry-After` |
+| `engine_loading` | A parked model is unloading or reloading; sending the request again drives it; `Retry-After` |
+| `engine_reload_failed` | A parked model's reload was attempted and failed; the next request tries again; `Retry-After` |
+| `engine_busy` | The engine had no room for this request (a busy engine, a full speech lane); send it again |
+| `engine_unavailable` | The engine is closed (for embeddings and rerank, also stale); retry after it reopens |
+| `memory_pressure` | The host is under critical memory pressure and takes no new request until it eases |
+
+A capacity refusal keeps the frozen Python engine's shape (`type` `invalid_request_error` and its message) and still carries no `Retry-After`; the code is native's addition. The Messages routes keep their Anthropic envelope, which has no code field, and the Sliding Weights learn/delete and imprint routes keep their own 503 bodies.
+
 ## Conversations on disk
 
 Use `--prompt-cache-disk DIR` to keep conversation prompt states on disk:
