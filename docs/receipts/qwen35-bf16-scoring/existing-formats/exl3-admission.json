@@ -4,8 +4,8 @@
     "repo": "UnstableLlama/Qwen3.5-27B-exl3-4.00bpw",
     "revision": "dc0df71be8810b51ed04eb43b51341f609a75fa2"
   },
-  "parent_commit": "b0b5beb8db0856091798123cf62dcdfaec1e0445",
-  "candidate_inference_source": "327ef639fb7dbc355f44b4a5efc53209a3e06543",
+  "parent_commit": "c5a3feefaa24315dd55600ff1490c10c5fb27036",
+  "candidate_inference_source": "ddb1f831724940801b7766a170c266a958141b18",
   "attempt_order": [
     "parent",
     "candidate",
