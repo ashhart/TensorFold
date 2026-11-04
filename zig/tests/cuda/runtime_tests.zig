@@ -25,6 +25,16 @@ pub fn smoke(gpu: Gpu) !void {
     try check.sameBytes("H2D, D2D, D2H round trip (1 MiB)", back, pattern);
     check.pass("blocking copies: 1 MiB host -> device -> device -> host equal", .{});
 
+    // Larger than one staged piece: the copy goes through in pieces and still lands whole.
+    const big_n: usize = 6 << 20;
+    var big = try cuda.DeviceBuffer.alloc(d, big_n);
+    defer big.free();
+    try big.fill8(0x3c, null);
+    const big_back = try check.download(gpu, big);
+    defer gpu.gpa.free(big_back);
+    try expect(std.mem.allEqual(u8, big_back, 0x3c), "6 MiB download", .{});
+    check.pass("blocking copies: a 6 MiB download through staged pieces equal", .{});
+
     var stream = try cuda.Stream.init(d, true);
     defer stream.deinit();
     var pinned = try cuda.HostBuffer.alloc(d, n);

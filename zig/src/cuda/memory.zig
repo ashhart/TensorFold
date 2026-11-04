@@ -190,10 +190,20 @@ pub const DeviceBuffer = struct {
         try @import("copy_source.zig").synchronousCopy(self.d, dst, bytes, std.heap.page_allocator);
     }
 
+    /// Returns once the bytes have landed; the copy stages through this thread's page-locked buffer, a
+    /// piece of at most `download_stage.most` bytes at a time (see that module for why).
     pub fn download(self: DeviceBuffer, offset: usize, out: []u8) Error!void {
         const src = try self.span(offset, out.len);
         if (out.len == 0) return;
-        try self.d.check(self.d.api.cuMemcpyDtoH_v2(out.ptr, src, out.len), "cuMemcpyDtoH");
+        const stage = @import("download_stage.zig");
+        var done: usize = 0;
+        while (done < out.len) {
+            const n = @min(out.len - done, stage.most);
+            const bounce = try stage.take(self.d, n);
+            try self.d.check(self.d.api.cuMemcpyDtoH_v2(bounce.ptr, src + done, n), "cuMemcpyDtoH");
+            @memcpy(out[done..][0..n], bounce[0..n]);
+            done += n;
+        }
     }
 
     /// Owns a pinned source copy until completion. Captured uploads must use copy_source.Stage or Buffer.
