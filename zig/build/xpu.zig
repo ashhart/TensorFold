@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const exlr8_build = @import("exlr8.zig");
+const xpu_contract = @import("xpu_contract.zig");
 
 /// ze.zig as its own module: the Qwen27 runner and the Nemotron runtime share one Level Zero table.
 fn zeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -171,6 +172,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     var runners = family(b, target, optimize, runtime(b, target, optimize, &nem.images, ze_mod, runner_core, dpas), runner_core, lanes);
     runners.images = nem.images;
     nemotronSteps(b, target, optimize, runners);
+    const with_contract = b.option(bool, "xpu-contract", "Build the XPU kernel contract's limits audit (needs ocloc for the objects)") orelse false;
+    if (with_contract) xpu_contract.steps(b, target, optimize, ocloc, device);
 }
 
 /// One SPIR-V image: the .cl in zig/kernels/xpu (`src`, else `name`) and its ocloc options (dot/matrix kernels: CL3.0).
