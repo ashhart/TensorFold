@@ -90,8 +90,14 @@ const Compile = struct {
 
 /// Records the structure the engine is handed, then answers two tokens, so a whole run stays on this thread.
 const Record = struct {
-    field: []const u8 = "",
+    /// The name copied while the request is still valid: `api.Request` only promises its slices until `finished`.
+    buf: [32]u8 = undefined,
+    len: usize = 0,
     kind: []const u8 = "",
+
+    fn field(r: *const Record) []const u8 {
+        return r.buf[0..r.len];
+    }
 
     fn engine(r: *Record) api.Engine {
         return .{ .ctx = r, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -102,7 +108,8 @@ const Record = struct {
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const r: *Record = @ptrCast(@alignCast(ctx));
         if (request.structure) |st| {
-            r.field = st.field;
+            r.len = @min(st.field.len, r.buf.len);
+            @memcpy(r.buf[0..r.len], st.field[0..r.len]);
             r.kind = @tagName(st.kind);
         }
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
@@ -307,7 +314,7 @@ test "structure field: a Messages output_config.format reaches the engine as its
     try std.testing.expectEqualStrings("json_schema", @tagName(structure.kind));
 }
 
-test "structure field: the Responses route hands the engine text.format" {
+test "structure field: the Responses translation hands the engine text.format" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const g = arena.allocator();
@@ -330,11 +337,12 @@ test "structure field: the Responses route hands the engine text.format" {
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = g };
     var wire: Wire = .{};
     openai.runNamed(srv, g, wire.out(), .{ .conn = &conn }, true, r.chat, r.format);
-    try std.testing.expectEqualStrings("text.format", rec.field);
+    try std.testing.expectEqual(@as(u16, 200), wire.status);
+    try std.testing.expectEqualStrings("text.format", rec.field());
     try std.testing.expectEqualStrings("json", rec.kind);
 }
 
-test "structure field: the chat route still hands the engine response_format" {
+test "structure field: the chat completion hands the engine response_format" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const g = arena.allocator();
@@ -350,6 +358,7 @@ test "structure field: the chat route still hands the engine response_format" {
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = g };
     var wire: Wire = .{};
     openai.run(srv, g, wire.out(), .{ .conn = &conn }, true, body);
-    try std.testing.expectEqualStrings("response_format", rec.field);
+    try std.testing.expectEqual(@as(u16, 200), wire.status);
+    try std.testing.expectEqualStrings("response_format", rec.field());
     try std.testing.expectEqualStrings("json", rec.kind);
 }
