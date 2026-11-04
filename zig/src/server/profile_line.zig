@@ -44,7 +44,6 @@ const TestEnv = struct {
         if (std.mem.eql(u8, name, "TF_KV_PAGES")) return e.glm_pages;
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST")) return e.glm_host;
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST_SHARED")) return e.glm_shared;
-        if (std.mem.eql(u8, name, "TF_GLM_KV_SHARE")) return null;
         if (std.mem.eql(u8, name, "TF_KV_SHARE")) return null;
         return "fixture-secret-must-not-be-read";
     }
