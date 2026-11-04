@@ -173,3 +173,33 @@ extern "C" __global__ void __launch_bounds__(tf_act_l2::NT) tf_swiglu_l2_rows(co
                                                                              __nv_bfloat16* out, int n, float eps) {
     tf_act_l2::swiglu_rows<tf_act_l2::GS | tf_act_l2::US | tf_act_l2::PROD>(g, g_ld, u, u_ld, sug, suu, out, n, eps);
 }
+
+// Gemma 4 E-series per-layer inputs in layer_input.zig's steps (scale, 256-wide rms, + table * token, * mix).
+extern "C" __global__ void __launch_bounds__(64) tf_ple_rows(const __nv_bfloat16* __restrict__ p,
+                                                             const __nv_bfloat16* __restrict__ t,
+                                                             const __nv_bfloat16* __restrict__ w,
+                                                             __nv_bfloat16* __restrict__ out, int parts, float scale,
+                                                             float token, float mix, float eps) {
+    __shared__ float sums[2];
+    const long long base = ((long long)blockIdx.x * parts + blockIdx.y) * 256 + threadIdx.x * 4;
+    const int lane = threadIdx.x & 31;
+    float x[4];
+    float acc = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        x[i] = __bfloat162float(__float2bfloat16_rn(__fmul_rn(__bfloat162float(p[base + i]), scale)));
+        acc = __fadd_rn(acc, __fmul_rn(x[i], x[i]));
+    }
+    for (int s = 1; s < 32; s <<= 1) acc = __fadd_rn(acc, __shfl_xor_sync(0xffffffffu, acc, s));
+    if (lane == 0) sums[threadIdx.x >> 5] = acc;
+    __syncthreads();
+    const float mean = __fadd_rn(__fdiv_rn(__fadd_rn(sums[0], sums[1]), 256.0f), eps);
+    const float inv = (float)(1.0 / sqrt((double)mean));
+    for (int i = 0; i < 4; i++) {
+        const int k = threadIdx.x * 4 + i;
+        const float n = __bfloat162float(__float2bfloat16_rn(__fmul_rn(x[i], inv)));
+        const float y = __bfloat162float(__float2bfloat16_rn(__fmul_rn(__bfloat162float(w[k]), n)));
+        const float tt = __bfloat162float(__float2bfloat16_rn(__fmul_rn(__bfloat162float(t[base + i]), token)));
+        const float sum = __bfloat162float(__float2bfloat16_rn(__fadd_rn(y, tt)));
+        out[base + i] = __float2bfloat16_rn(__fmul_rn(sum, mix));
+    }
+}
