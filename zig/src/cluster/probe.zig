@@ -317,7 +317,7 @@ pub fn uuid(text: []const u8) ?Gid {
     return if (k == 16) out else null;
 }
 
-/// An IPv6-style GID ("aca4:89d1:...", "fe80::3498:1bff:fe4a:9540") as 16 bytes.
+/// An IPv6-style GID ("0011:2233:...", "fe80::aaaa:bbff:fecc:dd40") as 16 bytes.
 pub fn gid(text: []const u8) ?Gid {
     var groups: [8]u16 = @splat(0);
     const gap = std.mem.indexOf(u8, text, "::");
@@ -449,9 +449,9 @@ test "a GB10 inventory comes from meminfo, nvidia-smi and ConnectX-7" {
 }
 
 test "GIDs and UUIDs parse in both notations" {
-    const a = gid("aca4:89d1:0c3b:4215:9512:325f:c1e8:e37a").?;
-    try std.testing.expectEqualSlices(u8, &a, &uuid("ACA489D1-0C3B-4215-9512-325FC1E8E37A").?);
-    const b = gid("fe80::3498:1bff:fe4a:9540").?;
+    const a = gid("0011:2233:4455:6677:8899:aabb:ccdd:eeff").?;
+    try std.testing.expectEqualSlices(u8, &a, &uuid("00112233-4455-6677-8899-AABBCCDDEEFF").?);
+    const b = gid("fe80::aaaa:bbff:fecc:dd40").?;
     try std.testing.expectEqual(@as(u8, 0xfe), b[0]);
     try std.testing.expectEqual(@as(u8, 0x40), b[15]);
     try std.testing.expectEqualSlices(u8, &gid("fe80::1").?, &gid("fe80:0000:0000:0000:0000:0000:0000:0001").?);
