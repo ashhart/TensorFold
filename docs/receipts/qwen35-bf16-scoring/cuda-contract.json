@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "source_commit": "612bca872b70461787e6d74480454391cb1dc4a2",
+  "source_commit": "5332d97eb387af7e1a10433d77ee032a86bc631a",
   "native_version": "1.2.1",
   "runner_sha256": "31ee399fc7df52c8dd719f1d3a1cb5494d6817700507b32a804458724f3fb729",
   "command": "zig-out/bin/tf-cuda-test kernel-contract",

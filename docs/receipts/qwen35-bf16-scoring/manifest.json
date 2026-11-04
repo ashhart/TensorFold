@@ -1,15 +1,15 @@
 {
   "schema": 2,
   "status": "partial qualification; draft",
-  "source_commit": "612bca872b70461787e6d74480454391cb1dc4a2",
-  "stack_parent": "c5a3feefaa24315dd55600ff1490c10c5fb27036",
+  "source_commit": "5332d97eb387af7e1a10433d77ee032a86bc631a",
+  "stack_parent": "b0b5beb8db0856091798123cf62dcdfaec1e0445",
   "native_binary_sha256": "271398a1c9dab32785759182ae78e2921907d68f86b0053b64e2613cc9038886",
   "inference_source_tree": "58f8dfd99868cc1f928754ca3879e283eeac2079",
   "kernel_source_tree": "c76669664406836e32b89ba33d9b9734c71bd90c",
   "files": {
-    "README.md": "6d904bdfb3a4e873c8289c472617306b155afba97da7e50b7c78c19c401bc3d7",
+    "README.md": "39091040bde6fb036b7a16223a8470a4613fd338e76512b024eade73a6916841",
     "api.json": "3541b3afa2debed9030b0e69371f413b053001195bffafd117110624f5e08667",
-    "asset.json": "05b4dd0a8e18789468d6433951b2771db364d3172c4436e5edc82be2ee71fb95",
+    "asset.json": "1e353b850f6cc02b658d710c01c2bf3bb6d30b4b10d6b5f07220025679c199ae",
     "cache/chat-fixtures.json": "c30f3bd2c719aed9738e0f0cab6c803e80e979b136d063db2b946e9ddc7c96c6",
     "cache/fresh.json": "8b61a0c255638a6a5bc1323981be479216101ec61cdd08e9c2d8b5d2d658105d",
     "cache/lifecycle-restart.json": "a15b3231b990c2e7665a7d31ca4e8d28a937ea9557b5aa1c6531e3a7eb4c2b6b",
@@ -26,8 +26,8 @@
     "cold/sglang-8192.json": "8a1897d1982bc51208b945f88b1049622c0530936bd7134bf01594aedf1f9760",
     "cold/sglang-scheduler-cache.json": "1452580faebf6bbd7fcd19219f14379cf156f202b65afb8a9f06a1c139354b78",
     "cold/summary.json": "d3a5dbbaccf6fe1d59bc2e2a21fca4ff14b765bce28af99fb25959d18b47c3ee",
-    "cuda-contract.json": "4b893c462dec146d2ae87014688c3f0795bc18a7f665fce1225fee8c3af3cd68",
-    "existing-formats/exl3-admission.json": "6bdabb668064f0fc4f9d523584e8c6a2e63f991b03b2bc46657c706a58255cb6",
+    "cuda-contract.json": "dd9f6aec6af7dfab5cea1fc913f2eb0337be18cb2aced2487f8c6520901e2ad6",
+    "existing-formats/exl3-admission.json": "668915cf59e8b6045a56ea7e4e41d9d888aa14a8220e7a13ba646a0446c3fdc8",
     "existing-formats/mlx4-integrated-1-decode.json": "dba91d75f3325b9c303774afe519417d8bf93dbbd2c03c722db5b37944139a5c",
     "existing-formats/mlx4-integrated-3-decode.json": "aac0c776d2635ba6d42773f5c38aa081e9a7d8f1447caf1a841b20de6b569e22",
     "existing-formats/mlx4-parent-0-decode.json": "3356caae24666062efe65e0358d3aa1c9178a487fd016278d9e57bca5cc37bf4",
@@ -38,19 +38,22 @@
     "existing-formats/modelopt-parent-2-decode.json": "520fea567b0a470b57801d906fa059c1f65bffac8544d47b1da014aec02a9e6c",
     "existing-formats/summary.json": "cab4e7a76c9abb41f6c209d2aa0c5be1a698dc761c2a8af32927ff0bcba76747",
     "fixtures.json": "c83f0cb7e56f447de3b6131b921ac06b0743cbfcdfbe856970f0f5e7e9c61fe4",
+    "followup-checks.json": "fb635193741b16d992986c35c99665d4d2befd1742f9ab9df4cceaa46b5a1e3f",
     "fp64.json": "9a7344dfeca63b07c94fd36f6e0cabf5cbceec7fee4f26812c16e95b8fea6b2a",
-    "host-and-ci.json": "6dba0a07e69ff6e6cb3fe75062b318cb55f3ff931fa9b156ccf500f676c93a01",
-    "limits-comparison.json": "d0d28832a35dbbd9416e6afec9faa95a846d9caff26c60bf48b485af73ed2cd4",
+    "host-and-ci.json": "f4d8380c99248466cedb2c09954a39af413119dc1ece598512192d65919df2c1",
+    "limits-comparison.json": "68ae984daa20579cfd82226ec69adf89bc233b63cc6baa2f55ddd8c181653165",
     "memory.json": "a39ad01720fb882e7e7f73f92077708fb929cb35f3742ad38b272868fedaa6fd",
     "models.json": "acb06444d0baa3e49bad1b89111c7673e5f8d2c6d93b4c024779e66c3ab87b1e",
     "native-decode.json": "f7600ab11e90ac2ed4fe968bb4a4e85de137efead0c2679e0737ce0829a0b9d8",
     "overlap.json": "bdae283023edaf66f2453349be8ba191e6eff03e1707e9005b748ee9213be940",
     "reference-fixtures.json": "c2b05afefcdbea4504deb799e68b581e0635b9c316927549418674a480efb289",
+    "reference-verdict.json": "7b53f1df4abaa1e0cddb6442442533858936abde13aed868bc632120cdbe3714",
     "rendered-prompts.json": "bee53acb930548cf9b55ae8f00b9e2d684bd6745c93725c2347e378fd333254d",
     "reproduce-cache.py": "6334a19acfa43de98ebe614dfbb61db047de435eb661fcff228d5c39f229eecd",
     "reproduce-cold.py": "de1d8d6d9f778a34041fbc9cac7ea5ad3e728080da5f735dbabb952669d91ee1",
     "reproduce-disconnect.py": "b786fdb8eebc8f9cb82a0edea70055dcc1ddcfe587d19c9077febefaf161e2a9",
     "sglang-precision/sitecustomize.py": "2129ecd851b0d174fb578c4bb9c3d502093373d6866e620391cf398f60b44608",
+    "source-provenance.json": "a639037f4a544408ceaf55c6f16a81957130afd02ec33dba950df7717e5b200a",
     "standard/configuration.json": "b792fa34ea9b914d57d0b180059768643567a099620f272c62590f336eec1ef0",
     "standard/rendered-prompts.json": "8a273d0756b2e9d2ce1aa6fbbe710f8431b980c878269ace5ae0636e6f5ad452",
     "standard/sglang-decode.json": "f8bb2f3637dd969b0d5ffc60a9156c99bd914b3310f0f9380949bc3629534251",
@@ -68,9 +71,10 @@
     "Maintainer performance acceptance remains unresolved; BF16 prefill and C4 throughput substantially slower than standard server.",
     "EXL3 export not admitted by either build; inference unqualified.",
     "Other physical chips/backends, multiple ranks, FP8 KV and optional grammar/tool generation unqualified.",
-    "Publication-head hosted CI must be read on PR; host-and-ci.json binds the earlier passed head."
+    "Publication-head hosted CI must be read on PR; host-and-ci.json binds the earlier passed head.",
+    "Transformers BF16-distance comparison fails; captured rows do not prove a direct served HTTP comparison. 4097-token FP32 arm not-run."
   ],
-  "inference_build_commit": "ddb1f831724940801b7766a170c266a958141b18",
+  "inference_build_commit": "327ef639fb7dbc355f44b4a5efc53209a3e06543",
   "publication_transforms": [
     "Generated prose samples omitted; numeric rates and output fingerprints retained.",
     "Concurrent interval origins normalized to the earliest send in each repetition.",
@@ -79,7 +83,21 @@
   ],
   "reference_script": {
     "path": "tools/zig/qwen35_transformers_reference.py",
-    "sha256": "25ade21bcfe9a9a884582dd1d57dac03cd154b0ece088055643664a13628d124",
-    "bytes": 87206
+    "sha256": "565567c45b3e2c98be4f0961aef87563eb3c1f924ab1861088e496fddaef9c13",
+    "bytes": 12586
+  },
+  "current_stack_parent": "c5a3feefaa24315dd55600ff1490c10c5fb27036",
+  "out_of_tree_assets": {
+    "record": "asset.json",
+    "files": 3,
+    "members": 21,
+    "note": "Published immutable public evidence links and verified checksums; summaries only in the source branch."
+  },
+  "reference_modules": {
+    "tools/zig/qwen35_reference_compare.py": "eefb291b263884cfbc5e24735ff5aa84c87cd81673c1c8867abc978864738274",
+    "tools/zig/qwen35_reference_fixture.py": "cdd5cbbe347dae97e21893645a76e16f7bc1b98b8610c3724fff570771992b56",
+    "tools/zig/qwen35_reference_forward.py": "e9f5cbbd176cc6e53f87da1a32aa1d95cd1f27a9db8d14d103d83bdb16846016",
+    "tools/zig/qwen35_reference_inputs.py": "9de576d0b0824063363c674798f5c3948e234ba7aa742ff902e202e7eb1cee1e",
+    "tools/zig/qwen35_reference_verdict.py": "45eddfb4179d8157be0bb102a4ccaa33e734cfaaedeb23109796fbdb506c605d"
   }
 }
