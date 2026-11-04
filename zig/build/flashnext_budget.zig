@@ -5,7 +5,9 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
         const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true });
         const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-        const tests = b.createModule(.{ .root_source_file = b.path("zig/src/native/flashnext_constraint_test.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api } } });
+        // the constraint run reads lanes through `tensorfold`, as native_engines' other files do; here that is lanes alone
+        const tf = b.createModule(.{ .root_source_file = b.addWriteFiles().add("flashnext-constraint-tf.zig", "pub const lanes = @import(\"lanes\");\n"), .target = b.graph.host, .optimize = mode, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+        const tests = b.createModule(.{ .root_source_file = b.path("zig/src/native/flashnext_constraint_test.zig"), .target = b.graph.host, .optimize = mode, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = tf } } });
         constrained.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tests })).step);
     }
     all.dependOn(constrained);
