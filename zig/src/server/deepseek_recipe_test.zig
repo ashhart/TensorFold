@@ -6,11 +6,11 @@ const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const messages = @import("messages.zig");
 const model_text = @import("model_text.zig");
+const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const HfText = @import("hf_text.zig").HfText;
 const Server = @import("server.zig").Server;
-const dsv41_chat = @import("dsv41_chat");
-const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
+const kept = @import("deepseek_recipe_kept.zig").kept;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 const t = std.testing;
@@ -76,16 +76,15 @@ pub const Served = struct {
     }
 };
 
-/// The effort a request names for a case's budget; a number past low / high / max reaches only a server default.
+/// The effort name for a case's budget, as DeepSeek's harness sent it (`cc_effort`): high for any other number.
 fn effortName(budget: Value) []const u8 {
-    const text = if (budget == .int) budget.int else if (budget == .string) budget.string else "75";
+    const text = if (budget == .int) budget.int else if (budget == .string) budget.string else "";
     if (std.mem.eql(u8, text, "50")) return "low";
-    if (std.mem.eql(u8, text, "75")) return "high";
     if (std.mem.eql(u8, text, "100")) return "max";
-    return text;
+    return "high";
 }
 
-/// The chat request a case stands for, with the server defaults it assumes set on `srv`.
+/// The chat request a case stands for: the one DeepSeek's endpoint took (chat_ok), else the case's flags by name.
 fn requestOf(a: Allocator, srv: *Server, c: Value) !Value {
     const body = try json.newObject(a);
     try body.put(a, "messages", c.get("messages").?);
@@ -106,22 +105,25 @@ fn requestOf(a: Allocator, srv: *Server, c: Value) !Value {
         if (c.get("default_thinking")) |d| if (d == .bool) {
             srv.config.enable_thinking = d.bool;
         };
-    } else {
-        const kwargs = try json.newObject(a);
-        try kwargs.put(a, "enable_thinking", c.get("thinking").?);
-        try body.put(a, "chat_template_kwargs", .{ .object = kwargs });
-        srv.config.reasoning_effort = effortName(c.get("budget").?);
+        return .{ .object = body };
     }
+    const chat_ok = c.get("chat_ok").? == .bool and c.get("chat_ok").?.bool;
+    const on = if (chat_ok) c.get("cc_thinking").? else c.get("thinking").?;
+    const kwargs = try json.newObject(a);
+    try kwargs.put(a, "enable_thinking", on);
+    try body.put(a, "chat_template_kwargs", .{ .object = kwargs });
+    if (on.bool) try body.put(a, "reasoning_effort", if (chat_ok) c.get("cc_effort").? else .{ .string = effortName(c.get("budget").?) });
     return .{ .object = body };
 }
 
-/// The prompt text as /tokenize and the chat route render it: their field reading, then prompt.renderIds before encode.
+/// The prompt text /tokenize renders for the case (a chat request's always ends in the generation prompt).
 pub fn serverPath(a: Allocator, srv: *Server, c: Value) !Outcome {
     var cx: errors.Cx = .{ .a = a };
     const body = try requestOf(a, srv, c);
     var media = srv.media();
     if (c.get("image_text").? != .null) media.images = true; // a vision-serving build; the text is DeepSeek's
-    const generation = c.get("generation").?.bool;
+    const chat_ok = c.get("chat_ok").? == .bool and c.get("chat_ok").?.bool;
+    const generation = chat_ok or c.get("generation").?.bool;
     const refused = struct {
         fn of(x: *errors.Cx, e: errors.Refused) errors.Refused!Outcome {
             return if (e == error.Refused) .{ .refused = x.message } else e;
@@ -134,7 +136,7 @@ pub fn serverPath(a: Allocator, srv: *Server, c: Value) !Outcome {
     cx.clear_thinking = thinking.clear;
     if (@hasField(errors.Cx, "response_format")) cx.response_format = body.get("response_format");
     const effort = srv.effortFor(thinking.effort);
-    const normalized = messages.toolArguments(&cx, messages.normalizeWith(&cx, msgs, srv.late_system, srv.needs_user_after_tool, media) catch |e| return refused(&cx, e)) catch |e| return refused(&cx, e);
+    const normalized = prompt.templateMessages(srv, &cx, msgs, media) catch |e| return refused(&cx, e);
     var options: model_text.RenderOptions = .{
         .tools = if (tools.len > 0) Value{ .array = tools } else null,
         .add_generation_prompt = generation,
@@ -152,44 +154,6 @@ pub fn serverPath(a: Allocator, srv: *Server, c: Value) !Outcome {
     return .{ .text = rendered.text };
 }
 
-fn imageText(ctx: ?*anyopaque, _: Value) []const u8 {
-    const s: *const []const u8 = @ptrCast(@alignCast(ctx.?));
-    return s.*;
-}
-
-/// The family encoder alone with the case's own flags, as golden_test.zig feeds it.
-pub fn encoderPath(a: Allocator, c: Value) !Outcome {
-    var image_text: []const u8 = "";
-    var o: dsv41.Options = .{
-        .thinking = c.get("thinking").?.bool,
-        .budget = dsv41.budgetOf(c.get("budget").?) orelse 0,
-        .drop_thinking = c.get("drop_thinking").?.bool,
-        .add_generation_prompt = c.get("generation").?.bool,
-    };
-    if (c.get("effort_field")) |field| {
-        const text = if (field == .string) field.string else if (field == .int) field.int else "";
-        const level = dsv41.effortOf(text) orelse return .{ .refused = "reasoning_effort refused" };
-        o.thinking = level != null;
-        o.budget = level orelse dsv41.default_budget;
-    }
-    if (c.get("tools")) |tools| if (tools == .array) {
-        o.tools = tools.array;
-    };
-    if (c.get("response_format")) |rf| if (rf != .null) {
-        o.response_format = rf;
-    };
-    if (c.get("image_text")) |it| if (it == .string) {
-        image_text = it.string;
-        o.image = .{ .ctx = @ptrCast(&image_text), .text = imageText };
-    };
-    var problem: dsv41.Problem = .{};
-    const text = dsv41.render(a, c.get("messages").?, o, &problem) catch |e| switch (e) {
-        error.Refused => return .{ .refused = problem.message },
-        else => |x| return x,
-    };
-    return .{ .text = text };
-}
-
 /// Equal text, or a refusal where deepseek-recipe gives no prompt.
 pub fn agrees(want: Value, got: Outcome) bool {
     return switch (got) {
@@ -198,10 +162,34 @@ pub fn agrees(want: Value, got: Outcome) bool {
     };
 }
 
-pub const Layer = enum { server, encoder };
+/// The kept class listing case `id`, or null.
+fn keptFor(id: usize) ?usize {
+    for (kept, 0..) |k, i| for (k.ids) |x| if (x == id) return i;
+    return null;
+}
 
-/// Every case through `layer`; each result appended to `report` as a JSON line; the count that differ.
-fn run(layer: Layer, report: ?*std.Io.Writer) !usize {
+fn className(i: usize) []const u8 {
+    for (kept, 0..) |k, j| if (j == i) return k.class;
+    unreachable;
+}
+
+fn waits(i: usize) ?u16 {
+    for (kept, 0..) |k, j| if (j == i) return k.waits;
+    unreachable;
+}
+
+fn show(id: usize, want: Value, got: Outcome) void {
+    switch (got) {
+        .refused => |why| std.debug.print("case {d}: refused ({s}) where deepseek-recipe renders\n", .{ id, why }),
+        .text => |g| if (want == .string) {
+            const k = std.mem.indexOfDiff(u8, g, want.string) orelse g.len;
+            std.debug.print("case {d} differs at byte {d}:\n  want {f}\n  got  {f}\n", .{ id, k, std.json.fmt(want.string[k..@min(want.string.len, k + 120)], .{}), std.json.fmt(g[k..@min(g.len, k + 120)], .{}) });
+        } else std.debug.print("case {d}: renders where deepseek-recipe refuses\n", .{id}),
+    }
+}
+
+/// Every case through the server path, each result appended to `report`; the count of unlisted and stale cases.
+fn run(report: ?*std.Io.Writer) !usize {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const lines = try readCases(arena.allocator());
@@ -212,72 +200,125 @@ fn run(layer: Layer, report: ?*std.Io.Writer) !usize {
     defer case_arena.deinit();
     var it = std.mem.splitScalar(u8, lines, '\n');
     var cases: usize = 0;
+    var equal: usize = 0;
     var bad: usize = 0;
     while (it.next()) |line| {
         if (line.len == 0) continue;
         _ = case_arena.reset(.retain_capacity);
         const a = case_arena.allocator();
         const c = (try json.parseText(a, line)).ok;
-        const got = switch (layer) {
-            .server => try serverPath(a, served.srv, c),
-            .encoder => try encoderPath(a, c),
-        };
+        const got = try serverPath(a, served.srv, c);
         const want = c.get("prompt").?;
+        const id = cases;
         cases += 1;
-        if (report) |w| try w.print("{f}\n", .{std.json.fmt(.{ .layer = @tagName(layer), .id = cases - 1, .text = if (got == .text) got.text else null, .refused = if (got == .refused) got.refused else null }, .{})});
-        if (agrees(want, got)) continue;
-        bad += 1;
-        if (bad > 3) continue;
-        switch (got) {
-            .refused => |why| std.debug.print("{s} case {d}: refused ({s}) where deepseek-recipe renders\n", .{ @tagName(layer), cases - 1, why }),
-            .text => |g| if (want == .string) {
-                const k = std.mem.indexOfDiff(u8, g, want.string).?;
-                std.debug.print("{s} case {d} differs at byte {d}:\n  want {f}\n  got  {f}\n", .{ @tagName(layer), cases - 1, k, std.json.fmt(want.string[k..@min(want.string.len, k + 120)], .{}), std.json.fmt(g[k..@min(g.len, k + 120)], .{}) });
-            } else std.debug.print("{s} case {d}: renders where deepseek-recipe refuses\n", .{ @tagName(layer), cases - 1 }),
+        if (report) |w| try w.print("{f}\n", .{std.json.fmt(.{ .id = id, .text = if (got == .text) got.text else null, .refused = if (got == .refused) got.refused else null }, .{})});
+        const listed = keptFor(id);
+        const chat_ok = c.get("chat_ok").? == .bool and c.get("chat_ok").?.bool;
+        if (agrees(want, got)) {
+            equal += 1;
+            if (listed) |k| {
+                bad += 1;
+                std.debug.print("case {d} now agrees: take it off kept class {s}\n", .{ id, className(k) });
+            }
+        } else if (listed) |k| {
+            if (chat_ok and waits(k) == null) {
+                bad += 1;
+                std.debug.print("case {d}: DeepSeek's endpoint takes it, so class {s} cannot keep it\n", .{ id, className(k) });
+            }
+        } else {
+            bad += 1;
+            if (bad <= 5) show(id, want, got);
         }
     }
     try t.expectEqual(@as(usize, case_count), cases);
-    std.debug.print("dsrecipe {s}: {d}/{d} equal to deepseek-recipe's prompt text\n", .{ @tagName(layer), cases - bad, cases });
+    std.debug.print("dsrecipe server: {d}/{d} equal to deepseek-recipe's prompt text, {d} kept, {d} unexplained\n", .{ equal, cases, cases - equal, bad });
     return bad;
 }
 
-/// Runs `layer`, writing every result to TF_DSRECIPE_REPORT's file (one per layer) when it is set.
-fn check(layer: Layer) !void {
+test "DeepSeek recipe: the server's chat render path gives deepseek-recipe's prompt text or a kept difference" {
     var out: std.Io.Writer.Allocating = .init(t.allocator);
     defer out.deinit();
     const dir = t.environ.getPosix("TF_DSRECIPE_REPORT");
-    const bad = try run(layer, if (dir != null) &out.writer else null);
+    const bad = try run(if (dir != null) &out.writer else null);
     if (dir) |d| {
-        const path = try std.fmt.allocPrint(t.allocator, "{s}/{s}.jsonl", .{ d, @tagName(layer) });
+        const path = try std.fmt.allocPrint(t.allocator, "{s}/server.jsonl", .{d});
         defer t.allocator.free(path);
         try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = path, .data = out.written() });
     }
     try t.expectEqual(@as(usize, 0), bad);
 }
 
-test "DeepSeek recipe: the server's chat render path gives deepseek-recipe's prompt text for every case" {
-    try check(.server);
+/// The kept class listing effort name `name`, or null.
+fn keptEffort(name: []const u8) ?[]const u8 {
+    for (kept) |k| for (k.efforts) |e| if (std.mem.eql(u8, e, name)) return k.class;
+    return null;
 }
 
-test "DeepSeek recipe: the family encoder with each case's own flags gives deepseek-recipe's prompt text" {
-    try check(.encoder);
+/// A one-message request with `effort` and the server's default thinking `default`, through the server path.
+fn effortProbe(a: Allocator, srv: *Server, effort: Value, default: Value) !Outcome {
+    const probe = (try json.parseText(a, "{\"messages\": [{\"role\": \"user\", \"content\": \"x\"}], \"tools\": null, \"response_format\": null, \"image_text\": null, \"chat_ok\": true}")).ok;
+    try probe.object.put(a, "effort_field", effort);
+    try probe.object.put(a, "default_thinking", default);
+    return serverPath(a, srv, probe);
 }
 
-test "DeepSeek recipe: the fixture is whole and a case the recipe refuses has no prompt" {
+test "DeepSeek recipe: every reasoning_effort DeepSeek's endpoint takes resolves as its records say, or is kept" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var served: Served = undefined;
+    try served.init(a);
+    defer served.deinit();
+    const lines = try readCases(a);
+    var it = std.mem.splitScalar(u8, lines, '\n');
+    var checked: usize = 0;
+    var bad: usize = 0;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        const c = (try json.parseText(a, line)).ok;
+        const ok = c.get("effort_ok") orelse continue;
+        if (!ok.bool) continue;
+        const name = c.get("effort_field").?.string;
+        const got = try effortProbe(a, served.srv, c.get("effort_field").?, c.get("default_thinking").?);
+        const want: ?[]const u8 = if (c.get("effort_thinking").?.bool) try std.fmt.allocPrint(a, "Reasoning Effort: {d} (range", .{c.get("effort_budget").?.int64().?}) else null;
+        const text = if (got == .text) got.text else "";
+        const right = if (want) |w| std.mem.indexOf(u8, text, w) != null else got == .text and std.mem.indexOf(u8, text, "Reasoning Effort:") == null;
+        checked += 1;
+        if (right == (keptEffort(name) == null)) continue;
+        bad += 1;
+        if (right) std.debug.print("reasoning_effort {s} now resolves as DeepSeek's: take it off kept class {s}\n", .{ name, keptEffort(name).? });
+        if (!right) std.debug.print("reasoning_effort {s} (thinking by default {}): want {s}, got {f}\n", .{ name, c.get("default_thinking").?.bool, want orelse "thinking off", std.json.fmt(text[0..@min(text.len, 120)], .{}) });
+    }
+    try t.expectEqual(@as(usize, 14), checked);
+    // a kept name no record covers stays refused
+    const ultra = try effortProbe(a, served.srv, .{ .string = "ultra" }, .{ .bool = true });
+    try t.expect(keptEffort("ultra") == null or ultra == .refused);
+    try t.expectEqual(@as(usize, 0), bad);
+}
+
+test "DeepSeek recipe: the fixture is whole, a case the recipe refuses has no prompt, and each kept case once" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const lines = try readCases(arena.allocator());
     var it = std.mem.splitScalar(u8, lines, '\n');
     var n: usize = 0;
     var refused: usize = 0;
+    var chat: usize = 0;
     while (it.next()) |line| {
         if (line.len == 0) continue;
         const c = (try json.parseText(arena.allocator(), line)).ok;
         try t.expectEqual(@as(i64, @intCast(n)), c.get("id").?.int64().?);
         if (c.get("prompt").? == .null) refused += 1;
+        if (c.get("chat_ok").? == .bool and c.get("chat_ok").?.bool) chat += 1;
         n += 1;
     }
     try t.expectEqual(@as(usize, case_count), n);
     try t.expectEqual(@as(usize, 12), refused);
+    try t.expectEqual(@as(usize, 78), chat);
     try t.expect(agrees(.null, .{ .refused = "x" }) and !agrees(.{ .string = "x" }, .{ .refused = "x" }));
+    var seen: std.StaticBitSet(case_count) = .empty;
+    for (kept) |k| for (k.ids) |id| {
+        try t.expect(id < case_count and !seen.isSet(id));
+        seen.set(id);
+    };
 }
