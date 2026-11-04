@@ -319,7 +319,9 @@ pub const cuda_sets = [_]CudaSet{
     .{ .release = .{ .major = 13, .minor = 3 }, .usage = &([_]Override{
         .{ .name = "flashnext_batch fn_qsa_select", .usage = .{ .{ .regs = 32, .static = 1168, .bound = 1024 }, .{ .regs = 52, .static = 1168, .bound = 1024 }, .{ .regs = 52, .static = 1168, .bound = 1024 }, .{ .regs = 63, .static = 1168, .bound = 1024 }, .{ .regs = 63, .static = 1168, .bound = 1024 } } },
     } ++ @import("flashnext_tile_records.zig").cuda_133 ++ @import("glm_cuda_records.zig").cuda_133 ++ @import("nvcc_133_records.zig").cuda_133 ++ @import("minimax_cuda_records.zig").cuda_133 ++ @import("nvfp4_experts32_records.zig").cuda_133) },
-    .{ .release = .{ .major = 13, .minor = 4 }, .usage = &.{.{ .name = "exl3_candidate tf_exl3_prompt_2", .usage = .{ .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 77, .static = 32768, .bound = 256 }, .{ .regs = 77, .static = 32768, .bound = 256 } } }} },
+    .{ .release = .{ .major = 13, .minor = 4 }, .usage = &([_]Override{
+        .{ .name = "exl3_candidate tf_exl3_prompt_2", .usage = .{ .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 77, .static = 32768, .bound = 256 }, .{ .regs = 77, .static = 32768, .bound = 256 } } },
+    } ++ @import("flashnext_pages_pending.zig").cuda_134) },
 };
 pub fn newer(x: limits.Nvcc, y: limits.Nvcc) bool {
     return x.major > y.major or (x.major == y.major and x.minor > y.minor);
