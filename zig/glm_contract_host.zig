@@ -60,3 +60,7 @@ test {
     _ = @import("tests/cuda/contract_glm_f32w_host.zig");
     _ = @import("tests/cuda/glm_loader_control.zig");
 }
+
+test {
+    _ = @import("src/families/glm/cuda_host_key_pages_test.zig");
+}
