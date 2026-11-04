@@ -175,7 +175,7 @@ pub fn main(init: std.process.Init) !void {
     defer tok.deinit();
     var runner = try q.decode_round.Runner.init(init.gpa, m, 1, 512);
     defer runner.deinit();
-    // The blocks are one to `layers`, and the layer after the last one is the head's input.
+    // The slots run 0 to `layers`: one for the embedding and one for each block's output.
     const sites = m.config.layers + 1;
     var capture = try derive.Capture.init(m.device, sites, m.config.hidden, m.frame.get(.dims).buffer, site);
     defer capture.deinit();
