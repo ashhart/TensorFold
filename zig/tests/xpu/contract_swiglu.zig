@@ -108,13 +108,16 @@ pub const Swiglu = struct {
         }
         self.gub = try kit.bytes(a, self.gu, .f16);
         self.act = try a.alloc(f64, rows * FF);
-        for (0..rows) |r| for (0..FF) |j| {
-            self.act[r * FF + j] = ref.actKernel(self.gu[r * GU + j], self.gu[r * GU + FF + j]);
-        };
         self.gin = try self.rig.input(self.gub);
         self.ahi = if (self.part == .sums) try self.rig.output(rows * (FF / GS) * 2) else try self.rig.scratch(rows * (FF / GS) * 2);
         self.alo = try self.rig.scratch(rows * (FF / GS) * 2);
         self.hout = if (self.part == .act) try self.rig.output(rows * FF * 2) else try self.rig.scratch(rows * FF * 2);
+        if (self.part == .sums) {
+            // the sums cover the activation the card wrote: the reference reads those fp16 bytes, not a model
+            try self.run();
+            const h = try self.rig.bytes(self.hout, rows * FF * 2);
+            for (self.act, 0..) |*v, i| v.* = kit.get(.f16, h, i);
+        }
         return true;
     }
 
@@ -134,14 +137,6 @@ pub const Swiglu = struct {
         switch (self.part) {
             .act => ref.swigluAct(self.gu, FF, want, mag),
             .sums => ref.swigluSums(self.act, FF, want, mag),
-        }
-    }
-
-    /// The activation's own allowance, and the row sums' plus what the terms' own rounding can move them by.
-    pub fn bounds(self: *Swiglu, want: []const f64, mag: []const f64, allow: []f64) !void {
-        for (allow, want, mag) |*l, w, m| {
-            l.* = c.bound(spec(self.part), self.shape, w, m);
-            if (self.part == .sums) l.* += m * 0x1p-9;
         }
     }
 
