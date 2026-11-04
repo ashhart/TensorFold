@@ -8,6 +8,9 @@ const canon_ = @import("contract_flashnext_exl3_canon.zig");
 const writeback = @import("contract_flashnext_writeback.zig");
 const kvt_ = @import("contract_flashnext_exl3_kvt.zig");
 const kvt_plan_ = @import("contract_flashnext_exl3_kvt_plan.zig");
+const prefill_ = @import("contract_flashnext_exl3_prefill.zig");
+const promptd_ = @import("contract_flashnext_exl3_promptd.zig");
+const tppf_ = @import("contract_flashnext_exl3_tppf.zig");
 const flash = @import("flashnext");
 
 comptime {
@@ -26,6 +29,9 @@ pub const Suite = struct {
     masks: tp_.Masks,
     canons: canon_.Canons,
     kvt: *kvt_.Group,
+    prefill: *prefill_.Group,
+    promptd: *promptd_.Set,
+    tppf: *tppf_.Set,
 
     pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, kernels: *std.ArrayList(g.Kernel), hc: cuda.Module, controls: cuda.Module) !*Suite {
         const self = try a.create(Suite);
@@ -48,10 +54,25 @@ pub const Suite = struct {
         errdefer self.canons.deinit();
         try self.canons.add(a, kernels);
         self.kvt = try kvt_.Group.create(a, gpu, s, kernels);
+        errdefer self.kvt.destroy();
+        self.prefill = try prefill_.Group.create(a, gpu, s, kernels);
+        errdefer self.prefill.destroy();
+        self.promptd = try a.create(promptd_.Set);
+        errdefer a.destroy(self.promptd);
+        self.promptd.* = .{};
+        errdefer self.promptd.deinit();
+        try self.promptd.add(gpu, s, kernels);
+        self.tppf = try tppf_.Set.create(a, gpu, s, controls);
+        errdefer self.tppf.destroy();
+        try self.tppf.add(a, kernels);
         return self;
     }
 
     pub fn destroy(self: *Suite) void {
+        self.tppf.destroy();
+        self.promptd.deinit();
+        self.a.destroy(self.promptd);
+        self.prefill.destroy();
         self.canons.deinit();
         self.kvt.destroy();
         self.masks.deinit();
