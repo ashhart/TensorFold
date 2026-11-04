@@ -15,8 +15,8 @@ const Weight = cuda.qmmf.Weight;
 
 const D = 2560; // dims
 const most = 1536; // the default chunk
-/// Decode rows, a stage of 16, the prompt tile's first row count and the default chunk.
-const counts = [_]usize{ 1, 4, 16, 64, most };
+/// Decode rows, a stage of 16, 64, the prompt tile's first row count (Kernels.prompt_rows) and the default chunk.
+const counts = [_]usize{ 1, 4, 16, 64, 1024, most };
 const head_dim = 256;
 const index_heads = 4;
 const index_dim = 128;
@@ -42,10 +42,10 @@ const Ctx = struct {
         return p.native.?;
     }
 
-    /// One lane call as the pass makes it (bf16 rows), or its fp32 rows, into a buffer of 0xff bytes.
+    /// One native call as the pass makes it (lane, or prompt tile from prompt_rows rows), bf16 or fp32, in 0xff bytes.
     fn lane(c: *Ctx, comptime T: type, x: u64, m: usize, w: Weight) ![]T {
         const dst = try c.r.out(m * w.n * @sizeOf(T));
-        try c.k.native_lane.matmulOut(c.r.s, x, w.k, m, w, dst, if (T == f32) .f32 else .bf16, c.part.ptr);
+        try c.k.nativeMatmul(c.r.s, x, w.k, m, w, dst, c.part.ptr, if (T == f32) .f32 else .bf16);
         return c.r.back(T, dst, m * w.n);
     }
 
@@ -109,7 +109,7 @@ fn projection(c: *Ctx, comptime what: []const u8, prefix: []const u8, parts: []c
         }
     }
     check.pass("flashnext-tp-heads {s}: each rank's {d} rows equal the whole {d}-row projection's kept rows byte for byte " ++
-        "(bf16 and fp32) at 1 to 1,536 rows; the unpinned cut differs", .{ what, mine[0].n, whole.n });
+        "(bf16 and fp32) at 1 to 1,536 rows, lane and prompt tile; the unpinned cut differs", .{ what, mine[0].n, whole.n });
     return rows;
 }
 
@@ -292,6 +292,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8) !void {
     defer r.deinit();
     var k = try Kernels.load(gpu.d);
     defer k.deinit();
+    try check.expect(k.prompt != null and k.prompt_rows == 1024, "the BF16 prompt tile is loaded and takes 1,024 rows and more", .{});
     var g = try flash.Glue.load(gpu.d);
     defer g.deinit();
     // the unpinned witness's two K slices of up to 8,240 fp32 columns a row
