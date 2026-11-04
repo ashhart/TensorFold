@@ -44,6 +44,8 @@ pub const Loaded = struct {
     /// The streams admitted at once, and the server's startup line (the memory plan).
     streams: usize,
     startup: []const u8,
+    /// The readouts the engine answers (null: none; it generates text instead).
+    readouts: ?lanes.readout.Info = null,
 };
 
 /// A flag or a resource the engine cannot take: `problem` says why.
@@ -278,6 +280,7 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
         .deinit = release,
         .streams = p.streams,
         .startup = p.startup,
+        .readouts = own.backend.readouts(),
     };
 }
 

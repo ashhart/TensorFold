@@ -316,7 +316,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
     errdefer h.core.deinit();
     const what = Serves.of(loaded, r.options.window);
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (r.dev.group) |g| @intCast(g.world) else 1, .lanes = @intCast(loaded.streams), .context_window = @intCast(what.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = what.text_generation, .text_generation = what.text_generation, .embeddings = what.embeddings, .decides = what.decides, .rerank = what.rerank, .vision = visionOffer(loaded), .reasoning = reasoning(F) });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (r.dev.group) |g| @intCast(g.world) else 1, .lanes = @intCast(loaded.streams), .context_window = @intCast(what.window), .prefill_step = F.prefill_step, .decode_share = o.decode_share, .policy = h.policy_line, .startup = loaded.startup, .structures = what.text_generation, .text_generation = what.text_generation, .embeddings = what.embeddings, .decides = what.decides, .rerank = what.rerank, .readouts = what.readouts, .vision = visionOffer(loaded), .reasoning = reasoning(F) });
     h.host.memory = .{ .read = readMemory };
     if (@hasField(@TypeOf(loaded), "cache")) {
         h.host.cache = loaded.cache;
@@ -335,6 +335,8 @@ const Serves = struct {
     embeddings: ?api.EmbeddingInfo = null,
     decides: bool = false,
     rerank: ?api.Rerank = null,
+    /// A family whose `Loaded` reports readouts answers them and generates nothing.
+    readouts: ?lanes.readout.Info = null,
     window: usize,
 
     fn of(loaded: anytype, asked: usize) Serves {
@@ -344,6 +346,10 @@ const Serves = struct {
         if (@hasField(L, "embeddings")) s.embeddings = loaded.embeddings;
         if (@hasField(L, "decides")) s.decides = loaded.decides;
         if (@hasField(L, "rerank")) s.rerank = loaded.rerank;
+        if (@hasField(L, "readouts")) if (loaded.readouts) |info| {
+            s.readouts = info;
+            s.text_generation = false;
+        };
         if (@hasField(L, "window")) if (loaded.window) |w| {
             s.window = w;
         };
@@ -569,4 +575,11 @@ test "a family's Loaded names what it serves; one without the fields generates t
     try std.testing.expectEqual(@as(u32, 9693), r.rerank.?.yes);
     try std.testing.expect(p.rerank == null and e.rerank == null);
     try std.testing.expect(!p.decides and !e.decides);
+    const Readout = struct { readouts: ?lanes.readout.Info };
+    const d = Serves.of(Readout{ .readouts = .{ .max_rows = 16384, .max_questions = 64, .max_options = 1024 } }, 16384);
+    try std.testing.expect(!d.text_generation and d.embeddings == null and d.rerank == null);
+    try std.testing.expectEqual(@as(u32, 1024), d.readouts.?.max_options);
+    try std.testing.expect(Serves.of(Readout{ .readouts = null }, 4096).text_generation and p.readouts == null);
+    // Qwen3.5's `Loaded` must carry the field, or its readouts would never reach the Info
+    try std.testing.expect(@hasField(@typeInfo(@typeInfo(@TypeOf(qwen35.native.open)).@"fn".return_type.?).error_union.payload, "readouts"));
 }
