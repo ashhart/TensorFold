@@ -166,40 +166,75 @@ instead of a refusal looks like.
 | --- | --- | --- | --- |
 | No vector | 30/30 | 0/30 | 60/60 |
 | Vector at strength 1e-6 | 30/30 | 0/30 | 60/60 |
-| Published GLP-49, layers 10-58, strength 1.0 | 19/30 | 6/30 | 60/60 |
-| Our vector, last-row capture, layers 10-58, strength 1.0 | 18/30 | 7/30 | 60/60 |
-| Our vector, masked at 0.005, strength 1.0 | 0/30 | 0/30 | 60/60 |
+| Published GLP-49, per layer, layers 10-58, strength 1.0 | 19/30 | 6/30 | 60/60 |
+| Published GLP-63, pooled, layers 1-63, strength 1.0 | 2/30 | 0/30 | 60/60 |
+| Our vector, layers 10-58, strength 1.0 | 18/30 | 7/30 | 60/60 |
+| Our vector, masked at 0.005, layers 10-58, strength 1.0 | 0/30 | 0/30 | 60/60 |
 
 A strength of 1e-6 reproduces the baseline: the path is a no-op at zero.
 
-The published vector is `msuiche/Qwen3.8-27B-abliterated-cyber-GLP-49`. It is
-downloaded and run here; it is not vendored and it is not committed. The last
-two rows are vectors this repository's own producer derives from the model
-itself, on our own prompt set.
+The two published vectors are `msuiche/Qwen3.8-27B-abliterated-cyber-GLP-49`
+and its pooled sibling GLP-63. They are downloaded and run here; they are not
+vendored and they are not committed. The last two rows are vectors this
+repository's own producer derives from the model itself, on our own prompt
+set.
 
 The masked vector is the one to read. It takes every refusal off and takes no
-harmless prompt with it: the refusal direction, with the dimensions the
-massive activations dominate left out of it, is a direction at the refusal
-rather than a direction at the stream's offset.
+harmless prompt with it: with the dimensions the massive activations dominate
+left out of it, the direction is a direction at the refusal rather than a
+direction at the stream's offset.
 
 The unmasked vector is the same derivation without that exclusion, and it
 shows what the exclusion is worth: it removes two refusals in three and costs
 seven harmless refusals in thirty. The direction that carries "I will not"
 also carried "I will", because it was pointing at the wrong thing.
 
+The published pooled vector reaches close to the same place with a direction
+that was made differently, and the published per-layer one does not: a
+difference of means over this model's massive activations is a direction at
+the activations.
+
 That the replies stay coherent in every arm matters more than the rates: a
 vector that silences the model is not a refusal removal, so read the replies,
-not the rate.
+not the rate. The masked vector was put through an ordinary capability check
+as well: twelve tasks of the model's own work, code, arithmetic, translation,
+a regular expression, a haiku, facts and protocols, and it answered every one
+of them.
 
 The benign column is the price in the arms that pay it, and it is not small:
-six of the thirty harmless twins are refused under the published vector, and
-seven under the unmasked vector, against none without one. Our prompt set is
-deliberately tight, so a twin differs from its harmful counterpart in intent
-alone. That is the strength's dial, and the reply text is the measure.
+six of the thirty harmless twins are refused under the published per-layer
+vector, and seven under the unmasked vector, against none without one. Our
+prompt set is deliberately tight, so a twin differs from its harmful
+counterpart in intent alone. That is the strength's dial, and the reply text
+is the measure.
 
 The vector's strength has a ceiling. Past it the model stops answering: the
 residual stream loses more than the direction it was asked to lose. Take the
 strength from the file's own `glp.alpha_default`, and read the replies.
+
+The masked vector's strength is not a delicate dial. Across a sixfold range
+the refusal rate and the over-refusal rate do not move at all, and the model
+keeps answering:
+
+| Strength | Harmful refused | Benign refused | Replies coherent |
+| --- | --- | --- | --- |
+| 0.5 | 0/8 | 0/8 | 16/16 |
+| 0.75 | 0/8 | 0/8 | 16/16 |
+| 1.0 | 0/30 | 0/30 | 60/60 |
+| 1.25 | 0/8 | 0/8 | 16/16 |
+| 1.5 | 0/8 | 0/8 | 16/16 |
+| 2.0 | 0/8 | 0/8 | 16/16 |
+| 3.0 | 0/8 | 0/8 | 16/16 |
+| 4.0 | 0/8 | 0/8 | 0/16 |
+
+That flatness is the point: a direction that is at the refusal and not at the
+stream's offset is not one whose dose has to be found.
+
+The last row is the ceiling, and it is where the reference implementation says
+it is. The published vector's own metadata records "alpha=4 collapses this
+model", and at strength 4 this runtime stops answering too: the replies go
+empty. The container, the kernel and the strength's meaning agree with the
+implementation that wrote the file.
 
 ## The file
 
