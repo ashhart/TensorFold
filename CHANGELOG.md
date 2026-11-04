@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- `TF_KV_SHARE=n` keeps a paged CUDA family's prompts as its core pool's pages (Gemma 4, Kolibri-1), with replies equal to a fresh prefill; it's opt-in, and costs about 3.5% decode after a short cold prompt on Kolibri-1 (#1755, part of #1657). Thanks to @jschmied.
+
 - Docs: the GLM CUDA recipe gives `TF_GLM_OVERLAP_PIECES=8` beside `TF_GLM_CHUNK_SOLO` at TP=3 with `TF_GLM_ROCE_MULTI` (#2067). Thanks to @Bizuayeu.
 
 - Docs: the Flash Next recipe says native Metal takes `--ple-on-ssd`, which reads per-layer embedding rows from the SSD in batches (#2068). Thanks to @swbiggart.
