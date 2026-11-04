@@ -267,7 +267,6 @@ pub const Error = error{
     UnsupportedModel,
     InvalidMoe,
     InvalidRotary,
-    InvalidLayerTypes,
 } || checks.Error || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
 
 pub const checks = @import("config_checks.zig");
@@ -289,7 +288,6 @@ pub const Spec = struct {
     eps: f64,
     rope_theta: f64,
     rotary_dim: usize,
-    full_every: usize,
     bits: u8,
     group: u16,
     experts: usize,
@@ -374,7 +372,6 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
         .eps = try numberOf(tower.get("rms_norm_eps") orelse .{ .float = 1e-6 }),
         .rope_theta = base,
         .rotary_dim = rotary,
-        .full_every = try optionalInt(tower, "full_attention_interval", 4),
         .bits = bits,
         .group = group_size,
         .experts = experts,
@@ -384,10 +381,10 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
         .mtp_layers = try optionalInt(tower, "mtp_num_hidden_layers", 0),
     };
     if (rotary % 2 != 0 or rotary == 0 or rotary > per_head) return error.InvalidRotary;
-    if (spec.full_every == 0 or attn_heads == 0) return error.InvalidConfig;
+    if (attn_heads == 0) return error.InvalidConfig;
     try checks.computes(tower);
     try checks.products(.{ .hidden = spec.hidden, .intermediate = spec.intermediate, .vocab = spec.vocab, .heads = spec.heads, .kv_heads = spec.kv_heads, .head_dim = spec.head_dim, .key_heads = spec.key_heads, .value_heads = spec.value_heads, .key_dim = spec.key_dim, .value_dim = spec.value_dim, .conv = spec.conv, .experts = spec.experts, .moe_width = spec.moe_width, .shared_width = spec.shared_width });
-    try checks.layers(&spec.full_layers, tower, spec.n_layers, spec.full_every);
+    try checks.layers(&spec.full_layers, tower, spec.n_layers);
     spec.mrope = try checks.mrope(rope, rotary);
     try checks.defaultRope(tower, rope);
     spec.max_position = try checks.maxPosition(tower);
@@ -505,7 +502,7 @@ test "a top-level config, the partial rotary default and the MoE fields" {
     try std.testing.expectEqual(@as(usize, 512), s.moe_width);
     try std.testing.expectEqual(@as(usize, 512), s.shared_width);
     try std.testing.expectEqual(@as(usize, 0), s.intermediate);
-    try std.testing.expectEqual(@as(usize, 4), s.full_every);
+    try std.testing.expect(s.full(3) and !s.full(0) and !s.full(2)); // no interval, no list: every fourth layer
 }
 
 test "the geometry refuses what the kernels do not compute and sizes past 32 bits" {
@@ -537,14 +534,17 @@ test "the Python loader's refusals" {
     const wrong = try std.mem.replaceOwned(u8, a, sample_text, "\"qwen3_5\"", "\"llama\"");
     defer a.free(wrong);
     try std.testing.expectError(error.UnsupportedModel, declared(arena.allocator(), wrong));
-    // any mix of the two kinds is read as written; another kind is refused
+    // any mix of the two kinds is read as written unless the interval contradicts it; another kind is refused
     const mixed = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"linear_attention\"],");
     defer a.free(mixed);
-    const s = try geometry(try textTower(try declared(arena.allocator(), mixed)), 4, 64);
+    try std.testing.expectError(error.LayerTypesContradictFullAttentionInterval, geometry(try textTower(try declared(arena.allocator(), mixed)), 4, 64));
+    const unset = try std.mem.replaceOwned(u8, a, mixed, "\"full_attention_interval\": 4,", "\"full_attention_interval\": null,");
+    defer a.free(unset);
+    const s = try geometry(try textTower(try declared(arena.allocator(), unset)), 4, 64);
     try std.testing.expect(s.full(3) and !s.full(7));
     const types = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"sliding_attention\"],");
     defer a.free(types);
-    try std.testing.expectError(error.InvalidLayerTypes, geometry(try textTower(try declared(arena.allocator(), types)), 4, 64));
+    try std.testing.expectError(error.UnsupportedLayerTypes, geometry(try textTower(try declared(arena.allocator(), types)), 4, 64));
     const moe = try std.mem.replaceOwned(u8, a, sample_text, "\"vocab_size\"", "\"num_experts\": 8, \"num_experts_per_tok\": 9, \"vocab_size\"");
     defer a.free(moe);
     try std.testing.expectError(error.InvalidMoe, geometry(try textTower(try declared(arena.allocator(), moe)), 4, 64));
