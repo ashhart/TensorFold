@@ -1,14 +1,17 @@
 //! Recording-only Metal boundary: no Objective-C, device discovery or shader compilation.
 const std = @import("std");
 pub var builds: usize = 0;
+pub var scalar_limit: usize = 512;
+pub var tile_limit: usize = 512;
 pub const Pipeline = struct {
     id: u64 = 1,
+    scalar: bool = false,
     pub fn init(_: Device, _: Library, name: []const u8, _: bool) !Pipeline {
         builds += 1;
-        return .{ .id = std.hash.Wyhash.hash(0, name) };
+        return .{ .id = std.hash.Wyhash.hash(0, name), .scalar = std.mem.startsWith(u8, name, "tf_sqw_scalar_") };
     }
-    pub fn maxThreads(_: Pipeline) usize {
-        return 512;
+    pub fn maxThreads(p: Pipeline) usize {
+        return if (p.scalar) scalar_limit else tile_limit;
     }
     pub fn deinit(_: Pipeline) void {}
 };

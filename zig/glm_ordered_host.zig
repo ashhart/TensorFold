@@ -157,3 +157,24 @@ test "GLM ordered: every scalar resource record matches the specialization's act
     }
     try t.expectEqual(@as(usize, 72), seen);
 }
+
+test "GLM ordered: reflected scalar refusal falls back to tiles, zero tile capacity is refused" {
+    defer mtl.scalar_limit = 512;
+    defer mtl.tile_limit = 512;
+    mtl.scalar_limit = 0;
+    mtl.tile_limit = 256;
+    var p = try simd.Pipelines.load(.{});
+    defer p.deinit();
+    try p.warm();
+    var k: Kernels = .{ .ordered = p };
+    var rec: mtl.Record = .{};
+    const q: affine.Affine = .{ .w = ref(1, 0), .s = ref(2, 0), .b = ref(3, 0), .n = 8192, .k = 4096, .bits = 3, .group = 64 };
+    try t.expectError(error.SimdThreads, simd.call(&p, 3, 8192, 4096, 2, 8192, true, 0));
+    try t.expect(projection.encode(&k, .{ .r = &rec }, q, .{ .in = ref(4, 0), .out = ref(5, 0), .ldx = 4096, .ldo = 8192, .rows = 2 }));
+    try t.expectEqual(@as(usize, 1), rec.n);
+    try t.expect(!rec.passes[0].pipe.scalar);
+    try t.expect(rec.passes[0].threads.width > 0 and rec.passes[0].threads.width <= 256);
+    mtl.tile_limit = 0;
+    try t.expectError(error.SimdThreads, simd.call(&p, 2, 8192, 4096, 16, 8192, false, 0));
+    try t.expectError(error.SimdThreads, simd.call(&p, 4, 8192, 4096, 16, 8192, false, 0));
+}
