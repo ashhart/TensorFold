@@ -9,7 +9,7 @@ producer derives such a direction from the model's own activations.
 - Apple M4 Pro (`applegpu_g16`), macOS 26.5.1 (25F80), 48 GiB of RAM, Metal.
 - Zig 0.17.0, the version the repository pins.
 - TensorFold 1.1.8, branch `feature/glp-steering`, rebased onto the upstream `main`
-  at `8abd45089`.
+  at `7b65d604d`.
 - Checkpoint `TensorFold/Qwen3.8-27B-MLX-4bit` at
   `22d8d538154e0e5b6f8dcb1fcc74a60a0798104c`, MLX 4-bit.
 - Serving settings: strength 1.0, 300 new tokens per prompt, the server's own
@@ -125,8 +125,8 @@ reproduces the baseline exactly.
   pool, four attempts across two runs, while the base tree's own runs are
   cancelled the same way in the same window; the job's four steps were run here
   under the job's own pins, and they pass.
-- The lean checker finds 424 problems on this branch against 425 on the base it
-  sits on, `8abd45089`: zero new.
+- The lean checker finds 424 problems on this branch against 424 on the base it
+  sits on, `7b65d604d`: zero new.
 
 ## Not covered
 
