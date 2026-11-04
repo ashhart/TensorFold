@@ -274,7 +274,7 @@ pub fn Ops(comptime Tri: type) type {
         }
 
         /// draft over several drafts, greedy or sampled: kept rows in one pass, then one a step, each as it would alone
-        pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidence: f64, outs: []const *Chain) !void {
+        pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidences: []const f64, outs: []const *Chain) !void {
             const h = o.h;
             const n_l = ds.len;
             for (ds, outs) |d, out| {
@@ -292,7 +292,7 @@ pub fn Ops(comptime Tri: type) type {
                 n_act += 1;
             };
             var stops: [max_lanes]mtp.Stop = undefined;
-            for (stops[0..ds.len]) |*st| st.* = .{ .c = confidence };
+            for (stops[0..ds.len], confidences) |*st, c| st.* = .{ .c = c };
             var j: usize = 0;
             var best_host: [max_lanes * 4]f32 = undefined;
             var step_ds: [max_lanes]*Draft = undefined;
