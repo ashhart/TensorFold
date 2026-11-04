@@ -480,7 +480,11 @@ pub const Engine = struct {
         const has_media = for (seqs) |q| {
             if (q.media != null) break true;
         } else false;
-        if (e.collective != null and round_graph.enabled() and !has_media and
+        const has_paged = for (seqs) |q| {
+            if (q.paged != null) break true;
+        } else false;
+        // a captured round fixes the lanes' tables: paged streams run the plain pass
+        if (e.collective != null and round_graph.enabled() and !has_media and !has_paged and
             e.layers[0].dense_cut == null and
             !@import("exl3/model/cuda_exl3_pass.zig").waitsHost(p.m.layers))
         {
