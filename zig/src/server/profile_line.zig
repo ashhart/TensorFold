@@ -20,7 +20,7 @@ pub fn format(a: std.mem.Allocator, profile: p.Profile, family: []const u8, back
     for (p.entries) |e| {
         if (!e.applies(family, backend)) continue;
         const raw = environment.get(e.name()) orelse continue;
-        if (!e.differs(raw)) continue;
+        if (!e.differs(family, raw)) continue;
         try out.writer.print("{s} {s}=", .{ if (found) ";" else "", e.name() });
         try shown(&out.writer, raw);
         try out.writer.print(" ({s}, env)", .{@tagName(e.class)});
