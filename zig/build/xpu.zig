@@ -332,4 +332,9 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const gdn_tests = b.addRunArtifact(b.addTest(.{ .root_module = gdn }));
     b.step("test-fp64-gdn-xpu-host", "The XPU GDN FP64 reference's bf16 rounding without devices or ocloc").dependOn(&gdn_tests.step);
     step.dependOn(&gdn_tests.step);
+    // the Qwen27 runner's config.json check (xpu/qwen27_config.zig), which Runner.init makes before any load
+    const shape = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27_config.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    const shape_tests = b.addRunArtifact(b.addTest(.{ .root_module = shape }));
+    b.step("test-qwen27-config-xpu-host", "The XPU 27B runner's config.json shape and layer pattern without devices or ocloc").dependOn(&shape_tests.step);
+    step.dependOn(&shape_tests.step);
 }
