@@ -67,3 +67,20 @@ test "llama drafter: a probe stays armed until a round verifies its drafts, then
     r.round(4, 3); // drafts the pricing chose, not a probe: the gap starts over
     try std.testing.expectEqual(@as(u32, 64), r.gap);
 }
+
+test "llama drafter: a probe whose drafts the lane core cuts disarms after one more plain round, its gap doubled" {
+    var d: Drafter = undefined;
+    d.kept = 0;
+    d.tried = 0;
+    var r: Request = .{ .d = &d, .gpa = std.testing.allocator, .slot = 0, .eos = &.{}, .aside = 7, .gap = 8, .probing = true };
+    r.asked = .{ .len = 10, .max_draft = 15 };
+    r.round(1, 0); // the look-ahead's plain round: still armed
+    try std.testing.expect(r.probing);
+    try std.testing.expectEqual(@as(u32, 7), r.aside);
+    r.asked = .{ .len = 11, .max_draft = 15 };
+    r.round(1, 0); // the verify's round came back plain too: the copy plan was trimmed to nothing
+    try std.testing.expect(!r.probing);
+    try std.testing.expectEqual(@as(u32, 0), r.aside);
+    try std.testing.expectEqual(@as(u32, 16), r.gap);
+    try std.testing.expectEqual(@as(u64, 0), r.offered); // nothing verified, nothing measured
+}
