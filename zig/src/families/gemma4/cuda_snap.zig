@@ -1,4 +1,4 @@
-//! A stream's caches at a prompt position: full layers' [0, at), each sliding layer's last window - 1 positions.
+//! A stream's caches at a prompt position: full layers' [0, at), sliding layers' last window - 1; owning layers only.
 const std = @import("std");
 const cuda = @import("cuda");
 const cfg = @import("cuda_config.zig");
@@ -31,7 +31,7 @@ fn rowBytes(m: *const fwd.Model, i: usize) usize {
 /// Bytes a state at `at` copies, its full layers' positions below `from` held as pages.
 pub fn copyBytes(m: *const fwd.Model, at: usize, from: usize) u64 {
     var n: usize = 0;
-    for (0..m.layers) |i| n += 2 * (if (cfg.global(i)) at - from else tail(at)) * rowBytes(m, i);
+    for (0..fwd.pages.ownLayers(m)) |i| n += 2 * (if (cfg.global(i)) at - from else tail(at)) * rowBytes(m, i);
     return n;
 }
 
@@ -39,7 +39,7 @@ pub fn copyBytes(m: *const fwd.Model, at: usize, from: usize) u64 {
 fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
     if (from > 0 and (!m.paged or from % fwd.pages.tokens != 0 or from > at)) return error.KeptPagesUnpaged;
     var off: usize = 0;
-    for (0..m.layers) |i| for ([_][]u64{ m.kc, m.vc }) |cache| {
+    for (0..fwd.pages.ownLayers(m)) |i| for ([_][]u64{ m.kc, m.vc }) |cache| {
         const rb = rowBytes(m, i);
         if (cfg.global(i) and m.paged) { // pages: p in page p / page_tokens of the slot's row, a copy a run within one
             var p: usize = from;
@@ -101,7 +101,7 @@ fn regions(m: *const fwd.Model) usize {
 
 fn fullLayer(m: *const fwd.Model, j: usize) usize {
     var n: usize = 0;
-    for (0..m.layers) |i| if (cfg.global(i)) {
+    for (0..fwd.pages.ownLayers(m)) |i| if (cfg.global(i)) {
         if (n == j) return i;
         n += 1;
     };
