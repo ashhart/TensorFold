@@ -44,9 +44,9 @@ pub const Options = struct {
         return if (o.on) .{ 1, o.mb, o.ctas, o.pace_gbps } else @splat(0);
     }
 
-    /// Whether a GPU of compute capability `cap` prefetches: named on any GPU, unset on a GB10 (sm_121) alone.
-    pub fn want(o: Options, cap: usize) bool {
-        return o.on and (o.named or cap == 121);
+    /// Whether `cap` prefetches at `world` ranks: named on any GPU, unset on a GB10 (sm_121) at two ranks or more.
+    pub fn want(o: Options, cap: usize, world: usize) bool {
+        return o.on and (o.named or (cap == 121 and world >= 2));
     }
 };
 
@@ -258,18 +258,19 @@ fn Env(comptime pairs: anytype) type {
     };
 }
 
-test "TF_GLM_L2PF: on unless 0, unset on a GB10 alone, DeepSeek's knobs by default, refusals naming a bad value" {
+test "TF_GLM_L2PF: on unless 0, unset on a GB10 at two ranks or more, DeepSeek's knobs by default, refusals naming a bad value" {
     const t = std.testing;
     var problem: []const u8 = "";
     const unset = try Options.read(Env(.{}).get, &problem);
     try t.expectEqual([4]u32{ 1, 12, 2, 150 }, unset.words());
-    try t.expect(unset.want(121) and !unset.want(120) and !unset.want(90));
+    try t.expect(unset.want(121, 2) and unset.want(121, 3) and !unset.want(121, 1));
+    try t.expect(!unset.want(120, 2) and !unset.want(90, 2));
     const off = try Options.read(Env(.{ .{ "TF_GLM_L2PF", "0" }, .{ "TF_GLM_L2PF_MB", "0" } }).get, &problem);
     try t.expectEqual([4]u32{ 0, 0, 0, 0 }, off.words());
-    try t.expect(!off.want(121));
+    try t.expect(!off.want(121, 2) and !off.want(121, 1));
     const named = try Options.read(Env(.{.{ "TF_GLM_L2PF", "1" }}).get, &problem);
     try t.expectEqual([4]u32{ 1, 12, 2, 150 }, named.words());
-    try t.expect(named.want(121) and named.want(120) and named.want(90));
+    try t.expect(named.want(121, 1) and named.want(121, 2) and named.want(120, 1) and named.want(90, 2));
     const set = Env(.{ .{ "TF_GLM_L2PF", "1" }, .{ "TF_GLM_L2PF_MB", "4" }, .{ "TF_GLM_L2PF_CTAS", "4" }, .{ "TF_GLM_L2PF_PACE_GBPS", "0" } });
     try t.expectEqual([4]u32{ 1, 4, 4, 0 }, (try Options.read(set.get, &problem)).words());
     const bad = .{
