@@ -122,6 +122,7 @@ pub fn Pass(comptime Tri: type) type {
         prepared: bool = false,
         /// The pending write-back's branch sits in fp32 in moe_f32 (something added to it, or it is kept).
         pending_f32: bool = false,
+        pending_f32_weights: ?u64 = null,
         /// The EXL3 canonical branch is already reduced into moe_f32.
         canon_f32: bool = false,
         /// This layer's out projection leaves part's other slices alone; its writeback adds the zero slice once.
@@ -171,29 +172,7 @@ pub fn Pass(comptime Tri: type) type {
 
         // ---- the blocks ----------------------------------------------------------------------------------------
 
-        /// The pending MoE output (or none: mode 0, the streams' sums alone) written back into rows [r0, r0 + n).
-        pub fn writeback(self: *Self, r0: usize, n: usize) !void {
-            const s = self.s;
-            const dummy = s.dummy;
-            const h = s.h + r0 * wide * 2;
-            const pss = s.pss + r0 * pss_n * 4;
-            const inj = s.inj + r0 * streams * 2;
-            const rs = self.rows * dims;
-            if (self.pending == null) {
-                try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", dummy, dummy, "*bf16", dummy, "*bf16", rs, n, dims, streams, 0, 1, 1, 1);
-                return;
-            }
-            self.pending = null;
-            if (self.pending_f32) {
-                // the fp32 branch rounded once, as MODE 2 rounds its sum (a slice of one)
-                self.pending_f32 = false;
-                try self.tri.hcWriteback(h, h, pss, s.moe_f32 + r0 * dims * 4, "*fp32", inj, dummy, "*bf16", dummy, "*bf16", rs, n, dims, streams, 4, 1, 1, 1);
-                return;
-            }
-            const y = s.y + r0 * slots * dims * 4;
-            const wts = s.wts + r0 * slots * 4;
-            try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, 10, 11, 1);
-        }
+        pub const writeback = @import("cuda_batch_moe.zig").writeback;
 
         /// A read-out over rows [r0, r0 + n) of the streams: mixed and its group sums, and the inject gates.
         pub fn readout(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
@@ -499,6 +478,7 @@ pub fn Pass(comptime Tri: type) type {
             self.pos0 = pos0;
             self.pending = null;
             self.pending_f32 = false;
+            self.pending_f32_weights = null;
             self.canon_f32 = false;
             // the gather writes the scratch's pinned rows, so the last pass's uploads must have read them first
             if (!self.prepared and !self.staged) try s.ready();

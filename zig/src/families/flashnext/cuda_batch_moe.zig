@@ -56,3 +56,32 @@ pub fn kept(self: anytype) void {
     self.canon_f32 = true;
     self.pending_f32 = true;
 }
+
+/// The pending MoE output (or none: mode 0, the streams' sums alone) written back into rows [r0, r0 + n).
+pub fn writeback(self: anytype, r0: usize, n: usize) !void {
+    const s = self.s;
+    const dummy = s.dummy;
+    const h = s.h + r0 * wt.wide * 2;
+    const pss = s.pss + r0 * batch.pss_n * 4;
+    const inj = s.inj + r0 * wt.streams * 2;
+    const rs = self.rows * dims;
+    if (self.pending == null) {
+        try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", dummy, dummy, "*bf16", dummy, "*bf16", rs, n, dims, wt.streams, 0, 1, 1, 1);
+        return;
+    }
+    self.pending = null;
+    if (self.pending_f32) {
+        // the fp32 branch rounded once, as MODE 2 rounds its sum (a slice of one)
+        self.pending_f32 = false;
+        if (self.pending_f32_weights) |weights| {
+            self.pending_f32_weights = null;
+            try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, s.moe_f32 + r0 * dims * 4, "*fp32", weights + r0 * 4, "*fp32", rs, n, dims, wt.streams, 2, 0, 1, 1);
+            return;
+        }
+        try self.tri.hcWriteback(h, h, pss, s.moe_f32 + r0 * dims * 4, "*fp32", inj, dummy, "*bf16", dummy, "*bf16", rs, n, dims, wt.streams, 4, 1, 1, 1);
+        return;
+    }
+    const y = s.y + r0 * slots * dims * 4;
+    const wts = s.wts + r0 * slots * 4;
+    try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, wt.streams, 2, 10, 11, 1);
+}
