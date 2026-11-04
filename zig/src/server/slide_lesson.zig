@@ -89,7 +89,7 @@ pub const Check = struct { question: []const u8, before: []const u8, thinking: [
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "", context: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it; context: the conversation it is asked after
 
 /// A lesson for the learner, its facts, and what to ask after it; `probes` are wordings it never trains on.
-pub const Plan = struct { full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{} };
+pub const Plan = struct { questions: []const Held = &.{}, corrections: []const @import("slide_correction.zig").Entry = &.{}, full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{} };
 
 /// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
 pub const round_steps = 20;
@@ -199,32 +199,10 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         .unasked = parts.unasked.items,
         .steps = steps,
     };
-    return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items } };
+    return .{ .questions = parts.all.items, .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items } };
 }
 
-/// The facts' examples as a lesson gathers them.
-pub const Parts = struct {
-    train: std.ArrayList(api.Example) = .empty,
-    held_ex: std.ArrayList(api.Example) = .empty,
-    held: std.ArrayList(Held) = .empty,
-    twins: std.ArrayList(api.Example) = .empty,
-    near: std.ArrayList(Check) = .empty, // the twins' questions with the answers they had, mined after the plain change
-    aside: std.ArrayList(Check) = .empty, // every fourth near miss, never trained on: checked after
-    think_train: std.ArrayList(api.Example) = .empty, // the facts' thinking answers, learned once the change is plain
-    think_held: std.ArrayList(api.Example) = .empty,
-    think_twins: std.ArrayList(api.Example) = .empty, // the trained near misses' thinking replies, held as they are
-    think_keep: std.ArrayList(api.Example) = .empty, // the keep prompts' thinking replies
-    asked: std.ArrayList(api.Example) = .empty, // more wordings of the facts' questions, prompts only, for the router
-    probes: std.ArrayList(Held) = .empty, // some of those wordings, asked after each round
-    unasked: std.ArrayList(api.Example) = .empty, // the questions asked about others, prompts only, for the router
-    seen: usize = 0,
-    thinks: bool = false, // each question is learned and held with thinking on too
-    document: bool = false, // the facts come from the user's documents, asked about as a colleague would, not told in chat
-    words: []const []const u8 = &.{}, // the open fact's subject words (none: it is about the user)
-    named: []const []const u8 = &.{}, // of those, the ones a question must say to name it
-    siblings: []const []const u8 = &.{}, // every fact told with these, whose questions are theirs to answer
-    own: std.ArrayList([]const u8) = .empty, // the facts' kept questions: none is also checked or kept as it was
-};
+pub const Parts = @import("slide_lesson_parts.zig").Parts;
 
 /// A reply as written, and whether it ended there: a cut reply learns no turn's end, which would teach stopping early.
 const Said = struct {
@@ -396,6 +374,7 @@ pub fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usi
     log.line("slide: {d} questions kept for: {s} ({s})", .{ refs.items.len, fact, try std.mem.join(a, " | ", told.items) });
     if (qs.len < min_probes) log.line("slide: the questions came back as: {s}", .{asked.content});
     if (pairs.items.len < min_probes) return false;
+    try parts.all.appendSlice(a, refs.items);
     // the two most typical wordings held out, so a vague one ("Which dog do I have?") never decides recall
     const n = pairs.items.len;
     const pair = heldPair(fact, refs.items);

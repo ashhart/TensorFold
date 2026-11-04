@@ -3,6 +3,7 @@ const std = @import("std");
 
 pub fn metal(b: *std.Build, m: anytype) void {
     const target = b.graph.host;
+    @import("locate_host.zig").compile(b, m.engine, "metal");
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = m.lanes }} });
     const native = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "tensorfold", .module = m.engine }, .{ .name = "engine_api", .module = api } } });
     native.addImport("living", m.living);

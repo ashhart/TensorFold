@@ -27,7 +27,7 @@ const disownLesson = examples.disownLesson;
 pub const Codes = struct { words: []u32, scales: []const u16, biases: []const u16 };
 
 pub const Report = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32 },
+    learned: struct { recalled: bool, steps: u32, loss: f32, candidate: bool = false },
     failed: []const u8,
 };
 
@@ -39,7 +39,7 @@ const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they 
 const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
 /// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
-const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire };
+const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire, shrink };
 
 /// The lessons over host H: its trainer and hooks (family.zig), routed blocks only when its trainer keeps `sites`.
 pub fn Learner(comptime H: type) type {
@@ -141,7 +141,12 @@ pub fn Learner(comptime H: type) type {
             if (has_pocket and l.trainer != null) {
                 if (lesson.save) try whole_lessons.healLive(l) else try whole_lessons.heal(l);
             }
+            if (lesson.against.len > 0 and (!@hasDecl(H.Trainer, "causalLogit") or !l.whole or l.method != .pocket)) return error.CorrectionsUnsupported;
             l.lesson = lesson;
+            if (lesson.shrink != .none) {
+                l.phase = .shrink;
+                return;
+            }
             if (lesson.undo) {
                 l.phase = .undo;
                 return;
@@ -263,6 +268,10 @@ pub fn Learner(comptime H: type) type {
                     return .{ .done = true, .changed = true };
                 },
                 .save => return l.saveOnce(),
+                .shrink => {
+                    l.phase = .idle;
+                    return if (has_pocket) whole_lessons.shrink(l) else .{ .done = true };
+                },
                 .retire => {
                     l.phase = .idle;
                     if (has_whole and l.whole) if (try whole_lessons.retire(l, l.lesson)) |s| return s;
