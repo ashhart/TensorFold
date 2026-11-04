@@ -11,12 +11,12 @@ converted pack and no Python or libtorch in the served engine. It was qualified 
 zig build native -Doptimize=ReleaseFast
 zig-out/native/bin/tensorfold-native serve <Unlimited-OCR-2 checkpoint> \
   --name Unlimited-OCR-2 --host 127.0.0.1 --port 8896 --vision --vision-max-images 64 \
-  --chat-template zig/src/families/uocr/chat_template.jinja \
   --context 131072 --max-tokens 131072 --no-update-check
 ```
 
-The release ships no chat template, so the family's own is passed with `--chat-template`: one page marker and image
-per image part, then the user's text, or the publisher's default instruction `Multi page parsing.` when there is none.
+The release ships no chat template, so the server uses the family's own (`zig/src/families/uocr/chat_template.jinja`):
+one page marker and image per image part, then the user's text, or the publisher's default instruction
+`Multi page parsing.` when there is none. A checkpoint's own template, or `--chat-template`, takes its place.
 JPEG pages need libjpeg-turbo 3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG`), which keeps their pixels equal to the reference's;
 PNG and WebP need nothing extra.
 

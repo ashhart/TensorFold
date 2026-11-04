@@ -14,8 +14,8 @@ torch 2.15.0 (the card tests 2.13.0 on CUDA; this runs on the CPU), Pillow 13.0.
                            --base for the global view alone) and writes OUT/<case>.json: the prompt ids, the
                            generated ids and the text
 
-Compare a served reply with the reference's text: `tensorfold-native serve MODEL --vision --chat-template
-zig/src/families/uocr/chat_template.jinja`, then the same pages in one chat request."""
+Compare a served reply with the reference's text: `tensorfold-native serve MODEL --vision`, then the same pages in
+one chat request."""
 
 import argparse
 import json
