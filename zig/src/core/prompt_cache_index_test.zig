@@ -163,7 +163,7 @@ test "snapshot index: two borrowers survive invalidation and a later insertion" 
     try oracle.check(&s);
 }
 
-test "snapshot index: failed restore removes only its indexed state and retries a shorter one" {
+test "snapshot index: a refused restore removes only its indexed state, and the next shorter one resumes" {
     const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
@@ -172,16 +172,18 @@ test "snapshot index: failed restore removes only its indexed state and retries 
     defer s.deinit();
     try keep(&s, &f, &prompt, 4, &.{});
     try keep(&s, &f, &prompt, 8, &.{});
-    f.fail_restore = true;
+    f.refuse_at = 8; // the index's longest state is refused
+    const resumed = try s.begin(arena.allocator(), &prompt, 0, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(u32, 4), resumed.from); // the next shorter state, from the same begin
+    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
+    try std.testing.expectEqual(@as(u64, 1), s.counts.hits);
+    try std.testing.expectEqual(@as(u32, 4), s.find(&prompt, &.{}, &.{}).?.at); // only the refused state left the index
+    try std.testing.expectEqual(@import("prompt_cache_test.zig").fresh(&prompt), f.pass(&s, &prompt, resumed));
+    try oracle.check(&s);
+    f.fail_restore = true; // every restore refused: the last state goes too and the pass starts from 0
     const failed = try s.begin(arena.allocator(), &prompt, 0, &.{}, &.{}, null, &.{});
     try std.testing.expectEqual(@as(u32, 0), failed.from);
-    try std.testing.expectEqual(@as(u64, 0), s.counts.hits);
-    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
-    try oracle.check(&s);
-    f.fail_restore = false;
-    const resumed = try s.begin(arena.allocator(), &prompt, 0, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqual(@as(u32, 4), resumed.from);
-    try std.testing.expectEqual(@import("prompt_cache_test.zig").fresh(&prompt), f.pass(&s, &prompt, resumed));
+    try std.testing.expectEqual(@as(u64, 2), s.counts.failed);
     try oracle.check(&s);
 }
 

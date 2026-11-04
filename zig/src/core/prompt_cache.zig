@@ -250,13 +250,27 @@ pub const Store = struct {
 
     /// Begin with a known end of the latest user message, for its optional interior state (0: unknown).
     pub fn beginUser(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
-        const l = try s.lookupUser(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans);
-        const e = l.entry orelse return .{ .marks = l.marks };
-        const failure: ?anyerror = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| null else |err| err;
-        const from = if (failure == null) e.at else 0;
-        s.resumedWithReason(e, prompt, failure);
-        s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
-        return .{ .from = from, .marks = l.marks };
+        var l = try s.lookupUser(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans);
+        // the first lookup's marks, kept for the pass from the start if no shorter kept state resumes
+        var fresh_marks: ?[]const u32 = null;
+        while (l.entry) |e| {
+            if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| {
+                const at = e.at; // read before the reserve may evict the entry
+                s.resumedWithReason(e, prompt, null);
+                if (fresh_marks) |m| if (m.ptr != l.marks.ptr) a.free(m);
+                s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
+                return .{ .from = at, .marks = l.marks };
+            } else |err| {
+                // a refused state is dropped, then the next shorter kept state is tried before the pass from the start
+                if (fresh_marks == null) fresh_marks = l.marks else a.free(l.marks);
+                s.resumedWithReason(e, prompt, err);
+                l = try s.lookupUser(a, prompt, @intCast(prompt.len), history_len, rewind_len, user_end, shared, starts, spans);
+            }
+        }
+        const marks_ = fresh_marks orelse l.marks;
+        if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
+        s.reserve(prompt, @intCast(prompt.len), null, marks_, spans);
+        return .{ .marks = marks_ };
     }
 
     /// Look up canonical-span state and marks without restoring; the caller later reports resumed.
