@@ -34,30 +34,73 @@ jobs:
   zig:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # A compile's manifest names a builtin.zig in zig's global cache, so without that here every compile misses.
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache/global
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
+      # About three seconds, and three of four red mains in 31 hours (4 Nov): they run before the 18 minutes of builds.
+      - name: Shared CUDA primitive copies
+        run: |
+          python3 tools/zig/cuda_common_check.py
+          python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
+      # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
+      - name: lean check
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            base=$(git merge-base HEAD "origin/$BASE_REF")
+          else
+            base=$(git rev-parse "$PUSH_BASE^{commit}")
+          fi
+          git worktree add --detach ../lean-base "$base"
+          cp tools/zig/lean_check.py ../lean-base/tools/zig/lean_check.py
+          (cd ../lean-base && python3 tools/zig/lean_check.py > ../lean-base.txt || true)
+          python3 tools/zig/lean_check.py > ../lean-head.txt || true
+          python3 tools/zig/lean_new.py ../lean-base.txt ../lean-head.txt
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
+          use-cache: false
+      # setup-zig empties a cache past its size limit and saves it empty, which every run of this job has outgrown.
+      # So main alone saves, and a pull request restores main's newest and adds nothing to the budget.
+      # -Drerun-tests runs every check again: the cache saves compiles, and a stale result can't hide a broken fixture.
+      # Nearly every test imports these sources, so a change to them recompiles nearly everything. Main then starts from
+      # nothing, which keeps one build in the cache: adding to the last one doubled it (0.85 to 1.5 GB on 4 Nov).
+      - name: Cache key
+        id: cache-key
+        shell: bash
+        env:
+          SHARED: ${{ hashFiles('zig/src/core/**', 'zig/src/platform/**', 'zig/src/hip/**', 'zig/src/*.zig') }}
+        run: echo "shared=$SHARED" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .zig-cache
+          key: zig-build-v2-Linux-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
+          restore-keys: |
+            zig-build-v2-Linux-0.17.0-${{ steps.cache-key.outputs.shared }}-
+            ${{ github.event_name == 'pull_request' && 'zig-build-v2-Linux-0.17.0-' || '' }}
       # zig build test is the host unit tests. No GPU. The Python suite is not this check.
       # A unit test that hangs fails by name after 10 minutes instead of holding the runner until the job's limit.
       - name: zig build test
-        run: zig build test --test-timeout 10m
+        run: zig build -Drerun-tests test --test-timeout 10m
       # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
       - name: zig build test-kernel-contract
-        run: zig build test-kernel-contract
+        run: zig build -Drerun-tests test-kernel-contract
       # The frozen server goldens: request parsing, rendering and streaming against recorded answers.
       - name: zig build test-golden
-        run: zig build test-golden
+        run: zig build -Drerun-tests test-golden
       # Hostile HTTP framing, API keys and download paths, on the CPU.
       - name: zig build test-server-security test-pull-security
-        run: zig build test-server-security test-pull-security
+        run: zig build -Drerun-tests test-server-security test-pull-security
       # Cortheon's readers of untrusted web bytes under the fuzz harness: seeds, 100,000 edits, linear time.
       - name: zig build fuzz-cortheon
-        run: zig build fuzz-cortheon
+        run: zig build -Drerun-tests fuzz-cortheon
       - name: Served Flash Next gate regressions
         run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
       # The generated Engram tables: committing a table that its generator no longer reproduces is a silent drift.
@@ -79,29 +122,18 @@ jobs:
       # Every build option is declared for every target, so one build script fits every OS.
       - name: build options
         run: python3 -m unittest discover -s tools/zig -p build_options_test.py
-      # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
-      - name: Shared CUDA primitive copies
-        run: |
-          python3 tools/zig/cuda_common_check.py
-          python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
-      - name: lean check
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          PUSH_BASE: ${{ github.event.before }}
-        run: |
-          if [ -n "$BASE_REF" ]; then
-            base=$(git merge-base HEAD "origin/$BASE_REF")
-          else
-            base=$(git rev-parse "$PUSH_BASE^{commit}")
-          fi
-          git worktree add --detach ../lean-base "$base"
-          cp tools/zig/lean_check.py ../lean-base/tools/zig/lean_check.py
-          (cd ../lean-base && python3 tools/zig/lean_check.py > ../lean-base.txt || true)
-          python3 tools/zig/lean_check.py > ../lean-head.txt || true
-          python3 tools/zig/lean_new.py ../lean-base.txt ../lean-head.txt
+      - name: Save the build cache
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .zig-cache
+          key: zig-build-v2-Linux-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
   zig-windows:
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      # A compile's manifest names a builtin.zig in zig's global cache, so without that here every compile misses.
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache/global
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -109,14 +141,39 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
+          use-cache: false
+      # setup-zig empties a cache past its size limit and saves it empty, which every run of this job has outgrown.
+      # So main alone saves, and a pull request restores main's newest and adds nothing to the budget.
+      # -Drerun-tests runs every check again: the cache saves compiles, and a stale result can't hide a broken fixture.
+      # Nearly every test imports these sources, so a change to them recompiles nearly everything. Main then starts from
+      # nothing, which keeps one build in the cache: adding to the last one doubled it (0.85 to 1.5 GB on 4 Nov).
+      - name: Cache key
+        id: cache-key
+        shell: bash
+        env:
+          SHARED: ${{ hashFiles('zig/src/core/**', 'zig/src/platform/**', 'zig/src/hip/**', 'zig/src/*.zig') }}
+        run: echo "shared=$SHARED" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .zig-cache
+          key: zig-build-v2-Windows-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
+          restore-keys: |
+            zig-build-v2-Windows-0.17.0-${{ steps.cache-key.outputs.shared }}-
+            ${{ github.event_name == 'pull_request' && 'zig-build-v2-Windows-0.17.0-' || '' }}
       # The same host unit tests on Windows: the platform layer (zig/src/platform) over the UCRT, Win32 and Winsock.
       - name: zig build test
-        run: zig build test --test-timeout 10m
+        run: zig build -Drerun-tests test --test-timeout 10m
       # The server goldens and the Cortheon fuzz harness on Windows too; the goldens skip the signal-driven cases.
       - name: zig build test-golden
-        run: zig build test-golden
+        run: zig build -Drerun-tests test-golden
       - name: zig build fuzz-cortheon
-        run: zig build fuzz-cortheon
+        run: zig build -Drerun-tests fuzz-cortheon
+      - name: Save the build cache
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .zig-cache
+          key: zig-build-v2-Windows-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
   # The release's own path check on each platform's dist server (no fatbins), so a leak fails here, not at release.
   # Pull requests check Linux x86_64 only; every push to main checks all three platforms.
   release-paths:
