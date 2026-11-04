@@ -138,14 +138,6 @@ pub fn simulateGated(a: std.mem.Allocator, y: []const f64, z: []const f64, w: []
     }
 }
 
-/// The SwiGLU activation as the kernel's fp32 arithmetic gives it, for the sums over its hl values.
-pub fn actKernel(g: f64, u: f64) f64 {
-    const gf: f32 = @floatCast(g);
-    const s: f32 = gf / (1 + @exp(-gf));
-    const o: f32 = s * @as(f32, @floatCast(u));
-    return @as(f64, @as(f16, @floatCast(c.fromBf16(c.toBf16(o)))));
-}
-
 /// The SwiGLU activation, fp16(bf16(silu(g) · u)), gate at column c and up at Q27_FF + c.
 pub fn swigluAct(gu: []const f64, ff: usize, want: []f64, mag: []f64) void {
     for (0..want.len) |i| {

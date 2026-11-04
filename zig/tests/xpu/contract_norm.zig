@@ -81,7 +81,8 @@ pub fn spec(w: Which) c.Spec {
             s.accum = .none;
             s.depth = zero;
             s.ops = 0;
-            s.mids = 131072; // one bf16 rounding at the top of its binade: 2^-7 is 131,072 fp32 ulps
+            s.store = .bf16; // the residual is a bf16 value in an fp32 word, as glue.cl's rbf stores it
+            s.mids = 1; // the tie the card's fp32 sum and the bf16 store can differ by
             s.out = .f32;
         },
         .add_rmsnorm_dec_x => {
@@ -89,7 +90,8 @@ pub fn spec(w: Which) c.Spec {
             s.accum = .none;
             s.depth = zero;
             s.ops = 0;
-            s.mids = 131072;
+            s.store = .bf16;
+            s.mids = 1;
             s.out = .f32;
             s.served = &dec_served;
         },
