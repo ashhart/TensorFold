@@ -158,7 +158,7 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
             return x.id < y.id;
         }
     }.lessThan);
-    // "direction.5" and "direction.05" both parse as layer 5; a file that names one layer twice has no single direction to apply.
+    // "direction.5" and "direction.05" both parse as layer 5; refuse a file that names one layer twice.
     for (layers.items[1..], 1..) |l, i| {
         if (l.id == layers.items[i - 1].id) return refuse(why, "the file holds two directions for layer {d}", .{l.id});
     }

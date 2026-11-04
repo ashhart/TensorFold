@@ -1,5 +1,4 @@
-//! The GGUF v3 subset a GLP control-vector container needs: its header, its metadata and its tensors.
-//! It is named for the GLP container rather than `gguf.zig`, so it does not collide with the engine's GGUF reader.
+//! The GGUF v3 subset a GLP control-vector container needs, named so it cannot collide with the engine's reader.
 
 const std = @import("std");
 
