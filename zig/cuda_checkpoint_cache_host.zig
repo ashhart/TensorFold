@@ -50,17 +50,17 @@ const mm = "families/minimax_m3/";
 const glm = "families/glm/";
 
 test "CUDA load cache: Qwen dense backbone closes after all load reads" {
-    try scope(qwen ++ "cuda_engine.zig", "init", "ck");
+    try scope(qwen ++ "cuda_engine.zig", "initStage", "ck");
     try scope(qwen ++ "cuda_train_load.zig", "weights", "ck");
 }
 test "CUDA load cache: Qwen MoE backbone and its separate heads" {
-    try scope(qwen ++ "cuda_engine.zig", "init", "ck");
+    try scope(qwen ++ "cuda_engine.zig", "initStage", "ck");
     try scope(qwen ++ "cuda_mtp_weights.zig", "load", "ck");
     try scope(qwen ++ "cuda_mtp_bf16.zig", "load", "ck");
     try scope(qwen ++ "cuda_draft_weights.zig", "load", "ck");
 }
 test "CUDA load cache: Qwen EXL3 shares the backbone checkpoint owner" {
-    try scope(qwen ++ "cuda_engine.zig", "init", "ck");
+    try scope(qwen ++ "cuda_engine.zig", "initStage", "ck");
 }
 test "CUDA load cache: Gemma backbone, vision and both draft loaders" {
     try scope(gemma ++ "cuda_weights.zig", "load", "ck");
