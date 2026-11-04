@@ -64,6 +64,29 @@ pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) !kv.Lay
     return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = page / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run_bytes };
 }
 
+/// `l` with every stream's run `k` pages: the ranks of a pair agree the larger, so their pools open the same ids.
+pub fn withRunPages(l: kv.Layout, k: usize) kv.Layout {
+    var out = l;
+    out.run_bytes = k * l.pageBytes();
+    return out;
+}
+
+/// The lanes' pool on `own`; a pair's ranks agree lanes, pages and run pages, so their page ids are equal.
+pub fn attachTo(own: anytype, streams: u32, count: usize) !void {
+    var lay = own.kv.layout.?;
+    var lane_count: usize = streams;
+    var page_count = count;
+    if (own.ranks) |r| {
+        lane_count = @intCast(try r.room(streams));
+        page_count = @intCast(try r.room(count));
+        lay = withRunPages(lay, @intCast(~(try r.room(~@as(u64, lay.runPages())))));
+    }
+    own.kv.layout = lay;
+    own.kv.pool = try Pool.initOn(own.gpa, own.engine, lay, own.context, own.kv.head, lane_count, page_count, own.device, own.io);
+    own.kv.paged_only = pagedOnly() and lane_count > 0;
+    if (own.ranks) |r| r.pool = own.kv.pool;
+}
+
 /// Where a stream's caches came from: no pool, the one stream on its own caches beside a pool, or a pool lane.
 pub const From = enum { none, own, pool };
 
@@ -368,6 +391,11 @@ pub const Pool = struct {
         return d;
     }
 
+    /// Whether `seq` is a lane's cache.
+    pub fn owns(p: *Pool, seq: *const prompt.Seq) bool {
+        return p.laneOf(seq) != null;
+    }
+
     fn laneOf(p: *Pool, seq: *const prompt.Seq) ?*Lane {
         const t = (seq.paged orelse return null).table.ptr;
         for (p.lanes) |*x| if (x.seq.paged.?.table.ptr == t) return x;
@@ -459,37 +487,6 @@ pub const Pool = struct {
         }
     };
 };
-
-test "TF_FLASHNEXT_KV_PAGES: unset, empty or whitespace-only text reads as no pages; every valid size unchanged" {
-    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
-    const t = std.testing;
-    const env = @import("sys").env;
-    const name = "TF_FLASHNEXT_KV_PAGES";
-    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
-    defer {
-        if (before) |v| {
-            _ = env.setenv(name, v, 1);
-            t.allocator.free(v);
-        } else _ = env.unsetenv(name);
-    }
-    _ = env.unsetenv(name);
-    try t.expectEqual(@as(usize, 0), try paging());
-    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
-        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
-        try t.expectEqual(@as(usize, 0), try paging());
-    }
-    for ([_][:0]const u8{ "0", "4", "256" }, [_]usize{ 0, 4, 256 }) |v, n| {
-        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
-        try t.expectEqual(n, try paging());
-    }
-    for ([_][:0]const u8{ "abc", " 256", "256 ", "\t256", "6", "18446744073709551616" }) |v| {
-        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
-        try t.expectError(error.BadFlashNextKvPages, paging());
-    }
-    try t.expectEqual(@as(usize, 0), try pagingOf(null));
-    try t.expectError(error.BadFlashNextKvPages, pagingOf(""));
-    try t.expectError(error.BadFlashNextKvPages, pagingOf(" "));
-}
 
 /// The page ids the free stack hands an open out next, past the run of `run_pages` it claims first, into `out`.
 pub fn nextPages(pool: *const kv.Pool, run_pages: usize, out: []u32) []u32 {

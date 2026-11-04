@@ -83,3 +83,98 @@ test "KV lifetime: Flash Next close and deinit retain pages until context proof"
         try t.expectEqual(@as(usize, 0), D.freed_pending);
     }
 }
+
+test "KV lanes: two ranks whose pages differ in bytes open and close the same page ids in the same order" {
+    var d = D.driver();
+    var e = engine(&d);
+    defer cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
+    // rank 0 keeps the MTP head's layer and a bigger run, rank 1 neither: both take the larger run in pages
+    const head: pages.Head = .{ .draft_n = 4096, .rows = 64 };
+    const a = pages.layout(256, 16, head, 0);
+    const b = pages.layout(256, 16, null, 0);
+    try t.expect(a.pageBytes() != b.pageBytes());
+    const k = @max(a.runPages(), b.runPages());
+    const left = pages.withRunPages(a, k);
+    const right = pages.withRunPages(b, k);
+    try t.expectEqual(left.runPages(), right.runPages());
+    const count = 4 * k + 64;
+    const p0 = try pages.Pool.init(t.allocator, &e, left, 256, head, 3, count);
+    defer p0.deinit();
+    const p1 = try pages.Pool.init(t.allocator, &e, right, 256, null, 3, count);
+    defer p1.deinit();
+    const caps = [_]usize{ 40, 17, 100 };
+    var s0: [3]@import("cuda_prompt.zig").Seq = undefined;
+    var s1: [3]@import("cuda_prompt.zig").Seq = undefined;
+    for (caps, 0..) |cap, i| {
+        s0[i] = try p0.open(cap);
+        s1[i] = try p1.open(cap);
+    }
+    for (0..3) |i| {
+        try t.expectEqualSlices(u32, p0.lanes[i].lease.ids.items, p1.lanes[i].lease.ids.items);
+        try t.expectEqual(p0.lanes[i].run, p1.lanes[i].run);
+    }
+    try t.expect(p0.close(&s0[1]) and p1.close(&s1[1]));
+    s0[1] = try p0.open(60);
+    s1[1] = try p1.open(60);
+    try t.expectEqualSlices(u32, p0.lanes[1].lease.ids.items, p1.lanes[1].lease.ids.items);
+    try t.expectEqual(p0.lanes[1].run, p1.lanes[1].run);
+    for (0..3) |i| {
+        try t.expect(p0.close(&s0[i]) and p1.close(&s1[i]));
+    }
+    try t.expect(p0.pool.idle() and p1.pool.idle());
+}
+
+test "KV lanes: every pass over a lane's MTP head reads its cache through the lane's pages, across a page boundary" {
+    const wt = @import("cuda_prompt_wt.zig");
+    const pg = @import("cuda_pages.zig");
+    var d = D.driver();
+    var e = engine(&d);
+    defer cuda.completion.drain(&d, e.stream.*, "the test driver must drain before it leaves");
+    const head: pages.Head = .{ .draft_n = 4096, .rows = 64 };
+    const l = pages.layout(256, 16, head, 0);
+    const p = try pages.Pool.init(t.allocator, &e, l, 256, head, 1, 4 * l.runPages() + 64);
+    defer p.deinit();
+    var seq = try p.open(100);
+    var dr = try p.draft(&seq, 100);
+    defer dr.deinit();
+    const paged = seq.paged.?;
+    // the head's rows 15 and 16 are in two pages: not a contiguous cache's next row
+    try t.expect(paged.rowAt(wt.attn_n, .key, 16) != paged.rowAt(wt.attn_n, .key, 15) + pg.rowBytes(.key));
+    // the head's pass (a prompt chunk, a window's absorb, a shared round, the EXL3 deep chunk) takes the lane's table
+    const hs = dr.headSeq(null, 0);
+    try t.expect(hs.pg.pt != 0);
+    try t.expectEqual(paged.pg(), hs.pg);
+    try t.expectEqual(dr.kc.ptr, hs.kc[0].ptr);
+    try t.expect(p.close(&seq));
+}
+
+test "TF_FLASHNEXT_KV_PAGES: unset, empty or whitespace-only text reads as no pages; every valid size unchanged" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const env = @import("sys").env;
+    const name = "TF_FLASHNEXT_KV_PAGES";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(usize, 0), try pages.paging());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(@as(usize, 0), try pages.paging());
+    }
+    for ([_][:0]const u8{ "0", "4", "256" }, [_]usize{ 0, 4, 256 }) |v, n| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(n, try pages.paging());
+    }
+    for ([_][:0]const u8{ "abc", " 256", "256 ", "\t256", "6", "18446744073709551616" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectError(error.BadFlashNextKvPages, pages.paging());
+    }
+    try t.expectEqual(@as(usize, 0), try pages.pagingOf(null));
+    try t.expectError(error.BadFlashNextKvPages, pages.pagingOf(""));
+    try t.expectError(error.BadFlashNextKvPages, pages.pagingOf(" "));
+}

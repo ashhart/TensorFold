@@ -19,7 +19,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest => "TF_FLASHNEXT_KV_PAGES and _PAGE_TEST take positions a page, a multiple of 4",
-        error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs one rank, our own glue and no --slide: unset it",
+        error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs our own glue and no --slide: unset it",
         error.FlashNextKvHostNeedsExl3 => "TF_FLASHNEXT_KV_HOST needs an EXL3 Flash Next checkpoint; unset it for MLX or ModelOpt",
         error.BadFlashNextKvHost => "TF_FLASHNEXT_KV_HOST takes a nonnegative whole MiB budget fitting a native byte count; TF_FLASHNEXT_KV_FRAMES and TF_FLASHNEXT_KV_SLOTS take positive whole frame counts (blank is unset)",
         error.FlashNextTierRanksDisagree => "the tensor-parallel ranks disagree on the host K/V tier; restart both with matching checkpoints and TF_FLASHNEXT_KV_HOST, TF_FLASHNEXT_KV_FRAMES and TF_FLASHNEXT_KV_SLOTS",
