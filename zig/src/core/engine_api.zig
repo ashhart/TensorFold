@@ -184,7 +184,7 @@ pub const Info = struct {
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
-    /// Requests' presence_penalty and frequency_penalty change the draws (false: they are ignored, and logged once).
+    /// Requests' presence_penalty and frequency_penalty change the draws (false: nonzero is refused).
     penalties: bool = false,
     /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
     prompt_logprobs: bool = false,

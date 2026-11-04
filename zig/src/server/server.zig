@@ -150,7 +150,6 @@ pub const Server = struct {
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
     draining: std.atomic.Value(bool) = .init(false),
-    penalties_logged: std.atomic.Value(bool) = .init(false), // an engine without them was sent penalties: said once
     generating: std.atomic.Value(u32) = .init(0),
     /// Model requests holding a reservation, when config.admission is on.
     admission: @import("request_admission.zig").Controller = .{},
@@ -292,18 +291,16 @@ pub const Server = struct {
         };
     }
 
-    /// The request's penalties over the configured defaults; none, and a log line once, where the engine ignores them.
+    /// The request's penalties over configured defaults; unsupported non-default values are refused by name.
     pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value) errors.Refused!api.Penalties {
         const options = try json.newObject(cx.a);
         if (srv.config.default_sampling) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
         try merge(options, cx, try fields.parseNumbers(cx, f));
-        const p: api.Penalties = .{
-            .presence = @floatCast(number(options.get("presence_penalty")) orelse 0),
-            .frequency = @floatCast(number(options.get("frequency_penalty")) orelse 0),
-        };
-        if (!p.active() or srv.info.penalties) return p;
-        if (!srv.penalties_logged.swap(true, .monotonic)) log.line("presence_penalty and frequency_penalty are ignored: {s} does not apply them", .{srv.backendName()});
-        return .{};
+        const presence = number(options.get("presence_penalty")) orelse 0;
+        const frequency = number(options.get("frequency_penalty")) orelse 0;
+        if (!srv.info.penalties and (presence != 0 or frequency != 0))
+            return cx.fail(.request, "presence_penalty and frequency_penalty are not supported by backend '{s}': send 0 or leave them out", .{srv.backendName()});
+        return .{ .presence = @floatCast(presence), .frequency = @floatCast(frequency) };
     }
 
     /// A specific engine name, or the server's backend identity when the shared host uses its default name.
