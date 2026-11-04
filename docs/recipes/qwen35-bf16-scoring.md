@@ -2,10 +2,11 @@
 
 This candidate adds a dense, unquantized BF16 format to the existing native Qwen3.5 CUDA engine.
 It serves nonstreamed `/v1/completions` requests with `prompt_logprobs: 0..20` through the normal lane scheduler.
-It does not introduce a separate inference worker. Qualification remains incomplete.
+It does not introduce a separate inference worker. This remains an experimental text/scoring format.
 The [qualification receipt](../receipts/qwen35-bf16-scoring/README.md) retains API, FP64, complete CUDA,
-served/cold, cache/cancellation, existing-format and memory results. The full CUDA launch-limit gate fails;
-BF16 prefill and concurrency performance remain limiting. This remains a draft, not a performance-qualified format.
+served/cold, cache/cancellation, existing-format and memory results. The complete sm_120 CUDA run passes
+with six unchanged known findings and zero launch-limit problems. BF16 prefill and concurrency remain limiting;
+model equivalence, production and performance qualification are not established.
 
 ## Checkpoint and precision
 
@@ -86,8 +87,18 @@ The receipt retains matched MLX/Qwen3.5 and ModelOpt/Qwen3.8 parent/candidate to
 The public EXL3 export is rejected by both builds because its embeddings are F16; EXL3 inference is unqualified.
 FP8 KV and optional grammar/tool generation are also unqualified for this new format.
 
-The receipt binds source identities, the failed complete CUDA SUMMARY, matched parent asset-limit diagnostics,
-host/plain-build and zero-new lean checks, public fixture hashes, independent FP64 reports and served measurements.
+The receipt binds exact source/binary identities, complete CUDA SUMMARY and exit status, live and five-SM compile
+checks, host/plain builds, zero-new lean findings, public fixture hashes, FP64 reports and served measurements.
 Cold 2k/8k/32k/64k arrays and requests are retained. Memory separates Linux RSS, container budgets, CUDA-owned peaks
-and sampled pinned maxima. SGLang HTTP cache counters are absent; actual zero-cache scheduler records are separate.
-Resolve launch-limit catalog findings and agree performance acceptance before calling this contribution ready.
+and sampled pinned maxima. SGLang HTTP cache counters are absent; observed scheduler counts remain separate evidence.
+
+The [issue gate](https://github.com/ashhart/TensorFold/issues/1136#issuecomment-6553918935) requires same-weight FP64
+worst-row/token evidence and unchanged existing formats; it explicitly allows the other-engine comparison to fail.
+The actual served-versus-Transformers experiment reports both measured BF16/FP32 directions without widening a tolerance.
+Both precision arms cover the 4097-ID seam, and the reference restores all 96 original FP32 GDN/A_log parameters.
+This experimental format's functional review does not establish model equivalence or performance qualification:
+BF16 prefill and multi-stream throughput remain slow. Read the current receipt's results and limitations.
+
+```sh
+python3 tools/zig/check_qwen35_served_reference.py http://127.0.0.1:8091 qwen35-bf16 fixtures.json transformers.json --output served-reference.json
+```

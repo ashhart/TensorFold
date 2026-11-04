@@ -1,103 +1,80 @@
 {
-  "schema": 2,
-  "status": "partial qualification; draft",
-  "source_commit": "5332d97eb387af7e1a10433d77ee032a86bc631a",
-  "stack_parent": "b0b5beb8db0856091798123cf62dcdfaec1e0445",
-  "native_binary_sha256": "271398a1c9dab32785759182ae78e2921907d68f86b0053b64e2613cc9038886",
-  "inference_source_tree": "58f8dfd99868cc1f928754ca3879e283eeac2079",
-  "kernel_source_tree": "c76669664406836e32b89ba33d9b9734c71bd90c",
+  "schema": 3,
+  "qualified_source": "b168b36d0cc3503ae69e8bffcad494574019caf5",
+  "qualified_source_tree": "652aec7a5953ddc204005696b8f5281c72d23111",
+  "public_alias_equivalent": "55dbec4758f42ca08a7e7dede4ebd5da7877119f",
+  "pinned_main_baseline": "0d19cc19b5b49a0b4a0188a56b6705bbedae91e4",
+  "executed_dependency": "789846adbf0b6bde4a9734fdc7c7e36e65702c64",
+  "submitted_parent": "30e9b87284d4cad99ef6b826d95f5578d6341f63",
+  "last_code_followup": "c6f3e221ac5a2914fcd3a6b950eb620d1eaaa23b",
+  "native_sha256": "fa2f415a1b7a6f47a62ee078e7f6de86f3f677d2bf74ffa5c2d273e1ce713a64",
+  "complete_cuda_runner_sha256": "1cec1417c7d6d47ff86cf278dbba47f60267e9f9e4b99ca4d2a7964863555c39",
+  "evidence_commit": "164be6e57dae9124893e27d8d1ac8a1be7d03f1c",
+  "scope": "Every execution retains its real producer. Final receipt-only commit identity and hosted CI are reported on the PR. This manifest covers all receipt files except itself.",
   "files": {
-    "README.md": "39091040bde6fb036b7a16223a8470a4613fd338e76512b024eade73a6916841",
-    "api.json": "3541b3afa2debed9030b0e69371f413b053001195bffafd117110624f5e08667",
-    "asset.json": "1e353b850f6cc02b658d710c01c2bf3bb6d30b4b10d6b5f07220025679c199ae",
-    "cache/chat-fixtures.json": "c30f3bd2c719aed9738e0f0cab6c803e80e979b136d063db2b946e9ddc7c96c6",
-    "cache/fresh.json": "8b61a0c255638a6a5bc1323981be479216101ec61cdd08e9c2d8b5d2d658105d",
-    "cache/lifecycle-restart.json": "a15b3231b990c2e7665a7d31ca4e8d28a937ea9557b5aa1c6531e3a7eb4c2b6b",
-    "cache/lifecycle-retained.json": "217fe0a09cae3e8be76ccede168aa82a4dc33b12ae82752f3399579beee90b60",
-    "cache/observed-cancellation.json": "72fc96b2620eeefd082215188614c893d513807575cc1c81897c37e575f12523",
-    "cache/retained.json": "79bd8d6b6b091a98cbc2dd050cd340756368064982adbe2845ede55dc44f27db",
-    "cold/native-2048.json": "d65e8e8b4dec8b024e7a1027d16fd79969a8be1fb0dbdff6d51e7b99ee23a496",
-    "cold/native-32768.json": "9af13e954c8dff81a415121ba1f2e9fc054c89f3a601824afc7869e5091907b2",
-    "cold/native-65536.json": "cd9c2c814b7d5a19618b8f2ed58af66e3296972ed2d2443ca9880cb073b1dd1b",
-    "cold/native-8192.json": "f526c90e59848518f381635f70a421086b00200910374dc093294ec434aa8006",
-    "cold/sglang-2048.json": "fc186fa41c4b5ba576d59ebccf2920047e5cdc50ff000178a0499f8a69d034f8",
-    "cold/sglang-32768.json": "bf7827185af885816e375a75edf13cfcf3363a0087d39092f70337e806fec765",
-    "cold/sglang-65536.json": "8da15385cb0a45524d02e9151e3d9c6f068026094a1924332146845caf9e8ec2",
-    "cold/sglang-8192.json": "8a1897d1982bc51208b945f88b1049622c0530936bd7134bf01594aedf1f9760",
-    "cold/sglang-scheduler-cache.json": "1452580faebf6bbd7fcd19219f14379cf156f202b65afb8a9f06a1c139354b78",
-    "cold/summary.json": "d3a5dbbaccf6fe1d59bc2e2a21fca4ff14b765bce28af99fb25959d18b47c3ee",
-    "cuda-contract.json": "dd9f6aec6af7dfab5cea1fc913f2eb0337be18cb2aced2487f8c6520901e2ad6",
-    "existing-formats/exl3-admission.json": "668915cf59e8b6045a56ea7e4e41d9d888aa14a8220e7a13ba646a0446c3fdc8",
-    "existing-formats/mlx4-integrated-1-decode.json": "dba91d75f3325b9c303774afe519417d8bf93dbbd2c03c722db5b37944139a5c",
-    "existing-formats/mlx4-integrated-3-decode.json": "aac0c776d2635ba6d42773f5c38aa081e9a7d8f1447caf1a841b20de6b569e22",
-    "existing-formats/mlx4-parent-0-decode.json": "3356caae24666062efe65e0358d3aa1c9178a487fd016278d9e57bca5cc37bf4",
-    "existing-formats/mlx4-parent-2-decode.json": "fcc9133b89c1c80e7c460c08d52b5b5c60873a7d70c84049804ac2d2a6701abd",
-    "existing-formats/modelopt-integrated-1-decode.json": "edc6b3c805101338d0bc82cd839aed34063b28b6cbc9c07ccb267e1ea0f8b84f",
-    "existing-formats/modelopt-integrated-3-decode.json": "0c7aeda60f81d571a9b3d64b426ddc649d6ff03a6bc1c6122e7918788e010871",
-    "existing-formats/modelopt-parent-0-decode.json": "e495f8fdb94d5597312457c59137a0536399bd7ad7c684aaf106183d444fed0b",
-    "existing-formats/modelopt-parent-2-decode.json": "520fea567b0a470b57801d906fa059c1f65bffac8544d47b1da014aec02a9e6c",
-    "existing-formats/summary.json": "cab4e7a76c9abb41f6c209d2aa0c5be1a698dc761c2a8af32927ff0bcba76747",
-    "fixtures.json": "c83f0cb7e56f447de3b6131b921ac06b0743cbfcdfbe856970f0f5e7e9c61fe4",
-    "followup-checks.json": "fb635193741b16d992986c35c99665d4d2befd1742f9ab9df4cceaa46b5a1e3f",
-    "fp64.json": "9a7344dfeca63b07c94fd36f6e0cabf5cbceec7fee4f26812c16e95b8fea6b2a",
-    "host-and-ci.json": "f4d8380c99248466cedb2c09954a39af413119dc1ece598512192d65919df2c1",
-    "limits-comparison.json": "68ae984daa20579cfd82226ec69adf89bc233b63cc6baa2f55ddd8c181653165",
-    "memory.json": "a39ad01720fb882e7e7f73f92077708fb929cb35f3742ad38b272868fedaa6fd",
-    "models.json": "acb06444d0baa3e49bad1b89111c7673e5f8d2c6d93b4c024779e66c3ab87b1e",
-    "native-decode.json": "f7600ab11e90ac2ed4fe968bb4a4e85de137efead0c2679e0737ce0829a0b9d8",
-    "overlap.json": "bdae283023edaf66f2453349be8ba191e6eff03e1707e9005b748ee9213be940",
-    "reference-fixtures.json": "c2b05afefcdbea4504deb799e68b581e0635b9c316927549418674a480efb289",
-    "reference-verdict.json": "7b53f1df4abaa1e0cddb6442442533858936abde13aed868bc632120cdbe3714",
-    "rendered-prompts.json": "bee53acb930548cf9b55ae8f00b9e2d684bd6745c93725c2347e378fd333254d",
-    "reproduce-cache.py": "6334a19acfa43de98ebe614dfbb61db047de435eb661fcff228d5c39f229eecd",
-    "reproduce-cold.py": "de1d8d6d9f778a34041fbc9cac7ea5ad3e728080da5f735dbabb952669d91ee1",
-    "reproduce-disconnect.py": "b786fdb8eebc8f9cb82a0edea70055dcc1ddcfe587d19c9077febefaf161e2a9",
-    "sglang-precision/sitecustomize.py": "2129ecd851b0d174fb578c4bb9c3d502093373d6866e620391cf398f60b44608",
-    "source-provenance.json": "a639037f4a544408ceaf55c6f16a81957130afd02ec33dba950df7717e5b200a",
-    "standard/configuration.json": "b792fa34ea9b914d57d0b180059768643567a099620f272c62590f336eec1ef0",
-    "standard/rendered-prompts.json": "8a273d0756b2e9d2ce1aa6fbbe710f8431b980c878269ace5ae0636e6f5ad452",
-    "standard/sglang-decode.json": "f8bb2f3637dd969b0d5ffc60a9156c99bd914b3310f0f9380949bc3629534251",
-    "test_reproduce_cache.py": "3c9abb1f25499a0937859cff5ad0ecc8f37b8f303c61234d144b1dada6b133cf",
-    "transformers-comparison.json": "4427fea8e216dc587b7a8f3870ca1718e98e47e238905303c4d1dd4559426085"
-  },
-  "assets": {
-    "record": "asset.json",
-    "files": 3,
-    "members": 21,
-    "note": "The per-request dumps, the complete CUDA contract log and the transformers payload/run log are kept out of the tree and not published; asset.json pins each sha256 and byte count."
-  },
-  "pending": [
-    "Complete CUDA contract remains failed: 342 launch-limit problems; parent full/live-only run not-run.",
-    "Maintainer performance acceptance remains unresolved; BF16 prefill and C4 throughput substantially slower than standard server.",
-    "EXL3 export not admitted by either build; inference unqualified.",
-    "Other physical chips/backends, multiple ranks, FP8 KV and optional grammar/tool generation unqualified.",
-    "Publication-head hosted CI must be read on PR; host-and-ci.json binds the earlier passed head.",
-    "Transformers BF16-distance comparison fails; captured rows do not prove a direct served HTTP comparison. 4097-token FP32 arm not-run."
-  ],
-  "inference_build_commit": "327ef639fb7dbc355f44b4a5efc53209a3e06543",
-  "publication_transforms": [
-    "Generated prose samples omitted; numeric rates and output fingerprints retained.",
-    "Concurrent interval origins normalized to the earliest send in each repetition.",
-    "Public chat fixture JSON compacted without changing token arrays.",
-    "Private infrastructure/configuration metadata excluded; public model, software, quota and hardware identities retained."
-  ],
-  "reference_script": {
-    "path": "tools/zig/qwen35_transformers_reference.py",
-    "sha256": "565567c45b3e2c98be4f0961aef87563eb3c1f924ab1861088e496fddaef9c13",
-    "bytes": 12586
-  },
-  "current_stack_parent": "c5a3feefaa24315dd55600ff1490c10c5fb27036",
-  "out_of_tree_assets": {
-    "record": "asset.json",
-    "files": 3,
-    "members": 21,
-    "note": "Published immutable public evidence links and verified checksums; summaries only in the source branch."
-  },
-  "reference_modules": {
-    "tools/zig/qwen35_reference_compare.py": "fd918c442874c011ce21166fcc57132d136832c90ac63bf50836851c9db03b14",
-    "tools/zig/qwen35_reference_fixture.py": "f4ea4b17bab9ec5c83c5c06084799bea2296f82e5c5b25c79968418960e88c96",
-    "tools/zig/qwen35_reference_forward.py": "5a71a50076c83500cd248232e632cff9c5be68bd1924a8840c5d113fec47f391",
-    "tools/zig/qwen35_reference_inputs.py": "f54759f00b14100e7ca40e1b0211a0440bda79463648cf81610ae987359dc55e",
-    "tools/zig/qwen35_reference_verdict.py": "45eddfb4179d8157be0bb102a4ccaa33e734cfaaedeb23109796fbdb506c605d"
+    "README.md": {
+      "bytes": 16419,
+      "sha256": "872bbc67cea934ed0e72ea584c7563b23d60a101e44ec346eb99f0d4e8c8289a"
+    },
+    "asset.json": {
+      "bytes": 7534,
+      "sha256": "f823546290e20e1d05d35138cb1752a70b4faa29334c2731009606f276748626"
+    },
+    "commands.md": {
+      "bytes": 7538,
+      "sha256": "4bcbbdca93fe2b710b8a12c7a9e262f7a5f67fa8033d97ea622fae2796cc9021"
+    },
+    "fixtures.json": {
+      "bytes": 22875,
+      "sha256": "c83f0cb7e56f447de3b6131b921ac06b0743cbfcdfbe856970f0f5e7e9c61fe4"
+    },
+    "historical-summary.json": {
+      "bytes": 13893,
+      "sha256": "a7e91de61a5a3ab72b86e4e5bceacf09323544c5d558c45f5143ee2b815a021a"
+    },
+    "models.json": {
+      "bytes": 535,
+      "sha256": "acb06444d0baa3e49bad1b89111c7673e5f8d2c6d93b4c024779e66c3ab87b1e"
+    },
+    "reference-fixtures.json": {
+      "bytes": 2274,
+      "sha256": "c2b05afefcdbea4504deb799e68b581e0635b9c316927549418674a480efb289"
+    },
+    "reference-verdict.json": {
+      "bytes": 1414,
+      "sha256": "7b53f1df4abaa1e0cddb6442442533858936abde13aed868bc632120cdbe3714"
+    },
+    "reproduce-cache.py": {
+      "bytes": 3613,
+      "sha256": "6334a19acfa43de98ebe614dfbb61db047de435eb661fcff228d5c39f229eecd"
+    },
+    "reproduce-cold.py": {
+      "bytes": 1444,
+      "sha256": "de1d8d6d9f778a34041fbc9cac7ea5ad3e728080da5f735dbabb952669d91ee1"
+    },
+    "reproduce-disconnect.py": {
+      "bytes": 6455,
+      "sha256": "b786fdb8eebc8f9cb82a0edea70055dcc1ddcfe587d19c9077febefaf161e2a9"
+    },
+    "sglang-precision/sitecustomize.py": {
+      "bytes": 300,
+      "sha256": "2129ecd851b0d174fb578c4bb9c3d502093373d6866e620391cf398f60b44608"
+    },
+    "source-provenance.json": {
+      "bytes": 2234,
+      "sha256": "40dad69a1ff230145aad11df87bf7da3a9c12bd45ccb1f67c4b34698b9c80aa1"
+    },
+    "summary.json": {
+      "bytes": 107387,
+      "sha256": "34b511ad911553b486fb01518b1e32432b42a48820a3bfab6c2e19b34b120c7c"
+    },
+    "test_reproduce_cache.py": {
+      "bytes": 2182,
+      "sha256": "3c9abb1f25499a0937859cff5ad0ecc8f37b8f303c61234d144b1dada6b133cf"
+    },
+    "transformers-comparison.json": {
+      "bytes": 10677,
+      "sha256": "0bd9232cf5eb3fc7151c899ff7aaa4a1a5a4d4656bdfc5024a3a1b4d72609731"
+    }
   }
 }

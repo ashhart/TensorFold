@@ -9,5 +9,16 @@
     "ddb1f831724940801b7766a170c266a958141b18": "327ef639fb7dbc355f44b4a5efc53209a3e06543",
     "43776dc9bee25be15187aef84a8205871dbcef5b": "284339b080b3af960822458158ab69a7bbaf6bd7"
   },
-  "scope": "Rebased history does not rewrite measured binaries, test executions or hosted CI identities. Current rebased native build/device qualification is not established by the historical receipts. This follow-up changes only finite reference clients and documentation."
+  "historical_scope": "Earlier rebases and reference-only follow-ups did not establish another device execution. Historical results retain their measured identities and failures; the current qualification below is separate.",
+  "current_qualification_source": "b168b36d0cc3503ae69e8bffcad494574019caf5",
+  "current_main_baseline": "0d19cc19b5b49a0b4a0188a56b6705bbedae91e4",
+  "declared_parent": "789846adbf0b6bde4a9734fdc7c7e36e65702c64",
+  "scope": "Every execution retains its actual source and binary identity. Later receipt-only commits do not claim another device execution.",
+  "public_alias_equivalent_source": "55dbec4758f42ca08a7e7dede4ebd5da7877119f",
+  "public_alias_source_tree": "652aec7a5953ddc204005696b8f5281c72d23111",
+  "submitted_parent_followup": "30e9b87284d4cad99ef6b826d95f5578d6341f63",
+  "qualified_parent_scope": "GPU execution includes parent 789846adb. Submitted parent 30e9b872 adds four matching resource receipts and two host-only regression cases; two resource tables remain token-equivalent apart from formatting/comments.",
+  "last_code_followup": "c6f3e221ac5a2914fcd3a6b950eb620d1eaaa23b",
+  "last_code_followup_scope": "Optional CPU-reference dependency guard only; all three real tests remain active when dependencies are installed. Inference and numerical gates unchanged.",
+  "complete_cuda_retry_scope": "Same b168b36d source; explicit five-SM auxiliary H3 rebuild. Initial and retry runner hashes are distinct; served native bytes are unchanged. See summary and linked proof."
 }
