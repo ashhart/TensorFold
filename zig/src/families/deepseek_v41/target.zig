@@ -307,7 +307,10 @@ pub const GpuTarget = struct {
 
     /// The slot's pending window dropped on every rank, nothing committed (calibration timing).
     pub fn dropWindow(t: *GpuTarget, slot: u32) !void {
-        if (t.rows) |b| return b.drop(slot);
+        if (t.rows) |b| {
+            b.tree[slot].clear();
+            return b.drop(slot);
+        }
         if (slot != 0) return error.Slots;
         t.tree.clear();
         if (t.f.slot.pending != null) try t.f.drop();
@@ -393,7 +396,7 @@ pub const GpuTarget = struct {
 
     fn taps(p: *anyopaque, slot: u32) iface.Taps {
         const t = self_(p);
-        if (t.rows) |b| if (b.tapsOf(slot)) |x| return .{ .address = x.address, .rows = x.rows, .stride = @intCast(t.f.cfg.dspark_targets.items().len * t.f.cfg.hidden) };
+        if (t.rows) |b| if (b.tapsOf(slot)) |x| return .{ .address = x.address, .rows = x.rows, .stride = @intCast(t.f.cfg.dspark_targets.items().len * t.f.cfg.hidden), .map = b.tree[slot].map() };
         const n: u32 = if (t.f.slot.pending) |w| w.n else @intCast(t.f.ids.len);
         const D: u32 = t.f.cfg.hidden;
         const k: u32 = @intCast(t.f.cfg.dspark_targets.items().len);

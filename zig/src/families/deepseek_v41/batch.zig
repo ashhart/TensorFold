@@ -24,6 +24,7 @@ const batch_engram = @import("batch_engram.zig");
 const batch_graph = @import("batch_graph.zig");
 const batch_target = @import("batch_target.zig");
 const batch_prof = @import("batch_prof.zig");
+const branches = @import("draft/branches.zig");
 
 pub const Error = error{ BadWindow, NotAChain, RowsCap, BadPlan, TreeWindow, Sampling, Slots };
 
@@ -58,6 +59,8 @@ pub const Batch = struct {
     taps_at: std.AutoHashMapUnmanaged(graphs.Key, ?usize) = .empty, // each key's program's last "w.taps" call, cached
     g: ?Graphs = null,
     pend: []?Pend,
+    /// each slot's resolved draft tree (draft/branches.zig): the last tree window's rows and its taps map
+    tree: [16]branches.Resolver = @splat(.{}),
     /// the last window's rows (real, padded)
     n: u32 = 0,
     R: u32 = 0,
@@ -210,6 +213,13 @@ pub const Batch = struct {
     pub fn window(b: *Batch, mix: []const rowtab.Seg, ids: []const u32, more: bool) !void {
         if (!more) try b.settle();
         return b.runRows(mix, ids, more);
+    }
+
+    /// One slot's chain window alone (a draft tree's branch chain): no round settle — the resolver keeps/drops the
+    /// slot's pending. `more` stashes the other slots' pending taps before this forward overwrites the shared window.
+    pub fn runSlot(b: *Batch, slot: u32, start: u64, tokens: []const u32, more: bool) !void {
+        var mix = [_]rowtab.Seg{.{ .slot = slot, .start = start, .rows = @intCast(tokens.len) } };
+        try b.runRows(&mix, tokens, more);
     }
 
     fn runRows(b: *Batch, mix: []const rowtab.Seg, ids: []const u32, more: bool) !void {
@@ -399,6 +409,7 @@ pub const Batch = struct {
     /// A slot leaves (every rank, the leader's order): its pending window dropped, then Forward.release on it.
     pub fn release(b: *Batch, slot: u32) !void {
         if (slot >= b.ss.n) return error.Slots;
+        b.tree[slot].clear();
         if (b.ss.leads()) try b.f.link.?.send(&.{ slots_mod.op_rows_drop, slot });
         try b.dropPending(slot);
         try b.ss.activate(slot);
@@ -408,6 +419,7 @@ pub const Batch = struct {
     /// A slot leaves as a session turn: pending window kept, slot activated, entry saved, slot emptied (every rank).
     pub fn saveTurn(b: *Batch, slot: u32, ss: *sessions_gpu.Sessions) !void {
         if (slot >= b.ss.n) return error.Slots;
+        b.tree[slot].clear();
         if (b.pend[slot]) |p| try b.keep(slot, p.n - 1);
         try b.ss.activate(slot);
         _ = try ss.save();
