@@ -14,17 +14,19 @@ release fixes it, and the release notes say which one.
   speed and tokens are the same, and prompts with no shared start take the same time.
 - Qwen3.5-2B with a JSON schema: on an integer field it wants to write as a decimal, the 2B can keep adding digits until
   `max_tokens`, because the grammar allows no decimal point there. Nemotron writes the same schema correctly.
-- Qwen3.8-27B on an M1 to M4 Mac: the drafter's landing counts last for the server's life, so after four prose replies
-  greedy code drafts shallower, about 4% slower on an M3 Ultra. The tokens are the same.
+- Qwen3.8-27B: the drafter's landing counts last for the server's life, so the first greedy code reply after prose lands
+  about 5% fewer tokens a round on an M3 Ultra. Its shallower rounds cost less, so decode stays within about 1% of a fresh
+  server, even after 40 prose replies. The tokens are the same.
 - Qwen3.8-27B on Metal allocates DeltaNet rollback scratch lazily for the verification slots that need it. The bank
   can be resized or released between completed rounds; an idle or newly lone host can release it after the previous
   verification has been kept. A revised physical-memory peak comparison with 1.0.12 remains unmeasured.
 - Qwen3.8-27B cold prefill at 64K tokens on RTX 50-series GPUs (sm_120) measures about 2% slower than 1.1.0; 32K and shorter prompts, and GB10, are at parity or faster.
-- Flash Next on Metal with explicit --parallel 2 or more retains a cache-count/performance issue: on an M3 Ultra with
-  the MLX 4-bit checkpoint, 9 of 12 chat steps reused 17 to 312 fewer tokens than the single host, with the same
-  output tokens, and a lone request decoded 7% slower. The default --parallel auto uses the single host and matched
-  1.0.12's cache counts; the separate shared-session repair is held for a later 1.1.x and is absent from the current
-  1.1.1 series.
+- Flash Next on Metal with explicit --parallel 2 or more ([#1893](https://github.com/ashhart/TensorFold/issues/1893)):
+  on an M3 Ultra with the MLX 4-bit checkpoint, a lone request decodes about 4% slower than at --parallel 1 (likely
+  because kept DeltaNet states can't hand over to shared rounds), and in a 12-turn chat of about 15,000 tokens, 8 of the 11 resumed
+  turns reused 31 to 350 fewer tokens than the single host, about 0.4 s in all. Replies are the same. On a chip with
+  tensor units, a long prompt beside a running reply still takes a 32-row step before each round, which slows both;
+  `--decode-share` helps. The default --parallel auto uses the single host.
 - The 1.0.12 gfx1151 Qwen receipts leave the 27B cancellation failure open and the 9B/27B drafted/plain comparisons
   unrun. Those receipts do not establish a new 1.1.0 device pass.
 - Qwen3.8-Flash-Next in speed-up mode: a drafted request right after a `"draft": false` one decodes slowly, and the next
