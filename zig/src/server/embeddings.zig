@@ -14,7 +14,7 @@ pub const Failure = errors.Refused || error{Cancelled};
 
 pub fn reply(srv: *Server, cx: *errors.Cx, body: json.Value, gone: anytype) Failure!json.Value {
     const cap = srv.info.embeddings orelse return cx.refuse("this model does not produce embeddings");
-    if (srv.info.text_generation) return cx.fail(.server, "invalid embedding model capabilities", .{});
+    if (srv.info.capability(.text_generation)) return cx.fail(.server, "invalid embedding model capabilities", .{});
     if (body.field("model")) |model| {
         if (model != .string) return cx.refuse("model must be a string");
         var found = false;

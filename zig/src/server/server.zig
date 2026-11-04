@@ -188,8 +188,8 @@ pub const Server = struct {
         const srv = try gpa.create(Server);
         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
-        if (srv.info.embeddings != null and srv.info.text_generation) return error.InvalidEmbeddingCapabilities;
-        if (srv.info.readouts != null and (srv.info.text_generation or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
+        if (srv.info.embeddings != null and srv.info.capability(.text_generation)) return error.InvalidEmbeddingCapabilities;
+        if (srv.info.readouts != null and (srv.info.capability(.text_generation) or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
         if (srv.info.vision) |vision| if (@import("vision_markers.zig").firstUnsafe(text, vision)) |id| {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
@@ -199,7 +199,7 @@ pub const Server = struct {
             srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);
         }
         _ = try @import("drama_voice.zig").select(srv.voices, config.default_voice, "default");
-        if (!srv.info.text_generation) {
+        if (!srv.info.capability(.text_generation)) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;
         }
@@ -275,7 +275,7 @@ pub const Server = struct {
         try merge(options, cx, supplied);
         const temp = number(options.get("temperature")) orelse 0;
         if (temp <= 0) return null;
-        if (srv.info.greedy_only) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)
+        if (srv.info.capability(.greedy_only)) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)
             "this engine decodes greedily only and this server samples by default: send temperature 0, or serve with --temperature 0"
         else
             "this engine decodes greedily only: send temperature 0 or leave it out");
@@ -303,7 +303,7 @@ pub const Server = struct {
         try merge(options, cx, try fields.parseNumbers(cx, f));
         const presence = number(options.get("presence_penalty")) orelse 0;
         const frequency = number(options.get("frequency_penalty")) orelse 0;
-        if (!srv.info.penalties and (presence != 0 or frequency != 0))
+        if (!srv.info.capability(.penalties) and (presence != 0 or frequency != 0))
             return cx.fail(.request, "presence_penalty and frequency_penalty are not supported by backend '{s}': send 0 or leave them out", .{srv.backendName()});
         return .{ .presence = @floatCast(presence), .frequency = @floatCast(frequency) };
     }
@@ -321,14 +321,14 @@ pub const Server = struct {
         const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
         const all = has_tools and !required and tool_grammar.autoAllEnv();
         if (has_tools and required) {
-            if (!srv.info.structures) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
+            if (!srv.info.capability(.structures)) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
             request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);
-        } else if (has_tools and srv.info.structures and tool_grammar.autoWanted(tools, all) and srv.grammarCompiler() != null) {
+        } else if (has_tools and srv.info.capability(.structures) and tool_grammar.autoWanted(tools, all) and srv.grammarCompiler() != null) {
             // auto with a strict tool (any, TENSORFOLD_TOOL_GRAMMAR=1): text or calls; no grammar library, no grammar
             request.structure = try tool_grammar.optionalStructure(srv, cx, tools, all, !one_call, thinking);
         }
         if (try grammar.spec(cx, f)) |s| {
-            if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
+            if (!srv.info.capability(.structures)) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
             const st = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
             if (request.structure) |tool| tool.free();
             request.structure = st;
