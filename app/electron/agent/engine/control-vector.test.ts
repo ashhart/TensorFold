@@ -70,21 +70,31 @@ async function main() {
     assert.equal(restrung.length, 3, 'a new strength restarts the model with it')
     assert.equal(restrung[2].args[restrung[2].args.indexOf('--glp-alpha') + 1], '3')
 
+    // Another file takes effect at once when a vector is already in force.
+    const other = path.join(h.root, 'other.gguf')
+    await fs.writeFile(other, 'glp')
+    const swapped = await svc.chooseControlVector(other)
+    assert.equal(swapped.file, other)
+    assert.equal(swapped.enabled, true)
+    const exchanged = (await h.records()).filter((row) => row.kind === 'serve')
+    assert.equal(exchanged.length, 4, 'swapping the file restarts the model with it')
+    assert.equal(exchanged[3].args[exchanged[3].args.indexOf('--glp') + 1], other)
+
     // The choice survives a restart of the app: it is on disk, not in memory.
     const stored = new EnginePreferenceStore(h.root)
-    assert.equal(stored.get().controlVector.file, vector)
+    assert.equal(stored.get().controlVector.file, other)
     assert.equal(stored.get().controlVector.alpha, 3)
 
     await svc.setControlVector({ enabled: false })
     const off = (await h.records()).filter((row) => row.kind === 'serve')
-    assert.equal(off.length, 4)
-    assert.ok(!off[3].args.includes('--glp'), 'turning the vector off restarts the model without it')
+    assert.equal(off.length, 5)
+    assert.ok(!off[4].args.includes('--glp'), 'turning the vector off restarts the model without it')
     const after = new EnginePreferenceStore(h.root)
     assert.equal(after.get().controlVector.enabled, false)
     assert.equal(after.get().controlVector.alpha, 3, 'turning it off leaves the strength alone')
 
     // A file that is no longer on this Mac cannot be put back in force.
-    await fs.rm(vector)
+    await fs.rm(other)
     await assert.rejects(svc.setControlVector({ enabled: true, alpha: 1 }), /no longer on this Mac/)
     const cleared = await svc.clearControlVector()
     assert.equal(cleared.file, null)
