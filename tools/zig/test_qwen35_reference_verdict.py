@@ -51,6 +51,10 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(public["input"]["sha256"], "abc")
         self.assertEqual(public["numeric"], raw["numeric"])
 
+    def test_incomplete_run_cannot_reuse_an_earlier_pass(self):
+        self.report["complete"] = False
+        self.assertEqual(evaluate_report(self.report)["status"], "not-run")
+
     def test_recorded_counterexamples_stay_failed(self):
         path = Path(__file__).resolve().parents[2] / "docs/receipts/qwen35-bf16-scoring/transformers-comparison.json"
         result = evaluate_report(json.loads(path.read_text()))

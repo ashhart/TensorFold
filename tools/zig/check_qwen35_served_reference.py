@@ -44,6 +44,18 @@ def compare_rows(ids, response, reference):
     return out
 
 
+
+def response_evidence(response):
+    """Retain numeric score/runtime evidence without generated prose or identifying request metadata."""
+    rows = response["choices"][0]["prompt_logprobs"]
+    scores = [None if row is None else {token: {k: cell[k] for k in ("logprob", "rank")}
+                                      for token, cell in row.items()} for row in rows]
+    runtime = response.get("tensorfold", {})
+    keys = ("token_ids", "token_sha256", "prefill_seconds", "tokens_per_second", "drafts")
+    return {"choices": [{"prompt_logprobs": scores}], "usage": response["usage"],
+            "tensorfold": {k: runtime[k] for k in keys if k in runtime}}
+
+
 def summarize(rows):
     """Retain the worst observed position and separate each comparison direction."""
     if not rows:
@@ -89,7 +101,7 @@ def main():
         records.append({"fixture": index, "length": len(ids), "elapsed_s": elapsed,
                         "ids_sha256": hashlib.sha256(json.dumps(ids).encode()).hexdigest(),
                         "summary": summarize(rows), "rows": rows,
-                        "request": body, "response": response})
+                        "request": body, "response": response_evidence(response)})
         print(json.dumps({"fixture": index, **summarize(rows)}), flush=True)
     report = {"schema": 1, "collection_passed": True, "checkpoint": oracle["checkpoint"]["revision"],
               "scope": "actual HTTP selected prompt logprobs; both Transformers arms cover every scored row",
