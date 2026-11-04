@@ -3,7 +3,7 @@ const cuda = @import("cuda");
 const pool = @import("../offload/cuda_exl3_pool.zig");
 const telemetry = @import("exl3_telemetry.zig");
 
-test "exl3: aggregate telemetry finds attached pools deduplicates pool aliases and separates committed device plans" {
+test "exl3: aggregate telemetry finds attached pools deduplicates MTP aliases and separates committed device plans" {
     var resident: pool.Pool = undefined;
     resident.lines.pinned_bank = null;
     resident.telemetry_id = 991;
@@ -23,7 +23,7 @@ test "exl3: aggregate telemetry finds attached pools deduplicates pool aliases a
     engine.n_layers = 1;
     engine.layers[0].exl3 = &experts;
     const collector = @import("cuda_exl3_telemetry.zig");
-    var snapshot = try collector.sampleAfterConsumers(std.testing.allocator, &engine, &.{}, .{ .rank = 0, .world = 1 }, .all_rank_consumers_joined);
+    var snapshot = try collector.sampleAfterConsumers(std.testing.allocator, &engine, &engine.layers[0], &.{}, .{ .rank = 0, .world = 2 }, .all_rank_consumers_joined);
     defer snapshot.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), snapshot.expert_pools);
     try std.testing.expectEqual(@as(u64, 2), snapshot.experts.host_plans);
