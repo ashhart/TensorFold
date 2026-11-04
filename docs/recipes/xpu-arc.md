@@ -56,7 +56,7 @@ DPAS) under WSL2 (Ubuntu 24.04, 8 GB given to WSL), Ubuntu's compute runtime 23.
 
 | Setup | Decode, c=1, `--no-drafts` | Decode, c=1, copy drafts | Decode, c=4, aggregate | TTFT, 1,024 tokens | TTFT, 8,192 tokens | Memory (`serve --context 16384`) |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| Iris Xe, LFM3-1.7B MLX 4-bit | 15.6 to 16.8 tok/s | 15.9 (chat) to 26.3 (prose) tok/s | 25 to 32 tok/s | 11.7 to 12.2 s | 116.3 to 117.7 s | 1.33 GB device allocation, 448 MB host resident |
+| Iris Xe, LFM3-1.7B MLX 4-bit | 15.6 to 16.8 tok/s | 15.9 (chat) to 26.3 (prose) tok/s | 25 to 32 tok/s | 4.6 to 4.7 s | 55.4 to 55.6 s | 1.33 GB device allocation, 448 MB host resident |
 
 Decode, c=1: two short chats (160 tokens), a 1,001-token prose prompt and a 601-token code prompt (128 tokens), greedy, three runs
 each, with copy drafts (the default) and with `--no-drafts`; c=4: four concurrent 128-token completions of distinct 32-token prompts,
