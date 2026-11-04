@@ -60,7 +60,7 @@ The reader fails closed rather than guessing.
 | A direction is not a unit vector | A projective direction has to be one. |
 | The digest does not match the bytes | The file says one thing and holds another. |
 | The width does not match the checkpoint | The vector is for another model. |
-| The base model does not match | The vector was derived from another checkpoint. |
+| The base model does not match | The vector was derived from another checkpoint. The names are compared without their owners, because a checkpoint is often a quantization of another repo's model under a new name. |
 | A Gemma checkpoint | Its terms of use forbid circumventing its safety filters, so a Gemma is never steered. |
 | A CUDA or ROCm backend | Only the Metal engine steers. |
 

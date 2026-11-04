@@ -200,7 +200,7 @@ pub fn checkModel(v: Vector, hidden: usize, base_model: []const u8, why: *Why) E
     }
 }
 
-/// The served checkpoint is the vector's model when it is that model or a conversion of it: a checkpoint is often a quantization of another repo's model under a new name, so the names are compared without their owners and the served one may carry a suffix.
+/// The served checkpoint is the vector's model when it is that model or a conversion of it.
 fn sameModel(base: []const u8, served: []const u8) bool {
     if (std.mem.eql(u8, base, served)) return true;
     return std.mem.startsWith(u8, nameOf(served), nameOf(base));
