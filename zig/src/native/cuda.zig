@@ -587,3 +587,14 @@ test "slide admission: cuda refuses before checkpoint or device access" {
 test {
     _ = @import("copy_drafts_cuda_test.zig");
 }
+
+test "GLM capabilities: CUDA offers the EXL3 format its loader accepts" {
+    const config_json = "{\"quantization_config\":{\"quant_method\":\"exl3\",\"bits\":4,\"codebook\":\"mcg\"}}";
+    var why: @import("core").modelopt.Why = .{};
+    try std.testing.expect(glm.exl3.isExl3(std.testing.allocator, config_json));
+    try glm.exl3.admit(std.testing.allocator, config_json, &why);
+    for (families) |family| if (std.mem.eql(u8, family.model_type, "glm5_next")) {
+        for (family.formats) |format| if (std.mem.eql(u8, format, "exl3")) return;
+    };
+    return error.NoExl3Format;
+}
