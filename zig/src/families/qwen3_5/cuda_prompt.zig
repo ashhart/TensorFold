@@ -33,7 +33,7 @@ pub fn resolve(attention: cuda.Module, gdn: cuda.Module) !Fns {
     return f;
 }
 
-fn arguments(e: *const E.Engine, sg: Seg, layer: usize, rows: usize) cuda.Args {
+fn arguments(e: *const E.Engine, sg: Seg, layer: usize, rows: usize, at: u64) cuda.Args {
     const g = e.g;
     const kvh: u64 = g.kv_heads;
     const cap: u64 = @intCast(sg.cap);
@@ -46,10 +46,10 @@ fn arguments(e: *const E.Engine, sg: Seg, layer: usize, rows: usize) cuda.Args {
         const keys = base;
         const values = keys + heads * head_dim;
         const kscale = values + heads * head_dim;
-        for ([_]u64{ e.qn, keys, values, kscale, kscale + heads * 4, e.y }) |v| a.add(v);
+        for ([_]u64{ e.qn + at, keys, values, kscale, kscale + heads * 4, e.y + at }) |v| a.add(v);
     } else {
         const base = sg.kv + layer * 2 * heads * head_dim * 2;
-        for ([_]u64{ e.qn, base, base + heads * head_dim * 2, e.y }) |v| a.add(v);
+        for ([_]u64{ e.qn + at, base, base + heads * head_dim * 2, e.y + at }) |v| a.add(v);
     }
     for ([_]usize{ @intCast(sg.len), rows, g.q_heads, g.kv_heads, group }) |v| a.add(@as(c_int, @intCast(v)));
     a.add(@as(f32, 1.0 / 16.0));
@@ -64,11 +64,18 @@ fn arguments(e: *const E.Engine, sg: Seg, layer: usize, rows: usize) cuda.Args {
 
 /// Attention layer `layer` into e.y: a chunk's queries (e.qn) over cache positions 0 .. len + row (rope wrote its own).
 pub fn run(e: *E.Engine, layer: usize, rows: usize) !void {
+    return runFrom(e, layer, 0, rows);
+}
+
+/// `run` for the chunk's rows from `from` to `end` only: each row's queries over its own keys, the same key tiles.
+pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
     const g = e.g;
     const group = g.q_heads / g.kv_heads;
-    const sg = std.mem.bytesToValue(Seg, e.staged.bytes[E.Engine.segs_at..][0..@sizeOf(Seg)]);
+    const rows = end - from;
+    var sg = std.mem.bytesToValue(Seg, e.staged.bytes[E.Engine.segs_at..][0..@sizeOf(Seg)]);
+    sg.len += @intCast(from); // row `from` is the first query: its keys end at len + from
     const paged = sg.pt != 0;
-    var a = arguments(e, sg, layer, rows);
+    var a = arguments(e, sg, layer, rows, from * g.q_heads * head_dim * 2);
     const cfg: cuda.Config = .{ .grid = .{ .x = @intCast((rows + block_rows - 1) / block_rows), .y = @intCast(g.kv_heads * (group / hpc)) }, .block = .{ .x = 256 }, .shared = smem };
     const f = if (paged) (if (e.kv8) e.prompt_attn.fp8 else e.prompt_attn.bf16) else (if (e.kv8) e.prompt_attn.fp8_whole else e.prompt_attn.bf16_whole);
     try cuda.launch.launch(f, cfg, e.stream, &a);
@@ -103,7 +110,7 @@ test "Qwen prompt layout: whole ABI omits page metadata and keeps original layer
         sg.ps = if (paged) 0x100000 else std.math.maxInt(u64);
         sg.ptok = if (paged) 48 else 0;
         for ([_]usize{ 0, 1, 15 }) |layer| for ([_]usize{ 1, 63, 64, 65, 2048 }) |rows| {
-            const a = arguments(&e, sg, layer, rows);
+            const a = arguments(&e, sg, layer, rows, 0);
             const np: usize = if (fp8) 6 else 4;
             const heads: u64 = 4 * @as(u64, if (paged) 48 else 65536);
             const base = sg.kv + layer * 2 * heads * @as(u64, if (fp8) head_dim + 4 else head_dim * 2);

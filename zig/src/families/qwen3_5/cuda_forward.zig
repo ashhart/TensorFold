@@ -48,7 +48,12 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     if (e.features != 0) try e.run(e.fns.splice, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.features, e.tables.ptr + src_at, @as(c_int, @intCast(g.hidden)), t_params });
     var di: usize = 0;
     var ai: c_int = 0;
+    // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
+    const tail_at: ?usize = if (prompt) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden) else null;
     for (e.layers, 0..) |l, i| {
+        const tail = tail_at != null and i + 1 == e.layers.len;
+        const t0: usize = if (tail) tail_at.? else 0;
+        const rows: usize = total - t0;
         try e.norm(i != 0, l.input_norm, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
@@ -66,14 +71,17 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             },
             .attention => |m| {
                 const aw = g.attnWidth();
-                try e.projManyPrompt(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
+                if (tail) {
+                    try e.projManyPrompt(&.{ m.k, m.v }, e.x, &.{ e.kraw, e.vraw }, total, prompt);
+                    try e.projAgain(m.q, e.x + t0 * g.hidden * 2, e.qraw + t0 * 2 * aw * 2, rows, prompt);
+                } else try e.projManyPrompt(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
                 try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                 try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
                 try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
                 if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
-                    try @import("cuda_prompt.zig").run(e, @intCast(ai), total);
+                    try @import("cuda_prompt.zig").runFrom(e, @intCast(ai), t0, total);
                 } else {
                     const args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po };
                     const tile_rows: usize = if (shape.mt2) 32 / group else 64 / group;
@@ -89,31 +97,42 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                     }
                     try launch(e, e.fns.attn_merge, sig.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
                 }
-                try launch(e, e.fns.attn_gate, sig.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params, sums });
+                // the tail's rows from their own pointers, so no device row count (0: the launch's rows are real)
+                const gp: u64 = if (tail) 0 else t_params;
+                const y0 = e.y + t0 * aw * 2;
+                const mix0 = e.mix + t0 * aw * 2;
+                const gate_args = .{ geo, y0, e.qraw + t0 * 2 * aw * 2, mix0, @as(c_int, @intCast(rows)), gp, sums };
+                const gate_grid = .{ (rows * aw + 255) / 256, 1, 1 };
+                try launch(e, e.fns.attn_gate, sig.attn_gate, gate_grid, .{ 256, 1, 1 }, gate_args);
                 if (e.learning) |k| try k.gated(i, e.mix, total);
-                try e.projAgain(m.o, e.mix, e.r, total, prompt);
+                try e.projAgain(m.o, mix0, e.r + t0 * g.hidden * 2, rows, prompt);
                 ai += 1;
             },
         }
         try e.norm(true, l.post_norm, total);
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
+        // the tail: its rows' MLP at buffer row 0, their outputs into r at their own rows
+        const x0 = e.x + t0 * g.hidden * 2;
+        const r0 = e.r + t0 * g.hidden * 2;
+        const rp: u64 = if (tail) 0 else t_params;
         switch (l.mlp) {
             .dense => |m| {
                 if (m.gate == .x3) {
-                    try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, prompt); // one EXL3 group launch
+                    try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
                 } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
                 } else {
-                    try e.projAgain(m.gate, e.x, e.gate, total, prompt);
-                    try e.projAgain(m.up, e.x, e.up, total, prompt);
+                    try e.projAgain(m.gate, x0, e.gate, rows, prompt);
+                    try e.projAgain(m.up, x0, e.up, rows, prompt);
                 }
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
-                const n: c_longlong = @intCast(total * g.intermediate);
-                try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)), sums });
-                try e.projAgain(m.down, e.act, e.r, total, prompt);
+                const n: c_longlong = @intCast(rows * g.intermediate);
+                const act_args = .{ e.gate, e.up, e.act, n, rp, @as(c_int, @intCast(g.intermediate)), sums };
+                try e.run(e.fns.mlp_act, .{ (rows * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, act_args);
+                try e.projAgain(m.down, e.act, r0, rows, prompt);
                 if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.add(e.stream, i, e.x, e.r, total, e.taught);
             },
-            .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, promptMoe(prompt, total), t_params),
+            .moe => |m| try e.routedRows(m.router, m.experts, x0, r0, rows, promptMoe(prompt, rows), rp),
         }
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
             try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
