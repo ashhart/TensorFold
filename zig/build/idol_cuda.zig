@@ -11,13 +11,13 @@ fn launchers(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/idol/cuda_kernels.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
 }
 
-/// The launchers in tf-cuda-test's `runner` (idol-contract), and tf-idol: the case driver on the first GPU.
-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, strip: ?bool, cuda: *std.Build.Module, core: *std.Build.Module, runner: *std.Build.Module) void {
-    runner.addImport("idol_cuda", launchers(b, target, optimize, cuda));
+/// tf-idol, the case driver on the first GPU; returns the launchers for tf-cuda-test's `runner` (idol-contract).
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, strip: ?bool, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
     const tool = b.createModule(.{ .root_source_file = b.path("zig/tests/idol_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "idol", .module = module(b, target, optimize, cuda, core) } } });
     const exe = b.addExecutable(.{ .name = "tf-idol", .root_module = tool });
     b.installArtifact(exe);
     b.step("idol-cuda", "Build tf-idol: Idol's denoiser on a reference case on CUDA").dependOn(&b.addInstallArtifact(exe, .{}).step);
+    return launchers(b, target, optimize, cuda);
 }
 
 /// The family's host tests (config, schedule, scratch, admission, launch geometry, contract ranges) in `all`.
