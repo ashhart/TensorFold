@@ -37,14 +37,26 @@ inline size_t fl_slot(constant fl_args& a, uint row) { return a.ring ? (a.pos + 
   for (uint i = t; i < a.width; i += n) out[(size_t)row * a.width + i] = bfloat(float(w[i]) * float(bfloat(x[i] * inv)));
 }
 
-// A = silu(gate) * up as MLX rounds it: s = bf16(sigmoid(g)), bf16(bf16(g * s) * u), over rows x width.
+// MLX's Sigmoid: 1 / (1 + exp(|x|)) below 0, one less that above; on fp32 router logits in fp32.
+inline float fl_sigmoid(float x) {
+  const float y = 1.0f / (1.0f + precise::exp(fabs(x)));
+  return x < 0.0f ? y : 1.0f - y;
+}
+
+// The same on a bf16 gate as MLX runs it on a bfloat array: every step rounds to bf16.
+inline float fl_sigmoid_bf16(float x) {
+  const float e = float(bfloat(precise::exp(fabs(x))));
+  const float y = float(bfloat(1.0f / float(bfloat(1.0f + e))));
+  return float(bfloat(x < 0.0f ? y : 1.0f - y));
+}
+
+// A = silu(gate) * up as MLX rounds it: s = sigmoid(g) in bf16 steps, bf16(bf16(g * s) * u), over rows x width.
 [[kernel]] void fl_swiglu(const device bfloat* Gt [[buffer(0)]], const device bfloat* U [[buffer(1)]],
     constant fl_args& a [[buffer(2)]], device bfloat* A [[buffer(3)]], uint2 p [[thread_position_in_grid]]) {
   if (p.x >= a.width || p.y >= a.rows) return;
   const size_t i = (size_t)p.y * a.width + p.x;
   const float g = float(Gt[i]), u = float(U[i]);
-  const float e = precise::exp(-fabs(g)), y = 1.0f / (1.0f + e);
-  const float s = float(bfloat(g < 0.0f ? 1.0f - y : y));
+  const float s = fl_sigmoid_bf16(g);
   A[i] = bfloat(float(bfloat(g * s)) * u);
 }
 
@@ -109,9 +121,7 @@ inline size_t fl_slot(constant fl_args& a, uint row) { return a.ring ? (a.pos + 
   for (uint j = 0; j < PER; ++j) {
     const uint id = j * 32 + lane;
     if (id < a.width) {
-      const float x = L[(size_t)row * a.width + id];
-      const float y = 1.0f / (1.0f + precise::exp(fabs(x)));
-      sc[j] = x < 0 ? y : 1.0f - y;
+      sc[j] = fl_sigmoid(L[(size_t)row * a.width + id]);
     } else {
       sc[j] = 0.0f;
       taken |= 1u << j;
@@ -319,14 +329,13 @@ struct fl_prep_args { uint rows, heads, kv_heads, dim, pos, ring, rope, stride; 
   for (uint j = 0; j < per; ++j) vd[lane + 32 * j] = vs[lane + 32 * j];
 }
 
-// fl_swiglu on a stacked gate|up row (gate at 0, up at a.width): A = bf16(bf16(g * bf16(sigmoid(g))) * u).
+// fl_swiglu on a stacked gate|up row (gate at 0, up at a.width): A = bf16(bf16(g * sigmoid(g)) * u), as there.
 [[kernel]] void fl_swiglu_gu(const device bfloat* GU [[buffer(0)]], constant fl_args& a [[buffer(1)]],
     device bfloat* A [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
   if (p.x >= a.width || p.y >= a.rows) return;
   const size_t at = (size_t)p.y * 2 * a.width + p.x;
   const float g = float(GU[at]), u = float(GU[at + a.width]);
-  const float e = precise::exp(-fabs(g)), y = 1.0f / (1.0f + e);
-  const float s = float(bfloat(g < 0.0f ? 1.0f - y : y));
+  const float s = fl_sigmoid_bf16(g);
   A[(size_t)p.y * a.width + p.x] = bfloat(float(bfloat(g * s)) * u);
 }
 
