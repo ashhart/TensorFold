@@ -119,6 +119,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     h.gpa = gpa;
     h.eng = eng;
     h.vis = vis;
+    try eng.keepLoneStates(); // before the sessions: the engine's own carries the records
     h.back = try Backend.init(gpa, eng, caps.items);
     errdefer h.back.deinit();
     if (vis != null) h.back.images = .{ .ctx = h, .build = buildImages, .release = releaseImages };
@@ -141,8 +142,8 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     eng.snap_pool.max = plan.budget_bytes;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .decode_share = tf.flashnext_backend.decodeShare(decode_share, std.c.getenv("TENSORFOLD_PREFILL_SHARE") != null, eng.r.device.tensorUnits()), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     h.back.fill_grows = !eng.r.device.tensorUnits() and h.host.share.p < 1; // a share of 1 asked for keeps today's small steps
-    // FLASHNEXT_NO_LONE=1 keeps lone requests on shared rounds; image streams always (engine rounds: slot positions).
-    if (eng.r.gdn_kept == null and std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun, .images = false };
+    // FLASHNEXT_NO_LONE=1: lone requests on shared rounds. Images always; sampled ones on tensor units (unmeasured).
+    if (std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun, .images = false, .sampled = !eng.r.device.tensorUnits() };
     // The standard frame (buildImages): an image moves no row before it, so the cache keys carry no frame.
     if (vis) |v| h.host.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
     h.cache = null;
@@ -240,7 +241,7 @@ const dropResident = @import("flashnext_residency.zig").dropShared;
 /// Auto with room for only one session transfers the loaded engine, preserving the chosen footprint limit.
 fn single(gpa: std.mem.Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over: bool, cap: u64, vis: ?*images.Vision, learn: ?Learn, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
     const host = @import("flashnext_host.zig");
-    try eng.keepStates(); // no shared rounds here, so no hand-off a kept state would refuse
+    try eng.keepStates(); // no shared rounds here
     const h = try host.openWarmed(gpa, io, eng, window, cache_gib, over, learn, cap, vis, a, why);
     return .{ .engine = h.engine(), .close = host.close, .ctx = h };
 }

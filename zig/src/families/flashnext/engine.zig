@@ -159,6 +159,9 @@ pub const Engine = struct {
     pub fn keepStates(e: *Engine) !void {
         return @import("engine_rounds.zig").keepStates(e);
     }
+    pub fn keepLoneStates(e: *Engine) !void {
+        return @import("engine_rounds.zig").keepLoneStates(e);
+    }
 
     /// Host-driven calls (prompt chunks, the head's first drafts) read the host's metadata buffers.
     pub fn hostMode(e: *Engine) void {
