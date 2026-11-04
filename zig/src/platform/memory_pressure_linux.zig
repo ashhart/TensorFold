@@ -8,11 +8,10 @@ pub const Reading = struct {
     some_avg10: f64,
     full_avg10: f64,
 
-    /// Experimental kernel-compatible levels: 1 normal, 2 warning, 4 critical; the governor owns recovery timing.
+    /// Experimental PSI levels: 1 normal, 2 warning, 4 critical; the governor owns recovery timing.
     pub fn level(r: Reading) u32 {
-        const available = @as(u128, r.available) * 100;
-        if (available <= @as(u128, r.total) * 5 or r.full_avg10 >= 10) return 4;
-        if (available <= @as(u128, r.total) * 10 or r.some_avg10 >= 10 or r.full_avg10 >= 1) return 2;
+        if (r.full_avg10 >= 10) return 4;
+        if (r.some_avg10 >= 10 or r.full_avg10 >= 1) return 2;
         return 1;
     }
 };

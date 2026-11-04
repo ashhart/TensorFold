@@ -23,7 +23,24 @@ fn plant(dir: std.Io.Dir, p: []const u8, m: []const u8) !void {
     try dir.writeFile(io, .{ .sub_path = "meminfo", .data = m });
 }
 
-test "memory pressure: Linux planted files classify availability and PSI boundaries, not cached bytes or MemFree" {
+test "memory pressure: a normally budgeted Linux host at low MemAvailable stays normal" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    const full = "MemTotal: 126877696 kB\nMemAvailable: 4194304 kB\nMemFree: 1 kB\nCached: 2097152 kB\n";
+    try plant(tmp.dir, quiet, full);
+    const reading = linux.readAt(root).?;
+    try std.testing.expectEqual(@as(u64, 4) << 30, reading.available);
+    try std.testing.expectEqual(@as(u32, 1), reading.level());
+    var files: Files = .{ .root = root };
+    var g: mp.Governor = .{ .source = .{ .ctx = &files, .read = Files.read } };
+    try std.testing.expect(g.poll(0) == null);
+    try std.testing.expectEqual(mp.Level.normal, g.level);
+}
+
+test "memory pressure: Linux planted files classify PSI boundaries and retain available-memory diagnostics" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -33,9 +50,9 @@ test "memory pressure: Linux planted files classify availability and PSI boundar
     try std.testing.expectEqual(@as(u32, 1), linux.readAt(root).?.level());
     const Case = struct { available: u64, some: f64 = 0, full: f64 = 0, want: u32 };
     const cases = [_]Case{
-        .{ .available = 100001, .want = 1 },                .{ .available = 100000, .want = 2 },
-        .{ .available = 50001, .want = 2 },                 .{ .available = 50000, .want = 4 },
-        .{ .available = 0, .want = 4 },                     .{ .available = 1000000, .want = 1 },
+        .{ .available = 100001, .want = 1 },                .{ .available = 100000, .want = 1 },
+        .{ .available = 50001, .want = 1 },                 .{ .available = 50000, .want = 1 },
+        .{ .available = 0, .want = 1 },                     .{ .available = 1000000, .want = 1 },
         .{ .available = 400000, .some = 9.999, .want = 1 }, .{ .available = 400000, .some = 10, .want = 2 },
         .{ .available = 400000, .full = 0.999, .want = 1 }, .{ .available = 400000, .full = 1, .want = 2 },
         .{ .available = 400000, .full = 9.999, .want = 2 }, .{ .available = 400000, .full = 10, .want = 4 },
