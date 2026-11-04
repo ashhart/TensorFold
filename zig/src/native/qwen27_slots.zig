@@ -367,8 +367,12 @@ pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
 
 /// A drafter context's bytes: the taps ring, and K/V caches when the slot drafts.
 fn contextBytes(c: q.dflash.config.Config, drafting: bool) usize {
-    const ring = @as(usize, c.window) * c.tapWidth() * 2;
-    return ring + if (drafting) @as(usize, c.layers) * 2 * (@as(usize, c.window) + 16) * c.kvWidth() * 2 else 0;
+    const ring = @as(usize, c.span()) * c.ringWidth() * 2;
+    var caches: usize = 0;
+    if (drafting) for (0..c.layers) |i| {
+        caches += 2 * (@as(usize, c.layerWindow(i)) + 16) * c.kvWidth() * 2;
+    };
+    return ring + caches;
 }
 
 /// A free slot for a new stream, slot 0 (the drafter's) first.
