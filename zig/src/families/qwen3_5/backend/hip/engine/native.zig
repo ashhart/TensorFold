@@ -14,8 +14,8 @@ const worker = @import("worker.zig");
 const hip_lanes = @import("hip_lanes.zig");
 const config = @import("../../../weights/config.zig");
 
-/// The MLX affine widths the family loads, and unquantized BF16 (a decision backbone).
-const mlx_formats: []const []const u8 = &.{ "mlx-q2", "mlx-q3", "mlx-q4", "mlx-q5", "mlx-q6", "mlx-q8", "bf16" };
+/// The MLX affine widths this native text server loads.
+const mlx_formats: []const []const u8 = &.{ "mlx-q2", "mlx-q3", "mlx-q4", "mlx-q5", "mlx-q6", "mlx-q8" };
 
 /// The dense and the sparse checkpoints are two registry entries over one engine.
 pub fn Native(comptime type_name: []const u8) type {
@@ -326,6 +326,9 @@ test "a bf16 checkpoint is refused as decision-only, naming what it lacks; an ML
     try tmp.dir.writeFile(io, .{ .sub_path = "joint_head_config.json", .data = "{}" });
     const headed = decisionOnly(a, std.testing.allocator, io, dir).?;
     try std.testing.expect(std.mem.indexOf(u8, headed, "no readout requests or joint schema head") != null);
+    inline for (.{ "qwen3_5", "qwen3_5_moe" }) |kind| {
+        for (Native(kind).formats) |format| try std.testing.expect(!std.mem.eql(u8, format, "bf16"));
+    }
     const mlx = try std.mem.replaceOwned(u8, a, text, "\"tie_word_embeddings\": false,", "\"tie_word_embeddings\": false, \"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"},");
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
     try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
