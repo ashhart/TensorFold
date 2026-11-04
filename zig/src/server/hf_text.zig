@@ -339,7 +339,7 @@ pub const HfText = struct {
             opts.tools = tools.array;
         }
         if (options.reasoning_effort) |effort| {
-            const budget = dsv41.effortOf(effort) orelse {
+            const budget = dsv41.effortIn(effort, t.recipe) orelse {
                 problem.* = "reasoning_effort must be 1-100 or low / medium / high / max";
                 return error.Template;
             };

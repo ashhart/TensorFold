@@ -21,6 +21,8 @@ pub const IMAGE_ESCAPED = "<\u{200b}｜deepseek_image｜>";
 
 /// ``reasoning_effort`` names as the server reads them: none / minimal turn thinking off (the jinja maps medium to 62).
 pub const efforts = [_]struct { []const u8, ?u8 }{ .{ "none", null }, .{ "minimal", null }, .{ "low", 50 }, .{ "medium", 75 }, .{ "high", 75 }, .{ "xhigh", 100 }, .{ "max", 100 } };
+/// DeepSeek's own resolution of the names (deepseek-recipe's records): minimal thinks at 50, xhigh at 75.
+pub const recipe_efforts = [_]struct { []const u8, ?u8 }{ .{ "none", null }, .{ "minimal", 50 }, .{ "low", 50 }, .{ "medium", 75 }, .{ "high", 75 }, .{ "xhigh", 75 }, .{ "max", 100 } };
 pub const default_budget: u8 = 75;
 
 pub const Error = error{ Refused, OutOfMemory };
@@ -55,11 +57,16 @@ pub const Problem = struct { message: []const u8 = "" };
 
 /// A ``reasoning_effort`` value: null if refused, ``.{null}`` for none / minimal, else 1-100 (names trimmed, lower).
 pub fn effortOf(s: []const u8) ??u8 {
+    return effortIn(s, false);
+}
+
+/// `effortOf` with DeepSeek's own names where `recipe` (``recipe_efforts``).
+pub fn effortIn(s: []const u8, recipe: bool) ??u8 {
     var buf: [16]u8 = undefined;
     const trimmed = std.mem.trim(u8, s, " \t\n\r");
     if (trimmed.len == 0 or trimmed.len > buf.len) return null;
     const t = std.ascii.lowerString(&buf, trimmed);
-    for (efforts) |e| if (std.mem.eql(u8, e[0], t)) return e[1];
+    for (if (recipe) &recipe_efforts else &efforts) |e| if (std.mem.eql(u8, e[0], t)) return e[1];
     for (t) |c| if (!std.ascii.isDigit(c)) return null;
     const n = std.fmt.parseInt(i64, t, 10) catch return null;
     if (n < 1 or n > 100) return null;

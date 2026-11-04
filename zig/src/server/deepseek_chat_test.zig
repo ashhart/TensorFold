@@ -41,10 +41,13 @@ test "DeepSeek chat: missing Jinja uses the committed text goldens, V4.1's expec
                 .add_generation_prompt = c.get("generation").?.bool,
                 .reasoning_effort = if (thinking) try json.stringify(a, c.get("budget").?, .{}) else null,
             };
-            if (c.get("effort_field")) |effort| opts.reasoning_effort = switch (effort) {
-                .string, .int => |s| s,
-                else => unreachable,
-            };
+            if (c.get("effort_field")) |effort| {
+                opts.reasoning_effort = switch (effort) {
+                    .string, .int => |s| s,
+                    else => unreachable,
+                };
+                opts.enable_thinking = true; // as the server reads a named effort; the name decides
+            }
             if (c.get("tools")) |tools| if (tools == .array) {
                 opts.tools = tools;
             };

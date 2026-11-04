@@ -133,7 +133,7 @@ fn renderCase(a: std.mem.Allocator, c: json.Value, recipe: bool, efforts: *usize
             .string, .int => |t| t,
             else => unreachable,
         };
-        const level = template.effortOf(text) orelse return error.TestUnexpectedRefusal;
+        const level = template.effortIn(text, recipe) orelse return error.TestUnexpectedRefusal;
         opts.thinking = level != null;
         opts.budget = level orelse 75;
         if (!recipe) try testing.expectEqual(c.get("thinking").?.bool, opts.thinking);
