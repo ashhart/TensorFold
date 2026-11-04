@@ -56,3 +56,42 @@ pub fn admits(comptime Lanes: type) !void {
         try t.expectEqual(@as(usize, parallel), try admitted(Lanes, parallel, 0)); // the checks
     }
 }
+
+/// --parallel `parallel` with pages for `paged` streams: those admit, the rest wait for pages (--parallel a cap).
+fn capped(comptime Lanes: type, parallel: u32, paged: u32) !usize {
+    var d = D.driver();
+    var e = engine(&d);
+    var l: Lanes = .{
+        .gpa = t.allocator,
+        .io = undefined,
+        .e = &e,
+        .capacity = capacity,
+        .page_tokens = page,
+        .engine_paged = true,
+        .target = undefined,
+    };
+    const lay = pages.layout(&e, capacity, page, 0, 0);
+    try native.attach(&l, parallel - 1, paged * (lay.pages(capacity + pages.window_rows) + lay.runPages()));
+    var open: std.ArrayList(*engine_mod.Cache) = .empty;
+    defer {
+        for (open.items) |x| _ = l.pages.?.close(x);
+        open.deinit(t.allocator);
+        l.pages.?.deinit();
+    }
+    while (open.items.len <= parallel) {
+        if (!native.fits(&l, capacity - pages.window_rows, 16)) break;
+        try open.append(t.allocator, try l.take(capacity - pages.window_rows, 16));
+    }
+    return open.items.len;
+}
+
+/// TF_QWEN_KV_PAGES set: --parallel caps the streams and a request waits for pages. Unset: no pool, nothing waits.
+pub fn caps(comptime Lanes: type) !void {
+    try t.expectEqual(@as(usize, 2), try capped(Lanes, 4, 2));
+    try t.expectEqual(@as(usize, 4), try capped(Lanes, 4, 4));
+    var d = D.driver();
+    var e = engine(&d);
+    var l: Lanes = .{ .gpa = t.allocator, .io = undefined, .e = &e, .capacity = capacity, .target = undefined };
+    try t.expect(native.pagedLayout(&l, 0) == null); // no pool: the plan reserves a window for each of --parallel's
+    try t.expect(native.fits(&l, capacity, 16));
+}
