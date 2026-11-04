@@ -1,4 +1,4 @@
-//! Rollback conformance (#2138): heads landing no draft, some or all, and cancels at every boundary, against fresh runs.
+//! Rollback conformance (#2138): heads landing no draft, some or all, and cancels at each boundary, against fresh runs.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const Engine = @import("engine.zig").Engine;
@@ -97,7 +97,7 @@ const Rig = struct {
         return n;
     }
 
-    /// One cache a live stream; each one's digest is a fresh run's prompt and committed tokens, the pending one fed or not.
+    /// One cache a live stream, its digest a fresh run's: the prompt and committed tokens, the pending one fed or not.
     fn expectStates(r: *Rig) !void {
         const partial: usize = if (r.filling) |s| @intFromBool(r.target.cache(s) != null) else 0;
         try std.testing.expectEqual(r.engine.live.items.len + partial, r.target.lanes.count());
