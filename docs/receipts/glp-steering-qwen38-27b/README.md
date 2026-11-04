@@ -90,8 +90,28 @@ reproduces the baseline exactly.
   PASS nonfinite/repeat/shapes qwen27 steer add (sums: N/A, declares none sums)
   CONTROL qwen27 steer project nan control:  red at nonfinite, as planted
   CONTROL qwen27 steer project sums control: red at sums, as planted
+  PASS normalised: the fused kernel's row is the plain norm's row, element for element, and the planted fault shows
   SUMMARY 2 kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems
   ```
+
+- The fused kernel's normalisation is checked against the family's own plain norm
+  kernel, element for element: the row the fused kernel projected, normalised by
+  the plain kernel, has to be the same row. A fault planted in the normalisation
+  alone is caught, so a wrong sum of squares cannot pass unnoticed.
+
+## What the projection costs
+
+- The steering kernel replaces the norm kernel, so the vector costs one dispatch
+  per steered layer and not two: its work rides in a pass the model already makes.
+- The direction is read once per row and kept in registers, so the dot and the
+  projection read the same stretch of it.
+- The add mode does not use the dot, so the kernel does not compute it: the
+  reduction the project mode needs is skipped, which is what the spec declares
+  for that mode.
+- Measured against the same build and the same server without a vector, on this
+  M4 Pro with Qwen3.8-27B-MLX-4bit: under one percent of a decoded token and
+  under half a percent of a prefill. That is under what this machine resolves
+  between runs, so the honest reading is that the cost is below the noise.
 
 ## Tests
 
@@ -114,10 +134,10 @@ reproduces the baseline exactly.
 - Apple chips other than this one: the limits for M1 to M5 are checked without a
   GPU by `zig build test-kernel-contract`, and the device gates ran on this
   M4 Pro.
-- Decode and prompt speed before and after: the feature did not exist on this
-  branch before the change, so there is no earlier build to measure against. The
-  unsteered path is unchanged by construction, because the projection is skipped
-  when no direction is in force.
+- Decode and prompt speed before and after the branch: the feature did not exist
+  on this branch before the change, so there is no earlier build to measure
+  against. The vector's own cost, measured against the same build without one,
+  is in the section above.
 - The Gemma 4 rounded-dense device gate cannot run on this chip, which has no
   tensor units. That gate belongs to the base tree and stops the full contract
   run on this machine before it reaches any kernel of this branch.
