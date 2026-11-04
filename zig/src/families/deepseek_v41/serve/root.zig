@@ -9,4 +9,5 @@ pub const fixtures = @import("dsv41_serve_fixtures");
 test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("golden_test.zig");
+    _ = @import("recipe_test.zig");
 }
