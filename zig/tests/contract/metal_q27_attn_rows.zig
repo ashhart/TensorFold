@@ -55,7 +55,8 @@ pub fn served(comptime h: at_.Heads, comptime w: Which) []const c.Shape {
     // even starts fork at 3 rows or more; 2046 and 510 split a tree over two tail chunks; 8190 and 8191 take 64 chunks
     return comptime switch (w) {
         .decode => &.{ .{ .rows = 1, .n = n, .k = 2 }, .{ .rows = two, .n = n, .k = 64 }, .{ .rows = three, .n = n, .k = 64 }, .{ .rows = two, .n = n, .k = 65 }, .{ .rows = three, .n = n, .k = 65 }, .{ .rows = 16, .n = n, .k = 2046 }, .{ .rows = 16, .n = n, .k = 2047 }, .{ .rows = 128, .n = n, .k = 510 }, .{ .rows = 128, .n = n, .k = 511 }, .{ .rows = 1, .n = n, .k = 8191 }, .{ .rows = five, .n = n, .k = 8190 }, .{ .rows = six, .n = n, .k = 8191 } },
-        .prompt => &.{ .{ .rows = 16, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 1920 }, .{ .rows = 16, .n = n, .k = 8176 } },
+        // gate 1 takes the first shape at 8 rows: k 57 has a whole step past row 0's keys, then a partial one
+        .prompt => &.{ .{ .rows = 16, .n = n, .k = 57 }, .{ .rows = 16, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 1920 }, .{ .rows = 16, .n = n, .k = 8176 } },
     };
 }
 
@@ -194,7 +195,7 @@ pub const Attn = struct {
         return true;
     }
 
-    /// Gate 1: key 0 zero, +Inf in its value; -Inf in row 1's value (row 0 must not see it); NaN in a key, query, gate.
+    /// Gate 1: key 0 zero, +Inf in its value; -Inf in row 1's, +Inf in the last row's; NaN in a key, query, gate.
     fn plant(t: *Attn) void {
         const gm = t.geo();
         const nh: usize = gm.heads;
@@ -203,6 +204,7 @@ pub const Attn = struct {
         @memset(t.kc[t.at(0, 0, 0)..][0..D], 0);
         t.vc[t.at(0, 0, 0) + 3] = c.toBf16(std.math.inf(f32));
         if (r.counts[0] > 1) t.vc[t.at(0, 0, s0 + 1) + 3] = c.toBf16(-std.math.inf(f32));
+        if (r.counts[0] > 1) t.vc[t.at(0, 0, s0 + r.counts[0] - 1) + 7] = c.toBf16(std.math.inf(f32));
         if (r.counts[0] > 2) t.kc[t.at(0, gm.kv_heads - 1, s0 + 2) + 10] = c.toBf16(std.math.nan(f32));
         if (r.rows > 3) t.q_in[(3 * nh + 1) * D] = c.toBf16(std.math.nan(f32));
         if (r.rows > 4) t.gate_in[4 * nh * 2 * D + D + 7] = c.toBf16(std.math.nan(f32));
