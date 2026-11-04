@@ -56,6 +56,8 @@ pub fn addTo(
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"logprobs_test"} }));
     b.step("test-logprob-offers-host", "Logprob request capability refusals before engine submission").dependOn(&logprobs.step);
+    const models = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"model discovery"} }));
+    b.step("test-model-discovery-host", "Loaded context and reasoning offers for each model discovery entry").dependOn(&models.step);
     const drafts = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"draft sources:"} }));
     b.step("test-draft-line-host", "Serving line draft provenance without devices").dependOn(&drafts.step);
     all.dependOn(&drafts.step);
