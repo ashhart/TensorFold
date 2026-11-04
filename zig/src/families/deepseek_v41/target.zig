@@ -396,7 +396,11 @@ pub const GpuTarget = struct {
 
     fn taps(p: *anyopaque, slot: u32) iface.Taps {
         const t = self_(p);
-        if (t.rows) |b| if (b.tapsOf(slot)) |x| return .{ .address = x.address, .rows = x.rows, .stride = @intCast(t.f.cfg.dspark_targets.items().len * t.f.cfg.hidden), .map = b.tree[slot].map() };
+        if (t.rows) |b| {
+            if (b.tapsOf(slot)) |x| return .{ .address = x.address, .rows = x.rows, .stride = @intCast(t.f.cfg.dspark_targets.items().len * t.f.cfg.hidden), .map = b.tree[slot].map() };
+            // a tree kept (no pending window): its last chain taps are still the shared window's
+            if (b.tree[slot].live) return .{ .address = t.f.runner.addressOf("w.taps") orelse 0, .rows = @intCast(b.tree[slot].n), .stride = @intCast(t.f.cfg.dspark_targets.items().len * t.f.cfg.hidden), .map = b.tree[slot].map() };
+        }
         const n: u32 = if (t.f.slot.pending) |w| w.n else @intCast(t.f.ids.len);
         const D: u32 = t.f.cfg.hidden;
         const k: u32 = @intCast(t.f.cfg.dspark_targets.items().len);

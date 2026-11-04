@@ -126,7 +126,6 @@ pub fn ingest(p: *anyopaque, slot: u32, start: u64, taps: iface.Taps, rws: []con
     if (slot >= x.nslots) return error.Slots;
     if (rws.len == 0) return;
     for (rws, 0..) |r, i| if (r != rws[0] + i) return error.NotAPrefix;
-    if (taps.map != null) return error.NotAPrefix; // trees are refused with several slots (batch.zig)
     // a device-launched round already ingested this slot's window rows (afterPick): the same rows, positions
     if (x.dl) |dl| if (rws[0] == 0 and std.mem.indexOfScalar(u32, dl.slots[0..dl.k], slot) != null) if (x.bat.?.pend[slot]) |pd| if (pd.start == start and rws.len <= pd.n) return;
     const n: u32 = @intCast(rws.len);
