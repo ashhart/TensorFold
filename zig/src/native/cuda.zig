@@ -549,8 +549,8 @@ test "family readiness reaches production lane admission without binding CUDA" {
     try @import("cuda_health_test.zig").check(Host, Host.readiness, Host.serve);
 }
 
-test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
-    try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
+test "Flash Next takes kept prompt states and drafts together on any rank count" {
+    try @import("cuda_flashnext_refusal_test.zig").cache();
 }
 
 test "Flash Next takes --vision at family admission" {

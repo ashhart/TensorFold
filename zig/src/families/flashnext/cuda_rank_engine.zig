@@ -257,8 +257,9 @@ pub const Session = struct {
         return item.value_ptr;
     }
 
-    pub fn save(s: *Session, q: *prompt.Seq) !*snaps.Snap {
-        const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, null);
+    /// The leader's copy, the head's rows in it with `d`; the peer has no head, and first flushes its pending rows.
+    pub fn save(s: *Session, q: *prompt.Seq, d: ?*mtp.Draft) !*snaps.Snap {
+        const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, d);
         errdefer snaps.drop(s.gpa, s.engine.stream.*, kept);
         kept.rank_id = s.next_object;
         s.next_object = std.math.add(u64, s.next_object, 1) catch return error.BadRankFrame;
@@ -267,11 +268,13 @@ pub const Session = struct {
         return kept;
     }
 
-    pub fn restore(s: *Session, q: *prompt.Seq, kept: *const snaps.Snap) !void {
+    /// Refused before the peer moves when this state can't serve `q`; the peer's own window starts over with it.
+    pub fn restore(s: *Session, q: *prompt.Seq, d: ?*mtp.Draft, kept: *const snaps.Snap) !void {
         if (kept.at > q.cap) return error.SequenceTooShort;
+        if (d) |w| if (!kept.head or kept.at > w.cap) return error.NoHeadState;
         const h = try s.command(.{ .kind = .restore, .object = q.rank_id, .arg = kept.rank_id }, &.{});
         errdefer s.poison();
-        try snaps.restore(s.engine.stream.*, q, null, kept);
+        try snaps.restore(s.engine.stream.*, q, d, kept);
         try s.ack(h);
     }
 
@@ -378,6 +381,10 @@ pub const Session = struct {
             .save => {
                 if (s.saved.contains(h.arg)) return error.BadRankFrame;
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                if (s.windows.getPtr(h.object)) |w| {
+                    const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
+                    try ops.flushLate(q, w); // the state holds them as the leader's does
+                }
                 const kept = try snaps.save(s.gpa, s.engine.driver, s.engine.stream.*, q, null);
                 errdefer snaps.drop(s.gpa, s.engine.stream.*, kept);
                 try s.saved.put(s.gpa, h.arg, kept);
@@ -386,6 +393,7 @@ pub const Session = struct {
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
                 const kept = s.saved.get(h.arg) orelse return error.UnknownRankSnapshot;
                 try snaps.restore(s.engine.stream.*, q, null, kept);
+                if (s.windows.getPtr(h.object)) |w| w.reset(); // its pending rows were the old state's
             },
             .drop_snap => {
                 const entry = s.saved.fetchRemove(h.object) orelse return error.UnknownRankSnapshot;
