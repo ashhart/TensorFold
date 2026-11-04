@@ -11,6 +11,9 @@ const put32 = payload.put32;
 pub const plan_fixed = 24;
 pub const stream_size = 28;
 
+/// A round's rows: a window (each row's state recorded, as decode and a verify run) or a prompt chunk's rows.
+pub const Mode = enum(u8) { window = 0, prompt = 1 };
+
 /// What a round does with a stream: start it, extend it, end it, drop it, or resume it from a kept prompt state.
 pub const Op = enum(u8) { open = 1, @"continue" = 2, close = 3, cancel = 4, @"resume" = 5 };
 
@@ -56,6 +59,7 @@ pub const Error = payload.Error || error{
     TooManyRows,
     BadTotal,
     BadCut,
+    BadMode,
 };
 
 pub fn planSize(streams: usize, cuts: usize) usize {
@@ -64,6 +68,11 @@ pub fn planSize(streams: usize, cuts: usize) usize {
 
 /// The plan's bytes at the start of `out`, unchecked: `encode` checks them, the fixtures plant bad ones with this.
 pub fn write(streams: []const Stream, cuts: []const u32, out: []u8) payload.Error![]u8 {
+    return writeMode(.window, streams, cuts, out);
+}
+
+/// `write` for a round of `mode`.
+pub fn writeMode(mode: Mode, streams: []const Stream, cuts: []const u32, out: []u8) payload.Error![]u8 {
     const n = planSize(streams.len, cuts.len);
     if (out.len < n) return error.NoRoom;
     const p = out[0..n];
@@ -84,14 +93,20 @@ pub fn write(streams: []const Stream, cuts: []const u32, out: []u8) payload.Erro
         total +%= s.rows;
     }
     put32(p, 16, total);
+    p[20] = @backingInt(mode);
     for (cuts, 0..) |c, i| put32(p, plan_fixed + stream_size * streams.len + 4 * i, c);
     return p;
 }
 
 /// The plan's bytes at the start of `out`, refused unless a stage with `limits` would take them.
 pub fn encode(streams: []const Stream, cuts: []const u32, limits: Limits, out: []u8) Error![]u8 {
+    return encodeMode(.window, streams, cuts, limits, out);
+}
+
+/// `encode` for a round of `mode`.
+pub fn encodeMode(mode: Mode, streams: []const Stream, cuts: []const u32, limits: Limits, out: []u8) Error![]u8 {
     if (streams.len > limits.streams) return error.TooManyStreams;
-    const p = try write(streams, cuts, out);
+    const p = try writeMode(mode, streams, cuts, out);
     _ = try decode(p, limits);
     return p;
 }
@@ -103,6 +118,7 @@ pub const Plan = struct {
     cuts: u32,
     /// The rows the round's rows frames carry: the sum of every stream's rows.
     rows: u32,
+    mode: Mode,
 
     pub fn stream(p: Plan, i: usize) Stream {
         const at = plan_fixed + stream_size * i;
@@ -135,9 +151,11 @@ pub fn decode(p: []const u8, limits: Limits) Error!Plan {
     const n: u64 = get32(p, 8);
     const c: u64 = get32(p, 12);
     if (p.len != plan_fixed + stream_size * n + 4 * c) return error.BadLength;
-    if (get32(p, 20) != 0) return error.BadReserved;
+    if (p[21] != 0 or p[22] != 0 or p[23] != 0) return error.BadReserved;
+    const mode = std.enums.fromInt(Mode, p[20]) orelse return error.BadMode;
+    if (n == 0 and mode != .window) return error.BadMode; // a keep-alive runs no rows
     if (n > limits.streams) return error.TooManyStreams;
-    const plan: Plan = .{ .bytes = p, .streams = @intCast(n), .cuts = @intCast(c), .rows = get32(p, 16) };
+    const plan: Plan = .{ .bytes = p, .streams = @intCast(n), .cuts = @intCast(c), .rows = get32(p, 16), .mode = mode };
     var sum: u64 = 0;
     for (0..plan.streams) |i| {
         const at = plan_fixed + stream_size * i;

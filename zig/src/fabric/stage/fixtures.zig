@@ -111,6 +111,11 @@ fn keepAlive(out: []u8) anyerror![]u8 {
     return plan.write(&.{}, &.{}, out);
 }
 
+/// A prompt chunk's round: stream 3 opens with its first 4 rows.
+fn prompt(out: []u8) anyerror![]u8 {
+    return plan.writeMode(.prompt, streams[0..1], &.{}, out);
+}
+
 fn tooManyStreams(out: []u8) anyerror![]u8 {
     var s: [5]plan.Stream = undefined;
     for (&s, 0..) |*x, i| x.* = .{ .id = @intCast(i), .op = .@"continue", .first = 1, .rows = 1 };
@@ -233,7 +238,10 @@ pub const all = [_]Fixture{
     fx("plan_keepalive", keepAlive, null),
     fx("plan_round", round, null),
     fx("plan_bad_length", short(round, 4), error.BadLength),
-    fx("plan_bad_reserved", poke(keepAlive, 20, 1), error.BadReserved),
+    fx("plan_bad_reserved", poke(keepAlive, 21, 1), error.BadReserved),
+    fx("plan_prompt", prompt, null),
+    fx("plan_bad_mode", poke(round, 20, 2), error.BadMode),
+    fx("plan_keepalive_mode", poke(keepAlive, 20, 1), error.BadMode),
     fx("plan_too_many_streams", tooManyStreams, error.TooManyStreams),
     fx("plan_unordered", planWith(struct {
         fn f(s: *[streams.len]plan.Stream, _: *[cuts.len]u32) void {

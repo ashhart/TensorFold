@@ -235,3 +235,13 @@ test "stage protocol: truncated and randomly edited messages are refused, never 
         try hammer(f.kind, try f.build(&buf), 2000);
     };
 }
+
+test "stage plan: a round names its mode, a prompt chunk's or a window's, and a keep-alive is a window" {
+    var buf: [plan.planSize(4, 1)]u8 = undefined;
+    const lim = fixtures.limits;
+    const p = try plan.decode(try plan.encodeMode(.prompt, fixtures.streams[0..1], &.{}, lim, &buf), lim);
+    try t.expectEqual(plan.Mode.prompt, p.mode);
+    const w = try plan.decode(try plan.encode(&fixtures.streams, &fixtures.cuts, lim, &buf), lim);
+    try t.expectEqual(plan.Mode.window, w.mode);
+    try t.expectError(error.BadMode, plan.encodeMode(.prompt, &.{}, &.{}, lim, &buf));
+}

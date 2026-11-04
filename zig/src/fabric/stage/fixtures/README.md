@@ -45,9 +45,10 @@ Dtypes: 1 bf16, 2 f16, 3 f32, 4 f8e4m3, 5 nvfp4 (KV only; not a row dtype).
 Ready (message 2), 16 bytes: prefix, rank u32, flags u32 (bit 0 loaded; bit 1 warm, executable for the declared
 shapes, with no graph capture implied; others 0).
 
-Plan (message 3), 24 bytes, then 28 bytes a stream, then u32 cuts: prefix, streams u32, cuts u32, total rows u32
-(the streams' sum), reserved u32. A stream: id u32 (strictly ascending), op u8 (1 open, 2 continue, 3 close,
-4 cancel, 5 resume), 3 reserved bytes, first position u32, rows u32, accepted u32, resume point u32 (0 unless resume),
+Plan (message 3), 24 bytes, then 28 bytes a stream, then u32 cuts: prefix, streams u32, cuts u32, total rows u32 (the
+streams' sum), mode u8 (0 a window: every row's state recorded, as decode and a verify run; 1 a prompt chunk's rows; a
+keep-alive is 0), 3 reserved bytes. A stream: id u32 (strictly ascending), op u8 (1 open, 2 continue, 3 close, 4
+cancel, 5 resume), 3 reserved bytes, first position u32, rows u32, accepted u32, resume point u32 (0 unless resume),
 state generation u32 (0 for open; a stage refuses a stream whose generation is not its slot's, `OtherGeneration`).
 Cuts are row offsets into the round's rows, strictly ascending, each in 1..rows-1. No streams: the keep-alive, sent
 whenever rank 0 has sent no plan for 2 s, mid-round too; it never changes a stream's state.
@@ -88,7 +89,10 @@ the draft width is not 0, `rows` x `draft_width` fp32 tap partial sums. The fram
 | `plan_keepalive.bin` | 24 | no streams, no cuts | taken |
 | `plan_round.bin` | 140 | the round below | taken |
 | `plan_bad_length.bin` | 136 | the round without its last 4 bytes | `BadLength` |
-| `plan_bad_reserved.bin` | 24 | keep-alive, byte 20 = 1 | `BadReserved` |
+| `plan_bad_reserved.bin` | 24 | keep-alive, byte 21 = 1 | `BadReserved` |
+| `plan_prompt.bin` | 52 | a prompt chunk: stream 3 opens with 4 rows, mode 1 | taken |
+| `plan_bad_mode.bin` | 140 | the round, mode byte 20 = 2 | `BadMode` |
+| `plan_keepalive_mode.bin` | 24 | keep-alive, mode byte 20 = 1 (prompt) | `BadMode` |
 | `plan_too_many_streams.bin` | 164 | 5 streams (parallel is 4) | `TooManyStreams` |
 | `plan_unordered.bin` | 140 | the round, stream 1's id 2 (after 3) | `UnorderedStreams` |
 | `plan_bad_op.bin` | 140 | the round, stream 0's op byte = 6 | `BadOp` |
