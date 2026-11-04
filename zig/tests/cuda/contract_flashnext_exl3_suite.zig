@@ -6,12 +6,26 @@ const g = @import("core").contract.gates;
 const tp_ = @import("contract_flashnext_exl3_tp.zig");
 const canon_ = @import("contract_flashnext_exl3_canon.zig");
 const writeback = @import("contract_flashnext_writeback.zig");
+const kvt_ = @import("contract_flashnext_exl3_kvt.zig");
+const kvt_plan_ = @import("contract_flashnext_exl3_kvt_plan.zig");
+const flash = @import("flashnext");
+
+comptime {
+    const wt = flash.exl3.prompt_wt;
+    const pages = flash.exl3.pages;
+    const rows = flash.exl3.kvtier.page_rows;
+    std.debug.assert(kvt_plan_.ratio == wt.index_ratio and kvt_plan_.top == wt.index_top and kvt_plan_.idw == wt.index_idw);
+    std.debug.assert(kvt_plan_.page_rows == rows and kvt_.row_bytes == pages.rowBytes(.key));
+    std.debug.assert(kvt_.kv_page == pages.kvPageBytes(rows, 1) and kvt_.value_at == pages.planeOffset(rows, 0, .value));
+    std.debug.assert(pages.planeOffset(rows, 0, .key) == 0);
+}
 
 pub const Suite = struct {
     a: std.mem.Allocator,
     writebacks: [3]writeback.Writeback,
     masks: tp_.Masks,
     canons: canon_.Canons,
+    kvt: *kvt_.Group,
 
     pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, kernels: *std.ArrayList(g.Kernel), hc: cuda.Module, controls: cuda.Module) !*Suite {
         const self = try a.create(Suite);
@@ -33,11 +47,13 @@ pub const Suite = struct {
         self.canons = try canon_.Canons.init(gpu, s, controls);
         errdefer self.canons.deinit();
         try self.canons.add(a, kernels);
+        self.kvt = try kvt_.Group.create(a, gpu, s, kernels);
         return self;
     }
 
     pub fn destroy(self: *Suite) void {
         self.canons.deinit();
+        self.kvt.destroy();
         self.masks.deinit();
         for (&self.writebacks) |*w| w.deinit();
         self.a.destroy(self);

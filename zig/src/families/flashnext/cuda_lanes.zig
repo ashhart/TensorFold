@@ -54,7 +54,7 @@ pub fn Namespace(comptime Tri: type) type {
             return of(p).kv.fits(rows, max_tokens);
         }
         pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool { // what the host's ledger counts (#1943)
-            return if (of(p).kv.pool) |x| &x.pool else null;
+            return if (of(p).kv.pool) |x| x.pool else null;
         }
         /// The pass ignores its cuts, so states keep at any token; the MTP head reads one token on (lookahead 1).
         pub const cache_rules = struct {

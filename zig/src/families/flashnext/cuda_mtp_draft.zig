@@ -45,6 +45,7 @@ pub const Chain = struct {
 pub const Draft = struct {
     /// Its graphs' keys (cuda_window_graph.nextGen).
     gen: u64 = 0,
+    sel: ?*@import("exl3/kv/cuda_exl3_kvtier.zig").LaneSel = null, // a host tier's selection of the stream's blocks
     label: []const u8 = "unbound",
     pooled_lane: bool = false,
     stream: ?cuda.Stream = null,
