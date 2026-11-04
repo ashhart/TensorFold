@@ -1,4 +1,4 @@
-//! The ring's keep-alive as pure state: rank 0 sends an empty plan every 2 s when idle; a stage that misses 3 dies.
+//! The ring's keep-alive as pure state: rank 0 sends an empty plan once 2 s pass without one; a stage missing 3 dies.
 const std = @import("std");
 
 pub const interval_ns: u64 = 2 * std.time.ns_per_s;
@@ -53,7 +53,7 @@ pub const Watch = struct {
 
 const s = std.time.ns_per_s;
 
-test "stage keepalive: rank 0 beats every 2 s when idle, and a round's plan resets the beat" {
+test "stage keepalive: rank 0 beats once 2 s pass without a plan, idle or mid-round, and any plan resets the beat" {
     var b = Beat.init(10 * s);
     try std.testing.expect(!b.due(10 * s));
     try std.testing.expect(!b.due(12 * s - 1));
