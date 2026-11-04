@@ -10,6 +10,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-cuda-persistence-source-host", "Captured CUDA source keys without loading a driver").dependOn(&captured.step);
     step.dependOn(&captured.step);
 
+    b.step("test-qwen35-request-starts-host", "Request-start and shared-KV startup refusal without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"request starts:"} })).step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen stepped prefill:"} }));
