@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const glp = @import("glp.zig");
+const gguf = @import("gguf.zig");
 
 /// What a container holds, so a test can bend one rule at a time.
 const Shape = struct {
@@ -176,6 +177,53 @@ fn reason(bytes: []const u8) ![]const u8 {
     }
 }
 
+/// A unit vector of a given width, pointing along one axis.
+fn unitDir(a: std.mem.Allocator, width: usize, axis: usize) ![]f32 {
+    const dir = try a.alloc(f32, width);
+    for (dir) |*v| v.* = 0.0;
+    dir[axis] = 1.0;
+    return dir;
+}
+
+/// A container and the arena that holds its metadata.
+const Parsed = struct {
+    arena: std.heap.ArenaAllocator,
+    file: gguf.File,
+
+    fn deinit(self: *Parsed) void {
+        self.arena.deinit();
+    }
+};
+
+/// The container a file holds, read with the generic reader.
+fn parseFile(a: std.mem.Allocator, bytes: []const u8) !Parsed {
+    var arena = std.heap.ArenaAllocator.init(a);
+    errdefer arena.deinit();
+    var problem: gguf.Problem = .{};
+    const file = try gguf.parse(arena.allocator(), bytes, &problem);
+    return .{ .arena = arena, .file = file };
+}
+
+/// The vector a producer writes for two layers, handed over in the order a caller would hold them.
+fn writeSample(a: std.mem.Allocator) ![]u8 {
+    const dir10 = try unitDir(a, 8, 0);
+    defer a.free(dir10);
+    const dir11 = try unitDir(a, 8, 1);
+    defer a.free(dir11);
+    const layers = [_]glp.Layer{ .{ .id = 11, .dir = dir11 }, .{ .id = 10, .dir = dir10 } };
+    return glp.write(a, .{
+        .mode = .project,
+        .alpha = 0.75,
+        .hook_point = glp.residual_site,
+        .derived_at = null,
+        .base_model = "Qwen/Qwen3.8-27B",
+        .base_revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        .method = "difference_of_means_per_layer",
+        .contrast = "diverse_harmful_vs_form_matched_harmless_unpaired",
+        .layers = &layers,
+    });
+}
+
 test "a projected vector with the metadata a producer writes is accepted" {
     const bytes = try writeFixture(.{});
     defer std.testing.allocator.free(bytes);
@@ -290,4 +338,170 @@ test "a truncated file is refused, not read past" {
     const cut = try std.testing.allocator.dupe(u8, bytes[0 .. bytes.len - 64]);
     defer std.testing.allocator.free(cut);
     try refused(cut);
+}
+
+test "a written vector reads back with every field intact" {
+    const a = std.testing.allocator;
+    const bytes = try writeSample(a);
+    defer a.free(bytes);
+    var read = try readOk(bytes);
+    defer read.deinit();
+    const v = read.vector;
+    try std.testing.expectEqual(glp.Mode.project, v.mode);
+    try std.testing.expectEqual(@as(f32, 0.75), v.alpha);
+    try std.testing.expectEqualStrings("residual_stream_post_layer", v.hook_point);
+    try std.testing.expectEqualStrings("residual_stream_post_layer", v.derived_at);
+    try std.testing.expectEqualStrings("Qwen/Qwen3.8-27B", v.base_model);
+    try std.testing.expectEqualStrings("1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0", v.base_revision);
+    try std.testing.expectEqualStrings("difference_of_means_per_layer", v.method);
+    try std.testing.expectEqualStrings("diverse_harmful_vs_form_matched_harmless_unpaired", v.contrast);
+    try std.testing.expectEqual(@as(usize, 8), v.width);
+    try std.testing.expectEqual(@as(usize, 2), v.layers.len);
+    try std.testing.expectEqual(@as(u32, 10), v.layers[0].id);
+    try std.testing.expectEqual(@as(u32, 11), v.layers[1].id);
+    try std.testing.expect(!v.transferred);
+    try std.testing.expect(!std.mem.allEqual(u8, &v.sha256, 0));
+}
+
+test "a written vector's digest covers its tensor bytes" {
+    const a = std.testing.allocator;
+    const bytes = try writeSample(a);
+    defer a.free(bytes);
+    var parsed = try parseFile(a, bytes);
+    defer parsed.deinit();
+    const claimed = parsed.file.str("glp.content_sha256").?;
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    for (parsed.file.tensors) |t| h.update(parsed.file.bytesOf(t).?);
+    var sha: [32]u8 = undefined;
+    h.final(&sha);
+    const hex = std.fmt.bytesToHex(sha, .lower);
+    try std.testing.expectEqualStrings(hex[0..], claimed);
+}
+
+test "a written vector is accepted by the reader's own rules" {
+    const a = std.testing.allocator;
+    const bytes = try writeSample(a);
+    defer a.free(bytes);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var why: glp.Why = .{};
+    _ = try glp.read(arena.allocator(), bytes, &why);
+    try std.testing.expectEqual(@as(usize, 0), why.len);
+}
+
+test "a written vector holds one direction tensor per layer" {
+    const a = std.testing.allocator;
+    const bytes = try writeSample(a);
+    defer a.free(bytes);
+    var parsed = try parseFile(a, bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.file.tensors.len);
+    try std.testing.expectEqualStrings("direction.10", parsed.file.tensors[0].name);
+    try std.testing.expectEqualStrings("direction.11", parsed.file.tensors[1].name);
+    try std.testing.expectEqual(@as(u64, 8), parsed.file.tensors[0].dims[0]);
+    try std.testing.expectEqual(@as(u32, gguf.f32_type), parsed.file.tensors[0].kind);
+    try std.testing.expectEqualStrings("10,11", parsed.file.str("glp.layer_ids_zero_based").?);
+    const first = parsed.file.bytesOf(parsed.file.tensors[0]).?;
+    const second = parsed.file.bytesOf(parsed.file.tensors[1]).?;
+    try std.testing.expectEqual(@as(usize, 32), first.len);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1.0))), std.mem.readInt(u32, first[0..4], .little));
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 0.0))), std.mem.readInt(u32, first[4..8], .little));
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 0.0))), std.mem.readInt(u32, second[0..4], .little));
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(f32, 1.0))), std.mem.readInt(u32, second[4..8], .little));
+}
+
+test "a written vector derived at another site is transferred" {
+    const a = std.testing.allocator;
+    const dir = try unitDir(a, 4, 0);
+    defer a.free(dir);
+    const layers = [_]glp.Layer{.{ .id = 10, .dir = dir }};
+    const bytes = try glp.write(a, .{ .hook_point = glp.residual_site, .derived_at = "ffn_out_pre_residual", .layers = &layers });
+    defer a.free(bytes);
+    var read = try readOk(bytes);
+    defer read.deinit();
+    const v = read.vector;
+    try std.testing.expect(v.transferred);
+    try std.testing.expectEqualStrings("ffn_out_pre_residual", v.derived_at);
+    try std.testing.expectEqualStrings("residual_stream_post_layer", v.hook_point);
+}
+
+test "a vector written again keeps its digest and its layers" {
+    const a = std.testing.allocator;
+    const bytes = try writeSample(a);
+    defer a.free(bytes);
+    var read = try readOk(bytes);
+    defer read.deinit();
+    const again = try glp.writeVector(a, read.vector);
+    defer a.free(again);
+    var reread = try readOk(again);
+    defer reread.deinit();
+    try std.testing.expectEqualSlices(u8, &read.vector.sha256, &reread.vector.sha256);
+    try std.testing.expectEqual(read.vector.layers.len, reread.vector.layers.len);
+    try std.testing.expectEqual(@as(u32, 10), reread.vector.layers[0].id);
+}
+
+test "a producer refuses a direction that is not a unit vector" {
+    const a = std.testing.allocator;
+    const dir = try a.alloc(f32, 4);
+    defer a.free(dir);
+    @memset(dir, 0.25);
+    const layers = [_]glp.Layer{.{ .id = 10, .dir = dir }};
+    try std.testing.expectError(error.BadGlpVector, glp.write(a, .{ .layers = &layers }));
+}
+
+test "a producer refuses a layer the reader cannot steer" {
+    const a = std.testing.allocator;
+    const dir = try unitDir(a, 4, 0);
+    defer a.free(dir);
+    const layers = [_]glp.Layer{.{ .id = 0, .dir = dir }};
+    try std.testing.expectError(error.BadGlpVector, glp.write(a, .{ .layers = &layers }));
+}
+
+test "a written container is a version 3 file" {
+    const a = std.testing.allocator;
+    const bytes = try writeSample(a);
+    defer a.free(bytes);
+    try std.testing.expectEqualStrings("GGUF", bytes[0..4]);
+    try std.testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, bytes[4..8], .little));
+    try std.testing.expectEqual(@as(u64, 2), std.mem.readInt(u64, bytes[8..16], .little));
+    try std.testing.expectEqual(@as(u64, 15), std.mem.readInt(u64, bytes[16..24], .little));
+    try std.testing.expectEqual(@as(usize, 0), bytes.len % 32);
+}
+
+test "the container keeps every value type it is given" {
+    const a = std.testing.allocator;
+    const entries = [_]gguf.Entry{
+        .{ .key = "a.u8", .value = .{ .u8v = 7 } },
+        .{ .key = "a.i8", .value = .{ .i8v = -7 } },
+        .{ .key = "a.u16", .value = .{ .u16v = 1000 } },
+        .{ .key = "a.i16", .value = .{ .i16v = -1000 } },
+        .{ .key = "a.u32", .value = .{ .u32v = 100000 } },
+        .{ .key = "a.i32", .value = .{ .i32v = -100000 } },
+        .{ .key = "a.f32", .value = .{ .f32v = 0.5 } },
+        .{ .key = "a.bool", .value = .{ .boolv = true } },
+        .{ .key = "a.string", .value = .{ .string = "hello" } },
+        .{ .key = "a.array", .value = .{ .array = .{ .elem = .u32v, .items = &.{ .{ .u32v = 1 }, .{ .u32v = 2 } } } } },
+        .{ .key = "a.u64", .value = .{ .u64v = 1 << 40 } },
+        .{ .key = "a.i64", .value = .{ .i64v = -(1 << 40) } },
+        .{ .key = "a.f64", .value = .{ .f64v = 0.25 } },
+    };
+    const bytes = try gguf.write(a, &entries, &.{});
+    defer a.free(bytes);
+    var parsed = try parseFile(a, bytes);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 13), parsed.file.entries.len);
+    try std.testing.expectEqual(@as(u8, 7), parsed.file.find("a.u8").?.u8v);
+    try std.testing.expectEqual(@as(i8, -7), parsed.file.find("a.i8").?.i8v);
+    try std.testing.expectEqual(@as(u16, 1000), parsed.file.find("a.u16").?.u16v);
+    try std.testing.expectEqual(@as(i16, -1000), parsed.file.find("a.i16").?.i16v);
+    try std.testing.expectEqual(@as(u32, 100000), parsed.file.find("a.u32").?.u32v);
+    try std.testing.expectEqual(@as(i32, -100000), parsed.file.find("a.i32").?.i32v);
+    try std.testing.expectEqual(@as(f32, 0.5), parsed.file.find("a.f32").?.f32v);
+    try std.testing.expectEqual(true, parsed.file.find("a.bool").?.boolv);
+    try std.testing.expectEqualStrings("hello", parsed.file.find("a.string").?.string);
+    try std.testing.expectEqual(@as(usize, 2), parsed.file.find("a.array").?.array.items.len);
+    try std.testing.expectEqual(@as(u32, 2), parsed.file.find("a.array").?.array.items[1].u32v);
+    try std.testing.expectEqual(@as(u64, 1 << 40), parsed.file.find("a.u64").?.u64v);
+    try std.testing.expectEqual(@as(i64, -(1 << 40)), parsed.file.find("a.i64").?.i64v);
+    try std.testing.expectEqual(@as(f64, 0.25), parsed.file.find("a.f64").?.f64v);
 }

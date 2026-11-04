@@ -1,6 +1,7 @@
-//! A GLP control vector: the GGUF container's GLP subset read whole, and the metadata rules that accept or refuse it.
+//! A GLP control vector: the GGUF container's GLP subset read whole, written whole, and the rules that accept it.
 
 const std = @import("std");
+const gguf = @import("gguf.zig");
 
 /// Why a file was refused, in one sentence the server prints.
 pub const Why = struct {
@@ -53,218 +54,9 @@ pub const Vector = struct {
 /// The residual site this reader applies at, the one llama.cpp's control vectors name.
 pub const residual_site = "residual_stream_post_layer";
 
-/// The gguf value types the container may hold.
-const Type = enum(u32) {
-    u8v = 0,
-    i8v = 1,
-    u16v = 2,
-    i16v = 3,
-    u32v = 4,
-    i32v = 5,
-    f32v = 6,
-    boolv = 7,
-    string = 8,
-    array = 9,
-    u64v = 10,
-    i64v = 11,
-    f64v = 12,
-};
-
-/// A metadata value; strings and arrays borrow from the file's bytes or the arena.
-const Value = union(Type) {
-    u8v: u8,
-    i8v: i8,
-    u16v: u16,
-    i16v: i16,
-    u32v: u32,
-    i32v: i32,
-    f32v: f32,
-    boolv: bool,
-    string: []const u8,
-    array: []Value,
-    u64v: u64,
-    i64v: i64,
-    f64v: f64,
-};
-
-const Entry = struct { key: []const u8, value: Value };
-
-/// One tensor's header: its name, its shape, its ggml type and its offset in the data section.
-const Tensor = struct { name: []const u8, dims: []const u64, kind: u32, offset: u64 };
-
-/// The ggml type a GLP direction uses.
-const f32_type = 0;
-
 fn refuse(why: *Why, comptime fmt: []const u8, args: anytype) Error {
     why.set(fmt, args);
     return error.BadGlpVector;
-}
-
-/// A cursor over the file's bytes that refuses to read past its end.
-const Cursor = struct {
-    b: []const u8,
-    o: usize = 0,
-
-    fn need(self: *Cursor, n: usize) Error!void {
-        if (n > self.b.len or self.o + n > self.b.len) return error.BadGlpVector;
-    }
-
-    fn u8v(self: *Cursor) Error!u8 {
-        try self.need(1);
-        defer self.o += 1;
-        return self.b[self.o];
-    }
-
-    fn u32v(self: *Cursor) Error!u32 {
-        try self.need(4);
-        defer self.o += 4;
-        return std.mem.readInt(u32, self.b[self.o..][0..4], .little);
-    }
-
-    fn u64v(self: *Cursor) Error!u64 {
-        try self.need(8);
-        defer self.o += 8;
-        return std.mem.readInt(u64, self.b[self.o..][0..8], .little);
-    }
-
-    fn f32v(self: *Cursor) Error!f32 {
-        try self.need(4);
-        defer self.o += 4;
-        return @bitCast(std.mem.readInt(u32, self.b[self.o..][0..4], .little));
-    }
-
-    fn string(self: *Cursor) Error![]const u8 {
-        const n = try self.u64v();
-        if (n > self.b.len) return error.BadGlpVector;
-        try self.need(@intCast(n));
-        defer self.o += @intCast(n);
-        return self.b[self.o..][0..@intCast(n)];
-    }
-};
-
-fn alignUp(x: usize, a: usize) usize {
-    return (x + a - 1) / a * a;
-}
-
-fn find(kv: []const Entry, key: []const u8) ?Value {
-    for (kv) |e| if (std.mem.eql(u8, e.key, key)) return e.value;
-    return null;
-}
-
-fn str(kv: []const Entry, key: []const u8) ?[]const u8 {
-    const v = find(kv, key) orelse return null;
-    return switch (v) {
-        .string => |s| s,
-        else => null,
-    };
-}
-
-fn num(kv: []const Entry, key: []const u8) ?u64 {
-    const v = find(kv, key) orelse return null;
-    return switch (v) {
-        .u8v => |x| x,
-        .u16v => |x| x,
-        .u32v => |x| x,
-        .u64v => |x| x,
-        .i8v => |x| @intCast(x),
-        .i16v => |x| @intCast(x),
-        .i32v => |x| @intCast(x),
-        .i64v => |x| @intCast(x),
-        else => null,
-    };
-}
-
-/// Read the container's metadata and tensor headers; the arena keeps every allocation.
-const Container = struct {
-    kv: []Entry,
-    tensors: []Tensor,
-    data_start: usize,
-    alignment: usize,
-};
-
-fn parseContainer(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Container {
-    var c: Cursor = .{ .b = bytes };
-    const magic = c.b[0..4];
-    if (!std.mem.eql(u8, magic, "GGUF")) return refuse(why, "not a GGUF container", .{});
-    c.o = 4;
-    const version = try c.u32v();
-    if (version != 3) return refuse(why, "GGUF version {d}; the GLP container is version 3", .{version});
-    const tensor_count = try c.u64v();
-    const kv_count = try c.u64v();
-    if (tensor_count > 1 << 20 or kv_count > 1 << 16) return refuse(why, "the container's counts are out of range", .{});
-
-    var kv: std.ArrayList(Entry) = .empty;
-    for (0..kv_count) |_| {
-        const key = try c.string();
-        const kind = std.enums.fromInt(Type, try c.u32v()) orelse return refuse(why, "the container holds an unknown metadata type", .{});
-        const value = try readValue(a, &c, kind);
-        try kv.append(a, .{ .key = key, .value = value });
-    }
-
-    var tensors: std.ArrayList(Tensor) = .empty;
-    for (0..tensor_count) |_| {
-        const name = try c.string();
-        const n_dims = try c.u32v();
-        if (n_dims > 8) return refuse(why, "a tensor has {d} dimensions", .{n_dims});
-        const dims = try a.alloc(u64, n_dims);
-        for (dims) |*d| d.* = try c.u64v();
-        const kind = try c.u32v();
-        const offset = try c.u64v();
-        try tensors.append(a, .{ .name = name, .dims = dims, .kind = kind, .offset = offset });
-    }
-
-    const alignment: usize = if (find(kv.items, "general.alignment")) |v| switch (v) {
-        .u32v => |x| x,
-        .u64v => |x| @intCast(x),
-        else => 32,
-    } else 32;
-    if (alignment == 0 or !std.math.isPowerOfTwo(alignment)) return refuse(why, "the container's alignment is {d}", .{alignment});
-
-    return .{
-        .kv = kv.items,
-        .tensors = tensors.items,
-        .data_start = alignUp(c.o, alignment),
-        .alignment = alignment,
-    };
-}
-
-fn readValue(a: std.mem.Allocator, c: *Cursor, kind: Type) Error!Value {
-    return switch (kind) {
-        .u8v => .{ .u8v = try c.u8v() },
-        .i8v => .{ .i8v = @bitCast(try c.u8v()) },
-        .u16v => .{ .u16v = @truncate(try c.u32v()) },
-        .i16v => .{ .i16v = @bitCast(@as(u16, @truncate(try c.u32v()))) },
-        .u32v => .{ .u32v = try c.u32v() },
-        .i32v => .{ .i32v = @bitCast(try c.u32v()) },
-        .f32v => .{ .f32v = try c.f32v() },
-        .boolv => .{ .boolv = (try c.u8v()) != 0 },
-        .string => .{ .string = try c.string() },
-        .u64v => .{ .u64v = try c.u64v() },
-        .i64v => .{ .i64v = @bitCast(try c.u64v()) },
-        .f64v => .{ .f64v = @bitCast(try c.u64v()) },
-        .array => blk: {
-            const elem = std.enums.fromInt(Type, try c.u32v()) orelse return error.BadGlpVector;
-            const n = try c.u64v();
-            if (n > 1 << 20) return error.BadGlpVector;
-            const items = try a.alloc(Value, @intCast(n));
-            for (items) |*it| it.* = try readValue(a, c, elem);
-            break :blk .{ .array = items };
-        },
-    };
-}
-
-/// The tensor's bytes, by its offset in the data section.
-fn tensorBytes(bytes: []const u8, c: Container, t: Tensor) ?[]const u8 {
-    var n: u64 = 1;
-    for (t.dims) |d| {
-        if (d == 0 or n > (1 << 40) / d) return null;
-        n *= d;
-    }
-    const width: usize = if (t.kind == f32_type) 4 else 2;
-    const size = n * width;
-    const start = c.data_start + @as(usize, @intCast(t.offset));
-    if (start < c.data_start or size > bytes.len or start + size > bytes.len) return null;
-    return bytes[start..][0..size];
 }
 
 /// The direction's layer id, or null when the tensor is not one.
@@ -277,11 +69,11 @@ fn directionId(name: []const u8) ?u32 {
 }
 
 /// The digest over the tensor bytes; the file's own key names the vectors it covers.
-fn digest(bytes: []const u8, c: Container, only_directions: bool) ?[32]u8 {
+fn digest(file: gguf.File, only_directions: bool) ?[32]u8 {
     var h: std.crypto.hash.sha2.Sha256 = .init(.{});
-    for (c.tensors) |t| {
+    for (file.tensors) |t| {
         if (only_directions and directionId(t.name) == null) continue;
-        const raw = tensorBytes(bytes, c, t) orelse return null;
+        const raw = file.bytesOf(t) orelse return null;
         h.update(raw);
     }
     var out: [32]u8 = undefined;
@@ -292,10 +84,10 @@ fn digest(bytes: []const u8, c: Container, only_directions: bool) ?[32]u8 {
 /// Read a vector whole and accept it, or refuse it with a reason; the strings and layers live in `a`.
 pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
     if (bytes.len < 8) return refuse(why, "the file is too short to be a control vector", .{});
-    const c = try parseContainer(a, bytes, why);
+    const file = try parseContainer(a, bytes, why);
 
     var glp_keys: usize = 0;
-    for (c.kv) |e| {
+    for (file.entries) |e| {
         // The keys whose meaning the spec version decides; alpha and the digest mean the same in every version.
         const interpretation = std.mem.eql(u8, e.key, "glp.mode") or std.mem.eql(u8, e.key, "glp.rank") or
             std.mem.eql(u8, e.key, "glp.orthonormal") or std.mem.eql(u8, e.key, "glp.hook_point") or
@@ -304,31 +96,31 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         if (interpretation) glp_keys += 1;
     }
 
-    const mode_key = if (str(c.kv, "glp.mode") != null) "glp.mode" else if (str(c.kv, "dspark.mode") != null) "dspark.mode" else "";
-    const mode: Mode = if (mode_key.len == 0) .add else if (std.mem.eql(u8, str(c.kv, mode_key).?, "project")) .project else if (std.mem.eql(u8, str(c.kv, mode_key).?, "add")) .add else return refuse(why, "the file's mode is not one this reader applies", .{});
+    const mode_key = if (file.str("glp.mode") != null) "glp.mode" else if (file.str("dspark.mode") != null) "dspark.mode" else "";
+    const mode: Mode = if (mode_key.len == 0) .add else if (std.mem.eql(u8, file.str(mode_key).?, "project")) .project else if (std.mem.eql(u8, file.str(mode_key).?, "add")) .add else return refuse(why, "the file's mode is not one this reader applies", .{});
 
-    if (num(c.kv, "glp.spec_version")) |version| {
+    if (file.num("glp.spec_version")) |version| {
         if (version != 1) return refuse(why, "glp.spec_version {d}; this reader implements version 1", .{version});
     } else if (glp_keys > 0) {
         return refuse(why, "the file carries glp keys but no glp.spec_version", .{});
     }
 
     if (glp_keys > 0) {
-        const rank = num(c.kv, "glp.rank") orelse 1;
+        const rank = file.num("glp.rank") orelse 1;
         if (rank != 1) return refuse(why, "glp.rank {d}; this reader implements rank 1", .{rank});
-        const site = str(c.kv, "glp.hook_point") orelse return refuse(why, "the file names no glp.hook_point", .{});
+        const site = file.str("glp.hook_point") orelse return refuse(why, "the file names no glp.hook_point", .{});
         if (!std.mem.eql(u8, site, residual_site)) return refuse(why, "the file's hook point is {s}; this reader applies at {s}", .{ site, residual_site });
     }
 
     var layers: std.ArrayList(Layer) = .empty;
     var width: usize = 0;
-    for (c.tensors) |t| {
+    for (file.tensors) |t| {
         const id = directionId(t.name) orelse continue;
         if (id == 0) return refuse(why, "the file holds direction.0; layer 0 is not steerable", .{});
-        if (t.kind != f32_type) return refuse(why, "{s} is not fp32", .{t.name});
+        if (t.kind != gguf.f32_type) return refuse(why, "{s} is not fp32", .{t.name});
         if (t.dims.len != 1) return refuse(why, "{s} is not one dimensional", .{t.name});
         if (width == 0) width = @intCast(t.dims[0]) else if (width != t.dims[0]) return refuse(why, "{s} is {d} wide; the other directions are {d}", .{ t.name, t.dims[0], width });
-        const raw = tensorBytes(bytes, c, t) orelse return refuse(why, "{s} points past the file", .{t.name});
+        const raw = file.bytesOf(t) orelse return refuse(why, "{s} points past the file", .{t.name});
         const dir = try a.alloc(f32, t.dims[0]);
         for (dir, 0..) |*v, i| v.* = @bitCast(std.mem.readInt(u32, raw[i * 4 ..][0..4], .little));
         try layers.append(a, .{ .id = id, .dir = dir });
@@ -340,7 +132,7 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         }
     }.lessThan);
 
-    if (str(c.kv, "glp.layer_ids_zero_based")) |list| {
+    if (file.str("glp.layer_ids_zero_based")) |list| {
         var it = std.mem.splitScalar(u8, list, ',');
         var i: usize = 0;
         while (it.next()) |part| {
@@ -362,31 +154,37 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
     }
 
     var sha: [32]u8 = undefined;
-    if (str(c.kv, "glp.content_sha256")) |claimed| {
-        const all = digest(bytes, c, false) orelse return refuse(why, "the file's tensors point past its end", .{});
-        const dirs = digest(bytes, c, true) orelse return refuse(why, "the file's tensors point past its end", .{});
-        if (!std.mem.eql(u8, &std.fmt.bytesToHex(all, .lower), claimed) and !std.mem.eql(u8, &std.fmt.bytesToHex(dirs, .lower), claimed)) {
+    if (file.str("glp.content_sha256")) |claimed| {
+        const all = digest(file, false) orelse return refuse(why, "the file's tensors point past its end", .{});
+        const dirs = digest(file, true) orelse return refuse(why, "the file's tensors point past its end", .{});
+        // The file may claim the digest over every tensor or over the directions alone; the match decides.
+        const hex_all = std.fmt.bytesToHex(all, .lower);
+        const hex_dirs = std.fmt.bytesToHex(dirs, .lower);
+        if (std.mem.eql(u8, hex_all[0..], claimed)) {
+            sha = all;
+        } else if (std.mem.eql(u8, hex_dirs[0..], claimed)) {
+            sha = dirs;
+        } else {
             return refuse(why, "the file's content digest does not match its vectors", .{});
         }
-        sha = all;
-    } else sha = digest(bytes, c, true) orelse std.mem.zeroes([32]u8);
+    } else sha = digest(file, true) orelse std.mem.zeroes([32]u8);
 
-    const hook = str(c.kv, "glp.hook_point") orelse residual_site;
-    const derived = str(c.kv, "glp.derived_at") orelse hook;
+    const hook = file.str("glp.hook_point") orelse residual_site;
+    const derived = file.str("glp.derived_at") orelse hook;
 
     return .{
         .mode = mode,
-        .alpha = if (find(c.kv, "glp.alpha_default")) |v| switch (v) {
+        .alpha = if (file.find("glp.alpha_default")) |v| switch (v) {
             .f32v => |x| x,
             .f64v => |x| @floatCast(x),
             else => 1.0,
         } else 1.0,
         .hook_point = hook,
         .derived_at = derived,
-        .base_model = str(c.kv, "glp.base_model") orelse str(c.kv, "general.base_model.0.repo_url") orelse "",
-        .base_revision = str(c.kv, "glp.base_revision") orelse "",
-        .method = str(c.kv, "glp.method") orelse "",
-        .contrast = str(c.kv, "glp.contrast") orelse "",
+        .base_model = file.str("glp.base_model") orelse file.str("general.base_model.0.repo_url") orelse "",
+        .base_revision = file.str("glp.base_revision") orelse "",
+        .method = file.str("glp.method") orelse "",
+        .contrast = file.str("glp.contrast") orelse "",
         .width = width,
         .layers = layers.items,
         .sha256 = sha,
@@ -400,6 +198,130 @@ pub fn checkModel(v: Vector, hidden: usize, base_model: []const u8, why: *Why) E
     if (base_model.len > 0 and v.base_model.len > 0 and !std.mem.eql(u8, base_model, v.base_model)) {
         return refuse(why, "the vector is for {s}; the model is {s}", .{ v.base_model, base_model });
     }
+}
+
+/// The container's metadata and tensor headers; the arena keeps every allocation.
+fn parseContainer(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!gguf.File {
+    var problem: gguf.Problem = .{};
+    const file = gguf.parse(a, bytes, &problem) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return refuse(why, "{s}", .{problem.text()});
+    };
+    return file;
+}
+
+/// What a producer writes: the vector's fields and one direction per layer.
+pub const WriteSpec = struct {
+    mode: Mode = .project,
+    alpha: f32 = 1.0,
+    hook_point: []const u8 = residual_site,
+    derived_at: ?[]const u8 = null,
+    base_model: []const u8 = "",
+    base_revision: []const u8 = "",
+    method: []const u8 = "",
+    contrast: []const u8 = "",
+    layers: []const Layer,
+};
+
+/// Write a vector file the way the spec names it; the returned bytes are owned by the caller.
+pub fn write(a: std.mem.Allocator, spec: WriteSpec) Error![]u8 {
+    if (spec.layers.len == 0) return error.BadGlpVector;
+    if (!std.mem.eql(u8, spec.hook_point, residual_site)) return error.BadGlpVector;
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const tmp = arena.allocator();
+
+    // The file lists its layers in ascending order, whatever order the caller hands them over in.
+    const sorted = try tmp.alloc(Layer, spec.layers.len);
+    @memcpy(sorted, spec.layers);
+    std.mem.sort(Layer, sorted, {}, struct {
+        fn lessThan(_: void, x: Layer, y: Layer) bool {
+            return x.id < y.id;
+        }
+    }.lessThan);
+
+    const width = sorted[0].dir.len;
+    for (sorted, 0..) |l, i| {
+        if (i > 0 and l.id == sorted[i - 1].id) return error.BadGlpVector;
+        if (l.id == 0 or l.dir.len == 0 or l.dir.len != width) return error.BadGlpVector;
+        var sum: f64 = 0;
+        for (l.dir) |v| sum += @as(f64, v) * @as(f64, v);
+        const norm = @sqrt(sum);
+        if (!std.math.isFinite(norm) or @abs(norm - 1.0) > 1e-3) return error.BadGlpVector;
+    }
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(tmp);
+    for (sorted) |l| {
+        for (l.dir) |v| {
+            var buf: [4]u8 = undefined;
+            std.mem.writeInt(u32, &buf, @bitCast(v), .little);
+            try payload.appendSlice(tmp, &buf);
+        }
+    }
+
+    // The digest covers the concatenated tensor bytes, which is what the reader hashes to check the file.
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    h.update(payload.items);
+    var sha: [32]u8 = undefined;
+    h.final(&sha);
+    const hex = std.fmt.bytesToHex(sha, .lower);
+
+    var ids: std.ArrayList(u8) = .empty;
+    defer ids.deinit(tmp);
+    for (sorted, 0..) |l, i| {
+        if (i > 0) try ids.append(tmp, ',');
+        try ids.print(tmp, "{d}", .{l.id});
+    }
+
+    const dims = try tmp.alloc(u64, 1);
+    dims[0] = width;
+    const names = try tmp.alloc([32]u8, sorted.len);
+    const tensors = try tmp.alloc(gguf.OutTensor, sorted.len);
+    var start: usize = 0;
+    for (sorted, tensors, 0..) |l, *t, i| {
+        const name = std.fmt.bufPrint(names[i][0..], "direction.{d}", .{l.id}) catch return error.BadGlpVector;
+        t.* = .{ .name = name, .dims = dims, .kind = gguf.f32_type, .data = payload.items[start..][0 .. l.dir.len * 4] };
+        start += l.dir.len * 4;
+    }
+
+    const entries = [_]gguf.Entry{
+        .{ .key = "general.architecture", .value = .{ .string = "controlvector" } },
+        .{ .key = "general.alignment", .value = .{ .u32v = 32 } },
+        .{ .key = "glp.spec_version", .value = .{ .u32v = 1 } },
+        .{ .key = "glp.mode", .value = .{ .string = if (spec.mode == .project) "project" else "add" } },
+        .{ .key = "glp.rank", .value = .{ .u32v = 1 } },
+        .{ .key = "glp.orthonormal", .value = .{ .boolv = true } },
+        .{ .key = "glp.alpha_default", .value = .{ .f32v = spec.alpha } },
+        .{ .key = "glp.hook_point", .value = .{ .string = spec.hook_point } },
+        .{ .key = "glp.derived_at", .value = .{ .string = spec.derived_at orelse spec.hook_point } },
+        .{ .key = "glp.base_model", .value = .{ .string = spec.base_model } },
+        .{ .key = "glp.base_revision", .value = .{ .string = spec.base_revision } },
+        .{ .key = "glp.method", .value = .{ .string = spec.method } },
+        .{ .key = "glp.contrast", .value = .{ .string = spec.contrast } },
+        .{ .key = "glp.layer_ids_zero_based", .value = .{ .string = ids.items } },
+        .{ .key = "glp.content_sha256", .value = .{ .string = hex[0..] } },
+    };
+    return gguf.write(a, &entries, tensors) catch |err| switch (err) {
+        error.BadGguf => error.BadGlpVector,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+/// Write a vector read earlier back out, so a file can be rewritten with the same fields.
+pub fn writeVector(a: std.mem.Allocator, v: Vector) Error![]u8 {
+    return write(a, .{
+        .mode = v.mode,
+        .alpha = v.alpha,
+        .hook_point = v.hook_point,
+        .derived_at = v.derived_at,
+        .base_model = v.base_model,
+        .base_revision = v.base_revision,
+        .method = v.method,
+        .contrast = v.contrast,
+        .layers = v.layers,
+    });
 }
 
 test {
