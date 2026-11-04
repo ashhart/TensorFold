@@ -26,7 +26,9 @@ pub const text =
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
     \\  flashnext-exl3 DIR names|norms|router [layers] [rows]|layer [layers]  Flash Next on an EXL3 pack vs float64
+    \\  flashnext-exl3-tp RANK PORT DIR layer [layers]|sum|head|memory  EXL3 expert parallel on two ranks vs tp=1 and float64
     \\  flashnext-exl3-engine DIR tf|gen GOLDEN [LINES] | bench [LINES]  the family's Engine with the offload pool vs the reference golden
+    \\  flashnext-exl3-tpe RANK WORLD PORT DIR tf|gen GOLDEN DUMP | bench  the Engine at tp=1/2 with per-rank pools
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
     \\  flashnext-gdn-heads [BASELINE]  DeltaNet full/half bytes, optionally against a frozen flashnext_batch.fatbin
     \\  flashnext-tp-heads MODEL  each rank's cut in-projections and attention heads equal the whole layer's bytes
@@ -126,6 +128,7 @@ pub const text =
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
     \\  exl3-pack DIR [REPS]       EXL3 Dense and grouped experts on a real EXL3 pack's shapes: float64 error and timing
     \\  exl3-ple2 DIR [ROW] [N]    EXL3 n-gram table through cuda_ple.Ngram (ids, rows, RSS) and the PLE kernels vs float64
+    \\  exl3-draft DIR [THREADS]   EXL3 draft head rows dequantised from lm_head vs the full head (Dense) and float64
     \\  exl3-prefill DIR experts|copy [LAYER]|dense  EXL3 prefill pieces on the pack: grouped experts by rows, expert-major passes, line copies, prompt Dense
     \\  exl3-pool DIR [equal|bench|hit FILES] [LAYERS]  Flash Next EXL3 expert offload pool on Experts' pointer tables vs fully resident
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
