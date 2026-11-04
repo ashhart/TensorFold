@@ -74,7 +74,7 @@ pub const flags = [_]Flag{
     .{ .name = "--min-p", .native = true },
     .{ .name = "--thinking", .kind = .store_true, .native = true },
     .{ .name = "--no-thinking", .kind = .store_true, .native = true },
-    .{ .name = "--reasoning-effort", .choices = &.{ "low", "medium", "high", "xhigh" }, .native = true },
+    .{ .name = "--reasoning-effort", .choices = @import("fields.zig").efforts[1..], .native = true },
     .{ .name = "--thinking-budget", .native = true },
     .{ .name = "--thinking-reserve", .native = true },
     .{ .name = "--loop-guard", .kind = .store_true, .native = true },
