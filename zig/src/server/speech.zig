@@ -493,5 +493,6 @@ pub const Test = if (@import("builtin").is_test) struct {
 
 test {
     _ = @import("speech_audio_test.zig");
+    // The HTTP admission harness uses a Unix socket pair, unavailable on Windows.
     if (comptime @import("builtin").os.tag != .windows) _ = @import("drama_admission_test.zig");
 }
