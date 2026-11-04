@@ -208,6 +208,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const o = a.o;
     const p = a.p;
     const roce_bytes = a.roce_bytes;
+    const copies = try cuda.priority_copies.read("TF_GLM_COPIES", o.drafts);
     var load_cache = @import("core").checkpoint.cache.Load.begin(io, p.world > 1);
     defer load_cache.deinit();
     // TF_GLM_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
@@ -262,10 +263,12 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
         .cap = cap,
         .roce_bytes = roce_bytes,
         .load_cache = &load_cache,
+        .copies = copies,
     }, finishRank);
 }
 
 const OpenArgs = struct {
+    copies: bool,
     load_cache: *@import("core").checkpoint.cache.Load,
     own: *Owned,
     io: std.Io,
@@ -339,7 +342,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     return .{
         .draft_kind = if (own.e.drafter != null) "DFlash2" else null,
         .backend = own.lanes.backend(),
-        .facts = own.lanes.facts(),
+        .facts = own.lanes.factsWithCopies(a.copies),
         .rows = glm_lanes.max_rows,
         .stream_bytes = own.e.seqBytes() + extra, // each stream past the first makes its own sequence on every rank
         .free_streams = 1, // the first is the sequence the engine made
@@ -453,6 +456,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadGlmKvShare => "TF_GLM_KV_SHARE: give how many states the prompt cache over the KV pages keeps, or 0 or unset for off",
         error.GlmShareNeedsPages => "TF_GLM_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
+        error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
         error.GlmSoloWithDrafter => "TF_GLM_CHUNK_SOLO=4096 holds buffers no pass uses beside --drafter: unset it, or leave out --drafter",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
         error.TooManyRanks => std.fmt.comptimePrint(
