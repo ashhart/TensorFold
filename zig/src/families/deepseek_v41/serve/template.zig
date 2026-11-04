@@ -369,7 +369,9 @@ fn messagesOf(r: *R, messages: Value, o: Options) Error![]Msg {
                 try u.blocks.append(r.a, block);
                 try merged.append(r.a, u);
             }
-        } else try merged.append(r.a, m);
+        } else if (!(o.recipe and m.role == .latest_reminder and merged.items.len > 0 and merged.items[merged.items.len - 1].role == .latest_reminder)) {
+            try merged.append(r.a, m); // DeepSeek's keeps the first of consecutive reminders
+        }
     }
     for (merged.items) |*m| {
         if (m.role != .user or !m.order_set) continue;
@@ -470,9 +472,10 @@ fn renderInner(a: Allocator, messages: Value, o: Options, problem: *Problem, tra
             .tool => unreachable, // merged into user turns
         }
         const next: ?Role = if (idx + 1 < msgs.len) msgs[idx + 1].role else null;
-        if (next) |n| if (n != .assistant and n != .latest_reminder) continue;
+        // DeepSeek's reminder comes before the next turn's marker: its assistant turn opens itself
+        if (next) |n| if (n != .assistant and (n != .latest_reminder or o.recipe)) continue;
         if (next == null and !o.add_generation_prompt and m.role != .assistant) continue;
-        if (m.role == .user or (m.role == .system and idx > 0)) {
+        if (m.role == .user or (m.role == .system and idx > 0) or (o.recipe and m.role == .latest_reminder and next == null)) {
             opened = true;
             try r.put(ASSISTANT);
             const open = if (o.recipe and next == .assistant) thinking and !drop else thinking and (!drop or last == null or idx >= last.?);

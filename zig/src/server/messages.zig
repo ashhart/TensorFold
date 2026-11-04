@@ -97,7 +97,8 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
     for (list.array) |message| {
         if (message != .object) return cx.refuse("each message must be an object");
         const role = message.get("role");
-        if (!isRole(role)) return cx.refuse("message role must be system, developer, user, assistant or tool");
+        const reminder = media.dsv41 and role != null and role.? == .string and std.mem.eql(u8, role.?.string, "latest_reminder");
+        if (!isRole(role) and !reminder) return cx.refuse("message role must be system, developer, user, assistant or tool");
         if (fields.hasMedia(message)) return cx.refuse("this server accepts text only; image, audio and video inputs are unsupported");
         const content = message.get("content");
         var item: *json.Object = message.object;
@@ -378,4 +379,14 @@ test "a user message with a PDF file content part normalizes into image_url part
     try std.testing.expectEqualStrings("text", content[0].get("type").?.string);
     try std.testing.expectEqualStrings("image_url", content[1].get("type").?.string);
     try std.testing.expectEqualStrings("image_url", content[2].get("type").?.string);
+}
+
+test "a latest_reminder turn reaches DeepSeek-V4.1's own encoder only; other templates still refuse the role" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a, "[{\"role\": \"user\", \"content\": \"a\"}, {\"role\": \"latest_reminder\", \"content\": \"r\"}]")).ok;
+    try std.testing.expectError(error.Refused, normalize(&cx, messages, "system", false));
+    const out = try normalizeWith(&cx, messages, "system", false, .{ .dsv41 = true });
+    try std.testing.expectEqualStrings("latest_reminder", out.array[1].get("role").?.string);
 }
