@@ -10,14 +10,14 @@
     ],
     [
      "Content-Length",
-     "496"
+     "640"
     ],
     [
      "Connection",
      "close"
     ]
    ],
-   "body": "{\"object\": \"list\", \"data\": [{\"id\": \"fake-model\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\", \"context_length\": 1024, \"max_model_len\": 1024, \"reasoning\": {\"default_enabled\": true, \"supported_efforts\": [\"xhigh\", \"medium\", \"low\", \"none\"]}}, {\"id\": \"fake-alias\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\", \"context_length\": 1024, \"max_model_len\": 1024, \"reasoning\": {\"default_enabled\": true, \"supported_efforts\": [\"xhigh\", \"medium\", \"low\", \"none\"]}}]}",
+   "body": "{\"object\": \"list\", \"data\": [{\"id\": \"fake-model\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\", \"context_length\": 1024, \"max_model_len\": 1024, \"reasoning\": {\"default_enabled\": true, \"supported_efforts\": [\"xhigh\", \"medium\", \"low\", \"none\"]}, \"capabilities\": {\"thinking_switch\": true, \"thinking_applicable\": true}}, {\"id\": \"fake-alias\", \"object\": \"model\", \"created\": <ts>, \"owned_by\": \"tensorfold\", \"context_length\": 1024, \"max_model_len\": 1024, \"reasoning\": {\"default_enabled\": true, \"supported_efforts\": [\"xhigh\", \"medium\", \"low\", \"none\"]}, \"capabilities\": {\"thinking_switch\": true, \"thinking_applicable\": true}}]}",
    "interim": ""
   }
  ]

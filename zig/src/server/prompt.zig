@@ -30,6 +30,10 @@ pub const isTitle = messages_mod.isTitleRequest;
 
 /// ``render_prompt_ids``: messages normalized for this template, rendered, and a dangling ``<think>`` closed.
 pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool) errors.Refused![]const u32 {
+    return renderRequest(srv, cx, messages, tools, thinking, effort, generation, false);
+}
+
+fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool) errors.Refused![]const u32 {
     const normalized = if (srv.text.vtable.format == .kimi) messages else try messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.media()));
     var problem: []const u8 = "";
     const options: model_text.RenderOptions = .{
@@ -42,10 +46,12 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         .response_format = cx.template_fields.get("response_format"),
         .images = srv.info.vision != null,
     };
-    var ids = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
+    const rendered = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Template => return cx.fail(.request, "{s}", .{problem}),
     };
+    var ids = rendered.ids;
+    var closed = rendered.closed;
     // MiniMax-M3 thinks adaptively: with thinking off, its reply begins after the `</mm:think>` the prompt ends with
     if (!thinking and generation and std.mem.eql(u8, srv.markers.close, @import("reply_text.zig").mm_markers.close)) {
         if (srv.text.tokenId(srv.markers.close)) |close| return try std.mem.concat(cx.a, u32, &.{ ids, &.{close} });
@@ -57,20 +63,44 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Template => &[_]u32{},
             };
-            if (close.len == 1) ids = try std.mem.concat(cx.a, u32, &.{ ids, close });
+            if (close.len == 1) {
+                ids = try std.mem.concat(cx.a, u32, &.{ ids, close });
+                closed = true;
+            }
         }
     }
+    if (require_off and !thinking and generation and srv.close_id != null and !srv.thinking_switch and !closed)
+        return cx.refuse("thinking off is not supported by this chat template: it has no thinking switch or closable generation prefix");
     return ids;
 }
 
+/// Whether a simple chat's explicit off passes the same renderer/refusal as an actual request, without generation.
+pub fn thinkingSwitch(srv: *Server, a: std.mem.Allocator) std.mem.Allocator.Error!bool {
+    if (!srv.info.text_generation) return false;
+    if (srv.close_id == null or srv.thinking_switch) return true;
+    var cx: Cx = .{ .a = a };
+    const user = try json.newObject(a);
+    try user.put(a, "role", .{ .string = "user" });
+    try user.put(a, "content", .{ .string = "x" });
+    const list = try a.alloc(Value, 1);
+    list[0] = .{ .object = user };
+    _ = renderRequest(srv, &cx, .{ .array = list }, &.{}, false, null, true, true) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Refused => return false,
+    };
+    return true;
+}
+
+const RenderedIds = struct { ids: []u32, closed: bool };
+
 /// The template's ids for `messages`; with image input, a marker the text spells is ordinary text (images.zig).
-fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error![]u32 {
+fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!RenderedIds {
     var rendered = try srv.text.render(a, messages, options, problem);
     if (srv.info.vision) |v| if (v.video) |o| if (o.video_text.len > 0) {
         const word = try srv.text.tokenString(a, o.video_token);
         rendered = try rendered.replaceTemplate(a, o.video_text, word);
     };
-    return rendered.encode(srv.text, a, problem);
+    return .{ .ids = try rendered.encode(srv.text, a, problem), .closed = templateClosed(rendered, srv.markers.close) };
 }
 
 /// The template's generation prompt (thinking on or off): what a probe conversation renders past its history.
@@ -118,7 +148,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
         .ids => |ids| return .{ .ids = ids },
     };
     cx.template_fields = input.fields;
-    const prompt = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, true);
+    const asked = input.fields.field("enable_thinking");
+    const require_off = input.client_request and asked != null and asked.? == .bool and !asked.?.bool;
+    const prompt = try renderRequest(srv, cx, input.messages, input.tools, thinking, effort, true, require_off);
     const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
     var history_len: usize = 0;
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
@@ -205,4 +237,21 @@ pub fn systemPrefixLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Va
     var shared: usize = 0;
     while (shared < @min(prompt_ids.len, other.len) and prompt_ids[shared] == other[shared]) shared += 1;
     return if (shared >= 512) shared else 0;
+}
+
+/// A closing suffix represents the template's off mode only when no request range wrote it.
+fn templateClosed(rendered: model_text.Rendered, close: []const u8) bool {
+    const stripped = @import("reply_text.zig").pyStrip(rendered.text);
+    if (!std.mem.endsWith(u8, stripped, close)) return false;
+    const end = @intFromPtr(stripped.ptr) - @intFromPtr(rendered.text.ptr) + stripped.len;
+    return rendered.isTemplate(end - close.len, end);
+}
+
+test "thinking request: a quoted close is not a template-authored closing suffix" {
+    const rendered: model_text.Rendered = .{ .text = "  H</think>\n " };
+    try std.testing.expect(templateClosed(rendered, "</think>"));
+    var quoted = rendered;
+    quoted.spans = &.{.{ 3, 11 }};
+    try std.testing.expect(!templateClosed(quoted, "</think>"));
+    try std.testing.expect(!templateClosed(.{ .text = "</think> H" }, "</think>"));
 }
