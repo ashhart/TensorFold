@@ -171,6 +171,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "flashnext_exl3", .src = "flashnext_exl3/flashnext_exl3", .flags = glue },
     // ours: Flash Next's EXL3 expert-parallel pick mask
     .{ .name = "flashnext_exl3_tp", .src = "flashnext_exl3/flashnext_exl3_tp", .flags = glue },
+    // ours: Flash Next EXL3 prefill experts, 64-member tiles any width
+    .{ .name = "flashnext_exl3_prefill", .src = "flashnext_exl3/flashnext_exl3_prefill", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.

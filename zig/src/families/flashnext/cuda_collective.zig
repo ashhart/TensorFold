@@ -144,6 +144,23 @@ pub const Collective = struct {
         try c.wait(null, wire.deadline(c.timeout_ms));
     }
 
+    /// FP32 values sent to the peer and the peer's received, enqueued together: no arithmetic, the bytes as they are.
+    pub fn exchange(c: *Collective, stream: cuda.Stream, send: u64, send_count: usize, recv: u64, recv_count: usize) !void {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        if (send_count == 0 and recv_count == 0) return;
+        errdefer c.abort();
+        try c.link.checkPeer();
+        const peer: c_int = @intCast(1 - c.rank);
+        try c.submitted(c.lib.api.ncclGroupStart());
+        var posted: nccl.Result = 0;
+        if (send_count != 0) posted = c.lib.api.ncclSend(send, send_count, .f32, peer, c.comm, stream.handle);
+        if (posted == 0 and recv_count != 0) posted = c.lib.api.ncclRecv(recv, recv_count, .f32, peer, c.comm, stream.handle);
+        const ended = c.lib.api.ncclGroupEnd();
+        try c.submitted(posted);
+        try c.submitted(ended);
+        try c.wait(null, wire.deadline(c.timeout_ms));
+    }
+
     /// FP32 sum is enqueued on the compute stream; later kernels on that stream observe its result.
     pub fn sum(c: *Collective, stream: cuda.Stream, values: u64, count: usize) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;

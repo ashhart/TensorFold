@@ -30,7 +30,7 @@ test "exl3: invalid device telemetry cannot fail normal ownership transfer or pu
 }
 
 test "exl3: phase report stable schema rank and model-row denominators" {
-    const before: telemetry.Snapshot = .{ .rank = .{ .rank = 1, .world = 2 }, .scope = 7 };
+    var before: telemetry.Snapshot = .{ .rank = .{ .rank = 1, .world = 2 }, .scope = 7 };
     var after = before;
     after.experts.device_hit_picks = 40;
     after.experts.device_miss_picks = 10;
@@ -45,6 +45,11 @@ test "exl3: phase report stable schema rank and model-row denominators" {
     after = before;
     after.scope += 1;
     try expectError(error.TelemetryOwnerChanged, telemetry.Report.between(before, after, .{ .phase = .decode, .model_rows = 1, .steps = 1 }));
+    after = before;
+    after.ring_owner = 13;
+    _ = try telemetry.Report.between(before, after, .{ .phase = .prefill, .model_rows = 1, .steps = 1 });
+    before.ring_owner = 12;
+    try expectError(error.TelemetryOwnerChanged, telemetry.Report.between(before, after, .{ .phase = .prefill, .model_rows = 1, .steps = 1 }));
 }
 
 test "exl3: per-layer deltas sum to aggregate counters and overlapping reports claim counters once" {
