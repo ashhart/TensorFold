@@ -54,7 +54,7 @@ pub fn parse(doc: *const g.Document, p: *Problem) !cfg.Config {
     const view = try doc.config();
     const tok = doc.tokenizer() catch |err| return p.fail("tokenizer.ggml: {s}", .{@errorName(err)});
     const tokens = tok.tokens orelse return p.fail("tokenizer.ggml.tokens: missing", .{});
-    const end = tok.eos orelse return p.fail("tokenizer.ggml.eos_token_id: missing", .{});
+    if (tok.eos == null) return p.fail("tokenizer.ggml.eos_token_id: missing", .{});
     if (tokens.len == 0 or tokens.len > std.math.maxInt(u32)) return p.fail("tokenizer.ggml.tokens: invalid vocabulary", .{});
     const vh = try r.uint("ssm.time_step_rank");
     const inner = try r.uint("ssm.inner_size");
@@ -63,8 +63,7 @@ pub fn parse(doc: *const g.Document, p: *Problem) !cfg.Config {
     var c: cfg.Config = .{ .hidden = @intCast(view.embedding.?), .intermediate = @intCast(view.feed_forward.?), .layers = @intCast(view.layers.?), .vocab = tokens.len, .heads = @intCast(view.heads.?), .kv_heads = @intCast(view.kv_heads.?), .head_dim = @intCast(view.key_length.?), .k_heads = try r.uint("ssm.group_count"), .v_heads = vh, .dk = try r.uint("ssm.state_size"), .dv = inner / vh, .conv_kernel = try r.uint("ssm.conv_kernel"), .eps = @floatCast(view.rms_epsilon.?), .rope_dims = @intCast(view.rope_dimensions.?), .rope_theta = view.rope_base.?, .max_position = @intCast(view.context.?) };
     if (c.layers > cfg.max_layers) return p.fail("{s}.block_count: exceeds {d}", .{ arch, cfg.max_layers });
     if (!std.math.isFinite(c.eps) or c.eps <= 0) return p.fail("{s}.attention.layer_norm_rms_epsilon: not representable", .{arch});
-    c.eos[0] = @intCast(end);
-    c.eos_count = 1;
+    c.eos_count = @intCast(g.stops.read(doc, &.{"<|endoftext|>"}, &c.eos) catch |err| return p.fail("tokenizer.ggml stop set: {s}", .{@errorName(err)}));
     if (g.views.scoped(doc, arch, "rope.dimension_sections")) |value| {
         if (value != .array or value.array.len != 4) return p.fail("{s}.rope.dimension_sections: expected four integers", .{arch});
         var it = value.array.iterator();

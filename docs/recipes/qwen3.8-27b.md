@@ -448,3 +448,30 @@ Endpoint, rewind and shared states have priority within the same byte and slot c
 is published in `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; restored tokens also count
 in `tensorfold:prompt_tokens_cached_total`. Synthetic host checks cover the two-request pattern and exact
 output. Real-model parity and TTFT for this state still need the Metal gate.
+
+### GGUF text parity and current projection speed
+
+Q4_K_M and Q8_0 GGUFs both use the generic weight-only projection for their affine linear products. Q4_K tensors use four-bit
+codes with groups of 32; Q6_K codes widen losslessly to eight bits with groups of 16; Q8_0 uses eight-bit codes
+with groups of 32. All retain their F32 scales and biases. These formats do not take the MLX projection kernels.
+On the M3 Ultra with 256 GiB, Q4_K_M decoded at about 2.8 tok/s on the three short greedy 32-token requests in
+the GGUF receipt. That is the current generic path's observed speed, not a speed improvement or a Q8_0 decode
+measurement. Q8_0 uses the same generic path; its generation speed remains unmeasured.
+
+The full Qwen stop set keeps the declared EOS and the end-of-text control, in that order. Both model config and
+server text expose the same set. An ordinary end-of-text spelling refuses rather than becoming a stop. Adding
+an EOS in tokenization appends only the primary EOS. The six FIM/repository/file added tokens remain ordinary
+for skip-special decoding, and GGUF unused slots are absent from the tokenizer vocabulary.
+
+`zig build gguf-tokenizer-compare-host` builds a CPU-only check over the actual GGUF and MLX text providers:
+
+```sh
+tf-gguf-tokenizer-compare model.gguf mlx-checkpoint
+```
+
+The tool maps the GGUF read-only and reads its metadata, without repacking weights or opening a device. Its default corpus is
+the 834 varied strings used by the earlier tokenizer check. An optional third argument supplies another JSON
+case array. It checks every vocabulary slot, added-token flags, both stop sets, full and masked encodings,
+decoding with both skip-special settings, and one real rendered chat prompt's bytes and token IDs. Its receipt
+reports each comparison class separately. Both providers use the native tokenizer and template engines with
+independently loaded assets. Model inference and other GPUs keep their own qualification checks.
