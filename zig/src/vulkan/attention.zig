@@ -1,6 +1,6 @@
 // Qwen3.5-2B uses half-split RoPE: head_dim 256, rotary_dim 64, theta 1e7; 8 query heads, 2 KV heads; scale 1/16.
 
-// fast_rope: -DUSE_BF16 -DASH_QWEN35 (no mid bf16 rounding); sdpa: -DBF16_IO -DSDPA_DIM=256 -DSDPA_ROWS; gate: none
+// fast_rope: -DUSE_BF16 -DORACLE_QWEN35 (no mid bf16 rounding); sdpa: -DBF16_IO -DSDPA_DIM=256 -DSDPA_ROWS; gate: none
 
 // zig/src/families/qwen3_5/forward.zig attention(); zig/kernels/metal/qwen3_5/{layout,attn_partial,attn_merge}.metal.
 const std = @import("std");
@@ -36,6 +36,10 @@ pub const Shaders = struct {
     rope_bf16: []align(4) const u8,
     sdpa_rows_bf16: []align(4) const u8,
     gate_bf16: []align(4) const u8,
+    rope_f32: []align(4) const u8,
+    rope_f32_kcache: []align(4) const u8,
+    sdpa_rows_f32q: []align(4) const u8,
+    gate_f32: []align(4) const u8,
 };
 
 /// attention_gate.comp's own one-word push block.
@@ -56,6 +60,10 @@ pub const Attention = struct {
     rope_bf16: dispatch.Pipeline,
     sdpa_bf16: dispatch.Pipeline,
     gate_bf16: dispatch.Pipeline,
+    rope_f32: dispatch.Pipeline,
+    rope_f32_kcache: dispatch.Pipeline,
+    sdpa_f32q: dispatch.Pipeline,
+    gate_f32: dispatch.Pipeline,
     // The i32 base position is read by each rope dispatch; setBasePosition writes it between operations.
     offsets: Buffer,
 
@@ -69,6 +77,10 @@ pub const Attention = struct {
             .rope_bf16 = undefined,
             .sdpa_bf16 = undefined,
             .gate_bf16 = undefined,
+            .rope_f32 = undefined,
+            .rope_f32_kcache = undefined,
+            .sdpa_f32q = undefined,
+            .gate_f32 = undefined,
             .offsets = try Buffer.init(dev, .device, 4),
         };
         errdefer a.offsets.deinit();
@@ -78,6 +90,14 @@ pub const Attention = struct {
         a.sdpa_bf16 = try dispatch.Pipeline.init(dev, shaders.sdpa_rows_bf16, .{ .bindings = 4, .push_bytes = params.push_bytes, .writes = 1 << 3 });
         errdefer a.sdpa_bf16.deinit();
         a.gate_bf16 = try dispatch.Pipeline.init(dev, shaders.gate_bf16, .{ .bindings = 3, .push_bytes = gate_push_bytes, .writes = 1 << 2 });
+        errdefer a.gate_bf16.deinit();
+        a.rope_f32 = try dispatch.Pipeline.init(dev, shaders.rope_f32, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 1 });
+        errdefer a.rope_f32.deinit();
+        a.rope_f32_kcache = try dispatch.Pipeline.init(dev, shaders.rope_f32_kcache, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 1 });
+        errdefer a.rope_f32_kcache.deinit();
+        a.sdpa_f32q = try dispatch.Pipeline.init(dev, shaders.sdpa_rows_f32q, .{ .bindings = 4, .push_bytes = params.push_bytes, .writes = 1 << 3 });
+        errdefer a.sdpa_f32q.deinit();
+        a.gate_f32 = try dispatch.Pipeline.init(dev, shaders.gate_f32, .{ .bindings = 3, .push_bytes = gate_push_bytes, .writes = 1 << 2 });
         return a;
     }
 
@@ -86,6 +106,10 @@ pub const Attention = struct {
         a.rope_bf16.deinit();
         a.sdpa_bf16.deinit();
         a.gate_bf16.deinit();
+        a.rope_f32.deinit();
+        a.rope_f32_kcache.deinit();
+        a.sdpa_f32q.deinit();
+        a.gate_f32.deinit();
         a.offsets.deinit();
     }
 
@@ -96,34 +120,42 @@ pub const Attention = struct {
         try commands.upload(cmds, a.offsets, 0, staging, &bytes, timeout_ns);
     }
 
-    // Rotates normalized q (rows,8,256) into a fresh bf16 window at position base+row.
+    // Rotates normalized q (rows,8,256); bf16 stays word-packed, the wide f32 path addresses elements.
     pub fn ropeQueries(a: *Attention, cmds: *Commands, out: View, q: View, rows: u64, timeout_ns: u64) Error!void {
         const plan = try ropePlan(out.elements, q.elements, rows, query_heads);
         if (out.overlaps(q)) return error.Aliased;
-        try a.rope_bf16.bind(&.{ q.bind(), out.bind(), a.offsetBinding() });
-        try a.ropeRun(cmds, plan, queryStrides(), 0, timeout_ns);
+        const f32io = out.kind == .f32;
+        if (q.kind != (if (f32io) tensor.Kind.f32 else tensor.Kind.bf16) or out.kind != q.kind) return error.Invalid;
+        const pipe = if (f32io) &a.rope_f32 else &a.rope_bf16;
+        try pipe.bind(&.{ q.bind(), out.bind(), a.offsetBinding() });
+        try a.ropeRun(pipe, cmds, plan, queryStrides(), 0, if (f32io) plan.elements else plan.words, timeout_ns);
     }
 
-    // K rotates into cache; V uses bit-exact Ops.copy_u16; barriers order reads. Per-op storage roundings match oracle.
+    // K rotates into cache (rounded to bf16 on landing); V rides the f32->bf16 rounding copy in wide layers.
     pub fn cacheKV(a: *Attention, cmds: *Commands, cache_keys: View, cache_values: View, knorm: View, v: View, rows: u64, base: u64, capacity: u64, timeout_ns: u64) Error!void {
         if (cache_keys.kind != .bf16 or cache_values.kind != .bf16) return error.Invalid;
+        if (knorm.kind != .bf16 and knorm.kind != .f32) return error.Invalid;
+        if (v.kind != knorm.kind) return error.Invalid;
         const cache_elems = kv_heads *| capacity *| head_dim;
         if (cache_keys.elements != cache_elems or cache_values.elements != cache_elems) return error.Invalid;
         const end = std.math.add(u64, base, rows) catch return error.TooLarge;
         if (end > capacity) return error.OutOfRange;
         if (cache_keys.overlaps(knorm) or cache_values.overlaps(v)) return error.Aliased;
         const plan = try ropePlan(knorm.elements, knorm.elements, rows, kv_heads);
-        // K: passthrough tail copies d >= 64; rotation covers d < 64.
-        try a.rope_bf16.bind(&.{ knorm.bind(), cache_keys.bind(), a.offsetBinding() });
-        try a.ropeRun(cmds, plan, .{
+        const wide = knorm.kind == .f32;
+        // K: passthrough tail copies d >= 64; rotation covers d < 64; f32 in rounds to bf16 on the cache store.
+        const rope = if (wide) &a.rope_f32_kcache else &a.rope_bf16;
+        try rope.bind(&.{ knorm.bind(), cache_keys.bind(), a.offsetBinding() });
+        try a.ropeRun(rope, cmds, plan, .{
             .in_head = head_dim,
             .in_time = kv_heads * head_dim,
             .out_head = capacity * head_dim, // cache head stride
             .out_time = head_dim, // cache time stride
-        }, base * head_dim, timeout_ns);
-        // V: copy_general USE_U16, dims 3, bit-exact uint16 transport.
+        }, base * head_dim, if (wide) plan.elements else plan.words, timeout_ns);
+        // V: copy_general, dims 3; bf16 is a bit-exact uint16 transport, f32 rounds to bf16 on landing.
         const copy = try vCopyPlan(rows, capacity, v.elements);
-        try a.ops.copy_u16.bind(&.{ v.bind(), a.ops.dummyBinding(), cache_values.bind(), a.ops.dummyBinding() });
+        const vpipe = if (wide) &a.ops.copy_f32_bf16 else &a.ops.copy_u16;
+        try vpipe.bind(&.{ v.bind(), a.ops.dummyBinding(), cache_values.bind(), a.ops.dummyBinding() });
         var p: params.Params = .{
             .count = copy.elements,
             .dims = 3,
@@ -132,14 +164,16 @@ pub const Attention = struct {
             .out_strides = .{ 1, try ops_mod.cast32(capacity * head_dim), @intCast(head_dim), 0 },
         };
         p.output_offset = try ops_mod.cast32(base * head_dim);
-        try a.ops.copy_u16.run(cmds, std.mem.asBytes(&p), try groups(copy.elements, a.ops.copy_u16.local[0], a.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
+        try vpipe.run(cmds, std.mem.asBytes(&p), try groups(copy.elements, vpipe.local[0], a.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 
     // SDPA scales q once, streams f32 scores; Metal scales per-score in 128-key chunks. No bit-exact/performance claim.
     pub fn attend(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, prefix: u64, rows: u64, capacity: u64, timeout_ns: u64) Error!void {
         const plan = try attendPlan(prefix, rows, capacity, queries.elements, y.elements, cache_keys.elements, cache_values.elements);
+        if (y.kind != queries.kind or (queries.kind != .bf16 and queries.kind != .f32)) return error.Invalid;
         if (y.overlaps(queries) or y.overlaps(cache_keys) or y.overlaps(cache_values)) return error.Aliased;
-        try a.sdpa_bf16.bind(&.{ queries.bind(), cache_keys.bind(), cache_values.bind(), y.bind() });
+        const pipe = if (queries.kind == .f32) &a.sdpa_f32q else &a.sdpa_bf16;
+        try pipe.bind(&.{ queries.bind(), cache_keys.bind(), cache_values.bind(), y.bind() });
         var p: params.Params = .{
             .matrix_m = @intCast(query_heads), // repeats = 8/2 = 4
             .matrix_n = @intCast(kv_heads),
@@ -152,16 +186,20 @@ pub const Attention = struct {
             .out_strides = .{ @intCast(query_heads * head_dim), 0, 0, 0 },
         };
         const groups_x = std.math.cast(u32, plan.rows) orelse return error.TooLarge;
-        try a.sdpa_bf16.run(cmds, std.mem.asBytes(&p), .{ @intCast(query_heads), groups_x, 1 }, timeout_ns);
+        try pipe.run(cmds, std.mem.asBytes(&p), .{ @intCast(query_heads), groups_x, 1 }, timeout_ns);
     }
 
-    // Gate is bf16(ctx*bf16(sigmoid(gate))); qraw second halves hold gate. Shapes: (rows,2048), qraw (rows,4096).
+    // Gate is bf16(ctx*bf16(sigmoid(gate))) narrow or f32(ctx*sigmoid(gate)) wide; qraw's second halves hold the gate.
     pub fn gateOutput(a: *Attention, cmds: *Commands, out: View, ctx: View, qraw: View, rows: u64, timeout_ns: u64) Error!void {
         const plan = try gatePlan(out.elements, ctx.elements, qraw.elements, rows);
+        const wide = out.kind == .f32;
+        if (ctx.kind != out.kind or qraw.kind != out.kind) return error.Invalid;
         if (out.overlaps(ctx) or out.overlaps(qraw)) return error.Aliased;
-        try a.gate_bf16.bind(&.{ ctx.bind(), qraw.bind(), out.bind() });
-        const p: GateParams = .{ .words = plan.words };
-        try a.gate_bf16.run(cmds, std.mem.asBytes(&p), try groups(plan.words, a.gate_bf16.local[0], a.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
+        const pipe = if (wide) &a.gate_f32 else &a.gate_bf16;
+        try pipe.bind(&.{ ctx.bind(), qraw.bind(), out.bind() });
+        const words = if (wide) plan.elements else plan.words;
+        const p: GateParams = .{ .words = words };
+        try pipe.run(cmds, std.mem.asBytes(&p), try groups(words, pipe.local[0], a.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 
     fn offsetBinding(a: *const Attention) dispatch.Binding {
@@ -169,10 +207,11 @@ pub const Attention = struct {
     }
 
     // out_base offsets cache; trig uses omarchy_trig.h wrappers, not metal::cos/sin; exp/pow/cos may differ in ulps.
-    fn ropeRun(a: *Attention, cmds: *Commands, plan: RopePlan, strides: RopeStrides, out_base: u64, timeout_ns: u64) Error!void {
+    fn ropeRun(a: *Attention, pipe: *dispatch.Pipeline, cmds: *Commands, plan: RopePlan, strides: RopeStrides, out_base: u64, items: u32, timeout_ns: u64) Error!void {
+        // bf16 addresses words of two halves; the f32 variants address one element per item with the same strides.
         // Passthrough inv_freq is exp(-i*beta), with beta=ln(1e7)/32, yielding 1e7^(-i/32) up to exp/pow ulps.
         var p: params.Params = .{
-            .count = plan.words,
+            .count = items,
             .flags = rope_flags,
             .alpha = 1.0, // position = 1 * (t + base)
             .beta = @log(theta) / @as(f32, rotary_pairs),
@@ -182,7 +221,7 @@ pub const Attention = struct {
             .out_strides = .{ try ops_mod.cast32(strides.out_head), try ops_mod.cast32(strides.out_time), 1, 0 },
         };
         p.output_offset = try ops_mod.cast32(out_base);
-        try a.rope_bf16.run(cmds, std.mem.asBytes(&p), try groups(plan.words, a.rope_bf16.local[0], a.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
+        try pipe.run(cmds, std.mem.asBytes(&p), try groups(items, pipe.local[0], a.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 };
 
@@ -206,8 +245,8 @@ fn groups(count: u64, local: u32, max_x: u32) Error![3]u32 {
     return .{ @min(n, max_x), 1, 1 };
 }
 
-// Rope geometry: one passthrough+rotation dispatch over packed bf16 words; pure and host-tested.
-pub const RopePlan = struct { rows: u32, heads: u32, words: u32 };
+// Rope geometry: bf16 addresses packed words (two halves), f32 addresses elements; pure and host-tested.
+pub const RopePlan = struct { rows: u32, heads: u32, words: u32, elements: u32 };
 
 pub fn ropePlan(out_elements: u64, in_elements: u64, rows: u64, heads: u64) Error!RopePlan {
     if (rows == 0 or rows > std.math.maxInt(u32)) return error.Invalid;
@@ -219,6 +258,7 @@ pub fn ropePlan(out_elements: u64, in_elements: u64, rows: u64, heads: u64) Erro
         .rows = @intCast(rows),
         .heads = @intCast(heads),
         .words = try ops_mod.cast32(total / 2), // one word per bf16 pair
+        .elements = try ops_mod.cast32(total),
     };
 }
 
@@ -250,8 +290,8 @@ pub fn attendPlan(prefix: u64, rows: u64, capacity: u64, q_elements: u64, y_elem
     return .{ .rows = @intCast(rows), .total_keys = try ops_mod.cast32(total) };
 }
 
-/// Gate geometry; pure and host-tested.
-pub const GatePlan = struct { rows: u32, words: u32 };
+/// Gate geometry; words covers the bf16 pair count, elements the f32 count; pure and host-tested.
+pub const GatePlan = struct { rows: u32, words: u32, elements: u32 };
 
 pub fn gatePlan(out_elements: u64, ctx_elements: u64, qraw_elements: u64, rows: u64) Error!GatePlan {
     if (rows == 0 or rows > std.math.maxInt(u32)) return error.Invalid;
@@ -260,6 +300,7 @@ pub fn gatePlan(out_elements: u64, ctx_elements: u64, qraw_elements: u64, rows: 
     return .{
         .rows = @intCast(rows),
         .words = try ops_mod.cast32(rows * gate_row_words),
+        .elements = try ops_mod.cast32(rows * gate_row_elems),
     };
 }
 
@@ -268,8 +309,10 @@ const testing = std.testing;
 test "ropePlan derives the word count and refuses torn or foreign shapes" {
     const plan = try ropePlan(4 * 8 * 256, 4 * 8 * 256, 4, query_heads);
     try testing.expectEqual(@as(u32, 4 * 8 * 128), plan.words);
+    try testing.expectEqual(@as(u32, 4 * 8 * 256), plan.elements);
     const kv = try ropePlan(3 * 2 * 256, 3 * 2 * 256, 3, kv_heads);
     try testing.expectEqual(@as(u32, 3 * 2 * 128), kv.words);
+    try testing.expectEqual(@as(u32, 3 * 2 * 256), kv.elements);
     try testing.expectError(error.Invalid, ropePlan(4 * 8 * 256 + 1, 4 * 8 * 256, 4, query_heads));
     try testing.expectError(error.Invalid, ropePlan(4 * 8 * 256, 4 * 8 * 256, 4, 4)); // not the model's head count
     try testing.expectError(error.Invalid, ropePlan(0, 0, 0, query_heads));
@@ -299,6 +342,7 @@ test "vCopyPlan refuses rows past capacity and caches past u32 offsets" {
 test "gatePlan derives the word count and refuses torn rows" {
     const plan = try gatePlan(4 * 2048, 4 * 2048, 4 * 4096, 4);
     try testing.expectEqual(@as(u32, 4 * 1024), plan.words);
+    try testing.expectEqual(@as(u32, 4 * 2048), plan.elements);
     try testing.expectError(error.Invalid, gatePlan(4 * 2048, 4 * 2048 + 1, 4 * 4096, 4));
     try testing.expectError(error.Invalid, gatePlan(4 * 2048, 4 * 2048, 4 * 4095, 4));
     try testing.expectError(error.Invalid, gatePlan(0, 0, 0, 0));

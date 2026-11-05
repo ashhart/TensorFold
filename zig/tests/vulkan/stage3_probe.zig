@@ -79,6 +79,8 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     var ops = try vk.ops.Ops.init(&dev, .{
         .qmm_bf16 = &ops_shaders.qmm_bf16,
         .qmm_q4_vec4 = &ops_shaders.qmm_q4_vec4,
+        .qmm_f32 = &ops_shaders.qmm_f32,
+        .copy_f32_bf16 = &ops_shaders.copy_f32_bf16,
         .dequant_bf16 = &ops_shaders.dequant_bf16,
         .gather_u32 = &ops_shaders.gather_u32,
         .gather_u16 = &ops_shaders.gather_u16,
@@ -92,6 +94,10 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         .rope_bf16 = &shaders.rope_bf16,
         .sdpa_rows_bf16 = &shaders.sdpa_rows_bf16,
         .gate_bf16 = &shaders.gate_bf16,
+        .rope_f32 = &shaders.rope_f32,
+        .rope_f32_kcache = &shaders.rope_f32_kcache,
+        .sdpa_rows_f32q = &shaders.sdpa_rows_f32q,
+        .gate_f32 = &shaders.gate_f32,
     }, &ops);
     defer attn.deinit();
 

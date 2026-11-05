@@ -93,6 +93,7 @@ pub const stage2_variants = [_]ShaderVariant{
     .{ .name = "norm_bf16_in", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35", "-DACT_OUT_F32" } },
     .{ .name = "add_f32", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DACT_F32"} },
     .{ .name = "add_wide_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DADD_WIDE"} },
+    .{ .name = "add_bf16_f32", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DADD_WIDE_F32"} },
     .{ .name = "swiglu_f32", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35", "-DACT_F32" } },
 };
 
@@ -106,6 +107,7 @@ pub const stage2_shaders_src =
     \\pub const norm_bf16_in align(4) = @embedFile("norm_bf16_in.spv").*;
     \\pub const add_f32 align(4) = @embedFile("add_f32.spv").*;
     \\pub const add_wide_bf16 align(4) = @embedFile("add_wide_bf16.spv").*;
+    \\pub const add_bf16_f32 align(4) = @embedFile("add_bf16_f32.spv").*;
     \\pub const swiglu_f32 align(4) = @embedFile("swiglu_f32.spv").*;
 ;
 
