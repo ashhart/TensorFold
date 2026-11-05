@@ -65,6 +65,7 @@ pub const Context = struct {
     pub fn deinit(self: *Context) void {
         self.d.synchronize() catch {};
         @import("copy_source.zig").dropSpares(self.d, self.handle); // their pinned bytes go with the context
+        @import("pinned_download.zig").drop(self.d, self.handle, false);
         _ = self.d.api.cuDevicePrimaryCtxRelease_v2(self.device);
         @import("context_health.zig").release(self.d, self.handle);
         self.* = undefined;

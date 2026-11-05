@@ -541,6 +541,11 @@ test "every registered family and d1's decision engine are listed for capabiliti
     try std.testing.expectEqualStrings("qwen4_text", families[registry.len + 3].model_type);
 }
 
+test "CUDA switch scope: a CUDA runtime switch is registered for every served CUDA model type and no other" {
+    try std.testing.expectEqual(families.len, api.profile.cuda_families.len);
+    for (families) |f| try std.testing.expect(api.profile.entry(.TF_CUDA_PINNED_DOWNLOAD).applies(f.model_type, "cuda"));
+}
+
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {
     try @import("cuda_prompt_cancel_test.zig").check(Host, Host.serve);
 }

@@ -14,6 +14,7 @@ pub const Switch = enum {
     TF_KV_PAGES,
     TF_GLM_KV_HOST,
     TF_GLM_KV_HOST_SHARED,
+    TF_CUDA_PINNED_DOWNLOAD,
 };
 pub const Syntax = enum { count, one, auto };
 pub const Entry = struct {
@@ -53,6 +54,8 @@ pub const Entry = struct {
 
 const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
+/// Every model type the native CUDA engine registers; native/cuda.zig's family test holds this list to it.
+pub const cuda_families: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4_unified", "gemma4", "spark2_5", "dory", "lfm2_vl", "fish_omni", "qwen4", "qwen4_text" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },
@@ -66,6 +69,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_KV_PAGES, .families = &.{ "nemotron_h", "nemotron_h_omni" }, .class = .identical, .report_values = &.{ "0", "all" }, .effect = "Nemotron KV pool pages by default; exact 0 disables, exact all pages every stream", .evidence = "#781" },
     .{ .id = .TF_GLM_KV_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
     .{ .id = .TF_GLM_KV_HOST_SHARED, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
+    .{ .id = .TF_CUDA_PINNED_DOWNLOAD, .families = cuda_families, .class = .identical, .syntax = .one, .effect = "Exact 1 stages DeviceBuffer.download through reused pinned memory", .evidence = "#2102" },
 };
 
 comptime {

@@ -4,7 +4,8 @@
 the same profile. It enables no additional optimization and supplies no new environment values.
 
 This is the foundation of [#1660](https://github.com/ashhart/TensorFold/issues/1660), beginning with the CUDA KV
-switches in its first table, their `_ALL` companions, and GLM's and Nemotron's paging policies (eight variables).
+switches in its first table, their `_ALL` companions, GLM's and Nemotron's paging policies, and the CUDA runtime's
+pinned download staging (nine variables).
 It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings continue through their existing readers. `fast-exact` and `fast`
 are refused by name; they are not aliases
 for `stable` and cannot enable unqualified optimizations.
@@ -46,6 +47,12 @@ Initial coverage is:
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, and Spark2.5 on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
+- Every CUDA model type: `TF_CUDA_PINNED_DOWNLOAD`. Exactly `1` makes `DeviceBuffer.download` copy into reused pinned
+  memory first, then into the caller's slice ([#2102](https://github.com/ashhart/TensorFold/issues/2102)). It is off
+  by default, and only the exact value `1` turns it on. Asynchronous downloads, and family code that calls
+  `cuMemcpyDtoH_v2` directly, are unchanged. The host tests check which destination the copy uses. They don't show
+  that staging avoids the GB10 fault in that issue, which has no deterministic reproducer. Staging adds a host copy to
+  every download.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the
 switch is faster for every shape, device, or workload. The `*_ALL` checks stay `debug`; Flash Next paging remains
