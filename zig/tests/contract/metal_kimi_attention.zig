@@ -77,7 +77,7 @@ pub const Probe = struct {
         };
     }
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .spec = .{ .name = name(p.ctl), .accum = .f32, .depth = depth, .ops = 8, .out = .f32, .served = &shapes }, .ctx = p, .vt = &g.hooks(Probe), .control = switch (p.ctl) {
+        return .{ .spec = .{ .name = name(p.ctl), .accum = .f32, .depth = depth, .ops = 8, .out = .f32, .served = &shapes }, .ctx = p, .vt = &vt, .control = switch (p.ctl) {
             1 => .nonfinite,
             2 => .shapes,
             3 => .sums,
@@ -85,6 +85,9 @@ pub const Probe = struct {
             else => null,
         } };
     }
+
+    const vt = g.hooks(Probe);
+
     fn heads(p: *const Probe) usize {
         return p.shape.n / 512;
     }

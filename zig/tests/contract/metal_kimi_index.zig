@@ -72,7 +72,7 @@ pub const Probe = struct {
             .tiles = .{ .{ .size = 16 }, .{}, .{} },
             .sums = if (p.which == .key) .{ .f16 = 0, .bf16 = 0, .exact = false, .why = "nonlinear BF16 normalization can mask reduced sums; this fixture does not qualify either reduced-precision discriminator" } else .{},
         };
-        return .{ .spec = spec, .ctx = p, .vt = &g.hooks(Probe), .control = switch (p.ctl) {
+        return .{ .spec = spec, .ctx = p, .vt = &vt, .control = switch (p.ctl) {
             1 => .nonfinite,
             2 => .shapes,
             3 => .sums,
@@ -80,6 +80,8 @@ pub const Probe = struct {
             else => null,
         } };
     }
+
+    const vt = g.hooks(Probe);
 
     fn values(p: *Probe, n: usize, rng: std.Random) !rig_.Ref {
         const words = try p.a.alloc(u16, n);

@@ -43,8 +43,10 @@ pub const Probe = struct {
         return if (control) "kimi index control: NaN selected first" else "kimi index select k3_index_topk";
     }
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .spec = .{ .name = name(p.control), .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "NaNs last; signed zeros tie; numeric ties prefer low position; causal selected list is chronological" }, .served = &shapes }, .ctx = p, .vt = &g.hooks(Probe), .control = if (p.control) .nonfinite else null };
+        return .{ .spec = .{ .name = name(p.control), .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "NaNs last; signed zeros tie; numeric ties prefer low position; causal selected list is chronological" }, .served = &shapes }, .ctx = p, .vt = &vt, .control = if (p.control) .nonfinite else null };
     }
+
+    const vt = g.hooks(Probe);
 
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows < 1 or shape.rows > 256 or shape.k < 1 or shape.k > 65536 or shape.n != @min(ix.topk, shape.k)) return false;
