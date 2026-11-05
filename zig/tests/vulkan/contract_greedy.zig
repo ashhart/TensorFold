@@ -79,6 +79,8 @@ pub const Rig = struct {
     }
 
     pub fn reset(r: *Rig) void {
+        // No freed buffer may stay referenced by an open command buffer's records.
+        r.cmds.discard();
         if (r.shell) |b| {
             var s = b;
             s.deinit();
@@ -189,6 +191,8 @@ pub const Greedy = struct {
     }
 
     fn dropDevices(self: *Greedy) void {
+        // No freed pipeline or buffer may stay referenced by an open command buffer's records.
+        self.cmds.discard();
         if (self.greedy) |*x| x.deinit();
         self.greedy = null;
         if (self.pipe) |*p| p.deinit();
@@ -441,7 +445,7 @@ test "the draw arm's fence guard passes a refusal through: only Timeout and InFl
 
 test "the input shell uploads the pattern intact() checks; fresh device memory reads zeros" {
     var rig = Rig{ .a = testing.allocator, .dev = undefined, .cmds = undefined, .staging = undefined, .timeout = 0 };
-    defer rig.deinit();
+    // shellFor is host-only and the rig owns nothing here: no deinit, since reset discards through cmds.
     const data = [_]u8{ 1, 2, 3, 4 };
     const all = try rig.shellFor(&data);
     defer testing.allocator.free(all);
