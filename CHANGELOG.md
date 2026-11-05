@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) runs on CUDA from `mlx_lm.convert` 4-bit checkpoints: per-layer inputs in their own launch and layers 24 to 41 on the caches of 22 and 23, with replies equal across streams and resumes (#1222, #2230).
+
 - Qwen3-Reranker-8B on HIP computes a rerank request's shared start (the system prompt, the instruction and the query) once a pass instead of once a document, with the same responses byte for byte: 16 documents of about 260 tokens take 1.98 s instead of 2.63 s on the dot2 tile and 0.73 s instead of 0.99 s with the gfx12 WMMA tile (opt-in, `--policy matrix=on`), on a Radeon AI PRO R9700. The decide GPU checks now run on the tile and attention path that `TF_QWEN3_MATRIX` and `TF_QWEN3_ATTENTION` choose (#2245). Thanks to @laudney.
 
 ## 1.2.3
@@ -16,8 +18,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next at `--tp 2` on CUDA: each rank computes its own output columns of the dense projections instead of both repeating the whole projection, with the same replies as one GPU. On two GB10s with NVIDIA's NVFP4 release, plain decode is 21-23% faster, drafted decode 9-11% faster at one stream and 76-77% at two, and prompts about 6%. Model memory goes from 45.04 to 42.42 GiB a rank, and a stream's KV at 65,536 tokens from 2.18 to 1.30 GiB (#1784, refs #1754). Thanks to @laudney.
 - Flash Next on CUDA, beside another open stream: a greedy chain stops at 0.6 per draft, and a round with more than four streams drafting drafts greedy chains 6 deep. That fixes #1786's loss at eight greedy streams: on a GB10, MLX 4-bit chat goes from 288.8 to 303.8 tok/s and code from 336.9 to 358.5, FP4 stays level and every reply keeps its bits. `TF_FLASHNEXT_GREEDY_WIDE` sets the width and `TF_FLASHNEXT_SHARED_DRAFTS=0` keeps the alone rule (#2160, part of #1762). Thanks to @Arminova.
 - With `--ssd-experts`, the expert pool counts uses, so an expert used once leaves before one used again. On an M3 Ultra, Flash Next reads about 11% less from disk at 17 and 35 GiB pools, and a mixed workload took 8% less time at 35 GiB, with the same replies (#2209).
-
-- Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) runs on CUDA from `mlx_lm.convert` 4-bit checkpoints: per-layer inputs in their own launch and layers 24 to 41 on the caches of 22 and 23, with replies equal across streams and resumes (#1222, #2230).
 
 - Flash Next on a Mac without tensor units, with `--parallel` above one: a lone reply runs as fast as at `--parallel 1`. On an M3 Ultra, sampled replies are 12-19% faster and greedy ones about 4%, with the same tokens, and a second request joining a reply leaves it unchanged (#2199).
 
