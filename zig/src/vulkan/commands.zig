@@ -18,8 +18,7 @@ pub const Commands = struct {
     recording: bool = false,
     /// Dispatches in the open command buffer; Pipeline.run submits when it reaches half a batch.
     pending: u32 = 0,
-    /// Set by a state-corrupting failure (signaled fence or invalid buffer): every later
-    /// begin and submit refuses with the stored terminal error.
+    /// Set by a state-corrupting failure (signaled fence or invalid buffer): later begin and submit refuse.
     poison: ?Error = null,
 
     pub fn init(dev: *const Device) Error!Commands {
@@ -53,8 +52,7 @@ pub const Commands = struct {
         self.* = undefined;
     }
 
-    /// Drops unsubmitted records without running them; call before freeing any buffer an open
-    /// command buffer may reference. Nothing recorded was ever submitted, so the fence is untouched.
+    /// Drops unsubmitted records unrun. Call before freeing any buffer an open command buffer may reference.
     pub fn discard(self: *Commands) void {
         if (!self.recording) return;
         _ = self.dev.api.vkResetCommandBuffer(self.cmd, 0);
@@ -83,8 +81,7 @@ pub const Commands = struct {
         const api = &self.dev.api;
         const ended = api.vkEndCommandBuffer(self.cmd);
         if (ended != c.VK_SUCCESS) {
-            // The buffer is invalid after a failed end; a caught error must never reach a
-            // recording begin. Poison the stream; orExit ends the process.
+            // Invalid after a failed end: poison the stream so no recording begin reuses it.
             self.poison = error.CommandBufferInvalid;
             self.recording = false;
             if (!builtin.is_test) std.log.err("vulkan: vkEndCommandBuffer returned {d}; the command stream is poisoned", .{ended});
@@ -109,8 +106,7 @@ pub const Commands = struct {
         };
         const reset_done = api.vkResetFences(self.dev.handle, 1, &self.fence);
         if (reset_done != c.VK_SUCCESS) {
-            // The wait succeeded, so the fence stays signaled: resubmitting it is invalid usage.
-            // Poison the stream and classify the failure as terminal; orExit ends the process.
+            // The fence stays signaled after a good wait: poison the stream; orExit ends the process.
             self.poison = error.FencePoisoned;
             if (!builtin.is_test) std.log.err("vulkan: vkResetFences returned {d} after a signaled wait; the command stream is poisoned", .{reset_done});
             return error.FencePoisoned;
@@ -302,8 +298,7 @@ test "a failed reset still clears the batch state, and reuse fails without recor
     try std.testing.expectEqual(@as(usize, 1), Calls.resets);
     try std.testing.expectEqual(false, cmds.recording);
     try std.testing.expectEqual(@as(u32, 0), cmds.pending);
-    // Reuse is fenced: submit is a no-op while nothing is recording, and begin's checked
-    // reset fails before any record, so stale records cannot reach the queue.
+    // Submit is a no-op while not recording, and a failed begin reset adds no record.
     try cmds.submit(0);
     try std.testing.expectEqual(@as(usize, 0), Calls.submits);
     try std.testing.expectError(error.OutOfMemory, cmds.begin());
@@ -347,8 +342,7 @@ test "a vkResetFences failure after a signaled wait poisons the stream terminall
     var cmds: Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = @ptrFromInt(0x4000), .recording = true, .pending = 3 };
     std.testing.log_level = .err; // the poison path logs the reset failure, as it is meant to
     defer std.testing.log_level = .warn;
-    // The wait succeeded, so the fence is signaled; the failed reset must not surface as an
-    // ordinary recoverable error, and no later submit may reuse the signaled fence.
+    // The fence is signaled after a good wait: a failed reset is terminal, and no submit may reuse it.
     try std.testing.expectError(error.FencePoisoned, cmds.submit(0));
     try std.testing.expectEqual(@as(usize, 1), Calls.queues);
     try std.testing.expectEqual(@as(usize, 1), Calls.waits);
@@ -388,8 +382,7 @@ test "a failed vkEndCommandBuffer poisons the stream: a caught error cannot reac
     var cmds: Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = @ptrFromInt(0x4000), .recording = true, .pending = 5 };
     std.testing.log_level = .err; // the poison path logs the end failure, as it is meant to
     defer std.testing.log_level = .warn;
-    // A gate wrapper catches this error and continues; the buffer's state is invalid and
-    // must never be handed out again.
+    // A gate wrapper catches this and continues: the buffer is invalid and must never be handed out again.
     try std.testing.expectError(error.CommandBufferInvalid, cmds.submit(0));
     try std.testing.expectEqual(@as(usize, 1), Calls.ends);
     try std.testing.expectEqual(@as(usize, 0), Calls.queues);
