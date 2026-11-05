@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "common/reduce.cuh"
 #include "common/act.cuh"
+#include "flashnext_exl3_leaf.cuh"
 
 // out[i] = the sum of the sk slices' part[s][i] in order, rounded once (qmm.cu's reduce_kernel): bf16 if out_bf16.
 extern "C" __global__ void fn_sum_slices(const float* __restrict__ part, void* __restrict__ out, int out_bf16,
@@ -564,9 +565,6 @@ extern "C" __global__ void fn_moe_sum(const float* __restrict__ y, const float* 
         acc = __fmaf_rn(y[(static_cast<long long>(r) * slots + k) * d + col], wts[r * slots + k], acc);
     out[static_cast<long long>(r) * d + col] = acc;
 }
-
-#include "flashnext_exl3_leaf.cuh"
-
 // dst [rows, width] (rows dst_pitch apart) = the columns src [rows, width] (src_pitch apart), 16-bit values.
 extern "C" __global__ void fn_copy_cols(const uint16_t* __restrict__ src, long long src_pitch, uint16_t* __restrict__ dst,
                                         long long dst_pitch, int width) {
