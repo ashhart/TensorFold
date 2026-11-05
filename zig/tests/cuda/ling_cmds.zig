@@ -17,6 +17,7 @@ pub const usage =
     \\  ling-exl3-clamp <dir> [layer]   an EXL3 MoE layer's grouped gate-up in Ling's clamp order vs float64
     \\  ling-tp <dir> <out> [--layers a,b] [--steps N] [--prompt N] [--capacity N] [--resume M] [--window W] [--split] [--mtp]
     \\                            greedy rows at TP=1, or TP=2 over TF_LING_RANK/WORLD (--split: the latent caches split)
+    \\  ling-contract             the Ling family's own glue, MLA and routing kernels through kernel-contract gates 1-4
     \\
 ;
 
@@ -55,6 +56,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
         try @import("ling_exl3_clamp.zig").run(gpu, rest);
     } else if (eq(u8, cmd, "ling-tp")) {
         try @import("ling_tp.zig").run(gpu, rest);
+    } else if (eq(u8, cmd, "ling-contract")) {
+        try @import("contract_ling.zig").run(gpu);
     } else return false;
     return true;
 }
