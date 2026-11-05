@@ -187,10 +187,10 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
-    try @import("cuda_bf16_format.zig").options((try E.Geometry.read(gpa, io, dir)).bf16, o.vision != null, o.prompt_int8, o.slide);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     if (kv_host_mod.onHost()) try kv_host_mod.checkDevice(try ctx.attribute(.integrated) != 0, page_tokens, engine_paged);
     const share_snaps = try prefix_mod.sharing();
+    try @import("cuda_bf16_format.zig").options((try E.Geometry.read(gpa, io, dir)).bf16, o.vision != null, o.prompt_int8, o.slide);
     if (kv_host_mod.onHost()) try kv_host_mod.checkShared(share_snaps);
     // shared save marks are page edges and become cold-pass cuts independent of the compute chunk grid
     if (share_snaps > 0 and page_tokens == 0) return error.QwenShareNeedsPages;

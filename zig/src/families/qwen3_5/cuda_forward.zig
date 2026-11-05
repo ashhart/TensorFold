@@ -91,7 +91,6 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         const t0: usize = if (tail) tail_at.? else 0;
         const rows: usize = total - t0;
         try e.norm(g.first + i != 0, l.input_norm, total);
-        try @import("cuda_hidden_trace.zig").emit(e, i, e.h, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
@@ -153,6 +152,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 ai += 1;
             },
         }
+        try @import("cuda_hidden_trace.zig").emit(e, i, e.h, total);
         try e.norm(true, l.post_norm, total);
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
         // the tail: its rows' MLP at buffer row 0, their outputs into r at their own rows
