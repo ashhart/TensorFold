@@ -19,7 +19,7 @@ test "exl3: kv a prompt cut is the same busy or solo, with or without TF_FLASHNE
     hub.cut(&unset, false);
     try std.testing.expectEqual(hub.exl3_chunk, unset.chunk);
     try std.testing.expectEqual(unset.chunk, unset.busy_chunk);
-    var set = Rows{ .chunk = 4096, .busy_chunk = 4096 };
+    var set = Rows{ .chunk = 8192, .busy_chunk = 4096 };
     hub.cut(&set, true);
     try std.testing.expectEqual(@as(usize, 4096), set.chunk);
     try std.testing.expectEqual(set.chunk, set.busy_chunk);

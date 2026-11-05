@@ -49,7 +49,7 @@ pub const exl3_chunk: usize = 1024;
 
 /// One prompt cut whatever else decodes (chunks never depend on batching): busy and solo passes take the same rows.
 pub fn cut(e: anytype, chunk_set: bool) void {
-    if (!chunk_set) e.chunk = exl3_chunk;
+    e.chunk = if (chunk_set) e.busy_chunk else exl3_chunk;
     e.busy_chunk = e.chunk;
 }
 
