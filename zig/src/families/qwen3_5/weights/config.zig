@@ -11,8 +11,16 @@ pub const Width = quant.mlx.Width;
 
 pub const Spec = shared.Spec;
 
-/// Whether the quantization object declares ModelOpt's own formats, whole or per module (`quant_method` modelopt).
-fn isModelOpt(q: std.json.ObjectMap) bool {
+/// Whether the checkpoint declares ModelOpt's own formats, at the root's `quantization_config` or in `q`.
+fn isModelOpt(root: std.json.ObjectMap, q: std.json.ObjectMap) bool {
+    if (root.get("quantization_config")) |qc| if (qc == .object) {
+        if (declaresModelOpt(qc.object)) return true;
+    };
+    return declaresModelOpt(q);
+}
+
+/// The checks themselves: `quant_method`, `producer`, `quant_algo`, and the per-module table.
+fn declaresModelOpt(q: std.json.ObjectMap) bool {
     if (q.get("quant_method")) |m| if (m == .string and std.mem.eql(u8, m.string, "modelopt")) return true;
     if (q.get("producer")) |p| if (p == .object) if (p.object.get("name")) |n| if (n == .string and std.mem.eql(u8, n.string, "modelopt")) return true;
     if (q.get("quant_algo")) |a| if (a == .string) {
@@ -66,7 +74,7 @@ pub const Config = struct {
         const tower = try shared.textTower(doc);
         const sources: quant.Sources = .{ .root = doc, .quantization = try shared.pickObject(doc, tower, "quantization") };
         // the family's own order: ModelOpt's weight-only formats as BF16, an unquantized BF16 checkpoint, then the shared formats
-        const table: quant.Config = if (isModelOpt(sources.quantization))
+        const table: quant.Config = if (isModelOpt(doc, sources.quantization))
             .{ .bf16 = {} }
         else if (try quant.bf16.detect(a, sources)) |b| .{ .bf16 = b } else try quant.detect(a, sources);
         const width: Width = if (table == .bf16) .{ .bits = 16, .group = 0 } else try table.width("");
