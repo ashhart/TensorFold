@@ -12,7 +12,7 @@ const View = vk.tensor.View;
 pub const max_prefill_rows: usize = 32;
 
 // Layers 0-3 keep every activation store in f32; 4+ round stores to bf16 (the validated store policy).
-pub const wide_layers: usize = 4;
+pub const wide_layers: usize = state.wide_layers;
 
 // The activation kind a layer's stores use; pure, host-tested alongside the ring kinds.
 pub fn actKind(layer: usize) vk.tensor.Kind {
@@ -106,7 +106,7 @@ pub const Core = struct {
         c.scratch.reset(mark) catch {};
     }
 
-    // GDN: qkv/z/a/b, conv, gates/recurrence; every store takes the layer's kind; g stays f32, beta bf16.
+    // GDN: qkv/z/a/b, conv, gates/recurrence; every store takes the layer's kind; g stays f32.
     pub fn linearLayer(c: *const Core, x: View, layer: weights.LinearLayer, s: *state.State, slot: usize, rows: usize, r_out: View) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
@@ -122,7 +122,7 @@ pub const Core = struct {
         try c.project(b, x, layer.b);
         const soa = try c.scratch.alloc(act, rows * 3 * dim);
         const g = try c.scratch.alloc(.f32, rows * pinned.linear_heads);
-        const beta = try c.scratch.alloc(.bf16, rows * pinned.linear_heads);
+        const beta = try c.scratch.alloc(act, rows * pinned.linear_heads);
         const conv_out = try c.scratch.alloc(act, rows * pinned.conv_dim);
         const conv_in = try c.scratch.alloc(act, (rows + state.conv_rows) * pinned.conv_dim);
         try vk.orExit(c.acc.gdn.convPrefill(c.cmds, soa, g, beta, conv_out, conv_in, s.convInput(slot), qkv, layer.conv, a, b, layer.a_log, layer.dt_bias, s.convOutput(slot), rows, c.timeout_ns));

@@ -49,7 +49,7 @@ pub const Shaders = struct {
     fast_norm_gated_bf16: []align(4) const u8,
     /// copy_general.comp -DUSE_U16
     copy_u16: []align(4) const u8,
-    /// conv_dw1d.comp default float build: f32 activations for the wide layers
+    /// conv_dw1d.comp -DUSE_BF16 -DACT_F32: f32 activations over the bf16 taps for the wide layers
     conv_dw1d_f32: []align(4) const u8,
     /// gdn_split.comp -DACT_F32
     gdn_split_f32: []align(4) const u8,
@@ -93,8 +93,12 @@ fn groups(count: u64, local: u32, max_x: u32) Error![3]u32 {
     return .{ @min(n, max_x), 1, 1 };
 }
 
+fn wantKind(kind: tensor.Kind, views: []const View) Error!void {
+    for (views) |v| if (v.kind != kind) return error.Invalid;
+}
+
 fn wantBf16(views: []const View) Error!void {
-    for (views) |v| if (v.kind != .bf16) return error.Invalid;
+    try wantKind(.bf16, views);
 }
 
 fn wantF32(views: []const View) Error!void {
@@ -104,7 +108,7 @@ fn wantF32(views: []const View) Error!void {
 // Standalone and composite split outputs are bf16 soa/beta and f32 g (narrow) or f32 soa/beta/g (wide).
 pub fn wantSplitOutputs(out_soa: View, g_out: View, beta_out: View) Error!void {
     if (out_soa.kind != .bf16 and out_soa.kind != .f32) return error.Invalid;
-    if (beta_out.kind != .bf16) return error.Invalid;
+    if (beta_out.kind != out_soa.kind) return error.Invalid;
     try wantF32(&.{g_out});
 }
 
@@ -259,13 +263,15 @@ pub const Gdn = struct {
         try pipe.run(cmds, std.mem.asBytes(&p), try groups(count, pipe.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 
-    // Split applies SiLU and Q/K L2 norm; V passes through as bf16 SoA, gates are f32 g and bf16 beta.
+    // Split applies SiLU and Q/K L2 norm; V passes through as SoA, gates are f32 g and beta in the layer's kind.
     pub fn split(m: *Gdn, cmds: *Commands, out_soa: View, g_out: View, beta_out: View, conv_out: View, a: View, b: View, a_log: View, dt: View, tokens: u64, timeout_ns: u64) Error!void {
-        try wantBf16(&.{ conv_out, a, b, dt, out_soa, beta_out });
+        const variant = try splitVariant(conv_out, out_soa);
+        try wantKind(conv_out.kind, &.{ a, b, beta_out });
+        try wantBf16(&.{dt});
         try wantF32(&.{ a_log, g_out });
         const plan = try splitPlan(conv_out.elements, out_soa.elements, g_out.elements, beta_out.elements, a.elements, b.elements, a_log.elements, dt.elements, tokens);
         try refuseOverlap(&.{ out_soa, g_out, beta_out }, &.{ conv_out, a, b, a_log, dt });
-        const pipe = if ((try splitVariant(conv_out, out_soa)) == .f32) &m.split_f32 else &m.split_bf16;
+        const pipe = if (variant == .f32) &m.split_f32 else &m.split_bf16;
         try pipe.bind(&.{
             conv_out.bind(), a.bind(),     b.bind(),        a_log.bind(), dt.bind(),
             out_soa.bind(),  g_out.bind(), beta_out.bind(),
@@ -285,13 +291,8 @@ pub const Gdn = struct {
     pub fn convPrefill(m: *Gdn, cmds: *Commands, out_soa: View, g_out: View, beta_out: View, conv_out: View, conv_input: View, conv_state_in: View, qkv: View, weight: View, a: View, b: View, a_log: View, dt: View, conv_state_out: View, tokens: u64, timeout_ns: u64) Error!void {
         const variant = try splitVariant(conv_out, out_soa);
         const wide = variant == .f32;
-        if (wide) {
-            try wantF32(&.{ conv_out, conv_input, conv_state_in, qkv, weight, conv_state_out, out_soa });
-            try wantBf16(&.{beta_out});
-        } else {
-            try wantBf16(&.{ conv_out, conv_input, conv_state_in, qkv, weight, conv_state_out, out_soa, beta_out });
-        }
-        try wantBf16(&.{ a, b, dt });
+        try wantKind(conv_out.kind, &.{ conv_input, conv_state_in, qkv, conv_state_out, beta_out, a, b });
+        try wantBf16(&.{ weight, dt });
         try wantF32(&.{ a_log, g_out });
         const plan = try convPrefillPlan(conv_input.elements, conv_state_in.elements, qkv.elements, weight.elements, conv_state_out.elements, tokens);
         try refuseOverlap(&.{ conv_input, conv_state_out }, &.{ conv_state_in, qkv, weight });
@@ -338,7 +339,7 @@ pub const Gdn = struct {
 
     // Preserve the omitted contract, precision, and host-interface facts from the original comment.
     pub fn prefillRecur(m: *Gdn, cmds: *Commands, soa: View, g: View, beta: View, h0: View, y: View, hf: View, snap: ?View, tokens: u64, chunk: u64, timeout_ns: u64) Error!void {
-        try wantBf16(&.{beta});
+        if (beta.kind != soa.kind) return error.Invalid;
         try wantF32(&.{ g, h0, hf });
         if (snap) |s| try wantF32(&.{s});
         // the scan's activations: soa and y share bf16 (narrow) or f32 (wide layers)
@@ -494,6 +495,10 @@ test "wantSplitOutputs requires bf16 soa/beta and f32 g on real View kinds" {
     try testing.expectError(error.Invalid, wantSplitOutputs(soa, g, beta_f32));
     const soa_u16 = try View.init(&buf, .u16, 0, words / 2);
     try testing.expectError(error.Invalid, wantSplitOutputs(soa_u16, g, beta));
+    // the wide layers: f32 soa takes an f32 beta (the shader stores floats) and refuses a bf16 one
+    const soa_f32 = try View.init(&buf, .f32, 0, words / 4);
+    try wantSplitOutputs(soa_f32, g, beta_f32);
+    try testing.expectError(error.Invalid, wantSplitOutputs(soa_f32, g, beta));
 }
 
 test "gateReferenceF64 behaves like exp(-exp(A_log) softplus) and a sigmoid" {
