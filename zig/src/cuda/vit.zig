@@ -1,4 +1,4 @@
-//! Vision towers' shared glue (vit.cu), torch Linears through cuBLASLt, and full attention over a picture's rows.
+//! Vision and audio towers' shared glue (vit.cu), torch Linears through cuBLASLt, and full attention over their rows.
 const std = @import("std");
 const kernels = @import("kernels.zig");
 const module = @import("module.zig");
@@ -34,6 +34,8 @@ pub const Kernels = struct {
     unshuffle_fn: module.Function,
     cast_fn: module.Function,
     position_fn: module.Function,
+    conv_cols_fn: module.Function,
+    conv_flatten_fn: module.Function,
 
     pub fn load(d: *const Driver) !Kernels {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -52,6 +54,8 @@ pub const Kernels = struct {
             .unshuffle_fn = try mod.function("tf_vit_unshuffle"),
             .cast_fn = try mod.function("tf_vit_cast"),
             .position_fn = try mod.function("tf_vit_position_add"),
+            .conv_cols_fn = try mod.function("tf_vit_conv_cols"),
+            .conv_flatten_fn = try mod.function("tf_vit_conv_flatten"),
         };
     }
 
@@ -153,6 +157,25 @@ pub const Kernels = struct {
         a.add(y);
         a.add(@as(i64, @intCast(count)));
         try go(k.cast_fn, s, blocks(count, threads), 1, &a);
+    }
+
+    /// y [n fo to, ld]: the 3x3 stride-2 pad-1 conv taps of x [n, fi, ti, c] (channels last), zero past 9 c columns.
+    pub fn convCols(k: *const Kernels, s: Stream, x: u64, y: u64, n: usize, fi: usize, ti: usize, c: usize, ld: usize) !void {
+        if (ld < 9 * c or fi == 0 or ti == 0) return error.RowShape;
+        var a: Args = .{};
+        a.add(x);
+        a.add(y);
+        for ([_]usize{ fi, ti, c, ld }) |v| a.add(int(v));
+        try go(k.conv_cols_fn, s, n * ((fi - 1) / 2 + 1) * ((ti - 1) / 2 + 1), blocks(ld, threads), &a);
+    }
+
+    /// y [n t, c f] = x [n, f, t, c] with each row's (f, c) block transposed: torch's flatten of a [c, f] conv row.
+    pub fn convFlatten(k: *const Kernels, s: Stream, x: u64, y: u64, n: usize, f: usize, t: usize, c: usize) !void {
+        var a: Args = .{};
+        a.add(x);
+        a.add(y);
+        for ([_]usize{ f, t, c }) |v| a.add(int(v));
+        try go(k.conv_flatten_fn, s, n * t, 1, &a);
     }
 
     /// o [h * w, c] = bf16(x + bf16(the table [side * side, c] resized to the longer side's square, y < h, x < w)).
@@ -272,8 +295,9 @@ const Full = struct {
     }
 };
 
-/// Full attention by head dim: SigLIP2's 72, RADIO's 80 (full_kernel's bits in one barrier a tile), MOSS-Image's 128.
+/// Full attention by head dim: Qwen3-ASR's 64, SigLIP2's 72, RADIO's 80 (full_kernel's bits), MOSS-Image's 128.
 const fulls = [_]Full{
+    .{ .dim = 64, .warps = 8 },
     .{ .dim = 72, .warps = 8, .slots = 8 },
     .{ .dim = 80, .warps = 8 },
     .{ .dim = 128, .warps = 8 },

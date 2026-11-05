@@ -1,4 +1,4 @@
-// Vision towers' glue (cuda/vit.zig; LFM2-VL's SigLIP2, RADIO): LayerNorm, Linear epilogues, activations, unshuffle.
+// Vision and audio towers' glue (cuda/vit.zig): LayerNorm, Linear epilogues, activations, unshuffle, conv taps.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -88,6 +88,35 @@ extern "C" __global__ void __launch_bounds__(NT) tf_vit_unshuffle(const __nv_bfl
         const int q = e / C;
         const int64_t src = static_cast<int64_t>(2 * i + q / 2) * w + 2 * j + q % 2;
         Y[static_cast<int64_t>(o) * 4 * C + e] = X[src * C + e % C];
+    }
+}
+
+// Block (row (n, fo, to), columns): 3x3 stride-2 pad-1 taps of X [n][fi][ti][c], column ci 9 + kh 3 + kw; 0 past 9 c.
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_conv_cols(const __nv_bfloat16* __restrict__ X, __nv_bfloat16* __restrict__ Y, int fi,
+                                                                      int ti, int c, int ld) {
+    const int fo = (fi - 1) / 2 + 1, to = (ti - 1) / 2 + 1;
+    const int64_t r = blockIdx.x;
+    const int64_t n = r / (static_cast<int64_t>(fo) * to);
+    const int f = static_cast<int>(r / to % fo), t = static_cast<int>(r % to);
+    const int j = blockIdx.y * NT + threadIdx.x;
+    if (j >= ld) return;
+    __nv_bfloat16 v = __float2bfloat16_rn(0.0f);
+    if (j < 9 * c) {
+        const int ci = j / 9, kh = j % 9 / 3, kw = j % 3;
+        const int sf = 2 * f - 1 + kh, st = 2 * t - 1 + kw;
+        if (sf >= 0 && st >= 0 && sf < fi && st < ti) v = X[((n * fi + sf) * ti + st) * c + ci];
+    }
+    Y[r * ld + j] = v;
+}
+
+// Block a row (n, t): Y [n][t][c * f + fb] = X [n][fb][t][c], a conv's channels-last rows as torch flattens [c][f].
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_conv_flatten(const __nv_bfloat16* __restrict__ X, __nv_bfloat16* __restrict__ Y, int f,
+                                                                         int t, int c) {
+    const int64_t row = blockIdx.x, n = row / t;
+    const int tt = static_cast<int>(row % t);
+    for (int e = threadIdx.x; e < c * f; e += NT) {
+        const int ci = e / f, fb = e % f;
+        Y[row * c * f + e] = X[((n * f + fb) * t + tt) * c + ci];
     }
 }
 
