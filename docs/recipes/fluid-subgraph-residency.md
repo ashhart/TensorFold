@@ -16,6 +16,17 @@ Readers require macOS `F_NOCACHE` and use positional reads directly into shared 
 
 Decode prefetch uses the next layer's own router on the current state. One bounded worker reads predictions into unleased slots behind submitted expert compute. The later real router remains authoritative. A wrong prediction wastes reads and cannot change routes or output. Prompt chunks load each layer's complete demand union once per chunk. Streaming chunks use one command stream so host storage cuts cannot wait on an unsubmitted staggered sibling; concurrent request windows and MTP still use the lane core.
 
+Loading doesn't bring the whole expert set into memory: the peak stays about 2 GiB above where memory settles. Flash Next MLX 4-bit MTP on an M3 Ultra, `--context 65536 --parallel 1`, physical footprint sampled every 250 ms through load, a short reply, a 16,000-token prompt and a 512-token reply, one run each, with the same reply bytes in every row:
+
+| Flags | After load | Peak | 16K prompt and 32 tokens |
+| --- | --- | --- | --- |
+| `--ssd-experts 8 --ple-on-ssd` | 36.0 GiB | 37.8 GiB | 49.1 s |
+| `--ssd-experts 17 --ple-on-ssd` | 45.0 GiB | 46.8 GiB | 47.8 s |
+| `--ssd-experts 8` | 65.9 GiB | 67.6 GiB | 44.4 s |
+| `--ssd-experts 17` | 74.9 GiB | 76.9 GiB | 34.9 s |
+| `--ssd-experts 35` | 92.9 GiB | 94.9 GiB | 35.9 s |
+| Everything in memory | 129.7 GiB | 131.6 GiB | 11.2 s |
+
 ## Bound read overhead
 
 The demand path deduplicates route IDs and reserves missing experts in logical order. Adjacent stored experts merge only when both the source bytes and their destination slots are contiguous. A request is at most 4 MiB. The reader queues at most nine requests through macOS asynchronous IO, drains every submitted request on errors, and checks each touched file's length before and after the batch. Queue pressure falls back to positional reads after submitted work drains. Cache bypass remains required.
