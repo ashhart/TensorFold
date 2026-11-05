@@ -78,15 +78,21 @@ jobs:
       - name: Let a restored cache fit this checkout
         shell: bash
         run: zig run -OReleaseFast -mcpu=baseline tools/zig/zig_cache_restat.zig -- .zig-cache "$(dirname "$(command -v zig)")/lib" || echo "::warning::zig_cache_restat failed, so this job rebuilds and reruns more than it needs to"
-      # The restat tool's own test, on main and on a pull request that changes the tool, this workflow or Zig's version.
+      # The restat tool's own test, when a change touches the tool, this workflow or Zig's version.
       - name: Restored cache regressions
         shell: bash
         env:
           BASE_REF: ${{ github.base_ref }}
+          PUSH_BASE: ${{ github.event.before }}
         run: |
-          if [ -n "$BASE_REF" ] && git diff --quiet "$(git merge-base HEAD "origin/$BASE_REF")" HEAD -- \
+          if [ -n "$BASE_REF" ]; then
+            base=$(git merge-base HEAD "origin/$BASE_REF")
+          else
+            base=$(git rev-parse "$PUSH_BASE^{commit}" 2> /dev/null || true)
+          fi
+          if [ -n "$base" ] && git diff --quiet "$base" HEAD -- \
               tools/zig/zig_cache_restat.zig tools/zig/zig_cache_restat_test.py .github/workflows/no-gpu.yml .zig-version build.zig.zon; then
-            echo "None of the files it covers changed; main runs it."
+            echo "None of the files it covers changed."
             exit 0
           fi
           python3 -m unittest discover -s tools/zig -p zig_cache_restat_test.py -v
