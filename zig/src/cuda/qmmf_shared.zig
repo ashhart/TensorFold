@@ -4,15 +4,15 @@ const launch = @import("launch.zig");
 const Stream = @import("stream.zig").Stream;
 pub const symbols = [4][:0]const u8{ "tf_qmmf_shared16_half", "tf_qmmf_shared16", "tf_qmmf_shared32", "tf_qmmf_shared64" };
 
-/// Keep the existing geometry and refuse products that require a K-slice reduction.
-pub fn eligible(l: q.Lane, m: usize, w: q.Weight) bool {
+/// The launch takes it: BF16, one K slice, a shape and strides (`ldx` in, `ldy` out) it addresses; else fall back.
+pub fn eligible(l: q.Lane, m: usize, w: q.Weight, ldx: usize, ldy: usize) bool {
+    if (m == 0 or w.n == 0 or w.k == 0 or w.k % q.group != 0 or w.npad < w.n or w.npad % 128 != 0) return false;
+    if (ldy < w.n or ldx < w.k or (m > 1 and ldx % 8 != 0)) return false; // rows of x load as 16-byte copies
     return w.mode == .bf16 and q.planFor(m, w, l.clusters).sk == 1;
 }
 
 pub fn matmulF32Strided(l: q.Lane, s: Stream, x: u64, ldx: usize, m: usize, w: q.Weight, y: u64, ldy: usize) !void {
-    if (!eligible(l, m, w)) return error.StridedLaneNotSupported;
-    if (m == 0 or w.n == 0 or w.k == 0 or w.k % q.group != 0 or w.npad < w.n or w.npad % 128 != 0 or
-        ldy < w.n or ldx < w.k) return error.BadStridedLaneShape;
+    if (!eligible(l, m, w, ldx, ldy)) return error.StridedLaneNotSupported;
     const bm: usize = q.bucket(m);
     const rows = (m + bm - 1) / bm;
     const half = bm == 16 and rows * ((w.n + 63) / 64) < l.half_below;
@@ -68,10 +68,32 @@ test "shared down stride: geometry, output address and stride match the contiguo
     try std.testing.expectError(error.StridedLaneNotSupported, l.matmulF32Strided(s, 12, 640, 64, other, 1000, 28160));
     other = w;
     other.k = 6144;
-    try std.testing.expect(!eligible(l, 64, other));
-    try std.testing.expectError(error.BadStridedLaneShape, l.matmulF32Strided(s, 12, 640, 64, w, 1000, 2559));
+    try std.testing.expect(!eligible(l, 64, other, 6144, 28160));
     other = w;
     other.sk = 4;
-    try std.testing.expect(!eligible(l, 64, other));
+    try std.testing.expect(!eligible(l, 64, other, 640, 28160));
     try std.testing.expectError(error.StridedLaneNotSupported, l.matmulF32Strided(s, 12, 640, 64, other, 1000, 28160));
+    // every shape the launch cannot address is refused by eligible, before any launch
+    try std.testing.expect(eligible(l, 64, w, 640, 28160));
+    var npad_short = w;
+    npad_short.npad = 2432;
+    var npad_odd = w;
+    npad_odd.npad = 2561;
+    var k_odd = w;
+    k_odd.k = 641;
+    const bad = [_]struct { m: usize, w: q.Weight, ldx: usize, ldy: usize }{
+        .{ .m = 0, .w = w, .ldx = 640, .ldy = 28160 },
+        .{ .m = 64, .w = npad_short, .ldx = 640, .ldy = 28160 },
+        .{ .m = 64, .w = npad_odd, .ldx = 640, .ldy = 28160 },
+        .{ .m = 64, .w = k_odd, .ldx = 641, .ldy = 28160 },
+        .{ .m = 64, .w = w, .ldx = 639, .ldy = 28160 },
+        .{ .m = 64, .w = w, .ldx = 640, .ldy = 2559 },
+        .{ .m = 2, .w = w, .ldx = 641, .ldy = 28160 },
+    };
+    for (bad) |c| {
+        Mock.id = 0;
+        try std.testing.expect(!eligible(l, c.m, c.w, c.ldx, c.ldy));
+        try std.testing.expectError(error.StridedLaneNotSupported, l.matmulF32Strided(s, 12, c.ldx, c.m, c.w, 1000, c.ldy));
+        try std.testing.expectEqual(@as(usize, 0), Mock.id);
+    }
 }

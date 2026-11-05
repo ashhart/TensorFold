@@ -323,4 +323,17 @@ test "shared expert composition keeps whole direct slots and split full-K output
             } else try std.testing.expectEqual(@as(usize, 0x600), last.f);
         }
     };
+    // a down weight the strided launch cannot address keeps the contiguous product and the scatter, without an error
+    r.c.rank = 0;
+    var native: @import("cuda_mixed_experts.zig").Owned = undefined;
+    native.rank = 0;
+    native.split_shared = false;
+    for (0..3) |i| native.shared[i].native = cuda.modelopt.bf16Weight(0x2000, if (i == 2) dims else wt.moe_w, if (i == 2) wt.moe_w else dims);
+    native.shared[2].native.?.npad += 1;
+    var self: Self = .{ .k = &r.k, .s = &r.s, .m = r.pass(64, true).m, .stream = .{ .d = &r.d, .handle = null }, .tri = .{ .own = &glue } };
+    Rec.n = 0;
+    try @import("cuda_shared_split.zig").run(&self, &native, 64);
+    try std.testing.expectEqual(@as(usize, 0x600), recorded()[Rec.n - 1].f);
+    try std.testing.expectEqual(qmmf_id, recorded()[Rec.n - 2].f);
+    for (recorded()) |c| try std.testing.expect(c.f != strided_id);
 }
