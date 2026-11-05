@@ -4,6 +4,7 @@ const std = @import("std");
 test {
     _ = @import("config.zig");
     _ = @import("config_test.zig");
+    _ = @import("rope.zig");
     _ = @import("names.zig");
     _ = @import("names_test.zig");
     _ = @import("tiny_test.zig");

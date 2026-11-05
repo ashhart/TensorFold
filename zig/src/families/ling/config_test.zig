@@ -119,7 +119,9 @@ test "refusals: one edit each, with the reason" {
     try refused("\"use_kda_lora\": false", "\"use_kda_lora\": true", error.KdaLora, "no_kda_lora");
     try refused("\"kda_safe_gate\": true", "\"kda_safe_gate\": false", error.KdaGate, "kda_safe_gate");
     try refused("\"head_wise\"", "\"element_wise\"", error.GateGranularity, "element_wise");
-    try refused("\"rope_scaling\": null", "\"rope_scaling\": {\"type\": \"yarn\", \"factor\": 4}", error.RopeScaling, "rope_scaling");
+    try refused("\"rope_scaling\": null", "\"rope_scaling\": {\"type\": \"yarn\", \"factor\": 4}", error.RopeScaling, "original_max");
+    try refused("\"rope_scaling\": null", "\"rope_scaling\": {\"rope_type\": \"linear\", \"factor\": 4}", error.RopeScaling, "type linear");
+    try refused("\"rope_scaling\": null", "\"rope_scaling\": {\"rope_type\": \"yarn\", \"factor\": 2, \"original_max_position_embeddings\": 65536}", error.RopeScaling, "differs");
     try refused("\"n_group\": 8", "\"n_group\": 7", error.Routing, "groups");
     try refused("\"topk_group\": 4", "\"topk_group\": 9", error.Routing, "groups");
     try refused("\"num_experts\": 512", "\"num_experts\": 1024", error.Routing, "glue.select");
@@ -136,6 +138,19 @@ test "refusals: one edit each, with the reason" {
     try refused("\"eos_token_id\": 156895", "\"eos_token_id\": 157184", error.BadConfig, "eos_token_id");
     try refused("\"num_hidden_layers\": 72", "\"num_hidden_layers\": 73", error.LimitList, "72 entries for 73");
     try refused("\"hidden_size\": 4096", "\"hidden_sz\": 4096", error.BadConfig, "hidden_size");
+}
+
+test "SGLang's 1M override parses to yarn factor 4 over 262144; partial_rotary_factor is read past (64 columns turn)" {
+    const json = try edit("\"rope_scaling\": null", "\"rope_scaling\": {\"rope_type\": \"yarn\", \"factor\": 4.0, \"original_max_position_embeddings\": 262144, \"rope_theta\": 6000000, \"partial_rotary_factor\": 0.5}");
+    defer t.allocator.free(json);
+    var why: config.Why = .{};
+    var c = try config.parse(t.allocator, json, &why);
+    try t.expectEqual(@as(f64, 4), c.rope_scaling.?.factor);
+    try t.expectEqual(@as(u32, 262144), c.rope_scaling.?.original);
+    try t.expectEqual(@as(?@import("rope.zig").Yarn, null), c.yarn);
+    const plain = c.smScale();
+    c.yarn = c.rope_scaling;
+    try t.expectEqual(plain, c.smScale()); // no mscale_all_dim: the softmax scale stays qk_head_dim^-0.5
 }
 
 test "optional keys: no quantization reads bf16, a null q_lora_rank one q_proj" {
@@ -191,8 +206,16 @@ test "hf_quant_config.json's NVFP4 block when config.json has none; groups other
     try t.expectEqual(config.Quant.bf16, (try config.parseWith(t.allocator, json, null, &why)).quant);
 }
 
-test "EXL3 is refused naming #832; a glob matches whole names only" {
-    try refused("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\"", error.Exl3, "#832");
+test "an EXL3 pack parses to quant exl3, an unknown codebook is refused; a glob matches whole names only" {
+    {
+        const json = try edit("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\"");
+        defer t.allocator.free(json);
+        var why: config.Why = .{};
+        const c = try config.parse(t.allocator, json, &why);
+        try t.expectEqual(config.Quant.exl3, c.quant);
+        try t.expectEqual(@as(u32, 0), c.plain_n);
+    }
+    try refused("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\", \"codebook\": \"e8p\"", error.Exl3, "codebook e8p");
     try t.expect(config.glob("*.mlp.gate", "model.layers.4.mlp.gate"));
     try t.expect(!config.glob("*.mlp.gate", "model.layers.4.mlp.gate_proj"));
     try t.expect(config.glob("model.layers.*.attention*", "model.layers.12.attention.q_proj"));
