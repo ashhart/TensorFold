@@ -71,9 +71,11 @@ test {
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
     _ = @import("speech.zig");
+    _ = @import("images_generations.zig");
     _ = @import("drama_cfg.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_cfg_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("images_generations_test.zig"); // over a Unix socket pair
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_lane_release_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_speakers_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_sampling_test.zig");
