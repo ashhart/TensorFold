@@ -519,6 +519,7 @@ pub const Engine = struct {
 pub const Lone = struct {
     ctx: *anyopaque,
     sampled: bool = false, // it drives sampled streams too
+    plain: bool = false, // it drives streams with drafts off too
     logprobs: bool = false, // it gives each token its logprob row too
     structures: bool = false, // it masks each window's rows by the stream's grammar too
     images: bool = true, // it takes image requests too (false: they stay in the lane core)
