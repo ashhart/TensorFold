@@ -113,6 +113,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-projection-cases", "Build real-input production projection precision replay", "zig/tests/qwen27/projection_cases.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal } });
     _ = program(b, "tf-qwen27-dflash-run", "Build the explicit draft prototype and its plain comparison on real weights", "zig/tests/qwen27/dflash_run.zig", target, true, family);
     const engine_only: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } };
+    _ = program(b, "tf-qwen27-pages-resume", "Build kept states saved, restored and moved through KV pages against main's, no models", "zig/tests/qwen27/pages_resume.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-empty-keep", "Build shared empty/full keep state checks", "zig/tests/qwen27/empty_keep.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-synthetic", "Build bounded synthetic native hybrid chunk checks, no models", "zig/tests/qwen27/synthetic.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-dflash-synthetic", "Build model-free native draft context/forward/tree check", "zig/tests/qwen27/dflash_runtime.zig", target, false, engine_only);
