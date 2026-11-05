@@ -312,10 +312,10 @@ fn memoryMode(gpu: Gpu, dir: []const u8) !void {
     std.debug.print("RESULT memory lm_head {d:.3} GiB a rank replicated; split: {d:.3} GiB a rank\n", .{ gib(head_bytes), gib(head_bytes / 2) });
     const prompt = flash.prompt;
     const window: usize = 200_000;
-    const seq = prompt.seqBytes(window);
-    const kv = wt.attn_n * window * 2 * prompt.kv_row_bytes;
+    const seq = prompt.seqBytes(window, .full);
+    const kv = wt.attn_n * window * 2 * flash.Heads.full.kvRow();
     const kv8 = kv / 2 + wt.attn_n * window * 2 * wt.kv_heads * 4; // int8 rows plus an fp32 scale a row and head
-    const draft = flash.mtp.Draft.bytes(window + flash.mtp.max_rows, 1, flash.prompt.batch.default_chunk);
+    const draft = flash.mtp.Draft.bytes(window + flash.mtp.max_rows, 1, flash.prompt.batch.default_chunk, .full);
     const scratch = flash.prompt.batch.Scratch.bytes(flash.prompt.batch.default_chunk, .{ .format = .exl3 });
     std.debug.print("RESULT memory a sequence at {d} tokens: {d:.3} GiB (bf16 K/V {d:.3} GiB of it; int8 K/V would be {d:.3}); MTP draft cache {d:.3} GiB; pass scratch at chunk {d}: {d:.3} GiB\n", .{ window, gib(seq), gib(kv), gib(kv8), gib(draft), flash.prompt.batch.default_chunk, gib(scratch) });
     check.pass("memory: per-rank placement read from the pack's headers", .{});
