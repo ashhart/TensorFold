@@ -229,6 +229,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   writes, and `zig build test-tp-check` runs its tests (#2321, part of #1236). Thanks to @ThinkOffApp.
 - Tests: `core/lanes` gains a shared depth sweep any core drafter can run, a fresh run at each depth from 1 to the block and one zig-zag run, each checked against a reference pass, so an adapter that ignores its hold depth or drafts past its block fails (#2729, part of #2460). Thanks to @jschmied and @EugeneClaw.
 
+- GLM on CUDA: `TF_GLM_GRAPHS=1` (opt-in) replays verify windows as CUDA graphs on each rank, keyed on every host value their launches take, with replies equal to eager. At TP=2 on two GB10s, decode is 3.3% to 3.6% faster at 1, 2 and 4 streams, and MemAvailable runs about 1.4 GiB lower (#2279, part of #1490). Thanks to @atakann.
 - CUDA: `TF_DSPINE_WINDOW=N` (16 to 8,192, opt-in) narrows a Qwen3.8-27B DSpine drafter's sliding window to N rows without editing the checkpoint; a value outside the block size and the checkpoint's own window is refused when the drafter opens, and unset keeps the checkpoint's window. Drafts are verified, so replies are unchanged (#2705, after #2633). Thanks to @jschmied.
 
 - Metal: Spark2.5's and Llama's bf16 decode matvec kernels come from one source, with the same compiled code; Qwen3.8-27B saved prompt states on Metal are recomputed once after upgrading (#2792, part of #2251). Thanks to @jschmied.
