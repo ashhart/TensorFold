@@ -93,27 +93,27 @@ fn scenario(a: std.mem.Allocator, e: *E.Engine, lead: *S.Lead, out: *std.ArrayLi
     for (other) |*t| t.* = rnd.intRangeLessThan(u32, 1000, 60000);
     var toks: std.ArrayList(u32) = .empty;
     // stream 1's prompt in two chunks, then stream 2's beside it
-    try lead.step(&.{.{ .id = 1, .op = .open, .rows = 4096 }}, prompt[0..4096], .last);
+    try lead.step(&.{.{ .id = 1, .op = .open, .rows = 4096 }}, prompt[0..4096], .prompt);
     try out.appendSlice(a, std.mem.sliceAsBytes(lead.cache(1).?.logits));
-    try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 904 }}, prompt[4096..], .last);
+    try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 904 }}, prompt[4096..], .prompt);
     try out.appendSlice(a, std.mem.sliceAsBytes(lead.cache(1).?.logits));
     var t1 = argmax(lead.cache(1).?.logits);
     try toks.append(a, t1);
     var kept1: u32 = 0; // stream 1's previous window: no window after a prompt chunk
     for (0..8) |_| {
-        try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 1, .accepted = kept1 }}, &.{t1}, .logits);
+        try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 1, .accepted = kept1 }}, &.{t1}, .window);
         try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(0)));
         t1 = argmax(e.rowLogits(0));
         try toks.append(a, t1);
         kept1 = 1;
     }
-    try lead.step(&.{.{ .id = 2, .op = .open, .rows = 300 }}, other, .last);
+    try lead.step(&.{.{ .id = 2, .op = .open, .rows = 300 }}, other, .prompt);
     try out.appendSlice(a, std.mem.sliceAsBytes(lead.cache(2).?.logits));
     var t2 = argmax(lead.cache(2).?.logits);
     var kept2: u32 = 0;
     for (0..8) |_| {
         const both = [_]S.Entry{ .{ .id = 1, .op = .@"continue", .rows = 1, .accepted = kept1 }, .{ .id = 2, .op = .@"continue", .rows = 1, .accepted = kept2 } };
-        try lead.step(&both, &.{ t1, t2 }, .logits);
+        try lead.step(&both, &.{ t1, t2 }, .window);
         for (0..2) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
         t1 = argmax(e.rowLogits(0));
         t2 = argmax(e.rowLogits(1));
@@ -126,7 +126,7 @@ fn scenario(a: std.mem.Allocator, e: *E.Engine, lead: *S.Lead, out: *std.ArrayLi
     for (0..4) |w| {
         var win: [5]u32 = @splat(t1);
         for (win[cut[w]..]) |*d| d.* = rnd.intRangeLessThan(u32, 1000, 60000);
-        try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 5, .accepted = kept1 }}, &win, .logits);
+        try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 5, .accepted = kept1 }}, &win, .window);
         var take: u32 = 1;
         while (take < 5 and argmax(e.rowLogits(take - 1)) == win[take]) take += 1;
         for (0..5) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
@@ -136,10 +136,10 @@ fn scenario(a: std.mem.Allocator, e: *E.Engine, lead: *S.Lead, out: *std.ArrayLi
         std.debug.print("window {d}: {d} of 5 rows kept\n", .{ w, kept1 });
         if (w == 2) t1 = win[0];
     }
-    try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 1, .accepted = kept1 }}, &.{t1}, .logits);
+    try lead.step(&.{.{ .id = 1, .op = .@"continue", .rows = 1, .accepted = kept1 }}, &.{t1}, .window);
     try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(0)));
     try toks.append(a, argmax(e.rowLogits(0)));
-    try lead.step(&.{ .{ .id = 1, .op = .close }, .{ .id = 2, .op = .close } }, &.{}, .logits);
+    try lead.step(&.{ .{ .id = 1, .op = .close }, .{ .id = 2, .op = .close } }, &.{}, .window);
     return toks.items;
 }
 
