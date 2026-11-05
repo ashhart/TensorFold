@@ -81,6 +81,9 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   a slot for each of the n kept states' other parts in the prompt cache, as many as the cache holds; the rest of the
   cache goes to the pool's pages. `--prompt-cache-gib N` bounds them: the startup line names the slots, and when the
   cache holds fewer than n, how many it holds and the `--prompt-cache-gib` that holds all n.
+- `TF_GLM_GRAPHS=1` on every rank (opt-in) replays the verify windows as CUDA graphs, with replies equal to eager. On
+  two GB10s at TP=2, decode went from 70.1 to 72.4 tok/s at one stream and from 133.5 to 138.2 at four, with about
+  1.4 GiB less available memory a rank (#2279).
 - `TF_GLM_CHUNK_SOLO=4096` on every rank (opt-in) lets a prompt pass take 4,096 rows while no other stream is decoding.
   Unset or `2048`, every pass takes 2,048 rows and nothing extra is held. See [Prompt chunk size](#prompt-chunk-size).
 - `TF_GLM_REQUEST_STARTS=1` on rank 0 (opt-in, off by default) cuts each prompt pass at the request's message starts
