@@ -388,7 +388,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const streams = counted.streams;
     const layout = counted.layout;
     const paged = counted.paged;
-    if (!try kv_pages.attach(F, a, loaded.ctx, paged, problem)) return null;
+    if (!try kv_pages.attach(F, a, loaded.ctx, paged, problem) or !try drafted.price(F, a, io, &g.ctx, o.dir, loaded.ctx, &served, problem)) return null;
     served.reserve(streams) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot reserve {d} streams' caches at a {d}-token window ({s}): serve fewer with --parallel, or lower --context", .{ streams, window, @errorName(e) });
         return null;

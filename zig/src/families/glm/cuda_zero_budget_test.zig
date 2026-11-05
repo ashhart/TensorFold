@@ -58,6 +58,7 @@ test "shared head costs: GLM CUDA MTP is unpriced and DFlash2 already uses node 
     b.x.e = &e;
     b.alone = false;
     b.mtp_confidence = null;
+    b.costs = null;
     for ([_]bool{ false, true }) |block| {
         e.drafter = if (block) @ptrFromInt(16) else null;
         const m = b.facts();

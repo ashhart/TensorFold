@@ -18,7 +18,7 @@ const kda_block = @import("cuda_kda_block.zig");
 /// A prompt chunk's rows (decode.PREFILL_ROWS).
 pub const prefill_rows = 2048;
 /// A decode window's rows (Engine's max_rows).
-pub const window_rows = 8;
+pub const window_rows = 32;
 /// Prompts one prompt pass takes together (cuda_prompts): a prompt buffer's logits rows, one a prompt.
 pub const prompt_heads = 16;
 /// The context the buffers' dense attention partials reach (Buffers' min(capacity, 2560)).
@@ -177,16 +177,16 @@ pub const Buffers = struct {
     part: u64, // fp32 [rows][dims]: this rank's partial rows a split exchange sends from
 
     pub fn init(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize) !Buffers {
-        return make(d, w, rows, prefill, capacity, rows);
+        return make(d, w, rows, prefill, capacity, rows, prefill);
     }
 
     /// A shared window's scratch: `rows` rows of several streams, each one's attention and KDA chain on `window_rows`.
     pub fn initShared(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, capacity: usize) !Buffers {
-        return make(d, w, rows, false, capacity, window_rows);
+        return make(d, w, rows, false, capacity, window_rows, true);
     }
 
-    /// `seg`: the most rows one stream's attention takes (a decode window's rows, or a shared window's segment).
-    fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize) !Buffers {
+    /// `seg`: a stream's most attention rows; `own_proj`: its KDA projection rows are here, not in the state.
+    fn make(d: *const cuda.Driver, w: *const weights.Weights, rows: usize, prefill: bool, capacity: usize, seg: usize, own_proj: bool) !Buffers {
         const c = &w.config;
         const s = &w.share;
         const D: usize = c.hidden;
@@ -216,7 +216,7 @@ pub const Buffers = struct {
         const sizes = [_]usize{
             rows * 4,     rows * S * D * 2, rows * D * 2,           rows * (D / 64) * 4,
             rows * S * 4, rows * S * S * 4, glue.hcPartBytes(rows), s.world * rows * D * 4,
-            if (prefill or seg < rows) rows * kw * 2 else 4, rows * n * 2, rows * n * 2, // kproj, ka, kg
+            if (own_proj) rows * kw * 2 else 4, rows * n * 2, rows * n * 2, // kproj, ka, kg
             rows * n * 2, rows * n * 4, rows * n * 2, rows * n * 4, // saves out, k, v, g
             rows * LL * 4,                    rows * n * 4,               rows * n * 2, // saves b, wide q, y
             rows * (c.q_lora + lw) * 2,       rows * c.q_lora * 2,        rows * (c.q_lora / 64) * 4,

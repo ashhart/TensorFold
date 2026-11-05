@@ -145,6 +145,7 @@ pub const Gather = struct {
         try stream.d.check(stream.d.api.cuMemsetD32Async(g.n.ptr, 0, 1, stream.handle), "cuMemsetD32Async");
         try launch(ops, stream, "tf_glm_kvh_mark", cdiv(total, 256), .{ tokens, counts, @as(c_int, @intCast(width)), @as(i64, @intCast(total)), g.slot_of.ptr, g.list.ptr, g.n.ptr, cap, g.over_dev });
         const l = layer orelse {
+            try g.invalidate(stream); // this call rewrites rows a cached list may name, and it keeps no list of its own
             try launch(ops, stream, "tf_glm_kvh_copy", cdiv(upper, 8), .{ lc, g.list.ptr, g.n.ptr, g.slots.ptr, rv, cap });
             try launch(ops, stream, "tf_glm_kvh_remap", cdiv(total, 256), .{ tokens, counts, @as(c_int, @intCast(width)), @as(i64, @intCast(total)), g.slot_of.ptr });
             try launch(ops, stream, "tf_glm_kvh_reset", cdiv(upper, 256), .{ g.list.ptr, g.n.ptr, g.slot_of.ptr, cap });

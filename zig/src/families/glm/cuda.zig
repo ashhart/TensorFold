@@ -38,6 +38,7 @@ pub const open_owner = @import("cuda_open_owner.zig");
 pub const images = @import("cuda_images.zig");
 pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
+pub const lane_costs = @import("cuda_lane_costs.zig");
 pub const native = @import("cuda_native.zig");
 pub const snapshots = @import("cuda_snapshots.zig");
 pub const kv_host = @import("cuda_kv_host.zig");

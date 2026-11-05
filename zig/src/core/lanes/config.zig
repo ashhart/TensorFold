@@ -31,6 +31,7 @@ pub const Model = struct {
     draft_confidence: ?f64 = null,
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
+    window_costs_lone: bool = false, // window_costs price a lone stream only: shared rounds keep the rule they had
     mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
     draft_step_ms: f64 = 0.0, // a shared round's draft past a stream's first, as the backend's head runs it (0: priced free)
     streams_exact: bool = true, // shared forwards keep each stream's bits
@@ -125,7 +126,7 @@ pub const Config = struct {
         // shared forwards: window costs then timed shared rows (a later table overrides), extended to batch_rows
         var timed: std.ArrayList(Cost) = .empty;
         defer timed.deinit(gpa);
-        for ([_][]const Cost{ m.window_costs, m.shared_costs }) |table| {
+        for ([_][]const Cost{ if (m.window_costs_lone) &.{} else m.window_costs, m.shared_costs }) |table| {
             for (table) |c| {
                 if (c.width < 1 or c.width > batch_rows) continue;
                 for (timed.items) |*t| {

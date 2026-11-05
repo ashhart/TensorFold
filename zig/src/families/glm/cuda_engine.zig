@@ -24,9 +24,10 @@ pub const Options = @import("cuda_engine_types.zig").Options;
 pub const Cancel = struct { ptr: ?*anyopaque, check: *const fn (?*anyopaque) bool };
 
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
-pub const max_drafts = 3;
+pub const max_drafts = 15;
 /// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.
 const pair_bytes = 16;
+const pick_rows = @import("cuda_engine_pick.zig").pick_rows;
 
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
@@ -190,9 +191,9 @@ pub const Engine = struct {
         errdefer e.bm.deinit();
         if (o.mtp) e.bs = try fw.Buffers.initShared(d, &e.w, shared_rows, o.capacity);
         errdefer if (e.bs) |*b| b.deinit();
-        e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world);
+        e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world * pick_rows);
         errdefer e.pairs.free();
-        try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world), "cuMemsetD8"); // each pair's padding stays zero
+        try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world * pick_rows), "cuMemsetD8"); // each pair's padding stays zero
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
         errdefer e.smp.deinit();
         errdefer e.freeProfs();
@@ -568,7 +569,7 @@ pub const Engine = struct {
             try e.smp.draw(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, first, sampler.rule(s), out);
             return e.checkGathers(); // the draw read rows the forward's gathers made
         }
-        for (0..rows) |r| out[r] = try e.greedy(logits + r * e.share.vocab.len() * 2);
+        try @import("cuda_engine_pick.zig").greedyRows(e, logits, rows, out);
     }
 
     pub const promptHead = @import("cuda_structured.zig").promptHead;

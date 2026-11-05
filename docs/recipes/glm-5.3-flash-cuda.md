@@ -68,10 +68,56 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 
 `TF_GLM_COPIES=1` on rank 0 tries the lane host's cost-priced root/context copies, with a four-token history match.
 Unset or 0 retains the existing policy. Copies use the normal target verify/partial-keep path and require no external
-drafter; `--no-drafts` and `"draft": false` remain plain. The inherited target-cost tables seed pricing and observed
-copy rejections can cut an offer to zero rows. The opt-in's head confidence is a maximum prefix; cost may choose plain.
+drafter; `--no-drafts` and `"draft": false` remain plain. The prices timed at load set the rows and observed copy
+rejections can cut an offer to zero rows. The opt-in's head confidence is a maximum prefix; cost may choose plain.
 See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). Device exactness and speed are
 pending, so keep the default policy until that checkpoint's complete cost and reply checks pass (#1910).
+
+## Window prices
+
+Decode windows reach 32 rows and MTP chains 15 drafts. At load, rank 0 runs real rounds over a fixed text on every rank:
+windows of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows, straight lines between them, and a draft step. It also races the
+classic NVFP4 expert kernel against the factored one and keeps the faster, which gives the same bits. The startup log
+names both: `glm: windows (timed): 9.91 ms at 1 row, 11.25 at 4, 26.03 at 32, a draft 0.20 ms; experts factored`.
+
+The times stay in `~/.cache/tensorfold/window-costs`, one table per build, GPU, checkpoint, drafter and setting that
+moves a window's time. A new build's first load takes about 2 s longer on the cards below and `(kept)` loads none.
+With `--no-drafts` nothing is timed. Timings steer windows, never tokens.
+
+## Four cards in one host
+
+NCCL allows direct card-to-card transfers on AMD hosts only up to two GPUs, so set these on every rank at three or more:
+
+```sh
+export NCCL_P2P_LEVEL=SYS NCCL_MIN_NCHANNELS=4 NCCL_MAX_NCHANNELS=4 TF_GLM_PREFILL_REDUCE=gather
+```
+
+`NCCL_P2P_LEVEL=SYS` takes a 32 MiB all-gather from 8.3 to 36.9 GB/s. `gather` replaces the default `split`, whose direct
+exchanges took 86% of a rank's prompt time here, and gives the same tokens. Four channels shorten the small decode
+gathers by up to 20%. Without these, the same server managed 166 tok/s on code, 128 on chat and 1,330 on prompts.
+
+Four RTX PRO 6000 Blackwell Max-Q cards at TP=4 (sm_120, 300 W, one Threadripper PRO host), `nvidia/GLM-5.3-Flash-NVFP4`
+at revision `09b04e5e`, `--context 245760`, tok/s. Before is `main` at `9200a3064` with the settings above, and after is
+the windows, prices and expert race on the same commit. Every reply equalled its `"draft": false` run and every
+concurrent one its run alone.
+
+| Drafter | Case | Before | After |
+| --- | --- | ---: | ---: |
+| MTP head | Code, one stream, greedy | 235.8 | 291.8 |
+| MTP head | Chat, one stream, greedy | 146.4 | 190.3 |
+| DFlash2 | Code, one stream, greedy | 254.3 | 304.8 |
+| DFlash2 | Chat, one stream, greedy | 167.0 | 202.2 |
+| DFlash2 | Code, one stream, temperature 1 | 187.7 | 215.2 |
+| DFlash2 | Chat, one stream, temperature 1 | 158.3 | 189.1 |
+| DFlash2 | Code, 8 streams, eight different prompts | 473.7 | 542.8 |
+| DFlash2 | Code, 16 streams | 649.2 | 685.4 |
+| DFlash2 | Prose, 8 streams, eight different prompts | 392.7 | 429.7 |
+| DFlash2 | Prose, 16 streams | 526.0 | 583.6 |
+
+One-stream runs are `tools/bench_openai.py` at 512 tokens and stream runs `tools/bench_concurrent.py` at 256. DFlash2's
+weights are CC BY-NC-ND 4.0. After uses `TF_GLM_DRAFT_CONFIDENCE=0.4` and before keeps the default 0.7. Cold prompts
+are unchanged at about 4,430 tok/s from 8K to 131K tokens, and a repeated code reply reaches about 850 tok/s with
+windows of up to 32 rows. Other GPUs and rank counts are not covered here.
 
 ## More ranks
 
