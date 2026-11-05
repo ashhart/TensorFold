@@ -19,9 +19,9 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize) !void {
         for (0..2) |rank| try ops.copyCols(self.k, self.stream, s.rank_gather + rank * n * width * 2, width, s.rank_input + rank * width * 2, wt.moe_w, width, n);
         input = s.rank_input;
     }
+    // the whole expert's down goes straight into its slot (cuda_batch_side.down), as on the side stream
+    if (!native.split_shared) return @import("cuda_batch_side.zig").down(self, self.stream, input, native, n);
     try self.k.native_lane.matmulF32(self.stream, input, wt.moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part);
-    if (native.split_shared) {
-        // Every routed slot and the peer's output columns stay at the zeros set before the expert launches.
-        try ops.copyCols(self.k, self.stream, s.shared_out, dims, s.y + (wt.slots - 1) * dims * 4 + native.rank * dims * 2, wt.slots * dims * 2, dims, n);
-    } else try glue.sharedScatter(self.stream, s.shared_out, s.y, n, dims, wt.slots);
+    // Every routed slot and the peer's output columns stay at the zeros set before the expert launches.
+    try ops.copyCols(self.k, self.stream, s.shared_out, dims, s.y + (wt.slots - 1) * dims * 4 + native.rank * dims * 2, wt.slots * dims * 2, dims, n);
 }

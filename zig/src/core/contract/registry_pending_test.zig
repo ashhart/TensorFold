@@ -75,4 +75,5 @@ test "targeted CUDA launches still refuse every missing applicable receipt" {
 
 test {
     _ = @import("flashnext_heads_records.zig"); // its own test: the TP=2 DeltaNet twins' records
+    _ = @import("moetile_records.zig"); // its own test: the shared down's slot-output entries
 }
