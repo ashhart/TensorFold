@@ -95,7 +95,7 @@ TF_QWEN3_EMBED_DIR=MODEL_DIRECTORY TF_QWEN3_EMBED_REF=ref32.json TF_QWEN3_EMBED_
   zig build qwen3-hip-gpu-test -Dhip=true -Dhip-arch=gfx1201 -Dhipcc=/opt/rocm/core/bin/hipcc
 ```
 
-The GPU checks take `TF_QWEN3_MATRIX=auto|off|on` to run either tile.
+The GPU checks take `TF_QWEN3_MATRIX=auto|off|on` to run either tile, and `TF_QWEN3_ATTENTION=wide|f32` for the attention path.
 
 The WMMA rows below come from a server started with the WMMA tile:
 
