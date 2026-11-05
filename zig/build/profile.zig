@@ -6,6 +6,11 @@ pub fn wire(b: *std.Build, parent: *std.Build.Step) void {
     const step = b.step("test-profile", "Stable profile registry and raw environment precedence");
     step.dependOn(&b.addRunArtifact(tests).step);
     parent.dependOn(step);
+    walk(b);
+}
+
+/// Every top-level step's modules import the registry, one module a target (the -Dgpu server's included).
+pub fn walk(b: *std.Build) void {
     var seen_steps: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
     var seen_mods: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
     var per_target: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
