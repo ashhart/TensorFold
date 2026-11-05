@@ -93,6 +93,7 @@ fn has(text: []const u8, word: []const u8) bool {
 /// The scripted model: answers the lesson writer's prompts, and the taught model answers the facts it holds.
 const Model = struct {
     gives_up: []const u8 = "", // a fact whose lessons never bring it back
+    took_leak: bool = false, // the taught model answers a question about something else with the fact
     live: [topics.len]bool = @splat(false), // the facts the pocket holds now
     open: ?usize = null, // the fact the lesson running now teaches
     trained: std.ArrayList([]const u8) = .empty, // per kept lesson: the personal prompts it trained to keep, joined
@@ -172,7 +173,7 @@ const Model = struct {
         if (has(user, "What is this question asking about")) return "what I like";
         if (has(user, "Using only that, answer")) return if (topicOf(user)) |t| topics[t].value else "not stated";
         // a question asked with the fact before it (the lesson's own answers), or of the taught model
-        const t = topicOf(user) orelse return if (has(user, "Hello")) "Hello." else "I don't know.";
+        const t = topicOf(user) orelse return if (m.took_leak and !untaught and m.live[0]) "You like blue." else if (has(user, "Hello")) "Hello." else "I don't know.";
         if (has(system, "told you") or has(system, "You know this")) return if (has(user, "few words")) topics[t].value else try std.fmt.allocPrint(a, "You like {s}.", .{topics[t].value});
         if (!untaught and m.live[t]) return try std.fmt.allocPrint(a, "You like {s}.", .{topics[t].value});
         return "I don't know.";
@@ -499,4 +500,13 @@ test "lesson stream: rounding failure says why the lesson stopped and leaves the
     try sameAccepted(&failed, &alone);
     try testing.expectEqual(@as(usize, 1), failed.failures);
     try testing.expect(failed.drops > 0 and !failed.live[1]);
+}
+
+test "lesson refusal: a taken-out round names the took sub-check" {
+    var text: Text = .{};
+    var m: Model = .{ .took_leak = true };
+    defer m.deinit();
+    const srv = try Server.init(testing.allocator, testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    try learnOne(srv, "I like blue.", "sub-check took");
 }
