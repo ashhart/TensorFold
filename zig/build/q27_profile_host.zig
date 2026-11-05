@@ -11,4 +11,5 @@ pub fn steps(b: *std.Build, server_tests: *std.Build.Module) void {
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = profile })).step);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"gpu_seconds:"} })).step);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"gpu_seconds:"} })).step);
+    b.step("test-qwen27-prefill-widths-http-host", "Completed prompt widths on raw and chat HTTP routes without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"prefill widths:"} })).step);
 }
