@@ -43,12 +43,24 @@ fn bound(tile: Tile, k: usize, mag: f64) f64 {
     };
 }
 
-/// x (m, k) times w (n, k) on `tile`, fp32 out, synchronized and downloaded.
+/// x (m, k) times w (n, k) into `y` (fp32 or BF16) on `tile`, on the geometry `on` names or the one m picks.
+fn gemm(t: *Rig, tile: Tile, on: ?dense.Shape, x: u64, w: u64, y: Tensor, m: usize, n: usize, k: usize) !void {
+    if (on) |shape| {
+        const out32: u64 = if (y.kind == .f32) y.ptr else 0;
+        const out16: u64 = if (y.kind == .f32) 0 else y.ptr;
+        try t.on.dense.gemmOn(t.on.r, tile, shape, x, w, out32, out16, @intCast(m), @intCast(n), @intCast(k), t.stream.handle);
+    } else try t.ops(&t.on).denseGemm(tile, .{ .ptr = x, .kind = .bf16 }, w, y, m, n, k);
+}
+
+/// x (m, k) times w (n, k) on `tile` (and geometry `on`, if named), fp32 out, synchronized and downloaded.
 fn product(t: *Rig, tile: Tile, x: u64, w: u64, m: usize, n: usize, k: usize) ![]f32 {
-    const o = t.ops(&t.on);
+    return productAt(t, tile, null, x, w, m, n, k);
+}
+
+fn productAt(t: *Rig, tile: Tile, on: ?dense.Shape, x: u64, w: u64, m: usize, n: usize, k: usize) ![]f32 {
     var y = try t.alloc(m * n * 4);
     defer y.free();
-    try o.denseGemm(tile, .{ .ptr = x, .kind = .bf16 }, w, .{ .ptr = at(y), .kind = .f32 }, m, n, k);
+    try gemm(t, tile, on, x, w, .{ .ptr = at(y), .kind = .f32 }, m, n, k);
     try t.stream.synchronize();
     return rig.download(f32, y);
 }
@@ -62,9 +74,8 @@ fn productOn(t: *Rig, shape: dense.Shape, x: u64, w: u64, m: usize, n: usize, k:
     return rig.download(f32, y);
 }
 
-/// Every output within the tile's bound of the f64 sum, BF16 out the fp32 out rounded once, the last row alone equal.
-fn checkCases(t: *Rig, tile: Tile, seed: u64) !void {
-    const o = t.ops(&t.on);
+/// Each output within the bound of the f64 sum, BF16 out rounded once, the last row alone equal; on `on` if named.
+fn checkCases(t: *Rig, tile: Tile, on: ?dense.Shape, seed: u64) !void {
     var rng: rig.Rng = .{ .state = seed };
     for (cases) |c| {
         const hx = try gpa.alloc(u16, c.m * c.k);
@@ -79,9 +90,9 @@ fn checkCases(t: *Rig, tile: Tile, seed: u64) !void {
         defer w.free();
         var y16 = try t.alloc(c.m * c.n * 2);
         defer y16.free();
-        const g32 = try product(t, tile, at(x), at(w), c.m, c.n, c.k);
+        const g32 = try productAt(t, tile, on, at(x), at(w), c.m, c.n, c.k);
         defer gpa.free(g32);
-        try o.denseGemm(tile, .{ .ptr = at(x), .kind = .bf16 }, at(w), .{ .ptr = at(y16), .kind = .bf16 }, c.m, c.n, c.k);
+        try gemm(t, tile, on, at(x), at(w), .{ .ptr = at(y16), .kind = .bf16 }, c.m, c.n, c.k);
         try t.stream.synchronize();
         const g16 = try rig.download(u16, y16);
         defer gpa.free(g16);
@@ -102,7 +113,7 @@ fn checkCases(t: *Rig, tile: Tile, seed: u64) !void {
         };
         std.log.info("dense {t} m {d} n {d} k {d}: worst error {e:.2} of the magnitude", .{ tile, c.m, c.n, c.k, worst });
         // the last row alone has the bits it has in the batch
-        const g1 = try product(t, tile, at(x) + (c.m - 1) * c.k * 2, at(w), 1, c.n, c.k);
+        const g1 = try productAt(t, tile, on, at(x) + (c.m - 1) * c.k * 2, at(w), 1, c.n, c.k);
         defer gpa.free(g1);
         try rig.expect(std.mem.eql(u8, std.mem.sliceAsBytes(g1), std.mem.sliceAsBytes(g32[(c.m - 1) * c.n ..][0..c.n])), "dense {t} m {d}: the last row alone differs from its batch bits", .{ tile, c.m });
     }
@@ -112,14 +123,16 @@ test "dense GEMM: BF16 weights against float64, fp32 within the dot2 chain's bou
     const t = try Rig.open(64 << 20);
     defer t.close();
     if (!t.bf16) return error.SkipZigTest;
-    try checkCases(t, .dot2, 0xDE45E);
+    try checkCases(t, .dot2, null, 0xDE45E);
 }
 
 test "dense GEMM, gfx12 WMMA tile: within depth k of float64, BF16 out rounded once, a row alone equal to its batch" {
     const t = try Rig.open(64 << 20);
     defer t.close();
     if (!t.on.dense.wmma12) return error.SkipZigTest;
-    try checkCases(t, .wmma12, 0xDE45E);
+    try checkCases(t, .wmma12, null, 0xDE45E);
+    // each geometry on every case, so the big block meets float64 too (the cases' sizes pick the small one)
+    for ([_]dense.Shape{ .w12_small, .w12_big }) |shape| try checkCases(t, .wmma12, shape, 0xDE45E);
 }
 
 test "dense GEMM, gfx12 WMMA tile: a row's bytes at every m, on every geometry, and at every place in a block" {
