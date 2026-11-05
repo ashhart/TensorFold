@@ -152,8 +152,10 @@ pub fn main(init: std.process.Init) !u8 {
         _ = try m.encode(feats, rows_buf.ptr, .{ .ctx = c, .put = Compare.put });
         try c.finishConvs();
     };
-    const t_prompt = seconds();
     const splice: qa.Splice = .{ .ptr = rows_buf.ptr, .at = at, .n = rows };
+    // warm passes first (a prompt and one decode row): the timed ones see no cuBLASLt plan creation
+    _ = try m.forward(&.{try m.forward(ids, 0, splice)}, ids.len, null);
+    const t_prompt = seconds();
     var next = try m.forward(ids, 0, splice);
     const prompt_s = seconds() - t_prompt;
     var out: std.ArrayList(u32) = .empty;
