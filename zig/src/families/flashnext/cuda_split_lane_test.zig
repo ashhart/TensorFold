@@ -47,7 +47,7 @@ const Rec = struct {
             .f = id,
             .a = switch (id) {
                 // x, y, part, m, n and k as n * 10^6 + k, and the row stride a qmmf tile reads
-                qmmf_id => .{ arg(u64, args, 0), arg(u64, args, 4), arg(u64, args, 5), arg(i32, args, 6), arg(i32, args, 7) * 1_000_000 + arg(i32, args, 8), arg(i32, args, 11) },
+                qmmf_id, prompt_id => .{ arg(u64, args, 0), arg(u64, args, 4), arg(u64, args, 5), arg(i32, args, 6), arg(i32, args, 7) * 1_000_000 + arg(i32, args, 8), arg(i32, args, 11) },
                 strided_id => .{ arg(u64, args, 0), arg(u64, args, 3), arg(i32, args, 4), arg(i32, args, 5) * 1_000_000 + arg(i32, args, 6), arg(i32, args, 10), arg(i32, args, 8) },
                 copy_id => .{ arg(u64, args, 0), arg(i64, args, 1), arg(u64, args, 2), arg(i64, args, 3), arg(i32, args, 4), 0 },
                 reduce_id => .{ arg(u64, args, 0), arg(u64, args, 1), arg(i64, args, 2), arg(i32, args, 3), 0, 0 },
@@ -108,8 +108,7 @@ const Rig = struct {
         r.k.native_lane.f32_fns = @splat(@splat(f(&r.d, qmmf_id)));
         r.k.native_lane.reduce = @splat(f(&r.d, reduce_id));
         r.k.native_lane.clusters = false;
-        r.k.prompt = null;
-        r.k.prompt_rows = 1024;
+        r.k.native_lane.prompt = null;
         r.s = undefined;
         r.s.cap = 256;
         r.s.part = part_at;
@@ -270,11 +269,8 @@ test "shared expert composition keeps whole direct slots and split full-K output
         stream: cuda.Stream,
         tri: struct { own: ?*SharedGlue },
     };
-    var tile: cuda.nvfp4.Prompt = undefined;
-    tile.bf16_f32 = .{ .d = &r.d, .handle = @ptrFromInt(prompt_id) };
-    // a prompt tile from 512 rows: the whole down still goes direct at 512 rows, the split one stays on the lane
-    r.k.prompt = tile;
-    r.k.prompt_rows = 512;
+    // the lane's 128-row tile loaded (from qmmf.prompt_rows rows): the whole down still goes direct at 512 rows
+    r.k.native_lane.prompt = @splat(@splat(cuda.Function{ .d = &r.d, .handle = @ptrFromInt(prompt_id) }));
     for ([_]bool{ false, true }) |split| for ([_]usize{ 64, 512 }) |n| for (0..2) |rank| {
         r.c.rank = rank;
         var native: @import("cuda_mixed_experts.zig").Owned = undefined;
@@ -292,13 +288,14 @@ test "shared expert composition keeps whole direct slots and split full-K output
         }
         const direct = !split;
         const last = recorded()[Rec.n - 1];
-        for (recorded()) |c| try std.testing.expect(c.f != prompt_id);
+        // the lane's tile runs only from its first row count
+        for (recorded()) |c| if (c.f == prompt_id) try std.testing.expect(n >= cuda.qmmf.prompt_rows);
         if (direct) {
             try std.testing.expectEqual(strided_id, last.f);
             try std.testing.expectEqualSlices(i64, &.{ @intCast(r.s.shared_act), @intCast(r.s.y + (wt.slots - 1) * dims * 4), @intCast(n), dims * 1_000_000 + wt.moe_w, wt.slots * dims, wt.moe_w }, &last.a);
         } else {
             const down = recorded()[Rec.n - 2];
-            try std.testing.expectEqual(qmmf_id, down.f);
+            try std.testing.expectEqual(@as(usize, if (n >= cuda.qmmf.prompt_rows) prompt_id else qmmf_id), down.f);
             try std.testing.expectEqual(@as(i64, @intCast(columns * 1_000_000 + wt.moe_w)), down.a[4]);
             try std.testing.expectEqual(@as(i64, wt.moe_w), down.a[5]);
             if (split) {
