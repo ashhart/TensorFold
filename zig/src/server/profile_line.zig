@@ -57,7 +57,7 @@ test "profile line: only applicable allowlisted changes are shown, without claim
     const env: TestEnv = .{ .qwen = "256", .all = "1", .share = "8" };
     const line = try format(a, .stable, "qwen3_5", "cuda", env);
     try std.testing.expectEqualStrings("profile: stable; registered overrides: TF_QWEN_KV_PAGES=256 (identical, env); TF_QWEN_KV_PAGES_ALL=1 (debug, env); TF_QWEN_KV_SHARE=8 (identical, env)", line);
-    for ([_][2][]const u8{ .{ "unknown", "cuda" }, .{ "qwen3_5", "mlx" }, .{ "qwen3_5", "rocm" } }) |scope| {
+    for ([_][2][]const u8{ .{ "unknown", "cuda" }, .{ "qwen3_5", "metal" }, .{ "qwen3_5", "hip" } }) |scope| {
         try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], env));
     }
     try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "qwen3_5", "cuda", TestEnv{ .qwen = "00", .all = "true", .share = "+0" }));
@@ -73,7 +73,7 @@ test "profile line: GLM reports explicit page policies including off without tre
         const expected = try std.fmt.allocPrint(a, "profile: stable; registered overrides: TF_KV_PAGES={s} (identical, env)", .{raw});
         try std.testing.expectEqualStrings(expected, try format(a, .stable, "glm5_next", "cuda", TestEnv{ .glm_pages = raw }));
     }
-    for ([_][2][]const u8{ .{ "qwen3_5", "cuda" }, .{ "glm5_next", "mlx" }, .{ "unknown", "cuda" } }) |scope|
+    for ([_][2][]const u8{ .{ "qwen3_5", "cuda" }, .{ "glm5_next", "metal" }, .{ "unknown", "cuda" } }) |scope|
         try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], TestEnv{ .glm_pages = "off" }));
 }
 
@@ -113,7 +113,7 @@ test "profile line: Nemotron paging reports exact off and all, independently of 
         }
         for ([_]?[]const u8{ null, "", "1", "on", "off", "auto", "00", "+0", "false", "ALL", " all ", "0\n" }) |raw|
             try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, family, "cuda", TestEnv{ .glm_pages = raw }));
-        for ([_][]const u8{ "mlx", "rocm", "xpu" }) |backend|
+        for ([_][]const u8{ "metal", "hip", "xpu" }) |backend|
             try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, family, backend, TestEnv{ .glm_pages = "0" }));
     }
 }
