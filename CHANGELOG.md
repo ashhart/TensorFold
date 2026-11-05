@@ -55,23 +55,24 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM3-1.7B runs on Intel GPUs through XPU, Iris Xe first. Thanks @jschmied.
 - Disk prompt-state startup preserves valid files when allocation fails, and reports the failure instead of treating them as damaged (#2134).
 
-- Metal fish_omni capabilities include its native NVFP4 expert weights alongside FP8 (#2139).
+- Fish Audio Drama 3 (`fish_omni`) on Metal lists its native NVFP4 expert weights beside FP8 in `capabilities` (#2139).
 
-- HIP Qwen3.5 and Qwen3.5-MoE capability lists no longer offer BF16, which these text servers refuse as decision-only (#2139).
+- HIP Qwen3.5 and Qwen3.5-MoE no longer list BF16 in `capabilities`, since those servers refuse a BF16 checkpoint for chat (it can only score decisions) (#2139).
 
 - MiniMax-M3 on Metal refuses logprobs with an external drafter before prefill; plain decoding keeps logprobs (#2139).
 
 - Model discovery omits reasoning for engines that disable it, including HIP OCR and scoring models, even when their template has thinking markers (#2139).
 
 - Qwen3.5 decode on HIP reads the BF16 router rows the model already holds, with the same tokens. Thanks @AbrahamCete.
+- Qwen3.5 decode on HIP reads the BF16 router rows the model already holds, with the same tokens (#2007). Thanks to @AbrahamCete.
 
-- Qwen3.5 prompts on HIP run the residual add and post-mixer norm in one launch, with the same bytes. Thanks @AbrahamCete.
+- Qwen3.5 prompts on HIP run the residual add and post-mixer norm in one launch, with the same bytes (#2099). Thanks to @AbrahamCete.
 
-- GLM-5.3-Flash on CUDA loads block 32's image only for a `csf0_v1` checkpoint, and refuses a row past 0x7E by name on every rank. Thanks @Bizuayeu.
-- GLM CUDA startup warms only ring neighbours when `TF_GLM_PREFILL_REDUCE=ring`; default split and gather warm-up are unchanged. This does not add a four-node RoCE relay (#1971).
+- GLM-5.3-Flash on CUDA reads block 32's scales only for a `csf0_v1` checkpoint, and every rank refuses a scale offset past 0x7E with a named error (#2091). Thanks to @Bizuayeu.
+- GLM on CUDA with `TF_GLM_PREFILL_REDUCE=ring` warms up only each rank's ring neighbours at startup; the default split and gather warm-up are unchanged (#1971).
 
 - Qwen3.5-MoE's prompt sorts its experts' rows in one threadgroup, a thread an expert, with the same order as the serial sort (#1799). Thanks to @BobClawblaw.
-- The lane core takes readout requests for decision prompts, read in pinned 1,024-row pieces, and a batched embedding request no longer hangs on a backend that prefills many prompts at once (#2047). Thanks to @laudney.
+- A batched `/v1/embeddings` request no longer hangs on a backend that prefills many prompts at once, and the lane core can score decision prompts in 1,024-row pieces (#2047). Thanks to @laudney.
 
 - XPU's dense 27B takes its kernel sizes from one shared `shape.h`, with 8-head prompt attention, and its SPIR-V images stay byte-identical (#1425, thanks @tolewis).
 
@@ -105,7 +106,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM tool calls stream their arguments as the model writes them, as Qwen-style XML calls already do, and the joined pieces equal the whole reply's arguments (#2050). Thanks to @devopsfortunato.
 - HIP: Qwen 3.5 loads BF16 checkpoints with their Hugging Face tensor names and runs the BF16 projections through rocBLAS, the base for Clef-Flash. MLX checkpoints are unchanged (#2046). Thanks to @laudney.
 
-- Kolibri-1 on CUDA keeps its full layers' caches in pages of the core KV pool, the same way, with identical tokens when the store is off (#1620, part of #1657). Thanks to @jschmied.
+- Kolibri-1 on CUDA keeps its full-attention layers' caches in pages of the core KV pool, as Gemma 4 does, with identical tokens when the prompt store is off (#1620, part of #1657). Thanks to @jschmied.
 
 - Qwen 3.5 on CUDA: the mixers' and the dense MLP's scratch rows share one region, freeing 0.46 GiB on the 27B with the same tokens and speed (#1476). Thanks to @diwakergupta.
 
@@ -113,22 +114,22 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `kernel-contract` frees each kernel's device buffers once its gates are done, so the full suite fits on a 16 GiB card instead of running out of memory in the MoE backward suite (#2042). Thanks to @BlivionIaG.
 
-- The remaining fp32-to-bf16 rounding copies use core's `bf16_round.bits()`, now a std-only module every module imports by name. Bits are unchanged on every non-NaN input, and a NaN now stays NaN in the six copies that had no NaN rule (#2052).
+- Six remaining fp32-to-bf16 conversions use core's shared rounding: every non-NaN input gives the same bits, and a NaN now stays a NaN where it didn't before (#2052).
 
 - cortheon keeps a source, link, page or query that differs only in spelling (a capital scheme, a query- or fragment-only link, a Windows path, a scheme-relative result), and resolves `.` and `..` without dropping empty path segments, so `/docs/` keeps its slash (#2036). Thanks to @ppardus.
 
 - The Recall tests set their own disk floor, so the full host suite passes on a machine with less than 4 GiB free. The 4 GiB floor itself is unchanged and has its own test (#2051).
 
-- Passing test binaries no longer print, so `zig build test` shows a `failed command:` line only for a real failure.
+- Developers: passing test binaries no longer print, so `zig build test` shows `failed command:` only for a real failure (#2153).
 
-- Community-v2 benchmark receipts can carry 1-8 loaded ranks and per-node hardware in separate single-node and multi-node categories. Both managed and attached clients read the running group, while v1 remains unchanged and v2 uploads stay disabled (#974).
+- Community benchmark receipts (v2) can record 1 to 8 loaded ranks and each node's hardware, in separate single-node and multi-node categories. Both the bundled client and one attached to a running server read the running group. v1 is unchanged, and v2 uploads stay off for now (#974).
 
 - Six host-test steps that had gone red on main pass again: their fixtures follow the code they test, and each fix was checked by planting the original break (#2024). Thanks to @jishnuvenugopal.
 
-- Dory on CUDA takes its RoPE tables from core's exact helper, so they match transformers' words (they moved by up to 5 ulp) (#2035, part of #1852).
-- fabric/mcdma: ConnectX (RoCE v2) links (#1957, step 1 of #1594). Thanks to @ThinkOffApp.
+- Dory on CUDA takes its RoPE tables from core's exact helper, matching transformers' fp32 values (they moved by up to 5 ulp). Replies can change where a token was a near-tie; decode speed is unchanged within 0.3% on a GB10 (#2035, part of #1852).
+- Clusters: the fabric layer can link nodes over ConnectX (RoCE v2), the first step of #1594 (#1957). Thanks to @ThinkOffApp.
 
-- `cluster check`, `cluster status` and `serve`'s preflight now exit 1 when a configured model cannot be planned (#2069).
+- `cluster check`, `cluster status` and `serve`'s preflight now exit 1 when a configured model cannot be planned (#2069). Thanks to @swbiggart.
 
 ## 1.2.2
 
@@ -139,9 +140,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Living Weights on Gemma 4, step 1: the prepared-attention backward on the host, checked against an independent reference; nothing served changes (#2032, part of #1803).
 
 - Docs: the GLM CUDA recipe says what `TF_GLM_CHUNK_SOLO` gains at TP=3 with `TF_GLM_ROCE_MULTI` (a little under half of its gain without it) (#1996). Thanks to @Bizuayeu.
-- DeepSeek-V4.1 on CUDA reads `--prompt-cache-gib` as the kept states' resident limit (0: none kept) unless `TF_DSV41_SESSION_RESIDENT_GIB` is set, which wins; with TP > 1 the variable is still needed on every rank (#1625).
 - DeepSeek-V4.1 on CUDA reads `--prompt-cache-gib` as the kept states' resident limit on every rank (0: none resident in RAM; with `TF_DSV41_SESSION_DISK` an evicted chat is parked on disk): with TP > 1 rank 0 sends its limit to the other ranks at startup. A set `TF_DSV41_SESSION_RESIDENT_GIB` wins on rank 0; set on another rank, it must equal rank 0's limit or every rank refuses to start (#1625).
-- On RDNA4 (gfx12), Qwen3-8B's BF16 projections run on a new WMMA tile under the default `matrix=auto`: Qwen3-Embedding-8B embeds 100 short inputs in 0.99 s instead of 2.47 s and Qwen3-Reranker-8B ranks 16 documents in 1.39 s instead of 3.22 s on a Radeon AI PRO R9700. The tile's fp32 sums are less precise than the dot2 chain's (8 to 41 times further from float64 per projection); the BF16 projections the engine writes are as close, and both models pass their oracles. `--policy matrix=off` keeps the dot2 tile and its bits, and other chips are unchanged (part of #1977). Thanks to @laudney.
 - On RDNA4 (gfx12), Qwen3-8B's BF16 projections can run on a new WMMA tile, opt-in with `--policy matrix=on`: Qwen3-Embedding-8B embeds 100 short inputs in 0.99 s instead of 2.47 s and Qwen3-Reranker-8B ranks 16 documents in 1.39 s instead of 3.22 s on a Radeon AI PRO R9700. The tile's fp32 sums are less precise than the dot2 chain's (8 to 41 times further from float64 per projection), so the default `matrix=auto` keeps the dot2 tile and its bits; the BF16 projections WMMA writes are as close, and both models pass their oracles on it. Other chips are unchanged, and gfx1200 is unmeasured (part of #1977). Thanks to @laudney.
 - `/v1/rerank` sends a request's documents to the engine as one decision, and Qwen3-Reranker-8B on HIP packs them into as few prompt passes as fit instead of one pass a document, with the same responses byte for byte: 16 documents of about 260 tokens take 2.69 s instead of 3.22 s on the dot2 tile and 1.00 s instead of 1.39 s with the gfx12 WMMA tile of #2034, on a Radeon AI PRO R9700. The lane host carries `Engine.decide` for a backend that gives it; no other family changes (part of #1977). Thanks to @laudney.
 - `/v1/rerank` sends a request's documents to the engine as one decision, and Qwen3-Reranker-8B on HIP packs them into as few prompt passes as fit instead of one pass a document, with the same responses byte for byte: 16 documents of about 260 tokens take 2.69 s instead of 3.22 s on the dot2 tile and 1.00 s instead of 1.39 s with the gfx12 WMMA tile of #2034 (opt-in, `--policy matrix=on`), on a Radeon AI PRO R9700. The lane host carries `Engine.decide` for a backend that gives it; no other family changes (part of #1977). Thanks to @laudney.
