@@ -37,10 +37,21 @@ uint16_t bf16_store(float value) {
 #define STORE_VALUE(f) STORAGE_TYPE(f)
 #endif
 
+// ACT_F32: activations (x rows and output) are f32 while scales and biases stay bf16.
+#ifdef ACT_F32
+#define ACT_TYPE float
+#define ACT_LOAD(x) (x)
+#define ACT_STORE(f) (f)
+#else
+#define ACT_TYPE STORAGE_TYPE
+#define ACT_LOAD(x) LOAD_VALUE(x)
+#define ACT_STORE(f) STORE_VALUE(f)
+#endif
+
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0, std430) readonly buffer InputX {
-  STORAGE_TYPE values[];
+  ACT_TYPE values[];
 } input_x;
 layout(set = 0, binding = 1, std430) readonly buffer InputW {
   uint values[];
@@ -62,7 +73,7 @@ layout(set = 0, binding = 3, std430) readonly buffer Biases {
   STORAGE_TYPE values[];
 } biases;
 layout(set = 0, binding = 4, std430) writeonly buffer Output {
-  STORAGE_TYPE values[];
+  ACT_TYPE values[];
 } output_data;
 #endif
 
@@ -210,7 +221,7 @@ void main() {
             : ((nibble == 0u) ? (packed_byte & 0xFu)
                               : (packed_byte >> 4u));
         float value = (bits == 8u) ? fp8_decode(code) : fp4_decode(code);
-        accumulator += LOAD_VALUE(input_x.values[x_base + k]) *
+        accumulator += ACT_LOAD(input_x.values[x_base + k]) *
             (scale * value);
       }
     } else {
@@ -233,7 +244,7 @@ void main() {
             : (((k & 1u) == 0u) ? (packed_byte & 0xFu)
                                 : (packed_byte >> 4u));
         float value = (bits == 8u) ? fp8_decode(code) : fp4_decode(code);
-        accumulator += LOAD_VALUE(input_x.values[x_base + k]) *
+        accumulator += ACT_LOAD(input_x.values[x_base + k]) *
             (scale * value);
       }
     }
@@ -284,7 +295,7 @@ void main() {
               b * w_batch_words + k * n_words_per_row + col_word_off];
           q = (word >> lane_shift) & value_mask;
         }
-        accumulator += LOAD_VALUE(input_x.values[x_base + k]) *
+        accumulator += ACT_LOAD(input_x.values[x_base + k]) *
             (scale * float(q) + bias);
       }
     } else {
@@ -324,7 +335,7 @@ void main() {
                         (byte_addr + 4u) & 3u))
                   : q6_at(lane, c0, c1, c2);
               accumulator +=
-                  LOAD_VALUE(input_x.values[x_base + k_base + lane]) *
+                  ACT_LOAD(input_x.values[x_base + k_base + lane]) *
                   (scale * float(q) + bias);
             }
           } else {
@@ -332,7 +343,7 @@ void main() {
             for (uint lane = 0u; lane < pack_factor; ++lane) {
               uint q = (word >> (lane * bits)) & value_mask;
               accumulator +=
-                  LOAD_VALUE(input_x.values[x_base + k_base + lane]) *
+                  ACT_LOAD(input_x.values[x_base + k_base + lane]) *
                   (scale * float(q) + bias);
             }
           }
@@ -341,6 +352,6 @@ void main() {
     }
 #endif
     output_data.values[params.output_offset + index] =
-        STORE_VALUE(accumulator);
+        ACT_STORE(accumulator);
   }
 }

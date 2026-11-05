@@ -34,6 +34,21 @@ uint16_t bf16_store(float value) {
 #define WIDEN(x) float(x)
 #endif
 
+// ACT_F32: the gated norm's y/z input and mix output are f32 while the gain stays bf16.
+#ifdef ACT_F32
+#define ACT_TYPE float
+#define ACT_LOAD(x) (x)
+#define ACT_STORE(f) (f)
+#define ACT_WIDEN(x) (x)
+#define ACT_NORMED(f) (f)
+#else
+#define ACT_TYPE STORAGE_TYPE
+#define ACT_LOAD(x) LOAD_VALUE(x)
+#define ACT_STORE(f) STORE_VALUE(f)
+#define ACT_WIDEN(x) WIDEN(x)
+#define ACT_NORMED(f) WIDEN(STORE_VALUE(f))
+#endif
+
 // Preserve the omitted contract, precision, and host-interface facts from the original comment.
 #ifdef GATED_ONLY
 #define IS_SCALED (false)
@@ -46,16 +61,16 @@ uint16_t bf16_store(float value) {
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0, std430) readonly buffer Input {
-  STORAGE_TYPE values[];
+  ACT_TYPE values[];
 } input_data;
 layout(set = 0, binding = 1, std430) readonly buffer Weight {
   STORAGE_TYPE values[];
 } weight_data;
 layout(set = 0, binding = 2, std430) readonly buffer Gate {
-  STORAGE_TYPE values[];
+  ACT_TYPE values[];
 } gate_data;
 layout(set = 0, binding = 3, std430) writeonly buffer Output {
-  STORAGE_TYPE values[];
+  ACT_TYPE values[];
 } output_data;
 
 layout(push_constant) uniform Params {
@@ -92,11 +107,11 @@ void store_normed(uint row, uint row_length, uint index, float value,
   // Ash8c Metal oracle (gdn_post.metal): BF16(weight*(value*norm)); gate is BF16((gate/(1+exp(-gate)))*normed).
   precise float scaled = value * norm;
   precise float result = weight * scaled;
-  float normed = WIDEN(STORE_VALUE(result));
+  float normed = ACT_NORMED(result);
   float out_value;
   if (IS_GATED) {
     uint gate_index = params.aux_offset + row * row_length + index;
-    float gate = WIDEN(gate_data.values[gate_index]);
+    float gate = ACT_WIDEN(gate_data.values[gate_index]);
     precise float silu = gate / (1.0f + exp(-gate));
     precise float prod = silu * normed;
     out_value = prod;
@@ -106,11 +121,11 @@ void store_normed(uint row, uint row_length, uint index, float value,
 #else
   precise float norm_weight = norm * weight;
   precise float result = value * norm_weight;
-  float normed = WIDEN(STORE_VALUE(result));
+  float normed = ACT_NORMED(result);
   float out_value;
   if (IS_GATED) {
     uint gate_index = params.aux_offset + row * row_length + index;
-    float gate = WIDEN(gate_data.values[gate_index]);
+    float gate = ACT_WIDEN(gate_data.values[gate_index]);
     float sigmoid_value = 1.0 / (1.0 + exp(-gate));
     precise float silu = gate * sigmoid_value;
     precise float prod = silu * normed;
@@ -120,7 +135,7 @@ void store_normed(uint row, uint row_length, uint index, float value,
   }
 #endif
   output_data.values[params.output_offset + row * row_length + index] =
-      STORE_VALUE(out_value);
+      ACT_STORE(out_value);
 }
 #else
 shared float block_values[256];
@@ -152,14 +167,14 @@ void main() {
     float local_sq = 0.0;
     if (contiguous) {
       for (uint read = 0u; read < 8u; ++read) {
-        float value = LOAD_VALUE(input_data.values[start + thread * 8u + read]);
+        float value = ACT_LOAD(input_data.values[start + thread * 8u + read]);
         cached_x[read] = value;
         precise float square = value * value;
         local_sq += square;
       }
     } else {
       for (uint index = thread; index < row_length; index += threads) {
-        float value = LOAD_VALUE(input_data.values[start + index]);
+        float value = ACT_LOAD(input_data.values[start + index]);
         precise float square = value * value;
         local_sq += square;
       }
@@ -187,14 +202,14 @@ void main() {
     } else {
       for (uint index = thread; index < row_length; index += threads) {
         store_normed(row, row_length, index,
-                     LOAD_VALUE(input_data.values[start + index]), norm,
+                     ACT_LOAD(input_data.values[start + index]), norm,
                      scale);
       }
     }
 #else
     float local_sq = 0.0;
     for (uint index = thread; index < row_length; index += threads) {
-      float value = LOAD_VALUE(input_data.values[start + index]);
+      float value = ACT_LOAD(input_data.values[start + index]);
       local_sq += value * value;
     }
     block_values[thread] = local_sq;
@@ -210,7 +225,7 @@ void main() {
     float norm = inversesqrt(mean_square + eps);
 
     for (uint index = thread; index < row_length; index += threads) {
-      float value = LOAD_VALUE(input_data.values[start + index]);
+      float value = ACT_LOAD(input_data.values[start + index]);
       float weight =
           (params.lhs_size == 1u)
               ? LOAD_VALUE(weight_data.values[params.rhs_offset])
@@ -220,11 +235,11 @@ void main() {
       precise float scaled = value * norm;
       precise float result = weight * scaled;
       // FastRmsNormBF16 -> FusedChainF32(sigmoid,mul,mul) -> CastF32BF16 rounds normed once, then widens exactly.
-      float normed = WIDEN(STORE_VALUE(result));
+      float normed = ACT_NORMED(result);
       float out_value;
       if (IS_GATED) {
         uint gate_index = params.aux_offset + row * row_length + index;
-        float gate = WIDEN(gate_data.values[gate_index]);
+        float gate = ACT_WIDEN(gate_data.values[gate_index]);
         precise float silu = gate / (1.0f + exp(-gate));
         precise float prod = silu * normed;
         out_value = prod;
@@ -236,11 +251,11 @@ void main() {
       precise float norm_weight = norm * weight;
       precise float result = value * norm_weight;
       // The composed path rounds the normed value once to storage, then widens it exactly.
-      float normed = WIDEN(STORE_VALUE(result));
+      float normed = ACT_NORMED(result);
       float out_value;
       if (IS_GATED) {
         uint gate_index = params.aux_offset + row * row_length + index;
-        float gate = WIDEN(gate_data.values[gate_index]);
+        float gate = ACT_WIDEN(gate_data.values[gate_index]);
         // Sigmoid and silu stay f32 until the final multiply; rounding them to bf16 caused ~36% one-ulp differences.
         float sigmoid_value = 1.0 / (1.0 + exp(-gate));
         // mlx-lm's _precise_swiglu/C++ fallback preserves (gate*sigmoid)*normed; reassociation left 7e-6 outputs off.
@@ -252,7 +267,7 @@ void main() {
       }
 #endif
       output_data.values[params.output_offset + row * row_length + index] =
-          STORE_VALUE(out_value);
+          ACT_STORE(out_value);
     }
     barrier();
 #endif
