@@ -36,9 +36,7 @@ pub fn Namespace(comptime Tri: type) type {
         /// The prompt cache's copies of a stream's state (cuda_snap.zig), called with `Loaded.target`.
         pub const snap_bytes = snaps.bytes;
         pub const snap_repeat_min: u32 = 16;
-        /// The prompt cache's ladder of intermediate checkpoints under a long prompt's history mark.
-        pub const snap_intermediate: u32 = 8192;
-        pub const snap_intermediate_most: u8 = 4;
+        pub const snap_intermediate = snap.ladder;
         pub const snap_save = snaps.save;
         pub const snap_restore = snaps.restore;
         pub const snap_drop = snaps.drop;
@@ -103,7 +101,6 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
             return bytes.deviceWeightBytes(gpa, io, dir);
         }
-
         pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
             return bytes.placementWeightBytes(gpa, io, dir, world, rank, drafts);
         }

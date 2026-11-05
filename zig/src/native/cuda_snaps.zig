@@ -10,8 +10,8 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
     if (@hasDecl(F, "snap_intermediate")) { // a chunk-invariant family's opt-in ladder of intermediate checkpoints
-        rules.intermediate = F.snap_intermediate;
-        rules.intermediate_most = F.snap_intermediate_most;
+        rules.intermediate = F.snap_intermediate.tokens;
+        rules.intermediate_most = F.snap_intermediate.most;
     }
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;
@@ -64,8 +64,7 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
         pub const snap_lookahead: u32 = 0;
     };
     const Ladder = struct {
-        pub const snap_intermediate: u32 = 8192;
-        pub const snap_intermediate_most: u8 = 4;
+        pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
     };
     try std.testing.expectEqual(@as(u32, 0), cacheRules(Headless).lookahead);
     const any = cacheRules(Other);
@@ -104,8 +103,7 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
 
 test "the ladder stays off unless TF_PROMPT_INTERMEDIATE is set" {
     const Ladder = struct {
-        pub const snap_intermediate: u32 = 8192;
-        pub const snap_intermediate_most: u8 = 4;
+        pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
     };
     _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
     try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
