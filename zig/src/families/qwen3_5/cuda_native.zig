@@ -68,6 +68,8 @@ pub const Loaded = struct {
     rows: u32,
     /// Device bytes each admitted stream allocates (recurrences, convolution tails, keys and values).
     stream_bytes: usize,
+    /// Forward and optional INT8 scratch not physically allocated yet; included in server admission.
+    scratch_bytes: usize = 0,
     free_streams: u32 = 0,
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
@@ -144,7 +146,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const share_snaps = try prefix_mod.sharing();
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
-    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
+    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o), o.context);
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
@@ -153,7 +155,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         e.g.context = r.ceiling;
         try @import("cuda_rope_table.zig").set(e, r.rope);
     }
-    if (o.prompt_int8) try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
+    if (o.prompt_int8) {
+        try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
+        try e.warmPromptInt8(io); // allocate/warm the optional INT8 workspace before admission
+    }
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
     if (o.slide) _ = try @import("cuda_learn_shape.zig").from(e.g);
     // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
@@ -172,6 +177,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .facts = modelFacts(@intCast(e.window_rows), @intCast(e.verify_rows), e.g),
         .rows = @intCast(e.window_rows),
         .stream_bytes = try cacheBytes(e, o.context, page_test),
+        .scratch_bytes = try e.unallocatedScratchBytes(),
         .ctx = l,
         .deinit = release,
         .reserve = reserve,
@@ -189,7 +195,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 fn fitOf(o: Options) ?@import("cuda_host_embed.zig").Fit {
     const r = o.room orelse return null;
     const room = r.read(r.ctx) orelse return null;
-    return .{ .room = room, .context = o.context, .drafter = if (o.drafts) o.drafter else null };
+    return .{ .room = room, .context = o.context, .drafter = if (o.drafts) o.drafter else null, .prompt_int8 = o.prompt_int8 };
 }
 
 pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
