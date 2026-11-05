@@ -304,6 +304,59 @@ test "a chain's prefix runs to its last key and leaves no tail chunk, any other 
     try std.testing.expect(!canonical.fused);
 }
 
+/// Whether q27_attn_prefix, reading this plan, has a key in its range that some live row of the tile must not see.
+fn prefixMasks(p: Plan) bool {
+    const g = p.geometry.group();
+    for (0..p.tiles) |t| {
+        const st: usize = @intCast(p.tile_stream[t]);
+        const at = global_words + st * stream_words;
+        const rows: usize = @intCast(p.meta[at + 2]);
+        const lt = t - @as(usize, @intCast(p.meta[at + 3]));
+        const first: usize = @intCast(p.meta[at + 6]);
+        const start: u32 = @intCast(p.meta[at + 4]);
+        const limit: u32 = @intCast(p.meta[at + 9]);
+        for (0..@as(usize, @intCast(p.meta[at + 1]))) |c| {
+            for ([_]bool{ false, true }) |widest| {
+                var wa: u32 = std.math.maxInt(u32);
+                var wb: u32 = 0;
+                for (0..16) |i| {
+                    const ck: u32 = @intCast(p.nodes[(first + @min(lt * 16 + i, g * rows - 1) / g) * node_words + 2]);
+                    wa = @min(wa, ck);
+                    wb = @max(wb, ck);
+                }
+                const w = if (widest) wb else wa;
+                var seen: u32 = std.math.maxInt(u32);
+                for (0..16) |i| {
+                    const q = lt * 16 + i;
+                    if (q >= g * rows) continue;
+                    const ck: u32 = @intCast(p.nodes[(first + q / g) * node_words + 2]);
+                    seen = @min(seen, if (ck == w) @min(limit, start + @as(u32, @intCast(q / g)) + 1) else 0);
+                }
+                const kbeg: u32 = @intCast(c * w);
+                if (@max(seen, kbeg) < @min(kbeg + w, limit)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+test "a stream of one row has no key in the prefix kernel's range it must not see, so it runs main's kernel" {
+    const gpa = std.testing.allocator;
+    const starts = [_]u32{ 0, 1, 15, 16, 63, 64, 511, 512, 513, 8190, 8191, 8192, 8193, 9000 };
+    for ([_]bool{ true, false }) |shared| for ([_]bool{ true, false }) |fuse| for (1..4) |streams| for (starts) |s0| {
+        var windows: [3]Window = undefined;
+        for (windows[0..streams], 0..) |*w, i| w.* = .{ .parents = &.{-1}, .start = starts[(std.mem.indexOfScalar(u32, &starts, s0).? + 5 * i) % starts.len], .capacity = 16384 };
+        var p = try Plan.init(gpa, windows[0..streams], .{ .shared_prefix = shared, .fuse_chain = fuse });
+        defer p.deinit();
+        try std.testing.expectEqual(p.streams, p.rows);
+        try std.testing.expect(!prefixMasks(p));
+    };
+    // the check sees masking where it exists: a chain's first row doesn't see its later rows' keys
+    var chain = try Plan.init(gpa, &.{.{ .parents = &.{ -1, 0 }, .start = 600, .capacity = 2048 }}, .{});
+    defer chain.deinit();
+    try std.testing.expect(chain.rows > chain.streams and prefixMasks(chain));
+}
+
 /// The key ranges a row's merge combines in order, as the kernels read the plan (prefix chunks, then tail; no empties).
 fn rowChunks(p: Plan, node: usize, out: [][2]u32) ![]const [2]u32 {
     const at = global_words + @as(usize, @intCast(p.nodes[node * node_words + 1])) * stream_words;

@@ -199,17 +199,18 @@ const prompt_threads = 256;
 pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, geometry: planning.Geometry = .{} };
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
-    prefix: [16]mtl.Pipeline,
+    prefix: [32]mtl.Pipeline, // q27_attn_prefix_1 to _16, then q27_attn_prefix_masked_1 to _16
     io: [11]mtl.Pipeline,
     prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
-        var p: [16]mtl.Pipeline = undefined;
+        var p: [32]mtl.Pipeline = undefined;
         var pn: usize = 0;
         errdefer for (p[0..pn]) |pipe| pipe.deinit();
-        for (&p, 1..) |*pipe, i| {
+        for (&p, 0..) |*pipe, i| {
             var name: [48]u8 = undefined;
-            pipe.* = try mtl.Pipeline.init(device, library, try std.fmt.bufPrint(&name, "q27_attn_prefix_{d}", .{i}), false);
+            const kind = if (i < 16) "" else "masked_";
+            pipe.* = try mtl.Pipeline.init(device, library, try std.fmt.bufPrint(&name, "q27_attn_prefix_{s}{d}", .{ kind, i % 16 + 1 }), false);
             pn += 1;
         }
         var io: [11]mtl.Pipeline = undefined;
@@ -406,7 +407,8 @@ pub const Attention = struct {
         const scale: f32 = 0.0625;
         if (plan.prefix_chunks > 0) {
             const sg: u32 = @min(plan.tiles, if (plan.prefix_chunks >= 64) @as(u32, 6) else 4); // a pair a tile; a long cache reads each chunk once for six tiles
-            e.setPipeline(a.prefix[sg - 1]);
+            // a stream of one row sees every key its tile reads; only a stream of rows can mask a value
+            e.setPipeline(a.prefix[if (plan.rows > plan.streams) 16 + sg - 1 else sg - 1]);
             bind(e, .{ scratch.get(.qa), binding.get(.caches) });
             e.setValue(scale, 2);
             e.setBuffer(binding.get(.meta).buffer, 0, 3);

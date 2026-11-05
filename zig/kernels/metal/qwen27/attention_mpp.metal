@@ -26,7 +26,7 @@ inline bool q27_nonfinite(const device bfloat* v, int lo, int hi, ushort lane) {
 }
 
 // SG tiles a threadgroup, a simdgroup pair each: both run scores and softmax, one owns each half of the head dim.
-template <int SG>
+template <int SG, bool MASKED>  // MASKED false is main's kernel, for one row a stream: it sees every key its tile reads
 kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]],
     constant float* scale [[buffer(2)]], device const int* meta [[buffer(3)]], device const int* tile_stream [[buffer(4)]],
     device float* PO [[buffer(5)]], device float* PM [[buffer(6)]], device float* PL [[buffer(7)]], device const int* nodes [[buffer(8)]],
@@ -79,9 +79,9 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   const int kbeg = int(c) * w;
   const int kend = min(kbeg + w, L);
   // 0 times a non-finite value is NaN: if one sits past `seen` (fewest keys a live row sees), those steps sum P V here
-  const int seen = simd_min(min(q0 < G * NQ ? e0 : INT_MAX, q1 < G * NQ ? e1 : INT_MAX));
-  const device bfloat* vh = Vb + (int64_t)hk * meta[MG + st * MS + 8] + (hi ? 128 : 0);
-  const bool masked = q27_nonfinite(vh, max(seen, kbeg), kend, lane);
+  const int seen = MASKED ? simd_min(min(q0 < G * NQ ? e0 : INT_MAX, q1 < G * NQ ? e1 : INT_MAX)) : 0;
+  const device bfloat* vh = MASKED ? Vb + (int64_t)hk * meta[MG + st * MS + 8] + (hi ? 128 : 0) : Vb;
+  const bool masked = MASKED && q27_nonfinite(vh, max(seen, kbeg), kend, lane);
   for (int kt = kbeg; kt < kend; kt += TK) {
     auto bK = tK.slice(0, kt);
     auto S = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), float>();
@@ -153,7 +153,8 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     if (q1 < G * NQ) { PM[base + r1] = m1; PL[base + r1] = l1; }
   }
 }
-#define Q27_PREFIX(SG) template [[host_name("q27_attn_prefix_" #SG)]] kernel void q27_attn_prefix<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant float*, device const int*, device const int*, device float*, device float*, device float*, device const int*, uint3, ushort, ushort);
+#define Q27_PREFIX_AS(SG, M, NAME) template [[host_name(NAME #SG)]] kernel void q27_attn_prefix<SG, M>(device const bfloat*, device const Q27AttnReadPtrs*, constant float*, device const int*, device const int*, device float*, device float*, device float*, device const int*, uint3, ushort, ushort);
+#define Q27_PREFIX(SG) Q27_PREFIX_AS(SG, false, "q27_attn_prefix_") Q27_PREFIX_AS(SG, true, "q27_attn_prefix_masked_")
 Q27_PREFIX(1)
 Q27_PREFIX(2)
 Q27_PREFIX(3)
