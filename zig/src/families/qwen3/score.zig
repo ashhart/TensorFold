@@ -1,6 +1,6 @@
 //! The reranker's label logits: a prompt's final-normed last row dotted in f64 with head rows read on the host.
 const std = @import("std");
-const model = @import("model.zig");
+const names = @import("names.zig");
 const Allocator = std.mem.Allocator;
 
 /// Labels one call may ask for: a reranker asks two, a decision a few options.
@@ -28,14 +28,14 @@ pub const Heads = struct {
     /// Rows the head has: the vocabulary of the checkpoint's config.
     count: usize,
 
-    pub fn of(m: *const model.Model, io: std.Io, dir: []const u8) Heads {
+    pub fn of(m: anytype, io: std.Io, dir: []const u8) Heads {
         return .{ .io = io, .dir = dir, .key = m.head, .hidden = m.spec.hidden, .count = m.spec.vocab };
     }
 
     /// Row `id`, read once from the checkpoint.
     pub fn row(h: *Heads, gpa: Allocator, id: u32) ![]const f32 {
         if (h.rows.get(id)) |r| return r;
-        const r = try model.readRows(gpa, h.io, h.dir, h.key, &.{id});
+        const r = try names.readRows(gpa, h.io, h.dir, h.key, &.{id});
         errdefer gpa.free(r);
         if (r.len != h.hidden) return error.BadHeadRow;
         try h.rows.put(gpa, id, r);
