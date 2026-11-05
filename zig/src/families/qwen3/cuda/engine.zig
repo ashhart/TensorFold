@@ -91,14 +91,12 @@ pub const Engine = struct {
         e.sized = true;
     }
 
-    /// Each input's final-normed last row as fp32 into `out` (ends.len rows of hidden); inputs end at `ends`.
+    /// Each input's final-normed last row as fp32 into `out`: after a shared `trunk` of tokens, inputs end at `ends`.
     pub fn run(e: *Engine, tokens: []const u32, trunk: u32, ends: []const u32, out: []f32) !void {
         const s = e.m.spec;
-        // a shared trunk comes with the reranker's packed decisions; embeddings run independent inputs
-        if (trunk != 0) return error.InvalidBatch;
         if (!e.sized or tokens.len == 0 or tokens.len > e.window or ends.len == 0 or ends.len > max_inputs or
             ends[ends.len - 1] != tokens.len or out.len != ends.len * s.hidden) return error.InvalidBatch;
-        var begin: u32 = 0;
+        var begin: u32 = trunk;
         for (ends) |x| {
             if (x <= begin) return error.InvalidBatch;
             begin = x;
@@ -107,7 +105,7 @@ pub const Engine = struct {
         const ids = e.ids_host.slice(u32)[0..tokens.len];
         @memcpy(ids, tokens);
         try store.view(&e.d, e.a.ids, 4 * tokens.len).uploadAsync(0, std.mem.sliceAsBytes(ids), e.s.handle);
-        try lm.Lm.forward(&e.l, &e.m, e.a, e.cap, ends);
+        try lm.Lm.forward(&e.l, &e.m, e.a, e.cap, trunk, ends);
         const rows = e.rows_host.slice(u16)[0 .. ends.len * s.hidden];
         try store.view(&e.d, e.a.rows, 2 * rows.len).downloadAsync(0, std.mem.sliceAsBytes(rows), e.s.handle);
         try e.s.synchronize();
