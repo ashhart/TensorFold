@@ -13,7 +13,6 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
         .{ "zig/src/core/contract/contract.zig", "core/contract/contract.zig" },
         .{ "zig/src/core/contract/rows.zig", "core/contract/rows.zig" },
         .{ "zig/src/core/contract/limits.zig", "core/contract/limits.zig" },
-        .{ "zig/src/core/bf16_round.zig", "core/bf16_round.zig" },
         .{ "zig/src/core/norms_ref.zig", "core/norms_ref.zig" },
     };
     for (sources) |pair| _ = files.addCopyFile(b.path(pair[0]), pair[1]);
@@ -29,6 +28,8 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
         .optimize = .ReleaseSafe,
         .link_libc = true,
     });
+    // The bf16_round wiring skips generated roots, so this one names the module itself.
+    module.addImport("bf16_round", b.createModule(.{ .root_source_file = b.path("zig/src/core/bf16_round.zig"), .target = target }));
     const host = b.addRunArtifact(b.addTest(.{ .root_module = module }));
     host.setCwd(b.path("."));
     step.dependOn(&host.step);
