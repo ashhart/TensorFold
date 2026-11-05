@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: the whole shared expert's down projection writes straight into its output slot, without a scatter, so NVFP4 prompts run about 0.7% faster on a GB10 with the same tokens (#1792). Thanks to @laudney.
+
 - Qwen3.8-27B on Metal: a NaN or infinity in a value a row must not see no longer turns that row's attention output into NaN on the prompt kernels (before M5 and on M5) or the M5 decode prefix. Replies change only where such a value already sits in a masked key, and finite inputs keep their bytes (#2106). Thanks to @cshintov.
 
 - Flash Next on Metal: a lone `"draft": false` reply at `--parallel` above one runs as it does at `--parallel 1`, 17-18% faster on an M3 Ultra with the same tokens (#2272).
