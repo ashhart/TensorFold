@@ -132,6 +132,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
     }
     charge(b, s, before);
+    @import("qwen27_prompt_rows.zig").completed(b.gpa, s, part.len);
     f.at = end;
     s.fill_at.store(@intCast(end), .monotonic); // a prompt chunk waits: `at` is landed progress
     if (end == f.rewind) saveRewind(b, f.rewind);

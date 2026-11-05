@@ -181,6 +181,8 @@ pub const Stream = struct {
     rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
     prompt_logprobs: ?u8 = null,
     prompt_rows: std.ArrayList(Row) = .empty, // with `prompt_logprobs`: one a prompt token after the first, in order
+    prefill_widths: std.ArrayList(u32) = .empty, // completed target prompt passes, reported by an instrumented backend
+    prefill_widths_failed: bool = false, // an allocation failure invalidates this observation without failing the reply
     reuse: Reuse = .{},
     decode_spans: []const [2]u32 = &.{},
     decide: ?u32 = null,
@@ -296,6 +298,7 @@ pub const Stream = struct {
         s.context.deinit(gpa);
         s.rows.deinit(gpa);
         s.prompt_rows.deinit(gpa);
+        s.prefill_widths.deinit(gpa);
         s.force.deinit(gpa);
         s.long_loop.deinit(gpa);
         s.dropRoundState(gpa);
