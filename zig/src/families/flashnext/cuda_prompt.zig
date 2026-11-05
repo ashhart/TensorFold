@@ -536,7 +536,6 @@ test "linear layers skip every fourth index and attention starts at 3" {
     try @import("cuda_prompt_test.zig").layerIndices();
 }
 
-
 test "a failed fill frees the buffer it was filling and every one before it" {
     try @import("cuda_prompt_test.zig").failedFill(made);
 }
