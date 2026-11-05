@@ -61,6 +61,7 @@ test "lanes' DeltaNet steps: one launch a step when the round fits, nothing laun
     d.api.cuLaunchKernel = Mock.launch;
     var lw: Layer = undefined;
     @memset(std.mem.asBytes(&lw), 0);
+    lw.heads = .full;
     var conv: [lanes.gdn_lanes_max + 1]cuda.DeviceBuffer = undefined;
     var state: [lanes.gdn_lanes_max + 1]cuda.DeviceBuffer = undefined;
     var ls: [lanes.gdn_lanes_max + 1]parts.Lane = undefined;
@@ -95,6 +96,10 @@ test "lanes' DeltaNet steps: one launch a step when the round fits, nothing laun
     var tp = pass(&d, round(&d, &conv, &state, ls[0..2], 9, null), 0x400000);
     tp.m.collective = &collective;
     try expectOnce(&tp, &lw, false, 0); // tensor parallel keeps the lane loop
+    var half = lw;
+    half.heads = .half;
+    const halved = pass(&d, round(&d, &conv, &state, ls[0..2], 9, null), 0x400000);
+    try expectOnce(&halved, &half, false, 0); // a rank's half of the heads: these kernels have no twin
 
     _ = env.setenv("TF_FLASHNEXT_GDN_LANES", "0", 1);
     defer _ = env.unsetenv("TF_FLASHNEXT_GDN_LANES");
