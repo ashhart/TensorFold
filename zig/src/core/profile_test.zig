@@ -22,8 +22,8 @@ test "stable profile: registry scopes metadata and never supplies a default" {
         try t.expect(e.stable == null);
         try t.expect(p.resolve(.stable, e.id, null) == null);
         try t.expect(e.applies(e.families[0], "cuda"));
-        try t.expect(!e.applies(e.families[0], "mlx"));
-        try t.expect(!e.applies(e.families[0], "rocm"));
+        try t.expect(!e.applies(e.families[0], "metal"));
+        try t.expect(!e.applies(e.families[0], "hip"));
         try t.expect(!e.applies("unknown-model", "cuda"));
     }
     try t.expectEqual(p.Class.debug, p.entry(.TF_QWEN_KV_PAGES_ALL).class);
@@ -84,7 +84,7 @@ test "stable profile: GLM paging registers automatic policy without supplying or
     try t.expectEqual(p.Class.identical, e.class);
     try t.expect(e.applies("glm5_next", "cuda"));
     try t.expect(!e.applies("qwen3_5", "cuda"));
-    try t.expect(!e.applies("glm5_next", "mlx"));
+    try t.expect(!e.applies("glm5_next", "metal"));
     try t.expect(!e.differs("auto"));
     for ([_][]const u8{ "off", "0", "on", "1", "all", "", "AUTO", "false", " 0 " }) |raw|
         try t.expect(e.differs(raw));
