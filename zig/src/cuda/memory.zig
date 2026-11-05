@@ -190,12 +190,15 @@ pub const DeviceBuffer = struct {
         try @import("copy_source.zig").synchronousCopy(self.d, dst, bytes, std.heap.page_allocator);
     }
 
-    /// Returns once the bytes have landed; the copy stages through this thread's page-locked buffer, a
-    /// piece of at most `download_stage.most` bytes at a time (see that module for why).
+    /// Returns once the bytes have landed; an integrated GPU stages through this thread's pinned bounce.
     pub fn download(self: DeviceBuffer, offset: usize, out: []u8) Error!void {
         const src = try self.span(offset, out.len);
         if (out.len == 0) return;
         const stage = @import("download_stage.zig");
+        if (!try stage.integrated(self.d)) {
+            try self.d.check(self.d.api.cuMemcpyDtoH_v2(out.ptr, src, out.len), "cuMemcpyDtoH");
+            return;
+        }
         var done: usize = 0;
         while (done < out.len) {
             const n = @min(out.len - done, stage.most);
@@ -552,6 +555,11 @@ test "taking an interval preserves transient peaks before resetting them" {
 
 pub fn releaseRetainedHost(bytes: usize) void {
     freed(&host_bytes, bytes);
+}
+
+/// Counts pinned bytes the driver allocated directly (a download's bounce), so `usage` and the limit see them.
+pub fn retainHost(bytes: usize) void {
+    held(&host_bytes, bytes);
 }
 
 test "Failure boundaries: a buffer keeps its allocation hook when the installed hook changes" {
