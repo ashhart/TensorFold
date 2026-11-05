@@ -56,17 +56,17 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 9. FP8 KV | done [#886] | yes | done¹ | yes | yes |
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
-| 12. Add + norm | done H[#2099] | yes | yes | done¹ | done [#796] |
+| 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
 | 13. MoE grouped | done [#605] | done [#1351] | done [#864] | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | yes [#1490] | done [#1174] | done [#615] |
 | 15. MTP | done [#1562] | done [#1925] | done [#1585] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done [#979] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
 | 18. Copy drafts | done [#1477] | done [#468] | done [#2146] | done [#2022] | done [#1974] |
-| 19. Shared drafts | done [#1562] | yes | done [#1779] | done [#1779] | done [#768] |
+| 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779] | done [#1779] | done [#768] |
 | 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | yes | yes |
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | open [#2033] |
-| 22. Direct load | yes | done [#1901] | yes | yes | yes |
+| 22. Direct load | open [#2282] | done [#1901] | yes | open [#2282] | done [#458] |
 | 23. Page drop | done [#1884] | done [#1880] | done [#600] | done [#1884] | done [#1884] |
 | 24. L2 prefetch | failed [#2014] | yes | open [#2162] | yes | failed [#2014] |
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
@@ -142,7 +142,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | Optimization | q27 | lfm2 | llama | step5 |
 | --- | --- | --- | --- | --- |
 | 1. Prompt tail | no (Metal) | no (n/a) | no (Metal) | no (Metal) |
-| 2. Paged KV | yes [#1293] | no (scores) | yes | yes |
+| 2. Paged KV | open M[#2283] | no (scores) | yes | yes |
 | 3. Prompt store | yes | no (scores) | yes | yes |
 | 4. iGPU states | no (unified) | no (scores) | no (unified) | no (unified) |
 | 5. State walk | yes | no (scores) | yes | yes |
@@ -410,6 +410,7 @@ below; these are estimates for planning a port, not results.
     and the startup line prints what differs from the defaults ([#1660], [#1944]). Only `stable` is served;
     `fast-exact` and `fast` are refused by name until switches qualify for them.
 
+[#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
 [#519]: https://github.com/ashhart/TensorFold/pull/519
 [#558]: https://github.com/ashhart/TensorFold/pull/558
@@ -482,6 +483,7 @@ below; these are estimates for planning a port, not results.
 [#1751]: https://github.com/ashhart/TensorFold/pull/1751
 [#1755]: https://github.com/ashhart/TensorFold/pull/1755
 [#1756]: https://github.com/ashhart/TensorFold/pull/1756
+[#1762]: https://github.com/ashhart/TensorFold/issues/1762
 [#1771]: https://github.com/ashhart/TensorFold/pull/1771
 [#1779]: https://github.com/ashhart/TensorFold/pull/1779
 [#1783]: https://github.com/ashhart/TensorFold/pull/1783
@@ -527,3 +529,5 @@ below; these are estimates for planning a port, not results.
 [#2215]: https://github.com/ashhart/TensorFold/pull/2215
 [#2221]: https://github.com/ashhart/TensorFold/pull/2221
 [#2229]: https://github.com/ashhart/TensorFold/pull/2229
+[#2282]: https://github.com/ashhart/TensorFold/pull/2282
+[#2283]: https://github.com/ashhart/TensorFold/pull/2283
