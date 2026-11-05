@@ -96,6 +96,69 @@ pub const Gather = struct {
     }
 };
 
+pub const Error = @typeInfo(@typeInfo(@TypeOf(Gather.read)).@"fn".return_type.?).error_union.error_set;
+
+/// A loader's hook, run on the reading thread just before a read `Pair.start` began.
+pub const Hook = struct { ctx: *anyopaque, run: *const fn (*anyopaque) void };
+
+/// Two arenas: the views one read pointed at stay valid while the next read fills the other, on its own thread.
+pub const Pair = struct {
+    gathers: [2]Gather,
+    at: usize = 0, // the arena the next read fills
+    thread: ?std.Thread = null,
+    sources: []const Source = &.{},
+    views: []const *[]const u8 = &.{},
+    hook: ?Hook = null,
+    failed: ?Error = null,
+
+    pub fn init(gpa: std.mem.Allocator, readers: usize) Pair {
+        return .{ .gathers = .{ .init(gpa, readers), .init(gpa, readers) } };
+    }
+
+    pub fn deinit(p: *Pair) void {
+        p.wait() catch {};
+        for (&p.gathers) |*g| g.deinit();
+    }
+
+    /// `views` read now (after any read in flight), into the arena the read before last used.
+    pub fn read(p: *Pair, sources: []const Source, views: []const *[]const u8) Error!void {
+        try p.wait();
+        const g = &p.gathers[p.at];
+        p.at = 1 - p.at;
+        try g.read(sources, views);
+    }
+
+    /// `views` read on a thread of its own (inline if none starts) until `wait`; they must stay put until then.
+    pub fn start(p: *Pair, sources: []const Source, views: []const *[]const u8, hook: ?Hook) Error!void {
+        try p.wait();
+        p.sources = sources;
+        p.views = views;
+        p.hook = hook;
+        p.thread = std.Thread.spawn(.{}, readAhead, .{p}) catch blk: {
+            readAhead(p);
+            break :blk null;
+        };
+    }
+
+    /// The read `start` began joined (idempotent), then its error if it failed.
+    pub fn wait(p: *Pair) Error!void {
+        if (p.thread) |t| t.join();
+        p.thread = null;
+        const failed = p.failed;
+        p.failed = null;
+        if (failed) |err| return err;
+    }
+
+    fn readAhead(p: *Pair) void {
+        if (p.hook) |h| h.run(h.ctx);
+        const g = &p.gathers[p.at];
+        p.at = 1 - p.at;
+        g.read(p.sources, p.views) catch |err| {
+            p.failed = err;
+        };
+    }
+};
+
 fn lower(_: void, x: Range, y: Range) bool {
     return if (x.file != y.file) x.file < y.file else x.lo < y.lo;
 }
@@ -191,6 +254,48 @@ test "views read past the page cache hold their mapped bytes, joined, cut and in
         const p = @intFromPtr(v.ptr);
         try std.testing.expect(p >= @intFromPtr(g.arena.ptr) and p + v.len <= @intFromPtr(g.arena.ptr) + g.arena.len);
     }
+}
+
+test "a pair reads ahead into one arena while the other's views stay readable" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const bytes = try gpa.alloc(u8, 2 * chunk + 4096);
+    defer gpa.free(bytes);
+    var prng = std.Random.DefaultPrng.init(11);
+    prng.random().bytes(bytes);
+    try tmp.dir.writeFile(io, .{ .sub_path = "p.bin", .data = bytes });
+    const real = try tmp.dir.realPathFileAlloc(io, "p.bin", gpa);
+    defer gpa.free(real);
+    const path = try gpa.dupeSentinel(u8, real, 0);
+    defer gpa.free(path);
+    const sources = [_]Source{.{ .path = path, .memory = bytes }};
+    var p = Pair.init(gpa, 2);
+    defer p.deinit();
+    var a: []const u8 = bytes[3..][0..chunk];
+    var b: []const u8 = bytes[chunk + 5 ..][0..chunk];
+    var c: []const u8 = bytes[7..][0..100];
+    try p.read(&sources, &.{&a});
+    const Count = struct {
+        n: usize = 0,
+        fn bump(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.n += 1;
+        }
+    };
+    var count: Count = .{};
+    try p.start(&sources, &.{&b}, .{ .ctx = &count, .run = Count.bump });
+    try std.testing.expectEqualSlices(u8, bytes[3..][0..chunk], a); // a's arena is not the one being filled
+    try p.wait();
+    try std.testing.expectEqualSlices(u8, bytes[chunk + 5 ..][0..chunk], b);
+    try std.testing.expectEqual(@as(usize, 1), count.n);
+    // the third read takes a's arena again: b's views stay where they were
+    try p.read(&sources, &.{&c});
+    try std.testing.expectEqualSlices(u8, bytes[7..][0..100], c);
+    try std.testing.expectEqualSlices(u8, bytes[chunk + 5 ..][0..chunk], b);
+    try std.testing.expect(@intFromPtr(c.ptr) >= @intFromPtr(p.gathers[0].arena.ptr));
+    try std.testing.expect(@intFromPtr(c.ptr) < @intFromPtr(p.gathers[0].arena.ptr) + p.gathers[0].arena.len);
 }
 
 test "a view outside every mapping is refused" {
