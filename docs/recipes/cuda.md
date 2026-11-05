@@ -2,21 +2,30 @@
 
 ## Engine versions
 
-The family and checkpoint tables, two-rank setup and PyTorch/Triton implementation notes on this page describe
+The family and checkpoint tables, Python transport and PyTorch/Triton implementation notes on this page describe
 the Python 0.6.6 engine, available at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6).
-They are not the native Zig release's support matrix. The kernel paths, the prompt and NVFP4 precision flags
-(`--prefill-fp8`, `--no-prefill-fp8`, `--precision`) and the request and memory notes below are that engine's too,
-and the native binary refuses those flags.
+Its flags, formats, rank counts and measurements are historical, not the native Zig release's support matrix.
+The native binary refuses `--prefill-fp8` and `--no-prefill-fp8`; its `--precision` options are family-specific
+(see [Super VL's native modes](nemotron-3.5-super-vl.md)).
 
-The native binary registers Nemotron on CUDA, qualified on NVIDIA GB10 and on Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40), and Flash Next from its MLX 4-bit checkpoint, run on a GB10 ([Flash Next on CUDA](flash-next-cuda.md)).
-A user's receipt for 1.0.4 on a bare-metal RTX 3090, at 225 W and 350 W, is in [#592](https://github.com/ashhart/TensorFold/issues/592).
-GLM-5.3-Flash on CUDA, EXL3 loading and DFlash2 drafting remain Python-engine features, not native upgrade paths.
+The native CUDA registry includes Nemotron, GLM-5.3-Flash, Qwen3.5/3.8 dense and Qwen3.6 MoE, Flash Next,
+Gemma 4, MiniMax-M3.1-Flash, Kolibri-1, Spark-X2.6 and Dory. LFM2 and Drama have separate native open paths.
+Qwen4 is registered as preparation with synthetic gates, without a real-checkpoint qualification.
+A registry entry does not qualify every checkpoint, format, GPU or rank count.
+See the [qualified models](../../README.md#qualified-models), [changes](../../CHANGELOG.md) and
+[native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for recorded serving scope.
+Native [GLM](glm-5.3-flash-cuda.md) has TP=2 and TP=3 serving receipts; native EXL3 loading and DFlash2 drafting
+also exist for the families and formats recorded there. DeepSeek remains refused by the release server pending gate #827.
+
+Nemotron's MLX 4-bit serving record covers GB10 (sm_121), RTX 3090 (sm_86) and RTX PRO 6000 (sm_120).
+The [RTX 3090 receipt](https://github.com/ashhart/TensorFold/issues/592) does not measure every sm_86 card.
+Release kernels include the A100 (sm_80), and [#846](https://github.com/ashhart/TensorFold/pull/846) records
+kernel checks on GA100. No served checkpoint is recorded on sm_80, so the A100 is not model-qualified.
+Nemotron and dense Qwen have NVFP4/FP8 fallback code for sm_80 to sm_89, without thread-block clusters
+(#901, #1470); no NVFP4/FP8 model run on sm_80 is recorded. Kernel checks do not establish that model receipt.
+
 Inspect the installed binary with `tensorfold-native --version` and `tensorfold-native capabilities --json`.
-See the [qualified models](../../README.md#qualified-models) and
-[native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for the released engine.
 The [native prompt controls](#native-prompt-controls) below describe the separate Zig CLI.
-Native GLM CUDA work and its gate are tracked in [#593](https://github.com/ashhart/TensorFold/issues/593);
-until a family lands there, GLM on CUDA is the Python 0.6.6 engine's.
 
 ## Python 0.6 CUDA families
 
@@ -58,8 +67,9 @@ The module is at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v
 
 ## Checkpoints
 
-On CUDA, TensorFold serves NVFP4 and EXL3 checkpoints, usually the ones Mia-AiLab's DGX Spark recipes run or your
-own exports, and MLX 4-bit checkpoints as the portable option: the same files a Mac serves. `tensorfold serve` loads
+The table and measurements in this section describe Python 0.6.6. That engine serves NVFP4 and EXL3 checkpoints,
+usually the ones Mia-AiLab's DGX Spark recipes run or your own exports, and MLX 4-bit checkpoints as the portable
+option: the same files a Mac serves. `tensorfold serve` loads
 the checkpoint you name; it picks none by itself.
 
 | Family | NVFP4 | EXL3 | MLX 4-bit |
@@ -93,7 +103,7 @@ format ([prompt precision](#prompt-precision)):
 
 ## Native prompt controls
 
-The native `tensorfold run` command accepts `--device N` to choose a CUDA ordinal. If
+For Nemotron, the native `tensorfold run` command accepts `--device N` to choose a CUDA ordinal. If
 the flag is absent, it uses `TF_CUDA_DEVICE`, then device 0. `--segments N` enables
 staggered prompt work for 1 through 4 whole 2,048-row chunks; without the flag it
 uses `TF_CUDA_SEGMENTS`, then 1. The `tensorfold segments` command compares the
@@ -149,7 +159,12 @@ Each engine defines its own serial reference. A verify row uses the same group o
 rounding as that row alone. Attention partitions depend on absolute key position; router ties use a
 stable ID order. Recurrent commits replay the accepted path with the same update routine.
 
-Two ranks are the Python engine's; the native CUDA build serves one GPU. In that engine, @jayleaton's
+Native CUDA has tensor-parallel serving as well as one-GPU paths. GLM's recorded TP=2 and TP=3 setups use
+`TF_GLM_RANK`, `TF_GLM_WORLD` and `NCCL_COMM_ID`; see [native GLM placement](glm-5.3-flash-cuda.md#run).
+Other families take `--tp`, `--rank` and `--master` only where their native options support ranks; for example,
+[Super VL](nemotron-3.5-super-vl.md) serves on one or two GB10s. A rank option is not universal family support.
+
+The following transport and two-rank reduction notes describe Python 0.6.6. In that engine, @jayleaton's
 [#219](https://github.com/ashhart/TensorFold/pull/219) gave the communicator its transport interface
 ([`src/tensorfold/cuda/comm.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/cuda/comm.py)).
 A two-rank engine opens its communicator with `tensorfold.cuda.comm.open_comm`: NCCL, wrapped by a registered
@@ -191,8 +206,9 @@ counterpart.
 
 ### Prompt precision
 
-This section and the next describe the Python 0.6.6 engine; the native binary refuses `--prefill-fp8`,
-`--no-prefill-fp8` and `--precision`.
+The FP8 prompt and NVFP4 measurements below describe Python 0.6.6; the native binary refuses `--prefill-fp8`
+and `--no-prefill-fp8`. Native `--precision full` and `--precision checkpoint` are family-specific: Super VL's
+checkpoint math needs Blackwell, while dense Qwen's ModelOpt path accepts full precision only.
 
 The native Qwen3.5 engine has its own switch, `--prompt-precision int8` (bf16 by default). Prompt passes past 16 rows
 quantize each MLX affine 4-bit projection's inputs to int8, one scale (amax / 127) a 64-input group, and run the int8
@@ -203,7 +219,7 @@ fixture, compiler, flags and fatbin hashes with the quality and timing results. 
 quality measurements are contributor observations until those receipts and the chunk, cache, draft and concurrency
 comparisons are complete.
 
-Prompt matmuls take bf16 activations by default. `--prefill-fp8` switches the ones that have an FP8 kernel (the
+In Python 0.6.6, prompt matmuls take bf16 activations by default. `--prefill-fp8` switches the ones that have an FP8 kernel (the
 27B's and Qwen3.6's MLX 4-bit projections, and the FP8, NVFP4 and MXFP8 layers of NVFP4 checkpoints) to e4m3
 activations with one scale a row, the arithmetic of TensorFold 0.5.0's prompts; `--no-prefill-fp8` asks for bf16 by
 name. e4m3 keeps 3 mantissa bits to bf16's 7, and one scale a row loses a row's small values when one of its channels
@@ -310,7 +326,7 @@ This section describes the Python 0.6.6 engine's CUDA families. The native CUDA 
 `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` (@eleqtrizit, [#165](https://github.com/ashhart/TensorFold/pull/165)) in
 `zig/src/native/cuda_memory.zig`; its own reserves are in the [API reference](../api.md#context-and-errors).
 
-CUDA `--parallel auto` serves one request at a time. Set an explicit `--parallel N` above one for shared
+In Python 0.6.6, CUDA `--parallel auto` serves one request at a time. Set an explicit `--parallel N` above one for shared
 Qwen3.8-27B or Flash Next rounds on one or two ranks; Nemotron, GLM and Qwen3.6 remain serialized. The shared
 scheduler admits requests between decode rounds, then verifies each active stream's drafts together and commits
 each stream independently. On the 27B, a new prompt prefills 1,024 tokens a round while the other streams keep
@@ -337,7 +353,9 @@ caches. The CUDA CLI also does not apply `--alias`; use `--name` for the served 
 
 ## Multi-GPU P2P startup report
 
-With two or more CUDA ranks, each rank logs `p2p:` lines once its NCCL communicator is up: its GPU and PCI bus id,
+The native CUDA implementation has this report on its ranked paths; DeepSeek's implementation remains behind
+the release server's #827 refusal. With two or more CUDA ranks, each rank logs `p2p:` lines once its NCCL
+communicator is up: its GPU and PCI bus id,
 the driver, CUDA driver API and NCCL versions, each other GPU's NVML P2P read and write status and PCIe path
 (`nvidia-smi topo -m`'s names), CUDA's peer access when the process sees more than one device, the values of
 `NCCL_P2P_DISABLE`, `NCCL_P2P_LEVEL`, `NCCL_P2P_READ_ENABLE`, `NCCL_SHM_DISABLE`, `NCCL_ALGO`, `NCCL_PROTO` and
