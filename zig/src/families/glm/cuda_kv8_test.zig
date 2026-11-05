@@ -291,10 +291,10 @@ test "GLM FP8 KV: canonical per-rank state bytes at configured long windows are 
     try t.expectEqual(@as(usize, 11), mla);
     const contexts = [_]usize{ 8192, 65536, 199307, 245760 };
     const bytes = [_][3]usize{
-        .{ 8256, 296101376, 245772800 },
-        .{ 65600, 1044784640, 644887040 },
-        .{ 199360, 2791155200, 1575856640 },
-        .{ 245824, 3397789184, 1899246080 },
+        .{ 8256, 350153216, 299824640 },
+        .{ 65600, 1098836480, 698938880 },
+        .{ 199360, 2845207040, 1629908480 },
+        .{ 245824, 3451841024, 1953297920 },
     };
     for (contexts, bytes) |context, want| {
         const capacity = @import("cuda_native.zig").capacity(context);
@@ -331,4 +331,27 @@ test "GLM FP8 KV: unset, empty or whitespace-only TF_KV_PAGES is auto at every r
         try t.expectEqual(@as(c_int, 0), sys_env.setenv(name, v, 1));
         try t.expectEqualStrings(v, start.pagesText().?);
     }
+}
+
+test "GLM shared window: its KDA projection rows have their own room, even when one stream may take every row" {
+    var d = Fake.driver();
+    var layers: [45]weights.Layer = undefined;
+    var w: weights.Weights = undefined;
+    w.config = .{};
+    w.share = try shard.Share.of(&w.config, 0, 4);
+    for (&layers, 0..) |*l, i| if (w.config.kind(@intCast(i)) == .mla) {
+        l.mixer = .{ .mla = undefined };
+    } else {
+        l.mixer = .{ .kda = undefined };
+    };
+    w.layers = &layers;
+    const rows = @import("cuda_engine.zig").shared_rows;
+    try t.expectEqual(rows, state.window_rows);
+    const row_bytes = @import("cuda_kda_block.zig").rowWidth(w.share.kda.len()) * 2;
+    var shared = try state.Buffers.initShared(&d, &w, rows, 8256);
+    defer shared.deinit();
+    try t.expect(shared.kda.ka - shared.kproj >= rows * row_bytes);
+    var window = try state.Buffers.init(&d, &w, rows, false, 8256);
+    defer window.deinit();
+    try t.expect(window.kda.ka - window.kproj < rows * row_bytes); // a lone window's rows stay in the state
 }
