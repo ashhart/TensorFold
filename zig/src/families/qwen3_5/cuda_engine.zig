@@ -99,6 +99,7 @@ pub const Engine = struct {
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
     arena: DeviceBuffer,
     arena_at: usize = 0,
+    weight_bytes: usize = 0, // final packed weights, before scratch: the load receipt hashes this prefix
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -262,6 +263,7 @@ pub const Engine = struct {
             try weights.load(e, &ck, &stage);
         }
         if (e.mo) |*m| try m.reserveParts(e);
+        e.weight_bytes = e.arena_at;
         try @import("cuda_engine_tail.zig").finish(e, io, started);
         return e;
     }
