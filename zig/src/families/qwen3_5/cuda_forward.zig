@@ -91,6 +91,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         const t0: usize = if (tail) tail_at.? else 0;
         const rows: usize = total - t0;
         try e.norm(g.first + i != 0, l.input_norm, total);
+        try @import("cuda_hidden_trace.zig").emit(e, i, e.h, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
@@ -214,6 +215,8 @@ pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool, rows: bool) 
     if (hidden) return;
     const g = e.g;
     try e.norm(true, e.final_norm, total);
+    try @import("cuda_hidden_trace.zig").emit(e, e.g.layers, e.h, total);
+    try @import("cuda_hidden_trace.zig").emit(e, e.g.layers + 1, e.x, total);
     if (rows) return;
     if (e.learning) |k| try k.final(e.h, total);
     // the head over the kept rows

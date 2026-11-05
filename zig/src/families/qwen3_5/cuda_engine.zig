@@ -69,6 +69,7 @@ pub const Engine = struct {
     dir: []const u8,
     pockets: pocket.Pockets,
     learning: ?*const hooks.Keep = null,
+    hidden_trace: ?@import("cuda_hidden_trace.zig").Trace = null,
     mlp: ?hooks.MlpAdd = null,
     taught: u64 = 0,
     d: *const cuda.Driver,
@@ -473,6 +474,7 @@ pub const Engine = struct {
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const total = ids.len;
         try e.admit(parts, ids, keep);
+        if (keep != .last and e.hidden_trace != null) return error.TraceRequiresPrompt;
         try scratch_memory.requireCapacity(e.scratch_capacity, total);
         if (!keep.verifies() and e.int8.on and total > e.int8.capacity) return error.PromptInt8CapacityExceeded;
         e.mtp_prompt.epoch +%= 1;

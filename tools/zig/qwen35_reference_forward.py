@@ -157,7 +157,7 @@ def make_text_masks(lang, hidden_ref, seq3, device):
 
 
 def manual_forward(model, ids, upcast=False, verify_layers=None, verify_report=None,
-                   track_params=False):
+                   track_params=False, capture=None):
     'Run the exact library module graph over the text model'
     lang = model.model.language_model
     cfg = lang.config
@@ -167,6 +167,8 @@ def manual_forward(model, ids, upcast=False, verify_layers=None, verify_report=N
     h = lang.embed_tokens(ids)
     if upcast:
         h = h.to(torch.float32)
+    if capture is not None:
+        capture(0, h)
     seq3 = torch.arange(L, device=device).view(1, 1, -1).expand(3, b, -1)
     rope = lang.rotary_emb(h, seq3)
     masks = make_text_masks(lang, h, seq3, device)
@@ -185,6 +187,8 @@ def manual_forward(model, ids, upcast=False, verify_layers=None, verify_report=N
         h = layer(h, position_embeddings=rope,
                   attention_mask=masks[cfg.layer_types[i]],
                   position_ids=seq3[0], past_key_values=None)
+        if capture is not None:
+            capture(i + 1, h)
         if saved is not None:
             restore_module(saved)
             stats["restored"] += 1
@@ -213,6 +217,8 @@ def manual_forward(model, ids, upcast=False, verify_layers=None, verify_report=N
         stats["restored"] += 1
     else:
         h = lang.norm(h)
+    if capture is not None:
+        capture(cfg.num_hidden_layers + 1, h)
     if track_params:
         stats["parameter_dtypes_after"] = sorted(set(str(p.dtype) for p in model.parameters()))
     return h, stats
