@@ -17,6 +17,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next on CUDA, beside another open stream: a greedy chain stops at 0.6 per draft, and a round with more than four streams drafting drafts greedy chains 6 deep. That fixes #1786's loss at eight greedy streams: on a GB10, MLX 4-bit chat goes from 288.8 to 303.8 tok/s and code from 336.9 to 358.5, FP4 stays level and every reply keeps its bits. `TF_FLASHNEXT_GREEDY_WIDE` sets the width and `TF_FLASHNEXT_SHARED_DRAFTS=0` keeps the alone rule (#2160, part of #1762). Thanks to @Arminova.
 - With `--ssd-experts`, the expert pool counts uses, so an expert used once leaves before one used again. On an M3 Ultra, Flash Next reads about 11% less from disk at 17 and 35 GiB pools, and a mixed workload took 8% less time at 35 GiB, with the same replies (#2209).
 
+- Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) runs on CUDA from `mlx_lm.convert` 4-bit checkpoints: per-layer inputs in their own launch and layers 24 to 41 on the caches of 22 and 23, with replies equal across streams and resumes (#1222, #2230).
+
 - Flash Next on a Mac without tensor units, with `--parallel` above one: a lone reply runs as fast as at `--parallel 1`. On an M3 Ultra, sampled replies are 12-19% faster and greedy ones about 4%, with the same tokens, and a second request joining a reply leaves it unchanged (#2199).
 
 - Flash Next on Metal reports a filling prompt's progress: the dashboard shows what's left, and `TENSORFOLD_PREFILL_ORDER=srpt` works from a server's first long prompt (#2194).
