@@ -425,6 +425,8 @@ pub const Store = struct {
         const stable: u32 = if (part == 0 or part >= history_len or part < history_len / 2) 0 else if (s.rules.fork) part -| s.rules.lookahead else part;
         if (stable > 0) try want.append(a, stable);
         if (!short) try want.appendSlice(a, shared);
+        // tail: a prompt that names no history keeps its last chunk too (a chat keeps its history's mark alone)
+        if (!short and s.rules.tail and history_len == 0) try want.append(a, @intCast(prompt.len -| @max(1, s.rules.lookahead)));
         const fork_at = if (s.rules.fork and s.rules.planned) s.startAt(starts, stable) else stable; // where the loop snaps it
         for (want.items, 0..) |w, k| {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
@@ -593,4 +595,5 @@ test {
 
 test {
     _ = @import("prompt_cache_repeat_test.zig");
+    _ = @import("prompt_cache_tail_test.zig");
 }

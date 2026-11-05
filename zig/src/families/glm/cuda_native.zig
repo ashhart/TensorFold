@@ -26,6 +26,8 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = fw.prefill_rows;
 /// Prompt kernels change arithmetic with a chunk's rows: states keep and resume only on chunk starts.
 pub const snap_grid: u32 = prompt_rows;
+/// A prompt that names no history keeps its last chunk start, as the KV pages' store keeps its last page.
+pub const snap_tail = true;
 /// `explain` words this family's open refusals too (where to set the rank and the id).
 pub const explains_open = true;
 
