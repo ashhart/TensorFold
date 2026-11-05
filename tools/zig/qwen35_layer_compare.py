@@ -61,7 +61,10 @@ def compare(native_dir, reference_dir):
     if nm['boundaries'] != nm['layers'] + 2 or not nm.get('trace_plain_logits_equal'):
         raise ValueError('incomplete or perturbing native trace')
     count = nm['rows'] * nm['hidden']
-    result, tensors = [], []
+    result, all_rows, tensors = [], [], []
+    scored_rows = nm["rows"] - 1
+    if scored_rows < 1:
+        raise ValueError("fixture needs a scored row")
     for i in range(nm['boundaries']):
         paths = [(native_dir / ('%d.bf16' % i), 'bf16'),
                  (reference_dir / 'bf16' / ('%d.f32' % i), 'f32'),
@@ -71,15 +74,20 @@ def compare(native_dir, reference_dir):
             values.append(read_values(path, dtype, count))
             tensors.append({'boundary': i, 'arm': ('native' if dtype == 'bf16' else path.parent.name),
                             'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
-        row = distance(*values, nm['hidden'])
+        full = distance(*values, nm['hidden'])
+        row = distance(*(v[:scored_rows * nm['hidden']] for v in values), nm['hidden'])
         row.update(boundary=i, layer=i-1 if 0 < i <= nm['layers'] else None,
                    kind='embedding' if i == 0 else 'final_norm' if i > nm['layers'] else 'residual')
+        full.update(boundary=i, layer=row["layer"], kind=row["kind"])
+        all_rows.append(full)
         result.append(row)
     failures = [r for r in result if not r['within_bf16_max_distance']]
     first_layer = next((r['layer'] for r in failures if r['kind'] == 'residual'), None)
     return {'rule': 'per boundary, max |native-FP32| <= max |Transformers BF16-FP32|; no added tolerance',
             'status': 'failed' if failures else 'passed', 'first_exceeding_layer_zero_based': first_layer,
             'shape': {k: nm[k] for k in ('rows', 'hidden', 'layers', 'boundaries')},
+            'compared_rows': scored_rows, 'row_scope': 'hidden rows 0..N-2 predict the served prompt IDs 1..N-1',
+            'all_input_rows_boundaries': all_rows,
             'boundaries': result, 'tensors': tensors}
 
 

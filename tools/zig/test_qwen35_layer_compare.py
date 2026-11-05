@@ -18,13 +18,13 @@ class LayerComparisonTests(unittest.TestCase):
             native.mkdir()
             for arm in ('bf16', 'fp32'):
                 (reference / arm).mkdir(parents=True)
-            meta = dict(rows=1, hidden=1, layers=2, boundaries=4, trace_plain_logits_equal=True)
+            meta = dict(rows=2, hidden=1, layers=2, boundaries=4, trace_plain_logits_equal=True)
             for dest in (native, reference):
                 (dest / 'meta.json').write_text(json.dumps(meta))
             for i in range(4):
-                (native / ('%d.bf16' % i)).write_bytes(struct.pack('<H', 0x4000 if i == 2 else 0x3f80))
-                (reference / 'bf16' / ('%d.f32' % i)).write_bytes(struct.pack('<f', 1.25))
-                (reference / 'fp32' / ('%d.f32' % i)).write_bytes(struct.pack('<f', 1.0))
+                (native / ('%d.bf16' % i)).write_bytes(struct.pack('<HH', 0x4000 if i == 2 else 0x3f80, 0x3f80))
+                (reference / 'bf16' / ('%d.f32' % i)).write_bytes(struct.pack('<ff', 1.25, 1.25))
+                (reference / 'fp32' / ('%d.f32' % i)).write_bytes(struct.pack('<ff', 1.0, 1.0))
             result = compare(native, reference)
             self.assertEqual(result['status'], 'failed')
             self.assertEqual(result['first_exceeding_layer_zero_based'], 1)
@@ -33,8 +33,13 @@ class LayerComparisonTests(unittest.TestCase):
                                    '--reference', str(reference), '--output', str(root / 'out.json')],
                                   capture_output=True, timeout=10)
             self.assertEqual(proc.returncode, 1)
-            (native / '2.bf16').write_bytes(struct.pack('<H', 0x3f80))
+            (native / '2.bf16').write_bytes(struct.pack('<HH', 0x3f80, 0x3f80))
             self.assertEqual(compare(native, reference)['status'], 'passed')
+            (native / '2.bf16').write_bytes(struct.pack('<HH', 0x3f80, 0x4100))
+            served = compare(native, reference)
+            self.assertEqual(served['status'], 'passed')
+            self.assertEqual(served['compared_rows'], 1)
+            self.assertFalse(served['all_input_rows_boundaries'][2]['within_bf16_max_distance'])
             (native / '3.bf16').unlink()
             with self.assertRaises(FileNotFoundError):
                 compare(native, reference)
