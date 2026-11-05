@@ -2,8 +2,10 @@
 
 Tested implementation: the binaries built from `d3e06e76…`, upstream `main` at `ad98b602c` plus the change (commit.txt
 has the commit and its tree). The receipt's commit adds this folder and a recipe paragraph and changes no source.
-Rebased: onto upstream main 8094ec962 as c39cff503; the rebased tree differs from the tested one by the fingerprint
-reconciliation only (layout 17, kv_live_half placed after upstream's kda_pad) and the changelog line's position
+Rebased: onto upstream main 8abb30f6f as 0119e4893, then onto 29d6e8b64 as f43f279d2; the rebased tree differs from
+the tested one by the fingerprint reconciliation only (layout 20 as assigned in the review, kv_live_half placed after
+upstream's kda_pad), the changelog line's position and the recipe bullet's fresh context (upstream's KV-pages paragraph
+now sits above it)
 Test date: 2026-11-03 (06:13:22 to 06:39:57 UTC, the nodes' production ring stopped and restored). Platform: two GB10
 (sm_121, 128 GB shared memory) at TP=2 over a direct RoCE link, ranks pinned to CPUs 0-4,10-14, `--parallel 1`,
 context 65,536, the prompt cache in pinned host memory (`TF_GLM_HOST_CACHE=1`, `--prompt-cache-gib 16`).
@@ -18,7 +20,7 @@ prompt chunk or decode window: every chunk and every committed window reads `rec
 and flips the layer's bit, and a keep waits for an empty window, so nothing reads the dead half after a restore.
 With `TF_GLM_KV_LIVE_HALF=1` the snapshot plan carries the arena head in two parts around the dead half, a restore
 builds its plan from the kept state's own parity and leaves the slot's dead half as it was, and the ranks'
-fingerprint carries the flag (layout 16 in the tested binary, 17 on the rebased branch after upstream took 16 for `kda_pad`; ranks that disagree stop before loading).
+fingerprint carries the flag (layout 16 in the tested binary, 20 on the branch as the maintainer assigned, after upstream took 16 for `kda_pad`; ranks that disagree stop before loading).
 
 This qualifies the change served at TP=2: the whole head (`both`, the flag at 0) against the live half (`live`),
 with drafts off and then on (`both-drafts`, `live-drafts`: the MTP head and copies), the same binary, one growing
