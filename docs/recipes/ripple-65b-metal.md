@@ -62,12 +62,13 @@ release's NVFP4 weights with bf16 activations and fp32 sums: what is measured be
 publisher's W4A4 kernels.
 
 Every kernel is registered with the kernel contract (`zig/tests/contract/metal_ricursive*.zig`, the roll call in
-`contracts.zig`): the glue, decode and prompt attention for both layer kinds, the NVFP4 row kernels, dequantization
-and GEMM, and llama's row projections, merge, argmax and GEMM again at Ripple's shapes. Fifteen planted controls each
-edit one kernel's source, and each must turn its gate red. `tf-kernel-contract --only ricursive` on the M5 Ultra:
+`contracts.zig`): the glue, decode and prompt attention for both layer kinds, the NVFP4 row kernels, dequantization and
+GEMM, and llama's row projections, merge, argmax and GEMM again at Ripple's shapes (every reduction it runs: k 5,120,
+10,240 for the attention output and 40,960). Fifteen planted controls each edit one kernel's source, and each must turn
+its gate red. `tf-kernel-contract --only ricursive` on the M5 Ultra:
 
 ```
-SUMMARY 36 kernels: 36 pass gates 1-4, 0 fail, 0 known findings; 15 controls: 15 red as planted, 0 missed; 0 limit problems; gates 571778 ms, limits 298 ms
+SUMMARY 46 kernels: 46 pass gates 1-4, 0 fail, 0 known findings; 15 controls: 15 red as planted, 0 missed; 0 limit problems; gates 645430 ms, limits 140 ms
 ```
 
 ## Correctness (M5 Ultra, 4 Nov 2026)
