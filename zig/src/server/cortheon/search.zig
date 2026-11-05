@@ -108,9 +108,13 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         const block_start = if (block) |b| lo + b else tag_start;
         if (std.mem.indexOf(u8, page[block_start..tag_start], "result--ad") != null) continue;
         const tag = page[tag_start..tag_end];
-        const href_at = std.ascii.findIgnoreCase(tag, "href=\"") orelse continue; // HREF= is the same attribute
-        const href_end = std.mem.indexOfScalarPos(u8, tag, href_at + 6, '"') orelse continue;
-        const url = (try resultTarget(a, tag[href_at + 6 .. href_end])) orelse continue;
+        const href_at = std.ascii.findIgnoreCase(tag, "href=") orelse continue; // HREF= is the same attribute
+        var v = tag[href_at + 5 ..];
+        const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else 0; // a single-quoted target is still a link
+        if (q == 0) continue;
+        v = v[1..];
+        const href_end = std.mem.indexOfScalar(u8, v, q) orelse continue;
+        const url = (try resultTarget(a, v[0..href_end])) orelse continue;
         const close = std.ascii.findIgnoreCasePos(page[0..next], tag_end, "</a>") orelse continue; // </A> closes the title too
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
@@ -205,6 +209,17 @@ test "a search result keeps a link whose attribute name differs only in case" {
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps a link written in single quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<tr><td><a rel=\"nofollow\" href='https://example.org/page' class='result-link'>Example</a></td></tr>";
+    const results = try parseDuckDuckGoLite(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+    try std.testing.expectEqualStrings("Example", results[0].title);
 }
 
 test "DuckDuckGo's lite page reads the same way" {
