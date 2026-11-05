@@ -1,4 +1,4 @@
-//! The joint schema head's contract entry: its kernels from the joint_schema image, with their planted controls, through gates 1-4.
+//! The joint schema head's contract entry: its kernels and planted controls through gates 1-4.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
