@@ -100,6 +100,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Prompt scheduling: a resumed turn that has not started its prompt pass is ranked by its uncached tail, not its whole prompt, so a long cached history no longer waits behind a cold prefill; a rejected restore ranks the whole prompt again (#2276, #2256). Thanks to @devopsfortunato, and to @laidick for the report.
 
 - CI: a pull request's `zig` and `zig-windows` jobs reuse main's test passes and compiles, C and C++ included, so they run only what its diff changed; main still checks every commit from scratch (#2274).
+- Nemotron on Metal: the 16 decode attention partials share one source, with the same kernels and bits (#2263). Saved Nemotron prompt states on Metal take their identity from the source text, so after upgrading they are not reused: the first long prompt prefills again, and is kept as before from then on.
 
 - Tests: Metal learning admission checks Kimi's own refusal and runs without shader compilation. Serving is unchanged (#2267).
 
