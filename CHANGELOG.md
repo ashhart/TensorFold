@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: a pull request's `zig` and `zig-windows` jobs reuse main's test passes and compiles, C and C++ included, so they run only what its diff changed; main still checks every commit from scratch (#2274).
+
 - Tests: Metal learning admission checks Kimi's own refusal and runs without shader compilation. Serving is unchanged (#2267).
 
 - Tests: Metal GLM draft-source facts use a defined host capability receiver, removing a random crash from an uninitialized device. Serving is unchanged (#2268).
