@@ -190,15 +190,9 @@ const lm = "language_model.model.";
 /// Admission as Metal's (MLX affine 2-6 and 8 bits, groups of 64), every tensor checked. `layers` caps them (checks).
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, layers: ?usize, images: bool) !Weights {
     const c = try cfg.Config.read(gpa, io, dir);
-    try c.requireDense();
+    if (c.geo.layer_input != 0) try requireAffineInputs(c) else try c.requireDense(); // the E-series (#1222)
+    if (c.geo.layer_input != 0 and images) return error.GemmaESeriesImagesNotServed;
     return loadConfig(gpa, io, d, s, k, dir, c, layers, images);
-}
-
-/// `load` with the E-series admitted, for synthetic checks until checkpoint receipts lift its refusal (#1222).
-pub fn loadESeries(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, layers: ?usize) !Weights {
-    const c = try cfg.Config.read(gpa, io, dir);
-    try requireAffineInputs(c);
-    return loadConfig(gpa, io, d, s, k, dir, c, layers, false);
 }
 
 /// The CUDA E-series reads its per-layer linears and table at an MLX affine width only (a BF16 one: dense_rows, next).
@@ -350,21 +344,22 @@ fn vision(x: *Ctx, c: cfg.Config) !Vision {
     return v;
 }
 
-test "an E-series checkpoint is refused before a weight is read or the device is touched" {
+test "an E-series checkpoint with BF16 per-layer linears is refused before a weight is read or the device is touched" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = @embedFile("fixtures/config_e4b.json") });
+    const bf16 = try std.mem.replaceOwned(u8, a, @embedFile("fixtures/config_e4b.json"), "\"mode\": \"affine\"", "\"mode\": \"affine\", \"layers.3.per_layer_input_gate\": false");
+    defer a.free(bf16);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = bf16 });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer a.free(path);
     var d: cuda.Driver = undefined;
     const s: cuda.Stream = undefined;
     var k: kern.Kernels = undefined;
-    try std.testing.expectError(error.GemmaPerLayerInputsNotServed, load(a, std.testing.io, &d, s, &k, path, null, false));
+    try std.testing.expectError(error.GemmaLayerInputBf16NotServed, load(a, std.testing.io, &d, s, &k, path, null, false));
 }
 
 test "the CUDA E-series takes affine per-layer linears and refuses a BF16 one by name" {
-    _ = &loadESeries; // analysed on hosts without a GPU too
     var c = try cfg.parse(std.testing.allocator, @embedFile("fixtures/config_e4b.json"));
     try requireAffineInputs(c);
     c.widths.layer_gate[7] = null;
