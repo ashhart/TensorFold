@@ -1,4 +1,4 @@
-// Qwen3-ASR on Metal: the tower's and the Qwen3 LM's ops at the CUDA binding's bf16 points, fp32 sums.
+// Qwen3-ASR's own Metal ops (the core kernels do attention, GELU and unbiased GEMMs) at the CUDA binding's bf16 points.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -20,43 +20,12 @@ inline float tg_sum(float v, threadgroup float* part, uint n, uint lane, uint sg
   return out;
 }
 
-inline float tg_max(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_max(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : -INFINITY;
-    s = simd_max(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
-// erfc(z) for z >= 0 by Numerical Recipes' erfcc Chebyshev fit (relative error below 1.2e-7), as drama3's codec.
-inline float erfc_pos(float z) {
-  const float t = 1.0f / (1.0f + 0.5f * z);
-  const float p = -z * z - 1.26551223f +
-                  t * (1.00002368f + t * (0.37409196f + t * (0.09678418f + t * (-0.18628806f + t * (0.27886807f +
-                  t * (-1.13520398f + t * (1.48851587f + t * (-0.82215223f + t * 0.17087277f))))))));
-  return t * precise::exp(p);
-}
-
-// torch's exact GELU in fp32: 0.5 x (1 + erf(x / sqrt 2)).
-inline float gelu(float v) {
-  const float z = v * 0.70710678118654752f;
-  return 0.5f * v * (z >= 0.0f ? 2.0f - erfc_pos(z) : erfc_pos(-z));
-}
-
 struct Gemm {
   uint m, n, k;
-  uint act;  // 0 none, 1 GELU
   uint res;  // 1: add res [m, n]
 };
 
-// y [m, n] = bf16(act(bf16(x [m, k] . w [n, k]^T + b)) + res): 32 x 32 tiles, four simdgroups of 16 x 16, fp32 sums.
+// y [m, n] = bf16(bf16(x [m, k] . w [n, k]^T + b) + res): 32 x 32 tiles, four simdgroups of 16 x 16, fp32 sums.
 constant constexpr uint BM = 32, BN = 32, BK = 32;
 [[max_total_threads_per_threadgroup(128)]] kernel void q3a_gemm(
     const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]], const device bfloat* b [[buffer(2)]],
@@ -95,7 +64,6 @@ constant constexpr uint BM = 32, BN = 32, BK = 32;
     if (gm >= p.m || gn >= p.n) continue;
     const ulong at = ulong(gm) * p.n + gn;
     float v = bf(Cs[e] + float(b[gn]));
-    if (p.act == 1) v = bf(gelu(v));
     if (p.res != 0) v = bf(v + float(res[at]));
     y[at] = bfloat(v);
   }
@@ -114,7 +82,6 @@ constant constexpr uint BM = 32, BN = 32, BK = 32;
   s = simd_sum(s);
   if (lane != 0) return;
   float v = bf(s + float(b[col]));
-  if (p.act == 1) v = bf(gelu(v));
   if (p.res != 0) v = bf(v + float(res[col]));
   y[col] = bfloat(v);
 }
@@ -198,12 +165,6 @@ struct Rows {
   }
 }
 
-// y = bf16(gelu(x)).
-[[max_total_threads_per_threadgroup(256)]] kernel void q3a_gelu(
-    const device bfloat* x [[buffer(0)]], device bfloat* y [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
-  if (i < n) y[i] = bfloat(gelu(float(x[i])));
-}
-
 // out [rows, i] = bf16(silu(gate) up) of [gate | up] rows.
 [[max_total_threads_per_threadgroup(256)]] kernel void q3a_swiglu(
     const device bfloat* gu [[buffer(0)]], device bfloat* out [[buffer(1)]], constant uint2& p [[buffer(2)]],
@@ -263,51 +224,14 @@ struct QkRope {
   else q[(ulong(r) * p.h + hd) * dim + d] = out;
 }
 
-struct Attn {
-  uint q_ld, k_ld, v_ld, o_ld;  // elements a row
-  uint heads, group, dim;       // group: q heads a kv head
-  uint keys;                    // keys for a full pass; 0: causal, row r sees first + r + 1
-  uint first;                   // the pass's first position
-  float scale;
-};
-
-constant constexpr uint MAX_KEYS = 6144;
-
-// Attention of one (q row, head): fp32 scores and softmax over the keys in threadgroup memory, out rounded once.
-[[max_total_threads_per_threadgroup(256)]] kernel void q3a_attn(
-    const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
-    device bfloat* o [[buffer(3)]], constant Attn& p [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
-    uint t [[thread_index_in_threadgroup]], uint2 ntg [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]]) {
-  const uint n = ntg.x;
-  threadgroup float part[33];
-  threadgroup float qs[256];
-  threadgroup float sc[MAX_KEYS];
-  const uint r = tg.x, hd = tg.y, kh = hd / p.group, dim = p.dim;
-  const uint nk = p.keys != 0 ? p.keys : p.first + r + 1;
-  for (uint d = t; d < dim; d += n) qs[d] = float(q[ulong(r) * p.q_ld + hd * dim + d]);
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  float mx = -INFINITY;
-  for (uint j = t; j < nk; j += n) {
-    const device bfloat* kr = k + ulong(j) * p.k_ld + kh * dim;
-    float s = 0.0f;
-    for (uint d = 0; d < dim; d++) s = fma(qs[d], float(kr[d]), s);
-    s *= p.scale;
-    sc[j] = s;
-    mx = max(mx, s);
-  }
-  mx = tg_max(mx, part, n, lane, sg);
-  float sum = 0.0f;
-  for (uint j = t; j < nk; j += n) {
-    const float e = precise::exp(sc[j] - mx);
-    sc[j] = e;
-    sum += e;
-  }
-  sum = tg_sum(sum, part, n, lane, sg);
-  const float inv = 1.0f / sum;
-  for (uint d = t; d < dim; d += n) {
-    float acc = 0.0f;
-    for (uint j = 0; j < nk; j++) acc = fma(sc[j], float(v[ulong(j) * p.v_ld + kh * dim + d]), acc);
-    o[ulong(r) * p.o_ld + hd * dim + d] = bfloat(acc * inv);
-  }
+// A window's [q | k | v] rows to q, k and v, each [rows, heads x dim] (shared_attention's token-major layout).
+[[max_total_threads_per_threadgroup(256)]] kernel void q3a_split_qkv(
+    const device bfloat* qkv [[buffer(0)]], device bfloat* q [[buffer(1)]], device bfloat* k [[buffer(2)]],
+    device bfloat* v [[buffer(3)]], constant uint2& p [[buffer(4)]], uint2 at [[thread_position_in_grid]]) {
+  const uint c = at.x, r = at.y, d = p.y;
+  if (c >= d || r >= p.x) return;
+  const ulong src = ulong(r) * 3 * d + c, dst = ulong(r) * d + c;
+  q[dst] = qkv[src];
+  k[dst] = qkv[src + d];
+  v[dst] = qkv[src + 2 * d];
 }

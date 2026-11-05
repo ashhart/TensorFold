@@ -3,12 +3,13 @@ const std = @import("std");
 const mtl = @import("metal");
 
 /// Every pipeline of qwen3_asr.metallib, by its kernel name.
-pub const P = enum { q3a_gemm, q3a_gemv, q3a_conv_cols, q3a_flatten, q3a_layernorm, q3a_add_rmsnorm, q3a_gelu, q3a_swiglu, q3a_embed, q3a_copy, q3a_qk_rope, q3a_attn };
+pub const P = enum { q3a_gemm, q3a_gemv, q3a_conv_cols, q3a_flatten, q3a_layernorm, q3a_add_rmsnorm, q3a_swiglu, q3a_embed, q3a_copy, q3a_qk_rope, q3a_split_qkv };
 
 const n_pipes = @typeInfo(P).@"enum".field_names.len;
 const slot_shift = 40;
 
-pub const Ref = struct { buf: mtl.Buffer, off: usize };
+/// A buffer and byte offset, as the core kernels take them.
+pub const Ref = @import("shared_attention").Ref;
 
 pub const Gpu = struct {
     gpa: std.mem.Allocator,
@@ -75,7 +76,7 @@ pub const Gpu = struct {
         return r.buf.contents()[r.off..][0..len];
     }
 
-    fn encoder(g: *Gpu) mtl.ComputeEncoder {
+    pub fn encoder(g: *Gpu) mtl.ComputeEncoder {
         if (g.enc) |e| return e;
         if (g.pool == null) g.pool = mtl.objc.Pool.push();
         const cb = g.queue.commandBuffer();
