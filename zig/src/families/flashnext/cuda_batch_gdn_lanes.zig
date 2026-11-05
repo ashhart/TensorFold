@@ -25,9 +25,9 @@ pub fn on() bool {
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// A shared pass's DeltaNet steps, one launch each over its lanes; false: the caller loops (off, one lane, many, TP).
+/// A shared pass's DeltaNet steps, one launch each; false: the caller loops (off, one lane, many, TP, half the heads).
 pub fn once(self: anytype, lw: *const Layer, layer: usize, li: usize) !bool {
-    if (!on() or self.lanes.len < 2 or self.lanes.len > gdn_lanes_max or self.m.collective != null) return false;
+    if (!on() or self.lanes.len < 2 or self.lanes.len > gdn_lanes_max or self.m.collective != null or !lw.heads.eql(.full)) return false;
     const s = self.s;
     var t: GdnLanes = .{ .n = @intCast(self.lanes.len) };
     var row0: usize = 0;
