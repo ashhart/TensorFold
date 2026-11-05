@@ -84,7 +84,7 @@ fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: [
         const what = "the joint schema head needs the BF16 checkpoint";
         return std.fmt.allocPrint(a, "{s}: {s} is quantized ({t})", .{ what, dir, c.quant }) catch what;
     }
-    if (c.quant != .bf16 or head) return null;
+    if (c.quant != .bf16 or c.modelopt or head) return null;
     if (engine.chatBf16(gpa, io, dir)) return null; // an image checkpoint: a tower the engine reads, no joint head
     const what = "BF16 Qwen3.5 serves as a decision backbone only";
     return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;

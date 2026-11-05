@@ -39,6 +39,8 @@ pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     spec: Spec,
     quant: quant.Config,
+    /// ModelOpt's weight-only formats, read as BF16 at load: a chat checkpoint, not a decision backbone.
+    modelopt: bool = false,
     /// `tie_word_embeddings`: the output head is the embedding.
     tied: bool,
     /// The end ids of config.json and generation_config.json.
@@ -83,7 +85,7 @@ pub const Config = struct {
         if (gen) |g| if (g != .object) return error.InvalidConfig;
         const ids = try a.create([shared.checks.max_eos]u32);
         const eos = try shared.checks.eos(ids, doc, tower, if (gen) |g| g.object else null, spec.vocab);
-        return .{ .arena = arena, .spec = spec, .quant = table, .tied = shared.isTied(doc, tower), .eos = eos };
+        return .{ .arena = arena, .spec = spec, .quant = table, .modelopt = isModelOpt(doc, sources.quantization), .tied = shared.isTied(doc, tower), .eos = eos };
     }
 };
 
