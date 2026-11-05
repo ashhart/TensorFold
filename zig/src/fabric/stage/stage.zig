@@ -9,6 +9,7 @@ pub const boot = @import("boot.zig");
 pub const plan = @import("plan.zig");
 pub const keepalive = @import("keepalive.zig");
 pub const fixtures = @import("fixtures.zig");
+pub const driver = @import("driver.zig");
 
 pub const Ring = ring.Ring;
 pub const Options = ring.Options;
@@ -25,6 +26,7 @@ test {
     _ = plan;
     _ = keepalive;
     _ = fixtures;
+    _ = driver;
     _ = @import("protocol_test.zig");
     _ = @import("fixtures_test.zig");
 }
