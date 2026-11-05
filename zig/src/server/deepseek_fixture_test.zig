@@ -169,7 +169,7 @@ test "DeepSeek chat: licensed encoder fixture through the server render path" {
     try std.testing.expectEqual(@as(usize, 8), compatibility);
 }
 
-// These rejected API cases record budgets50 and100; replay their prompts through the equivalent named client efforts.
+// These rejected API cases record budgets 50 and 100; replay their prompts through the equivalent named client efforts.
 fn compatibilityEffort(c: json.Value) ?json.Value {
     return switch (c.get("id").?.int64().?) {
         59 => .{ .string = "low" },
@@ -228,9 +228,7 @@ fn checkPrompt(a: std.mem.Allocator, c: json.Value, got: []const u8) !bool {
     }
     try std.testing.expectEqual(@as(usize, 3), count);
     if (match) |row| {
-        var hash: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(recorded, &hash, .{});
-        try std.testing.expectEqualStrings(row.get("recorded_prompt_sha256").?.string, &std.fmt.bytesToHex(hash, .lower));
+        try checkNamespacePin(a, row, recorded);
         try std.testing.expect(row.get("reason").?.string.len > 0);
         const expected = row.get("expected_qualified").?.string;
         try std.testing.expect(!std.mem.eql(u8, expected, recorded));
@@ -239,6 +237,54 @@ fn checkPrompt(a: std.mem.Allocator, c: json.Value, got: []const u8) !bool {
     }
     try std.testing.expectEqualStrings(recorded, got);
     return true;
+}
+
+fn checkNamespacePin(a: std.mem.Allocator, row: json.Value, recorded: []const u8) !void {
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(recorded, &hash, .{});
+    const pinned = row.get("recorded_prompt_sha256").?.string;
+    try std.testing.expectEqualStrings(pinned, &std.fmt.bytesToHex(hash, .lower));
+    const names: [2][]const u8 = switch (row.get("id").?.int64().?) {
+        6 => .{ "\"name\": \"git::commit\", \"description\": \"Git operations.\\nCommit staged changes\"", "\"name\": \"commit\", \"description\": \"Commit staged changes\"" },
+        67, 97 => .{ "\"name\": \"fs::read_file\"", "\"name\": \"read_file\"" },
+        else => return error.TestUnexpectedResult,
+    };
+    const qualified = row.get("expected_qualified").?.string;
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, qualified, names[0]));
+    const undone = try std.mem.replaceOwned(u8, a, qualified, names[0], names[1]);
+    defer a.free(undone);
+    std.crypto.hash.sha2.Sha256.hash(undone, &hash, .{});
+    try std.testing.expectEqualStrings(pinned, &std.fmt.bytesToHex(hash, .lower));
+}
+
+test "DeepSeek chat: namespace pins reject unrelated prompt drift" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var it = std.mem.splitScalar(u8, @embedFile("fixtures/deepseek_v41_encoder/namespaces.jsonl"), '\n');
+    const input = try cases(a);
+    var checked: usize = 0;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        const row = (try json.parseText(a, line)).ok;
+        var originals = std.mem.splitScalar(u8, input, '\n');
+        var recorded: ?[]const u8 = null;
+        while (originals.next()) |original| {
+            if (original.len == 0) continue;
+            const c = (try json.parseText(a, original)).ok;
+            if (c.get("id").?.int64().? == row.get("id").?.int64().?) {
+                recorded = c.get("prompt").?.string;
+                break;
+            }
+        }
+        try std.testing.expect(recorded != null);
+        try checkNamespacePin(a, row, recorded.?);
+        const expected = row.get("expected_qualified").?.string;
+        try row.object.put(a, "expected_qualified", .{ .string = try std.fmt.allocPrint(a, "{s}unrelated drift", .{expected}) });
+        try std.testing.expectError(error.TestExpectedEqual, checkNamespacePin(a, row, recorded.?));
+        checked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), checked);
 }
 
 fn checkEncoder(a: std.mem.Allocator, c: json.Value) !void {
