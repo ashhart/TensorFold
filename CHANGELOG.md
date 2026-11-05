@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the slow drafted request after a `draft: false` one no longer reproduces, and the expert recipe lists peak memory at each `--ssd-experts` budget (#2237).
+
 - Flash Next with `--ssd-experts`: a request no longer waits for a forecast read it doesn't need, and a forecast that never started keeps the expert it displaced: about 8% faster at 35 GiB and 4% at 17 GiB (#2236).
 
 - CI: a pull request's `zig` and `zig-windows` jobs reuse main's test passes and compiles, C and C++ included, so they run only what its diff changed; main still checks every commit from scratch (#2274).
