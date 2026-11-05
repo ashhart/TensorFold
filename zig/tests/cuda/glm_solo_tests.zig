@@ -88,7 +88,7 @@ pub fn soloCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_
             const win = [_]u32{ t, 101, 202, 303 };
             try x.verify(&win, &outs[twin], 0);
             logits[twin] = try a.alloc(u16, win.len * V);
-            try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(logits[twin].ptr, e.bd.logits, win.len * V * 2), "cuMemcpyDtoH");
+            try cuda.memory.download(gpu.d, e.bd.logits, std.mem.sliceAsBytes(logits[twin])[0 .. win.len * V * 2]);
         }
         const st = &e.seqs.items[2 * i].?.st;
         const tw = &e.seqs.items[2 * i + 1].?.st;

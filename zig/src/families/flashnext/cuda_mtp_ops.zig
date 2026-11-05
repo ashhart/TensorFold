@@ -63,7 +63,7 @@ fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
 fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
     const d = stream.d;
     try stream.synchronize();
-    try d.check(d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
+    try cuda.memory.download(d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
 }
 
 /// An owner can mirror main-model mutations to a peer without exposing device pointers on the control wire.

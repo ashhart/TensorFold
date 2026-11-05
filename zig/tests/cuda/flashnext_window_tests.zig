@@ -65,7 +65,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
         try session.restore(&window, null, base);
         try session.verify(flash.Tri, tri, &window, &draft, &forced);
         try stream.synchronize();
-        try e.driver.check(e.driver.api.cuMemcpyDtoH_v2(rows.ptr, draft.logits.ptr, rows.len), "cuMemcpyDtoH");
+        try cuda.memory.download(e.driver, draft.logits.ptr, std.mem.sliceAsBytes(rows)[0..rows.len]);
         try check.sameBytes("each two-rank window row equals its serial teacher-forced row", rows, expected);
         try session.keep(flash.Tri, tri, &window, &draft, keep);
         try check.expect(window.fed == ids.items.len + keep, "kept prefix position is exact", .{});
