@@ -25,6 +25,14 @@ pub const conv_channels: usize = pinned.conv_dim; // 6144
 pub const gdn_heads: usize = pinned.linear_heads; // 16
 pub const gdn_head_dim: usize = pinned.linear_dim; // 128
 
+/// Layers 0..wide_layers-1 keep f32 activation stores; their conv windows are f32 too, every other layer's stay bf16.
+pub const wide_layers: usize = 4;
+
+/// The conv window kind of linear slot `slot` (layers 0-2 are slots 0-2; layer 3 is the first full layer).
+pub fn convKind(slot: usize) vk.tensor.Kind {
+    return if (slot < wide_layers - wide_layers / 4) .f32 else .bf16;
+}
+
 /// The whole-model capacity: the context pin admits, the SDPA limit bounds.
 pub fn capacityFor(context: usize) Error!usize {
     if (context == 0 or context > max_capacity) return error.ContextTooLong;
@@ -105,9 +113,9 @@ pub const State = struct {
             next += 1;
         }
         for (0..linear_layers) |slot| {
-            s.conv[2 * slot] = try s.region(next, .bf16, conv_elements);
+            s.conv[2 * slot] = try s.region(next, convKind(slot), conv_elements);
             next += 1;
-            s.conv[2 * slot + 1] = try s.region(next, .bf16, conv_elements);
+            s.conv[2 * slot + 1] = try s.region(next, convKind(slot), conv_elements);
             next += 1;
         }
         for (0..linear_layers) |slot| {
@@ -162,7 +170,7 @@ pub const State = struct {
         return s.values[slot];
     }
 
-    /// The linear slot's conv window the next step reads, `[3, 6144]` BF16.
+    /// The linear slot's conv window the next step reads, `[3, 6144]` in `convKind(slot)`.
     pub fn convInput(s: *const State, slot: usize) View {
         return s.conv[2 * slot + s.parity[slot]];
     }
@@ -248,7 +256,7 @@ fn fakeState(gpa: Allocator, capacity: usize) !State {
     const kb2: *Buffer = fakes[1];
     for (s.keys) |*v| v.* = try View.init(kb, .bf16, 0, kv_elements);
     for (s.values) |*v| v.* = try View.init(kb, .bf16, 0, kv_elements);
-    for (s.conv, 0..) |*v, i| v.* = try View.init(if (i % 2 == 0) kb else kb2, .bf16, 0, conv_elements);
+    for (s.conv, 0..) |*v, i| v.* = try View.init(if (i % 2 == 0) kb else kb2, convKind(i / 2), 0, conv_elements);
     for (s.gdn, 0..) |*v, i| v.* = try View.init(if (i % 2 == 0) kb else kb2, .f32, 0, gdn_elements);
     _ = conv_bytes;
     return s;
@@ -304,6 +312,13 @@ test "cache regions carry the pinned shapes and stay inside their buffers" {
     // ping-pong halves are disjoint views of different buffers
     try testing.expect(!s.convInput(3).overlaps(s.convOutput(3)));
     try testing.expect(!s.gdnInput(9).overlaps(s.gdnOutput(9)));
+}
+
+test "convKind is f32 exactly for the linear slots of the wide layers" {
+    // layers 0-2 are linear slots 0-2 (layer 3 is full attention); layer 4 is slot 3
+    try testing.expectEqual(vk.tensor.Kind.f32, convKind(0));
+    try testing.expectEqual(vk.tensor.Kind.f32, convKind(2));
+    try testing.expectEqual(vk.tensor.Kind.bf16, convKind(3));
 }
 
 test "flip swaps the halves and append is the only length commit" {

@@ -379,9 +379,8 @@ test "the arena holds the persistent windows plus the worst transient layer" {
     const rows: u64 = max_prefill_rows;
     const conv: u64 = pinned.conv_dim;
     const dim: u64 = pinned.linear_heads * pinned.linear_dim;
-    // one linear layer at the cap in f32 activations: qkv, z, a, b, soa, g, conv_out, conv_in, y, mix (beta stays bf16)
-    const linear = 4 * (rows * (5 * conv + 3 * dim + 3 * pinned.linear_heads) + (rows + state.conv_rows) * conv) +
-        2 * rows * pinned.linear_heads;
+    // one linear layer at the cap in f32 activations: qkv, z, a, b, soa, g, beta, conv_out, conv_in, y, mix
+    const linear = 4 * (rows * (5 * conv + 3 * dim + 4 * pinned.linear_heads) + (rows + state.conv_rows) * conv);
     // one full-attention layer at the cap in f32: qraw, q, qn, k, kn, v, queries, y, mix
     const full = 4 * rows * (2 * 8 * 256 + 5 * 8 * 256 + 3 * 2 * 256);
     // the MLP in f32: gate + up + act
