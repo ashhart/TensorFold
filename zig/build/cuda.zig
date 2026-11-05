@@ -206,6 +206,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(root), .target = host }) })).step);
     // ReleaseSafe keeps every runtime check and takes seconds, not minutes (#2242).
     const cuda = runtime(b, host, .ReleaseSafe, &.{});
+    b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     b.step("test-nccl-version-host", "Shared NCCL minimum without a communicator or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"NCCL minimum:"} })).step);
     // H3's library opens its checkpoint with mmap: not Windows
     if (host.result.os.tag != .windows) @import("h3_host.zig").targets(b, cuda, step);
