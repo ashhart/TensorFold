@@ -121,6 +121,7 @@ pub fn build(b: *std.Build) void {
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/dsv41_metal.zig").steps(b, budget_mods.metal, budget_mods.sources, test_step);
         @import("zig/build/slide_host.zig").metal(b, budget_mods);
+        @import("zig/build/moss_image_teacher_host.zig").compileMetal(b, budget_mods.metal, budget_mods.engine);
     }
     // every tracked path checks out on Windows too
     const names_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/portable_names.zig"), .target = target }) }));
@@ -129,6 +130,7 @@ pub fn build(b: *std.Build) void {
     // the XPU server's stream admission, a pure function of the card's memory
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu_admit.zig"), .target = target }) })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/limits.zig"), .target = target }) })).step);
+    @import("zig/build/moss_image_teacher_host.zig").steps(b, test_step);
     // MOSS-Image's seeded starting latents and its schedule against torch's, host computations on every platform
     for ([_][]const u8{ "noise", "schedule" }) |name| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/moss_image/{s}.zig", .{name})), .target = target }) })).step);
