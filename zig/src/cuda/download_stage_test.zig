@@ -57,6 +57,7 @@ test "an integrated GPU's download lands in pinned memory, not the caller's page
     allocations = 0;
     stage.forget();
     stage.drop();
+    defer stage.forget();
     defer stage.drop();
     const before = memory.usage(false).host;
     var d = driver();
@@ -75,6 +76,7 @@ test "a discrete GPU's download copies straight into the caller's slice" {
     allocations = 0;
     stage.forget();
     stage.drop();
+    defer stage.forget();
     defer stage.drop();
     var d = driver();
     var out: [64]u8 = @splat(0xaa);
