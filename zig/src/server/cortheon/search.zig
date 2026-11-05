@@ -108,7 +108,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         const block_start = if (block) |b| lo + b else tag_start;
         if (std.mem.indexOf(u8, page[block_start..tag_start], "result--ad") != null) continue;
         const tag = page[tag_start..tag_end];
-        const href_at = std.mem.indexOf(u8, tag, "href=\"") orelse continue;
+        const href_at = std.ascii.findIgnoreCase(tag, "href=\"") orelse continue; // HREF= is the same attribute
         const href_end = std.mem.indexOfScalarPos(u8, tag, href_at + 6, '"') orelse continue;
         const url = (try resultTarget(a, tag[href_at + 6 .. href_end])) orelse continue;
         const close = std.ascii.findIgnoreCasePos(page[0..next], tag_end, "</a>") orelse continue; // </A> closes the title too
@@ -194,6 +194,16 @@ test "a search result keeps a title when its closer's letters differ" {
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("Example", results[0].title);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps a link whose attribute name differs only in case" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" HREF=\"https://example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
 }
 
