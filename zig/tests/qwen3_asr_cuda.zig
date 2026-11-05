@@ -188,8 +188,8 @@ pub fn main(init: std.process.Init) !u8 {
             const ref = c.case.floats(gpa, "greedy_margin") catch try gpa.alloc(f32, 0); // older cases have none
             defer gpa.free(ref);
             std.debug.print(" from token {d}: ours {d} (margin {d:.4}), the case's {d} (margin {d:.4})\n", .{
-                first,                                                         if (first < out.items.len) out.items[first] else 0,
-                if (first < margins.items.len) margins.items[first] else 0,    if (first < want.len) want[first] else 0,
+                first,                                                      if (first < out.items.len) out.items[first] else 0,
+                if (first < margins.items.len) margins.items[first] else 0, if (first < want.len) want[first] else 0,
                 if (first < ref.len) ref[first] else 0,
             });
         }

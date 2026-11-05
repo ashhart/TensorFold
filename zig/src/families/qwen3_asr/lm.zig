@@ -36,8 +36,8 @@ pub const Weights = struct {
             const gu = [2][]const u8{ try src.expect(try p(&nb[0], i, "mlp.gate_proj.weight"), &.{ t.intermediate, t.hidden }), try src.expect(try p(&nb[1], i, "mlp.up_proj.weight"), &.{ t.intermediate, t.hidden }) };
             l.gate_up = try tower.joined(gpa, up, &gu);
             const one = .{
-                .{ &l.in_norm, "input_layernorm.weight", &[_]usize{t.hidden} }, .{ &l.post_norm, "post_attention_layernorm.weight", &[_]usize{t.hidden} },
-                .{ &l.o, "self_attn.o_proj.weight", &[_]usize{ t.hidden, qd } }, .{ &l.q_norm, "self_attn.q_norm.weight", &[_]usize{t.head_dim} },
+                .{ &l.in_norm, "input_layernorm.weight", &[_]usize{t.hidden} },   .{ &l.post_norm, "post_attention_layernorm.weight", &[_]usize{t.hidden} },
+                .{ &l.o, "self_attn.o_proj.weight", &[_]usize{ t.hidden, qd } },  .{ &l.q_norm, "self_attn.q_norm.weight", &[_]usize{t.head_dim} },
                 .{ &l.k_norm, "self_attn.k_norm.weight", &[_]usize{t.head_dim} }, .{ &l.down, "mlp.down_proj.weight", &[_]usize{ t.hidden, t.intermediate } },
             };
             inline for (one) |x| x[0].* = try up.put(try src.expect(try p(&nb[2], i, x[1]), x[2]));
