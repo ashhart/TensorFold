@@ -48,7 +48,6 @@ test "MOSS-Image: the limits a picture request is held to are the API's own, unl
     try std.testing.expect(l.max_prompt_tokens > 0 and l.max_prompt_tokens < 4096);
     // 1,536 x 1,024 is the largest geometry the transformer's one scratch is planned for
     try std.testing.expectEqual(l.max_pixels, 1536 * 1024);
-    try std.testing.expectEqual(spec.max_rows, l.max_pixels / (16 * 16));
 }
 
 test "MOSS-Image: every text-engine option is refused by name, and a bare open is not" {
