@@ -57,10 +57,10 @@ fn lmNames(list: *std.ArrayList(Want), arena: std.mem.Allocator, t: cfg.Text) !v
     for (0..t.layers) |i| {
         const p = try std.fmt.allocPrint(arena, lm ++ "layers.{d}.", .{i});
         const parts = .{
-            .{ "input_layernorm.weight", &[_]usize{t.hidden} },        .{ "post_attention_layernorm.weight", &[_]usize{t.hidden} },
-            .{ "self_attn.q_proj.weight", &[_]usize{ qd, t.hidden } }, .{ "self_attn.k_proj.weight", &[_]usize{ kvd, t.hidden } },
-            .{ "self_attn.v_proj.weight", &[_]usize{ kvd, t.hidden } }, .{ "self_attn.o_proj.weight", &[_]usize{ t.hidden, qd } },
-            .{ "self_attn.q_norm.weight", &[_]usize{t.head_dim} },     .{ "self_attn.k_norm.weight", &[_]usize{t.head_dim} },
+            .{ "input_layernorm.weight", &[_]usize{t.hidden} },                 .{ "post_attention_layernorm.weight", &[_]usize{t.hidden} },
+            .{ "self_attn.q_proj.weight", &[_]usize{ qd, t.hidden } },          .{ "self_attn.k_proj.weight", &[_]usize{ kvd, t.hidden } },
+            .{ "self_attn.v_proj.weight", &[_]usize{ kvd, t.hidden } },         .{ "self_attn.o_proj.weight", &[_]usize{ t.hidden, qd } },
+            .{ "self_attn.q_norm.weight", &[_]usize{t.head_dim} },              .{ "self_attn.k_norm.weight", &[_]usize{t.head_dim} },
             .{ "mlp.gate_proj.weight", &[_]usize{ t.intermediate, t.hidden } }, .{ "mlp.up_proj.weight", &[_]usize{ t.intermediate, t.hidden } },
             .{ "mlp.down_proj.weight", &[_]usize{ t.hidden, t.intermediate } },
         };
