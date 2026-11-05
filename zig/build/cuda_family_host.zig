@@ -99,6 +99,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const launch_args = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_launch_args_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "qwen35", .module = mods.qwen35 }} });
     const launch_args_run = b.addRunArtifact(b.addTest(.{ .root_module = launch_args }));
     launch_args_run.setCwd(b.path("."));
+    launch_args_run.has_side_effects = true; // it reads the q35 sources and .cu kernels while it runs
     b.step("test-qwen35-launch-args-host", "The q35 attention launches' argument lists against the .cu kernels' signatures without devices").dependOn(&launch_args_run.step);
     step.dependOn(&launch_args_run.step);
     const startup = b.createModule(.{ .root_source_file = b.path("zig/cuda_startup_costs_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
