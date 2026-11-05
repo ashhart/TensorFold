@@ -6,8 +6,8 @@ pub const max_layers = 128;
 pub const max_eos = 4;
 /// Query heads a key head at most: a decode attention threadgroup holds a simdgroup each.
 pub const max_group = 32;
-/// The longest context the engine takes: its decode blocks reach 1,048,576 positions (state.max_capacity).
-pub const max_context = 1 << 20;
+/// The longest context taken: the longest checked (a needle at 258,039 tokens); longer waits for a qualifying run.
+pub const max_context = 262144;
 
 pub const Error = error{
     BadRicursiveConfig,

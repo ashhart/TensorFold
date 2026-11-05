@@ -55,7 +55,12 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const budget = try fr.budget.caches(ram, model.device.maxWorkingSet(), null, model.checkpoint.residentBytes() + scratch);
     const most: usize = @min(model.config.context, fr.state.max_capacity);
     const fits = fr.budget.longest(&model.config, budget, most);
-    const window: i64 = o.context orelse @intCast(@min(fits, 262144));
+    if (o.context) |asked| if (asked > fr.config.max_context) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d}: the native Ripple engine is checked to {d} tokens; longer contexts are refused until a run at that length qualifies them", .{ asked, fr.config.max_context });
+        model.deinit();
+        return null;
+    };
+    const window: i64 = o.context orelse @intCast(@min(fits, fr.config.max_context));
     if (window < 1 or window > fits) {
         problem.* = if (o.context) |asked|
             try std.fmt.allocPrint(a, "--context {d}: this Mac's Ripple caches fit {d} tokens beside the weights under its load limit (75% of RAM)", .{ asked, fits })

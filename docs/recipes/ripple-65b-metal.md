@@ -32,8 +32,8 @@ chunk); every fifth layer is global and keeps every key, in bf16. Under the defa
 Mac holds the NVFP4 weights (54.8 GiB, wired between requests) and 135 GiB of caches: eight 262,144-token streams.
 Thinking follows the chat template: Ripple writes `<think>` itself when it thinks and answers bare otherwise, and the
 server files a reply without the block as answer, not reasoning, whatever `enable_thinking` says (the template has no
-switch). `--context` takes up to 1,048,576 tokens, the card's 1M; 262,144 is the default and the longest checked
-(below).
+switch). `--context` takes up to 262,144 tokens, the default and the longest checked (below); the card's 1M is
+refused by name until a run at that length qualifies it.
 
 ## What the family is
 
@@ -136,8 +136,8 @@ with the same reply as on a restarted server.
 
 ## Not done
 
-No quality suite was run. Contexts past 258,039 tokens were not run, though `--context` admits up to 1,048,576 (64.8
-GiB of caches a stream). Ripple's think markers are spelled from several tokens, not one each, so a thinking budget
+No quality suite was run. Contexts past 258,039 tokens were not run, so `--context` stops at 262,144 and refuses
+the card's 1M by name. Ripple's think markers are spelled from several tokens, not one each, so a thinking budget
 (which forces a close) and logprobs (which cut the reply at its close token) are refused by name, and a reply's
 `reasoning_tokens` reads 0. The family has no draft head: drafts come only from the lane core's copies. No images:
 Ripple has no vision tower. The bf16 release's correctness is measured above, but its serving numbers did not go
