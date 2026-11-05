@@ -3,6 +3,7 @@ const std = @import("std");
 const tokenizer = @import("tokenizer.zig");
 const Tokenizer = tokenizer.Tokenizer;
 const parse = tokenizer.parse;
+const loadTokenizer = tokenizer.loadTokenizer;
 const Memo = tokenizer.Memo;
 const eos = tokenizer.eos;
 const steps = @import("steps.zig");
@@ -330,4 +331,34 @@ test "normalized added tokens match compatibility forms but decode their origina
         defer a.free(text);
         try std.testing.expectEqualStrings("ǅ", text);
     }
+}
+
+test "a Qwen2 slow tokenizer's files convert as transformers' Qwen2Converter does" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (.{ "vocab.json", "merges.txt", "tokenizer_config.json", "golden.json" }) |name| {
+        try tmp.dir.writeFile(io, .{ .sub_path = name, .data = @embedFile("fixtures/qwen2_slow/" ++ name) });
+    }
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    var slow = try loadTokenizer(io, a, dir);
+    defer slow.deinit();
+    const golden_path = try std.fmt.allocPrint(a, "{s}/golden.json", .{dir});
+    defer a.free(golden_path);
+    var golden = try loadTokenizer(io, a, golden_path);
+    defer golden.deinit();
+    for ([_][]const u8{ "the world", " hello", "the  world", "<|endoftext|>the", "a<|endoftext|>b" }) |text| {
+        const got = try slow.encode(a, text);
+        defer a.free(got);
+        const want = try golden.encode(a, text);
+        defer a.free(want);
+        try std.testing.expectEqualSlices(u32, want, got);
+    }
+    try std.testing.expectEqual(@as(?u32, 266), slow.specialTokenId("<|endoftext|>"));
+    try std.testing.expectEqual(@as(?u32, 266), golden.specialTokenId("<|endoftext|>"));
+    const decoded = try slow.decode(a, &.{ 266, 107, 258 }, false);
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings("<|endoftext|>the", decoded);
 }
