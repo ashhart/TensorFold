@@ -27,6 +27,18 @@ test "TF_KV_SHARE below 4 states a GLM stream is too few; off is not" {
     try std.testing.expect(!fewStates(0, 4));
 }
 
+/// TF_GLM_KV_SHARE is TF_KV_SHARE now: a value that asked for a store is refused; empty and 0 asked for none.
+pub fn moved(v: []const u8) bool {
+    return v.len != 0 and (std.fmt.parseInt(usize, v, 10) catch 1) != 0;
+}
+
+test "TF_GLM_KV_SHARE: a count or anything else is refused; empty and 0 asked for nothing" {
+    try std.testing.expect(moved("16"));
+    try std.testing.expect(moved("on"));
+    try std.testing.expect(!moved(""));
+    try std.testing.expect(!moved("0"));
+}
+
 /// The store the server attached to rank 0's pages (null: none, or another rank).
 pub fn of(e: *const engine.Engine) ?kp.Prompts {
     const p = e.pages orelse return null;
