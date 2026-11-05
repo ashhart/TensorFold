@@ -53,6 +53,13 @@ pub fn absorbPositions(start: u64, pos: []i32) !void {
     for (pos, 0..) |*p, i| p.* = @intCast(start + i);
 }
 
+/// A frame's rows a stream: its deepest hold's drafts and the pending row, within `block` (a frame costs by its rows).
+pub fn frameBlock(items: []const dr.Hold, block: usize) usize {
+    var deepest: usize = 1;
+    for (items) |it| deepest = @max(deepest, it.depth);
+    return @min(block, deepest + 1);
+}
+
 /// What a frame needs of the config.
 pub const Shape = struct { block: usize, vocab: usize, mask: u32 };
 
@@ -159,6 +166,21 @@ test "a frame refuses a context behind its hold, a shared ring, a tree, and too 
 }
 
 const lanes_shape = @import("lanes").shape;
+
+test "a frame runs its deepest hold's drafts and the pending row, at least one draft, at most the block" {
+    const one = [_]dr.Hold{.{ .stream = undefined, .pending = 7, .position = 11, .depth = 3 }};
+    try std.testing.expectEqual(@as(usize, 4), frameBlock(&one, 16));
+    const mixed = [_]dr.Hold{
+        .{ .stream = undefined, .pending = 7, .position = 11, .depth = 1 },
+        .{ .stream = undefined, .pending = 8, .position = 5, .depth = 6 },
+    };
+    try std.testing.expectEqual(@as(usize, 7), frameBlock(&mixed, 16));
+    const none = [_]dr.Hold{.{ .stream = undefined, .pending = 7, .position = 11, .depth = 0 }};
+    try std.testing.expectEqual(@as(usize, 2), frameBlock(&none, 16));
+    const deep = [_]dr.Hold{.{ .stream = undefined, .pending = 7, .position = 11, .depth = 15 }};
+    try std.testing.expectEqual(@as(usize, 16), frameBlock(&deep, 16));
+    try std.testing.expectEqual(@as(usize, 8), frameBlock(&deep, 8));
+}
 
 test "absorbed rows take their own positions" {
     var pos: [3]i32 = undefined;

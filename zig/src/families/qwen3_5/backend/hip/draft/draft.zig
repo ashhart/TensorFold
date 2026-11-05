@@ -47,7 +47,7 @@ pub const Draft = struct {
     projected: []f32,
     streams: std.AutoHashMapUnmanaged(*Stream, *Owned) = .empty,
     pool: std.ArrayList(*Owned) = .empty,
-    /// One more draft's cost: a hold's quickest of several at load over the block's drafts.
+    /// One more draft's cost: the quickest block hold past the quickest one-draft hold, over the drafts between.
     step_ms: f64 = 1.0,
     costs: [16]lanes.config.Cost = undefined,
     n_costs: usize = 0,
@@ -98,16 +98,16 @@ pub const Draft = struct {
         const ks = std.mem.bytesAsSlice(i32, d.scalars.bytes[d.layout.ks..][0 .. 4 * drafts]);
         @memset(@as([]align(1) i32, ks), @intCast(c.topk));
         try d.scalars_dev.upload(d.layout.ks, d.scalars.bytes[d.layout.ks..][0 .. 4 * drafts]);
-        // the first context, and a hold timed on it (the quickest of several: the first ones pay the driver's stalls)
+        // the first context, and holds timed on it (the quickest of several: the first ones pay the driver's stalls)
         const owned = try d.create();
         errdefer d.drop(owned);
-        var quickest: f64 = std.math.inf(f64);
-        for (0..8) |_| {
+        var quickest = [2]f64{ std.math.inf(f64), std.math.inf(f64) };
+        for (0..8) |_| for (&quickest, [2]usize{ 1, c.block - 1 }) |*q, depth| {
             const t0 = std.Io.Clock.awake.now(io);
-            try d.warm(&owned.ctx);
-            quickest = @min(quickest, ms(io, t0));
-        }
-        d.step_ms = quickest / @as(f64, @floatFromInt(c.block - 1));
+            try d.warm(&owned.ctx, depth);
+            q.* = @min(q.*, ms(io, t0));
+        };
+        d.step_ms = stepMs(quickest[0], quickest[1], c.block);
         owned.ctx.clear();
         try d.pool.append(gpa, owned);
         d.times = .{};
@@ -153,7 +153,7 @@ pub const Draft = struct {
         });
         const most = arena.peak;
         arena.reset();
-        _ = try frame.forward(o, d.net(), d.layout, fake, d.frame_streams);
+        _ = try frame.forward(o, d.net(), d.layout, fake, d.frame_streams, d.c.block);
         return @max(most, arena.peak);
     }
 
@@ -170,16 +170,16 @@ pub const Draft = struct {
         errdefer o.buf.free();
         try o.buf.fill8(0);
         o.ctx = .{ .ring = o.buf.base() };
-        try d.warm(&o.ctx);
+        try d.warm(&o.ctx, d.c.block - 1);
         o.ctx.clear();
         return o;
     }
 
-    /// An absorb of the blank row at position 0 and a full hold after it.
-    fn warm(d: *Draft, ctx: *Ctx) !void {
+    /// An absorb of the blank row at position 0 and a hold of `depth` drafts after it.
+    fn warm(d: *Draft, ctx: *Ctx, depth: usize) !void {
         ctx.clear();
         try d.absorbRows(ctx, d.blank.base(), 1, 0, 1, null);
-        const item: dr.Hold = .{ .stream = undefined, .pending = 0, .position = 2, .depth = @intCast(d.c.block - 1) };
+        const item: dr.Hold = .{ .stream = undefined, .pending = 0, .position = 2, .depth = @intCast(depth) };
         try d.frameOf(&.{item}, &.{ctx});
     }
 
@@ -256,21 +256,23 @@ pub const Draft = struct {
         const c = d.c;
         const l = d.layout;
         const st = d.scalars.bytes;
-        const B = items.len * c.block;
+        // a frame's rows are its deepest hold's: the round loop prices a hold by the drafts it asks
+        const block = context.frameBlock(items, c.block);
+        const B = items.len * block;
         for (contexts) |ctx| ctx.held_n = 0;
         // a frame's regions are its own (an absorb's positions may still be going up); it waits at its end
         const ids = std.mem.bytesAsSlice(u32, st[l.ids..][0 .. 4 * B]);
         const pos = std.mem.bytesAsSlice(i32, st[l.pos..][0 .. 4 * B]);
         const segs = std.mem.bytesAsSlice(context.Segment, st[l.segs..][0 .. @sizeOf(context.Segment) * items.len]);
-        const shape: context.Shape = .{ .block = c.block, .vocab = c.vocab, .mask = c.mask };
+        const shape: context.Shape = .{ .block = block, .vocab = c.vocab, .mask = c.mask };
         try context.stage(shape, items, contexts, @alignCast(ids), @alignCast(pos), @alignCast(segs));
         const s = d.e.stream.handle;
         try hip.raw.upload(d.scalars_dev, l.ids, st[l.ids..][0 .. 4 * B], s);
         try hip.raw.upload(d.scalars_dev, l.pos, st[l.pos..][0 .. 4 * B], s);
         try hip.raw.upload(d.scalars_dev, l.segs, st[l.segs..][0 .. @sizeOf(context.Segment) * items.len], s);
         d.arena.reset();
-        const out = try frame.forward(d.e.ops(&d.arena), d.net(), l, d.scalars_dev.base(), items.len);
-        const rows = items.len * (c.block - 1);
+        const out = try frame.forward(d.e.ops(&d.arena), d.net(), l, d.scalars_dev.base(), items.len, block);
+        const rows = items.len * (block - 1);
         try d.fetch(l.top_ids, out.top_ids, 4 * rows * c.topk);
         try d.fetch(l.top_vals, out.top_vals, 2 * rows * c.topk);
         try d.fetch(l.hp, out.hp, 2 * rows * c.rank);
@@ -280,7 +282,7 @@ pub const Draft = struct {
         const act = d.e.model().act;
         widen(act, std.mem.bytesAsSlice(u16, st[l.top_vals..][0 .. 2 * rows * c.topk]), d.logits[0 .. rows * c.topk]);
         widen(act, std.mem.bytesAsSlice(u16, st[l.hp..][0 .. 2 * rows * c.rank]), d.projected[0 .. rows * c.rank]);
-        const per = c.block - 1;
+        const per = block - 1;
         for (items, contexts, 0..) |it, ctx, i| {
             const cand: select.Candidates = .{
                 .apart = .{
@@ -413,6 +415,17 @@ pub fn absorbStart(it: dr.Absorb, row_bytes: usize, dtype: lanes.backend.Feature
     return it.start;
 }
 
+/// The least a draft step costs, so the round loop never takes a draft for free.
+pub const min_step_ms = 0.01;
+
+/// A draft's cost: the block's hold past a one-draft hold a draft; a noisy margin falls back to the block's a draft.
+pub fn stepMs(one_ms: f64, block_ms: f64, block: usize) f64 {
+    const step = (block_ms - one_ms) / @as(f64, @floatFromInt(@max(1, block -| 2)));
+    if (std.math.isFinite(step) and step >= min_step_ms) return step;
+    const each = block_ms / @as(f64, @floatFromInt(@max(1, block -| 1)));
+    return if (std.math.isFinite(each) and each >= min_step_ms) each else min_step_ms;
+}
+
 fn ms(io: std.Io, t0: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
 }
@@ -447,6 +460,16 @@ test "an absorb's kept rows pick from its features' rows; a row past them is ref
     try std.testing.expectError(error.BadDraftRows, absorbStart(it, 64, .bf16));
     it.features.rows = 17;
     try std.testing.expectEqual(@as(u64, 40), try absorbStart(it, 64, .bf16));
+}
+
+test "a draft step costs the block's hold past a one-draft hold; a margin at or under nothing falls back" {
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), stepMs(10.0, 13.0, 8), 1e-12);
+    // noise can time the block's hold under the one-draft hold: a draft is then the block's hold a draft
+    try std.testing.expectApproxEqAbs(@as(f64, 9.0 / 7.0), stepMs(10.0, 9.0, 8), 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0 / 7.0), stepMs(10.0, 10.0, 8), 1e-12);
+    try std.testing.expectEqual(min_step_ms, stepMs(std.math.inf(f64), std.math.inf(f64), 8));
+    try std.testing.expectEqual(min_step_ms, stepMs(0.0, std.math.nan(f64), 8));
+    try std.testing.expectEqual(min_step_ms, stepMs(0.0, 0.0, 2));
 }
 
 test "16-bit logits widen by their kind" {

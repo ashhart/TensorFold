@@ -165,6 +165,52 @@ fn twice(gpa: std.mem.Allocator, d: *Draft, t: Track) !Rounds {
     return a[0].r;
 }
 
+/// Drafts kept at `depth` a hold, frames truncated to depth + 1 rows and full blocks, each hold at the same context.
+const Truncated = struct { rounds: usize = 0, same: usize = 0, short: usize = 0, full: usize = 0 };
+
+/// A greedy walk held twice a round, at `depth` (a frame of depth + 1 rows) and at the block (its first drafts).
+fn truncated(d: *Draft, s: *lanes.Stream, f0: Features, len: usize, g: []const u32, depth: usize) !Truncated {
+    const x = d.drafter();
+    const block = d.c.block - 1;
+    var r: Truncated = .{};
+    try x.open(s);
+    defer x.release(s);
+    var f = f0;
+    f.offset = 0;
+    f.rows = @intCast(len);
+    try x.absorb(&.{.{ .stream = s, .features = f, .start = 0, .follow = g[0..1] }});
+    var p = len;
+    while (p - len + block + 1 <= g.len) {
+        const at = p - len;
+        var short: [16]u32 = undefined;
+        var full: [16]u32 = undefined;
+        try x.hold(&.{.{ .stream = s, .pending = g[at], .position = p + 1, .depth = @intCast(depth) }});
+        try x.held(&.{s}, &.{short[0..depth]});
+        try x.hold(&.{.{ .stream = s, .pending = g[at], .position = p + 1, .depth = @intCast(block) }});
+        try x.held(&.{s}, &.{full[0..block]});
+        const ks = matching(short[0..depth], g[at + 1 ..]);
+        const kf = matching(full[0..depth], g[at + 1 ..]);
+        r.rounds += 1;
+        r.short += ks;
+        r.full += kf;
+        if (std.mem.eql(u32, short[0..depth], full[0..depth])) r.same += 1;
+        // the walk keeps the full block's drafts, so both holds see the same contexts
+        f.offset = p;
+        f.rows = @intCast(kf + 1);
+        const follow = g[at + 1 ..][0 .. kf + 1];
+        try x.absorb(&.{.{ .stream = s, .features = f, .start = p, .follow = follow, .prompt = false }});
+        p += kf + 1;
+    }
+    return r;
+}
+
+/// Drafts matching the greedy continuation `g` from the first.
+fn matching(drafts: []const u32, g: []const u32) usize {
+    var k: usize = 0;
+    while (k < drafts.len and drafts[k] == g[k]) k += 1;
+    return k;
+}
+
 /// Positions and shapes through the contract: a hold behind its context and too few held drafts are refused.
 fn refusals(d: *Draft, s: *lanes.Stream, f0: Features) !void {
     const x = d.drafter();
@@ -339,9 +385,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     // frames of two streams at most: a lone stream's holds run frames of one, the pair's frames of two
     const d = try Draft.init(gpa, io, e, args[0], 2);
     defer d.deinit();
-    const depth: f64 = @floatFromInt(c.block - 1);
-    const loaded = "PASS drafter load: {d:.1} s, a draft step {d:.2} ms (a hold of {d} drafts {d:.2} ms)\n";
-    std.debug.print(loaded, .{ ms(io, t_load) / 1e3, d.step_ms, c.block - 1, d.step_ms * depth });
+    const loaded = "PASS drafter load: {d:.1} s, a draft step {d:.2} ms (past a one-draft hold)\n";
+    std.debug.print(loaded, .{ ms(io, t_load) / 1e3, d.step_ms });
     var streams: [2]lanes.Stream = undefined;
     for (&streams) |*s| s.sampling = null;
     // every prompt's greedy continuation, its caches kept for the pair that drafts two prompts together
@@ -353,6 +398,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         gpa.free(g);
     };
     var plain_ms: f64 = 0;
+    var cut: [cut_depths.len]Truncated = .{ .{}, .{} };
     for (prompts, 0..) |prompt, n| {
         greedy[n] = try gpa.alloc(u32, steps);
         caches[n] = e.newCaches(prompt.len + steps + 8) catch |err| {
@@ -386,7 +432,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         const per = a.kept();
         std.debug.print(fmt, .{ n, prompt.len, steps, a.rounds, a.first, a.rounds, per, per + 1, hold_ms, absorb_ms });
         all.add(a);
+        for (&cut, cut_depths) |*sum, depth| {
+            const one = try truncated(d, &streams[0], f, prompt.len, greedy[n], depth);
+            inline for (.{ "rounds", "same", "short", "full" }) |name| @field(sum, name) += @field(one, name);
+        }
     }
+    try truncatedHolds(cut);
     if (all.rounds < min_rounds) {
         std.debug.print("FAIL drafter: {d} rounds, too few to judge acceptance (at least {d})\n", .{ all.rounds, min_rounds });
         return error.TooFewRounds;
@@ -424,6 +475,26 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
     try served(gpa, e, d, long);
     std.debug.print("PASS drafter served: a {d}-token prompt through the lanes backend and Drafted; features " ++
         "serve its drafter window and refuse rows out of the ring, unwritten or none\n", .{long.len});
+}
+
+/// The depths whose truncated frames are checked against the full block.
+const cut_depths = [_]usize{ 1, 3 };
+
+/// The acceptance length a truncated frame may lose to the full block.
+const max_truncated_loss = 0.05;
+
+/// Truncated frames keep the full block's acceptance, not its chains: the block's rows attend to each other unmasked.
+fn truncatedHolds(cut: [cut_depths.len]Truncated) !void {
+    for (cut, cut_depths) |r, depth| {
+        const n: f64 = @floatFromInt(r.rounds);
+        const short = @as(f64, @floatFromInt(r.short)) / n + 1;
+        const full = @as(f64, @floatFromInt(r.full)) / n + 1;
+        const fmt = "{s} drafter depth {d} truncated frames: {d} rounds, {d} chains as the full block's, " ++
+            "acceptance length {d:.3} against {d:.3}\n";
+        const lost = short + max_truncated_loss < full;
+        std.debug.print(fmt, .{ if (lost) "FAIL" else "PASS", depth, r.rounds, r.same, short, full });
+        if (lost) return error.TruncatedFramesLoseAcceptance;
+    }
 }
 
 /// Greedy steps a prompt at least, and rounds over all prompts at least, for the acceptance to mean anything.
