@@ -114,8 +114,7 @@ pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, m
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = false });
     try fields.put(a, "temperature", .{ .float = temperature });
-    // Extra wordings are sampled: seed them from the lesson's own text so a run repeats. --prompt-seed's
-    // prompt-keyed seed stays in charge when configured (it wins over this one).
+    // Extra wordings repeat: seeded from the lesson's text, unless --prompt-seed's own seed is on.
     if (!srv.config.prompt_seed) try fields.put(a, "seed", try json.intValue(a, lessonSeed(system, user)));
     var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = temperature }, gone);
     prepared.request.decide = null;
