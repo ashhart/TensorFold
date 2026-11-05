@@ -1,5 +1,20 @@
+// #if is chosen when the file is compiled, not while the helper is running.
+// On a Mac, CoreGraphics, Darwin, and CoreFoundation exist, so those imports stay.
+// On Linux, swift test skips them. CoreGraphicsStub.swift supplies CGPoint and CGKeyCode.
+// Darwin is the Mac C library and Glibc is the Linux one. pid_t comes from whichever is present.
+// CoreFoundation is what tells JSON true apart from the number 1.
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+#if canImport(CoreFoundation)
+import CoreFoundation
+#endif
 
 struct HelperError: Error {
     let code: String

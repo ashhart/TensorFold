@@ -1,4 +1,6 @@
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 
 // The parser refuses phone taps and typing before any Mac API runs.
 func phoneLocalPoint(_ point: CGPoint, size: CGSize) -> Bool {

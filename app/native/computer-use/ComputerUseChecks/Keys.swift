@@ -1,4 +1,6 @@
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 
 struct Modifier: Equatable {
     let flag: CGEventFlags
