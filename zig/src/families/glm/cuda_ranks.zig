@@ -30,6 +30,7 @@ pub const Settings = struct {
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
+    graphs: bool = false, // TF_GLM_GRAPHS: 1 (verify windows as CUDA graphs, cuda_window_graph) or 0
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
 
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
@@ -153,6 +154,12 @@ pub const Settings = struct {
         if (s.prompt_fixed_k and !s.tiled) {
             problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
             return error.BadSetting;
+        }
+        if (get("TF_GLM_GRAPHS")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.graphs = true else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_GRAPHS: 0 or 1";
+                return error.BadSetting;
+            }
         }
         if (get("TF_GLM_KV_HOST")) |v| {
             if (std.mem.eql(u8, v, "1")) s.kv_host = 1 else if (!std.mem.eql(u8, v, "0")) {
