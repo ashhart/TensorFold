@@ -120,3 +120,9 @@ test "shared KDA: malformed geometry refuses before the driver is touched" {
     try std.testing.expectError(error.KdaShape, kda.replayLayers(&ks, stream, undefined, 1, 1, 0));
     try std.testing.expectEqual(@as(usize, 0), Capture.count);
 }
+
+test "shared KDA: a model's head widths and conv taps other than the kernels' are refused" {
+    try kda.geometry(128, 128, 4);
+    for ([_][3]usize{ .{ 64, 128, 4 }, .{ 128, 64, 4 }, .{ 256, 256, 4 }, .{ 128, 128, 3 }, .{ 128, 128, 5 }, .{ 0, 0, 0 } }) |g|
+        try std.testing.expectError(error.KdaGeometry, kda.geometry(g[0], g[1], g[2]));
+}
