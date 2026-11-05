@@ -178,7 +178,9 @@ pub const Server = struct {
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {
-        return .ofVision(srv.info.vision, srv.config.vision_pdf);
+        var result = @import("messages.zig").Media.ofVision(srv.info.vision, srv.config.vision_pdf);
+        result.native_deepseek = srv.text.native_deepseek;
+        return result;
     }
 
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {

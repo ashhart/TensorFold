@@ -30,6 +30,7 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_
 
 /// The media parts an engine reads: image_url (``Info.vision``), video_url (``video``), and PDFs (``--vision-pdf``).
 pub const Media = struct {
+    native_deepseek: bool = false,
     images: bool = false,
     videos: bool = false,
     pdfs: bool = false,
@@ -94,8 +95,9 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
     var pdf_budget: pdf.Budget = .{};
     for (list.array) |message| {
         if (message != .object) return cx.refuse("each message must be an object");
+        if (media.native_deepseek) try @import("deepseek_request.zig").message(cx, message);
         const role = message.get("role");
-        if (!isRole(role)) return cx.refuse("message role must be system, developer, user, assistant or tool");
+        if (!isRole(role) and !(media.native_deepseek and role != null and role.? == .string and std.mem.eql(u8, role.?.string, "latest_reminder"))) return cx.refuse("message role must be system, developer, user, assistant or tool");
         if (fields.hasMedia(message)) return cx.refuse("this server accepts text only; image, audio and video inputs are unsupported");
         const content = message.get("content");
         var item: *json.Object = message.object;
@@ -103,7 +105,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             var text: std.ArrayList(u8) = .empty;
             var parts: std.ArrayList(Value) = .empty; // with images: text and image parts in order
             var has_image = false;
-            for (content.?.array) |part| {
+            for (content.?.array, 0..) |part, part_index| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
                 // an image part, or one this normalization already wrote with the template's type (it runs twice)
                 if (images and (std.mem.eql(u8, kind, "image_url") or std.mem.eql(u8, kind, media.image_type))) {
@@ -136,6 +138,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                 if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
+                if (media.native_deepseek and part_index > 0) try text.appendSlice(cx.a, "\n\n");
                 try text.appendSlice(cx.a, t.string);
                 if (images) {
                     const tp = try json.newObject(cx.a);
@@ -151,7 +154,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             return cx.refuse("message content must be text or an array of text parts");
         }
         const r = role.?.string;
-        if (std.mem.eql(u8, r, "system") or std.mem.eql(u8, r, "developer")) {
+        if (!media.native_deepseek and (std.mem.eql(u8, r, "system") or std.mem.eql(u8, r, "developer"))) {
             if (out.items.len == 0) {
                 try instructions.append(cx.a, item);
                 continue;
