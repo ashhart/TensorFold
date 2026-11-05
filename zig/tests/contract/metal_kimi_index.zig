@@ -124,15 +124,55 @@ pub const Probe = struct {
         return p.shape.rows * p.shape.n;
     }
 
+    pub fn encode(p: *Probe, e: mtl.ComputeEncoder, first: usize, nr: usize) void {
+        e.setPipeline(p.pipe);
+        e.setBuffer(p.x.buf, p.x.off + first * (if (p.which == .key) @as(usize, 128) else 4096) * 2, 0);
+        e.setBuffer(p.w.buf, p.w.off + (if (p.which == .key) 0 else first * 32 * 2), 1);
+        e.setBuffer(p.k.buf, p.k.off, 2);
+        e.setBuffer(p.meta.buf, p.meta.off + first * @sizeOf(ix.Row), 3);
+        e.setValue(ix.Args{ .rows = @intCast(nr), .slot_keys = @intCast(if (p.which == .key) p.shape.rows else p.shape.n), .score_stride = @intCast(p.shape.n) }, 4);
+        e.setBuffer(p.out.buf, p.out.off + (if (p.which == .key) 0 else first * p.shape.n * 4), 5);
+        e.dispatchGroups(mtl.Size.of(if (p.which == .key) nr else (p.shape.n + 127) / 128, if (p.which == .key) 1 else nr, 1), mtl.Size.of(if (p.which == .key) 32 else 128, 1, 1));
+    }
+
     pub fn run(p: *Probe) !void {
         const pass = p.rig.begin();
-        pass.e.setPipeline(p.pipe);
-        const refs = .{ p.x, p.w, p.k, p.meta };
-        inline for (refs, 0..) |r, i| pass.e.setBuffer(r.buf, r.off, i);
-        pass.e.setValue(ix.Args{ .rows = @intCast(p.shape.rows), .slot_keys = @intCast(if (p.which == .key) p.shape.rows else p.shape.n), .score_stride = @intCast(p.shape.n) }, 4);
-        pass.e.setBuffer(p.out.buf, p.out.off, 5);
-        pass.e.dispatchGroups(mtl.Size.of(if (p.which == .key) p.shape.rows else (p.shape.n + 127) / 128, if (p.which == .key) 1 else p.shape.rows, 1), mtl.Size.of(if (p.which == .key) 32 else 128, 1, 1));
+        p.encode(pass.e, 0, p.shape.rows);
         try p.rig.finish(pass);
+    }
+
+    pub fn independentRows(p: *Probe) !void {
+        if (!try p.prepare(.{ .rows = 8, .n = if (p.which == .key) 128 else 2051, .k = 128 }, .random, 973)) return error.IndexFixtureRefused;
+        const meta: []ix.Row = @alignCast(std.mem.bytesAsSlice(ix.Row, p.rig.bytes(p.meta, 8 * @sizeOf(ix.Row))));
+        if (p.which == .scores) for (meta, 0..) |*row, i| {
+            row.pos = @intCast(([_]usize{ 0, 126, 127, 128, 511, 2046, 2047, 2050 })[i]);
+        };
+        try p.run();
+        const width: usize = if (p.which == .key) 2 else 4;
+        const bytes = try p.a.dupe(u8, p.rig.bytes(p.out, p.count() * width));
+        defer p.a.free(bytes);
+        const want = try p.a.alloc(f64, p.count());
+        defer p.a.free(want);
+        const mag = try p.a.alloc(f64, p.count());
+        defer p.a.free(mag);
+        const allow = try p.a.alloc(f64, p.count());
+        defer p.a.free(allow);
+        try p.reference(want, mag);
+        try p.bounds(want, mag, allow);
+        for (0..8) |r| for (0..p.shape.n) |j| {
+            const i = r * p.shape.n + j;
+            if (p.which == .scores and j > meta[r].pos) {
+                if (std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little) != 0xffffffff) return error.IndexFutureKeyWritten;
+            } else {
+                const got = c.read(p.kernel().spec.out, bytes, i);
+                if (!(@abs(got - want[i]) <= allow[i])) return error.IndexCausalReference;
+            }
+        };
+        @memset(p.rig.bytes(p.out, p.count() * width), 0xff);
+        const pass = p.rig.begin();
+        for (0..8) |i| p.encode(pass.e, 7 - i, 1);
+        try p.rig.finish(pass);
+        if (!std.mem.eql(u8, bytes, p.rig.bytes(p.out, bytes.len)) or !try p.rig.intact()) return error.IndexRowOrder;
     }
 
     fn evaluate(p: *Probe, sum: ref.Sum, want: []f64, mag: []f64) void {
@@ -231,6 +271,12 @@ pub const Suite = struct {
             }
         }
         return s;
+    }
+    pub fn invariance(s: *Suite) !void {
+        for (s.probes.items) |p| if (p.ctl == 0) {
+            try p.independentRows();
+            std.debug.print("PASS kimi index {t}: causal binary64 outputs, untouched future keys and reverse single-row launches equal batch bytes\n", .{p.which});
+        };
     }
     pub fn destroy(s: *Suite) void {
         for (s.probes.items) |p| {

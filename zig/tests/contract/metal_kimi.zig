@@ -12,19 +12,29 @@ pub const Suite = struct {
     attn: [5]?*attention.Probe = @splat(null),
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(contract.gates.Kernel), only: ?[]const u8) !*Suite {
         const s = try a.create(Suite);
-        errdefer a.destroy(s);
-        s.* = .{ .a = a, .index = try scores.Suite.create(a, device, queue, kernels, only) };
+        const index = scores.Suite.create(a, device, queue, kernels, only) catch |err| {
+            a.destroy(s);
+            return err;
+        };
+        s.* = .{ .a = a, .index = index };
+        errdefer s.destroy();
         for ([_]bool{ false, true }, 0..) |control, i| {
             if (only) |text| if (std.mem.indexOf(u8, select.Probe.name(control), text) == null) continue;
             const p = try a.create(select.Probe);
-            p.* = try select.Probe.init(a, device, queue, control);
+            p.* = select.Probe.init(a, device, queue, control) catch |err| {
+                a.destroy(p);
+                return err;
+            };
             s.selected[i] = p;
             try kernels.append(a, p.kernel());
         }
         for (0..5) |ctl| {
             if (only) |text| if (std.mem.indexOf(u8, attention.Probe.name(@intCast(ctl)), text) == null) continue;
             const p = try a.create(attention.Probe);
-            p.* = try attention.Probe.init(a, device, queue, @intCast(ctl));
+            p.* = attention.Probe.init(a, device, queue, @intCast(ctl)) catch |err| {
+                a.destroy(p);
+                return err;
+            };
             s.attn[ctl] = p;
             try kernels.append(a, p.kernel());
         }
@@ -43,6 +53,7 @@ pub const Suite = struct {
         s.a.destroy(s);
     }
     pub fn exact(s: *Suite) !void {
+        try s.index.invariance();
         if (s.attn[0]) |p| {
             for ([_]usize{ 1, 15, 16, 17, 511, 512, 513, 2047, 2048, 2049, 4097 }) |keys| {
                 if (!try p.prepare(.{ .rows = 2, .n = 3 * 512, .k = keys }, .random, 973)) return error.IndexFixtureRefused;
