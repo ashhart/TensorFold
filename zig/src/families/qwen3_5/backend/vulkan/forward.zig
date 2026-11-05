@@ -60,8 +60,7 @@ pub const Core = struct {
         try vk.orExit(c.acc.norm.rmsNorm(c.cmds, out, h, gain, rows, pinned.hidden, pinned.eps, c.timeout_ns));
     }
 
-    // `extractQueries` reads `qraw[d + k * 512]`, `k = row * 8 + head`, matching `qwen35_head_norm` source indexing.
-    // Deinterleaves [q | gate] rows; the transport rides the views' kind (u16 words bf16, u32 words f32).
+    // `extractQueries` reads `qraw[d + k * 512]` (k = row * 8 + head); the transport rides the views' kind.
     pub fn extractQueries(c: *const Core, q_out: View, qraw: View, rows: usize) !void {
         const plan = extractQPlan(rows, q_out.elements, qraw.elements) orelse return error.Invalid;
         if (q_out.kind != qraw.kind or (q_out.kind != .bf16 and q_out.kind != .f32)) return error.Invalid;
@@ -77,8 +76,7 @@ pub const Core = struct {
         try vk.orExit(pipe.run(c.cmds, std.mem.asBytes(&p), vk.ops.dispatchGroups(plan.count, pipe.local[0]), c.timeout_ns));
     }
 
-    // Attention uses Q/K/V, gamma (256), RoPE, KV at `base`, causal GQA SDPA and gate/O; `r_out` cannot alias reads.
-    // Every activation store takes the layer's kind; q/k/v out, attention y and gate mix follow x.
+    // Attention: Q/K/V, gamma, RoPE, KV at `base`, GQA SDPA, gate/O; every activation store takes the layer's kind.
     pub fn fullLayer(c: *const Core, x: View, layer: weights.FullLayer, s: *state.State, slot: usize, rows: usize, r_out: View, base: u64) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
@@ -108,8 +106,7 @@ pub const Core = struct {
         c.scratch.reset(mark) catch {};
     }
 
-    // GDN runs qkv/z/a/b, raw-BF16 conv, gates/recurrence; one-row prefill preserves rounding; slot flips after writes.
-    // Every activation store takes the layer's kind; g stays f32 and beta bf16 at both ends of the scan.
+    // GDN: qkv/z/a/b, conv, gates/recurrence; every store takes the layer's kind; g stays f32, beta bf16.
     pub fn linearLayer(c: *const Core, x: View, layer: weights.LinearLayer, s: *state.State, slot: usize, rows: usize, r_out: View) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
