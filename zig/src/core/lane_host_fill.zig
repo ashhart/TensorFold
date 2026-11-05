@@ -241,7 +241,7 @@ fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
     const job = h.filling.items[at];
     var buf: [64]i64 = undefined;
     const left = @import("lane_host_srpt.zig").replyTokens(h.core.live.items, &buf);
-    const first = h.srpt.decodeFirst(remaining(h, job), left);
+    const first = h.srpt.decodeFirst(remaining(h, job), left) and h.srpt.lends(job.stream.prompt_len -| job.stream.cached, job.fill_lent_ns);
     const p = h.srpt.share(first, h.share.p, h.decode_cap and h.share.p >= 1);
     h.filling.items[at].stream.settle_step = decoding and p < 1;
     const t0 = std.Io.Clock.awake.now(h.io);
@@ -249,6 +249,7 @@ fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
     const ns: i64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
     // no progress shown is no sample; a backend that never reports shows a whole prompt at its last step
     h.srpt.filled(if (rows == std.math.maxInt(u64) or !h.core.backend.vtable.reports_fill) 0 else rows, ns);
+    if (first and decoding and p < 1) job.fill_lent_ns += @as(f64, @floatFromInt(ns)) * (1 - p) / p;
     h.share.steppedAt(ns, decoding, p);
     return rows;
 }

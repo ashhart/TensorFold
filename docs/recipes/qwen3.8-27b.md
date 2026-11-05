@@ -301,7 +301,8 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --parallel 16 --context 8192 --
 
 `--parallel N` decodes up to N requests in shared rounds: each stream verifies its own DFlash2 tree in one
 forward, and every reply equals the same request served alone. A new prompt prefills 1,024 tokens a round
-while the other streams decode. States kept at message starts let prompts that share a system prompt resume
+while the other streams decode. On Metal, a reply that would end well before a long prompt goes first: the prompt
+lends it at most a quarter of its own time, and `--decode-share` or `TENSORFOLD_PREFILL_ORDER` overrides this. States kept at message starts let prompts that share a system prompt resume
 there, and each stream's caches are sized once, at admission.
 
 On one DGX Spark, with the workload from issue #38 (48 chat requests of 3,000 to 5,100 tokens sharing a

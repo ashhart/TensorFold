@@ -6,13 +6,21 @@ pub const Srpt = struct {
     on: bool = false, // TENSORFOLD_PREFILL_ORDER=srpt; off keeps the fixed share and main's order
     floor: f64 = 0.1, // the long prompt's least share of wall time beside replies: it always makes progress
     fill_ns_row: f64 = 0, // EMA of a prompt row's fill time; 0 until a step is timed
-    round_ns: f64 = 0, // EMA of a decode round's time; 0 until a round is timed
-    round_tokens: f64 = 0, // EMA of the tokens a round commits, all streams together
+    round_ns: f64 = 0, // a decode round's time, averaged over `round_alpha`; 0 until a round is timed
+    round_tokens: f64 = 0, // the tokens a round commits, all streams together, averaged with it
+    rounds: u32 = 0, // rounds sampled: their plain mean until `round_alpha` takes over
 
-    pub const alpha = 0.25; // the weight a new sample carries in each EMA
+    pub const alpha = 0.25; // the weight a new fill sample carries
+    pub const round_alpha = 1.0 / 32.0; // drafts land in bursts: a round's tokens swing threefold, a stretch of them doesn't
+    pub const margin = 0.25; // a reply goes first when it would end within this part of the fill left; near a tie the prompt keeps its lead
 
     pub fn fromEnv() Srpt {
         return if (std.c.getenv("TENSORFOLD_PREFILL_ORDER")) |text| fromText(std.mem.span(text)) else .{};
+    }
+
+    /// A family's default order: `on` unless the env names one.
+    pub fn withDefault(on: bool) Srpt {
+        return if (std.c.getenv("TENSORFOLD_PREFILL_ORDER")) |text| fromText(std.mem.span(text)) else .{ .on = on };
     }
 
     /// `srpt`; anything else is off.
@@ -29,15 +37,17 @@ pub const Srpt = struct {
     /// A decode round of `ns` that committed `tokens` over every live stream.
     pub fn rounded(s: *Srpt, ns: i64, tokens: u64) void {
         if (ns <= 0 or tokens == 0) return;
-        s.round_ns = ema(s.round_ns, @as(f64, @floatFromInt(ns)));
-        s.round_tokens = ema(s.round_tokens, @as(f64, @floatFromInt(tokens)));
+        s.rounds +|= 1;
+        const w = @max(round_alpha, 1.0 / @as(f64, @floatFromInt(s.rounds)));
+        s.round_ns += w * (@as(f64, @floatFromInt(ns)) - s.round_ns);
+        s.round_tokens += w * (@as(f64, @floatFromInt(tokens)) - s.round_tokens);
     }
 
     fn ema(old: f64, sample: f64) f64 {
         return if (old > 0) old + alpha * (sample - old) else sample;
     }
 
-    /// Whether some reply's estimated time left is under the long prompt's; false until both are sampled.
+    /// Whether a reply would end within `margin` of the long prompt's estimated time left; false before both samples.
     pub fn decodeFirst(s: *const Srpt, fill_rows_left: u64, reply_tokens_left: []const i64) bool {
         if (!s.on or s.fill_ns_row <= 0 or s.round_ns <= 0 or s.round_tokens <= 0) return false;
         var runnable: usize = 0;
@@ -47,9 +57,14 @@ pub const Srpt = struct {
         const fill_ns = @as(f64, @floatFromInt(fill_rows_left)) * s.fill_ns_row;
         for (reply_tokens_left) |t| {
             if (t <= 0) continue;
-            if (@as(f64, @floatFromInt(t)) * s.round_ns / per_round < fill_ns) return true;
+            if (@as(f64, @floatFromInt(t)) * s.round_ns / per_round < fill_ns * margin) return true;
         }
         return false;
+    }
+
+    /// Whether a prompt of `rows` rows to fill can lend replies more: `lent_ns` so far, `margin` of its time at most.
+    pub fn lends(s: *const Srpt, rows: u64, lent_ns: f64) bool {
+        return lent_ns < @as(f64, @floatFromInt(rows)) * s.fill_ns_row * margin;
     }
 
     /// The prompt's share of a step: `p`, at most the floor when a reply goes first; a whole prompt stays whole.
@@ -94,19 +109,59 @@ test "TENSORFOLD_PREFILL_ORDER: srpt is on, anything else or unset is off" {
     try std.testing.expect(Srpt.fromText(" srpt\t").on);
 }
 
+test "TENSORFOLD_PREFILL_ORDER: a family's default stands until the env names an order" {
+    const env = @import("sys").env;
+    const name = "TENSORFOLD_PREFILL_ORDER";
+    _ = env.unsetenv(name);
+    try std.testing.expect(Srpt.withDefault(true).on);
+    try std.testing.expect(!Srpt.withDefault(false).on);
+    _ = env.setenv(name, "fifo", 1);
+    defer _ = env.unsetenv(name);
+    try std.testing.expect(!Srpt.withDefault(true).on);
+    _ = env.setenv(name, "srpt", 1);
+    try std.testing.expect(Srpt.withDefault(false).on);
+}
+
 test "srpt: no sample yet is no order; a short reply goes first, a long one does not" {
     var s: Srpt = .{ .on = true };
     try std.testing.expect(!s.decodeFirst(900_000, &.{200}));
     s.filled(1000, 500_000_000); // 0.5 ms a row
     try std.testing.expect(!s.decodeFirst(900_000, &.{200})); // the round is still unsampled
-    s.rounded(60_000_000, 2); // 60 ms a round, 2.5 tokens a round after the EMA
+    s.rounded(60_000_000, 2); // 60 ms a round, 3 tokens a round: the first rounds' plain mean
     s.rounded(60_000_000, 4);
-    try std.testing.expectEqual(@as(f64, 2.5), s.round_tokens);
-    try std.testing.expect(s.decodeFirst(900_000, &.{200})); // 200 tokens: 4.8 s against 450 s of fill
-    try std.testing.expect(!s.decodeFirst(1_000, &.{1_000_000})); // 24,000 s against 0.5 s of fill
+    try std.testing.expectEqual(@as(f64, 3), s.round_tokens);
+    try std.testing.expect(s.decodeFirst(900_000, &.{200})); // 200 tokens: 4 s against 450 s of fill
+    try std.testing.expect(!s.decodeFirst(1_000, &.{1_000_000})); // 20,000 s against 0.5 s of fill
+    try std.testing.expect(!s.decodeFirst(900_000, &.{6_000})); // 120 s of reply against 450 s: past the margin, the prompt leads
+    try std.testing.expect(s.decodeFirst(900_000, &.{5_000})); // 100 s: inside it
     try std.testing.expect(!s.decodeFirst(900_000, &.{ 0, -1 })); // nothing runnable
     try std.testing.expectEqual(@as(f64, 0.1), s.share(true, 1, false));
     try std.testing.expectEqual(@as(f64, 1), s.share(false, 1, false));
+}
+
+test "srpt: a burst of landed drafts doesn't swing the estimate" {
+    var s: Srpt = .{ .on = true };
+    s.filled(1000, 3_000_000_000); // 3 ms a row: 32,000 rows left is 96 s
+    for (0..64) |i| s.rounded(40_000_000, if (i % 2 == 0) 1 else 5); // 3 tokens a round on average
+    const before = s.round_tokens;
+    s.rounded(40_000_000, 5);
+    s.rounded(40_000_000, 5);
+    try std.testing.expect(@abs(s.round_tokens - before) < 0.2);
+    for (0..8) |_| {
+        s.rounded(40_000_000, 1);
+        s.rounded(40_000_000, 5);
+        try std.testing.expect(!s.decodeFirst(32_000, &.{8_000})); // 107 s of reply against 96 s of fill: the prompt, every time
+        try std.testing.expect(s.decodeFirst(32_000, &.{1_000})); // 13 s: the reply, every time
+    }
+}
+
+test "srpt: a prompt lends at most a quarter of its own time, however many replies keep coming" {
+    var s: Srpt = .{ .on = true };
+    s.filled(1000, 3_000_000_000); // 3 ms a row: 8,000 rows is 24 s, so 6 s to lend
+    try std.testing.expect(s.lends(8_000, 0));
+    try std.testing.expect(s.lends(8_000, 5_999_000_000));
+    try std.testing.expect(!s.lends(8_000, 6_000_000_000));
+    try std.testing.expect(!s.lends(0, 0));
 }
 
 test "srpt: a step at the floor owes nine times its time; a whole step owes nothing" {
