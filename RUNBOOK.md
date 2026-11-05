@@ -186,11 +186,19 @@ For source builds with `zig build native` (including `--prefix` installs): Struc
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
 The archives require glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`.
 Their kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
-CUDA serves Nemotron 3.5 Lightning, qualified on GB10 (`linux-aarch64`, greedy and sampled) and on Ampere cards with
-compute capability 8.6 (`linux-x86_64`, greedy: the RTX 30 series, RTX A6000, A10 and A40), and checked on an RTX PRO 6000 Blackwell (compute
-capability 12.0, `linux-x86_64`).
-Flash Next also serves on CUDA from its MLX 4-bit checkpoint, on the built-in kernels, run on a GB10: see
-[Flash Next on CUDA](docs/recipes/flash-next-cuda.md).
+See [qualified models](README.md#qualified-models) for native CUDA serving by family and format.
+Nemotron 3.5 Lightning MLX 4-bit has serving receipts on GB10 (sm_121, greedy and sampled), RTX 3090 (sm_86, greedy)
+and RTX PRO 6000 Blackwell (sm_120). A receipt on one sm_86 card does not measure every card of that class.
+Flash Next MLX 4-bit has served on a GB10 ([native recipe](docs/recipes/flash-next-cuda.md)).
+[GLM-5.3-Flash](docs/recipes/glm-5.3-flash-cuda.md) has recorded native TP=2 and TP=3 runs, including FP4-Local and
+XSFP4 on two and three GB10s. GLM uses `TF_GLM_RANK`, `TF_GLM_WORLD` and `NCCL_COMM_ID`; other ranked families use
+their supported `--tp` options. [Gemma 4](CHANGELOG.md#114) 12B and 31B MLX checkpoints have served on a GB10 too.
+
+Release fatbins contain sm_80, sm_86, sm_120 and sm_121 images. The A100 (sm_80) has kernel checks recorded in
+[#846](https://github.com/ashhart/TensorFold/pull/846), but no served checkpoint on record, so it is not model-qualified.
+Nemotron and dense Qwen's NVFP4/FP8 paths have non-cluster fallbacks for sm_80 to sm_89 (#901, #1470).
+No NVFP4/FP8 model run on sm_80 is recorded; implementation and kernel checks are not whole-model qualification.
+DeepSeek is refused by the release CUDA server until whole-model gate #827 passes; Qwen4 has synthetic gates only.
 
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
