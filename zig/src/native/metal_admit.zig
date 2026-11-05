@@ -5,6 +5,28 @@ const api = @import("engine_api");
 const kv_pool = @import("tensorfold").kv_pool;
 const cache_fit = @import("cache_fit.zig");
 
+/// The M generation in a Metal device name ("Apple M5 Max": 5).
+pub fn generation(name: []const u8) ?u32 {
+    var words = std.mem.tokenizeScalar(u8, name, ' ');
+    if (!std.ascii.eqlIgnoreCase(words.next() orelse return null, "apple")) return null;
+    const word = words.next() orelse return null;
+    if (word.len < 2 or std.ascii.toLower(word[0]) != 'm') return null;
+    const gen = std.fmt.parseInt(u32, word[1..], 10) catch return null;
+    return if (gen >= 1) gen else null;
+}
+
+/// Serving DSpark needs M5 or newer; unknown names take the same no-drafter route as older devices.
+pub fn lfm2DrafterOptions(o: api.Open, name: []const u8) api.Open {
+    if (o.drafter == null or !std.mem.eql(u8, o.model_type, "lfm2_moe") or
+        (generation(name) orelse 0) >= 5) return o;
+    var plain = o;
+    plain.drafter = null;
+    plain.drafter_name = null;
+    plain.drafter_bits = 4;
+    plain.drafter_bits_given = false;
+    return plain; // Keep drafts: ordinary serving still funds cheap copies and the target's calibration.
+}
+
 /// What the load limit (70% of RAM, at most the working set) leaves past the footprint or the device's buffers.
 pub fn room(device: mtl.Device) u64 {
     const limit = (cache_fit.ceiling(cache_fit.ram() orelse 0, device.maxWorkingSet(), null) catch unreachable).bytes;
@@ -104,5 +126,55 @@ test "Gemma 4 31B and 12B (no weights here): streams at a 131072-token window, p
         try std.testing.expectEqual(@as(?u32, 2), try streams(a, "gemma4", per, 2 * per + (1 << 20), .{ .dir = "", .model_type = "gemma4" }, 131072, &why));
         try std.testing.expectEqual(@as(?u32, null), try streams(a, "gemma4", per, per - 1, .{ .dir = "", .model_type = "gemma4", .lanes = 1 }, 131072, &why));
         a.free(why);
+    }
+}
+
+test "chip classes from Metal device names" {
+    try std.testing.expectEqual(@as(?u32, 5), generation("Apple M5 Max"));
+    try std.testing.expectEqual(@as(?u32, 12), generation("Apple M12"));
+    try std.testing.expectEqual(@as(?u32, null), generation("AMD Radeon Pro"));
+    try std.testing.expectEqual(@as(?u32, null), generation("Apple Mx"));
+}
+
+test "DSpark device admission requires a recognized M5 or later name in either weight mode" {
+    const devices = [_]struct { name: []const u8, enabled: bool }{
+        .{ .name = "Apple M1", .enabled = false },
+        .{ .name = "Apple M2 Ultra", .enabled = false },
+        .{ .name = "Apple M3 Max", .enabled = false },
+        .{ .name = "Apple M4", .enabled = false },
+        .{ .name = "Apple M4 Pro", .enabled = false },
+        .{ .name = "Apple M4 Max", .enabled = false },
+        .{ .name = "Apple M5", .enabled = true },
+        .{ .name = "Apple M5 Pro", .enabled = true },
+        .{ .name = "Apple M5 Max", .enabled = true },
+        .{ .name = "Apple M6", .enabled = true },
+        .{ .name = "Apple M12 Ultra", .enabled = true },
+        .{ .name = "apple m5 max", .enabled = true },
+        .{ .name = "AMD Radeon Pro", .enabled = false },
+        .{ .name = "Apple GPU", .enabled = false },
+        .{ .name = "Apple Mx", .enabled = false },
+        .{ .name = "Apple M0", .enabled = false },
+        .{ .name = "Apple M4294967296", .enabled = false },
+        .{ .name = "", .enabled = false },
+    };
+    for (devices) |device| {
+        for ([_]?u8{ null, 0, 8 }) |bits| {
+            var requested: api.Open = .{ .dir = "target", .model_type = "lfm2_moe", .drafter = "cached/dspark" };
+            if (bits) |b| {
+                requested.drafter_bits = b;
+                requested.drafter_bits_given = true;
+            }
+            const admitted = lfm2DrafterOptions(requested, device.name).drafter != null;
+            try std.testing.expectEqual(device.enabled, admitted);
+        }
+    }
+}
+
+test "DSpark's device policy does not disable another family's drafter" {
+    for ([_][]const u8{ "qwen3_5", "qwen3_5_moe", "llama", "gemma4", "gemma4_unified" }) |family| {
+        const requested: api.Open = .{ .dir = "target", .model_type = family, .drafter = "cached/drafter" };
+        for ([_][]const u8{ "Apple M4 Max", "Apple M5 Max", "unknown" }) |name| {
+            try std.testing.expect(lfm2DrafterOptions(requested, name).drafter != null);
+        }
     }
 }

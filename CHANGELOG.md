@@ -8,6 +8,42 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: Metal GLM draft-source facts use a defined host capability receiver, removing a random crash from an uninitialized device. Serving is unchanged (#2268).
 
+- LFM2 DSpark keeps context and host-draw prices separate from learned shared-row costs when integrated with current main. CLI GPU admission tests live in their own module to keep the shared CLI test file below 600 lines.
+
+- LFM2 DSpark stands aside on pre-M5 or unrecognized Metal device names before neural loading, calibration and admission charges. Those requests retain the canonical target-only path and cheap copies; recognized M5-or-newer names keep the funded neural path. Independent native FP32 diagnostics and other families' drafters are unchanged.
+
+- LFM2 DSpark prices request-level neural-context enrollment before prefill. Target-only requests keep cheap copies and canonical no-tap forwards; enrolled requests retain zero-grant context and in-request recovery. Only complete, paying serving quotes fund enrollment or cold trials: unknown prices and unpaid quotes cannot spend recovery probes even if hypothetical perfect acceptance would pay. Fully unbound direct diagnostics remain available. Recent head-only rates seed fresh request state without a stream-count cutoff. This is not a throughput-qualification claim.
+
+- LFM2 DSpark's native diagnostic releases independent target-control caches after their last forward, creates the main tap buffer and comparison cache after capture controls, and separates independent stage buffers. Context lengths, capture layouts, FP32 references and numerical bounds are unchanged; serving code is unaffected.
+
+- Lane reservations retain the next window's copy decision, including silence and source evidence, until verification consumes it. Planning no longer advances suffix-lookup backoff twice, and shared borrowed proposals survive another stream's lookup.
+
+- LFM2 DSpark retains the configured bidirectional query block when the scheduler asks for a shorter proposal prefix. Physical packing, clean calibration, context funding and the FP32 reference use the same fixed query width; larger logical cohorts still run as bounded passes. This corrects grant-dependent model inputs, not a claim of higher acceptance or throughput.
+
+- LFM2 DSpark attention reserves a tail chunk for full query masks at maximum context, without changing the target's context window or attention capacity. A real-GPU regression catches partials overwriting the next scratch row and checks that the extra keys contribute to the merged result.
+
+- LFM2 DSpark holds gather adjacent small context pieces in preallocated scratch. Target normalization carries raw BF16 residuals in captured tap columns instead of storing them twice. Bounded, admission-priced lane storage retains verified taps until a hold, snapshot or overflow needs their projections, preserving context across zero-grant rounds and target-tap overwrites.
+
+- `tools/bench_lfm2_dspark.py` records the complete same-head no-drafter/BF16/8-bit qualification matrix, checks token equality across solo, draft-disabled and concurrent runs, and fails every cell below its plain baseline. Reduced runs are explicitly smoke evidence, not qualification.
+
+- LFM2 DSpark prices physical drafter passes from its measured stream-count/depth grid, including split passes in execution order; copy and forced rows still count toward verification. A new stream waits for its first priced grant, while owned prompt and verified taps preserve contiguous context through zero-grant rounds, snapshots and stage overflow. Measured precommit CPU encoding is charged at launch and settled GPU work at its existing wait, each once without extra synchronization. Actual-timing backends do not also subtract modeled extra-step work.
+
+- LFM2 DSpark stages newly verified rows once before hold budgeting and prices the selected group's live context debt from a separate 60-cell calibration. Both grids use paired CPU-encoding plus GPU measurements. Clean-hold price updates subtract the matching estimated catch-up cost while round accounting retains both actual components. Temporary K/V calibration lanes and their shared raw fixture are freed before serving. This does not establish throughput qualification.
+
+- LFM2 DSpark rewinds zero-row context updates without encoding an empty command buffer, preserves completed shared drafts when only a timing receipt is unavailable, and caches tap GPU bases for their live allocation rather than querying them per segment.
+
+- DSpark confidence scheduling keeps a useful observed prefix when its full hold cannot pay. Recovery trials require a fresh positive reservation and funding in the full round's verify and physical hold costs, including companion rows; an impossible trial does not spend its probe cadence. Forced heads retain their unused recovery clocks. Verify allocation keeps the checkpoint confidences, and the absent-head fallback keeps its original prior. No stream-count cutoff is added; full no-slowdown qualification remains separate.
+
+- LFM2 DSpark's allocation-failure regression now derives the warm-up failure point from scratch preparation and disables in-place allocator growth, so scratch and warm-up cleanup are tested without reaching uninitialized model state. Serving behavior is unchanged.
+
+- LFM2 DSpark refuses isolated NaN and either infinity sign from the Markov scan on waited and asynchronous held paths. Empty scan groups retain their negative-infinity/invalid-token sentinel; finite arithmetic and lowest-token ties are unchanged.
+
+- DSpark recovery checks retain their shape-only exploration minimum when host-draw timing changes, applying the live draw quote at the funding boundary. Changed hold or forward prices still invalidate the cached shape; strict funding and recovery admission are unchanged.
+
+- LFM2 DSpark and shared-lane modules keep the 600-line source limit by separating scratch allocation and behavioral test fixtures. The original tap-only oracle stays untouched for independent rounding work; inference arithmetic, activation formats and the existing assertions are unchanged (#1394).
+
+- Tests: MiniMax's external-draft capability fixture supplies a valid drafter vtable when the shared backend reads hold-context facts. Assertions and serving behavior are unchanged.
+
 - CI: main's build cache now fits every runner, because CI compiles host code for one CPU, and `release-paths` and the macOS dev tools use the cache too (#2252).
 
 - Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) runs on CUDA from `mlx_lm.convert` 4-bit checkpoints: per-layer inputs in their own launch and layers 24 to 41 on the caches of 22 and 23, with replies equal across streams and resumes (#1222, #2230).

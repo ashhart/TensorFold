@@ -296,6 +296,32 @@ test "row cost: a draft that pays at the learned price is still taken" {
     try t.expect(counts[0] > 0 and counts[1] > 0);
 }
 
+test "row cost: confidence holds retain host and context prices when the shared row price is learned" {
+    var table: Table = .{};
+    defer table.deinit(t.allocator);
+    for (1..9) |rows| try table.put(t.allocator, @intCast(rows), 10 + @as(f64, @floatFromInt(rows)));
+    const holds = [_]depth.HoldCost{.{ .streams = 1, .depth = 1, .ms = 0.1 }};
+    const contexts = [_]@import("hold_price.zig").ContextCost{.{ .streams = 1, .rows = 3, .ms = 0.1 }};
+    var rule: depth.Rule = .{ .gpa = t.allocator, .k = .{ .learn_rows = true, .hold_costs = &holds, .hold_context_costs = &contexts }, .prior = &.{0.99}, .most_drafts = 1, .family_costs = &table, .shared_costs = &table, .mtp_step_ms = 0, .plain_guard = false, .node_probabilities = true, .granted_depth = true, .batch_rows = 8 };
+    defer rule.deinit();
+    var states: [2]?depth.State = .{ null, null };
+    defer for (&states) |*state| if (state.*) |*s| s.deinit(t.allocator);
+    const whos = [_]depth.Who{
+        .{ .state = &states[0], .draft_room = 2, .finished = false, .forced = false, .granted = 1, .gain = 0.99, .prices = &.{0.99}, .row_ms = 2, .hold_context_rows = 3 },
+        .{ .state = &states[1], .draft_room = 2, .finished = false, .forced = true },
+    };
+    var base = @import("hold_price.zig").Base.pending(2);
+    base.host_ms = 2;
+    var out = [_]i64{ 1, 0 };
+    try rule.payHolds(&whos, false, &out, base);
+    try t.expectEqualSlices(i64, &.{ 1, 0 }, &out);
+    // Synthetic residuals exclude the separately quoted host draw and hold pass.
+    for ([_]u64{ 2, 4, 6 }) |rows| try feed(&rule.row_cost, 2, rows, 3.8 * @as(f64, @floatFromInt(rows - 2)), 8);
+    out = .{ 1, 0 };
+    try rule.payHolds(&whos, false, &out, base);
+    try t.expectEqualSlices(i64, &.{ 0, 0 }, &out);
+}
+
 test "row cost: a forced row pays the excess too, so a draft beside it is priced from the same base" {
     var table: Table = .{};
     defer table.deinit(t.allocator);

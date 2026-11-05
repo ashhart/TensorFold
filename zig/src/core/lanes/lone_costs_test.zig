@@ -11,7 +11,7 @@ fn setup() !Config {
     return Config.init(a, .{ .exact_width = 64, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 63, .plain_guard = true, .draft_probabilities = true, .hidden_rows = true, .batch_rows = 128, .window_costs = &.{ .{ .width = 1, .ms = 80 }, .{ .width = 16, .ms = 80 }, .{ .width = 17, .ms = 81 }, .{ .width = 64, .ms = 90 } }, .lone_cost_tile = 16 }, 64, 63);
 }
 
-fn selected(wide_ms: f64, alone: bool, timed: bool, neighbor_ms: ?f64) !usize {
+fn selected(wide_ms: f64, alone: bool, timed: bool, neighbor_ms: ?f64, row_ms: ?f64) !usize {
     var cfg = try setup();
     defer cfg.deinit(a);
     cfg.timed = timed;
@@ -23,6 +23,7 @@ fn selected(wide_ms: f64, alone: bool, timed: bool, neighbor_ms: ?f64) !usize {
     e.alone = alone;
     var s = try Stream.init(a, .{ .id = "own-width", .prompt = &.{ 3, 1, 4 }, .max_new = 128 });
     defer s.deinit(a);
+    s.verify_row_ms = row_ms;
     // Near-certain prefixes are synthetic controls; the two round prices are supplied timing witnesses.
     _ = try e.rule.rates(win.who(&s));
     @memset(s.depth.?.p, 0.99);
@@ -40,18 +41,25 @@ fn selected(wide_ms: f64, alone: bool, timed: bool, neighbor_ms: ?f64) !usize {
 }
 
 test "lone price: a marginal second tile loses on actual round time, but wins when it pays" {
-    try std.testing.expectEqual(@as(usize, 15), try selected(107.5, true, true, null));
-    try std.testing.expectEqual(@as(usize, 16), try selected(95, true, true, null));
+    try std.testing.expectEqual(@as(usize, 15), try selected(107.5, true, true, null, null));
+    try std.testing.expectEqual(@as(usize, 16), try selected(95, true, true, null, null));
 }
 
 test "lone price: another stream's measurements cannot change this stream's width" {
-    try std.testing.expectEqual(@as(usize, 15), try selected(107.5, true, true, 1));
-    try std.testing.expectEqual(@as(usize, 15), try selected(107.5, true, true, 1000));
+    try std.testing.expectEqual(@as(usize, 15), try selected(107.5, true, true, 1, null));
+    try std.testing.expectEqual(@as(usize, 15), try selected(107.5, true, true, 1000, null));
 }
 
 test "lone price: untimed and shared allocation retain the startup cost policy" {
-    try std.testing.expectEqual(@as(usize, 16), try selected(107.5, false, true, null));
-    try std.testing.expectEqual(@as(usize, 16), try selected(107.5, true, false, null));
+    try std.testing.expectEqual(@as(usize, 16), try selected(107.5, false, true, null, null));
+    try std.testing.expectEqual(@as(usize, 16), try selected(107.5, true, false, null, null));
+}
+
+test "lone price: observed complete rounds receive no additional host row surcharge" {
+    for ([_]f64{ 0, 1000 }) |row_ms| {
+        try std.testing.expectEqual(@as(usize, 15), try selected(107.5, true, true, null, row_ms));
+        try std.testing.expectEqual(@as(usize, 16), try selected(95, true, true, null, row_ms));
+    }
 }
 
 const Table = @import("table.zig").Table;

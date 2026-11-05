@@ -25,6 +25,9 @@ pub const Facts = struct {
     slack: u32 = 0, // with chances: drafts a hold offers past the stream's last grant (0: the depth rule's own)
     copy_first: bool = false, // a hold costs a pass of its own: none is asked for a stream with a copy ahead
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // that pass's ms by blocks and depth (timed at load)
+    hold_context_costs: []const @import("hold_price.zig").ContextCost = &.{},
+    hold_rows: u32 = 0, // rows one hold pass holds at most, a block as long as its pass's deepest: more run as passes in order (0: no bound)
+    hold_block_rows: u32 = 0, // minimum query rows per block, independent of the returned proposal depth
 };
 
 /// Target rows [start, start + features.rows) and the token after each; `rows`, when given, picks which to absorb.
@@ -42,9 +45,13 @@ pub const Absorb = struct {
 /// `depth` drafts after `pending` at `position`; `lanes`: a tree's ranks; `tokens`, `sampling`: the stream's, if given.
 pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, plan: ?*const @import("proposal_head.zig").Plan = null, lanes: ?*const Shape = null, tokens: []const u32 = &.{}, sampling: ?@import("sampling.zig").Sampling = null };
 
+/// All live wrapper requests, and tracked peers including the candidate, before its target prompt pass.
+pub const Enrollment = struct { streams: usize, heads: usize };
+
 pub const Drafter = struct {
     kind: []const u8 = "draft model", // descriptive only; the loader identifies the implementation it attached
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
+    hold_timing: ?@import("backend.zig").DraftTiming = null, // nonoverlapping encode CPU + settled GPU ms, consumed once without waiting (null: modeled)
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -52,6 +59,10 @@ pub const Drafter = struct {
         /// The target's layers the drafter reads, in the order its features concatenate them.
         taps: *const fn (ptr: *anyopaque) []const u32,
         facts: *const fn (ptr: *anyopaque) Facts,
+        /// A request-stable choice made before the target captures any prompt features.
+        enroll: ?*const fn (*anyopaque, *Stream, Enrollment) bool = null,
+        /// Only a verified head prefix, excluding copies, grafts and grammar continuations.
+        observe_head: ?*const fn (*anyopaque, *Stream, u32, u32) void = null,
         /// A new stream: its own caches, empty.
         open: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         absorb: *const fn (ptr: *anyopaque, items: []const Absorb) anyerror!void,
@@ -73,6 +84,10 @@ pub const Drafter = struct {
     }
     pub fn facts(d: Drafter) Facts {
         return d.vtable.facts(d.ptr);
+    }
+    pub fn enroll(d: Drafter, s: *Stream, context: Enrollment) bool {
+        const f = d.vtable.enroll orelse return true;
+        return f(d.ptr, s, context);
     }
     pub fn open(d: Drafter, s: *Stream) !void {
         return d.vtable.open(d.ptr, s);

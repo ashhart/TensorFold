@@ -20,6 +20,9 @@ const Counted = struct {
 
 test "qwen27 grants: native shared proposals do not spend nodes beyond the verified grants" {
     var runner: tf.qwen27.decode_round.Runner = undefined;
+    var model: @typeInfo(@TypeOf(runner.model)).pointer.child = undefined;
+    model.config.experts = 0;
+    runner.model = &model;
     runner.slots = 4;
     var b: native.Metal = undefined;
     b.runner = &runner;

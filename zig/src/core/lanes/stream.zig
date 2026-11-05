@@ -157,6 +157,9 @@ pub const Stream = struct {
     sampling: ?Sampling,
     penalties: Penalties = .{},
     drafts: bool,
+    head_context: ?bool = null, // null: legacy; false: request-stable target-only external-head route
+    head_prior: []const f64 = &.{}, // provider-owned conditional rates, cloned when the rule first needs them
+    prefill_cohort: usize = 0, // host's admitted/queued lane bound before prefill (0: unknown)
     proposer: ?Proposer,
     recall: ?*Reader,
     stop_check: ?StopCheck,
@@ -241,7 +244,24 @@ pub const Stream = struct {
     grant_short: bool = false, // the last grant verified fewer drafts than the stream held
     grant_gain: ?f64 = null, // the drafts its last grant expected to keep (the chances it was priced by)
     draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
+    hold_context_rows: u32 = 0, // raw context still owed to the active drafter, maintained by that provider
+    verify_row_ms: ?f64 = null, // backend's live host-draw ms per row (null: unsupported or not observed)
+    verify_host_ms: f64 = 0, // completed host draws in this verify, consumed once by the round
     copy_width: ?u32 = null,
+    copy_tokens: std.ArrayList(u32) = .empty, // owned across round-arena resets and queries sharing a proposer's buffer
+    reserved_copy: ?struct {
+        context: []const u32, // identity and length; commit invalidates before appending to history
+        cache_len: u64,
+        pending: ?u32,
+        rounds: u64,
+        room: i64,
+        width: ?u32,
+        alone: bool,
+        proposer: ?Proposer,
+        recall: ?*Reader,
+        recalled: bool,
+        trusted: bool,
+    } = null,
 
     pub fn init(gpa: Allocator, spec: Spec) !Stream {
         var s: Stream = .{
@@ -301,9 +321,12 @@ pub const Stream = struct {
         s.dropRoundState(gpa);
     }
 
-    /// Forget the round loop's state (Python `_release_stream_state`).
+    /// Forget round-local state; same-backend detach keeps enrollment and the provider's complete context.
     pub fn dropRoundState(s: *Stream, gpa: Allocator) void {
         if (s.depth) |*d| d.deinit(gpa);
+        s.reserved_copy = null;
+        s.copy_tokens.deinit(gpa);
+        s.copy_tokens = .empty;
         s.dropHeld(gpa);
         s.depth = null;
         s.mode = null;
@@ -314,6 +337,8 @@ pub const Stream = struct {
         s.grant_gain = null;
         s.draft_chances.deinit(gpa);
         s.draft_chances = .empty;
+        s.verify_row_ms = null;
+        s.verify_host_ms = 0;
         s.copy_width = null;
         s.proposal_depth = null;
     }
@@ -326,6 +351,10 @@ pub const Stream = struct {
         s.next = null;
         if (s.lanes) |l| l.deinit(gpa);
         s.lanes = null;
+    }
+
+    pub fn headDrafts(s: *const Stream) bool {
+        return s.drafts and s.head_context != false;
     }
 
     pub fn prompt(s: *const Stream) []const u32 {
@@ -408,6 +437,7 @@ pub const Stream = struct {
     /// Begin the thinking budget's close: its first token now, the rest forced after it.
     pub fn startClose(s: *Stream, gpa: Allocator) !u32 {
         try s.force.ensureTotalCapacity(gpa, s.think_close.len - 1);
+        s.reserved_copy = null;
         s.think_open = false;
         s.force.clearRetainingCapacity();
         s.force.appendSliceAssumeCapacity(s.think_close[1..]);
@@ -458,6 +488,7 @@ pub const Stream = struct {
             }
             try s.long_loop.reserve(gpa, s.emitted().len + end);
         }
+        s.reserved_copy = null;
         var landed: usize = 0;
         for (tokens, 0..) |t, i| {
             if (s.finished) break;
@@ -517,12 +548,14 @@ pub const Stream = struct {
 
     pub fn popForce(s: *Stream) ?u32 {
         if (s.force.items.len == 0) return null;
+        s.reserved_copy = null;
         return s.force.orderedRemove(0);
     }
 };
 
 test {
     _ = @import("commit_storage_test.zig");
+    _ = @import("stream_limits_test.zig");
 }
 
 test "commit stops at eos and length" {
@@ -543,47 +576,4 @@ test "a logprob stream lands a row with each token it lands, and refuses tokens 
     try std.testing.expectEqual(@as(usize, 2), try s.commit(gpa, &.{ 5, 9, 7 }, &rows));
     try std.testing.expectEqual(@as(usize, 2), s.rows.items.len);
     try std.testing.expectEqual(@as(u32, 9), s.rows.items[1].token);
-}
-
-test "loop guard stops at the cap even when no cycle fires" {
-    const gpa = std.testing.allocator;
-    var tokens: [20]u32 = undefined;
-    for (&tokens, 0..) |*token, i| token.* = @intCast(100 + i);
-    var guarded = try Stream.init(gpa, .{ .id = "guarded", .prompt = &.{1}, .max_new = 10, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
-    defer guarded.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 10), try guarded.commit(gpa, &tokens, &.{}));
-    try std.testing.expect(guarded.finished and guarded.reason == .length);
-}
-
-test "loop guard fires, closes thinking, and latches once" {
-    const gpa = std.testing.allocator;
-    var tokens: std.ArrayList(u32) = .empty;
-    defer tokens.deinit(gpa);
-    for (0..loop_warm_in) |i| try tokens.append(gpa, @intCast(1000 + i));
-    for (0..257) |_| try tokens.append(gpa, 7);
-    var s = try Stream.init(gpa, .{ .id = "loop", .prompt = &.{1}, .max_new = 400, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
-    defer s.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 321), try s.commit(gpa, tokens.items, &.{}));
-    try std.testing.expectEqual(@as(u32, 1), s.loop_period.?);
-    try std.testing.expect(!s.finished and !s.think_open and s.force.items.len == 3);
-    while (s.popForce()) |token| _ = try s.commit(gpa, &.{token}, &.{});
-    try std.testing.expect(!s.finished and s.force.items.len == 0);
-    _ = try s.commit(gpa, &.{8}, &.{});
-    try std.testing.expect(!s.finished and s.loop_period.? == 1);
-}
-
-test "answer_max limits the reply after the think block, not the reasoning" {
-    const gpa = std.testing.allocator;
-    var s = try Stream.init(gpa, .{ .id = "answer", .prompt = &.{1}, .max_new = 12, .think_end = 91, .answer_max = 2 });
-    defer s.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 5), try s.commit(gpa, &.{ 5, 6, 7, 8, 91 }, &.{}));
-    try std.testing.expect(!s.finished);
-    try std.testing.expectEqual(@as(i64, 2), s.budgetLeft());
-    try std.testing.expectEqual(@as(usize, 2), try s.commit(gpa, &.{ 10, 11, 12 }, &.{}));
-    try std.testing.expect(s.finished);
-    try std.testing.expectEqual(Reason.length, s.reason);
-    var long = try Stream.init(gpa, .{ .id = "long", .prompt = &.{1}, .max_new = 4, .think_end = 91, .answer_max = 2 });
-    defer long.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 4), try long.commit(gpa, &.{ 5, 6, 7, 8, 9 }, &.{}));
-    try std.testing.expectEqual(Reason.length, long.reason);
 }

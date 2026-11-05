@@ -10,7 +10,11 @@ const tile = @import("../../core/tile_qmm.zig");
 const am = @import("../../core/affine_mm.zig");
 const segs = @import("segments.zig");
 const Buffer = mtl.Buffer;
-pub const Segment = struct { cache: *st.Cache, rows: usize };
+/// Where a segment's tapped rows go: the scratch's taps, nowhere, or a stage.
+pub const Tap = union(enum) { scratch, none, stage: Place };
+/// `gpu_base` belongs to the live `buf` allocation; `off` remains a raw byte offset.
+pub const Place = struct { buf: Buffer, gpu_base: u64, off: usize };
+pub const Segment = struct { cache: *st.Cache, rows: usize, tap: Tap = .scratch };
 /// GPU seconds of every call so far (the bench reports a chunk's GPU time beside its wall time).
 pub var gpu_seconds: f64 = 0;
 /// `all`: every row's logits and greedy pick (Scratch.best); `last`: the last row's logits alone.
@@ -19,6 +23,27 @@ pub const Head = enum { last, all };
 const tile_rows = 33;
 /// A buffer and byte offset as core/affine_mm binds them.
 const Ref = struct { buf: Buffer, off: usize = 0 };
+/// The previous FFN's output stays live until the next operator norm, or the final norm.
+const Pending = enum { none, twin, sorted };
+
+/// Each row's tap destination into the scratch's table, every buffer it names declared on `e`.
+fn tapTable(e: mtl.ComputeEncoder, s: *st.Scratch, segments: []const Segment) void {
+    const taps = s.taps orelse return;
+    const width = taps.count * c.hidden * 2;
+    const table = @as([*]u64, @ptrCast(@alignCast(taps.buf.contents() + taps.table_at)))[0..s.rows];
+    var base: usize = 0;
+    for (segments) |seg| {
+        const place: ?Place = switch (seg.tap) {
+            .scratch => .{ .buf = taps.buf, .gpu_base = taps.gpu_base, .off = base * width },
+            .none => null,
+            .stage => |p| p,
+        };
+        if (place) |p| e.useResource(p.buf, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        const address = if (place) |p| p.gpu_base + p.off else null;
+        for (table[base..][0..seg.rows], 0..) |*dst, i| dst.* = if (address) |a| a + i * width else 0;
+        base += seg.rows;
+    }
+}
 
 const QkArgs = extern struct { len: u32, cap: u32, eps: f32, log2_theta: f32 };
 const AttnArgs = extern struct { len: u32, cap: u32, scale: f32, subs: u32 };
@@ -33,6 +58,7 @@ const Encoder = struct {
     record: bool,
     /// A recorded window of several streams: their conv and attention kernels run once a layer over every row.
     plan: ?segs.Plan = null,
+    capture: bool = false, // all-uncaptured forwards take the canonical no-tap norm pipelines
 
     fn pipe(self: Encoder, comptime key: []const u8) void {
         self.e.setPipeline(self.m.kernels.get(key));
@@ -58,39 +84,72 @@ const Encoder = struct {
     }
     /// y[rows] = x[rows] W^T: the prompt tiles (on x's group sums), or their twin at decode and window rows.
     fn projection(self: Encoder, w: row.Weights, x: Buffer, x_off: usize, y: Buffer, y_off: usize, rows: usize) void {
+        self.projectAll(&.{w}, .{ .buf = x, .off = x_off }, &.{.{ .buf = y, .off = y_off }}, rows);
+    }
+    /// Ordered products on one immutable BF16 input; only compatible, still-live sums are reused.
+    fn projectAll(self: Encoder, ws: []const row.Weights, x: Ref, outs: []const Ref, rows: usize) void {
         const t = &self.m.kernels.tiles;
-        if (self.nax(w.bits)) |p| {
-            const xr = Ref{ .buf = x, .off = x_off };
-            const sums = Ref{ .buf = self.s.sums };
-            am.rowSums(self.e, p, c.group, xr, sums, @intCast(rows), @intCast(w.k));
-            am.dense(self.e, p, xr, sums, affine(w), Ref{ .buf = y, .off = y_off }, @intCast(rows));
+        if (!self.prompt and self.m.kernels.twin) {
+            for (ws, outs) |w, out| tile.encodeTwin(self.e, t, matrix(w), x.buf, x.off, out.buf, out.off, rows) catch unreachable;
             return;
         }
-        if (self.prompt or !self.m.kernels.twin) {
-            tile.encodeSums(self.e, t, w.k, x, x_off, self.s.sums, rows);
-            tile.encode(self.e, t, matrix(w), x, x_off, self.s.sums, 0, y, y_off, rows) catch unreachable;
-        } else tile.encodeTwin(self.e, t, matrix(w), x, x_off, y, y_off, rows) catch unreachable;
+        const sums = Ref{ .buf = self.s.sums };
+        var previous: ?usize = null;
+        var tensor_sums = false;
+        for (ws, outs, 0..) |w, out, i| {
+            const p = self.nax(w.bits);
+            // Code width affects the product, not either sums kernel. Never cross their regimes.
+            const reuse = if (previous) |j|
+                ws[j].k == w.k and ws[j].group == w.group and ws[j].sum == w.sum and tensor_sums == (p != null)
+            else
+                false;
+            if (!reuse) {
+                if (p) |pipes| {
+                    am.rowSums(self.e, pipes, c.group, x, sums, @intCast(rows), @intCast(w.k));
+                } else tile.encodeSums(self.e, t, w.k, x.buf, x.off, self.s.sums, rows);
+                previous = i;
+                tensor_sums = p != null;
+            }
+            if (p) |pipes| {
+                am.dense(self.e, pipes, x, sums, affine(w), out, @intCast(rows));
+            } else tile.encode(self.e, t, matrix(w), x.buf, x.off, self.s.sums, 0, out.buf, out.off, rows) catch unreachable;
+        }
     }
-    /// h += r unless first, then x = norm(h); `combine`: r is the decode experts' combine, taken here instead.
-    fn norm(self: Encoder, s: *st.Scratch, weight: wts.Tensor, first: bool, rows: usize, combine: bool) void {
-        if (combine) {
-            self.pipe("lfm2_combine_norm");
+    /// h += the pending FFN output (or r), then the canonical norm and optional raw-state tap.
+    fn norm(self: Encoder, s: *st.Scratch, weight: wts.Tensor, first: bool, rows: usize, combine: Pending, tap_layer: ?usize) void {
+        var mask: u32 = 0; // the tap columns of this layer, bit i: column i
+        if (self.capture) if (s.taps) |taps| if (tap_layer) |layer| for (taps.layers[0..taps.count], 0..) |l, i| if (l == layer) {
+            mask |= @as(u32, 1) << @intCast(i);
+        };
+        if (combine != .none) {
+            switch (combine) {
+                .none => unreachable,
+                .twin => if (mask == 0) self.pipe("lfm2_combine_norm") else self.pipe("lfm2_combine_norm_tap"),
+                .sorted => {
+                    if (mask == 0) self.pipe("lfm2_combine_sorted_norm") else self.pipe("lfm2_combine_sorted_norm_tap");
+                    self.e.setBuffer(s.pos, 0, 8);
+                },
+            }
             self.e.setBuffer(s.experts, 0, 0);
             self.e.setBuffer(s.weights, 0, 1);
             self.e.setBuffer(s.h, 0, 2);
             self.tensor(weight, 3);
             self.e.setValue(c.eps, 4);
             self.e.setBuffer(s.x, 0, 5);
-            self.groups(.{ rows, 1, 1 }, .{ c.hidden / 4, 1, 1 });
-            return;
+        } else {
+            if (mask == 0) self.pipe("lfm2_norm") else self.pipe("lfm2_norm_tap");
+            self.e.setBuffer(s.h, 0, 0);
+            self.e.setBuffer(s.r, 0, 1);
+            self.tensor(weight, 2);
+            self.e.setValue(c.eps, 3);
+            self.e.setValue(@as(u32, @intFromBool(!first)), 4);
+            self.e.setBuffer(s.x, 0, 5);
         }
-        self.pipe("lfm2_norm");
-        self.e.setBuffer(s.h, 0, 0);
-        self.e.setBuffer(s.r, 0, 1);
-        self.tensor(weight, 2);
-        self.e.setValue(c.eps, 3);
-        self.e.setValue(@as(u32, @intFromBool(!first)), 4);
-        self.e.setBuffer(s.x, 0, 5);
+        if (mask != 0) {
+            const taps = s.taps.?;
+            self.e.setBuffer(taps.buf, taps.table_at, 6);
+            self.e.setValue(mask, 7);
+        }
         self.groups(.{ rows, 1, 1 }, .{ c.hidden / 4, 1, 1 });
     }
     fn swiglu(self: Encoder, s: *st.Scratch, count: usize) void {
@@ -118,12 +177,31 @@ pub fn matrix(w: row.Weights) tile.Matrix {
     return .{ .w = w.w, .w_off = w.w_off, .scales = w.scales, .s_off = w.s_off, .biases = w.biases, .b_off = w.b_off, .n = w.n, .k = w.k, .bits = w.bits };
 }
 
+/// A window's held drafts on the device: `count` tokens at `src` + `off`, `stride` words apart, into ids from `row`.
+pub const Held = struct { row: usize, src: Buffer, off: usize, stride: u32, count: u32 };
+/// A GPU event the forward waits on before it reads held drafts, and the value it waits for.
+pub const Wait = struct { event: mtl.Event, value: u64 };
+
 pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, record: bool, head: Head) !void {
+    return runHeld(m, s, segments, tokens, record, head, &.{}, null);
+}
+
+/// `run` with held drafts copied into the rows' ids on the GPU first (after `wait`): their host ids are ignored.
+pub fn runHeld(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const u32, record: bool, head: Head, held: []const Held, wait: ?Wait) !void {
     if (tokens.len == 0 or tokens.len > s.rows or (record and tokens.len > st.batch_rows)) return error.LfmRowsExceeded;
     var total: usize = 0;
+    var capture = false;
+    const table_only = if (s.taps) |taps| taps.table_at == 0 else false;
     for (segments) |seg| {
         if (seg.rows == 0 or seg.cache.len + seg.rows > seg.cache.capacity) return error.LfmContextFull;
+        // Table-only serving must not interpret its address table as captured feature storage.
+        if (table_only) switch (seg.tap) {
+            .scratch => return error.BadLfmTapDestination,
+            .stage => |p| if (p.buf.id == s.taps.?.buf.id) return error.BadLfmTapDestination,
+            .none => {},
+        };
         total += seg.rows;
+        capture = capture or (s.taps != null and seg.tap != .none);
     }
     if (total != tokens.len or (head == .all and total > st.batch_rows) or (!record and segments.len != 1)) return error.InvalidLfmSegments;
     for (tokens) |id| if (id >= c.vocab) return error.InvalidLfmToken;
@@ -131,10 +209,21 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
+    if (wait) |w| cb.waitForEvent(w.event, w.value);
     const prompt = (!record and head == .last) or total >= tile_rows;
     const e = cb.compute(.serial);
     const plan = if (segs.batched(record, segments.len)) segs.prepare(e, s, segments) else null;
-    const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan };
+    if (capture) tapTable(e, s, segments);
+    const enc = Encoder{ .e = e, .m = m, .s = s, .prompt = prompt, .record = record, .plan = plan, .capture = capture };
+    if (held.len > 0) @memset(s.bad.contents()[0..4], 0);
+    for (held) |h| {
+        enc.pipe("lfm2_draft_ids");
+        e.setBuffer(h.src, h.off, 0);
+        e.setValue([4]u32{ h.stride, h.count, c.vocab, 0 }, 1);
+        e.setBuffer(s.ids, h.row * 4, 2);
+        e.setBuffer(s.bad, 0, 3);
+        enc.threads(.{ h.count, 1, 1 }, .{ 32, 1, 1 });
+    }
     const embedding = m.weights.embedding;
     e.setPipeline(m.kernels.embed(embedding.bits));
     e.setBuffer(s.ids, 0, 0);
@@ -142,28 +231,25 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     e.setBuffer(s.h, 0, 4);
     const units = c.hidden / @as(usize, if (embedding.bits == 6) 4 else 8 / embedding.bits);
     enc.threads(.{ units, total, 1 }, .{ 256, 1, 1 });
-    var combine = false; // the previous block's decode experts, combined by the next norm
+    var combine: Pending = .none;
     for (m.weights.blocks, 0..) |block, i| {
-        enc.norm(s, block.operator_norm, i == 0, total, combine);
-        combine = false;
-        if (i > 0) tap(enc, s, i - 1, total);
+        enc.norm(s, block.operator_norm, i == 0, total, combine, if (i > 0) i - 1 else null);
+        combine = .none;
         switch (block.mixer) {
             .conv => |cv| conv(enc, s, cv, i, segments, total),
             .attention => |a| attention(enc, s, a, &m.config, segments, i, total),
         }
-        enc.norm(s, block.ffn_norm, false, total, false);
+        enc.norm(s, block.ffn_norm, false, total, .none, null);
         switch (block.ffn) {
             .dense => |d| {
-                enc.projection(d.gate, s.x, 0, s.gate, 0, total);
-                enc.projection(d.up, s.x, 0, s.up, 0, total);
+                enc.projectAll(&.{ d.gate, d.up }, .{ .buf = s.x }, &.{ .{ .buf = s.gate }, .{ .buf = s.up } }, total);
                 enc.swiglu(s, total * c.intermediate);
                 enc.projection(d.down, s.act, 0, s.r, 0, total);
             },
             .moe => |x| combine = moe(enc, s, x, m.config.scale, total),
         }
     }
-    enc.norm(s, m.weights.norm, false, total, combine);
-    tap(enc, s, c.layers - 1, total);
+    enc.norm(s, m.weights.norm, false, total, combine, c.layers - 1);
     if (head == .all) {
         enc.projection(embedding, s.x, 0, s.logits, 0, total);
         enc.pipe("lfm2_argmax");
@@ -180,6 +266,7 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         std.debug.print("LFM2 forward: {s}\n", .{msg});
         return error.GpuFailed;
     }
+    if (held.len > 0 and std.mem.readInt(u32, s.bad.contents()[0..4], .little) != 0) return error.DraftNonfinite;
     var base: usize = 0;
     for (segments) |seg| {
         const logit_row = if (head == .all) base + seg.rows - 1 else 0;
@@ -187,18 +274,6 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
         seg.cache.commit(s, base, seg.rows, record);
         base += seg.rows;
     }
-}
-
-/// Layer `layer`'s output rows (h, just summed by the next norm) into each tap of it, when a drafter reads them.
-fn tap(enc: Encoder, s: *st.Scratch, layer: usize, total: usize) void {
-    const taps = s.taps orelse return;
-    for (taps.layers[0..taps.count], 0..) |l, t| if (l == layer) {
-        enc.pipe("lfm2_tap");
-        enc.e.setBuffer(s.h, 0, 0);
-        enc.e.setBuffer(taps.buf, 0, 1);
-        enc.e.setValue([2]u32{ taps.count * c.hidden, @intCast(t * c.hidden) }, 2);
-        enc.threads(.{ c.hidden / 8, total, 1 }, .{ 256, 1, 1 });
-    };
 }
 
 fn conv(enc: Encoder, s: *st.Scratch, cv: wts.Conv, layer: usize, segments: []const Segment, total: usize) void {
@@ -232,9 +307,7 @@ fn conv(enc: Encoder, s: *st.Scratch, cv: wts.Conv, layer: usize, segments: []co
 
 fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Config, segments: []const Segment, layer: usize, total: usize) void {
     const e = enc.e;
-    enc.projection(a.q, s.x, 0, s.q, 0, total);
-    enc.projection(a.k, s.x, 0, s.k, 0, total);
-    enc.projection(a.v, s.x, 0, s.v, 0, total);
+    enc.projectAll(&.{ a.q, a.k, a.v }, .{ .buf = s.x }, &.{ .{ .buf = s.queries }, .{ .buf = s.k }, .{ .buf = s.v } }, total);
     if (enc.plan) |plan| {
         attentionSegs(enc, s, a, config, layer, total, plan);
         return enc.projection(a.out, s.y, 0, s.r, 0, total);
@@ -245,13 +318,13 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Co
         const len: u32 = @intCast(seg.cache.len);
         const cap: u32 = @intCast(seg.cache.capacity);
         enc.pipe("lfm2_qk");
-        e.setBuffer(s.q, base * c.hidden * 2, 0);
+        e.setBuffer(s.queries, base * c.hidden * 2, 0);
         e.setBuffer(s.k, base * c.kv_heads * c.head_dim * 2, 1);
         e.setBuffer(s.v, base * c.kv_heads * c.head_dim * 2, 2);
         enc.tensor(a.q_norm, 3);
         enc.tensor(a.k_norm, 4);
         e.setBytes(std.mem.asBytes(&QkArgs{ .len = len, .cap = cap, .eps = c.eps, .log2_theta = std.math.log2(config.theta) }), 5);
-        e.setBuffer(s.queries, base * c.hidden * 2, 6);
+        e.setBuffer(s.x, base * c.hidden * 2, 6);
         e.setBuffer(cache.keys, 0, 7);
         e.setBuffer(cache.values, 0, 8);
         enc.groups(.{ c.query_heads + c.kv_heads, seg.rows, 1 }, .{ 32, 1, 1 });
@@ -269,7 +342,7 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Co
             if (nax_attn) {
                 e.setPipeline(enc.m.kernels.attn_nax.?);
             } else if (wide) enc.pipe("lfm2_attn_mma_r2") else enc.pipe("lfm2_attn_mma");
-            e.setBuffer(s.queries, (base + at) * c.hidden * 2, 0);
+            e.setBuffer(s.x, (base + at) * c.hidden * 2, 0);
             e.setBuffer(cache.keys, 0, 1);
             e.setBuffer(cache.values, 0, 2);
             e.setBytes(std.mem.asBytes(&args), 3);
@@ -297,19 +370,19 @@ fn attentionSegs(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const 
     const e = enc.e;
     const table = layer * segs.table_bytes;
     enc.pipe("lfm2_qk_segs");
-    e.setBuffer(s.q, 0, 0);
+    e.setBuffer(s.queries, 0, 0);
     e.setBuffer(s.k, 0, 1);
     e.setBuffer(s.v, 0, 2);
     enc.tensor(a.q_norm, 3);
     enc.tensor(a.k_norm, 4);
     e.setBytes(std.mem.asBytes(&QkArgs{ .len = 0, .cap = 0, .eps = c.eps, .log2_theta = std.math.log2(config.theta) }), 5);
-    e.setBuffer(s.queries, 0, 6);
+    e.setBuffer(s.x, 0, 6);
     e.setBuffer(s.segs, table, 7);
     e.setBuffer(s.rowseg, 0, 8);
     enc.groups(.{ c.query_heads + c.kv_heads, total, 1 }, .{ 32, 1, 1 });
     const args = AttnArgs{ .len = 0, .cap = 0, .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = 0 };
     enc.pipe("lfm2_attn_segs");
-    e.setBuffer(s.queries, 0, 0);
+    e.setBuffer(s.x, 0, 0);
     e.setBuffer(s.segs, table, 1);
     e.setBuffer(s.tiles, 0, 2);
     e.setBytes(std.mem.asBytes(&args), 3);
@@ -328,8 +401,8 @@ fn attentionSegs(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const 
     enc.groups(.{ c.query_heads, total, 1 }, .{ 32, 1, 1 });
 }
 
-/// True when the picks' combine is left to the next norm (decode rows).
-fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool {
+/// Picks, weights, positions and expert rows are not reused before the immediately following norm.
+fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) Pending {
     const e = enc.e;
     const slots = total * c.topk;
     enc.pipe("lfm2_route_logits");
@@ -352,15 +425,14 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
         const gate = matrix(x.gate.one);
         tile.encodeTwinGlu(e, t, gate, matrix(x.up.one), s.x, s.act, s.picks, groups, slots, c.topk) catch unreachable;
         tile.encodeTwinIndexed(e, t, matrix(x.down.one), s.act, s.experts, s.picks, groups, slots, 1) catch unreachable;
-        return true;
+        return .twin;
     }
     enc.pipe("lfm2_sort");
     e.setBuffer(s.picks, 0, 0);
     e.setValue(@as(u32, @intCast(slots)), 1);
     e.setBuffer(s.starts, 0, 2);
-    e.setBuffer(s.order, 0, 3);
-    e.setBuffer(s.pos, 0, 4);
-    e.setBuffer(s.tokens, 0, 5);
+    e.setBuffer(s.pos, 0, 3);
+    e.setBuffer(s.tokens, 0, 4);
     enc.groups(.{ 1, 1, 1 }, .{ c.experts * 16, 1, 1 });
     if (enc.nax(x.gate.one.bits)) |p| {
         // Sorted slot j reads token row tokens[j]; gate and up SwiGLU'd into act, then down over act's sorted rows.
@@ -388,11 +460,5 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
         tile.encodeGrouped(e, t, down, c.experts, s.act, s.sums, s.ident, s.experts, slots, sorted[0], sorted[1]) catch
             unreachable;
     }
-    enc.pipe("lfm2_combine_sorted");
-    e.setBuffer(s.experts, 0, 0);
-    e.setBuffer(s.weights, 0, 1);
-    e.setBuffer(s.r, 0, 2);
-    e.setBuffer(s.pos, 0, 3);
-    enc.threads(.{ c.hidden, total, 1 }, .{ 256, 1, 1 });
-    return false;
+    return .sorted;
 }

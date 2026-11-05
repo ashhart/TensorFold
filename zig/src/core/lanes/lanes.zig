@@ -53,6 +53,8 @@ pub const SuffixLookup = proposer.SuffixLookup;
 pub const LogprobRow = logprob.Row;
 pub const Trim = trim.Trim;
 
+pub const FakeDrafter = @import("drafted_test.zig").FakeDrafter;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
@@ -67,6 +69,7 @@ test {
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
     _ = @import("drafted_chances_test.zig");
+    _ = @import("hold_recovery_test.zig");
     _ = @import("drafted_copy_test.zig");
     _ = @import("root_copy_test.zig");
     _ = @import("drafted_grammar_test.zig");
@@ -74,6 +77,10 @@ test {
     _ = @import("grammar_time_test.zig");
     _ = @import("grammar_parallel_test.zig");
     _ = @import("pricing_test.zig");
+    _ = @import("host_pricing_test.zig");
+    _ = @import("hold_prefix_test.zig");
+    _ = @import("hold_context_test.zig");
+    _ = @import("pass_pricing_test.zig");
     _ = @import("depth_probe_test.zig");
     _ = @import("proposal_external_test.zig");
     _ = @import("lone_costs_test.zig");

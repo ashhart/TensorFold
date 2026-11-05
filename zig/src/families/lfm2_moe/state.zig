@@ -53,20 +53,27 @@ pub const Storage = struct {
 pub const Attention = struct { keys: mtl.Buffer, values: mtl.Buffer };
 /// Layers a drafter reads at most (each layer's output, hidden wide).
 pub const max_taps = 8;
-/// The drafter's layers in its order and every forward row's outputs of them, [rows][count][hidden] bf16.
-pub const Taps = struct { layers: [max_taps]u32 = @splat(0), count: u32 = 0, buf: mtl.Buffer };
-/// Where a stream's latest tapped rows sit in the scratch: cache rows [start, start + rows) from scratch row `row`.
-pub const TapRows = struct { start: usize, row: usize, rows: usize, gen: u64 };
+/// The forward's row destination addresses, preceded by raw bf16 rows only for generic scratch capture.
+pub const Taps = struct {
+    layers: [max_taps]u32 = @splat(0),
+    count: u32 = 0,
+    buf: mtl.Buffer,
+    gpu_base: u64, // `buf`'s base address, cached for this allocation (not `table_at`)
+    table_at: usize,
+};
+/// Latest scratch rows from `row`, or owned stage bytes from `stage`; gen 0 keeps a prompt anchor across forwards.
+pub const TapRows = struct { start: usize, row: usize, rows: usize, gen: u64, stage: ?usize = null };
 pub const Mixer = union(enum) { conv: mtl.Buffer, attention: Attention };
 
 pub const Cache = struct {
     memory: Storage,
     capacity: usize,
     len: usize = 0,
-    last: ?struct { start: usize, base: usize, rows: usize } = null,
+    /// Native all-row owner, compared only; backend caches are destroyed before scratch.
+    last: ?struct { start: usize, base: usize, rows: usize, committed: ?*const Scratch = null } = null,
     blocks: [c.layers]Mixer,
     logits: mtl.Buffer,
-    /// The stream's latest tapped rows in the scratch, and its prompt's last row's taps (kept for the first draft).
+    /// Latest captured rows; generic capture alone copies the prompt anchor into `last_tap`.
     tap: ?TapRows = null,
     last_tap: ?mtl.Buffer = null,
 
@@ -108,9 +115,13 @@ pub const Cache = struct {
         if (path.len == 0 or path.len > last.rows) return error.NothingToKeep;
         for (path, 0..) |p, i| if (p != i) return error.UnsupportedLfmTree;
         const row = last.base + path.len - 1;
-        self.restore(scratch, row);
+        // Native verify already owns this full frame's conv/logits, independently of later scratch use.
+        const committed = last.committed == scratch and path.len == last.rows and self.len == last.start + last.rows;
+        if (!committed) {
+            self.restore(scratch, row);
+            @memcpy(self.logits.contents()[0 .. c.vocab * 2], (scratch.logits.contents() + row * c.vocab * 2)[0 .. c.vocab * 2]);
+        }
         self.len = last.start + path.len;
-        @memcpy(self.logits.contents()[0 .. c.vocab * 2], (scratch.logits.contents() + row * c.vocab * 2)[0 .. c.vocab * 2]);
         self.last = null;
     }
 };
@@ -119,12 +130,12 @@ pub const Scratch = struct {
     memory: Storage,
     rows: usize,
     ids: mtl.Buffer,
+    bad: mtl.Buffer, // set by lfm2_draft_ids when a held pick is flagged nonfinite or past the vocabulary
     h: mtl.Buffer,
     x: mtl.Buffer,
     r: mtl.Buffer,
     bcx: mtl.Buffer,
     y: mtl.Buffer,
-    q: mtl.Buffer,
     k: mtl.Buffer,
     v: mtl.Buffer,
     queries: mtl.Buffer,
@@ -138,9 +149,8 @@ pub const Scratch = struct {
     picks: mtl.Buffer,
     weights: mtl.Buffer,
     experts: mtl.Buffer,
-    /// Prompt rows' picks by expert: starts, sorted -> slot, slot -> sorted, sorted -> token row, and the identity map.
+    /// Prompt rows' picks by expert: starts, slot -> sorted, sorted -> token row, and the identity map.
     starts: mtl.Buffer,
-    order: mtl.Buffer,
     pos: mtl.Buffer,
     tokens: mtl.Buffer,
     ident: mtl.Buffer,
@@ -157,7 +167,7 @@ pub const Scratch = struct {
     segs: mtl.Buffer,
     rowseg: mtl.Buffer,
     tiles: mtl.Buffer,
-    /// A drafter's taps of every row, once the backend is told its layers (null: none kept).
+    /// A drafter's taps (null: none kept).
     taps: ?Taps = null,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, rows: usize) !Scratch {
@@ -170,8 +180,10 @@ pub const Scratch = struct {
         const mem = &out.memory;
         const slots = rows * c.topk;
         out.ids = try mem.alloc(rows * 4);
-        inline for (.{ "h", "x", "r", "y", "q" }) |name| @field(out, name) = try mem.alloc(rows * c.hidden * 2);
-        out.queries = try mem.alloc((rows + attn_rows) * c.hidden * 2); // a prompt attention tile reads attn_rows from its first
+        out.bad = try mem.alloc(4);
+        inline for (.{ "h", "r", "y" }) |name| @field(out, name) = try mem.alloc(rows * c.hidden * 2);
+        out.x = try mem.alloc((rows + attn_rows) * c.hidden * 2); // normalized Q reuses x; prompt attention reads a padded tile
+        out.queries = try mem.alloc(rows * c.hidden * 2);
         out.bcx = try mem.alloc(rows * 3 * c.hidden * 2);
         out.k = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
         out.v = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
@@ -186,7 +198,6 @@ pub const Scratch = struct {
         out.weights = try mem.alloc(slots * 2);
         out.experts = try mem.alloc(slots * c.hidden * 2);
         out.starts = try mem.alloc((c.experts + 1) * 4);
-        out.order = try mem.alloc(slots * 4);
         out.pos = try mem.alloc(slots * 4);
         out.tokens = try mem.alloc(slots * 4);
         out.ident = try mem.alloc(slots * 4);
@@ -257,4 +268,123 @@ test "a stream's cache bytes: logits and conv windows at any length, keys and va
     attention[1] = true;
     attention[3] = true;
     try std.testing.expectEqual(@as(u64, 2 * 2 * c.kv_heads * c.head_dim * 2), cacheBytes(&attention, 1) - cacheBytes(&attention, 0));
+}
+
+fn fillKeepRows(s: *Scratch) void {
+    for (0..s.rows) |row| {
+        @memset((s.logits.contents() + row * c.vocab * 2)[0 .. c.vocab * 2], @intCast(11 + row));
+        for (s.snapshots, 0..) |snapshot, layer| if (snapshot) |b|
+            @memset((b.contents() + row * conv_bytes)[0..conv_bytes], @intCast(31 + row + layer));
+    }
+}
+
+fn expectKeepRow(cache: *const Cache, s: *const Scratch, conv_row: usize, logit_row: usize, len: usize) !void {
+    try std.testing.expectEqual(len, cache.len);
+    try std.testing.expectEqualSlices(u8, (s.logits.contents() + logit_row * c.vocab * 2)[0 .. c.vocab * 2], cache.logits.contents()[0 .. c.vocab * 2]);
+    for (cache.blocks, s.snapshots) |b, snapshot| if (b == .conv)
+        try std.testing.expectEqualSlices(u8, (snapshot.?.contents() + conv_row * conv_bytes)[0..conv_bytes], b.conv.contents()[0..conv_bytes]);
+}
+
+fn commitKeep(cache: *Cache, s: *const Scratch, base: usize, rows: usize, record: bool, logit_row: usize, native: bool) void {
+    @memcpy(cache.logits.contents()[0 .. c.vocab * 2], (s.logits.contents() + logit_row * c.vocab * 2)[0 .. c.vocab * 2]);
+    cache.commit(s, base, rows, record);
+    if (native) cache.last.?.committed = s;
+}
+
+test "lfm2_moe: full keep validates before consuming, then partial and prompt commits replace the frame" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const attention: [c.layers]bool = @splat(false);
+    var s = try Scratch.init(std.testing.allocator, device, &attention, 4);
+    defer s.deinit();
+    fillKeepRows(&s);
+    var cache = try Cache.init(std.testing.allocator, device, &attention, 32);
+    defer cache.deinit();
+    cache.len = 5;
+    commitKeep(&cache, &s, 1, 3, true, 3, true);
+    for ([_][]const u32{ &.{}, &.{ 9, 8, 7, 6 } }) |path|
+        try std.testing.expectError(error.NothingToKeep, cache.keep(&s, path));
+    for ([_][]const u32{ &.{1}, &.{ 0, 2 }, &.{ 0, 1, 1 } }) |path|
+        try std.testing.expectError(error.UnsupportedLfmTree, cache.keep(&s, path));
+    try expectKeepRow(&cache, &s, 3, 3, 8);
+    try cache.keep(&s, &.{ 0, 1, 2 });
+    try expectKeepRow(&cache, &s, 3, 3, 8);
+    try std.testing.expectError(error.NothingToKeep, cache.keep(&s, &.{ 0, 1, 2 }));
+    commitKeep(&cache, &s, 0, 3, true, 2, true);
+    try cache.keep(&s, &.{ 0, 1 });
+    try expectKeepRow(&cache, &s, 1, 1, 10);
+    try std.testing.expectError(error.NothingToKeep, cache.keep(&s, &.{0}));
+    commitKeep(&cache, &s, 2, 1, true, 2, true);
+    try cache.keep(&s, &.{0});
+    try expectKeepRow(&cache, &s, 2, 2, 11);
+    commitKeep(&cache, &s, 0, 2, true, 1, true);
+    commitKeep(&cache, &s, 0, 3, false, 0, false);
+    try expectKeepRow(&cache, &s, 0, 0, 16);
+    try std.testing.expectError(error.NothingToKeep, cache.keep(&s, &.{0}));
+}
+
+test "lfm2_moe: last-only heads, replaced scratch and rewound lengths retain restoring keeps" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const attention: [c.layers]bool = @splat(false);
+    var s = try Scratch.init(std.testing.allocator, device, &attention, 4);
+    defer s.deinit();
+    fillKeepRows(&s);
+    var cache = try Cache.init(std.testing.allocator, device, &attention, 32);
+    defer cache.deinit();
+    // A recorded last-only head writes row zero, even for later segments.
+    for ([_]usize{ 0, 2 }) |base| {
+        commitKeep(&cache, &s, base, 2, true, 0, false);
+        try expectKeepRow(&cache, &s, base + 1, 0, cache.len);
+        try cache.keep(&s, &.{ 0, 1 });
+        try expectKeepRow(&cache, &s, base + 1, base + 1, cache.len);
+    }
+    commitKeep(&cache, &s, 0, 2, true, 1, false);
+    // An unmarked generic frame still reads the supplied scratch after it is reused.
+    @memset(s.logits.contents()[0 .. 4 * c.vocab * 2], 81);
+    for (s.snapshots) |snapshot| if (snapshot) |b| @memset(b.contents()[0 .. 4 * conv_bytes], 82);
+    try cache.keep(&s, &.{ 0, 1 });
+    try expectKeepRow(&cache, &s, 1, 1, 6);
+    commitKeep(&cache, &s, 0, 2, true, 1, true);
+    const other = s; // an explicitly supplied different scratch remains the restore source
+    @memset(s.logits.contents()[0 .. 4 * c.vocab * 2], 91);
+    for (s.snapshots) |snapshot| if (snapshot) |b| @memset(b.contents()[0 .. 4 * conv_bytes], 92);
+    try cache.keep(&other, &.{ 0, 1 });
+    try expectKeepRow(&cache, &other, 1, 1, 8);
+    commitKeep(&cache, &s, 0, 2, true, 1, true);
+    cache.len -= 1;
+    @memset(cache.logits.contents()[0 .. c.vocab * 2], 0);
+    for (cache.blocks) |b| @memset(b.conv.contents()[0..conv_bytes], 0);
+    try cache.keep(&s, &.{ 0, 1 });
+    try expectKeepRow(&cache, &s, 1, 1, 10);
+}
+
+test "lfm2_moe: native full keep owns its bytes across scratch reuse, generic keep still restores" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const attention: [c.layers]bool = @splat(false);
+    var s = try Scratch.init(std.testing.allocator, device, &attention, 2);
+    defer s.deinit();
+    fillKeepRows(&s);
+    var native = try Cache.init(std.testing.allocator, device, &attention, 8);
+    defer native.deinit();
+    var generic = try Cache.init(std.testing.allocator, device, &attention, 8);
+    defer generic.deinit();
+    commitKeep(&native, &s, 0, 2, true, 1, true);
+    commitKeep(&generic, &s, 0, 2, true, 1, false);
+    @memset(s.logits.contents()[0 .. 2 * c.vocab * 2], 91);
+    for (s.snapshots) |snapshot| if (snapshot) |b| @memset(b.contents()[0 .. 2 * conv_bytes], 92);
+    try native.keep(&s, &.{ 0, 1 });
+    try std.testing.expectEqual(generic.len, native.len);
+    try std.testing.expectEqualSlices(u8, generic.logits.contents()[0 .. c.vocab * 2], native.logits.contents()[0 .. c.vocab * 2]);
+    for (generic.blocks, native.blocks) |a, b|
+        try std.testing.expectEqualSlices(u8, a.conv.contents()[0..conv_bytes], b.conv.contents()[0..conv_bytes]);
+    try std.testing.expectError(error.NothingToKeep, native.keep(&s, &.{ 0, 1 }));
+    try generic.keep(&s, &.{ 0, 1 });
+    try expectKeepRow(&generic, &s, 1, 1, 2);
+    // A later generic commit must also clear the earlier native frame's ownership.
+    commitKeep(&native, &s, 0, 2, true, 0, false);
+    @memset(s.logits.contents()[0 .. 2 * c.vocab * 2], 101);
+    try native.keep(&s, &.{ 0, 1 });
+    try expectKeepRow(&native, &s, 1, 1, 4);
 }

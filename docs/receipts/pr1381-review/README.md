@@ -1,5 +1,26 @@
 # PR 1381 standalone review fixes
 
+## Padded hold attribution on main `b17fb507a`
+
+When hold-pass prices are supplied, `Rule.headMs` uses their positive block count and maximum
+depth. Without them, legacy head-step pricing is unchanged. The observer and hold decision therefore
+use the same pass price instead of leaving its nonlinear remainder in the predicted plain baseline.
+
+A native public-API reproduction and the consumer regression use a measured padded pass of 6 ms.
+The old estimate was 3 ms; the first case must reject its unpaid holds, while real fixed host work
+can make the same holds profitable:
+
+| Case | Head attributed, ms | Fixed overhead, ms | Retained hold depths |
+|---|---:|---:|---|
+| Before, no fixed host work | 3 | 3 | `[1, 3, 0]` — incorrect |
+| After, no fixed host work | 6 | 0 | `[0, 0, 0]` |
+| After, 2.5 ms fixed host work | 6 | 2.5 | `[1, 3, 0]` |
+
+The regression fails before the correction (299 pass, one fail) and passes after it (300/300).
+It covers greedy and sampled overhead separately, unequal depths, a zero-depth lane, and a
+profitable control. The separate native program fails with `UnpaidHold` before and exits zero
+after. [Native output and exact source-file identities](hold-observer-before-after.json).
+This corrects pricing attribution; it does not establish the downstream no-slowdown gate.
 ## Composition with requested main `cb036e00f`
 
 The shared-reservation stack is integrated without restoring the rejected shared-round guard.

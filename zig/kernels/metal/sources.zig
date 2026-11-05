@@ -24,9 +24,11 @@ pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
 pub const gemma4_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("gemma4/vision.metal");
 
 /// LFM2-MoE: embedding, norms, the short conv, attention, the route and the experts' glue.
-pub const lfm2 = @embedFile("lfm2/lfm2.metal") ++ @embedFile("lfm2/lfm2_segments.metal");
+pub const lfm2 = @embedFile("lfm2/lfm2.metal") ++ @embedFile("lfm2/lfm2_sorted.metal") ++ @embedFile("lfm2/lfm2_dspark.metal") ++ @embedFile("lfm2/lfm2_segments.metal");
 /// LFM2's prompt attention on the tensor units (nax.h inlined at load, after lfm2.metal's text).
 pub const lfm2_attn_nax = @embedFile("lfm2/lfm2_attn_nax.metal");
+/// DSpark's released BF16 projections; compiled separately, only on GPUs with tensor units.
+pub const lfm2_bf16_nax = @embedFile("lfm2/lfm2_bf16_nax.metal");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");

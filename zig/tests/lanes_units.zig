@@ -116,12 +116,15 @@ fn depthCase(a: std.mem.Allocator, case: fx.Value) !void {
             const whos = try a.alloc(depth.Who, names.len);
             for (whos, names) |*w, n| w.* = stubs[index(ids, fx.str(n))].who();
             const out = try a.alloc(i64, names.len);
-            try rule.budgets(whos, probe, out);
+            try rule.budgets(whos, probe, false, out);
             try t.expectEqualSlices(i64, try fx.i64s(a, fx.get(op, "result")), out);
         } else if (std.mem.eql(u8, kind, "observe_overhead")) {
-            try rule.observeOverhead(@intCast(fx.int(fx.get(op, "streams"))), @intCast(fx.int(fx.get(op, "rows"))), fx.float(fx.get(op, "ms")));
+            const streams: u32 = @intCast(fx.int(fx.get(op, "streams")));
+            const rows: u64 = @intCast(fx.int(fx.get(op, "rows")));
+            const head_ms = rule.mtp_step_ms * @as(f64, @floatFromInt(rows -| streams));
+            try rule.observeOverhead(streams, rows, fx.float(fx.get(op, "ms")), false, head_ms);
         } else if (std.mem.eql(u8, kind, "overhead")) {
-            try expectBits(fx.float(fx.get(op, "result")), rule.overheadMs(@intCast(fx.int(fx.get(op, "streams")))));
+            try expectBits(fx.float(fx.get(op, "result")), rule.overheadMs(@intCast(fx.int(fx.get(op, "streams"))), false));
         } else unreachable;
         try checkState(a, &rule, stubs, fx.get(op, "state"));
     }
@@ -270,7 +273,7 @@ test "stream commits, thinking cuts and room (stream.jsonl)" {
             const result = fx.get(op, "result");
             if (std.mem.eql(u8, kind, "commit")) {
                 const tokens = try fx.u32s(a, fx.get(op, "tokens"));
-                const landed = try s.commit(gpa, tokens);
+                const landed = try s.commit(gpa, tokens, &.{});
                 try t.expectEqualSlices(u32, try fx.u32s(a, result), tokens[0..landed]);
             } else if (std.mem.eql(u8, kind, "cut")) {
                 const got = s.thinkCut(try fx.i64s(a, fx.get(op, "tokens")));

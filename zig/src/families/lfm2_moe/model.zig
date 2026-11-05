@@ -41,6 +41,7 @@ pub const Model = struct {
         for (files) |path| try m.checkpoint.addFile(m.device, path, "");
         m.weights = try weights.load(&m.checkpoint, &m.config);
         m.kernels = try kernels.load(m.device);
+        errdefer m.kernels.deinit();
         m.kernels.twin = try twins(m);
         m.resident = null;
         if (hold_weights) {

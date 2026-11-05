@@ -67,7 +67,7 @@ fn isGemma4(model_type: []const u8) bool {
 pub fn chip(a: Allocator) ?[]const u8 {
     const device = mtl.Device.init() catch return null;
     defer device.deinit();
-    const gen = generation(std.mem.span(device.name())) orelse return null;
+    const gen = metal_admit.generation(std.mem.span(device.name())) orelse return null;
     return std.fmt.allocPrint(a, "apple-m{d}", .{gen}) catch null;
 }
 
@@ -78,19 +78,9 @@ pub fn deviceName(a: Allocator, _: ?u32) ?[]const u8 {
     return a.dupe(u8, std.mem.span(device.name())) catch null;
 }
 
-/// The M generation in a Metal device name ("Apple M5 Max": 5).
-fn generation(name: []const u8) ?u32 {
-    var words = std.mem.tokenizeScalar(u8, name, ' ');
-    if (!std.ascii.eqlIgnoreCase(words.next() orelse return null, "apple")) return null;
-    const word = words.next() orelse return null;
-    if (word.len < 2 or std.ascii.toLower(word[0]) != 'm') return null;
-    const gen = std.fmt.parseInt(u32, word[1..], 10) catch return null;
-    return if (gen >= 1) gen else null;
-}
-
 /// Python's prompt chunk: 8,192 rows with tensor units (M5 on) where memory allows, else its 2,048.
 fn prefillStep(device: mtl.Device) u32 {
-    const gen = generation(std.mem.span(device.name())) orelse 0;
+    const gen = metal_admit.generation(std.mem.span(device.name())) orelse 0;
     return if (gen >= 5 and device.maxWorkingSet() >= 48 << 30) 8192 else 2048;
 }
 
@@ -180,6 +170,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
+
     if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
@@ -194,7 +185,20 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "spark2_5")) return @import("spark25.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return @import("minimax_m3.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "llama")) return @import("llama.zig").open(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) {
+        var serving = o;
+        if (o.drafter != null) {
+            const device = try mtl.Device.init();
+            defer device.deinit();
+            const name = std.mem.span(device.name());
+            serving = metal_admit.lfm2DrafterOptions(o, name);
+            if (serving.drafter == null and o.drafts) std.log.info(
+                "lfm2: DSpark standing aside on {s}; serving without a neural drafter (requires Apple M5 or newer)",
+                .{name},
+            );
+        }
+        return @import("lfm2_moe.zig").open(a, gpa, io, serving, problem);
+    }
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
@@ -321,7 +325,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
     if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
-    if (o.drafter != null and !dense and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), Gemma 4 dense and Llama (a smaller Llama on the same tokenizer)";
+    if (o.drafter != null and !dense and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe") and !std.mem.eql(u8, t, "lfm2_moe")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), Gemma 4 dense, Llama (a smaller Llama on the same tokenizer) and LFM2.5-24B-A2B";
     const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
@@ -477,13 +481,6 @@ fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
 }
 
-test "chip classes from Metal device names" {
-    try std.testing.expectEqual(@as(?u32, 5), generation("Apple M5 Max"));
-    try std.testing.expectEqual(@as(?u32, 12), generation("Apple M12"));
-    try std.testing.expectEqual(@as(?u32, null), generation("AMD Radeon Pro"));
-    try std.testing.expectEqual(@as(?u32, null), generation("Apple Mx"));
-}
-
 test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for the families that keep prompt states on disk" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -545,6 +542,17 @@ test "--slide is refused by every family but Nemotron, which learns into its wei
     for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next", "qwen3_5" }) |t| {
         const why = (try refusal(a, .{ .dir = "d", .model_type = t, .slide = true }, true)) orelse return error.TestExpectedRefusal;
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t}), why);
+    }
+}
+
+test "drafter admission: LFM2 DSpark and Llama survive centralized Metal refusal" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "lfm2_moe", "llama", "gemma4", "qwen3_5_moe" }) |model| {
+        try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = model, .drafter = "draft" }, false)) == null);
+    }
+    try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "qwen3_5", .drafter = "draft" }, true)) == null);
+    for ([_][]const u8{ "qwen3_5", "nemotron_h", "unknown" }) |model| {
+        try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = model, .drafter = "draft" }, false)) != null);
     }
 }
 

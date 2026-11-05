@@ -167,3 +167,58 @@ test "shared depth probe: every eighth grant adds at most one row and rotates st
     }
     for (seen) |s| try t.expect(s);
 }
+
+test "a depth's acceptance estimate moves by the configured weight of the newest round" {
+    const empty: @import("table.zig").Table = .{};
+    var rule: depth.Rule = .{ .gpa = gpa, .k = .{ .depth_rate = 0.08 }, .prior = &.{ 0.5, 0.5 }, .most_drafts = 2, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = true, .node_probabilities = false, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?depth.State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: depth.Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try rule.observeDepth(who, 2, 1); // the first draft landed, the second did not
+    try t.expectApproxEqAbs(@as(f64, 0.54), st.?.p[0], 1e-12);
+    try t.expectApproxEqAbs(@as(f64, 0.46), st.?.p[1], 1e-12);
+}
+
+test "depth picks the most tokens a ms and probes deeper" {
+    var fc: @import("table.zig").Table = .{};
+    defer fc.deinit(gpa);
+    for (1..5) |w| try fc.put(gpa, @intCast(w), 5.0 + @as(f64, @floatFromInt(w)));
+    const shared: @import("table.zig").Table = .{};
+    var rule: depth.Rule = .{ .gpa = gpa, .prior = &.{ 0.9, 0.9, 0.9 }, .most_drafts = 3, .family_costs = &fc, .shared_costs = &shared, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = false, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?depth.State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: depth.Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try t.expectEqual(@as(i64, 3), try rule.depth(who));
+}
+
+test "forced rounds retain a due plain-recovery trial until a draft can run" {
+    var slots = [_]?f64{ null, 10, 10 };
+    const costs: @import("table.zig").Table = .{ .slots = &slots };
+    var rule: depth.Rule = .{ .gpa = gpa, .prior = &.{0.5}, .most_drafts = 1, .family_costs = &costs, .shared_costs = &costs, .mtp_step_ms = 100, .plain_guard = true, .node_probabilities = false, .batch_rows = 2 };
+    defer rule.deinit();
+    var state: ?depth.State = .{ .p = try gpa.dupe(f64, &.{0.5}), .rounds = 19, .plain = 7, .wait = 8 };
+    defer state.?.deinit(gpa);
+    var whos = [_]depth.Who{.{ .state = &state, .draft_room = 64, .finished = false, .forced = true }};
+    var unused: u8 = 0;
+    const probe: depth.Probe = .{ .ptr = &unused, .copy = noCopy };
+    var out: [1]i64 = undefined;
+    for (0..3) |_| {
+        try rule.budgets(&whos, probe, false, &out);
+        try t.expectEqual(@as(i64, 0), out[0]);
+        try t.expectEqual(@as(?u64, 7), state.?.plain);
+        try t.expectEqual(@as(?u64, 8), state.?.wait);
+        try t.expectEqual(@as(u64, 19), state.?.rounds);
+    }
+    try t.expectEqual(@as(i64, 0), try rule.headDepth(&whos[0], null, probe));
+    try t.expectEqual(@as(?u64, 7), state.?.plain);
+    try t.expectEqual(@as(?u64, 8), state.?.wait);
+    try t.expectEqual(@as(u64, 19), state.?.rounds);
+    whos[0].forced = false;
+    try rule.budgets(&whos, probe, false, &out);
+    try t.expectEqual(@as(i64, 1), out[0]);
+    try t.expectEqual(@as(?u64, 0), state.?.plain);
+    try t.expectEqual(@as(?u64, 16), state.?.wait);
+    try t.expectEqual(@as(u64, 20), state.?.rounds);
+}
