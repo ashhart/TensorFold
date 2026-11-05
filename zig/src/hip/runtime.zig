@@ -17,7 +17,12 @@ pub const Runtime = struct {
 
     pub fn open() Error!Runtime {
         if (platform.getenv("TENSORFOLD_HIP")) |path| return openPath(path);
-        for (names) |name| return openPath(name) catch continue;
+        for (names) |name| {
+            return openPath(name) catch |err| switch (err) {
+                error.DriverUnavailable => continue,
+                else => return err,
+            };
+        }
         return error.DriverUnavailable;
     }
 
