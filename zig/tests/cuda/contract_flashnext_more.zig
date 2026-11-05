@@ -5,6 +5,7 @@ const core = @import("core");
 const tc = @import("check.zig");
 const late_k = @import("contract_flashnext_late.zig");
 const roll_k = @import("contract_flashnext_roll.zig");
+const lanes_k = @import("contract_flashnext_lanes.zig");
 const wbnorm_k = @import("contract_flashnext_wbnorm.zig");
 const topk_k = @import("contract_flashnext_topk.zig");
 const flash = @import("flashnext");
@@ -19,6 +20,8 @@ pub const Set = struct {
     late: [2]late_k.Late,
     roll_fns: roll_k.Fns,
     roll: roll_k.Roll,
+    lanes_fns: lanes_k.Fns,
+    lanes: [4]lanes_k.Lanes,
     glue: flash.Glue,
     wbnorm: [3]wbnorm_k.WbNorm,
     mtp: cuda.Module,
@@ -37,6 +40,9 @@ pub const Set = struct {
         self.roll_fns = .{ .shift = try b.function("fn_shift_window"), .roll = try b.function("fn_late_roll") };
         self.roll = .{ .rig = .{ .gpu = gpu, .s = s }, .f = &self.roll_fns };
         try kernels.append(a, self.roll.kernel());
+        self.lanes_fns = .{ .front = try b.function("fn_gdn_front"), .front_log = try b.function("fn_gdn_front_log"), .rows = try b.function("fn_gdn_rows"), .rows_to = try b.function("fn_gdn_rows_to"), .rows_late = try b.function("fn_gdn_rows_late"), .shift = try b.function("fn_shift_window"), .lanes_keep = try b.function("fn_gdn_lanes_keep"), .lanes_front = try b.function("fn_gdn_lanes_front"), .lanes_chain = try b.function("fn_gdn_lanes_chain"), .lanes_shift = try b.function("fn_gdn_lanes_shift") };
+        for (std.enums.values(lanes_k.Kind), &self.lanes) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = &self.lanes_fns };
+        for (&self.lanes) |*x| try kernels.append(a, x.kernel());
         self.glue = try flash.Glue.load(gpu.d);
         errdefer self.glue.deinit();
         for (std.enums.values(wbnorm_k.Mode), &self.wbnorm) |mode, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .mode = mode, .glue = &self.glue };
@@ -51,6 +57,7 @@ pub const Set = struct {
     pub fn deinit(self: *Set) void {
         for (&self.late) |*x| x.deinit();
         self.roll.deinit();
+        for (&self.lanes) |*x| x.deinit();
         for (&self.wbnorm) |*x| x.deinit();
         self.topk.deinit();
         self.mtp.unload();

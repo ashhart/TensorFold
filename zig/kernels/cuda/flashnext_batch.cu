@@ -319,6 +319,9 @@ extern "C" __global__ void fn_late_roll(const fn_roll::Jobs t, int keep) {
     }
 }
 
+// A shared pass's lanes, one launch a DeltaNet step: fn_gdn_lanes_keep / front / chain / shift.
+#include "flashnext_gdn_lanes.cuh"
+
 // fn_gdn_rows and fn_gdn_rows_to on one rank's 8 key and 24 value heads.
 extern "C" __global__ void __launch_bounds__(128) fn_gdn_rows_h8(
         const float* __restrict__ qn, const float* __restrict__ kn, const float* __restrict__ v,
