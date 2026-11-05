@@ -11,13 +11,14 @@ const serve = @import("hip_serve");
 const glm_ocr = @import("glm_ocr");
 const qwen3 = @import("qwen3");
 const dots = @import("dots_mocr");
+const lighton = @import("lighton_ocr");
 const fam = @import("hip_families.zig");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
 
 /// The HIP families: namespaces with `model_type`, `formats`, `default_context`, `prefill_step`, `open` and `follow`.
-const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native, qwen3.native, dots.native };
+const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native, qwen3.native, dots.native, lighton.native };
 
 pub const backends: []const []const u8 = &.{"hip"};
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
@@ -390,7 +391,7 @@ test {
 }
 
 test "every registered family is listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len), families.len);
+    try std.testing.expectEqual(@as(usize, registry.len + 1), families.len);
     try std.testing.expectEqualStrings("qwen3_5", families[0].model_type);
     try std.testing.expectEqualStrings("qwen3_5_moe", families[1].model_type);
     try std.testing.expectEqualStrings("qwen4_exp", families[2].model_type);
@@ -398,6 +399,11 @@ test "every registered family is listed for capabilities" {
     try std.testing.expectEqualStrings("glm_ocr", families[4].model_type);
     try std.testing.expectEqualStrings("qwen3", families[5].model_type);
     try std.testing.expectEqualStrings("dots_ocr", families[6].model_type);
+    try std.testing.expectEqualStrings("mistral3", families[7].model_type);
+    try std.testing.expectEqualStrings("lighton_ocr", families[8].model_type);
+    try std.testing.expect(fam.reads(lighton.native, "lighton_ocr") and !fam.reads(lighton.native, "mistral"));
+    try std.testing.expect(!reasoning(lighton.native)); // LightOnOCR-3 1B replies carry no reasoning block
+    try std.testing.expect(reasoning(qwen35.native)); // the 0.8B and 4B share Qwen3.5, which can reason
 }
 
 test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy drafts remain" {

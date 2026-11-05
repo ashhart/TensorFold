@@ -191,8 +191,14 @@ pub const Model = struct {
 
     /// As `load`, keeping only tensor-parallel rank `rank`'s share (null: the whole model).
     pub fn loadRank(gpa: std.mem.Allocator, io: std.Io, d: *const hip.Runtime, dir: []const u8, rank: ?slicing.Rank) !Model {
+        return loadRankWith(gpa, io, d, dir, rank, false);
+    }
+
+    /// `loadRank`, with a bf16 checkpoint's projections widened to fp32 dense when `widen` (a chat checkpoint).
+    pub fn loadRankWith(gpa: std.mem.Allocator, io: std.Io, d: *const hip.Runtime, dir: []const u8, rank: ?slicing.Rank, widen: bool) !Model {
         var ck = try checkpoint.Checkpoint.open(gpa, io, dir);
         defer ck.close();
+        ck.main.widen = widen;
         return fromCheckpointRank(gpa, d, &ck, std.math.maxInt(usize), rank);
     }
 

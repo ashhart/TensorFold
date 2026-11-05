@@ -24,6 +24,8 @@ pub const Layout = struct {
     desc: usize,
     snaps: usize,
     words: usize,
+    rope: usize,
+    rotary: usize,
 
     pub fn of(rows: usize, slots: usize, layers: usize) Layout {
         var l: Layout = undefined;
@@ -36,7 +38,9 @@ pub const Layout = struct {
         l.keep = l.count + slots;
         l.desc = std.mem.alignForward(usize, l.keep + slots, 2);
         l.snaps = l.desc + 2 * slots;
-        l.words = l.snaps + 4 * layers;
+        l.rope = l.snaps + 4 * layers;
+        l.rotary = l.rope + 3 * rows;
+        l.words = l.rotary + rows;
         return l;
     }
 };
@@ -47,7 +51,7 @@ fn put64(w: []u32, v: u64) void {
 }
 
 /// One stream's window of a round: its descriptor, the slot its first row takes, its tokens.
-pub const Window = struct { desc: u64, pos: usize, tokens: []const u32 };
+pub const Window = struct { desc: u64, pos: usize, tokens: []const u32, shift: i32 = 0 };
 
 /// The plan buffer of one engine, as large as its biggest round, and the pinned words a round is written in.
 pub const Buffer = struct {
@@ -102,6 +106,9 @@ pub const Buffer = struct {
                 w[l.tokens + at + i] = t;
                 w[l.pos + at + i] = @intCast(win.pos + i);
                 w[l.slot + at + i] = @intCast(s);
+                const rp = @as(i32, @intCast(win.pos + i)) + win.shift;
+                for (0..3) |axis| w[l.rope + 3 * (at + i) + axis] = @bitCast(rp);
+                w[l.rotary + at + i] = @bitCast(rp);
             }
             at += win.tokens.len;
         }
@@ -121,6 +128,8 @@ pub const Buffer = struct {
             w[l.tokens + at + i] = 0;
             w[l.pos + at + i] = @intCast(i);
             w[l.slot + at + i] = @intCast(slots - 1);
+            for (0..3) |axis| w[l.rope + 3 * (at + i) + axis] = @intCast(i);
+            w[l.rotary + at + i] = @intCast(i);
         }
         for (snaps, 0..) |pair, i| {
             put64(w[l.snaps + 4 * i ..], pair[0]);
@@ -138,4 +147,18 @@ test "layout keeps the eight-byte arrays on even words" {
     const l = Layout.of(5, 4, 3);
     try std.testing.expect(l.desc % 2 == 0 and l.snaps % 2 == 0);
     try std.testing.expect(l.words >= l.snaps + 12);
+}
+
+test "round rotary metadata keeps each lane's shift separate from physical cache positions" {
+    const l = Layout.of(5, 3, 0);
+    var words: [128]u32 = undefined;
+    var b: Buffer = .{ .host = .{ .r = undefined, .bytes = std.mem.sliceAsBytes(words[0..l.words]) }, .dev = undefined, .pool_pages = 0 };
+    const windows = [_]Window{
+        .{ .desc = 0x1000, .pos = 10, .tokens = &.{ 5, 6 }, .shift = -3 },
+        .{ .desc = 0x2000, .pos = 20, .tokens = &.{7}, .shift = -9 },
+    };
+    b.fill(l, .{ .rows = 5, .slots = 3, .span = 64 }, &windows, 0x3000, &.{});
+    try std.testing.expectEqualSlices(u32, &.{ 10, 11, 20, 0, 1 }, words[l.pos..][0..5]);
+    try std.testing.expectEqualSlices(u32, &.{ 7, 7, 7, 8, 8, 8, 11, 11, 11, 0, 0, 0, 1, 1, 1 }, words[l.rope..][0..15]);
+    try std.testing.expectEqualSlices(u32, &.{ 7, 8, 11, 0, 1 }, words[l.rotary..][0..5]);
 }

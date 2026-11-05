@@ -49,6 +49,11 @@ pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len
         const rows = @min(SPAN, len - start);
         try o.embedRows(m.embed, ids + start * 4, rows, at(x, start * s.hidden));
     }
+    if (m.frame) |frame| {
+        for (frame.runs) |run| if (run.clip(pos0, len, s.hidden)) |clip| {
+            try o.copyCols(.{ .ptr = clip.features, .kind = .bf16 }, s.hidden, 0, x.ptr + clip.first * s.hidden * 2, clip.rows, s.hidden);
+        };
+    }
     for (m.layers, 0..) |layer, index| {
         start = 0;
         while (start < len) : (start += SPAN) {
@@ -99,12 +104,24 @@ fn attention(o: Ops, m: *const view.Model, f: view.Full, caches: *state.Caches, 
     try o.rms(keys, f.k_norm, kn, rows * s.kv_heads, hd, @floatCast(s.eps));
     const theta: f32 = @floatCast(s.rope_theta);
     const q32 = try o.arena.of(f32, q_rows * hd);
+    // HF BF16 text and image prompts take Torch's M-RoPE; other text keeps the MLX kernels' arithmetic
+    const torch = m.torch_text or (if (m.frame) |fr| fr.runs.len != 0 else false);
+    const positions = (if (m.frame) |fr| fr.positions else m.positions) + pos * 12;
+    const stream: hip.Stream = .{ .r = o.l.r, .handle = o.stream };
     // q rounded to the activation dtype by apply_rope, then widened for the kernel: (heads, rows, d) fp32
-    try o.ropePrefill(qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, s.rotary_dim, pos, theta);
+    if (!torch) {
+        try o.ropePrefill(qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, s.rotary_dim, pos, theta);
+    } else if (o.stream != hip.counting) {
+        m.rope.?.textRope(stream, qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, s.rotary_dim, positions, theta) catch return error.HipFailed;
+    }
     const c = caches.paged(m, index);
     // k rotated and rounded to the activation dtype as (kv_heads, rows, d), then with v into the pages from slot pos
     const kr = try take(o, m.act, rows * s.kv_heads * hd);
-    try o.ropePrefill(kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, pos, theta);
+    if (!torch) {
+        try o.ropePrefill(kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, pos, theta);
+    } else if (o.stream != hip.counting) {
+        m.rope.?.textRope(stream, kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, positions, theta) catch return error.HipFailed;
+    }
     try o.pageWrite(kr.ptr, c.k, c.table, rows, s.kv_heads, hd, rows * hd, hd, pos, c.count);
     try o.pageWrite(values.ptr, c.v, c.table, rows, s.kv_heads, hd, hd, s.kv_heads * hd, pos, c.count);
     const att = try o.arena.of(f32, q_rows * hd);

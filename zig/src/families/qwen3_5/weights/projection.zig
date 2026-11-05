@@ -39,7 +39,10 @@ pub fn conv(a: std.mem.Allocator, t: *const Table, key: []const u8) Error!Tensor
     if (w.rank == 3 and w.shape[2] == 1) {
         w.rank = 2;
     } else if (w.rank == 3 and w.shape[1] == 1) {
-        return refuse(key, "still in the unsanitized (channels, 1, kernel) layout");
+        if (t.quant != .dense) return refuse(key, "still in the unsanitized (channels, 1, kernel) layout");
+        w.shape[1] = w.shape[2];
+        w.shape[2] = 1;
+        w.rank = 2;
     }
     if (w.rank != 2) return refuse(key, "conv weight must be (channels, kernel)");
     return w;
@@ -55,8 +58,12 @@ pub fn squeezed(w: Tensor) ?Tensor {
     return out;
 }
 
-/// `_packed`: a projection in whichever format its tensors are in; a bf16 checkpoint's are BF16 as stored.
+/// `_packed`: a projection in whichever format its tensors are in; a bf16 one's are BF16 as stored, or fp32 widened.
 pub fn projection(a: std.mem.Allocator, t: *const Table, key: []const u8) !host.Projection {
+    if (t.quant == .bf16 and t.widen) {
+        _ = try quant.bf16.read(a, t, key); // the same dtype and rank checks
+        return .{ .dense = try quant.dense.read(a, t, key) };
+    }
     if (t.quant == .bf16) return .{ .bf16 = try quant.bf16.read(a, t, key) };
     return quant.read(a, t, key);
 }

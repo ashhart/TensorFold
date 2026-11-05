@@ -5,6 +5,8 @@ const Record = @import("hip_records.zig").Record;
 pub const records = .{
     @import("hip_records_glm_ocr.zig").records,
     @import("hip_records_joint.zig").records,
+    @import("hip_records_lighton_ocr.zig").records,
+    @import("hip_records_qwen_vision.zig").records,
 };
 
 /// Every family's records as one array.
@@ -14,8 +16,8 @@ pub const all = join: {
     break :join joined[0..joined.len].*;
 };
 
-test "the HIP records stay main's; the family lists only regroup GLM-OCR's and the joint schema's" {
+test "the HIP records are main's and the families' own: GLM-OCR's, the joint schema's, LightOn's and the Qwen tower's" {
     const every = @import("hip_records.zig").records;
-    try std.testing.expectEqual(@as(usize, 199), every.len); // 197 frozen records and two drafter-tap records
+    try std.testing.expectEqual(@as(usize, 220), every.len); // 199 main records and 21 LightOn and Qwen vision records
     try std.testing.expectEqual(@as(usize, 177), every.len - all.len);
 }

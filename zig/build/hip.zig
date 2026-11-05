@@ -176,6 +176,19 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("test-hip-native-options-host", "Shared HIP native open settings without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve, .filters = &.{"HIP native options:"} })).step);
     @import("dots_mocr.zig").hipTests(b, host.hip, test_step);
     b.step("test-dots-native-host", "dots.mocr registry, reasoning, and unsupported flags without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{ "dots refuses", "every registered family", "a HIP family declares replies without reasoning" } })).step);
+    @import("lighton_hip.zig").host(b, host.lighton, test_step);
+    const qwen_vision_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family.import_table.get("qwen_hip_vision").? }));
+    b.step("test-qwen-vision-hip-host", "Qwen HIP vision settings, layouts and memory admission without devices").dependOn(&qwen_vision_host.step);
+    test_step.dependOn(&qwen_vision_host.step);
+    const vision_contract_host = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/contract_qwen_vision.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = host.hip }, .{ .name = "core", .module = host.hip.import_table.get("core").? }, .{ .name = "qwen_hip_vision", .module = host.family.import_table.get("qwen_hip_vision").? } },
+    }) }));
+    b.step("test-qwen-vision-contract-host", "Qwen HIP contract references and wrappers without a device").dependOn(&vision_contract_host.step);
+    test_step.dependOn(&vision_contract_host.step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
     b.step("test-qwen-hip-formats-host", "Qwen HIP format offers: the BF16 refusal, and discovery against actual config and matrix admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family, .filters = &.{ "a bf16 checkpoint without a joint head", "capability audit: HIP Qwen format" } })).step);
@@ -189,7 +202,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&qwen3_host.step);
     b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);
+    const native_host_tests = b.addRunArtifact(b.addTest(.{ .root_module = host.native }));
+    test_step.dependOn(&native_host_tests.step);
+    b.step("test-native-hip-host", "Native HIP family offers and flags without a device").dependOn(&native_host_tests.step);
     // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
     test_step.dependOn(&checksExe(b, b.graph.host, .Debug, host).step);
     test_step.dependOn(&clefExe(b, b.graph.host, .Debug, host).step);
@@ -252,6 +267,24 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "dots_mocr", .module = gpu.native.import_table.get("dots_mocr").? }, .{ .name = "hip_serve", .module = gpu.native.import_table.get("hip_serve").? } },
     }), .filters = &.{"dots HIP device owner:"} });
     b.step("build-dots-hip-owner-test", "Build real owner close and failure cleanup checks without GPU execution").dependOn(&b.addInstallArtifact(dots_owner, .{}).step);
+    const lighton_capture = b.addExecutable(.{ .name = "tf-lighton-hip-capture", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/lighton_hip/capture.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "core", .module = gpu.hip.import_table.get("core").? }, .{ .name = "lighton_ocr", .module = gpu.lighton } },
+    }) });
+    b.step("tf-lighton-hip-capture", "Capture native HIP LightOnOCR stages against a local reference fixture").dependOn(&b.addInstallArtifact(lighton_capture, .{}).step);
+    const qwen_capture_host = captureQwen(b, b.graph.host, host);
+    b.step("check-qwen-hip-capture-host", "Compile the Qwen HIP fixture capture without device execution").dependOn(&qwen_capture_host.step);
+    const qwen_capture_gpu = captureQwen(b, target, gpu);
+    b.step("tf-qwen-hip-capture", "Capture native Qwen HIP stages against local reference fixtures").dependOn(&b.addInstallArtifact(qwen_capture_gpu, .{}).step);
+    for ([_][]const u8{ "lighton", "qwen" }) |family_name| {
+        const exact_host = exactTool(b, b.graph.host, host, family_name);
+        b.step(b.fmt("check-{s}-hip-exact-host", .{family_name}), "Compile native HIP image consistency checks without execution").dependOn(&exact_host.step);
+        const exact_gpu = exactTool(b, target, gpu, family_name);
+        b.step(b.fmt("tf-{s}-hip-exact", .{family_name}), "Build native HIP image consistency checks").dependOn(&b.addInstallArtifact(exact_gpu, .{}).step);
+    }
     const native = server(b, target, gpu, build_options);
     b.step("native-hip", "tensorfold-native with the HIP engines into zig-out/native-hip/bin (-Dhip-arch)").dependOn(&b.addInstallArtifact(native, .{ .dest_dir = .{ .override = .{ .custom = "native-hip/bin" } } }).step);
     @import("hip_contract.zig").steps(b, .{
@@ -261,6 +294,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .arch = hip_arch,
         .gpu = gpu.hip,
         .host = host.hip,
+        .lighton_gpu = gpu.lighton,
+        .lighton_host = host.lighton,
         .test_step = test_step,
     });
 }
@@ -296,6 +331,7 @@ pub const Engine = struct {
     flashnext: *std.Build.Module,
     nemotron: *std.Build.Module,
     qwen3: *std.Build.Module,
+    lighton: *std.Build.Module,
     native: *std.Build.Module,
 };
 
@@ -336,6 +372,9 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "hip_serve", .module = serve },
         },
     });
+    const qwen_vision = @import("lighton_hip.zig").vision(b, target, optimize, hip, core, lanes, serve);
+    family.addImport("qwen_hip_vision", qwen_vision);
+    const lighton = @import("lighton_hip.zig").module(b, target, optimize, hip, core, lanes, api, serve);
     const flashnext = b.createModule(.{
         .root_source_file = b.path("zig/src/families/flashnext/hip.zig"),
         .target = target,
@@ -397,6 +436,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
             .{ .name = "hip_serve", .module = serve },
             .{ .name = "qwen3", .module = qwen3 },
             .{ .name = "dots_mocr", .module = dots },
+            .{ .name = "lighton_ocr", .module = lighton },
         },
     });
     return .{
@@ -408,6 +448,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         .flashnext = flashnext,
         .nemotron = nemotron,
         .qwen3 = qwen3,
+        .lighton = lighton,
         .native = native,
     };
 }
@@ -430,6 +471,27 @@ pub fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_
     return exe;
 }
 
+fn captureQwen(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine) *std.Build.Step.Compile {
+    return b.addExecutable(.{ .name = "tf-qwen-hip-capture", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/lighton_hip/qwen_capture.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "qwen_hip_vision", .module = e.family.import_table.get("qwen_hip_vision").? } },
+    }) });
+}
+
+fn exactTool(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, family_name: []const u8) *std.Build.Step.Compile {
+    const file = if (std.mem.eql(u8, family_name, "lighton")) "exact.zig" else "qwen_exact.zig";
+    return b.addExecutable(.{ .name = b.fmt("tf-{s}-hip-exact", .{family_name}), .root_module = b.createModule(.{
+        .root_source_file = b.path(b.fmt("zig/tests/lighton_hip/{s}", .{file})),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "core", .module = e.hip.import_table.get("core").? }, .{ .name = "lighton_ocr", .module = e.lighton }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "qwen_hip_vision", .module = e.family.import_table.get("qwen_hip_vision").? } },
+    }) });
+}
+
 /// A group's source and whether it compiles with IEEE arithmetic (`strict`: -O2 -fno-fast-math, IEEE denormals).
 const Source = struct { path: []const u8, strict: bool = false };
 
@@ -448,6 +510,8 @@ const groups = [_]Source{
     .{ .path = "recurrence/mamba.hip" },
     .{ .path = "glm_ocr/pointwise.hip" },
     .{ .path = "joint_schema/joint_schema.hip" },
+    .{ .path = "lighton_ocr.hip", .strict = true },
+    .{ .path = "qwen_vision.hip", .strict = true },
 };
 
 /// What the group sources include, so an edit to one rebuilds them.
