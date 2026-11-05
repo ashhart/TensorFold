@@ -205,7 +205,8 @@ pub const Engine = struct {
         e.arena_at = 0;
         e.scratch_buf = null;
         e.scratch_capacity = 0;
-        e.scratch_rows = @max(1, @min(max_rows, prompt_rows_limit));
+        // Admission tracks the configured prompt ceiling; startup warmup itself needs only 32 rows.
+        e.scratch_rows = @max(32, @min(max_rows, prompt_rows_limit));
         errdefer if (e.scratch_buf) |*b| b.free();
         e.graphs = .empty;
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
@@ -288,10 +289,13 @@ pub const Engine = struct {
 
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
-        e.ensureScratch(e.scratch_rows) catch |err| {
+        // Warm the actual 32-row startup path, not the entire configured context.
+        // unallocatedScratchBytes() reserves the larger context ceiling for later growth.
+        const warm_rows = @min(32, e.scratch_rows);
+        e.ensureScratch(warm_rows) catch |err| {
             if (err != error.ScratchGrowFailed) return err;
         };
-        if (e.int8.on) e.int8.ensureRows(e, e.scratch_rows) catch |err| {
+        if (e.int8.on) e.int8.ensureRows(e, warm_rows) catch |err| {
             if (err != error.ScratchGrowFailed) return err;
         };
         const ids: [32]u32 = @splat(0);
