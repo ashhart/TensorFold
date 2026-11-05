@@ -68,6 +68,11 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-equality-host", "Shared lanes drafted, resumed and concurrent equality on the fake target").dependOn(&equal.step);
     const resume_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const resume_api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = resume_lanes }} });
+    const prompt_stats = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_prefill_stats_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = resume_lanes }, .{ .name = "engine_api", .module = resume_api } } });
+    const prompt_stats_run = b.addRunArtifact(b.addTest(.{ .root_module = prompt_stats, .filters = &.{"qwen27 prefill stats:"} }));
+    prompt_stats_run.has_side_effects = true;
+    test_step.dependOn(&prompt_stats_run.step);
+    b.step("test-qwen27-prefill-stats-host", "Completed prompt passes through the lane host and server mailbox without a GPU").dependOn(&prompt_stats_run.step);
     const resume_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
     b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
 }
