@@ -47,7 +47,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | --- | --- | --- | --- | --- | --- |
 | 1. Prompt tail | open [#2229] | yes | yes | yes | yes |
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
-| 3. Prompt store | done [#1357] | yes | done [#1732] | done [#1883] | open M[#1850] |
+| 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | open M[#1850] |
 | 4. iGPU states | open [#2113] | yes | yes | yes | yes |
 | 5. State walk | yes | yes | open [#2215] | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
@@ -277,7 +277,8 @@ below; these are estimates for planning a port, not results.
    copies nothing and the cache and the streams draw on the same memory (`TF_QWEN_KV_SHARE`, `TF_GLM_KV_SHARE`, and
    `TF_KV_SHARE` on the core adapter, [#1657]). On Qwen3.8-27B a cold first turn is 3–6 % faster with it on, and the
    second turn level ([#1357]). [#2211] (open) moves GLM onto the shared store. It can't be combined with
-   `--learn-conversations` today.
+   `--learn-conversations` today. Flash Next already resumes a prefix from the host store's whole-state copies; on the
+   shared store a kept 32k state would stop duplicating about 0.9 GiB of attention rows (27 KiB a token).
 
 4. **Prompt states in device memory on integrated GPUs.** On a GB10 the device and host share memory, so a kept
    state can stay where it is instead of being copied through pinned host memory on every save ([#2043]). On Qwen
