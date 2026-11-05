@@ -31,8 +31,7 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     return error.UnknownContractImage;
 }
 
-/// Gate 5 on this GPU: the table's row for it against the driver, each record against the loaded function.
-/// `only` (kernel-contract's words): the live launches so named, and no offline audit of every record.
+/// Gate 5 on this GPU, each record against the loaded function; `only`: the launches so named, no offline audit.
 pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
     var n: usize = 0;
     if (only.len == 0) n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
