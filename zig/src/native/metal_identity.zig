@@ -23,6 +23,7 @@ pub fn learned(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.M
     var os: [64]u8 = undefined;
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(b.m.device.name()));
+    @import("disk_identity.zig").profile(&h, .{ .family = "nemotron_h", .backend = "metal" });
     return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 

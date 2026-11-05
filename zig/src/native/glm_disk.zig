@@ -98,5 +98,6 @@ pub fn identity(io: std.Io, eng: *const glm.engine.Engine, sl: *glm.slots.Slots)
     var os: [64]u8 = undefined;
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.device.name()));
+    @import("disk_identity.zig").profile(&h, .{ .family = "glm5_next", .backend = "metal" });
     return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }

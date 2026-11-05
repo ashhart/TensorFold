@@ -1,0 +1,27 @@
+# Persisted prompt keys and reviewed profile values
+
+The native disk identities call `zig/src/native/disk_identity.zig`'s profile helper. It visits every registered entry whose class is arithmetic, experimental or debug and whose family/backend scope applies. CUDA passes the loaded Nemotron model_type or the generic registered family name; the Metal owners pass their family and metal backend, with Qwen distinguishing dense and routed configurations. No eligible entries means the helper leaves its input hash unchanged.
+
+Environment values take precedence over the entry's stable default, as in the profile resolver. Exact-one booleans resolve to0 or1, so unset and explicit0 share a key. Counts use their numeric value, including equivalent decimal spellings; absent counts default to0. Auto values default to auto. Entries with special reporting values retain their explicit/default distinction. Malformed counts retain their raw value in a separate hash domain; this helper introduces no new startup refusal.
+
+Names, classes and resolved values are length-framed, with family/backend and a format tag. A changed relevant value gives a new namespace. The old files remain under their old identity; the first long prompt for the new namespace prefills again. State bytes, token matching, kernels and serving defaults are unchanged.
+
+The supplied main has no arithmetic-class entry. The regression therefore supplies a clearly marked fake arithmetic row, with an isolated environment callback, to the actual CUDA identity function and recording driver. It verifies unset=0, unset!=1, a same-key reopen hit and a changed-key persisted-index miss. Other tests cover all non-identical classes, every applicable row, defaults and out-of-scope/identical controls. This is a host contract, not qualification of a real arithmetic switch or device. TF_QWEN_REQUEST_STARTS is a separate contribution (#2176).
+
+## Audit of the supplied main
+
+The table covers the common native disk owners. Numeric token-prefix matching, chunk starts, decoded spans and image identity are shared preconditions, so tokenizer/template filenames need not independently invalidate identical numeric state. A tokenizer or template change that changes those inputs misses through the shared matcher. This is a prompt-state cache, with no stored rendered reply.
+
+| Owner | Source/checkpoint binding already present | Arithmetic and KV form | Tokenizer/template, adapters and learned epoch | Remaining gap or fix |
+| --- | --- | --- | --- | --- |
+| CUDA Nemotron and generic kept-state families | Embedded CUDA strings, optional aot.json, device/driver, family facts, fixed probe; checkpoint config/index and safetensors stamps | Family facts/probe plus this helper for every applicable non-identical profile entry | Shared exact numeric prefix/modes/images; loaded-family ownership; learner clear barrier | Profile omission fixed here. Full executable/captured-cubin binding remains in the separate source-binding follow-up #2163. |
+| Metal Qwen dense/routed host | Main and drafter config/index/shard stamps, runtime/shared source texts, OS/chip and probe | Tensor-unit/ANE/drafter facts, probe and this helper | Same shared matching and learner barrier; drafter checkpoint included | Profile omission fixed here. Complete executable/layout binding belongs to #2163. |
+| Metal Nemotron | Config/index/shard stamps, MTP header, kernel source hash, OS/chip and probe | Chunk/head facts, attention precision, probe and this helper | Same shared matching and learner barrier | Profile omission fixed here. Complete host/shared source binding belongs to #2163. |
+| Metal GLM | Config/index model hash, kernel source hash, OS/chip and probe | TP, chunk rows, EP presence, probe and this helper | Same shared matching and learner barrier | Profile omission fixed here. Current supplied main still lacks shard-payload stamp binding at this owner; checkpoint/source follow-up #2163 handles it. |
+| Metal Flash Next | Prepared checkpoint identity, selected source hash, OS/chip and probe | Three loaded mode bits, probe and this helper | Same shared matching and learner barrier | Profile omission fixed here. Current main still needs current shard stamps, complete loaded variant/policy and executable binding from #2163. |
+
+The shared matcher is `prompt_imprint.Imprint.best` plus `prompt_cache.Store`'s decoded-span/image checks. The live learned epoch is an invalidation barrier: `lane_host_learn.zig` clears the cache after changed learning steps; `Store.clear` stops disk writes, expires states and detaches both disk stores. It is not a persisted epoch counter. Supported weight commits move checkpoint stamps before a later process opens a store. This change does not introduce an external adapter loader; adapter-specific cross-process reuse remains unqualified.
+
+DeepSeek reference sessions use fresh-start behavior rather than these common disk owners; adapters without a disk attachment have no cross-process store in this scope. The source-binding follow-up is separate from this profile fix. No claim that the supplied main closes every #2131 gap follows from the table.
+
+Host checks: `zig build test-disk-identity-host test-cuda-disk-open-host check-native-cuda-host compile-disk-identity-metal-host -j1`. The Metal step only emits an object for the four real identity bodies and their probes; it has no shader producer or execution step. Actual model/device resume-versus-fresh qualification remains required separately.

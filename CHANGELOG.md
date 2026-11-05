@@ -15,6 +15,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - HIP: the OCR families share one host protocol, with the same replies (#2040). Thanks to @laudney.
 - `THIRD_PARTY_NOTICES.md` names the model release and library code that five sets of files follow, with the LFM Open License text.
 
+- Persisted prompt states include the resolved profile values that can affect a family's arithmetic or experimental/debug path. Changing one moves the disk namespace, so the first long prompt under that setting prefills again; an unset boolean and explicit0 share the same key. Native CUDA and the four Metal persistence owners use the same scoped helper (#2131).
+
+
 - Lane host: the paged KV pool's promises now count in the host's one ledger, with no change in behaviour (#2127). Thanks to @jschmied.
 
 - Qwen3.5 on HIP: the prompt conv writes q, k and v to their own rows, which drops 144 of the 27B's 160 column copies, with the same results (#2117). Thanks to @AbrahamCete.
