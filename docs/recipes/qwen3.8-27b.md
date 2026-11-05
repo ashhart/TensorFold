@@ -219,11 +219,15 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 
 DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
 `--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
-The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
-loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
+On HIP, `serve --drafter DIR` runs the DFlash2 drafter over the dense checkpoints: the target taps the
+drafter's layers into a ring beside each stream's caches, budgeted before the streams are sized, and the
+drafter's chains reach the round loop through the lane core's drafter wrapper. It runs on one rank at 4 bits:
+`--drafter` with `--tp` above 1 and `--drafter-bits 0` are refused before any load, and the other HIP families
+(the sparse `qwen3_5_moe` among them) refuse `--drafter` by name. Prompts reach the drafter whole, as their
+prompt pass ends. Without `--drafter` the engine still drafts on its own: the model's MTP head where the
 checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
-head, so on HIP it drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts` turns
-both off and decodes plain.
+head, so on HIP it then drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts`
+turns every draft off (the drafter is not loaded) and decodes plain.
 The target verifies every proposed token against its own serial sample.
 
 ## CUDA
