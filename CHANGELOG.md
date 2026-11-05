@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA at `--tp 2` with drafts keeps prompt states, and no longer needs `--prompt-cache-gib 0` to start. On two GB10s, a chat with about 28,500 tokens of history replies in 1.5 s resumed against 21.2 s fresh, with the same replies (#2214, fixes #1829).
+
 - Flash Next on CUDA: the whole shared expert's down projection writes straight into its output slot, without a scatter, so NVFP4 prompts run about 0.7% faster on a GB10 with the same tokens (#1792). Thanks to @laudney.
 
 - Qwen3.8-27B on Metal: a NaN or infinity in a value a row must not see no longer turns that row's attention output into NaN on the prompt kernels (before M5 and on M5) or the M5 decode prefix. Replies change only where such a value already sits in a masked key, and finite inputs keep their bytes (#2106). Thanks to @cshintov.
