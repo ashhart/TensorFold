@@ -533,3 +533,4 @@ TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_2, 2, tf_exl3::PLAIN)
 TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_skip, 2, tf_exl3::SKIP)
 TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_stale, 2, tf_exl3::STALE)
 #undef TF_CTL_EXL3_GROUPED
+#include "contract_qwen3_asr_controls.cuh"
