@@ -22,7 +22,7 @@ const shapes = [_]Case{
     .{ .n = 960, .k = 4096, .name = "n 960" },
     .{ .n = 1088, .k = 4096, .name = "n 1088" },
 };
-/// Each WMMA threshold and the row past it (dense.small_rows, dense.narrow_rows), and the served sizes.
+/// Each WMMA threshold and the row past it (dense.small_rows, cached_rows, narrow_rows), and the served sizes.
 const rows = [_]usize{ 1, 16, 64, 65, 96, 97, 128, 192, 256, 257, 276, 384, 385, 512, 2048 };
 
 test "hip-dense-tune: both tiles at the served shapes, TFLOPS with cold weights" {
@@ -82,7 +82,7 @@ test "hip-dense-tune: both tiles at the served shapes, TFLOPS with cold weights"
             }
             if (kernels.len == 3) {
                 // the geometry shapeOf serves against the faster one: SLOW past 5%
-                const chosen = dense.shapeOf(.wmma12, @intCast(m), @intCast(sh.n));
+                const chosen = dense.shapeOf(.wmma12, @intCast(m), @intCast(sh.n), @intCast(sh.k));
                 const took = mids[@backingInt(chosen)];
                 const best = @min(mids[1], mids[2]);
                 std.debug.print("ROUTE {s:>8} n{d:>5} m{d:>5} {t:>9}: {d:>9.2} us, faster {d:>9.2} us {s}\n", .{
