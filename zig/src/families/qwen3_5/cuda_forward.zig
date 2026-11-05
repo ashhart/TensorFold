@@ -50,6 +50,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     var ai: c_int = 0;
     for (e.layers, 0..) |l, i| {
         try e.norm(i != 0, l.input_norm, total);
+        try @import("cuda_hidden_trace.zig").emit(e, i, e.h, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
@@ -147,6 +148,8 @@ pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool) !void {
     if (hidden) return;
     const g = e.g;
     try e.norm(true, e.final_norm, total);
+    try @import("cuda_hidden_trace.zig").emit(e, e.g.layers, e.h, total);
+    try @import("cuda_hidden_trace.zig").emit(e, e.g.layers + 1, e.x, total);
     if (e.learning) |k| try k.final(e.h, total);
     // the head over the kept rows
     try e.proj(e.head, e.x + (total - heads) * g.hidden * 2, e.logits, heads, false);

@@ -73,6 +73,7 @@ pub const Engine = struct {
     dir: []const u8,
     pockets: pocket.Pockets,
     learning: ?*const hooks.Keep = null,
+    hidden_trace: ?@import("cuda_hidden_trace.zig").Trace = null,
     mlp: ?hooks.MlpAdd = null,
     taught: u64 = 0,
     d: *const cuda.Driver,
@@ -408,6 +409,7 @@ pub const Engine = struct {
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         try e.admit(parts, ids, keep);
+        if (keep != .last and e.hidden_trace != null) return error.TraceRequiresPrompt;
         const g = e.g;
         const total = ids.len;
         const record = keep != .last;
