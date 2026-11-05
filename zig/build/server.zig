@@ -49,12 +49,18 @@ pub fn addTo(
     if (m.import_table.get("engine_api")) |api| if (api.import_table.get("lanes")) |lanes| m.addImport("lanes", lanes);
     // a build whose engines learn hands the server their own living module; the rest read only its families
     if (m.import_table.get("living") == null) m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
-    m.addImport("nemotron_limits", b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/limits.zig"), .target = target, .optimize = optimize }));
     return j;
+}
+
+/// Isolated server tests share the pure family limits; native servers keep the family's existing file owner.
+pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    m.addImport("nemotron_limits", b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/limits.zig"), .target = target, .optimize = optimize }));
 }
 
 /// Tool parsing and actual chat visibility checks share the aggregate's real modules.
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
+    testImports(b, parser, b.graph.host, .debug);
+    testImports(b, server, b.graph.host, .debug);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"logprobs_test"} }));
     b.step("test-logprob-offers-host", "Logprob request capability refusals before engine submission").dependOn(&logprobs.step);
     const models = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"model discovery"} }));
@@ -100,6 +106,7 @@ pub fn plain(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, 
         .{ .name = "template", .module = template },
     } });
     _ = addTo(b, m, target, optimize);
+    testImports(b, m, target, optimize);
     return m;
 }
 
