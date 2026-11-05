@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: a reply that would end well before a long prompt now goes first, and the prompt lends it at most a quarter of its own time (#2224).
+
 - Flash Next on CUDA: at `--parallel 1` on one GPU, a prompt pass takes up to 8,192 rows, so prompts run 15-23% faster on a GB10 for about 3.2 GiB more memory; `TF_FLASHNEXT_CHUNK_SOLO` still decides (#2246).
 
 - Docs: the slow drafted request after a `draft: false` one no longer reproduces, and the expert recipe lists peak memory at each `--ssd-experts` budget (#2237).
