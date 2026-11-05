@@ -12,10 +12,11 @@ pub fn metalNative(b: *std.Build, target: std.Build.ResolvedTarget, native: *std
     native.addImport("qwen4", module(b, target, native.optimize orelse .Debug, core));
 }
 pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
-    const core = b.createModule(.{ .root_source_file = b.path("zig/qwen4_core_host.zig"), .target = b.graph.host, .optimize = .Debug });
+    // ReleaseSafe keeps every runtime check and runs this host gate in minutes less than Debug (#2242).
+    const core = b.createModule(.{ .root_source_file = b.path("zig/qwen4_core_host.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
     core.addImport("lanes", b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host }));
     core.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .imports = &.{.{ .name = "lanes", .module = core.import_table.get("lanes").? }} }));
-    const family = module(b, b.graph.host, .Debug, core);
+    const family = module(b, b.graph.host, .ReleaseSafe, core);
     const m = family;
     m.addCSourceFile(.{ .file = b.path("zig/tests/qwen4/weight_only_host.cpp"), .flags = flags });
     @import("qwen4_hc_host.zig").wire(b, m);
