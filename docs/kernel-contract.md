@@ -296,7 +296,9 @@ On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block g
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the
 controls' code object, with its own gate-5 record) on the same inputs, and the kernel tests hold both geometries to
-float64. The control, the small block summing each 16-deep step in BF16 (`tf_ctl_wmma12_bf16_sum`), goes red at gate 4.
+float64. Three controls go red: the small block summing each 16-deep step in BF16 (`tf_ctl_wmma12_bf16_sum`) at gate 4,
+and at gate 3 against the frozen block, the big block loading its operands without the stores' swizzle
+(`tf_ctl_wmma12_unswizzled`) and the big block without its K loop's barriers (`tf_ctl_wmma12_unordered`).
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.

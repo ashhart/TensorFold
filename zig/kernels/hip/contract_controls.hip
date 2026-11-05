@@ -163,6 +163,24 @@ extern "C" __global__ void tf_ctl_js_combine_unrounded(const float* prior, const
     logits[j] = tf_ctl_bf16(prior[j] + gate * (joint_scale * cosine[j] + tf_ctl_x(res, j)));
 }
 
+// Gate 3: the big block loading its operands without the stores' swizzle, and without its K loop's barriers.
+struct TfCtlUnswizzled {
+    static constexpr bool swizzled_loads = false, ordered = true;
+};
+struct TfCtlUnordered {
+    static constexpr bool swizzled_loads = true, ordered = false;
+};
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Big::Threads) tf_ctl_wmma12_unswizzled(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_gemm_tile<W12Big, IdentityAct<DotBF16>, GemmOut<DotBF16>, W12Step, TfCtlUnswizzled>(a);
+}
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Big::Threads) tf_ctl_wmma12_unordered(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_gemm_tile<W12Big, IdentityAct<DotBF16>, GemmOut<DotBF16>, W12Step, TfCtlUnordered>(a);
+}
+
 // Not a control: the WMMA big block as served before #2264, the byte baseline the faster block replaces (gate 3).
 extern "C" __global__ void __launch_bounds__(256) tf_ref_wmma12_k32(tf::rocm::Affine a) {
     using namespace tf::rocm;
