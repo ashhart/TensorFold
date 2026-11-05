@@ -264,3 +264,7 @@ test "disk identity: DeepSeek values hash their exact bytes and leave every othe
         };
     }
 }
+
+test {
+    _ = @import("cuda_disk_policy_test.zig");
+}
