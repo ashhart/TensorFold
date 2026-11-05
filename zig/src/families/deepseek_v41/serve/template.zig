@@ -194,11 +194,25 @@ fn text(r: *R, content: ?Value, where: []const u8, index: usize, image: ?ImageHo
     }
 }
 
-/// Listings and historical calls use the same bare function name; namespace metadata is not prompt text.
-fn bareName(a: Allocator, fn_obj: Value) Allocator.Error!?[]const u8 {
+/// ``namespace::name`` from a namespace (string or {"name"}) and a name that may carry its own.
+fn qualifiedName(a: Allocator, fn_obj: Value, namespace: ?Value) Allocator.Error!?[]const u8 {
     const raw = fn_obj.get("name") orelse return null;
     const name = try scalarText(a, raw) orelse try dumps(a, raw);
-    return if (std.mem.indexOf(u8, name, "::")) |sep| name[sep + 2 ..] else name;
+    var ns: ?[]const u8 = null;
+    if (namespace) |n| switch (n) {
+        .null => {},
+        .object => if (n.get("name")) |x| {
+            if (x != .null) ns = try scalarText(a, x) orelse try dumps(a, x);
+        },
+        else => ns = try scalarText(a, n) orelse try dumps(a, n),
+    };
+    var bare = name;
+    if (std.mem.indexOf(u8, name, "::")) |sep| {
+        ns = name[0..sep];
+        bare = name[sep + 2 ..];
+    }
+    if (ns) |s| if (s.len > 0) return try std.fmt.allocPrint(a, "{s}::{s}", .{ s, bare });
+    return bare;
 }
 
 /// Tool schemas use exactly name, description and parameters; unrelated function keys are not prompt text.
@@ -206,10 +220,18 @@ fn toolFunction(r: *R, tool: Value) Error!Value {
     if (tool != .object) return r.refuse("tools must be a list of objects", .{});
     const inner = tool.get("function");
     const src = if (inner != null and inner.? == .object) inner.? else tool;
-    const name = try bareName(r.a, src) orelse return r.refuse("a tool has no name", .{});
+    const outer_ns = tool.get("namespace");
+    const ns = if (outer_ns != null and outer_ns.? != .null) outer_ns else src.get("namespace");
+    const name = try qualifiedName(r.a, src, ns) orelse return r.refuse("a tool has no name", .{});
+    var description = src.get("description") orelse Value{ .string = "" };
+    if (ns) |n| if (n == .object) if (n.get("description")) |d| if (d.truthy()) {
+        const prefix = try scalarText(r.a, d) orelse try dumps(r.a, d);
+        const own = if (description.truthy()) (try scalarText(r.a, description) orelse try dumps(r.a, description)) else "";
+        description = .{ .string = try std.fmt.allocPrint(r.a, "{s}\n{s}", .{ prefix, own }) };
+    };
     const out = try json.newObject(r.a);
     try out.put(r.a, "name", .{ .string = name });
-    try out.put(r.a, "description", src.get("description") orelse .{ .string = "" });
+    try out.put(r.a, "description", description);
     try out.put(r.a, "parameters", src.get("parameters") orelse .{ .object = try json.newObject(r.a) });
     return .{ .object = out };
 }
@@ -261,7 +283,7 @@ fn renderCalls(r: *R, calls: []const Value) Error!void {
         const f = c.get("function");
         const fnv = if (f != null and f.? != .null) f.? else c;
         if (fnv != .object) return r.refuse("a tool call's function must be an object", .{});
-        const name = try bareName(r.a, fnv) orelse return r.refuse("a tool call has no name", .{});
+        const name = try qualifiedName(r.a, fnv, fnv.get("namespace")) orelse return r.refuse("a tool call has no name", .{});
         try r.put("<" ++ DSML ++ " invoke name=\"");
         try r.request(name);
         try r.put("\">\n");
@@ -474,7 +496,7 @@ test "a thinking conversation with a tool call and an out-of-order result" {
     try std.testing.expectEqual(@as(?u8, null), budgetOf(.{ .int = "101" }));
 }
 
-test "native tool listings and history use the same bare name" {
+test "native tool listings and history use the same qualified name" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -489,8 +511,30 @@ test "native tool listings and history use the same bare name" {
         try tools.array[0].get("function").?.object.put(a, "name", .{ .string = name });
         try messages.array[1].get("tool_calls").?.array[0].get("function").?.object.put(a, "name", .{ .string = name });
         const out = try render(a, messages, .{ .tools = tools.array }, &problem);
-        try std.testing.expect(std.mem.indexOf(u8, out, "\"name\": \"f\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, out, "invoke name=\"f\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, out, "space") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "\"name\": \"space::f\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "invoke name=\"space::f\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "\"description\": \"namespace\\n\"") != null);
     }
+}
+
+test "tools sharing a bare name remain distinct across namespaces" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parseText(a,
+        \\[{"type":"function","namespace":{"name":"files","description":"File operations."},"function":{"name":"run","description":"Read files.","parameters":{},"strict":true,"extra":"omit"}},{"type":"function","function":{"name":"jobs::run","namespace":{"name":"jobs","description":"Job operations."},"description":"Start jobs.","parameters":{},"strict":false,"extra":"omit"}}]
+    )).ok;
+    const messages = (try json.parseText(a,
+        \\[{"role":"user","content":"Run both."},{"role":"assistant","tool_calls":[{"id":"f","type":"function","function":{"name":"run","namespace":"files","arguments":"{}"}},{"id":"j","type":"function","function":{"name":"jobs::run","namespace":"ignored","arguments":"{}"}}]}]
+    )).ok;
+    var problem: Problem = .{};
+    const out = try render(a, messages, .{ .tools = tools.array }, &problem);
+    for ([_][]const u8{
+        "\"name\": \"files::run\", \"description\": \"File operations.\\nRead files.\", \"parameters\": {}",
+        "\"name\": \"jobs::run\", \"description\": \"Job operations.\\nStart jobs.\", \"parameters\": {}",
+        "invoke name=\"files::run\"",
+        "invoke name=\"jobs::run\"",
+    }) |want| try std.testing.expect(std.mem.indexOf(u8, out, want) != null);
+    for ([_][]const u8{ "\"strict\"", "\"extra\"", "\"namespace\"", "\"name\": \"run\"", "invoke name=\"run\"", "ignored::" }) |unwanted|
+        try std.testing.expect(std.mem.indexOf(u8, out, unwanted) == null);
 }
