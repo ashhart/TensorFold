@@ -337,12 +337,15 @@ pub const Gemma = struct {
         return k.at;
     }
 
-    /// One chunk from `l.fill` to the next grid line, image or mark; true once the prompt's last row is in. `_: u32`.
+    /// One chunk from `l.fill` to a grid line, image or mark; true once the prompt's last row is in. `_: u32`.
     fn chunk(x: *Gemma, s: *Stream, l: *Lane, streamed: bool, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
-        var end = @min(p.len, (at / prompt_rows + 1) * prompt_rows);
+        // solo passes (TF_GEMMA4_CHUNK_SOLO) only without a drafter's taps, at most `injects` images a pass
+        const solo = lanes.solo_chunk.passRows(&x.lanes, s, "fill", x.m.prompt_most, prompt_rows);
+        const rows = if (x.tapped or s.images.len > 8) prompt_rows else solo;
+        var end = @min(p.len, at / prompt_rows * prompt_rows + rows);
         for (if (l.shared) l.marks else s.reuse.marks) |mk| if (mk > at and mk < end and !insideImage(s, mk)) {
             end = mk;
         };
