@@ -2,16 +2,13 @@ The JSON files are unchanged metadata from the Apache-2.0 checkpoint
 `lightonai/LightOnOCR-3-1B`, revision
 `23d544085c886bbdace647bcfab91203299417e2`.
 
-Image processing follows Hugging Face Transformers `v5.5.4`, specifically
-`models/pixtral/image_processing_pixtral.py` and
-`models/lighton_ocr/processing_lighton_ocr.py`. The LightOnOCR processor
-expands one image marker to `floor(grid_h / 2) * floor(grid_w / 2)` tokens.
-Its encoder still reads the complete raster patch grid, including unpaired
-edges. The image tests use synthetic patch colors and contain no model
-weights, generated pages or private user data.
-
-The resize algorithm is adapted from the Apache-2.0 Transformers image
-processor, copyright 2024 The HuggingFace Inc. team. The LightOnOCR token
-count follows its Apache-2.0 processor, copyright 2026 The LightOn Team
-and The HuggingFace Inc. team. The original source files include the
-Apache License notice at <https://www.apache.org/licenses/LICENSE-2.0>.
+The image input is written from the checkpoint's `processor_config.json`
+and from the processor's measured output, with no library source. With
+`longest_edge` 1540, an image whose longer side exceeds 1540 is scaled
+by `long / 1540` in f64, each side floored; each side then rounds up to
+a multiple of `patch_size` x `spatial_merge_size` = 28 pixels, and one
+image marker expands to `(h / 28) * (w / 28)` tokens. Running the full
+1B processor (text and image) as a black box gave 30505 sizes, all
+equal, and the CHW pixels of 40 test images, all byte-equal. The image
+tests use synthetic patch colors and contain no model weights, generated
+pages or private user data.

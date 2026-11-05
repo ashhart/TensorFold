@@ -1,6 +1,4 @@
-//! Transformers v5.5.4 LightOnOcrProcessor: Pixtral resize and normalization, raster patches and plain image tokens.
-
-// Resize adapted from Hugging Face Transformers v5.5.4, copyright 2024 The HuggingFace Inc. team, Apache-2.0.
+//! LightOnOCR-3-1B image input: the checkpoint processor's resize and normalization, raster patches and image tokens.
 const std = @import("std");
 const picture = @import("core").picture;
 const Config = @import("config.zig").Config;
@@ -12,26 +10,31 @@ pub const Size = struct { h: u32, w: u32 };
 pub const Prepared = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
 pub const patch: u32 = 14;
 pub const merge: u32 = 2;
+/// Each resized side is a multiple of one merged block: `patch_size` x `spatial_merge_size` pixels.
+pub const step: u32 = patch * merge;
 pub const patch_width: u32 = 3 * patch * patch;
 pub const mean = [3]f32{ 0.48145466, 0.4578275, 0.40821073 };
 pub const sd = [3]f32{ 0.26862954, 0.26130258, 0.27577711 };
 pub const rescale: f64 = 1.0 / 255.0;
 
-/// floor after shrinking, then round each side up to a 14-pixel boundary; never align the grid to the merger.
+/// Fit the longer side within `longest_edge` (aspect kept, sides floored), then round each side up to `step`.
 pub fn targetSize(height: u32, width: u32, longest_edge: u32) Error!Size {
-    if (height == 0 or width == 0 or longest_edge == 0 or longest_edge > 1540) return error.ImageTooSmall;
-    var h: f64 = @floatFromInt(height);
-    var w: f64 = @floatFromInt(width);
-    const edge: f64 = @floatFromInt(longest_edge);
-    const ratio = @max(h / edge, w / edge);
-    if (ratio > 1) {
-        h = @floor(h / ratio);
-        w = @floor(w / ratio);
+    if (longest_edge == 0 or longest_edge > 1540) return error.ImageTooSmall;
+    var h: u32 = height;
+    var w: u32 = width;
+    const long = @max(h, w);
+    if (long > longest_edge) {
+        // The scale is an f64 division; an exact integer ratio sizes some inputs differently (414 x 2520).
+        const ratio = @as(f64, @floatFromInt(long)) / @as(f64, @floatFromInt(longest_edge));
+        h = @intFromFloat(@floor(@as(f64, @floatFromInt(h)) / ratio));
+        w = @intFromFloat(@floor(@as(f64, @floatFromInt(w)) / ratio));
     }
-    if (h < 1 or w < 1) return error.ImageTooSmall;
-    const ih: u32 = @intFromFloat(h);
-    const iw: u32 = @intFromFloat(w);
-    return .{ .h = ((ih - 1) / patch + 1) * patch, .w = ((iw - 1) / patch + 1) * patch };
+    if (h == 0 or w == 0) return error.ImageTooSmall;
+    return .{ .h = roundUp(h), .w = roundUp(w) };
+}
+
+fn roundUp(n: u32) u32 {
+    return (n + step - 1) / step * step;
 }
 
 /// Read the checkpoint's processor before advertising this fixed, qualified processor implementation.
@@ -81,7 +84,7 @@ pub fn readProcessor(gpa: Allocator, io: std.Io, dir: []const u8, c: Config) !vo
     try validateProcessor(gpa, bytes, c);
 }
 
-/// The encoder reads every patch; the projector's 2x2 unfold drops an unpaired last row or column.
+/// One image token per merged 2x2 block of patches; `targetSize` makes both grid sides even.
 pub fn tokens(gh: u32, gw: u32) u32 {
     return (gh / merge) * (gw / merge);
 }
@@ -117,7 +120,7 @@ pub fn prepareRgb(gpa: Allocator, rgb: picture.Rgb, bytes_hash: u64, c: Config, 
 
 pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.ImageTooSmall => "LightOnOCR needs at least two 14-pixel patches on each image side after resizing",
+        error.ImageTooSmall => "LightOnOCR needs each image side to keep at least one pixel when the longer side is scaled to 1540",
         error.ImageTokensExceeded => "the image exceeds this request's image-token budget at the checkpoint's resolution",
         error.BadLightOnProcessor, error.UnsupportedLightOnProcessor => "this LightOnOCR image processor is unsupported",
         else => picture.decoderProblem(err),
