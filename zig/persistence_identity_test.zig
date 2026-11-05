@@ -149,3 +149,7 @@ test "persistence identity: tokenizer and template edits reuse only identical ca
     try t.expect(kept.best(&.{ 5, 7, 13 }, &.{ 1, 2 }, true, 0) == null);
     try t.expect(kept.best(&ids, &.{ 0, 2 }, true, 0) == null);
 }
+
+test {
+    _ = @import("persistence_policy_test.zig");
+}
