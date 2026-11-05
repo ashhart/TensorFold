@@ -26,10 +26,10 @@ pub const Which = enum { decode, prompt };
 /// `control`: values that aren't finite go to P V as they are, so a row's 0 for a key it must not see gives NaN.
 pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false };
 
-/// The control's edit on this chip's kernel: before M5 prompts take attention_prompt_sg, decode rows the tail.
+/// The control's edit: prompts never pick the masked kernel; decode rows before M5 take the tail (no control).
 fn controlEdit(w: Which, tensor: bool) ?at_.Edit {
     return switch (w) {
-        .prompt => if (tensor) .{ .from = "? 0x8000 : 0;", .to = "? 0 : 0;" } else .{ .from = "? 0x80008000u : 0u;", .to = "? 0u : 0u;" },
+        .prompt => .{ .from = "if (simd_any(inf != 0) && lane == 0) atomic_fetch_or", .to = "if (false && lane == 0) atomic_fetch_or" },
         .decode => if (tensor) .{ .from = "const bool masked = q27_nonfinite(", .to = "const bool masked = false && q27_nonfinite(" } else null,
     };
 }
