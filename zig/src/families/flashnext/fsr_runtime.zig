@@ -149,6 +149,10 @@ pub const Runtime = struct {
     /// Slot publication never overlaps a writer or a GPU consumer of the same expert.
     pub fn after(s: *Runtime, r: *fz.Run) !void {
         if (s.predicted_count == 0) return;
+        if (s.pool.?.arena.readingAhead()) {
+            s.predicted_count = 0;
+            return;
+        }
         var missing = false;
         for (s.predicted[0..s.predicted_count]) |key| if (try s.pool.?.arena.clock.peek(key) == null) {
             missing = true;
