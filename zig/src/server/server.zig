@@ -251,7 +251,7 @@ pub const Server = struct {
 
     /// The effort the template hears: the request's name, or this server's default.
     pub fn effortFor(srv: *const Server, explicit: ?[]const u8) ?[]const u8 {
-        const e = explicit orelse srv.config.reasoning_effort orelse return null;
+        const e = explicit orelse srv.config.reasoning_effort orelse (if (srv.text.vtable.format == .kimi) "max" else return null);
         return fields.coerceEffort(e, srv.effort_levels);
     }
 

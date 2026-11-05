@@ -1,12 +1,18 @@
 # Third-party notices
 
-## Kimi K3 and K3.1-Pro release fixtures
+## Kimi K3 and K3.1-Pro release fixtures and native text adapter
 
 The configuration fixtures in `zig/src/families/kimi_k3/fixtures/` are Moonshot AI's release files, Copyright (c) 2026
 Moonshot AI. `k3-config.json` comes from Kimi K3 at revision `f831ab66814297da540d832a5235f8e904f29d06`, under the
 [Kimi K3 License](LICENSES/Kimi-K3.txt). `k31-config.json` comes from Kimi K3.1 Pro at revision
 `6d0a0202956796543364d666ab19c6ad1a494ee1`, under the [Kimi K3.1-Pro License](LICENSES/Kimi-K3.1-Pro.txt). These are
 the models' release licenses, including their additional conditions, not the TensorFold Apache-2.0 license.
+
+The native XTML rendering and argument helpers in `zig/src/server/kimi_prompt.zig`
+and `kimi_values.zig` adapt that release's `encoding_k3.py`; native tokenizer
+integration follows its `tokenization_kimi.py`. The release-rendered prompt
+fixtures in `zig/src/server/fixtures/kimi/golden.json` retain their revision and
+source hashes. These adaptations retain the same copyright and license notice.
 
 The GLM-OCR HIP operators in `zig/kernels/hip/glm_ocr/pointwise.hip`
 adapt reduction ordering and vectorized LayerNorm statistics from PyTorch

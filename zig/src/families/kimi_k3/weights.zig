@@ -163,6 +163,7 @@ pub fn layer(c: *const Config, i: u32, src: store.Source, device: mtl.Device, gp
     const ef = .{ .{ "router", "moe.gate.weight" }, .{ "bias", "moe.gate.e_score_correction_bias" }, .{ "down", "moe.routed_expert_down_proj.weight" }, .{ "norm", "moe.routed_expert_norm.weight" }, .{ "up", "moe.routed_expert_up_proj.weight" }, .{ "sh_gate", "shared_experts.gate_proj.weight" }, .{ "sh_up", "shared_experts.up_proj.weight" }, .{ "sh_down", "shared_experts.down_proj.weight" } };
     inline for (ef) |f| @field(m, f[0]) = try fetch(src, sp, f[1]);
     m.table = try device.buffer(@as(usize, c.experts) * @sizeOf(kernels.ExpertPtrs), mtl.ResourceOptions.shared);
+    errdefer m.table.deinit();
     const table = m.table.slice(kernels.ExpertPtrs, c.experts);
     @memset(table, std.mem.zeroes(kernels.ExpertPtrs));
     for (first..last) |e| {
