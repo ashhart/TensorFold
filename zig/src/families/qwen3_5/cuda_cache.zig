@@ -92,6 +92,24 @@ pub fn pageExtra(g: geometry.Geometry, cap: usize, tokens: usize, kv8: bool) !us
     return std.math.add(usize, padding, try std.math.mul(usize, rows / tokens, 4));
 }
 
+/// Where a cache's before sits in its log's bytes: past the first row, which is all a one-row window logs.
+pub fn overlay(e: *const Engine) @import("core").recurrent_workspace.Overlay {
+    return .init(e.g.stateBytes(), e.g.logBytes(1), engine.most_window);
+}
+
+/// What a cache's log and before take: one overlaid block, or with adaptive scratch the bound its owner holds.
+pub fn scratchBytes(e: *const Engine) usize {
+    return if (recurrent.enabled(e)) recurrent.bound(e) else overlay(e).bytes;
+}
+
+fn logView(e: *const Engine, at: u64) DeviceBuffer {
+    return .{ .d = e.d, .ptr = at, .len = e.g.logBytes(engine.most_window), .borrowed = true };
+}
+
+fn beforeView(e: *const Engine, at: u64) DeviceBuffer {
+    return .{ .d = e.d, .ptr = at + overlay(e).before_at, .len = e.g.stateBytes(), .borrowed = true };
+}
+
 pub const Cache = struct {
     owner: ?*recurrent.Pool = null,
     log_lease: ?recurrent.Lease = null,
@@ -107,6 +125,8 @@ pub const Cache = struct {
     state: DeviceBuffer,
     /// The exact state before a recorded one-row round advances its stable slot in place.
     before: ?DeviceBuffer = null,
+    /// A window's log and before in one block (recurrent_workspace.Overlay); runs and adaptive caches have none.
+    block: ?DeviceBuffer = null,
     kv: DeviceBuffer,
     /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
     tap: ?DeviceBuffer = null,
@@ -161,33 +181,33 @@ pub const Cache = struct {
         return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
     }
 
-    /// Bytes of a pool lane's run: state, before, log, tap ring and a drafter's ring (`ring`), each 256-aligned.
+    /// Bytes of a pool lane's run: state, log with its rollback copy, tap ring and a drafter's ring, each 256-aligned.
     pub fn runBytes(e: *const Engine, ring: usize) usize {
         var n: usize = 0;
         for (runParts(e, ring)) |len| n += std.mem.alignForward(usize, len, 256);
         return n;
     }
 
-    fn runParts(e: *const Engine, ring: usize) [5]usize {
-        return .{ e.g.stateBytes(), e.g.stateBytes(), e.g.logBytes(engine.most_window), e.tapBytes(), ring };
+    fn runParts(e: *const Engine, ring: usize) [4]usize {
+        return .{ e.g.stateBytes(), overlay(e).bytes, e.tapBytes(), ring };
     }
 
-    /// A lane's state, before, log, taps and drafter ring as views of the run at `base`; a short run is refused.
+    /// A lane's state, log and before, taps and drafter ring as views of the run at `base`; a short run is refused.
     pub fn mapRun(self: *Cache, e: *const Engine, base: u64, len: usize, ring: usize) !void {
         if (runBytes(e, ring) > len) return error.QwenRunTooShort;
         var at = base;
-        var views: [5]DeviceBuffer = undefined;
+        var views: [4]DeviceBuffer = undefined;
         for (runParts(e, ring), &views) |n, *v| {
             v.* = .{ .d = e.d, .ptr = at, .len = n, .borrowed = true };
             at += std.mem.alignForward(usize, n, 256);
         }
         self.state = views[0];
         self.pend = 0;
-        self.before = views[1];
-        self.log = views[2];
-        self.tap = if (e.n_taps > 0) views[3] else null;
-        self.drafter_ring = if (ring > 0) views[4].ptr else null;
-        for ([_]DeviceBuffer{ views[2], views[3], views[4] }) |v| if (v.len > 0) try v.fill8(0, e.stream.handle);
+        self.log = logView(e, views[1].ptr);
+        self.before = beforeView(e, views[1].ptr);
+        self.tap = if (e.n_taps > 0) views[2] else null;
+        self.drafter_ring = if (ring > 0) views[3].ptr else null;
+        for ([_]DeviceBuffer{ self.log, views[2], views[3] }) |v| if (v.len > 0) try v.fill8(0, e.stream.handle);
     }
 
     /// A closed lane's views dropped: its run went back to the pool.
@@ -206,12 +226,12 @@ pub const Cache = struct {
         var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
         errdefer state.free();
         const adaptive = recurrent.enabled(e);
-        var before: ?DeviceBuffer = null;
-        errdefer if (before) |*b| b.free();
-        if (!adaptive) before = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
-        var log: DeviceBuffer = .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true };
-        if (!adaptive) log = try DeviceBuffer.alloc(e.d, e.g.logBytes(engine.most_window));
-        errdefer log.free();
+        var block: ?DeviceBuffer = null;
+        errdefer if (block) |*b| b.free();
+        if (!adaptive) block = try DeviceBuffer.alloc(e.d, overlay(e).bytes);
+        const before: ?DeviceBuffer = if (block) |b| beforeView(e, b.ptr) else null;
+        const none: DeviceBuffer = .{ .d = e.d, .ptr = 0, .len = 0, .borrowed = true };
+        const log = if (block) |b| logView(e, b.ptr) else none;
         var tap: ?DeviceBuffer = null;
         errdefer if (tap) |*t| t.free();
         if (e.n_taps > 0) {
@@ -226,7 +246,9 @@ pub const Cache = struct {
         try e.stream.synchronize();
         const scratch = if (adaptive) recurrent.bound(e) else 0;
         e.rec_scratch.cap += scratch;
-        return .{ .owner = if (adaptive) &e.rec_scratch else null, .scratch = scratch, .state = state, .before = before, .kv = kv, .paged = paged, .tap = tap, .log = log, .cap = cap, .logits = logits };
+        var c: Cache = .{ .owner = if (adaptive) &e.rec_scratch else null, .scratch = scratch, .state = state, .before = before, .kv = kv, .paged = paged, .tap = tap, .log = log, .cap = cap, .logits = logits };
+        c.block = block;
+        return c;
     }
 
     /// Publish a completed forward's metadata, including one-row slots that already advanced in place.
@@ -253,6 +275,7 @@ pub const Cache = struct {
         if (self.owner) |p| p.cap -= self.scratch;
         self.state.free();
         if (self.before) |*b| b.free();
+        if (self.block) |*b| b.free();
         self.kv.free();
         if (self.paged) |*p| freePaged(gpa, p);
         self.log.free();
