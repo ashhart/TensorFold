@@ -18,7 +18,7 @@ pub fn chunkEnd(done: usize, total: usize) usize {
 
 // The staged-transfer buffer: 8 MiB so the load's ~27k tensors stream in large chunks instead of one 64 KiB fence each.
 pub const staging_bytes: u64 = 8 << 20;
-// The 8 MiB scratch arena holds persistent windows and worst-layer prefill transients (~3.4 MiB), with headroom.
+// The 8 MiB scratch arena holds persistent windows and worst-layer prefill transients (~5.6 MiB), with headroom.
 pub const arena_bytes: u64 = 8 << 20;
 
 // Step errors include dispatch.Error; Timeout exits 124 and InFlight exits 1 inside `vk.orExit`, before teardown.
@@ -50,10 +50,10 @@ pub fn logitsReady(poisoned: bool, visible: u64) Error!void {
     if (visible == 0) return error.Invalid;
 }
 
-// The arena stores four hidden-row buffers, ids, and full logits; it also fits the worst transient layer.
+// The arena stores four f32 hidden-row buffers, ids, and full logits; it also fits the worst transient layer.
 pub fn persistentBytes() u64 {
     const rows: u64 = max_prefill_rows;
-    return 4 * rows * pinned.hidden * 2 + rows * 4 + pinned.vocab * 2;
+    return 4 * rows * pinned.hidden * 4 + rows * 4 + pinned.vocab * 2;
 }
 
 pub const Engine = struct {
@@ -125,11 +125,12 @@ pub const Engine = struct {
 
         e.arena = try vk.arena.Arena.init(e.dev, arena_bytes);
         errdefer e.arena.deinit();
+        // h/r/x hold f32 bytes at their widest; per-layer views re-kind the same span (see ringView).
         const rows: u64 = max_prefill_rows;
-        e.h[0] = try e.arena.alloc(.bf16, rows * pinned.hidden);
-        e.h[1] = try e.arena.alloc(.bf16, rows * pinned.hidden);
-        e.r = try e.arena.alloc(.bf16, rows * pinned.hidden);
-        e.x = try e.arena.alloc(.bf16, rows * pinned.hidden);
+        e.h[0] = try e.arena.alloc(.f32, rows * pinned.hidden);
+        e.h[1] = try e.arena.alloc(.f32, rows * pinned.hidden);
+        e.r = try e.arena.alloc(.f32, rows * pinned.hidden);
+        e.x = try e.arena.alloc(.f32, rows * pinned.hidden);
         e.ids = try e.arena.alloc(.u32, rows);
         e.logits = try e.arena.alloc(.bf16, pinned.vocab);
         e.base_mark = e.arena.mark();
@@ -190,7 +191,7 @@ pub const Engine = struct {
         try planFor(@intCast(e.state.capacity), e.state.visible(), tokens.len, 1);
         e.poisoned = true;
         try vk.orExit(vk.upload(e.cmds, e.ids.buffer.*, e.ids.byte_offset, e.staging, std.mem.sliceAsBytes(tokens), e.timeout_ns));
-        try vk.orExit(embed(e, try e.h[0].slice(0, tokens.len * pinned.hidden), tokens.len));
+        try vk.orExit(embed(e, ringView(try e.h[0].slice(0, tokens.len * pinned.hidden), .bf16), tokens.len));
         try runLayers(e, tokens.len);
         try vk.orExit(e.state.append(tokens.len));
         e.poisoned = false;
@@ -203,7 +204,7 @@ pub const Engine = struct {
         try planFor(@intCast(e.state.capacity), e.state.visible(), 1, 1);
         e.poisoned = true;
         try vk.orExit(vk.upload(e.cmds, e.ids.buffer.*, e.ids.byte_offset, e.staging, std.mem.sliceAsBytes(&[1]u32{token}), e.timeout_ns));
-        try vk.orExit(embed(e, try e.h[0].slice(0, pinned.hidden), 1));
+        try vk.orExit(embed(e, ringView(try e.h[0].slice(0, pinned.hidden), .bf16), 1));
         try runLayers(e, 1);
         try vk.orExit(e.state.append(1));
         e.poisoned = false;
@@ -268,35 +269,46 @@ pub const Engine = struct {
     }
 
     // 24 layers: norm (plain at layer 0, else residual add), mixer, post norm, MLP; ring keeps add buffers disjoint.
+    // Layer kinds follow fwd.actKind: an input add reads the previous layer's stores and writes the current kind.
     fn runLayers(e: *Engine, rows: usize) Error!void {
         const cx = e.core();
         const span = rows * pinned.hidden;
         const base = e.state.visible();
         var ring: usize = 0;
-        const x = try e.x.slice(0, span);
-        const r = try e.r.slice(0, span);
         for (e.model.layers, 0..) |layer, i| {
+            const act = fwd.actKind(i);
+            const prev: vk.tensor.Kind = if (i == 0) .bf16 else fwd.actKind(i - 1);
+            const x = ringView(try e.x.slice(0, span), act);
             const input_norm, const post_norm, const mlp_q = switch (layer) {
                 .full => |fl| .{ fl.input_norm, fl.post_norm, fl.mlp },
                 .linear => |ll| .{ ll.input_norm, ll.post_norm, ll.mlp },
             };
             if (i == 0) {
-                try cx.plainNorm(x, try e.h[0].slice(0, span), input_norm, rows);
+                try cx.plainNorm(x, ringView(try e.h[0].slice(0, span), prev), input_norm, rows);
             } else {
-                try cx.addNorm(x, try e.h[ring ^ 1].slice(0, span), try e.h[ring].slice(0, span), r, input_norm, rows);
+                // the residual still holds the previous layer's MLP output in its kind
+                try cx.addNorm(x, ringView(try e.h[ring ^ 1].slice(0, span), prev), ringView(try e.h[ring].slice(0, span), prev), ringView(try e.r.slice(0, span), prev), input_norm, rows);
                 ring ^= 1;
             }
+            const r = ringView(try e.r.slice(0, span), act);
             switch (layer) {
                 .full => |fl| try cx.fullLayer(x, fl, &e.state, state.fullSlot(i).?, rows, r, base),
                 .linear => |ll| try cx.linearLayer(x, ll, &e.state, state.linearSlot(i).?, rows, r),
             }
-            try cx.addNorm(x, try e.h[ring ^ 1].slice(0, span), try e.h[ring].slice(0, span), r, post_norm, rows);
+            // the sum lands in the current layer's kind; its `a` side still reads the previous sum
+            try cx.addNorm(ringView(try e.x.slice(0, span), act), ringView(try e.h[ring ^ 1].slice(0, span), act), ringView(try e.h[ring].slice(0, span), prev), r, post_norm, rows);
             ring ^= 1;
-            try cx.mlp(x, rows, mlp_q, r);
+            try cx.mlp(ringView(try e.x.slice(0, span), act), rows, mlp_q, ringView(try e.r.slice(0, span), act));
         }
-        try cx.finish(try e.h[ring ^ 1].slice(0, span), try e.h[ring].slice(0, span), r, try e.x.slice(0, span), e.model.final_norm, e.model.outputHead(), e.logits, rows);
+        const bf16: vk.tensor.Kind = .bf16;
+        try cx.finish(ringView(try e.h[ring ^ 1].slice(0, span), bf16), ringView(try e.h[ring].slice(0, span), bf16), ringView(try e.r.slice(0, span), bf16), ringView(try e.x.slice(0, span), bf16), e.model.final_norm, e.model.outputHead(), e.logits, rows);
     }
 };
+
+/// The same span over the arena's f32-backed window, viewed in another element kind.
+fn ringView(v: View, kind: vk.tensor.Kind) View {
+    return .{ .buffer = v.buffer, .byte_offset = v.byte_offset, .kind = kind, .elements = v.elements };
+}
 
 const testing = std.testing;
 
@@ -361,14 +373,16 @@ test "the arena holds the persistent windows plus the worst transient layer" {
     const rows: u64 = max_prefill_rows;
     const conv: u64 = pinned.conv_dim;
     const dim: u64 = pinned.linear_heads * pinned.linear_dim;
-    // one linear layer at the cap, term by term in bytes: qkv, z, a, b, soa, g (f32), beta, conv_out, conv_in, y, mix
-    const linear = 2 * rows * (conv + 4 * dim + 3 * conv + dim + dim) +
-        7 * rows * pinned.linear_heads + 2 * (rows + state.conv_rows) * conv;
-    // one full-attention layer at the cap: qraw, q, qn, k, kn, v, queries, y, mix
-    const full = 2 * rows * (2 * 8 * 256 + 5 * 8 * 256 + 3 * 2 * 256);
-    // the MLP: gate + up + act
-    const mlp = 6 * pinned.intermediate * rows;
+    // one linear layer at the cap in f32 activations: qkv, z, a, b, soa, g, conv_out, conv_in, y, mix (beta stays bf16)
+    const linear = 4 * (rows * (5 * conv + 3 * dim + 3 * pinned.linear_heads) + (rows + state.conv_rows) * conv) +
+        2 * rows * pinned.linear_heads;
+    // one full-attention layer at the cap in f32: qraw, q, qn, k, kn, v, queries, y, mix
+    const full = 4 * rows * (2 * 8 * 256 + 5 * 8 * 256 + 3 * 2 * 256);
+    // the MLP in f32: gate + up + act
+    const mlp = 12 * pinned.intermediate * rows;
     const worst = @max(linear, @max(full, mlp));
     try testing.expect(worst > 0);
+    try testing.expectEqual(fwd.actKind(0), vk.tensor.Kind.f32); // the wide layers the buffers size for
+    try testing.expectEqual(fwd.actKind(fwd.wide_layers), vk.tensor.Kind.bf16); // the first narrow layer
     try testing.expect(arena_bytes >= persistentBytes() + worst + (1 << 20));
 }

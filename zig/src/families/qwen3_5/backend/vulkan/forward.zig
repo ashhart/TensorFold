@@ -10,6 +10,14 @@ const View = vk.tensor.View;
 
 // Whole-prompt rows are split into dispatch chunks capped here; persistent windows use this cap.
 pub const max_prefill_rows: usize = 32;
+
+// Layers 0-3 keep every activation store in f32; 4+ round stores to bf16 (the validated store policy).
+pub const wide_layers: usize = 4;
+
+// The activation kind a layer's stores use; pure, host-tested alongside the ring kinds.
+pub fn actKind(layer: usize) vk.tensor.Kind {
+    return if (layer < wide_layers) .f32 else .bf16;
+}
 /// The GDN prefill scan's chunk cap (chunks of 1 when a prefill fits one).
 pub const max_gdn_chunk: u64 = 32;
 
@@ -53,9 +61,12 @@ pub const Core = struct {
     }
 
     // `extractQueries` reads `qraw[d + k * 512]`, `k = row * 8 + head`, matching `qwen35_head_norm` source indexing.
+    // Deinterleaves [q | gate] rows; the transport rides the views' kind (u16 words bf16, u32 words f32).
     pub fn extractQueries(c: *const Core, q_out: View, qraw: View, rows: usize) !void {
         const plan = extractQPlan(rows, q_out.elements, qraw.elements) orelse return error.Invalid;
-        try c.acc.ops.copy_u16.bind(&.{ qraw.bind(), c.acc.ops.dummyBinding(), q_out.bind(), c.acc.ops.dummyBinding() });
+        if (q_out.kind != qraw.kind or (q_out.kind != .bf16 and q_out.kind != .f32)) return error.Invalid;
+        const pipe = c.acc.ops.copyPipeline(q_out.kind);
+        try pipe.bind(&.{ qraw.bind(), c.acc.ops.dummyBinding(), q_out.bind(), c.acc.ops.dummyBinding() });
         var p: vk.params.Params = .{
             .count = plan.count,
             .dims = 2,
@@ -63,60 +74,64 @@ pub const Core = struct {
             .in_strides = .{ 1, plan.in_head_stride, 0, 0 },
             .out_strides = .{ 1, plan.dim, 0, 0 },
         };
-        try vk.orExit(c.acc.ops.copy_u16.run(c.cmds, std.mem.asBytes(&p), vk.ops.dispatchGroups(plan.count, c.acc.ops.copy_u16.local[0]), c.timeout_ns));
+        try vk.orExit(pipe.run(c.cmds, std.mem.asBytes(&p), vk.ops.dispatchGroups(plan.count, pipe.local[0]), c.timeout_ns));
     }
 
     // Attention uses Q/K/V, gamma (256), RoPE, KV at `base`, causal GQA SDPA and gate/O; `r_out` cannot alias reads.
+    // Every activation store takes the layer's kind; q/k/v out, attention y and gate mix follow x.
     pub fn fullLayer(c: *const Core, x: View, layer: weights.FullLayer, s: *state.State, slot: usize, rows: usize, r_out: View, base: u64) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
         const hidden = pinned.hidden;
-        const qraw = try c.scratch.alloc(.bf16, rows * 2 * pinned.query_heads * pinned.head_dim);
+        const act = x.kind;
+        const qraw = try c.scratch.alloc(act, rows * 2 * pinned.query_heads * pinned.head_dim);
         try c.project(qraw, x, layer.q);
-        const q = try c.scratch.alloc(.bf16, rows * pinned.query_heads * pinned.head_dim);
+        const q = try c.scratch.alloc(act, rows * pinned.query_heads * pinned.head_dim);
         try c.extractQueries(q, qraw, rows);
-        const qn = try c.scratch.alloc(.bf16, q.elements);
+        const qn = try c.scratch.alloc(act, q.elements);
         try vk.orExit(c.acc.norm.rmsNorm(c.cmds, qn, q, layer.q_norm, rows * pinned.query_heads, pinned.head_dim, pinned.eps, c.timeout_ns));
-        const k = try c.scratch.alloc(.bf16, rows * pinned.kv_heads * pinned.head_dim);
+        const k = try c.scratch.alloc(act, rows * pinned.kv_heads * pinned.head_dim);
         try c.project(k, x, layer.k);
-        const kn = try c.scratch.alloc(.bf16, k.elements);
+        const kn = try c.scratch.alloc(act, k.elements);
         try vk.orExit(c.acc.norm.rmsNorm(c.cmds, kn, k, layer.k_norm, rows * pinned.kv_heads, pinned.head_dim, pinned.eps, c.timeout_ns));
-        const v = try c.scratch.alloc(.bf16, k.elements);
+        const v = try c.scratch.alloc(act, k.elements);
         try c.project(v, x, layer.v);
-        const queries = try c.scratch.alloc(.bf16, q.elements);
+        const queries = try c.scratch.alloc(act, q.elements);
         try vk.orExit(c.acc.attn.setBasePosition(c.cmds, c.staging, @intCast(base), c.timeout_ns));
         try vk.orExit(c.acc.attn.ropeQueries(c.cmds, queries, qn, rows, c.timeout_ns));
         try vk.orExit(c.acc.attn.cacheKV(c.cmds, s.keysFor(slot), s.valuesFor(slot), kn, v, rows, base, s.capacity, c.timeout_ns));
-        const y = try c.scratch.alloc(.bf16, q.elements);
+        const y = try c.scratch.alloc(act, q.elements);
         try vk.orExit(c.acc.attn.attend(c.cmds, y, queries, s.keysFor(slot), s.valuesFor(slot), base, rows, s.capacity, c.timeout_ns));
-        const mix = try c.scratch.alloc(.bf16, rows * hidden);
+        const mix = try c.scratch.alloc(act, rows * hidden);
         try vk.orExit(c.acc.attn.gateOutput(c.cmds, mix, y, qraw, rows, c.timeout_ns));
         try c.project(r_out, mix, layer.o);
         c.scratch.reset(mark) catch {};
     }
 
     // GDN runs qkv/z/a/b, raw-BF16 conv, gates/recurrence; one-row prefill preserves rounding; slot flips after writes.
+    // Every activation store takes the layer's kind; g stays f32 and beta bf16 at both ends of the scan.
     pub fn linearLayer(c: *const Core, x: View, layer: weights.LinearLayer, s: *state.State, slot: usize, rows: usize, r_out: View) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
         const dim = pinned.linear_heads * pinned.linear_dim;
-        const qkv = try c.scratch.alloc(.bf16, rows * pinned.conv_dim);
+        const act = x.kind;
+        const qkv = try c.scratch.alloc(act, rows * pinned.conv_dim);
         try c.project(qkv, x, layer.qkv);
-        const z = try c.scratch.alloc(.bf16, rows * dim);
+        const z = try c.scratch.alloc(act, rows * dim);
         try c.project(z, x, layer.z);
-        const a = try c.scratch.alloc(.bf16, rows * pinned.linear_heads);
+        const a = try c.scratch.alloc(act, rows * pinned.linear_heads);
         try c.project(a, x, layer.a);
-        const b = try c.scratch.alloc(.bf16, rows * pinned.linear_heads);
+        const b = try c.scratch.alloc(act, rows * pinned.linear_heads);
         try c.project(b, x, layer.b);
-        const soa = try c.scratch.alloc(.bf16, rows * 3 * dim);
+        const soa = try c.scratch.alloc(act, rows * 3 * dim);
         const g = try c.scratch.alloc(.f32, rows * pinned.linear_heads);
         const beta = try c.scratch.alloc(.bf16, rows * pinned.linear_heads);
-        const conv_out = try c.scratch.alloc(.bf16, rows * pinned.conv_dim);
-        const conv_in = try c.scratch.alloc(.bf16, (rows + state.conv_rows) * pinned.conv_dim);
+        const conv_out = try c.scratch.alloc(act, rows * pinned.conv_dim);
+        const conv_in = try c.scratch.alloc(act, (rows + state.conv_rows) * pinned.conv_dim);
         try vk.orExit(c.acc.gdn.convPrefill(c.cmds, soa, g, beta, conv_out, conv_in, s.convInput(slot), qkv, layer.conv, a, b, layer.a_log, layer.dt_bias, s.convOutput(slot), rows, c.timeout_ns));
-        const y = try c.scratch.alloc(.bf16, rows * dim);
+        const y = try c.scratch.alloc(act, rows * dim);
         try vk.orExit(c.acc.gdn.prefillRecur(c.cmds, soa, g, beta, s.gdnInput(slot), y, s.gdnOutput(slot), null, rows, @min(rows, max_gdn_chunk), c.timeout_ns));
-        const mix = try c.scratch.alloc(.bf16, rows * dim);
+        const mix = try c.scratch.alloc(act, rows * dim);
         try vk.orExit(c.acc.gdn.gatedNorm(c.cmds, mix, y, z, layer.gnorm, rows, pinned.eps, c.timeout_ns));
         try c.project(r_out, mix, layer.out);
         s.flip(slot);
@@ -127,13 +142,14 @@ pub const Core = struct {
     pub fn mlp(c: *const Core, x: View, rows: usize, m: weights.DenseMlp, r_out: View) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};
-        const gate = try c.scratch.alloc(.bf16, rows * pinned.intermediate);
+        const act = x.kind;
+        const gate = try c.scratch.alloc(act, rows * pinned.intermediate);
         try c.project(gate, x, m.gate);
-        const up = try c.scratch.alloc(.bf16, rows * pinned.intermediate);
+        const up = try c.scratch.alloc(act, rows * pinned.intermediate);
         try c.project(up, x, m.up);
-        const act = try c.scratch.alloc(.bf16, rows * pinned.intermediate);
-        try vk.orExit(c.acc.norm.swiglu(c.cmds, act, gate, up, c.timeout_ns));
-        try c.project(r_out, act, m.down);
+        const activated = try c.scratch.alloc(act, rows * pinned.intermediate);
+        try vk.orExit(c.acc.norm.swiglu(c.cmds, activated, gate, up, c.timeout_ns));
+        try c.project(r_out, activated, m.down);
         c.scratch.reset(mark) catch {};
     }
 
