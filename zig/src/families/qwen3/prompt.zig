@@ -54,12 +54,12 @@ pub const Prompt = struct {
         try score.check(ids, labels, logits, mass, e.window, e.m.spec.vocab, heads.count);
         const row = try p.gpa.alloc(f32, e.m.spec.hidden);
         defer p.gpa.free(row);
-        try e.run(ids, &.{@intCast(ids.len)}, row);
+        try e.run(ids, 0, &.{@intCast(ids.len)}, row);
         try score.labelLogits(p.gpa, heads, row, labels, logits);
         return 0;
     }
 
-    /// The decide hook: branches packed into few runs; a last row keeps its prompt's bits, so scoreLabels's logits.
+    /// The decide hook: the trunk once a run, branches packed after it; a last row keeps scoreLabels's bits.
     pub fn decideLabels(ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, problem: *[]const u8) anyerror!void {
         const p = of(ptr);
         const heads = if (p.heads) |*h| h else return error.NoScoreHead;
@@ -71,8 +71,8 @@ pub const Prompt = struct {
         const Runner = struct {
             e: *Engine,
             hidden: usize,
-            pub fn run(r: @This(), tokens: []const u32, ends: []const u32, rows: []f32) !void {
-                try r.e.run(tokens, ends, rows);
+            pub fn run(r: @This(), tokens: []const u32, trunk_len: u32, ends: []const u32, rows: []f32) !void {
+                try r.e.run(tokens, trunk_len, ends, rows);
             }
         };
         try score.decidePacked(p.gpa, Runner{ .e = e, .hidden = e.m.spec.hidden }, heads, trunk, branches, counts, labels, logits, e.window, engine_max_inputs);
@@ -94,7 +94,7 @@ pub const Prompt = struct {
         const hidden = p.engine.m.spec.hidden;
         const rows = try p.gpa.alloc(f32, batch.ends.len * hidden);
         errdefer p.gpa.free(rows);
-        try p.engine.run(s.prompt(), batch.ends, rows);
+        try p.engine.run(s.prompt(), 0, batch.ends, rows);
         const slot = try p.slots.getOrPut(p.gpa, s);
         if (slot.found_existing) p.gpa.free(slot.value_ptr.*);
         slot.value_ptr.* = rows;

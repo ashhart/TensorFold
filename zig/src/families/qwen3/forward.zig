@@ -25,19 +25,20 @@ pub fn scaleOf(head_dim: usize) f32 {
     return @floatCast(std.math.pow(f64, @floatFromInt(head_dim), -0.5));
 }
 
-/// Each input's final-normed last row into `out` (ends.len, hidden); inputs end at `ends`, start at position 0.
-pub fn lastRows(ops: Ops, m: *const model.Model, ids: u64, ends: []const u32, out: Tensor) Error!void {
+/// Each branch's final-normed last row into `out`: branches end at `ends` and continue a shared `trunk` (0: none).
+pub fn lastRows(ops: Ops, m: *const model.Model, ids: u64, trunk: u32, ends: []const u32, out: Tensor) Error!void {
     var o = ops;
     o.prefill = true; // prefill's kernels at any row count: an input's rows have the same bits alone or batched
     const s = m.spec;
     const total: usize = if (ends.len == 0) return else ends[ends.len - 1];
     var longest: usize = 0;
-    var begin: usize = 0;
+    var begin: usize = trunk;
     for (ends) |e| {
         if (e <= begin) return error.BadShape;
         longest = @max(longest, e - begin);
         begin = e;
     }
+    longest += trunk; // a branch's cache holds the trunk's slots, then its own
     const x = try take(o, m.act, total * s.hidden);
     var start: usize = 0;
     while (start < total) : (start += SPAN) {
@@ -47,7 +48,7 @@ pub fn lastRows(ops: Ops, m: *const model.Model, ids: u64, ends: []const u32, ou
     for (m.layers) |*layer| {
         const mark = o.arena.mark();
         defer o.arena.release(mark);
-        try layerRows(o, m, layer, x, ends, total, longest, null);
+        try layerRows(o, m, layer, x, trunk, ends, total, longest, null);
     }
     for (ends, 0..) |e, i| try o.rms(at(x, (e - 1) * s.hidden), m.final_norm, at(out, i * s.hidden), 1, s.hidden, @floatCast(s.eps));
 }
@@ -62,11 +63,11 @@ pub fn layerInputs(ops: Ops, m: *const model.Model, ids: u64, total: u32, taps: 
     if (total == 0 or total > SPAN) return error.BadShape;
     const x = try take(o, m.act, total * m.spec.hidden);
     try o.embedRows(m.embed, ids, total, x);
-    try layerRows(o, m, &m.layers[0], x, &.{total}, total, total, taps);
+    try layerRows(o, m, &m.layers[0], x, 0, &.{total}, total, total, taps);
 }
 
-/// One decoder layer over every row: norms, projections and MLP in SPAN blocks, attention input by input.
-fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, ends: []const u32, total: usize, longest: usize, taps: ?Taps) Error!void {
+/// One decoder layer over every row: norms, projections and MLP in SPAN blocks; attention trunk first, then branches.
+fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, trunk: usize, ends: []const u32, total: usize, longest: usize, taps: ?Taps) Error!void {
     const s = m.spec;
     const hd = s.head_dim;
     const qw = s.heads * hd;
@@ -87,12 +88,13 @@ fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, en
         try copyRows(o, try o.project(normed, l.v, rows, false), at(v, start * kvw), rows * kvw);
     }
     const attn = try take(o, m.act, total * qw);
-    // one input's flat cache, reused by each input in turn: (kv_heads, longest, d)
+    // one flat cache (kv_heads, longest, d): the trunk's slots [0, trunk), then each branch's after them in turn
     const cache: Ops.Cache = .{ .k = try o.arena.take(kvw * longest * m.act.size()), .v = try o.arena.take(kvw * longest * m.act.size()), .kind = m.act, .kv_heads = s.kv_heads, .total = longest, .d = hd };
-    var a: usize = 0;
+    if (trunk > 0) try attention(o, m, l, q, k, v, attn, cache, 0, trunk, 0);
+    var a: usize = trunk;
     for (ends) |b| {
         defer a = b;
-        try attention(o, m, l, q, k, v, attn, cache, a, b);
+        try attention(o, m, l, q, k, v, attn, cache, a, b, trunk);
     }
     if (taps) |tp| try copyRows(o, attn, .{ .ptr = tp.attn, .kind = m.act }, total * qw);
     start = 0;
@@ -116,8 +118,8 @@ fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, en
     }
 }
 
-/// Input rows [a, b): head norms, RoPE from position 0, its cache, causal attention, head-major rows back.
-fn attention(o: Ops, m: *const model.Model, l: *const model.Layer, q: Tensor, k: Tensor, v: Tensor, attn: Tensor, c: Ops.Cache, a: usize, b: usize) Error!void {
+/// Input rows [a, b) at positions from `pos`: head norms, RoPE, cache slots, causal attention, head-major rows back.
+fn attention(o: Ops, m: *const model.Model, l: *const model.Layer, q: Tensor, k: Tensor, v: Tensor, attn: Tensor, c: Ops.Cache, a: usize, b: usize, pos: usize) Error!void {
     const s = m.spec;
     const hd = s.head_dim;
     const qw = s.heads * hd;
@@ -127,6 +129,7 @@ fn attention(o: Ops, m: *const model.Model, l: *const model.Layer, q: Tensor, k:
     var p: usize = 0;
     while (p < len) : (p += SPAN) {
         const rows = @min(SPAN, len - p);
+        const at_pos = pos + p; // the chunk's first position and cache slot; its rows sit at a + p
         const mark = o.arena.mark();
         defer o.arena.release(mark);
         const qn = try take(o, m.act, rows * qw);
@@ -135,12 +138,12 @@ fn attention(o: Ops, m: *const model.Model, l: *const model.Layer, q: Tensor, k:
         try o.rms(at(k, (a + p) * kvw), l.k_norm, kn, rows * s.kv_heads, hd, @floatCast(s.eps));
         // q rotated, rounded to the activation dtype, then widened: (heads, rows, d) fp32 for the kernel
         const q32 = try o.arena.of(f32, rows * qw);
-        try o.ropePrefill(qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, hd, p, theta);
-        // k rotated into the cache (kv_heads, total, d) from slot p (the kernel writes row r at r * s_row); v as it is
-        try o.ropePrefill(kn, .{ .ptr = c.k + p * hd * c.kind.size(), .kind = c.kind }, c.total * hd, hd, rows, s.kv_heads, hd, hd, p, theta);
-        try o.kvWrite(at(v, (a + p) * kvw), c.v, rows, s.kv_heads, hd, c.total, p);
+        try o.ropePrefill(qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, hd, at_pos, theta);
+        // k rotated into the cache (kv_heads, total, d) from slot at_pos (row r at r * s_row); v as it is
+        try o.ropePrefill(kn, .{ .ptr = c.k + at_pos * hd * c.kind.size(), .kind = c.kind }, c.total * hd, hd, rows, s.kv_heads, hd, hd, at_pos, theta);
+        try o.kvWrite(at(v, (a + p) * kvw), c.v, rows, s.kv_heads, hd, c.total, at_pos);
         const att = try o.arena.of(f32, rows * qw);
-        try o.causalPrefill(q32, c, att, rows, p + rows, s.heads, scaleOf(hd), p);
+        try o.causalPrefill(q32, c, att, rows, at_pos + rows, s.heads, scaleOf(hd), at_pos);
         try o.headsRows(att, at(attn, (a + p) * qw), rows, s.heads, hd);
     }
 }

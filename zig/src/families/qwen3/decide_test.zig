@@ -140,3 +140,64 @@ test "Qwen3-Reranker decide: every scored reference case, the windows' too, pack
     }
     std.debug.print("rerank decide ({t}, {s}): all {d} scored cases ({d} tokens, trunk {d}) packed at a {d}-token window equal alone\n", .{ e.lib.dense.serve, checks.attentionPath(&e.lib), prompts.items.len, tokens, trunk_len, window });
 }
+
+/// The decide runs through the engine at a window below its own, so one load also gives several runs.
+const Runner = struct {
+    e: *qwen3.engine.Engine,
+    hidden: usize,
+    runs: usize = 0,
+
+    pub fn run(r: *Runner, tokens: []const u32, trunk: u32, ends: []const u32, rows: []f32) !void {
+        r.runs += 1;
+        try r.e.run(tokens, trunk, ends, rows);
+    }
+};
+
+test "Qwen3-Reranker decide: a trunk longer than one span, in one run and in two, equals scoreLabels alone" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try env(a, "TF_QWEN3_RERANK_DIR") orelse return error.SkipZigTest;
+    const ref_path = try env(a, "TF_QWEN3_RERANK_REF") orelse return error.SkipZigTest;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, ref_path, a, .limited(64 << 20));
+    const ref = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
+    var prompt: []u32 = &.{};
+    for (ref.object.get("cases").?.array.items) |c| {
+        if (!std.mem.eql(u8, c.object.get("kind").?.string, "len8192")) continue;
+        const ids = c.object.get("ids").?.array.items;
+        prompt = try a.alloc(u32, ids.len);
+        for (prompt, ids) |*o, v| o.* = @intCast(v.integer);
+    }
+    try t.expectEqual(@as(usize, 8272), prompt.len);
+    // a 2,100-token trunk (past one 2,048-row span), then branches of 1, 100, 2,048 (a span) and the rest
+    const trunk_len = 2100;
+    const trunk = prompt[0..trunk_len];
+    const lengths = [_]usize{ 1, 100, 2048, prompt.len - trunk_len };
+    var branches: [4][]const u32 = undefined;
+    for (&branches, lengths) |*b, n| b.* = prompt[trunk_len..][0..n];
+    const counts = [_]usize{ 2, 2, 2, 2 };
+    const yes: u32 = @intCast(ref.object.get("yes").?.integer);
+    const no: u32 = @intCast(ref.object.get("no").?.integer);
+    const labels = [_]u32{ yes, no, yes, no, yes, no, yes, no };
+    const e = try qwen3.engine.Engine.load(gpa, t.io, dir, 0, try checks.choices());
+    defer e.deinit();
+    try e.size(40960);
+    var p = qwen3.prompt.Prompt.init(gpa, e, false);
+    defer p.deinit();
+    p.heads = qwen3.score.Heads.of(&e.m, t.io, dir);
+    var one: [8]f64 = undefined;
+    var problem: []const u8 = "";
+    try qwen3.prompt.Prompt.decideLabels(&p, trunk, &branches, &counts, &labels, &one, &problem);
+    // at 4,200 tokens the first three take two runs: the trunk + 1 + 100, then the trunk + 2,048
+    var runner: Runner = .{ .e = e, .hidden = e.m.spec.hidden };
+    var two: [6]f64 = undefined;
+    try qwen3.score.decidePacked(a, &runner, &p.heads.?, trunk, branches[0..3], counts[0..3], labels[0..6], &two, 4200, qwen3.engine.max_inputs);
+    try t.expectEqual(@as(usize, 2), runner.runs);
+    for (lengths, 0..) |n, i| {
+        var alone: [2]f64 = undefined;
+        _ = try qwen3.prompt.Prompt.scoreLabels(&p, prompt[0 .. trunk_len + n], labels[2 * i ..][0..2], &alone, false);
+        for (one[2 * i ..][0..2], alone) |x, y| try t.expectEqual(@as(u64, @bitCast(y)), @as(u64, @bitCast(x)));
+        if (i < 3) for (two[2 * i ..][0..2], alone) |x, y| try t.expectEqual(@as(u64, @bitCast(y)), @as(u64, @bitCast(x)));
+    }
+    std.debug.print("rerank decide ({t}, {s}): a {d}-token trunk, branches of 1, 100, 2048 and {d} tokens, in one run and two, equal alone\n", .{ e.lib.dense.serve, checks.attentionPath(&e.lib), trunk_len, lengths[3] });
+}
