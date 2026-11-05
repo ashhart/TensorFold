@@ -113,6 +113,7 @@ test "DeepSeek chat: licensed encoder fixture through the server render path" {
     var rejected: usize = 0;
     var unexpected: usize = 0;
     var compatibility: usize = 0;
+    var qualified: usize = 0;
     var it = std.mem.splitScalar(u8, try cases(a), '\n');
     while (it.next()) |line| {
         if (line.len == 0) continue;
@@ -144,7 +145,7 @@ test "DeepSeek chat: licensed encoder fixture through the server render path" {
             continue;
         };
         if (!ok and compatibilityCase(c)) {
-            try std.testing.expectEqualStrings(try expectedPrompt(a, c), probe.rendered.text);
+            try std.testing.expectEqualStrings(c.get("prompt").?.string, probe.rendered.text);
             try checkEncoder(a, c);
             compatibility += 1;
             continue;
@@ -154,31 +155,18 @@ test "DeepSeek chat: licensed encoder fixture through the server render path" {
             unexpected += 1;
             continue;
         }
-        const expected = c.get("prompt").?.string;
-        if (std.mem.eql(u8, expected, probe.rendered.text)) equal += 1 else {
-            const diff = std.mem.indexOfDiff(u8, expected, probe.rendered.text).?;
-            std.debug.print("FIXTURE case={d} differs={d} want={s} got={s}\n", .{ c.get("id").?.int64().?, diff, expected[diff..@min(expected.len, diff + 100)], probe.rendered.text[@min(diff, probe.rendered.text.len)..@min(probe.rendered.text.len, diff + 100)] });
-        }
+        if (try checkPrompt(a, c, probe.rendered.text)) equal += 1 else qualified += 1;
     }
-    std.debug.print("FIXTURE total={d} accepted={d} equal={d} refused={d}\n", .{ total, accepted, equal, refused });
+    std.debug.print("FIXTURE total={d} accepted={d} equal={d} qualified={d} refused={d}\n", .{ total, accepted, equal, qualified, refused });
     try extraRequests(srv, &probe, a);
     try std.testing.expectEqual(@as(usize, 328), total);
     try std.testing.expectEqual(@as(usize, 78), accepted);
-    try std.testing.expectEqual(@as(usize, 53), equal);
+    try std.testing.expectEqual(@as(usize, 50), equal);
+    try std.testing.expectEqual(@as(usize, 3), qualified);
     try std.testing.expectEqual(@as(usize, 25), refused);
     try std.testing.expectEqual(@as(usize, 242), rejected);
     try std.testing.expectEqual(@as(usize, 0), unexpected);
     try std.testing.expectEqual(@as(usize, 8), compatibility);
-}
-
-// Cases191 and237 were API refusals; their qualified listings differ from the accepted fixture's bare-name policy.
-fn expectedPrompt(a: std.mem.Allocator, c: json.Value) ![]const u8 {
-    const prompt = c.get("prompt").?.string;
-    return switch (c.get("id").?.int64().?) {
-        191 => std.mem.replaceOwned(u8, a, prompt, "\"name\": \"fs::read_file\"", "\"name\": \"read_file\""),
-        237 => std.mem.replaceOwned(u8, a, prompt, "\"name\": \"git::commit\", \"description\": \"Git operations.\\nCommit staged changes\"", "\"name\": \"commit\", \"description\": \"Commit staged changes\""),
-        else => prompt,
-    };
 }
 
 // These rejected API cases record budgets50 and100; replay their prompts through the equivalent named client efforts.
@@ -220,6 +208,39 @@ fn image(_: ?*anyopaque, _: json.Value) []const u8 {
     return "<｜image｜>";
 }
 
+// Three supplied accepted records drop namespaces; keep their original bytes and pin the qualified policy separately.
+fn checkPrompt(a: std.mem.Allocator, c: json.Value, got: []const u8) !bool {
+    const id = c.get("id").?.int64().?;
+    const recorded = c.get("prompt").?.string;
+    var it = std.mem.splitScalar(u8, @embedFile("fixtures/deepseek_v41_encoder/namespaces.jsonl"), '\n');
+    var count: usize = 0;
+    var match: ?json.Value = null;
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        const row = (try json.parseText(a, line)).ok;
+        const row_id = row.get("id").?.int64().?;
+        try std.testing.expect(row_id == 6 or row_id == 67 or row_id == 97);
+        if (row_id == id) {
+            try std.testing.expect(match == null);
+            match = row;
+        }
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+    if (match) |row| {
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(recorded, &hash, .{});
+        try std.testing.expectEqualStrings(row.get("recorded_prompt_sha256").?.string, &std.fmt.bytesToHex(hash, .lower));
+        try std.testing.expect(row.get("reason").?.string.len > 0);
+        const expected = row.get("expected_qualified").?.string;
+        try std.testing.expect(!std.mem.eql(u8, expected, recorded));
+        try std.testing.expectEqualStrings(expected, got);
+        return false;
+    }
+    try std.testing.expectEqualStrings(recorded, got);
+    return true;
+}
+
 fn checkEncoder(a: std.mem.Allocator, c: json.Value) !void {
     const ds = @import("dsv41_chat");
     const e = c.field("cc_effort") orelse compatibilityEffort(c);
@@ -231,7 +252,7 @@ fn checkEncoder(a: std.mem.Allocator, c: json.Value) !void {
         .response_format = c.field("response_format"),
         .image = .{ .text = image },
     }, &problem);
-    try std.testing.expectEqualStrings(try expectedPrompt(a, c), got);
+    _ = try checkPrompt(a, c, got);
 }
 
 fn checkEffort(srv: *Server, p: *Probe, a: std.mem.Allocator, c: json.Value) !void {
