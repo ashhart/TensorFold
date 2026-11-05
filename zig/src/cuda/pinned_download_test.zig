@@ -74,8 +74,10 @@ const Fake = struct {
     }
 };
 
+/// Sets or unsets the switch and has the next download read it, as a fresh process would.
 fn set(value: ?[:0]const u8) void {
     _ = if (value) |v| env.setenv(name, v, 1) else env.unsetenv(name);
+    pinned.rereadForTest();
 }
 
 /// The bytes a download of `out.len` from `offset` must deliver: each source address's low byte.
@@ -152,6 +154,29 @@ test "pinned download: TF_CUDA_PINNED_DOWNLOAD=1 copies into the driver's pinned
     try t.expectEqual(@as(usize, 2), Fake.frees);
     try t.expectEqual(@as(usize, 0), pinned.idleCount(&d));
     try t.expectEqual(before, memory.usage(false).host);
+}
+
+test "pinned download: the switch is read once, and a later change reaches no download until it is read again" {
+    defer Fake.deinit();
+    defer set(null);
+    set(null);
+    Fake.reset();
+    var d = Fake.driver();
+    defer pinned.drop(&d, null, true);
+    const buf: memory.DeviceBuffer = .{ .d = &d, .ptr = base, .len = 4096, .borrowed = true };
+    var out: [64]u8 = undefined;
+    try buf.download(0, &out);
+    _ = env.setenv(name, "1", 1); // no reread: the unset switch's first read stands, and the call stays main's
+    try buf.download(0, &out);
+    try t.expectEqual(@as(usize, 0), Fake.allocs);
+    try t.expectEqual(@intFromPtr(&out), Fake.copies.items[1].dst);
+    pinned.rereadForTest();
+    try buf.download(0, &out);
+    try t.expectEqual(Fake.pinnedAt(0), Fake.copies.items[2].dst);
+    _ = env.unsetenv(name); // no reread: the exact 1 stands
+    try buf.download(0, &out);
+    try t.expectEqual(Fake.pinnedAt(0), Fake.copies.items[3].dst);
+    try expectDelivered(&out, 0);
 }
 
 test "pinned download: a copy longer than the bounce goes through it in pieces, the bounce capped" {
