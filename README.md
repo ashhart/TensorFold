@@ -163,7 +163,7 @@ and drafters need memory beyond the weights. `tensorfold info REPO` reports the 
 Where no RAM capacity is published, inspect that floor before serving a large checkpoint.
 CUDA release images include sm_80, sm_86, sm_120 and sm_121. The A100 (sm_80) has kernel-check evidence
 ([#846](https://github.com/ashhart/TensorFold/pull/846)), but no served checkpoint on record, so it is not model-qualified.
-Nemotron and dense Qwen have NVFP4/FP8 fallback code for sm_80 to sm_89 (#901, #1470); no such model run on sm_80 is recorded.
+Nemotron and dense Qwen have NVFP4/FP8 fallback code for sm_80 to sm_89 (#901, #1470); no such model run on sm_80 to sm_89 is recorded.
 
 Run a table command after installation. On a Linux archive installation, use the `tensorfold` shell function from Quick start.
 `REPO@revision` pins a pull; serve the repository name without the revision after pulling it.
