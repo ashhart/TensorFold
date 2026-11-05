@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on Metal: a lone `"draft": false` reply at `--parallel` above one runs as it does at `--parallel 1`, 17-18% faster on an M3 Ultra with the same tokens (#2272).
+
 - CI: the cache tool's own test runs only when the tool, `no-gpu.yml` or Zig's version changes, on main too, which saves about 2 minutes of each main `zig` job (#2277).
 
 - Qwen3.8-27B on Metal: a reply that would end well before a long prompt now goes first, and the prompt lends it at most a quarter of its own time (#2224).
