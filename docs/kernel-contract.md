@@ -370,3 +370,14 @@ A third registration executes the real cut kernel against the full FP32 bound an
 The product fixture writes float output so BF16 rounding cannot conceal that control.
 Both modes still require exceptional-class, repeat, guard, shape, accumulator and separate launch checks.
 See [the mode's scope and device checks](recipes/m5-attention-precision.md); other families' rounding is unchanged.
+
+Flash Next's BF16 shared-down entries `tf_qmmf_shared16_half`, `tf_qmmf_shared16`, `tf_qmmf_shared32` and
+`tf_qmmf_shared64` preserve the contiguous projection's FP32 result and store it directly in expert slot 10.
+The baseline shared expert has all 640 intermediate channels and runs only on rank 0 at two ranks.
+The contract checks all four geometries, nonfinite inputs, output bytes and untouched routed slots.
+`moetile_records.zig` holds launch geometry and measured nvcc 13.0 resources on all five served SMs.
+Later compiler receipts remain pending. Check each build with `tf-cuda-test kernel-contract-limits zig-out/fatbin`.
+`tf-cuda-test moetile` compares the direct slot and the BF16 prompt tile plus scatter with the lane's contiguous
+product and scatter at 1, 16, 17, 32, 64, 65, 1536 and 4218 rows, five repeats with guards.
+`moetile-contract` runs the replacement gates and planted control.
+`moetile-bench` rotates GPU event timings of the three at 64 to 4218 rows; no timing is a gate.
