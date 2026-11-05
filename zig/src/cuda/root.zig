@@ -82,6 +82,7 @@ pub const exl3_grouped = @import("exl3_grouped.zig");
 pub const arena = @import("arena.zig");
 pub const pack = @import("pack.zig");
 pub const graph_cache = @import("graph_cache.zig");
+pub const keyed_graph = @import("keyed_graph.zig");
 
 test {
     _ = priority_copies;
@@ -171,6 +172,7 @@ test {
     _ = @import("graph_cache_regression_test.zig");
     _ = @import("graph_cache_ranks_test.zig");
     _ = @import("graph_cache_shapes_test.zig");
+    _ = @import("keyed_graph_test.zig");
     _ = exl3.block.dense;
     _ = exl3.block.experts;
     _ = exl3.block.lin2;

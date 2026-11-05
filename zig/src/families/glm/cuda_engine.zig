@@ -22,6 +22,7 @@ const l2pf_mod = @import("cuda_l2pf.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 const tp = @import("tp");
 const mesh_mod = @import("mesh");
+const window_graph = @import("cuda_window_graph.zig");
 pub const Options = @import("cuda_engine_types.zig").Options;
 
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
@@ -89,6 +90,7 @@ pub const Engine = struct {
     slot: u32 = 0,
     capacity: usize,
     mtp: bool,
+    graphs: ?window_graph.Graphs = null, // TF_GLM_GRAPHS=1: verify windows as CUDA graphs (cuda_window_graph)
     heat_gate: heat.Gate, // upstream's bands (off unless set), read before each prompt chunk on the gathered maximum
     shared_buf: cuda.DeviceBuffer, // one f64 every rank all-reduces to its maximum
     snaps: std.AutoHashMapUnmanaged(u64, Snap) = .empty, // kept prompt states by id (the same ids on every rank)
@@ -164,7 +166,7 @@ pub const Engine = struct {
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
-        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .mesh = place, .backend = backend, .collective = backend.collective(), .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
+        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .mesh = place, .backend = backend, .collective = backend.collective(), .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp, .graphs = if (window_graph.enabled()) .{} else null };
         const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
         const Tile = struct {
@@ -244,6 +246,7 @@ pub const Engine = struct {
         e.dropped.deinit(e.gpa);
         e.shared_buf.free();
         e.freeProfs();
+        if (e.graphs) |*g| g.clear(e.gpa);
         if (e.prompt_bufs) |*b| b.free();
         e.prompt_out.free();
         e.smp.deinit();
@@ -456,7 +459,7 @@ pub const Engine = struct {
         const at = e.cur.st.pos;
         f.prof = e.profs[ids.len - 1];
         if (f.prof) |p| try p.begin(e.stream, verifyLabel(ids.len));
-        try f.run(@ptrCast(ids));
+        try window_graph.window(e, &f, @ptrCast(ids));
         if (e.drafter) |dr| try dr.noteVerify(e.slot, 0, ids.len, at, true);
         e.cur.rows_at = e.bd.fnormed;
         try e.draw(e.bd.logits, ids.len, at + 1, bits, out);
@@ -470,6 +473,7 @@ pub const Engine = struct {
         const b = if (e.bs) |*x| x else return error.NoSharedWindows;
         if (parts.len == 0 or parts.len > max_shared) return error.WindowTooWide;
         var segs: [max_shared]fw.Seg = undefined;
+        var slots: [max_shared]u32 = undefined;
         var ids: [shared_rows]u32 = undefined;
         var rows: usize = 0;
         for (parts, 0..) |p, i| {
@@ -477,12 +481,13 @@ pub const Engine = struct {
             for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
             try e.bind(p.slot);
             segs[i] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.ids.len };
+            slots[i] = p.slot;
             @memcpy(ids[rows..][0..p.ids.len], p.ids);
             rows += p.ids.len;
         }
         var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
         const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null };
-        try f.run(@ptrCast(ids[0..rows]));
+        try window_graph.windows(e, &f, @ptrCast(ids[0..rows]), slots[0..parts.len]);
         if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
         for (parts, segs[0..parts.len]) |p, g| {
             try e.bind(p.slot);
