@@ -117,6 +117,11 @@ Each setting is two fresh servers (one at TP=2 for the cold row), `--parallel 4 
 repeated filler line gains 2 to 5% at the same sizes. The other rows ran with the prompt cache on (the default at TP=2,
 2 GiB at TP=3). Three rows at TP=2 that waited on the heat guard are left out.
 
+It doesn't pay with every checkpoint. With `nvidia/GLM-5.3-Flash-NVFP4` on two GB10s at `--parallel 1 --context 65536`,
+`=4096` made cold prompts slower: 8K and 32K prompts ran 12 to 14% slower (about 1,280 against 1,480 tok/s at 8K), and
+the model took 1.9 GiB more at startup. That's two fresh servers each, with the same tokens either way. Leave it unset
+there.
+
 At TP=3 with `TF_GLM_ROCE_MULTI=1` (#1524) the gain is a little under half: on three GB10s at `--parallel 8` with
 `TF_GLM_KV_SHARE=32` and `TENSORFOLD_PREFILL_SHARE=0.7`, not the table's settings, cold Python-source prompts of 8K to
 128K tokens came 3.2 to 3.4% sooner with the wire and 7.3 to 8.4% sooner without it, two fresh servers each. The wire's
