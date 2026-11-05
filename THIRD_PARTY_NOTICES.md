@@ -35,6 +35,25 @@ The native engine installs and links neither. It reads checkpoints in their form
 `zig/kernels/metal/` repeat the arithmetic of MLX's kernels and mlx-lm's model math, many of them bit for bit.
 The Python engine, frozen at 0.6.6, installs MLX and mlx-lm as dependencies.
 
+## Nemotron 3.5 Parse on HIP
+
+The reference tool `tools/zig/nemotron_parse_reference.py` adapts `run_transformers_inference.py` from NVIDIA's
+[nvidia/Nemotron-3.5-Parse](https://huggingface.co/nvidia/Nemotron-3.5-Parse) at revision
+`4035ffb1d8f8bafcdb867dfaf6f7514f101464f9`, and keeps that file's SPDX header. The native family follows the same
+release's code for its math, rounding and resizing; each file is written for TensorFold, and the file named is the
+reference:
+
+- `zig/src/families/nemotron_parse/processor.zig`: `NemotronParseImageProcessor` in `hf_nemotron_parse_processor.py`
+  (the aspect-preserving resize, the NaViT white padding, the normalization and the patch order).
+- `zig/src/families/nemotron_parse/tower.zig` and `decoder.zig`: `RadioWithNeck`, `_VisionTransformer`,
+  `NemotronParseDecoder`, `_DecoderLayer`, `_GQAAttention` and `_ScaledEmbedding` in `hf_nemotron_parse_modeling.py`.
+- `zig/kernels/hip/ops/vl_position.hpp`: `_normalized_2d_position_pages` in `hf_prefix_geometry.py`.
+
+These release files are Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES, under the NVIDIA OpenMDW License 1.1; see
+[the license text](LICENSES/NVIDIA-OpenMDW-1.1.txt). The encoder's blocks in `tower.zig` also follow timm's `Block`
+(`timm/models/vision_transformer.py`, timm 1.0.22), which the modeling file imports; timm is Copyright 2019 Ross
+Wightman, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+
 ## MLX and mlx-lm adaptations
 
 In the Python engine, frozen at 0.6.6, the DeltaNet implementations in
