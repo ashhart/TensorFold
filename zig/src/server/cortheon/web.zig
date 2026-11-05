@@ -263,6 +263,7 @@ fn withoutDots(a: Allocator, url: []const u8) Allocator.Error![]const u8 {
 pub fn resolveUrl(a: Allocator, base: []const u8, location: []const u8) Allocator.Error![]const u8 {
     const loc = std.mem.trim(u8, location, " \t");
     if (std.ascii.startsWithIgnoreCase(loc, "http://") or std.ascii.startsWithIgnoreCase(loc, "https://")) return withoutDots(a, try a.dupe(u8, loc));
+    if (std.mem.indexOf(u8, loc, "://") != null) return a.dupe(u8, loc); // an absolute URL of another scheme stays itself
     const scheme_end = std.mem.indexOf(u8, base, "://") orelse return a.dupe(u8, loc);
     if (std.mem.startsWith(u8, loc, "//")) return withoutDots(a, try std.fmt.allocPrint(a, "{s}:{s}", .{ base[0..scheme_end], loc }));
     const host_start = scheme_end + 3;
@@ -305,6 +306,7 @@ test "redirect locations resolve against the page" {
     try std.testing.expectEqualStrings("https://a.org/root", try resolveUrl(a, "https://a.org/p/q?z=1", "/root"));
     try std.testing.expectEqualStrings("https://a.org/p/sib", try resolveUrl(a, "https://a.org/p/q", "sib"));
     try std.testing.expectEqualStrings("https://a.org/sib", try resolveUrl(a, "https://a.org", "sib"));
+    try std.testing.expectEqualStrings("ftp://files.example/a", try resolveUrl(a, "https://a.org/docs/intro", "ftp://files.example/a"));
 }
 
 test "a link that only replaces the query or the fragment stays on its page" {
