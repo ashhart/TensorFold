@@ -75,6 +75,10 @@ fn serve(request: *const Request, resumes: bool) !Runs {
 }
 
 fn serveImages(request: *const Request, resumes: bool, images: bool) !Runs {
+    return serveDriver(request, resumes, images, false);
+}
+
+fn serveDriver(request: *const Request, resumes: bool, images: bool, plain: bool) !Runs {
     // a drafted family's windowed rounds, as the lone driver's backends run them (lanes/engine_test.zig's model)
     var costs: [16]lanes.config.Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
@@ -87,7 +91,7 @@ fn serveImages(request: *const Request, resumes: bool, images: bool) !Runs {
     defer core.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     var lone: Lone = .{ .be = target.backend() };
-    host.lone = .{ .ctx = &lone, .run = Lone.run, .resumes = resumes, .images = images };
+    host.lone = .{ .ctx = &lone, .run = Lone.run, .resumes = resumes, .images = images, .plain = plain };
     try host.start();
     defer host.stop();
     var box: Box = .{};
@@ -117,6 +121,12 @@ test "the lane core's last stream goes back to the lone driver, its tokens serve
 test "a stream the lone driver does not take stays in the lane core to its end" {
     const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24, .drafts = false }, true);
     try std.testing.expectEqual(@as(u32, 0), runs.opened);
+    try std.testing.expectEqual(@as(u32, 0), runs.resumed);
+}
+
+test "a lone driver that takes plain streams opens one with drafts off" {
+    const runs = try serveDriver(&.{ .prompt = &prompt, .max_tokens = 24, .drafts = false }, false, true, true);
+    try std.testing.expectEqual(@as(u32, 1), runs.opened);
     try std.testing.expectEqual(@as(u32, 0), runs.resumed);
 }
 
