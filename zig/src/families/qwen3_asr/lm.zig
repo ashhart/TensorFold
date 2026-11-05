@@ -91,28 +91,43 @@ pub fn forward(r: anytype, t: cfg.Text, w: *const Weights, b: Buffers, ids: []co
         if (sp.at < pos or sp.at + sp.n > pos + rows) return error.SpliceOutsidePass;
         try r.copy(b.e + (sp.at - pos) * t.hidden * 2, sp.ptr, sp.n * t.hidden * 2);
     }
+    try r.dump("lm_embed", b.e, rows, t.hidden);
     const qd = t.heads * t.head_dim;
     const kvd = t.kv_heads * t.head_dim;
     var x = b.e;
     var res: ?u64 = null;
     var cur: usize = 0;
+    var name: [24]u8 = undefined;
     for (w.layers, 0..) |l, i| {
         try r.addNorm(x, res, l.in_norm, b.h[cur], b.y, rows);
+        if (i > 0) try r.dump(try layerName(&name, i - 1), b.h[cur], rows, t.hidden); // h: the layer before's output
+        if (i == 0) try r.dump("lm0_norm", b.y, rows, t.hidden); // layer 0's steps, as the case taps them
         try r.gemm(b.y, l.qkv, b.qkv, rows, qd + 2 * kvd, t.hidden);
         try r.qkRope(b.qkv, l.q_norm, l.k_norm, i, rows);
         try r.attention(i, b.att, rows);
+        if (i == 0) try r.dump("lm0_attn", b.att, rows, qd);
         try r.gemm(b.att, l.o, b.o, rows, t.hidden, qd);
-        try r.addNorm(b.o, b.h[cur], l.post_norm, b.h[1 - cur], b.y, rows);
+        if (i == 0) try r.dump("lm0_o", b.o, rows, t.hidden);
+        const stream = if (res == null) x else b.h[cur]; // with no residual the norm leaves h unwritten: x is the stream
+        try r.addNorm(b.o, stream, l.post_norm, b.h[1 - cur], b.y, rows);
+        if (i == 0) try r.dump("lm0_post", b.y, rows, t.hidden);
         cur = 1 - cur;
         try r.gemm(b.y, l.gate_up, b.gu, rows, 2 * t.intermediate, t.hidden);
         try r.swiglu(b.gu, b.act, rows, t.intermediate);
         try r.gemm(b.act, l.down, b.dn, rows, t.hidden, t.intermediate);
+        if (i == 0) try r.dump("lm0_mlp", b.dn, rows, t.hidden);
         x = b.dn;
         res = b.h[cur];
         cur = 1 - cur;
     }
     try r.addNorm(x, res, w.norm, b.h[cur], b.y, rows);
+    try r.dump(try layerName(&name, w.layers.len - 1), b.h[cur], rows, t.hidden);
+    try r.dump("lm_norm", b.y, rows, t.hidden);
     return r.greedy(b.y + (rows - 1) * t.hidden * 2, w.embed);
+}
+
+fn layerName(buf: *[24]u8, i: usize) ![]const u8 {
+    return std.fmt.bufPrint(buf, "lm_layer{d}", .{i});
 }
 
 /// The first largest bf16 logit (torch.argmax's tie rule); a NaN logit wins, as torch's max does.
@@ -128,6 +143,15 @@ pub fn argmax(logits: []const u16) u32 {
         }
     }
     return @intCast(best);
+}
+
+/// The pick's lead over the best other logit (a greedy difference is listed with it).
+pub fn margin(logits: []const u16, best: u32) f32 {
+    var other: f32 = -std.math.inf(f32);
+    for (logits, 0..) |bits, i| if (i != best) {
+        other = @max(other, @as(f32, @bitCast(@as(u32, bits) << 16)));
+    };
+    return @as(f32, @bitCast(@as(u32, logits[best]) << 16)) - other;
 }
 
 /// RoPE's cos and sin at positions [0, n) as transformers stores them: fp32 angles, the values cast to bf16.
@@ -149,6 +173,10 @@ pub fn ropeTables(t: cfg.Text, cs: []f32, sn: []f32, n: usize) void {
 test "argmax: the first of equal logits, a NaN first" {
     try std.testing.expectEqual(@as(u32, 1), argmax(&.{ 0x3f80, 0x4000, 0x4000 }));
     try std.testing.expectEqual(@as(u32, 2), argmax(&.{ 0x3f80, 0x4000, 0x7fc0 }));
+}
+
+test "margin: the lead over the runner-up" {
+    try std.testing.expectEqual(@as(f32, 1), margin(&.{ 0x3f80, 0x4000, 0x3f80 }, 1));
 }
 
 test "ropeTables: position 0 is cos 1, sin 0; the halves repeat" {
