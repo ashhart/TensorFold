@@ -19,6 +19,8 @@ Placement is family-specific; use the selected family's current native recipe. `
 
 New community-v2 receipts carry an optional `group` object with 1-8 loaded ranks, per-node hardware and a `single-node` or `multi-node` category. The server gathers it at startup and HTTP reads its frozen snapshot. `settings.rank_count` must agree. [Loaded group receipts](loaded-group-receipts.md) defines the fields, validation and receiver partitions. Ranks sharing a node are not multiple nodes; identical hardware names on two nodes do not merge them.
 
+Flash Next registers engine cleanup before constructing its loaded-rank inventory, so a failed startup inventory releases the loaded engine.
+
 V1 remains byte-for-byte unchanged, accepting 1, 2 or null as before. Legacy v2 receipts without `group` keep that bound. Missing, unsupported or inconsistent inventories remain unranked. No client or environment rank hint can fill them. ROCm distributed inventory remains unavailable. Community-v2 publication stays disabled until the receiver accepts and separates its new fields.
 
 ## The settings the ranks agreed on
