@@ -29,13 +29,15 @@ fn axisTaps(comptime torch: bool, index: u32, size: u32, side: u32) AxisTaps {
     return out;
 }
 
-/// PyTorch v2.10.0 CPU linspace, RangeFactoriesKernel.cpp; BSD-3-Clause in LICENSES/PyTorch-BSD-3.txt.
+/// Element `index` of `size` f32 points over [0, side - 1]: head counts up by the step, tail fuses down from the end.
 fn coordinate(index: u32, size: u32, side: u32) f32 {
     if (size <= 1) return 0;
+    std.debug.assert(side >= 1 and index < size);
     const end: f32 = @floatFromInt(side - 1);
-    const step = end / @as(f32, @floatFromInt(size - 1));
+    const step: f32 = end / @as(f32, @floatFromInt(size - 1));
     if (index < size / 2) return step * @as(f32, @floatFromInt(index));
-    return @mulAdd(f32, -step, @as(f32, @floatFromInt(size - index - 1)), end);
+    const from_end: f32 = @floatFromInt(size - 1 - index);
+    return @mulAdd(f32, -step, from_end, end);
 }
 
 fn tapsOf(comptime torch: bool, row: u32, col: u32, gh: u32, gw: u32, side: u32) Taps {
