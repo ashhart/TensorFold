@@ -7,6 +7,8 @@ pub const thinking_efforts = [_][]const u8{ "low", "medium", "high", "max" };
 
 pub const Config = struct {
     dsa: ?dsa_config.Indexer = null,
+    /// Only cut-down synthetic diagnostics may evaluate the unconfirmed long-context index schedule.
+    experimental_index: bool = false,
     hidden: u32 = 7168,
     layers: u32 = 93,
     vocab: u32 = 163840,
@@ -36,6 +38,11 @@ pub const Config = struct {
     full_attn: std.StaticBitSet(128) = defaultFull(),
 
     pub fn checkEnd(c: *const Config, pos: u32, rows: u32) !void {
+        if (c.experimental_index) {
+            if (c.dsa == null or c.layers >= 93 or c.experts >= 896 or c.vocab >= 163840) return error.KimiSyntheticIndexOnly;
+            if (@as(u64, pos) + rows > 65536) return error.KimiIndexCapacity;
+            return;
+        }
         if (c.dsa != null) try dsa_config.checkEnd(pos, rows);
     }
 
@@ -145,4 +152,22 @@ test "K3's defaults: 69 KDA and 24 MLA layers, layer 0 KDA, layers 3 and 92 MLA"
 
 test {
     _ = @import("config_test.zig");
+}
+
+test "Kimi experimental index mode cannot bypass native release admission" {
+    var c: Config = .{ .dsa = .{}, .experimental_index = true };
+    try std.testing.expectError(error.KimiSyntheticIndexOnly, c.checkEnd(0, 2049));
+    c.layers = 1;
+    c.experts = 16;
+    c.vocab = 512;
+    try c.checkEnd(0, 65536);
+    try std.testing.expectError(error.KimiIndexCapacity, c.checkEnd(65536, 1));
+    c.experimental_index = false;
+    try std.testing.expectError(error.K31ContextLimit, c.checkEnd(0, 2048));
+}
+
+test "Kimi native JSON retains the capped mode for the released K3.1 config" {
+    const c = try parse(std.testing.allocator, @embedFile("fixtures/k31-config.json"));
+    try std.testing.expect(!c.experimental_index);
+    try std.testing.expectError(error.K31ContextLimit, c.checkEnd(0, 2048));
 }

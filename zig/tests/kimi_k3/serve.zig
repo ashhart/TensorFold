@@ -8,7 +8,7 @@ const Synth = @import("synth.zig").Synth;
 const M = k3.backend.Metal;
 const A = std.mem.Allocator;
 
-const Proposal = struct {
+pub const Proposal = struct {
     ids: [7]u32 = .{ 1, 2, 3, 4, 5, 6, 7 },
     widest: u32 = 0,
     rounds: usize = 0,
@@ -29,7 +29,7 @@ const Proposal = struct {
     }
 };
 
-fn tokens(a: A, io: std.Io, m: *M, prompt: []const u32, proposal: ?*Proposal, saved: ?*k3.snapshot.Snap, sample: ?lanes.Sampling) ![]u32 {
+pub fn tokens(a: A, io: std.Io, m: *M, prompt: []const u32, proposal: ?*Proposal, saved: ?*k3.snapshot.Snap, sample: ?lanes.Sampling) ![]u32 {
     var config = try lanes.Config.init(a, m.facts(), k3.backend.window, k3.backend.window - 1);
     defer config.deinit(a);
     config.timed = false;
@@ -49,7 +49,7 @@ fn tokens(a: A, io: std.Io, m: *M, prompt: []const u32, proposal: ?*Proposal, sa
     return a.dupe(u32, s.emitted());
 }
 
-fn together(a: A, io: std.Io, m: *M, prompts: []const []const u32, answers: []const []const u32, sample: ?lanes.Sampling) !void {
+pub fn together(a: A, io: std.Io, m: *M, prompts: []const []const u32, answers: []const []const u32, sample: ?lanes.Sampling) !void {
     var config = try lanes.Config.init(a, m.facts(), k3.backend.window, k3.backend.window - 1);
     defer config.deinit(a);
     config.timed = false;
@@ -86,6 +86,11 @@ pub fn main(init: std.process.Init) !void {
     c.vocab = 512;
     c.full_attn = .empty;
     c.full_attn.set(3);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len > 1) {
+        if (args.len != 2 or !std.mem.eql(u8, args[1], "--k31")) return error.Usage;
+        c.dsa = .{};
+    }
     var graph = try k3.graph.Graph.load(a, gpu.device, gpu.queue, &gpu.k, c, source.source());
     defer graph.deinit();
     source.sync();
@@ -101,6 +106,9 @@ pub fn main(init: std.process.Init) !void {
     const solo = try tokens(a, init.io, m, &p1, null, null, null);
     defer a.free(solo);
     try std.testing.expect(!std.mem.eql(u16, first_logits, m.logits(0)));
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(first_logits), &digest, .{});
+    std.debug.print("KIMI_NATIVE_LOGITS first={x}\n", .{digest});
     std.debug.print("KIMI_NATIVE_TOKENS plain={any} other_prompt={any}; finite logits differ across prompts\n", .{ plain, solo });
     var proposal: Proposal = .{};
     const drafted = try tokens(a, init.io, m, &p0, &proposal, null, null);

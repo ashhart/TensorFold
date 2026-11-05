@@ -15,7 +15,7 @@ inline float k31_index_sum(float v) {
 }
 
 // Assumption: BF16 projection, biased population LayerNorm in FP32, one BF16 store, and no index RoPE.
-kernel void k3_index_key(const device bfloat* proj [[buffer(0)]], const device bfloat* w [[buffer(1)]],
+[[kernel, max_total_threads_per_threadgroup(32)]] void k3_index_key(const device bfloat* proj [[buffer(0)]], const device bfloat* w [[buffer(1)]],
                          const device bfloat* b [[buffer(2)]], const device K31IndexRow* rows [[buffer(3)]],
                          constant K31IndexArgs& a [[buffer(4)]], device bfloat* cache [[buffer(5)]],
                          uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
@@ -34,7 +34,7 @@ kernel void k3_index_key(const device bfloat* proj [[buffer(0)]], const device b
 }
 
 // Assumption: heads in order, sequential FMA dots, inclusive causal visibility, the GLM score's two scales.
-kernel void k3_index_scores(const device bfloat* q [[buffer(0)]], const device bfloat* weights [[buffer(1)]],
+[[kernel, max_total_threads_per_threadgroup(128)]] void k3_index_scores(const device bfloat* q [[buffer(0)]], const device bfloat* weights [[buffer(1)]],
                             const device bfloat* cache [[buffer(2)]], const device K31IndexRow* rows [[buffer(3)]],
                             constant K31IndexArgs& a [[buffer(4)]], device float* scores [[buffer(5)]],
                             uint2 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
@@ -67,7 +67,7 @@ inline uint k31_index_order(float v) {
 }
 
 // Our GLM radix selection with an explicit experimental exceptional-value order; selected keys remain chronological.
-kernel void k3_index_topk(const device float* score [[buffer(0)]], device K31IndexRow* rows [[buffer(1)]],
+[[kernel, max_total_threads_per_threadgroup(1024)]] void k3_index_topk(const device float* score [[buffer(0)]], device K31IndexRow* rows [[buffer(1)]],
                           constant K31IndexArgs& a [[buffer(2)]], device uint* list [[buffer(3)]],
                           uint r [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
                           uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {

@@ -7,6 +7,11 @@ const Indexer = @import("weights.zig").Indexer;
 const Ref = @import("kernels.zig").Ref;
 const MlaArgs = @import("kernels.zig").MlaArgs;
 
+pub const source = @import("kimi_index_sources").index;
+pub const attention_source = @import("kimi_index_sources").attention;
+pub const dense_source = @import("kimi_index_sources").dense;
+pub const common_source = @import("kimi_index_sources").common;
+
 pub const heads = 32;
 pub const dim = 128;
 pub const topk = 2048;

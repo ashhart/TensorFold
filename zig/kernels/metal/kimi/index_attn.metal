@@ -61,7 +61,7 @@ kernel void k3_index_attend(const device bfloat* q [[buffer(0)]], const device f
 }
 
 // Identical split merge to K3, with the selected count replacing the dense visible-key count.
-kernel void k3_index_merge(const device float* partial [[buffer(0)]], const device K31AttnRow* rows [[buffer(1)]],
+[[kernel, max_total_threads_per_threadgroup(256)]] void k3_index_merge(const device float* partial [[buffer(0)]], const device K31AttnRow* rows [[buffer(1)]],
                            device float* olat [[buffer(2)]], constant K31MlaArgs& a [[buffer(3)]],
                            uint2 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
   const uint r = tg.y, hl = tg.x, n = rows[r].nkeys;
