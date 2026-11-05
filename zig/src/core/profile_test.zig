@@ -105,6 +105,18 @@ test "stable profile: the GLM host KV tier registers as an exact-one switch a fa
     }
 }
 
+test "stable profile: GLM's raw prompt tail registers as an exact-one switch, off unless set" {
+    const e = p.entry(.TF_GLM_PROMPT_TAIL);
+    try t.expectEqual(p.Class.identical, e.class);
+    try t.expectEqual(p.Syntax.one, e.syntax);
+    try t.expect(e.applies("glm5_next", "cuda") and !e.applies("qwen3_5", "cuda"));
+    try t.expectEqualStrings("#2226", e.evidence);
+    try t.expect(p.resolve(.stable, .TF_GLM_PROMPT_TAIL, null) == null);
+    try t.expect(e.differs("1"));
+    for ([_][]const u8{ "0", "", "false", " 1 " }) |raw| try t.expect(!e.differs(raw));
+    try t.expectEqual(p.Switch.TF_GLM_PROMPT_TAIL, p.registered("TF_GLM_PROMPT_TAIL").?);
+}
+
 test "stable profile: a runtime name lookup covers the registry and leaves every other name to libc" {
     try t.expectEqual(p.Switch.TF_GLM_KV_HOST, p.registered("TF_GLM_KV_HOST").?);
     try t.expectEqual(p.Switch.TF_QWEN_KV_PAGES, p.registered("TF_QWEN_KV_PAGES").?);

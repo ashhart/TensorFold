@@ -42,7 +42,7 @@ profile supplies no value. Registry metadata comes directly from the same table 
 Initial coverage is:
 
 - Qwen3.5 dense/MoE on CUDA: `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL`, `TF_QWEN_KV_SHARE`.
-- GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`.
+- GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`.
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, Spark2.5 and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
@@ -51,7 +51,8 @@ Initial coverage is:
 switch is faster for every shape, device, or workload. The `*_ALL` checks stay `debug`; Flash Next paging remains
 `experimental`. No class turns a switch on. GLM's existing automatic paging default is preserved; other default-on
 paging outside this registry is unchanged. The two GLM host-memory switches carry [#1795](https://github.com/ashhart/TensorFold/pull/1795)'s
-identical tokens at TP=2 on two GB10s. `TF_GLM_KV_HOST_GIB` stays outside the registry: it sizes those pages rather
+identical tokens at TP=2 on two GB10s, and `TF_GLM_PROMPT_TAIL` carries [#2226](https://github.com/ashhart/TensorFold/pull/2226)'s.
+`TF_GLM_KV_HOST_GIB` stays outside the registry: it sizes those pages rather
 than choosing a policy, and its reader keeps its own default.
 
 A reader that resolves its switch by name uses `core.profile.lookup`: a registered name comes from this registry, and

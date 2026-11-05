@@ -35,6 +35,13 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        // TF_GLM_PROMPT_TAIL: rank 0's prompt cache reads it (cuda_snaps' cacheRules); a typo is refused on every rank
+        if (get("TF_GLM_PROMPT_TAIL")) |v| {
+            if (!std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "1")) {
+                problem.* = "TF_GLM_PROMPT_TAIL: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         if (get("TF_GLM_MM")) |v| {
             if (std.mem.eql(u8, v, "0")) s.tiled = false else if (!std.mem.eql(u8, v, "1")) {
                 problem.* = "TF_GLM_MM: 0 or 1";
