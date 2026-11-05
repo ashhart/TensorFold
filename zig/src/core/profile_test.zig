@@ -78,6 +78,18 @@ test "stable profile: reporting follows the original count and exact-one flag se
     for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |v| try t.expect(!flag.differs(v));
 }
 
+test "stable profile: pinned CUDA downloads are an exact-one switch on every CUDA model type and no other backend" {
+    const e = p.entry(.TF_CUDA_PINNED_DOWNLOAD);
+    try t.expectEqual(p.Class.identical, e.class);
+    try t.expectEqual(p.Syntax.one, e.syntax);
+    for (p.cuda_families) |family| {
+        try t.expect(e.applies(family, "cuda"));
+        for ([_][]const u8{ "mlx", "rocm", "hip", "xpu" }) |backend| try t.expect(!e.applies(family, backend));
+    }
+    try t.expect(e.differs("1"));
+    for ([_][]const u8{ "", "0", "01", "true", "on", " 1" }) |raw| try t.expect(!e.differs(raw));
+}
+
 test "stable profile: GLM paging registers automatic policy without supplying or coercing its value" {
     const e = p.entry(.TF_KV_PAGES);
     try t.expectEqual(p.Syntax.auto, e.syntax);

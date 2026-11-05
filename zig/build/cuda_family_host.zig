@@ -149,8 +149,11 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-live-host", "Live CUDA launch buckets and startup warmups without devices").dependOn(&live_run.step);
 }
 
-pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {
+pub fn registerNativeChecks(b: *std.Build, native: *std.Build.Module, step: *std.Build.Step) void {
     const family_copies = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA lane copies:"} }));
     b.step("test-family-copies-host", "Actual Gemma, MiniMax, Spark, Kolibri and Dory copy policies through the lane core").dependOn(&family_copies.step);
     step.dependOn(&family_copies.step);
+    const scope = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA switch scope:"} }));
+    b.step("test-cuda-switch-scope-host", "CUDA runtime switches are registered for every served CUDA model type").dependOn(&scope.step);
+    step.dependOn(&scope.step);
 }

@@ -344,7 +344,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
     b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
-    @import("cuda_family_host.zig").registerCopyFamilies(b, native, step);
+    @import("cuda_family_host.zig").registerNativeChecks(b, native, step);
     const copies = b.step("test-nemotron-copies-host", "Nemotron CUDA copy gates and plain equality without devices");
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
         const rt = runtime(b, host, mode, &.{});

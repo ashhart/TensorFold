@@ -190,9 +190,11 @@ pub const DeviceBuffer = struct {
         try @import("copy_source.zig").synchronousCopy(self.d, dst, bytes, std.heap.page_allocator);
     }
 
+    /// TF_CUDA_PINNED_DOWNLOAD=1 has the driver write a reused pinned bounce, then copies it into `out` (#2102).
     pub fn download(self: DeviceBuffer, offset: usize, out: []u8) Error!void {
         const src = try self.span(offset, out.len);
         if (out.len == 0) return;
+        if (@import("pinned_download.zig").enabled()) return @import("pinned_download.zig").download(self.d, src, out);
         try self.d.check(self.d.api.cuMemcpyDtoH_v2(out.ptr, src, out.len), "cuMemcpyDtoH");
     }
 
