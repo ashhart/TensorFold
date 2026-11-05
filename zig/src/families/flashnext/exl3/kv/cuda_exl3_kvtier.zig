@@ -308,12 +308,14 @@ pub const LaneSel = struct {
     }
 };
 
-/// One block of attention rows: where its queries and outputs are, its rows' selection in the batch's lists.
-pub const Block = struct { q: u64, ao: u64, kc: u64, vc: u64, pos: u64, sel: usize, m: usize, ends: usize, first_row: usize };
+/// One block's owned heads, query/output rows and selection in the batch's lists.
+pub const Block = struct { q: u64, ao: u64, kc: u64, vc: u64, pos: u64, sel: usize, m: usize, ends: usize, first_row: usize, heads: @import("../../cuda_heads.zig").Heads };
 
 /// Attention for `a.m` rows: plan, fetch, remap, chunks, merge; sparse rows a few at a time, within the layer's slots.
 pub fn attend(s: *LaneSel, b: anytype, ai: usize, a: Block) !void {
     const st = b.s;
+    const h = a.heads;
+    const qr = h.q * wt.head_dim * 2;
     const per = if (a.first_row / ratio > top) s.rowsPerPlan() else a.m;
     var first: usize = 0;
     while (first < a.m) : (first += per) {
@@ -323,7 +325,7 @@ pub fn attend(s: *LaneSel, b: anytype, ai: usize, a: Block) !void {
         const spr = st.qspr + (a.sel + first) * 4;
         if (a.ends / ratio > top) try s.page(b.stream, ai, ids, nk, spr, cnt);
         const chunks = (@min(a.ends, wt.dense_keys) + 511) / 512;
-        try b.tri.attnChunks(a.q + first * wt.q_heads * wt.head_dim * 2, a.kc, a.vc, a.pos, st.po, st.pm, st.pl, ids, nk, spr, cnt, wt.kv_heads, chunks, true, b.seq.pg);
-        try b.tri.attnMerge(st.po, st.pm, st.pl, a.pos, a.ao + first * wt.out_k * 2, nk, spr, cnt, wt.kv_heads, true);
+        try b.tri.attnChunks(a.q + first * qr, a.kc, a.vc, a.pos, st.po, st.pm, st.pl, ids, nk, spr, cnt, h, chunks, true, b.seq.pg);
+        try b.tri.attnMerge(st.po, st.pm, st.pl, a.pos, a.ao + first * qr, nk, spr, cnt, h, true);
     }
 }
