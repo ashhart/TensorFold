@@ -259,11 +259,24 @@ fn withoutDots(a: Allocator, url: []const u8) Allocator.Error![]const u8 {
     return out.items;
 }
 
+/// Whether `url` begins with a scheme: a letter, then letters, digits, `+`, `-` or `.`, then `:`.
+fn hasScheme(url: []const u8) bool {
+    if (url.len == 0 or !std.ascii.isAlphabetic(url[0])) return false;
+    var i: usize = 1;
+    while (i < url.len) : (i += 1) {
+        const ch = url[i];
+        if (ch == ':') return true;
+        if (ch == '/' or ch == '?' or ch == '#') return false;
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '+' or ch == '-' or ch == '.')) return false;
+    }
+    return false;
+}
+
 /// `location` resolved against `base` (absolute, scheme-relative, root-relative or path-relative).
 pub fn resolveUrl(a: Allocator, base: []const u8, location: []const u8) Allocator.Error![]const u8 {
     const loc = std.mem.trim(u8, location, " \t");
     if (std.ascii.startsWithIgnoreCase(loc, "http://") or std.ascii.startsWithIgnoreCase(loc, "https://")) return withoutDots(a, try a.dupe(u8, loc));
-    if (std.mem.indexOf(u8, loc, "://") != null) return a.dupe(u8, loc); // an absolute URL of another scheme stays itself
+    if (hasScheme(loc)) return a.dupe(u8, loc); // an absolute URL of another scheme stays itself
     const scheme_end = std.mem.indexOf(u8, base, "://") orelse return a.dupe(u8, loc);
     if (std.mem.startsWith(u8, loc, "//")) return withoutDots(a, try std.fmt.allocPrint(a, "{s}:{s}", .{ base[0..scheme_end], loc }));
     const host_start = scheme_end + 3;
@@ -307,6 +320,7 @@ test "redirect locations resolve against the page" {
     try std.testing.expectEqualStrings("https://a.org/p/sib", try resolveUrl(a, "https://a.org/p/q", "sib"));
     try std.testing.expectEqualStrings("https://a.org/sib", try resolveUrl(a, "https://a.org", "sib"));
     try std.testing.expectEqualStrings("ftp://files.example/a", try resolveUrl(a, "https://a.org/docs/intro", "ftp://files.example/a"));
+    try std.testing.expectEqualStrings("https://a.org/login?next=https://a.org/x", try resolveUrl(a, "https://a.org/docs/intro", "/login?next=https://a.org/x"));
 }
 
 test "a link that only replaces the query or the fragment stays on its page" {
