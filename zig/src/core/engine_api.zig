@@ -182,6 +182,8 @@ pub const Info = struct {
     thinking_budget: bool = true,
     /// The model can emit a reasoning block; false: all reply text is answer content, whatever enable_thinking renders.
     reasoning: bool = true,
+    /// The reply opens its own think block or answers without one: text that does not open a block is all answer.
+    reasoning_optional: bool = false,
     thinking_switch: bool = false, // server-set from the chat template (Server.init): an explicit thinking off is honoured
     thinking_applicable: bool = false, // server-set from the tokenizer (Server.init): the thinking close marker is one token
     /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).

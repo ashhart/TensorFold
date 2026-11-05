@@ -148,7 +148,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (gone.check()) return error.Cancelled;
     const thinking = input.prompt == null and (flag(f, "enable_thinking") orelse srv.config.enable_thinking);
     const instruct = input.prompt == null and !thinking and !input.own; // a client's chat with thinking off may take --instruct-sampling's set
-    const reasoning = thinking and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
+    // the prompt renders `thinking`; the reply reads `reasoning` (always, when the model decides for itself)
+    const reasoning = (thinking or (srv.markers.optional and input.prompt == null)) and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null);
     const effort = srv.effortFor(if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null);
     cx.clear_thinking = flag(f, "clear_thinking");
     cx.template_fields = f;
