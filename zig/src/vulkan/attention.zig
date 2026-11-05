@@ -208,7 +208,6 @@ pub const Attention = struct {
 
     // out_base offsets cache; trig uses omarchy_trig.h wrappers, not metal::cos/sin; exp/pow/cos may differ in ulps.
     fn ropeRun(a: *Attention, pipe: *dispatch.Pipeline, cmds: *Commands, plan: RopePlan, strides: RopeStrides, out_base: u64, items: u32, timeout_ns: u64) Error!void {
-        // bf16 addresses words of two halves; the f32 variants address one element per item with the same strides.
         // Passthrough inv_freq is exp(-i*beta), with beta=ln(1e7)/32, yielding 1e7^(-i/32) up to exp/pow ulps.
         var p: params.Params = .{
             .count = items,

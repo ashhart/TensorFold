@@ -172,7 +172,6 @@ pub const Ops = struct {
     }
 
     /// Contiguous same-kind raw copy through copy_general (dims 1, unit strides); strided copies are refused.
-    /// The word transport a kind rides: raw uint32 for f32, raw uint16 for bf16.
     pub fn copyPipeline(o: *Ops, kind: tensor.Kind) *dispatch.Pipeline {
         return switch (kind) {
             .f32, .u32 => &o.copy_u32,

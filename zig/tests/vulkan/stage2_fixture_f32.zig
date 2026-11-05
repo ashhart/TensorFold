@@ -1,5 +1,4 @@
-// The f32 activation pipelines' want formulas: no store rounding inside the wide layers, one RNE bf16 store
-// in each transition. Same case tables and bf16 inputs as stage2_fixture_ops; GPU probes compare against these.
+// The f32 activation pipelines' want formulas: no store rounding inside the wide layers, one RNE store at a transition.
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
