@@ -29,11 +29,41 @@ const served = [_]c.Shape{
     .{ .rows = 257, .n = 1024, .k = 128 },
 };
 
+/// The planted controls: each breaks one thing the served tile relies on, and must go red at its gate.
+pub const Plant = enum {
+    /// Each 16-deep step summed in BF16 (the small block): red at gate 4.
+    bf16_sum,
+    /// The big block's operand loads ignoring the stores' swizzle: red at gate 3 against the frozen block.
+    unswizzled,
+    /// The big block without its K loop's barriers: red at gate 3 against the frozen block.
+    unordered,
+
+    pub fn symbol(p: Plant) [:0]const u8 {
+        return switch (p) {
+            .bf16_sum => "tf_ctl_wmma12_bf16_sum",
+            .unswizzled => "tf_ctl_wmma12_unswizzled",
+            .unordered => "tf_ctl_wmma12_unordered",
+        };
+    }
+
+    fn name(p: Plant) []const u8 {
+        return switch (p) {
+            .bf16_sum => "control: WMMA dense tile summed in bf16",
+            .unswizzled => "control: WMMA big block loading unswizzled rows",
+            .unordered => "control: WMMA big block without its K-step barriers",
+        };
+    }
+
+    fn gate(p: Plant) g.Gate {
+        return if (p == .bf16_sum) .sums else .shapes;
+    }
+};
+
 /// One geometry's registration: every served shape runs on it, its own block's edges included.
-pub fn spec(wide: bool, geo: Shape, planted: bool) c.Spec {
+pub fn spec(wide: bool, geo: Shape, planted: ?Plant) c.Spec {
     const small = geo == .w12_small;
     return .{
-        .name = if (planted) "control: WMMA dense tile summed in bf16" else switch (geo) {
+        .name = if (planted) |p| p.name() else switch (geo) {
             .w12_small => if (wide) "hip dense_wmma12_gemm<W12Small> (bf16 weights, fp32 out)" else "hip dense_wmma12_gemm<W12Small> (bf16 weights, bf16 out)",
             else => if (wide) "hip dense_wmma12_gemm<W12Big> (bf16 weights, fp32 out)" else "hip dense_wmma12_gemm<W12Big> (bf16 weights, bf16 out)",
         },
@@ -43,7 +73,7 @@ pub fn spec(wide: bool, geo: Shape, planted: bool) c.Spec {
         .served = &served,
         .tiles = .{ .{ .size = if (small) 16 else 128 }, .{ .size = if (small) 64 else 128 }, .{ .size = 12288, .step = 128, .min = 128 } },
         // the big block's 64-deep swizzled steps must keep the bytes of the 32-deep block they replace (#2264)
-        .replaces = if (small or planted) null else "dense_wmma12_gemm<W12Geo<128, 128, 32, 2, 4>> (tf_ref_wmma12_k32)",
+        .replaces = if (small) null else "dense_wmma12_gemm<W12Geo<128, 128, 32, 2, 4>> (tf_ref_wmma12_k32)",
     };
 }
 
@@ -54,8 +84,9 @@ pub const DenseWmma12 = struct {
     wide: bool,
     /// The block geometry every shape runs on (both give equal bytes; each is gated on its own).
     geo: Shape,
-    /// The planted control (tf_ctl_wmma12_bf16_sum, the small block's arguments) in place of the served kernel.
+    /// A planted control (its kernel from the controls' object, its geometry's arguments) in place of the served one.
     planted: ?hip.Function = null,
+    plant: Plant = .bf16_sum,
     /// The big block's byte baseline (tf_ref_wmma12_k32, a frozen copy of the block it replaces).
     baseline: ?hip.Function = null,
     d: ?Dense = null,
@@ -73,8 +104,8 @@ pub const DenseWmma12 = struct {
     }
 
     pub fn kernel(self: *DenseWmma12) g.Kernel {
-        const sums: ?g.Gate = if (self.planted) |_| .sums else null;
-        return .{ .spec = spec(self.wide, self.geo, self.planted != null), .ctx = self, .vt = &vt, .control = sums };
+        const plant: ?Plant = if (self.planted != null) self.plant else null;
+        return .{ .spec = spec(self.wide, self.geo, plant), .ctx = self, .vt = &vt, .control = if (plant) |p| p.gate() else null };
     }
 
     const vt = g.hooks(DenseWmma12);

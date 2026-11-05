@@ -57,6 +57,12 @@ struct W12Step {
 #endif
 };
 
+// The served tile's staging: operand loads undo the stores' swizzle, and the K loop's barriers order LDS. The contract's
+// controls each break one (a swizzle the loads ignore, a K loop without its barriers) and must go red.
+struct W12Exact {
+    static constexpr bool swizzled_loads = true, ordered = true;
+};
+
 // Block (x, y) in launch order takes tile (bx, by): bands of kW12Band row blocks share each column block's weights.
 __device__ __forceinline__ void w12_band(int& bx, int& by) {
     const int cols = gridDim.x, rows = gridDim.y;
@@ -71,7 +77,7 @@ __device__ __forceinline__ void w12_band(int& bx, int& by) {
 // One G::BM x G::BN block. gfx12 wave32 operands: A lane l holds row l % 16 with k = 8 (l / 16) + i, B lane l column
 // l % 16 with the same k; D lane l, element i is row 8 (l / 16) + i, column l % 16.
 // Rows past m stage row 0 and columns past n the last column; neither is stored.
-template <class G, class Act, class Epi, class Step = W12Step, class Args>
+template <class G, class Act, class Epi, class Step = W12Step, class Fault = W12Exact, class Args>
 __device__ __forceinline__ void wmma12_gemm_tile(const Args& a) {
 #if TF_DEVICE_WMMA_GFX12
     constexpr int kW12M = G::BM, kW12N = G::BN, kW12K = G::BK, kW12Ld = G::Ld;
@@ -126,6 +132,8 @@ __device__ __forceinline__ void wmma12_gemm_tile(const Args& a) {
         }
     };
 
+    // an operand's chunk as the stores laid it out (a control's loads may ignore the swizzle)
+    const auto load_at = [](int r, int c) { return Fault::swizzled_loads ? w12_at<G>(r, c) : r * G::Ld + 8 * c; };
     f32x8 acc[TM][TN];
 #pragma unroll
     for (int i = 0; i < TM; ++i)
@@ -136,7 +144,7 @@ __device__ __forceinline__ void wmma12_gemm_tile(const Args& a) {
     const int koff = 8 * (lane >> 4);
     fetch(0);
     stash(0);
-    w12_sync();
+    if constexpr (Fault::ordered) w12_sync();
     for (int s = 0; s < steps; ++s) {
         const int buf = s & 1;
         if (s + 1 < steps) fetch(s + 1);
@@ -144,16 +152,16 @@ __device__ __forceinline__ void wmma12_gemm_tile(const Args& a) {
         for (int kk = 0; kk < kW12K; kk += 16) {
             bf16x8 av[TM], bv[TN];
 #pragma unroll
-            for (int i = 0; i < TM; ++i) av[i] = *reinterpret_cast<const bf16x8*>(&xs[buf][w12_at<G>(arow + 16 * i, (kk + koff) / 8)]);
+            for (int i = 0; i < TM; ++i) av[i] = *reinterpret_cast<const bf16x8*>(&xs[buf][load_at(arow + 16 * i, (kk + koff) / 8)]);
 #pragma unroll
-            for (int j = 0; j < TN; ++j) bv[j] = *reinterpret_cast<const bf16x8*>(&ws[buf][w12_at<G>(bcol + 16 * j, (kk + koff) / 8)]);
+            for (int j = 0; j < TN; ++j) bv[j] = *reinterpret_cast<const bf16x8*>(&ws[buf][load_at(bcol + 16 * j, (kk + koff) / 8)]);
 #pragma unroll
             for (int i = 0; i < TM; ++i)
 #pragma unroll
                 for (int j = 0; j < TN; ++j) acc[i][j] = Step::mma(av[i], bv[j], acc[i][j]);
         }
         if (s + 1 < steps) stash(buf ^ 1);
-        w12_sync();
+        if constexpr (Fault::ordered) w12_sync();
     }
 #pragma unroll
     for (int i = 0; i < TM; ++i) {
