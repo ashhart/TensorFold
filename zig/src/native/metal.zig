@@ -38,6 +38,8 @@ const affine_widths = blk: {
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
 
 pub const families: []const api.Family = &.{
+    .{ .model_type = "kimi_k3", .formats = &.{"mxfp4"} },
+    .{ .model_type = "kimi_k31", .formats = &.{"mxfp4"} },
     .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats },
     .{ .model_type = "fish_omni", .formats = &.{ "fp8-block128", "nvfp4" } },
@@ -170,6 +172,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
+    if (std.mem.eql(u8, o.model_type, "kimi_k3") or std.mem.eql(u8, o.model_type, "kimi_k31"))
+        return @import("kimi_metal.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_metal.zig").open(a, gpa, io, o, problem);
     const dense = (std.mem.eql(u8, o.model_type, "qwen3_5") and @import("qwen27_engine.zig").owns(a, io, o.dir)) or std.mem.eql(u8, o.model_type, "qwen3_5_moe");
     if (try refusal(a, o, dense)) |why| {
@@ -409,6 +413,7 @@ pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, prob
 }
 
 test {
+    _ = @import("kimi_metal.zig");
     _ = metal_slide;
     _ = @import("metal_slide_test.zig");
     _ = @import("draft_sources_metal_test.zig");

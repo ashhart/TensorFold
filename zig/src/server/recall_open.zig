@@ -1,7 +1,6 @@
 //! Recall's record for the served tokenizer: its identity, its directory, and refusal of another tokenizer's record.
 const std = @import("std");
 const api = @import("engine_api");
-const tokenizer = @import("tokenizer");
 const cli = @import("cli.zig");
 const hf_text = @import("hf_text.zig");
 const rs = api.recall_store;
@@ -18,7 +17,7 @@ pub fn open(
     problem: *[]const u8,
 ) !?*rs.Store {
     if (!args.recall) return null;
-    const digest = try tokenizer.identity(&text.tok, a);
+    const digest = try text.identity(a);
     const identity: rs.Identity = .{ .digest = digest, .vocab = text.text().vocabSize(), .name = served };
     const dir = args.recall_dir orelse try rs.defaultDir(a, identity);
     const cap: u64 = @intFromFloat(args.recall_gib * (1 << 30));
