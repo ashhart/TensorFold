@@ -6,8 +6,20 @@ const Ref = @import("projection.zig").Ref;
 const glue = @import("glue.zig");
 pub const planning = @import("attention_plan.zig");
 pub const Plan = planning.Plan;
-pub const Cache = struct { keys: Ref, values: Ref, capacity: u32, key_stride: u32 = 0, value_stride: u32 = 0 };
+pub const Cache = struct {
+    keys: Ref,
+    values: Ref,
+    capacity: u32,
+    key_stride: u32 = 0,
+    value_stride: u32 = 0,
+    /// TF_QWEN27_METAL_KV_PAGES: keys and values are this layer's part of every page; rows found through the table.
+    pages: ?Pages = null,
+};
+/// A paged stream's table (u32 page ids, 256 rows a page) and the bytes from one page to the next in the arena.
+pub const Pages = struct { table: Ref, page_bytes: u64 };
 const CachePtrs = extern struct { keys: u64, values: u64 };
+/// The paged kernels' read pointers (kernels/metal/qwen27/paged.zig): main's two and the stream's table and page size.
+const PagedPtrs = extern struct { keys: u64, values: u64, table: u64, page_bytes: u64 };
 /// The pack and append kernels' arguments (public for the kernel contract's io check).
 pub const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
 /// Keep's gather and scatter: rows kept, and the KV heads a staging row holds.
@@ -30,6 +42,7 @@ pub const Binding = struct {
     uploaded: ?[32]u8 = null,
     streams: u32 = 0,
     pointers: [planning.max_streams]CachePtrs = @splat(.{ .keys = 0, .values = 0 }),
+    paged: bool = false,
     strides: [planning.max_streams][2]u32 = @splat(.{ 0, 0 }),
     kept: ?u32 = null,
     pub fn init(device: mtl.Device, limits: Limits) !Binding {
@@ -37,7 +50,7 @@ pub const Binding = struct {
         var buffers: [3]mtl.Buffer = undefined;
         var made: usize = 0;
         errdefer for (buffers[0..made]) |buffer| buffer.deinit();
-        for ([_]usize{ (planning.global_words + planning.max_streams * planning.stream_words) * 4, planning.max_streams * @sizeOf(CachePtrs), limits.rows * 16 }, &buffers) |allocation_bytes, *buffer| {
+        for ([_]usize{ (planning.global_words + planning.max_streams * planning.stream_words) * 4, planning.max_streams * @sizeOf(PagedPtrs), limits.rows * 16 }, &buffers) |allocation_bytes, *buffer| {
             buffer.* = try device.buffer(allocation_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             made += 1;
         }
@@ -53,11 +66,24 @@ pub const Binding = struct {
         if (plan.rows > b.limits.rows or plan.streams > b.limits.streams or caches.len != plan.streams or !plan.geometry.sameShape(b.limits.geometry)) return error.AttentionLimits;
         var meta = plan.meta;
         var table: [planning.max_streams]CachePtrs = @splat(.{ .keys = 0, .values = 0 });
+        var paged: [planning.max_streams]PagedPtrs = @splat(.{ .keys = 0, .values = 0, .table = 0, .page_bytes = 0 });
+        const pages = caches.len > 0 and caches[0].pages != null;
         for (caches, 0..) |cache, i| {
             const at = 8 + i * 12;
             const start: u32 = @intCast(meta[at + 4]);
             const rows: u32 = @intCast(meta[at + 2]);
             if (cache.capacity == 0 or cache.capacity > std.math.maxInt(i32) / b.limits.geometry.dim or @as(u64, start) + rows > cache.capacity) return error.AttentionCapacity;
+            if ((cache.pages != null) != pages) return error.AttentionMixedPages;
+            if (cache.pages) |p| {
+                // a page's head runs are [kv_heads][256][dim]: no stride, and no span past the table's pages
+                try spanAligned(p.table, pageCount(cache.capacity) * 4, 4);
+                if (cache.key_stride != 0 or cache.value_stride != 0 or p.page_bytes % 16 != 0) return error.AttentionCacheStride;
+                table[i] = .{ .keys = cache.keys.buffer.gpuAddress() + cache.keys.offset, .values = cache.values.buffer.gpuAddress() + cache.values.offset };
+                paged[i] = .{ .keys = table[i].keys, .values = table[i].values, .table = p.table.buffer.gpuAddress() + p.table.offset, .page_bytes = p.page_bytes };
+                meta[at + 7] = @intCast(cache.capacity * b.limits.geometry.dim);
+                meta[at + 8] = @intCast(cache.capacity * b.limits.geometry.dim);
+                continue;
+            }
             const ks = if (cache.key_stride == 0) cache.capacity * b.limits.geometry.dim else cache.key_stride;
             const vs = if (cache.value_stride == 0) cache.capacity * b.limits.geometry.dim else cache.value_stride;
             if (ks < @as(u64, cache.capacity) * b.limits.geometry.dim or vs < @as(u64, cache.capacity) * b.limits.geometry.dim or ks > std.math.maxInt(i32) or vs > std.math.maxInt(i32)) return error.AttentionCacheStride;
@@ -71,11 +97,12 @@ pub const Binding = struct {
             meta[at + 7] = @intCast(ks);
             meta[at + 8] = @intCast(vs);
         }
-        @memcpy(b.get(.caches).buffer.slice(CachePtrs, planning.max_streams), &table);
+        if (pages) @memcpy(b.get(.caches).buffer.slice(PagedPtrs, planning.max_streams), &paged) else @memcpy(b.get(.caches).buffer.slice(CachePtrs, planning.max_streams), &table);
         @memcpy(b.get(.meta).buffer.slice(i32, meta.len), &meta);
         b.uploaded = fingerprint(plan);
         b.streams = plan.streams;
         b.pointers = table;
+        b.paged = pages;
         for (caches, 0..) |_, i| b.strides[i] = .{ @intCast(meta[8 + i * 12 + 7]), @intCast(meta[8 + i * 12 + 8]) };
         b.kept = null;
     }
@@ -91,6 +118,11 @@ pub const Binding = struct {
     fn checkCaches(b: *const Binding, caches: []const Cache) !void {
         if (b.uploaded == null or caches.len != b.streams) return error.AttentionNotUploaded;
         for (caches, 0..) |cache, i| {
+            if ((cache.pages != null) != b.paged) return error.AttentionNotUploaded;
+            if (cache.pages != null) {
+                if (cache.keys.buffer.gpuAddress() + cache.keys.offset != b.pointers[i].keys or cache.values.buffer.gpuAddress() + cache.values.offset != b.pointers[i].values) return error.AttentionNotUploaded;
+                continue;
+            }
             if (cache.capacity == 0 or cache.capacity > std.math.maxInt(i32) / b.limits.geometry.dim or cache.keys.buffer.gpuAddress() + cache.keys.offset != b.pointers[i].keys or cache.values.buffer.gpuAddress() + cache.values.offset != b.pointers[i].values) return error.AttentionNotUploaded;
             const ks = if (cache.key_stride == 0) cache.capacity * b.limits.geometry.dim else cache.key_stride;
             const vs = if (cache.value_stride == 0) cache.capacity * b.limits.geometry.dim else cache.value_stride;
@@ -190,6 +222,20 @@ fn cacheBytes(cache: Cache, key: bool, geometry: planning.Geometry) usize {
     const stride: usize = if (requested == 0) @as(usize, cache.capacity) * geometry.dim else requested;
     return ((@as(usize, geometry.kv_heads) - 1) * stride + @as(usize, cache.capacity) * geometry.dim) * 2;
 }
+/// The caches' buffers, and a paged stream's table, resident for the pass's indirect reads.
+fn useCaches(e: mtl.ComputeEncoder, caches: []const Cache) void {
+    for (caches) |cache| {
+        e.useResource(cache.keys.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        e.useResource(cache.values.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        if (cache.pages) |p| e.useResource(p.table.buffer, mtl.ResourceUsage.read);
+    }
+}
+/// Pages a stream of `rows` rows takes (metal_kv_pages.page_tokens a page).
+pub fn pageCount(rows: u32) usize {
+    return (@as(usize, rows) + page_rows - 1) / page_rows;
+}
+/// Rows a page holds: kernels/metal/core/kv_pages.h's TF_PAGE_TOKENS.
+pub const page_rows = 256;
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
 }
@@ -316,15 +362,17 @@ pub const Attention = struct {
         }
         const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = q_bytes }, .{ .ref = k, .bytes = kv_bytes }, .{ .ref = v, .bytes = kv_bytes }, .{ .ref = out, .bytes = q_bytes } };
         for (caches) |cache| for (operands) |operand| {
+            if (cache.pages != null) {
+                // the arena holds only pages: an operand in it at all is an alias
+                if (operand.ref.buffer.id == cache.keys.buffer.id or operand.ref.buffer.id == cache.values.buffer.id) return error.AttentionAlias;
+                continue;
+            }
             try disjoint(cache.keys, cacheBytes(cache, true, plan.geometry), operand.ref, operand.bytes);
             try disjoint(cache.values, cacheBytes(cache, false, plan.geometry), operand.ref, operand.bytes);
         };
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-        for (caches) |cache| {
-            e.useResource(cache.keys.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-            e.useResource(cache.values.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-        }
+        useCaches(e, caches);
         const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16, .heads = g.heads, .kv_heads = g.kv_heads, .dim = g.dim, .group = g.group() };
         e.setPipeline(a.io[2]);
         bind(e, .{ k, v, binding.get(.caches), binding.get(.meta), scratch.get(.nodes) });
@@ -449,10 +497,7 @@ pub const Attention = struct {
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         if (kept == 0) return;
-        for (caches) |cache| {
-            e.useResource(cache.keys.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-            e.useResource(cache.values.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
-        }
+        useCaches(e, caches);
         e.setPipeline(a.io[5]);
         bind(e, .{ binding.get(.caches), binding.get(.meta), binding.get(.keep_map), scratch.get(.keep_k), scratch.get(.keep_v) });
         e.setValue(args, 5);
@@ -467,6 +512,7 @@ pub const Attention = struct {
 };
 test "cache and pack descriptors match native pointer and six-word ABI" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(CachePtrs));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PagedPtrs));
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(PackArgs));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(planning.KeepRow));
 }

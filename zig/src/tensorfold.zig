@@ -122,6 +122,8 @@ pub const shared_attention = @import("core/shared_attention.zig");
 pub const tile_qmm = @import("core/tile_qmm.zig");
 
 pub const gpu_profile = @import("core/gpu_profile.zig");
+/// The core KV pool on Metal: one arena of pages and each stream's table (qwen27's TF_QWEN27_METAL_KV_PAGES).
+pub const metal_kv_pages = @import("core/metal_kv_pages.zig");
 
 pub const draft_ops = @import("draft_ops");
 
