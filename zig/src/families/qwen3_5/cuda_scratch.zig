@@ -80,6 +80,13 @@ pub fn scratch(e: anytype, rows: usize, mode: Mode) !usize {
     return t.total;
 }
 
+fn growthCapacity(capacity: usize, rows: usize) usize {
+    if (capacity >= rows) return capacity;
+    var target = if (capacity == 0) rows else capacity;
+    while (target < rows) target = @min(max_rows, target * 2);
+    return target;
+}
+
 fn pendingBytes(capacity: usize, rows: usize, replacement: usize) usize {
     return if (capacity < rows) replacement else 0;
 }
@@ -98,18 +105,21 @@ pub fn unallocatedScratchBytes(e: anytype) !usize {
 /// Pending scratch bytes for a known prompt INT8 setting, including the replacement peak.
 pub fn unallocatedScratchBytesFor(e: anytype, int8_on: bool) !usize {
     const rows = @min(e.scratch_rows, max_rows);
+    // Admission must reserve the same geometric capacity ensureScratch/ensureRows will allocate.
+    const main_capacity = growthCapacity(e.scratch_capacity, rows);
     var measured = e.*;
-    const full = try scratch(&measured, rows, .measure);
-    const main_new = pendingBytes(e.scratch_capacity, rows, full);
+    const full = try scratch(&measured, main_capacity, .measure);
+    const main_new = pendingBytes(e.scratch_capacity, main_capacity, full);
     var main_old: usize = 0;
     if (main_new > 0 and e.scratch_capacity > 0) {
         var old_measure = e.*;
         main_old = try scratch(&old_measure, e.scratch_capacity, .measure);
     }
-    const int8_new = if (int8_on and e.int8.capacity < rows) blk: {
+    const int8_capacity = growthCapacity(e.int8.capacity, rows);
+    const int8_new = if (int8_on and e.int8.capacity < int8_capacity) blk: {
         const g = e.g;
         const k = @max(g.intermediate, g.valueWidth(), g.attnWidth(), g.hidden);
-        break :blk cuda.w4a8.Kernels.scratch(rows, k);
+        break :blk cuda.w4a8.Kernels.scratch(int8_capacity, k);
     } else 0;
     return pendingPeak(main_new, main_old, int8_new);
 }
@@ -124,14 +134,17 @@ test "lazy scratch admission reserves a full replacement only while growth remai
     try std.testing.expectEqual(at_512, pendingPeak(at_512, at_32, 5 * mib));
     try std.testing.expectEqual(at_512 + 5 * mib, pendingPeak(at_512, 0, 5 * mib));
     try std.testing.expectEqual(5 * mib, pendingPeak(0, 0, 5 * mib));
+    try std.testing.expectEqual(@as(usize, 64), growthCapacity(32, 40));
+    try std.testing.expectEqual(@as(usize, 40), growthCapacity(0, 40));
+    try std.testing.expectEqual(@as(usize, 512), growthCapacity(256, 300));
+    try std.testing.expectEqual(@as(usize, 512), growthCapacity(512, 300));
 }
 
 /// Grow scratch without sacrificing the previous allocation on failure.
 pub fn ensureScratch(e: anytype, rows: usize) !void {
     if (rows == 0 or rows > max_rows) return error.InvalidScratchRows;
     if (rows <= e.scratch_capacity) return;
-    var capacity = if (e.scratch_capacity == 0) rows else e.scratch_capacity;
-    while (capacity < rows) capacity = @min(max_rows, capacity * 2);
+    const capacity = growthCapacity(e.scratch_capacity, rows);
     var measured = e.*;
     const bytes = try scratch(&measured, capacity, .measure);
     var replacement = DeviceBuffer.alloc(e.d, bytes) catch return error.ScratchGrowFailed;
