@@ -144,7 +144,7 @@ inline void q27_prompt_step(thread Q27PromptRun& r, int kt, int kend, const devi
 }
 
 // One chunk's partial per packed row: a simdgroup pair halves the head dim; only the last step reads bounded.
-template <int SG>
+template <int SG, bool MASKED>
 kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]], constant Q27PromptArgs& args [[buffer(2)]],
     device float* PO [[buffer(3)]], device float* PM [[buffer(4)]], device float* PL [[buffer(5)]],
     uint3 tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {
@@ -165,13 +165,18 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
   _Pragma("clang loop unroll(full)")
   for (int j = 0; j < 8; j++) r.O[j] = 0.0f;
   r.m0 = -INFINITY; r.m1 = -INFINITY; r.l0 = 0.0f; r.l1 = 0.0f;
-  // 0 times a non-finite value is NaN: if one sits past `seen` (fewest keys a live row sees), mask it and unmask after
-  const int seen = simd_min(min(n0 ? n0 : INT_MAX, n1 ? n1 : INT_MAX));
-  const ushort mask = q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x8000 : 0;
   int kt = kbeg;
-  const int seen_by_all = kbeg + max(min(seen, kend) - kbeg, 0) / PTK * PTK;  // steps below it: every live row sees all 32 keys
-  for (; kt < seen_by_all; kt += PTK) q27_prompt_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
-  for (; kt < kend; kt += PTK) q27_prompt_step<true, true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
+  if (!MASKED) {  // main's loop; q27_attn_prompt_pick sends MASKED when a value some row must not see isn't finite
+    for (; kt + PTK <= kend; kt += PTK) q27_prompt_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
+    if (kt < kend) q27_prompt_step<true, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
+  } else {
+    // 0 times a non-finite value is NaN: if one sits past `seen` (fewest keys a live row sees), mask, then unmask
+    const int seen = simd_min(min(n0 ? n0 : INT_MAX, n1 ? n1 : INT_MAX));
+    const ushort mask = q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x8000 : 0;
+    const int seen_by_all = kbeg + max(min(seen, kend) - kbeg, 0) / PTK * PTK;  // steps below it: every live row sees all 32 keys
+    for (; kt < seen_by_all; kt += PTK) q27_prompt_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
+    for (; kt < kend; kt += PTK) q27_prompt_step<true, true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
+  }
   if (!live) return;
   const int64_t base = ((int64_t)hk * args.chunks + c) * args.rp + tile * 16;
   _Pragma("clang loop unroll(full)")
@@ -185,8 +190,29 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
     PM[base + fm + 8] = r.m1; PL[base + fm + 8] = r.l1;
   }
 }
-#define Q27_PROMPT(SG) template [[host_name("q27_attn_prompt_" #SG)]] kernel void q27_attn_prompt<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant Q27PromptArgs&, device float*, device float*, device float*, uint3, ushort, ushort);
-Q27_PROMPT(8)
+#define Q27_PROMPT(SG, M, NAME) template [[host_name(NAME #SG)]] kernel void q27_attn_prompt<SG, M>(device const bfloat*, device const Q27AttnReadPtrs*, constant Q27PromptArgs&, device float*, device float*, device float*, uint3, ushort, ushort);
+Q27_PROMPT(8, false, "q27_attn_prompt_")
+Q27_PROMPT(8, true, "q27_attn_prompt_masked_")
+
+// flag[0] = 1 if a value some row must not see isn't finite: keys start + 1 to start + rows, a simdgroup a key.
+kernel void q27_attn_prompt_scan(device const Q27AttnReadPtrs* caches [[buffer(0)]], constant Q27PromptArgs& args [[buffer(1)]],
+    device atomic_uint* flag [[buffer(2)]], uint3 tg [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]],
+    ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort sgs [[simdgroups_per_threadgroup]]) {
+  const device bfloat* v = caches[0].values + (int64_t)tg.x * args.value_stride;
+  uint inf = 0;
+  for (int key = args.start + 1 + int(tg.y) * sgs + sg; key < args.start + args.rows; key += int(groups.y) * sgs) {
+    const uint4 w = *(const device uint4*)(v + (int64_t)key * PD + lane * 8);
+    inf |= q27_inf2(w.x) | q27_inf2(w.y) | q27_inf2(w.z) | q27_inf2(w.w);
+  }
+  if (simd_any(inf != 0) && lane == 0) atomic_fetch_or_explicit(flag, 1u, memory_order_relaxed);
+}
+
+// The indirect grids: q27_attn_prompt's if the scan found nothing, else the masked kernel's; clears the flag.
+kernel void q27_attn_prompt_pick(device atomic_uint* flag [[buffer(0)]], constant uint* grid [[buffer(1)]], device uint* grids [[buffer(2)]]) {
+  const bool masked = atomic_load_explicit(flag, memory_order_relaxed) != 0;
+  atomic_store_explicit(flag, 0u, memory_order_relaxed);
+  for (int i = 0; i < 3; i++) { grids[i] = masked ? 0u : grid[i]; grids[3 + i] = masked ? grid[i] : 0u; }
+}
 
 // A packed row's chunks merged in key order, normalized and written as the row's head output.
 kernel void q27_attn_prompt_merge(device const float* PO [[buffer(0)]], device const float* PM [[buffer(1)]], device const float* PL [[buffer(2)]],

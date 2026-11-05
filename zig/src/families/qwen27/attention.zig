@@ -12,7 +12,7 @@ const CachePtrs = extern struct { keys: u64, values: u64 };
 pub const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
 /// Keep's gather and scatter: rows kept, and the KV heads a staging row holds.
 const KeepArgs = extern struct { kept: u32, kv_heads: u32 };
-const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32, kv_heads: i32 };
+pub const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32, kv_heads: i32 };
 pub const Limits = struct {
     rows: u32 = 128,
     streams: u32 = 8,
@@ -21,7 +21,7 @@ pub const Limits = struct {
     /// Numeric shape; shared_prefix above selects the allocation's execution mode.
     geometry: planning.Geometry = .{},
 };
-pub const Field = enum { tile_stream, q_rows, nodes, paths, positions, qa, qb, poa, pma, pla, pob, pmb, plb, keep_k, keep_v };
+pub const Field = enum { tile_stream, q_rows, nodes, paths, positions, qa, qb, poa, pma, pla, pob, pmb, plb, keep_k, keep_v, pick };
 pub const BindingField = enum { meta, caches, keep_map };
 // Each layer owns immutable descriptors until its command buffer is terminal; arithmetic workspace is shared serially.
 pub const Binding = struct {
@@ -131,6 +131,7 @@ pub const Scratch = struct {
             buffer.* = try device.buffer(@max(allocation_bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             made += 1;
         }
+        @memset(buffers[@backingInt(Field.pick)].slice(u32, 12), 0); // the pick clears the flag after each read
         return .{ .buffers = buffers, .limits = limits, .tiles = layout.tiles, .chunks = layout.chunks, .tail_chunks = layout.tail_chunks };
     }
     pub fn deinit(s: *Scratch) void {
@@ -200,7 +201,7 @@ pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [16]mtl.Pipeline,
     io: [11]mtl.Pipeline,
-    prompt: ?[3]mtl.Pipeline, // a prompt chunk's kernel and merge: tensor ops on the M5, simdgroup matrices before it
+    prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
         var p: [16]mtl.Pipeline = undefined;
@@ -225,18 +226,23 @@ pub const Attention = struct {
         for (a.prefix ++ a.io) |pipe| pipe.deinit();
         if (a.prompt) |pipes| for (pipes) |pipe| pipe.deinit();
     }
-    /// The prompt kernel plus pair and single-Mac merges; before M5 null unless a group holds `prompt_threads`.
-    pub fn promptPipelines(device: mtl.Device, library: mtl.Library, units: bool) !?[3]mtl.Pipeline {
-        const chunks = try mtl.Pipeline.init(device, library, if (units) "q27_attn_prompt_8" else "q27_attn_prompt_sg_8", false);
-        if (!units and chunks.maxThreads() < prompt_threads) {
-            std.log.info("qwen27: the prompt attention kernel runs {d} threads a group here, not {d}; prompt rows take the decode path", .{ chunks.maxThreads(), prompt_threads });
-            chunks.deinit();
+    /// Prompt kernel, pair and single merges, masked kernel, scan, pick; before M5 null below `prompt_threads`.
+    pub fn promptPipelines(device: mtl.Device, library: mtl.Library, units: bool) !?[6]mtl.Pipeline {
+        const names = if (units) [2][]const u8{ "q27_attn_prompt_8", "q27_attn_prompt_masked_8" } else [2][]const u8{ "q27_attn_prompt_sg_8", "q27_attn_prompt_sg_masked_8" };
+        var out: [6]mtl.Pipeline = undefined;
+        var n: usize = 0;
+        errdefer for (out[0..n]) |pipe| pipe.deinit();
+        for ([_][]const u8{ names[0], "q27_attn_prompt_merge", "q27_attn_prompt_merge_single", names[1], "q27_attn_prompt_scan", "q27_attn_prompt_pick" }, &out) |name, *pipe| {
+            pipe.* = try mtl.Pipeline.init(device, library, name, false);
+            n += 1;
+        }
+        const threads = @min(out[0].maxThreads(), out[3].maxThreads());
+        if (!units and threads < prompt_threads) {
+            std.log.info("qwen27: the prompt attention kernel runs {d} threads a group here, not {d}; prompt rows take the decode path", .{ threads, prompt_threads });
+            for (out) |pipe| pipe.deinit();
             return null;
         }
-        errdefer chunks.deinit();
-        const merge = try mtl.Pipeline.init(device, library, "q27_attn_prompt_merge", false);
-        errdefer merge.deinit();
-        return .{ chunks, merge, try mtl.Pipeline.init(device, library, "q27_attn_prompt_merge_single", false) };
+        return out;
     }
     pub fn preprocess(a: *const Attention, input_encoder: mtl.ComputeEncoder, p: Preprocess) !void {
         try p.geometry.check();
@@ -341,6 +347,21 @@ pub const Attention = struct {
         } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args, split);
         try timing.end();
     }
+    /// `grid` at pick + 16 when every value some row must not see is finite, else at pick + 28; the other grid is 0.
+    pub fn encodePick(e: mtl.ComputeEncoder, pipes: [2]mtl.Pipeline, caches: Ref, args: PromptArgs, pick: mtl.Buffer, grid: [3]u32) void {
+        e.setPipeline(pipes[0]);
+        bind(e, .{caches});
+        e.setValue(args, 1);
+        e.setBuffer(pick, 0, 2);
+        e.dispatchGroups(mtl.Size.of(@intCast(args.kv_heads), @intCast(@max(@divFloor(args.rows + 31, 32), 1)), 1), mtl.Size.of(256, 1, 1));
+        e.barrier();
+        e.setPipeline(pipes[1]);
+        e.setBuffer(pick, 0, 0);
+        e.setValue(grid, 1);
+        e.setBuffer(pick, 16, 2);
+        e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+        e.barrier();
+    }
     /// A prompt chunk's rows over absolute 512-key chunks (attention_prompt.metal), merged in key order.
     fn promptRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, out: Ref, split: bool) !void {
         const g = plan.geometry;
@@ -353,13 +374,17 @@ pub const Attention = struct {
         if (!g.shared_prefix and @as(usize, chunks) * plan.tiles * 16 > @as(usize, scratch.tail_chunks) * scratch.limits.rows * 16) return error.AttentionLimits;
         const args = PromptArgs{ .start = start, .rows = @intCast(plan.rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .key_stride = @intCast(binding.strides[0][0]), .value_stride = @intCast(binding.strides[0][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads) };
         const pairs = prompt_threads / 64; // simdgroup pairs, each halving the head dim of one 16-row tile
-        e.setPipeline(a.prompt.?[0]);
-        bind(e, .{ scratch.get(.qa), binding.get(.caches) });
-        e.setValue(args, 2);
-        e.setBuffer(scratch.get(parts[0]).buffer, 0, 3);
-        e.setBuffer(scratch.get(parts[1]).buffer, 0, 4);
-        e.setBuffer(scratch.get(parts[2]).buffer, 0, 5);
-        e.dispatchGroups(mtl.Size.of(g.kv_heads, chunks, (plan.tiles + pairs - 1) / pairs), mtl.Size.of(prompt_threads, 1, 1));
+        const pick = scratch.get(.pick).buffer;
+        encodePick(e, a.prompt.?[4..6].*, binding.get(.caches), args, pick, .{ g.kv_heads, chunks, (plan.tiles + pairs - 1) / pairs });
+        for ([_]usize{ 0, 3 }, [_]usize{ 16, 28 }) |which, at| { // one of the two grids is empty: no barrier between
+            e.setPipeline(a.prompt.?[which]);
+            bind(e, .{ scratch.get(.qa), binding.get(.caches) });
+            e.setValue(args, 2);
+            e.setBuffer(scratch.get(parts[0]).buffer, 0, 3);
+            e.setBuffer(scratch.get(parts[1]).buffer, 0, 4);
+            e.setBuffer(scratch.get(parts[2]).buffer, 0, 5);
+            e.dispatchIndirect(pick, at, mtl.Size.of(prompt_threads, 1, 1));
+        }
         e.barrier();
         e.setPipeline(a.prompt.?[if (split) 1 else 2]);
         bind(e, .{ scratch.get(parts[0]), scratch.get(parts[1]), scratch.get(parts[2]) });
