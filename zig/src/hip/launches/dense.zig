@@ -43,7 +43,7 @@ fn geometry(shape: Shape) Geometry {
 const symbols = [_][:0]const u8{
     "_ZN2tf4rocm16dense_gemm_blockINS0_7DotBF16ELi8EEEvNS0_6AffineE",
     "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi16ELi64ELi64ELi1ELi4EEEEEvNS0_6AffineE",
-    "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi32ELi2ELi4EEEEEvNS0_6AffineE",
+    "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi64ELi2ELi4EEEEEvNS0_6AffineE",
 };
 
 pub const Kernels = struct {

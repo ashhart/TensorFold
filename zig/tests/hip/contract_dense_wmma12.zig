@@ -41,6 +41,8 @@ pub fn spec(wide: bool, geo: Shape, planted: bool) c.Spec {
         .out = if (wide) .f32 else .bf16,
         .served = &served,
         .tiles = .{ .{ .size = if (small) 16 else 128 }, .{ .size = if (small) 64 else 128 }, .{ .size = 12288, .step = 128, .min = 128 } },
+        // the big block's 64-deep swizzled steps must keep the bytes of the 32-deep block they replace (#2264)
+        .replaces = if (small or planted) null else "dense_wmma12_gemm<W12Geo<128, 128, 32, 2, 4>> (tf_ref_wmma12_k32)",
     };
 }
 
@@ -53,6 +55,8 @@ pub const DenseWmma12 = struct {
     geo: Shape,
     /// The planted control (tf_ctl_wmma12_bf16_sum, the small block's arguments) in place of the served kernel.
     planted: ?hip.Function = null,
+    /// The big block's byte baseline (tf_ref_wmma12_k32, a frozen copy of the block it replaces).
+    baseline: ?hip.Function = null,
     d: ?Dense = null,
     x: u64 = 0,
     w: u64 = 0,
@@ -118,6 +122,19 @@ pub const DenseWmma12 = struct {
             try self.l.dense.gemmWith(self.l.r, f, self.geo, self.x, self.w, out32, out16, m, n, k, h);
         } else try self.l.dense.gemmOn(self.l.r, .wmma12, self.geo, self.x, self.w, out32, out16, m, n, k, h);
         try self.rig.s.synchronize();
+    }
+
+    /// The replaced block's bytes on the prepared inputs: the frozen 32-deep block into its own buffer.
+    pub fn replaced(self: *DenseWmma12) ![]const u8 {
+        const s = self.d.?.shape;
+        const f = self.baseline orelse return error.NoBaseline;
+        const len = self.d.?.outputs() * @as(usize, if (self.wide) 4 else 2);
+        const base = try self.rig.scratch(len);
+        const out32: u64 = if (self.wide) base else 0;
+        const out16: u64 = if (self.wide) 0 else base;
+        try self.l.dense.gemmWith(self.l.r, f, .w12_big, self.x, self.w, out32, out16, @intCast(s.rows), @intCast(s.n), @intCast(s.k), self.rig.s.handle);
+        try self.rig.s.synchronize();
+        return self.rig.bytes(base, len);
     }
 
     /// The design's absolute term: a product below fp32's normal range may round or flush, 2^-126 each, k of them.

@@ -231,6 +231,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     // the WMMA dense tile serves gfx12 only; elsewhere its symbol, and its control's, keep a trap body
     if (l.dense.wmma12) {
         dense12[4].planted = try ctl.function("tf_ctl_wmma12_bf16_sum");
+        const k32 = try ctl.function("tf_ref_wmma12_k32"); // the big block's byte baseline, from the controls object
+        dense12[2].baseline = k32;
+        dense12[3].baseline = k32;
         for (&dense12) |*d| try kernels.append(a, d.kernel());
     } else std.debug.print("N/A  hip dense_wmma12_gemm: not served off gfx12\n", .{});
     var gates: [3]gate_k.Gate = undefined;

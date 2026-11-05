@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "quant/dense_tiles.hpp"
+#include "tiles/wmma12_gemm_k32_ref.hpp"
 
 __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
     return __uint_as_float(static_cast<uint32_t>(x[i]) << 16);
@@ -160,4 +161,10 @@ extern "C" __global__ void tf_ctl_js_combine_unrounded(const float* prior, const
     const int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= n) return;
     logits[j] = tf_ctl_bf16(prior[j] + gate * (joint_scale * cosine[j] + tf_ctl_x(res, j)));
+}
+
+// Not a control: the WMMA big block as served before #2264, the byte baseline the faster block replaces (gate 3).
+extern "C" __global__ void __launch_bounds__(256) tf_ref_wmma12_k32(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_k32_ref_tile<IdentityAct<DotBF16>, GemmOut<DotBF16>>(a);
 }
