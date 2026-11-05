@@ -538,7 +538,7 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null);
 }
 
-fn kimiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
+pub fn kimiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
     const kimi = b.createModule(.{
         .root_source_file = b.path("zig/src/families/kimi_k3/kimi_k3.zig"),
         .target = target,
