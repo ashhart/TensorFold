@@ -80,7 +80,7 @@ pub const Settings = struct {
                 problem.* = "TF_GLM_OVERLAP_PIECES: 1 to 8";
                 return error.BadSetting;
             }
-        } else if (s.solo and s.roce_multi) {
+        } else if (s.solo and s.roce_multi and wireOpens(get)) {
             s.pieces = 8; // TF_GLM_CHUNK_SOLO=4096 with TF_GLM_ROCE_MULTI=1: solo's doubled passes on the wire
         }
         if (get("TF_GLM_INDEX_SPLIT")) |v| {
@@ -156,6 +156,12 @@ pub const max_world = 16;
 /// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
     return @import("profile").lookup(name);
+}
+
+/// Whether TF_GLM_ROCE_MULTI's wire opens at TF_GLM_WORLD: three ranks or more (cuda_roce_multi); TP=2 stays on NCCL.
+fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
+    const v = get("TF_GLM_WORLD") orelse return false;
+    return (std.fmt.parseInt(usize, v, 10) catch 0) >= 3;
 }
 
 /// What every rank must agree on, as bytes the communicator carries.
