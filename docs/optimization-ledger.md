@@ -208,6 +208,42 @@ Not in the table: `h3` (MiniMax H3 denoising blocks), `drama3` (speech), `moss_i
 the HIP OCR families `dots_mocr` and `glm_ocr`. They are not autoregressive text servers on the lane host, so few rows
 apply.
 
+## Rough gain
+
+A rough size of each optimization's effect where it applies, before measuring a family: `low` under 3 %, `medium`
+3–15 %, `big` over 15 %, or for memory, what lets a case fit at all. Measured numbers and their PRs are in the list
+below; these are estimates for planning a port, not results.
+
+| Optimization | Prefill | Decode | Memory | Where it shows |
+| --- | --- | --- | --- | --- |
+| 1. Prompt tail | low | none | none | a cold prompt, about 1/layers |
+| 2. Paged KV | none | none | big | streams take pages as they grow |
+| 3. Prompt store | big | none | medium | resumed turns skip their prefix; cold turns 3–6 % |
+| 4. iGPU states | low | none | low | integrated GPUs only |
+| 5. State walk | none | none | none | shared code; enables pool pages |
+| 6. KV ledger | none | none | medium | more streams admitted in the same memory |
+| 7. Host KV tier | medium | low (a cost) | big | resumes past the card's memory |
+| 8. Disk cache | big | none | big | resumes across restarts and long sessions |
+| 9. FP8 KV | low | medium | big | half the KV; decode gains at long context |
+| 10. FP4/FP8 decode | low | low | none | 4–5 % of the FP4 prompt kernels |
+| 11. Fused proj. | medium | medium | none | +3..+13 % measured |
+| 12. Add + norm | low | low | none | one launch and one read fewer per layer |
+| 13. MoE grouped | big | medium | none | MoE families only |
+| 14. CUDA graphs | none | medium | none | launch time at one to few streams |
+| 15. MTP | none | big | low | +30..+70 % one stream, acceptance-bound |
+| 16. DFlash(2) | none | big | low | drafter weights; acceptance-bound |
+| 17. DSpark | none | big | low | drafter ships with the release |
+| 18. Copy drafts | none | medium | none | only where the reply repeats the context |
+| 19. Shared drafts | none | big | none | +18..+38 % at 2–8 streams; none at one |
+| 20. Solo chunks | medium | none | none | first token −5..−10 % |
+| 21. Read-ahead | none | none | none | cold load about −50 % |
+| 22. Direct load | none | none | low | cold load; no page-cache copy |
+| 23. Page drop | none | none | medium | frees the checkpoint's page cache |
+| 24. L2 prefetch | none | low | none | +1..+4 % on GLM TP=3; a cost on Qwen |
+| 25. TP ranks | big | big | big | scale-out: models past one box |
+| 26. Pipeline | none | none | big | fits models across nodes; adds hops |
+| 27. Profiles | none | none | none | names the opt-in switches |
+
 ## The optimizations
 
 1. **Prompt tail on the last layer.** A prompt chunk keeps one row's logits, so past the last layer's keys and values
