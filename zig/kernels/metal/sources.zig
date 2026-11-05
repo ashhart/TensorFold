@@ -263,6 +263,13 @@ pub const llama_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/
 pub const llama_attention_nax = "#define TF_PROMPT_ATTENTION ll_prompt_attention\n" ++ prompt_attention_nax;
 /// Llama's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
 pub const llama_gemm = gemm_nax ++ @embedFile("llama/gemm.metal");
+/// Ripple's glue at the release's rounding points: embedding, four norms a layer, q/k norm, RoPE, gate, clamp.
+pub const ricursive_glue = @embedFile("ricursive/glue.metal");
+/// The NVFP4 release's MLP row kernels and dequantization; its tensor-unit GEMM after gemm_nax.metal.
+pub const ricursive_fp4 = @embedFile("ricursive/fp4.metal");
+pub const ricursive_fp4_gemm = gemm_nax ++ @embedFile("ricursive/fp4_gemm.metal");
+/// Ripple's prompt attention on the tensor units (llama's kernel over a window, keys in a ring; nax.h inlined at load).
+pub const ricursive_attention_nax = @embedFile("ricursive/attention_nax.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 
