@@ -13,7 +13,7 @@ const TestText = pre.TestText;
 const NoHistory = pre.NoHistory;
 
 /// What the fake engine says when asked; `off` builds a vtable with no `refusal` entry at all.
-const Mode = enum { off, always, tools_only, long_message, empty };
+const Mode = enum { off, always, tools_only, long_message, literal, empty };
 
 /// An engine that answers in its own words and counts what the server asked it.
 const Refuser = struct {
@@ -74,6 +74,7 @@ fn refusal(ctx: *anyopaque, request: *const api.Request, out: []u8) ?[]const u8 
         .always => put(out, "the engine cannot serve this request as asked"),
         .tools_only => if (request.tools_json.len > 0) put(out, "this engine serves tools that name one parameter") else null,
         .long_message => put(out, &long_pattern),
+        .literal => "a literal the engine never wrote into the buffer",
         .empty => out[0..0],
     };
 }
@@ -246,6 +247,15 @@ test "engine refusal: a long message is cut at 256 bytes on a UTF-8 boundary" {
     try std.testing.expect(seen.text().len <= api.refusal_bytes);
     try std.testing.expect(seen.text().len > 0);
     try std.testing.expectEqual(@as(usize, 255), seen.text().len); // the engine's 256 cut the last character in two
+    try std.testing.expectEqual(@as(usize, 0), backend.submissions);
+}
+
+test "engine refusal: a literal message that never touched the buffer reaches the client" {
+    var backend: Refuser = .{ .mode = .literal };
+    const seen = try send(&backend, .chat, no_tools ++ "}");
+    try std.testing.expectEqual(@as(?u16, 400), seen.status);
+    try std.testing.expect(!seen.opened);
+    try std.testing.expectEqualStrings("a literal the engine never wrote into the buffer", seen.text());
     try std.testing.expectEqual(@as(usize, 0), backend.submissions);
 }
 

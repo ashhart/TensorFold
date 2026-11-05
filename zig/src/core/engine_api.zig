@@ -443,7 +443,7 @@ pub const Engine = struct {
         drain: ?*const fn (ctx: *anyopaque) void = null,
         /// The server's load-ledger producer at attach, null at detach (load_ledger.zig); null entry: no engine group.
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
-        /// Asked once when the request is whole: written into `out`; the return says how many bytes; null: accepted.
+        /// Asked once per whole request: the returned message is the refusal, up to `refusal_bytes`; null: accepted.
         refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
     };
 
@@ -519,7 +519,7 @@ pub const Engine = struct {
         return f(e.ctx, request, sink);
     }
 
-    /// The engine's refusal of a whole `request`, written into `out`; null: accepted.
+    /// The engine's refusal of a whole `request`: the returned message, up to `refusal_bytes`; null: accepted.
     pub fn refusal(e: Engine, request: *const Request, out: []u8) ?[]const u8 {
         const f = e.vtable.refusal orelse return null;
         return f(e.ctx, request, out);
