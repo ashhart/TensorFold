@@ -142,6 +142,7 @@ pub const Rendered = struct {
 };
 
 pub const Text = struct {
+    native_deepseek: bool = false,
     ctx: *anyopaque,
     vtable: *const VTable,
 
