@@ -142,8 +142,9 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     eng.snap_pool.max = plan.budget_bytes;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .decode_share = tf.flashnext_backend.decodeShare(decode_share, std.c.getenv("TENSORFOLD_PREFILL_SHARE") != null, eng.r.device.tensorUnits()), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     h.back.fill_grows = !eng.r.device.tensorUnits() and h.host.share.p < 1; // a share of 1 asked for keeps today's small steps
-    // FLASHNEXT_NO_LONE=1: lone requests on shared rounds. Images always; sampled ones on tensor units (unmeasured).
-    if (std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun, .images = false, .sampled = !eng.r.device.tensorUnits() };
+    // FLASHNEXT_NO_LONE=1: lone requests on shared rounds. Images always; sampled, plain on tensor units (unmeasured).
+    const measured = !eng.r.device.tensorUnits();
+    if (std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun, .images = false, .sampled = measured, .plain = measured };
     // The standard frame (buildImages): an image moves no row before it, so the cache keys carry no frame.
     if (vis) |v| h.host.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
     h.cache = null;
