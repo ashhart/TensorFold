@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA with `TF_GLM_KV_SHARE`: a prompt resumed through pool pages now reports its reused tokens in `cached_tokens` and `prompt_tokens_cached_total` (#1899).
+
 - Living Weights: a lesson's extra wordings are seeded from the lesson, so the same lesson samples the same wordings on each run (#1587).
 
 - `cached_tokens` and `prompt_tokens_cached_total` can no longer exceed the prompt, whatever a backend reports (#1899).
