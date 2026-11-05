@@ -356,11 +356,18 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     const conv = g.convWidth();
     const taps_shape: []const usize = if (mo) &.{ conv, 1, geometry.taps } else &.{ conv, geometry.taps, 1 }; // the same bytes
     const readers = try core.checkpoint.loadReaders();
+    // each layer read past the page cache, the next one while it packs (TF_LOAD_DIRECT=0: #1928's read-ahead)
+    var direct = core.checkpoint.direct.Layers.init(e.gpa, ck, readers);
+    defer direct.deinit();
     for (e.layers, 0..) |*l, i| {
-        var pbuf: [96]u8 = undefined;
-        const p = try std.fmt.bufPrint(&pbuf, "{s}layers.{d}.", .{ m, i });
-        defer if (readers > 0) ck.release(); // a read-ahead layer is on the device: its pages leave the cache (none read ahead: main's one release at close)
-        var reading = ck.prefetch(p, readers); // read ahead by threads of their own while the layer packs
+        var pbuf: [2][96]u8 = undefined;
+        const p = try std.fmt.bufPrint(&pbuf[0], "{s}layers.{d}.", .{ m, i });
+        const last = i + 1 == e.layers.len;
+        try direct.enter(p, if (last) null else try std.fmt.bufPrint(&pbuf[1], "{s}layers.{d}.", .{ m, i + 1 }));
+        // a read-ahead layer is on the device: its pages leave the cache (none: main's one release at close)
+        defer if (readers > 0 and !direct.on()) ck.release();
+        // read ahead by threads of their own while the layer packs
+        var reading: core.checkpoint.Ahead = if (direct.on()) .{} else ck.prefetch(p, readers);
         defer _ = reading.join();
         var ps: std.enums.EnumArray(Slot, Proj) = .initUndefined();
         for (slots(g, i)) |slot| {
