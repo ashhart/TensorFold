@@ -36,6 +36,16 @@ pub const Served = struct {
     }
 };
 
+/// A family that times its windows once its pool attaches: prices into `s.facts`; false with `problem` set.
+pub fn price(comptime F: type, a: Allocator, io: std.Io, ctx: anytype, dir: []const u8, family: *anyopaque, s: *Served, problem: *[]const u8) !bool {
+    if (comptime !@hasDecl(F, "priceWindows")) return true;
+    s.facts = F.priceWindows(family, io, ctx, dir, s.facts) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot time its windows ({s})", .{@errorName(e)});
+        return false;
+    };
+    return true;
+}
+
 const Held = struct { drafted: lanes.drafted.Drafted, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void };
 
 /// `loaded`'s backend, wrapped with the drafter `o.drafter` names when it does; null with `problem` set on refusal.
