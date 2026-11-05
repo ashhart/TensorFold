@@ -16,6 +16,7 @@ const Server = @import("server.zig").Server;
 const chunk_plan = @import("chunk_plan.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
 const StopHook = @import("stop_hook.zig").StopHook;
+const engine_refusal = @import("engine_refusal.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -202,6 +203,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, reasoning, request.think_budget, count);
     request.prompt_logprobs = input.prompt_logprobs;
+    if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
     return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing };
 }
 

@@ -12,7 +12,7 @@ const Conn = @import("http_conn.zig").Conn;
 
 /// Bytes as tokens; every prompt renders as "prompt" (6 tokens).
 pub const TestText = struct {
-    fn text(t: *@This()) model_text.Text {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 
@@ -221,7 +221,7 @@ const Seen = struct {
 const Route = enum { chat, messages, responses };
 
 /// A Responses request with no stored conversation to read.
-const NoHistory = struct {
+pub const NoHistory = struct {
     pub fn conversation(_: NoHistory, cx: *errors.Cx, _: json.Value) errors.Refused![]json.Value {
         return cx.refuse("no stored responses in this test");
     }
