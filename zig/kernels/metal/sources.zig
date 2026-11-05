@@ -7,6 +7,8 @@ pub const dsv41 = @import("deepseek_v41/sources.zig");
 pub const nemotron = @import("nemotron/kernels.zig");
 /// Nemotron's KV in pages of the core pool: twins of its seven K/V kernels, each library beside its original.
 pub const nemotron_paged = @import("nemotron/paged.zig");
+/// The 27B's KV in pages of the core pool: its attention sources with the K/V address through a stream's table.
+pub const qwen27_paged = @import("qwen27/paged.zig");
 
 pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
