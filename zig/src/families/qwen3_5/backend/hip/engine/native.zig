@@ -12,9 +12,18 @@ const pages = @import("../forward/pages.zig");
 const state = @import("../forward/state.zig");
 const worker = @import("worker.zig");
 const hip_lanes = @import("hip_lanes.zig");
+const config = @import("../../../weights/config.zig");
 
-/// The MLX affine widths the family loads.
-const mlx_formats: []const []const u8 = &.{ "mlx-q2", "mlx-q3", "mlx-q4", "mlx-q5", "mlx-q6", "mlx-q8" };
+/// The MLX affine widths this native text server loads, each with its group size.
+const mlx_formats = blk: {
+    const widths = @import("core").quant.mlx.bit_widths;
+    var out: [widths.len * 3][]const u8 = undefined;
+    for (widths, 0..) |bits, i| for ([_]u16{ 32, 64, 128 }, 0..) |g, j| {
+        out[3 * i + j] = std.fmt.comptimePrint("mlx-q{d}g{d}", .{ bits, g });
+    };
+    const done = out;
+    break :blk &done;
+};
 
 /// The dense and the sparse checkpoints are two registry entries over one engine.
 pub fn Native(comptime type_name: []const u8) type {
@@ -31,20 +40,8 @@ pub fn Native(comptime type_name: []const u8) type {
 }
 
 /// What the serve flags ask of the engine, as the host read them.
-pub const Options = struct {
-    /// Prompt plus reply tokens a request may use: --context, or the family default within the model's window.
-    window: usize,
-    /// Streams asked for at once; `fixed` when --parallel named the number, which then fits or is refused.
-    streams: usize,
-    fixed: bool = false,
-    /// This process is `rank` of `world`.
-    rank: u32 = 0,
-    world: u32 = 1,
-    /// Bytes kept prompt states may hold (null: the policy's, else what the streams leave) and their snapshot slots.
-    cache_gib: ?f64 = null,
-    /// A --prompt-cache-gib past what the streams leave is kept, not refused.
-    cache_over_cap: bool = false,
-};
+const serve = @import("hip_serve");
+pub const Options = serve.Options;
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -56,6 +53,8 @@ pub const Loaded = struct {
     /// The streams admitted at once, and the server's startup line (the memory plan).
     streams: usize,
     startup: []const u8,
+    /// The readouts the engine answers, if any (then it generates no text); the host's defaults otherwise.
+    offer: serve.Offer = .{},
 };
 
 /// A flag or a resource the engine cannot take: `problem` says why.
@@ -68,6 +67,18 @@ fn refuse(a: std.mem.Allocator, problem: *[]const u8, comptime fmt: []const u8, 
 
 fn gibs(bytes: usize) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
+}
+
+/// Why `dir` cannot be served yet: a bf16 Qwen3.5 checkpoint answers decisions only; null for every other one.
+fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]const u8 {
+    // a config that does not read is the loader's to report
+    var c = config.Config.read(gpa, io, dir) catch return null;
+    defer c.deinit();
+    if (c.quant != .bf16) return null;
+    const what = "BF16 Qwen3.5 serves as a decision backbone only";
+    const path = std.fs.path.join(a, &.{ dir, "joint_head_config.json" }) catch return what;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
+    return what ++ ", and this build has no readout requests or joint schema head to serve its decisions yet";
 }
 
 /// One rank's loaded and sized engine: the streams and prompt cache every rank agreed on.
@@ -241,6 +252,7 @@ fn release(p: *anyopaque) void {
 
 /// The engine for `dir` on `dev`; under tensor parallelism this is rank 0, which serves.
 fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: Options, problem: *[]const u8) anyerror!Loaded {
+    if (decisionOnly(a, gpa, io, dir)) |why| return refuse(a, problem, "{s}", .{why});
     var steps: hip.Startup = .{ .link = if (dev.group) |g| g.link() else null };
     const p = try prepare(a, gpa, io, dev, dir, o, &steps, problem);
     errdefer p.e.deinit();
@@ -267,8 +279,8 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     if (p.cache.pages > 0) own.backend.keepPages(p.cache.pages, p.cache.snaps);
     // rank 0 serves only once every follower is ready behind it
     _ = try steps.together(a, .{ 0, 0 }, .first, problem);
-    // a lone rank times its forwards for the depth rule; the ranks of a group draft without costs
-    if (dev.group) |g| own.backend.withLink(g.link()) else own.backend.measure();
+    // a lone rank times its forwards for the depth rule; the ranks of a group draft without costs; bf16 drafts none
+    if (dev.group) |g| own.backend.withLink(g.link()) else if (!p.e.plain()) own.backend.measure();
     return .{
         .backend = own.backend.backend(),
         .facts = own.backend.facts(),
@@ -277,11 +289,13 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
         .deinit = release,
         .streams = p.streams,
         .startup = p.startup,
+        .offer = .{ .readouts = own.backend.readouts() },
     };
 }
 
 /// A rank above 0: holds its share of the model and runs rank 0's steps until rank 0 stops.
 fn followRank(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: Options, problem: *[]const u8) anyerror!void {
+    if (decisionOnly(a, gpa, io, dir)) |why| return refuse(a, problem, "{s}", .{why});
     var steps: hip.Startup = .{ .link = dev.group.?.link() };
     const p = try prepare(a, gpa, io, dev, dir, o, &steps, problem);
     defer p.e.deinit();
@@ -295,4 +309,74 @@ fn followRank(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     defer w.deinit();
     _ = try steps.together(a, .{ 0, 0 }, .first, problem);
     try w.follow(dev.group.?.link());
+}
+
+test "a bf16 checkpoint is refused as decision-only, naming what it lacks; an MLX one loads" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const text =
+        \\{"model_type": "qwen3_5", "tie_word_embeddings": false,
+        \\ "text_config": {"hidden_size": 64, "intermediate_size": 32, "num_hidden_layers": 2,
+        \\  "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 32, "linear_num_key_heads": 1,
+        \\  "linear_num_value_heads": 2, "linear_key_head_dim": 32, "linear_value_head_dim": 16,
+        \\  "linear_conv_kernel_dim": 4, "vocab_size": 16, "full_attention_interval": 2,
+        \\  "layer_types": ["linear_attention", "full_attention"], "eos_token_id": 1}}
+    ;
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = text });
+    const bare = decisionOnly(a, std.testing.allocator, io, dir).?;
+    try std.testing.expect(std.mem.startsWith(u8, bare, "BF16 Qwen3.5 serves as a decision backbone only: "));
+    try std.testing.expect(std.mem.endsWith(u8, bare, "has no joint_head_config.json"));
+    try tmp.dir.writeFile(io, .{ .sub_path = "joint_head_config.json", .data = "{}" });
+    const headed = decisionOnly(a, std.testing.allocator, io, dir).?;
+    try std.testing.expect(std.mem.indexOf(u8, headed, "no readout requests or joint schema head") != null);
+    inline for (.{ "qwen3_5", "qwen3_5_moe" }) |kind| {
+        for (Native(kind).formats) |format| try std.testing.expect(!std.mem.eql(u8, format, "bf16"));
+    }
+    const mlx = try std.mem.replaceOwned(u8, a, text, "\"tie_word_embeddings\": false,", "\"tie_word_embeddings\": false, \"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"},");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
+    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
+}
+
+test "capability audit: HIP Qwen format names cover the admitted affine widths" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text =
+        \\{"model_type":"qwen3_5","tie_word_embeddings":false,
+        \\ "hidden_size":4096,"intermediate_size":12288,"num_hidden_layers":8,
+        \\ "num_attention_heads":16,"num_key_value_heads":4,"head_dim":256,
+        \\ "linear_num_key_heads":16,"linear_num_value_heads":32,"linear_key_head_dim":128,
+        \\ "linear_value_head_dim":128,"linear_conv_kernel_dim":4,"vocab_size":248320,
+        \\ "full_attention_interval":4,"eos_token_id":248044}
+    ;
+    inline for (.{ Native("qwen3_5"), Native("qwen3_5_moe") }) |F| {
+        for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |g| {
+            var doc = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+            try doc.object.put(a, "model_type", .{ .string = F.model_type });
+            var q: std.json.ObjectMap = .empty;
+            try q.put(a, "bits", .{ .integer = bits });
+            try q.put(a, "group_size", .{ .integer = g });
+            try doc.object.put(a, "quantization", .{ .object = q });
+            var parsed = try config.Config.parse(a, try std.json.Stringify.valueAlloc(a, doc, .{}), null);
+            defer parsed.deinit();
+            try std.testing.expectEqual(config.Width{ .bits = bits, .group = g }, try parsed.quant.width(""));
+            const matrix: hip.ops.Affine = .{ .words = 0, .scale = 0, .bias = 0, .tables = .bf16, .n = 4096, .k = 4096, .bits = bits, .group = g };
+            try matrix.check();
+            const name = try std.fmt.allocPrint(a, "mlx-q{d}g{d}", .{ bits, g });
+            const found = for (F.formats) |listed| {
+                if (std.mem.eql(u8, listed, name)) break true;
+            } else false;
+            try std.testing.expect(found);
+        };
+        var affine_count: usize = 0;
+        for (F.formats) |name| if (std.mem.startsWith(u8, name, "mlx-")) {
+            affine_count += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 18), affine_count);
+    }
 }

@@ -1,0 +1,72 @@
+{
+  "architectures": [
+    "GlmOcrForConditionalGeneration"
+  ],
+  "image_end_token_id": 59257,
+  "image_start_token_id": 59256,
+  "image_token_id": 59280,
+  "model_type": "glm_ocr",
+  "text_config": {
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "dtype": "bfloat16",
+    "eos_token_id": [
+      59246,
+      59253
+    ],
+    "head_dim": 128,
+    "hidden_act": "silu",
+    "hidden_size": 1536,
+    "initializer_range": 0.02,
+    "intermediate_size": 4608,
+    "max_position_embeddings": 131072,
+    "model_type": "glm_ocr_text",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 16,
+    "num_key_value_heads": 8,
+    "num_nextn_predict_layers": 1,
+    "pad_token_id": 59246,
+    "rms_norm_eps": 1e-05,
+    "rope_parameters": {
+      "mrope_section": [
+        16,
+        24,
+        24
+      ],
+      "partial_rotary_factor": 1.0,
+      "rope_theta": 10000,
+      "rope_type": "default"
+    },
+    "tie_word_embeddings": false,
+    "use_cache": true,
+    "vocab_size": 59392
+  },
+  "tie_word_embeddings": false,
+  "transformers_version": "5.17.0",
+  "video_end_token_id": 59259,
+  "video_start_token_id": 59258,
+  "video_token_id": 59281,
+  "vision_config": {
+    "attention_bias": true,
+    "attention_dropout": 0.0,
+    "depth": 24,
+    "hidden_act": "silu",
+    "hidden_dropout_prob": 0.0,
+    "hidden_size": 1024,
+    "image_size": 336,
+    "in_channels": 3,
+    "initializer_range": 0.02,
+    "intermediate_size": 4096,
+    "model_type": "glm_ocr_vision",
+    "num_heads": 16,
+    "out_hidden_size": 1536,
+    "patch_size": 14,
+    "rms_norm_eps": 1e-05,
+    "rope_parameters": {
+      "rope_theta": 10000.0,
+      "rope_type": "axial"
+    },
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2
+  }
+}

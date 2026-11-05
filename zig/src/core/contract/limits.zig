@@ -200,6 +200,8 @@ pub const HipLaunch = struct {
 /// What hipcc made of one kernel for one chip, from the code object's metadata (vgprs 0: none recorded).
 pub const HipUsage = struct {
     vgprs: u32,
+    /// False: the kernel is not launched on this chip (its image keeps a trap body there); no usage is checked.
+    served: bool = true,
     sgprs: u32 = 0,
     lds: u32 = 0,
     private: u32 = 0,

@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const h3 = @import("cuda.zig");
 const host = @import("cuda_host.zig");
 const mock = @import("cuda_runtime_fake.zig");
+const report = @import("report.zig");
 test "h3 runtime: failed forwardHost growth keeps old optional owner" {
     const m = try mock.model();
     defer mock.clean(m);
@@ -47,6 +48,7 @@ test "h3 runtime: failed forward completion retains every parent at model close"
     try std.testing.expectError(error.NotReady, m.forward(&in));
     try std.testing.expect(mock.pending);
     m.deinit();
+    try report.expect("H3 model retained at close", error.NotReady);
     const destroyed = mock.unloads != 0;
     defer if (!destroyed) mock.clean(m);
     try std.testing.expectEqual(@as(usize, 0), mock.unsafe_frees);
@@ -60,6 +62,7 @@ test "h3 runtime: geometry resize refuses disposal after failed forward completi
     try std.testing.expectError(error.NotReady, m.forward(&in));
     const used = m.geometry.used;
     h3.geometry.release(m);
+    try report.expect("H3 geometry retained", error.NotReady);
     try std.testing.expectEqual(@as(usize, 0), mock.unsafe_frees);
     try std.testing.expectEqual(used, m.geometry.used);
     in.rows = 1;

@@ -1,7 +1,9 @@
 //! TensorFold's CUDA runtime: the driver, cuBLASLt and NCCL through dlopen, our kernels and Triton's, no Python.
 
+pub const sm120_test_override = @import("sm120_test_override.zig");
 pub const abi = @import("abi.zig");
 pub const Driver = @import("driver.zig").Driver;
+pub const priority_copies = @import("priority_copies.zig");
 pub const copy_source = @import("copy_source.zig");
 pub const completion = @import("completion.zig");
 pub const paging_test_device = if (@import("builtin").is_test) @import("paging_test_device.zig") else struct {};
@@ -50,6 +52,7 @@ pub const act_rows = @import("act_rows.zig");
 pub const gdn_prep = @import("gdn_prep.zig");
 pub const qk_rows = @import("qk_rows.zig");
 pub const experts = @import("experts.zig");
+pub const experts32 = @import("experts32.zig");
 pub const experts_waves = @import("experts_waves.zig");
 pub const sample = @import("sample.zig");
 pub const rank_scatter = @import("rank_scatter.zig");
@@ -75,6 +78,7 @@ pub const pack = @import("pack.zig");
 pub const graph_cache = @import("graph_cache.zig");
 
 test {
+    _ = priority_copies;
     _ = nccl;
     _ = @import("p2p_nvml.zig");
     _ = @import("p2p_probe.zig");
@@ -99,6 +103,7 @@ test {
     _ = @import("qk_rows.zig");
     _ = @import("exl3_candidate.zig");
     _ = @import("experts.zig");
+    _ = @import("experts32.zig");
     _ = @import("experts_waves.zig");
     _ = @import("sample.zig");
     _ = @import("roce.zig");

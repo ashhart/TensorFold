@@ -91,10 +91,9 @@ pub fn errorBody(a: Allocator, cx: *const Cx, param: ?[]const u8) Allocator.Erro
     try o.put(a, "message", .{ .string = cx.message });
     if (cx.kind == .other or cx.kind == .server) return .{ .object = o };
     try o.put(a, "type", .{ .string = "invalid_request_error" });
-    if (cx.kind == .context_length) {
-        try o.put(a, "param", if (param) |p| .{ .string = p } else .null);
-        try o.put(a, "code", .{ .string = "context_length_exceeded" });
-    }
+    if (cx.kind == .context_length) try o.put(a, "param", if (param) |p| .{ .string = p } else .null);
+    const code: ?[]const u8 = cx.code orelse if (cx.kind == .context_length) "context_length_exceeded" else null;
+    if (code) |c| try o.put(a, "code", .{ .string = c });
     return .{ .object = o };
 }
 
@@ -134,10 +133,10 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined };
     if (is_chat) {
-        input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, .of(srv.info.vision));
+        input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
         input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
-        input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, .of(srv.info.vision));
+        input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
     if (!is_chat and input.messages.array.len == 0) input.prompt = try legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
@@ -331,23 +330,7 @@ const Run = struct {
 
     /// ``ToolCallPolicy.finish``: the reply's calls parsed out of its content.
     fn attachCalls(r: *Run, reply: *chat.Reply) Allocator.Error!?[]Value {
-        const tools = r.plan.input.tools;
-        if (tools.len == 0) return null;
-        const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
-        if (parsed.rejected_envelopes > 0) log.line("warning: kept {d} malformed or unoffered tool envelopes as content", .{parsed.rejected_envelopes});
-        // max_tokens cut a call the stream had begun: the whole reply returns it cut too, as the stream did (#1238)
-        const cut = if (!r.plan.policy.single and std.mem.eql(u8, reply.finish_reason, "length")) try tool_stream.cutCalls(r.a, reply.content, tools) else null;
-        if (cut != null) reply.content = try @import("reply_text.zig").cutProse(r.a, reply.content);
-        const found = cut orelse parsed.calls;
-        const calls = (if (r.turn != null) cortheon.clientCalls(found) else found) orelse {
-            if (r.plan.policy.single or parsed.calls != null) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
-            return null;
-        };
-        if (cut != null) return calls;
-        reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
-        reply.finish_reason = "tool_calls";
-        if (r.plan.policy.single) reply.tool_calls_streamed = false;
-        return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
+        return @import("openai_calls.zig").attach(r, reply);
     }
 
     fn fail(r: *Run, cx: *const Cx, field: []const u8) void {

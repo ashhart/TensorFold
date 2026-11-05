@@ -2,6 +2,9 @@
 
 #include "common.hpp"
 #include "elementwise.hpp"
+#include "columns.hpp"
+#include "vision.hpp"
+#include "dense_text.hpp"
 #include "attention.hpp"
 #include "linear.hpp"
 #include "rope.hpp"

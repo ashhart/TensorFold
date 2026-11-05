@@ -131,6 +131,9 @@ const released =
 ;
 
 test "the released scheduler config parses; an option this family does not implement is refused" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const a = std.testing.allocator;
     try std.testing.expectEqual(Config{}, try parse(a, released));
     const turned_on = .{ .{ "\"use_karras_sigmas\": false", "\"use_karras_sigmas\": true" }, .{ "\"use_dynamic_shifting\": false", "\"use_dynamic_shifting\": true" }, .{ "\"invert_sigmas\": false", "\"invert_sigmas\": true" }, .{ "\"shift_terminal\": null", "\"shift_terminal\": 0.1" }, .{ "\"stochastic_sampling\": false", "\"stochastic_sampling\": true" }, .{ "\"use_beta_sigmas\": false", "\"use_beta_sigmas\": true" }, .{ "\"use_exponential_sigmas\": false", "\"use_exponential_sigmas\": true" } };

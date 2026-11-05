@@ -4,6 +4,7 @@
 #include <cuda_fp16.h>
 #include <math.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 __device__ __forceinline__ float tf_ctl_x(const __nv_bfloat16* x, int64_t i) { return __bfloat162float(x[i]); }
 
@@ -29,10 +30,7 @@ __device__ __forceinline__ float tf_ctl_rowsum(const __nv_bfloat16* X, int K, in
     return s;
 }
 
-__device__ __forceinline__ float tf_ctl_warp(float s) {
-    for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
-    return s;
-}
+__device__ __forceinline__ float tf_ctl_warp(float s) { return tf_common::warp_sum(s); }
 
 // Gate 2 too: a row sum that writes the sum back into its own input, which its spec says it never does.
 extern "C" __global__ void tf_ctl_scribble_sum(__nv_bfloat16* X, int K, float* Y) {
@@ -370,10 +368,7 @@ namespace tf_ctl_moss {
 typedef __nv_bfloat16 bf16;
 __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 __device__ __forceinline__ float ld(const bf16* p) { return __bfloat162float(*p); }
-__device__ __forceinline__ float warp_sum(float v) {
-  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
+using tf_common::warp_sum;
 // tf_moss_norm; DROP 0: bf16(x inv), 1: bf16(y s).
 template <int DROP>
 __device__ void norm(const bf16* X, const bf16* W, const bf16* S, const bf16* B, bf16* Y, int width, float eps,

@@ -92,6 +92,10 @@ test "HIP BLAS device: BF16 projection preserves inputs, guards and exact FP32 s
     var b = try hip.blas.Blas.open(stream);
     defer b.close();
     const cases = [_][3]usize{ .{ 1, 1536, 1536 }, .{ 4, 1024, 1176 }, .{ 7, 9216, 1536 }, .{ 2, 1536, 4608 }, .{ 17, 2048, 1536 }, .{ 4, 1536, 2048 }, .{ 4, 1024, 1536 }, .{ 2, 59392, 1536 } };
+    var dimensions: [cases.len]hip.blas_fixed.Dimensions = undefined;
+    for (cases, &dimensions) |shape, *d| d.* = .{ .n = shape[1], .k = shape[2] };
+    var fixed = try hip.blas_fixed.Fixed.open(stream, &dimensions);
+    defer fixed.close();
     for (cases) |shape| {
         const m, const n, const k = shape;
         if ((try ctx.memInfo()).free < (m * k + n * k + m * n + 32) * 2 + (128 << 20)) return error.NoDeviceBudget;
@@ -117,8 +121,8 @@ test "HIP BLAS device: BF16 projection preserves inputs, guards and exact FP32 s
         var dy = try hip.DeviceBuffer.alloc(&r, out.len * 2);
         defer dy.free();
         try dy.fill8(0xa5);
-        for (0..5) |_| {
-            try b.project(dx.base(), dw.base(), dy.base() + 32, m, n, k);
+        for (0..10) |repeat| {
+            if (repeat < 5) try b.project(dx.base(), dw.base(), dy.base() + 32, m, n, k) else try fixed.project(dx.base(), dw.base(), dy.base() + 32, m, n, k);
             try stream.synchronize();
             try dy.download(0, std.mem.sliceAsBytes(out));
             try std.testing.expectEqualSlices(u16, want, out[16..][0 .. m * n]);
@@ -134,6 +138,43 @@ test "HIP BLAS device: BF16 projection preserves inputs, guards and exact FP32 s
         try std.testing.expectEqualSlices(u16, x, actual_x);
         try std.testing.expectEqualSlices(u16, w, actual_w);
     }
+}
+
+test "HIP BLAS device: products run in the planned workspace, which rocBLAS keeps and never outgrows" {
+    const a = std.testing.allocator;
+    var r = try selectedRuntime();
+    defer r.close();
+    var ctx = try hip.Context.init(&r, 0);
+    defer ctx.deinit();
+    var stream = try hip.Stream.init(&r);
+    defer stream.deinit();
+    var b = try hip.blas.Blas.open(stream);
+    defer b.close();
+    var ws = try hip.DeviceBuffer.alloc(&r, hip.blas.workspace_bytes);
+    defer ws.free();
+    try b.useWorkspace(ws.base(), ws.len);
+    const set = try b.workspace();
+    try std.testing.expect(!set.managed);
+    try std.testing.expectEqual(hip.blas.workspace_bytes, set.bytes);
+    // Clef-Flash's projections (n, k) at prompt-piece row counts, the 248,320-row head at a few rows
+    const shapes = [_][2]usize{ .{ 8192, 4096 }, .{ 4096, 4096 }, .{ 32, 4096 }, .{ 12288, 4096 }, .{ 4096, 12288 }, .{ 1024, 4096 } };
+    const rows = [_]usize{ 1, 2, 3, 7, 17, 64, 255, 512, 513, 1000, 1024 };
+    const x = try a.alloc(u16, 1024 * 12288);
+    defer a.free(x);
+    for (x, 0..) |*v, i| v.* = bf16(@floatFromInt(@as(i32, @intCast(i % 5)) - 2));
+    var dx = try hip.DeviceBuffer.fromHost(&r, std.mem.sliceAsBytes(x));
+    defer dx.free();
+    var dw = try hip.DeviceBuffer.alloc(&r, 248320 * 4096 * 2);
+    defer dw.free();
+    try dw.fill8(0);
+    var dy = try hip.DeviceBuffer.alloc(&r, 1024 * 12288 * 2);
+    defer dy.free();
+    for (shapes) |s| for (rows) |m| try b.project(dx.base(), dw.base(), dy.base(), m, s[0], s[1]);
+    for ([_]usize{ 1, 4, 32 }) |m| try b.project(dx.base(), dw.base(), dy.base(), m, 248320, 4096);
+    try stream.synchronize();
+    const after = try b.workspace();
+    try std.testing.expect(!after.managed);
+    try std.testing.expectEqual(hip.blas.workspace_bytes, after.bytes);
 }
 
 fn selectedRuntime() !hip.Runtime {

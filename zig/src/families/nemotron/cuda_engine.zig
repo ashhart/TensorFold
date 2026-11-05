@@ -114,6 +114,7 @@ pub const Engine = struct {
     snaps_configured: bool = false,
     snaps: marks.Slots = .{}, // the prompt cache's snapshot slots, made at load (cuda_reuse.slots)
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
+    benchmark_group: ?[]const u8 = null,
     tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
     vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
     snap_host: bool = false, // kept prompt states in pinned host memory (cuda_reuse.zig), set when the host opens the engine
@@ -131,6 +132,8 @@ pub const Engine = struct {
         e.trace = platform.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
         try latent.place(&e.c);
+        var load_cache = @import("core").checkpoint.cache.Load.begin(io, e.c.world > 1);
+        defer load_cache.deinit();
         if (e.c.rank > 0) return error.RankServesExperts; // ranks past 0 run cuda_worker.serve, not an engine
         e.c.ck = try @import("cuda_latent_ck.zig").wanted(ctx, e.c, opts.precision);
         if (e.c.world > 1 and opts.segments > 1) return error.SegmentsNeedOneRank; // one stream keeps the jobs in order
@@ -160,6 +163,8 @@ pub const Engine = struct {
         if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(ctx.d, e.c.rank, e.c.world);
         errdefer if (!keep_owner) if (e.tp) |*g| g.close();
         if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream, model_dir);
+        e.benchmark_group = if (e.tp) |*g| try @import("core").benchmark_group.cuda(gpa, io, ctx, g, e.stream) else null;
+        errdefer if (!keep_owner) if (e.benchmark_group) |b| gpa.free(b);
         // every byte this rank holds, hashed while the weights load; the ranks compare the digests at ready
         var content: ?*identity.Content = if (e.tp != null) try identity.Content.start(gpa, io, model_dir, e.c.held != null) else null;
         errdefer if (content) |x| x.abandon();
@@ -217,8 +222,8 @@ pub const Engine = struct {
         try e.setSampling(opts.sampling);
         if (content) |x| { // every rank loaded, with the same bytes, before the first job
             content = null;
-            try cuda.tp_watch.ready(io, try x.finish());
-        }
+            try load_cache.finishAfter(.{ io, try x.finish() }, cuda.tp_watch.ready);
+        } else load_cache.finish();
         if (opts.graphs) try e.capture(mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
@@ -326,6 +331,7 @@ pub const Engine = struct {
         if (e.tp) |*g| g.close();
         if (e.vision) |v| v.deinit();
         e.stream.deinit();
+        if (e.benchmark_group) |b| e.gpa.free(b);
         e.gpa.destroy(e);
     }
 
@@ -432,34 +438,8 @@ pub const Engine = struct {
     pub const promptHost = prompt_pass.promptHost;
     pub const segmentSet = prompt_pass.segmentSet;
 
-    /// Any block's change, for the buffers every block shares (null: no lesson is attached).
-    pub fn lessons(e: *const Engine) ?weights.Adapter {
-        for (e.w.blocks) |blk| switch (blk.kind) {
-            .mamba => if (blk.mamba.adapter) |ad| return ad,
-            .attention => if (blk.attn.adapter) |ad| return ad,
-            .moe => if (blk.moe.adapter) |ad| return ad,
-        };
-        return null;
-    }
-
-    /// Dev trace (TF_SLIDE_TRACE): the bound sequence's router scores at its decision row and which lessons act on it.
-    pub fn traceLessons(e: *const Engine) void {
-        const ad = e.lessons() orelse return;
-        if (e.decide == lesson_route.none) return;
-        const n = lesson_route.max_blocks;
-        var score: [n]f32 = undefined;
-        var need: [n]f32 = undefined;
-        var flags: [n]u32 = undefined;
-        const o = e.ops();
-        o.download(std.mem.sliceAsBytes(&score), ad.score + e.slot * n * 4) catch return;
-        o.download(std.mem.sliceAsBytes(&need), ad.need) catch return;
-        o.download(std.mem.sliceAsBytes(&flags), ad.latch + e.slot * n * 4) catch return;
-        e.stream.synchronize() catch return;
-        var line: [2048]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ e.decide, w.buffered() });
-    }
+    pub const lessons = @import("cuda_lesson_trace.zig").lessons;
+    pub const traceLessons = @import("cuda_lesson_trace.zig").traceLessons;
 
     pub fn trainOps(e: *const Engine) train_ops.Ops {
         return .{ .k = &e.k.train, .s = e.stream };

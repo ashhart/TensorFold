@@ -167,7 +167,10 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     w.layers = try gpa.alloc(Layer, n);
     var b1: [128]u8 = undefined;
     var b2: [128]u8 = undefined;
+    const readers = try core.checkpoint_read_ahead.optInReaders();
     for (w.layers, 0..) |*l, i| {
+        var reading = try @import("cuda_load_prefetch.zig").begin(&ck, i, readers);
+        defer reading.deinit();
         const name = struct {
             fn of(b: []u8, layer: usize, suffix: []const u8) ![]const u8 {
                 return std.fmt.bufPrint(b, m ++ "layers.{d}.{s}", .{ layer, suffix });
@@ -181,6 +184,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
         l.down = try x.linear(&.{try name(&b1, i, "mlp.down_proj")}, &.{h}, geo.intermediate);
         l.input_norm = try x.widened(try name(&b1, i, "input_layernorm.weight"), h);
         l.post_attention = try x.widened(try name(&b1, i, "post_attention_layernorm.weight"), h);
+        _ = try reading.check();
     }
     return w;
 }

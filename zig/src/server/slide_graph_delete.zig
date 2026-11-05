@@ -84,6 +84,11 @@ fn update(g: *Graph, ids: []const u32, states: []const slide_graph.State, at: ?i
 pub fn snapshot(g: *Graph, a: Allocator) ![]Fact {
     g.mutex.lockUncancelable(g.io);
     defer g.mutex.unlock(g.io);
+    return copyLocked(g, a);
+}
+
+/// A copied fact listing while the caller holds the graph lock, shared with its atomic audit view.
+pub fn copyLocked(g: *Graph, a: Allocator) ![]Fact {
     const out = try a.alloc(Fact, g.facts.items.len);
     for (g.facts.items, out) |f, *o| {
         o.* = f;

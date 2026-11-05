@@ -45,7 +45,7 @@ const Fake = struct {
     pub fn fusedAttentionOwned(_: @This()) bool {
         return C.tri().fusedAttentionOwned();
     }
-    pub fn attnPrep(_: @This(), _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, pg: flash.Pg) !void {
+    pub fn attnPrep(_: @This(), _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, pg: flash.Pg) !void {
         try std.testing.expectEqual(C.expected_pg, pg);
     }
     pub fn qsaPool(_: @This(), _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, _: anytype, pg: flash.Pg) !void {
@@ -120,6 +120,7 @@ test "paged grouped prompts: every current attention route receives the sequence
     s.gxs_attn = 0x1200000000;
     s.part = 0x1300000000;
     var lw: Layer = undefined;
+    lw.heads = .full;
     lw.proj.native = null;
     lw.proj.w.ptr = 0x1000;
     lw.proj.s.ptr = 0x2000;
@@ -132,6 +133,7 @@ test "paged grouped prompts: every current attention route receives the sequence
     lw.out.b.ptr = 0x6000;
     lw.out.k = 6144;
     lw.out.n = 7680;
+    lw.dense_cut = null;
     lw.q_scale.ptr = 0x7000;
     lw.k_scale.ptr = 0x8000;
     lw.i_scale.ptr = 0x9000;

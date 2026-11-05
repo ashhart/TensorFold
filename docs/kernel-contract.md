@@ -14,6 +14,10 @@ whether the launch fits every chip we serve.
 The test of a kernel fills a `contract.spec.Spec` and hands the harness a few hooks (`contract.gates.VTable`, or
 `gates.hooks(T)` for a test type with `prepare`, `run`, `count` and `reference`).
 
+`runAll` calls each kernel's optional `VTable.release` before moving to the next kernel, including after a failed
+gate or planted control. `gates.hooks(T)` supplies `rig.reset()` for value or pointer rigs with a `reset` method.
+Direct `one` callers remain responsible for cleanup.
+
 - Its float64 reference: the kernel's own formula in float64. The input families in `zig/src/core/contract/` cover the
   common cases: `affine` (MLX's affine-quantized projections), `dense` (dots against dequantized weights, in K
   slices) and `rows` (RMS norm, softmax, sums, dots, maxima). Each builds inputs for every gate, computes the reference
@@ -208,6 +212,16 @@ finite (its id word carries bit 31, its value word a NaN) and takes the lower id
 rank's word into the id sentinel, so both Macs refuse a non-finite round where one Mac does. Six controls edit the
 source: a stage reading the peer's half, a gather writing its own half twice, and an argmax or pick tie to the higher
 id must go red at `shapes`, and an argmax or pick that does not flag at `nonfinite`.
+The Llama family's own kernels (`metal_llama*.zig`): its glue (embedding, the norms at HF's rounding points, the
+residual add, RoPE with bf16 cos and sin, the SiLU gate, the decode attention's partials and their merge, the argmax
+draw by its stated rule), its row projections (1 to 32 rows) and, on the M5's tensor units, its four GEMM forms and the
+prompt attention at both served geometries; gate 5 reads their pipelines on this GPU. Twelve controls edit the
+source, one a kernel group: an embedding reading its own row, a norm's mean over the threads, a subtracting add, an
+add-norm dropping its residual, a SiLU with gate and up swapped, a rope at the window's first position, a decode that
+never rescales, a merge dropping each block's scale, a row projection dropping its tail, a GEMM reading its weights
+untransposed and a prompt attention seeing the next key go red at `shapes`, and an argmax never picking a NaN at
+`nonfinite`. The INT4 release's row projections and dequantization have two more: every group taking its row's first
+zero point, and a word's nibbles read in reverse, both red at `shapes`.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and
@@ -257,10 +271,16 @@ HIP also checks the 64-row prompt attention tile (`prefill.hip`): `tf_fa_paged_b
 permuted page table at the 27B's, the 35B-A3B's and Nemotron's head counts, each output within attention_ref's float64
 bound, and `tf_fa_wide_bf16` and `tf_fa_wide_f16`, which no model calls, bit-equal to them on flat keys. A build runs
 its chip's cache type (fp16 on gfx1030, bf16 on the rest); gate 5 holds all four.
+HIP's unquantized embedding gather (`tf_embed_dense`) reads a BF16 table byte for byte and an fp32 table bit-equal to
+the gather before its table kind; two controls gather the next row and read a BF16 table as fp16.
 
 HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf_router_bf16`, and its fp16-activation
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
 and the exact sums of gate 4.
+
+On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out) against
+its depth-k bound. Its control, the same tile summing each 16-deep step in BF16 (`tf_ctl_wmma12_bf16_sum`), goes red
+at gate 4.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
@@ -277,6 +297,10 @@ their slots from host pages or the layer's row cache, the token lists' slots, th
 pages out of order, and the layer's cache kept, each exact against the host's replay (nine controls, one a kernel: a
 stale mark, a dropped row or swapped slots).
 
+Ornith-1.5-122B's routed block on Metal registers the experts' decode rows with the shared expert as an extra matrix
+(`q27_rows_extra`, 4 and 8 bits), the router's softmax and top-k with renormalized bf16 weights (`q27_route`: picks
+equal to the host's, each weight within float64's range at its bf16 points), the tensor units' expert sort and gather
+(bit for bit), the experts' SwiGLU, and the weighted combine with the gated shared expert (in place and from its slot).
 GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 and 8 bits, plus both gathered paths.
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.

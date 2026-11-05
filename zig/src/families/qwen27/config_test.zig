@@ -50,6 +50,22 @@ test "explicit layer types preserve their order" {
     try std.testing.expectEqualSlices(Kind, &.{ .attention, .linear, .attention, .linear }, c.kinds[0..4]);
 }
 
+test "null layer types read as absent, and an interval they contradict is refused by both names" {
+    const a = std.testing.allocator;
+    const absent = try edit(a, "layer_types", .null);
+    defer a.free(absent);
+    try std.testing.expectEqualSlices(Kind, &.{ .linear, .linear, .linear, .attention }, (try parse(a, absent, null)).kinds[0..4]);
+    var p = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+    defer p.deinit();
+    const types = try std.json.parseFromSlice(std.json.Value, a, "[\"linear_attention\",\"full_attention\",\"linear_attention\",\"full_attention\"]", .{});
+    defer types.deinit();
+    try p.value.object.put(p.arena.allocator(), "layer_types", types.value);
+    try p.value.object.put(p.arena.allocator(), "full_attention_interval", .{ .integer = 4 });
+    const both = try std.json.Stringify.valueAlloc(a, p.value, .{});
+    defer a.free(both);
+    try std.testing.expectError(error.LayerTypesContradictFullAttentionInterval, parse(a, both, null));
+}
+
 test "rope parameters preserve precision and section metadata" {
     const a = std.testing.allocator;
     const p = try std.json.parseFromSlice(std.json.Value, a, "{\"rope_theta\":1234567.25,\"partial_rotary_factor\":0.5,\"mrope_section\":[2,1,1]}", .{});
@@ -81,6 +97,39 @@ test "a scaled rope (rope_type or type yarn, a rope_scaling block) is refused; a
     const json = try edit(a, "rope_parameters", plain.value);
     defer a.free(json);
     _ = try parse(a, json, null);
+}
+
+test "a routed config reads its experts, the shared expert's width as the layer's and the routing flag" {
+    const a = std.testing.allocator;
+    const json =
+        \\{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":3072,"intermediate_size":1024,
+        \\"moe_intermediate_size":1024,"shared_expert_intermediate_size":1024,"num_experts":256,"num_experts_per_tok":8,
+        \\"num_hidden_layers":48,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":64,"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}
+    ;
+    const c = try parse(a, json, null);
+    try std.testing.expect(c.moe());
+    try std.testing.expectEqual(@as(usize, 256), c.experts);
+    try std.testing.expectEqual(@as(usize, 8), c.top_k);
+    try std.testing.expectEqual(@as(usize, 1024), c.moe_intermediate);
+    try std.testing.expectEqual(@as(usize, 1024), c.intermediate);
+    try std.testing.expect(c.renorm); // absent: renormalized
+    try std.testing.expectEqual(Kind.attention, c.kind(3));
+    try std.testing.expectEqual(Kind.linear, c.kind(2));
+    // a routed model type without experts, and a dense one with them, are refused
+    const dense_typed = try std.mem.replaceOwned(u8, a, json, "\"num_experts\":256", "\"num_experts\":0");
+    defer a.free(dense_typed);
+    try std.testing.expectError(error.NotQwenDense, parse(a, dense_typed, null));
+}
+
+test "a routed config refuses a rank split" {
+    var c = model27();
+    c.experts = 256;
+    c.top_k = 8;
+    c.moe_intermediate = c.intermediate;
+    try std.testing.expectError(error.BadShard, split(&c, 0, 2, .full));
+    try std.testing.expectError(error.BadShard, split(&c, 1, 2, .mlp));
 }
 
 test "dense config refuses MoE and tied embedding heads" {
@@ -121,7 +170,7 @@ test "malformed layer and rope metadata fail" {
     const a = std.testing.allocator;
     const layers = try edit(a, "layer_types", .{ .bool = true });
     defer a.free(layers);
-    try std.testing.expectError(error.BadConfig, parse(a, layers, null));
+    try std.testing.expectError(error.BadLayerTypes, parse(a, layers, null));
     const rope = try edit(a, "partial_rotary_factor", .{ .float = 2 });
     defer a.free(rope);
     try std.testing.expectError(error.BadConfig, parse(a, rope, null));

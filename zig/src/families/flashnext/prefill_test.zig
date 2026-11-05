@@ -8,6 +8,7 @@ test "flashnext prefill: actual backend advertises completed prompt steps" {
         const callbacks = @import("prefill.zig").Callbacks(Backend);
         try std.testing.expect(b.backend().vtable.prefill_step == callbacks.one);
         try std.testing.expect(b.backend().vtable.prefill == callbacks.whole);
+        try std.testing.expect(b.backend().vtable.reports_fill); // the status page's totals and srpt's row time read it
     } else return error.SkipZigTest;
 }
 

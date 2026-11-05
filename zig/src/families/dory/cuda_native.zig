@@ -92,8 +92,15 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.db.admits(prompt, max_tokens);
 }
 
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.db.pool) |*pool| pool else null;
+}
+
 /// The checkpoint at its loop count, the shared kernels and every stream's caches.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    const priority_copies = try cuda.priority_copies.read("TF_DORY_COPIES", o.drafts);
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows / be.max_window) return error.ParallelPastRound;
     if (o.loops) |l| if (l == 0 or l > config.max_loops) return error.BadLoops;
@@ -122,6 +129,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_DORY_GRAPHS"); // =0: every decode forward eager
     own.db = try be.Dory.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    own.db.priority_copies = priority_copies;
     if (own.m.paged) {
         std.log.info("Dory at {d} loops (per_loop KV): {d} caches a stream, the full ones ({d}) in pages of {d} positions, CUDA graphs {s}", .{ own.w.config.loops, own.m.sched.caches, own.m.sched.cacheCount(.full), pages.tokens, if (own.m.graphed) "on" else "off" });
     } else std.log.info("Dory at {d} loops (per_loop KV): {d} caches a stream, {d} streams, CUDA graphs {s}", .{ own.w.config.loops, own.m.sched.caches, n, if (own.m.graphed) "on" else "off" });

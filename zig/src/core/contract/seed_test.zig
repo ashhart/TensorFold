@@ -4,8 +4,17 @@ const g = @import("gates.zig");
 const c = @import("contract.zig");
 const Probe = struct {
     seed: u64 = 0,
+    buffer: ?[]u8 = null,
+    previous: ?*Probe = null,
+    fn release(p: *anyopaque) void {
+        const self: *Probe = @ptrCast(@alignCast(p));
+        if (self.buffer) |buffer| std.testing.allocator.free(buffer);
+        self.buffer = null;
+    }
     fn prepare(p: *anyopaque, _: c.Shape, _: g.Fill, s: u64) anyerror!bool {
         const self: *Probe = @ptrCast(@alignCast(p));
+        if (self.previous) |previous| std.debug.assert(previous.buffer == null);
+        if (self.buffer == null) self.buffer = try std.testing.allocator.alloc(u8, 64);
         self.seed = s;
         return false;
     }
@@ -31,7 +40,7 @@ const Probe = struct {
         return 0;
     }
     fn kernel(p: *Probe, name: []const u8) g.Kernel {
-        return .{ .spec = .{ .name = name, .accum = .none, .out = .raw, .depth = depth, .served = &.{.{ .rows = 1, .n = 1, .k = 1 }}, .tiles = .{ .{}, .{}, .{} } }, .ctx = p, .vt = &.{ .prepare = prepare, .run = run, .output = bytes, .inputs = bytes, .intact = intact, .overlap = overlap, .count = count, .reference = reference } };
+        return .{ .spec = .{ .name = name, .accum = .none, .out = .raw, .depth = depth, .served = &.{.{ .rows = 1, .n = 1, .k = 1 }}, .tiles = .{ .{}, .{}, .{} } }, .ctx = p, .vt = &.{ .prepare = prepare, .run = run, .output = bytes, .inputs = bytes, .intact = intact, .overlap = overlap, .count = count, .reference = reference, .release = release } };
     }
 };
 test "contract seed: an inserted kernel cannot change another named fixture's seed" {
@@ -46,4 +55,16 @@ test "contract seed: an inserted kernel cannot change another named fixture's se
     try g.runAll(std.testing.allocator, &.{ inserted.kernel("new fixture"), target.kernel("unchanged fixture") }, 0x6b63, &tally);
     try std.testing.expectEqual(before, target.seed);
     try std.testing.expect(inserted.seed != target.seed);
+}
+
+test "contract release: prior kernel buffers are freed before the next prepares" {
+    const was = g.quiet;
+    g.quiet = true;
+    defer g.quiet = was;
+    var a: Probe = .{};
+    var b: Probe = .{ .previous = &a };
+    var tally: g.Tally = .{};
+    try g.runAll(std.testing.allocator, &.{ a.kernel("first"), b.kernel("second") }, 0x6b63, &tally);
+    try std.testing.expect(a.buffer == null);
+    try std.testing.expect(b.buffer == null);
 }

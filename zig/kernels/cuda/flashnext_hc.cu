@@ -49,16 +49,7 @@ __device__ __forceinline__ void group_dot(float (&p)[4], const uint32_t (&a)[2][
 }
 
 // A block's fixed-order sum: each warp's butterfly, then the warps' sums in warp order.
-__device__ __forceinline__ float block_sum(float v, float* scratch) {
-    v = warp_sum(v);
-    const int warps = blockDim.x >> 5;
-    if ((threadIdx.x & 31) == 0) scratch[threadIdx.x >> 5] = v;
-    __syncthreads();
-    float total = 0.0f;
-    for (int w = 0; w < warps; ++w) total = __fadd_rn(total, scratch[w]);
-    __syncthreads();
-    return total;
-}
+using tf_common::block_sum_serial;
 
 }  // namespace fn_hc
 
@@ -438,8 +429,8 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat1
             kss = __fmaf_rn(kv, kv, kss);
             qss = __fmaf_rn(hv, hv, qss);
         }
-        kss = block_sum(kss, scratch);
-        qss = block_sum(qss, scratch);
+        kss = block_sum_serial(kss, scratch);
+        qss = block_sum_serial(qss, scratch);
         const float krinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(kss, fd), eps)));
         const float qrinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(qss, fd), eps)));
         float dot = 0.0f;
@@ -448,7 +439,7 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat1
             const float qn = rbf(__fmul_rn(__fmul_rn(bf(H[row + d]), qrinv), NQ[s * D + d]));
             dot = __fadd_rn(dot, rbf(__fmul_rn(kn, qn)));
         }
-        dot = block_sum(dot, scratch);
+        dot = block_sum_serial(dot, scratch);
         float gate = rbf(__fdiv_rn(dot, __fsqrt_rn(fd)));
         const float mag = __fsqrt_rn(fmaxf(fabsf(gate), 1e-6f));
         gate = rbf(gate > 0.0f ? mag : (gate < 0.0f ? -mag : 0.0f));
@@ -459,7 +450,7 @@ extern "C" __global__ void __launch_bounds__(512) fn_ple_gate(const __nv_bfloat1
             GATED[row + d] = __float2bfloat16_rn(gv);
             gss = __fmaf_rn(gv, gv, gss);
         }
-        gss = block_sum(gss, scratch);
+        gss = block_sum_serial(gss, scratch);
         if (threadIdx.x == 0) PSS[static_cast<long long>(r) * S + s] = gss;
     }
 }

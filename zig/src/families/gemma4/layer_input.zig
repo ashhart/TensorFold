@@ -1,6 +1,6 @@
 //! Gemma 4 E-series per-layer inputs on the host at MLX's bf16 steps, and the float64 reference they are checked by.
 const std = @import("std");
-const bf16_round = @import("../../core/bf16_round.zig");
+const bf16_round = @import("bf16_round");
 const cfg = @import("config.zig");
 
 // One-row steps match MLX 0.32.4's SHA-256 prints (tools/zig/gemma4_e4b_layer_input_oracle.py); M > 1: up to 0.05% off.

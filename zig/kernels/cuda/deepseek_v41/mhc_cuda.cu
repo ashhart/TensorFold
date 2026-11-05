@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cuda_runtime.h>
+#include "common/cp_async.cuh"
 
 namespace dsv41_mhc {
 
@@ -46,12 +47,7 @@ struct Args {
     int defer;                                   // TAIL: the coefficient items run in coef_kernel (a side stream)
 };
 
-__device__ __forceinline__ uint4 ld_stream(const void* p) {
-    uint4 v;
-    asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
-                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
-    return v;
-}
+__device__ __forceinline__ uint4 ld_stream(const void* p) { return tf_common::ld_nc(reinterpret_cast<const uint4*>(p)); }
 __device__ __forceinline__ uint4 ld_plain(const void* p) { return *reinterpret_cast<const uint4*>(p); }
 __device__ __forceinline__ void widen8(const uint4 v, float (&f)[8]) {     // 8 bf16, column ascending -> fp32
     f[0] = __uint_as_float(v.x << 16); f[1] = __uint_as_float(v.x & 0xffff0000u);

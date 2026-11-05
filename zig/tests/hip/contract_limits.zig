@@ -34,11 +34,7 @@ fn file(a: std.mem.Allocator, dir: []const u8, chip: []const u8, name: []const u
 
 /// Gate 5 from the records alone: every launch on every chip, and each control red; returns the problems.
 pub fn table(a: std.mem.Allocator) !usize {
-    var n = try records.check(a, &records.records, false);
-    const word = if (n == 0) "PASS" else "FAIL";
-    const chips = "gfx1030/1100/1151/1201";
-    const say = "{s} limits: {d} registered HIP launches against {s}, {d} problems\n";
-    std.debug.print(say, .{ word, records.records.len, chips, n });
+    var n = try tableOf(a, &records.records);
     for (records.controls) |r| {
         const missed = try records.controlProblems(a, r, false);
         n += missed;
@@ -49,8 +45,23 @@ pub fn table(a: std.mem.Allocator) !usize {
     return n;
 }
 
+/// Gate 5 from `list` alone: each launch on every chip; returns the problems.
+pub fn tableOf(a: std.mem.Allocator, list: []const records.Record) !usize {
+    const n = try records.check(a, list, false);
+    const word = if (n == 0) "PASS" else "FAIL";
+    const chips = "gfx1030/1100/1151/1201";
+    const say = "{s} limits: {d} registered HIP launches against {s}, {d} problems\n";
+    std.debug.print(say, .{ word, list.len, chips, n });
+    return n;
+}
+
 /// Gate 5 on this GPU: the device's limits against its chip's row, each loaded kernel against its record.
 pub fn live(a: std.mem.Allocator, r: *const hip.Runtime, ctx: hip.Context, arch: []const u8) !usize {
+    return liveOf(a, r, ctx, arch, &all);
+}
+
+/// `live` over `list`: each record checked in its own code object, whatever image the selection spans.
+pub fn liveOf(a: std.mem.Allocator, r: *const hip.Runtime, ctx: hip.Context, arch: []const u8, list: []const records.Record) !usize {
     const at = for (limits.rdna, 0..) |t, i| {
         if (std.mem.eql(u8, t.name, arch)) break i;
     } else {
@@ -71,7 +82,12 @@ pub fn live(a: std.mem.Allocator, r: *const hip.Runtime, ctx: hip.Context, arch:
         const say = "{s} limits live {s} {s}: the device says {d}, the table {d}\n";
         std.debug.print(say, .{ word, arch, d[0], got, d[2] });
     }
-    for (all) |rec| {
+    for (list) |rec| {
+        // a planted control is checked on every chip: only a registered launch may be unserved somewhere
+        if (!rec.usage[at].served and !isControl(rec)) {
+            std.debug.print("N/A  limits live {s}: not served on {s}\n", .{ rec.launch.name, arch });
+            continue;
+        }
         const bytes = try image(rec.launch.image);
         const listed = try hsaco.kernels(a, bytes);
         defer a.free(listed);
@@ -108,6 +124,11 @@ pub fn objects(a: std.mem.Allocator, io: std.Io, dir: []const u8) !usize {
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(a);
         for (limits.rdna, 0..) |t, i| {
+            if (!rec.usage[i].served and !control) {
+                std.debug.print("N/A  limits {s} {s}: not served there\n", .{ t.name, rec.launch.name });
+                try line.appendSlice(a, ".{ .vgprs = 0, .served = false }, ");
+                continue;
+            }
             const path = try file(a, dir, t.name, rec.launch.image);
             defer a.free(path);
             const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 28)) catch |err| {

@@ -7,6 +7,8 @@ pub const metal_reference = @embedFile("fixtures/native-metal-binary64.json");
 pub const cuda_reference = @embedFile("fixtures/native-cuda-binary64.json");
 pub const legacy_reference = @embedFile("fixtures/native-binary64.json");
 pub const reference = cuda_reference;
+/// Host tests set this: `failures` drops the gate's PASS receipts, `nothing` also a planted fault's FAIL lines.
+pub var say: enum { all, failures, nothing } = .all;
 pub const Fixture = struct {
     path: []const u8,
     a: std.mem.Allocator,
@@ -34,7 +36,9 @@ pub const Fixture = struct {
 };
 pub fn same(comptime T: type, name: []const u8, want: []const T, got: []const T) !void {
     if (std.mem.eql(T, want, got)) return;
-    std.debug.print("FAIL qwen4 {s}: expected {d} values, got {d}; first difference {?d}\n", .{ name, want.len, got.len, std.mem.indexOfDiff(T, want, got) });
+    if (say != .nothing) std.debug.print("FAIL qwen4 {s}: expected {d} values, got {d}; first difference {?d}\n", .{
+        name, want.len, got.len, std.mem.indexOfDiff(T, want, got),
+    });
     return error.Qwen4DeviceExactness;
 }
 pub fn oracle(want: Oracle, logits: []const u16, picks: []const u32) !void {
@@ -45,14 +49,19 @@ pub fn oracle(want: Oracle, logits: []const u16, picks: []const u32) !void {
         if (at >= logits.len) return error.Qwen4OracleShape;
         const expected = @import("core").quant.convert.bf16(@floatCast(value));
         if (expected != logits[at]) {
-            if (different < 8) std.debug.print("FAIL qwen4 binary64 row={d} col={d}: expected 0x{x:0>4}, got 0x{x:0>4}\n", .{ r, col, expected, logits[at] });
+            if (different < 8 and say != .nothing) std.debug.print(
+                "FAIL qwen4 binary64 row={d} col={d}: expected 0x{x:0>4}, got 0x{x:0>4}\n",
+                .{ r, col, expected, logits[at] },
+            );
             different += 1;
         }
         at += 1;
     };
     if (at != logits.len) return error.Qwen4OracleShape;
     if (different != 0) {
-        std.debug.print("FAIL qwen4 binary64: {d}/{d} logits differ\n", .{ different, logits.len });
+        if (say != .nothing) std.debug.print("FAIL qwen4 binary64: {d}/{d} logits differ\n", .{
+            different, logits.len,
+        });
         return error.Qwen4OracleMismatch;
     }
     try same(u32, "binary64 token picks", want.picks, picks);

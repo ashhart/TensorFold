@@ -235,6 +235,9 @@ pub fn waitActive(io: std.Io, slow: *Slow, n: u32) void {
 }
 
 test "SIGTERM drains: 503 + Retry-After and /health draining while a reply finishes; at the deadline the rest end \"server restarting\" at a round boundary, then the engine closes" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = testing.allocator;
     const io = testing.io;
     var tt: TestText = .{};
@@ -348,6 +351,9 @@ const Gap = struct {
 };
 
 test "a stop that lands between a request's count and its drain check: the request is refused (503) and the drain waited for it, never lost" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = testing.allocator;
     const io = testing.io;
     var tt: TestText = .{};

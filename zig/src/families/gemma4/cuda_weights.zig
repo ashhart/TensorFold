@@ -200,6 +200,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     const n = @min(layers orelse geo.layers, geo.layers);
     w.layers = try gpa.alloc(Layer, n);
     var buf: [192]u8 = undefined;
+    const readers = try core.checkpoint.loadReaders();
     for (w.layers, 0..) |*l, i| {
         const dh = cfg.headDim(i);
         const kvh = geo.kvHeads(i);
@@ -207,6 +208,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
         const kv_out = kvh * dh;
         const p = try std.fmt.allocPrint(gpa, lm ++ "layers.{d}.", .{i});
         defer gpa.free(p);
+        defer if (readers > 0) x.ck.release(); // a read-ahead layer is on the device: its pages leave the cache (none read ahead: main's one release at close)
+        var reading = x.ck.prefetch(p, readers); // read ahead by threads of their own while the layer packs
+        defer _ = reading.join();
         const name = struct {
             fn of(b: []u8, pre: []const u8, suffix: []const u8) ![]const u8 {
                 return std.fmt.bufPrint(b, "{s}{s}", .{ pre, suffix });

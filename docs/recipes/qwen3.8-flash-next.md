@@ -9,8 +9,9 @@ requested storage, with the shared runtime reserve. Unused source-file padding i
 `info` prints the base text load and cold pack budgets separately; these are conservative plans, not measured fit results.
 A 128 GB Mac may not hold the complete load even when the weight files fit.
 Use a smaller quantization or raise the OS wired limit where supported; fewer streams or a shorter context reduce
-additional session storage. Native Metal does not implement `--ple-on-ssd` yet. CUDA also serves the 4-bit checkpoint
-([Flash Next on CUDA](flash-next-cuda.md)), and HIP serves it and two oQ checkpoints on a Strix Halo iGPU
+additional session storage. Native Metal's `--ple-on-ssd` leaves the n-gram tables in the checkpoint and reads their
+rows from SSD in batches ([Exact Fluid Subgraph Residency](fluid-subgraph-residency.md)). CUDA also serves the 4-bit
+checkpoint ([Flash Next on CUDA](flash-next-cuda.md)), and HIP serves it and two oQ checkpoints on a Strix Halo iGPU
 ([native HIP](#native-hip-on-a-strix-halo-igpu)).
 
 ```bash
@@ -414,7 +415,7 @@ reply still equals its solo run. The cost is decode speed while prompts fill: a 
 most of the experts, so live replies decode at about a tenth of their usual rate during a burst's prefill (2.6-3.2
 of 32-41 tok/s on one Spark) instead of stopping. `--decode-share S` sizes the passes so a round's decoding takes
 that share of the pass's time: 0.25 about doubles decode during a prefill and roughly halves prompt speed. The
-default, 0, keeps whole passes. The native binary refuses `--decode-share`.
+default, 0, keeps whole passes. The native server takes `--decode-share` as a time share instead: see [the API](../api.md).
 
 Prompt pieces are 2,048 rows, or 4,096 while nothing decodes on a DGX Spark serving the MLX checkpoint without
 `--vision`, when the admitted window leaves room (the startup log names the choice). `TENSORFOLD_PREFILL_ROWS=N`

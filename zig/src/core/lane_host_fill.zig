@@ -247,7 +247,8 @@ fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
     const t0 = std.Io.Clock.awake.now(h.io);
     const rows = step(h, at);
     const ns: i64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
-    h.srpt.filled(if (rows == std.math.maxInt(u64)) 0 else rows, ns); // no progress shown is no sample
+    // no progress shown is no sample; a backend that never reports shows a whole prompt at its last step
+    h.srpt.filled(if (rows == std.math.maxInt(u64) or !h.core.backend.vtable.reports_fill) 0 else rows, ns);
     h.share.steppedAt(ns, decoding, p);
     return rows;
 }
@@ -513,6 +514,38 @@ test "prefill service: fcfs fills only the oldest long prompt a visit, at TOKENS
             try std.testing.expectEqual(@as(u32, 1024), calls.caps[2]);
         }
     }.body, true, &.{ 2048, 2048, 2048 }, .{ .policy = .fcfs, .tokens = 1024 });
+}
+
+test "srpt: a prompt's steps teach its row time only where the backend reports them" {
+    const lanes = @import("lanes");
+    const api = @import("engine_api.zig");
+    const gpa = std.testing.allocator;
+    for ([_]bool{ true, false }) |reports| {
+        var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+        defer cfg.deinit(gpa);
+        var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 2 };
+        defer target.deinit();
+        var vt = target.stepped().vtable.*;
+        vt.reports_fill = reports;
+        var clock: lanes.fake.FixedClock = .{};
+        var core = lanes.Engine.init(gpa, &cfg, .{ .ptr = &target, .vtable = &vt }, clock.clock());
+        defer core.deinit();
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+        defer {
+            @import("lane_host_end.zig").closeAll(&host);
+            host.stop();
+        }
+        host.srpt.on = true;
+        const prompt: [2048]u32 = @splat(3);
+        const request: api.Request = .{ .prompt = &prompt, .max_tokens = 1, .drafts = false };
+        try host.engine().submit(1, &request, .{ .ctx = &host, .event = policyEvent });
+        try std.testing.expect(host.admitOne());
+        _ = longStep(&host, 0); // half of it: a reporting backend shows those rows
+        try std.testing.expectEqual(reports, host.srpt.fill_ns_row > 0);
+        _ = longStep(&host, 0); // its last: a silent backend's whole prompt in one step is no row's time
+        try std.testing.expectEqual(@as(usize, 0), host.filling.items.len);
+        try std.testing.expectEqual(reports, host.srpt.fill_ns_row > 0);
+    }
 }
 
 test "prefill service: fcfs alone with nothing decoding takes the engine's own cut" {

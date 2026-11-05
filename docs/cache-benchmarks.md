@@ -19,6 +19,13 @@ Completed streams with no nonempty text or reasoning also have no output or toke
 claims positive completion tokens or the server supplies a token hash. Usage and completion remain recorded.
 Missing counts/timings remain null, and failed or insufficiently streamed replies do not enter decode rates.
 
+Tool-call-only replies (`delta.tool_calls` without nonempty text or reasoning) are also outside this
+qualification: their fingerprints remain null and the cache client exits 1, including when cache assertions pass.
+Tool names, IDs and argument fragments do not contribute to `output_sha256` or text-chunk latency measurements.
+A mixed reply with text or reasoning can qualify under the usual checks, but its output fingerprint covers only
+that text and reasoning; matching output fingerprints do not establish matching tool calls or arguments.
+Use text/reasoning-producing replies for these cache receipts. Tool-call correctness needs a separate check.
+
 ## First, repeated and concurrent requests
 
 The standard-library-only cache client runs one first request, identical repeated requests, then a
@@ -97,12 +104,25 @@ python3 tools/bench_concurrent.py http://127.0.0.1:8080 MODEL \
 Each item has a unique `name`, a `kind` (`chat` or `completion`) and a `prompt`. `--alone` and `--serial` check
 each request against its own prompt's solo and `"draft": false` runs. `--prompts` and `--mixed` are exclusive.
 
+## A long prompt beside a running reply
+
+`tools/bench_fill.py` measures what the two cost each other: a reply decoding while a long prompt fills, in both arrival
+orders, against each one run alone. Serve with the prompt cache off, so the long prompt stays cold, and two streams or more:
+
+```sh
+python3 tools/bench_fill.py http://127.0.0.1:8080 MODEL --corpus FILE --long 65536 --reply 1024 --output fill.json
+```
+
+`FILE` is any text long enough for `--long` tokens. The report gives `reply_s` (sent to last token), `long_ttft_s`,
+`both_done_s` and the reply's largest gaps for each order, plus `alone` for the sum to compare `both_done_s` with. `exact`
+is true only when every reply's `token_sha256` equals its run alone; the tool exits 1 when it isn't, or when `cold` isn't.
+
 ## Model-free checks
 
 ```sh
 python3 -m unittest discover -s tools/tests -p 'test_bench*.py' -v
 ```
 
-Tests exercise usage validation, missing hashes, errors, incomplete/empty SSE, Unicode chunking,
+Tests exercise usage validation, missing hashes, errors, incomplete/empty/tool-call-only SSE, Unicode chunking,
 concurrent request ordering, assertion failures, receipt allowlisting, and a real loopback HTTP server.
 They do not load weights or substitute for checkpoint/device performance and exactness gates.

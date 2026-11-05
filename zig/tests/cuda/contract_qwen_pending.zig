@@ -56,8 +56,8 @@ const windows = [_]Window{
     .{ .what = "a 64-row chain", .parents = &chain64 },
 };
 
-/// Pending rows: one, the scan's 8-row load batches around 8, and cuda_cache.zig's pend_commit and pend_cap.
-const counts = [_]usize{ 1, 7, 8, 9, 24, 48 };
+/// Pending rows: one, the scan's 8-row load batches around 8, cuda_cache.zig's pend_commit and pend_cap, then a window.
+const counts = [_]usize{ 1, 7, 8, 9, 24, 48, 49, most };
 
 /// qwen35_slots.cuh's scans: register slots, and value rows a warp (cuda_engine.zig deltaScan's grid).
 const Scan = struct { slots: usize, r: usize };

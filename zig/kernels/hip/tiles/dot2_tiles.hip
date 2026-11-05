@@ -6,6 +6,7 @@
 #include "tiles/stream.hpp"
 #include "tiles/matrix_gemm.hpp"
 #include "quant/mlx_tiles.hpp"
+#include "quant/dense_tiles.hpp"
 
 namespace tf {
 namespace rocm {
@@ -366,7 +367,8 @@ using Dot = DotF16;
     TF_STREAM(BITS, 1, 2) TF_STREAM(BITS, 1, 4) TF_STREAM(BITS, 1, 8)                        \
     TF_STREAM(BITS, 2, 2) TF_STREAM(BITS, 2, 4) TF_STREAM(BITS, 2, 8)                        \
     TF_STREAM(BITS, 4, 2) TF_STREAM(BITS, 4, 4)                                               \
-    TF_WMMA(BITS)
+    TF_WMMA(BITS)                                                                             \
+    template __global__ void affine_wmma_item<BITS, 4>(Affine);
 
 TF_TILES(2)
 TF_TILES(3)
@@ -374,6 +376,12 @@ TF_TILES(4)
 TF_TILES(5)
 TF_TILES(6)
 TF_TILES(8)
+
+// The BF16 dense GEMM on every build (its body traps where there is no BF16 dot2), so every image has the symbol.
+template __global__ void dense_gemm_block<DotBF16, GemmShape<DotBF16>::rt>(Affine);
+// gfx12's WMMA dense tile on every build too (its body traps without gfx12 WMMA).
+template __global__ void dense_wmma12_gemm<DotBF16, W12Small>(Affine);
+template __global__ void dense_wmma12_gemm<DotBF16, W12Big>(Affine);
 
 }  // namespace rocm
 }  // namespace tf

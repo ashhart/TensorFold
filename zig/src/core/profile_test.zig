@@ -15,19 +15,50 @@ test "stable profile: live lookup is exactly the legacy libc lookup for every re
     }
 }
 
-test "stable profile: registry covers its switches once, scopes metadata and never supplies a default" {
+test "stable profile: registry scopes metadata and never supplies a default" {
     for (p.entries) |e| {
         try t.expectEqual(e.id, p.entry(e.id).id);
         try t.expect(e.name().len > 0 and e.families.len > 0 and e.effect.len > 0 and e.evidence.len > 0);
         try t.expect(e.stable == null);
         try t.expect(p.resolve(.stable, e.id, null) == null);
         try t.expect(e.applies(e.families[0], "cuda"));
-        try t.expect(!e.applies(e.families[0], "mlx"));
-        try t.expect(!e.applies(e.families[0], "rocm"));
+        try t.expect(!e.applies(e.families[0], "metal"));
+        try t.expect(!e.applies(e.families[0], "hip"));
         try t.expect(!e.applies("unknown-model", "cuda"));
     }
     try t.expectEqual(p.Class.debug, p.entry(.TF_QWEN_KV_PAGES_ALL).class);
     try t.expectEqual(p.Class.experimental, p.entry(.TF_FLASHNEXT_KV_PAGES).class);
+}
+
+test "stable profile: shared paging variable has disjoint GLM and Nemotron reporting policies" {
+    var glm: usize = 0;
+    var nemotron: usize = 0;
+    var omni: usize = 0;
+    for (p.entries) |e| {
+        if (e.id != .TF_KV_PAGES) continue;
+        if (e.applies("glm5_next", "cuda")) {
+            glm += 1;
+            try t.expectEqual(p.Syntax.auto, e.syntax);
+            try t.expect(e.differs("on"));
+            try t.expect(e.differs("off"));
+            try t.expect(!e.differs("auto"));
+        }
+        if (e.applies("nemotron_h", "cuda")) {
+            nemotron += 1;
+            try t.expectEqual(@as(usize, 2), e.report_values.?.len);
+            try t.expectEqualStrings("0", e.report_values.?[0]);
+            try t.expectEqualStrings("all", e.report_values.?[1]);
+            for ([_][]const u8{ "0", "all" }) |raw| try t.expect(e.differs(raw));
+            for ([_][]const u8{ "", "on", "off", "1", "auto", "00", "+0", "ALL", "false", " all ", "0\n" }) |raw|
+                try t.expect(!e.differs(raw));
+        }
+        if (e.applies("nemotron_h_omni", "cuda")) omni += 1;
+        try t.expectEqual(p.Class.identical, e.class);
+        try t.expect(e.stable == null);
+    }
+    try t.expectEqual(@as(usize, 1), glm);
+    try t.expectEqual(@as(usize, 1), nemotron);
+    try t.expectEqual(@as(usize, 1), omni);
 }
 
 test "stable profile: explicit off, empty, malformed and ordinary values are returned without coercion" {
@@ -53,8 +84,33 @@ test "stable profile: GLM paging registers automatic policy without supplying or
     try t.expectEqual(p.Class.identical, e.class);
     try t.expect(e.applies("glm5_next", "cuda"));
     try t.expect(!e.applies("qwen3_5", "cuda"));
-    try t.expect(!e.applies("glm5_next", "mlx"));
+    try t.expect(!e.applies("glm5_next", "metal"));
     try t.expect(!e.differs("auto"));
     for ([_][]const u8{ "off", "0", "on", "1", "all", "", "AUTO", "false", " 0 " }) |raw|
         try t.expect(e.differs(raw));
+}
+
+test "stable profile: the GLM host KV tier registers as an exact-one switch a family, off unless set" {
+    inline for (.{ .TF_GLM_KV_HOST, .TF_GLM_KV_HOST_SHARED }) |id| {
+        const e = p.entry(id);
+        try t.expectEqual(p.Class.identical, e.class);
+        try t.expectEqual(p.Syntax.one, e.syntax);
+        try t.expect(e.applies("glm5_next", "cuda"));
+        try t.expect(!e.applies("qwen3_5", "cuda"));
+        try t.expect(!e.applies("glm5_next", "mlx"));
+        try t.expectEqualStrings("#1795", e.evidence);
+        try t.expect(p.resolve(.stable, id, null) == null);
+        try t.expect(e.differs("1"));
+        for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |raw| try t.expect(!e.differs(raw));
+    }
+}
+
+test "stable profile: a runtime name lookup covers the registry and leaves every other name to libc" {
+    try t.expectEqual(p.Switch.TF_GLM_KV_HOST, p.registered("TF_GLM_KV_HOST").?);
+    try t.expectEqual(p.Switch.TF_QWEN_KV_PAGES, p.registered("TF_QWEN_KV_PAGES").?);
+    for ([_][]const u8{ "TF_GLM_KV_HOST_GIB", "TF_UNREGISTERED_FIXTURE", "", "tf_glm_kv_host" }) |name|
+        try t.expect(p.registered(name) == null);
+    // An unset variable is null through both paths, so an unregistered name keeps the reader's old default.
+    try t.expect(p.lookup("TF_PROFILE_FIXTURE_UNSET") == null);
+    inline for (p.entries) |e| try t.expectEqual(p.get(e.id), p.lookup(e.name()));
 }

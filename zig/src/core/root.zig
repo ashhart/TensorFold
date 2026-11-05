@@ -1,5 +1,6 @@
 //! Backend-neutral engine parts: checkpoint files, the CUDA draft-depth rule, the copy index, the tokenizer.
 
+pub const benchmark_group = @import("benchmark_group.zig");
 pub const weight_only = @import("weight_only.zig");
 pub const profile = @import("profile");
 pub const safetensors = @import("safetensors.zig");
@@ -10,7 +11,9 @@ pub const exlr8 = @import("exlr8.zig");
 pub const eaq_container = @import("eaq_container.zig");
 pub const digest_cache = @import("digest_cache.zig");
 pub const checkpoint_identity = @import("checkpoint_identity.zig");
+pub const checkpoint_read_ahead = @import("checkpoint_read_ahead.zig");
 pub const checkpoint = @import("checkpoint.zig");
+pub const checkpoint_fixture = @import("checkpoint_fixture.zig");
 pub const exl3_load = @import("exl3_load.zig");
 pub const direct_io = @import("direct_io.zig");
 pub const direct_gather = @import("direct_gather.zig");
@@ -36,7 +39,7 @@ pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const l2_ref = @import("l2_ref.zig");
 pub const act_ref = @import("act_ref.zig");
-pub const bf16_round = @import("bf16_round.zig");
+pub const bf16_round = @import("bf16_round");
 pub const rope_yarn = @import("rope_yarn.zig");
 /// transformers' default and proportional RoPE inverse frequencies in fp32, word for word.
 pub const rope_freq = @import("rope_freq.zig");
@@ -65,6 +68,7 @@ pub const kv_pool = @import("kv_pool.zig");
 pub const kv_prompts = @import("kv_prompts.zig");
 
 test {
+    _ = benchmark_group;
     _ = profile;
     _ = checkpoint_weights;
     _ = safetensors;

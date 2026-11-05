@@ -4,6 +4,7 @@ const tokenizer = @import("tokenizer");
 const template = @import("template");
 const json = @import("json");
 const model_text = @import("model_text.zig");
+const KimiText = @import("kimi_text.zig").KimiText;
 const dsv41_chat = @import("dsv41_chat");
 const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
 const Value = json.Value;
@@ -22,6 +23,7 @@ pub const HfText = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     tok: tokenizer.Tokenizer,
+    native_kimi: ?*KimiText = null,
     source: []const u8 = "",
     native_deepseek: bool = false,
     clear_thinking: ?bool = null, // GLM-5.3's, given to its template on every render (``glmClearThinking``)
@@ -40,6 +42,21 @@ pub const HfText = struct {
         t.* = .{ .gpa = gpa, .arena = .init(gpa), .tok = undefined };
         errdefer t.arena.deinit();
         const a = t.arena.allocator();
+        const probe = readJson(io, a, dir, "config.json");
+        if (probe == .object) if (probe.object.get("model_type")) |kind| if (kind == .string and
+            (std.mem.eql(u8, kind.string, "kimi_k3") or std.mem.eql(u8, kind.string, "kimi_k31")))
+        {
+            if (template_override != null) {
+                problem.* = "Kimi uses the release XTML renderer; --chat-template is unsupported";
+                return error.Load;
+            }
+            t.native_kimi = KimiText.load(gpa, io, dir) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                problem.* = try std.fmt.allocPrint(pa, "cannot load Kimi tiktoken/XTML assets ({s})", .{@errorName(err)});
+                return error.Load;
+            };
+            return t;
+        };
         t.tok = tokenizer.loadTokenizer(io, gpa, dir) catch |e| {
             problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
             return error.Load;
@@ -95,7 +112,7 @@ pub const HfText = struct {
     pub fn deinit(t: *HfText) void {
         if (t.compiled) |*c| c.deinit();
         if (t.tool_compiled) |*c| c.deinit();
-        t.tok.deinit();
+        if (t.native_kimi) |kimi| kimi.deinit() else t.tok.deinit();
         t.arena.deinit();
         t.gpa.destroy(t);
     }
@@ -240,6 +257,7 @@ pub const HfText = struct {
     }
 
     pub fn text(t: *HfText) model_text.Text {
+        if (t.native_kimi) |kimi| return kimi.text();
         return .{ .ctx = t, .vtable = &.{
             .encode = encodeFn,
             .decode = decodeFn,
@@ -255,6 +273,10 @@ pub const HfText = struct {
             .encode_plain = encodePlainFn,
             .encode_masked = encodeMaskedFn,
         } };
+    }
+
+    pub fn identity(t: *const HfText, a: Allocator) Allocator.Error![32]u8 {
+        return if (t.native_kimi) |kimi| kimi.identity() else tokenizer.identity(&t.tok, a);
     }
 
     fn specialFn(ctx: *anyopaque, id: u32) bool {

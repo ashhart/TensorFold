@@ -20,15 +20,7 @@ pub const max_rows = fw.window_rows;
 const mtp_rows = 1 + engine.max_drafts;
 const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
 
-/// With DFlash2: a window's ms by rows on two GB10s (EXL3, TF_GLM_PROF: 86 to 107 ms at 5 to 8), shared as glm_cuda's.
-const gb10_window_costs = costTable(max_rows, 52.0, 6.8);
-const gb10_shared_costs = costTable(engine.shared_rows, 76.0, 4.1);
-
-fn costTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]lanes.config.Cost {
-    var c: [n]lanes.config.Cost = undefined;
-    for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = one + row * @as(f64, @floatFromInt(i)) };
-    return c;
-}
+const copy_policy = @import("cuda_copy_policy.zig");
 
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
 const Lane = struct {
@@ -47,6 +39,7 @@ pub const Lanes = struct {
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
     alone: bool = false, // each window in its own forward (TF_GLM_SHARED=0)
     mtp_confidence: ?f64 = null, // --mtp-confidence: the MTP head's chains stop where their chance falls under it
+    copy_confidence: bool = false, // copy mode keeps head confidence in probabilities so target copies stay priced
     shared: u64 = 0, // forwards that held several streams' windows (checks read it)
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
@@ -93,6 +86,7 @@ pub const Lanes = struct {
         .keep = keepFn,
         .draft = draftFn,
         .probabilities = chancesFn,
+        .tree = copy_policy.held,
         .release = releaseFn,
         .first_masked = firstMaskedFn,
         .held = heldFn,
@@ -125,12 +119,18 @@ pub const Lanes = struct {
             .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
             .draft_probabilities = block or self.mtp_confidence != null, // chances size each window (DFlash2's by the costs)
             .draft_confidence = if (block) null else self.mtp_confidence,
-            .window_costs = if (block) &gb10_window_costs else &.{},
-            .shared_costs = if (block) &gb10_shared_costs else &.{},
+            .window_costs = if (block) &copy_policy.window_costs else &.{},
+            .shared_costs = if (block) &copy_policy.shared_costs else &.{},
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
             .max_streams = if (sharing) engine.max_shared else 1,
         };
+    }
+
+    /// Root/context copies use the same verify/keep path and shared cost allocator as every target window.
+    pub fn factsWithCopies(self: *Lanes, enabled: bool) lanes.Model {
+        self.copy_confidence = enabled and self.x.e.mtp;
+        return copy_policy.apply(self.facts(), enabled);
     }
 
     fn of(ptr: *anyopaque) *Lanes {
@@ -287,7 +287,7 @@ pub const Lanes = struct {
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(gpa);
         // TF_GLM_KV_SHARE: the deepest kept state's pages, held for this call until the seat takes them
-        const marks: []const u32 = if (share) (try self.prefix.?.begin(ids, s.history_len, s.shared_prefixes, &owner, &adopt)).marks else &.{};
+        const marks: []const u32 = if (share) (try self.prefix.?.beginStream(s, &owner, &adopt)).marks else &.{};
         var held = true;
         errdefer if (held) gpa.free(marks);
         const pages = try self.seat(s, ids.len, s.max_new, adopt.items);
@@ -311,9 +311,9 @@ pub const Lanes = struct {
         return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
     }
 
-    /// Whether the prompt cache over the pool's pages keeps and resumes this pass: text alone, no prompt rows asked.
+    /// Whether the pool's prompt cache keeps this content-keyed pass, with no prompt logprob rows asked.
     fn cached(self: *const Lanes, s: *const lanes.Stream) bool {
-        return self.prefix != null and s.images.len == 0 and s.prompt_logprobs == null;
+        return self.prefix != null and prefix_mod.cacheable(s);
     }
 
     /// The stream's slot, its pages (the cache's `adopted` first, given back on a refusal), then its sequence.
@@ -364,8 +364,7 @@ pub const Lanes = struct {
     fn marksOf(self: *Lanes, s: *lanes.Stream, keeps: *prefix_mod.Keeps) ?engine.Marks {
         if (self.cached(s)) {
             const l = self.lanes.getPtr(s) orelse return null;
-            keeps.* = .{ .x = self.prefix.?, .slot = l.slot, .prompt = s.prompt() };
-            return if (l.marks.len == 0) null else .{ .at = l.marks, .ctx = keeps, .call = prefix_mod.Keeps.at, .interrupted = prefix_mod.Keeps.at };
+            return self.prefix.?.marks(l.slot, s, l.marks, keeps);
         }
         return if (s.reuse.hook == null) null else .{
             .at = s.reuse.marks,
@@ -576,6 +575,7 @@ pub const Lanes = struct {
             chain *= p;
             c.* = chain;
         }
+        if (self.mtp_confidence != null and self.copy_confidence and self.x.e.drafter == null) copy_policy.confidence(self.mtp_confidence, out[0..n]);
         for (out[n..]) |*c| c.* = 0;
         return true;
     }

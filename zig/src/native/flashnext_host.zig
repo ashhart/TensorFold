@@ -8,6 +8,7 @@ const tf = @import("tensorfold");
 const fx = tf.flashnext_engine;
 const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
+const cache_setup = @import("flashnext_cache_setup.zig");
 const disk = @import("flashnext_disk.zig");
 const Snaps = @import("flashnext_snaps.zig").Snaps;
 const Resident = @import("resident.zig").Resident;
@@ -417,29 +418,10 @@ fn ms(ns: i96) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e6;
 }
 
-/// The prompt cache's plan (cache_fit.zig); without an OS reading, `gib` or the Metal working set's spare.
-fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
-    const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
-    const dev = eng.r.device;
-    if (limit) |cap| {
-        const ready = cache_fit.footprint() orelse return error.NoMemoryReading;
-        if (ready +| cache_fit.MARGIN > cap) return error.OverMemoryLimit;
-        return cache_fit.budgetUnder(cap, gib, over, dev.maxWorkingSet() -| dev.allocated(), a, why, rank);
-    }
-    return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
-}
-
 /// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
 pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, daily: u64 = 32 << 30, conversations: bool = false, spill: api.prompt_cache.rows.Spill = .off, slots: ?usize = null };
 
 const rows_image: api.prompt_cache.rows.Image = disk.image(Host);
-
-/// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
-fn learnedStates(gpa: Allocator, io: std.Io, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try disk.identity(gpa, io, eng)).id, cap);
-    std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
-    return m;
-}
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, vision: ?api.VisionOpen, a: Allocator, why: *[]const u8) !*Host {
@@ -466,7 +448,7 @@ pub fn openConfigured(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]cons
 
 /// Takes a warmed engine and its image tower, if any, without loading or warming; the caller keeps both on error.
 pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over_cap: bool, learn: ?Learn, limit: ?u64, vis: ?*images.Vision, a: Allocator, why: *[]const u8) !*Host {
-    const cache_plan = try cacheBudget(eng, cache_gib, over_cap, limit, a, why);
+    const cache_plan = try cache_setup.cacheBudget(eng, cache_gib, over_cap, limit, a, why);
     const budget = cache_plan.budget_bytes;
     eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
     eng.snap_pool.max = budget;
@@ -478,7 +460,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const context_limit: i64 = @as(i64, @intCast(eng.r.window.capacity)) - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .name = "flashnext-zig", .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .benchmark_ranks = if (eng.r.tp != null) 2 else 1, .benchmark_group = if (eng.r.tp) |t| t.benchmark_group else null, .name = "flashnext-zig", .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
     h.warm = .{ .queue = eng.r.queue };
     if (vis) |v| h.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
     // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
@@ -492,7 +474,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     if (learn) |l| if (l.conversations) {
         if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l);
     } else {
-        h.learned = try learnedStates(gpa, io, eng, l.root, l.cap);
+        h.learned = try cache_setup.learnedStates(gpa, io, eng, l.root, l.cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;
     };
     errdefer if (h.learned) |*m| m.deinit();

@@ -3,6 +3,7 @@
 const std = @import("std");
 const registry = @import("core").registry;
 const affine = @import("affine.zig");
+const item = @import("matrix_item.zig");
 
 const Entry = affine.Entry;
 const Shape = registry.Shape;
@@ -185,6 +186,13 @@ fn fitsPrefillMatrix(s: Shape) bool {
     return prefillOk(s) and !s.fp16 and gemmFits(s);
 }
 
+/// Prompt chunks of at most this many rows: past it an expert holds enough rows that the 128-row tile wins.
+const item_rows = 1024;
+
+fn fitsPrefillItem(s: Shape) bool {
+    return fitsPrefillMatrix(s) and s.m <= item_rows;
+}
+
 fn fitsPrefillGemm(s: Shape) bool {
     return prefillOk(s) and gemmFits(s);
 }
@@ -243,6 +251,14 @@ fn launchKp(comptime tier: usize) Launch {
     return struct {
         fn f(k: *const Kernels, c: Call) Error!void {
             try k.kpGo(c.r, c.arg, c.s, c.items, tier);
+        }
+    }.f;
+}
+
+fn launchItem(comptime tier: usize) Launch {
+    return struct {
+        fn f(k: *const Kernels, c: Call) Error!void {
+            try item.go(k, c, tier);
         }
     }.f;
 }
@@ -317,7 +333,12 @@ fn prefill(comptime op: Op) [7]Entry {
     };
 }
 
-pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed);
+/// The routed prompt's matrix-core tile of 64 rows an item, the 128-row tile's bits for items of few rows.
+const routed_item = [_]Entry{
+    entry(.routed, .prefill, "item64", .{ .family = .gemm, .fits = &fitsPrefillItem, .launch = launchItem(0), .caps = &matrixCores, .policy = &matrixOn }),
+};
+
+pub const all = project_decode ++ routed_decode ++ other_decode ++ prefill(.project) ++ prefill(.routed) ++ routed_item;
 
 // ---- the choices on the GPUs' tables
 
@@ -456,5 +477,26 @@ test "gfx1201 takes the K-parallel tile for short routed prompts, up to its item
     for (want) |w| {
         const shape: Shape = .{ .m = 128, .n = w[0], .k = w[1], .bits = 4, .group = w[2], .fp16 = false, .items = w[3], .plan_pairs = w[4] };
         try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[5]));
+    }
+}
+
+test "gfx1151 takes the 64-row routed tile for prompt chunks of up to 1,024 rows, the 128-row tile past them" {
+    const r = kernelsOn("gfx1151");
+    const env = envOn("gfx1151", true, true, true);
+    // Flash Next's gate and up: 11 slots a row, the plan's item capacity as the launch passes it
+    for ([_]struct { u32, []const u8 }{ .{ 1024, "item64" }, .{ 1025, "matrix" }, .{ 4096, "matrix" } }) |w| {
+        const pairs = w[0] * 11;
+        const items = @min(pairs, 512) + pairs / 8;
+        const shape: Shape = .{
+            .m = w[0],
+            .n = 1280,
+            .k = 2560,
+            .bits = 4,
+            .group = 32,
+            .fp16 = false,
+            .items = items,
+            .plan_pairs = pairs,
+        };
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .routed, .prefill, shape).?.id, w[1]));
     }
 }

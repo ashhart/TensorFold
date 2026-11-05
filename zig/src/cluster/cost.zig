@@ -86,6 +86,7 @@ pub fn expectedMax(ranks: u32, per: u32, q: f64) f64 {
 
 /// Chance an expert is picked by at least one of `rows` rows, each choosing `k` of `experts` (uniform routing).
 pub fn picked(experts: u32, k: u32, rows: u32) f64 {
+    if (experts == 0) return 0;
     return 1.0 - std.math.pow(f64, 1.0 - @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(experts)), @floatFromInt(rows));
 }
 

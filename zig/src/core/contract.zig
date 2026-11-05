@@ -8,7 +8,7 @@ pub const rows = @import("contract/rows.zig");
 pub const reference_threads = @import("contract/reference_threads.zig");
 pub const affine = @import("contract/affine.zig");
 pub const dense = @import("contract/dense.zig");
-pub const bf16_round = @import("bf16_round.zig");
+pub const bf16_round = @import("bf16_round");
 pub const attention_range = @import("attention_range.zig");
 pub const limits = @import("contract/limits.zig");
 pub const registry = @import("contract/registry.zig");
@@ -28,6 +28,7 @@ test {
     _ = @import("contract/nemotron_experts_records.zig");
     _ = @import("contract/moss_image_records.zig");
     _ = @import("contract/metal_pair_records.zig");
+    _ = @import("contract/affine_gather_records.zig");
     _ = spec;
     _ = gates;
     _ = rows;
@@ -40,6 +41,8 @@ test {
     _ = cubin;
     _ = hsaco;
     _ = hip_records;
+    _ = @import("contract/hip_records_qwen3.zig");
+    _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");
 }
 

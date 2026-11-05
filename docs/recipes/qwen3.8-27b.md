@@ -7,6 +7,12 @@ the drafter; without it the model decodes plain. On CUDA the native engine serve
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
 
+The Metal dense loader reads aligned hidden, intermediate, layer and head counts from `config.json`.
+It retains the existing attention/DeltaNet head layouts and layer schedule. The untied 9B geometry
+(4096 hidden, 12288 intermediate, 32 layers) uses the same runtime-shaped projections; full checkpoint
+reference, draft, resume, concurrency and performance qualification remains pending. The pinned 2B
+continues to open its separate engine. Host header checks do not qualify another checkpoint.
+
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
@@ -85,6 +91,41 @@ DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_st
 window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
+
+## GGUF host adapter
+
+`families/qwen27/gguf.zig` prepares the dense family's GGUF metadata and tensor identities on the host (#1920).
+It accepts the observed qwen35 architecture, refuses the unproven qwen3 alias, uses core's typed views
+and checks the fixed DeltaNet/attention geometry and layer schedule. Unknown computation keys, conflicting
+patterns, missing tensors, wrong shapes and unsupported quantization are refused by key or tensor identity.
+
+The observed ggml-org revision a316ea527fde32c12487be7574e2db5ac2ad2a7e has 40 metadata keys and 851 tensors.
+Core's reader checks both Q4_K_M and Q8_0 header/index lists against the plan, with no missing names or shapes.
+The testdata directory pins the extracted keys, tensor names/shapes and corresponding native Config input.
+Host tests use those data files and need no checkpoint. Large tokenizer arrays record type/count only.
+
+`Adapter.open` borrows the GGUF byte image and owns its index, destination names and compact affine arrays until
+`deinit`. FP32 coefficient tables and group-16/32 layouts remain intact. Dense F32/F16/BF16 tensors borrow their
+original bytes. GGUF matrices reverse dimension labels only; the convolution is reshaped without a transpose.
+The host fixture checks every repacked value against independent source decoding for all ten core formats.
+Core's documented signed-zero cancellation exception still applies; this does not extend its exactness claim.
+
+Destination names are identities for future native loading, not ready-to-serve tensors. The `ssm_a` entry has an
+explicit negative-exponential-decay role: its bytes are not relabelled as a usable logarithmic `A_log`. GDN head
+ordering still needs checkpoint qualification. No coefficient is narrowed or group merged.
+
+The final, input, post-attention, gated-linear, Q and K norm tensors carry the explicit `rms_gain` role.
+Sixteen values per class from both GGUF variants match the supplied MLX BF16 gains after rounding to BF16.
+Both checkpoints therefore store effective multiplicative gains here: the adapter neither adds nor subtracts one.
+It preserves the GGUF F32 values, including the bits beyond the MLX BF16 representation. The paired sample fixture
+checks all 96 values and the borrowed byte identities; this comparison does not qualify the remaining weights.
+Existing Metal paths still need FP32 metadata and group-16 qualification, tokenizer/chat-template integration,
+prepared-cache integration and real-model token/performance gates. GGUF model arguments receive a coming-later
+refusal; the adapter does not enable end-to-end GGUF inference.
+
+```sh
+zig build test-qwen27-gguf-host test-gguf-host -j1 --summary all
+```
 
 The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that

@@ -8,7 +8,10 @@ pub const planning = @import("attention_plan.zig");
 pub const Plan = planning.Plan;
 pub const Cache = struct { keys: Ref, values: Ref, capacity: u32, key_stride: u32 = 0, value_stride: u32 = 0 };
 const CachePtrs = extern struct { keys: u64, values: u64 };
-const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
+/// The pack and append kernels' arguments (public for the kernel contract's io check).
+pub const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
+/// Keep's gather and scatter: rows kept, and the KV heads a staging row holds.
+const KeepArgs = extern struct { kept: u32, kv_heads: u32 };
 const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32, kv_heads: i32 };
 pub const Limits = struct {
     rows: u32 = 128,
@@ -413,6 +416,9 @@ pub const Attention = struct {
         if (kept > scratch.limits.rows or binding.kept == null or binding.kept.? != kept) return error.AttentionKeep;
         try binding.checkCaches(caches);
         const g = binding.limits.geometry;
+        // the staging rows (scratch's keep_k, keep_v) hold scratch's KV heads; the caches' must be the same count
+        if (scratch.limits.geometry.kv_heads != g.kv_heads) return error.AttentionKeep;
+        const args = KeepArgs{ .kept = kept, .kv_heads = g.kv_heads };
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         if (kept == 0) return;
@@ -422,12 +428,12 @@ pub const Attention = struct {
         }
         e.setPipeline(a.io[5]);
         bind(e, .{ binding.get(.caches), binding.get(.meta), binding.get(.keep_map), scratch.get(.keep_k), scratch.get(.keep_v) });
-        e.setValue(kept, 5);
+        e.setValue(args, 5);
         e.dispatchThreads(mtl.Size.of(g.dim, g.kv_heads, kept), mtl.Size.of(32, 4, 1));
         e.barrier();
         e.setPipeline(a.io[6]);
         bind(e, .{ scratch.get(.keep_k), scratch.get(.keep_v), binding.get(.caches), binding.get(.meta), binding.get(.keep_map) });
-        e.setValue(kept, 5);
+        e.setValue(args, 5);
         e.dispatchThreads(mtl.Size.of(g.dim, g.kv_heads, kept), mtl.Size.of(32, 4, 1));
         e.barrier();
     }

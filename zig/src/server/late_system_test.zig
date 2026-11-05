@@ -468,6 +468,7 @@ test "GET and DELETE /v1/recall: 404 without a record, its state, emptied, and 4
     const opts: api.recall_store.Options = .{ .dir = dir, .cap_bytes = 64 << 20 };
     const w = (try Store.open(std.testing.allocator, std.testing.io, id, opts, &problem, arena.allocator())).?;
     defer w.close();
+    w.admission.floor = 0;
     var prompt: [200]u32 = undefined;
     for (&prompt, 0..) |*t, i| t.* = @intCast((i * 13) % 1000);
     w.readPrompt(&prompt, 0);

@@ -112,6 +112,13 @@ pub const Group = struct {
         try s.synchronize();
     }
 
+    pub fn benchmarkShape(g: *const Group) !nccl.Shape {
+        const actual = try g.lib.shape(g.comm);
+        if (actual.world != g.world or actual.rank != g.rank) return error.BadWorld;
+        return actual;
+    }
+    pub const benchmarkGather = gather;
+
     /// Every rank's `mine` in rank order into `out` (world of them), waited for.
     pub fn gather(g: *const Group, comptime T: type, d: *const driver.Driver, s: Stream, mine: T, out: []T) !void {
         if (out.len != g.world) return error.BadWorld;
@@ -198,4 +205,32 @@ test "an aborted two-rank communicator is not destroyed a second time" {
     group.destroyComm();
     try std.testing.expectEqual(@as(usize, 1), Fake.aborts);
     try std.testing.expectEqual(@as(usize, 0), Fake.destroys);
+}
+
+test "benchmark group: communicator count and rank refuse stored placement hints that disagree" {
+    const Fake = struct {
+        var fail_count = false;
+        fn count(_: nccl.Comm, out: *c_int) callconv(.c) nccl.Result {
+            if (fail_count) return 1;
+            out.* = 4;
+            return 0;
+        }
+        fn rank(_: nccl.Comm, out: *c_int) callconv(.c) nccl.Result {
+            out.* = 2;
+            return 0;
+        }
+    };
+    var g: Group = .{ .lib = undefined, .comm = null, .rank = 2, .world = 4 };
+    g.lib.api.ncclCommCount = Fake.count;
+    g.lib.api.ncclCommUserRank = Fake.rank;
+    try std.testing.expectEqual(nccl.Shape{ .world = 4, .rank = 2 }, try g.benchmarkShape());
+    g.world = 8;
+    try std.testing.expectError(error.BadWorld, g.benchmarkShape());
+    g.world = 4;
+    g.rank = 0;
+    try std.testing.expectError(error.BadWorld, g.benchmarkShape());
+    g.rank = 2;
+    Fake.fail_count = true;
+    defer Fake.fail_count = false;
+    try std.testing.expectError(error.NcclFailed, g.benchmarkShape());
 }

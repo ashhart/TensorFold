@@ -82,11 +82,11 @@ test "residency owner Qwen27: actual reusable drafter frame buffers follow alloc
         try record.check();
         frame.release();
         _ = try frame.begin();
-        record.fail_at = record.allocations.items.len;
-        try std.testing.expectError(error.InjectedBufferFailure, frame.alloc(32, 16, .bf16));
+        record.fail_at = record.allocations.items.len; // 128 KiB outgrows the first slot's 64 KiB: a replacement
+        try std.testing.expectError(error.InjectedBufferFailure, frame.alloc(4096, 16, .bf16));
         record.fail_at = null;
         try record.check();
-        _ = try frame.alloc(32, 16, .bf16);
+        _ = try frame.alloc(4096, 16, .bf16);
         owner.held.flush();
         try record.check();
         frame.release();
@@ -182,6 +182,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
             r.residency = null;
             r.failed = false;
             r.active = null;
+            r.reading = @splat(null);
             var offsets = [_]u32{1};
             r.offsets = &offsets;
             const budget = try Budget.init(try abi.Shape.init(model.config), 1, 1, 16);
@@ -197,6 +198,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
             defer r.taps.deinit();
             var back: Back = .{ .picks = try owned.take(), .kept = try owned.take() };
             var h: Host = .{ .gpa = a, .model = &model, .runner = r, .back = &back };
+            defer h.runner.settleSlot(0);
             var draft_model: runtime.Model = undefined;
             var draft: Draft = .{ .model = &draft_model };
             var vision: Vision = undefined;

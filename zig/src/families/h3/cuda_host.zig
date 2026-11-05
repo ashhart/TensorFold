@@ -1,5 +1,6 @@
 //! Host-memory entry points for the H3 block library, independent of transport.
 const std = @import("std");
+const report = @import("report.zig");
 const cuda = @import("cuda");
 const Model = @import("cuda.zig").Model;
 
@@ -49,7 +50,7 @@ pub fn hostAlloc(self: *Model, bytes: usize, device: *u64) !*anyopaque {
 }
 pub fn hostFree(self: *Model, ptr: *anyopaque) void {
     self.drain() catch |e| {
-        std.debug.print("H3 host allocation retained: {t}\n", .{e});
+        report.say("H3 host allocation retained: {t}", .{e});
         return;
     };
     if (self.hosts.fetchRemove(@intFromPtr(ptr))) |entry| {

@@ -15,6 +15,7 @@ test {
     _ = @import("weights/shard.zig");
     _ = @import("weights/projection.zig");
     _ = @import("weights/checkpoint_test.zig");
+    _ = @import("weights/checkpoint_hf_test.zig");
     _ = @import("weights/real_test.zig");
     @import("std").testing.refAllDecls(slicing);
     _ = @import("config.zig");

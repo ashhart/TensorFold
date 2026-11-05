@@ -27,6 +27,22 @@ over its scalar. Default `gid` remains 1 for old one/two-device settings; it is 
 scan each device independently, skipping zero GIDs and preferring IPv6 link-local. Invalid counts, duplicate devices,
 port overflow, empty members and conflicting device/via plural and singular fields refuse parsing or endpoint creation.
 
+`mtu` is the RC path MTU: 1024, 2048 or 4096, default 4096. Both ends must give the same value, at most the port's
+active MTU; Thunderbolt keeps 4096, and a ConnectX link through a switch may need 1024. `kind` is optional: `tb5` or
+`cx5` names the link MCDMA must report and refuses the other; omitted, the endpoint takes whichever connects. Endpoint
+creation refuses `cx5` with gid -1 (NeedGidIndex), a bond or port arrays (UnsupportedLink) before anything opens; any
+other `mtu` or `kind` value refuses parsing.
+
+```json
+{"rank":0,"library":"/opt/mcdma/libmcdma-fabric.dylib","links":[
+  {"peer":1,"device":"rdma_mcrdma0","via":"en0/192.0.2.2","port":7490,"name":"speedup","gid":0,"mtu":1024,"kind":"cx5"}
+]}
+```
+
+On a Mac a ConnectX link needs `gid` 0 (the MCDMA kext exposes only GID index 0) and a window plus both ranks' staging
+of at most 63 x 4 MiB, about 252 MiB (the kext registers at most 64 memory regions per context), so flashnext and glm
+do not fit a Mac ConnectX link yet.
+
 The existing `tp.zig` path passes the parsed logical link through unchanged to the MCDMA endpoint. Tensor partitioning
 and its flags do not depend on the number of physical members. An inactive or missing member refuses initialization;
 a member failing later fails the entire logical peer. Qualify prompt first-token time and decode with token equality

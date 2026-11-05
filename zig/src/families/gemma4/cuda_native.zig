@@ -52,8 +52,8 @@ const native = @This();
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-/// No `precision` field: the server refuses --precision for this family by name. --vision: the 12B's image embedder.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null };
+/// No `precision` field (refused by name). --vision: the 12B's embedder. kv_pages false, a drafter or env =0: linear.
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null, kv_pages: bool = true };
 
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
@@ -97,6 +97,11 @@ const Plan = struct {
     }
 };
 
+/// Global caches in pool pages: asked, no drafter (its paged verify trails main), TENSORFOLD_GEMMA4_KV_PAGES not 0.
+fn pagesOn(o: Options) bool {
+    return o.kv_pages and !(o.drafts and o.drafter != null) and !envOff("TENSORFOLD_GEMMA4_KV_PAGES");
+}
+
 /// The device bytes of the image path's workspace (the 31B's tower or the 12B's embedder), 0 without --vision.
 fn visionBytes(vision: bool, tower: bool) u64 {
     if (!vision) return 0;
@@ -121,9 +126,11 @@ fn positions(context: usize) usize {
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    const priority_copies = try cuda.priority_copies.read("TF_GEMMA4_COPIES", o.drafts);
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound;
-    const paged = try @import("core").kv_prompts.sharing() > 0;
+    // TF_KV_SHARE keeps prompts as the pool's pages, so it pages too; otherwise the default, unless turned off
+    const paged = try @import("core").kv_prompts.sharing() > 0 or pagesOn(o);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .w = undefined, .k = undefined, .s = undefined, .m = undefined, .gb = undefined };
@@ -151,6 +158,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_GEMMA4_GRAPHS"); // =0: every decode forward eager
     own.gb = try be.Gemma.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    own.gb.priority_copies = priority_copies;
     errdefer own.gb.deinit();
     if (o.vision) |lim| {
         const v = try gpa.create(cv.Vision);

@@ -7,7 +7,6 @@ const fwd = @import("cuda_forward.zig");
 const kern = @import("cuda_kernels.zig");
 const snap = @import("cuda_snap.zig");
 const cv = @import("cuda_vision.zig");
-
 const be = lanes.backend;
 const Stream = lanes.Stream;
 pub const shared = @import("cuda_shared.zig");
@@ -19,6 +18,8 @@ pub const prompt_rows = fwd.prompt_rows;
 pub const round_rows = fwd.round_rows;
 /// The widest window a stream verifies: one-row steps and every wider window give a row the same bits.
 pub const max_window = 16;
+/// Pages a request holds at most (cuda_shared.zig).
+pub const pagesFor = shared.pagesFor;
 /// Drawn tokens a handle names (a ring; read before the round loop could wrap it).
 const ring = 1024;
 
@@ -47,6 +48,7 @@ pub const Keeper = struct { ctx: *anyopaque, bytes: *const fn (*anyopaque, usize
 const Tap = struct { row: usize = 0, start: u64 = 0, rows: usize = 0, gen: u64 = 0 };
 
 pub const Gemma = struct {
+    priority_copies: bool = false,
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     m: *fwd.Model,
@@ -180,7 +182,7 @@ pub const Gemma = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Gemma) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(if (x.m.paged) round_rows else x.m.slots, round_rows)) };
+        return .{ .root_copies = x.priority_copies, .context_copies = x.priority_copies, .copy_match = if (x.priority_copies) 4 else 8, .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(if (x.m.paged) round_rows else x.m.slots, round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Gemma {
@@ -533,6 +535,7 @@ pub const Gemma = struct {
                 x.s.synchronize() catch {};
                 b.free();
             }
+            if (x.lanes.count() == 0) shared.report(x);
         }
     }
 
@@ -576,18 +579,13 @@ test "a greedy pick under a grammar: the first largest allowed token, refusals b
     try std.testing.expectError(error.NonFiniteLogits, pickAllowed(&row, &mask));
 }
 
-test "zero grant: Gemma CUDA assistant and DFlash preserve tokens through a long shared skip" {
+test "zero grant and shared head costs: Gemma CUDA assistant and DFlash keep tokens and costed copy grants" {
     var m: fwd.Model = undefined;
     m.slots = 16;
+    m.paged = false;
     var b: Gemma = undefined;
     b.m = &m;
+    b.priority_copies = true;
     try lanes.shared_draft_check.check(b.facts(), true);
-}
-
-test "shared head costs: Gemma CUDA assistant and DFlash retain costed copy grants" {
-    var m: fwd.Model = undefined;
-    m.slots = 16;
-    var b: Gemma = undefined;
-    b.m = &m;
     try @import("cuda_head_cost_test.zig").check(b.facts());
 }

@@ -11,13 +11,7 @@ namespace tf_nvfp4_experts {
 
 constexpr int BLOCK4 = 36;
 
-__device__ __forceinline__ uint4 ld_nc(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint4 ld_nc(const uint4* p) { return tf_common::ld_nc(p); }
 
 using tf_common::fp4pair;
 
@@ -167,11 +161,7 @@ struct Half {
   uint2 xa[2], xb[2];
 };
 
-__device__ __forceinline__ uint2 ld_nc2(const void* p) {
-  uint2 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v2.u32 {%0, %1}, [%2];\n" : "=r"(r.x), "=r"(r.y) : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint2 ld_nc2(const void* p) { return tf_common::ld_nc2(p); }
 
 template <int M>
 __device__ __forceinline__ void load_half(Half<M>& st, const uint4* blk, int g, int lane, int t, int jh,
@@ -325,20 +315,10 @@ __device__ __forceinline__ uint32_t e4m3x2(uint32_t x) {
 }
 
 // a * b in bf16 pairs; exact for e2m1 codes times e4m3 scales (six significant bits at most).
-__device__ __forceinline__ uint32_t mul2(uint32_t a, uint32_t b) {
-  uint32_t r;
-  asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(a), "r"(b), "r"(0x80008000u));
-  return r;
-}
+using tf_common::mul2;
 
 // mma from zero (C = 0): the same sums as the decode form's zeroed p[4], no register moves.
-__device__ __forceinline__ void mma_z(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
-                                      uint32_t b1) {
-  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-      "{%10, %10, %10, %10};\n"
-      : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(0.f));
-}
+__device__ __forceinline__ void mma_z(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) { qmm_frag::mma0(d, a0, a1, a2, a3, b0, b1); }
 
 // Prompt rows, 64 inputs a stage, NT row tiles a warp. FACT: the decode form's sums (per-16 mma from zero, then fma).
 template <int M, int EPI, int RT, int WM, int WN, int NT, bool FACT = false>

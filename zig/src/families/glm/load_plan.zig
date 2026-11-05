@@ -29,6 +29,12 @@ pub fn planBytes(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c:
     const plan = try wts.load(gpa, device, dir, c, 16, true);
     defer gpa.destroy(plan);
     defer plan.deinit();
+    var buf: [256]u8 = undefined;
+    const widths = wts.tally(plan, c).summary(&buf);
+    const gb = @as(f64, @floatFromInt(plan.bytes)) / 1e9;
+    const mtp = if (plan.mtp != null) " and the MTP layer" else "";
+    std.debug.print("glm plan: {d} of {d} layers{s}, {d:.2} GB in buffers, " ++
+        "every tensor's name, dtype and shape checked; {s}\n", .{ c.run, c.layers, mtp, gb, widths });
     return plan.bytes;
 }
 

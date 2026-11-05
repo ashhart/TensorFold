@@ -111,8 +111,8 @@ fn paths(text: []const u8) Paths {
         if (dot == 0 or dot + 1 >= token.len) continue;
         const ext = token[dot + 1 ..];
         var named = true;
-        for (token[0..dot]) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '/' or ch == '-')) {
-            named = false;
+        for (token[0..dot]) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '/' or ch == '\\' or ch == '-')) {
+            named = false; // a backslash separates a windows path the way a slash does
         };
         if (!named) continue;
         var tech = false;
@@ -120,7 +120,7 @@ fn paths(text: []const u8) Paths {
         if (tech) continue;
         for (code_ext) |e| if (std.ascii.eqlIgnoreCase(ext, e)) {
             out.code = true;
-            if (std.mem.indexOfScalar(u8, token, '/') != null) out.local_code = true;
+            if (std.mem.indexOfAny(u8, token, "/\\") != null) out.local_code = true;
         };
         for (doc_ext) |e| if (std.ascii.eqlIgnoreCase(ext, e)) {
             out.document = true;
@@ -356,6 +356,9 @@ test "code changes, research and plain answers classify as Cortheon does" {
     try std.testing.expect(!hello.frontier and hello.quick);
     try std.testing.expectEqual(Kind.general, classify(a, "Use node.js to serve pages").kind);
     try std.testing.expectEqual(Kind.documents, classify(a, "Summarize notes.md").kind);
+    const windows = classify(a, "Explain src\\app.py");
+    try std.testing.expectEqual(Kind.code, windows.kind);
+    try std.testing.expectEqual(Deliverable.code_understanding, windows.deliverable);
 }
 
 test "harness context and transform asks do not read as research" {

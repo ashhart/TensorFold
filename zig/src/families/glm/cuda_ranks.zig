@@ -15,7 +15,7 @@ pub const Settings = struct {
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
     kda_pad: bool = false, // TF_GLM_KDA_PAD: 1 (the fused KDA input padded to eight columns at load, for glm_mm) or 0
-    pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole).
+    pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole); unset, 8 under solo on the wire.
     solo: bool = false, // TF_GLM_CHUNK_SOLO: 4096 (prompt buffers for two chunks a pass, while no stream decodes) or 2048
     index_split: u32 = 2048, // TF_GLM_INDEX_SPLIT: from this position on, rank 0 splits a prompt chunk's indexer rows (0: never)
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
@@ -80,6 +80,8 @@ pub const Settings = struct {
                 problem.* = "TF_GLM_OVERLAP_PIECES: 1 to 8";
                 return error.BadSetting;
             }
+        } else if (s.solo and s.roce_multi and wireOpens(get)) {
+            s.pieces = 8; // TF_GLM_CHUNK_SOLO=4096 with TF_GLM_ROCE_MULTI=1: solo's doubled passes on the wire
         }
         if (get("TF_GLM_INDEX_SPLIT")) |v| {
             s.index_split = std.fmt.parseInt(u32, v, 10) catch {
@@ -151,9 +153,15 @@ pub const Settings = struct {
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
 
-/// The process environment's value of `name` (null when unset).
+/// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
-    return std.mem.span(std.c.getenv(name) orelse return null);
+    return @import("profile").lookup(name);
+}
+
+/// Whether TF_GLM_ROCE_MULTI's wire opens at TF_GLM_WORLD: three ranks or more (cuda_roce_multi); TP=2 stays on NCCL.
+fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
+    const v = get("TF_GLM_WORLD") orelse return false;
+    return (std.fmt.parseInt(usize, v, 10) catch 0) >= 3;
 }
 
 /// What every rank must agree on, as bytes the communicator carries.
@@ -371,7 +379,14 @@ fn probeSplit(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.n
     };
 }
 
+/// The latest pair split refused, which a test build keeps for its test instead of printing the refusal.
+pub var refused_pair: ?[2]usize = null;
+
 fn unreachablePeer(rank: usize, peer: usize) error{SplitUnreachable} {
+    if (@import("builtin").is_test) {
+        refused_pair = .{ rank, peer };
+        return error.SplitUnreachable;
+    }
     std.debug.print("REFUSE TF_GLM_PREFILL_REDUCE=split: rank {d} cannot exchange with rank {d}; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather\n", .{ rank, peer });
     return error.SplitUnreachable;
 }

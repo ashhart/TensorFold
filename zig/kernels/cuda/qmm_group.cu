@@ -28,16 +28,7 @@ struct Parts {
     int count;
 };
 
-__device__ __forceinline__ uint32_t pairm(uint32_t w, int s, uint32_t mask) {
-    const uint32_t t = ((w >> s) & mask) | 0x43004300u;
-    uint32_t r;
-#if __CUDA_ARCH__ >= 900
-    asm("sub.rn.bf16x2 %0, %1, %2;\n" : "=r"(r) : "r"(t), "r"(0x43004300u));
-#else
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
-#endif
-    return r;
-}
+using qmm_frag::pairm;
 
 template <int N>
 using ic = std::integral_constant<int, N>;
@@ -338,6 +329,9 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
 
 // The instantiations Nemotron's windows launch on sm_121 (tile 2: rows <= 16, bf16 out).
 template __global__ void tf_qmm_group::group_kernel<64, 16, 64, 1, 4, 8, false, false, false, false>(
+    const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+
+template __global__ void tf_qmm_group::group_kernel<64, 16, 128, 1, 8, 4, false, false, false, false>(
     const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
 
 // Two independent m16 accumulators reuse each weight panel; K groups, fmas and slice sums keep the narrow order.

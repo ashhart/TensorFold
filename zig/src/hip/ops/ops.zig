@@ -18,6 +18,7 @@ pub const mamba = @import("mamba.zig");
 pub const Kind = types.Kind;
 pub const Error = types.Error;
 pub const Tensor = types.Tensor;
+pub const ConvSplit = recurrence.ConvSplit;
 pub const Affine = types.Affine;
 /// The gated norm's gate: SiLU or sigmoid.
 pub const Gate = norms.Gate;
@@ -33,6 +34,8 @@ pub const Ops = struct {
     prefill: bool = false,
     /// A lane round's forward: decode tiles at any row count, so a row's bits ignore the rows it shares a round with.
     window: bool = false,
+    /// rocBLAS on this stream, for bf16 projections (null: the model has none).
+    blas: ?*const @import("../blas.zig").Blas = null,
 
     pub const project = products.project;
     pub const projectGroup = products.projectGroup;
@@ -48,6 +51,7 @@ pub const Ops = struct {
     pub const affineRouted = products.affineRouted;
     pub const embedAffine = products.embedAffine;
     pub const denseRows = products.denseRows;
+    pub const denseGemm = products.denseGemm;
 
     /// Whether decode.hip's merged launches are on.
     pub fn fused(o: Ops) bool {
@@ -55,6 +59,7 @@ pub const Ops = struct {
     }
 
     pub const attnGate = attention.attnGate;
+    pub const headsRows = attention.headsRows;
     pub const ropePrefill = attention.ropePrefill;
     pub const qkRope = attention.qkRope;
     pub const ropeDecode = attention.ropeDecode;

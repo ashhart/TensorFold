@@ -88,12 +88,19 @@ pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     return own.sb.admits(prompt, max_tokens);
 }
 
+/// The pool the lane host's ledger admits this family's promises by (#1943).
+pub fn ledgerPool(p: *anyopaque) ?*kv.Pool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.sb.pool) |*pool| pool else null;
+}
+
 /// Positions a stream's caches hold: whole 1,024s.
 fn positions(context: usize) usize {
     return (context + 1023) / 1024 * 1024;
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    const priority_copies = try cuda.priority_copies.read("TF_SPARK_COPIES", o.drafts);
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound;
     const own = try gpa.create(Owned);
@@ -120,6 +127,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_SPARK_GRAPHS"); // =0: every decode forward eager
     own.sb = try be.Spark.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    own.sb.priority_copies = priority_copies;
     errdefer own.sb.deinit();
     return .{
         .backend = own.sb.backend(),

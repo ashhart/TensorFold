@@ -30,6 +30,59 @@ pub const View = struct { codes: []const u8, scales: []const u8 = &.{}, fixed: [
 /// Readers a direct load gathers each chunk's planes with (the NVMe's O_DIRECT rate holds from 4 streams).
 const direct_readers = 4;
 
+const Source = core.direct_gather.Source;
+const GatherError = @typeInfo(@typeInfo(@TypeOf(core.direct_gather.Gather.read)).@"fn".return_type.?).error_union.error_set;
+
+/// A store's hook at chunk k's gather start (`gather`) or pack end (a test's; the weight store has none).
+fn mark(store: anytype, gather: bool, k: usize) void {
+    if (comptime @hasDecl(std.meta.Child(@TypeOf(store)), "chunkMark")) store.chunkMark(gather, k);
+}
+
+/// The chunk's plane views as the gather repoints them: codes, scales, fixed and exceptions of each.
+fn planes(part: []View, ptrs: []*[]const u8) []*[]const u8 {
+    for (part, 0..) |*v, j| {
+        ptrs[4 * j] = &v.codes;
+        ptrs[4 * j + 1] = &v.scales;
+        ptrs[4 * j + 2] = &v.fixed;
+        ptrs[4 * j + 3] = &v.exceptions;
+    }
+    return ptrs[0 .. 4 * part.len];
+}
+
+/// One chunk's gather on its own thread (inline if none starts) while the chunk before it packs.
+fn Next(comptime S: type) type {
+    return struct {
+        store: S,
+        g: *core.direct_gather.Gather,
+        sources: []const Source,
+        ptrs: []const *[]const u8,
+        k: usize,
+        thread: ?std.Thread = null,
+        failed: ?GatherError = null,
+
+        fn run(self: *@This()) void {
+            mark(self.store, true, self.k);
+            self.g.read(self.sources, self.ptrs) catch |err| {
+                self.failed = err;
+            };
+        }
+
+        fn start(self: *@This()) void {
+            self.thread = std.Thread.spawn(.{}, run, .{self}) catch blk: {
+                self.run();
+                break :blk null;
+            };
+        }
+
+        /// Joined (idempotent), then its error if the gather failed.
+        fn wait(self: *@This()) GatherError!void {
+            if (self.thread) |t| t.join();
+            self.thread = null;
+            if (self.failed) |err| return err;
+        }
+    };
+}
+
 /// The store as slice.stored reads it, every tensor's pages read ahead (this loader copies all of each).
 fn Ahead(comptime S: type) type {
     return struct {
@@ -179,8 +232,9 @@ pub fn loadMode(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pre
         views[3 * i + 1] = try viewOf(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.up_proj", .{ prefix, i }), width, dims, direct);
         views[3 * i + 2] = try viewOf(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.down_proj", .{ prefix, i }), dims, width, direct);
     }
-    var gather = core.direct_gather.Gather.init(a, direct_readers);
-    defer gather.deinit();
+    // two arenas: chunk k packs from one while chunk k + 1 is gathered into the other
+    var gathers = [2]core.direct_gather.Gather{ .init(a, direct_readers), .init(a, direct_readers) };
+    defer for (&gathers) |*g| g.deinit();
     var held: [core.direct_gather.max_sources]core.direct_gather.Source = undefined;
     // a layer whose shards don't fit one gather reads through the mapping, as a file system without O_DIRECT does
     const sources: ?[]core.direct_gather.Source = if (direct) store.sources(&held) catch |err| switch (err) {
@@ -191,7 +245,7 @@ pub fn loadMode(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pre
     if (direct) {
         // every global first (a 4-byte read each, joined where they sit together), checked as viewOf checks them
         for (views, 0..) |*v, j| ptrs[j] = &v.global_bytes;
-        if (sources) |s| try gather.read(s, ptrs[0..view_count]);
+        if (sources) |src| try gathers[0].read(src, ptrs[0..view_count]);
         for (views) |*v| try globalOf(v);
     }
     var up = try cuda.DeviceBuffer.alloc(d, up_total);
@@ -201,25 +255,32 @@ pub fn loadMode(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, pre
     // the store's pinned staging, kept across a load's layers and freed by its dropStaging or deinit on any path
     const chunk = @max(1, @min(count, stage_cap / (up_bytes + down_bytes)));
     const stage = try store.pinned(d, chunk * (up_bytes + down_bytes));
+    if (sources) |src| {
+        mark(store, true, 0);
+        try gathers[0].read(src, planes(views[0 .. 3 * @min(chunk, count)], ptrs));
+    }
     var lo: usize = 0;
-    while (lo < count) : (lo += chunk) {
+    var k: usize = 0;
+    while (lo < count) : ({
+        lo += chunk;
+        k += 1;
+    }) {
         const m = @min(chunk, count - lo);
-        if (sources) |s| {
-            const part = views[3 * lo ..][0 .. 3 * m];
-            for (part, 0..) |*v, j| {
-                ptrs[4 * j] = &v.codes;
-                ptrs[4 * j + 1] = &v.scales;
-                ptrs[4 * j + 2] = &v.fixed;
-                ptrs[4 * j + 3] = &v.exceptions;
-            }
-            try gather.read(s, ptrs[0 .. 4 * part.len]);
+        // the next chunk's gather runs while this one packs; the main thread allocates nothing from `a` meanwhile
+        var next: Next(@TypeOf(store)) = .{ .store = store, .g = &gathers[(k + 1) % 2], .sources = sources orelse &.{}, .ptrs = &.{}, .k = k + 1 };
+        defer next.wait() catch {};
+        if (sources != null and lo + chunk < count) {
+            next.ptrs = planes(views[3 * (lo + chunk) ..][0 .. 3 * @min(chunk, count - lo - chunk)], ptrs);
+            next.start();
         }
         const up_words = std.mem.bytesAsSlice(u32, stage[0 .. m * up_bytes]);
         const down_words: []u32 = @alignCast(std.mem.bytesAsSlice(u32, stage[m * up_bytes ..][0 .. m * down_bytes]));
         try pack(views[3 * lo ..][0 .. 3 * m], up_words, down_words, width, dims, n);
+        mark(store, false, k);
         // synchronous from pinned memory, as cuda_pocket.zig's staged: done before return, so the next chunk may refill
         try d.check(d.api.cuMemcpyHtoD_v2(try up.at(lo * up_bytes), stage.ptr, m * up_bytes), "cuMemcpyHtoD pinned experts");
         try d.check(d.api.cuMemcpyHtoD_v2(try down.at(lo * down_bytes), stage.ptr + m * up_bytes, m * down_bytes), "cuMemcpyHtoD pinned experts");
+        try next.wait();
         // the next chunk's gather reuses these views' memory: only their globals are read after this
         for (views[3 * lo ..][0 .. 3 * m]) |*v| v.* = .{ .codes = &.{}, .global = v.global };
     }

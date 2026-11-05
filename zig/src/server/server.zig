@@ -69,6 +69,8 @@ pub const Config = struct {
     use_drafts: bool = true,
     /// --vision-urls: image parts may name public HTTPS URLs, fetched before admission (media_fetch.zig).
     vision_urls: bool = false,
+    /// --vision-pdf: file/input_file and data:application/pdf parts are rendered via PDFium (pdf.zig).
+    vision_pdf: bool = false,
     seed_salt: i64 = 0,
     silence_mid: bool = false,
     silence_guard: bool = false,
@@ -101,7 +103,7 @@ pub const Config = struct {
     admission: @import("request_admission.zig").Limits = .{},
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
-    /// The process environment GET /v1/benchmark/manifest reads (rank count, revision, the hardware probe); null: none.
+    /// The process environment GET /v1/benchmark/manifest reads (revision and the hardware probe); null: none.
     environ: ?*const std.process.Environ.Map = null,
 };
 
@@ -168,11 +170,16 @@ pub const Server = struct {
     recall: ?*api.recall_store.Store = null,
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
+    pub fn media(srv: *const Server) @import("messages.zig").Media {
+        return .ofVision(srv.info.vision, srv.config.vision_pdf);
+    }
+
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
         const srv = try gpa.create(Server);
         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
         if (srv.info.embeddings != null and srv.info.text_generation) return error.InvalidEmbeddingCapabilities;
+        if (srv.info.readouts != null and (srv.info.text_generation or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
         if (srv.info.vision) |vision| if (@import("vision_markers.zig").firstUnsafe(text, vision)) |id| {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
@@ -244,7 +251,7 @@ pub const Server = struct {
 
     /// The effort the template hears: the request's name, or this server's default.
     pub fn effortFor(srv: *const Server, explicit: ?[]const u8) ?[]const u8 {
-        const e = explicit orelse srv.config.reasoning_effort orelse return null;
+        const e = explicit orelse srv.config.reasoning_effort orelse (if (srv.text.vtable.format == .kimi) "max" else return null);
         return fields.coerceEffort(e, srv.effort_levels);
     }
 

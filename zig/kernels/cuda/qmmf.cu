@@ -31,9 +31,7 @@ __device__ __forceinline__ float e8m0f(uint8_t b) {
 
 __device__ __forceinline__ uint32_t comp(const uint4& v, int c) { return c == 0 ? v.x : c == 1 ? v.y : c == 2 ? v.z : v.w; }
 
-__device__ __forceinline__ float e4m3f(uint8_t b) {
-    return __half2float(__half(__nv_cvt_fp8_to_halfraw(b, __NV_E4M3)));
-}
+using tf_common::e4m3f;
 
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES>
 struct Tile {

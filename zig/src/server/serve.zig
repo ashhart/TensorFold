@@ -192,6 +192,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .default_sampling = s.sampling,
         .use_drafts = !args.no_drafts,
         .vision_urls = args.vision_urls,
+        .vision_pdf = args.vision_pdf,
         .seed_salt = salt,
         .silence_mid = args.silence.mid_seconds != null,
         .silence_guard = args.silence.enabled(),
@@ -244,6 +245,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     installSignals(store.enabled());
     const port = lis.port();
     platform.optional_libraries.warnMissing(.grammar, a, io, platform);
+    if (args.vision_pdf) @import("pdf.zig").logStartup(a, io);
     if (s.on_listen) |f| f(port);
     const window = srv.info.context_window;
     if (srv.info.startup.len > 0) log.line("{s}", .{srv.info.startup});

@@ -64,6 +64,38 @@ test "stable profile: default and explicit spelling preserve every argument and 
     }
 }
 
+test "stable profile: capabilities describe the shared paging variable by family without changing its name" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try capabilities(&output.writer, .{ .version = "test" });
+    const decoded = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output.written(), .{});
+    defer decoded.deinit();
+    const entries = decoded.value.object.get("profiles").?.object.get("registered_switches").?.array.items;
+    var policies: usize = 0;
+    for (entries) |row| {
+        const fields = row.object;
+        if (!std.mem.eql(u8, fields.get("id").?.string, "TF_KV_PAGES")) continue;
+        policies += 1;
+        try std.testing.expectEqualStrings("cuda", fields.get("backend").?.string);
+        try std.testing.expect(fields.get("stable").? == .null);
+        const families = fields.get("families").?.array.items;
+        if (fields.get("report_values").? == .null) {
+            try std.testing.expectEqualStrings("auto", fields.get("syntax").?.string);
+            try std.testing.expectEqual(@as(usize, 1), families.len);
+            try std.testing.expectEqualStrings("glm5_next", families[0].string);
+        } else {
+            const values = fields.get("report_values").?.array.items;
+            try std.testing.expectEqual(@as(usize, 2), values.len);
+            try std.testing.expectEqualStrings("0", values[0].string);
+            try std.testing.expectEqualStrings("all", values[1].string);
+            try std.testing.expectEqual(@as(usize, 2), families.len);
+            try std.testing.expectEqualStrings("nemotron_h", families[0].string);
+            try std.testing.expectEqualStrings("nemotron_h_omni", families[1].string);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), policies);
+}
+
 test "max frames CLI bounds and engine request preserve the default" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -218,7 +250,7 @@ test "parse and capabilities share the table" {
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--kv-cache", "int4" }, &u));
     try std.testing.expectEqualStrings("int8", (try parse(a, &.{ "m", "--prompt-precision", "int8" }, &u)).prompt_precision);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--prompt-precision", "fp4" }, &u));
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--reasoning-effort", "max" }, &u));
+    try std.testing.expectEqualStrings("max", (try parse(a, &.{ "m", "--reasoning-effort", "max" }, &u)).reasoning_effort.?);
     try std.testing.expectEqual(@as(?f64, 12.5), (try parse(a, &.{ "m", "--prompt-cache-gib", "12.5" }, &u)).prompt_cache_gib);
     try std.testing.expectEqual(@as(?f64, 0), (try parse(a, &.{ "m", "--prompt-cache-gib", "0" }, &u)).prompt_cache_gib);
     try std.testing.expect(!(try parse(a, &.{ "m", "--prompt-cache-gib", "16" }, &u)).prompt_cache_over_cap);
@@ -261,6 +293,11 @@ test "parse and capabilities share the table" {
     try std.testing.expect(urls.vision and urls.vision_urls);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision-urls" }, &u));
     try std.testing.expectEqualStrings("--vision-urls needs --vision", u.message);
+    const pdfs = try parse(a, &.{ "m", "--vision", "--vision-pdf" }, &u);
+    try std.testing.expect(pdfs.vision and pdfs.vision_pdf);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision-pdf" }, &u));
+    try std.testing.expectEqualStrings("--vision-pdf needs --vision", u.message);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--vision-pdf\": {}") != null);
 }
 
 test "learned disk floor parses once with a finite byte-safe default and is a native capability" {

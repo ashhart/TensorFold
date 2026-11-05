@@ -1,0 +1,49 @@
+// The kernel registry's costs on RDNA3.5 (bf16 activations, dot2 tiles and the gfx11 matrix cores).
+//
+// An entry is `mlx.<op>.<path>.<kernel>`; the cheapest entry that takes a product runs.
+// An entry not listed here is not tuned for this GPU and never runs on it.
+// Beside its `cost` an entry says which products it takes:
+//   rows        the most rows of a plain product (0: any); rows_matrix, the most when matrix cores take more
+//   min_rows    the fewest rows
+//   items       the most items of a routed plan (0: any)
+//   pairs_per_item  the most pairs a routed plan holds per item (0: any)
+//   plain, routed   whether it takes plain products, routed plans (both by default)
+// gfx1100's rows, plus the 64-row routed matrix-core tile below 12 pairs an item (measured on gfx1151).
+.{
+    .gfx = "gfx1151",
+    .entries = .{
+        // a lane round or a call of few rows: the stream tile takes what it can; matrix cores take 16 rows and up
+        .{ .id = "mlx.project.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
+        .{ .id = "mlx.project.decode.row", .cost = 2 },
+        .{ .id = "mlx.project.decode.lanes", .cost = 3, .rows = 8 },
+        .{ .id = "mlx.project.decode.matrix", .cost = 5, .min_rows = 16 },
+        .{ .id = "mlx.project.decode.gemm", .cost = 6, .min_rows = 9 },
+        .{ .id = "mlx.project.decode.block", .cost = 7, .min_rows = 9 },
+
+        .{ .id = "mlx.group.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
+        .{ .id = "mlx.routed.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
+        .{ .id = "mlx.routed.decode.row", .cost = 2 },
+        .{ .id = "mlx.routed.decode.lanes", .cost = 3, .rows = 8 },
+        .{ .id = "mlx.routed.decode.matrix", .cost = 5, .min_rows = 16 },
+        .{ .id = "mlx.routed.decode.gemm", .cost = 6, .min_rows = 9 },
+        .{ .id = "mlx.routed.decode.block", .cost = 7, .min_rows = 9 },
+        .{ .id = "mlx.routed_act.decode.stream", .cost = 1, .rows = 16, .rows_matrix = 15 },
+
+        // a prompt: the K-parallel tiles for a few rows or a short plan, the 128-row tile past them
+        .{ .id = "mlx.project.prefill.kp0", .cost = 1, .rows = 2, .routed = false },
+        .{ .id = "mlx.project.prefill.kp3", .cost = 2, .items = 300, .plain = false },
+        .{ .id = "mlx.project.prefill.kp1", .cost = 3, .rows = 4, .items = 300 },
+        .{ .id = "mlx.project.prefill.kp2", .cost = 4, .rows = 32, .routed = false },
+        .{ .id = "mlx.project.prefill.matrix", .cost = 10 },
+        .{ .id = "mlx.project.prefill.gemm", .cost = 11 },
+        .{ .id = "mlx.project.prefill.block", .cost = 12 },
+        .{ .id = "mlx.routed.prefill.kp0", .cost = 1, .rows = 2, .routed = false },
+        .{ .id = "mlx.routed.prefill.kp3", .cost = 2, .items = 300, .plain = false },
+        .{ .id = "mlx.routed.prefill.kp1", .cost = 3, .rows = 4, .items = 300 },
+        .{ .id = "mlx.routed.prefill.kp2", .cost = 4, .rows = 32, .routed = false },
+        .{ .id = "mlx.routed.prefill.item64", .cost = 9, .pairs_per_item = 12, .plain = false },
+        .{ .id = "mlx.routed.prefill.matrix", .cost = 10 },
+        .{ .id = "mlx.routed.prefill.gemm", .cost = 11 },
+        .{ .id = "mlx.routed.prefill.block", .cost = 12 },
+    },
+}

@@ -59,6 +59,29 @@ fn content(cx: *Cx, c: ?Value) errors.Refused!Value {
             try p.put(a, "type", .{ .string = "image_url" });
             try p.put(a, "image_url", .{ .object = url });
             try parts.append(a, .{ .object = p });
+        } else if (kind != null and kind.? == .string and (std.mem.eql(u8, k, "input_file") or std.mem.eql(u8, k, "file"))) {
+            const inner = if (part.get("file")) |f| (if (f == .object) f.object else return cx.refuse("file must be an object")) else blk: {
+                const f = try json.newObject(a);
+                if (part.get("filename")) |v| try f.put(a, "filename", v);
+                if (part.get("file_data")) |v| try f.put(a, "file_data", v);
+                if (part.get("file_url")) |v| try f.put(a, "url", v);
+                if (part.get("file_id")) |v| try f.put(a, "file_id", v);
+                break :blk f;
+            };
+            const iv: Value = .{ .object = inner };
+            if (iv.get("file_id") != null and iv.get("file_data") == null and iv.get("data") == null and iv.get("url") == null and iv.get("file_url") == null)
+                return cx.refuse("file parts require inline file_data (base64 or data:application/pdf;base64,...); file_id is not supported");
+            if (iv.strField("url") orelse iv.strField("file_url")) |u| {
+                const trimmed = std.mem.trim(u8, u, " \t\r\n");
+                if (trimmed.len > 0 and !std.ascii.startsWithIgnoreCase(trimmed, "data:"))
+                    return cx.refuse("URLs are not accepted for PDF inputs; send inline base64 or a data:application/pdf;base64,... URL");
+            }
+            if ((iv.strField("file_data") orelse iv.strField("data") orelse iv.strField("url") orelse iv.strField("file_url")) == null)
+                return cx.fail(.request, "content parts of type {s} are not supported: send input_text or input_image", .{try pyrepr.repr(a, kind)});
+            const p = try json.newObject(a);
+            try p.put(a, "type", .{ .string = "file" });
+            try p.put(a, "file", .{ .object = inner });
+            try parts.append(a, .{ .object = p });
         } else return cx.fail(.request, "content parts of type {s} are not supported: send input_text or input_image", .{try pyrepr.repr(a, kind)});
     }
     return .{ .array = parts.items };
@@ -77,7 +100,7 @@ fn output(cx: *Cx, o: ?Value) errors.Refused!Value {
             const k = kindOf(p);
             const name = if (k != null and k.? == .string) k.?.string else "";
             if (!std.mem.eql(u8, name, "input_text")) texts_only = false;
-            if (!std.mem.eql(u8, name, "input_text") and !std.mem.eql(u8, name, "input_image")) parts_only = false;
+            if (!std.mem.eql(u8, name, "input_text") and !std.mem.eql(u8, name, "input_image") and !std.mem.eql(u8, name, "input_file")) parts_only = false;
         }
         if (texts_only) {
             var joined: std.ArrayList(u8) = .empty;
@@ -349,4 +372,15 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     try echo.put(a, "user", body.get("user") orelse .null);
     try echo.put(a, "background", .{ .bool = false });
     return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream") };
+}
+
+test "input_file refuses remote file_url" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const items = (try json.parse(cx.a,
+        \\[{"role": "user", "content": [{"type": "input_file", "file_url": "https://example.com/doc.pdf"}]}]
+    )).ok.array;
+    try std.testing.expectError(error.Refused, messages(&cx, items));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "URLs are not accepted") != null);
 }

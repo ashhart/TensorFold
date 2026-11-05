@@ -9,7 +9,7 @@ pub fn Snaps(comptime Cuda: type) type {
         }
 
         pub fn bytes(ptr: *anyopaque, at: u32) u64 {
-            return snap.bytes(at, of(ptr).head != null);
+            return snap.bytes(at, of(ptr).head != null, of(ptr).engine.heads);
         }
 
         /// The owner stream's state, its prompt pass standing at `at` (a drafting stream's with the head's rows).

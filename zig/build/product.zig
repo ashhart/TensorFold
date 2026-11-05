@@ -119,6 +119,8 @@ pub fn build(b: *std.Build, name: []const u8) void {
     @import("sys.zig").wire(b);
     @import("checkpoint_config.zig").wire(b);
     @import("save_guard.zig").wire(b);
+    @import("bf16_round.zig").wire(b, null);
+    @import("qwen35_layers.zig").wire(b, null);
 }
 
 /// The development `native` server for one SM, with every image built for it (nvcc) or checked (prebuilt).

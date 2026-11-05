@@ -104,6 +104,12 @@ pub const Context = struct {
         return std.mem.sliceTo(buf, 0);
     }
 
+    pub fn uuid(self: *const Context) Error![16]u8 {
+        var id: [16]u8 = undefined;
+        try self.d.check(self.d.api.cuDeviceGetUuid_v2(&id, self.device), "cuDeviceGetUuid");
+        return id;
+    }
+
     pub const MemInfo = struct { free: usize, total: usize };
 
     pub fn memInfo(self: *const Context) Error!MemInfo {

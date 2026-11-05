@@ -25,6 +25,33 @@ test "FSR CLOCK protects the whole incoming union before evicting early misses" 
     for (c.demand) |x| try std.testing.expect(!x);
 }
 
+test "FSR an expert used once leaves before one used again, and counts wear off" {
+    var c = try Cache.init(a, 8, 2);
+    defer c.deinit();
+    try fill(&c, &.{0}); // read, used once
+    c.release();
+    try fill(&c, &.{1});
+    c.release();
+    try fill(&c, &.{1}); // used again
+    c.release();
+    try fill(&c, &.{2}); // needs a slot: 0 leaves, 1 stays
+    c.release();
+    try std.testing.expect(try c.peek(0) == null);
+    try std.testing.expect(try c.peek(1) != null);
+    for (0..4) |_| {
+        // every miss wears 1 down: a burst of new experts displaces it however often it was used before
+        try fill(&c, &.{2});
+        c.release();
+    }
+    try fill(&c, &.{3});
+    c.release();
+    try fill(&c, &.{4});
+    c.release();
+    try fill(&c, &.{5});
+    c.release();
+    try std.testing.expect(try c.peek(1) == null);
+}
+
 test "FSR reads publish all components atomically and cannot replace leased consumers" {
     var c = try Cache.init(a, 4, 1);
     defer c.deinit();
@@ -81,24 +108,26 @@ test "FSR publishes into the borrowed GPU map and never frees its owner" {
     try std.testing.expectEqual(@as(i32, 17), map[0]);
 }
 
-test "FSR forecast cannot spend demand second chances or promote unused predictions" {
+test "FSR forecast cannot spend demand's counts or promote unused predictions" {
     var c = try Cache.init(a, 8, 3);
     defer c.deinit();
     try fill(&c, &.{ 0, 1, 2 });
+    c.release();
+    try fill(&c, &.{ 0, 1, 2 }); // used again: each holds a count
     c.release();
     const result = c.reserve(3, true);
     if (result) |ticket| {
         if (ticket) |t| try c.abort(t);
         return error.ForecastEvictedRecentDemand;
     } else |err| try std.testing.expectEqual(error.NoEvictableSlot, err);
-    for (c.slots) |s| try std.testing.expect(s.referenced);
-    try fill(&c, &.{3});
+    for (c.slots) |s| try std.testing.expectEqual(@as(u2, 1), s.uses);
+    try fill(&c, &.{3}); // demand's hand takes them off
     c.release();
     const predicted = (try c.reserve(4, true)).?;
     try c.publish(predicted);
-    try std.testing.expect(!c.slots[predicted.slot].referenced);
+    try std.testing.expectEqual(@as(u2, 0), c.slots[predicted.slot].uses);
     try std.testing.expect(try c.peek(4) != null);
-    try std.testing.expect(!c.slots[predicted.slot].referenced);
+    try std.testing.expectEqual(@as(u2, 0), c.slots[predicted.slot].uses);
     _ = try c.resident(4);
-    try std.testing.expect(c.slots[predicted.slot].referenced);
+    try std.testing.expectEqual(@as(u2, 1), c.slots[predicted.slot].uses);
 }

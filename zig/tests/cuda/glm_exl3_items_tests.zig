@@ -179,7 +179,7 @@ pub fn run_(gpu: Gpu) !void {
     defer pm.unload();
     var k = try glm.exl3.Kernels.load(gpu.d);
     defer k.unload();
-    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)));
+    var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), false);
     defer ek.unload();
     var t: Tally = .{};
     // dims 4096 is GLM-5.3-Flash's served size, at the 768/1024 widths a rank meets

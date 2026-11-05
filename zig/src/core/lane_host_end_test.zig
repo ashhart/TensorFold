@@ -89,6 +89,9 @@ fn endWithoutMemory(end: End) !void {
 }
 
 test "a failed round ends every admitted job once, failed, when no allocation can succeed" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     try endWithoutMemory(.fail);
 }
 
@@ -102,6 +105,9 @@ test "a close ends every queued and admitted job once, cancelled, when no alloca
 
 // last: on the old failAll this reads an unopened stream, which can end the test binary before the others report
 test "a planner whose admitted callback fails ends the jobs it admitted, failed once each, opening no stream" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);

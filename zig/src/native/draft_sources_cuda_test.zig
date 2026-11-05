@@ -51,7 +51,9 @@ test "draft sources: CUDA Gemma, Spark, Kolibri and Dory have copy windows and n
     var gb: g.backend.Gemma = undefined;
     var gm: @typeInfo(@TypeOf(gb.m)).pointer.child = undefined;
     gm.slots = 4;
+    gm.paged = false;
     gb.m = &gm;
+    gb.priority_copies = false;
     try check(gb.facts(), null, true, false);
     const s = @import("spark25");
     var sb: s.backend.Spark = undefined;
@@ -59,12 +61,14 @@ test "draft sources: CUDA Gemma, Spark, Kolibri and Dory have copy windows and n
     sm.slots = 4;
     sm.paged = false;
     sb.m = &sm;
+    sb.priority_copies = false;
     try check(sb.facts(), null, true, false);
     const k = @import("kolibri1");
     var kb: k.backend.Kolibri = undefined;
     var km: @typeInfo(@TypeOf(kb.m)).pointer.child = undefined;
     km.slots = 4;
     kb.m = &km;
+    kb.priority_copies = false;
     try check(kb.facts(), null, true, false);
     const d = @import("dory");
     var dm: d.cuda_model.Model = undefined;
@@ -72,6 +76,7 @@ test "draft sources: CUDA Gemma, Spark, Kolibri and Dory have copy windows and n
     dm.paged = false;
     var db: d.cuda_backend.Dory = undefined;
     db.m = &dm;
+    db.priority_copies = false;
     try check(db.facts(), null, true, false);
 }
 
@@ -97,6 +102,7 @@ test "draft sources: CUDA Flash Next follows the loaded checkpoint head" {
     var b: @import("flashnext").native.Cuda = undefined;
     b.head = null;
     b.depth = 8;
+    b.depth_greedy = 8;
     try check(b.facts(), null, true, false);
     b.head = present(@TypeOf(b.head.?));
     try check(b.facts(), null, true, true);

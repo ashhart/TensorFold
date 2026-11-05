@@ -16,6 +16,7 @@ const tk = @import("cuda_tile_kernels.zig");
 const moe_native = @import("cuda_moe_native.zig");
 const zs = @import("cuda_zero_slice.zig");
 const ops = @import("cuda_batch_ops.zig");
+const split_lane = @import("cuda_split_lane.zig");
 
 const layers_n = wt.layers_n;
 const linear_n = wt.linear_n;
@@ -29,14 +30,11 @@ const experts_n = wt.experts_n;
 const slots = wt.slots;
 const moe_w = wt.moe_w;
 const tile = wt.tile;
-const q_heads = wt.q_heads;
-const kv_heads = wt.kv_heads;
 const head_dim = wt.head_dim;
 const index_heads = wt.index_heads;
 const index_dim = wt.index_dim;
 const half = wt.half;
 const proj_n = wt.proj_n;
-const out_k = wt.out_k;
 const nch = wt.nch;
 const ple_layer = wt.ple_layer;
 const ple_tail_n = wt.ple_tail_n;
@@ -45,6 +43,7 @@ const out_sk = wt.out_sk;
 const Q4 = wt.Q4;
 const HcW = wt.HcW;
 const Layer = load.Layer;
+const Heads = @import("cuda_heads.zig").Heads;
 
 /// Normed-stream partial sums a row: D / 256 blocks of each stream.
 pub const pss_n = (dims / 256) * streams;
@@ -82,6 +81,7 @@ pub const late_rows = parts.late_rows;
 pub const late_store = parts.late_store;
 pub const late_row_bytes = parts.late_row_bytes;
 pub const Kernels = parts.Kernels;
+const Gdn = @import("cuda_batch_kernels.zig").Gdn;
 pub const Scratch = parts.Scratch;
 pub const SeqState = parts.SeqState;
 pub const scoreStride = parts.scoreStride;
@@ -122,6 +122,8 @@ pub fn Pass(comptime Tri: type) type {
         pending_f32: bool = false,
         /// This layer's out projection leaves part's other slices alone; its writeback adds the zero slice once.
         zero_slices: bool = false,
+        /// stageWindow queued the pass's uploads (ids, positions, n-gram rows): it launches kernels alone (graphs).
+        staged: bool = false,
         /// This round's lanes take their attention in one launch a kernel (batch_lanes, TF_FLASHNEXT_ATTN_LANES).
         lanes_attn: bool = false,
 
@@ -185,11 +187,6 @@ pub fn Pass(comptime Tri: type) type {
             try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, 10, 11, 1);
         }
 
-        /// Prompt rows' read-out on flashnext_hcf.cu's tiles, fn_hc_down's and fn_hc_upmix's bits (K slices folded).
-        fn readoutTiles(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
-            return tiles.readout(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
-        }
-
         /// A read-out over rows [r0, r0 + n) of the streams: mixed and its group sums, and the inject gates.
         pub fn readout(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
             return self.readoutKeep(hc_w, r0, n, .{});
@@ -208,7 +205,7 @@ pub fn Pass(comptime Tri: type) type {
                 try self.tri.hcNormalize(h, pss, hc_w.scale.ptr, norm, eps, n, dims, streams);
                 return hc.readoutNative(self, hc_w, r0, n);
             }
-            if (n >= parts.readoutTileRows() and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return self.readoutTiles(hc_w, r0, n);
+            if (n >= @import("cuda_chunk.zig").readoutTileRows() and self.tri.readoutTilesOwned() and std.meta.eql(keep, HcKeep{})) return tiles.readout(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
             try self.copy(keep.h, h, n * wide * 2);
             if (hc_sk * n * hc_w.n_down * 4 > s.hc_part_bytes) return error.UnexpectedTensor;
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
@@ -251,11 +248,15 @@ pub fn Pass(comptime Tri: type) type {
         pub fn gdnBlock(self: *Self, lw: *const Layer, layer: usize, li: usize, keep: LayerKeep) !void {
             const s = self.s;
             const n = self.rows;
+            const h = lw.heads;
+            const g = try self.k.gdnSet(h); // before any launch: the full kernels, or the _h8 twins for a rank's half
+            const pw = h.projWidth();
+            const cd = h.convDim();
             _ = try self.lane(s.mixed, s.xsm, lw.proj, s.proj, s.dummy, n, 1);
             // a lone pass keeps its projection and conv window; a shared pass keeps each lane's own
             if (self.lanes.len == 0) {
-                try self.copy(keep.proj, s.proj, n * gdn.proj_width * 2);
-                try self.copy(keep.hist, self.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
+                try self.copy(keep.proj, s.proj, n * pw * 2);
+                try self.copy(keep.hist, self.seq.conv[li].ptr, (gdn.taps - 1) * cd * 2);
             }
             // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
             const fused = self.lanes.len == 0 and n >= 64 and gdn_fused.on();
@@ -263,45 +264,45 @@ pub fn Pass(comptime Tri: type) type {
             if (fused) {
                 // the three in one kernel a value head: the same per-row op sequences, no fp32 rows through memory
                 const st = self.seq.state[li].ptr;
-                const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr };
-                try gdn_fused.launch(self.k.gdn_fused, self.stream, in, n, s.gout, s.gxs);
+                const in: gdn_fused.In = .{ .proj = s.proj, .conv = self.seq.conv[li].ptr, .cw = lw.cw.ptr, .a_log = lw.a_log.ptr, .dt = lw.dt.ptr, .state = st, .state_out = if (keep.state_out != 0) keep.state_out else st, .norm = lw.norm.ptr, .heads = h };
+                try gdn_fused.launch(g.fused, self.stream, in, n, s.gout, s.gxs);
             } else if (self.lanes.len == 0 and keep.log != 0) {
-                // pending rows: the window goes into the log after them, the chain runs from before them
+                // pending rows (one GPU, whole heads: --tp refuses them): the window goes into the log after them
                 try late.front(self.k, self.stream, lw, s.proj, self.seq.conv[li].ptr, n, s.gq, keep);
                 try late.chain(self.k, self.stream, s.gq, keep, self.seq.state[li].ptr, n, s.ys);
             } else if (self.lanes.len == 0) {
-                try self.gdnFront(lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
-                try self.gdnChain(s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
+                try self.gdnFront(g, lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
+                try self.gdnChain(g, h, s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
             } else {
                 // shared rounds: each lane's rows kept, fronted and chained on its own conv window and state
                 var row0: usize = 0;
                 for (self.lanes) |l| {
                     const lk: LayerKeep = if (l.keep) |kp| kp.layers[layer] else .{};
-                    const proj = s.proj + row0 * gdn.proj_width * 2;
-                    const qk = row0 * gdn.nk * gdn.dk * 4;
-                    const v = row0 * gdn.value_dim * 4;
-                    const gb = row0 * gdn.nv * 2 * 4;
-                    try self.copy(lk.proj, proj, l.rows * gdn.proj_width * 2);
-                    try self.copy(lk.hist, l.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
+                    const proj = s.proj + row0 * pw * 2;
+                    const qk = row0 * h.nk * gdn.dk * 4;
+                    const v = row0 * h.valueDim() * 4;
+                    const gb = row0 * h.nv * 2 * 4;
+                    try self.copy(lk.proj, proj, l.rows * pw * 2);
+                    try self.copy(lk.hist, l.seq.conv[li].ptr, (gdn.taps - 1) * cd * 2);
                     if (lk.log != 0) {
                         try late.front(self.k, self.stream, lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, lk);
                         try late.chain(self.k, self.stream, s.gq + qk, lk, l.seq.state[li].ptr, l.rows, s.ys + v);
                     } else {
-                        try self.gdnFront(lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb);
-                        try self.gdnChain(s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, lk.state_out, l.rows, s.ys + v);
+                        try self.gdnFront(g, lw, proj, l.seq.conv[li].ptr, l.rows, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb);
+                        try self.gdnChain(g, h, s.gq + qk, s.gk + qk, s.gv + v, s.ggb + gb, l.seq.state[li].ptr, lk.state_out, l.rows, s.ys + v);
                     }
                     // the lane's conv window moves on now: the gated norm below reads none of it
-                    try self.shiftWindow(l.seq.conv[li].ptr, proj, gdn.proj_width, l.rows, gdn.taps - 1, gdn.conv_dim);
+                    try self.shiftWindow(l.seq.conv[li].ptr, proj, pw, l.rows, gdn.taps - 1, cd);
                     row0 += l.rows;
                 }
             }
-            if (!fused) try gdn_fused.norm(self.k.gnorm, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n);
-            if (self.lanes.len == 0) try self.shiftWindow(self.seq.conv[li].ptr, s.proj, gdn.proj_width, n, gdn.taps - 1, gdn.conv_dim);
-            self.out_slices = try self.lane(s.gout, s.gxs, lw.out, s.dummy, s.part, n, out_sk);
+            if (!fused) try gdn_fused.norm(g.norm, self.stream, s.ys, s.proj, lw.norm.ptr, s.gout, s.gxs, n, h);
+            if (self.lanes.len == 0) try self.shiftWindow(self.seq.conv[li].ptr, s.proj, pw, n, gdn.taps - 1, cd);
+            self.out_slices = try split_lane.out(self, s.gout, s.gxs, lw);
         }
 
         /// fn_gdn_front over `rows` projection rows after the conv window `conv`.
-        fn gdnFront(self: *Self, lw: *const Layer, proj: u64, conv: u64, rows: usize, gq: u64, gk: u64, gv: u64, ggb: u64) !void {
+        fn gdnFront(self: *Self, g: *const Gdn, lw: *const Layer, proj: u64, conv: u64, rows: usize, gq: u64, gk: u64, gv: u64, ggb: u64) !void {
             var f: cuda.Args = .{};
             f.add(proj);
             f.add(conv);
@@ -312,11 +313,11 @@ pub fn Pass(comptime Tri: type) type {
             f.add(gk);
             f.add(gv);
             f.add(ggb);
-            try cuda.launch.launch(self.k.front, .{ .grid = .{ .x = @intCast(rows), .y = gdn.nk + gdn.nv }, .block = .{ .x = 256 } }, self.stream, &f);
+            try cuda.launch.launch(g.front, .{ .grid = .{ .x = @intCast(rows), .y = lw.heads.nk + lw.heads.nv }, .block = .{ .x = 256 } }, self.stream, &f);
         }
 
         /// fn_gdn_rows over `rows` rows from `state`, in place or (state_out) to fn_gdn_rows_to's; readouts into ys.
-        fn gdnChain(self: *Self, gq: u64, gk: u64, gv: u64, ggb: u64, state: u64, state_out: u64, rows: usize, ys: u64) !void {
+        fn gdnChain(self: *Self, g: *const Gdn, h: Heads, gq: u64, gk: u64, gv: u64, ggb: u64, state: u64, state_out: u64, rows: usize, ys: u64) !void {
             var a: cuda.Args = .{};
             a.add(gq);
             a.add(gk);
@@ -328,12 +329,12 @@ pub fn Pass(comptime Tri: type) type {
                 a.add(if (state_out != 0) state_out else state);
                 a.add(cint(rows));
                 a.add(ys);
-                return cuda.launch.launch(self.k.chain_tpr, .{ .grid = .{ .x = gdn.nv }, .block = .{ .x = 256 }, .shared = parts.chain_tpr_smem }, self.stream, &a);
+                return cuda.launch.launch(g.chain_tpr, .{ .grid = .{ .x = h.nv }, .block = .{ .x = 256 }, .shared = parts.chain_tpr_smem }, self.stream, &a);
             }
             if (state_out != 0) a.add(state_out);
             a.add(cint(rows));
             a.add(ys);
-            try cuda.launch.launch(if (state_out != 0) self.k.chain_to else self.k.chain, .{ .grid = .{ .x = gdn.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, self.stream, &a);
+            try cuda.launch.launch(if (state_out != 0) g.chain_to else g.chain, .{ .grid = .{ .x = h.nv, .y = gdn.dv / 16 }, .block = .{ .x = 128 } }, self.stream, &a);
         }
 
         pub fn attnBlock(self: *Self, lw: *const Layer, ai: usize) !void {
@@ -345,12 +346,14 @@ pub fn Pass(comptime Tri: type) type {
             const s = self.s;
             const n = self.rows;
             const pa = s.proj;
+            const h = lw.heads;
+            const pn = h.projN();
             _ = try self.lane(s.mixed, s.xsm, lw.proj, pa, s.dummy, n, 1);
-            const qw2 = q_heads * 2 * head_dim;
-            const kw = kv_heads * head_dim;
-            try self.copyCols(pa, proj_n, keep.pq, qw2, qw2, n);
-            try self.copyCols(pa + qw2 * 2, proj_n, keep.pk, kw, kw, n);
-            try self.copyCols(pa + (qw2 + kw) * 2, proj_n, keep.pv, kw, kw, n);
+            const qw2 = h.q * 2 * head_dim;
+            const kw = h.kv * head_dim;
+            try self.copyCols(pa, pn, keep.pq, qw2, qw2, n);
+            try self.copyCols(pa + qw2 * 2, pn, keep.pk, kw, kw, n);
+            try self.copyCols(pa + (qw2 + kw) * 2, pn, keep.pv, kw, kw, n);
             if (self.lanes_attn) {
                 try batch_lanes.attn(self, lw, ai, pa);
             } else if (self.lanes.len > 0) {
@@ -365,13 +368,13 @@ pub fn Pass(comptime Tri: type) type {
                 for (self.lanes, 0..) |l, i| {
                     self.seq = l.seq;
                     self.pos0 = l.pos;
-                    try self.attnRows(lw, ai, pa + row0 * proj_n * 2, l.rows, .{ .pos = s.pos + i * 16, .q = s.q + row0 * q_heads * head_dim * 2, .iq = s.iq + row0 * index_heads * index_dim * 2, .ao = s.ao + row0 * out_k * 2 });
+                    try self.attnRows(lw, ai, pa + row0 * pn * 2, l.rows, .{ .pos = s.pos + i * 16, .q = s.q + row0 * h.q * head_dim * 2, .iq = s.iq + row0 * index_heads * index_dim * 2, .ao = s.ao + row0 * h.q * head_dim * 2 });
                     row0 += l.rows;
                 }
             } else try self.attnRows(lw, ai, pa, n, .{ .pos = s.pos, .q = s.q, .iq = s.iq, .ao = s.ao });
             const gated = if (keep.gated != 0) keep.gated else s.gated;
-            try self.tri.attnGate(s.ao, pa, gated, s.gxs_attn, n, proj_n, q_heads, head_dim);
-            self.out_slices = try self.lane(gated, s.gxs_attn, lw.out, s.dummy, s.part, n, out_sk);
+            try self.tri.attnGate(s.ao, pa, gated, s.gxs_attn, n, pn, h.q, head_dim);
+            self.out_slices = try split_lane.out(self, gated, s.gxs_attn, lw);
         }
 
         /// Where attnRows reads its rows' positions (16 bytes apart) and writes queries, indexer queries and outputs.
@@ -380,12 +383,14 @@ pub fn Pass(comptime Tri: type) type {
         /// `n` rows of self.seq from self.pos0: rope, cache writes and pooling, then scores, selection and attention.
         fn attnRows(self: *Self, lw: *const Layer, ai: usize, pa: u64, n: usize, at: RowsAt) !void {
             const s = self.s;
+            const h = lw.heads;
+            const qr = h.q * head_dim * 2; // a row's queries, and its attention output
             const kc = self.seq.kc[ai].ptr;
             const vc = self.seq.vc[ai].ptr;
             const ikc = self.seq.ikc[ai].ptr;
             const pooled = self.seq.pooled[ai].ptr;
             const pg = self.seq.pg;
-            if (self.seq.media) |m| try m.attn(self.stream, pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, eps, n, pg) else try self.tri.attnPrep(pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, s.dummy, s.dummy, eps, n, 0, pg);
+            if (self.seq.media) |m| try m.attn(self.stream, pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, eps, n, h, pg) else try self.tri.attnPrep(pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, s.dummy, s.dummy, eps, n, 0, h, pg);
             // attention.qsa_pool for the blocks these rows complete, then each block of rows' scores and attention
             if (self.seq.media) |m| try m.pooled(self.stream, ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n, pg) else try self.tri.qsaPool(ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n, pg);
             const nb = scoreStride(self.seq.cap);
@@ -418,11 +423,11 @@ pub fn Pass(comptime Tri: type) type {
                     try cuda.launch.launch(self.k.select, .{ .grid = .{ .x = @intCast(m) }, .block = .{ .x = 1024 } }, self.stream, &a);
                     if (!fused) {
                         const chunks = cdiv(@min(ends, wt.dense_keys), 512);
-                        try self.tri.attnChunks(at.q + r0 * q_heads * head_dim * 2, kc, vc, pos, s.po, s.pm, s.pl, s.qids, s.qnk, s.qspr, m, kv_heads, chunks, true, pg);
-                        try self.tri.attnMerge(s.po, s.pm, s.pl, pos, at.ao + r0 * out_k * 2, s.qnk, s.qspr, m, kv_heads, true);
+                        try self.tri.attnChunks(at.q + r0 * qr, kc, vc, pos, s.po, s.pm, s.pl, s.qids, s.qnk, s.qspr, m, h, chunks, true, pg);
+                        try self.tri.attnMerge(s.po, s.pm, s.pl, pos, at.ao + r0 * qr, s.qnk, s.qspr, m, h, true);
                     }
                 }
-                if (fused) try self.tri.attnFused(at.q + g0 * q_heads * head_dim * 2, kc, vc, at.pos + (g0 / att_rows) * 16, at.ao + g0 * out_k * 2, s.qids, s.qnk, s.qspr, gm, kv_heads, pg);
+                if (fused) try self.tri.attnFused(at.q + g0 * qr, kc, vc, at.pos + (g0 / att_rows) * 16, at.ao + g0 * qr, s.qids, s.qnk, s.qspr, gm, h, pg);
             }
         }
 
@@ -499,13 +504,13 @@ pub fn Pass(comptime Tri: type) type {
             self.pending = null;
             self.pending_f32 = false;
             // the gather writes the scratch's pinned rows, so the last pass's uploads must have read them first
-            if (!self.prepared) try s.ready();
+            if (!self.prepared and !self.staged) try s.ready();
             const emb = s.hostEmb(n);
             const xs = s.hostXs(n);
             var gather: Gather = .{ .ngram = self.m.ngram, .history = self.seq.history[0..], .ids = ids, .emb = emb, .xs = xs, .io = self.io, .lanes = self.lanes };
-            var thread: ?std.Thread = if (self.prepared) null else try std.Thread.spawn(.{}, Gather.main, .{&gather});
+            var thread: ?std.Thread = if (self.prepared or self.staged) null else try std.Thread.spawn(.{}, Gather.main, .{&gather});
             defer if (thread) |th| th.join();
-            try self.stage(ids);
+            if (!self.staged) try self.stage(ids);
             if (self.m.table_dense) {
                 try self.tri.embedDense(s.ids, self.m.table_w, s.h, dims, streams, n);
             } else {
@@ -519,9 +524,11 @@ pub fn Pass(comptime Tri: type) type {
                     thread = null;
                     if (gather.failed) |err| return err;
                     if (profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
-                    try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
-                    try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
-                    if (!self.prepared) try s.uploaded();
+                    if (!self.staged) {
+                        try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
+                        try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
+                        if (!self.prepared) try s.uploaded();
+                    }
                     if (self.pending != null) try self.writeback(0, n);
                     try self.pleBlock(lw, ids);
                 }

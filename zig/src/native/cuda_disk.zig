@@ -89,13 +89,13 @@ fn whole(_: *anyopaque, saved: api.prompt_cache.Saved) bool {
 }
 
 /// What disk states are read under: the checkpoint, kernels (ours or a captured set), driver, device, a probe's bits.
-pub fn identity(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, backend: lanes.backend.Backend, t: *Target) !struct { id: u64, rate: f64 } {
+pub fn identity(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, backend: lanes.backend.Backend, t: *Target, family: []const u8) !struct { id: u64, rate: f64 } {
     const p = try probe(a, io, backend, t);
-    return .{ .id = try identityOf(a, io, g, dir, kernels, &[_]u64{@intFromBool(t.head != null)}, p.hash), .rate = p.rate };
+    return .{ .id = try identityOf(a, io, g, dir, kernels, &[_]u64{@intFromBool(t.head != null)}, p.hash, .{ .family = family, .backend = "cuda" }), .rate = p.rate };
 }
 
 /// The identity's hash: the checkpoint, kernels, device, driver, a family's facts, then its probe's hash.
-pub fn identityOf(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, facts: []const u64, probed: u64) !u64 {
+pub fn identityOf(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, facts: []const u64, probed: u64, profile: disk_identity.Profile) !u64 {
     var h = std.hash.Wyhash.init(0x6375);
     try disk_identity.checkpoint(&h, a, io, dir);
     inline for (comptime std.meta.declarations(cuda.kernels)) |d| {
@@ -109,6 +109,7 @@ pub fn identityOf(a: Allocator, io: std.Io, g: *const cuda.Context, dir: []const
     h.update(std.mem.sliceAsBytes(&device));
     h.update(std.mem.sliceAsBytes(facts));
     h.update(std.mem.asBytes(&probed));
+    disk_identity.profile(&h, profile);
     return h.final();
 }
 
@@ -153,7 +154,7 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
 /// --learn-conversations: the identity probed on this thread (its context current), the store opened and attached.
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     loaded.target.ctx = ctx;
-    const id = try identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target);
+    const id = try identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target, o.model_type);
     try open(o, root, id.id, id.rate, store, "nemotron");
 }
 
@@ -170,7 +171,7 @@ pub fn attachKept(comptime K: type, name: []const u8, a: Allocator, io: std.Io, 
         const p = try K.probe(a, io, loaded.backend, loaded.target);
         const facts = K.facts(loaded.target); // an array, or a slice
         const list: []const u64 = if (@typeInfo(@TypeOf(facts)) == .pointer) facts else &facts;
-        try open(o, root, try identityOf(a, io, ctx, o.dir, kernels, list, p.hash), p.rate, store, name);
+        try open(o, root, try identityOf(a, io, ctx, o.dir, kernels, list, p.hash, .{ .family = name, .backend = "cuda" }), p.rate, store, name);
     }
 }
 

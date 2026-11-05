@@ -36,18 +36,22 @@ test "cache capacity: 256K context, four streams, 0.3 GiB cannot retain one plan
     try t.expectEqual(bytes, facts.budget_bytes);
     try t.expectEqual(minimum, facts.minimum_state_bytes);
     Log.calls = 0;
-    pool.warnCapacity(facts, false, Log);
+    pool.warnCapacity(facts, false, 0, Log);
     try t.expectEqual(@as(usize, 1), Log.calls);
     for ([_][]const u8{ "322122547", "402653184", "--context", "--parallel", "--prompt-cache-gib", "TENSORFOLD_MEMORY_RESERVE_GIB" }) |word| try t.expect(std.mem.indexOf(u8, Log.text[0..Log.len], word) != null);
     try t.expectEqualDeep(before, kept);
     Log.calls = 0;
-    pool.warnCapacity(.{ .budget_bytes = minimum, .minimum_state_bytes = minimum }, false, Log);
-    pool.warnCapacity(.{ .budget_bytes = minimum + 1, .minimum_state_bytes = minimum }, false, Log);
-    pool.warnCapacity(facts, true, Log);
-    pool.warnCapacity(null, false, Log);
+    pool.warnCapacity(.{ .budget_bytes = minimum, .minimum_state_bytes = minimum }, false, 0, Log);
+    pool.warnCapacity(.{ .budget_bytes = minimum + 1, .minimum_state_bytes = minimum }, false, 0, Log);
+    pool.warnCapacity(facts, true, 0, Log);
+    pool.warnCapacity(null, false, 0, Log);
     try t.expectEqual(@as(usize, 0), Log.calls);
-    pool.warnCapacity(.{ .budget_bytes = minimum - 1, .minimum_state_bytes = minimum }, false, Log);
+    pool.warnCapacity(.{ .budget_bytes = minimum - 1, .minimum_state_bytes = minimum }, false, 0, Log);
     try t.expectEqual(@as(usize, 1), Log.calls);
+    // on pages whose windows took the cache first, the warning names what they took and --prompt-cache-gib
+    pool.warnCapacity(.{ .budget_bytes = 0, .minimum_state_bytes = minimum }, false, 12 << 30, Log);
+    try t.expectEqual(@as(usize, 2), Log.calls);
+    for ([_][]const u8{ "12.000 GiB", "windows past the engine's own", "--prompt-cache-gib N keeps N GiB" }) |word| try t.expect(std.mem.indexOf(u8, Log.text[0..Log.len], word) != null);
     try t.expectEqual(@as(?api.PromptCacheCapacity, null), pool.capacity(struct {}, loaded, kept, 262144));
     try t.expectEqual(@as(?api.PromptCacheCapacity, null), pool.capacity(Fake, loaded, kept, 2048));
 }

@@ -97,25 +97,16 @@ __device__ void bmm(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, f
 }
 
 __device__ __forceinline__ void cp16(void* dst, const void* src, bool ok) {
-  const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(dst));
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(ok ? 16 : 0));
+  tf_common::cp16z(dst, src, ok);
 }
 __device__ __forceinline__ void cp16s(unsigned d, const void* src, bool ok) {
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(ok ? 16 : 0));
+  tf_common::cp16z(d, src, ok);
 }
-__device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;\n" ::); }
+__device__ __forceinline__ void commit() { tf_common::cp_commit(); }
 template <int N>
-__device__ __forceinline__ void wait() {
-  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
-}
-__device__ __forceinline__ void ldm4s(uint32_t* r, unsigned a) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-               : "r"(a));
-}
-__device__ __forceinline__ void ldm2s(uint32_t* r, unsigned a) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(a));
-}
+__device__ __forceinline__ void wait() { tf_common::cp_wait<N>(); }
+__device__ __forceinline__ void ldm4s(uint32_t* r, unsigned a) { qmm_frag::ldmatrix4(r, a); }
+__device__ __forceinline__ void ldm2s(uint32_t* r, unsigned a) { qmm_frag::ldmatrix2(r, a); }
 __device__ __forceinline__ void ldm4(uint32_t* r, const void* p) {
   ldm4s(r, static_cast<unsigned>(__cvta_generic_to_shared(p)));
 }

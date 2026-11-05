@@ -15,6 +15,7 @@ pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
+pub const kv_ledger = @import("kv_ledger.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -31,36 +32,8 @@ pub const Stop = struct {
     check: *const fn (ctx: *anyopaque, emitted: []const u32) bool,
 };
 
-/// tool_choice "required" or a named function: outside a think block the answer opens a call to an offered tool.
-pub const CallGate = struct {
-    /// The token that opens a call, the template text before the name, and the mark that ends the name.
-    opener: u32,
-    lead: []const u8 = "",
-    tail: []const u8 = "",
-    /// Offered names (empty: any); the gate completes a name its prefix starts.
-    names: []const []const u8 = &.{},
-    think_open: ?u32 = null,
-    think_end: ?u32 = null,
-};
-
-/// response_format and the guided_* fields: every token keeps the reply inside this grammar.
-pub const Structure = struct {
-    kind: enum { json, json_schema, regex, choice, grammar, structural_tag },
-    /// The schema (JSON text), regex, choices (a JSON array), EBNF or structural tag; empty for any JSON object.
-    text: []const u8 = "",
-    /// With thinking on, the grammar starts after this token.
-    after: ?u32 = null,
-    /// The server's compiler, which has compiled `text` once already (the engine's compile is then a cache hit).
-    compiler: ?*grammar.Compiler = null,
-    /// That compile, which the engine reads instead of compiling again; the server frees it after `finished`.
-    compiled: ?grammar.Compiled = null,
-    /// grammar_budget: mask tokens after which the reply could no longer complete within its token limits.
-    budget: bool = false,
-
-    pub fn free(st: Structure) void {
-        if (st.compiled) |g| g.free();
-    }
-};
+pub const CallGate = @import("engine_request_controls.zig").CallGate;
+pub const Structure = @import("engine_request_controls.zig").Structure;
 
 pub const grammar = lanes.grammar;
 
@@ -68,6 +41,7 @@ pub const grammar = lanes.grammar;
 pub const Request = struct {
     prompt: []const u32,
     embedding: ?lanes.embedding.Batch = null,
+    readout: ?*const lanes.readout.Spec = null, // an answer from the prompt's rows (Info.readouts engines only)
     max_tokens: u32,
     sampling: ?Sampling = null,
     penalties: Penalties = .{},
@@ -124,6 +98,11 @@ pub const Request = struct {
         return if (r.cache_key.len > 0) r.cache_key else r.prompt;
     }
 
+    /// No token is drawn: the backend answers from the prompt's rows (an embedding or a readout).
+    pub fn promptOnly(r: *const Request) bool {
+        return r.embedding != null or r.readout != null;
+    }
+
     /// The prompt length its kept states count as: its own, or for a warm pass the request whose reply it prefills.
     pub fn bornLen(r: *const Request) u32 {
         return if (r.born > 0) r.born else @intCast(r.prompt.len);
@@ -171,15 +150,26 @@ pub const Sink = struct {
     event: *const fn (ctx: *anyopaque, id: Id, event: *const Event) void,
 };
 
+pub const Benchmark = @import("benchmark_info.zig").Snapshot;
+/// A reranker's label tokens: a prompt's relevance score is sigmoid(yes - no) of their last-row logits.
+pub const Rerank = struct { yes: u32, no: u32 };
+
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
+    /// The loaded world; multi-rank engines override the local engine's one before publication.
+    benchmark_ranks: ?u32 = 1,
+    /// Frozen public startup inventory, owned by the engine; never invokes an HTTP-thread collective.
+    benchmark_group: ?[]const u8 = null,
     name: []const u8 = "lanes",
     text_generation: bool = true,
     embeddings: ?lanes.embedding.Info = null,
+    readouts: ?lanes.readout.Info = null, // non-null: the engine answers readout requests and nothing else
     speech: ?SpeechInfo = null,
     lanes: u32 = 1,
-    /// Prompt plus reply tokens one request may use (0: no limit).
+    /// Server preflight prompt-plus-reply limit (0: the engine owns admission).
     context_window: u32 = 0,
+    /// Discovery-only limit for an engine that keeps its existing prefill admission and error policy.
+    reported_context_window: ?u32 = null,
     context_fitted: bool = false,
     /// What the engine enforces; the server refuses requests that need more.
     call_gates: bool = false,
@@ -220,6 +210,8 @@ pub const Info = struct {
     decode_share: ?f64 = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
     decides: bool = false,
+    /// The engine is a reranker (it scores through `score`): the server answers POST /v1/rerank only when set.
+    rerank: ?Rerank = null,
     /// Decisions may carry pictures (`Decision.pictures`).
     pictures: bool = false,
     /// Image input (--vision); null: text only.
@@ -417,6 +409,7 @@ pub const LearnEvent = @import("learning_api.zig").LearnEvent;
 pub const LearnSink = @import("learning_api.zig").LearnSink;
 pub const LearnError = @import("learning_api.zig").LearnError;
 pub const Learner = @import("learning_api.zig").Learner;
+pub const pocket_audit = @import("pocket_audit.zig");
 
 pub const Engine = struct {
     ctx: *anyopaque,
@@ -455,13 +448,16 @@ pub const Engine = struct {
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
         const info_ = e.info();
-        if (request.embedding) |batch| {
+        if (request.embedding != null and request.readout != null) return error.InvalidRequest;
+        if (request.readout != null) {
+            lanes.readout.admit(info_, request) catch return error.InvalidRequest;
+        } else if (request.embedding) |batch| {
             const cap = info_.embeddings orelse return error.InvalidRequest;
             if (info_.text_generation or request.max_tokens != 0 or request.drafts or request.sampling != null or
                 request.images.len != 0 or request.structure != null or request.logprobs != null or
                 request.prompt_logprobs != null or request.decode_spans.len != 0) return error.InvalidRequest;
             batch.validate(cap, request.prompt, info_.context_window) catch return error.InvalidRequest;
-        } else if (info_.embeddings != null) return error.InvalidRequest;
+        } else if (info_.embeddings != null or info_.readouts != null) return error.InvalidRequest;
         return e.vtable.submit(e.ctx, id, request, sink);
     }
     pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
@@ -577,17 +573,5 @@ pub const originals = @import("originals.zig");
 pub const save_guard = @import("save_guard");
 
 test {
-    _ = @import("lane_embedding_test.zig");
-    _ = speech_guard;
-    _ = @import("lane_host.zig");
-    _ = load_ledger;
-    _ = @import("lane_host_test.zig");
-    _ = @import("lane_root_copy_test.zig");
-    _ = @import("lane_rounds_test.zig");
-    _ = @import("lane_halt_test.zig");
-    _ = @import("prompt_cache.zig");
-    _ = @import("prompt_radix.zig");
-    _ = @import("prompt_imprint.zig");
-    _ = @import("keepalive.zig");
-    _ = @import("originals_test.zig");
+    _ = @import("engine_api_test.zig");
 }

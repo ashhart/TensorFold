@@ -33,6 +33,12 @@ class Config:
     situ_beta: float = 4.0
     situ_linear: float = 25.0
     full_attn: tuple = tuple(range(4, 93, 4)) + (93,)
+    dsa: bool = False
+
+    def check_end(self, pos: int, rows: int) -> None:
+        """Stage 1's all-visible inference is limited to 2047 total positions, not the new prompt alone."""
+        if self.dsa and (pos < 0 or rows < 0 or pos + rows > 2047):
+            raise ValueError("K3.1 all-visible prefix exceeds 2047 evaluated tokens")
 
     def is_kda(self, i: int) -> bool:
         """Layer i (0-based) is KDA unless i + 1 is in the 1-based full-attention list."""
@@ -203,11 +209,14 @@ class Stream:
     """One stream's caches across layers: KDA states and MLA latent lists."""
     kda: dict = field(default_factory=dict)
     mla: dict = field(default_factory=dict)
+    positions: dict = field(default_factory=dict)
 
 
 def layer(i, prefix, blocks, W, cfg, stream: Stream, trace=None, decoded=expert_weights):
     """One decoder layer with attention residuals; rows are one stream's tokens in order."""
     p = f"layers.{i}."
+    pos = stream.positions.get(i, 0)
+    cfg.check_end(pos, len(prefix))
     t = {} if trace is None else trace
     hs = attn_res(prefix, blocks, W[p + "self_attention_res_norm.weight"], W[p + "self_attention_res_proj.weight"],
                   cfg.eps) if blocks else prefix
@@ -226,6 +235,7 @@ def layer(i, prefix, blocks, W, cfg, stream: Stream, trace=None, decoded=expert_
     else:
         m, t["ids"], t["weights"] = moe(h, W, p + "block_sparse_moe.", cfg, decoded)
     t.update(attn_in=x, attn=a, prefix=prefix, mlp_in=h, mlp=m)
+    stream.positions[i] = pos + len(prefix)
     return bf16(prefix + m), blocks
 
 

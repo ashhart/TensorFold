@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/cp_async.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace {
 
@@ -21,10 +22,7 @@ struct Geo {
   static constexpr int BLOCK = 32 * WV + 4 * SBV;
 };
 
-__device__ __forceinline__ void cp16(void* dst, const void* src) {
-  const uint32_t d = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(d), "l"(src));
-}
+using tf_common::cp16;
 
 using tf_common::cp_commit;
 using tf_common::cp_wait;
@@ -40,13 +38,7 @@ __device__ __forceinline__ uint32_t nib2(uint32_t w, int sh) {
   return *reinterpret_cast<uint32_t*>(&r);
 }
 
-__device__ __forceinline__ void mma(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
-                                    uint32_t b1) {
-  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-      "{%0, %1, %2, %3};\n"
-      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
-}
+__device__ __forceinline__ void mma(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) { qmm_frag::mma(d, a0, a1, a2, a3, b0, b1); }
 
 __device__ __forceinline__ float lo_f(uint32_t v) { return __uint_as_float(v << 16); }
 __device__ __forceinline__ float hi_f(uint32_t v) { return __uint_as_float(v & 0xFFFF0000u); }

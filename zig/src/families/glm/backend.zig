@@ -53,6 +53,7 @@ pub const Backend = struct {
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
     pub fn facts(b: *const Backend) lanes.Model {
         return .{
+            .learn_row_costs = b.sl.e.ep == null and !b.sl.e.device.tensorUnits(), // the table is an M5 Ultra's: others pay more
             .allocate_shared_drafts = b.sl.e.hasMtp(),
             .limit_shared_drafts = b.sl.e.hasMtp(),
             .exact_width = st.max_rows,
@@ -482,5 +483,5 @@ test "GLM disk charge: a whole read is larger than a resident save and charged a
     try std.testing.expectEqual(whole, Backend.snapCharged(&b, &snap));
     snap.bytes = @intCast(resident);
     try std.testing.expectEqual(resident, Backend.snapCharged(&b, &snap));
-    std.debug.print("GLM_DISK_CHARGE at=130000 resident={d} whole={d} missing={d}\n", .{ resident, whole, whole - resident });
+    try std.testing.expectEqual([2]u64{ 147619840, 2643622912 }, [2]u64{ resident, whole });
 }

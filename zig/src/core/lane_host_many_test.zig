@@ -113,6 +113,9 @@ test "a backend without room for them all: they go one at a time, a later pass o
 }
 
 test "one request the backend refuses fails alone: the pass is retried a stream at a time, the others' replies kept" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const r = try serve(4, null, 2);
     try std.testing.expectEqual(@as(usize, 0), r.passes);
 }

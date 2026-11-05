@@ -1,5 +1,6 @@
 //! MLX's affine 4-bit layout at group 64 on the host: 8 codes a u32 word, low nibble first, bf16 scale and bias.
 const std = @import("std");
+const bf16_round = @import("bf16_round");
 
 pub const group = 64;
 
@@ -8,11 +9,7 @@ pub fn f32of(b: u16) f32 {
 }
 
 /// The nearest bf16, ties to even; NaN stays NaN.
-pub fn bf16of(x: f32) u16 {
-    const u: u32 = @bitCast(x);
-    if (std.math.isNan(x)) return @intCast((u >> 16) | 0x40);
-    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
-}
+pub const bf16of = bf16_round.bits;
 
 /// Row-major values from codes, scales and biases: scale * q + bias in f32 (the rows' width a multiple of 64).
 pub fn dequantize(words: []const u32, scales: []const u16, biases: []const u16, out: []f32) void {
@@ -83,4 +80,29 @@ test "dequantized codes land within half a step, a flat group exactly on its bia
     try std.testing.expectEqual(@as(u16, 0x3f80), bf16of(@bitCast(@as(u32, 0x3f808000))));
     try std.testing.expectEqual(@as(u16, 0x3f82), bf16of(@bitCast(@as(u32, 0x3f818000))));
     try std.testing.expect(std.math.isNan(f32of(bf16of(std.math.nan(f32)))));
+}
+
+test "affine4_host bf16of: the old spelling's bits on every zero, subnormal, infinity, NaN and tie" {
+    const old = struct {
+        /// bf16of as it was spelled before it was core's bits(): the oracle for every input, NaN included.
+        fn spelled(x: f32) u16 {
+            const u: u32 = @bitCast(x);
+            if (std.math.isNan(x)) return @intCast((u >> 16) | 0x40);
+            return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = bf16of(v);
+            try std.testing.expectEqual(spelled(v), h);
+            if (std.math.isNan(v)) try std.testing.expect(std.math.isNan(f32of(h)));
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
 }

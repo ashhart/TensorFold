@@ -43,6 +43,7 @@ pub const qsa_norm_contract = @import("qsa_norm_contract.zig");
 pub const qsa_scores_contract = @import("qsa_scores_contract.zig");
 pub const qsa_select_contract = @import("qsa_select_contract.zig");
 pub const qsa_attn_contract = @import("qsa_attn_contract.zig");
+pub const qsa_backward = @import("qsa_backward.zig");
 pub const qsa_control_source = @import("qsa_control_source.zig");
 pub const cuda_ple = @import("cuda_ple.zig");
 pub const metal_ple = @import("metal_ple.zig");
@@ -50,6 +51,7 @@ pub const metal_gdn = @import("metal_gdn.zig");
 pub const Config = config.Config;
 pub const Problem = config.Problem;
 test {
+    _ = qsa_backward;
     _ = metal_control;
     _ = @import("rotary_table.zig");
     _ = @import("node_capture_test.zig");

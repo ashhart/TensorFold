@@ -6,6 +6,7 @@ const tc = @import("check.zig");
 const late_k = @import("contract_flashnext_late.zig");
 const roll_k = @import("contract_flashnext_roll.zig");
 const wbnorm_k = @import("contract_flashnext_wbnorm.zig");
+const topk_k = @import("contract_flashnext_topk.zig");
 const flash = @import("flashnext");
 
 const g = core.contract.gates;
@@ -20,6 +21,8 @@ pub const Set = struct {
     roll: roll_k.Roll,
     glue: flash.Glue,
     wbnorm: [3]wbnorm_k.WbNorm,
+    mtp: cuda.Module,
+    topk: topk_k.TopK,
 
     pub fn init(gpu: tc.Gpu, s: cuda.Stream, a: std.mem.Allocator, kernels: *std.ArrayList(g.Kernel)) !*Set {
         const self = try a.create(Set);
@@ -38,6 +41,10 @@ pub const Set = struct {
         errdefer self.glue.deinit();
         for (std.enums.values(wbnorm_k.Mode), &self.wbnorm) |mode, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .mode = mode, .glue = &self.glue };
         for (&self.wbnorm) |*x| try kernels.append(a, x.kernel());
+        self.mtp = try cuda.Module.load(gpu.d, cuda.kernels.flashnext_mtp);
+        errdefer self.mtp.unload();
+        self.topk = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try self.mtp.function("fn_row_topk") };
+        try kernels.append(a, self.topk.kernel());
         return self;
     }
 
@@ -45,6 +52,8 @@ pub const Set = struct {
         for (&self.late) |*x| x.deinit();
         self.roll.deinit();
         for (&self.wbnorm) |*x| x.deinit();
+        self.topk.deinit();
+        self.mtp.unload();
         self.glue.deinit();
         self.batch.unload();
         self.a.destroy(self);

@@ -274,6 +274,32 @@ zig build video -Dffmpeg=$HOME/ffmpeg-9.0.2     # zig-out/native/lib/libtfvideo.
 - **Checks:** `tools/zig/glm_video_fixtures.py` checks the patches bit for bit against the processor on frames PyAV
   decodes, over 13 clips. `tools/zig/video_served.py` checks a served model's prompt ids against the processor's.
 
+### PDF inputs
+
+With `--vision --vision-pdf`, user messages and tool results also accept inline PDF documents: `file` parts in
+`/v1/chat/completions`, `input_file` parts in `/v1/responses`, `document` blocks in `/v1/messages`, or
+`data:application/pdf;base64,...` URLs. Without `--vision-pdf`, PDF parts are refused with the flag's name. Remote URLs
+(`file_url` or `document.source.type: "url"`) are refused.
+
+- **Libraries:** rendering requires PDFium (`chromium/7725`, `libpdfium.so` on Linux, `libpdfium.dylib` on macOS,
+  `pdfium.dll` on Windows) installed in `lib/` beside the server or named by `TENSORFOLD_LIBPDFIUM` (the ambient loader
+  search path is not used), plus libjpeg-turbo 3.1.4.1 (`libturbojpeg`, `TENSORFOLD_LIBTURBOJPEG`). At startup with
+  `--vision-pdf`, the server logs the loaded PDFium file path and its SHA-256 digest; missing libraries are reported in
+  `capabilities --json`, logged at startup, and return HTTP `501` at request time.
+- **Request-wide limits before rendering:** across the entire request, PDF pages and regular images share one running
+  count and byte/pixel budget: at most `min(16, --vision-max-images)` PDF pages (`TENSORFOLD_MAX_PDF_PAGES` can lower
+  or raise the 16-page cap up to `--vision-max-images`), `--vision-max-images` total images, 20 MiB encoded image
+  bytes, and 32 megapixels. A request that would cross any of those limits is refused before rendering the page that
+  would exceed them, and a page that fails to load or render is refused explicitly rather than skipped.
+- **Images only, no text layer:** each page is rendered at 144 DPI (bounded to 2,048 pixels a side and 3.6 megapixels)
+  and passed to the vision tower as a JPEG image (bounded by the 10 MiB per-image and 20 MiB per-request encoded byte
+  limits). No PDF text layer is extracted.
+- **Resource and crash isolation:** on POSIX (`Linux` and `macOS`), each PDF renders in a forked worker process that
+  closes inherited descriptors past standard streams except its result pipe, sets `setrlimit` CPU, core, file-size, and
+  (on Linux) 1 GiB address-space growth limits, checks progressive-rendering pauses (`IFSDK_PAUSE`), and enforces a
+  10-second wall-clock deadline (`SIGKILL` on timeout) under a serializing lock so one PDF renders at a time and the OS
+  reclaims PDFium's heap after each document.
+
 ### Nemotron 3.5 Super VL on CUDA
 
 With `--vision`, Nemotron 3.5 Super VL reads images through the checkpoint's own RADIO tower and projector, run in

@@ -90,7 +90,7 @@ pub const LaneHost = struct {
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
     capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
-    kv: ?@import("kv_ledger.zig").Ledger = null, // Info.ledger's budget, under mutex (lane_host_ledger.zig); null: none
+    kv: ?@import("kv_ledger.zig").Ledger = null, // Info.ledger's budget or the paged pool's (lane_host_ledger.zig)
 
     pub const ThreadInit = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -105,8 +105,18 @@ pub const LaneHost = struct {
         return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
     }
 
+    /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
+    pub fn countPool(h: *LaneHost, pool: anytype) void {
+        ledger.count(h, pool);
+    }
+
+    /// The pool counts on its own pages again (a host that never started).
+    pub fn uncountPool(h: *LaneHost) void {
+        ledger.uncount(h);
+    }
+
     pub fn start(h: *LaneHost) !void {
-        if (h.rounds != null and h.kv != null) return error.LedgerWithRounds; // a planner admits past takeJob's promise
+        if (h.rounds != null and ledger.priced(h)) return error.LedgerWithRounds; // a planner admits past takeJob
         if (h.rounds != null and !h.core.backend.pieces()) return error.PiecesUnsupported; // a drafter wrapper runs whole prompts
         h.thread = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, run, .{h});
     }
@@ -115,6 +125,7 @@ pub const LaneHost = struct {
     pub fn stop(h: *LaneHost) void {
         rows_host.drainThread(h);
         ledger.checkIdle(h); // the engine thread has ended every job
+        ledger.uncount(h); // a paged pool outlives the host: its own pages admit it again
         rows_host.close(h);
         @import("lane_host_fetch.zig").stop(h);
         scoring.close(h);
@@ -136,7 +147,8 @@ pub const LaneHost = struct {
 
     pub fn engine(h: *LaneHost) Engine {
         // decisions' label scores only when the backend gives them, so the route refuses as before otherwise
-        return .{ .ctx = h, .vtable = if (h.core.backend.vtable.score != null) &scored_vtable else &plain_vtable };
+        const vt = h.core.backend.vtable;
+        return .{ .ctx = h, .vtable = if (vt.score != null and vt.decide != null) &decided_vtable else if (vt.score != null) &scored_vtable else &plain_vtable };
     }
 
     const plain_vtable: Engine.VTable = .{
@@ -159,6 +171,12 @@ pub const LaneHost = struct {
         break :blk v;
     };
 
+    const decided_vtable: Engine.VTable = blk: {
+        var v = scored_vtable;
+        v.decide = scoring.decide;
+        break :blk v;
+    };
+
     /// The family's queue as a keepalive target, when it set one.
     fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
         return self(ctx).keepalive_target;
@@ -174,9 +192,7 @@ pub const LaneHost = struct {
 
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
-        if ((request.embedding != null) != (h.info_.embeddings != null)) return error.InvalidRequest;
-        if (request.embedding != null and (h.rounds != null or h.core.backend.vtable.prefill_step == null or
-            h.core.backend.vtable.embedding == null)) return error.InvalidRequest;
+        if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
         h.mutex.lockUncancelable(h.io);
@@ -365,15 +381,15 @@ pub const LaneHost = struct {
 
     /// Whether a set-up job starts outside a shared prompt pass: a warm pass, or the lone driver's.
     pub fn startsAlone(h: *LaneHost, job: *Job) bool {
-        if (job.request.embedding != null) return false;
+        if (job.request.promptOnly()) return false;
         return (job.request.max_tokens == 0 and h.info_.warm_turns) or lone.fits(h, job);
     }
 
     /// A set-up job into the engine: a warm pass, the lone driver, the fill queue, or its own prompt pass.
     pub fn launch(h: *LaneHost, job: *Job, began: i96) bool {
         const r = job.request;
-        if (r.embedding == null and r.max_tokens == 0 and h.info_.warm_turns) return @import("lane_host_warm.zig").pass(h, job, began);
-        if (r.embedding == null and lone.fits(h, job)) return lone.run(h, job, began, false);
+        if (!r.promptOnly() and r.max_tokens == 0 and h.info_.warm_turns) return @import("lane_host_warm.zig").pass(h, job, began);
+        if (!r.promptOnly() and lone.fits(h, job)) return lone.run(h, job, began, false);
         if (h.core.fills()) {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
             return true;
@@ -381,7 +397,7 @@ pub const LaneHost = struct {
         load.calling(h, job);
         h.core.addStreamCommitted(&job.stream, .{ .ptr = job, .call = firstCommitted }) catch |e| return h.failedPass(job, e);
         h.prefilled(job, began);
-        if (r.embedding != null) return @import("lane_embeddings.zig").complete(h, job);
+        if (r.promptOnly()) return @import("lane_prompt_only.zig").complete(h, job);
         _ = h.deliver(job);
         return true;
     }
@@ -416,8 +432,8 @@ pub const LaneHost = struct {
         if (!done) return;
         _ = h.filling.orderedRemove(at);
         h.prefilled(job, job.began);
-        if (job.request.embedding != null) {
-            _ = @import("lane_embeddings.zig").complete(h, job);
+        if (job.request.promptOnly()) {
+            _ = @import("lane_prompt_only.zig").complete(h, job);
             return;
         }
         _ = h.deliver(job);
@@ -453,7 +469,9 @@ pub const LaneHost = struct {
         job.reported();
         if (h.cache) |store| {
             store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
-            if (job.request.images.len == 0 and job.request.cache_key.len == 0) {
+            if (job.request.promptOnly()) {
+                // never kept, so a repeat of it is not worth noting
+            } else if (job.request.images.len == 0 and job.request.cache_key.len == 0) {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.request.prompt);
             } else if (store.rules.repeat_keyed and job.request.cache_key.len > 0) {
                 store.repeat_log.note(store.gpa, store.rules.repeat_min, job.cacheKey());
