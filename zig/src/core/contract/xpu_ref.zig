@@ -150,7 +150,7 @@ pub fn swigluAct(gu: []const f64, ff: usize, want: []f64, mag: []f64) void {
     }
 }
 
-/// The SwiGLU row sums, fp16(mean(act) · ASC) a group of GS; mag is the terms' magnitude the sum carries.
+/// The SwiGLU row sums, mean(act) · ASC a group of GS before the fp16 store the bound allows, Inf past fp16's range.
 pub fn swigluSums(act: []const f64, ff: usize, want: []f64, mag: []f64) void {
     const groups = ff / GS;
     for (0..act.len / ff) |row| for (0..groups) |g| {
@@ -161,7 +161,7 @@ pub fn swigluSums(act: []const f64, ff: usize, want: []f64, mag: []f64) void {
             abs += @abs(v);
         }
         const s = sum / @as(f64, @floatFromInt(GS)) * ASC;
-        want[row * groups + g] = f16Round(s);
+        want[row * groups + g] = if (std.math.isInf(f16Round(s))) f16Round(s) else s;
         mag[row * groups + g] = abs / @as(f64, @floatFromInt(GS)) * ASC;
     };
 }
@@ -317,6 +317,21 @@ test "the SwiGLU row sums are exact in fp32 and their fp16 replay misses by more
     var miss: f64 = 0;
     for (got, want) |g, wv| miss = @max(miss, @abs(g - wv) / (0x1p-11 * @abs(wv) + 0x1p-24));
     try std.testing.expect(miss < 100); // the f16 output's rounding hides it: the spec says 0
+}
+
+test "a SwiGLU row sum at an fp16 tie is not rounded in the reference, so either neighbour is within the bound" {
+    var act: [GS]f64 = undefined;
+    @memset(&act, 0);
+    act[0] = -19.2890625 * @as(f64, GS) / ASC; // the midpoint of fp16 -19.28125 and -19.296875
+    var want: [1]f64 = undefined;
+    var mag: [1]f64 = undefined;
+    swigluSums(&act, GS, &want, &mag);
+    try std.testing.expectEqual(@as(f64, -19.2890625), want[0]);
+    const served = [_]c.Shape{.{ .rows = 1, .n = GS, .k = GS }};
+    const s = c.Spec{ .name = "", .accum = .f32, .depth = sumsDepth, .ops = 0, .mids = 0, .out = .f16, .served = &served };
+    const b = c.bound(s, served[0], want[0], mag[0]);
+    for ([_]f64{ -19.28125, -19.296875 }) |got| try std.testing.expect(@abs(got - want[0]) <= b);
+    try std.testing.expect(@abs(-19.265625 - want[0]) > b);
 }
 
 test "the embedding value rounds once to bf16 and keeps a NaN a NaN" {
