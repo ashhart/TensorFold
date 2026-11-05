@@ -69,4 +69,9 @@ test "the 1.7B: admitted, the tower's rows at the LM's width" {
     try std.testing.expectEqual(@as(usize, 64), cfg.audio.headDim());
     try std.testing.expectEqual(cfg.audio.out, cfg.text.hidden);
     try std.testing.expectEqual(@as(usize, 128), cfg.text.head_dim);
+    try std.testing.expectEqual(@as(usize, 2048), cfg.audio.out);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const names = @import("names.zig");
+    try std.testing.expectEqual(@as(usize, 24 * 16 + 28 * 11 + 16), (try names.all(arena.allocator(), cfg)).len);
 }
