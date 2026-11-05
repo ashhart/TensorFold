@@ -1,6 +1,7 @@
 //! Prompt rows a pass: TF_FLASHNEXT_CHUNK while another stream decodes, TF_FLASHNEXT_CHUNK_SOLO when none does.
 const std = @import("std");
 const batch = @import("cuda_batch.zig");
+const solo_chunk = @import("lanes").solo_chunk;
 
 /// TF_FLASHNEXT_CHUNK's rows a pass: unset, the default; otherwise 1 to batch.max_chunk, anything else refused.
 pub fn parseChunk(v: ?[]const u8) !usize {
@@ -19,22 +20,17 @@ pub const lone_rows: usize = 8192;
 
 /// TF_FLASHNEXT_CHUNK_SOLO's rows: unset, `lone_rows` when `lone`, else `busy` (off); below `busy`, refused.
 pub fn parseSolo(v: ?[]const u8, busy: usize, lone: bool) !usize {
-    const s = v orelse return if (lone) @max(busy, lone_rows) else busy;
-    const n = parseChunk(s) catch return error.BadChunk;
-    if (n < busy) return error.BadChunk;
-    return n;
+    if (v == null and lone) return @max(busy, lone_rows);
+    return solo_chunk.parse(v, .{ .busy = busy, .most = batch.max_chunk }) catch error.BadChunk;
 }
 
 pub fn soloRows(busy: usize, lone: bool) !usize {
     return parseSolo(if (std.c.getenv("TF_FLASHNEXT_CHUNK_SOLO")) |v| std.mem.span(v) else null, busy, lone);
 }
 
-/// The rows a pass of `own` takes when it starts: `solo` unless another lane's prompt is in (it decodes).
+/// The rows the pass of stream `own` takes when it starts: lanes.solo_chunk's rule on the lanes' `filled`.
 pub fn passRows(lanes: anytype, own: anytype, solo: usize, busy: usize) usize {
-    if (solo == busy) return busy;
-    var it = lanes.valueIterator();
-    while (it.next()) |l| if (l != own and l.filled == null) return busy;
-    return solo;
+    return solo_chunk.passRows(lanes, own, "filled", solo, busy);
 }
 
 var readout_rows: ?usize = null;
@@ -73,12 +69,10 @@ test "a pass takes the solo rows unless another lane decodes; prompts still fill
     var m: std.AutoHashMapUnmanaged(u32, L) = .empty;
     defer m.deinit(std.testing.allocator);
     try m.put(std.testing.allocator, 0, .{ .filled = 0 });
-    const own = m.getPtr(0).?;
-    try std.testing.expectEqual(@as(usize, 8192), passRows(&m, own, 8192, 1536));
+    try std.testing.expectEqual(@as(usize, 8192), passRows(&m, 0, 8192, 1536));
     try m.put(std.testing.allocator, 1, .{ .filled = 3072 });
-    const mine = m.getPtr(0).?;
-    try std.testing.expectEqual(@as(usize, 8192), passRows(&m, mine, 8192, 1536));
+    try std.testing.expectEqual(@as(usize, 8192), passRows(&m, 0, 8192, 1536));
     m.getPtr(1).?.filled = null;
-    try std.testing.expectEqual(@as(usize, 1536), passRows(&m, m.getPtr(0).?, 8192, 1536));
-    try std.testing.expectEqual(@as(usize, 1536), passRows(&m, m.getPtr(0).?, 1536, 1536));
+    try std.testing.expectEqual(@as(usize, 1536), passRows(&m, 0, 8192, 1536));
+    try std.testing.expectEqual(@as(usize, 1536), passRows(&m, 0, 1536, 1536));
 }
