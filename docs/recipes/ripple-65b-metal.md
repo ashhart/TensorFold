@@ -74,18 +74,24 @@ SUMMARY 36 kernels: 36 pass gates 1-4, 0 fail, 0 known findings; 15 controls: 15
 
 `tools/zig/ricursive_reference.py` runs a checkpoint on the CPU, one layer's weights at a time: in float64 (the
 weights cast up exactly; the NVFP4 MLPs dequantized exactly), and with `--bf16-points` rounded to bf16 at every point
-the release's bf16 forward rounds. Teacher-forced over a 2,586-token chat:
+the release's bf16 forward rounds; with `--release`, the checkpoint's own `modeling_ricursive.py` layers in bf16 (the
+torch CPU forward, its weights loaded a layer at a time). Teacher-forced over a 2,586-token chat:
 
 | engine logits | against | mean KL | notes |
 |---|---|---:|---|
 | bf16 release, 2,048-row prompt chunks | its float64 pass | 0.00086 | |
 | bf16 release, 16-row decode windows | its float64 pass | 0.00073 | |
+| bf16 release, 2,048-row prompt chunks | `modeling_ricursive.py` in bf16 | 0.00073 | top-1 98.7% |
+| bf16 release, 16-row decode windows | `modeling_ricursive.py` in bf16 | 0.00069 | top-1 98.8% |
+| `modeling_ricursive.py` in bf16 (no engine) | the float64 pass | 0.00079 | top-1 98.3% |
 | NVFP4 release, 2,048-row prompt chunks | its float64 pass | 0.00069 | |
 | NVFP4 release, 16-row decode windows | its float64 pass | 0.00107 | |
 | NVFP4 release, prompt chunks | the bf16 release's float64 pass | 0.0060 | top-1 96.1% |
 | NVFP4 float64 pass (no engine) | the bf16 release's float64 pass | 0.0059 | top-1 95.8% |
 
-The last two rows are **what the NVFP4 release costs**: the publisher's quantization, not the engine's, about eight
+Against the release's own bf16 code the engine sits as close as the float64 pass does (0.00073 and 0.00069 against
+0.00076 for float64 measured the same way): the differences are bf16 rounding order, on either side. The last two rows
+are **what the NVFP4 release costs**: the publisher's quantization, not the engine's, about eight
 times the engine's own rounding. The engine adds nothing measurable to it.
 
 - Prompt chunks of 2,048, 1,000 and 333 rows give bit-identical logits; decode windows of 16 and 7 rows equal one-row
@@ -101,7 +107,7 @@ times the engine's own rounding. The engine adds nothing measurable to it.
 
 ## Measured
 
-Served through the recipe harness (4 Nov 2026, the NVFP4 release, no other model loaded; speed and prompt runs on
+Served through the recipe harness (4 Nov 2026, the NVFP4 release, no other model busy; speed and prompt runs on
 build 588e7d2a2, the serving checks repeated on d26cd59ad with the same results and speeds), `--context 262144
 --parallel 2`, greedy 256-token replies:
 
@@ -123,6 +129,21 @@ lengths), 488, 458, 503 and 410 tokens a second.
 A multi-turn chat's third turn, resumed from 4,513 of its 4,597 kept tokens, starts in 0.67 s against 8.2 s cold,
 with the same reply as on a restarted server.
 
+The bf16 release through the same harness (5 Nov 2026, built from the context-cap commit before its rebase; no other model busy, `--context 262144
+--parallel 2`, greedy 256-token replies):
+
+| streams | prose | code | structured | list | first token | a round |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 5.8 | 5.0 | 4.9 | 5.0 | 0.51-1.30 s | 194.7 ms |
+| 2 | 11.5 | 11.0 | 10.5 | 11.8 | 0.86-1.81 s | 179.6 ms |
+
+One stream reads the 121 GiB of weights each step. The rows spread more than NVFP4's (the ruler after the serving
+checks gives 4.4 to 5.8 at 197.2 ms a round); the rounds are the steady figure. Cold prompts on a fresh server, with
+thinking requested: 2,206 tokens 519 tok/s (4.3 s), 8,830 596 (14.8 s), 34,931 586 (59.6 s), 139,870 459 (305 s).
+Without thinking requested the harness timed nothing: on all four prompts Ripple opened a think block of its own,
+and the 8-token replies held no answer token to time. A resumed third turn (4,513 of 4,597 kept) starts in 0.59 s
+against 7.5 s cold, with the same reply as on a restarted server.
+
 - Structured output (json_object, json_schema, regex, choice, grammar) 18/18, drafted == plain 12/12; tool calls
   (auto, required, named, thinking, streamed) 5/5; seeded sampling 9/9 equal on repeat and undrafted.
 - A 60-turn soak and 12 concurrent replies each equal to the request alone; streaming 4/4, multi-turn recall 8/8,
@@ -140,8 +161,7 @@ No quality suite was run. Contexts past 258,039 tokens were not run, so `--conte
 the card's 1M by name. Ripple's think markers are spelled from several tokens, not one each, so a thinking budget
 (which forces a close) and logprobs (which cut the reply at its close token) are refused by name, and a reply's
 `reasoning_tokens` reads 0. The family has no draft head: drafts come only from the lane core's copies. No images:
-Ripple has no vision tower. The bf16 release's correctness is measured above, but its serving numbers did not go
-through the recipe harness. Only the M5's tensor units were checked; M1 to M4 Macs are refused at load, and smaller
+Ripple has no vision tower. Only the M5's tensor units were checked; M1 to M4 Macs are refused at load, and smaller
 RAM is untested. The publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) is not served yet.
 
 ## Licence
