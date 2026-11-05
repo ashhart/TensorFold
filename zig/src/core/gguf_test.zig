@@ -437,3 +437,20 @@ test "GGUF: mutation between validation and indexing rechecks tensor range befor
         try t.expect(m.changed);
     }
 }
+
+test "GGUF: refused file retains a named unknown type after unmapping" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var b = Fixture.init(1, 0);
+    b.tensor("blk.0.unknown.weight", &.{32}, .q8_0, 0);
+    b.set(u32, b.len - 12, 99);
+    b.finish(32, 64);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "unknown.gguf", .data = b.slice() });
+    const path = try tmp.dir.realPathFileAlloc(t.io, "unknown.gguf", t.allocator);
+    defer t.allocator.free(path);
+    var issue: g.FileProblem = .{};
+    defer issue.deinit(t.allocator);
+    try t.expectError(error.UnsupportedTensorType, g.File.openDiagnosed(t.allocator, t.io, path, .{}, &issue));
+    try t.expectEqualStrings("blk.0.unknown.weight", issue.name.?);
+    try t.expectEqual(@as(u32, 99), issue.kind);
+}

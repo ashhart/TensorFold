@@ -35,6 +35,7 @@ pub const HfText = struct {
 
     /// Loads ``dir``'s tokenizer.json, chat template, special tokens and end-of-sequence ids; a failure's reason in `problem` (from `pa`).
     pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, template_override: ?[]const u8, pa: Allocator, problem: *[]const u8) !*HfText {
+        if (@import("gguf_path.zig").isFile(io, dir)) return @import("gguf_text.zig").load(HfText, gpa, io, dir, template_override, pa, problem);
         const t = try gpa.create(HfText);
         errdefer gpa.destroy(t);
         t.* = .{ .gpa = gpa, .arena = .init(gpa), .tok = undefined };
@@ -528,6 +529,7 @@ test "chat_template_kwargs.clear_thinking: a bool, null as unset, anything else 
 
 test {
     _ = @import("hf_eos_test.zig");
+    _ = @import("gguf_text_test.zig");
     _ = @import("dory_chat_test.zig");
     _ = @import("deepseek_chat_test.zig");
 }

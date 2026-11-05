@@ -50,6 +50,12 @@ pub const Buffer = struct {
     r: *Record,
     bytes: usize,
     owned: bool = false,
+    pub fn deviceId(_: Buffer) usize {
+        return 1;
+    }
+    pub fn gpuAddress(b: Buffer) u64 {
+        return @intFromPtr(b.r);
+    }
     pub fn length(b: Buffer) usize {
         return b.bytes;
     }
@@ -65,6 +71,7 @@ pub const Buffer = struct {
 };
 pub const Device = struct {
     r: *Record,
+    id: usize = 1,
     pub fn tensorUnits(_: Device) bool {
         return true;
     }
@@ -106,6 +113,10 @@ pub const Pipeline = struct {
 };
 pub const ComputeEncoder = struct {
     r: *Record,
+    pub fn deviceId(_: ComputeEncoder) usize {
+        return 1;
+    }
+    pub fn setBytes(_: ComputeEncoder, _: []const u8, _: usize) void {}
     pub fn setPipeline(e: ComputeEncoder, p: Pipeline) void {
         e.r.current = p.id;
     }

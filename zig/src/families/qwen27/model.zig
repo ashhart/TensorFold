@@ -37,6 +37,10 @@ pub const Model = struct {
     /// widths.Widths.tag: 0 for a uniform 4-bit g64 checkpoint.
     widths_tag: u64 = 0,
 
+    pub fn loadGguf(a: std.mem.Allocator, io: std.Io, path: []const u8, rows: u32, problem: *@import("gguf.zig").Problem) !*Model {
+        return @import("gguf_model.zig").load(a, io, path, rows, problem);
+    }
+
     /// Immediate share loading for tools; `share_fits` null keeps their existing unrestricted behavior.
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, share_fits: ?*const fn (u64) bool) !*Model {
         return loadWith(a, io, dir, rows, share_fits, false);

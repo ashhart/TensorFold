@@ -54,7 +54,7 @@ pub fn Adapter(comptime wo: type, comptime mtl: type) type {
                 if (enc.deviceId() != k.device.id) return error.WeightOnlyContext;
                 const views = [_]View{ x, w, s, b, out };
                 const ranges = [_]wo.Range{ try x.range(k.device), try w.range(k.device), try s.range(k.device), try b.range(k.device), try out.range(k.device) };
-                try wo.buffers(p, ranges[0], ranges[1], ranges[2], ranges[3], ranges[4]);
+                try wo.buffersMetal(p, ranges[0], ranges[1], ranges[2], ranges[3], ranges[4]);
                 enc.setPipeline(k.pipes[@backingInt(control)]);
                 for (views, 0..) |v, i| enc.setBuffer(v.buffer, v.offset, i);
                 enc.setBytes(std.mem.asBytes(&p), 5);

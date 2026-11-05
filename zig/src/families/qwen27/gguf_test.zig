@@ -175,4 +175,19 @@ test "Qwen27 GGUF: transposed source rows and a full-attention gate of the wrong
 
 test {
     _ = @import("gguf_real_test.zig");
+    _ = @import("gguf_projection_test.zig");
+}
+
+test "Qwen27 GGUF: the full stop set matches equivalent JSON before any repack" {
+    const bytes = try f.stopImage(a);
+    defer a.free(bytes);
+    const json = try std.mem.replaceOwned(u8, a, f.json, "\"eos_token_id\":2", "\"eos_token_id\":[2,3]");
+    defer a.free(json);
+    const expected = try @import("config.zig").parse(a, json, null);
+    var p: adapter.Problem = .{};
+    var open = try adapter.Adapter.open(a, bytes, &p);
+    defer open.deinit();
+    try t.expectEqualDeep(expected, open.config);
+    try t.expectEqualSlices(u32, &.{ 2, 3 }, open.config.eos[0..open.config.eos_count]);
+    try t.expect(open.config.isEos(2) and open.config.isEos(3) and !open.config.isEos(1));
 }
