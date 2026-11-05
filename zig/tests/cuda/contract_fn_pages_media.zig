@@ -60,4 +60,3 @@ test "paged media contract: real plans retain image axes, text suffixes and a ne
         }
     }
 }
-
