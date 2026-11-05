@@ -57,6 +57,7 @@ test {
     _ = glue;
     _ = image_rows;
     _ = @import("rope_test.zig");
+    _ = @import("attention_pick_test.zig");
     _ = state;
     _ = projection;
     _ = model;
