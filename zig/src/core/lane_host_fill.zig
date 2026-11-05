@@ -41,6 +41,9 @@ fn pick(h: *const LaneHost, among: enum { all, short, long }) ?usize {
 fn remaining(h: *const LaneHost, j: *const LaneHost.Job) u64 {
     const completed = if (j.fill_began and h.core.backend.vtable.reports_fill)
         @max(j.stream.cached, j.stream.fill_at.load(.monotonic))
+    else if (!j.fill_began and !j.stream.reuse_failed)
+        // an unstarted job's cache hit is known at admission; a rejected restore leaves the whole prompt
+        @max(j.stream.cached, j.stream.reuse.at)
     else
         j.stream.cached;
     return j.stream.prompt_len -| completed;
