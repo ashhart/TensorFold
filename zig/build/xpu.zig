@@ -155,6 +155,11 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    // tf-qwen3-asr-xpu: Qwen3-ASR's tower and language model on qwen3_asr.cl (no DPAS), a clip against a reference case
+    const asr = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_asr/qwen3_asr_xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "xpu", .module = nem.xpu }, .{ .name = "core", .module = core } } });
+    const asr_main = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen3_asr_xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "xpu", .module = nem.xpu }, .{ .name = "qwen3_asr", .module = asr }, .{ .name = "tokenizer", .module = tokenizer } } });
+    const asr_exe = b.addExecutable(.{ .name = "tf-qwen3-asr-xpu", .root_module = asr_main });
+    b.step("tf-qwen3-asr-xpu", "Build tf-qwen3-asr-xpu, Qwen3-ASR's tower and language model on the Intel GPU on a clip").dependOn(&b.addInstallArtifact(asr_exe, .{}).step);
     const checkpoint_cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, .ReleaseSafe, core), .{ .name = "core", .module = core } } });
     const server = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/main.zig"),
@@ -197,6 +202,8 @@ const kernels = [_]Kernel{
     .{ .name = "nem_attn_dec", .options = cl3 },
     .{ .name = "lfm3", .options = cl3 },
     .{ .name = "lfm3_mv", .options = cl3 },
+    .{ .name = "lfm3_gq2", .src = "lfm3", .options = cl3 ++ " -DGQ=2" },
+    .{ .name = "qwen3_asr", .options = cl3 },
 };
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).
@@ -272,7 +279,7 @@ fn lfm3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams", "lfm3_chunks", "lfm3_pgemm",
+    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams", "lfm3_chunks", "lfm3_pgemm", "qwen3_asr_ops",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
