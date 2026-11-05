@@ -389,6 +389,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
     // The narrow tensor window retains the serial loop; wide windows use the priced lane path.
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
+    // a reply that ends soon goes first beside a long prompt; a share someone set stays as they set it
+    if (o.decode_share == null and std.c.getenv("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
     var loop_text: [160]u8 = undefined;
     std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null, h.back.copies)});
     h.warm = .{ .queue = model.queue };
