@@ -8,6 +8,7 @@ pub const Capability = enum {
     loop_guard,
     thinking_budget,
     reasoning,
+    reasoning_optional,
     answer_limit,
     structures,
     logprobs,
