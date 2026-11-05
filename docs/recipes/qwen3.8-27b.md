@@ -229,6 +229,10 @@ checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.
 head, so on HIP it then drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts`
 turns every draft off (the drafter is not loaded) and decodes plain.
 The target verifies every proposed token against its own serial sample.
+`tf-qwen35-test check <model dir> --drafter DIR` (`zig build tf-qwen35-test -Dhip=true`) runs the HIP model checks
+with the drafter in front of the target, opened as the server opens it, so the lane checks compare drafted
+replies with serial ones (greedy and seeded), solo with together and graph with eager under the drafter; without
+`--drafter` the 27B has no draft head and skips the drafted == serial checks.
 
 ## CUDA
 

@@ -106,7 +106,7 @@ fn lanesSet(c: *Ctx, set: []const u8, prompts: []const ids_file.Prompt) void {
         var serial = job;
         serial.drafts = false;
         const drafted = named(c, "lanes {s} {s}: drafted == serial", .{ set, d.name });
-        if (c.session.h.head == null) {
+        if (c.session.h.head == null and c.session.drafted == null) {
             c.report.skip(drafted, "the model has no draft head");
         } else if (c.session.run(c.arena, serial)) |done| verdict(c, drafted, together, done) else |err| c.report.broke(drafted, err);
         var solo = job;
