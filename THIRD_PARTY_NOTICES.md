@@ -50,9 +50,7 @@ reference:
 - `zig/kernels/hip/ops/vl_position.hpp`: `_normalized_2d_position_pages` in `hf_prefix_geometry.py`.
 
 These release files are Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES, under the NVIDIA OpenMDW License 1.1; see
-[the license text](LICENSES/NVIDIA-OpenMDW-1.1.txt). The encoder's blocks in `tower.zig` also follow timm's `Block`
-(`timm/models/vision_transformer.py`, timm 1.0.22), which the modeling file imports; timm is Copyright 2019 Ross
-Wightman, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+[the license text](LICENSES/NVIDIA-OpenMDW-1.1.txt).
 
 ## MLX and mlx-lm adaptations
 
