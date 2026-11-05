@@ -11,6 +11,10 @@ fn sig(x: f64) f64 {
 fn silu(x: f64) f64 {
     return x * sig(x);
 }
+pub const Observer = struct {
+    ctx: *anyopaque,
+    emit: *const fn (*anyopaque, []const u8, []const f64) anyerror!void,
+};
 pub fn Point(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -20,6 +24,7 @@ pub fn Point(comptime T: type) type {
         frozen: bool = false,
         at: usize = 0,
         mem: std.mem.Allocator = undefined,
+        observer: ?Observer = null,
         pub fn deinit(o: *Self) void {
             o.offsets.deinit(o.a);
         }
@@ -46,7 +51,14 @@ pub fn Point(comptime T: type) type {
             const saved_ = try o.saved(l, scope, suffix);
             if (saved_.len != x.len) return error.ReferenceShape;
             for (x, saved_) |*v, s| v.* = try o.cut(v.*, bf(s));
+            if (!std.mem.eql(u8, suffix, "pocket_output")) try o.observe(x, l, scope, suffix);
             return x;
+        }
+        fn observe(o: *Self, x: []const f64, l: ?usize, scope: []const u8, suffix: []const u8) !void {
+            if (o.observer) |observer| {
+                var name: [192]u8 = undefined;
+                try observer.emit(observer.ctx, try @import("node_trace.zig").label(&name, l, scope, suffix), x);
+            }
         }
         fn matrix(o: *Self, x: []const f64, w: anytype) ![]f64 {
             const k: usize = @intCast(w.params.k);
@@ -297,6 +309,7 @@ pub fn Point(comptime T: type) type {
                 if (l == layer) for (output[row * c.hidden ..][0..c.hidden], direction) |*v, d| {
                     v.* += epsilon * d;
                 };
+                try o.observe(output, l, "mlp", "pocket_output");
                 h = try o.write(h, output, mhc.inject, l, "mlp_hyper_connection");
             }
             const mixed = try o.hc(h, null, "model.hyper_connection_mixer", t.e.model.readout);

@@ -34,6 +34,8 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     @import("qwen4_cuda_attention_host.zig").wire(b, m);
     const raw = b.createModule(.{ .root_source_file = b.path("zig/qwen4_raw_direction_host.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "qwen4", .module = family }} });
     b.step("diagnose-qwen4-raw-gradient-host", "Unqualified raw BF16 rule-v2 panel; retain failures separately from local derivatives").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = raw, .filters = &.{"Qwen4 raw directional:"} })).step);
+    const rounding = b.createModule(.{ .root_source_file = b.path("zig/qwen4_rounding_direction_host.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "qwen4", .module = family }} });
+    b.step("diagnose-qwen4-rounding-host", "First BF16 store and binary64 local derivatives; no change to raw qualification").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rounding, .filters = &.{"Qwen4 rounding directional:"} })).step);
     const step = b.step("test-qwen4-host", "Qwen4 explicit config admission and synthetic graph contracts");
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const mixer_step = b.step("test-qwen4-native-mixers-host", "Actual native mixer bodies under CPU collective instruments");
