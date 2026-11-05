@@ -35,6 +35,7 @@ empty negative prompt whose branch skips block 22, the bf16 transformer and text
 
 
 # pipeline_moss_image.py at OpenMOSS-Team/MOSS-Image-Base revision 85975793d8b3d432f1b6e27f352abaa4c2a4c0d3
+PUBLISHER_REVISION = "85975793d8b3d432f1b6e27f352abaa4c2a4c0d3"
 PIPELINE_SHA256 = "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
 
 
@@ -103,6 +104,13 @@ def to_png(pipe, latents, path: str) -> None:
     pipe.image_processor.postprocess(image, output_type="pil")[0].save(path)
 
 
+def teacher_steps(requested: int | None, available: int) -> int:
+    """Default to complete coverage of the publisher's actual schedule, which may retain fewer than requested steps."""
+    if requested is not None and requested < 0:
+        raise ValueError("--fp32-steps must be nonnegative")
+    return available if requested is None else min(requested, available)
+
+
 def case(args) -> int:
     import torch
     from safetensors.torch import save_file
@@ -147,12 +155,13 @@ def case(args) -> int:
                "latents": noise[0].permute(1, 2, 0).contiguous(), "inputs": torch.stack([c["input"] for c in cond]),
                "velocity": torch.stack([c["velocity"] for c in cond]),
                "velocity_negative": torch.stack([u["velocity"] for u in uncond])}
-    if args.fp32_steps:
+    coverage = teacher_steps(args.fp32_steps, len(cond))
+    if coverage:
         # the same transformer and inputs in float32 throughout: the bf16 reference's own distance from exact arithmetic
         pipe.transformer.float()
         exact, exact_negative = [], []
         with torch.no_grad():
-            for s in range(min(args.fp32_steps, len(cond))):
+            for s in range(coverage):
                 x = cond[s]["input"].permute(2, 0, 1)[None].to(args.device)
                 t = sched.timesteps[s]
                 exact.append(rows(pipe.transformer(x, t, positive.float()).sample))
@@ -166,7 +175,9 @@ def case(args) -> int:
     meta = {"width": args.width, "height": args.height, "seed": args.seed, "steps": len(cond),
             "prompt_rows": int(positive.shape[1]), "negative_rows": int(negative.shape[1]), "device": args.device,
             "encode_s": round(encode_s, 2), "torch_bf16_forward_s": [round(c["s"], 3) for c in calls],
-            "torch": torch.__version__}
+            "torch": torch.__version__, "publisher_revision": PUBLISHER_REVISION, "pipeline_sha256": PIPELINE_SHA256,
+            "fp32_teacher_steps": coverage, "fp32_teacher_branches": ["prompt", "negative"] if coverage else [],
+            "teacher_coverage": "complete" if coverage == len(cond) else "INCONCLUSIVE"}
     (out / "reference.json").write_text(json.dumps(meta, indent=1) + "\n")
     print(json.dumps({k: v for k, v in meta.items() if k != "torch_bf16_forward_s"}))
     return 0
@@ -425,7 +436,7 @@ def main() -> int:
     c.add_argument("--height", type=int, default=1024)
     c.add_argument("--seed", type=int, default=42)
     c.add_argument("--steps", type=int, default=50)
-    c.add_argument("--fp32-steps", type=int, default=1, help="steps also run in float32 (0: none)")
+    c.add_argument("--fp32-steps", type=int, help="steps also run in float32 (default: all; 0 or partial: INCONCLUSIVE)")
     c.add_argument("--device", default="mps")
     s = sub.add_parser("start")
     s.add_argument("model_dir")
