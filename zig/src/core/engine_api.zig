@@ -396,6 +396,9 @@ pub const pressure_message = "this Mac is under critical memory pressure: the se
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
 
+/// The longest engine refusal message the server keeps; a longer one is cut at a UTF-8 boundary.
+pub const refusal_bytes = 256;
+
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none); context: the rows of a conversation before its own turn, which other examples share (0: none)
 
@@ -440,6 +443,8 @@ pub const Engine = struct {
         drain: ?*const fn (ctx: *anyopaque) void = null,
         /// The server's load-ledger producer at attach, null at detach (load_ledger.zig); null entry: no engine group.
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
+        /// Asked once when the request is whole: written into `out`; the return says how many bytes; null: accepted.
+        refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -512,6 +517,12 @@ pub const Engine = struct {
     pub fn learn(e: Engine, request: *const LearnRequest, sink: LearnSink) LearnError!void {
         const f = e.vtable.learn orelse return error.Unsupported;
         return f(e.ctx, request, sink);
+    }
+
+    /// The engine's refusal of a whole `request`, written into `out`; null: accepted.
+    pub fn refusal(e: Engine, request: *const Request, out: []u8) ?[]const u8 {
+        const f = e.vtable.refusal orelse return null;
+        return f(e.ctx, request, out);
     }
 };
 
