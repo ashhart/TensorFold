@@ -17,4 +17,5 @@ test {
     _ = score;
     _ = gemm;
     _ = engine;
+    _ = native;
 }
