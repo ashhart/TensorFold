@@ -107,6 +107,13 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         .add_bf16 = &shaders2.add_bf16,
         .add_preserve_bf16 = &shaders2.add_preserve_bf16,
         .swiglu_bf16 = &shaders2.swiglu_bf16,
+        .norm_f32 = &shaders2.norm_f32,
+        .norm_f32_in = &shaders2.norm_f32_in,
+        .norm_bf16_in = &shaders2.norm_bf16_in,
+        .add_f32 = &shaders2.add_f32,
+        .add_wide_bf16 = &shaders2.add_wide_bf16,
+        .add_bf16_f32 = &shaders2.add_bf16_f32,
+        .swiglu_f32 = &shaders2.swiglu_f32,
     });
     defer m.deinit();
     var preserve = try vk.dispatch.Pipeline.init(&dev, &shaders2.add_preserve_bf16, .{ .bindings = 3, .push_bytes = vk.params.cast_push_bytes, .writes = 1 << 2 });
