@@ -148,6 +148,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next's first CUDA EXL3 slice uses the canonical fp32 expert tree, so adding tensor parallelism preserves its one-rank reduction order (#1441, #1442). Other formats are unchanged.
 
+- Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441).
+
 - Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks.
 
 - The CPU-only server build shares its existing core module with the server adapter, resolving the slide-model import after integration.

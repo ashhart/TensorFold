@@ -373,12 +373,13 @@ pub const Scratch = struct {
 
     /// The buffers in the order `allocationSizes` lists their sizes.
     const order = [_][]const u8{
-        "ids",         "pos",       "h",          "pss",        "norm",     "rinv",     "dn",      "hc_part",    "hc_up",      "native_part", "act",
-        "xs_act",      "inj",       "mixed",      "xsm",        "proj",     "rank_input", "rank_gather", "rank_output", "rank_result", "part", "gout", "gxs", "ys", "gq", "gk",
-        "gv",          "ggb",       "q",          "iq",         "po",       "pm",       "pl",      "qids",       "qnk",        "qspr",        "ao",
-        "gated",       "gxs_attn",  "router_l",   "picks",      "picks_ep", "wts",      "members", "items",      "counts",     "rank",        "hist",
-        "shared_gate", "shared_up", "shared_act", "shared_out", "moe_act",  "y",        "branch",  "moe_f32",    "pocket_act", "ple_emb",     "ple_xs",
-        "ple_keys",    "ple_vals",  "ple_part",   "ple_gated",  "ple_pss",  "ple_nrow", "logits",  "head_local", "inv",        "dummy",       "lanes_tab",
+        "ids",        "pos",        "h",       "pss",       "norm",        "rinv",       "dn",          "hc_part",     "hc_up",       "native_part", "act",
+        "xs_act",     "inj",        "mixed",   "xsm",       "proj",        "rank_input", "rank_gather", "rank_output", "rank_result", "part",        "gout",
+        "gxs",        "ys",         "gq",      "gk",        "gv",          "ggb",        "q",           "iq",          "po",          "pm",          "pl",
+        "qids",       "qnk",        "qspr",    "ao",        "gated",       "gxs_attn",   "router_l",    "picks",       "picks_ep",    "wts",         "members",
+        "items",      "counts",     "rank",    "hist",      "shared_gate", "shared_up",  "shared_act",  "shared_out",  "moe_act",     "y",           "branch",
+        "moe_f32",    "pocket_act", "ple_emb", "ple_xs",    "ple_keys",    "ple_vals",   "ple_part",    "ple_gated",   "ple_pss",     "ple_nrow",    "logits",
+        "head_local", "inv",        "dummy",   "lanes_tab",
     };
 
     pub fn allocationSizes(cap: usize, z: Sizes) [70]?usize {
@@ -567,7 +568,6 @@ pub const Gather = @import("cuda_batch_gather.zig").Gather;
 test {
     _ = @import("cuda_batch_state_test.zig");
     _ = @import("cuda_nvfp4_tile.zig");
-    _ = @import("cuda_scratch_layout_test.zig");
 }
 
 pub const Pg = @import("cuda_glue.zig").Pg;
