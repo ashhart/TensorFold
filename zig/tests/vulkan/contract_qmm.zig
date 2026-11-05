@@ -125,8 +125,7 @@ pub const Fixture = struct {
         return if (f.act_f32) 2 else 1;
     }
     fn reset(f: *Fixture) void {
-        // A hook error between a recorded dispatch and its submit leaves the buffer open:
-        // drop those records so the freed buffers below are never referenced by a later submit.
+        // A hook error after a recorded dispatch leaves the buffer open: drop those records before freeing buffers.
         f.cmds.discard();
         while (f.made > 0) {
             f.made -= 1;
