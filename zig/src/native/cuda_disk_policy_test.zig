@@ -58,3 +58,45 @@ test "disk identity: dense Qwen CUDA rotary policy misses with the same probe" {
 test "disk identity: MoE Qwen CUDA rotary policy misses with the same probe" {
     try ropeMiss(qwen.native_moe);
 }
+
+fn indexedMiss(comptime family: []const u8) !void {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    try tmp.dir.createDirPath(t.io, "tensors");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = "{}" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"unprobed.weight\":\"tensors/native-QB.bin\"}}" });
+    const header = "{\"unprobed.weight\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}";
+    var shard: [8 + header.len + 4]u8 = @splat(0);
+    std.mem.writeInt(u64, shard[0..8], header.len, .little);
+    @memcpy(shard[8..][0..header.len], header);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.bin", .data = &shard });
+    var driver: cuda.Driver = undefined;
+    driver.api.cuDeviceGetName = Driver.name;
+    driver.api.cuDeviceGetAttribute = Driver.attribute;
+    driver.api.cuDriverGetVersion = Driver.version;
+    const gpu: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+    const profile: @import("disk_identity.zig").Profile = .{ .family = family, .backend = "cuda" };
+    const before = try disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile);
+    const same = try disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile);
+    try std.Io.sleep(t.io, .fromMilliseconds(5), .awake);
+    shard[shard.len - 1] = 1;
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.bin", .data = &shard });
+    try fixture.misses(before, same, &.{try disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile)});
+}
+
+test "disk identity: Nemotron CUDA indexed shard misses with the same probe" {
+    try indexedMiss("nemotron_h");
+}
+test "disk identity: dense Qwen CUDA indexed shard misses with the same probe" {
+    try indexedMiss("qwen3_5");
+}
+test "disk identity: MoE Qwen CUDA indexed shard misses with the same probe" {
+    try indexedMiss("qwen3_5_moe");
+}
+test "disk identity: Flash Next CUDA indexed shard misses with the same probe" {
+    try indexedMiss("qwen4_exp");
+}

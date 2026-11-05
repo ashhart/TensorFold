@@ -28,7 +28,8 @@ boundaries, while the shared cache compares decoded spans and image identities. 
 rendered answer text. No separate hot-swappable LoRA state is admitted by these persistence adapters; checkpoint
 changes and supported external drafters use the identities above.
 
-GLM and Flash Next now include safetensors shard names, sizes, inode and modification/change stamps. A weight
+Checkpoint keys include every validated indexed shard path, including subfolders and nonstandard suffixes, plus
+auxiliary top-level safetensors files. Their names, sizes, inodes and modification/change stamps are bound. A weight
 write with unchanged config, index, tensor header and size moves their namespace even when a fixed probe does not
 visit the changed tensor. Flash Next also hashes the loaded variant text and input/output/meta bindings in sorted
 function-name order. Captured CUDA sets hash each cubin named by the parsed manifest, through the same loader

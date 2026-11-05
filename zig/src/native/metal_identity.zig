@@ -28,24 +28,9 @@ pub fn learned(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.M
     return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
-/// Each safetensors file's name, size, inode and change times: a weight written in place (--slide) moves the identity.
-fn shardStamps(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !void {
-    var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
-    defer d.close(io);
-    var names: std.ArrayList([]const u8) = .empty;
-    var it = d.iterate();
-    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors")) try names.append(a, try a.dupe(u8, e.name));
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn lt(_: void, x: []const u8, y: []const u8) bool {
-            return std.mem.lessThan(u8, x, y);
-        }
-    }.lt);
-    for (names.items) |name| {
-        const info = try d.statFile(io, name, .{});
-        const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
-        h.update(name);
-        h.update(std.mem.sliceAsBytes(&stamp));
-    }
+/// The checkpoint's current stamps, including validated indexed subfolders and auxiliary top-level files.
+pub fn shardStamps(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !void {
+    try @import("disk_identity.zig").checkpoint(h, a, io, dir);
 }
 
 /// A safetensors file's header (its tensors' names, shapes and offsets), in `a`.

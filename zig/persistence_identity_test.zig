@@ -153,3 +153,7 @@ test "persistence identity: tokenizer and template edits reuse only identical ca
 test {
     _ = @import("persistence_policy_test.zig");
 }
+
+test {
+    _ = @import("persistence_checkpoint_test.zig");
+}
