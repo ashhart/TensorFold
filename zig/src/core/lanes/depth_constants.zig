@@ -13,5 +13,8 @@ pub const Constants = struct {
     short_slack: i64 = 0, // granted depths: drafts past a grant that left some of them unverified
     copy_first: bool = false, // a copy ahead takes the next round whole: the head drafts none for it (else one)
     floor_rates: bool = false, // under a confidence floor a greedy stream keeps its rates' depth too (else it drafts the most)
-    hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass by blocks and depth: granted holds must pay for it
+    hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass by blocks and depth: it prices every hold (lone, shared, granted)
+    hold_context_costs: []const @import("hold_price.zig").ContextCost = &.{},
+    hold_rows: u32 = 0, // rows one of those hold passes holds at most; a larger hold runs as passes in order (0: no bound)
+    hold_block_rows: u32 = 0, // minimum query rows per block, independent of the returned proposal depth
 };

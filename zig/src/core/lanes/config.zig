@@ -18,6 +18,7 @@ pub const Model = struct {
     root_copies: bool = false, // verified context copies precede head drafts and skip their proposal pass
     copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
     own_copy_rates: bool = false, // a copy window is priced by its stream's own copies, not copy_rate's prior
+    matched_copy_rates: bool = false, // strong context matches keep a separate learned price
 
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
@@ -48,6 +49,9 @@ pub const Model = struct {
     draft_streams: bool = false, // the head drafts every stream of a shared round in one batch
     copy_first: bool = false, // a copy ahead takes the round: the head holds no drafts for it (a drafter's own pass)
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass, timed at load
+    hold_context_costs: []const @import("hold_price.zig").ContextCost = &.{},
+    hold_rows: u32 = 0, // rows one of that drafter's hold passes holds at most (0: no bound)
+    hold_block_rows: u32 = 0,
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
     join_tail: bool = false, // a prompt in pieces leaves its last token for the next shared round's window (Backend.join)
     piece_runs: bool = false, // a round's pieces go to the backend in one call (Backend.pieces: one forward over them)
@@ -67,6 +71,7 @@ pub const Config = struct {
     family_width: u32,
     max_copy: u32,
     own_copy_rates: bool = false, // Model.own_copy_rates
+    matched_copy_rates: bool = false, // Model.matched_copy_rates
     first_copy: u32,
     base_width: u32,
     family_mtp: bool,
@@ -154,6 +159,7 @@ pub const Config = struct {
             .family_width = width,
             .max_copy = max_copy,
             .own_copy_rates = m.own_copy_rates,
+            .matched_copy_rates = m.matched_copy_rates and m.own_copy_rates,
             .first_copy = first_copy,
             .base_width = @min(width, first_copy + 1),
             .family_mtp = m.mtp and width >= 2 and m.speculate,
@@ -188,6 +194,9 @@ pub const Config = struct {
                 .copy_first = m.copy_first and !m.context_copies,
                 .floor_rates = m.floor_rates,
                 .hold_costs = m.hold_costs,
+                .hold_context_costs = m.hold_context_costs,
+                .hold_rows = m.hold_rows,
+                .hold_block_rows = m.hold_block_rows,
             },
             .draft_step_ms = m.draft_step_ms,
             .shared_drafts = m.shared_drafts,
