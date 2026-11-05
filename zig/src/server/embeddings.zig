@@ -30,7 +30,8 @@ pub fn reply(srv: *Server, cx: *errors.Cx, body: json.Value, gone: anytype) Fail
     if (gone.check()) return error.Cancelled;
     const ended = @import("prompt_only_wait.zig").run(srv.engine, srv.io, id, &ask, gone) catch |err| return switch (err) {
         error.InvalidRequest, error.InvalidSpans => cx.refuse("the embedding request does not match the model"),
-        error.Busy, error.Closed, error.Stale => cx.wait(wait.engine_unavailable, "the embedding engine is unavailable", .{}),
+        error.Busy => cx.wait(wait.engine_busy, "the embedding engine is busy; retry shortly", .{}),
+        error.Closed, error.Stale => cx.wait(wait.engine_unavailable, "the embedding engine is unavailable", .{}),
         error.MemoryPressure => cx.wait(wait.memory_pressure, "{s}", .{api.pressure_message}),
     };
     switch (ended) {
