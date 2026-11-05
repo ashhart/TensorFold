@@ -12,6 +12,8 @@ import torch
 
 
 def save(out, manifest, name, t, kind="f32"):
+    if manifest.get("ids_only") and name not in ("prompt_ids", "greedy_ids", "greedy_top2", "greedy_margin"):
+        return
     a = t.detach().to(torch.float32 if kind == "f32" else torch.int32).cpu().numpy()
     a.astype("<f4" if kind == "f32" else "<i4").tofile(os.path.join(out, name + ".bin"))
     manifest["stages"][name] = {"shape": list(a.shape), "dtype": kind}
@@ -23,6 +25,7 @@ def main():
     p.add_argument("clip")
     p.add_argument("out")
     p.add_argument("--tokens", type=int, default=256)
+    p.add_argument("--ids-only", action="store_true", help="only the prompt, greedy ids and margins: no stage tensors")
     p.add_argument("--global-attention", action="store_true", help="the transformers backend as is: no windows")
     a = p.parse_args()
     torch.set_default_dtype(torch.bfloat16)
@@ -37,7 +40,7 @@ def main():
     wav, sr = sf.read(a.clip, dtype="float32")
     if sr != 16000 or wav.ndim != 1:
         sys.exit("want a 16 kHz mono clip")
-    manifest = {"clip": os.path.basename(a.clip), "samples": int(wav.shape[0]), "stages": {}}
+    manifest = {"clip": os.path.basename(a.clip), "samples": int(wav.shape[0]), "stages": {}, "ids_only": a.ids_only}
     prompt = asr._build_text_prompt(context="", force_language=None)
     inputs = proc(text=[prompt], audio=[wav], return_tensors="pt", padding=True)
     feats = inputs["input_features"][0]
@@ -92,13 +95,16 @@ def main():
         save(a.out, manifest, name, taps[name][0][0])
     new = gen.sequences[0, ids.shape[0]:]
     save(a.out, manifest, "greedy_ids", new, "i32")
-    scores = torch.stack([s[0] for s in gen.scores[:8]], 0)
-    save(a.out, manifest, "logits_first8", scores)
+    # each step's two best logits: a differing transcript is listed with the reference's margin where it differs
+    scores = torch.stack([s[0].float() for s in gen.scores], 0)
+    top = scores.topk(2, dim=-1)
+    save(a.out, manifest, "greedy_top2", top.indices, "i32")
+    save(a.out, manifest, "greedy_margin", top.values[:, 0] - top.values[:, 1])
     manifest["text"] = proc.batch_decode([new], skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
     manifest["torch"] = torch.__version__
     with open(os.path.join(a.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
-    print(json.dumps({"frames": flen, "rows": manifest["stages"]["audio_rows"]["shape"], "text": manifest["text"]}))
+    print(json.dumps({"frames": flen, "tokens": int(new.shape[0]), "text": manifest["text"]}))
 
 
 if __name__ == "__main__":
