@@ -246,6 +246,9 @@ drafter's chains reach the round loop through the lane core's drafter wrapper. I
 `--drafter` with `--tp` above 1 and `--drafter-bits 0` are refused before any load, and the other HIP families
 (the sparse `qwen3_5_moe` among them) refuse `--drafter` by name, as BF16 checkpoints do: the engine times no
 BF16 windows to price the drafter's rounds. Prompts reach the drafter whole, as their prompt pass ends.
+A hold runs only its deepest stream's drafts and the pending row, not the whole block, so the round loop's price
+of a draft holds. On gfx1151 at T=0, plain to drafted decode: one stream 14.3 to 33.8 tok/s (code) and 14.6 to
+28.2 (chat); four streams 45.8 to 53.6 and 45.4 to 50.0.
 Without `--drafter` the engine still drafts on its own: the model's MTP head where the
 checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
 head, so on HIP it then drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts`
