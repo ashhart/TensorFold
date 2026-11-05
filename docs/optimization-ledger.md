@@ -276,7 +276,7 @@ below; these are estimates for planning a port, not results.
 3. **Shared paged prompt store.** A kept prompt stays as the pool's own pages in one `prompt_radix` store, so a resume
    copies nothing and the cache and the streams draw on the same memory (`TF_QWEN_KV_SHARE`, `TF_GLM_KV_SHARE`, and
    `TF_KV_SHARE` on the core adapter, [#1657]). On Qwen3.8-27B a cold first turn is 3–6 % faster with it on, and the
-   second turn level ([#1357]). [#2211] moves GLM onto the shared store. It can't be combined with
+   second turn level ([#1357]). [#2211] (open) moves GLM onto the shared store. It can't be combined with
    `--learn-conversations` today.
 
 4. **Prompt states in device memory on integrated GPUs.** On a GB10 the device and host share memory, so a kept
