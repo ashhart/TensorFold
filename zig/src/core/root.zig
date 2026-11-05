@@ -110,6 +110,7 @@ test {
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
     _ = @import("checkpoint_prefetch.zig");
+    _ = @import("checkpoint_direct.zig");
     _ = checkpoint_identity;
     _ = direct_io;
     _ = direct_gather;
