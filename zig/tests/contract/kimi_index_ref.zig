@@ -26,14 +26,14 @@ pub const Sum = struct {
 pub const Score = struct { value: f64, magnitude: f64 };
 
 /// BF16 inputs, exact products and binary64 sums; no FP32 imitation serves as the numeric oracle.
-pub fn score(q: []const u16, key: []const u16, weights: []const u16, sum: Sum) Score {
+pub fn score(q: []const u16, key_bits: []const u16, weights: []const u16, sum: Sum) Score {
     var hterms: [heads]f64 = undefined;
     var magnitude: f64 = 0;
     for (0..heads) |h| {
         var terms: [dim]f64 = undefined;
         var mag: f64 = 0;
         for (&terms, 0..) |*term, j| {
-            term.* = f(q[h * dim + j]) * f(key[j]);
+            term.* = f(q[h * dim + j]) * f(key_bits[j]);
             mag += @abs(term.*);
         }
         hterms[h] = f(weights[h]) * relu(sum.of(&terms)) / 64.0;

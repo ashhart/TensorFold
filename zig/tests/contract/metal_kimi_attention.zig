@@ -57,8 +57,8 @@ pub const Probe = struct {
         var pipes: [4]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |p| p.deinit();
-        for ([_][]const u8{ "k3_index_attend", "k3_index_merge", "k3_mla_attend", "k3_mla_merge" }, 0..) |name, i| {
-            pipes[i] = try mtl.Pipeline.init(device, lib, name, false);
+        for ([_][]const u8{ "k3_index_attend", "k3_index_merge", "k3_mla_attend", "k3_mla_merge" }, 0..) |function_name, i| {
+            pipes[i] = try mtl.Pipeline.init(device, lib, function_name, false);
             made += 1;
         }
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = pipes, .ctl = ctl };

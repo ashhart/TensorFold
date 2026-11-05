@@ -152,16 +152,16 @@ pub const Work = struct {
         return .{ .buf = @field(w.*, name) };
     }
 
-    pub fn load(w: *Work, source: []const Kn.MlaRow) !void {
-        if (source.len == 0 or source.len > w.most) return error.KimiIndexCapacity;
-        const rows = w.rows.slice(Row, source.len);
+    pub fn load(w: *Work, entries: []const Kn.MlaRow) !void {
+        if (entries.len == 0 or entries.len > w.most) return error.KimiIndexCapacity;
+        const rows = w.rows.slice(Row, entries.len);
         w.visible = 0;
-        for (source, rows, 0..) |s, *row, i| {
+        for (entries, rows, 0..) |s, *row, i| {
             if (s.pos >= w.capacity) return error.KimiIndexCapacity;
             row.* = .{ .slot = s.slot, .pos = s.pos, .list = @intCast(i * topk) };
             w.visible = @max(w.visible, s.pos + 1);
         }
-        w.count = @intCast(source.len);
+        w.count = @intCast(entries.len);
     }
 
     /// These query/key/head-weight taps and BF16 roundings are model assumptions, not release-reference facts.

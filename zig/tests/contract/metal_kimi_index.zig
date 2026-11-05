@@ -82,10 +82,10 @@ pub const Probe = struct {
     }
 
     fn values(p: *Probe, n: usize, rng: std.Random) !rig_.Ref {
-        const bits = try p.a.alloc(u16, n);
-        defer p.a.free(bits);
-        for (bits) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 2);
-        return p.rig.input(std.mem.sliceAsBytes(bits));
+        const words = try p.a.alloc(u16, n);
+        defer p.a.free(words);
+        for (words) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 2);
+        return p.rig.input(std.mem.sliceAsBytes(words));
     }
 
     fn bits(p: *Probe, r: rig_.Ref, n: usize) []u16 {
@@ -275,7 +275,7 @@ pub const Suite = struct {
     pub fn invariance(s: *Suite) !void {
         for (s.probes.items) |p| if (p.ctl == 0) {
             try p.independentRows();
-            std.debug.print("PASS kimi index {t}: causal binary64 outputs, untouched future keys and reverse single-row launches equal batch bytes\n", .{p.which});
+            if (p.which == .scores) std.debug.print("PASS kimi index scores: causal binary64 outputs; future keys untouched; reverse single-row launches equal batch bytes\n", .{}) else std.debug.print("PASS kimi index key: binary64 outputs; reverse single-row launches equal batch bytes\n", .{});
         };
     }
     pub fn destroy(s: *Suite) void {

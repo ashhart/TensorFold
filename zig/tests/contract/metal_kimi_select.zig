@@ -98,9 +98,9 @@ pub const Probe = struct {
     }
 
     pub fn check(p: *Probe, _: g.Gate) !?[]const u8 {
-        const scores = std.mem.bytesAsSlice(f32, p.rig.bytes(p.scores, p.shape.rows * (p.shape.k + 3) * 4));
-        const got = std.mem.bytesAsSlice(u32, p.rig.bytes(p.out, p.count()));
-        const meta = std.mem.bytesAsSlice(ix.Row, p.rig.bytes(p.meta, p.shape.rows * @sizeOf(ix.Row)));
+        const scores: []f32 = @alignCast(std.mem.bytesAsSlice(f32, p.rig.bytes(p.scores, p.shape.rows * (p.shape.k + 3) * 4)));
+        const got: []u32 = @alignCast(std.mem.bytesAsSlice(u32, p.rig.bytes(p.out, p.count())));
+        const meta: []ix.Row = @alignCast(std.mem.bytesAsSlice(ix.Row, p.rig.bytes(p.meta, p.shape.rows * @sizeOf(ix.Row))));
         const want = try p.a.alloc(u32, p.shape.n);
         defer p.a.free(want);
         for (0..p.shape.rows) |r| {

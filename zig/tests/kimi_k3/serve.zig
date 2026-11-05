@@ -56,11 +56,18 @@ pub fn together(a: A, io: std.Io, m: *M, prompts: []const []const u32, answers: 
     var clock: lanes.backend.WallClock = .{ .io = io };
     var engine = lanes.Engine.init(a, &config, m.backend(), clock.clock());
     defer engine.deinit();
-    var streams: [2]lanes.Stream = undefined;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const streams = try a.alloc(lanes.Stream, prompts.len);
+    defer a.free(streams);
+    const proposals = try a.alloc(Proposal, prompts.len);
+    defer a.free(proposals);
+    @memset(proposals, .{});
     var ready: usize = 0;
     defer for (streams[0..ready]) |*s| s.deinit(a);
     for (prompts, 0..) |p, i| {
-        streams[i] = try lanes.Stream.init(a, .{ .id = if (i == 0) "a" else "b", .prompt = p, .max_new = 8, .sampling = sample, .drafts = false });
+        const id = try std.fmt.allocPrint(arena.allocator(), "stream-{d}", .{i});
+        streams[i] = try lanes.Stream.init(a, .{ .id = id, .prompt = p, .max_new = 8, .sampling = sample, .drafts = true, .proposer = proposals[i].interface() });
         ready += 1;
         try engine.addStream(&streams[i]);
     }
@@ -69,7 +76,10 @@ pub fn together(a: A, io: std.Io, m: *M, prompts: []const []const u32, answers: 
         if (rounds > 64) return error.SyntheticRoundLimit;
         try engine.step();
     }
-    for (&streams, answers) |*s, want| try std.testing.expectEqualSlices(u32, want, s.emitted());
+    for (streams, answers, proposals) |*s, want, proposal| {
+        try std.testing.expectEqualSlices(u32, want, s.emitted());
+        try std.testing.expect(proposal.widest > 1);
+    }
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -94,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
     var graph = try k3.graph.Graph.load(a, gpu.device, gpu.queue, &gpu.k, c, source.source());
     defer graph.deinit();
     source.sync();
-    const m = try M.init(a, &graph, gpu.device, gpu.queue, &gpu.k, 3, 128, source.bufs.items);
+    const m = try M.init(a, &graph, gpu.device, gpu.queue, &gpu.k, 8, 128, source.bufs.items);
     defer m.deinit();
     const p0 = [_]u32{ 1, 7, 3, 1, 7, 3, 1, 7, 3, 1, 7, 3, 1, 7, 3, 1, 7 };
     const p1 = [_]u32{ 5, 2, 4, 8, 5, 2, 4, 8, 5 };
@@ -115,7 +125,9 @@ pub fn main(init: std.process.Init) !void {
     defer a.free(drafted);
     try std.testing.expectEqualSlices(u32, plain, drafted);
     try std.testing.expect(proposal.widest > 1 and proposal.rounds > 0);
-    try together(a, init.io, m, &.{ &p0, &p1 }, &.{ plain, solo }, null);
+    const prompts = [_][]const u32{ &p0, &p1, &p0, &p1, &p0, &p1, &p0, &p1 };
+    const answers = [_][]const u32{ plain, solo, plain, solo, plain, solo, plain, solo };
+    for ([_]usize{ 2, 4, 8 }) |n| try together(a, init.io, m, prompts[0..n], answers[0..n], null);
     const sample: lanes.Sampling = .{ .seed = 973, .temperature = 0.7, .top_k = 8, .top_p = 0.9 };
     const sampled_plain = try tokens(a, init.io, m, &p0, null, null, sample);
     defer a.free(sampled_plain);
@@ -126,7 +138,8 @@ pub fn main(init: std.process.Init) !void {
     defer a.free(sampled_drafted);
     try std.testing.expectEqualSlices(u32, sampled_plain, sampled_drafted);
     try std.testing.expect(sampled_proposal.widest > 1);
-    try together(a, init.io, m, &.{ &p0, &p1 }, &.{ sampled_plain, sampled_other }, sample);
+    const sampled_answers = [_][]const u32{ sampled_plain, sampled_other, sampled_plain, sampled_other, sampled_plain, sampled_other, sampled_plain, sampled_other };
+    for ([_]usize{ 2, 4, 8 }) |n| try together(a, init.io, m, prompts[0..n], sampled_answers[0..n], sample);
     std.debug.print("KIMI_NATIVE_SAMPLED seed=973 plain={any} other_prompt={any}\n", .{ sampled_plain, sampled_other });
     const backend = m.backend();
     for ([_]usize{ 1, 4, 15, 16, 17 }) |cut| {
