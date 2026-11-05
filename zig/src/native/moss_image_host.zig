@@ -89,14 +89,11 @@ const Job = struct {
     /// The decoder's raw picture [height, width, 3] and its 8-bit rows, which the PNG carries.
     picture: []f32 = &.{},
     rgb: []u8 = &.{},
-    /// The prompt encoder's rows per branch, freed once the refiner has taken them.
-    embeds: [2][]u16 = .{ &.{}, &.{} },
 
     fn free(j: *Job, gpa: Allocator) void {
         if (j.prompt) |*p| p.deinit();
         if (j.negative) |*p| p.deinit();
         if (j.schedule) |s| s.deinit(gpa);
-        for (j.embeds) |rows| if (rows.len > 0) gpa.free(rows);
         for ([_][]f32{ j.x, j.cond, j.uncond, j.picture }) |buf| if (buf.len > 0) gpa.free(buf);
         if (j.rgb.len > 0) gpa.free(j.rgb);
     }
@@ -194,7 +191,6 @@ pub const Host = struct {
         h.lock();
         defer h.unlock();
         if (h.queue.find(id)) |slot| h.cancelled[slot] = true;
-        h.wake.signal(h.io);
     }
 
     fn status(p: *anyopaque, out: *api.Status, _: []u32) void {
@@ -279,7 +275,7 @@ pub const Host = struct {
                 }
                 j.step += 1;
                 // the last step is consumed: the picture is painted next, so the pass goes on into the decode
-                if (j.step >= j.request.steps) j.phase = .decode;
+                if (mi.schedule.past(schedule.*, j.step)) j.phase = .decode;
                 return true;
             },
             .decode => {
@@ -298,12 +294,15 @@ pub const Host = struct {
         defer h.gpa.free(ids);
         const negative = if (r.negative.len > 0) try bracket(h.gpa, h.before, r.negative, h.after) else null;
         defer if (negative) |n| h.gpa.free(n);
-        j.embeds[0] = try h.encode(ids);
-        defer gpaFree(h.gpa, &j.embeds[0]);
-        j.embeds[1] = if (negative) |n| try h.encode(n) else try h.gpa.dupe(u16, h.empty);
-        defer gpaFree(h.gpa, &j.embeds[1]);
-        j.prompt = try h.model.prompt(j.embeds[0]);
-        j.negative = try h.model.prompt(j.embeds[1]);
+        const cond = try h.encode(ids);
+        defer h.gpa.free(cond);
+        j.prompt = try h.model.prompt(cond);
+        // guidance 1 is the prompt's own velocity: the negative branch is never forwarded, so it is not built
+        if (r.guidance != 1) {
+            const uncond = if (negative) |n| try h.encode(n) else try h.gpa.dupe(u16, h.empty);
+            defer h.gpa.free(uncond);
+            j.negative = try h.model.prompt(uncond);
+        }
         j.schedule = try mi.schedule.timesteps(h.gpa, h.scheduler, r.steps);
         const count = grid.rows * grid.columns * mi.config.channels;
         j.x = try h.gpa.alloc(f32, count);
@@ -336,13 +335,11 @@ pub const Host = struct {
     /// The one finished event: the request's buffers go first, so the caller may free its own as the event lands.
     fn finish(h: *Host, slot: usize, reason: api.Reason, message: []const u8) void {
         h.lock();
-        const job = h.jobs[slot].?;
+        var job = h.jobs[slot].?;
         h.jobs[slot] = null;
-        h.cancelled[slot] = false;
         h.queue.release(slot);
         h.unlock();
-        var held = job;
-        held.free(h.gpa);
+        job.free(h.gpa);
         job.request.result.reason = reason;
         job.sink.event(job.sink.ctx, job.id, &.{ .finished = .{ .reason = reason, .message = message } });
     }
@@ -404,7 +401,7 @@ pub fn bracket(a: Allocator, before: []const u32, ids: []const u32, after: []con
 pub fn quantize(out: []u8, pixels: []const f32) void {
     for (out, pixels) |*o, v| {
         const unit = std.math.clamp(v, -1, 1) * 0.5 + 0.5;
-        o.* = roundEven(std.math.clamp(unit, 0, 1) * 255);
+        o.* = roundEven(unit * 255);
     }
 }
 
@@ -415,12 +412,6 @@ pub fn roundEven(x: f32) u8 {
     const frac = x - whole;
     const up: u32 = if (frac > 0.5 or (frac == 0.5 and at % 2 == 1)) 1 else 0;
     return @intCast(@min(at + up, 255));
-}
-
-fn gpaFree(gpa: Allocator, rows: *[]u16) void {
-    if (rows.len == 0) return;
-    gpa.free(rows.*);
-    rows.* = &.{};
 }
 
 fn read(a: Allocator, io: std.Io, dir: []const u8, name: []const u8) ![]u8 {
@@ -470,8 +461,6 @@ fn openCheckpoint(gpa: Allocator, io: std.Io, dir: []const u8) !api.Opened {
     errdefer h.driver.close();
     h.ctx = try cuda.Context.init(&h.driver, 0);
     errdefer h.ctx.deinit();
-    const sm = try h.ctx.capability();
-    if (sm != 120 and sm != 121) return error.UncheckedGpu;
     // the prompt encoder keeps its own context and stream over the same primary context, as its tool does
     h.encoder = try mi.Encoder.load(gpa, io, dir);
     errdefer h.encoder.deinit();

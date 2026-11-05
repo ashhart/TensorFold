@@ -65,8 +65,9 @@ pub const HfText = struct {
             };
             return t;
         };
-        t.tok = openTokenizer(io, gpa, dir) catch |e| {
-            problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
+        var read: []const u8 = dir;
+        t.tok = openTokenizer(io, a, gpa, dir, &read) catch |e| {
+            problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ read, @errorName(e) });
             return error.Load;
         };
         errdefer t.tok.deinit();
@@ -163,11 +164,14 @@ pub const HfText = struct {
         return doc;
     }
 
-    /// The checkpoint's tokenizer.json, else the tokenizer/ folder a diffusers pipeline keeps its own components in.
-    fn openTokenizer(io: std.Io, a: Allocator, dir: []const u8) !tokenizer.Tokenizer {
-        return tokenizer.loadTokenizer(io, a, dir) catch |e| {
+    /// The checkpoint's tokenizer.json, else the tokenizer/ folder a pipeline keeps it in; `path` names what was read.
+    fn openTokenizer(io: std.Io, a: Allocator, gpa: Allocator, dir: []const u8, path: *[]const u8) !tokenizer.Tokenizer {
+        path.* = dir;
+        return tokenizer.loadTokenizer(io, gpa, dir) catch |e| {
             if (e != error.FileNotFound) return e;
-            return tokenizer.loadTokenizer(io, a, try std.fs.path.join(a, &.{ dir, "tokenizer" }));
+            // the join lives in the caller's arena, so the fallback costs no allocation of its own
+            path.* = try std.fs.path.join(a, &.{ dir, "tokenizer" });
+            return tokenizer.loadTokenizer(io, gpa, path.*);
         };
     }
 
