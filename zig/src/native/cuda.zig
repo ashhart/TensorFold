@@ -36,12 +36,13 @@ pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
 pub const families: []const api.Family = blk: {
-    var out: [registry.len + 4]api.Family = undefined;
+    var out: [registry.len + 5]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
     out[registry.len] = lfm2.family;
     out[registry.len + 1] = .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} };
     out[registry.len + 2] = .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats };
     out[registry.len + 3] = .{ .model_type = "qwen4_text", .formats = @import("qwen4").family.native_host.formats };
+    out[registry.len + 4] = @import("uocr_cuda.zig").family;
     const final = out;
     break :blk &final;
 };
@@ -197,6 +198,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "unlimited-ocr")) return @import("uocr_cuda.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
     inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
@@ -534,7 +536,7 @@ test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance 
 }
 
 test "every registered family and d1's decision engine are listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len + 4), families.len);
+    try std.testing.expectEqual(@as(usize, registry.len + 5), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
     try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
     try std.testing.expectEqualStrings("qwen4", families[registry.len + 2].model_type);
@@ -560,6 +562,7 @@ test {
     _ = @import("cuda_health_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");
+    _ = @import("uocr_cuda.zig");
     _ = kv_pages;
     _ = drafted;
     _ = cuda_disk; // its tests run under test-cuda-disk-open-host's filter

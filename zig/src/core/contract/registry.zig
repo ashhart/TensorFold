@@ -351,7 +351,7 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     return u;
 }
 /// Restored Qwen launches retain a pending entry wherever a compiler receipt is absent.
-pub const cuda_pending = @import("qwen_whole_records.zig").records ++ @import("cuda_lane_pending.zig").records ++ @import("weight_only_records.zig").cuda ++ @import("hc_activation_records.zig").cuda ++ @import("qwen4_records.zig").cuda;
+pub const cuda_pending = @import("uocr_cuda_records.zig").cuda ++ @import("qwen_whole_records.zig").records ++ @import("cuda_lane_pending.zig").records ++ @import("weight_only_records.zig").cuda ++ @import("hc_activation_records.zig").cuda ++ @import("qwen4_records.zig").cuda;
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
     .{ .launch = .{ .name = "control: past its bounds", .symbol = "tf_ctl_bounded", .image = "contract_controls", .threads = 512 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 } } },
@@ -571,7 +571,7 @@ test {
 }
 /// The Metal collector keeps measured slots and the restored vision declarations.
 pub const all_metal = @import("attention_pv_records.zig").records ++ metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records ++ @import("metal_pair_records.zig").records ++ @import("glm_rows_records.zig").records ++ @import("weight_only_records.zig").metal ++ @import("hc_activation_records.zig").metal ++ @import("qwen4_records.zig").metal ++ @import("lfm2_records.zig").records ++ @import("nemotron_experts_records.zig").records ++ @import("nemotron_pages_records.zig").records ++ @import("nemotron_attention_records.zig").records ++
-    @import("nemotron_ssd_records.zig").records ++ @import("flashnext_attention_records.zig").records ++ @import("spark25_records.zig").records ++ @import("gemma_attention_records.zig").records ++ @import("moss_image_records.zig").records ++ @import("dsv41_metal_records.zig").records ++ @import("minimax_records.zig").records ++ @import("ling_route_records.zig").records ++ @import("qwen27_moe_records.zig").records ++ @import("affine_gather_records.zig").records;
+    @import("nemotron_ssd_records.zig").records ++ @import("flashnext_attention_records.zig").records ++ @import("spark25_records.zig").records ++ @import("gemma_attention_records.zig").records ++ @import("moss_image_records.zig").records ++ @import("dsv41_metal_records.zig").records ++ @import("minimax_records.zig").records ++ @import("ling_route_records.zig").records ++ @import("qwen27_moe_records.zig").records ++ @import("affine_gather_records.zig").records ++ @import("uocr_records.zig").records;
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;

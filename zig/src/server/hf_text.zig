@@ -7,6 +7,7 @@ const model_text = @import("model_text.zig");
 const KimiText = @import("kimi_text.zig").KimiText;
 const dsv41_chat = @import("dsv41_chat");
 const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
+const uocr_chat = @import("uocr_chat");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -89,7 +90,12 @@ pub const HfText = struct {
                 problem.* = try std.fmt.allocPrint(pa, "cannot read chat template override ({s})", .{@errorName(e)});
                 return error.Load;
             };
-        } else try t.readTemplates(io, a, dir, config);
+        } else {
+            try t.readTemplates(io, a, dir, config);
+            if (t.source.len == 0 and model_config == .object) if (model_config.object.get("model_type")) |kind| {
+                if (kind == .string and std.mem.eql(u8, kind.string, uocr_chat.model_type)) t.source = uocr_chat.source;
+            };
+        }
         t.specials = try specialsOf(a, config);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {
             if (e == error.OutOfMemory) return e;
@@ -552,4 +558,5 @@ test {
     _ = @import("hf_eos_test.zig");
     _ = @import("dory_chat_test.zig");
     _ = @import("deepseek_chat_test.zig");
+    _ = @import("uocr_chat_test.zig");
 }

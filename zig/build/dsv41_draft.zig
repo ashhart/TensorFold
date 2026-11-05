@@ -73,6 +73,7 @@ pub fn serverOn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     m.addImport("json", engine.import_table.get("dsv41_serve").?.import_table.get("json").?);
     m.addImport("dsv41_serve", engine.import_table.get("dsv41_serve").?);
     m.addImport("dsv41_chat", engine.import_table.get("dsv41_serve").?);
+    m.addImport("uocr_chat", b.createModule(.{ .root_source_file = b.path("zig/src/families/uocr/chat.zig"), .target = target, .optimize = optimize }));
     // the server's Drama voice catalog reads the prompt builder; this engine set has no drama3 family to share
     m.addImport("drama_prompt", b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/prompt.zig"), .target = target, .optimize = optimize }));
     const exe = b.addExecutable(.{ .name = name, .root_module = m });

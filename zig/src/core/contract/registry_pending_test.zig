@@ -72,3 +72,17 @@ test "targeted CUDA launches still refuse every missing applicable receipt" {
     record.usage[4] = record.usage[3];
     try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{record}, true));
 }
+
+test "Unlimited-OCR-2's CUDA launches: nvcc 13.0's and 13.3's measured usage fit all five SMs, 13.2 pending, each once" {
+    for (@import("uocr_cuda_records.zig").cuda) |r| {
+        var found: usize = 0;
+        for (registry.all_cuda) |active| found += @intFromBool(std.mem.eql(u8, active.launch.name, r.launch.name));
+        try std.testing.expectEqual(@as(usize, 1), found);
+        try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{r}, true));
+        try std.testing.expectEqual(r.usage, registry.usageFor(r, .{ .major = 13, .minor = 0 }));
+        try std.testing.expectEqual(none, registry.usageFor(r, .{ .major = 13, .minor = 2 }));
+        var measured = r;
+        measured.usage = registry.usageFor(r, .{ .major = 13, .minor = 3 });
+        try std.testing.expectEqual(@as(usize, 0), try checkCuda(std.testing.allocator, &.{measured}, true));
+    }
+}

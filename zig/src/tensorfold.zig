@@ -15,6 +15,8 @@ pub const qwen_vl_tower = @import("core/qwen_vl/metal.zig");
 pub const qwen_image = @import("families/qwen_image/qwen_image.zig");
 /// MOSS-Image's transformer on Metal: a denoiser driven by tf-moss-image, outside the lane engine.
 pub const moss_image = @import("families/moss_image/moss_image.zig");
+/// Unlimited-OCR-2 on Metal: document pages to text (its image encoder and decoder).
+pub const uocr = @import("families/uocr/uocr.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
 pub const shard_edit = @import("core/shard_edit.zig");
 pub const lora_merge = @import("core/lora_merge_dir.zig");
@@ -69,6 +71,7 @@ pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("families/uocr/uocr.zig");
     _ = lora_merge;
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.

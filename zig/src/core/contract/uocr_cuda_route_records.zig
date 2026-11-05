@@ -1,0 +1,10 @@
+//! Unlimited-OCR-2's CUDA route launches (uocr.cu): nvcc 13.0 measured, nvcc 13.3's in measurements/uocr_133.zig.
+const registry = @import("registry.zig");
+
+pub const cuda = [_]registry.CudaRecord{
+    .{ .launch = .{ .name = "uocr tf_uocr_block_keys", .symbol = "tf_uocr_block_keys", .image = "uocr", .threads = 32 }, .usage = .{ .{ .regs = 62, .static = 128, .bound = 32 }, .{ .regs = 74, .static = 128, .bound = 32 }, .{ .regs = 74, .static = 128, .bound = 32 }, .{ .regs = 72, .static = 128, .bound = 32 }, .{ .regs = 72, .static = 128, .bound = 32 } }, .later_pending = true },
+    .{ .launch = .{ .name = "uocr tf_uocr_route", .symbol = "tf_uocr_route", .image = "uocr", .threads = 256 }, .usage = .{ .{ .regs = 48, .static = 22144, .bound = 256 }, .{ .regs = 62, .static = 22144, .bound = 256 }, .{ .regs = 62, .static = 22144, .bound = 256 }, .{ .regs = 62, .static = 22144, .bound = 256 }, .{ .regs = 62, .static = 22144, .bound = 256 } }, .later_pending = true },
+    .{ .launch = .{ .name = "uocr tf_uocr_moe_gate", .symbol = "tf_uocr_moe_gate", .image = "uocr", .threads = 64 }, .usage = .{ .{ .regs = 82, .static = 388, .bound = 64 }, .{ .regs = 82, .static = 388, .bound = 64 }, .{ .regs = 82, .static = 388, .bound = 64 }, .{ .regs = 80, .static = 388, .bound = 64 }, .{ .regs = 80, .static = 388, .bound = 64 } }, .later_pending = true },
+    .{ .launch = .{ .name = "uocr tf_uocr_moe_combine", .symbol = "tf_uocr_moe_combine", .image = "uocr", .threads = 256 }, .usage = .{ .{ .regs = 23, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 23, .static = 0, .bound = 256 }, .{ .regs = 23, .static = 0, .bound = 256 } }, .later_pending = true },
+    .{ .launch = .{ .name = "uocr tf_uocr_argmax", .symbol = "tf_uocr_argmax", .image = "uocr", .threads = 1024 }, .usage = .{ .{ .regs = 27, .static = 256, .bound = 1024 }, .{ .regs = 26, .static = 256, .bound = 1024 }, .{ .regs = 26, .static = 256, .bound = 1024 }, .{ .regs = 31, .static = 256, .bound = 1024 }, .{ .regs = 31, .static = 256, .bound = 1024 } }, .later_pending = true },
+};
