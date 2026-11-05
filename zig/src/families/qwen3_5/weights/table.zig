@@ -20,6 +20,8 @@ pub const Table = struct {
     /// A key prefix the table drops (`language_model.`), as `_Shards(strip=)`.
     strip: []const u8,
     quant: formats.Config,
+    /// A bf16 chat checkpoint's projections read as fp32 dense (row-invariant kernels), not as rocBLAS BF16.
+    widen: bool = false,
 
     /// Maps `paths` (later files win a repeated name, as the Python dict does).
     pub fn open(gpa: std.mem.Allocator, io: Io, paths: []const []const u8, strip: []const u8, quant: formats.Config) !Table {

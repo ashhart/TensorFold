@@ -22,8 +22,10 @@ const prefix = @import("prefix.zig");
 const plan = @import("../forward/plan.zig");
 const config = @import("../../../weights/config.zig");
 const table = @import("../../../weights/table.zig");
+const vision = @import("vision.zig");
 
 pub const Options = struct {
+    vision: ?@import("engine_api").VisionOpen = null,
     /// Most positions a stream's caches hold (its prompt, its reply and a window's rows).
     capacity: usize = 0,
     /// Pages of the KV pool (0: enough for `default_streams` streams of the capacity and the scratch caches).
@@ -64,11 +66,41 @@ fn gib(bytes: usize) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
-/// The device bytes of the checkpoint's weights, near enough to refuse before reading them: a bf16 one's text tower.
-fn checkpointBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+/// The checkpoint's device bytes, near enough to refuse before reading: bf16 text, doubled when `chat` widens it.
+fn checkpointBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, chat: bool) !u64 {
     var c = try config.Config.read(gpa, io, dir);
     defer c.deinit();
-    return if (c.quant == .bf16) table.textBytes(gpa, io, dir) else admission.weightBytes(io, dir);
+    if (c.quant != .bf16) return admission.weightBytes(io, dir);
+    const bf16 = try table.textBytes(gpa, io, dir);
+    return if (chat) 2 * bf16 else bf16;
+}
+
+/// A bf16 checkpoint served for chat (chatBf16): its projections run widened, on the row-invariant dense kernels.
+fn chatCheckpoint(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    var c = config.Config.read(gpa, io, dir) catch return false;
+    defer c.deinit();
+    return c.quant == .bf16 and chatBf16(gpa, io, dir);
+}
+
+/// Whether a bf16 checkpoint serves chat: an image tower the engine reads and no joint_head_config.json (Clef's).
+pub fn chatBf16(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    const tower = vision.Vision.config(gpa, io, dir) catch return false;
+    @import("qwen_hip_vision").check(tower) catch return false; // a tower of another shape (72-wide heads) is not read
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/joint_head_config.json", .{dir}) catch return false;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return true;
+    return false;
+}
+
+/// [p, p, p] for every position below `capacity`: text-only prompt rows under Torch's M-RoPE.
+fn linearPositions(gpa: std.mem.Allocator, d: *const hip.Runtime, capacity: usize) !hip.DeviceBuffer {
+    var b = try hip.DeviceBuffer.alloc(d, capacity * 12);
+    errdefer b.free();
+    const rows = try gpa.alloc([3]i32, capacity);
+    defer gpa.free(rows);
+    for (rows, 0..) |*r, p| r.* = @splat(@intCast(p));
+    try b.upload(0, std.mem.sliceAsBytes(rows));
+    return b;
 }
 
 /// What `load` found before reading the weights.
@@ -88,6 +120,11 @@ pub const Engine = struct {
     weights: weights.Model,
     bridge: *bridge.Bridge,
     o: Options,
+    vision: ?*vision.Vision = null,
+    /// Torch's text M-RoPE (an HF BF16 checkpoint's text, image prompts), owned apart from the tower.
+    rope: ?@import("qwen_hip_vision").Kernels = null,
+    /// `rope`'s [p, p, p] rows for text-only prompts, sized with the capacity.
+    linear: ?hip.DeviceBuffer = null,
     /// The scratch below exists (`size` ran).
     sized: bool,
     /// A rank could not take a round: every rank stops before another collective.
@@ -119,8 +156,18 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
+        // --vision on a checkpoint without a tower serves text, as before; an unreadable tower still refuses at open
+        const seen: @FieldType(Options, "vision") = if (o.vision == null) null else if (vision.Vision.config(gpa, io, dir)) |_| o.vision else |err| switch (err) {
+            error.NoQwenVision => null,
+            else => return err,
+        };
         e.o = o;
         e.o.prompt_rows = @max(o.prompt_rows, o.cut_rows); // a test's cut is one piece: the prompts arena holds it
+        e.o.vision = seen;
+        e.vision = null;
+        e.rope = null;
+        e.linear = null;
+        if (seen != null and o.world > 1) return error.VisionTensorParallelUnsupported;
         e.sized = false;
         e.stopped = false;
         e.blas = null;
@@ -136,6 +183,7 @@ pub const Engine = struct {
         errdefer e.lib.unload();
         e.act = if (caps.act == .f16) .f16 else .bf16;
         e.dtype = if (caps.act == .f16) .f16 else .bf16;
+        if (seen != null and e.act != .bf16) return error.VisionRequiresBf16;
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
         const group: ?slicing.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
@@ -144,16 +192,19 @@ pub const Engine = struct {
         if (group != null) e.comm = try (o.group orelse return error.NoGroup).open();
         errdefer if (group != null) e.comm.close();
         _ = try steps.done(.{ 0, 0 }, .first);
+        // a chat checkpoint's drafted and concurrent rounds equal its solo ones: rocBLAS products vary with rows
+        const chat = chatCheckpoint(gpa, io, dir);
         if (o.preflight) |pf| {
             // a rank loads its share of the checkpoint, near enough to refuse before reading it
-            pf.* = .{ .pool = try e.budget(io), .held = hip.usage(false).device, .weights = try checkpointBytes(gpa, io, dir) / o.world };
+            pf.* = .{ .pool = try e.budget(io), .held = hip.usage(false).device, .weights = try checkpointBytes(gpa, io, dir, chat) / o.world };
+            if (seen) |limits| pf.weights += try vision.Vision.bytes(try vision.Vision.config(gpa, io, dir), limits);
             if (pf.weights > pf.pool.room(pf.held)) return error.WeightsDoNotFit;
         }
         _ = try steps.done(.{ 0, 0 }, .first);
-        e.weights = try weights.Model.loadRank(gpa, io, &e.driver, dir, group);
+        e.weights = try weights.Model.loadRankWith(gpa, io, &e.driver, dir, group, chat);
         errdefer e.weights.deinit();
-        if (e.plain()) {
-            // rocBLAS's products are BF16 in and out, on one rank, and not qualified under graph capture
+        if (e.plain() or chat) {
+            // a bf16 checkpoint's products (rocBLAS, or widened for chat): one rank, not qualified under graphs
             if (e.act != .bf16) {
                 std.log.err("a bf16 checkpoint needs bf16 activations; this GPU computes in fp16", .{});
                 return error.UnsupportedQuantization;
@@ -167,6 +218,18 @@ pub const Engine = struct {
         e.bridge = try bridge.Bridge.init(gpa, &e.driver, &e.weights, e.act);
         errdefer e.bridge.deinit();
         if (group != null) e.bridge.model.tp = e.comm;
+        // the checkpoint, not --vision, picks the text rotary: a bf16 chat checkpoint always takes Torch's
+        const torch_text = chat;
+        if (torch_text or seen != null) {
+            const s = e.weights.spec;
+            if (e.act != .bf16 or s.head_dim != 256 or s.rotary_dim != 64 or !s.mrope.interleaved or !std.mem.eql(usize, &s.mrope.section, &.{ 11, 11, 10 })) return error.UnsupportedTorchRope;
+            e.rope = try @import("qwen_hip_vision").Kernels.load(&e.driver, hip.kernels.images[@backingInt(hip.kernels.Group.qwen_vision)]);
+            e.bridge.model.rope = &e.rope.?;
+            e.bridge.model.torch_text = torch_text;
+        }
+        errdefer if (e.rope) |*k| k.deinit();
+        if (seen) |limits| e.vision = try vision.Vision.open(gpa, io, &e.driver, e.stream, &e.lib, dir, e.weights.spec.hidden, limits);
+        errdefer if (e.vision) |v| v.deinit();
         _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
@@ -188,6 +251,9 @@ pub const Engine = struct {
         errdefer e.ids.free();
         e.ids_dev = try hip.DeviceBuffer.alloc(&e.driver, prompt_rows * 4);
         errdefer e.ids_dev.free();
+        e.linear = if (e.bridge.model.torch_text) try linearPositions(e.gpa, &e.driver, capacity) else null;
+        errdefer if (e.linear) |*b| b.free();
+        e.bridge.model.positions = if (e.linear) |b| b.base() else 0;
         e.drawer = try draw.Drawer.init(e.gpa, &e.driver, e.dtype, e.bridge.model.head.n * e.o.world, rows);
         errdefer e.drawer.deinit();
         e.pool = try pages.Pool.init(e.gpa, &e.driver, &e.bridge.model, count, e.o.rank == 0);
@@ -204,7 +270,7 @@ pub const Engine = struct {
         errdefer e.closeBlas();
         if (e.blas) |*b| try b.useWorkspace(e.workspace.base(), e.workspace.len);
         const held = hip.usage(false).device - before;
-        const planned = e.sizedBytes(arenas, rows, prompt_rows, count);
+        const planned = e.sizedBytes(arenas, rows, prompt_rows, capacity, count);
         if (held != planned) {
             std.log.err("sizing held {d} device bytes, the plan says {d}", .{ held, planned });
             return error.SizeMismatch;
@@ -218,12 +284,12 @@ pub const Engine = struct {
     }
 
     /// Device bytes `size` allocates beside the weights, with the arenas already counted.
-    fn sizedBytes(e: *const Engine, arenas: [2]usize, rows: usize, prompt_rows: usize, pool_pages: usize) usize {
+    fn sizedBytes(e: *const Engine, arenas: [2]usize, rows: usize, prompt_rows: usize, capacity: usize, pool_pages: usize) usize {
         const m = e.model();
         const blas: usize = if (e.plain()) hip.blas.workspace_bytes else 0;
         return arenas[0] + arenas[1] + prompt_rows * 4 + draw.Drawer.deviceBytes(rows) + pages.Pool.deviceBytes(m, pool_pages) +
             plan.Buffer.deviceBytes(rows, m.spec.n_layers) + state.Caches.deviceBytes(m, rows) +
-            hip.Votes.bytes(e.o.world) + blas;
+            hip.Votes.bytes(e.o.world) + blas + if (m.torch_text) capacity * 12 else 0;
     }
 
     /// The checkpoint's projections are BF16 as stored (an unquantized HF checkpoint): rocBLAS runs them.
@@ -242,13 +308,13 @@ pub const Engine = struct {
     /// Device bytes `size(capacity, pool_pages)` would allocate with `rows` rows a forward: what admission weighs.
     pub fn sizeBytes(e: *Engine, rows: usize, capacity: usize, pool_pages: usize) !usize {
         const prompt_rows = @min(e.o.prompt_rows, capacity);
-        return e.sizedBytes(try e.arenaBytes(rows, prompt_rows, capacity), rows, prompt_rows, pool_pages);
+        return e.sizedBytes(try e.arenaBytes(rows, prompt_rows, capacity), rows, prompt_rows, capacity, pool_pages);
     }
 
     /// Device bytes beside the weights: `size`'s scratch and pool, `streams` lanes, `snapshots`, rank 0's head.
     pub fn planBytes(e: *Engine, streams: usize, rows: usize, capacity: usize, pool_pages: usize, snapshots: usize) !usize {
         const m = e.model();
-        const lane = state.Caches.deviceBytes(m, capacity) + m.spec.hidden * m.act.size() + m.taps.ringBytes(m.spec.hidden);
+        const lane = state.Caches.deviceBytes(m, capacity) + m.spec.hidden * m.act.size() + m.taps.ringBytes(m.spec.hidden) + if (e.vision) |v| v.laneBytes(capacity) else @as(usize, 0);
         // under tensor parallelism only rank 0 holds the head
         const head = if (e.o.rank > 0) 0 else try mtp.Head.deviceBytes(e.gpa, &e.driver, &e.lib, &e.weights, m, @min(rows, mtp.max_chains));
         return try e.sizeBytes(rows, capacity, pool_pages) + streams * lane + snapshots * memory.linearBytes(m.spec) + head;
@@ -297,12 +363,15 @@ pub const Engine = struct {
             e.closeBlas();
             e.round.deinit(e);
             e.drawer.deinit();
+            if (e.linear) |*b| b.free();
             e.ids_dev.free();
             e.ids.free();
             e.prompts.deinit();
             e.rounds.deinit();
             e.pool.deinit();
         }
+        if (e.vision) |v| v.deinit();
+        if (e.rope) |*k| k.deinit();
         e.bridge.deinit();
         e.weights.deinit();
         e.stream.deinit();
@@ -400,10 +469,7 @@ pub const Engine = struct {
     }
 
     /// Asked after each layer of a long prompt (the stream is idle then): true ends the pass with `error.Cancelled`.
-    pub const Cancel = struct {
-        ctx: *anyopaque,
-        check: *const fn (ctx: *anyopaque) bool,
-    };
+    pub const Cancel = @import("lanes").stream.CancelCheck;
 
     const Poll = struct {
         stream: hip.Stream,
@@ -412,7 +478,7 @@ pub const Engine = struct {
         fn layer(ctx: *anyopaque, _: usize, _: hip.ops.Tensor, _: usize) anyerror!void {
             const p: *Poll = @ptrCast(@alignCast(ctx));
             try p.stream.synchronize();
-            if (p.cancel.check(p.cancel.ctx)) return error.Cancelled;
+            try @import("hip_serve").cancel.poll(p.cancel);
         }
     };
 
