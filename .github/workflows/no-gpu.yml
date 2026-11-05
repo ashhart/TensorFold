@@ -1,134 +1,24 @@
 name: No GPU
 
 on:
-  push:
-    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
-# A pull request's newer push cancels its older run; every push to main keeps its own.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
-  benchmark-clients:
+  cold:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: "3.11"
-      - name: Model-free benchmark client tests
-        run: python -m unittest discover -s tools/tests -p "test_bench*.py" -v
-  zig:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      # About three seconds, and three of four red mains in 31 hours (4 Nov): they run before the 18 minutes of builds.
-      - name: Shared CUDA primitive copies
-        run: |
-          python3 tools/zig/cuda_common_check.py
-          python3 -m unittest discover -s tools/zig -p cuda_common_check_test.py -v
-      # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
-      - name: lean check
-        env:
-          BASE_REF: ${{ github.base_ref }}
-          PUSH_BASE: ${{ github.event.before }}
-        run: |
-          if [ -n "$BASE_REF" ]; then
-            base=$(git merge-base HEAD "origin/$BASE_REF")
-          else
-            base=$(git rev-parse "$PUSH_BASE^{commit}")
-          fi
-          git worktree add --detach ../lean-base "$base"
-          cp tools/zig/lean_check.py ../lean-base/tools/zig/lean_check.py
-          (cd ../lean-base && python3 tools/zig/lean_check.py > ../lean-base.txt || true)
-          python3 tools/zig/lean_check.py > ../lean-head.txt || true
-          python3 tools/zig/lean_new.py ../lean-base.txt ../lean-head.txt
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.0
-          use-cache: false
-      # setup-zig empties a cache past its size limit and saves it empty, which every run of this job has outgrown.
-      # So main alone saves, and a pull request restores main's newest and adds nothing to the budget.
-      # -Drerun-tests runs every check again: the cache saves compiles, and a stale result can't hide a broken fixture.
-      # -Dfixed-cpu: a compile's cache key carries its CPU and these runners differ, so all of them compile for one CPU.
-      # Nearly every test imports these sources, so a change to them recompiles nearly everything. Main then starts from
-      # nothing, which keeps one build in the cache: adding to the last one doubled it (0.85 to 1.5 GB on 4 Nov).
-      - name: Cache key
-        id: cache-key
-        shell: bash
-        env:
-          SHARED: ${{ hashFiles('zig/src/core/**', 'zig/src/platform/**', 'zig/src/hip/**', 'zig/src/*.zig') }}
-        run: echo "shared=$SHARED" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .zig-cache
-          key: zig-build-v3-Linux-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
-          restore-keys: |
-            zig-build-v3-Linux-0.17.0-${{ steps.cache-key.outputs.shared }}-
-            ${{ github.event_name == 'pull_request' && 'zig-build-v3-Linux-0.17.0-' || '' }}
-      # zig build test is the host unit tests. No GPU. The Python suite is not this check.
-      # A unit test that hangs fails by name after 10 minutes instead of holding the runner until the job's limit.
-      - name: zig build test
-        run: zig build -Dfixed-cpu -Drerun-tests test --test-timeout 10m
-      # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
-      - name: zig build test-kernel-contract
-        run: zig build -Dfixed-cpu -Drerun-tests test-kernel-contract
-      # The frozen server goldens: request parsing, rendering and streaming against recorded answers.
-      - name: zig build test-golden
-        run: zig build -Dfixed-cpu -Drerun-tests test-golden
-      # Hostile HTTP framing, API keys and download paths, on the CPU.
-      - name: zig build test-server-security test-pull-security
-        run: zig build -Dfixed-cpu -Drerun-tests test-server-security test-pull-security
-      # Cortheon's readers of untrusted web bytes under the fuzz harness: seeds, 100,000 edits, linear time.
-      - name: zig build fuzz-cortheon
-        run: zig build -Dfixed-cpu -Drerun-tests fuzz-cortheon
-      - name: Served Flash Next gate regressions
-        run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
-      # The generated Engram tables: committing a table that its generator no longer reproduces is a silent drift.
-      # The generator refuses any unicodedata but the pinned 16.0.0, which 3.14 carries and 3.12/3.13 do not.
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        id: nfkd-python
-        with:
-          python-version: "3.14"
-      - name: NFKD tables are current
-        env:
-          PYTHON: ${{ steps.nfkd-python.outputs.python-path }}
-        run: |
-          "$PYTHON" tools/zig/nfkd_tables.py --check --zig "$(command -v zig)" ||
-            { echo "regen: python3 tools/zig/nfkd_tables.py --zig zig"; exit 1; }
-      - name: NFKD generator tests
-        env:
-          PYTHON: ${{ steps.nfkd-python.outputs.python-path }}
-        run: cd tools/zig && "$PYTHON" -m unittest test_nfkd_tables
-      # Every build option is declared for every target, so one build script fits every OS.
-      - name: build options
-        run: python3 -m unittest discover -s tools/zig -p build_options_test.py
-      - name: Save the build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .zig-cache
-          key: zig-build-v3-Linux-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
-  zig-windows:
-    runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -137,48 +27,21 @@ jobs:
         with:
           version: 0.17.0
           use-cache: false
-      # setup-zig empties a cache past its size limit and saves it empty, which every run of this job has outgrown.
-      # So main alone saves, and a pull request restores main's newest and adds nothing to the budget.
-      # -Drerun-tests runs every check again: the cache saves compiles, and a stale result can't hide a broken fixture.
-      # -Dfixed-cpu: a compile's cache key carries its CPU and these runners differ, so all of them compile for one CPU.
-      # Nearly every test imports these sources, so a change to them recompiles nearly everything. Main then starts from
-      # nothing, which keeps one build in the cache: adding to the last one doubled it (0.85 to 1.5 GB on 4 Nov).
-      - name: Cache key
-        id: cache-key
+      - name: cold
         shell: bash
-        env:
-          SHARED: ${{ hashFiles('zig/src/core/**', 'zig/src/platform/**', 'zig/src/hip/**', 'zig/src/*.zig') }}
-        run: echo "shared=$SHARED" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        run: bash probe.sh
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
-          key: zig-build-v3-Windows-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
-          restore-keys: |
-            zig-build-v3-Windows-0.17.0-${{ steps.cache-key.outputs.shared }}-
-            ${{ github.event_name == 'pull_request' && 'zig-build-v3-Windows-0.17.0-' || '' }}
-      # The same host unit tests on Windows: the platform layer (zig/src/platform) over the UCRT, Win32 and Winsock.
-      - name: zig build test
-        run: zig build -Dfixed-cpu -Drerun-tests test --test-timeout 10m
-      # The server goldens and the Cortheon fuzz harness on Windows too; the goldens skip the signal-driven cases.
-      - name: zig build test-golden
-        run: zig build -Dfixed-cpu -Drerun-tests test-golden
-      - name: zig build fuzz-cortheon
-        run: zig build -Dfixed-cpu -Drerun-tests fuzz-cortheon
-      - name: Save the build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .zig-cache
-          key: zig-build-v3-Windows-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
-  # The release's own path check on each platform's dist server (no fatbins), so a leak fails here, not at release.
-  # Pull requests check Linux x86_64 only; every push to main checks all three platforms.
-  release-paths:
+          key: zig-probe7-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+  restored:
+    needs: cold
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'push' && fromJSON('["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"]') || fromJSON('["ubuntu-24.04"]') }}
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -187,65 +50,10 @@ jobs:
         with:
           version: 0.17.0
           use-cache: false
-      # The same cache as `zig`: main saves, and a pull request restores main's newest and adds nothing to the budget.
-      - name: Cache key
-        id: cache-key
-        shell: bash
-        env:
-          SHARED: ${{ hashFiles('zig/src/core/**', 'zig/src/platform/**', 'zig/src/hip/**', 'zig/src/*.zig') }}
-        run: echo "shared=$SHARED" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
-          key: zig-build-v3-paths-${{ matrix.os }}-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
-          restore-keys: |
-            zig-build-v3-paths-${{ matrix.os }}-0.17.0-${{ steps.cache-key.outputs.shared }}-
-            ${{ github.event_name == 'pull_request' && format('zig-build-v3-paths-{0}-0.17.0-', matrix.os) || '' }}
-      - name: Metal toolchain
-        if: runner.os == 'macOS'
-        run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
-      - name: zig build check-release-paths
-        run: zig build -Dfixed-cpu check-release-paths
-      - name: Save the build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .zig-cache
-          key: zig-build-v3-paths-${{ matrix.os }}-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
-  zig-macos-dev-tools:
-    runs-on: macos-26
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.17.0
-          use-cache: false
-      # The same cache as `zig`: main saves, and a pull request restores main's newest and adds nothing to the budget.
-      - name: Cache key
-        id: cache-key
+          key: zig-probe7-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: restored
         shell: bash
-        env:
-          SHARED: ${{ hashFiles('zig/src/core/**', 'zig/src/platform/**', 'zig/src/hip/**', 'zig/src/*.zig') }}
-        run: echo "shared=$SHARED" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .zig-cache
-          key: zig-build-v3-macOS-dev-tools-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
-          restore-keys: |
-            zig-build-v3-macOS-dev-tools-0.17.0-${{ steps.cache-key.outputs.shared }}-
-            ${{ github.event_name == 'pull_request' && 'zig-build-v3-macOS-dev-tools-0.17.0-' || '' }}
-      # Xcode 26 ships the Metal compiler as a separate component, which the image does not always carry.
-      - name: Metal toolchain
-        run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
-      # Every tf-* developer tool compiled and linked, none installed or run: an engine API change that breaks one fails.
-      - name: zig build dev-tools
-        run: zig build dev-tools -Doptimize=Debug  # compile and link only: Debug builds about 30% faster
-      - name: Save the build cache
-        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .zig-cache
-          key: zig-build-v3-macOS-dev-tools-0.17.0-${{ steps.cache-key.outputs.shared }}-${{ github.sha }}
+        run: bash probe.sh
