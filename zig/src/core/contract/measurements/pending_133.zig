@@ -1,6 +1,7 @@
 //! nvcc 13.3 receipts for pending launches: the five-SM fatbins' usage as kernel-contract-limits printed it.
 const Override = @import("../registry.zig").Override;
 pub const records = [_]Override{
+    .{ .name = "moe tf_moe_topk_sigmoid_score_groups", .usage = .{ .{ .regs = 197, .static = 0, .bound = 256 }, .{ .regs = 197, .static = 0, .bound = 256 }, .{ .regs = 197, .static = 0, .bound = 256 }, .{ .regs = 190, .static = 0, .bound = 256 }, .{ .regs = 190, .static = 0, .bound = 256 } } },
     .{ .name = "exl3_experts tf_exl3_grouped_0", .usage = .{ .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 158, .static = 32832, .bound = 0 }, .{ .regs = 158, .static = 32832, .bound = 0 } } },
     .{ .name = "exl3_experts tf_exl3_grouped_1", .usage = .{ .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 158, .static = 32832, .bound = 0 }, .{ .regs = 158, .static = 32832, .bound = 0 } } },
     .{ .name = "exl3_experts tf_exl3_grouped_2", .usage = .{ .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 148, .static = 32832, .bound = 0 }, .{ .regs = 148, .static = 32832, .bound = 0 } } },
