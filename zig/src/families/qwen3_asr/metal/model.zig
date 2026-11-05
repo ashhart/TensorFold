@@ -8,6 +8,7 @@ const lm = @import("../lm.zig");
 const gpu = @import("gpu.zig");
 const mtower = @import("tower.zig");
 const mlm = @import("lm.zig");
+const shared = @import("shared.zig");
 
 pub const Gpu = gpu.Gpu;
 pub const Dump = mtower.Dump;
@@ -53,6 +54,7 @@ pub const Model = struct {
     gpa: std.mem.Allocator,
     c: cfg.Config,
     g: *gpu.Gpu,
+    k: shared.Shared,
     weight_bytes: u64,
     tw: tower.Weights,
     lw: lm.Weights,
@@ -69,6 +71,8 @@ pub const Model = struct {
         m.c = c;
         m.g = try gpu.Gpu.open(gpa, metallib);
         errdefer m.g.close();
+        m.k = try shared.Shared.init(gpa, m.g.device, c.audio, c.text, o.positions, o.audio_rows);
+        errdefer m.k.deinit();
         const st: Store = .{ .g = m.g };
         {
             var ck = try core.Checkpoint.openModel(gpa, io, dir);
@@ -85,8 +89,8 @@ pub const Model = struct {
         m.weight_bytes = m.g.bytes;
         m.tb = try tower.Buffers.alloc(c.audio, o.group, o.audio_rows, st);
         m.lb = try lm.Buffers.alloc(c.text, o.pass_rows, st);
-        m.tr = try mtower.Tower.init(m.g, c.audio, o.group);
-        m.lr = try mlm.Lm.init(gpa, m.g, c.text, o.pass_rows, o.positions);
+        m.tr = try mtower.Tower.init(m.g, &m.k, c.audio, o.group, o.audio_rows);
+        m.lr = try mlm.Lm.init(gpa, m.g, &m.k, c.text, o.pass_rows, o.positions);
         return m;
     }
 
@@ -94,6 +98,7 @@ pub const Model = struct {
         m.lr.deinit(m.gpa);
         m.lw.deinit(m.gpa);
         m.tw.deinit(m.gpa);
+        m.k.deinit();
         m.g.close();
         m.gpa.destroy(m);
     }

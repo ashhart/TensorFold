@@ -1,9 +1,9 @@
-//! The audio tower's binding on Metal: qwen3_asr.metal's conv taps, GEMM (bias, GELU, residual), LayerNorm, attention.
+//! The audio tower's binding on Metal: conv taps and biased GEMMs here, attention and GELU from the core kernels.
 const std = @import("std");
 const cfg = @import("../config.zig");
-const chunks = @import("../chunks.zig");
 const shared = @import("../tower.zig");
 const gpu = @import("gpu.zig");
+const core = @import("shared.zig");
 
 /// Where a stage's rows go when a check asks for them: bf16 `rows` x `cols` at `ptr`, channels last for convs.
 pub const Dump = struct {
@@ -11,15 +11,11 @@ pub const Dump = struct {
     put: *const fn (ctx: *anyopaque, stage: []const u8, ptr: u64, rows: usize, cols: usize, conv: ?[3]usize) anyerror!void,
 };
 
-pub const Gemm = extern struct { m: u32, n: u32, k: u32, act: u32, res: u32 };
+pub const Gemm = extern struct { m: u32, n: u32, k: u32, res: u32 };
 const Conv = extern struct { n: u32, fi: u32, ti: u32, c: u32, fo: u32, to: u32, ld: u32 };
 pub const Rows = extern struct { rows: u32, width: u32, eps: f32, has_res: u32 };
-pub const Attn = extern struct { q_ld: u32, k_ld: u32, v_ld: u32, o_ld: u32, heads: u32, group: u32, dim: u32, keys: u32, first: u32, scale: f32 };
 
-/// The keys q3a_attn holds in threadgroup memory.
-pub const max_keys = 6144;
-
-fn u(x: usize) u32 {
+pub fn u(x: usize) u32 {
     return @intCast(x);
 }
 
@@ -27,9 +23,9 @@ fn ceil(a: usize, b: usize) usize {
     return (a + b - 1) / b;
 }
 
-/// y [rows, n] = bf16(act(bf16(x w^T + b)) + res), the GEMV when there is one row.
-pub fn gemm(g: *gpu.Gpu, x: u64, w: u64, b: u64, res: ?u64, y: u64, rows: usize, n: usize, k: usize, act: shared.Act) void {
-    const p: Gemm = .{ .m = u(rows), .n = u(n), .k = u(k), .act = @intFromBool(act == .gelu), .res = @intFromBool(res != null) };
+/// y [rows, n] = bf16(bf16(x w^T + b) + res): q3a_gemm, or q3a_gemv for one row.
+pub fn gemm(g: *gpu.Gpu, x: u64, w: u64, b: u64, res: ?u64, y: u64, rows: usize, n: usize, k: usize) void {
+    const p: Gemm = .{ .m = u(rows), .n = u(n), .k = u(k), .res = @intFromBool(res != null) };
     const bufs = [_]u64{ x, w, b, res orelse y, y };
     if (rows == 1) return g.go(.q3a_gemv, .{ ceil(n, 8), 1, 1 }, 256, &bufs, p);
     g.go(.q3a_gemm, .{ ceil(n, 32), ceil(rows, 32), 1 }, 128, &bufs, p);
@@ -37,22 +33,36 @@ pub fn gemm(g: *gpu.Gpu, x: u64, w: u64, b: u64, res: ?u64, y: u64, rows: usize,
 
 pub const Tower = struct {
     g: *gpu.Gpu,
+    k: *const core.Shared,
+    a: cfg.Audio,
     cols: u64, // a conv's taps
-    zero: u64, // the bias of a Linear without one
+    zero: u64, // the bias of a Linear without one, and of a bare GELU
+    q: u64, // a window's q, k and v, each [rows, heads, dim]: shared_attention's layout
+    kk: u64,
+    v: u64,
+    mask: u64, // every key visible: encode_rows rows of max_rows bytes
     sink: ?Dump = null,
 
-    /// Scratch for `group` chunks a conv pass.
-    pub fn init(g: *gpu.Gpu, a: cfg.Audio, group: usize) !Tower {
+    /// Scratch for `group` chunks a conv pass and windows of up to `max_rows` rows.
+    pub fn init(g: *gpu.Gpu, k: *const core.Shared, a: cfg.Audio, group: usize, max_rows: usize) !Tower {
         const cf = a.chunkFrames();
         const f1 = (a.mels - 1) / 2 + 1;
         const t1 = (cf - 1) / 2 + 1;
         const p1 = group * f1 * t1;
         const p2 = group * ((f1 - 1) / 2 + 1) * ((t1 - 1) / 2 + 1);
-        return .{
+        const t: Tower = .{
             .g = g,
+            .k = k,
+            .a = a,
             .cols = try g.alloc(2 * @max(p1 * 9, p2 * 9 * a.conv)),
-            .zero = try g.alloc(2 * @max(a.d, a.out, a.ffn, a.conv, 3 * a.d)),
+            .zero = try g.alloc(2 * @max(a.d, a.out, a.ffn, a.conv)),
+            .q = try g.alloc(2 * max_rows * a.d),
+            .kk = try g.alloc(2 * max_rows * a.d),
+            .v = try g.alloc(2 * max_rows * a.d),
+            .mask = try g.alloc(core.encode_rows * max_rows),
         };
+        @memset(g.host(t.mask, core.encode_rows * max_rows), 1);
+        return t;
     }
 
     pub fn upload(t: *Tower, dst: u64, bytes: []const u8) !void {
@@ -66,7 +76,7 @@ pub const Tower = struct {
         const rows = n * fo * to;
         const p: Conv = .{ .n = u(n), .fi = u(fi), .ti = u(ti), .c = u(c), .fo = u(fo), .to = u(to), .ld = u(9 * c) };
         t.g.go(.q3a_conv_cols, .{ ceil(9 * c, 256), rows, 1 }, 256, &.{ x, t.cols }, p);
-        gemm(t.g, t.cols, w, b, null, y, rows, co, 9 * c, .none);
+        gemm(t.g, t.cols, w, b, null, y, rows, co, 9 * c);
     }
 
     pub fn dump(t: *Tower, stage: []const u8, ptr: u64, rows: usize, cols: usize, conv_shape: ?[3]usize) !void {
@@ -81,9 +91,11 @@ pub const Tower = struct {
         t.g.go(.q3a_flatten, .{ ceil(n * f * tt * c, 256), 1, 1 }, 256, &.{ x, y }, p);
     }
 
-    /// y = bf16(act(bf16(x . w^T + b)) + res); a missing bias is zeros.
+    /// y = bf16(act(bf16(x . w^T + b)) + res); a missing bias is zeros (no layer has both GELU and residual).
     pub fn linear(t: *Tower, x: u64, w: u64, b: ?u64, y: u64, rows: usize, n: usize, k: usize, act: shared.Act, res: ?u64) !void {
-        gemm(t.g, x, w, b orelse t.zero, res, y, rows, n, k, act);
+        if (act == .gelu and res != null) return error.GeluWithResidual;
+        gemm(t.g, x, w, b orelse t.zero, res, y, rows, n, k);
+        if (act == .gelu) t.k.biasGelu(t.g.encoder(), t.g.ref(y), t.g.ref(t.zero), rows, n);
     }
 
     pub fn layernorm(t: *Tower, x: u64, w: u64, b: u64, y: u64, rows: usize, d: usize) !void {
@@ -91,16 +103,26 @@ pub const Tower = struct {
         t.g.go(.q3a_layernorm, .{ rows, 1, 1 }, 256, &.{ x, w, b, y }, p);
     }
 
-    /// Bidirectional attention over one window of `len` rows of [q | k | v] (heads x dim each).
+    /// Bidirectional attention over one window of `len` rows of [q | k | v] (heads x dim each), by shared_attention.
     pub fn attention(t: *Tower, qkv: u64, out: u64, len: usize, heads: usize, dim: usize) !void {
-        if (len > max_keys or dim > 256) return error.AttentionWindow;
         const d = heads * dim;
-        const p: Attn = .{ .q_ld = u(3 * d), .k_ld = u(3 * d), .v_ld = u(3 * d), .o_ld = u(d), .heads = u(heads), .group = 1, .dim = u(dim), .keys = u(len), .first = 0, .scale = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(dim)))) };
-        t.g.go(.q3a_attn, .{ len, heads, 1 }, 128, &.{ qkv, qkv + 2 * d, qkv + 4 * d, out }, p);
+        t.g.go(.q3a_split_qkv, .{ ceil(d, 256), len, 1 }, 256, &.{ qkv, t.q, t.kk, t.v }, [2]u32{ u(len), u(d) });
+        const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(dim))));
+        const e = t.g.encoder();
+        var r0: usize = 0;
+        while (r0 < len) : (r0 += core.encode_rows) {
+            const rows = @min(core.encode_rows, len - r0);
+            try t.k.tower.encode(e, rows, len, len, scale, t.g.ref(t.q + r0 * d * 2), t.g.ref(t.kk), t.g.ref(t.v), t.g.ref(t.mask), t.g.ref(out + r0 * d * 2));
+        }
     }
 
+    /// y = bf16(gelu(x)) through the core GELU (in place, after a copy when y is not x).
     pub fn gelu(t: *Tower, x: u64, y: u64, count: usize) !void {
-        t.g.go(.q3a_gelu, .{ ceil(count, 256), 1, 1 }, 256, &.{ x, y }, u(count));
+        if (x != y) t.g.go(.q3a_copy, .{ ceil(count, 256), 1, 1 }, 256, &.{ x, y }, u(count));
+        const width = for ([_]usize{ t.a.ffn, t.a.d, t.a.conv }) |w| {
+            if (count % w == 0) break w;
+        } else return error.GeluWidth;
+        t.k.biasGelu(t.g.encoder(), t.g.ref(y), t.g.ref(t.zero), count / width, width);
     }
 
     pub fn sync(t: *Tower) !void {
