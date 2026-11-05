@@ -14,6 +14,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - HIP: the OCR families share one host protocol, with the same replies (#2040). Thanks to @laudney.
 - `THIRD_PARTY_NOTICES.md` names the model release and library code that five sets of files follow, with the LFM Open License text.
+- CUDA: `TF_CUDA_PINNED_DOWNLOAD=1` stages `DeviceBuffer.download` through a reused pinned buffer, off by default (#2102).
 
 - Lane host: the paged KV pool's promises now count in the host's one ledger, with no change in behaviour (#2127). Thanks to @jschmied.
 
