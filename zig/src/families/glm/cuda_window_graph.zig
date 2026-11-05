@@ -22,12 +22,6 @@ pub const Graphs = struct {
     }
 };
 
-/// Off by default until measured; each rank reads its own, and a graph launches what its eager pass does.
-pub fn enabled() bool {
-    const v = std.c.getenv("TF_GLM_GRAPHS") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
-}
-
 /// A verify window's pass on one rank: `rows` rows of the stream in `slot`, then the hashes of everything else.
 pub const Key = struct {
     rows: u32,

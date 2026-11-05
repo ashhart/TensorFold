@@ -63,6 +63,9 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   pool then costs the card 768 bytes a token instead of 13,056, so a 1,048,576-token window fits beside the weights.
   `TF_GLM_KV_HOST_GIB` sizes the host pages (one full window unasked); `TF_GLM_KV_HOST_SHARED=1` gives the ranks of
   one host a single copy in `/dev/shm`. Checked on two RTX PRO 6000 Blackwell cards at TP=2.
+- `TF_GLM_GRAPHS=1` on every rank (opt-in) replays the verify windows as CUDA graphs, with replies equal to eager. On
+  two GB10s at TP=2, decode went from 70.1 to 72.4 tok/s at one stream and from 133.5 to 138.2 at four, with about
+  1.4 GiB less available memory a rank (#2279).
 - `TF_GLM_CHUNK_SOLO=4096` on every rank (opt-in) lets a prompt pass take 4,096 rows while no other stream is decoding.
   Unset or `2048`, every pass takes 2,048 rows and nothing extra is held. See [Prompt chunk size](#prompt-chunk-size).
 - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
