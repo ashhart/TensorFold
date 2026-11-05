@@ -4,12 +4,14 @@ const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
 const embeddings = @import("embeddings.zig");
+const openai = @import("openai.zig");
+const wait = @import("wait_reason.zig");
 const Server = @import("server.zig").Server;
 const ByteText = @import("embedding_protocol_test.zig").ByteText;
 const t = std.testing;
 const cap: api.EmbeddingInfo = .{ .dimensions = 3, .vocabulary = 256, .max_batch_tokens = 8, .max_inputs = 4, .mrl_dimensions = &.{ 1, 2 } };
 const Provider = struct {
-    mode: enum { normal, generator, partial, tokens, delayed } = .normal,
+    mode: enum { normal, generator, partial, tokens, delayed, busy, closed } = .normal,
     calls: usize = 0,
     cancelled: bool = false,
     borrowed_alive: bool = false,
@@ -28,6 +30,8 @@ const Provider = struct {
     fn submit(ptr: *anyopaque, id: api.Id, ask: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const p = cast(ptr);
         p.calls += 1;
+        if (p.mode == .busy) return error.Busy;
+        if (p.mode == .closed) return error.Closed;
         if (p.mode == .delayed) {
             p.pending = ask;
             p.sink = sink;
@@ -110,6 +114,29 @@ test "embeddings HTTP: missing vector writes and generated tokens cannot become 
         const body = (try json.parse(cx.a, "{\"input\":[1,2]}")).ok;
         try t.expectError(error.Refused, embeddings.reply(srv, &cx, body, Present{}));
         try t.expectEqual(errors.Kind.server, cx.kind);
+    }
+}
+
+test "embeddings HTTP: a busy engine answers engine_busy and a closed one engine_unavailable" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p: Provider = .{};
+    const srv = try server(&p);
+    defer srv.deinit();
+    const body = (try json.parse(a, "{\"input\":[1,2]}")).ok;
+    const Case = struct { @TypeOf(p.mode), []const u8, []const u8 };
+    for ([_]Case{
+        .{ .busy, wait.engine_busy, "the embedding engine is busy; retry shortly" },
+        .{ .closed, wait.engine_unavailable, "the embedding engine is unavailable" },
+    }) |case| {
+        p.mode = case[0];
+        var cx: errors.Cx = .{ .a = a };
+        try t.expectError(error.Refused, embeddings.reply(srv, &cx, body, Present{}));
+        try t.expectEqual(@as(u16, 503), cx.status());
+        const refusal = (try openai.wrapError(a, try openai.errorBody(a, &cx, null))).get("error").?;
+        try t.expectEqualStrings(case[1], refusal.get("code").?.string);
+        try t.expectEqualStrings(case[2], refusal.get("message").?.string);
     }
 }
 
