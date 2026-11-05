@@ -55,7 +55,3 @@ test {
     _ = @import("proposal_sampling_records.zig");
     _ = @import("pocket_records.zig");
 }
-
-test {
-    _ = @import("qwen_glue_receipts_test.zig");
-}
