@@ -64,13 +64,28 @@ PDF rendering belongs in the client. The family does not run a PDF parser.
 
 The model cards use this receipt in their Transformers examples:
 
-[Official receipt fixture](https://huggingface.co/datasets/hf-internal-testing/fixtures_ocr/resolve/main/SROIE-receipt.jpeg).
+[Official receipt fixture](https://huggingface.co/datasets/hf-internal-testing/fixtures_ocr/resolve/28fe12cdf7816b5dde94e22051b2ec8dc74267b7/SROIE-receipt.jpeg).
 
 Its SHA256 is
 `d66a3287c847823c6ddab9f8b2080582b96a66b7816d178472f697ea84e227b3`.
-Use `enable_thinking=False`, a 1024-token output cap and temperature 0.2
-for sampled example runs. Test deterministic outputs separately with
-temperature 0. Keep the checkpoint generation defaults in the reference.
+
+`tools/zig/lighton_ocr_reference.py` pins each checkpoint revision, the
+SHA256 of every non-weight file in it, and the Transformers 5.22.1
+model, processor and tokenizer sources each size loads. Every command
+checks those pins before any model code runs. `sources` prints the
+hashes and loads no model. `examples` runs the model card's
+Transformers example on the receipt, in grounding and transcription
+mode. It runs greedy and the card's own sampled call (1024 tokens,
+`enable_thinking=False` on the 0.8B and 4B, temperature 0.2). It writes
+a JSON receipt of prompt and output ids with their hashes:
+
+```sh
+python3 tools/zig/lighton_ocr_reference.py sources --size 0.8B \
+  --model MODEL_DIRECTORY
+python3 tools/zig/lighton_ocr_reference.py examples --size 0.8B \
+  --model MODEL_DIRECTORY --image SROIE-receipt.jpeg \
+  --output RECEIPT.json --device cuda:0
+```
 
 `tools/zig/lighton_ocr_reference.py capture` writes processor pixels,
 vision features, decoder inputs and teacher logits with pinned local
