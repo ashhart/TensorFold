@@ -29,8 +29,7 @@ fn source(set: bool) Source {
     return if (set) .set else .default;
 }
 
-/// One line from resolved settings; a pure function, so both ranks print the same words for the same settings.
-/// Off and unset differ: `0(default)` is the engine's default, `0(set)` an explicit off.
+/// One line, the same on both ranks; `0(default)` is the engine's default and `0(set)` an explicit off.
 pub fn line(buf: []u8, s: Settings) []const u8 {
     return std.fmt.bufPrint(buf, "dsv41 serve: pieces_floor={s} roce={s} graphs={s} side_streams={s}", .{
         value(s.pieces_floor),
