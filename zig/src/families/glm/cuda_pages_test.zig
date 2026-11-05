@@ -428,6 +428,15 @@ test "TF_GLM_KV_SHARE: a pass's pages below its mark go to the prompt cache, and
     try std.testing.expectEqualSlices(u32, &kept, adopt.items);
     try std.testing.expectEqualSlices(u32, &kept, (try p.openWith(2, b.len, 100, adopt.items))[0..4]);
     for (kept) |id| try expectEqual(@as(u32, 2), p.pool.holders(id)); // the tree and the stream
+    // a second pass that only adopts the pages (no state restore) still reports the rows it resumes
+    var rs = try lanes.Stream.init(gpa, .{ .id = "cached", .prompt = &b, .max_new = 100 });
+    defer rs.deinit(gpa);
+    var o2: prefix_mod.Owner = .{};
+    var ad2: std.ArrayList(u32) = .empty;
+    defer ad2.deinit(gpa);
+    _ = try x.beginStream(&rs, &o2, &ad2);
+    try expectEqual(@as(u32, 2048), rs.cached);
+    p.give(ad2.items);
     adopt.clearRetainingCapacity();
     p.close(2);
     // another token at the mark: the head's row 2,047 read it, so the last page is another page and nothing resumes

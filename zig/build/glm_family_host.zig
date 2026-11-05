@@ -28,6 +28,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const profile_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prompt profile:"} }));
     b.step("test-glm-prompt-profile-host", "Paired prompt-stage event timing, overlap, failure and disabled controls without devices").dependOn(&profile_run.step);
     step.dependOn(&profile_run.step);
+    b.step("test-glm-share-host", "GLM's paged prompt reuse reports the rows it resumes").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"TF_GLM_KV_SHARE:"} })).step);
     const pages = b.createModule(.{ .root_source_file = b.path("zig/glm_pages_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "core", .module = mods.core } } });
     const pages_run = b.addRunArtifact(b.addTest(.{ .root_module = pages, .filters = &.{"GLM pages:"} }));
     b.step("test-glm-pages-host", "Actual GLM page ownership, refusal and rollback without devices").dependOn(&pages_run.step);

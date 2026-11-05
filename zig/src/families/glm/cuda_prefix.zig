@@ -93,8 +93,10 @@ pub const Prefix = struct {
         return x.store.begin(x.gpa, prompt, history_len, shared, owner, adopt);
     }
 
-    pub fn beginStream(x: *Prefix, s: *const Stream, owner: *Owner, adopt: *std.ArrayList(u32)) !radix.Plan {
-        return x.begin(cacheKey(s) orelse return error.ImageCacheKeyRequired, s.history_len, s.shared_prefixes, owner, adopt);
+    pub fn beginStream(x: *Prefix, s: *Stream, owner: *Owner, adopt: *std.ArrayList(u32)) !radix.Plan {
+        const plan = try x.begin(cacheKey(s) orelse return error.ImageCacheKeyRequired, s.history_len, s.shared_prefixes, owner, adopt);
+        s.cached = plan.from; // the rows the adopted pages resume, counted by the lane host
+        return plan;
     }
 
     /// The same content key names lookup and every completed or interrupted keep.

@@ -278,7 +278,7 @@ pub const Lanes = struct {
     }
 
     /// A prompt pass begins: the stream's slot bound and its sequence fresh; where the pass resumes (a kept state).
-    fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
+    pub fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
         const gpa = self.x.e.gpa;
@@ -286,6 +286,7 @@ pub const Lanes = struct {
         var owner: prefix_mod.Owner = .{};
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(gpa);
+        s.cached = 0;
         // TF_GLM_KV_SHARE: the deepest kept state's pages, held for this call until the seat takes them
         const marks: []const u32 = if (share) (try self.prefix.?.beginStream(s, &owner, &adopt)).marks else &.{};
         var held = true;
@@ -297,7 +298,6 @@ pub const Lanes = struct {
         }
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.beginOn(s.sampling, pages, adopt.items.len);
-        s.cached = 0;
         s.prompt_rows.clearRetainingCapacity();
         const l = self.lanes.getPtr(s).?;
         gpa.free(l.marks);
