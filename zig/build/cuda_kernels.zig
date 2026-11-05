@@ -122,6 +122,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "lfm2", .flags = glue }, // ours: LFM2's short convolution, QK norm and rotary, gates and label rows
     .{ .name = "vit", .flags = glue }, // ours: vision towers' LayerNorm, Linear epilogues, activations, unshuffle
     .{ .name = "moss_image", .flags = glue }, // ours: MOSS-Image's modulated norm, q/k rotary, situ, gated add
+    .{ .name = "moss_image_decoder", .flags = glue }, // ours: MOSS-Image's fp32 decoder (unpack, convolutions, norms)
+    .{ .name = "moss_image_encoder", .flags = glue }, // ours: MOSS-Image's prompt encoder (Qwen3.5 norms, rotary, delta rule)
     .{ .name = "tree_round", .flags = &.{"-O3"} }, // ours: verified tree rounds for every family (cuda/tree_round.zig)
     .{ .name = "act_rows", .flags = &.{"-O3"} }, // ours: SwiGLU, output gates, group sums (cuda/act_rows.zig)
     .{ .name = "gemma4_ple", .flags = &.{"-O3"} }, // ours: Gemma 4 E-series per-layer inputs (gemma4/cuda_ple.zig)

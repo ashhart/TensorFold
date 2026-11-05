@@ -59,5 +59,8 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         },
     });
     mod.addImport("qwen4", @import("qwen4.zig").module(b, target, optimize, core));
+    // MOSS-Image's picture host: the family module (denoiser, encoder, decoder, noise, schedule, PNG) and tokenizer
+    mod.addImport("moss_image", b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } }));
+    mod.addImport("tokenizer", core.import_table.get("tokenizer").?);
     return .{ .api = api, .engines = mod };
 }
