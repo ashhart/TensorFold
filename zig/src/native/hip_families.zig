@@ -12,7 +12,7 @@ pub fn reads(comptime F: type, model_type: []const u8) bool {
     return false;
 }
 
-/// One capability entry per model_type a family reads, aliases after its own, with its `raw_text` when it names one.
+/// One capability entry per model_type a family reads, aliases after its own, with `raw_text` and `decision_formats`.
 pub fn list(comptime registry: anytype) []const api.Family {
     comptime {
         var count: usize = 0;
@@ -21,10 +21,11 @@ pub fn list(comptime registry: anytype) []const api.Family {
         var i: usize = 0;
         for (registry) |F| {
             const raw = if (@hasDecl(F, "raw_text")) F.raw_text else true;
-            out[i] = .{ .model_type = F.model_type, .formats = F.formats, .raw_text = raw };
+            const decide: []const []const u8 = if (@hasDecl(F, "decision_formats")) F.decision_formats else &.{};
+            out[i] = .{ .model_type = F.model_type, .formats = F.formats, .raw_text = raw, .decision_formats = decide };
             i += 1;
             if (@hasDecl(F, "also_model_types")) for (F.also_model_types) |alias| {
-                out[i] = .{ .model_type = alias, .formats = F.formats, .raw_text = raw };
+                out[i] = .{ .model_type = alias, .formats = F.formats, .raw_text = raw, .decision_formats = decide };
                 i += 1;
             };
         }
@@ -65,13 +66,14 @@ const Aliased = struct {
     pub const model_type = "first";
     pub const also_model_types: []const []const u8 = &.{"second"};
     pub const formats: []const []const u8 = &.{"bf16"};
+    pub const decision_formats: []const []const u8 = &.{"fp8"};
     pub const raw_text = false;
     pub fn refusal(o: api.Open) ?[]const u8 {
         return if (o.tp > 1) "--tp: this family serves one rank" else null;
     }
 };
 
-test "a family reads its own model_type and its aliases; the list has one entry each, with raw_text" {
+test "a family reads its own model_type and its aliases; the list has one entry each, with raw_text and decisions" {
     try std.testing.expect(reads(Plain, "plain") and !reads(Plain, "first"));
     try std.testing.expect(reads(Aliased, "first") and reads(Aliased, "second") and !reads(Aliased, "plain"));
     const families = comptime list(.{ Plain, Aliased });
@@ -81,6 +83,8 @@ test "a family reads its own model_type and its aliases; the list has one entry 
     try std.testing.expectEqualStrings("second", families[2].model_type);
     try std.testing.expectEqualStrings("bf16", families[2].formats[0]);
     try std.testing.expect(!families[1].raw_text and !families[2].raw_text);
+    try std.testing.expectEqual(@as(usize, 0), families[0].decision_formats.len);
+    try std.testing.expectEqualStrings("fp8", families[2].decision_formats[0]);
 }
 
 test "a family's own refusal comes first; --vision alone refuses nothing" {
