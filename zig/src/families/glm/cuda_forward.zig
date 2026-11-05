@@ -408,6 +408,12 @@ pub const Forward = struct {
 
     /// forward.forward of `ids`: logits in b.logits; a prompt chunk's KDA layers committed, a window's at `commit`.
     pub fn run(f: *const Forward, ids: []const i32) !void {
+        try f.stage(ids);
+        try f.kernels(ids.len);
+    }
+
+    /// run's host part, ahead of its launches: each rank's state checked (its rings rebased if due) and `ids` uploaded.
+    pub fn stage(f: *const Forward, ids: []const i32) !void {
         const R = ids.len;
         for (f.ranks) |r| {
             if (R == 0 or R > r.b.rows) return error.BadWindow;
@@ -418,6 +424,10 @@ pub const Forward = struct {
             } else try shared.begin(r, R, f.stream);
             try cuda.copy_source.enqueue(f.d, r.b.ids, std.mem.sliceAsBytes(ids), f.stream);
         }
+    }
+
+    /// run's launches over `R` staged rows, from the embedding to the head (a window's graph body: cuda_window_graph).
+    pub fn kernels(f: *const Forward, R: usize) !void {
         const c = &f.ranks[0].w.config;
         const embed_stamp = prof_mod.span(f.prof, f.stream, .embed);
         for (f.ranks) |r| try glue.embedB16(f.set(), f.stream, r.b.ids, r.w.embed, r.b.x, R, c.hidden, c.hc);
