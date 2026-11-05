@@ -10,7 +10,7 @@ pub const generated = kernels[1..];
 
 /// Kimi K3's kernels: one metallib, sharing kimi_common.h.
 pub const kimi_dir = "zig/kernels/metal/kimi";
-pub const kimi_kernels = [_][]const u8{ "dense.metal", "dense_mma.metal", "norms.metal", "experts.metal", "kda.metal", "mla.metal", "synth.metal", "index.metal", "index_attn.metal" };
+pub const kimi_kernels = [_][]const u8{ "dense.metal", "dense_mma.metal", "norms.metal", "experts.metal", "kda.metal", "mla.metal", "synth.metal" };
 
 /// Packed kernels for compilers refusing uint4b_format; keep in step with tools/zig/gen_nemotron_kernels.py.
 pub const nemotron_packed = [_][]const u8{

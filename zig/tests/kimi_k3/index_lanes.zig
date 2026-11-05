@@ -11,10 +11,17 @@ pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    var gpu = try Gpu.init();
+    {
+        var plain = try Gpu.init(false);
+        defer plain.deinit();
+        if (plain.k.index != null) return error.KimiUnexpectedIndexPipelines;
+        std.debug.print("KIMI_INDEX_LAZY PASS: plain K3 opens without experimental index pipelines\n", .{});
+    }
+    var gpu = try Gpu.init(true);
     defer gpu.deinit();
     const records = @import("contract").registry.all_metal;
-    const pipes = .{ gpu.k.index_key, gpu.k.index_scores, gpu.k.index_topk, gpu.k.index_attend, gpu.k.index_merge };
+    const ix = gpu.k.indexView();
+    const pipes = .{ ix.key, ix.scores, ix.select, ix.attend, ix.merge };
     const names = .{ "k3_index_key", "k3_index_scores", "k3_index_topk", "k3_index_attend", "k3_index_merge" };
     inline for (pipes, names) |pipe, name| {
         const record = for (records) |r| {
@@ -54,6 +61,13 @@ pub fn main(init: std.process.Init) !void {
     try std.testing.expect(proposal.widest > 1);
     try std.testing.expectEqualSlices(u32, plain, drafted);
     try cases.together(a, init.io, model, &.{ &p0, &p1 }, &.{ plain, solo }, null);
+    const short = try cases.tokens(a, init.io, model, p0[0..17], null, null, null);
+    defer a.free(short);
+    const crossing = try cases.tokens(a, init.io, model, p0[0..2043], null, null, null);
+    defer a.free(crossing);
+    try cases.together(a, init.io, model, &.{ &p0, p0[0..17], p0[0..2043] }, &.{ plain, short, crossing }, null);
+    try cases.together(a, init.io, model, &.{ p0[0..2043], p0[0..17], &p0 }, &.{ crossing, short, plain }, null);
+    std.debug.print("KIMI_INDEX_MIXED PASS: short, crossing and long streams equal solo in both row orders\n", .{});
     const backend = model.backend();
     for ([_]usize{ 1, 2047, 2048, 2049, 2050 }) |cut| {
         var prefix = try lanes.Stream.init(a, .{ .id = "prefix", .prompt = p0[0..cut], .max_new = 0, .drafts = false });

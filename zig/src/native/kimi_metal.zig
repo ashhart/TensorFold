@@ -126,7 +126,7 @@ fn inner(a: A, gpa: A, io: std.Io, o: api.Open, problem: *[]const u8) !api.Opene
     errdefer Host.close(h);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    h.gpu = try Gpu.init();
+    h.gpu = try Gpu.init(c.dsa != null);
     const gpu = &h.gpu.?;
     h.shards = try family.shards.Shards.open(gpa, io, gpu.device, o.dir);
     var physical: u64 = 0;

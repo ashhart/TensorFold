@@ -10,10 +10,14 @@ pub const Gpu = struct {
     lib: mtl.Library,
     k: k3.kernels.Kernels,
 
-    pub fn init() !Gpu {
+    pub fn init(dsa: bool) !Gpu {
         const device = try mtl.Device.init();
+        errdefer device.deinit();
         const lib = try mtl.Library.fromBytes(device, metallib.bytes);
-        return .{ .device = device, .queue = try device.queue(), .lib = lib, .k = try k3.kernels.Kernels.init(device, lib) };
+        errdefer lib.deinit();
+        const queue = try device.queue();
+        errdefer queue.deinit();
+        return .{ .device = device, .queue = queue, .lib = lib, .k = try k3.kernels.Kernels.init(device, lib, dsa) };
     }
 
     pub fn deinit(g: *Gpu) void {

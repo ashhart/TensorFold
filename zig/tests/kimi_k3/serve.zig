@@ -86,10 +86,6 @@ pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    var gpu = try Gpu.init();
-    defer gpu.deinit();
-    var source: Synth = .{ .gpa = a, .device = gpu.device, .queue = gpu.queue, .k = &gpu.k };
-    defer source.deinit();
     var c: k3.config.Config = .{};
     c.layers = 4;
     c.experts = 16;
@@ -101,6 +97,10 @@ pub fn main(init: std.process.Init) !void {
         if (args.len != 2 or !std.mem.eql(u8, args[1], "--k31")) return error.Usage;
         c.dsa = .{};
     }
+    var gpu = try Gpu.init(c.dsa != null);
+    defer gpu.deinit();
+    var source: Synth = .{ .gpa = a, .device = gpu.device, .queue = gpu.queue, .k = &gpu.k };
+    defer source.deinit();
     var graph = try k3.graph.Graph.load(a, gpu.device, gpu.queue, &gpu.k, c, source.source());
     defer graph.deinit();
     source.sync();

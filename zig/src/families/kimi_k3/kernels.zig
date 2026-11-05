@@ -1,6 +1,7 @@
 //! Kimi K3's Metal pipelines and how each is dispatched; argument structs mirror zig/kernels/metal/kimi.
 const std = @import("std");
 const mtl = @import("metal");
+const Index = @import("index.zig");
 
 /// A buffer binding: the buffer and a byte offset into it.
 pub const Ref = struct {
@@ -77,11 +78,7 @@ pub const Kernels = struct {
     mla_attend: mtl.Pipeline,
     mla_merge: mtl.Pipeline,
     mla_uv: mtl.Pipeline,
-    index_key: mtl.Pipeline,
-    index_scores: mtl.Pipeline,
-    index_topk: mtl.Pipeline,
-    index_attend: mtl.Pipeline,
-    index_merge: mtl.Pipeline,
+    index: ?Index.Pipelines,
     fill_bf16: mtl.Pipeline,
     fill_f32: mtl.Pipeline,
     fill_u8: mtl.Pipeline,
@@ -90,7 +87,9 @@ pub const Kernels = struct {
 
     const pipeline_count = count: {
         var n: usize = 0;
-        for (@typeInfo(Kernels).@"struct".field_types) |T| n += if (T == mtl.Pipeline) 1 else @typeInfo(T).array.len;
+        for (@typeInfo(Kernels).@"struct".field_types) |T| {
+            if (T == mtl.Pipeline) n += 1 else if (T != ?Index.Pipelines) n += @typeInfo(T).array.len;
+        }
         break :count n;
     };
 
@@ -101,8 +100,9 @@ pub const Kernels = struct {
         return p;
     }
 
-    pub fn init(device: mtl.Device, lib: mtl.Library) !Kernels {
+    pub fn init(device: mtl.Device, lib: mtl.Library, dsa: bool) !Kernels {
         var k: Kernels = undefined;
+        k.index = null;
         var opened: [pipeline_count]mtl.Pipeline = undefined;
         var count: usize = 0;
         errdefer for (opened[0..count]) |p| p.deinit();
@@ -121,18 +121,23 @@ pub const Kernels = struct {
             k.xp_up[i] = try tracked(device, lib, try std.fmt.bufPrint(&buf, "k3_xp_up_r{d}", .{rp}), &opened, &count);
             k.xp_down[i] = try tracked(device, lib, try std.fmt.bufPrint(&buf, "k3_xp_down_r{d}", .{rp}), &opened, &count);
         }
+        k.index = try Index.Pipelines.load(device, dsa);
         return k;
     }
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
-            if (T == mtl.Pipeline) @field(k, name).deinit() else for (&@field(k, name)) |*p| p.deinit();
+            if (T == mtl.Pipeline) {
+                @field(k, name).deinit();
+            } else if (T == ?Index.Pipelines) {
+                if (k.index) |*p| p.deinit();
+            } else for (&@field(k, name)) |*p| p.deinit();
         }
     }
 
     pub fn indexView(k: *const Kernels) @import("index.zig").Pipelines {
-        return .{ .key = k.index_key, .scores = k.index_scores, .select = k.index_topk, .attend = k.index_attend, .merge = k.index_merge };
+        return k.index.?;
     }
 
     /// y[r, n] = x[r] . w[n] for rows r (bf16 rounded, or fp32 when `f32_out`); `w` slice-interleaved, `part` scratch.

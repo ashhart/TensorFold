@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    var g = try Gpu.init();
+    var g = try Gpu.init(false);
     defer g.deinit();
     const cfg = k3.config.Config{};
     std.debug.print("device: {s} (bandwidth here is this GPU's; the M3 Ultra column is 800 GB/s nominal)\n", .{g.device.name()});

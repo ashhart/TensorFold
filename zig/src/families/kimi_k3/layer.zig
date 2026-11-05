@@ -74,14 +74,7 @@ pub fn mla(x: Ctx, e: mtl.ComputeEncoder, i: u32, w: *const weights.Mla) void {
     rows(x, e, xin, w.kva, sc.ref("kv"), H, c.kv_lora + c.rope, H, c.kv_lora + c.rope);
     x.k.mlaCache(e, sc.ref("kv"), w.kva_norm.ref, sc.ref("mrows"), a);
     x.k.mlaQlat(e, sc.ref("q"), w.kvb.ref, sc.ref("qlat"), a);
-    if (x.index != null and x.index.?.visible > @import("index.zig").topk) {
-        const ix = x.index.?;
-        const p = x.k.indexView();
-        p.attention(e, sc.ref("q"), sc.ref("qlat"), ix.ref("rows"), ix.ref("list"), sc.ref("partial"), sc.ref("olat"), a);
-    } else {
-        x.k.mlaAttend(e, sc.ref("q"), sc.ref("qlat"), sc.ref("mrows"), sc.ref("partial"), a);
-        x.k.mlaMerge(e, sc.ref("partial"), sc.ref("mrows"), sc.ref("olat"), a);
-    }
+    @import("attention.zig").encode(x.k, e, c, sc, x.index, a);
     rows(x, e, xin, w.g, sc.ref("g2"), H, ow, H, ow);
     x.k.mlaUv(e, sc.ref("olat"), w.kvb.ref, sc.ref("g2"), sc.ref("y"), a);
     rows(x, e, sc.ref("y"), w.o, sc.ref("delta"), ow, H, ow, H);
