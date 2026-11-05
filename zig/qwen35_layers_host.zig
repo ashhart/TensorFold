@@ -174,7 +174,7 @@ const Real = struct { file: []const u8, json: []const u8, tower: std.json.Object
 const sources = .{
     .{ "src/families/qwen3_5/config.zig", 3 },
     .{ "src/families/qwen3_5/weights/config.zig", 1 },
-    .{ "src/families/qwen3_5/weights/checkpoint_test.zig", 3 },
+    .{ "src/families/qwen3_5/weights/checkpoint_test.zig", 4 }, // with LightOnOCR-3's HF BF16 layout
     .{ "src/families/qwen3_5/cuda_geometry.zig", 3 },
     .{ "src/families/qwen3_5/cuda_modelopt.zig", 1 },
     .{ "src/families/qwen3_5/cuda_quant_admission_test.zig", 1 },
@@ -267,7 +267,7 @@ test "qwen35 layers: real configs, each entry point admits the pattern its old r
             relaxed += @intFromBool(now == .pattern and was == .refused);
         }
     }
-    try t.expectEqual(@as(usize, 20), admitted); // (config, backend) pairs, with #2046's HIP BF16 and #1125's Ornith
+    try t.expectEqual(@as(usize, 21), admitted); // (config, backend) pairs, with #2046's and LightOnOCR-3's HIP BF16 and #1125's Ornith
     try t.expectEqual(@as(usize, 0), relaxed); // none of the repo's configs is one the table newly admits
 }
 

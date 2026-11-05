@@ -261,7 +261,7 @@ test "the production hook is the stream's own cancel check" {
     // cancelOf reads the stream only, so the receiver is never touched.
     const c = source.Hip.cancelOf(&engine, &with);
     try T.expect(c != null);
-    try T.expectEqual(@as(*anyopaque, &flag), c.?.ctx);
+    try T.expectEqual(@as(*anyopaque, &flag), c.?.ptr);
     try T.expect(c.?.check == Flag.check);
     try T.expect(source.Hip.cancelOf(&engine, &without) == null);
 }
