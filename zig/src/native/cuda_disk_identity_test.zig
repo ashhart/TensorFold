@@ -156,3 +156,7 @@ test "disk identity: the shared helper also binds applicable Metal profile value
     try t.expect(unset != profileHash(&.{entry}, "nemotron_h", "metal", &.{.{ entry.id, "1" }}));
     try t.expectEqual(@as(usize, 1), Values.lookups);
 }
+
+test {
+    _ = @import("cuda_disk_policy_test.zig");
+}

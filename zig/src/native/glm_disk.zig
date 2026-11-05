@@ -99,5 +99,28 @@ pub fn identity(a: Allocator, io: std.Io, dir: []const u8, eng: *const glm.engin
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.device.name()));
     @import("disk_identity.zig").profile(&h, .{ .family = "glm5_next", .backend = "metal" });
-    return .{ .id = try @import("disk_identity.zig").scoped(a, io, dir, h.final()), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    const eh_nax = if (std.c.getenv("GLM_EHPROJ_NAX")) |v| v[0] != '0' else true;
+    return .{ .id = try @import("disk_identity.zig").scoped(a, io, dir, withPolicy(h.final(), eng, eh_nax)), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+}
+
+/// Extend a probe identity with the resolved execution policy.
+pub fn withPolicy(legacy: u64, eng: anytype, eh_nax: bool) u64 {
+    const c = eng.c;
+    return @import("persistence_policy.zig").extend(legacy, "glm-metal-policy-v1", &.{
+        c.run,
+        c.tp,
+        c.tp_rank,
+        c.own[0],
+        c.own[1],
+        c.inter[0],
+        c.inter[1],
+        c.dense_inter,
+        c.kda_heads,
+        c.mla_heads,
+        @intFromBool(eng.fused_route),
+        @intFromBool(eng.pr != null),
+        if (eng.pr) |p| p.rows else 0,
+        if (eng.pr) |p| @intFromBool(p.sparse_nax) else 0,
+        @intFromBool(eng.pr != null and eh_nax),
+    });
 }
