@@ -51,7 +51,7 @@ pub const records = [_]Record{
     .{
         .launch = tile(2, 2, 8, true),
         .usage = .{
-            .{ .vgprs = 256, .sgprs = 70, .lds = 0, .private = 124, .bound = 128, .wave = 32 },
+            .{ .vgprs = 136, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 234, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 234, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 234, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
@@ -195,7 +195,7 @@ pub const records = [_]Record{
     .{
         .launch = tile(4, 2, 8, true),
         .usage = .{
-            .{ .vgprs = 256, .sgprs = 70, .lds = 0, .private = 148, .bound = 128, .wave = 32 },
+            .{ .vgprs = 152, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 232, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 232, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 232, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
@@ -411,7 +411,7 @@ pub const records = [_]Record{
     .{
         .launch = tile(8, 2, 8, true),
         .usage = .{
-            .{ .vgprs = 256, .sgprs = 70, .lds = 0, .private = 92, .bound = 128, .wave = 32 },
+            .{ .vgprs = 206, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 232, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 232, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 232, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
