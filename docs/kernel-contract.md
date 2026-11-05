@@ -253,6 +253,22 @@ never rescales, a merge dropping each block's scale, a row projection dropping i
 untransposed and a prompt attention seeing the next key go red at `shapes`, and an argmax never picking a NaN at
 `nonfinite`. The INT4 release's row projections and dequantization have two more: every group taking its row's first
 zero point, and a word's nibbles read in reverse, both red at `shapes`.
+Ripple-65B's own kernels (`metal_ricursive*.zig`): its glue, each output inside float64's range at the release's bf16
+rounding points over the spread its fp32 steps allow (the scaled embedding; the add-norm in the forms the forward runs,
+the value residual's lerp, the sublayer's add and both; q and k's norms with RoPE and a ring slot on sliding layers,
+without RoPE on global ones; the output gate's fp32 sigmoid; the clamped SwiGLU), the decode attention's partials over a
+1,024-key window in a 3,072-slot ring and over a global layer's every key, and on the M5's tensor units the prompt
+attention for both layer kinds; the NVFP4 MLP (E2M1 nibbles low first, an unsigned E4M3 scale a block of 16, the
+tensor's fp32 global): its row kernels, bf16 of the global times the fp32 sum, the prompt's exact dequantization and the
+GEMM taking the global before its one rounding. Llama's row projections, merge, argmax and GEMM forms register again at
+Ripple's shapes (k to 40,960, 80 query heads, 100,352 logits), and Nemotron's `tf_sample_full`, Ripple's sampled draw,
+is held to a stated rule: each draw equals lanes' `gpu_full` twin. Fifteen controls edit the source, each red at
+`shapes`: an embedding reading its own row, an add-norm not writing its residual back, a lerp dropping its blend, a prep
+rotating a global layer or writing one ring slot late, a gate rounding its sigmoid's exp to bf16, a clamp missing its
+lower bound, a decode seeing the key before its window, a prompt attention seeing the 64 keys before it, one whose keys
+wrap 64 slots early, nibbles read high first, a scale's exponent bias off by one, the global applied after the sum
+rounds, a dequantization leaving out a block's scale, and a GEMM never taking the global. Their launches are in
+`ricursive_records.zig`.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and

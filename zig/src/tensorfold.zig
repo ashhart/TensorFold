@@ -64,6 +64,7 @@ pub const step5 = @import("families/step5/step5.zig");
 pub const spark25_metal = @import("families/spark25/metal.zig");
 pub const minimax_m3 = @import("families/minimax_m3/minimax_m3.zig");
 pub const llama = @import("families/llama/llama.zig");
+pub const ricursive = @import("families/ricursive/ricursive.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
@@ -96,6 +97,7 @@ test {
     _ = @import("families/spark25/metal.zig");
     _ = @import("families/minimax_m3/minimax_m3.zig");
     _ = @import("families/llama/llama.zig");
+    _ = @import("families/ricursive/ricursive.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");
