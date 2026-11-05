@@ -317,7 +317,7 @@ pub const Trainer = struct {
         defer t.gpa.free(raw);
         const d = t.e.d;
         try t.e.stream.synchronize();
-        try d.check(d.api.cuMemcpyDtoH_v2(raw.ptr, t.e.layers[l].post_norm, out.len * 2), "cuMemcpyDtoH");
+        try cuda.memory.download(d, t.e.layers[l].post_norm, std.mem.sliceAsBytes(raw)[0 .. out.len * 2]);
         for (out, raw) |*o, b| o.* = @bitCast(@as(u32, b) << 16);
     }
 
@@ -329,7 +329,7 @@ pub const Trainer = struct {
         if (at == 0) return t.resid;
         const d = t.e.d;
         t.e.stream.synchronize() catch return t.resid;
-        d.check(d.api.cuMemcpyDtoH_v2(t.resid.ptr, at + row * t.g.hidden * 2, t.g.hidden * 2), "cuMemcpyDtoH") catch return t.resid;
+        cuda.memory.download(d, at + row * t.g.hidden * 2, std.mem.sliceAsBytes(t.resid)[0 .. t.g.hidden * 2]) catch return t.resid;
         return t.resid;
     }
 

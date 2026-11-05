@@ -264,7 +264,7 @@ pub const Tower = struct {
         const n: usize = @intCast(N * H);
         if ((i + 1) * n > dst.len) return;
         try ru.stream.synchronize();
-        try t.d.check(t.d.api.cuMemcpyDtoH_v2(@ptrCast(dst[i * n ..].ptr), x32, n * 4), "vision stage");
+        try cuda.memory.download(t.d, x32, std.mem.sliceAsBytes(dst[i * n ..])[0 .. n * 4]);
     }
 
     /// D[m, n] = X[m, k] . W[n, k]^T (fp32 or bf16 out), a plan per shape kept for the next image.

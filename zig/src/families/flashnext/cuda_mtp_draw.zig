@@ -83,5 +83,5 @@ pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mt
 
 fn download(st: cuda.Stream, dst: []u8, src: u64) !void {
     try st.synchronize();
-    try st.d.check(st.d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
+    try cuda.memory.download(st.d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
 }
