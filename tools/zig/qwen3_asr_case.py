@@ -78,6 +78,10 @@ def main():
     manifest["attention"] = "global" if a.global_attention else "windows"
     hooks.append(lm.layers[0].register_forward_pre_hook(tap_in("lm_embed")))
     hooks.append(lm.norm.register_forward_hook(tap("lm_norm")))
+    l0 = lm.layers[0]  # layer 0's steps: a wrong LM stage is found inside its first layer
+    hooks += [l0.input_layernorm.register_forward_hook(tap("lm0_norm")), l0.self_attn.o_proj.register_forward_pre_hook(tap_in("lm0_attn")),
+              l0.self_attn.o_proj.register_forward_hook(tap("lm0_o")), l0.post_attention_layernorm.register_forward_hook(tap("lm0_post")),
+              l0.mlp.register_forward_hook(tap("lm0_mlp"))]
     for i in (0, len(lm.layers) // 2, len(lm.layers) - 1):
         hooks.append(lm.layers[i].register_forward_hook(tap(f"lm_layer{i}")))
     inputs = inputs.to(model.dtype)
@@ -91,7 +95,7 @@ def main():
         save(a.out, manifest, name, taps[name][0])
     ids = inputs["input_ids"][0]
     save(a.out, manifest, "prompt_ids", ids, "i32")
-    for name in [k for k in taps if k.startswith("lm_")]:
+    for name in [k for k in taps if k.startswith("lm")]:
         save(a.out, manifest, name, taps[name][0][0])
     new = gen.sequences[0, ids.shape[0]:]
     save(a.out, manifest, "greedy_ids", new, "i32")
