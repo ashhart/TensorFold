@@ -195,7 +195,11 @@ pub fn yielded(h: *LaneHost) void {
 /// The `requests` group from the host's lists; the caller holds the host mutex.
 fn requests(h: *const LaneHost) ledger.Requests {
     var waiting_tokens: u64 = 0;
-    for (h.queued.items) |job| waiting_tokens += job.request.prompt.len;
+    var waits: @import("wait_reason.zig").Waits = .{};
+    for (h.queued.items) |job| {
+        waiting_tokens += job.request.prompt.len;
+        waits.note(waitReason(h, job));
+    }
     const left = filling(h);
     return .{
         .running = @intCast(h.admitted.items.len),
@@ -206,7 +210,22 @@ fn requests(h: *const LaneHost) ledger.Requests {
         .started = h.load.started,
         .requeued = h.load.requeued,
         .yields = h.load.yields,
+        .waiting_reasons = waits.counts,
+        .refusals = h.refusals,
     };
+}
+
+/// Why a queued request is not running: one fixed code, in the order admission decides (lock held).
+fn waitReason(h: *const LaneHost, job: *const Job) @import("wait_reason.zig").Wait {
+    if (h.stale) return .engine_unavailable;
+    if (job.prefix.leader != null) return .prefix_cut;
+    if (@import("lane_host_fetch.zig").held(h, job)) return .state_read;
+    if (@import("lane_host_pressure.zig").holds(h)) return .memory_pressure;
+    const lanes_now = @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes);
+    if (h.admitted.items.len >= lanes_now) return .engine_busy;
+    if (@import("lane_host_ledger.zig").priced(h)) return if (@import("lane_host_ledger.zig").fits(h, job)) .engine_busy else .ledger_bytes;
+    if (h.info_.admit) |a| return if (a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens)) .engine_busy else .pool_room;
+    return .engine_busy;
 }
 
 /// Prompt tokens left in the foreground passes filling now: 0 for none, null when the backend reports no progress.

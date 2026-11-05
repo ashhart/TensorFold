@@ -79,6 +79,9 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const profile_line = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"profile line:"} }));
     profile_line.has_side_effects = true;
     b.step("test-profile-line-host", "Profile start-up line scoping against the tree's real backend names").dependOn(&profile_line.step);
+    const metrics = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "scrape", "load object", "wait reasons:" } }));
+    metrics.has_side_effects = true;
+    b.step("test-load-metrics-host", "Load ledger scrape and /v1/load carry bounded wait and refusal reasons").dependOn(&metrics.step);
     const admitted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"admission"} }));
     admitted.has_side_effects = true;
     b.step("test-admission-host", "Opt-in in-flight caps and per-key rates: limits, 429s over sockets, metrics").dependOn(&admitted.step);

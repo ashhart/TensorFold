@@ -9,16 +9,35 @@ const Id = api.Id;
 const Event = api.Event;
 const Request = api.Request;
 const Engine = api.Engine;
+const reasons = api.wait_reason;
+
+/// A pool where prompts of 64 tokens or more fit only when nothing else runs.
+const Pool = struct {
+    fn fits(_: *anyopaque, prompt: u32, _: u32) bool {
+        return prompt < 64;
+    }
+};
+
+fn cost(_: *anyopaque, prompt: u32, max_tokens: u32) u64 {
+    return @as(u64, prompt + max_tokens) * 4;
+}
 
 /// How a request finished, as the host reports it.
 const Box = struct {
     mutex: std.Io.Mutex = .init,
     done: ?Reason = null,
+    tokens: usize = 0,
     fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
         const b: *@This() = @ptrCast(@alignCast(ctx));
         b.mutex.lockUncancelable(std.testing.io);
         defer b.mutex.unlock(std.testing.io);
         if (e.* == .finished) b.done = e.finished.reason;
+        if (e.* == .tokens) b.tokens += e.tokens.len;
+    }
+    fn started(b: *@This()) bool {
+        b.mutex.lockUncancelable(std.testing.io);
+        defer b.mutex.unlock(std.testing.io);
+        return b.tokens > 0;
     }
     fn wait(b: *@This()) Reason {
         while (true) {
@@ -409,4 +428,134 @@ test "a request holding a lane lowers the free lanes" {
     }
     try std.testing.expectEqual(@as(?u32, 1), watch.free);
     try std.testing.expectEqual(@as(u32, 2), ledger.read().capacity.?.lanes_free);
+}
+
+test "waits by reason: a pool-room head and a lane-full queue each carry one fixed code" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 3, .admit = .{ .ctx = @ptrCast(&rig), .fits = Pool.fits } });
+    defer rig.deinit();
+    var ledger: Ledger = .init(std.testing.io);
+    ledger.attach(rig.host.engine());
+    const short = [_]u32{ 3, 1, 4 };
+    const long: [64]u32 = @splat(7);
+    var a: Box = .{};
+    var c: Box = .{};
+    var d: Box = .{};
+    var e: Box = .{};
+    var f: Box = .{};
+    const rs: Request = .{ .prompt = &short, .max_tokens = 512 };
+    const rl: Request = .{ .prompt = &long, .max_tokens = 4 };
+    try rig.host.engine().submit(1, &rs, a.sink());
+    try rig.host.engine().submit(2, &rl, c.sink());
+    try rig.host.engine().submit(3, &rs, d.sink());
+    try rig.host.start();
+    // one short prompt runs, a second goes beside it, and the long head waits with a lane still free
+    while (!d.started()) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    var q = ledger.read().requests.?;
+    try std.testing.expectEqual(@as(u32, 1), q.waiting);
+    try std.testing.expectEqual(@as(u32, 1), q.waiting_reasons[@backingInt(reasons.Wait.pool_room)]);
+    try std.testing.expectEqual(@as(u32, 0), q.waiting_reasons[@backingInt(reasons.Wait.engine_busy)]);
+    // two more short prompts: one takes the last lane, the rest wait for a lane, the long head included
+    try rig.host.engine().submit(4, &rs, e.sink());
+    try rig.host.engine().submit(5, &rs, f.sink());
+    for (0..2000) |_| {
+        var status: api.Status = .{};
+        rig.host.engine().status(&status, &.{});
+        if (status.running == 3) break;
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    q = ledger.read().requests.?;
+    try std.testing.expectEqual(@as(u32, 2), q.waiting);
+    try std.testing.expectEqual(@as(u32, 0), q.waiting_reasons[@backingInt(reasons.Wait.pool_room)]);
+    try std.testing.expectEqual(q.waiting, q.waiting_reasons[@backingInt(reasons.Wait.engine_busy)]);
+    try std.testing.expectEqual(q.waiting, (reasons.Waits{ .counts = q.waiting_reasons }).total());
+    _ = a.wait();
+    _ = c.wait();
+    _ = d.wait();
+    _ = e.wait();
+    _ = f.wait();
+    ledger.detach(false);
+}
+
+test "repeated prompt failures release every lane and count one fixed refusal each" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 2, .ledger = .{ .ctx = @ptrCast(&rig), .total = 1 << 20, .cost = cost } });
+    defer rig.deinit();
+    rig.target.memory_lanes = 0; // every prompt pass finds no lane memory, even alone
+    var ledger: Ledger = .init(std.testing.io);
+    ledger.attach(rig.host.engine());
+    const prompt = [_]u32{ 2, 7, 1, 8 };
+    var boxes: [3]Box = .{ .{}, .{}, .{} };
+    for (&boxes, 0..) |*b, i| {
+        const request: Request = .{ .prompt = &prompt, .max_tokens = 8 };
+        try rig.host.engine().submit(@intCast(i + 1), &request, b.sink());
+    }
+    try rig.host.start();
+    for (&boxes) |*b| try std.testing.expectEqual(Reason.failed, b.wait());
+    rig.host.lock(); // the last finish's publish has run by the time its event lands
+    rig.host.unlock();
+    const q = ledger.read().requests.?;
+    try std.testing.expectEqual(@as(u32, 0), q.waiting);
+    try std.testing.expectEqual(@as(u32, 0), q.running);
+    try std.testing.expectEqual(@as(u64, 3), q.refusals.count(.lane_memory_alone));
+    try std.testing.expect(rig.host.kv.?.idle()); // every promised lease came back
+    // memory returns: one request runs to its end and leaves the lane free
+    rig.target.memory_lanes = null;
+    var ok: Box = .{};
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 8 };
+    try rig.host.engine().submit(9, &request, ok.sink());
+    _ = ok.wait();
+    rig.host.lock();
+    rig.host.unlock();
+    var status: api.Status = .{};
+    rig.host.engine().status(&status, &.{});
+    try std.testing.expectEqual(@as(u32, 0), status.running);
+    try std.testing.expectEqual(@as(u32, 0), status.waiting);
+    try std.testing.expect(rig.host.kv.?.idle());
+    ledger.detach(false);
+}
+
+test "page-backed waits: publishing a queued request never asks for an absent per-request price" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 1 });
+    defer rig.deinit();
+    const kv = @import("kv_ledger.zig");
+    const Pages = struct {
+        fn read(_: *const anyopaque) kv.Pages {
+            return .{ .total = 4, .available = 4, .reclaimable = 0, .unit = 64 };
+        }
+        fn detach(_: *anyopaque) void {}
+    };
+    rig.host.kv = .ofPages(.{ .ctx = &rig, .read = Pages.read, .detach = Pages.detach });
+    var ledger: Ledger = .init(std.testing.io);
+    ledger.attach(rig.host.engine());
+    const prompt = [_]u32{ 2, 7, 1 };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    var box: Box = .{};
+    try rig.host.engine().submit(1, &request, box.sink());
+    try rig.host.start();
+    _ = box.wait();
+    ledger.detach(false);
+}
+
+test "capacity refusal codes: closed and stale keep their errors and share engine_unavailable" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 1 });
+    defer rig.deinit();
+    var ledger: Ledger = .init(std.testing.io);
+    ledger.attach(rig.host.engine());
+    const prompt = [_]u32{ 2, 7, 1 };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    var box: Box = .{};
+    rig.host.stale = true;
+    try std.testing.expectError(error.Stale, rig.host.engine().submit(1, &request, box.sink()));
+    rig.host.stale = false;
+    rig.host.closing = true;
+    try std.testing.expectError(error.Closed, rig.host.engine().submit(2, &request, box.sink()));
+    const q = ledger.read().requests.?;
+    try std.testing.expectEqual(@as(u64, 2), q.refusals.count(.engine_unavailable));
+    try std.testing.expectEqual(@as(u64, 0), q.refusals.count(.engine_busy));
+    try std.testing.expectEqual(@as(u32, 0), q.waiting);
+    rig.host.closing = false;
+    ledger.detach(false);
 }

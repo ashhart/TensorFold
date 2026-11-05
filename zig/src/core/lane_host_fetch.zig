@@ -43,7 +43,7 @@ pub fn queue(h: *LaneHost) void {
 }
 
 /// Whether queued `job` waits for its read: still going and inside the bound (the lock held).
-pub fn held(h: *LaneHost, job: *const Job) bool {
+pub fn held(h: *const LaneHost, job: *const Job) bool {
     const r = (h.cache orelse return false).disk orelse return false;
     const f = r.fetch orelse return false;
     if (job.fetch.writing) |name| {

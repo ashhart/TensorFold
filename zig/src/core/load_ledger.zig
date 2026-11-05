@@ -1,6 +1,7 @@
 //! The server's load ledger: scheduler load a host publishes as it happens, read whole by /metrics and /v1/load.
 const std = @import("std");
 const api = @import("engine_api.zig");
+const reasons = @import("wait_reason.zig");
 
 /// The model routes `http_requests_active` counts apart; a fixed set, so the label never grows.
 pub const RouteGroup = enum { chat_completions, completions, responses, messages, embeddings, speech, other };
@@ -20,6 +21,10 @@ pub const Requests = struct {
     started: u64 = 0,
     requeued: u64 = 0,
     yields: u64 = 0,
+    /// The queued requests by fixed wait reason; their sum is `waiting`.
+    waiting_reasons: [reasons.wait_count]u32 = @splat(0),
+    /// Refused requests by fixed reason; counters, folded into `base` at detach.
+    refusals: reasons.Refusals = .{},
 };
 
 /// The `work` group: prompt and output tokens as they are computed, and the engine time of their prompt calls.
@@ -181,6 +186,7 @@ fn fold(base: *Groups, cur: Groups) void {
         b.started += r.started;
         b.requeued += r.requeued;
         b.yields += r.yields;
+        b.refusals = reasons.Refusals.add(b.refusals, r.refusals);
     }
     if (cur.work) |w| base.work = addWork(w, base.work.?);
 }
@@ -191,6 +197,7 @@ fn addRequests(r: Requests, base: Requests) Requests {
     out.started += base.started;
     out.requeued += base.requeued;
     out.yields += base.yields;
+    out.refusals = reasons.Refusals.add(out.refusals, base.refusals);
     return out;
 }
 

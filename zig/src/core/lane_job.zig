@@ -68,6 +68,7 @@ pub const Job = struct {
         const store = job.host.cache orelse return;
         if (!job.started) return store.release(e);
         job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
+        if (job.stream.reuse_failed) job.host.refused(.restore_refused);
         const ok = !job.stream.reuse_failed and job.stream.cached == e.at;
         if (job.stream.reuse_failed or ok) store.resumedWithReason(e, job.cacheKey(), if (ok) null else job.stream.reuse_error orelse error.RestoreRejected) else store.release(e);
     }

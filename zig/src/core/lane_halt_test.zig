@@ -46,7 +46,7 @@ fn haltCase(release_at_stop: ?*bool) !void {
         fn admit(ctx: *anyopaque, ask: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
             const p = self(ctx);
             for (p.seqs.items) |x| if (!x.decoding) return .wait;
-            p.seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
+            p.seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .{ .refuse = .backend };
             return .admit;
         }
         fn admitted(_: *anyopaque) anyerror!void {}

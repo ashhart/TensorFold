@@ -24,7 +24,8 @@ pub const Rounds = struct {
         }
     } else struct {};
 
-    pub const Verdict = enum { admit, wait, skip, refuse };
+    pub const Refusal = enum { too_large, memory, backend };
+    pub const Verdict = union(enum) { admit, wait, skip, refuse: Refusal };
     pub const Piece = struct { key: usize, start: u64, end: u64, save: bool, run: bool = true };
     pub const Ask = struct { key: usize, prompt: []const u32, max_tokens: u32, submitted_s: f64 };
 
@@ -85,7 +86,12 @@ fn round(h: *LaneHost, rd: Rounds) bool {
                 },
                 .wait => break,
                 .skip => i += 1,
-                .refuse => {
+                .refuse => |r| {
+                    h.refusals.note(switch (r) {
+                        .too_large => .prompt_too_large,
+                        .memory => .lane_memory_alone,
+                        .backend => .backend_prompt,
+                    });
                     if (refused.append(h.gpa, .{ .job = job, .why = why })) |_| {} else |_| break;
                     _ = h.queued.orderedRemove(i);
                 },
@@ -184,6 +190,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
 
 /// A job whose piece failed: dropped and taken out of this round's finals (`drop` frees the job).
 fn dropPiece(h: *LaneHost, job: *Job, message: []const u8) void {
+    h.refused(.backend_prompt);
     const key = @intFromPtr(job);
     for (h.pieces.items) |*piece| if (piece.key == key) {
         piece.run = false;
@@ -217,6 +224,7 @@ fn runFinals(h: *LaneHost) void {
             }
             h.core.prepareFinals(ss[0..n]) catch |e| {
                 ends.failed(h, e);
+                h.refused(.backend_prompt);
                 ends.failAll(h, h.words(e));
                 return;
             };
@@ -246,6 +254,7 @@ fn runFinals(h: *LaneHost) void {
             if (joined > 0) std.log.info("join drafts: {d} of {d} finished prompts drafted in one pass", .{ joined, n });
             for (jobs[0..n], errs[0..n]) |job, x| {
                 if (x) |e| {
+                    if (e != error.Cancelled) h.refused(.backend_prompt);
                     _ = if (e == error.Cancelled) h.cancel(job) else ends.dropFailed(h, job, e);
                     continue;
                 }
@@ -258,6 +267,7 @@ fn runFinals(h: *LaneHost) void {
         const job: *Job = @ptrFromInt(key);
         if (job.stream.finished) continue;
         h.core.finishStream(&job.stream) catch |e| {
+            if (e != error.Cancelled) h.refused(.backend_prompt);
             _ = if (e == error.Cancelled) h.cancel(job) else ends.dropFailed(h, job, e);
             continue;
         };

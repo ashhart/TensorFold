@@ -89,7 +89,7 @@ pub const SchedHost = struct {
         const before = h.p.counts;
         const v = h.p.admit(&h.round, .{ .key = ask.key, .n = ask.prompt.len, .max_new = ask.max_tokens, .submitted = ask.submitted_s }, store, h.now(), h.memory()) catch |e| {
             words.* = @errorName(e);
-            return .refuse;
+            return .{ .refuse = .backend };
         };
         h.logWait(ask, v, before);
         switch (v) {
@@ -97,7 +97,7 @@ pub const SchedHost = struct {
                 h.admits.put(h.gpa, ask.key, a) catch {
                     h.p.ended(ask.key);
                     words.* = "out of memory";
-                    return .refuse;
+                    return .{ .refuse = .backend };
                 };
                 return .admit;
             },
@@ -108,7 +108,10 @@ pub const SchedHost = struct {
                     .too_large => "the request needs more KV pool pages than the pool has",
                     .memory => "the prompt's prefill cannot fit in this server's memory now (TF_DSV41_FLOOR_HARD_GIB)",
                 };
-                return .refuse;
+                return .{ .refuse = switch (r) {
+                    .too_large => .too_large,
+                    .memory => .memory,
+                } };
             },
         }
     }
@@ -123,13 +126,19 @@ pub const SchedHost = struct {
                 const waited = (h.waits.waiting(h.gpa, ask.key, t) catch return) orelse return;
                 if (c.pool_waits > before.pool_waits) {
                     const free = if (h.gt.sessions) |ss| ss.store.pool.available() else 0;
-                    log.info("admission: request {x} ({d} prompt tokens) has waited {d:.0} s for the KV pool: {d} pages wanted, {d} free, running requests hold the rest", .{ ask.key, ask.prompt.len, waited, h.want, free });
+                    log.info("admission: request {x} ({d} prompt tokens) has waited {d:.0} s reason={s}: {d} pages wanted, {d} free, running requests hold the rest", .{ ask.key, ask.prompt.len, waited, api.wait_reason.waitCode(.kv_pool), h.want, free });
                 } else if (c.mem_waits > before.mem_waits) {
-                    log.info("admission: request {x} ({d} prompt tokens) has waited {d:.0} s for the memory floor (TF_DSV41_FLOOR_HARD_GIB)", .{ ask.key, ask.prompt.len, waited });
-                } else log.info("admission: request {x} ({d} prompt tokens) has waited {d:.0} s behind a long prompt prefilling (TF_DSV41_PREFILL_CONCURRENT)", .{ ask.key, ask.prompt.len, waited });
+                    log.info("admission: request {x} ({d} prompt tokens) has waited {d:.0} s reason={s} (TF_DSV41_FLOOR_HARD_GIB)", .{ ask.key, ask.prompt.len, waited, api.wait_reason.waitCode(.memory_floor) });
+                } else log.info("admission: request {x} ({d} prompt tokens) has waited {d:.0} s reason={s} (TF_DSV41_PREFILL_CONCURRENT)", .{ ask.key, ask.prompt.len, waited, api.wait_reason.waitCode(.prefill_concurrent) });
             },
             .admit => if (h.waits.done(ask.key, t)) |waited| log.info("admission: request {x} admitted after {d:.1} s", .{ ask.key, waited }),
-            .refuse => _ = h.waits.done(ask.key, t),
+            .refuse => |r| {
+                _ = h.waits.done(ask.key, t);
+                log.info("admission: request {x} ({d} prompt tokens) refused reason={s}", .{ ask.key, ask.prompt.len, api.wait_reason.refusalCode(switch (r) {
+                    .too_large => .prompt_too_large,
+                    .memory => .lane_memory_alone,
+                }) });
+            },
         }
     }
 

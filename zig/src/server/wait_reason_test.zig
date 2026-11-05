@@ -210,3 +210,13 @@ test "wait reasons HTTP: a failed reload answers 503 engine_reload_failed and le
         try t.expectEqual(round + 1, broken.attempts);
     }
 }
+
+test "wait reasons: HTTP capacity codes equal load and scrape codes" {
+    const reasons = api.wait_reason;
+    try t.expectEqualStrings(wait.engine_busy, reasons.waitCode(.engine_busy));
+    try t.expectEqualStrings(wait.engine_busy, reasons.refusalCode(.engine_busy));
+    try t.expectEqualStrings(wait.engine_unavailable, reasons.waitCode(.engine_unavailable));
+    try t.expectEqualStrings(wait.engine_unavailable, reasons.refusalCode(.engine_unavailable));
+    try t.expectEqualStrings(wait.memory_pressure, reasons.waitCode(.memory_pressure));
+    try t.expectEqualStrings(wait.memory_pressure, reasons.refusalCode(.memory_pressure));
+}

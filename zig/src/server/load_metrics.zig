@@ -29,6 +29,14 @@ pub fn render(w: *std.Io.Writer, s: ledger.Snapshot, id: Identity) !void {
         try w.print("{s}http_requests_active{{route=\"{s}\"}} {d}\n", .{ prefix, @tagName(g), s.active(g) });
     if (s.requests) |r| {
         try gauge(w, "waiting_prompt_tokens", "gauge", "Prompt tokens of the queued requests, before any kept prefix restores part of them.", r.waiting_prompt_tokens);
+        try family(w, "requests_waiting_by_reason", "gauge", "Queued requests by fixed wait reason; the sum is requests_waiting.");
+        for (std.enums.values(api.wait_reason.Wait)) |why| {
+            try w.print("{s}requests_waiting_by_reason{{reason=\"{s}\"}} {d}\n", .{ prefix, api.wait_reason.waitCode(why), r.waiting_reasons[@backingInt(why)] });
+        }
+        try family(w, "request_refusals_total", "counter", "Refused requests by fixed reason.");
+        for (std.enums.values(api.wait_reason.Refusal)) |why| {
+            try w.print("{s}request_refusals_total{{reason=\"{s}\"}} {d}\n", .{ prefix, api.wait_reason.refusalCode(why), r.refusals.count(why) });
+        }
         if (r.filling_left) |left| try gauge(w, "filling_prompt_tokens_left", "gauge", "Prompt tokens still to prefill in the foreground passes filling now.", left);
         try gauge(w, "requests_started_total", "counter", "Requests the engine accepted into its queue.", r.started);
         try gauge(w, "requests_requeued_total", "counter", "Admitted requests that lost their lane for memory before a first token and queued again.", r.requeued);
@@ -77,6 +85,16 @@ pub fn object(a: Allocator, s: ledger.Snapshot, now_s: f64, model: []const u8) A
         try o.put(a, "requests_requeued", try json.intValue(a, r.requeued));
         try o.put(a, "background_yields", try json.intValue(a, r.yields));
         try o.put(a, "waiting_prompt_tokens", try json.intValue(a, r.waiting_prompt_tokens));
+        const waits = try json.newObject(a);
+        for (std.enums.values(api.wait_reason.Wait)) |why| {
+            try waits.put(a, api.wait_reason.waitCode(why), try json.intValue(a, r.waiting_reasons[@backingInt(why)]));
+        }
+        try o.put(a, "waiting_by_reason", .{ .object = waits });
+        const refused = try json.newObject(a);
+        for (std.enums.values(api.wait_reason.Refusal)) |why| {
+            try refused.put(a, api.wait_reason.refusalCode(why), try json.intValue(a, r.refusals.count(why)));
+        }
+        try o.put(a, "refusals", .{ .object = refused });
         if (r.filling_left) |left| try o.put(a, "filling_prompt_tokens_left", try json.intValue(a, left));
         try o.put(a, "fill_unknown", .{ .bool = r.fill_unknown });
     }
