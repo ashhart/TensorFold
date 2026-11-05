@@ -5,7 +5,7 @@ the same profile. It enables no additional optimization and supplies no new envi
 
 This is the foundation of [#1660](https://github.com/ashhart/TensorFold/issues/1660), beginning with the CUDA KV
 switches in its first table, their `_ALL` companions, GLM's and Nemotron's paging policies, and the CUDA runtime's
-pinned download staging (nine variables).
+pinned download staging (eleven variables).
 It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings continue through their existing readers. `fast-exact` and `fast`
 are refused by name; they are not aliases
 for `stable` and cannot enable unqualified optimizations.
