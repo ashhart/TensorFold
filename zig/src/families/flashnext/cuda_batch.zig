@@ -391,7 +391,7 @@ pub fn Pass(comptime Tri: type) type {
                     a.add(cint(ratio));
                     try cuda.launch.launch(self.k.select, .{ .grid = .{ .x = @intCast(m) }, .block = .{ .x = 1024 } }, self.stream, &a);
                     if (self.seq.sel) |t| {
-                        try @import("exl3/kv/cuda_exl3_kvtier.zig").attend(t, self, sl, .{ .q = at.q + r0 * qr, .ao = at.ao + r0 * qr, .kc = kc, .vc = vc, .pos = pos, .sel = sel, .m = m, .ends = ends, .first_row = self.pos0 + r0 });
+                        try @import("exl3/kv/cuda_exl3_kvtier.zig").attend(t, self, sl, .{ .q = at.q + r0 * qr, .ao = at.ao + r0 * qr, .kc = kc, .vc = vc, .pos = pos, .sel = sel, .m = m, .ends = ends, .first_row = self.pos0 + r0, .heads = h });
                     } else if (!fused) {
                         const chunks = cdiv(@min(ends, wt.dense_keys), 512);
                         try self.tri.attnChunks(at.q + r0 * qr, kc, vc, pos, s.po, s.pm, s.pl, s.qids, s.qnk, s.qspr, m, h, chunks, true, pg);
