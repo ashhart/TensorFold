@@ -1,4 +1,4 @@
-//! Gemma 4 E-series per-layer inputs on CUDA (#1222): tf_ple_rows bit-equal to layer_input.zig's host steps.
+//! Gemma 4 E-series per-layer inputs on CUDA (#1222): tf_gemma4_ple_rows bit-equal to layer_input.zig's host steps.
 const std = @import("std");
 const cuda = @import("cuda");
 const g4 = @import("gemma4_cuda");
@@ -17,7 +17,7 @@ fn value(b: u16) f32 {
 }
 
 /// One draw of `rows` rows: the kernel's bits against the host steps after the projection, every value.
-fn draw(gpu: check.Gpu, s: cuda.Stream, act: *const cuda.act_rows.ActRows, r: std.Random, rows: usize, spread: f32) !void {
+fn draw(gpu: check.Gpu, s: cuda.Stream, ple: *const g4.ple.PleRows, r: std.Random, rows: usize, spread: f32) !void {
     const gpa = gpu.gpa;
     const n = rows * parts * width;
     const p = try gpa.alloc(u16, n);
@@ -28,7 +28,7 @@ fn draw(gpu: check.Gpu, s: cuda.Stream, act: *const cuda.act_rows.ActRows, r: st
     for (p) |*v| v.* = bf16(r.floatNorm(f32) * spread);
     for (t) |*v| v.* = bf16(r.floatNorm(f32) * 0.05);
     for (&w) |*v| v.* = bf16(1 + 0.5 * r.floatNorm(f32));
-    const c: cuda.act_rows.ActRows.Ple = .{ .scale = li.scalar(1.0 / @sqrt(2560.0)), .token = li.scalar(@sqrt(256.0)), .mix = li.scalar(std.math.sqrt1_2), .eps = 1e-6 };
+    const c: g4.ple.Scalars = .{ .scale = li.scalar(1.0 / @sqrt(2560.0)), .token = li.scalar(@sqrt(256.0)), .mix = li.scalar(std.math.sqrt1_2), .eps = 1e-6 };
     var dp = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(p));
     defer dp.free();
     var dt = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(t));
@@ -37,7 +37,7 @@ fn draw(gpu: check.Gpu, s: cuda.Stream, act: *const cuda.act_rows.ActRows, r: st
     defer dw.free();
     var out = try cuda.DeviceBuffer.alloc(gpu.d, n * 2);
     defer out.free();
-    try act.ple(s, dp.ptr, dt.ptr, dw.ptr, out.ptr, rows, parts, c);
+    try ple.run(s, dp.ptr, dt.ptr, dw.ptr, out.ptr, rows, parts, c);
     try s.synchronize();
     const got = try gpa.alloc(u16, n);
     defer gpa.free(got);
@@ -61,10 +61,10 @@ fn draw(gpu: check.Gpu, s: cuda.Stream, act: *const cuda.act_rows.ActRows, r: st
 pub fn run(gpu: check.Gpu) !void {
     var s = try cuda.Stream.init(gpu.d, false);
     defer s.deinit();
-    var act = try cuda.act_rows.ActRows.load(gpu.d);
-    defer act.unload();
+    var ple = try g4.ple.PleRows.load(gpu.d);
+    defer ple.unload();
     var prng = std.Random.DefaultPrng.init(1222);
-    for ([_]usize{ 1, 3, 17, 128, 512 }) |rows| for ([_]f32{ 0.02, 1, 40 }) |spread| try draw(gpu, s, &act, prng.random(), rows, spread);
-    try std.testing.expectError(error.RowShape, act.ple(s, 8, 16, 0, 16, 1, 1, undefined));
+    for ([_]usize{ 1, 3, 17, 128, 512 }) |rows| for ([_]f32{ 0.02, 1, 40 }) |spread| try draw(gpu, s, &ple, prng.random(), rows, spread);
+    try std.testing.expectError(error.RowShape, ple.run(s, 8, 16, 0, 16, 1, 1, undefined));
     check.pass("gemma4 ple rows: 1 to 512 rows of 42 parts bit-equal to layer_input.zig's steps at three scales", .{});
 }

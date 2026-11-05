@@ -348,8 +348,8 @@ pub const Model = struct {
         try m.project(k, s, p.project, x.h[0], x.xs, x.li.proj, rows, prompt);
         try k.embed.affine(s, x.ids, p.table_w, p.table_s, p.table_b, x.li.table, rows, stacked, .{ .bits = p.table_bits, .group = cfg.group });
         const li = @import("cuda_layer_input.zig");
-        const c: cuda.act_rows.ActRows.Ple = .{ .scale = li.scalar(1.0 / @sqrt(@as(f64, @floatFromInt(g.hidden)))), .token = li.scalar(@sqrt(@as(f64, @floatFromInt(g.layer_input)))), .mix = li.scalar(std.math.sqrt1_2), .eps = cfg.eps };
-        try k.act.ple(s, x.li.proj, x.li.table, p.norm, x.li.all, rows, g.layers, c);
+        const c: @import("cuda_ple.zig").Scalars = .{ .scale = li.scalar(1.0 / @sqrt(@as(f64, @floatFromInt(g.hidden)))), .token = li.scalar(@sqrt(@as(f64, @floatFromInt(g.layer_input)))), .mix = li.scalar(std.math.sqrt1_2), .eps = cfg.eps };
+        try k.ple.run(s, x.li.proj, x.li.table, p.norm, x.li.all, rows, g.layers, c);
     }
 
     /// Layer i's per-layer block on the residual in s.h[0]: gate, GeGLU with its inputs, projection, the scaled tail.
