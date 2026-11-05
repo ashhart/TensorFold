@@ -236,7 +236,7 @@ test "exl3: a host-tier snapshot refuses another lease's pin before copying and 
     seq.paged.?.hbase = 0x6000_0000;
     seq.fed = 0;
     seq.history = .{ 1, 2 };
-    const kept: snap.Snap = .{ .buf = .{ .d = &d, .ptr = 0x8000_0000, .len = snap.bytes(150, false), .borrowed = true }, .at = 150, .history = .{ 5, 9 }, .head = false };
+    const kept: snap.Snap = .{ .buf = .{ .d = &d, .ptr = 0x8000_0000, .len = snap.bytes(150, false, seq.heads), .borrowed = true }, .at = 150, .history = .{ 5, 9 }, .head = false, .heads = seq.heads };
     try t.expectError(error.Pinned, snap.restore(stream, &seq, null, &kept));
     try t.expectEqual(@as(usize, 0), Fake.n);
     try t.expectEqual(@as(usize, 0), seq.fed);
