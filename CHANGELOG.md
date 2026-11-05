@@ -157,7 +157,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next's first CUDA EXL3 slice uses the canonical fp32 expert tree, so adding tensor parallelism preserves its one-rank reduction order (#1441, #1442). Other formats are unchanged.
 
-- Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441). Its configured prompt cut stays fixed when main widens a one-stream ModelOpt pass, preserving stream-independent EXL3 arithmetic.
+- Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441). Its configured prompt cut stays fixed when main widens a one-stream ModelOpt pass, preserving stream-independent EXL3 arithmetic. The kernel contract retains main's shared-down suite beside EXL3, releasing both if setup fails.
 
 - Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks.
 
