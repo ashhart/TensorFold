@@ -536,9 +536,7 @@ test "gather ids include an out-of-range id and a repeat, the rest are valid row
 }
 
 test "runAll swallows a kernel run's fence Timeout, so every fixture GPU call must exit before it escapes" {
-    // The real teardown failure needs a wedged GPU; this locks the channel instead: gates.zig's runAll
-    // converts error.Timeout to a FAIL verdict instead of propagating, so a guard inside the fixture's
-    // GPU calls (vk.orExit) is the only thing between a fence timeout and unwinding into rig frees.
+    // runAll turns a fence Timeout into a FAIL verdict, so vk.orExit in the fixture's GPU calls is the only exit.
     const F = struct {
         fn prepare(_: *anyopaque, _: c.Shape, _: g.Fill, _: u64) anyerror!bool {
             return true;
