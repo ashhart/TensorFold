@@ -11,6 +11,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the slow drafted request after a `draft: false` one no longer reproduces, and the expert recipe lists peak memory at each `--ssd-experts` budget (#2237).
 
 - Flash Next with `--ssd-experts`: a request no longer waits for a forecast read it doesn't need, and a forecast that never started keeps the expert it displaced: about 8% faster at 35 GiB and 4% at 17 GiB (#2236).
+- CUDA on integrated GPUs such as the GB10: synchronous downloads stage through a per-thread pinned buffer, which guards against a driver fault where a copy into pageable memory could miss pages. Discrete cards keep the direct copy. On an idle GB10, large copies take longer: 212 µs instead of 85 µs at 4 MiB (#2103). Thanks to @shuuul.
 
 - CI: a pull request's `zig` and `zig-windows` jobs reuse main's test passes and compiles, C and C++ included, so they run only what its diff changed; main still checks every commit from scratch (#2274).
 
@@ -20,9 +21,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CI: main's build cache now fits every runner, because CI compiles host code for one CPU, and `release-paths` and the macOS dev tools use the cache too (#2252).
 
-- Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) runs on CUDA from `mlx_lm.convert` 4-bit checkpoints: per-layer inputs in their own launch and layers 24 to 41 on the caches of 22 and 23, with replies equal across streams and resumes (#1222, #2230).
+- Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) runs on CUDA from `mlx_lm.convert` 4-bit checkpoints: per-layer inputs in their own launch and layers 24 to 41 on the caches of 22 and 23, with replies equal across streams and resumes (#1222, #2230). Thanks to @jschmied.
 
-- Qwen3-Reranker-8B on HIP computes a rerank request's shared start (the system prompt, the instruction and the query) once a pass instead of once a document, with the same responses byte for byte: 16 documents of about 260 tokens take 1.98 s instead of 2.63 s on the dot2 tile and 0.73 s instead of 0.99 s with the gfx12 WMMA tile (opt-in, `--policy matrix=on`), on a Radeon AI PRO R9700. The decide GPU checks now run on the tile and attention path that `TF_QWEN3_MATRIX` and `TF_QWEN3_ATTENTION` choose (#2245). Thanks to @laudney.
+- Qwen3-Reranker-8B on HIP computes a rerank request's shared start (the system prompt, the instruction and the query) once a pass instead of once a document, with the same responses byte for byte: 16 documents of 323 tokens, 87 of them shared, take 1.98 s instead of 2.63 s on the dot2 tile and 0.73 s instead of 0.99 s with the gfx12 WMMA tile (opt-in, `--policy matrix=on`), on a Radeon AI PRO R9700. The decide GPU checks now run on the tile and attention path that `TF_QWEN3_MATRIX` and `TF_QWEN3_ATTENTION` choose (#2262, part of #2245). Thanks to @laudney.
 
 ## 1.2.3
 
