@@ -9,6 +9,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (@hasField(F.Options, "mtp_drafts") and o.mtp_drafts == 0) opts.drafts = false;
     if (@hasField(F.Options, "lanes")) opts.lanes = o.lanes;
     if (@hasField(F.Options, "lanes_fixed")) opts.lanes_fixed = o.lanes_fixed;
+    if (@hasField(F.Options, "one_stream")) opts.one_stream = o.lanes == 1;
     if (@hasField(F.Options, "rank")) {
         opts.tp = @intCast(o.tp);
         opts.rank = @intCast(o.rank);

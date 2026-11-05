@@ -14,16 +14,19 @@ pub fn chunkRows() !usize {
     return parseChunk(if (std.c.getenv("TF_FLASHNEXT_CHUNK")) |v| std.mem.span(v) else null);
 }
 
-/// TF_FLASHNEXT_CHUNK_SOLO's rows for a pass no other stream waits on: unset, `busy` (off); below `busy`, refused.
-pub fn parseSolo(v: ?[]const u8, busy: usize) !usize {
-    const s = v orelse return busy;
+/// A pass's rows on a server of one stream: no request waits on a pass there, and this takes most of 16,384's gain.
+pub const lone_rows: usize = 8192;
+
+/// TF_FLASHNEXT_CHUNK_SOLO's rows: unset, `lone_rows` when `lone`, else `busy` (off); below `busy`, refused.
+pub fn parseSolo(v: ?[]const u8, busy: usize, lone: bool) !usize {
+    const s = v orelse return if (lone) @max(busy, lone_rows) else busy;
     const n = parseChunk(s) catch return error.BadChunk;
     if (n < busy) return error.BadChunk;
     return n;
 }
 
-pub fn soloRows(busy: usize) !usize {
-    return parseSolo(if (std.c.getenv("TF_FLASHNEXT_CHUNK_SOLO")) |v| std.mem.span(v) else null, busy);
+pub fn soloRows(busy: usize, lone: bool) !usize {
+    return parseSolo(if (std.c.getenv("TF_FLASHNEXT_CHUNK_SOLO")) |v| std.mem.span(v) else null, busy, lone);
 }
 
 /// The rows a pass of `own` takes when it starts: `solo` unless another lane's prompt is in (it decodes).
@@ -53,10 +56,16 @@ test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the re
 }
 
 test "TF_FLASHNEXT_CHUNK_SOLO is off unset, takes the busy chunk to the largest pass and refuses the rest" {
-    try std.testing.expectEqual(@as(usize, 1536), try parseSolo(null, 1536));
-    try std.testing.expectEqual(@as(usize, 8192), try parseSolo("8192", 1536));
-    try std.testing.expectEqual(@as(usize, 1536), try parseSolo("1536", 1536));
-    for ([_][]const u8{ "1024", "0", "16385", "8k", "" }) |bad| try std.testing.expectError(error.BadChunk, parseSolo(bad, 1536));
+    try std.testing.expectEqual(@as(usize, 1536), try parseSolo(null, 1536, false));
+    try std.testing.expectEqual(@as(usize, 8192), try parseSolo("8192", 1536, false));
+    try std.testing.expectEqual(@as(usize, 1536), try parseSolo("1536", 1536, false));
+    for ([_][]const u8{ "1024", "0", "16385", "8k", "" }) |bad| try std.testing.expectError(error.BadChunk, parseSolo(bad, 1536, false));
+}
+
+test "a server of one stream takes the larger pass unless the variable or a larger busy chunk says otherwise" {
+    try std.testing.expectEqual(lone_rows, try parseSolo(null, 1536, true));
+    try std.testing.expectEqual(@as(usize, 1536), try parseSolo("1536", 1536, true));
+    try std.testing.expectEqual(@as(usize, 16384), try parseSolo(null, 16384, true));
 }
 
 test "a pass takes the solo rows unless another lane decodes; prompts still filling do not count" {
