@@ -287,7 +287,7 @@ pub const Gdn = struct {
         const wide = variant == .f32;
         if (wide) {
             try wantF32(&.{ conv_out, conv_input, conv_state_in, qkv, weight, conv_state_out, out_soa });
-            try wantBf16(&.{ beta_out });
+            try wantBf16(&.{beta_out});
         } else {
             try wantBf16(&.{ conv_out, conv_input, conv_state_in, qkv, weight, conv_state_out, out_soa, beta_out });
         }
