@@ -11,6 +11,9 @@ fn job(h: *Host, r: *const api.Request) Host.Job {
     var j: Host.Job = .{ .host = h, .id = 1, .request = r, .sink = .{ .ctx = h, .event = event } };
     j.stream.prompt_len = r.prompt.len;
     j.stream.cached = 0;
+    // the ranking reads the stream defaults this test never sets
+    j.stream.reuse = .{};
+    j.stream.reuse_failed = false;
     return j;
 }
 
