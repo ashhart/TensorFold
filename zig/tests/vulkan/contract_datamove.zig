@@ -142,9 +142,9 @@ pub fn Cast(comptime to_bf16: bool) type {
             const src = try self.rig.view(self.in_at, in_kind, self.elements);
             const out = try self.rig.view(self.out_at, out_kind, self.elements);
             if (to_bf16) {
-                try self.o.castF32ToBf16(self.rig.cmds, out, src, self.rig.timeout_ns);
+                try vk.orExit(self.o.castF32ToBf16(self.rig.cmds, out, src, self.rig.timeout_ns));
             } else {
-                try self.o.castBf16ToF32(self.rig.cmds, out, src, self.rig.timeout_ns);
+                try vk.orExit(self.o.castBf16ToF32(self.rig.cmds, out, src, self.rig.timeout_ns));
             }
         }
 
@@ -241,7 +241,7 @@ pub fn Copy(comptime kind: vk.tensor.Kind) type {
         pub fn run(self: *Self) !void {
             const src = try self.rig.view(self.in_at, kind, self.elements);
             const dst = try self.rig.view(self.out_at, kind, self.elements);
-            try self.o.copy(self.rig.cmds, dst, src, self.rig.timeout_ns);
+            try vk.orExit(self.o.copy(self.rig.cmds, dst, src, self.rig.timeout_ns));
         }
 
         pub fn count(self: *Self) usize {
@@ -357,7 +357,7 @@ pub fn Gather(comptime kind: vk.tensor.Kind) type {
             const out = try self.rig.view(self.out_at, kind, self.tokens * self.cols);
             const table = try self.rig.view(self.table_at, kind, self.table_rows * self.cols);
             const ids = try self.rig.view(self.ids_at, .u32, self.tokens);
-            try self.o.gather(self.rig.cmds, out, table, ids, self.table_rows, self.rig.timeout_ns);
+            try vk.orExit(self.o.gather(self.rig.cmds, out, table, ids, self.table_rows, self.rig.timeout_ns));
         }
 
         pub fn count(self: *Self) usize {
@@ -485,7 +485,7 @@ pub const Dequant = struct {
         const w = try self.rig.view(self.w_at, .u32, self.rows * self.words);
         const scales = try self.rig.view(self.s_at, .bf16, self.rows * self.groups);
         const biases = try self.rig.view(self.b_at, .bf16, self.rows * self.groups);
-        try self.o.dequant(self.rig.cmds, out, w, scales, biases, self.words * 8, group, self.rig.timeout_ns);
+        try vk.orExit(self.o.dequant(self.rig.cmds, out, w, scales, biases, self.words * 8, group, self.rig.timeout_ns));
     }
 
     pub fn count(self: *Dequant) usize {
@@ -533,4 +533,52 @@ test "gather ids include an out-of-range id and a repeat, the rest are valid row
     try testing.expectEqual(@as(u32, 5), ids[0]); // out of range: gathers zeros, never a table row
     try testing.expectEqual(ids[1], ids[2]); // a repeated row
     for (ids[1..]) |id| try testing.expect(id < 5);
+}
+
+test "runAll swallows a kernel run's fence Timeout, so every fixture GPU call must exit before it escapes" {
+    // The real teardown failure needs a wedged GPU; this locks the channel instead: gates.zig's runAll
+    // converts error.Timeout to a FAIL verdict instead of propagating, so a guard inside the fixture's
+    // GPU calls (vk.orExit) is the only thing between a fence timeout and unwinding into rig frees.
+    const F = struct {
+        fn prepare(_: *anyopaque, _: c.Shape, _: g.Fill, _: u64) anyerror!bool {
+            return true;
+        }
+        fn run(_: *anyopaque) anyerror!void {
+            return error.Timeout;
+        }
+        fn output(_: *anyopaque) anyerror![]const u8 {
+            return "";
+        }
+        fn inputs(_: *anyopaque) anyerror![]const u8 {
+            return "";
+        }
+        fn intact(_: *anyopaque) anyerror!bool {
+            return true;
+        }
+        fn overlap(_: *anyopaque) bool {
+            return false;
+        }
+        fn count(_: *anyopaque) usize {
+            return 0;
+        }
+        fn reference(_: *anyopaque, want: []f64, mag: []f64) anyerror!void {
+            @memset(want, 0);
+            @memset(mag, 0);
+        }
+    };
+    const vt = g.VTable{
+        .prepare = F.prepare,
+        .run = F.run,
+        .output = F.output,
+        .inputs = F.inputs,
+        .intact = F.intact,
+        .overlap = F.overlap,
+        .count = F.count,
+        .reference = F.reference,
+    };
+    const k = g.Kernel{ .spec = Cast(true).spec, .ctx = undefined, .vt = &vt };
+    var t: g.Tally = .{};
+    try g.runAll(testing.allocator, &.{k}, 0, &t);
+    try testing.expectEqual(@as(usize, 1), t.failed); // the Timeout became a verdict, not an error return
+    try testing.expectEqual(@as(usize, 0), t.passed);
 }

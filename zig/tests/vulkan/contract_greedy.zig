@@ -259,7 +259,8 @@ pub const Greedy = struct {
             .draw => {
                 const greedy = &self.greedy.?;
                 for (0..rows) |r| {
-                    const tok: u32 = greedy.select(self.cmds, self.staging, self.views[r], self.timeout) catch |e| switch (e) {
+                    // Timeout or InFlight leaves completion unknown: exit here, never unwind into the rig's frees.
+                    const tok: u32 = vk.orExit(greedy.select(self.cmds, self.staging, self.views[r], self.timeout)) catch |e| switch (e) {
                         // The draw rule's refusal; check names the row and its evidence.
                         error.NonFinite => refused,
                         else => return e,
@@ -278,7 +279,8 @@ pub const Greedy = struct {
                 std.mem.writeInt(u32, &push, @intCast(n), .little);
                 const cmd = try self.cmds.begin();
                 try pipe.record(cmd, &push, .{ @intCast(rows), 1, 1 });
-                try self.cmds.submit(self.timeout);
+                // Timeout or InFlight leaves completion unknown: exit here, never unwind into the rig's frees.
+                try vk.orExit(self.cmds.submit(self.timeout));
                 try vk.orExit(vk.download(self.cmds, maxima.*, 0, self.staging, self.rig.outs.items, self.timeout));
             },
         }
@@ -421,6 +423,20 @@ test "the refused marker is the word the draw's own decode refuses to pass" {
     try testing.expectEqual(std.math.maxInt(u32), refused);
     try testing.expectError(error.VulkanFailed, vk.greedy.decode(4, .{ .finite_flag = 0, .first_bad = refused, .index = refused }));
     try testing.expectError(error.NonFinite, vk.greedy.decode(4, .{ .finite_flag = 1, .first_bad = 1, .index = 0 }));
+}
+
+test "the draw arm's fence guard passes a refusal through: only Timeout and InFlight exit" {
+    const nonFinite = struct {
+        fn f() anyerror!u32 {
+            return error.NonFinite;
+        }
+    }.f;
+    // The guard wraps select; a rule refusal must still reach the draw's refused marker, not exit.
+    const tok = vk.orExit(nonFinite()) catch |e| switch (e) {
+        error.NonFinite => refused,
+        else => return e,
+    };
+    try testing.expectEqual(refused, tok);
 }
 
 test "the input shell uploads the pattern intact() checks; fresh device memory reads zeros" {
