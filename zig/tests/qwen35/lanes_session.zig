@@ -7,6 +7,7 @@ const qwen35 = @import("qwen3_5");
 const ids_file = @import("ids_file.zig");
 
 const Hip = qwen35.hip_lanes.Hip;
+const Draft = qwen35.draft.Draft;
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -15,20 +16,61 @@ pub const Session = struct {
     h: *Hip,
     cfg: lanes.Config,
     clock: lanes.backend.WallClock,
+    /// The DFlash2 drafter `--drafter` loaded and the target wrapped behind it (null: the target drafts alone).
+    draft: ?*Draft = null,
+    drafted: ?lanes.drafted.Drafted = null,
+    /// The engine's taps before the drafter set its own, set again when the session ends.
+    taps: qwen35.view.Taps = .{},
 
     /// Rank 0 of a group of `link`'s ranks (null: a lone rank) runs the core; the others follow it.
     pub fn init(s: *Session, gpa: std.mem.Allocator, io: std.Io, e: *qwen35.engine.Engine, link: ?hip.collective.Link) !void {
+        return s.initDrafted(gpa, io, e, link, null, 1);
+    }
+
+    /// As `init`, with the DFlash2 drafter in `drafter` (null: none) in front, frames of up to `streams`.
+    pub fn initDrafted(
+        s: *Session,
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        e: *qwen35.engine.Engine,
+        link: ?hip.collective.Link,
+        drafter: ?[]const u8,
+        streams: usize,
+    ) !void {
+        // as the native server opens it: taps set before the lanes make the streams' caches and rings
+        const taps = e.model().taps;
+        errdefer if (drafter != null) e.setTaps(taps.layers[0..taps.n]) catch {};
+        const d: ?*Draft = if (drafter) |dir| try openDraft(gpa, io, e, dir, streams) else null;
+        errdefer if (d) |x| x.deinit();
         const h = try Hip.init(gpa, e);
         errdefer h.deinit();
         if (link) |l| h.withLink(l);
         if (link == null) h.measure();
         const rows = Hip.max_window;
-        s.* = .{ .gpa = gpa, .io = io, .e = e, .h = h, .cfg = try lanes.Config.init(gpa, h.facts(), rows, rows - 1), .clock = .{ .io = io } };
+        var drafted: ?lanes.drafted.Drafted = null;
+        if (d) |x| {
+            for (h.costs.window[0..h.costs.windows]) |c| x.setCost(c.width, c.ms);
+            drafted = try lanes.drafted.Drafted.init(gpa, h.backend(), x.drafter());
+        }
+        errdefer if (drafted) |*x| x.deinit();
+        const facts = if (drafted) |*x| x.facts(h.facts()) else h.facts();
+        s.* = .{ .gpa = gpa, .io = io, .e = e, .h = h, .cfg = try lanes.Config.init(gpa, facts, rows, rows - 1), .clock = .{ .io = io }, .draft = d, .drafted = drafted };
+        s.taps = taps;
     }
 
     pub fn deinit(s: *Session) void {
         s.cfg.deinit(s.gpa);
+        if (s.drafted) |*x| x.deinit();
         s.h.deinit();
+        if (s.draft) |d| {
+            d.deinit();
+            s.e.setTaps(s.taps.layers[0..s.taps.n]) catch {};
+        }
+    }
+
+    /// What the lane core drives: the drafter's wrapper when there is one, else the target.
+    fn backend(s: *Session) lanes.backend.Backend {
+        return if (s.drafted) |*x| x.backend() else s.h.backend();
     }
 
     pub const Job = struct {
@@ -112,7 +154,7 @@ pub const Session = struct {
     }
 
     fn finish(s: *Session, streams: []const *lanes.Stream) !void {
-        var engine = lanes.Engine.init(s.gpa, &s.cfg, s.h.backend(), s.clock.clock());
+        var engine = lanes.Engine.init(s.gpa, &s.cfg, s.backend(), s.clock.clock());
         defer engine.deinit();
         for (streams) |st| try engine.addStream(st);
         while (engine.live.items.len > 0) try engine.step();
@@ -127,6 +169,16 @@ pub const Session = struct {
         return if (s.h.head) |hd| hd.graphs.replayed else 0;
     }
 };
+
+/// The DFlash2 drafter in `dir` on `e`, its taps set first and a context ready for each of `streams`.
+fn openDraft(gpa: std.mem.Allocator, io: std.Io, e: *qwen35.engine.Engine, dir: []const u8, streams: usize) !*Draft {
+    const c = try qwen35.draft_config.Config.read(gpa, io, dir, qwen35.draft_config.Target.of(e.model().spec));
+    try e.setTaps(c.tapLayers());
+    const d = try Draft.init(gpa, io, e, dir, @min(@max(streams, 1), qwen35.draft.max_streams));
+    errdefer d.deinit();
+    try d.reserve(streams);
+    return d;
+}
 
 fn delta(now: [3]u64, before: [3]u64) [3]u64 {
     var out: [3]u64 = undefined;
