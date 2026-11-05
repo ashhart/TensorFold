@@ -272,6 +272,18 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 its stage sequences and their purposes, its rules for when a task needs outside sources, and its instruction-filter patterns,
 rewritten in Zig. MIT License, Copyright (c) 2026 Cortheon contributors; the license text is below.
 
+## Model release and library code these files follow
+
+These follow a model's release code or a library's model code for their math, rounding or resizing. Each is written for TensorFold; the file named is the reference.
+
+- `tools/lfm3/ref64.py` and `zig/kernels/xpu/lfm3.cl`: `modeling_lfm3.py` in [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B). Copyright Liquid AI, LFM Open License v1.0; see [the license text](LICENSES/LFM-Open-1.0.txt).
+- `zig/kernels/metal/minimax_m3/glue.metal`: the rounding points of `modeling_minimax_m3_vl.py` in [transformers](https://github.com/huggingface/transformers).
+- `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
+- `zig/src/core/picture/patches.zig`: `smart_resize`, `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; `patches_test.zig` checks it against them.
+- `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
+
+transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+
 ## MIT License text
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
