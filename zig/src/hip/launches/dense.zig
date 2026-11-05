@@ -19,15 +19,21 @@ pub const Tile = enum { dot2, wmma12 };
 /// The launched kernels: dot2, and the WMMA tile's two block geometries (W12Small, W12Big), with equal bytes.
 pub const Shape = enum { dot2, w12_small, w12_big };
 
-/// Rows the small WMMA geometry takes, more for narrow outputs (hip-dense-tune on an R9700, weights cold).
-pub const small_rows = 96;
-pub const narrow_rows = 384;
-pub const narrow_cols = 1024;
+/// Rows the small WMMA block takes (hip-dense-tune, R9700): any product; weights the cache holds; narrow outputs.
+pub const small_rows = 64;
+pub const cached_rows = 96;
+pub const narrow_rows = 256;
+pub const narrow_cols = 1152; // nine big-block columns: 2,048 columns already take the big block from 160 rows
+/// Weight bytes past which re-reading them from DRAM costs the small block more than the big block's emptier grid.
+pub const cache_bytes = 64 << 20;
 
-/// The kernel `tile` runs an `m` x `n` product on: few rows or narrow outputs fill the GPU with the small block.
-pub fn shapeOf(tile: Tile, m: c_int, n: c_int) Shape {
+/// The kernel `tile` runs an `m` x `n` x `k` product on: few rows or narrow outputs fill the GPU with the small block.
+pub fn shapeOf(tile: Tile, m: c_int, n: c_int, kk: c_int) Shape {
     if (tile == .dot2) return .dot2;
-    return if (m <= small_rows or (n <= narrow_cols and m <= narrow_rows)) .w12_small else .w12_big;
+    if (m <= small_rows) return .w12_small;
+    if (n <= narrow_cols) return if (m <= narrow_rows) .w12_small else .w12_big;
+    const weights = @as(i64, n) * kk * 2; // signed: a bad k is refused later, never trapped here
+    return if (weights <= cache_bytes and m <= cached_rows) .w12_small else .w12_big;
 }
 
 /// Each kernel's rows and columns a block and threads a block (tiles/gemm.hpp, tiles/wmma12_gemm.hpp).
@@ -79,7 +85,7 @@ pub const Kernels = struct {
 
     /// y = x . W^T for `m` BF16 rows of x and the [n, k] BF16 weights on `tile`: fp32 into `out`, or BF16 into `out16`.
     pub fn gemm(k: *const Kernels, r: *const runtime.Runtime, tile: Tile, x: u64, w: u64, out: u64, out16: u64, m: c_int, n: c_int, kk: c_int, s: abi.Stream) Error!void {
-        return k.gemmOn(r, tile, shapeOf(tile, m, n), x, w, out, out16, m, n, kk, s);
+        return k.gemmOn(r, tile, shapeOf(tile, m, n, kk), x, w, out, out16, m, n, kk, s);
     }
 
     /// `gemm` on one named kernel of `tile` (hip-dense-tune times each geometry); the shape must belong to the tile.
@@ -152,13 +158,25 @@ test "the dense GEMM refuses what its tile does not take" {
 }
 
 test "WMMA products take their geometry by size; dot2 has one" {
-    try std.testing.expectEqual(Shape.dot2, shapeOf(.dot2, 1, 4096));
-    try std.testing.expectEqual(Shape.w12_small, shapeOf(.wmma12, 1, 4096));
-    try std.testing.expectEqual(Shape.w12_small, shapeOf(.wmma12, small_rows, 12288));
-    try std.testing.expectEqual(Shape.w12_big, shapeOf(.wmma12, small_rows + 1, 4096));
-    try std.testing.expectEqual(Shape.w12_small, shapeOf(.wmma12, narrow_rows, narrow_cols));
-    try std.testing.expectEqual(Shape.w12_big, shapeOf(.wmma12, narrow_rows + 1, narrow_cols));
-    try std.testing.expectEqual(Shape.w12_big, shapeOf(.wmma12, small_rows + 1, narrow_cols + 1));
+    const small = Shape.w12_small;
+    const big = Shape.w12_big;
+    try std.testing.expectEqual(Shape.dot2, shapeOf(.dot2, 1, 4096, 4096));
+    // any product up to small_rows: gate/up's 96 MiB of weights too
+    try std.testing.expectEqual(small, shapeOf(.wmma12, 1, 12288, 4096));
+    try std.testing.expectEqual(small, shapeOf(.wmma12, small_rows, 12288, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, small_rows + 1, 12288, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, small_rows + 1, 4096, 12288)); // down: 96 MiB
+    // weights the cache holds (q/o: 32 MiB) up to cached_rows
+    try std.testing.expectEqual(small, shapeOf(.wmma12, cached_rows, 4096, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, cached_rows + 1, 4096, 4096));
+    // narrow outputs (k/v) up to narrow_rows
+    try std.testing.expectEqual(small, shapeOf(.wmma12, narrow_rows, 1024, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, narrow_rows + 1, 1024, 4096));
+    try std.testing.expectEqual(small, shapeOf(.wmma12, narrow_rows, narrow_cols, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, cached_rows + 1, 2048, 4096));
+    try std.testing.expectEqual(small, shapeOf(.wmma12, cached_rows, narrow_cols + 1, 4096));
+    // a negative k picks a block without trapping; gemmWith refuses the product
+    try std.testing.expectEqual(small, shapeOf(.wmma12, small_rows + 1, 4096, -128));
 }
 
 test "gfx12 serves the WMMA tile only under matrix=on; other chips keep dot2" {

@@ -15,7 +15,7 @@ fn depth(s: c.Shape) usize {
     return @FieldType(hip.Launcher, "dense").depthWmma12(s.k);
 }
 
-/// Qwen3-8B's projections at rows 1, 7, 64, 300 and 2,048, then the small (16 x 64) and big (128 x 128) blocks' edges.
+/// Qwen3-8B's projections at rows 1, 7, 64, 300 and 2,048, then the blocks' edges and each routing threshold's.
 const served = [_]c.Shape{
     .{ .rows = 1, .n = 4096, .k = 4096 },    .{ .rows = 7, .n = 4096, .k = 4096 },     .{ .rows = 64, .n = 4096, .k = 4096 },
     .{ .rows = 300, .n = 4096, .k = 4096 },  .{ .rows = 2048, .n = 4096, .k = 4096 },  .{ .rows = 1, .n = 1024, .k = 4096 },
@@ -24,8 +24,9 @@ const served = [_]c.Shape{
     .{ .rows = 64, .n = 12288, .k = 4096 },  .{ .rows = 300, .n = 12288, .k = 4096 },  .{ .rows = 2048, .n = 12288, .k = 4096 },
     .{ .rows = 1, .n = 4096, .k = 12288 },   .{ .rows = 7, .n = 4096, .k = 12288 },    .{ .rows = 64, .n = 4096, .k = 12288 },
     .{ .rows = 300, .n = 4096, .k = 12288 }, .{ .rows = 2048, .n = 4096, .k = 12288 }, .{ .rows = 15, .n = 63, .k = 128 },
-    .{ .rows = 17, .n = 65, .k = 256 },      .{ .rows = 96, .n = 130, .k = 4096 },     .{ .rows = 97, .n = 4096, .k = 128 },
-    .{ .rows = 129, .n = 130, .k = 4096 },   .{ .rows = 384, .n = 1024, .k = 128 },    .{ .rows = 385, .n = 1024, .k = 128 },
+    .{ .rows = 17, .n = 65, .k = 256 },      .{ .rows = 65, .n = 12288, .k = 4096 },   .{ .rows = 96, .n = 4096, .k = 128 },
+    .{ .rows = 97, .n = 4096, .k = 128 },    .{ .rows = 129, .n = 130, .k = 4096 },    .{ .rows = 256, .n = 1024, .k = 128 },
+    .{ .rows = 257, .n = 1024, .k = 128 },
 };
 
 /// One geometry's registration: every served shape runs on it, its own block's edges included.

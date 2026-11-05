@@ -164,7 +164,7 @@ test "dense GEMM, gfx12 WMMA tile: a row's bytes at every m, on every geometry, 
         try rig.expect(std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(all[0 .. m * n])), "dense wmma12: the first {d} rows differ from their bytes in the 300-row product", .{m});
     }
     // every geometry gives the same bytes at any row count, across the launcher's thresholds
-    for ([_]usize{ 1, 17, 64, dense.small_rows, dense.small_rows + 1, 200, m_all }) |m| {
+    for ([_]usize{ 1, 17, dense.small_rows, dense.small_rows + 1, dense.cached_rows, dense.cached_rows + 1, 200, dense.narrow_rows, dense.narrow_rows + 1, m_all }) |m| {
         for ([_]dense.Shape{ .w12_small, .w12_big }) |shape| {
             const got = try productOn(t, shape, at(x), at(w), m, n, k);
             defer gpa.free(got);
