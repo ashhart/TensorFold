@@ -181,6 +181,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 /// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.
 pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
+    try @import("cuda_bf16_format.zig").options((try E.Geometry.read(gpa, io, dir)).bf16, o.vision != null, o.prompt_int8, o.slide);
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     try @import("cuda_sm110_open.zig").check(gpa, io, ctx, o);
     const page_tokens = try pages_mod.paging();
@@ -190,7 +191,6 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     if (kv_host_mod.onHost()) try kv_host_mod.checkDevice(try ctx.attribute(.integrated) != 0, page_tokens, engine_paged);
     const share_snaps = try prefix_mod.sharing();
-    try @import("cuda_bf16_format.zig").options((try E.Geometry.read(gpa, io, dir)).bf16, o.vision != null, o.prompt_int8, o.slide);
     if (kv_host_mod.onHost()) try kv_host_mod.checkShared(share_snaps);
     // shared save marks are page edges and become cold-pass cuts independent of the compute chunk grid
     if (share_snaps > 0 and page_tokens == 0) return error.QwenShareNeedsPages;
