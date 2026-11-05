@@ -83,6 +83,51 @@ const qwen35 = @import("qwen3_5");
 const flashnext = @import("flashnext");
 const nemotron = @import("nemotron");
 
+/// A family's open as attach takes it: its drafter, if it loaded one, and the free of the whole model.
+const Loaded = struct {
+    backend: lanes.backend.Backend,
+    facts: lanes.Model,
+    drafter: ?lanes.drafter.Drafter = null,
+    ctx: *anyopaque = undefined,
+    deinit: *const fn (*anyopaque) void = undefined,
+};
+
+/// A drafter attach only wraps: it gives its taps and facts, and no stream ever reaches the rest.
+const Idle = struct {
+    depth: u32 = 3,
+
+    fn drafter(x: *Idle) lanes.drafter.Drafter {
+        return .{ .ptr = x, .vtable = &.{ .taps = taps, .facts = facts, .open = open, .absorb = absorb, .hold = hold, .held = held, .release = close } };
+    }
+    fn taps(_: *anyopaque) []const u32 {
+        return &.{ 5, 19 };
+    }
+    fn facts(ptr: *anyopaque) lanes.drafter.Facts {
+        return .{ .depth = @as(*Idle, @ptrCast(@alignCast(ptr))).depth, .step_ms = 1 };
+    }
+    fn open(_: *anyopaque, _: *lanes.Stream) anyerror!void {
+        return error.Unused;
+    }
+    fn absorb(_: *anyopaque, _: []const lanes.drafter.Absorb) anyerror!void {
+        return error.Unused;
+    }
+    fn hold(_: *anyopaque, _: []const lanes.drafter.Hold) anyerror!void {
+        return error.Unused;
+    }
+    fn held(_: *anyopaque, _: []const *lanes.Stream, _: []const []u32) anyerror!void {
+        return error.Unused;
+    }
+    fn close(_: *anyopaque, _: *lanes.Stream) void {}
+    /// A target that refuses the drafter's taps, as Drafted.init's prepare_features may.
+    fn refuseTaps(_: *anyopaque, _: []const u32) anyerror!void {
+        return error.TapsMismatch;
+    }
+    /// The model's free, counted in the u32 behind `ctx`.
+    fn free(ctx: *anyopaque) void {
+        @as(*u32, @ptrCast(@alignCast(ctx))).* += 1;
+    }
+};
+
 test "--drafter with --tp > 1 is refused by name, on rank 0 and on the ranks that follow it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -133,19 +178,49 @@ test "a plain serve and --no-drafts with --drafter load no drafter and serve as 
     try std.testing.expectEqualStrings("/models/drafter", drafterOf(drafted) orelse "");
     var fake: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
     const Bare = struct { backend: lanes.backend.Backend, facts: lanes.Model };
-    const Loaded = struct {
-        backend: lanes.backend.Backend,
-        facts: lanes.Model,
-        drafter: ?lanes.drafter.Drafter = null,
-        ctx: *anyopaque = undefined,
-        deinit: *const fn (*anyopaque) void = undefined,
-    };
     var problem: []const u8 = "";
     inline for (.{ Bare{ .backend = fake.backend(), .facts = undefined }, Loaded{ .backend = fake.backend(), .facts = undefined } }) |loaded| {
         const served = (try attach(std.testing.allocator, std.testing.allocator, loaded, plain, &problem)) orelse return error.TestUnexpectedResult;
         try std.testing.expect(served.drafted == null and served.backend.ptr == loaded.backend.ptr);
         release(std.testing.allocator, served.drafted);
     }
+}
+
+test "a loaded drafter is served behind Drafted over the family's backend, the model kept; release frees the wrapper" {
+    var fake: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+    var idle: Idle = .{};
+    var frees: u32 = 0;
+    const loaded: Loaded = .{ .backend = fake.backend(), .facts = .{ .exact_width = 8 }, .drafter = idle.drafter(), .ctx = &frees, .deinit = Idle.free };
+    const drafted: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .drafter = "/models/drafter" };
+    var problem: []const u8 = "";
+    const served = (try attach(std.testing.allocator, std.testing.allocator, loaded, drafted, &problem)) orelse return error.TestUnexpectedResult;
+    defer release(std.testing.allocator, served.drafted); // std.testing.allocator fails the test if the wrapper leaks
+    const x = served.drafted orelse return error.TestUnexpectedResult;
+    try std.testing.expect(served.backend.ptr == @as(*anyopaque, x) and x.target.ptr == loaded.backend.ptr);
+    try std.testing.expect(served.facts.mtp and served.facts.drafts == idle.depth);
+    try std.testing.expect(frees == 0 and problem.len == 0);
+}
+
+test "a drafter that cannot attach frees the model once and says why; a failed message leaves the free to the caller" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var fake: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+    var target = fake.backend();
+    var refusing = target.vtable.*;
+    refusing.prepare_features = Idle.refuseTaps;
+    target.vtable = &refusing;
+    var idle: Idle = .{};
+    var frees: u32 = 0;
+    const loaded: Loaded = .{ .backend = target, .facts = .{}, .drafter = idle.drafter(), .ctx = &frees, .deinit = Idle.free };
+    const drafted: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .drafter = "/models/drafter" };
+    var problem: []const u8 = "";
+    try std.testing.expect(try attach(arena.allocator(), std.testing.allocator, loaded, drafted, &problem) == null);
+    try std.testing.expectEqualStrings("the drafter /models/drafter cannot attach to this model (TapsMismatch)", problem);
+    try std.testing.expectEqual(@as(u32, 1), frees);
+    frees = 0;
+    var failing: std.testing.FailingAllocator = .init(arena.allocator(), .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, attach(failing.allocator(), std.testing.allocator, loaded, drafted, &problem));
+    try std.testing.expectEqual(@as(u32, 0), frees); // the caller's errdefer frees it, once
 }
 
 test "draft sources: HIP names the DFlash2 drafter --drafter attached; without one the line is unchanged" {
