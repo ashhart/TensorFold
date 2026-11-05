@@ -171,7 +171,7 @@ jobs:
           persist-credentials: false
       - uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2.4.0
         with:
-          swift-version: "6.2.4"
+          swift-version: "6.2.1"
       - name: Test the computer-use parser and key table
         working-directory: app/native/computer-use
         run: swift test
