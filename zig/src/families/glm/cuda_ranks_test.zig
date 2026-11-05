@@ -240,6 +240,31 @@ test "TF_GLM_KDA_PAD: 0 by default, 1 or 0, refused otherwise and without glm_mm
     const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, h), Fingerprint.of(2, 1, padded, 8192, true, h, h, h) };
     try std.testing.expectEqual(@as(?Mismatch, .{ .field = .kda_pad, .rank = 1 }), mismatch(&all));
 }
+
+test "TF_GLM_PROMPT_TAIL: unset, 0 or 1, refused otherwise" {
+    const Reader = struct {
+        fn off(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "0" else null;
+        }
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "1" else null;
+        }
+        fn empty(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "" else null;
+        }
+        fn yes(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_TAIL")) "yes" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    _ = try Settings.read(&fake, &problem);
+    _ = try Settings.read(Reader.off, &problem);
+    _ = try Settings.read(Reader.on, &problem);
+    for ([_]*const fn ([:0]const u8) ?[]const u8{ &Reader.empty, &Reader.yes }) |refused| {
+        try std.testing.expectError(error.BadSetting, Settings.read(refused, &problem));
+        try std.testing.expectEqualStrings("TF_GLM_PROMPT_TAIL: 0 or 1", problem);
+    }
+}
 fn digestFixture(io: std.Io, dir: std.Io.Dir, sub: []const u8, byte: u8) !void {
     try dir.createDirPath(io, sub);
     var d = try dir.openDir(io, sub, .{});
