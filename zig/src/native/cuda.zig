@@ -163,6 +163,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "qwen3")) {
+        const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
+        return @import("qwen3_cuda").native.open(a, gpa, io, o, device, problem, budget, windows);
+    }
     inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
         if (refusals.lfm2(o)) |why| {
@@ -578,7 +582,7 @@ test "Save recovery: real native close drains the dense trainer before any child
 
 test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
-    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni" });
+    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni", "qwen3" });
 }
 
 test {
