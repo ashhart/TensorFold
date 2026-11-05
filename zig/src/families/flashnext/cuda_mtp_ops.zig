@@ -102,7 +102,7 @@ pub fn Ops(comptime Tri: type) type {
             try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
-            if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
+            d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
         }
 
         /// The whole prompt a chunk of the engine's rows at a time, from an empty head cache.
@@ -123,6 +123,7 @@ pub fn Ops(comptime Tri: type) type {
             const h = o.h;
             if (next.len == 0) return;
             if (d.len + next.len > d.cap) return error.PromptTooLong;
+            if (try @import("exl3/prefill/cuda_exl3_prefill.zig").head(Tri, o, d, next, rows, scores)) return;
             const want = @max(@as(usize, 32), 2 * @min(next.len, piece_rows));
             const s = try e.reserve(want);
             const piece = @max(@as(usize, 1), @min(piece_rows, s.cap / 2));
@@ -136,7 +137,7 @@ pub fn Ops(comptime Tri: type) type {
                 .k = &e.batch_k,
                 .s = s,
                 .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
-                .seq = .{ .media = d.media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
+                .seq = d.headSeq(d.media, score_rows),
                 .hooks = .{ .logits = .none },
             };
             var at: usize = 0;
@@ -216,10 +217,8 @@ pub fn Ops(comptime Tri: type) type {
                 cap = @max(cap, d.cap);
             }
             if (n_l > max_lanes) return error.UnexpectedTensor;
-            // the head's plan: the admitted capacity bounds the pass's rows, so the head never grows the shared scratch
             const pl = plan.plan(e.admittedRows(), total);
             const s = try e.reserve(pl.pass_rows);
-            // the engine's block scores, priced to the piece (the single-stream head's rule)
             const score_rows = try e.reserveScores(cap, pl.score_rows);
             // the lanes in groups whose rows fit the piece
             var lane_rows: [max_lanes]usize = undefined;
@@ -247,7 +246,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             for (ds, nexts, 0..) |d, nx, i| {
                 total += nx.len;
-                lane_buf[i] = .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = nx.len };
+                lane_buf[i] = .{ .seq = d.headSeq(null, score_rows), .pos = d.len, .rows = nx.len };
                 @memcpy(ids_buf[at..][0..nx.len], nx);
                 at += nx.len;
             }
@@ -343,6 +342,8 @@ pub fn Ops(comptime Tri: type) type {
 
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
+            const telemetry_scope = o.e.telemetry.enter(.verify);
+            defer telemetry_scope.restore();
             if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
             o.e.round_graph.clear();
             const n = ids.len;

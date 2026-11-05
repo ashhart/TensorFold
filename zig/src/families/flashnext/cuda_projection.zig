@@ -10,8 +10,11 @@ pub const Projection = struct {
     n: usize,
     k: usize,
     native: ?cuda.qmmf.Weight = null,
+    /// An EXL3 checkpoint's projection: stored-layout EXL3 parts (and dense BF16 ones) a row (cuda_exl3_load.zig).
+    exl3: ?*@import("exl3/pack/cuda_exl3_load.zig").Proj = null,
 
     pub fn free(self: *Projection) void {
+        if (self.exl3) |e| e.destroy();
         self.w.free();
         self.s.free();
         self.b.free();

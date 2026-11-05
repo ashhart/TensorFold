@@ -1,5 +1,6 @@
 // EXL3 projections on CUDA: trellis tiles as stored ([K/16, N/16, 16 bits] int16), core/exl3_format.zig's codebooks.
 #include "exl3_candidate.cuh"
+#include "exl3_decode.cuh"
 
 struct TfExl3Rows {
   unsigned rows, x_stride, y_stride, y_f32;
@@ -175,6 +176,119 @@ __device__ __forceinline__ void tf_exl3_prompt_job(const __half* Xh, unsigned ro
 TF_EXL3_PROMPT(0)
 TF_EXL3_PROMPT(1)
 TF_EXL3_PROMPT(2)
+
+// Where decode (exl3_linear.cu) cuts the K sum: chains of `per` k tiles, `wk` chains a split, added in that order.
+struct TfExl3Chains {
+  unsigned per, wk;
+};
+
+// The prompt tile with decode's bytes at any row count: tf_exl3_rot_in's rows, chains summed as a decode warp does.
+template <int K, int C>
+__device__ __forceinline__ void tf_exl3_promptd_job(const __half* Xh, unsigned rows, const uint8_t* T, const __half* svh,
+                                                    const TfExl3Matrix m, const TfExl3Chains ch, uint8_t* Y, unsigned y_f32,
+                                                    float* buf) {
+  constexpr unsigned TB = 32 * K;
+  const unsigned tid = threadIdx.x, sg = tid / 32, lane = tid % 32, g8 = lane / 4, t4 = lane % 4, ob = blockIdx.x;
+  const unsigned row0 = blockIdx.y * 64, kb = m.k / 128;
+  __half* xs = reinterpret_cast<__half*>(buf);
+  const uint64_t row_bytes = (uint64_t)m.tiles_n * TB;
+  const uint8_t* col = T + (uint64_t)(8 * ob + sg) * TB;
+  float acc[4][2][4], part[4][2][4], tot[4][2][4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+#pragma unroll
+    for (int n = 0; n < 2; ++n)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) acc[i][n][q] = part[i][n][q] = tot[i][n][q] = 0.0f;
+  unsigned left = ch.per, w = 0, s = 0;
+  uint4 next = tf_exl3_words<K>(reinterpret_cast<const uint32_t*>(col), lane);
+  for (unsigned ib = 0; ib < kb; ++ib) {
+    for (unsigned i = tid; i < 64 * 16; i += 256) {
+      const unsigned r = i / 16, c = (i % 16) * 8;
+      const uint4 v = row0 + r < rows ? *reinterpret_cast<const uint4*>(Xh + (uint64_t)(row0 + r) * m.k + ib * 128 + c) : make_uint4(0, 0, 0, 0);
+      *reinterpret_cast<uint4*>(xs + r * TF_EXL3_XS + c) = v;
+    }
+    __syncthreads();
+    for (unsigned r = 0; r < 8; ++r) {
+      const uint4 now = next;
+      next = tf_exl3_words<K>(reinterpret_cast<const uint32_t*>(col + (uint64_t)(r < 7 ? 8 * ib + r + 1 : (ib + 1 < kb ? 8 * ib + 8 : 8 * ib + 7)) * row_bytes), lane);
+      __half wv[8];
+      tf_exl3_unpack<K, C>(now, lane, wv);
+      const uint32_t b[2][2] = {{tf_exl3_pair(wv[0], wv[1]), tf_exl3_pair(wv[2], wv[3])}, {tf_exl3_pair(wv[4], wv[5]), tf_exl3_pair(wv[6], wv[7])}};
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const __half* x = xs + (16 * i + g8) * TF_EXL3_XS + 16 * r + 2 * t4;
+        const uint32_t a[4] = {*reinterpret_cast<const uint32_t*>(x), *reinterpret_cast<const uint32_t*>(x + 8 * TF_EXL3_XS),
+                               *reinterpret_cast<const uint32_t*>(x + 8), *reinterpret_cast<const uint32_t*>(x + 8 * TF_EXL3_XS + 8)};
+        tf_exl3_mma(acc[i][0], a, b[0][0], b[0][1]);
+        tf_exl3_mma(acc[i][1], a, b[1][0], b[1][1]);
+      }
+      if (--left == 0) {   // a chain ends: into its split's warp sum, and the last chain of a split into the total
+        left = ch.per;
+#pragma unroll
+        for (int i = 0; i < 4; ++i)
+#pragma unroll
+          for (int n = 0; n < 2; ++n)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              part[i][n][q] = w == 0 ? acc[i][n][q] : __fadd_rn(part[i][n][q], acc[i][n][q]);
+              acc[i][n][q] = 0.0f;
+            }
+        if (++w == ch.wk) {
+          w = 0;
+#pragma unroll
+          for (int i = 0; i < 4; ++i)
+#pragma unroll
+            for (int n = 0; n < 2; ++n)
+#pragma unroll
+              for (int q = 0; q < 4; ++q) tot[i][n][q] = s == 0 ? part[i][n][q] : __fadd_rn(tot[i][n][q], part[i][n][q]);
+          ++s;
+        }
+      }
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (int i = 0; i < 4; ++i)
+    for (int n = 0; n < 2; ++n)
+      for (int h = 0; h < 2; ++h) {
+        const unsigned c = 16 * sg + 8 * n + 2 * t4;
+        buf[(16 * i + g8 + 8 * h) * 128 + c] = tot[i][n][2 * h];
+        buf[(16 * i + g8 + 8 * h) * 128 + c + 1] = tot[i][n][2 * h + 1];
+      }
+  __syncthreads();
+  for (unsigned i = sg; i < 64 && row0 + i < rows; i += 8) {
+    float v[4];
+    for (int q = 0; q < 4; ++q) v[q] = buf[i * 128 + 4 * lane + q];
+    tf_exl3::fwht128(v, lane);
+    for (int q = 0; q < 4; ++q) {
+      const unsigned c = ob * 128 + 4 * lane + q;
+      tf_exl3_store(Y, (uint64_t)(row0 + i) * m.n + c, __fmul_rn(__fmul_rn(v[q], tf_exl3::HAD_SCALE), __half2float(svh[c])), y_f32);
+    }
+  }
+}
+
+#define TF_EXL3_PROMPTD(C)                                                                                           \
+  extern "C" __global__ void __launch_bounds__(256) tf_exl3_promptd_##C(const __half* Xh, unsigned rows,             \
+                                                                       const uint8_t* T, const __half* svh,         \
+                                                                       const TfExl3Matrix m, const TfExl3Chains ch, \
+                                                                       uint8_t* Y, unsigned y_f32) {                \
+    __shared__ __align__(16) float buf[64 * 128];                                                                    \
+    switch (m.bits) {                                                                                                \
+      case 1: tf_exl3_promptd_job<1, C>(Xh, rows, T, svh, m, ch, Y, y_f32, buf); break;                              \
+      case 2: tf_exl3_promptd_job<2, C>(Xh, rows, T, svh, m, ch, Y, y_f32, buf); break;                              \
+      case 3: tf_exl3_promptd_job<3, C>(Xh, rows, T, svh, m, ch, Y, y_f32, buf); break;                              \
+      case 4: tf_exl3_promptd_job<4, C>(Xh, rows, T, svh, m, ch, Y, y_f32, buf); break;                              \
+      case 5: tf_exl3_promptd_job<5, C>(Xh, rows, T, svh, m, ch, Y, y_f32, buf); break;                              \
+      case 6: tf_exl3_promptd_job<6, C>(Xh, rows, T, svh, m, ch, Y, y_f32, buf); break;                              \
+      case 7: tf_exl3_promptd_job<7, C>(Xh, rows, T, svh, m, ch, Y, y_f32, buf); break;                              \
+      case 8: tf_exl3_promptd_job<8, C>(Xh, rows, T, svh, m, ch, Y, y_f32, buf); break;                              \
+      default: break;                                                                                                \
+    }                                                                                                                \
+  }
+TF_EXL3_PROMPTD(0)
+TF_EXL3_PROMPTD(1)
+TF_EXL3_PROMPTD(2)
 
 
 // Decode rows for the tensor units: tf_exl3_rotate_h's values, each 128-block in fragment order (t4, r, 4 halves).
