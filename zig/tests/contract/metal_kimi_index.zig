@@ -45,6 +45,8 @@ pub const Probe = struct {
             2 => .{ "h < K31_IH; ++h", "h + 1 < K31_IH; ++h" },
             3 => .{ "dot = fma(query[h * K31_ID + col], float(key[col]), dot)", "dot = float(half(fma(query[h * K31_ID + col], float(key[col]), dot)))" },
             4 => .{ "scores[ulong(r) * a.score_stride + k] = score;", "scores[ulong(r) * a.score_stride + k] = score; if (r == 0 && k == 0) scores[ulong(a.rows) * a.score_stride] = 1.0f;" },
+            5 => .{ "v += simd_shuffle_xor(v, d)", "v = float(half(v + simd_shuffle_xor(v, d)))" },
+            6 => .{ "v += simd_shuffle_xor(v, d)", "v = float(bfloat(v + simd_shuffle_xor(v, d)))" },
             else => null,
         };
         if (edit) |pair| {
@@ -70,13 +72,13 @@ pub const Probe = struct {
             .out = if (p.which == .key) .bf16 else .f32,
             .served = if (p.which == .key) &shapes_key else &shapes_scores,
             .tiles = .{ .{ .size = 16 }, .{}, .{} },
-            .sums = if (p.which == .key) .{ .f16 = 0, .bf16 = 0, .exact = false, .why = "nonlinear BF16 normalization can mask reduced sums; this fixture does not qualify either reduced-precision discriminator" } else .{},
         };
         return .{ .spec = spec, .ctx = p, .vt = &vt, .control = switch (p.ctl) {
             1 => .nonfinite,
             2 => .shapes,
             3 => .sums,
             4 => .repeat,
+            5, 6 => .sums,
             else => null,
         } };
     }
@@ -115,7 +117,8 @@ pub const Probe = struct {
             if (r < nr) x[r * (if (p.which == .key) @as(usize, 128) else 4096)] = v;
         };
         if (mode == .stress) {
-            for (x, 0..) |*v, i| v.* = c.toBf16(if (p.which == .key) @as(f32, @floatFromInt(i % 128)) - 64 else 100);
+            // The small mean offset is lost in either reduced accumulator, but visible after normalization.
+            for (x, 0..) |*v, i| v.* = c.toBf16(if (p.which == .key) @as(f32, if (i % 128 == 0) 132 else 128) else 100);
             @memset(p.bits(p.w, if (p.which == .key) 128 else nr * 32), c.toBf16(1));
             @memset(p.bits(p.k, if (p.which == .key) 128 else shape.n * 128), c.toBf16(if (p.which == .key) @as(f32, 0) else 100));
         }
@@ -255,6 +258,8 @@ pub const Suite = struct {
             .{ Which.scores, @as(u8, 2), "kimi index control: last head dropped" },
             .{ Which.scores, @as(u8, 3), "kimi index control: FP16 dot" },
             .{ Which.scores, @as(u8, 4), "kimi index control: output overrun" },
+            .{ Which.key, @as(u8, 5), "kimi index key control: FP16 shuffle sums" },
+            .{ Which.key, @as(u8, 6), "kimi index key control: BF16 shuffle sums" },
         };
         errdefer s.destroy();
         inline for (entries) |entry| {
