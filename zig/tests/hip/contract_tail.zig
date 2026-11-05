@@ -164,7 +164,7 @@ pub const Tail = struct {
     fn plant(self: *Tail) void {
         const s = self.shape;
         const big: f64 = if (self.k == .f16) 60000 else 3e38;
-        self.x[5] = std.math.nan(f64);
+        if (5 < self.x.len) self.x[5] = std.math.nan(f64);
         const at = [_]usize{ s.k + 9, 2 * s.k + 1 };
         for ([_]f64{ std.math.inf(f64), -std.math.inf(f64) }, at) |v, i| if (i < self.x.len) switch (self.mode) {
             .moe => self.y[(i / s.k * slots + 1) * s.k + i % s.k] = v,
