@@ -22,8 +22,7 @@ release fixes it, and the release notes say which one.
   verification has been kept. A revised physical-memory peak comparison with 1.0.12 remains unmeasured.
 - Qwen3.8-27B cold prefill at 64K tokens on RTX 50-series GPUs (sm_120) measures about 2% slower than 1.1.0; 32K and shorter prompts, and GB10, are at parity or faster.
 - Flash Next on Metal with explicit --parallel 2 or more ([#1893](https://github.com/ashhart/TensorFold/issues/1893)):
-  on an M3 Ultra with the MLX 4-bit checkpoint, a lone request decodes about 4% slower than at --parallel 1 (likely
-  because kept DeltaNet states can't hand over to shared rounds), and in a 12-turn chat of about 15,000 tokens, 8 of the 11 resumed
+  on an M3 Ultra with the MLX 4-bit checkpoint, in a 12-turn chat of about 15,000 tokens, 8 of the 11 resumed
   turns reused 31 to 350 fewer tokens than the single host, about 0.4 s in all. Replies are the same. On a chip with
   tensor units, a long prompt beside a running reply still takes a 32-row step before each round, which slows both;
   `--decode-share` helps. The default --parallel auto uses the single host.
