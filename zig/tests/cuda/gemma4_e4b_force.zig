@@ -1,4 +1,4 @@
-//! Gemma 4 on CUDA (any geometry) against a reference directory (gemma4_e4b_reference.py): its tokens forced, logits written.
+//! Gemma 4 on CUDA against a reference directory (gemma4_e4b_reference.py): its tokens forced, logits written.
 const std = @import("std");
 const cuda = @import("cuda");
 const g4 = @import("gemma4_cuda");

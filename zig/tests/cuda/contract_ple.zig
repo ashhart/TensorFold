@@ -1,4 +1,4 @@
-//! gemma4_ple.cu's tf_gemma4_ple_rows under the contract: Gemma 4 E-series per-layer inputs, and controls each dropping a step.
+//! gemma4_ple.cu's tf_gemma4_ple_rows under the contract, and controls each dropping a step.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -195,8 +195,7 @@ pub const Ple = struct {
         for (mag, want) |*m, v| m.* = @abs(v);
     }
 
-    /// A bf16 point the fp32 steps decide the other way moves y (x, x inv, w n: three) or t token by an ulp, 2^-7 of
-    /// its size, before the sum and the mix's two points: in a sum that cancels that is no share of the output.
+    /// A point decided the other way moves y (three points) or t token by 2^-7 of its size; a cancelling sum keeps it.
     pub fn bounds(self: *Ple, want: []const f64, _: []const f64, allow: []f64) !void {
         for (allow, want, self.terms) |*a, v, m| a.* = 0x1p-7 * (3 * m + 2 * @abs(v)) + 0x1p-133;
     }
@@ -234,6 +233,31 @@ pub const Ple = struct {
             }
         }
         return null;
+    }
+};
+
+/// Every registration, its kernels and controls appended to the run's list (the controls from `controls`).
+pub const Group = struct {
+    a: std.mem.Allocator,
+    rows: g4.ple.PleRows,
+    each: [std.enums.values(Which).len]Ple,
+
+    pub fn create(a: std.mem.Allocator, gpu: anytype, s: cuda.Stream, controls: cuda.Module, kernels: *std.ArrayList(g.Kernel)) !*Group {
+        const x = try a.create(Group);
+        errdefer a.destroy(x);
+        x.* = .{ .a = a, .rows = try g4.ple.PleRows.load(gpu.d), .each = undefined };
+        for (std.enums.values(Which), &x.each) |w, *p| {
+            const ctl = if (w != .served) try controls.function("tf_ctl_ple_rows") else null;
+            p.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &x.rows, .ctl = ctl };
+        }
+        for (&x.each) |*p| try kernels.append(a, p.kernel());
+        return x;
+    }
+
+    pub fn destroy(x: *Group) void {
+        for (&x.each) |*p| p.deinit();
+        x.rows.unload();
+        x.a.destroy(x);
     }
 };
 

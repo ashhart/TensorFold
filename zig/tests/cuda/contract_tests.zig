@@ -69,8 +69,7 @@ const images = struct {
     pub const h3 align(16) = @embedFile("fatbin_h3").*;
 };
 
-/// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5 on this GPU.
-/// `only`: kernels whose name holds one of these words, and none of the suites after the gates; empty: all.
+/// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `only`: contract_after.zig.
 pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     const a = gpu.gpa;
     if (!kk.available) return error.BuiltWithoutKernels;
@@ -362,12 +361,8 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     for (act_round_k.entries, &act_rounds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .act = &act_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_act_round") else null };
     defer for (&act_rounds) |*x| x.deinit();
     for (&act_rounds) |*x| try kernels.append(a, x.kernel());
-    var ple_rows = try ple_k.g4.ple.PleRows.load(gpu.d);
-    defer ple_rows.unload();
-    var ples: [std.enums.values(ple_k.Which).len]ple_k.Ple = undefined;
-    for (std.enums.values(ple_k.Which), &ples) |w, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &ple_rows, .ctl = if (w != .served) try mods[5].function("tf_ctl_ple_rows") else null };
-    defer for (&ples) |*x| x.deinit();
-    for (&ples) |*x| try kernels.append(a, x.kernel());
+    const ples = try ple_k.Group.create(a, gpu, s, mods[5], &kernels);
+    defer ples.destroy();
     const spark_acts = try @import("contract_spark_act.zig").Group.create(a, gpu, s, &act_rows, mods[5], &kernels);
     defer spark_acts.destroy();
     var gemma_ops: @import("contract_gemma_ops.zig").Group = .{};
@@ -570,29 +565,14 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);
-    if (only.len > 0) {
-        var kept: usize = 0;
-        for (kernels.items) |k| for (only) |w| if (std.mem.indexOf(u8, k.spec.name, w) != null) {
-            kernels.items[kept] = k;
-            kept += 1;
-            break;
-        };
-        kernels.shrinkRetainingCapacity(kept);
-    }
+    @import("contract_after.zig").keep(&kernels, only);
     try g.runAll(a, kernels.items, 0x6b63, &t);
     if (only.len == 0) try @import("contract_back_suites.zig").run(gpu);
     const t1 = check.now(gpu.io);
-    if (only.len == 0) {
-        try @import("contract_qwen_served.zig").run(gpu);
-        try @import("contract_qwen_pages.zig").run(gpu);
-        try @import("contract_qwen_pending.zig").run(gpu);
-        try @import("contract_qwen_learning.zig").numerical(gpu);
-        try @import("contract_fn_lanes.zig").run(gpu);
-    }
+    if (only.len == 0) try @import("contract_after.zig").suites(gpu);
     const lim = try live(gpu, only);
     const t2 = check.now(gpu.io);
-    if (only.len > 0) std.debug.print("(filtered) ", .{});
-    std.debug.print("SUMMARY {d} kernels: {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: {d} red as planted, {d} missed; {d} limit problems; gates {d} ms, limits {d} ms\n", .{ t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed, lim, @divTrunc(t1 - t0, std.time.ns_per_ms), @divTrunc(t2 - t1, std.time.ns_per_ms) });
+    std.debug.print("{s}SUMMARY {d} kernels: {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: {d} red as planted, {d} missed; {d} limit problems; gates {d} ms, limits {d} ms\n", .{ if (only.len > 0) "(filtered) " else "", t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed, lim, @divTrunc(t1 - t0, std.time.ns_per_ms), @divTrunc(t2 - t1, std.time.ns_per_ms) });
     try check.expect(t.problems() + lim == 0, "kernel-contract: {d} gate failures, {d} controls missed, {d} limit problems", .{ t.failed, t.missed, lim });
 }
 
