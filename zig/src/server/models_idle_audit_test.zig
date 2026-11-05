@@ -43,6 +43,14 @@ test "capability audit: model discovery waits for an idle reload and reads the p
     srv.thinking_switch = false;
     srv.effort_levels = &.{};
     srv.think_close = &.{};
+    // Discovery reads the template for effort use; this one names none.
+    var text_vtable: @TypeOf(srv.text.vtable.*) = undefined;
+    text_vtable.template_source = struct {
+        fn source(_: *anyopaque) []const u8 {
+            return "";
+        }
+    }.source;
+    srv.text = .{ .ctx = undefined, .vtable = &text_vtable };
     var manager: Manager = .{ .gpa = a, .io = std.testing.io, .args = .{}, .re = undefined, .dir = "", .model_type = "", .idle_s = 1 };
     srv.idle_manager = &manager;
     var reload: Reload = .{ .srv = &srv, .manager = &manager };
