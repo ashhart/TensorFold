@@ -370,7 +370,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.trace = null;
-    h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
+    // TF_QWEN27_METAL_KV_PAGES=1: every slot's rows in core-pool pages now (Fit charged each its whole window above)
+    h.runner = try if (q.decode_round.pagesOn()) q.decode_round.Runner.initPaged(gpa, model, slots, capacity + window) else q.decode_round.Runner.initReady(gpa, model, slots, capacity + window, 1);
     errdefer h.runner.deinit();
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
