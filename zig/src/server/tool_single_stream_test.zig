@@ -220,16 +220,41 @@ test "single: a cut reply ends its prose as the whole reply does" {
     try expectAgrees(.{ .reply = glm ++ "y", .cut = glm.len, .content = progress, .finish = "length" });
 }
 
-test "an unclosed DSML block stays in both replies, with or without a trailing newline, in either mode" {
+test "an unclosed DSML block streams the call it began while both replies keep its text" {
     const spaced = "Done.<\u{ff5c}DSML\u{ff5c} calls><\u{ff5c}DSML\u{ff5c} invoke name=\"lookup\"><\u{ff5c}DSML\u{ff5c} parameter name=\"q\" string=\"true\">x";
     const compact = "Done.<\u{ff5c}DSML\u{ff5c}tool_calls><\u{ff5c}DSML\u{ff5c}invoke name=\"lookup\"><\u{ff5c}DSML\u{ff5c}parameter name=\"q\" string=\"true\">x";
     inline for ([_]bool{ true, false }) |single| {
         // a single-call reply's content is the parse's and stripped; with many calls it is the reply's own text
         const end = if (single) "" else "\n";
-        try expectAgrees(.{ .reply = spaced, .content = spaced, .single = single });
-        try expectAgrees(.{ .reply = compact, .content = compact, .single = single });
-        try expectAgrees(.{ .reply = spaced ++ "\n", .content = spaced ++ end, .single = single });
-        try expectAgrees(.{ .reply = compact ++ "\n", .content = compact ++ end, .single = single });
+        inline for ([_][3][]const u8{
+            .{ spaced, spaced, "{\"q\":\"x" },
+            .{ compact, compact, "{\"q\":\"x" },
+            .{ spaced ++ "\n", spaced ++ end, "{\"q\":\"x\\n" },
+            .{ compact ++ "\n", compact ++ end, "{\"q\":\"x\\n" },
+        }) |pair| {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const tokens = try pre.TestText.encode(undefined, a, pair[0], false);
+            const body = try std.fmt.allocPrint(a, "{s}{s},\"max_tokens\":2000", .{ head, if (single) ",\"parallel_tool_calls\":false" else "" });
+            for ([_]bool{ false, true }) |batched| {
+                var backend: pre.CallEngine = .{ .tokens = tokens, .batched = batched };
+                var whole = try send(backend.engine(), try std.mem.concat(a, u8, &.{ body, ",\"stream\":false}" }));
+                defer whole.deinit();
+                var streamed = try send(backend.engine(), try std.mem.concat(a, u8, &.{ body, ",\"stream\":true}" }));
+                defer streamed.deinit();
+                try std.testing.expectEqual(@as(?u16, 200), whole.status);
+                try std.testing.expect(streamed.opened and streamed.status == null);
+                // the whole reply keeps the unclosed block as text and makes no call
+                try std.testing.expectEqualStrings(pair[1], whole.content.items);
+                try std.testing.expectEqual(@as(usize, 0), whole.calls);
+                try std.testing.expectEqualStrings(whole.content.items, streamed.content.items);
+                // the stream shows the call the name began, but the one-call policy withholds an unclosed one
+                try std.testing.expectEqual(@as(usize, if (single) 0 else 1), streamed.calls);
+                if (single) try std.testing.expectEqualStrings("", streamed.arguments.items) else try std.testing.expectEqualStrings(pair[2], streamed.arguments.items);
+                try std.testing.expectEqualStrings(whole.reason(), streamed.reason());
+            }
+        }
     }
 }
 

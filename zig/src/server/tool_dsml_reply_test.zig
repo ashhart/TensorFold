@@ -67,7 +67,7 @@ test "DSML calls agree whole and streamed in every spelling, with prose, typed v
     };
 }
 
-test "a DSML block that breaks before its first header fails as it did: no call, its text kept, whole and streamed" {
+test "a DSML block that breaks before its invoke name fails as it did: no call, its text kept, whole and streamed" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -90,7 +90,10 @@ test "a DSML call max_tokens cuts after its header returns cut whole and streame
         const reply = try std.mem.concat(a, u8, &.{ "Writing it.\n", try t.block(a, sp, &.{try t.invoke(a, sp, "write_file", &.{ .{ "path", true, "notes.txt" }, .{ "content", true, "The history of the bicycle" } })}) });
         const cases = [_]struct { usize, usize, []const u8 }{
             .{ std.mem.indexOf(u8, reply, " the bicycle").?, 1, "{\"path\":\"notes.txt\",\"content\":\"The history of" },
-            .{ std.mem.indexOf(u8, reply, "tes.txt").?, 0, "" },
+            // cut inside the first parameter: its header is out, so the cut reply returns the call it began
+            .{ std.mem.indexOf(u8, reply, "tes.txt").?, 1, "{\"path\":\"no" },
+            // cut inside the invoke name: no header went out, so both replies make no call
+            .{ std.mem.indexOf(u8, reply, "write_file").?, 0, "" },
         };
         for (cases) |case| {
             const body = try chatBody(a, t.tools_text, try std.fmt.allocPrint(a, ",\"max_tokens\":{d}", .{case[0]}));
