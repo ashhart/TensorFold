@@ -268,7 +268,7 @@ pub const Engine = struct {
         };
     }
 
-    // 24 layers, store kinds per fwd.actKind: norm (plain at 0, else add), mixer, post norm, MLP; ring keeps adds disjoint.
+    // 24 layers, store kinds per fwd.actKind: norm (plain at 0, else add), mixer, post norm, MLP.
     fn runLayers(e: *Engine, rows: usize) Error!void {
         const cx = e.core();
         const span = rows * pinned.hidden;
@@ -285,7 +285,7 @@ pub const Engine = struct {
             if (i == 0) {
                 try cx.plainNorm(x, ringView(try e.h[0].slice(0, span), prev), input_norm, rows);
             } else {
-                // the residual keeps the previous kind; layer 4's add reads the f32 stream and rounds the sum to bf16 on the store.
+                // the residual keeps the previous kind; layer 4's add rounds the f32 sum to bf16 on the store.
                 try cx.addNorm(x, ringView(try e.h[ring ^ 1].slice(0, span), prev), ringView(try e.h[ring].slice(0, span), prev), ringView(try e.r.slice(0, span), prev), input_norm, rows);
                 ring ^= 1;
             }
