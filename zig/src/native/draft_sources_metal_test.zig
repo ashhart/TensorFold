@@ -80,16 +80,23 @@ test "draft sources: Metal Step5 follows the checkpoint MTP layer count" {
 }
 
 test "draft sources: Metal GLM and GLM DSA follow actual MTP weights" {
+    const objc = @import("metal").objc;
+    // A host object with no Metal architecture answers the capability query without opening a GPU.
+    const no_arch = objc.msg(objc.Id, objc.class("NSObject"), "new", .{});
+    defer objc.release(no_arch);
     var e: tf.glm.engine.Engine = undefined;
     var weights: @typeInfo(@TypeOf(e.w)).pointer.child = undefined;
     e.w = &weights;
     e.ep = null;
+    e.device = .{ .id = no_arch };
     var slots: tf.glm.slots.Slots = undefined;
     var b: tf.glm.backend.Backend = .{ .gpa = std.testing.allocator, .sl = &slots };
     slots.e = &e;
     slots.slots = &.{};
     e.w.mtp = null;
-    try check(b.facts(), null, true, false);
+    const facts = b.facts();
+    try std.testing.expect(facts.learn_row_costs);
+    try check(facts, null, true, false);
     e.w.mtp = @as(@TypeOf(e.w.mtp.?), undefined);
     try check(b.facts(), null, true, true);
     var d: tf.glm_dsa.engine.Engine = undefined;
