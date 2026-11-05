@@ -115,7 +115,7 @@ pub fn fallback(a: Allocator, goal: []const u8) Allocator.Error![]const []const 
     while (lines.next()) |raw| {
         var line = std.mem.trim(u8, raw, " \t\r`#>-*");
         if (line.len < 3) continue;
-        for (line, 0..) |ch, i| if ((ch == '?' or ch == '.' or ch == '!') and (i + 1 == line.len or line[i + 1] == ' ')) {
+        for (line, 0..) |ch, i| if ((ch == '?' or ch == '.' or ch == '!') and (i + 1 == line.len or line[i + 1] == ' ' or line[i + 1] == '\t')) { // a tab ends a sentence the way a space does
             line = line[0..i];
             break;
         };
@@ -239,6 +239,7 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
     try std.testing.expectEqualStrings("Implement a client for the latest Stripe API, with retries and idempotency", f[0]);
     try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release? Name the version."))[0]);
+    try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release?\tName the version."))[0]);
 }
 
 fn textPart(a: Allocator, s: []const u8) !Value {
