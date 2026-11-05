@@ -121,6 +121,7 @@ pub const Fake = struct {
 
 pub const Box = struct {
     tokens: [2]std.ArrayList(u32) = @splat(.empty),
+    widths: [2]std.ArrayList(u32) = @splat(.empty),
     done: std.atomic.Value(u32) = .init(0),
     bad: bool = false,
     pub fn event(ptr: *anyopaque, id: api.Id, e: *const api.Event) void {
@@ -131,6 +132,9 @@ pub const Box = struct {
             },
             .finished => |end| {
                 if (end.reason == .failed) b.bad = true;
+                b.widths[id - 1].appendSlice(a, end.stats.prefill_widths) catch {
+                    b.bad = true;
+                };
                 _ = b.done.fetchAdd(1, .release);
             },
             else => {},
@@ -138,5 +142,6 @@ pub const Box = struct {
     }
     pub fn deinit(b: *Box) void {
         for (&b.tokens) |*ts| ts.deinit(a);
+        for (&b.widths) |*ws| ws.deinit(a);
     }
 };
