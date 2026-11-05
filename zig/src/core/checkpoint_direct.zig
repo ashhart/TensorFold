@@ -5,19 +5,16 @@ const builtin = @import("builtin");
 const gather = @import("direct_gather.zig");
 const Checkpoint = @import("checkpoint.zig").Checkpoint;
 
-/// One prefix's tensors: their names, their copies' views, and the arena those live in.
+/// One prefix's tensors: their names, their views (repointed at the copies), and the copies by name.
 const Slot = struct {
-    g: gather.Gather,
     prefix: [320]u8 = undefined,
     prefix_len: usize = 0,
     names: std.ArrayList([]const u8) = .empty,
     views: std.ArrayList([]const u8) = .empty,
     ptrs: std.ArrayList(*[]const u8) = .empty,
     copies: std.StringHashMapUnmanaged([]const u8) = .empty,
-    failed: ?anyerror = null,
 
     fn deinit(s: *Slot, gpa: std.mem.Allocator) void {
-        s.g.deinit();
         s.names.deinit(gpa);
         s.views.deinit(gpa);
         s.ptrs.deinit(gpa);
@@ -31,12 +28,14 @@ pub const Layers = struct {
     ck: ?*Checkpoint = null,
     sources: [gather.max_sources]gather.Source = undefined,
     n: usize = 0,
-    slots: [2]Slot,
-    cur: usize = 0,
-    ahead: ?std.Thread = null, // fills slots[1 - cur] with the prefix the last `enter` named next
+    pair: gather.Pair,
+    // each read fills the next slot and the pair's next arena: a slot's views point into its own arena
+    slots: [2]Slot = .{ .{}, .{} },
+    at: usize = 0, // the slot the next read fills
+    ahead: bool = false, // slots[at ^ 1] is being read by the pair's thread
 
     pub fn init(gpa: std.mem.Allocator, ck: *Checkpoint, readers: usize) Layers {
-        var l: Layers = .{ .gpa = gpa, .slots = .{ .{ .g = .init(gpa, readers) }, .{ .g = .init(gpa, readers) } } };
+        var l: Layers = .{ .gpa = gpa, .pair = .init(gpa, readers) };
         const files = ck.files.items;
         if (builtin.os.tag != .linux or readers == 0 or !gather.enabled() or files.len > gather.max_sources) return l;
         for (files, l.sources[0..files.len]) |*f, *s| s.* = .{ .path = f.path, .memory = f.map.memory };
@@ -53,61 +52,49 @@ pub const Layers = struct {
     pub fn enter(l: *Layers, prefix: []const u8, next: ?[]const u8) !void {
         const ck = l.ck orelse return;
         ck.copies = null;
-        const other = 1 - l.cur;
         var want: [320]u8 = undefined;
         const name = try std.fmt.bufPrint(&want, "{s}{s}", .{ ck.scope, prefix });
-        const read_ahead = l.ahead != null;
-        if (l.ahead) |t| t.join();
-        l.ahead = null;
-        const s = &l.slots[other];
-        if (!read_ahead or !std.mem.eql(u8, s.prefix[0..s.prefix_len], name)) {
-            try l.label(s, prefix);
-            l.fill(s);
+        try l.pair.wait();
+        var s = &l.slots[1 - l.at];
+        if (!l.ahead or !std.mem.eql(u8, s.prefix[0..s.prefix_len], name)) {
+            s = try l.collect(prefix);
+            try l.pair.read(l.sources[0..l.n], s.ptrs.items);
         }
-        if (s.failed) |err| return err;
-        l.cur = other;
+        l.ahead = false;
+        try s.copies.ensureTotalCapacity(l.gpa, @intCast(s.names.items.len));
+        for (s.names.items, s.views.items) |k, v| s.copies.putAssumeCapacity(k, v);
         ck.copies = &s.copies;
-        const n = next orelse return;
         // the slot read ahead into held the layer before this one: its bytes are on the device
-        const t = &l.slots[1 - other];
-        try l.label(t, n);
-        l.ahead = std.Thread.spawn(.{}, fill, .{ l, t }) catch null; // no thread: `next` is read when it is entered
+        const t = try l.collect(next orelse return);
+        try l.pair.start(l.sources[0..l.n], t.ptrs.items, null);
+        l.ahead = true;
     }
 
     pub fn deinit(l: *Layers) void {
-        if (l.ahead) |t| t.join();
+        l.pair.deinit();
         if (l.ck) |ck| ck.copies = null;
         for (&l.slots) |*s| s.deinit(l.gpa);
     }
 
-    fn label(l: *const Layers, s: *Slot, prefix: []const u8) !void {
-        s.prefix_len = (try std.fmt.bufPrint(&s.prefix, "{s}{s}", .{ l.ck.?.scope, prefix })).len;
-    }
-
-    fn fill(l: *const Layers, s: *Slot) void {
-        s.failed = null;
-        read(l, s) catch |err| {
-            s.failed = err;
-        };
-    }
-
-    /// Reads only the checkpoint's indexes, which no `get` changes: safe beside the loader's thread.
-    fn read(l: *const Layers, s: *Slot) !void {
+    /// The next slot holding `prefix`'s names and mapped views; only the checkpoint's indexes are read.
+    fn collect(l: *Layers, prefix: []const u8) !*Slot {
         const gpa = l.gpa;
+        const ck = l.ck.?;
+        const s = &l.slots[l.at];
+        l.at = 1 - l.at;
+        s.prefix_len = (try std.fmt.bufPrint(&s.prefix, "{s}{s}", .{ ck.scope, prefix })).len;
         s.names.clearRetainingCapacity();
         s.views.clearRetainingCapacity();
         s.copies.clearRetainingCapacity();
-        const prefix = s.prefix[0..s.prefix_len];
-        for (l.ck.?.files.items) |*f| for (f.names.keys()) |k| {
-            if (!std.mem.startsWith(u8, k, prefix)) continue;
+        const full = s.prefix[0..s.prefix_len];
+        for (ck.files.items) |*f| for (f.names.keys()) |k| {
+            if (!std.mem.startsWith(u8, k, full)) continue;
             try s.names.append(gpa, k);
             try s.views.append(gpa, f.get(k).?.bytes);
         };
         try s.ptrs.resize(gpa, s.views.items.len);
         for (s.views.items, s.ptrs.items) |*v, *p| p.* = v;
-        try s.g.read(l.sources[0..l.n], s.ptrs.items);
-        try s.copies.ensureTotalCapacity(gpa, @intCast(s.names.items.len));
-        for (s.names.items, s.views.items) |k, v| s.copies.putAssumeCapacity(k, v);
+        return s;
     }
 };
 
