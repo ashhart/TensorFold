@@ -28,7 +28,7 @@ boundaries, while the shared cache compares decoded spans and image identities. 
 rendered answer text. No separate hot-swappable LoRA state is admitted by these persistence adapters; checkpoint
 changes and supported external drafters use the identities above.
 
-Checkpoint keys include every validated indexed shard path, including subfolders and nonstandard suffixes, plus
+Checkpoint keys include every validated indexed shard path, including subfolders and any suffix accepted by the loader, plus
 auxiliary top-level safetensors files. Their names, sizes, inodes and modification/change stamps are bound. A weight
 write with unchanged config, index, tensor header and size moves their namespace even when a fixed probe does not
 visit the changed tensor. Flash Next also hashes the loaded variant text and input/output/meta bindings in sorted
