@@ -28,8 +28,6 @@ release fixes it, and the release notes say which one.
   `--decode-share` helps. The default --parallel auto uses the single host.
 - The 1.0.12 gfx1151 Qwen receipts leave the 27B cancellation failure open and the 9B/27B drafted/plain comparisons
   unrun. Those receipts do not establish a new 1.1.0 device pass.
-- Qwen3.8-Flash-Next in speed-up mode: a drafted request right after a `"draft": false` one decodes slowly, and the next
-  request is back to speed. The tokens are the same.
 - Qwen3.8-Flash-Next on a Mac: a turn more than `--keep-warm` seconds after the last request (900 by default) takes
   about 2 s to its first token on an M3 Ultra, even when its prompt is cached, while macOS wires the model again.
 - Qwen3.8-Flash-Next on one GB10 reads its n-gram embedding tables (29.8 GiB in the MLX 4-bit MTP checkpoint) from
