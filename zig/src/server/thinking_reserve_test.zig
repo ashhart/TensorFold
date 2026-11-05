@@ -69,7 +69,7 @@ const Engine = struct {
     fn info(ctx: *anyopaque) api.Info {
         const e: *@This() = @ptrCast(@alignCast(ctx));
         var out: api.Info = .{ .context_window = e.window, .answer_limit = e.answer_limit };
-        if (@hasField(api.Info, "reported_context_window")) @field(out, "reported_context_window") = e.reported;
+        out.reported_context_window = e.reported;
         return out;
     }
 
@@ -213,7 +213,6 @@ test "Nemotron window: discovery preserves the backend boundary and request poli
                 try std.testing.expect(got.status != 200);
                 try std.testing.expectEqualStrings("PromptTooLong", got.payload.get("error").?.get("message").?.string);
             }
-            std.debug.print("NEMOTRON sum={d} published={any} status={d}\n", .{ sum, published, got.status });
         }
     }
     for ([_]usize{ 1, 4096, 262144 }) |known| {

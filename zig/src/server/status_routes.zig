@@ -390,7 +390,7 @@ test "Nemotron window: model discovery reports the real fallback" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var info: api.Info = .{};
-    if (@hasField(api.Info, "reported_context_window")) @field(info, "reported_context_window") = @import("nemotron_limits").reported(0, @import("nemotron_limits").positions(0));
+    info.reported_context_window = @import("nemotron_limits").reported(0, @import("nemotron_limits").positions(0));
     const value = try modelValue(arena.allocator(), "model", info, 0, null);
     try std.testing.expect(value.get("context_length") != null);
     try std.testing.expectEqual(@as(i64, 262193), value.get("context_length").?.int64().?);
