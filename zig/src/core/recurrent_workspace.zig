@@ -6,6 +6,18 @@ pub fn rowClass(rows: usize, maximum: usize) !usize {
     return @min(maximum, try std.math.ceilPowerOfTwo(usize, rows));
 }
 
+/// A window's verify log and rollback copy in one block: only a one-row window has a copy, past the log's first row.
+pub const Overlay = struct {
+    before_at: usize,
+    bytes: usize,
+
+    /// `state` bytes a copy, `row_log` bytes a window row's log, `rows` the widest window's rows.
+    pub fn init(state: usize, row_log: usize, rows: usize) Overlay {
+        const at = std.mem.alignForward(usize, row_log, 256);
+        return .{ .before_at = at, .bytes = @max(at + state, row_log * rows) };
+    }
+};
+
 pub fn Workspace(comptime Resource: type) type {
     return struct {
         const Self = @This();
@@ -177,6 +189,17 @@ test "recurrent workspace: failed growth preserves a live lease and metadata all
     try std.testing.expectError(error.OutOfMemory, empty.acquire(9, 64, &f));
     try std.testing.expectEqual(before, f.allocs);
     try empty.deinit(9, &f);
+}
+
+test "recurrent overlay: a one-row window's log row and copy are apart, and the widest log fits" {
+    for ([_][3]usize{ .{ 64 << 20, 2 << 20, 64 }, .{ 147 << 20, 4 << 20, 64 }, .{ 1000, 300, 2 }, .{ 0, 1, 1 } }) |c| {
+        const o = Overlay.init(c[0], c[1], c[2]);
+        try std.testing.expect(o.before_at >= c[1] and o.before_at % 256 == 0);
+        try std.testing.expect(o.bytes >= o.before_at + c[0] and o.bytes >= c[1] * c[2]);
+    }
+    const o = Overlay.init(1000, 300, 2);
+    try std.testing.expectEqual(@as(usize, 512), o.before_at);
+    try std.testing.expectEqual(@as(usize, 1512), o.bytes);
 }
 
 test "recurrent workspace: every admitted window fits its power-of-two log class" {
