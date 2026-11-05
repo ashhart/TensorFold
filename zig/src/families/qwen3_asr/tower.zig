@@ -58,9 +58,9 @@ pub const Weights = struct {
             const qkv_b = [3][]const u8{ try src.expect(try p(&nb[0], i, "self_attn.q_proj.bias"), v), try src.expect(try p(&nb[1], i, "self_attn.k_proj.bias"), v), try src.expect(try p(&nb[2], i, "self_attn.v_proj.bias"), v) };
             l.qkv_b = try joined(gpa, up, &qkv_b);
             const one = .{
-                .{ &l.out, "self_attn.out_proj.weight", sq },  .{ &l.out_b, "self_attn.out_proj.bias", v },
-                .{ &l.ln1, "self_attn_layer_norm.weight", v }, .{ &l.ln1_b, "self_attn_layer_norm.bias", v },
-                .{ &l.ln2, "final_layer_norm.weight", v },     .{ &l.ln2_b, "final_layer_norm.bias", v },
+                .{ &l.out, "self_attn.out_proj.weight", sq },       .{ &l.out_b, "self_attn.out_proj.bias", v },
+                .{ &l.ln1, "self_attn_layer_norm.weight", v },      .{ &l.ln1_b, "self_attn_layer_norm.bias", v },
+                .{ &l.ln2, "final_layer_norm.weight", v },          .{ &l.ln2_b, "final_layer_norm.bias", v },
                 .{ &l.fc1, "fc1.weight", &[_]usize{ a.ffn, a.d } }, .{ &l.fc1_b, "fc1.bias", &[_]usize{a.ffn} },
                 .{ &l.fc2, "fc2.weight", &[_]usize{ a.d, a.ffn } }, .{ &l.fc2_b, "fc2.bias", v },
             };
