@@ -29,3 +29,7 @@ pub const nem_prow_gen12: []const u8 = if (available) &Blob("spv_nem_prow_gen12"
 pub const nem_attn_dec: []const u8 = if (available) &Blob("spv_nem_attn_dec").bytes else &.{};
 pub const lfm3: []const u8 = if (available) &Blob("spv_lfm3").bytes else &.{};
 pub const lfm3_mv: []const u8 = if (available) &Blob("spv_lfm3_mv").bytes else &.{};
+/// lfm3.cl at 2 query heads a KV head (Qwen3-0.6B, 16 on 8): its norms, SwiGLU and attention for Qwen3-ASR.
+pub const lfm3_gq2: []const u8 = if (available) &Blob("spv_lfm3_gq2").bytes else &.{};
+/// Qwen3-ASR's own ops: bf16 Linear and conv, LayerNorm, GELU, the tower's attention, Qwen3 QK norm and RoPE.
+pub const qwen3_asr: []const u8 = if (available) &Blob("spv_qwen3_asr").bytes else &.{};
