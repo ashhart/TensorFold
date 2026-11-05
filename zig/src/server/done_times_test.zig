@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const lanes = @import("lanes");
 const server = @import("server.zig");
 const chat = @import("chat.zig");
+const slide_ask = @import("slide_ask.zig");
 const log = @import("log.zig");
 const json = @import("json");
 const Text = @import("model_text.zig").Text;
@@ -103,6 +104,7 @@ const Script = struct {
     cached: u32 = 0,
     tokens: []const u32 = &.{ 'h', 'i' },
     seed: ?u64 = null,
+    prompt: []const u32 = &.{},
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
@@ -112,6 +114,7 @@ const Script = struct {
     fn submit(ctx: *anyopaque, id: api.Id, req: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const s: *Script = @ptrCast(@alignCast(ctx));
         s.seed = if (req.sampling) |v| v.seed else null;
+        s.prompt = req.prompt;
         Clock.ns = s.first;
         sink.event(sink.ctx, id, &.{ .prefilled = s.cached });
         sink.event(sink.ctx, id, &.{ .tokens = s.tokens });
@@ -129,6 +132,30 @@ const Script = struct {
 fn request(srv: *server.Server, a: std.mem.Allocator, id: []const u8, out: *Output) !chat.Reply {
     var cx: Cx = .{ .a = a };
     return chat.run(srv, &cx, .{ .id = id, .prompt = .{ .text = "prompt" }, .max_tokens = 2, .fields = .{ .object = try json.newObject(a) } }, out.sink(), Gone{});
+}
+
+test "slide ask: wordings are seeded from the lesson, and --prompt-seed still wins" {
+    const gpa = std.testing.allocator;
+    var capture: Capture = .{};
+    capture.start();
+    defer capture.deinit();
+    Clock.ns = 10_000_000_000;
+    var script: Script = .{ .first = 10_000_000_000 };
+    var tt: helpers = .{};
+    const srv = try server.Server.init(gpa, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "one user", 8, 0.9, Gone{});
+    const seeded = script.seed.?;
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "one user", 8, 0.9, Gone{});
+    try std.testing.expectEqual(seeded, script.seed.?);
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "another user", 8, 0.9, Gone{});
+    try std.testing.expect(script.seed.? != seeded);
+    srv.config.prompt_seed = true; // the server's prompt-keyed seed wins over the lesson's
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "one user", 8, 0.9, Gone{});
+    try std.testing.expectEqual(api.seedFor(script.prompt, srv.config.seed_salt), script.seed.?);
 }
 
 fn scripted(cached: u32, left: bool) !void {
