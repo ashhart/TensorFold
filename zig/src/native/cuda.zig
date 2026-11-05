@@ -1,5 +1,4 @@
 //! CUDA family registration, device setup, memory admission and the native lane host.
-const openDrama = @import("drama_open.zig").open;
 const std = @import("std");
 const platform = @import("sys");
 const cuda = @import("cuda");
@@ -182,6 +181,7 @@ pub const Host = struct {
     }
 };
 const refusals = @import("cuda_refusal.zig");
+const open_family = @import("cuda_open.zig");
 const record = @import("cuda_record.zig");
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -192,20 +192,17 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
+    // a checkpoint that serves pictures rather than tokens: its model_index.json decides, before any family's flags
+    if (@import("moss_image_spec.zig").recognize(a, io, o.dir)) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
     if (refusals.backend(o)) |why| {
         problem.* = why;
         return null;
     }
-    if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
-    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
-    if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
-        if (refusals.lfm2(o)) |why| {
-            problem.* = why;
-            return null;
-        }
-        return lfm2.open(a, gpa, io, o, problem);
+    switch (try open_family.special(a, gpa, io, o, problem)) {
+        .not_mine => {},
+        .opened => |engine| return engine,
     }
+    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
@@ -503,6 +500,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 }
 const toGib = family_memory.toGib;
 test {
+    _ = @import("moss_image_host_test.zig");
     _ = @import("draft_sources_cuda_test.zig");
     _ = @import("copy_drafts_nemotron_test.zig");
     _ = windows;

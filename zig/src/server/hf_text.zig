@@ -65,7 +65,7 @@ pub const HfText = struct {
             };
             return t;
         };
-        t.tok = tokenizer.loadTokenizer(io, gpa, dir) catch |e| {
+        t.tok = openTokenizer(io, gpa, dir) catch |e| {
             problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
             return error.Load;
         };
@@ -161,6 +161,14 @@ pub const HfText = struct {
         const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{ .allocate = .alloc_always });
         if (doc != .object) return error.BadEos;
         return doc;
+    }
+
+    /// The checkpoint's tokenizer.json, else the tokenizer/ folder a diffusers pipeline keeps its own components in.
+    fn openTokenizer(io: std.Io, a: Allocator, dir: []const u8) !tokenizer.Tokenizer {
+        return tokenizer.loadTokenizer(io, a, dir) catch |e| {
+            if (e != error.FileNotFound) return e;
+            return tokenizer.loadTokenizer(io, a, try std.fs.path.join(a, &.{ dir, "tokenizer" }));
+        };
     }
 
     /// chat_template.jinja, else chat_template.json, else tokenizer_config.json's (named: "default", and "tool_use").
