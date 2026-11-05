@@ -293,6 +293,9 @@ const LmBounds = struct {
         try b.touch(gu, rows * 2 * i);
         try b.touch(out, rows * i);
     }
+    pub fn dump(b: *LmBounds, _: []const u8, ptr: u64, rows: usize, cols: usize) !void {
+        try b.touch(ptr, rows * cols);
+    }
     pub fn greedy(b: *LmBounds, row: u64, embed_table: u64) !u32 {
         try b.touch(row, b.t.hidden);
         try b.touch(embed_table, b.t.vocab * b.t.hidden);

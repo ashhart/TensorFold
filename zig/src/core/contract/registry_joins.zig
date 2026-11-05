@@ -17,6 +17,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("pocket_records.zig").cuda ++
     @import("minimax_cuda_records.zig").cuda ++
     @import("moss_image_cuda_records.zig").cuda ++
+    @import("qwen3_asr_cuda_records.zig").cuda ++
     @import("exl3_dense_records.zig").cuda ++
     @import("exl3_finish_records.zig").cuda ++
     @import("lfm2_moe_cuda_records.zig").cuda ++
@@ -31,7 +32,8 @@ pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
     @import("flashnext_tile_records.zig").cuda_132 ++
     @import("nvfp4_fact_records.zig").cuda_132 ++
     @import("pocket_records.zig").cuda_132 ++
-    @import("minimax_cuda_records.zig").cuda_132;
+    @import("minimax_cuda_records.zig").cuda_132 ++
+    @import("qwen3_asr_cuda_records.zig").cuda_132;
 pub const nvcc_133_after = @import("flashnext_tile_records.zig").cuda_133 ++
     @import("glm_cuda_records.zig").cuda_133 ++
     @import("nvcc_133_records.zig").cuda_133 ++
