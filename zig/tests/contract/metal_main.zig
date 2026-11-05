@@ -436,6 +436,9 @@ pub fn main(init: std.process.Init) !u8 {
     var masked_values = @import("metal_masked_values.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer masked_values.deinit();
     try masked_values.collect(o.only);
+    var ricursive_set = @import("metal_ricursive_all.zig").Set{};
+    defer ricursive_set.deinit(a);
+    try ricursive_set.collect(a, device, queue, tensor, &kernels, o.only);
     var h3: h3_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer h3.deinit();
     try h3.collect(o.only);

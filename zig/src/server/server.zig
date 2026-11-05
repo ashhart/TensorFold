@@ -212,6 +212,7 @@ pub const Server = struct {
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
         const minimax = text.tokenId(reply_text.mm_markers.close) != null;
         if (minimax) srv.markers = reply_text.mm_markers;
+        if (srv.info.reasoning_optional and std.mem.eql(u8, srv.markers.close, reply_text.think_markers.close)) srv.markers.optional = true;
         srv.close_id = text.tokenId(srv.markers.close);
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
