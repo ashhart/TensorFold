@@ -27,16 +27,27 @@ uint16_t bf16_store(float value) {
 #define STORE_VALUE(f) STORAGE_TYPE(f)
 #endif
 
+// ACT_F32 (with USE_BF16): input and output are f32 while the taps stay bf16.
+#ifdef ACT_F32
+#define ACT_TYPE float
+#define ACT_LOAD(x) (x)
+#define ACT_STORE(f) (f)
+#else
+#define ACT_TYPE STORAGE_TYPE
+#define ACT_LOAD(x) LOAD_VALUE(x)
+#define ACT_STORE(f) STORE_VALUE(f)
+#endif
+
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0, std430) readonly buffer InputX {
-  STORAGE_TYPE values[];
+  ACT_TYPE values[];
 } input_x;
 layout(set = 0, binding = 1, std430) readonly buffer Weight {
   STORAGE_TYPE values[];
 } weight;
 layout(set = 0, binding = 2, std430) writeonly buffer Output {
-  STORAGE_TYPE values[];
+  ACT_TYPE values[];
 } output_data;
 
 layout(push_constant) uniform Params {
@@ -67,9 +78,9 @@ void main() {
     uint w_base = params.rhs_offset + channel * taps;
     float accumulator = 0.0;
     for (uint k = 0u; k < taps; ++k) {
-      accumulator += LOAD_VALUE(input_x.values[in_base + k * channels]) *
+      accumulator += ACT_LOAD(input_x.values[in_base + k * channels]) *
           LOAD_VALUE(weight.values[w_base + k]);
     }
-    output_data.values[params.output_offset + index] = STORE_VALUE(accumulator);
+    output_data.values[params.output_offset + index] = ACT_STORE(accumulator);
   }
 }
