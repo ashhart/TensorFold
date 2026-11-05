@@ -110,7 +110,6 @@ const exl3_ple2_tests = @import("flashnext_exl3/model/exl3_ple2_tests.zig");
 const exl3_draft_tests = @import("flashnext_exl3/tp/exl3_draft_tests.zig");
 const exl3_pool_tests = @import("flashnext_exl3/offload/exl3_pool_tests.zig");
 const exl3_prefill_tests = @import("flashnext_exl3/prefill/exl3_prefill_tests.zig");
-const exl3_tpprefill_tests = @import("flashnext_exl3/tp/exl3_tpprefill_tests.zig");
 const flashnext_exl3_tests = @import("flashnext_exl3/model/flashnext_exl3_tests.zig");
 const flashnext_exl3_tp_tests = @import("flashnext_exl3/tp/flashnext_exl3_tp_tests.zig");
 const flashnext_exl3_engine_tests = @import("flashnext_exl3/model/flashnext_exl3_engine_tests.zig");
@@ -477,7 +476,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3-draft")) return exl3_draft_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-pool")) return exl3_pool_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-prefill")) return exl3_prefill_tests.run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "exl3-tpprefill")) return exl3_tpprefill_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "exl3-tpprefill")) return @import("flashnext_exl3/tp/exl3_tpprefill_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "nccl-lat")) return exl3_pack_tests.ncclLatency(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-tiles")) return exl3_candidate_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-shapes")) return exl3_plan_bench.profileShapes(gpu, if (rest.len > 0) rest[0] else null);
