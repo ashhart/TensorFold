@@ -131,3 +131,30 @@ test "FSR forecast cannot spend demand's counts or promote unused predictions" {
     _ = try c.resident(4);
     try std.testing.expectEqual(@as(u2, 1), c.slots[predicted.slot].uses);
 }
+
+test "FSR a forecast gives back the expert it displaced, unless that expert moved" {
+    var c = try Cache.init(a, 8, 2);
+    defer c.deinit();
+    try c.protect(&.{ 0, 1 });
+    for ([_]usize{ 0, 1 }) |k| try c.publish((try c.reserve(k, false)).?);
+    c.release();
+    for (c.slots) |*s| s.uses = 0;
+    const slot = c.map[0];
+    const unread = (try c.reserve(2, true)).?;
+    try std.testing.expectEqual(absent, c.map[0]);
+    try c.giveBack(unread);
+    try std.testing.expectEqual(slot, c.map[0]);
+    try std.testing.expectEqual(absent, c.map[2]);
+    try std.testing.expect(c.pending(2) == null and try c.peek(0) != null);
+    c.hand = 0;
+    const first = (try c.reserve(2, true)).?; // displaces 0
+    const moved = (try c.reserve(0, true)).?; // 0 is being read into the other slot
+    try c.giveBack(first);
+    try std.testing.expectEqual(absent, c.map[0]);
+    try std.testing.expectEqual(absent, c.map[2]);
+    try c.publish(moved);
+    try std.testing.expect(c.map[0] >= 0);
+    const empty = (try c.reserve(3, true)).?; // the empty slot: nothing to give back
+    try c.giveBack(empty);
+    try std.testing.expectEqual(absent, c.map[3]);
+}
