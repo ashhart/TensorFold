@@ -18,8 +18,9 @@ const g = contract.gates;
 const family = rc.family;
 const R = rc.R;
 
-/// The label Ripple's registrations of llama's pipelines carry.
+/// The label Ripple's registrations of llama's pipelines carry, and those at o_proj's reduction.
 const label = "ricursive llama";
+const o_label = label ++ " o";
 const matvec_rows = [_]u32{ 1, 2, 4, 8, 16, 32 };
 
 fn wanted(only: ?[]const u8, name: []const u8) bool {
@@ -27,7 +28,7 @@ fn wanted(only: ?[]const u8, name: []const u8) bool {
     return std.mem.indexOf(u8, name, text) != null;
 }
 
-/// The row projections at Ripple's reductions: the FFN's down (k 40,960) and every other projection (k 5,120).
+/// The row projections at Ripple's reductions: the FFN's down (k 40,960) and those over the hidden width (k 5,120).
 fn matvecShapes(per: u32) [2]c.Shape {
     return .{ .{ .rows = per, .n = 1024, .k = R.intermediate }, .{ .rows = per, .n = 1024, .k = R.hidden } };
 }
@@ -36,6 +37,19 @@ fn matvecShapes(per: u32) [2]c.Shape {
 fn gemmShapes(am: bool, an: bool) [2]c.Shape {
     const n: usize = if (an) 1024 else 1088;
     return .{ .{ .rows = if (am) 64 else 33, .n = n, .k = R.hidden }, .{ .rows = if (am) 128 else 100, .n = n, .k = R.intermediate } };
+}
+
+/// o_proj's reduction over the heads (k 10,240): its 5,120 outputs, and a slice of them.
+fn oMatvecShapes(per: u32) [2]c.Shape {
+    const k = R.heads * rc.DH;
+    return .{ .{ .rows = per, .n = 1024, .k = k }, .{ .rows = per, .n = R.hidden, .k = k } };
+}
+
+/// o_proj's GEMM over a prompt chunk, whole or ragged tiles as the form takes them.
+fn oGemmShapes(am: bool, an: bool) [2]c.Shape {
+    const n: usize = if (an) 1024 else 1088;
+    const k = R.heads * rc.DH;
+    return .{ .{ .rows = if (am) 64 else 33, .n = n, .k = k }, .{ .rows = if (am) 128 else 100, .n = n, .k = k } };
 }
 
 /// A decode window's merge over a sliding layer's handful of blocks, and over a global layer's most (state.max_blocks).
@@ -151,6 +165,7 @@ pub const Set = struct {
         try functions.append(a, family.sample_name);
         if (wanted(only, sample.spec().name)) try keep(a, &s.sample, try sample.Sample.init(a, device, queue), kernels);
         try s.collectFp4(a, device, queue, tensor, kernels, only, &functions);
+        try s.collectO(a, device, queue, tensor, kernels, only);
         try family.requireComplete(functions.items);
         try s.plant(a, device, queue, tensor, kernels, only);
     }
@@ -170,6 +185,31 @@ pub const Set = struct {
             if (tensor and wanted(only, try std.fmt.bufPrint(&buf, "ricursive fp4 gemm {s}", .{fun}))) {
                 try keep(a, &s.fp4_gemm, try fp4_gemm.Gemm.init(a, device, queue, i / 2 == 1, i % 2 == 1, .none), kernels);
             }
+        }
+    }
+
+    /// llama's row projections and GEMMs at o_proj's reduction (already on the roll call above).
+    fn collectO(s: *Set, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, tensor: bool, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
+        var buf: [48]u8 = undefined;
+        for (matvec_rows, family.llama_names[0..matvec_rows.len]) |per, fun| {
+            if (!wanted(only, try std.fmt.bufPrint(&buf, "{s} {s}", .{ o_label, fun }))) continue;
+            var m = try dense.Matvec.init(a, device, queue, per, .none);
+            m.retarget(o_label, oMatvecShapes(per)) catch |err| {
+                m.deinit();
+                return err;
+            };
+            try keep(a, &s.matvec, m, kernels);
+        }
+        for (family.gemm_names, 0..) |fun, i| {
+            if (!tensor or !wanted(only, try std.fmt.bufPrint(&buf, "{s} {s}", .{ o_label, fun }))) continue;
+            const am = i / 2 == 1;
+            const an = i % 2 == 1;
+            var m = try dense.Gemm.init(a, device, queue, am, an, .none);
+            m.retarget(o_label, oGemmShapes(am, an)) catch |err| {
+                m.deinit();
+                return err;
+            };
+            try keep(a, &s.gemm, m, kernels);
         }
     }
 
