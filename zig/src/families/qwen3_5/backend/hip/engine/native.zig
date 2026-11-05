@@ -15,11 +15,10 @@ const hip_lanes = @import("hip_lanes.zig");
 const joint = @import("joint_readout.zig");
 const config = @import("../../../weights/config.zig");
 
-/// The MLX affine widths this native text server loads, each with its group size, and BF16 with a joint schema head.
+/// The MLX affine widths this native text server loads, each with its group size.
 const mlx_formats = blk: {
     const widths = @import("core").quant.mlx.bit_widths;
-    var out: [widths.len * 3 + 1][]const u8 = undefined;
-    out[widths.len * 3] = "bf16"; // a decision backbone: refused without joint_head_config.json
+    var out: [widths.len * 3][]const u8 = undefined;
     for (widths, 0..) |bits, i| for ([_]u16{ 32, 64, 128 }, 0..) |g, j| {
         out[3 * i + j] = std.fmt.comptimePrint("mlx-q{d}g{d}", .{ bits, g });
     };
@@ -32,6 +31,8 @@ pub fn Native(comptime type_name: []const u8) type {
     return struct {
         pub const model_type = type_name;
         pub const formats = mlx_formats;
+        /// BF16 serves decisions only, with a joint schema head (joint_head_config.json); chat refuses it.
+        pub const decision_formats: []const []const u8 = &.{"bf16"};
         /// Positions a stream holds when neither --context nor the checkpoint's config names a window.
         pub const default_context: i64 = 32768;
         /// The engine cuts prompts itself.
@@ -407,11 +408,9 @@ test "a bf16 checkpoint without a joint head is refused as decision-only, an MLX
     try std.testing.expect(oneRank(a, io, dir, .{ .window = 64, .streams = 1 }) == null);
     const tp = oneRank(a, io, dir, .{ .window = 64, .streams = 1, .world = 2 }).?;
     try std.testing.expectEqualStrings("the joint schema head serves on one rank; drop --tp", tp);
-    inline for (.{ "qwen3_5", "qwen3_5_moe" }) |kind| { // a headed checkpoint loads, so BF16 is offered again
-        const offered = for (Native(kind).formats) |format| {
-            if (std.mem.eql(u8, format, "bf16")) break true;
-        } else false;
-        try std.testing.expect(offered);
+    inline for (.{ "qwen3_5", "qwen3_5_moe" }) |kind| { // a headed checkpoint loads: BF16 offered for decisions only
+        for (Native(kind).formats) |format| try std.testing.expect(!std.mem.eql(u8, format, "bf16"));
+        try std.testing.expectEqualStrings("bf16", Native(kind).decision_formats[0]);
     }
     const mlx = try std.mem.replaceOwned(u8, a, text, "\"tie_word_embeddings\": false,", "\"tie_word_embeddings\": false, \"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"},");
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });

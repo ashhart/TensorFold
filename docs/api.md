@@ -181,7 +181,8 @@ context window before the first is scored, so a refused request costs no GPU wor
 `POST /v1/systemone` on a Clef checkpoint (Cloudflare's clef-flash: BF16 Qwen3.5 weights with
 `joint_head_config.json` and `joint_head.safetensors`) answers each question from the joint schema head, the way the
 model card's reference `systemone` does. The native server serves it on one HIP GPU; a Clef engine serves no chat, and
-`--tp` is refused. On every other engine the route keeps llama-server's System One request.
+`--tp` is refused. On every other engine the route keeps llama-server's System One request. `capabilities --json`
+lists such formats under `decisions` (`"qwen3_5": ["bf16"]`), apart from the `families` formats that serve chat.
 
 ```json
 {"model": "clef-flash",

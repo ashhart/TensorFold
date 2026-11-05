@@ -261,7 +261,13 @@ pub const PromptCachePlan = struct {
 };
 
 /// A native family's model type, weight formats and explicit raw-text capability.
-pub const Family = struct { model_type: []const u8, formats: []const []const u8, raw_text: bool = true };
+pub const Family = struct {
+    model_type: []const u8,
+    formats: []const []const u8,
+    raw_text: bool = true,
+    /// Formats it serves only for decisions (a readout head beside the checkpoint), not for chat.
+    decision_formats: []const []const u8 = &.{},
+};
 
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
