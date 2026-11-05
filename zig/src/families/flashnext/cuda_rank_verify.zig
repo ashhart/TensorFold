@@ -74,9 +74,10 @@ pub fn ensure(map: anytype, gpa: std.mem.Allocator, keys: []const u64, ctx: anyt
     }
 }
 
-/// Rank 1's window state for a sequence: one draft row, the head's absorb rows (Session.window's form).
+/// Rank 1's window state: EXL3 keeps no head cache; classic retains the sequence's head geometry.
 pub fn makeWindow(s: *Session, q: *const prompt.Seq) !mtp.Draft {
-    return mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, q.cap, 1, s.engine.chunk, s.engine.heads);
+    const cap = if (s.engine.scratch_format == .exl3) 1 else q.cap;
+    return mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, cap, 1, s.engine.chunk, s.engine.heads);
 }
 
 fn limitOf(s: *const Session) usize {

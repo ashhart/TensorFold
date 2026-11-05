@@ -110,6 +110,49 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
   `_chunks,_merge`) runs those entry points on our kernels and the rest on the set's, to put a difference down to one
   kernel.
 
+## EXL3 checkpoints
+
+An EXL3 pack (see [EXL3 weights](exl3.md)) serves on one sm_120 rank, or on two with expert parallel (`--tp 2`), with
+its routed experts in pinned host memory and a pool of expert lines a layer on the device. `tools/exl3_serve_tp2.sh`
+starts a rank. These switches tune it:
+
+| Name | Default | Effect |
+| --- | --- | --- |
+| `TF_FLASHNEXT_EXPERT_LINES` | from free memory | Expert lines a layer keeps on the device. |
+| `TF_FLASHNEXT_EXPERT_RESERVE_MB` | the server's reserve (`TENSORFOLD_MEMORY_RESERVE_GIB`) | MiB left free after the pools. |
+| `TF_FLASHNEXT_EXL3_STREAMS` | 1 | Streams whose caches the pool leaves room for, when `--parallel` does not say. |
+| `TF_FLASHNEXT_EXL3_LINE_DELTAS` | unset | `POOL:+N,POOL:-N` lines added to or removed from single pools of the uniform count. |
+| `TF_FLASHNEXT_EXL3_PROFILE_DIR` | unset | Directory where expert-use profiles persist between runs. |
+| `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | `0` | `1` sizes the pools from the stored profile; ignored with `TF_FLASHNEXT_EXPERT_LINES`. |
+| `TF_FLASHNEXT_EXL3_ROUTED` | host | `device` keeps every routed expert on the device. |
+| `TF_FLASHNEXT_EXL3_ARCH` | unset | `unqualified` serves on a device that is not sm_120, without a claim. |
+| `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | `0` | `1` keeps the MTP layer's experts on the device instead of a pool (one rank). |
+| `TF_FLASHNEXT_EXL3_PREFILL` | on | `0` turns the deep-chunk prefill path off. |
+| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | 8,192 | Rows of a deep chunk; also what the server reserves at load. |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING` | on | `0` stops streaming the coming layers' experts into one ring of the pools' lines. |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | 1 | Layers ahead the ring prefetches. |
+| `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | on | `0` (two ranks) stops overlapping the all-reduce with a chunk's compute. |
+| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH` | `0` | Experimental: `1` (two ranks) reduces the weighted branch in fp32, written back with unit weights. |
+| `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | `0` | Experimental: `1` (two ranks, ring) runs a second deep chunk beside the first when memory admits it. |
+| `TF_FLASHNEXT_EXL3_PREFILL_SNAP_GRID` | on | Diagnostics only: `0` keeps prompt-cache states at any row instead of on the serving step's starts, to test that a resumed prompt equals a fresh one. |
+| `TF_FLASHNEXT_PROFILE` | `0` | Diagnostics only: `1` times the ranks' combine, all-reduce and place of a deep chunk, with a wait each. |
+| `TF_FLASHNEXT_PLE_READ` | `map` | `pread` reads the n-gram embedding rows by positional read. |
+| `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | Whether kept prompt-cache states live in pinned host memory. |
+| `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
+| `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY` | `0` | Diagnostics only: `1`, with the switch above, adds per-layer counters. |
+| `TENSORFOLD_BIN`, `TF_SRC` | built binary, the checkout | Diagnostics only: the binary `tools/exl3_*.sh` run and the checkout `tools/exl3_*.py` read their corpus from. |
+
+### TP integration scope
+
+Expert-parallel EXL3 placement and the collective spin override are EXL3-only; NVFP4 retains its existing
+expert placement and reduction. Three shared Flash Next changes also apply to NVFP4:
+
+- Rank forward frames carry a validated telemetry phase, which the follower uses to label its diagnostics.
+- MTP's `prompt_last` advances after every prompt chunk, including chunks that do not request logits, so the
+  first draft reads the last completed prompt row.
+- Snapshot-reuse warnings report invalid marks or missing head state for either format. NVFP4's existing
+  refusal of TP snapshots with drafts remains; EXL3 can retain the rank-0 head cache.
+
 ## What the core runs and what the family runs
 
 The family plugs into the core's pieces and adds no scheduler:
