@@ -68,12 +68,12 @@ fn indexedMiss(comptime family: []const u8) !void {
     const dir = try tmp.dir.realPathFileAlloc(t.io, ".", a);
     try tmp.dir.createDirPath(t.io, "tensors");
     try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = "{}" });
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"unprobed.weight\":\"tensors/native-QB.bin\"}}" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"unprobed.weight\":\"tensors/native-QB.safetensors\"}}" });
     const header = "{\"unprobed.weight\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}";
     var shard: [8 + header.len + 4]u8 = @splat(0);
     std.mem.writeInt(u64, shard[0..8], header.len, .little);
     @memcpy(shard[8..][0..header.len], header);
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.bin", .data = &shard });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.safetensors", .data = &shard });
     var driver: cuda.Driver = undefined;
     driver.api.cuDeviceGetName = Driver.name;
     driver.api.cuDeviceGetAttribute = Driver.attribute;
@@ -84,7 +84,7 @@ fn indexedMiss(comptime family: []const u8) !void {
     const same = try disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile);
     try std.Io.sleep(t.io, .fromMilliseconds(5), .awake);
     shard[shard.len - 1] = 1;
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.bin", .data = &shard });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "tensors/native-QB.safetensors", .data = &shard });
     try fixture.misses(before, same, &.{try disk.identityOf(a, t.io, &gpu, dir, null, &.{1}, 42, profile)});
 }
 
