@@ -24,8 +24,7 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/bf16_round.zig`: the one fp32-to-bf16 rounding every host copy uses.
 - `zig/src/core/profile.zig` and [profiles](profiles.md): the `--profile` switch registry.
 - `zig/src/core/contract/` and the [kernel contract](kernel-contract.md): the gates a new or ported kernel passes.
-- `zig/src/core/prompt_tail.zig`: the last layer's kept tile. Not on main yet: it is on [#2229] (branch
-  `jschmied:tail/last-layer-kept-tile`).
+- `zig/src/core/prompt_tail.zig`: the last layer's kept tile. Not on main yet: it is on [#2229].
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
 ## The table
@@ -53,7 +52,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 5. State walk | yes | yes | open [#2215] | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
 | 7. Host KV tier | yes | open [#1501] | done [#1795] | yes | yes |
-| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | open C[#1411] | yes | done C[#1413] |
+| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | yes | done C[#1413] M¹ |
 | 9. FP8 KV | done [#886] | yes | done¹ | yes | yes |
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
@@ -63,7 +62,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 15. MTP | done [#1562] | done [#1925] | done [#1585] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done [#979] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
-| 18. Copy drafts | done [#1477] | done [#468] | open [#2146] | done [#2022] | done [#1974] |
+| 18. Copy drafts | done [#1477] | done [#468] | done [#2146] | done [#2022] | done [#1974] |
 | 19. Shared drafts | done [#1562] | yes | done [#1779] | done [#1779] | done [#768] |
 | 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | yes | yes |
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | open [#2033] |
