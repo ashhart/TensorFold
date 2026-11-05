@@ -4,6 +4,7 @@ pub const kimi_tiktoken = @import("tiktoken.zig");
 pub const unicode = @import("unicode.zig");
 const steps = @import("steps.zig");
 const models = @import("model.zig");
+const qwen2_slow = @import("qwen2_slow.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
 pub const eos = @import("eos.zig");
@@ -420,84 +421,18 @@ pub const Tokenizer = struct {
     }
 };
 
-/// Loads `path/tokenizer.json`, or `path` itself when it names a .json file. A directory without
-/// tokenizer.json but with a Qwen2 slow tokenizer's files is converted as transformers does.
+/// Loads `path/tokenizer.json`, or `path` itself when it names a .json file; a Qwen2 slow export is converted.
 pub fn loadTokenizer(io: std.Io, a: Allocator, path: []const u8) !Tokenizer {
     const file = if (std.mem.endsWith(u8, path, ".json")) try a.dupe(u8, path) else try std.fmt.allocPrint(a, "{s}/tokenizer.json", .{path});
     defer a.free(file);
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, file, a, .limited(1 << 30)) catch |e| {
         if (e != error.FileNotFound or std.mem.endsWith(u8, path, ".json")) return e;
-        const converted = qwen2Json(io, a, path) catch |f| return if (f == error.FileNotFound) e else f;
+        const converted = qwen2_slow.converted(io, a, path) catch |f| return if (f == error.FileNotFound) e else f;
         defer a.free(converted);
         return parse(a, converted);
     };
     defer a.free(bytes);
     return parse(a, bytes);
-}
-
-/// The tokenizer.json transformers' `Qwen2Converter` makes of `dir`'s vocab.json, merges.txt and
-/// tokenizer_config.json's `added_tokens_decoder` (`tokenizer_class` `Qwen2Tokenizer`), for a
-/// checkpoint that ships no tokenizer.json: transformers 4.57's convert_slow_tokenizer.py, as its
-/// `to_str()` writes it.
-pub fn qwen2Json(io: std.Io, a: Allocator, dir: []const u8) ![]u8 {
-    const cwd = std.Io.Dir.cwd();
-    const vocab_path = try std.fs.path.join(a, &.{ dir, "vocab.json" });
-    defer a.free(vocab_path);
-    const merges_path = try std.fs.path.join(a, &.{ dir, "merges.txt" });
-    defer a.free(merges_path);
-    const config_path = try std.fs.path.join(a, &.{ dir, "tokenizer_config.json" });
-    defer a.free(config_path);
-    const vocab = try cwd.readFileAlloc(io, vocab_path, a, .limited(1 << 28));
-    defer a.free(vocab);
-    const merges = try cwd.readFileAlloc(io, merges_path, a, .limited(1 << 28));
-    defer a.free(merges);
-    const config_text = try cwd.readFileAlloc(io, config_path, a, .limited(1 << 26));
-    defer a.free(config_text);
-    const config = std.json.parseFromSlice(std.json.Value, a, config_text, .{}) catch return error.InvalidTokenizer;
-    defer config.deinit();
-    if (config.value != .object) return error.InvalidTokenizer;
-    const class = config.value.object.get("tokenizer_class") orelse return error.InvalidTokenizer;
-    if (class != .string or !std.mem.startsWith(u8, class.string, "Qwen2Tokenizer")) return error.UnsupportedModel;
-    var out: std.Io.Writer.Allocating = .init(a);
-    errdefer out.deinit();
-    const w = &out.writer;
-    try w.writeAll("{\"model\":{\"type\":\"BPE\",\"dropout\":null,\"unk_token\":null,\"continuing_subword_prefix\":\"\",\"end_of_word_suffix\":\"\",\"fuse_unk\":false,\"byte_fallback\":false,\"ignore_merges\":false,\"vocab\":");
-    try w.writeAll(vocab);
-    try w.writeAll(",\"merges\":[");
-    var lines = std.mem.splitScalar(u8, merges, '\n');
-    var first = true;
-    while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, "\r");
-        // the slow tokenizer reads merges.txt without its "#version" line and its empty ones
-        if (line.len == 0 or std.mem.startsWith(u8, line, "#version")) continue;
-        if (!first) try w.writeByte(',');
-        first = false;
-        try std.json.Stringify.encodeJsonString(line, .{}, w);
-    }
-    try w.writeAll("]},\"added_tokens\":[");
-    if (config.value.object.get("added_tokens_decoder")) |added| if (added == .object) {
-        var it = added.object.iterator();
-        var n: usize = 0;
-        while (it.next()) |entry| : (n += 1) {
-            if (entry.value_ptr.* != .object) return error.InvalidTokenizer;
-            const o = entry.value_ptr.object;
-            const content = o.get("content") orelse return error.InvalidTokenizer;
-            if (content != .string) return error.InvalidTokenizer;
-            _ = std.fmt.parseInt(u32, entry.key_ptr.*, 10) catch return error.InvalidTokenizer;
-            if (n > 0) try w.writeByte(',');
-            try w.print("{{\"id\":{s},\"content\":", .{entry.key_ptr.*});
-            try std.json.Stringify.encodeJsonString(content.string, .{}, w);
-            inline for (.{ "single_word", "lstrip", "rstrip", "normalized", "special" }) |flag_name| {
-                const v = o.get(flag_name);
-                try w.print(",\"{s}\":{s}", .{ flag_name, if (v != null and v.? == .bool and v.?.bool) "true" else "false" });
-            }
-            try w.writeByte('}');
-        }
-    };
-    try w.writeAll("],\"normalizer\":{\"type\":\"NFC\"},\"pre_tokenizer\":{\"type\":\"Sequence\",\"pretokenizers\":[{\"type\":\"Split\",\"pattern\":{\"Regex\":");
-    try std.json.Stringify.encodeJsonString("(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+", .{}, w);
-    try w.writeAll("},\"behavior\":\"Isolated\",\"invert\":false},{\"type\":\"ByteLevel\",\"add_prefix_space\":false,\"trim_offsets\":true,\"use_regex\":false}]},\"post_processor\":{\"type\":\"ByteLevel\",\"add_prefix_space\":true,\"trim_offsets\":false,\"use_regex\":true},\"decoder\":{\"type\":\"ByteLevel\",\"add_prefix_space\":true,\"trim_offsets\":true,\"use_regex\":true}}");
-    return out.toOwnedSlice();
 }
 
 pub fn parse(a: Allocator, json: []const u8) Error!Tokenizer {
