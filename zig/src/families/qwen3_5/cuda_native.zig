@@ -133,6 +133,7 @@ pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
+    try @import("cuda_bf16_format.zig").options((try E.Geometry.read(gpa, io, dir)).bf16, o.vision != null, o.prompt_int8, o.slide);
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();
     const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
@@ -140,7 +141,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     _ = try cache_mod.cacheRows(o.context, page_test);
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     const share_snaps = try prefix_mod.sharing();
-    try @import("cuda_bf16_format.zig").options((try E.Geometry.read(gpa, io, dir)).bf16, o.vision != null, o.prompt_int8, o.slide);
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
