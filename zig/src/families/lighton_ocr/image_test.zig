@@ -7,22 +7,40 @@ fn config() !Config {
     return Config.parse(a, @embedFile("fixtures/config.json"));
 }
 
-test "LightOnOCR resize follows floor then patch ceil and preserves odd grids" {
+test "LightOnOCR resize floors the longer side to 1540, then rounds each side up to 28" {
     const cases = [_][4]u32{
         .{ 1540, 1540, 1540, 1540 },
-        .{ 1000, 2000, 770, 1540 },
-        .{ 2000, 1000, 1540, 770 },
-        .{ 900, 1280, 910, 1288 },
-        .{ 29, 29, 42, 42 },
+        .{ 1000, 2000, 784, 1540 },
+        .{ 2000, 1000, 1540, 784 },
+        .{ 900, 1280, 924, 1288 },
+        .{ 29, 29, 56, 56 },
         .{ 1541, 1541, 1540, 1540 },
         .{ 28, 28, 28, 28 },
     };
     for (cases) |c| try std.testing.expectEqual(image.Size{ .h = c[2], .w = c[3] }, try image.targetSize(c[0], c[1], 1540));
     try std.testing.expectEqual(@as(u32, 3025), image.tokens(110, 110));
-    try std.testing.expectEqual(@as(u32, 1485), image.tokens(55, 110));
-    try std.testing.expectEqual(@as(u32, 1), image.tokens(3, 3));
+    try std.testing.expectEqual(@as(u32, 1540), image.tokens(56, 110));
     try std.testing.expectError(error.ImageTooSmall, image.targetSize(0, 100, 1540));
     try std.testing.expectError(error.ImageTooSmall, image.targetSize(1, 1000000, 1540));
+}
+
+test "LightOnOCR resize equals sizes and image tokens measured from the checkpoint processor" {
+    // The full 1B processor (text and image) run as a black box: h, w, resized h, w, `<|image_pad|>` count.
+    const cases = [_][5]u32{
+        .{ 33, 3388, 28, 1540, 55 },      .{ 66, 6776, 28, 1540, 55 },       .{ 162, 16632, 28, 1540, 55 },
+        .{ 2047, 12460, 252, 1540, 495 }, .{ 414, 2520, 252, 1540, 495 },    .{ 18172, 177, 1540, 28, 55 },
+        .{ 1, 1, 28, 28, 1 },             .{ 10, 20, 28, 28, 1 },            .{ 1, 1540, 28, 1540, 55 },
+        .{ 3, 4620, 28, 1540, 55 },       .{ 14000, 6500, 1540, 728, 1430 }, .{ 15, 2000, 28, 1540, 55 },
+        .{ 1000, 2000, 784, 1540, 1540 }, .{ 900, 1280, 924, 1288, 1518 },   .{ 29, 29, 56, 56, 4 },
+    };
+    for (cases) |c| {
+        const size = try image.targetSize(c[0], c[1], 1540);
+        try std.testing.expectEqual(image.Size{ .h = c[2], .w = c[3] }, size);
+        try std.testing.expectEqual(c[4], image.tokens(size.h / image.patch, size.w / image.patch));
+    }
+    // The processor refuses these: the shorter side floors to zero.
+    for ([_][2]u32{ .{ 1, 1541 }, .{ 1541, 1 }, .{ 2, 3081 }, .{ 3, 4621 } }) |c|
+        try std.testing.expectError(error.ImageTooSmall, image.targetSize(c[0], c[1], 1540));
 }
 
 test "LightOnOCR processor settings match the published checkpoint and reject incompatible arithmetic" {
@@ -50,24 +68,24 @@ test "LightOnOCR processor settings match the published checkpoint and reject in
 }
 
 /// Raster-ordered patch colors distinguish row order from Qwen's block/merge order without depending on resize.
-fn pixels() [42 * 56 * 3]u8 {
-    var rgb: [42 * 56 * 3]u8 = undefined;
-    for (0..42) |y| for (0..56) |x| for (0..3) |ch| {
-        rgb[(y * 56 + x) * 3 + ch] = @intCast((y / 14 * 4 + x / 14) * 17 + ch * 9);
+fn pixels() [56 * 56 * 3]u8 {
+    var rgb: [56 * 56 * 3]u8 = undefined;
+    for (0..56) |y| for (0..56) |x| for (0..3) |ch| {
+        rgb[(y * 56 + x) * 3 + ch] = @intCast((y / 14 * 4 + x / 14) * 13 + ch * 9);
     };
     return rgb;
 }
 
-test "LightOnOCR patches stay raster ordered and channel-first, including the unpaired row" {
+test "LightOnOCR patches stay raster ordered and channel-first" {
     var rgb = pixels();
-    const p = try image.prepareRgb(a, .{ .height = 42, .width = 56, .pixels = &rgb }, 11, try config(), 2);
+    const p = try image.prepareRgb(a, .{ .height = 56, .width = 56, .pixels = &rgb }, 11, try config(), 4);
     defer a.free(p.pixels);
-    try std.testing.expectEqual(@as(u32, 3), p.gh);
+    try std.testing.expectEqual(@as(u32, 4), p.gh);
     try std.testing.expectEqual(@as(u32, 4), p.gw);
-    try std.testing.expectEqual(@as(u32, 2), p.tokens);
-    try std.testing.expectEqual(@as(usize, 12 * 588), p.pixels.len);
-    for (0..12) |patch_index| for (0..3) |ch| {
-        const value: f32 = @floatFromInt(patch_index * 17 + ch * 9);
+    try std.testing.expectEqual(@as(u32, 4), p.tokens);
+    try std.testing.expectEqual(@as(usize, 16 * 588), p.pixels.len);
+    for (0..16) |patch_index| for (0..3) |ch| {
+        const value: f32 = @floatFromInt(patch_index * 13 + ch * 9);
         const by: f32 = @floatCast(@as(f64, image.mean[ch]) / image.rescale);
         const scale: f32 = @floatCast(@as(f64, image.sd[ch]) / image.rescale);
         const expected = (value - by) / scale;
@@ -79,20 +97,21 @@ test "LightOnOCR patches stay raster ordered and channel-first, including the un
 test "LightOnOCR refuses too few image tokens and never changes resolution to fit" {
     var rgb = pixels();
     const c = try config();
-    const source: image.Rgb = .{ .height = 42, .width = 56, .pixels = &rgb };
-    try std.testing.expectError(error.ImageTokensExceeded, image.prepareRgb(a, source, 11, c, 1));
+    const source: image.Rgb = .{ .height = 56, .width = 56, .pixels = &rgb };
+    try std.testing.expectError(error.ImageTokensExceeded, image.prepareRgb(a, source, 11, c, 3));
     try std.testing.expectError(error.ImageTokensExceeded, image.prepareRgb(a, source, 11, c, 0));
+    var thin: [1541 * 3]u8 = @splat(0);
+    try std.testing.expectError(error.ImageTooSmall, image.prepareRgb(a, .{ .height = 1, .width = 1541, .pixels = &thin }, 11, c, 4096));
     var tiny: [14 * 28 * 3]u8 = @splat(0);
-    try std.testing.expectError(error.ImageTooSmall, image.prepareRgb(a, .{ .height = 14, .width = 28, .pixels = &tiny }, 11, c, 4096));
-    try std.testing.expectError(error.Invalid, image.prepareRgb(a, .{ .height = 42, .width = 56, .pixels = &tiny }, 11, c, 4096));
+    try std.testing.expectError(error.Invalid, image.prepareRgb(a, .{ .height = 56, .width = 56, .pixels = &tiny }, 11, c, 4096));
     try std.testing.expectError(error.Oversized, image.prepareRgb(a, .{ .height = std.math.maxInt(usize), .width = std.math.maxInt(usize), .pixels = &tiny }, 11, c, 4096));
 }
 
 test "LightOnOCR identity separates image bytes and grids while equal budgets keep the same image" {
     var rgb = pixels();
     const c = try config();
-    const source: image.Rgb = .{ .height = 42, .width = 56, .pixels = &rgb };
-    const first = try image.prepareRgb(a, source, 11, c, 2);
+    const source: image.Rgb = .{ .height = 56, .width = 56, .pixels = &rgb };
+    const first = try image.prepareRgb(a, source, 11, c, 4);
     defer a.free(first.pixels);
     const same = try image.prepareRgb(a, source, 11, c, 4096);
     defer a.free(same.pixels);
@@ -121,6 +140,6 @@ test "LightOnOCR decodes encoded RGB images and rejects invalid encoded bytes" {
 
 fn prepareWithFailures(gpa: std.mem.Allocator, c: Config) !void {
     var rgb = pixels();
-    const p = try image.prepareRgb(gpa, .{ .height = 42, .width = 56, .pixels = &rgb }, 11, c, 4096);
+    const p = try image.prepareRgb(gpa, .{ .height = 42, .width = 56, .pixels = rgb[0 .. 42 * 56 * 3] }, 11, c, 4096);
     gpa.free(p.pixels);
 }
