@@ -53,6 +53,9 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 - With KV pages (the default at two or more ranks), the pool sets the windows the room holds aside before the prompt
   cache, which gets what they leave of its 16 GiB. `--prompt-cache-gib N` sets N GiB aside first, after the engine's
   own window and a fixed part and page for each other stream, and the pool takes the rest.
+- A prompt that names no history, as a `/v1/completions` request's, keeps its state at its last prompt chunk start, as
+  a chat keeps its history's, so the same prompt or a longer one resumes there. The KV pages' store (`TF_KV_SHARE`)
+  keeps a prompt's last page the same way.
 - `TF_GLM_KV_HOST=1` on every rank (with KV pages, BF16) keeps the KV pages' latent rows in pinned host memory: the
   device keeps the pooled index keys, and each sparse call copies only the rows it picked into device slots. The KV
   pool then costs the card 768 bytes a token instead of 13,056, so a 1,048,576-token window fits beside the weights.
