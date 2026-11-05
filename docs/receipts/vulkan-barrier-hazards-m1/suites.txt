@@ -1,0 +1,42 @@
+== two-columns head
+tf-vulkan-kernel-contract rc=0
+  SUMMARY Apple M1 (G13G B1) 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 caught, 0 missed; 0 limit failures; gates 38087 ms
+tf-stage1-datamove rc=0
+  RESULT datamove on "Apple M1 (G13G B1)": kernels=7 passed=7 failed=0 controls=0 known=0
+tf-attention-contract rc=0
+  RESULT attention-contract elapsed_ms=5950 on "Apple M1 (G13G B1)": passed=15 total=15
+tf-vulkan-greedy-contract rc=0
+  SUMMARY vulkan greedy contract on "Apple M1 (G13G B1)": 1 kernel, 1 pass gates 1-4, 0 fail; 1 control: 1 red as planted, 0 missed
+tf-contract-pointwise rc=0
+  RESULT contract-pointwise elapsed_ms=43 on "Apple M1 (G13G B1)": passed=16 known=1 total=17
+tf-stage1-gpu rc=0
+  RESULT stage1 elapsed_ms=6687 on "Apple M1 (G13G B1)": passed=25 total=25
+tf-stage2-gpu rc=0
+  RESULT stage2 elapsed_ms=38 on "Apple M1 (G13G B1)": passed=9 total=9
+tf-stage3-gpu rc=0
+  RESULT stage3 elapsed_ms=105 on "Apple M1 (G13G B1)": passed=4 total=4
+tf-stage4-gpu rc=0
+  RESULT stage4 elapsed_ms=145 on "Apple M1 (G13G B1)": passed=6 total=6
+tf-stage5-gpu rc=0
+  RESULT stage5 elapsed_ms=95 on "Apple M1 (G13G B1)": passed=7 total=7
+== hazard head
+tf-vulkan-kernel-contract rc=0
+  SUMMARY Apple M1 (G13G B1) 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 8 controls: 8 caught, 0 missed; 0 limit failures; gates 37335 ms
+tf-stage1-datamove rc=0
+  RESULT datamove on "Apple M1 (G13G B1)": kernels=7 passed=7 failed=0 controls=0 known=0
+tf-attention-contract rc=0
+  RESULT attention-contract elapsed_ms=5902 on "Apple M1 (G13G B1)": passed=15 total=15
+tf-vulkan-greedy-contract rc=0
+  SUMMARY vulkan greedy contract on "Apple M1 (G13G B1)": 1 kernel, 1 pass gates 1-4, 0 fail; 1 control: 1 red as planted, 0 missed
+tf-contract-pointwise rc=0
+  RESULT contract-pointwise elapsed_ms=43 on "Apple M1 (G13G B1)": passed=16 known=1 total=17
+tf-stage1-gpu rc=0
+  RESULT stage1 elapsed_ms=6531 on "Apple M1 (G13G B1)": passed=25 total=25
+tf-stage2-gpu rc=0
+  RESULT stage2 elapsed_ms=21 on "Apple M1 (G13G B1)": passed=9 total=9
+tf-stage3-gpu rc=0
+  RESULT stage3 elapsed_ms=105 on "Apple M1 (G13G B1)": passed=4 total=4
+tf-stage4-gpu rc=0
+  RESULT stage4 elapsed_ms=131 on "Apple M1 (G13G B1)": passed=6 total=6
+tf-stage5-gpu rc=0
+  RESULT stage5 elapsed_ms=78 on "Apple M1 (G13G B1)": passed=7 total=7
