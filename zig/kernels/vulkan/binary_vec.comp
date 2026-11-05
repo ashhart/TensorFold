@@ -34,6 +34,16 @@ uint16_t bf16_store(float value) {
 }
 #define STORE_OUT(v) \
   u16vec4(bf16_store(v.x), bf16_store(v.y), bf16_store(v.z), bf16_store(v.w))
+#elif defined(ADD_WIDE_F32)
+// Mixed add: the bf16 narrow stream joins the f32 wide stream, keeping the f32 sum.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define VEC_A u16vec4
+#define VEC_B vec4
+#define VEC_OUT vec4
+#define LOAD_A(x) uintBitsToFloat(uvec4(x) << 16u)
+#define LOAD_B(x) (x)
+#define STORE_OUT(v) (v)
 #else
 #ifdef USE_FP16
 #extension GL_EXT_shader_16bit_storage : require

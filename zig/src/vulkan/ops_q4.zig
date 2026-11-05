@@ -35,8 +35,10 @@ pub fn chunkRows(l: Limits, k: u64, n: u64) Error!u64 {
 const Geometry = struct { m: u64, n: u64 };
 
 /// The projection's m and n from the views and k, or the named reason it cannot run; pure.
+/// Accepted kinds: x/out bf16 (narrow) or x/out f32 (wide layers); weights u32, scales/biases bf16 always.
 fn projectGeometry(out: View, x: View, w: View, scales: View, biases: View, k: u64) Error!Geometry {
-    if (out.kind != .bf16 or x.kind != .bf16 or w.kind != .u32 or scales.kind != .bf16 or biases.kind != .bf16) return error.Invalid;
+    if (out.kind != x.kind or (out.kind != .bf16 and out.kind != .f32)) return error.Invalid;
+    if (w.kind != .u32 or scales.kind != .bf16 or biases.kind != .bf16) return error.Invalid;
     if (k < group_size or k % group_size != 0) return error.Invalid;
     if (x.elements == 0 or x.elements % k != 0) return error.Invalid;
     const m = x.elements / k;
@@ -72,7 +74,8 @@ pub fn qmmVariant(x: View, w: View) Qmm {
     return if (x.byte_offset % 16 == 0 and w.byte_offset % 16 == 0) .vec4 else .scalar;
 }
 
-fn qmmPipeline(o: *Ops, force: ?Qmm, x: View, w: View) Error!*dispatch.Pipeline {
+fn qmmPipeline(o: *Ops, force: ?Qmm, act_f32: bool, x: View, w: View) Error!*dispatch.Pipeline {
+    if (act_f32) return &o.qmm_f32; // the wide layers 0-3 read f32 activations
     const fit = qmmVariant(x, w);
     const want = force orelse fit;
     if (want == .vec4 and fit == .scalar) return error.Misaligned;
@@ -91,15 +94,18 @@ pub fn projectAs(o: *Ops, force: ?Qmm, cmds: *Commands, out: View, x: View, w: V
     const lim = Limits{ .max_range = limits.maxStorageBufferRange, .alignment = limits.minStorageBufferOffsetAlignment };
     if (x.byteLen() > lim.max_range or out.byteLen() > lim.max_range) return error.TooLarge;
     const rows = try chunkRows(lim, k, g.n);
+    const act_f32 = out.kind == .f32;
     if (rows == 0) {
-        const pipe = try qmmPipeline(o, force, x, w);
+        const pipe = try qmmPipeline(o, force, act_f32, x, w);
         try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
         const p = try q4Push(g.m, g.n, k);
         try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
         return;
     }
-    const block = try scratch.alloc(.bf16, g.m * rows);
+    const block = try scratch.alloc(out.kind, g.m * rows);
     if (block.byteLen() > lim.max_range) return error.TooLarge;
+    // bf16 scatters ride raw u16 columns, f32 scatters raw u32 words; both keep every RNE byte.
+    const scatter = if (act_f32) &o.copy_u32 else &o.copy_u16;
     const row_words = k / 8;
     const row_groups = k / 64;
     var first: u64 = 0;
@@ -110,12 +116,11 @@ pub fn projectAs(o: *Ops, force: ?Qmm, cmds: *Commands, out: View, x: View, w: V
         const s_chunk = try scales.slice(first * row_groups, chunk * row_groups);
         const b_chunk = try biases.slice(first * row_groups, chunk * row_groups);
         const block_chunk = try block.slice(0, g.m * chunk);
-        const pipe = try qmmPipeline(o, force, x, w_chunk);
+        const pipe = try qmmPipeline(o, force, act_f32, x, w_chunk);
         try pipe.bind(&.{ x.bind(), w_chunk.bind(), s_chunk.bind(), b_chunk.bind(), block_chunk.bind() });
         const p = try q4Push(g.m, chunk, k);
         try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
-        // Scatter the packed block into the full row-major output; raw u16 columns keep every RNE byte.
-        const scatter = &o.copy_u16;
+        // Scatter the packed block into the full row-major output.
         try scatter.bind(&.{ block_chunk.bind(), o.dummyBinding(), out.bind(), o.dummyBinding() });
         var cp: params.Params = .{
             .count = try ops_mod.cast32(g.m * chunk),
@@ -202,7 +207,12 @@ test "project geometry derives m and n and refuses torn or wrong-kind views" {
     try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 100));
     try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 256));
     const f32x = try View.init(&buf, .f32, 1024, 3 * 128);
-    try testing.expectError(error.Invalid, projectGeometry(out, f32x, w, scales, biases, 128));
+    try testing.expectError(error.Invalid, projectGeometry(out, f32x, w, scales, biases, 128)); // mixed kinds
+    // the wide combination: f32 x and f32 out over the same bf16 scales and biases
+    const f32out = try View.init(&buf, .f32, 8192, 3 * 100);
+    const g32 = try projectGeometry(f32out, f32x, w, scales, biases, 128);
+    try testing.expectEqual(@as(u64, 3), g32.m);
+    try testing.expectEqual(@as(u64, 100), g32.n);
     const torn = try View.init(&buf, .u32, 2048, 100 * 16 + 1);
     try testing.expectError(error.Invalid, projectGeometry(out, x, torn, scales, biases, 128));
 }

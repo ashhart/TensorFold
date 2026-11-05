@@ -59,6 +59,11 @@ pub fn main(init: std.process.Init) !u8 {
         .gated_delta_decode_bf16 = &shaders4.gated_delta_decode_bf16,
         .fast_norm_gated_bf16 = &shaders4.fast_norm_gated_bf16,
         .copy_u16 = &shaders4.copy_u16,
+        .conv_dw1d_f32 = &shaders4.conv_dw1d_f32,
+        .gdn_split_f32 = &shaders4.gdn_split_f32,
+        .prefill_recur_f32 = &shaders4.prefill_recur_f32,
+        .fast_norm_gated_f32 = &shaders4.fast_norm_gated_f32,
+        .copy_u32 = &shaders4.gdn_copy_u32,
     });
     defer m.deinit();
     // Gate 5 checks every reflected local size and each shader's declared shared bytes against this device's limits.

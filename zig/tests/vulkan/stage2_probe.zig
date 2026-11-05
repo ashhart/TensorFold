@@ -100,6 +100,13 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         .add_bf16 = &shaders.add_bf16,
         .add_preserve_bf16 = &shaders.add_preserve_bf16,
         .swiglu_bf16 = &shaders.swiglu_bf16,
+        .norm_f32 = &shaders.norm_f32,
+        .norm_f32_in = &shaders.norm_f32_in,
+        .norm_bf16_in = &shaders.norm_bf16_in,
+        .add_f32 = &shaders.add_f32,
+        .add_wide_bf16 = &shaders.add_wide_bf16,
+        .add_bf16_f32 = &shaders.add_bf16_f32,
+        .swiglu_f32 = &shaders.swiglu_f32,
     });
     defer m.deinit();
 
