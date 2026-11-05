@@ -12,17 +12,22 @@ The native CUDA registry includes Nemotron, GLM-5.3-Flash, Qwen3.5/3.8 dense and
 Gemma 4, MiniMax-M3.1-Flash, Kolibri-1, Spark-X2.6 and Dory. LFM2 and Drama have separate native open paths.
 Qwen4 is registered as preparation with synthetic gates, without a real-checkpoint qualification.
 A registry entry does not qualify every checkpoint, format, GPU or rank count.
+MiniMax-M3.1-Flash refuses an A100: its CUDA path admits only sm_121 at exactly two ranks.
+DeepSeek requires sm_90 or newer and remains refused by the release server pending whole-model gate #827.
+Nemotron's `--precision checkpoint` is refused on an A100 because it needs Blackwell (compute capability 12.x).
+GLM also refuses an FP8 or MXFP8 projection on sm_80 to sm_89 when its shape needs split-K partial storage that
+this family does not hold. CUDA `--slide` learning is admitted only on sm_121.
 See the [qualified models](../../README.md#qualified-models), [changes](../../CHANGELOG.md) and
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for recorded serving scope.
 Native [GLM](glm-5.3-flash-cuda.md) has TP=2 and TP=3 serving receipts; native EXL3 loading and DFlash2 drafting
-also exist for the families and formats recorded there. DeepSeek remains refused by the release server pending gate #827.
+also exist for the families and formats recorded there.
 
-Nemotron's MLX 4-bit serving record covers GB10 (sm_121), RTX 3090 (sm_86) and RTX PRO 6000 (sm_120).
+Nemotron's MLX 4-bit has been checked on GB10 (sm_121), RTX 3090 (sm_86) and RTX PRO 6000 (sm_120).
 The [RTX 3090 receipt](https://github.com/ashhart/TensorFold/issues/592) does not measure every sm_86 card.
 Release kernels include the A100 (sm_80), and [#846](https://github.com/ashhart/TensorFold/pull/846) records
 kernel checks on GA100. No served checkpoint is recorded on sm_80, so the A100 is not model-qualified.
 Nemotron and dense Qwen have NVFP4/FP8 fallback code for sm_80 to sm_89, without thread-block clusters
-(#901, #1470); no NVFP4/FP8 model run on sm_80 is recorded. Kernel checks do not establish that model receipt.
+(#901, #1470); no NVFP4/FP8 model run on sm_80 to sm_89 is recorded. Kernel checks do not establish that model receipt.
 
 Inspect the installed binary with `tensorfold-native --version` and `tensorfold-native capabilities --json`.
 The [native prompt controls](#native-prompt-controls) below describe the separate Zig CLI.

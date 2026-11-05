@@ -32,14 +32,14 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 ## Capability floor
 
 The native release includes CUDA kernels for sm_80, sm_86, sm_120 and sm_121. This is a build target list, not
-per-card model qualification. Nemotron MLX 4-bit has serving receipts on GB10, RTX 3090 and RTX PRO 6000.
+per-card model qualification. Nemotron MLX 4-bit has been checked on GB10, RTX 3090 and RTX PRO 6000.
 The A100 (sm_80) has [kernel-check evidence](../../CHANGELOG.md#1012) from #846, but no served checkpoint on record;
 it is not model-qualified. See [qualified models](../../README.md#qualified-models) for the measured scope.
 `tensorfold info REPO` prints a checkpoint's memory floor: its weights plus a 2 GiB runtime margin.
 
 | Engine | Floor |
 | --- | --- |
-| Native CUDA, NVFP4 / FP8 | Nemotron and dense Qwen have non-cluster fallback code for sm_80 to sm_89 (#901, #1470). No NVFP4/FP8 model run on sm_80 is recorded; no A100 model qualification is claimed. Other families keep their own gates. |
+| Native CUDA, NVFP4 / FP8 | Nemotron and dense Qwen have non-cluster fallback code for sm_80 to sm_89 (#901, #1470). No NVFP4/FP8 model run on sm_80 to sm_89 is recorded; no A100 model qualification is claimed. Other families keep their own gates. |
 | Flash Next, native CUDA | MLX 4-bit served on a GB10; the ModelOpt/two-local-rank path is experimental. Drafting at multiple ranks requires the prompt cache off. No qualification on every release SM is implied. |
 | Intel GPU (XPU), Nemotron | Experimental. Weights need 17.3 GiB of device memory (18 to 19.4 GB in use from 4k to 128k context); measured on an Arc Pro B70 (32 GB). Cards below 24 GB are untested and a 16 GB card cannot hold the weights. |
 | Python 0.6.6 MLX, Apple Silicon | Historical family-page scopes, not measured minimums: GLM-5.3-Flash is written for a 256 GB Mac, about 151 GiB resident. DeepSeek-V4-Flash is the same, about 151 GiB resident. Flash Next's default command sizes to a 128 GiB M4 Max. Qwen3.8-27B on a 32 GB Mac needs more than the default 22.4 GiB. Machine classes, not measured minimums. |
