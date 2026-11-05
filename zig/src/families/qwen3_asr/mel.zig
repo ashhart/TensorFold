@@ -1,4 +1,4 @@
-//! WhisperFeatureExtractor's log-mel rows in float64: a centered, reflect-padded STFT, slaney mel filters, log10.
+//! Log-mel rows in float64: periodic Hann frames of a centered, reflect-padded STFT, slaney mel filters, log10.
 const std = @import("std");
 const cfg = @import("config.zig");
 
@@ -14,7 +14,7 @@ fn melToHz(m: f64) f64 {
     return if (m >= 15.0) 1000.0 * @exp(logstep * (m - 15.0)) else 200.0 * m / 3.0;
 }
 
-/// transformers' mel_filter_bank(201, mels, 0, 8000, 16000, "slaney", "slaney"): [bins][mels], float64.
+/// Slaney-scale triangles over the 201 bins, 0 to 8 kHz, each area-normalized: [bins][mels], float64.
 pub fn filters(gpa: std.mem.Allocator, mels: usize) ![]f64 {
     const out = try gpa.alloc(f64, bins * mels);
     errdefer gpa.free(out);
@@ -51,7 +51,7 @@ pub const Features = struct {
     }
 };
 
-/// Sample `i` of x reflect-padded by n_fft / 2 on each side (torch.stft's center=True, pad_mode="reflect").
+/// Sample `i` of x reflect-padded by n_fft / 2 on each side, the edge sample not repeated (frame t centered at t hop).
 fn padded(x: []const f32, i: isize) f64 {
     const n: isize = @intCast(x.len);
     var j = i - cfg.n_fft / 2;
@@ -60,7 +60,7 @@ fn padded(x: []const f32, i: isize) f64 {
     return x[@intCast(j)];
 }
 
-/// Log-mel features of `x`, as the package's processor gives them for one clip (no padding to 30 s).
+/// Log-mel features of `x`: log10 power floored at the clip's peak - 8, then (l + 4) / 4; no padding to 30 s.
 pub fn features(gpa: std.mem.Allocator, x: []const f32, mels: usize) !Features {
     if (x.len <= cfg.n_fft / 2) return error.AudioTooShort;
     const n_frames = x.len / cfg.hop;
@@ -68,7 +68,7 @@ pub fn features(gpa: std.mem.Allocator, x: []const f32, mels: usize) !Features {
     defer gpa.free(fb);
     const window = try gpa.alloc(f64, cfg.n_fft);
     defer gpa.free(window);
-    // torch.hann_window(400): periodic
+    // periodic Hann window of n_fft samples
     for (window, 0..) |*w, i| w.* = 0.5 - 0.5 * @cos(2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / cfg.n_fft);
     const twiddle = try gpa.alloc([2]f64, cfg.n_fft);
     defer gpa.free(twiddle);
