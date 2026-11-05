@@ -11,6 +11,22 @@ pub const Width = quant.mlx.Width;
 
 pub const Spec = shared.Spec;
 
+/// Whether the quantization object declares ModelOpt's own formats, whole or per module (`quant_method` modelopt).
+fn isModelOpt(q: std.json.ObjectMap) bool {
+    if (q.get("quant_method")) |m| if (m == .string and std.mem.eql(u8, m.string, "modelopt")) return true;
+    if (q.get("producer")) |p| if (p == .object) if (p.object.get("name")) |n| if (n == .string and std.mem.eql(u8, n.string, "modelopt")) return true;
+    if (q.get("quant_algo")) |a| if (a == .string) {
+        if (std.mem.eql(u8, a.string, "NVFP4") or std.mem.eql(u8, a.string, "MIXED_PRECISION")) return true;
+    };
+    if (q.get("quantized_layers")) |l| if (l == .object) {
+        var it = l.object.iterator();
+        while (it.next()) |kv| if (kv.value_ptr.* == .object) if (kv.value_ptr.object.get("quant_algo")) |a| if (a == .string) {
+            if (std.mem.eql(u8, a.string, "NVFP4") or std.mem.eql(u8, a.string, "FP8")) return true;
+        };
+    };
+    return false;
+}
+
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     spec: Spec,
@@ -49,8 +65,10 @@ pub const Config = struct {
         const doc = try shared.declared(a, bytes);
         const tower = try shared.textTower(doc);
         const sources: quant.Sources = .{ .root = doc, .quantization = try shared.pickObject(doc, tower, "quantization") };
-        // the family's own order: an unquantized BF16 checkpoint first, then the shared formats
-        const table: quant.Config = if (try quant.bf16.detect(a, sources)) |b| .{ .bf16 = b } else try quant.detect(a, sources);
+        // the family's own order: ModelOpt's weight-only formats as BF16, an unquantized BF16 checkpoint, then the shared formats
+        const table: quant.Config = if (isModelOpt(sources.quantization))
+            .{ .bf16 = {} }
+        else if (try quant.bf16.detect(a, sources)) |b| .{ .bf16 = b } else try quant.detect(a, sources);
         const width: Width = if (table == .bf16) .{ .bits = 16, .group = 0 } else try table.width("");
         const spec = try shared.geometry(tower, width.bits, width.group);
         const gen = if (generation) |g| (try std.json.parseFromSliceLeaky(std.json.Value, a, g, .{})) else null;
