@@ -343,6 +343,7 @@ pub const HfText = struct {
             opts.thinking = options.enable_thinking and budget != null;
             opts.budget = budget orelse dsv41.default_budget;
         }
+        opts.image_token = options.images;
         var diag: dsv41.Problem = .{};
         const out = dsv41.renderProvenance(a, messages, opts, &diag) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;

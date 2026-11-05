@@ -7,6 +7,7 @@ pub const attn = @import("csa2_attn.zig");
 pub const experts = @import("experts.zig");
 pub const mv = @import("mv.zig");
 pub const glue = @import("glue_k.zig");
+pub const vision = @import("vision.zig");
 pub const compress = @import("compress.zig");
 pub const xmma = @import("experts_mma.zig");
 pub const hc = @import("hc.zig");
