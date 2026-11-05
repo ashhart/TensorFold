@@ -559,7 +559,15 @@ test "prompt precision: Metal refuses int8 before any model or family-specific l
 
 test "slide admission: Metal entry points refuse before checkpoint or device access" {
     const check = @import("slide_open_test.zig").check;
-    for (families) |f| if (!std.mem.eql(u8, f.model_type, "nemotron_h")) try check(open, "Macs", &.{f.model_type});
+    const kimi = @import("kimi_metal.zig");
+    for (families) |f| {
+        if (std.mem.eql(u8, f.model_type, "nemotron_h")) continue;
+        if (std.mem.eql(u8, f.model_type, "kimi_k3") or std.mem.eql(u8, f.model_type, "kimi_k31")) {
+            const want = "Kimi: learned states and on-disk prompt states are not implemented";
+            try @import("slide_open_test.zig").message(open, f.model_type, want);
+            try @import("slide_open_test.zig").message(kimi.open, f.model_type, want);
+        } else try check(open, "Macs", &.{f.model_type});
+    }
     try check(@import("qwen35.zig").open, "Macs", &.{"qwen3_5"});
     try check(@import("gemma4.zig").open, "Macs", &.{"gemma4"});
     try check(@import("lfm2_moe.zig").open, "Macs", &.{"lfm2_moe"});
