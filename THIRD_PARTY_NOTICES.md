@@ -293,10 +293,20 @@ These follow a model's release code or a library's model code for their math, ro
 - `tools/lfm3/ref64.py` and `zig/kernels/xpu/lfm3.cl`: `modeling_lfm3.py` in [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B). Copyright Liquid AI, LFM Open License v1.0; see [the license text](LICENSES/LFM-Open-1.0.txt).
 - `zig/kernels/metal/minimax_m3/glue.metal`: the rounding points of `modeling_minimax_m3_vl.py` in [transformers](https://github.com/huggingface/transformers).
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
-- `zig/src/core/picture/patches.zig`: `smart_resize`, `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; `patches_test.zig` checks it against them.
+- `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
 
 transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+
+## Image patch preparation
+
+`zig/src/core/picture/patches.zig` implements the image budgets and geometry described by the
+[Qwen2-VL model card](https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct),
+[Qwen2.5-VL model card](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) and
+[LFM2-VL model card](https://huggingface.co/LiquidAI/LFM2-VL-450M).
+Its discrete sizing, patch ordering, normalization and cache identities are pinned by TensorFold's own tests and
+black-box processing outputs. The implementation was rewritten from those behavior sources; the recorded comparison
+data in `patches_test.zig` retains its provenance above.
 
 ## MIT License text
 
