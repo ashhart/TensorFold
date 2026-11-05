@@ -18,8 +18,8 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.segments != 1) return error.UnsupportedOption;
     if (o.tp != 1 and o.tp != 2) return error.FlashNextRanksOverTwo;
     if (o.rank >= o.tp) return error.BadRank;
-    // refused before the stream, the glue or a captured set loads
-    const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows()); // the largest pass, solo or not
+    // refused before the stream, the glue or a captured set loads: the largest pass, wider at --parallel 1 on one rank
+    const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows(), o.one_stream and o.tp == 1);
     _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
     const mode = try config.mode(gpa, io, dir);
     if (o.tp != 1 and mode != .modelopt) return error.FlashNextRanksNeedModelopt;
@@ -63,6 +63,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         r.deinit();
     };
     own.engine = try prompt.Engine.initRank(gpa, io, driver, &own.stream, dir, o.tp, o.rank);
+    own.engine.chunk = chunk;
     if (own.ranks) |r| {
         r.engine = own.engine;
         own.engine.collective = &r.collective;

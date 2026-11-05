@@ -141,7 +141,7 @@ pub const Engine = struct {
         if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
         // refused before anything loads: a bad TF_FLASHNEXT_CHUNK leaves no module or buffer behind
         const busy = try chunkRows();
-        const chunk = try chunks.soloRows(busy);
+        const chunk = try chunks.soloRows(busy, false);
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
