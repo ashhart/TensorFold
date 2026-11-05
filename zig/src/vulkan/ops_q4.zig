@@ -34,8 +34,7 @@ pub fn chunkRows(l: Limits, k: u64, n: u64) Error!u64 {
 
 const Geometry = struct { m: u64, n: u64 };
 
-/// The projection's m and n from the views and k, or the named reason it cannot run; pure.
-/// Accepted kinds: x/out bf16 (narrow) or x/out f32 (wide layers); weights u32, scales/biases bf16 always.
+/// The projection's m and n from the views and k, or the named reason it cannot run; x/out bf16 or f32; weights u32.
 fn projectGeometry(out: View, x: View, w: View, scales: View, biases: View, k: u64) Error!Geometry {
     if (out.kind != x.kind or (out.kind != .bf16 and out.kind != .f32)) return error.Invalid;
     if (w.kind != .u32 or scales.kind != .bf16 or biases.kind != .bf16) return error.Invalid;
