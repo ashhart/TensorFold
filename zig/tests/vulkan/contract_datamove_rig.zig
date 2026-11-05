@@ -28,6 +28,9 @@ pub const Rig = struct {
     }
 
     pub fn reset(r: *Rig) void {
+        // A hook error between a recorded dispatch and its submit leaves the buffer open:
+        // drop those records so the freed slot buffers below are never referenced by a later submit.
+        r.cmds.discard();
         for (r.slots.items) |*s| s.buf.deinit();
         r.slots.clearRetainingCapacity();
     }

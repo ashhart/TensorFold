@@ -125,6 +125,9 @@ pub const Fixture = struct {
         return if (f.act_f32) 2 else 1;
     }
     fn reset(f: *Fixture) void {
+        // A hook error between a recorded dispatch and its submit leaves the buffer open:
+        // drop those records so the freed buffers below are never referenced by a later submit.
+        f.cmds.discard();
         while (f.made > 0) {
             f.made -= 1;
             f.buffers[f.made].deinit();
@@ -363,6 +366,8 @@ pub const Control = struct {
         f.reset();
     }
     fn reset(f: *Control) void {
+        // Same rule as the fixture reset: no freed buffer may stay referenced by open records.
+        f.cmds.discard();
         if (f.x_device) |*b| b.deinit();
         if (f.w_device) |*b| b.deinit();
         if (f.y_device) |*b| b.deinit();
@@ -478,6 +483,52 @@ test "Vulkan bf16 fixture uses raw u16 storage and guards are aligned for storag
     try std.testing.expectEqual(@as(usize, 20), values.len);
     try std.testing.expectEqual(poison, values[0]);
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(u16));
+}
+
+test "a failed host allocation after a recorded dispatch is dropped before the fixture and control free their buffers" {
+    const Calls = struct {
+        var resets: usize = 0;
+        var submits: usize = 0;
+        fn reset(_: vk.c.VkCommandBuffer, _: vk.c.VkCommandBufferResetFlags) callconv(.c) vk.c.VkResult {
+            resets += 1;
+            return vk.c.VK_SUCCESS;
+        }
+        fn submit(_: vk.c.VkQueue, _: c_uint, _: [*c]const vk.c.VkSubmitInfo, _: vk.c.VkFence) callconv(.c) vk.c.VkResult {
+            submits += 1;
+            return vk.c.VK_SUCCESS;
+        }
+    };
+    var api: @TypeOf(@as(vk.Device, undefined).api) = undefined;
+    api.vkResetCommandBuffer = Calls.reset;
+    api.vkQueueSubmit = Calls.submit;
+    var dev: vk.Device = undefined;
+    dev.api = api;
+    var pipeline: dispatch.Pipeline = undefined;
+    const staging: vk.Buffer = undefined;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+
+    // Fixture.run records its dispatch, then its corrupt arm allocates a tampered copy; that allocation fails.
+    var cmds: vk.Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = undefined, .recording = true, .pending = 2 };
+    var fixture = Fixture.init(failing.allocator(), &dev, &cmds, staging, &pipeline);
+    try std.testing.expectError(error.OutOfMemory, fixture.a.dupe(u8, "x"));
+    fixture.reset();
+    try std.testing.expectEqual(false, cmds.recording);
+    try std.testing.expectEqual(@as(u32, 0), cmds.pending);
+    try std.testing.expectEqual(@as(usize, 1), Calls.resets);
+    try cmds.submit(0);
+    try std.testing.expectEqual(@as(usize, 0), Calls.submits);
+
+    // A control's reset drops open records the same way; Control.run allocates nothing after its dispatch.
+    cmds.recording = true;
+    cmds.pending = 2;
+    var control = Control.init(failing.allocator(), &dev, &cmds, staging, &pipeline, .qmm_fmax);
+    try std.testing.expectError(error.OutOfMemory, control.a.dupe(u8, "x"));
+    control.reset();
+    try std.testing.expectEqual(false, cmds.recording);
+    try std.testing.expectEqual(@as(u32, 0), cmds.pending);
+    try std.testing.expectEqual(@as(usize, 2), Calls.resets);
+    try cmds.submit(0);
+    try std.testing.expectEqual(@as(usize, 0), Calls.submits);
 }
 
 // Comptime constant for the same reason as Fixture.vt: the Kernel keeps a pointer to it.
