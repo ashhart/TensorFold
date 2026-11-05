@@ -5,8 +5,15 @@ const cuda = @import("root.zig");
 
 pub const dk = 128;
 pub const dv = 128;
+/// The conv window's taps (kda.cuh TAPS): three kept rows and the current one.
+pub const taps = 4;
 /// Windows of this many rows or more (prefill chunks) take the three-kernel chain (kda.WIDE_ROWS).
 pub const wide_rows = 64;
+
+/// A model's KDA shape against the one the kernels are built for, refused before anything is allocated or launched.
+pub fn geometry(key_dim: usize, value_dim: usize, conv_taps: usize) error{KdaGeometry}!void {
+    if (key_dim != dk or value_dim != dv or conv_taps != taps) return error.KdaGeometry;
+}
 
 /// glm_kda.cu's entries.
 pub const Kernels = struct {
