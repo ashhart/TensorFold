@@ -51,7 +51,7 @@ const Gpu = struct {
         const hidden = m.spec.hidden;
         var out = try hip.DeviceBuffer.alloc(&g.r, ends.len * hidden * 2);
         defer out.free();
-        try qwen3.lastRows(g.ops(), m, @intFromPtr(dev.ptr), ends, .{ .ptr = @intFromPtr(out.ptr), .kind = .bf16 });
+        try qwen3.lastRows(g.ops(), m, @intFromPtr(dev.ptr), 0, ends, .{ .ptr = @intFromPtr(out.ptr), .kind = .bf16 });
         try g.stream.synchronize();
         const rows = try gpa.alloc(u16, ends.len * hidden);
         errdefer gpa.free(rows);
