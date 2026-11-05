@@ -37,7 +37,7 @@ pub const fused_rows = 16;
 
 pub const Kind = timing.Kind;
 
-const Flight = struct { end: u64, cb: mtl.CommandBuffer, kind: Kind };
+const Flight = struct { end: u64, cb: mtl.CommandBuffer, kind: Kind, prompt: ?@import("prompt_flight.zig").Prompt = null };
 
 /// A window's host rows in the token ring: the pending token at `stage`, then `n` tokens after its `held` drafts.
 const Fill = struct { stage: u64, held: usize, n: usize };
@@ -185,18 +185,7 @@ pub const Metal = struct {
 
     /// Wait for the oldest command buffer in flight and record its GPU time.
     pub fn land(self: *Metal) !void {
-        const f = self.flights.orderedRemove(0);
-        defer f.cb.release();
-        f.cb.wait();
-        if (f.cb.failure()) |text| {
-            std.log.err("command buffer failed: {s}", .{text});
-            return error.GpuFailed;
-        }
-        self.landed = @max(self.landed, f.end);
-        self.last_ms = f.cb.gpuSeconds() * 1e3;
-        self.gpu_ms += self.last_ms;
-        self.timing.ms[@backingInt(f.kind)] += self.last_ms;
-        self.timing.count[@backingInt(f.kind)] += 1;
+        return @import("prompt_flight.zig").land(self);
     }
 
     pub fn drain(self: *Metal) !void {
@@ -304,15 +293,11 @@ pub const Metal = struct {
         // a command buffer a chunk, each committed before the one ahead is waited on, so the GPU keeps a chunk queued
         var k: usize = 0;
         while (at < ids.len) {
-            while (k < s.chunks.len and s.chunks[k] <= at) k += 1;
-            var end = if (k < s.chunks.len) @min(s.chunks[k], ids.len) else ids.len;
-            // the decision row ends its chunk: the rows after it read the lessons it latched
-            if (c.decide != lesson_route.none and c.decide >= at and c.decide + 1 < end) end = @intCast(c.decide + 1);
-            const rows = @min(self.o.chunk, end - at);
+            const decision: ?usize = if (c.decide == lesson_route.none) null else @intCast(c.decide);
+            const rows = @import("prompt_flight.zig").rows(s, at, self.o.chunk, decision, &k);
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
             try kv_pages.grow(c, at + rows);
-            try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
-            while (self.flights.items.len > 1) try self.land();
+            try @import("prompt_flight.zig").submit(self, s, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             at += rows;
             // landed tokens only: the newest chunk is still queued on the GPU
             s.fill_at.store(@intCast(at - rows), .monotonic);
@@ -590,7 +575,9 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const self: *Metal = @ptrCast(@alignCast(ptr));
-        self.drain() catch {};
+        self.drain() catch {
+            @import("prompt_flight.zig").forget(self, s);
+        };
         if (self.caches.fetchRemove(s)) |kv| {
             kv.value.deinit(&self.pool);
             self.gpa.destroy(kv.value);

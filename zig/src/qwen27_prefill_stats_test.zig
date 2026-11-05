@@ -3,7 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api");
 const Mailbox = @import("server/mailbox.zig").Mailbox;
-const rows = @import("native/qwen27_prompt_rows.zig");
+const rows = lanes.prefill_widths;
 const t = std.testing;
 const gpa = t.allocator;
 
