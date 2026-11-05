@@ -1,4 +1,4 @@
-//! Gemma 4 E4B on CUDA against a reference directory (gemma4_e4b_reference.py): its tokens forced, logits written.
+//! Gemma 4 on CUDA (any geometry) against a reference directory (gemma4_e4b_reference.py): its tokens forced, logits written.
 const std = @import("std");
 const cuda = @import("cuda");
 const g4 = @import("gemma4_cuda");
@@ -91,7 +91,7 @@ pub fn run(gpu: check.Gpu, rest: []const []const u8) !void {
         for (top.items, gen) |a, b| same += @intFromBool(a == b);
         const pre_ms = @as(f64, @floatFromInt(t0.durationTo(t1).toNanoseconds())) / 1e6;
         const dec_ms = @as(f64, @floatFromInt(t1.durationTo(t2).toNanoseconds())) / 1e6;
-        std.debug.print("E4B {s}: prompt {d}, forced {d}, top-1 equal {d}/{d}, prefill {d:.1} ms, decode {d:.2} ms/token (eager reads)\n", .{ name, ids.len, gen.len, same, gen.len, pre_ms, dec_ms / @as(f64, @floatFromInt(gen.len - 1)) });
+        std.debug.print("gemma4 {s} {s}: prompt {d}, forced {d}, top-1 equal {d}/{d}, prefill {d:.1} ms, decode {d:.2} ms/token (eager reads)\n", .{ w.config.geo.name, name, ids.len, gen.len, same, gen.len, pre_ms, dec_ms / @as(f64, @floatFromInt(gen.len - 1)) });
     }
-    check.pass("gemma4 e4b forced logits written to {s}", .{rest[2]});
+    check.pass("gemma4 {s} forced logits written to {s}", .{ w.config.geo.name, rest[2] });
 }
