@@ -18,10 +18,29 @@ fn lock() void {
     while (!mutex.tryLock()) std.Thread.yield() catch {};
 }
 
+/// The switch as the first download read it; later downloads branch on this instead of the environment.
+const State = enum(u8) { unread, off, on };
+var state: std.atomic.Value(State) = .init(.unread);
+
 /// Exactly `1` stages; unset or any other value keeps main's copy straight into the caller's slice.
 pub fn enabled() bool {
-    const raw = @import("profile").get(.TF_CUDA_PINNED_DOWNLOAD) orelse return false;
-    return std.mem.eql(u8, raw, "1");
+    return switch (state.load(.monotonic)) {
+        .on => true,
+        .off => false,
+        .unread => read(),
+    };
+}
+
+fn read() bool {
+    const on = std.mem.eql(u8, @import("profile").get(.TF_CUDA_PINNED_DOWNLOAD) orelse "", "1");
+    state.store(if (on) .on else .off, .monotonic);
+    return on;
+}
+
+/// Forgets the read switch, so the next download reads TF_CUDA_PINNED_DOWNLOAD again.
+pub fn rereadForTest() void {
+    if (!@import("builtin").is_test) @compileError("test only");
+    state.store(.unread, .monotonic);
 }
 
 /// Copies `out.len` bytes from `src` through a pinned bounce of this thread's context, then into `out`.

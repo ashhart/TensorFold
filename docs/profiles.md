@@ -52,7 +52,10 @@ Initial coverage is:
   by default, and only the exact value `1` turns it on. Asynchronous downloads, and family code that calls
   `cuMemcpyDtoH_v2` directly, are unchanged. The host tests check which destination the copy uses. They don't show
   that staging avoids the GB10 fault in that issue, which has no deterministic reproducer. Staging adds a host copy to
-  every download.
+  every download. It also holds pinned memory: one buffer for each download running at the same time in a CUDA
+  context, each up to 64 MiB, kept until that context ends. On a unified-memory machine such as GB10 that memory is
+  the GPU's memory too, but the engine's memory room and stream admission count only device allocations, so they
+  don't count it.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the
 switch is faster for every shape, device, or workload. The `*_ALL` checks stay `debug`; Flash Next paging remains
