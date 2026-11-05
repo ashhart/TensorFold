@@ -73,15 +73,15 @@ pub fn checkDecision(trunk: []const u32, branches: []const []const u32, counts: 
     for (labels) |id| if (id >= head_rows) return error.BadLabels;
 }
 
-/// Each run's end (past its last prompt), in order: a new run past `window` tokens or `most` prompts; no empty prompt.
-pub fn pack(a: Allocator, lengths: []const usize, window: usize, most: usize) (Allocator.Error || Refusal)![]usize {
+/// Each run's end (past its last length), in order: `base` tokens and its lengths within `window`, `most` at most.
+pub fn pack(a: Allocator, lengths: []const usize, base: usize, window: usize, most: usize) (Allocator.Error || Refusal)![]usize {
     var ends: std.ArrayList(usize) = .empty;
     errdefer ends.deinit(a);
     var tokens: usize = 0;
     var count: usize = 0;
     for (lengths, 0..) |n, i| {
-        if (n == 0 or n > window) return error.BadPrompt;
-        if (count > 0 and (tokens + n > window or count == most)) {
+        if (n == 0 or base + n > window) return error.BadPrompt;
+        if (count > 0 and (base + tokens + n > window or count == most)) {
             try ends.append(a, i);
             tokens = 0;
             count = 0;
@@ -93,12 +93,12 @@ pub fn pack(a: Allocator, lengths: []const usize, window: usize, most: usize) (A
     return ends.toOwnedSlice(a);
 }
 
-/// A checked decision through `runner` (`run`, `hidden`): each branch as trunk ++ branch, packed as `pack` cuts them.
+/// A checked decision through `runner` (`run`, `hidden`): each run the trunk once, then its branches as `pack` cuts.
 pub fn decidePacked(a: Allocator, runner: anytype, heads: anytype, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, window: usize, most: usize) !void {
     const lengths = try a.alloc(usize, branches.len);
     defer a.free(lengths);
-    for (lengths, branches) |*n, b| n.* = trunk.len + b.len;
-    const runs = try pack(a, lengths, window, most);
+    for (lengths, branches) |*n, b| n.* = b.len;
+    const runs = try pack(a, lengths, trunk.len, window, most);
     defer a.free(runs);
     var first: usize = 0;
     var at: usize = 0; // the first branch's labels and logits in this run
@@ -107,14 +107,14 @@ pub fn decidePacked(a: Allocator, runner: anytype, heads: anytype, trunk: []cons
         defer tokens.deinit(a);
         const ends = try a.alloc(u32, end - first);
         defer a.free(ends);
+        try tokens.appendSlice(a, trunk);
         for (branches[first..end], ends) |b, *e| {
-            try tokens.appendSlice(a, trunk);
             try tokens.appendSlice(a, b);
             e.* = @intCast(tokens.items.len);
         }
         const rows = try a.alloc(f32, (end - first) * runner.hidden);
         defer a.free(rows);
-        try runner.run(tokens.items, ends, rows);
+        try runner.run(tokens.items, @intCast(trunk.len), ends, rows);
         for (counts[first..end], 0..) |n, i| {
             try labelLogits(a, heads, rows[i * runner.hidden ..][0..runner.hidden], labels[at..][0..n], logits[at..][0..n]);
             at += n;
@@ -173,23 +173,39 @@ test "a decision's runs: at most `most` prompts and the window's tokens each, an
     const a = std.testing.allocator;
     var lengths: [129]usize = undefined;
     @memset(&lengths, 1);
-    const one = try pack(a, lengths[0..128], 2048, 128);
+    const one = try pack(a, lengths[0..128], 0, 2048, 128);
     defer a.free(one);
     try std.testing.expectEqualSlices(usize, &.{128}, one);
-    const two = try pack(a, &lengths, 2048, 128);
+    const two = try pack(a, &lengths, 0, 2048, 128);
     defer a.free(two);
     try std.testing.expectEqualSlices(usize, &.{ 128, 129 }, two);
-    const exact = try pack(a, &.{ 1000, 1048, 1 }, 2048, 128);
+    const exact = try pack(a, &.{ 1000, 1048, 1 }, 0, 2048, 128);
     defer a.free(exact);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, exact);
-    const over = try pack(a, &.{ 1000, 1049 }, 2048, 128);
+    const over = try pack(a, &.{ 1000, 1049 }, 0, 2048, 128);
     defer a.free(over);
     try std.testing.expectEqualSlices(usize, &.{ 1, 2 }, over);
-    const none = try pack(a, &.{}, 2048, 128);
+    const none = try pack(a, &.{}, 0, 2048, 128);
     defer a.free(none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
-    try std.testing.expectError(error.BadPrompt, pack(a, &.{ 5, 2049 }, 2048, 128));
-    try std.testing.expectError(error.BadPrompt, pack(a, &.{ 5, 0 }, 2048, 128));
+    try std.testing.expectError(error.BadPrompt, pack(a, &.{ 5, 2049 }, 0, 2048, 128));
+    try std.testing.expectError(error.BadPrompt, pack(a, &.{ 5, 0 }, 0, 2048, 128));
+}
+
+test "a decision's runs with a trunk: the trunk counts once a run, a length too long beside it is refused" {
+    const a = std.testing.allocator;
+    const cut = try pack(a, &.{ 3, 3, 3 }, 4, 10, 128); // 4 + 3 + 3 fills the window exactly; the third starts a run
+    defer a.free(cut);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, cut);
+    var ones: [129]usize = undefined;
+    @memset(&ones, 1);
+    const full = try pack(a, &ones, 10, 2048, 128);
+    defer a.free(full);
+    try std.testing.expectEqualSlices(usize, &.{ 128, 129 }, full);
+    const fits = try pack(a, &.{6}, 4, 10, 128);
+    defer a.free(fits);
+    try std.testing.expectEqualSlices(usize, &.{1}, fits);
+    try std.testing.expectError(error.BadPrompt, pack(a, &.{ 3, 7 }, 4, 10, 128));
 }
 
 test "a bad decision is refused before any work" {
@@ -210,18 +226,28 @@ test "a bad decision is refused before any work" {
     for (all, 0..) |x, i| for (all[i + 1 ..]) |y| try std.testing.expect(!std.mem.eql(u8, problemOf(x), problemOf(y)));
 }
 
-/// A fake engine of 2-wide rows: an input's row is (its length, the sum of its tokens); counts its runs.
+/// A fake engine of 2-wide rows that checks each run's exact tokens, trunk and ends against `want`.
 const FakeRunner = struct {
     hidden: usize = 2,
     runs: usize = 0,
+    want: []const Run,
 
-    fn run(r: *FakeRunner, tokens: []const u32, ends: []const u32, out: []f32) !void {
+    const Run = struct { tokens: []const u32, trunk: u32, ends: []const u32 };
+
+    /// A branch's row is its whole prompt's (trunk ++ branch): (its length, the sum of its tokens).
+    fn run(r: *FakeRunner, tokens: []const u32, trunk: u32, ends: []const u32, out: []f32) !void {
+        const w = r.want[r.runs];
         r.runs += 1;
-        var begin: u32 = 0;
+        try std.testing.expectEqualSlices(u32, w.tokens, tokens);
+        try std.testing.expectEqual(w.trunk, trunk);
+        try std.testing.expectEqualSlices(u32, w.ends, ends);
+        var trunk_sum: f32 = 0;
+        for (tokens[0..trunk]) |t| trunk_sum += @floatFromInt(t);
+        var begin: u32 = trunk;
         for (ends, 0..) |e, i| {
-            var sum: f32 = 0;
+            var sum = trunk_sum;
             for (tokens[begin..e]) |t| sum += @floatFromInt(t);
-            out[2 * i] = @floatFromInt(e - begin);
+            out[2 * i] = @floatFromInt(trunk + e - begin);
             out[2 * i + 1] = sum;
             begin = e;
         }
@@ -241,16 +267,20 @@ const FakeHeads = struct {
 
 test "a packed decision gives each branch's labels the logits of its own whole prompt, across several runs" {
     const a = std.testing.allocator;
-    var runner: FakeRunner = .{};
+    // the trunk once a run: 2 + 1 + 2, then 2 + 1 + 3, then 2 + 1 tokens (window 7, 2 branches a run)
+    var runner: FakeRunner = .{ .want = &.{
+        .{ .tokens = &.{ 1, 2, 3, 4, 5 }, .trunk = 2, .ends = &.{ 3, 5 } },
+        .{ .tokens = &.{ 1, 2, 6, 7, 8, 9 }, .trunk = 2, .ends = &.{ 3, 6 } },
+        .{ .tokens = &.{ 1, 2, 10 }, .trunk = 2, .ends = &.{3} },
+    } };
     var heads: FakeHeads = .{};
     const trunk = [_]u32{ 1, 2 };
     const branches: []const []const u32 = &.{ &.{3}, &.{ 4, 5 }, &.{6}, &.{ 7, 8, 9 }, &.{10} };
     const counts = [_]usize{ 2, 1, 2, 1, 2 };
     const labels = [_]u32{ 2, 3, 4, 5, 6, 7, 8, 9 };
     var logits: [8]f64 = undefined;
-    // prompts of 3, 4, 3, 5, 3 tokens, window 7, 2 prompts a run: runs [3, 4], [3], [5], [3]
     try decidePacked(a, &runner, &heads, &trunk, branches, &counts, &labels, &logits, 7, 2);
-    try std.testing.expectEqual(@as(usize, 4), runner.runs);
+    try std.testing.expectEqual(@as(usize, 3), runner.runs);
     var at: usize = 0;
     for (branches, counts) |b, n| {
         var sum: f64 = 3; // the trunk's 1 + 2
