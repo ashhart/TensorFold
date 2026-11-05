@@ -1,10 +1,21 @@
-//! The Qwen3 CUDA engine against transformers: embedding vectors, a batch's rows equal to alone's bits.
+//! The Qwen3 CUDA engine against transformers: embedding vectors, the reranker's logits, a batch equal to alone.
 const std = @import("std");
 const engine = @import("engine.zig");
 const checks = @import("../checks.zig");
+const score = @import("../score.zig");
 
 const t = std.testing;
 const gpa = t.allocator;
+
+/// The engine as score.decidePacked drives any runner: a trunk once a run, its branches after it.
+const Runner = struct {
+    e: *engine.Engine,
+    hidden: usize,
+
+    pub fn run(r: @This(), tokens: []const u32, trunk_len: u32, ends: []const u32, rows: []f32) !void {
+        try r.e.run(tokens, trunk_len, ends, rows);
+    }
+};
 
 test "Qwen3-Embedding: the card's and the long inputs on CUDA match transformers, a batch's rows equal alone's bits" {
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -79,4 +90,86 @@ test "Qwen3-Embedding: the card's and the long inputs on CUDA match transformers
             try t.expect(std.math.isFinite(distance) and distance <= limit);
         }
     }
+}
+
+test "Qwen3-Reranker: each case's yes - no logit matches transformers, and the packed decision equals the runs alone" {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try checks.env(a, "TF_QWEN3_RERANK_DIR") orelse return error.SkipZigTest;
+    const ref = try checks.readJson(a, try checks.env(a, "TF_QWEN3_RERANK_REF") orelse return error.SkipZigTest);
+    const cases = ref.object.get("cases").?.array.items;
+    const yes: u32 = @intCast(ref.object.get("yes").?.integer);
+    const no: u32 = @intCast(ref.object.get("no").?.integer);
+    var prompts: std.ArrayList([]const u32) = .empty;
+    var longest: usize = 0;
+    for (cases) |c| {
+        if (c.object.get("diff") == null) continue; // ids-only cases carry no score
+        const prompt = try checks.tokensOf(a, c.object.get("ids").?);
+        longest = @max(longest, prompt.len);
+        try prompts.append(a, prompt);
+    }
+    try t.expect(prompts.items.len >= 32);
+    const window = std.mem.alignForward(usize, @max(engine.least_window, longest), 512);
+    const e = try engine.Engine.load(gpa, t.io, dir, 0);
+    defer e.deinit();
+    try e.size(window);
+    const hidden = e.m.spec.hidden;
+    var heads = score.Heads.of(&e.m, t.io, dir);
+    defer heads.deinit(gpa);
+    var worst_diff: f64 = 0;
+    var worst_score: f64 = 0;
+    for (cases) |c| {
+        const want_diff = c.object.get("diff") orelse continue;
+        const prompt = try checks.tokensOf(a, c.object.get("ids").?);
+        const row = try a.alloc(f32, hidden);
+        try e.run(prompt, 0, &.{@intCast(prompt.len)}, row);
+        var logits: [2]f64 = undefined;
+        try score.labelLogits(gpa, &heads, row, &.{ yes, no }, &logits);
+        const diff = logits[0] - logits[1];
+        const rank = 1 / (1 + @exp(-diff));
+        const ref_score = checks.number(c.object.get("score").?);
+        // a NaN would slip through @max: every value must be finite before it counts
+        for ([_]f64{ diff, rank, checks.number(want_diff), ref_score }) |v| try t.expect(std.math.isFinite(v));
+        std.debug.print("rerank {s} {d} tokens: diff {d:.4} ref {d:.4} score {d:.6} ref {d:.6}\n", .{ c.object.get("kind").?.string, prompt.len, diff, checks.number(want_diff), rank, ref_score });
+        worst_diff = @max(worst_diff, @abs(diff - checks.number(want_diff)));
+        worst_score = @max(worst_score, @abs(rank - ref_score));
+    }
+    std.debug.print("rerank: {d} cases, worst |diff| {d:.4} (gate 0.25), worst |score| {d:.5} (gate 0.02)\n", .{ prompts.items.len, worst_diff, worst_score });
+    try t.expect(worst_diff <= 0.25);
+    try t.expect(worst_score <= 0.02);
+    // the decision path: branches packed into few runs, each prompt's logits the bits its own run gives
+    var trunk_len: usize = std.math.maxInt(usize);
+    for (prompts.items) |p| trunk_len = @min(trunk_len, p.len);
+    trunk_len -= 1;
+    for (prompts.items[1..]) |p| {
+        var n: usize = 0;
+        while (n < trunk_len and p[n] == prompts.items[0][n]) n += 1;
+        trunk_len = n;
+    }
+    try t.expect(trunk_len > 0);
+    const trunk = prompts.items[0][0..trunk_len];
+    const branches = try a.alloc([]const u32, prompts.items.len);
+    const counts = try a.alloc(usize, prompts.items.len);
+    var labels: std.ArrayList(u32) = .empty;
+    for (prompts.items, branches, counts, 0..) |p, *b, *n, i| {
+        b.* = p[trunk_len..];
+        // unequal label counts: yes and no, then yes alone
+        n.* = if (i % 2 == 0) 2 else 1;
+        try labels.append(a, yes);
+        if (i % 2 == 0) try labels.append(a, no);
+    }
+    const packed_logits = try a.alloc(f64, labels.items.len);
+    try score.decidePacked(a, Runner{ .e = e, .hidden = hidden }, &heads, trunk, branches, counts, labels.items, packed_logits, window, engine.max_inputs);
+    var at: usize = 0;
+    for (prompts.items, 0..) |prompt, i| {
+        const n = counts[i];
+        const row = try a.alloc(f32, hidden);
+        try e.run(prompt, 0, &.{@intCast(prompt.len)}, row);
+        var alone: [2]f64 = undefined;
+        try score.labelLogits(gpa, &heads, row, labels.items[at..][0..n], alone[0..n]);
+        for (packed_logits[at..][0..n], alone[0..n]) |x, y| try t.expectEqual(@as(u64, @bitCast(y)), @as(u64, @bitCast(x)));
+        at += n;
+    }
+    std.debug.print("rerank decide: {d} branches (trunk {d}) packed at a {d}-token window equal their runs alone\n", .{ prompts.items.len, trunk_len, window });
 }
