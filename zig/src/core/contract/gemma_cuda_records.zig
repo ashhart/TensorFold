@@ -1,4 +1,4 @@
-//! Gemma 4's CUDA launch records: act_rows, embed_rows, qk_rows, the wide LayerNorm and picks to ids.
+//! Gemma 4's CUDA launch records: act_rows, embed_rows, qk_rows, the wide LayerNorm, picks to ids, gemma4_ple.
 const CudaRecord = @import("registry.zig").CudaRecord;
 
 pub const cuda = [_]CudaRecord{
@@ -13,5 +13,5 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "act_rows tf_swiglu_rows_round 128 threads", .symbol = "tf_swiglu_rows_round", .image = "act_rows", .threads = 128 }, .usage = .{ .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "act_rows tf_softcap_rows 256 threads", .symbol = "tf_softcap_rows", .image = "act_rows", .threads = 256 }, .usage = .{ .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 25, .static = 0, .bound = 256 }, .{ .regs = 25, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "act_rows tf_softcap_rows 128 threads", .symbol = "tf_softcap_rows", .image = "act_rows", .threads = 128 }, .usage = .{ .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 24, .static = 0, .bound = 256 }, .{ .regs = 25, .static = 0, .bound = 256 }, .{ .regs = 25, .static = 0, .bound = 256 } } },
-    .{ .launch = .{ .name = "act_rows tf_ple_rows", .symbol = "tf_ple_rows", .image = "act_rows", .threads = 64 }, .usage = .{ .{ .regs = 24, .static = 8, .bound = 64 }, .{ .regs = 26, .static = 8, .bound = 64 }, .{ .regs = 26, .static = 8, .bound = 64 }, .{ .regs = 26, .static = 8, .bound = 64 }, .{ .regs = 26, .static = 8, .bound = 64 } } },
+    .{ .launch = .{ .name = "gemma4_ple tf_gemma4_ple_rows", .symbol = "tf_gemma4_ple_rows", .image = "gemma4_ple", .threads = 64 }, .usage = .{ .{ .regs = 24, .static = 8, .bound = 64 }, .{ .regs = 26, .static = 8, .bound = 64 }, .{ .regs = 26, .static = 8, .bound = 64 }, .{ .regs = 26, .static = 8, .bound = 64 }, .{ .regs = 26, .static = 8, .bound = 64 } } },
 };
