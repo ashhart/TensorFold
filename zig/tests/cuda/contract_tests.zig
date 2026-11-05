@@ -17,7 +17,6 @@ const mx_k = @import("contract_mxfp8.zig");
 const half_k = @import("contract_lane_half.zig");
 const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
-const writeback_k = @import("contract_flashnext_writeback.zig");
 const hcnorm_k = @import("contract_hc_normalize.zig");
 const hcmix_k = @import("contract_hc_mix.zig");
 const utility_k = @import("contract_utility.zig");
@@ -62,7 +61,6 @@ const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
-
 const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
     pub const h3 align(16) = @embedFile("fatbin_h3").*;
@@ -242,17 +240,8 @@ pub fn run(gpu: check.Gpu) !void {
     try kernels.append(a, rank.kernel());
     var hc = try cuda.Module.load(gpu.d, kk.flashnext_hc);
     defer hc.unload();
-    var writebacks: [3]writeback_k.Writeback = undefined;
-    for (std.enums.values(writeback_k.Mode), &writebacks) |mode, *w| {
-        const symbol: [:0]const u8 = switch (mode) {
-            .sums => "fn_hc_writeback0",
-            .moe => "fn_hc_writeback_moe",
-            .slices => "fn_hc_writeback_slices",
-        };
-        w.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try hc.function(symbol), .mode = mode };
-    }
-    defer for (&writebacks) |*w| w.deinit();
-    for (&writebacks) |*w| try kernels.append(a, w.kernel());
+    const exl3 = try @import("contract_flashnext_exl3_suite.zig").Suite.create(a, gpu, s, &kernels, hc, mods[5]);
+    defer exl3.destroy();
     var hcnorms: [2]hcnorm_k.Normalize = undefined;
     for (std.enums.values(hcnorm_k.Kind), &hcnorms) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .cols_fn = try hc.function("fn_hc_normalize_cols"), .old_fn = try hc.function("fn_hc_normalize") };
     defer for (&hcnorms) |*x| x.deinit();

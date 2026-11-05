@@ -533,3 +533,9 @@ TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_2, 2, tf_exl3::PLAIN)
 TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_skip, 2, tf_exl3::SKIP)
 TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_stale, 2, tf_exl3::STALE)
 #undef TF_CTL_EXL3_GROUPED
+
+// Gates 1-4: the canonical expert reduction's leaf tree and finish, each with a planted fault.
+#include "contract_leaf_controls.cuh"
+
+// Gates 1-4: the TP prefill's rotate, combine, finish and place launches, each with planted faults.
+#include "contract_tppf_controls.cuh"
