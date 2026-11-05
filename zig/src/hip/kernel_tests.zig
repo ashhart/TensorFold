@@ -21,6 +21,7 @@ test {
     _ = @import("kernel_tests/gdn.zig");
     _ = @import("kernel_tests/mamba.zig");
     _ = @import("kernel_tests/decode.zig");
+    _ = @import("kernel_tests/tail_pin.zig");
     _ = @import("kernel_tests/chain.zig");
     _ = @import("kernel_tests/attention.zig");
     _ = @import("kernel_tests/attention_pin.zig");
