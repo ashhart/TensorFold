@@ -8,6 +8,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Family | Recipe |
 | --- | --- |
 | dots.mocr | [Native HIP OCR, BF16, one GPU](dots-mocr-hip.md) |
+| Kimi K3 / K3.1 | [Native Metal bring-up, synthetic only, resident budget refusal](kimi-k3-metal.md) |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |

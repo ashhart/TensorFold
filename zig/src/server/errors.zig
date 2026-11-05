@@ -28,6 +28,8 @@ pub const Cx = struct {
     message: []const u8 = "",
     /// The request's ``chat_template_kwargs.clear_thinking``, over the server's (GLM-5.3 templates only).
     clear_thinking: ?bool = null,
+    /// The request controls a native prompt renderer must retain in every prefix probe.
+    template_fields: @import("json").Value = .null,
 
     pub fn fail(cx: *Cx, kind: Kind, comptime fmt: []const u8, args: anytype) Refused {
         cx.kind = kind;
