@@ -27,7 +27,7 @@ const Part = struct { buffer: mtl.Buffer, offset: usize, len: usize };
 pub fn bound(c: *const Config, at: u32, window: u32) u64 {
     const w = @as(u64, c.kda_heads) * c.kda_dim;
     const recurrent = w * c.kda_dim * 4 + @as(u64, c.conv - 1) * 3 * w * 2 + window * w * (3 * 4 + 3 * 2);
-    const mla = @as(u64, at) * (c.kv_lora + c.rope) * 2;
+    const mla = @as(u64, at) * (c.kv_lora + c.rope + @as(u32, if (c.dsa != null) 128 else 0)) * 2;
     return @sizeOf(Snap) + @as(u64, at) * 4 + @as(u64, c.vocab) * 2 + recurrent * c.countKind(.kda) + mla * c.countKind(.mla);
 }
 
@@ -37,7 +37,7 @@ fn parts(a: A, m: anytype, slot: u32, position: State.Stream) ![]Part {
     errdefer out.deinit(a);
     const c = m.graph.c;
     const w: usize = @as(usize, c.kda_heads) * c.kda_dim;
-    for (m.state.kda, m.state.mla) |maybe, mla| {
+    for (m.state.kda, m.state.mla, m.state.index_keys) |maybe, mla, index| {
         if (maybe) |k| {
             const sizes = .{
                 .{ "S", w * c.kda_dim * 4, w * c.kda_dim * 4 },
@@ -52,6 +52,7 @@ fn parts(a: A, m: anytype, slot: u32, position: State.Stream) ![]Part {
             const row = (c.kv_lora + c.rope) * 2;
             try out.append(a, .{ .buffer = buffer, .offset = @as(usize, slot) * m.state.limits.max_ctx * row, .len = @as(usize, position.pos) * row });
         }
+        if (index) |buffer| try out.append(a, .{ .buffer = buffer, .offset = @as(usize, slot) * m.state.limits.max_ctx * 128 * 2, .len = @as(usize, position.pos) * 128 * 2 });
     }
     return out.toOwnedSlice(a);
 }
@@ -131,4 +132,11 @@ test "Kimi snapshot bound includes recurrent logs even at the last prompt row" {
     const w: u64 = c.kdaWidth();
     try std.testing.expectEqual(@as(u64, c.countKind(.kda)) * 16 * w * 18, logged - base);
     try std.testing.expectEqual(@as(u64, c.countKind(.mla)) * (c.kv_lora + c.rope) * 2 + 4, bound(&c, 2047, 16) - bound(&c, 2046, 16));
+}
+
+test "Kimi K3.1 snapshot bound includes exactly its visible index-key planes" {
+    var c: Config = .{};
+    const before = bound(&c, 2047, 16);
+    c.dsa = .{};
+    try std.testing.expectEqual(@as(u64, c.countKind(.mla)) * 2047 * 128 * 2, bound(&c, 2047, 16) - before);
 }

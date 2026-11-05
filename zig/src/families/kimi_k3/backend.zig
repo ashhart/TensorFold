@@ -7,6 +7,7 @@ const Graph = @import("graph.zig").Graph;
 const State = @import("state.zig").State;
 const round = @import("round.zig");
 const Kernels = @import("kernels.zig").Kernels;
+const Index = @import("index.zig");
 const gpu_rows: usize = 256;
 pub const window: u32 = 16;
 pub const Slot = struct { stream: ?*lanes.Stream = null, first: usize = 0, verified: usize = 0, start: u32 = 0 };
@@ -19,6 +20,7 @@ pub const Metal = struct {
     k: *const Kernels,
     state: State,
     scratch: round.Scratch,
+    index: ?Index.Work = null,
     slots: []Slot,
     last: mtl.Buffer,
     resident: mtl.ResidencySet,
@@ -39,6 +41,8 @@ pub const Metal = struct {
         errdefer state.deinit();
         var scratch = try round.Scratch.init(device, &c, gpu_rows);
         errdefer scratch.deinit();
+        var index: ?Index.Work = if (c.dsa != null) try Index.Work.init(device, gpu_rows, capacity) else null;
+        errdefer if (index) |*ix| ix.deinit();
         const slots = try a.alloc(Slot, streams);
         errdefer a.free(slots);
         @memset(slots, .{});
@@ -51,6 +55,7 @@ pub const Metal = struct {
         try buffers.appendSlice(a, source_buffers);
         try graph.buffers(&buffers, a);
         try state.buffers(&buffers, a);
+        if (index) |*ix| try ix.buffers(&buffers, a);
         inline for (@typeInfo(round.Scratch).@"struct".field_names, @typeInfo(round.Scratch).@"struct".field_types) |f, T|
             if (T == mtl.Buffer) try buffers.append(a, @field(scratch, f));
         try buffers.append(a, last);
@@ -59,13 +64,14 @@ pub const Metal = struct {
         for (buffers.items) |b| resident.add(b);
         resident.commit();
         queue.addResidencySet(resident);
-        m.* = .{ .a = a, .graph = graph, .device = device, .queue = queue, .k = k, .state = state, .scratch = scratch, .slots = slots, .last = last, .values = values, .resident = resident };
+        m.* = .{ .a = a, .graph = graph, .device = device, .queue = queue, .k = k, .state = state, .scratch = scratch, .index = index, .slots = slots, .last = last, .values = values, .resident = resident };
         return m;
     }
 
     pub fn deinit(m: *Metal) void {
         m.queue.removeResidencySet(m.resident);
         m.resident.deinit();
+        if (m.index) |*ix| ix.deinit();
         m.last.deinit();
         m.state.deinit();
         m.scratch.deinit();
@@ -119,13 +125,14 @@ pub const Metal = struct {
         if (!m.healthy.load(.acquire)) return error.KimiEngineFailed;
         for (ids) |id| if (id >= m.graph.c.vocab) return error.KimiTokenOutOfRange;
         try m.scratch.load(&m.state, segments, ids);
+        if (m.index) |*ix| try ix.load(m.scratch.mrows.slice(@import("kernels.zig").MlaRow, m.scratch.rows));
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = m.queue.commandBuffer();
         const encoder = cb.compute(.serial);
         var local = @import("experts.zig").Local.all(m.k, &m.graph.c);
         const stage: @import("forward.zig").Stage = .{ .first = 0, .last = m.graph.c.layers, .layers = m.graph.layers, .head = &m.graph.head, .embed = m.graph.head.embed };
-        stage.encode(.{ .k = m.k, .c = &m.graph.c, .sc = &m.scratch, .st = &m.state, .experts = local.experts() }, encoder, null) catch |err| {
+        stage.encode(.{ .k = m.k, .c = &m.graph.c, .sc = &m.scratch, .st = &m.state, .experts = local.experts(), .index = if (m.index) |*ix| ix else null }, encoder, null) catch |err| {
             encoder.end();
             return err;
         };

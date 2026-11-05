@@ -77,6 +77,11 @@ pub const Kernels = struct {
     mla_attend: mtl.Pipeline,
     mla_merge: mtl.Pipeline,
     mla_uv: mtl.Pipeline,
+    index_key: mtl.Pipeline,
+    index_scores: mtl.Pipeline,
+    index_topk: mtl.Pipeline,
+    index_attend: mtl.Pipeline,
+    index_merge: mtl.Pipeline,
     fill_bf16: mtl.Pipeline,
     fill_f32: mtl.Pipeline,
     fill_u8: mtl.Pipeline,
@@ -108,6 +113,10 @@ pub const Kernels = struct {
         inline for (info.field_names, info.field_types) |name, T| {
             if (T == mtl.Pipeline) @field(k, name).deinit() else for (&@field(k, name)) |*p| p.deinit();
         }
+    }
+
+    pub fn indexView(k: *const Kernels) @import("index.zig").Pipelines {
+        return .{ .key = k.index_key, .scores = k.index_scores, .select = k.index_topk, .attend = k.index_attend, .merge = k.index_merge };
     }
 
     /// y[r, n] = x[r] . w[n] for rows r (bf16 rounded, or fp32 when `f32_out`); `w` slice-interleaved, `part` scratch.

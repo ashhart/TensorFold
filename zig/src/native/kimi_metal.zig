@@ -144,6 +144,9 @@ fn inner(a: A, gpa: A, io: std.Io, o: api.Open, problem: *[]const u8) !api.Opene
         if (T == mtl.Buffer) actual += @field(m.scratch, f).length();
     }
     buffers.clearRetainingCapacity();
+    if (m.index) |*ix| try ix.buffers(&buffers, gpa);
+    for (buffers.items) |b| actual += b.length();
+    buffers.clearRetainingCapacity();
     try m.state.buffers(&buffers, gpa);
     for (buffers.items) |b| actual += b.length();
     if (actual > fixed) return error.KimiScratchBound;

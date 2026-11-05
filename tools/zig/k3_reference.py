@@ -1,4 +1,4 @@
-"""Kimi K3's text forward in NumPy, written from the official semantics: fp64 sums, bf16 where the model rounds."""
+"""Kimi K3 text forward and explicitly assumed K3.1 index formulas: fp64 sums, BF16 at the recorded nodes."""
 from dataclasses import dataclass, field
 
 import numpy as np

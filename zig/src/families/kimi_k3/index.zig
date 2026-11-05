@@ -1,5 +1,9 @@
 //! K3.1's experimental indexer launch contract; the native 2047-position ceiling remains unchanged.
+const std = @import("std");
 const mtl = @import("metal");
+const Kn = @import("kernels.zig");
+const Config = @import("config.zig").Config;
+const Indexer = @import("weights.zig").Indexer;
 const Ref = @import("kernels.zig").Ref;
 const MlaArgs = @import("kernels.zig").MlaArgs;
 
@@ -90,3 +94,85 @@ pub const Pipelines = struct {
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
 }
+
+/// Independent index projections and lists never alias MLA or residual buffers.
+pub const Work = struct {
+    capacity: u32,
+    most: u32,
+    count: u32 = 0,
+    visible: u32 = 0,
+    q: mtl.Buffer,
+    k: mtl.Buffer,
+    weights: mtl.Buffer,
+    scores: mtl.Buffer,
+    rows: mtl.Buffer,
+    list: mtl.Buffer,
+
+    pub fn init(device: mtl.Device, most: u32, capacity: u32) !Work {
+        if (most == 0 or most > 256 or capacity == 0 or capacity > 65536) return error.KimiIndexCapacity;
+        var w: Work = undefined;
+        w.capacity = capacity;
+        w.most = most;
+        w.count = 0;
+        w.visible = 0;
+        const sizes = .{
+            .{ "q", @as(usize, most) * heads * dim * 2 }, .{ "k", @as(usize, most) * dim * 2 },
+            .{ "weights", @as(usize, most) * heads * 2 }, .{ "scores", @as(usize, most) * capacity * 4 },
+            .{ "rows", @as(usize, most) * @sizeOf(Row) }, .{ "list", @as(usize, most) * topk * 4 },
+        };
+        var made: usize = 0;
+        errdefer inline for (sizes, 0..) |entry, i| {
+            if (i < made) @field(w, entry[0]).deinit();
+        };
+        inline for (sizes) |entry| {
+            @field(w, entry[0]) = try device.buffer(entry[1], mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            made += 1;
+        }
+        return w;
+    }
+
+    pub fn deinit(w: *Work) void {
+        inline for (@typeInfo(Work).@"struct".field_names, @typeInfo(Work).@"struct".field_types) |name, T| {
+            if (T == mtl.Buffer) @field(w, name).deinit();
+        }
+    }
+
+    pub fn buffers(w: *const Work, out: *std.ArrayList(mtl.Buffer), a: std.mem.Allocator) !void {
+        inline for (@typeInfo(Work).@"struct".field_names, @typeInfo(Work).@"struct".field_types) |name, T| {
+            if (T == mtl.Buffer) try out.append(a, @field(w.*, name));
+        }
+    }
+
+    pub fn ref(w: *const Work, comptime name: []const u8) Ref {
+        return .{ .buf = @field(w.*, name) };
+    }
+
+    pub fn load(w: *Work, source: []const Kn.MlaRow) !void {
+        if (source.len == 0 or source.len > w.most) return error.KimiIndexCapacity;
+        const rows = w.rows.slice(Row, source.len);
+        w.visible = 0;
+        for (source, rows, 0..) |s, *row, i| {
+            if (s.pos >= w.capacity) return error.KimiIndexCapacity;
+            row.* = .{ .slot = s.slot, .pos = s.pos, .list = @intCast(i * topk) };
+            w.visible = @max(w.visible, s.pos + 1);
+        }
+        w.count = @intCast(source.len);
+    }
+
+    /// These query/key/head-weight taps and BF16 roundings are model assumptions, not release-reference facts.
+    pub fn project(w: *Work, k: *const Kn.Kernels, e: mtl.ComputeEncoder, c: *const Config, iw: Indexer, qan: Ref, xin: Ref, part: Ref, cache: Ref) void {
+        k.rows(e, qan, iw.q.ref, w.ref("q"), part, false, .{ .K = c.q_lora, .N = heads * dim, .rows = w.count, .x_stride = c.q_lora, .y_stride = heads * dim });
+        k.rows(e, xin, iw.k.ref, w.ref("k"), part, false, .{ .K = c.hidden, .N = dim, .rows = w.count, .x_stride = c.hidden, .y_stride = dim });
+        k.rows(e, xin, iw.weights.ref, w.ref("weights"), part, false, .{ .K = c.hidden, .N = heads, .rows = w.count, .x_stride = c.hidden, .y_stride = heads });
+        const a: Args = .{ .rows = w.count, .slot_keys = w.capacity, .score_stride = w.capacity, .eps = c.eps };
+        const p = k.indexView();
+        p.store(e, w.ref("k"), iw.norm.ref, iw.bias.ref, w.ref("rows"), cache, a);
+        e.barrier();
+        if (w.visible > topk) {
+            p.score(e, w.ref("q"), w.ref("weights"), cache, w.ref("rows"), w.ref("scores"), a, w.visible);
+            e.barrier();
+        }
+        p.top(e, w.ref("scores"), w.ref("rows"), w.ref("list"), a);
+        e.barrier();
+    }
+};

@@ -16,6 +16,7 @@ pub const forward = @import("forward.zig");
 pub const graph = @import("graph.zig");
 pub const backend = @import("backend.zig");
 pub const snapshot = @import("snapshot.zig");
+pub const index = @import("index.zig");
 
 test {
     std.testing.refAllDecls(@This());
