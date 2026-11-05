@@ -66,7 +66,7 @@ pub const records = [_]Record{
     .{
         .launch = pairTile(2, 8),
         .usage = .{
-            .{ .vgprs = 256, .sgprs = 82, .lds = 0, .private = 168, .bound = 128, .wave = 32 },
+            .{ .vgprs = 157, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 240, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 240, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 240, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
