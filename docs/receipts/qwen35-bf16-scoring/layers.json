@@ -81,5 +81,11 @@
     "Global hidden-state maxima do not waive the separately failed served-logprob rule.",
     "One public 32-ID fixture, one sm_120 GPU/rank, CPU references. No new performance or whole-model-equivalence qualification.",
     "The full CUDA run at b168b36d remains historical; a complete device suite was not rerun on the rebased head."
-  ]
+  ],
+  "subsequent_integration": {
+    "main": "9200a3064153b8041930f61f5ba92102d4bea692",
+    "parent": "d19ff3f075eb144870af1af159de1eccafd0b69b",
+    "qwen_cuda_family_and_kernel_sources_byte_equal_to_native_producer": true,
+    "coverage": "source identity plus new host/CI checks; no relabeling of the actual device producer"
+  }
 }
