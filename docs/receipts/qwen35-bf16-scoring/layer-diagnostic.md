@@ -32,6 +32,8 @@ The GPU is one RTX PRO 6000 Blackwell Max-Q workstation card, sm_120. The host h
 
 [Compact summary](layers.json), [archive hashes](asset.json), and [immutable archive/member manifest](https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json). Extract all three layer archives into one directory to reproduce the comparison. The 217-file packet retains complete build/capture logs and a superseded partial-export test-setup failure; the complete current-source reference suite passes 20/20.
 
+The subsequent integration uses main `9200a3064153b8041930f61f5ba92102d4bea692` and the refreshed parent `d19ff3f075eb144870af1af159de1eccafd0b69b`. The complete Qwen CUDA family and CUDA kernel source trees are byte-identical to the native diagnostic producer `9416f0cf`; the new upstream changes and parent test-registration placement are checked separately. This source comparison does not relabel the device execution.
+
 ## Reproduce
 
 Use Zig 0.17.0 and a CUDA toolchain supported by the repository. The recorded run uses NVCC 13.0.88 and one sm_120 GPU. The CPU reference uses Python 3.12.3, Torch 2.15.0+cu132, Transformers 5.22.1, accelerate 1.15.0, safetensors 0.8.0 and NumPy 2.5.4, with eager attention and CUDA disabled. CPU fallback implementations are disclosed in the reference log.
