@@ -11,8 +11,6 @@ pub const max_pixels: u32 = 1_572_864;
 pub const max_steps: u32 = 200;
 /// The prompt encoder's 4,096 rows less the chat template's own tokens around a prompt, as the pipeline cuts it.
 pub const max_prompt_tokens: u32 = 4096 - 32;
-/// The transformer's latent rows one row per 16 x 16 pixels: the largest geometry's count, 1,572,864 / 256.
-pub const max_rows: usize = max_pixels / (16 * 16);
 
 /// The limits the host publishes in its `Info.image`.
 pub fn limits() api.ImageInfo {
