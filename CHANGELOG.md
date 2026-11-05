@@ -95,6 +95,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - The CPU-only server build shares its existing core module with the server adapter, resolving the slide-model import after integration.
 
+- The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating.
+
 - `TF_KV_SHARE=n` keeps a paged CUDA family's prompts as its core pool's pages (Gemma 4, Kolibri-1), with replies equal to a fresh prefill; it's opt-in, and costs about 3.5% decode after a short cold prompt on Kolibri-1 (#1755, part of #1657). Thanks to @jschmied.
 - Qwen3.5's attention-layer pattern (`layer_types`, `full_attention_interval`) is read by one shared reader on Metal, CUDA, HIP and XPU, so a config gets the same pattern or the same refusal everywhere; a `layer_types` list that contradicts the interval is refused naming both keys, and XPU checks a present `config.json` at load (#2086, fixes #1863).
 - Flash Next FP4 on CUDA: drafted rounds send the first token earlier, keep the n-gram table resident, draft deeper on greedy requests and replay rounds through CUDA graphs. One-stream decode on a GB10 is up to 11.5% faster (chat +8.7%, code +6.3% at temperature 0), and every reply is token-equal to main (#1786, thanks @Arminova).
