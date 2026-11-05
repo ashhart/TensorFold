@@ -44,14 +44,7 @@ pub const State = struct {
         const sz: usize = @as(usize, heads) * cfg.kda_dim;
         const W3: usize = 3 * sz;
         for (layers) |i| switch (cfg.kind(i)) {
-            .kda => s.kda[i] = .{
-                .S = try device.buffer(n * sz * cfg.kda_dim * 4, opts),
-                .conv = try device.buffer(n * (cfg.conv - 1) * W3 * 2, opts),
-                .log_a = try device.buffer(n * limits.log_rows * sz * 4, opts),
-                .log_k = try device.buffer(n * limits.log_rows * sz * 4, opts),
-                .log_u = try device.buffer(n * limits.log_rows * sz * 4, opts),
-                .log_x = try device.buffer(n * limits.log_rows * W3 * 2, opts),
-            },
+            .kda => s.kda[i] = try arena(device, .{ n * sz * cfg.kda_dim * 4, n * (cfg.conv - 1) * W3 * 2, n * limits.log_rows * sz * 4, n * limits.log_rows * sz * 4, n * limits.log_rows * sz * 4, n * limits.log_rows * W3 * 2 }, opts),
             .mla => s.mla[i] = try device.buffer(n * limits.max_ctx * (cfg.kv_lora + cfg.rope) * 2, opts),
         };
         if (cfg.dsa != null) for (layers) |i| {
@@ -59,6 +52,20 @@ pub const State = struct {
         };
         for (0..limits.slots) |slot| s.reset(@intCast(slot));
         return s;
+    }
+
+    fn arena(device: mtl.Device, sizes: [6]usize, opts: usize) !KdaArena {
+        var result: KdaArena = undefined;
+        var made: usize = 0;
+        const fields = @typeInfo(KdaArena).@"struct".field_names;
+        errdefer inline for (fields, 0..) |name, n| {
+            if (n < made) @field(result, name).deinit();
+        };
+        inline for (fields, 0..) |name, n| {
+            @field(result, name) = try device.buffer(sizes[n], opts);
+            made += 1;
+        }
+        return result;
     }
 
     /// A slot's caches emptied for a new stream (zero state, zero conv window).
