@@ -8,6 +8,33 @@
 spirv_execution_mode(extensions = ["SPV_KHR_float_controls"], capabilities = [4464], 4459, 32);
 #endif
 
+#ifdef ACT_F32
+// F32 activations: all three buffers are plain vec4.
+#define VEC_A vec4
+#define VEC_B vec4
+#define VEC_OUT vec4
+#define LOAD_A(x) (x)
+#define LOAD_B(x) (x)
+#define STORE_OUT(v) (v)
+#elif defined(ADD_WIDE)
+// Mixed add: the f32 wide stream adds a bf16 residual and rounds the sum to bf16.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define VEC_A vec4
+#define VEC_B u16vec4
+#define VEC_OUT u16vec4
+#define LOAD_A(x) (x)
+#define LOAD_B(x) uintBitsToFloat(uvec4(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_OUT(v) \
+  u16vec4(bf16_store(v.x), bf16_store(v.y), bf16_store(v.z), bf16_store(v.w))
+#else
 #ifdef USE_FP16
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -29,17 +56,24 @@ uint16_t bf16_store(float value) {
 #define STORE_VEC(v) \
   u16vec4(bf16_store(v.x), bf16_store(v.y), bf16_store(v.z), bf16_store(v.w))
 #endif
+#define VEC_A STORAGE_VEC
+#define VEC_B STORAGE_VEC
+#define VEC_OUT STORAGE_VEC
+#define LOAD_A(x) LOAD_VEC(x)
+#define LOAD_B(x) LOAD_VEC(x)
+#define STORE_OUT(v) STORE_VEC(v)
+#endif
 
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0, std430) readonly buffer InputA {
-  STORAGE_VEC values[];
+  VEC_A values[];
 } input_a;
 layout(set = 0, binding = 1, std430) readonly buffer InputB {
-  STORAGE_VEC values[];
+  VEC_B values[];
 } input_b;
 layout(set = 0, binding = 2, std430) writeonly buffer Output {
-  STORAGE_VEC values[];
+  VEC_OUT values[];
 } output_data;
 
 // Push constants match elementwise.comp: first nine words are read; count, sizes, offsets are elements divided by four.
@@ -66,8 +100,8 @@ void main() {
         (lhs_vecs == vec_count ? index : index % lhs_vecs);
     uint rhs_index = params.rhs_offset / 4u +
         (rhs_vecs == vec_count ? index : index % rhs_vecs);
-    vec4 lhs = LOAD_VEC(input_a.values[lhs_index]);
-    vec4 rhs = LOAD_VEC(input_b.values[rhs_index]);
+    vec4 lhs = LOAD_A(input_a.values[lhs_index]);
+    vec4 rhs = LOAD_B(input_b.values[rhs_index]);
     vec4 value;
     switch (params.operation) {
       case 0u:
@@ -83,7 +117,7 @@ void main() {
         value = lhs - rhs;
         break;
     }
-    output_data.values[params.output_offset / 4u + index] = STORE_VEC(value);
+    output_data.values[params.output_offset / 4u + index] = STORE_OUT(value);
     if (vec_count - index <= stride) {
       break;
     }

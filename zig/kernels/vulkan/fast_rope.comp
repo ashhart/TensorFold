@@ -61,15 +61,32 @@ float rope_round(float value) {
 layout(set = 0, binding = 0, std430) readonly buffer Input {
   STORAGE_TYPE values[];
 } input_data;
-layout(set = 0, binding = 1, std430) writeonly buffer Output {
-  STORAGE_TYPE values[];
-} output_data;
 float rope_load(uint abs_index) {
   return input_data.values[abs_index];
 }
+#ifdef ACT_OUT_BF16
+// F32 rope with a bf16 cache write: element addressing, RNE store.
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+layout(set = 0, binding = 1, std430) writeonly buffer Output {
+  uint16_t values[];
+} output_data;
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  return isnan(value)
+      ? uint16_t((bits >> 16u) | 0x40u)
+      : uint16_t((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+}
+void rope_store(uint abs_index, float value) {
+  output_data.values[abs_index] = bf16_store(value);
+}
+#else
+layout(set = 0, binding = 1, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
 void rope_store(uint abs_index, float value) {
   output_data.values[abs_index] = value;
 }
+#endif
 float rope_round(float value) {
   return value;
 }

@@ -27,10 +27,29 @@ uint16_t bf16_store(float value) {
 #define STORE_VALUE(f) STORAGE_TYPE(f)
 #endif
 
+// ACT_IN_F32/ACT_OUT_F32/ACT_OUT_BF16: the norm's activation in/out while the gain stays bf16.
+#ifdef ACT_IN_F32
+#define ACT_IN float
+#define ACT_IN_LOAD(x) (x)
+#else
+#define ACT_IN STORAGE_TYPE
+#define ACT_IN_LOAD(x) LOAD_VALUE(x)
+#endif
+#ifdef ACT_OUT_F32
+#define ACT_OUT float
+#define ACT_OUT_STORE(f) (f)
+#elif defined(ACT_OUT_BF16)
+#define ACT_OUT uint16_t
+#define ACT_OUT_STORE(f) bf16_store(f)
+#else
+#define ACT_OUT STORAGE_TYPE
+#define ACT_OUT_STORE(f) STORE_VALUE(f)
+#endif
+
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0, std430) readonly buffer Input {
-  STORAGE_TYPE values[];
+  ACT_IN values[];
 } input_data;
 layout(set = 0, binding = 1, std430) readonly buffer Weight {
   STORAGE_TYPE values[];
@@ -41,7 +60,7 @@ layout(set = 0, binding = 2, std430) readonly buffer Bias {
 } bias_data;
 #endif
 layout(set = 0, binding = 3, std430) writeonly buffer Output {
-  STORAGE_TYPE values[];
+  ACT_OUT values[];
 } output_data;
 
 layout(push_constant) uniform Params {
@@ -79,7 +98,7 @@ void main() {
 #ifdef LAYER_NORM
     float local_sum = 0.0;
     for (uint index = thread; index < row_length; index += threads) {
-      local_sum += LOAD_VALUE(input_data.values[start + index]);
+      local_sum += ACT_IN_LOAD(input_data.values[start + index]);
     }
     block_values[thread] = local_sum;
     barrier();
@@ -95,7 +114,7 @@ void main() {
 
     float local_sq = 0.0;
     for (uint index = thread; index < row_length; index += threads) {
-      float value = LOAD_VALUE(input_data.values[start + index]);
+      float value = ACT_IN_LOAD(input_data.values[start + index]);
       local_sq += value * value;
     }
     block_values[thread] = local_sq;
@@ -116,7 +135,7 @@ void main() {
     float norm = inversesqrt(variance + eps);
 
     for (uint index = thread; index < row_length; index += threads) {
-      float value = LOAD_VALUE(input_data.values[start + index]);
+      float value = ACT_IN_LOAD(input_data.values[start + index]);
       float weight =
           (params.lhs_size == 1u)
               ? LOAD_VALUE(weight_data.values[params.rhs_offset])
@@ -136,7 +155,7 @@ void main() {
 #endif
 #endif
       output_data.values[params.output_offset + row * row_length + index] =
-          STORE_VALUE(result);
+          ACT_OUT_STORE(result);
     }
     barrier();
   }

@@ -4,6 +4,40 @@
 
 layout(local_size_x = 256) in;
 
+#ifdef ACT_F32
+// F32 activations: ctx, gate halves and output address f32 elements directly.
+layout(set = 0, binding = 0, std430) readonly buffer Context {
+  float values[];
+} ctx_data;
+layout(set = 0, binding = 1, std430) readonly buffer Gate {
+  float values[];
+} gate_data;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  float values[];
+} out_data;
+
+layout(push_constant) uniform Push {
+  uint words; // rows * 2048 f32 elements
+} push;
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (index < push.words) {
+    const uint row = index >> 11u;          // elements per row: 2048
+    const uint d = index & 2047u;
+    const uint head = d >> 8u;              // 256 elements per head block
+    const float gate = gate_data.values[row * 4096u + head * 512u + 256u + (d & 255u)];
+    const float s = 1.0f / (1.0f + exp(-gate));
+    out_data.values[index] = ctx_data.values[index] * s;
+    if (push.words - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}
+#else
+
 layout(set = 0, binding = 0, std430) readonly buffer Context {
   uint values[];
 } ctx_data;
@@ -56,3 +90,4 @@ void main() {
     index += stride;
   }
 }
+#endif

@@ -2,6 +2,15 @@
 
 #version 460
 
+#ifdef ACT_F32
+// F32 activations: every buffer is plain vec4 and the store rounding is transparent.
+#define STORAGE_VEC vec4
+#define LOAD_VEC(x) (x)
+#define STORE_VEC(v) (v)
+float round_intermediate(float f) {
+  return f;
+}
+#else
 #ifdef USE_FP16
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -28,6 +37,7 @@ uint16_t bf16_store(float value) {
 float round_intermediate(float f) {
   return uintBitsToFloat(uint(bf16_store(f)) << 16u);
 }
+#endif
 #endif
 
 layout(local_size_x = 256) in;
