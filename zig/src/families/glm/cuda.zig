@@ -66,6 +66,7 @@ test {
     _ = @import("cuda_lanes_test.zig");
     _ = @import("cuda_prompt_cuts.zig");
     _ = @import("cuda_request_starts_test.zig");
+    _ = @import("cuda_window_graph_test.zig");
     _ = @import("dflash_load.zig");
     _ = prompt_solo;
     _ = @import("cuda_l2pf.zig");
