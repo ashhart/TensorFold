@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: `zig` and `zig-windows` keep main's build cache instead of rebuilding from nothing, every check still reruns, and the quick checks run first.
+
 - HIP: the `tf_sum_partials` records follow ROCm 10.1's hipcc, taking 8 limit problems off the contract (#2233). Thanks to @AbrahamCete.
 
 - CUDA docs match the code: README, RUNBOOK and the recipes now say which families refuse an A100 at startup, that no NVFP4 or FP8 model has run on sm_80 to sm_89, and that the largest recorded run is three GB10s (#2227).
