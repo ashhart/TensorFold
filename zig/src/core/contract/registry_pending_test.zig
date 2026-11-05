@@ -26,6 +26,12 @@ test "EXL3 prompt resource records select measured CUDA 13.4 usage without chang
         try std.testing.expectEqual(@as(u32, 256), usage.bound);
     }
 }
+test "unmeasured CUDA records cannot pass a compiled resource check" {
+    for (cuda_pending) |r| {
+        if (!std.meta.eql(none, r.usage)) continue;
+        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+    }
+}
 test "CUDA lane resources distinguish recorded launches from missing receipts" {
     for (cuda_pending) |r| {
         try std.testing.expect(r.launch.threads > 0);
