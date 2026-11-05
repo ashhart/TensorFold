@@ -386,6 +386,8 @@ test "model discovery respects the loaded engine's reasoning refusal despite tem
     }
     const text = try modelValue(a, "text", .{ .reasoning = true }, 0, template);
     try std.testing.expect(text.get("reasoning").?.get("default_enabled").?.bool);
+}
+
 test "Nemotron window: model discovery reports the real fallback" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
