@@ -1,7 +1,8 @@
-//! Qwen3-Reranker: the real decide hook (branches packed into several runs) against scoreLabels alone, byte for byte.
+//! Qwen3-Reranker: the real decide hook against scoreLabels alone, byte for byte, on TF_QWEN3_MATRIX and _ATTENTION.
 const std = @import("std");
 const hip = @import("hip");
 const qwen3 = @import("qwen3");
+const checks = @import("forward_test.zig");
 
 const t = std.testing;
 const gpa = t.allocator;
@@ -60,7 +61,7 @@ test "Qwen3-Reranker decide: packed branches give each prompt's scoreLabels logi
         try labels.append(a, yes);
         if (i % 2 == 0) try labels.append(a, no);
     }
-    const e = try qwen3.engine.Engine.load(gpa, t.io, dir, 0, .{});
+    const e = try qwen3.engine.Engine.load(gpa, t.io, dir, 0, try checks.choices());
     defer e.deinit();
     try e.size(window);
     var p = qwen3.prompt.Prompt.init(gpa, e, false);
@@ -76,7 +77,7 @@ test "Qwen3-Reranker decide: packed branches give each prompt's scoreLabels logi
         for (packed_logits[at..][0..n], alone) |x, y| try t.expectEqual(@as(u64, @bitCast(y)), @as(u64, @bitCast(x)));
         at += n;
     }
-    std.debug.print("rerank decide: {d} branches ({d} tokens, trunk {d}) at a {d}-token window equal scoreLabels alone\n", .{ prompts.items.len, total, trunk_len, window });
+    std.debug.print("rerank decide ({t}, {s}): {d} branches ({d} tokens, trunk {d}) at a {d}-token window equal scoreLabels alone\n", .{ e.lib.dense.serve, checks.attentionPath(&e.lib), prompts.items.len, total, trunk_len, window });
 }
 
 test "Qwen3-Reranker decide: every scored reference case, the windows' too, packed equals scoreLabels alone" {
@@ -116,7 +117,7 @@ test "Qwen3-Reranker decide: every scored reference case, the windows' too, pack
         n.* = 2;
         labels[2 * i ..][0..2].* = .{ yes, no };
     }
-    const e = try qwen3.engine.Engine.load(gpa, t.io, dir, 0, .{});
+    const e = try qwen3.engine.Engine.load(gpa, t.io, dir, 0, try checks.choices());
     defer e.deinit();
     try e.size(window);
     var p = qwen3.prompt.Prompt.init(gpa, e, false);
@@ -137,5 +138,5 @@ test "Qwen3-Reranker decide: every scored reference case, the windows' too, pack
         for (packed_logits[2 * i ..][0..2], alone) |x, y| try t.expectEqual(@as(u64, @bitCast(y)), @as(u64, @bitCast(x)));
         tokens += prompt.len;
     }
-    std.debug.print("rerank decide: all {d} scored cases ({d} tokens, trunk {d}) packed at a {d}-token window equal alone\n", .{ prompts.items.len, tokens, trunk_len, window });
+    std.debug.print("rerank decide ({t}, {s}): all {d} scored cases ({d} tokens, trunk {d}) packed at a {d}-token window equal alone\n", .{ e.lib.dense.serve, checks.attentionPath(&e.lib), prompts.items.len, tokens, trunk_len, window });
 }
