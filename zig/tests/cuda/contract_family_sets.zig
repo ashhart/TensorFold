@@ -16,6 +16,7 @@ pub const Sets = struct {
     inkling2: *@import("contract_inkling2.zig").Set,
     moss: *@import("contract_moss_image.zig").Set,
     nemo_audio: *@import("contract_nemo_audio.zig").Set,
+    qwen3_asr: *@import("contract_qwen3_asr.zig").Set,
     modelopt: *@import("contract_flashnext_modelopt.zig").Set,
     grouped: *Grouped,
     flashnext: *@import("contract_flashnext_more.zig").Set,
@@ -42,6 +43,8 @@ pub const Sets = struct {
         errdefer moss.deinit();
         const nemo_audio = try @import("contract_nemo_audio.zig").Set.init(gpu, s, a, list);
         errdefer nemo_audio.deinit();
+        const qwen3_asr = try @import("contract_qwen3_asr.zig").Set.init(gpu, s, a, list);
+        errdefer qwen3_asr.deinit();
         const modelopt = try @import("contract_flashnext_modelopt.zig").Set.init(gpu, s, a, list);
         errdefer modelopt.deinit();
         const grouped = try gpu.gpa.create(Grouped);
@@ -82,6 +85,7 @@ pub const Sets = struct {
             .inkling2 = inkling2,
             .moss = moss,
             .nemo_audio = nemo_audio,
+            .qwen3_asr = qwen3_asr,
             .modelopt = modelopt,
             .grouped = grouped,
             .flashnext = flashnext,
@@ -110,6 +114,7 @@ pub const Sets = struct {
         sets.grouped.deinit();
         sets.gpa.destroy(sets.grouped);
         sets.modelopt.deinit();
+        sets.qwen3_asr.deinit();
         sets.nemo_audio.deinit();
         sets.moss.deinit();
         sets.inkling2.deinit();
