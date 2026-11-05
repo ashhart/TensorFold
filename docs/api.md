@@ -694,7 +694,7 @@ A retryable refusal on an inference route answers 503 and names its wait in the 
 | `server_restarting` | The server is draining for a restart; the answer carries `Retry-After` |
 | `engine_loading` | A parked model is unloading or reloading; sending the request again drives it; `Retry-After` |
 | `engine_reload_failed` | A parked model's reload was attempted and failed; the next request tries again; `Retry-After` |
-| `engine_busy` | The engine had no room for this request (a busy engine, a full speech lane); send it again |
+| `engine_busy` | The engine had no room for this request (a busy engine, a busy embedding engine, a full speech lane); send it again |
 | `engine_unavailable` | The engine is closed (for embeddings and rerank, also stale); retry after it reopens |
 | `memory_pressure` | The host is under critical memory pressure and takes no new request until it eases |
 
