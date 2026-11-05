@@ -44,6 +44,7 @@ test {
 
 test {
     _ = @import("session_restore_test.zig");
+    _ = @import("session_codec_test.zig");
     _ = @import("session_protocol.zig");
 }
 
