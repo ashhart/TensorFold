@@ -562,13 +562,11 @@ test "the registered launches fit every Apple family and every SM, and each plan
 test {
     _ = @import("registry_sets_test.zig");
     _ = @import("nvfp4_tile_pending.zig");
-}
-const paging = @import("paging_pending.zig");
-test {
     _ = paging;
     _ = @import("minimax_records.zig");
     _ = @import("nemotron_ssd_records.zig");
 }
+const paging = @import("paging_pending.zig");
 /// The Metal collector keeps measured slots and the restored vision declarations.
 pub const all_metal = @import("attention_pv_records.zig").records ++ metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records ++ @import("metal_pair_records.zig").records ++ @import("glm_rows_records.zig").records ++ @import("weight_only_records.zig").metal ++ @import("hc_activation_records.zig").metal ++ @import("qwen4_records.zig").metal ++ @import("lfm2_records.zig").records ++ @import("nemotron_experts_records.zig").records ++ @import("nemotron_pages_records.zig").records ++ @import("nemotron_attention_records.zig").records ++
     @import("nemotron_ssd_records.zig").records ++ @import("flashnext_attention_records.zig").records ++ @import("spark25_records.zig").records ++ @import("gemma_attention_records.zig").records ++ @import("moss_image_records.zig").records ++ @import("dsv41_metal_records.zig").records ++ @import("minimax_records.zig").records ++ @import("ling_route_records.zig").records ++ @import("qwen27_moe_records.zig").records ++ @import("affine_gather_records.zig").records;
@@ -580,7 +578,7 @@ pub const landed_cuda = cuda ++ @import("dory_cuda_records.zig").cuda ++ gradien
 test {
     _ = learning;
 }
-pub const all_cuda = @import("gb10_many_records.zig").records ++ @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_records.zig").records;
+pub const all_cuda = @import("moetile_records.zig").records ++ @import("gb10_many_records.zig").records ++ @import("nvfp4_tile_pending.zig").records ++ landed_cuda ++ dsv41_pending ++ @import("inc4_pending.zig").trees ++ @import("inc4_pending.zig").rows ++ @import("affine_verify_records.zig").records;
 pub const dsv41_pending = @import("registry_union.zig").extra(landed_cuda, @import("dsv41_pending_1.zig").records ++ @import("dsv41_pending_2.zig").records);
 test {
     _ = @import("qwen4_cuda_receipts_test.zig");
