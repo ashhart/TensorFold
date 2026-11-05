@@ -62,7 +62,10 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 pub fn build(b: *std.Build) void {
     @import("zig/build/fixed_cpu.zig").apply(b); // first: everything below compiles for the host it sets
     // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig)
-    if (@import("zig/build/product.zig").requested(b)) |gpu| return @import("zig/build/product.zig").build(b, gpu);
+    if (@import("zig/build/product.zig").requested(b)) |gpu| {
+        @import("zig/build/product.zig").build(b, gpu);
+        return @import("zig/build/profile.zig").walk(b); // the one server's modules import the registry too
+    }
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
