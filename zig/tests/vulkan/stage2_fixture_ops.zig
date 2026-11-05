@@ -43,7 +43,7 @@ fn guardIntact(shell: []const u16, at: usize, len: usize) !void {
 }
 
 /// A bf16-representable f32 value near `1` scaled by `scale` (a power of two).
-fn sampleBits(rng: std.Random, scale: f32) u16 {
+pub fn sampleBits(rng: std.Random, scale: f32) u16 {
     const v = (rng.float(f32) + 0.5) * scale * (if (rng.boolean()) @as(f32, 1) else -1);
     return c.toBf16(v);
 }
@@ -64,7 +64,7 @@ pub const add_cases = [_]AddCase{
 };
 
 /// Planted classes-case inputs; every pair is exercised (elems == len).
-const class_pairs = [_][2]u16{
+pub const class_pairs = [_][2]u16{
     .{ 0x7f80, 0x3f80 }, // +inf + 1 -> +inf
     .{ 0xff80, 0x3f80 }, // -inf + 1 -> -inf
     .{ 0x7f80, 0xff80 }, // +inf + -inf -> nan
@@ -177,7 +177,7 @@ pub const swiglu_cases = [_]SwigluCase{
 
 /// The controls: planted nan/+inf/-inf gates and signed zeros, up mostly 1 with two sign flips.
 pub const swiglu_gate_controls = [_]u16{ 0x7fc0, 0x7f80, 0xff80, 0x0000, 0x8000, 0x3f80, 0xbf80, 0x41a0, 0xc1a0, 0x3f00, 0xbf00, 0x4000, 0xc000, 0x3e80, 0x3d00, 0x4800 };
-const swiglu_up_controls = [_]u16{ 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0xbf80, 0x3f80, 0xc000, 0x3f80, 0xbf80, 0x3f80, 0x3f80 };
+pub const swiglu_up_controls = [_]u16{ 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x3f80, 0xbf80, 0x3f80, 0xc000, 0x3f80, 0xbf80, 0x3f80, 0x3f80 };
 
 pub const Swiglu = struct {
     a: std.mem.Allocator,

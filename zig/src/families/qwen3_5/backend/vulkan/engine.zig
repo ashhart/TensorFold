@@ -286,7 +286,8 @@ pub const Engine = struct {
             if (i == 0) {
                 try cx.plainNorm(x, ringView(try e.h[0].slice(0, span), prev), input_norm, rows);
             } else {
-                // the residual still holds the previous layer's MLP output in its kind
+                // the residual still holds the previous layer's MLP output in its kind; at layer 4 this add reads
+                // layer 3's f32 stream directly and rounds the sum to bf16 on the store (the reference's store rule).
                 try cx.addNorm(x, ringView(try e.h[ring ^ 1].slice(0, span), prev), ringView(try e.h[ring].slice(0, span), prev), ringView(try e.r.slice(0, span), prev), input_norm, rows);
                 ring ^= 1;
             }
@@ -367,6 +368,13 @@ test "the plan admits whole requests up to the capacity ceiling and refuses one 
     try testing.expectError(error.ContextTooLong, planFor(cap, 0, 7106, 64));
     try testing.expectError(error.ContextTooLong, planFor(cap + 1, 0, 1, 1));
     try planFor(cap, 0, 7167, 2); // 7167 + 2 - 1 = 7168: exact fit
+}
+
+test "the wide store policy covers exactly layers 0-3 of the 24-layer model" {
+    for (0..24) |i| {
+        const want: vk.tensor.Kind = if (i < 4) .f32 else .bf16;
+        try testing.expectEqual(want, fwd.actKind(i));
+    }
 }
 
 test "the arena holds the persistent windows plus the worst transient layer" {
