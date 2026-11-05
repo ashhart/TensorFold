@@ -408,6 +408,8 @@ pub fn absorbStart(it: dr.Absorb, row_bytes: usize, dtype: lanes.backend.Feature
     if (f.space != .device or f.dtype != dtype or f.row_bytes != row_bytes) return error.UnsupportedFeatures;
     // hip_lanes.zig's features put their first row's position in `offset`: rows of another position are refused
     if (f.offset != it.start) return error.FeaturesNotAtStart;
+    // kept rows index the features' rows: one past them would read a ring row the target did not hand over
+    if (it.rows) |rs| for (rs) |r| if (r >= f.rows) return error.BadDraftRows;
     return it.start;
 }
 
@@ -435,6 +437,16 @@ test "an absorb starts at its own start, and refuses features whose first row is
     it.start = 40;
     try std.testing.expectError(error.UnsupportedFeatures, absorbStart(it, 64, .f16));
     try std.testing.expectError(error.UnsupportedFeatures, absorbStart(it, 128, .bf16));
+}
+
+test "an absorb's kept rows pick from its features' rows; a row past them is refused" {
+    const f: lanes.backend.Features = .{ .buffer = 0x1000, .offset = 40, .rows = 16, .row_bytes = 64, .space = .device, .dtype = .bf16 };
+    var it: dr.Absorb = .{ .stream = undefined, .features = f, .start = 40, .follow = &.{}, .rows = &.{ 0, 5, 10, 15 } };
+    try std.testing.expectEqual(@as(u64, 40), try absorbStart(it, 64, .bf16));
+    it.rows = &.{ 0, 16 };
+    try std.testing.expectError(error.BadDraftRows, absorbStart(it, 64, .bf16));
+    it.features.rows = 17;
+    try std.testing.expectEqual(@as(u64, 40), try absorbStart(it, 64, .bf16));
 }
 
 test "16-bit logits widen by their kind" {

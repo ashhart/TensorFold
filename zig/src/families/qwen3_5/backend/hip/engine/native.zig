@@ -14,6 +14,8 @@ const worker = @import("worker.zig");
 const hip_lanes = @import("hip_lanes.zig");
 const joint = @import("joint_readout.zig");
 const config = @import("../../../weights/config.zig");
+const draft = @import("../draft/draft.zig");
+const Draft = draft.Draft;
 
 /// The MLX affine widths this native text server loads, each with its group size.
 const mlx_formats = blk: {
@@ -39,6 +41,8 @@ pub fn Native(comptime type_name: []const u8) type {
         pub const prefill_step: u32 = 0;
         pub const open = openEngine;
         pub const follow = followRank;
+        /// --drafter loads a DFlash2 draft model over the dense checkpoints (Qwen3.8-27B's); the sparse ones take none.
+        pub const takes_drafter = std.mem.eql(u8, type_name, "qwen3_5");
     };
 }
 
@@ -58,6 +62,8 @@ pub const Loaded = struct {
     startup: []const u8,
     /// The readouts the engine answers, if any (then it generates no text); the host's defaults otherwise.
     offer: serve.Offer = .{},
+    /// The DFlash2 drafter --drafter loaded, its taps already filling the streams' rings (null: none).
+    drafter: ?lanes.drafter.Drafter = null,
 };
 
 /// A flag or a resource the engine cannot take: `problem` says why.
@@ -116,13 +122,28 @@ const Prepared = struct {
     /// A Clef checkpoint's head weights and the readouts it plans (null for every other checkpoint).
     joint: ?joint.Loaded = null,
     bounds: hip.joint_schema.plan.Bounds = undefined,
+    draft: ?*Draft = null,
 };
 
 /// Device bytes of `streams` lanes at `capacity` beside the weights, and their readout states and the head's scratch.
-fn served(e: *Engine, streams: usize, capacity: usize, readouts: ?Readouts) !usize {
+fn served(e: *Engine, d: ?*Draft, streams: usize, capacity: usize, readouts: ?Readouts) !usize {
     const rows = streams * hip_lanes.Hip.max_window;
+    // a drafter's tap rings hold its window past the rows a forward writes: sized for these streams' rows
+    if (d != null) {
+        e.o.batch_rows = rows;
+        try e.setTaps(d.?.c.tapLayers());
+    }
+    const drafts = if (d) |x| streams * x.streamBytes() else 0;
     const head = if (readouts) |r| hip.joint_schema.plan.bytes(r.cfg, r.bounds, streams) else 0;
-    return try e.planBytes(streams, rows, capacity, streams * pages.pagesFor(capacity) + pages.pagesFor(rows), 0) + head;
+    return drafts + try e.planBytes(streams, rows, capacity, streams * pages.pagesFor(capacity) + pages.pagesFor(rows), 0) + head;
+}
+
+/// The DFlash2 drafter in `dir` on `e`, its taps set before the streams are sized, frames of up to `streams`.
+fn openDraft(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, streams: usize) !*Draft {
+    const c = try draft.config.Config.read(gpa, io, dir, draft.config.Target.of(e.model().spec));
+    try e.setTaps(c.tapLayers());
+    errdefer e.setTaps(&.{}) catch {};
+    return Draft.init(gpa, io, e, dir, @min(@max(streams, 1), draft.max_streams));
 }
 
 const Readouts = struct { cfg: @import("core").joint_schema.Config, bounds: hip.joint_schema.plan.Bounds };
@@ -201,6 +222,14 @@ fn prepare(
     // a Clef head's weights go up beside the model's and count with them
     var head = try loadJoint(a, gpa, io, e, dir, problem);
     errdefer if (head) |*h| h.deinit();
+    // the drafter's weights and scratch count with the model's; each stream's context with the streams'
+    const d: ?*Draft = if (o.drafter) |dir_d| openDraft(gpa, io, e, dir_d, o.streams) catch |err| return steps.refuseAll(
+        a,
+        problem,
+        "the native HIP engine cannot load the drafter {s} ({s})",
+        .{ dir_d, @errorName(err) },
+    ) else null;
+    errdefer if (d) |x| x.deinit();
     const model = hip.usage(false).device - held;
     const after = e.budget(io) catch |err| return steps.refuseAll(
         a,
@@ -217,7 +246,7 @@ fn prepare(
     // the most streams up to the ones asked whose bytes fit, then the least of that over the ranks
     var streams = o.streams;
     while (streams > 0) : (streams -= 1) {
-        if ((served(e, streams, capacity, readouts) catch |err| return steps.refuseAll(
+        if ((served(e, d, streams, capacity, readouts) catch |err| return steps.refuseAll(
             a,
             problem,
             "the native HIP engine cannot count its scratch ({s})",
@@ -227,11 +256,11 @@ fn prepare(
     streams = (try steps.together(a, .{ streams, 0 }, .least, problem))[0];
     // every rank holds the same least, so every rank refuses here alike
     if (streams == 0) {
-        const one = served(e, 1, capacity, readouts) catch 0;
+        const one = served(e, d, 1, capacity, readouts) catch 0;
         return refuse(a, problem, "the HIP memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, add ranks (--tp), or free device memory", .{ window, gibs(one), gibs(room), gibs(model), gibs(reserve) });
     }
     if (streams < o.streams and o.fixed) {
-        const asked = served(e, o.streams, capacity, readouts) catch 0;
+        const asked = served(e, d, o.streams, capacity, readouts) catch 0;
         return steps.refuseAll(
             a,
             problem,
@@ -240,7 +269,7 @@ fn prepare(
             .{ o.streams, gibs(asked), window, gibs(room), streams },
         );
     }
-    const need = served(e, streams, capacity, readouts) catch |err| return steps.refuseAll(
+    const need = served(e, d, streams, capacity, readouts) catch |err| return steps.refuseAll(
         a,
         problem,
         "the native HIP engine cannot count its scratch ({s})",
@@ -273,11 +302,18 @@ fn prepare(
             "the native HIP engine cannot allocate its scratch and pages ({s})",
             .{@errorName(err)},
         );
-    const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + e.model().taps.ringBytes(e.model().spec.hidden) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()));
-    const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks", .{
-        hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, prefix.chunk,
+    if (d) |x| x.reserve(streams) catch |err| return steps.refuseAll(
+        a,
+        problem,
+        "the drafter cannot allocate its streams' contexts ({s})",
+        .{@errorName(err)},
+    );
+    const own_bytes = if (d) |x| x.streamBytes() else 0;
+    const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + e.model().taps.ringBytes(e.model().spec.hidden) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()) + own_bytes);
+    const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks", .{
+        hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), if (d != null) " with its DFlash2 drafter" else "", streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, prefix.chunk,
     });
-    return .{ .e = e, .streams = streams, .cache = cache, .startup = startup, .joint = head, .bounds = if (readouts) |r| r.bounds else undefined };
+    return .{ .e = e, .streams = streams, .cache = cache, .startup = startup, .joint = head, .bounds = if (readouts) |r| r.bounds else undefined, .draft = d };
 }
 
 const Owned = struct {
@@ -286,6 +322,7 @@ const Owned = struct {
     backend: *hip_lanes.Hip,
     startup: []const u8,
     joint: ?*joint.Joint = null,
+    draft: ?*Draft,
 };
 
 fn release(p: *anyopaque) void {
@@ -296,6 +333,7 @@ fn release(p: *anyopaque) void {
         j.deinit();
         own.gpa.destroy(j);
     }
+    if (own.draft) |d| d.deinit();
     own.e.deinit();
     own.gpa.free(own.startup);
     own.gpa.destroy(own);
@@ -307,6 +345,7 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     var steps: hip.Startup = .{ .link = if (dev.group) |g| g.link() else null };
     var p = try prepare(a, gpa, io, dev, dir, o, &steps, problem);
     errdefer p.e.deinit();
+    errdefer if (p.draft) |d| d.deinit();
     errdefer gpa.free(p.startup);
     var weights_owned = p.joint != null;
     errdefer if (weights_owned) p.joint.?.deinit();
@@ -319,7 +358,7 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
         "the native HIP engine cannot start its lanes ({s})",
         .{@errorName(err)},
     );
-    own.* = .{ .gpa = gpa, .e = p.e, .backend = backend, .startup = p.startup };
+    own.* = .{ .gpa = gpa, .e = p.e, .backend = backend, .startup = p.startup, .draft = p.draft };
     errdefer own.backend.deinit();
     // the head is the one allocation of the plan made here: it holds what the plan counted for it
     const head = mtp.Head.deviceBytes(gpa, &p.e.driver, &p.e.lib, &p.e.weights, p.e.model(), @min(p.e.o.batch_rows, mtp.max_chains)) catch 0;
@@ -344,6 +383,8 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     _ = try steps.together(a, .{ 0, 0 }, .first, problem);
     // a lone rank times its forwards for the depth rule; the ranks of a group draft without costs; bf16 drafts none
     if (dev.group) |g| own.backend.withLink(g.link()) else if (!p.e.plain()) own.backend.measure();
+    // the drafter prices its rounds by the target's windows, timed with the taps on (cuda_native.zig's timeWindows)
+    if (p.draft) |d| for (own.backend.costs.window[0..own.backend.costs.windows]) |c| d.setCost(c.width, c.ms);
     return .{
         .backend = own.backend.backend(),
         .facts = own.backend.facts(),
@@ -353,6 +394,7 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
         .streams = p.streams,
         .startup = p.startup,
         .offer = .{ .readouts = own.backend.readouts(), .vision = serve.vision.offer(p.e.vision) },
+        .drafter = if (p.draft) |d| d.drafter() else null,
     };
 }
 

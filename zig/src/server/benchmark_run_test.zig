@@ -213,7 +213,7 @@ test "--drafter auto passes the family's drafter only when it is cached and says
     try std.testing.expect(!r.has(named) and try noDrafter(&r) and try passed(&r, "--no-drafts"));
 }
 
-test "a rocm run refuses a named --drafter before any serve child, and auto names no drafter on rocm" {
+test "a rocm run passes a named --drafter for qwen3_5 and refuses one for another family; auto names none on rocm" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -221,6 +221,7 @@ test "a rocm run refuses a named --drafter before any serve child, and auto name
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
+    r.families = &.{ .{ .model_type = "qwen3_5", .formats = &.{} }, .{ .model_type = "qwen3_5_moe", .formats = &.{} } };
     const m = try cli.managedWorld(a, false);
     defer m.stop();
     r.self_exe = try cli.standIn(&r, m.port);
@@ -232,8 +233,19 @@ test "a rocm run refuses a named --drafter before any serve child, and auto name
     try std.Io.Dir.cwd().createDirPath(io, big);
     const config = "{\"model_type\": \"qwen3_5\", \"hidden_size\": 5120, \"num_hidden_layers\": 64}";
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ big, "config.json" }), .data = config });
+    // a named drafter passes; this host build's serve then refuses --backend rocm itself (a HIP build serves it)
+    const flags = "the managed server refuses its flags: --backend rocm";
     for ([_][]const u8{ drafter, try r.path("hub") }) |named| {
         try std.testing.expectEqual(@as(u8, 1), try r.command(try argv(&r, &.{ big, "--backend", "rocm", "--drafter", named })));
+        try std.testing.expect(r.has(flags) and !r.has(benchmark.rocm_drafter) and m.count() == 0);
+    }
+    // the sparse family has no DFlash2 drafter on HIP: refused before the run starts
+    const moe = try r.path("moe-checkpoint");
+    try std.Io.Dir.cwd().createDirPath(io, moe);
+    const moe_config = "{\"model_type\": \"qwen3_5_moe\", \"hidden_size\": 2048, \"num_hidden_layers\": 40}";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ moe, "config.json" }), .data = moe_config });
+    for ([_][]const u8{ drafter, try r.path("hub") }) |named| {
+        try std.testing.expectEqual(@as(u8, 1), try r.command(try argv(&r, &.{ moe, "--backend", "rocm", "--drafter", named })));
         try std.testing.expect(r.has(benchmark.rocm_drafter) and !r.has("This generates model replies") and m.count() == 0);
         try missing(try r.path("pid"));
         try missing(try r.path(".tensorfold"));

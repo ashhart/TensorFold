@@ -25,12 +25,13 @@ pub const Ctx = struct {
 /// The rows an absorb runs: target rows [start, start + n).
 pub const Span = struct { start: u64, n: usize };
 
-/// Where an absorb of rows [start, start + n) lands: a rewind or a gap moves the span, past `window` rows are dropped.
+/// Where an absorb of rows [start, start + n) lands: a rewind or a gap moves the context, past `window` rows dropped.
 pub fn open(ctx: *Ctx, start_: u64, n_: usize, window: usize) Span {
     var start = start_;
     var n = n_;
     if (start < ctx.end) ctx.end = start;
-    if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
+    // a gap (a prompt restored from a cache) or a rewind below the begin: the context starts here
+    if (start > ctx.end or start < ctx.begin) ctx.begin = start;
     if (n > window) {
         start += n - window;
         n = window;
@@ -97,6 +98,23 @@ test "an absorb past the window keeps its last rows; a rewind and a gap move the
     close(&ctx, open(&ctx, 500, 3, 64), 64);
     try std.testing.expectEqual(@as(u64, 500), ctx.begin);
     try std.testing.expectEqual(@as(u64, 503), ctx.end);
+}
+
+test "a rewind below the context's begin starts the context at the absorb" {
+    var ctx: Ctx = .{ .ring = 1 };
+    close(&ctx, open(&ctx, 0, 100, 64), 64);
+    try std.testing.expectEqual(@as(u64, 36), ctx.begin);
+    // rows from 20 replace everything after them, and the ring holds nothing before them
+    close(&ctx, open(&ctx, 20, 3, 64), 64);
+    try std.testing.expectEqual(@as(u64, 20), ctx.begin);
+    try std.testing.expectEqual(@as(u64, 23), ctx.end);
+    var ids: [4]u32 = undefined;
+    var pos: [4]i32 = undefined;
+    var segs: [1]Segment = undefined;
+    const shape: Shape = .{ .block = 4, .vocab = 100, .mask = 99 };
+    const item = [_]dr.Hold{.{ .stream = undefined, .pending = 7, .position = 24, .depth = 3 }};
+    try stage(shape, &item, &.{&ctx}, &ids, &pos, &segs);
+    try std.testing.expectEqual(Segment{ .ring = 1, .begin = 20, .position = 23 }, segs[0]);
 }
 
 test "a frame stages each stream's pending token, its masks, positions from its end and its segment" {
