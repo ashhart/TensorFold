@@ -22,4 +22,3 @@ pub const cuda_132 = [_]@import("registry.zig").Override{
     .{ .name = "nvfp4_experts decode waves down f32", .usage = .{ .{ .regs = 79, .static = 25600, .bound = 128 }, .{ .regs = 82, .static = 25600, .bound = 128 }, .{ .regs = 101, .static = 25600, .bound = 128 }, .{ .regs = 107, .static = 25600, .bound = 128 }, .{ .regs = 107, .static = 25600, .bound = 128 } } },
     .{ .name = "nvfp4_experts decode waves gate-up, 1 warp", .usage = .{ .{ .regs = 103, .static = 8704, .bound = 32 }, .{ .regs = 103, .static = 8704, .bound = 32 }, .{ .regs = 140, .static = 8704, .bound = 32 }, .{ .regs = 124, .static = 8704, .bound = 32 }, .{ .regs = 124, .static = 8704, .bound = 32 } } },
 };
-
