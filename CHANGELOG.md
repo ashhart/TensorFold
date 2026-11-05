@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: `TF_GLM_COPIES=1` adds opt-in context copies, verified and priced with the same row costs as drafts. Off by default; tokens are unchanged (#2146).
+
 - Living Weights: a lesson's extra wordings are seeded from the lesson, so the same lesson samples the same wordings on each run (#1587).
 
 - `cached_tokens` and `prompt_tokens_cached_total` can no longer exceed the prompt, whatever a backend reports (#1899).
