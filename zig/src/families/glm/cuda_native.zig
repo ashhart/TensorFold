@@ -153,6 +153,7 @@ const snapshots = @import("cuda_snapshots.zig");
 const Owned = struct {
     gpa: std.mem.Allocator,
     benchmark_group: ?[]const u8,
+    progress: cuda.startup_watch.Watcher,
     group: cuda.tp_group.Group, // the ranks' communicator; two ranks add RoCE writes for the main stream's small gathers
     e: *engine.Engine,
     link: follow.Link,
@@ -231,6 +232,10 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     if (p.rank > 0 and std.c.getenv("NCCL_SOCKET_IFNAME") != null) _ = env.unsetenv("NCCL_COMM_ID");
     var diag = cuda.p2p_report.begin(p.rank, p.world);
     defer diag.end();
+    own.progress = .init(io, p.rank, p.world, diag.capture);
+    own.progress.start();
+    errdefer own.progress.end();
+    own.progress.enter(.nccl_init);
     var lib = try cuda.nccl.Library.open();
     errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
@@ -242,9 +247,11 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
     own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
     errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
+    own.progress.enter(.peer_warmup);
     if (p.world > 1) try @import("cuda_warm_peers.zig").warm(ctx.d, &own.group, set.ring);
     cuda.p2p_report.afterInit(&diag, .{ .lib = &own.group.lib, .comm = comm, .d = ctx.d, .later = true });
     const cap = capacity(o.context);
+    own.progress.enter(.weights);
     own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = o.vision, .drafter = o.drafter != null });
     errdefer own.e.deinit();
     if (o.vision) |lim| { // before the rooms: the tower's bytes count against rank 0's
@@ -318,6 +325,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     // every rank loaded and agreed (cuda_ranks) before the first step; the digest names what they agreed on
     cuda.memory_receipt.emit(@intCast(p.rank), .load_end, false);
     if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, frees what it owns, then leaves the process
+        startup_phase(own, .following);
         follow.follow(own.e, &own.link) catch |err| {
             std.log.err("rank {d}: following rank 0 stopped ({s})", .{ p.rank, @errorName(err) });
             cuda.tp_watch.fail(@errorName(err)); // rank 0 and the others stop with it
@@ -452,8 +460,16 @@ fn close(ptr: *anyopaque) void {
     cuda.memory_receipt.emit(rank, .cleanup_end, false);
 }
 
+/// The generic host reports calibration and readiness without changing either operation.
+pub fn startup_phase(ptr: *anyopaque, phase: cuda.startup_watch.Phase) void {
+    const own: *Owned = @ptrCast(@alignCast(ptr));
+    own.progress.enter(phase);
+    if (phase == .ready or phase == .following or phase == .failed) own.progress.end();
+}
+
 /// What a rank owns, freed by rank 0's close and by a follower before it leaves.
 fn release(own: *Owned) void {
+    own.progress.end();
     own.link.deinit();
     if (own.e.images) |v| v.deinit();
     own.e.deinit();
