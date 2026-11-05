@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
         .weight_bytes = bytes,
         .weights = weights,
         .hash_readback = "pinned asynchronous DtoH followed by stream completion",
-        .context = 4096,
+        .nemotron_context = if (q) @as(?u32, null) else 4096,
         .mtp = false,
     }, .{ .whitespace = .indent_2 });
     try output.writeStreamingAll(init.io, json);
