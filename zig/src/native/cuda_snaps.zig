@@ -2,12 +2,13 @@
 const std = @import("std");
 const api = @import("engine_api");
 
-/// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet and snap_fork if set.
+/// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet, snap_fork, snap_tail.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
+    if (@hasDecl(F, "snap_tail")) rules.tail = F.snap_tail; // opt-in as snap_fork is
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;
         rules.grid = F.snap_grid;
@@ -48,6 +49,7 @@ pub fn Snaps(comptime F: type, comptime image: ?*const api.prompt_cache.rows.Ima
 test "a family with snap_grid keeps on its chunk starts, any other at any row as Nemotron does" {
     const Glm = struct {
         pub const snap_grid: u32 = 2048;
+        pub const snap_tail = true;
     };
     const Other = struct {};
     const Warm = struct {
@@ -57,6 +59,7 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
         pub const snap_lookahead: u32 = 0;
     };
     try std.testing.expectEqual(@as(u32, 0), cacheRules(Headless).lookahead);
+    try std.testing.expect(cacheRules(Glm).tail and !cacheRules(Other).tail);
     const any = cacheRules(Other);
     try std.testing.expect(!any.planned and any.min_prompt == 0 and any.lookahead == 1 and any.warm == .off);
     try std.testing.expect(cacheRules(Warm).warm == .waits and cacheRules(Glm).warm == .off);
@@ -86,6 +89,8 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     defer store.deinit();
     const marks = try store.marks(arena.allocator(), prompt, 0, 3540, &.{}, &.{}, &.{});
     try std.testing.expectEqualSlices(u32, &[_]u32{2048}, marks);
+    // a raw prompt names no history: its tail keeps the same chunk start
+    try std.testing.expectEqualSlices(u32, &[_]u32{2048}, try store.marks(arena.allocator(), prompt, 0, 0, &.{}, &.{}, &.{}));
 }
 
 test {
