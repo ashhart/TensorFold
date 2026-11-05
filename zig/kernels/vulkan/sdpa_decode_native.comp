@@ -30,8 +30,14 @@ layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;
 // bf16 uses a uint16 word view; loads widen from the f32 top half.
 
 // RNE stores match every other USE_BF16 leg; see cast.comp.
+
+// F32_Q/F32_OUT keep the cache bf16 while the query and y activations are f32.
 layout(set = 0, binding = 0, std430) readonly buffer Query {
+#ifdef F32_Q
+  float values[];
+#else
   uint16_t values[];
+#endif
 } query_data;
 layout(set = 0, binding = 1, std430) readonly buffer Key {
   uint16_t values[];
@@ -40,7 +46,11 @@ layout(set = 0, binding = 2, std430) readonly buffer Value {
   uint16_t values[];
 } value_data;
 layout(set = 0, binding = 3, std430) writeonly buffer Output {
+#ifdef F32_OUT
+  float values[];
+#else
   uint16_t values[];
+#endif
 } output_data;
 #else
 layout(set = 0, binding = 0, std430) readonly buffer Query {
@@ -139,6 +149,23 @@ uint16_t bf16_store(float value) {
 #define LD16(x) float(x)
 #endif
 
+// F32_Q/F32_OUT: the query and y activations are f32; the K/V cache stays bf16.
+#ifdef BF16_IO
+#ifdef F32_Q
+#define Q_LOAD(x) (x)
+#else
+#define Q_LOAD(x) bf16_load(x)
+#endif
+#ifdef F32_OUT
+#define OUT_STORE(x) (x)
+#else
+#define OUT_STORE(x) bf16_store(x)
+#endif
+#else
+#define Q_LOAD(x) LD16(x)
+#define OUT_STORE(x) float16_t(x)
+#endif
+
 void store_pair(
     uint head,
     uint lane,
@@ -149,13 +176,8 @@ void store_pair(
   if (lane == 0u) {
     uint out_base = params.output_offset + head * SDPA_DIM +
         pair * 64u + 2u * gl_SubgroupID;
-#ifdef BF16_IO
-    output_data.values[out_base] = bf16_store(x / denominator);
-    output_data.values[out_base + 1u] = bf16_store(y / denominator);
-#else
-    output_data.values[out_base] = float16_t(x / denominator);
-    output_data.values[out_base + 1u] = float16_t(y / denominator);
-#endif
+    output_data.values[out_base] = OUT_STORE(x / denominator);
+    output_data.values[out_base + 1u] = OUT_STORE(y / denominator);
   }
 }
 
@@ -192,11 +214,11 @@ void main() {
 
   if (thread < SDPA_DIM) {
 #ifdef SDPA_ROWS
-    s_qrow[thread] = params.alpha * bf16_load(
+    s_qrow[thread] = params.alpha * Q_LOAD(
         query_data.values[q_batch + head * params.shape[0] +
             row * params.out_strides[0] + thread * params.shape[3]]);
 #else
-    s_qrow[thread] = params.alpha * bf16_load(
+    s_qrow[thread] = params.alpha * Q_LOAD(
         query_data.values[q_batch +
             head * params.shape[0] + thread * params.shape[3]]);
 #endif
@@ -308,10 +330,10 @@ void main() {
 
     // This matches the q read's use of out_strides[0].
     output_data.values[o_batch + head * params.shape[0] +
-        row * params.out_strides[0] + d] = bf16_store(1.0 * accumulator);
+        row * params.out_strides[0] + d] = OUT_STORE(1.0 * accumulator);
 #else
     output_data.values[o_batch + head * SDPA_DIM + d] =
-        bf16_store(1.0 * accumulator);
+        OUT_STORE(1.0 * accumulator);
 #endif
   }
   return;
