@@ -54,6 +54,7 @@ pub const Driver = struct {
 
     pub fn close(self: *Driver) void {
         if (@import("copy_source.zig").keepDriver(self)) return;
+        @import("download_stage.zig").closeDriver(self);
         self.lib.close();
     }
 

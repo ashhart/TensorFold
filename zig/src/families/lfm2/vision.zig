@@ -54,7 +54,7 @@ pub const Vision = struct {
         errdefer gpa.free(position);
         const table = try gpa.alloc(u16, position.len);
         defer gpa.free(table);
-        try d.check(d.api.cuMemcpyDtoH_v2(table.ptr, w.position, 2 * table.len), "cuMemcpyDtoH");
+        try cuda.memory.download(d, w.position, std.mem.sliceAsBytes(table)[0 .. 2 * table.len]);
         for (position, table) |*p, t| p.* = @bitCast(@as(u32, t) << 16);
         if (!finite(position)) {
             std.log.err("the vision tower's position embedding holds a non-finite value, which its resize cannot carry", .{});

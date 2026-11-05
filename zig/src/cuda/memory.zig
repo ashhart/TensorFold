@@ -119,6 +119,12 @@ pub fn currentHook() ?Hook {
     return alloc_hook;
 }
 
+/// Reads an unowned device span using the same integrated-device staging as DeviceBuffer.download.
+pub fn download(d: *const Driver, src: abi.DevicePtr, out: []u8) Error!void {
+    const view: DeviceBuffer = .{ .d = d, .ptr = src, .len = out.len, .borrowed = true };
+    try view.download(0, out);
+}
+
 pub const DeviceBuffer = struct {
     d: *const Driver,
     ptr: abi.DevicePtr,

@@ -1,5 +1,6 @@
 //! Whole-vocabulary grammar draws and prompt redraws.
 const cuda = @import("cuda");
+const std = @import("std");
 const sampler = @import("cuda_sampler.zig");
 const projection = @import("cuda_proj.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
@@ -27,7 +28,7 @@ pub fn drawWhole(e: anytype, logits: u64, rows: usize, first: u64, bits: u64, ou
         var pick: [2]u32 = undefined;
         try e.stream.synchronize();
         try e.checkGathers();
-        try e.d.check(e.d.api.cuMemcpyDtoH_v2(&pick, e.pairs.ptr, 8), "cuMemcpyDtoH");
+        try cuda.memory.download(e.d, e.pairs.ptr, std.mem.asBytes(&pick)[0..8]);
         out[r] = pick[1];
     }
 }

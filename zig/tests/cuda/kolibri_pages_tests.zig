@@ -1,5 +1,6 @@
 //! Kolibri-1's full layers as pool pages against linear caches: replies and last-row logits byte-equal, pages reused.
 const std = @import("std");
+const cuda = @import("cuda");
 const core = @import("core");
 const lanes = @import("lanes");
 const kolibri1 = @import("kolibri1");
@@ -55,7 +56,7 @@ fn run(gpu: Gpu, engine: *lanes.Engine, kb: *be.Kolibri, c: Case, count: u32) !O
     errdefer gpa.free(logits);
     try kb.s.synchronize();
     const l = kb.lanes.get(&s) orelse return error.UnknownStream;
-    try kb.d.check(kb.d.api.cuMemcpyDtoH_v2(logits.ptr, l.last, logits.len), "cuMemcpyDtoH");
+    try cuda.memory.download(kb.d, l.last, std.mem.sliceAsBytes(logits)[0..logits.len]);
     while (engine.activeCount() > 0) try engine.step();
     try idle(kb);
     return .{ .ids = try gpa.dupe(u32, s.emitted()), .logits = logits, .cached = if (s.reuse_failed) 0 else s.cached };
