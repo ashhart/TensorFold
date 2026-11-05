@@ -119,6 +119,7 @@ pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const tokenizer = server_mod.import_table.get("tokenizer").?;
     const template = server_mod.import_table.get("template").?;
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    server_mod.addImport("core", core);
     const none = b.createModule(.{ .root_source_file = b.path("zig/src/native/none.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "engine_api", .module = api }} });
     const fake = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/server/fake_serve.zig"),

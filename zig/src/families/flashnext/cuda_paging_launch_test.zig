@@ -6,7 +6,7 @@ const glue = @import("cuda_glue.zig");
 const Capture = struct {
     var count: usize = 0;
     var symbols: [6]usize = @splat(0);
-    var pages: [6]glue.Pg = @splat(.{});
+    var pages: [6]glue.PgMain = @splat(.{});
     fn launch(f: cuda.abi.Function, _: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: u32, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
         const id = @intFromPtr(f);
         symbols[count] = id;
@@ -19,7 +19,7 @@ const Capture = struct {
                 12 => 15,
                 else => unreachable,
             };
-            pages[count] = @as(*const glue.Pg, @ptrCast(@alignCast(args.?[at].?))).*;
+            pages[count] = @as(*const glue.PgMain, @ptrCast(@alignCast(args.?[at].?))).*;
         }
         count += 1;
         return cuda.abi.success;
@@ -60,7 +60,7 @@ test "paged launches: prep, pool, tiled QSA, ahead, one-buffer and fused select 
         try std.testing.expectEqual(@as(usize, 6), Capture.count);
         for (Capture.symbols, Capture.pages, 0..) |id, actual, i| {
             try std.testing.expectEqual(2 * i + 1 + @intFromBool(pg.pt != 0), id);
-            try std.testing.expectEqual(pg, actual);
+            try std.testing.expectEqual(pg.main(), actual);
         }
     }
 }
