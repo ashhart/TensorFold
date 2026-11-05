@@ -55,10 +55,29 @@ uint16_t bf16_store(float value) {
 #define STORAGE_TYPE uint64_t
 #define LOAD_VALUE(x) (x)
 #define STORE_VALUE(x) (x)
+#elif defined(USE_F32_TO_BF16)
+// F32 input, bf16 output with RNE store: the V-cache write rounds f32 activations on landing.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) (x)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VALUE(f) bf16_store(f)
+#define OUT_TYPE uint16_t
 #else
 #define STORAGE_TYPE float
 #define LOAD_VALUE(x) float(x)
 #define STORE_VALUE(f) STORAGE_TYPE(f)
+#endif
+
+#ifndef OUT_TYPE
+#define OUT_TYPE STORAGE_TYPE
 #endif
 
 layout(local_size_x = 256) in;
@@ -76,7 +95,7 @@ layout(set = 0, binding = 2, std430) buffer Output {
 } output_data;
 #else
 layout(set = 0, binding = 2, std430) writeonly buffer Output {
-  STORAGE_TYPE values[];
+  OUT_TYPE values[];
 } output_data;
 #endif
 

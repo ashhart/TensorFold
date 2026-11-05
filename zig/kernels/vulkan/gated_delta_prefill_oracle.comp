@@ -16,13 +16,24 @@
 
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0, std430) readonly buffer QBuf  { uint16_t v[]; } q_buf;
-layout(set = 0, binding = 1, std430) readonly buffer KBuf  { uint16_t v[]; } k_buf;
-layout(set = 0, binding = 2, std430) readonly buffer VBuf  { uint16_t v[]; } v_buf;
+// ACT_F32: the soa (q/k/v), beta and y activations are f32; the bf16 g binding stays for the non-f32 g path.
+#ifdef ACT_F32
+#define ACT_IO float
+#define ACT_LOADV(x) (x)
+#define ACT_STOREV(x) (x)
+#else
+#define ACT_IO uint16_t
+#define ACT_LOADV(x) bf16_load(x)
+#define ACT_STOREV(x) bf16_store(x)
+#endif
+
+layout(set = 0, binding = 0, std430) readonly buffer QBuf  { ACT_IO v[]; } q_buf;
+layout(set = 0, binding = 1, std430) readonly buffer KBuf  { ACT_IO v[]; } k_buf;
+layout(set = 0, binding = 2, std430) readonly buffer VBuf  { ACT_IO v[]; } v_buf;
 layout(set = 0, binding = 3, std430) readonly buffer GBuf  { uint16_t v[]; } g_buf;
-layout(set = 0, binding = 4, std430) readonly buffer BBuf  { uint16_t v[]; } b_buf;
+layout(set = 0, binding = 4, std430) readonly buffer BBuf  { ACT_IO v[]; } b_buf;
 layout(set = 0, binding = 5, std430) readonly buffer SIn    { float    v[]; } s_in;
-layout(set = 0, binding = 6, std430) writeonly buffer YBuf { uint16_t v[]; } y_buf;
+layout(set = 0, binding = 6, std430) writeonly buffer YBuf { ACT_IO v[]; } y_buf;
 layout(set = 0, binding = 7, std430) buffer         SOut { float    v[]; } s_out;
 layout(set = 0, binding = 8, std430) readonly buffer GBufF { float     v[]; } g_buf_f;
 layout(set = 0, binding = 9, std430) buffer         Snap   { float    v[]; } snap;
@@ -65,6 +76,7 @@ uint16_t bf16_store(float value) {
   }
   return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
 }
+
 
 shared float sk[2][DK];
 shared float sq[2][DK];
@@ -184,8 +196,8 @@ void main() {
     bool tok = true;
     // Preserve the omitted contract, precision, and host-interface facts from the original comment.
     uint buf = t & 1u;
-    sk[buf][tid] = bf16_load(k_buf.v[params.rhs_offset + t_head * DK + tid]);
-    sq[buf][tid] = bf16_load(q_buf.v[params.lhs_offset + t_head * DK + tid]);
+    sk[buf][tid] = ACT_LOADV(k_buf.v[params.rhs_offset + t_head * DK + tid]);
+    sq[buf][tid] = ACT_LOADV(q_buf.v[params.lhs_offset + t_head * DK + tid]);
     if ((params.flags & 1u) != 0u) {
       sg[buf][tid] = (params.flags & 4u) != 0u
           ? g_buf_f.v[params.shape[0] + (t * hv + head) * DK + tid]
@@ -193,9 +205,9 @@ void main() {
     }
     barrier();
 
-    float beta = bf16_load(b_buf.v[params.aux_offset + t * hv + head]);
+    float beta = ACT_LOADV(b_buf.v[params.aux_offset + t * hv + head]);
     float g = (params.flags & 1u) != 0u ? 0.0f : load_g_scalar(t, head, hv);
-    float v_row = bf16_load(v_buf.v[params.aux_size + t_head * dv + row]);
+    float v_row = ACT_LOADV(v_buf.v[params.aux_size + t_head * dv + row]);
 
     float o_acc;
     token_step(st, sub, tok, beta, g, v_row, out_pass, buf, o_acc);
@@ -203,7 +215,7 @@ void main() {
     if (out_pass) {
       if (sub == 0u) {
         y_buf.v[params.output_offset + t_head * dv + row] =
-            tok ? bf16_store(o_acc) : bf16_store(0.0f);
+            tok ? ACT_STOREV(o_acc) : ACT_STOREV(0.0f);
       }
     } else if ((t + 1u) % C == 0u && t + 1u < T) {
       // Chunk boundary: snapshot the slice for pass 1's chunk t/C + 1 (slot index t/C).
