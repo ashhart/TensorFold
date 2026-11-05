@@ -250,8 +250,7 @@ each reply of concurrent requests (`--parallel 4`) equals the same request alone
 through the same code; its replies have not been checked on their own.
 
 Not supported here:
-- `--tp 2` and `--ple-on-ssd` on an NVFP4 checkpoint stop at startup: two ranks read the MLX checkpoint, and the
-  NVFP4 exports' tables stay memory-mapped.
+- `--ple-on-ssd` on an NVFP4 checkpoint stops at startup: the NVFP4 exports' tables stay memory-mapped.
 - `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` (186 GB; bf16 linears and n-gram table) has the RadixArk layout apart
   from its bf16 table, which the loader reads, but the whole checkpoint has not been loaded or served here, so it
   is not listed as tested.
@@ -382,14 +381,17 @@ Serially on the mixed-K pack, TensorFold is 1.51-1.55x ExLlamaV3. On the uniform
 TensorFold's serial path is 5-6% behind ExLlamaV3's, and on both EXL3 packs it is 5-9% behind its own MLX path.
 With drafts on the current engine (the table above), the 3.05 bpw pack decodes 1.6-2.2x ExLlamaV3's serial speed.
 
-### MLX 4-bit, one or two ranks
+### One or two ranks
 
-For two ranks, pull the checkpoint on both and start rank 1 first:
+Two ranks split a ModelOpt checkpoint, not the MLX one. Pull it on both and start rank 1 first:
 
 ```bash
-tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
-tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+tensorfold serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
 ```
+
+With drafts on, two ranks keep prompt states as one GPU does. On two GB10s, a chat with about 28,500 tokens of history
+takes 22.5 s to reply fresh and 1.7 s resumed, and every resumed reply equals the fresh one.
 
 ### Serving
 
