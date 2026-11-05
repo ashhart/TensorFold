@@ -53,6 +53,17 @@ __device__ __forceinline__ float swiglu(float g, float u, float limit) {
   return bf(gv / (1.f + expf(-gv))) * uv;
 }
 
+// Ling's order (EPI 4): min(silu(g), L) * clip(u, -L, L), by comparisons so a NaN stays NaN as in torch.clamp.
+__device__ __forceinline__ float swiglu_after(float g, float u, float limit) {
+  const float gv = bf(g);
+  float uv = bf(u), s = bf(gv / (1.f + expf(-gv)));
+  if (limit > 0.f) {
+    s = s > limit ? limit : s;
+    uv = uv > limit ? limit : (uv < -limit ? -limit : uv);
+  }
+  return s * uv;
+}
+
 // a < 0 ? 0 : a, not fmaxf, which would make a NaN sum 0.
 __device__ __forceinline__ float relu2(float a) {
   const float b = bf(a), u = b < 0.f ? 0.f : b;
@@ -80,6 +91,9 @@ __device__ __forceinline__ void epilogue(const float (&acc)[M][RT][NTW][4], int 
         } else if constexpr (EPI == 2) {
           o0 = swiglu(a0, acc[M - 1][r][j][2 * h], limit);
           o1 = swiglu(a1, acc[M - 1][r][j][2 * h + 1], limit);
+        } else if constexpr (EPI == 4) {
+          o0 = swiglu_after(a0, acc[M - 1][r][j][2 * h], limit);
+          o1 = swiglu_after(a1, acc[M - 1][r][j][2 * h + 1], limit);
         } else {
           o0 = a0;
           o1 = a1;
