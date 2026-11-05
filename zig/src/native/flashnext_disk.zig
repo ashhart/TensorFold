@@ -145,7 +145,7 @@ pub fn identity(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine) !s
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.r.device.name()));
     @import("disk_identity.zig").profile(&h, .{ .family = "qwen4_exp", .backend = "metal" });
-    return .{ .id = try @import("disk_identity.zig").scoped(gpa, io, dir, h.final()), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    return .{ .id = try @import("disk_identity.zig").scoped(gpa, io, dir, try withInputs(withPolicy(h.final(), eng.r), gpa, io, eng.r)), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
 /// --learn-conversations or --spill-gib: the store under `l.root`, attached to the cache (Imprint's cut files unread).
@@ -154,4 +154,29 @@ pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, id: anytype, l: an
     r.prefill_rate = id.rate;
     std.log.info("flash next: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, l.cap >> 20 });
     return r;
+}
+
+/// Extend a probe identity with the loaded execution policy.
+pub fn withPolicy(legacy: u64, run: anytype) u64 {
+    return @import("persistence_policy.zig").extend(legacy, "flash-metal-policy-v1", &.{
+        @intFromBool(run.fused_xsum),    @intFromBool(run.serial),           @intFromBool(run.dense),
+        @intFromBool(run.dense_target),  @intFromBool(run.split),            @intFromBool(run.gdn_step),
+        @intFromBool(run.hc_mma),        @intFromBool(run.grouped),          @intFromBool(run.xpack),
+        @intFromBool(run.xfused),        @intFromBool(run.xsx),              @intFromBool(run.copy),
+        @intFromBool(run.prefetch),      @intFromBool(run.lane_new),         @intFromBool(run.rotary_enabled),
+        run.skip,                        run.hcskip,                         run.gskip,
+        run.lane_pf,                     @intFromBool(run.gdn_pipe != null), @intFromBool(run.gdn_kept != null),
+        @intFromBool(run.gx != null),    if (run.gx) |g| g.min_rows else 0,  @intFromBool(run.tp != null),
+        if (run.tp) |tp| tp.rank else 0,
+    });
+}
+
+/// Indexed weight files include the actual pack outside the source checkpoint.
+pub fn withFiles(legacy: u64, a: Allocator, io: std.Io, files: []const c_int) !u64 {
+    return @import("persistence_policy.zig").files(legacy, a, io, files);
+}
+
+/// The loaded weight files and metadata, including a supplied reference outside the checkpoint.
+pub fn withInputs(legacy: u64, a: Allocator, io: std.Io, run: anytype) !u64 {
+    return @import("persistence_policy.zig").mapped(try withFiles(legacy, a, io, run.files.items), a, run.maps.items);
 }
