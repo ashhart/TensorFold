@@ -7,6 +7,7 @@
 
 #include "attention/prefill.hpp"
 #include "quant/dense_tiles.hpp"
+#include "tiles/wmma12_gemm_k32_ref.hpp"
 
 __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
     return __uint_as_float(static_cast<uint32_t>(x[i]) << 16);
@@ -193,4 +194,10 @@ tf_ctl_fa_paged_unmasked_bf16(const float* q, const hip_bfloat16* k, const hip_b
                               int count) {
     fa_dot2<hip_bfloat16, true, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, 0, 0,
                                                     0, 0, 0, 0, table, count);
+}
+
+// Not a control: the WMMA big block as served before #2264, the byte baseline the faster block replaces (gate 3).
+extern "C" __global__ void __launch_bounds__(256) tf_ref_wmma12_k32(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_k32_ref_tile<IdentityAct<DotBF16>, GemmOut<DotBF16>>(a);
 }
