@@ -39,6 +39,24 @@ __device__ inline void stream_x_pairs(const uint32_t (&xn)[16], typename T::pair
      ...);
 }
 
+// RDNA2's 2x8 tiles at 2, 4 and 8 bits make a column's code pairs per row group: a chunk's at once spill there.
+template <class Dec, int R, int CB>
+constexpr bool stream_pairs_per_group() {
+    return kGen == Gen::rdna2 && R == 2 && CB == 8 && Dec::kGapPairs;
+}
+
+// One column's chunk against RG rows: each code pair is made once and dotted with every row's x.
+template <class Dec, typename T, int RG, int... I>
+__device__ inline void stream_dots(const typename T::pair (&xp)[RG][16], const uint32_t (&w)[Dec::kWords], float (&d)[RG],
+                                   std::integer_sequence<int, I...>) {
+    (([&] {
+         const typename T::pair q = Dec::template stream_pair<T, I>(w);
+#pragma unroll
+         for (int r = 0; r < RG; ++r) d[r] = T::dot(xp[r][I], q, d[r]);
+     }()),
+     ...);
+}
+
 // One column's 16 code pairs of a chunk, made once for every row of the block.
 template <class Dec, typename T, int... I>
 __device__ inline void stream_codes(const uint32_t (&w)[Dec::kWords], typename T::pair (&qp)[16],
@@ -141,6 +159,50 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
             sc[c] = live ? terms.widen(sr[c]) : 0.f;
             bi[c] = live ? terms.widen(br[c]) : 0.f;
         }
+        if constexpr (stream_pairs_per_group<Dec, R, CB>()) {
+            constexpr int RG = R < 4 ? R : 4;  // rows a pass keeps in registers
+            constexpr int NG = R / RG;
+#pragma unroll
+            for (int g = 0; g < NG; ++g) {
+                if (row0 + g * RG >= a.m) break;
+                pair xp[RG][16];
+                float sx[RG];
+#pragma unroll
+                for (int r = 0; r < RG; ++r) {
+                    uint32_t xn[16];
+                    const u32x4* src =
+                        reinterpret_cast<const u32x4*>(xr[g * RG + r] + static_cast<long long>(q) * 32);
+#pragma unroll
+                    for (int v = 0; v < 4; ++v) {
+                        const u32x4 t = src[v];
+                        xn[4 * v] = t.x;
+                        xn[4 * v + 1] = t.y;
+                        xn[4 * v + 2] = t.z;
+                        xn[4 * v + 3] = t.w;
+                    }
+                    float s = 0.f;
+#pragma unroll
+                    for (int i = 0; i < 16; ++i) {
+                        s = T::dot(__builtin_bit_cast(pair, xn[i]), __builtin_bit_cast(pair, kOne), s);
+                    }
+                    sx[r] = s;
+                    stream_x_pairs<Dec, T>(xn, xp[r], std::make_integer_sequence<int, 16>{});
+                }
+#pragma unroll
+                for (int c = 0; c < CB; ++c) {
+                    float d[RG];
+#pragma unroll
+                    for (int r = 0; r < RG; ++r) d[r] = 0.f;
+                    stream_dots<Dec, T, RG>(xp, w[c], d, std::make_integer_sequence<int, 16>{});
+#pragma unroll
+                    for (int r = 0; r < RG; ++r) {
+                        acc[g * RG + r][c] = Dec::fold_scale(acc[g * RG + r][c], d[r], sc[c]);
+                        acc[g * RG + r][c] = Dec::fold_bias(acc[g * RG + r][c], sx[r], bi[c]);
+                    }
+                }
+            }
+            return;
+        }
         // every column's code pairs are made once, then each row in turn dots them in the order a row alone takes
         pair qp[CB][16];
 #pragma unroll
@@ -234,8 +296,9 @@ __device__ inline void stream_body(const typename Dec::Args& a, int lpc_log2, in
 template <class Dec, class Act, class T, class Epi, int R, int CB, class Sides>
 __device__ inline void stream_tile(typename Dec::Args& a, const Sides& sides, int lpc_log2, int gshift) {
     // a one-row grid over more than R rows interleaves (launches/stream_layout.zig grid): row blocks neighbour on x
+    // the row-group tiles run 2 rows (stream_pick.zig rowTile), one row block, so they skip the interleave's index math
     const int nby = (a.m + R - 1) / R;
-    const bool interleaved = gridDim.y == 1 && nby > 1;
+    const bool interleaved = !stream_pairs_per_group<Dec, R, CB>() && gridDim.y == 1 && nby > 1;
     int bx = interleaved ? static_cast<int>(blockIdx.x) / nby : static_cast<int>(blockIdx.x);
     const int by = interleaved ? static_cast<int>(blockIdx.x) % nby : static_cast<int>(blockIdx.y);
     if (sides.count > 0) {

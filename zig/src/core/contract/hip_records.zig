@@ -347,7 +347,7 @@ const own_records = [_]Record{
     .{
         .launch = relu2Tile(2, 8),
         .usage = .{
-            .{ .vgprs = 256, .sgprs = 70, .lds = 0, .private = 164, .bound = 128, .wave = 32 },
+            .{ .vgprs = 156, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 239, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 239, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
             .{ .vgprs = 239, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
