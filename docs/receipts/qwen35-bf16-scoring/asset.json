@@ -70,6 +70,41 @@
       "sha256": "a54bbe46eec749f21f8842491fe208cbf9aeb3af3a0a3038c641b92b37e35ae6",
       "bytes": 80585,
       "url": "https://raw.githubusercontent.com/akol1/TensorFold/164be6e57dae9124893e27d8d1ac8a1be7d03f1c/qwen35-bf16-readiness-20261104.manifest.json"
+    },
+    "qwen35-bf16-layers-native-20261105.tar.gz": {
+      "sha256": "bd27869f3413e2c93281ad7601e47bd504fd046ffcea804155828cb6d313de75",
+      "bytes": 17339176,
+      "members": 85,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-native-20261105.tar.gz",
+      "member_manifest": {
+        "file": "qwen35-bf16-layers-20261105.manifest.json",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json"
+      }
+    },
+    "qwen35-bf16-layers-reference-bf16-20261105.tar.gz": {
+      "sha256": "2ecf3e829f85002a1d1839a1642d61cc05af579a64d6444fe8b938cad70766de",
+      "bytes": 20277706,
+      "members": 66,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-reference-bf16-20261105.tar.gz",
+      "member_manifest": {
+        "file": "qwen35-bf16-layers-20261105.manifest.json",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json"
+      }
+    },
+    "qwen35-bf16-layers-reference-fp32-20261105.tar.gz": {
+      "sha256": "e039545948564c91585660761860e9d161032aa03c803f936dabb31532d58204",
+      "bytes": 39883616,
+      "members": 66,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-reference-fp32-20261105.tar.gz",
+      "member_manifest": {
+        "file": "qwen35-bf16-layers-20261105.manifest.json",
+        "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json"
+      }
+    },
+    "qwen35-bf16-layers-20261105.manifest.json": {
+      "sha256": "d4cd5795074f7e4eb3512fc2af43d21e4e54b25b25d3104d81708d62dfbfa923",
+      "bytes": 41258,
+      "url": "https://raw.githubusercontent.com/akol1/TensorFold/7f54a5445ef4defa879b2b1fa76d01a64afdb5f4/qwen35-bf16-layers-20261105.manifest.json"
     }
   },
   "publication_transforms": [

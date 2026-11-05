@@ -1,5 +1,7 @@
 # Dense BF16 Qwen3.5 prompt-score qualification
 
+The [20261105 layer diagnostic](layer-diagnostic.md) records the requested 32-ID follow-up after rebasing onto current main. The first excess is at layer 0; the stricter score failures remain. Its native/reference producers are separate from the historical serving and full-CUDA producer below. [layers.json](layers.json) and [asset.json](asset.json) bind the new evidence.
+
 This receipt records qualification of the experimental dense BF16 text format and native nonstreamed
 `/v1/completions` prompt scores for the tested single-GPU configuration.
 It records functional, numerical and regression checks separately from timing.
