@@ -396,6 +396,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "moss-contract")) return @import("contract_moss_image.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "idol-decoder-contract")) return @import("contract_idol_decoder.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "idol-contract")) return @import("contract_idol.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "uocr-contract")) return @import("contract_uocr.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "window")) return window_tests.run(gpu);
