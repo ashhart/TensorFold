@@ -3,7 +3,7 @@ const std = @import("std");
 const kernel_contract = @import("kernel_contract.zig");
 
 /// `-Dxpu-contract=true`: tf-xpu-kernel-contract, the objects it reads, and the no-GPU audit.
-pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8) void {
+pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, prebuilt: ?[]const u8) void {
     const core = kernel_contract.module(b, target, optimize);
     const exe = b.addExecutable(.{ .name = "tf-xpu-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/xpu/contract_main.zig"),
@@ -41,11 +41,11 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     audit.addArg("limits");
     audit.addDirectoryArg(files.getDirectory());
     b.step("xpu-kernel-contract-limits", "Every registered XPU launch against the BMG card and its compiled images (no GPU)").dependOn(&audit.step);
-    runner(b, target, optimize, ocloc, device);
+    runner(b, target, optimize, ocloc, device, prebuilt);
 }
 
-/// The device runner: gates 1 to 4 and gate 5 live on a card, with the images linked in.
-pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8) void {
+/// The device runner: gates 1 to 4 and gate 5 live on a card, with the images linked in; `prebuilt` is -Dxpu-images.
+pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8, prebuilt: ?[]const u8) void {
     const core = kernel_contract.module(b, target, optimize);
     const ze = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/ze.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const options = b.addOptions();
@@ -57,7 +57,6 @@ pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     xpu.addImport("core", core);
 
     const files = b.addWriteFiles();
-    const prebuilt = b.option([]const u8, "xpu-images", "A directory of zebins made on a host with ocloc: glue.bin, contract_controls.bin, contract_gate_controls.bin");
     if (prebuilt) |dir| {
         for ([_][]const u8{ "glue", "contract_controls", "contract_gate_controls" }) |name| {
             _ = files.addCopyFile(.{ .cwd_relative = b.fmt("{s}/{s}.bin", .{ dir, name }) }, b.fmt("{s}.bin", .{name}));
