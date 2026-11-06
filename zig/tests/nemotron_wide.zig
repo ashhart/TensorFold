@@ -1,4 +1,4 @@
-//! Wide-window probes for Nemotron on Metal: window cost by kernel class, and expert picks of drafted, sibling and stream rows.
+//! Wide-window Nemotron probes on Metal: window cost by kernel class, expert picks of drafted, sibling, stream rows.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
