@@ -65,7 +65,7 @@ struct RouteArgs {
   float scale;
 };
 
-// One threadgroup of 512: each row's top-k by sigmoid + bias (ties to the lower id) and weights, then this Mac's groups and pick lists.
+// 512 threads: each row's top-k by sigmoid + bias (ties to the lower id), weights, then this Mac's groups, pick lists.
 [[kernel]] void tf_route_select(const device float* LOGITS [[buffer(0)]], const device float* BIAS [[buffer(1)]],
                                 constant RouteArgs& a [[buffer(2)]], device int* PICK [[buffer(3)]],
                                 device float* WTS [[buffer(4)]], device int* LIDS [[buffer(5)]],
