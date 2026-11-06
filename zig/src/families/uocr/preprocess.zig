@@ -1,7 +1,5 @@
 //! A page to the encoder's views as the publisher's processor makes them: the 1024 letterbox, gundam's 640 tiles.
 const std = @import("std");
-const picture = @import("../../core/picture/picture.zig");
-const resample = picture.resample;
 const cfg = @import("config.zig");
 const resize = @import("resize.zig");
 
@@ -40,13 +38,6 @@ pub const Views = struct {
     }
 };
 
-/// RGB rows as Pillow's convert('RGB') gives them: alpha dropped, never composited, no EXIF transpose.
-pub fn rgbOf(a: std.mem.Allocator, s: picture.Samples) ![]u8 {
-    const out = try a.alloc(u8, s.width * s.height * 3);
-    for (0..s.width * s.height) |i| @memcpy(out[i * 3 ..][0..3], s.data[i * s.channels ..][0..3]);
-    return out;
-}
-
 /// A decoded page: RGB rows the caller frees.
 pub const Page = struct {
     rgb: []u8,
@@ -58,18 +49,6 @@ pub const Page = struct {
         p.* = undefined;
     }
 };
-
-/// A PNG, JPEG or WebP file's page, taken as the publisher's Image.open(...).convert('RGB') takes it.
-pub fn decode(io: std.Io, a: std.mem.Allocator, bytes: []const u8) picture.Error!Page {
-    const s = switch (picture.sniff(bytes)) {
-        .png => try picture.png.decodeWithLimits(a, bytes, .{}),
-        .jpeg => try picture.jpeg.decodeWithLimits(io, a, bytes, .{}),
-        .webp => try picture.webp.decodeWithLimits(io, a, bytes, .{}),
-        .unknown => return error.Invalid,
-    };
-    defer a.free(s.data);
-    return .{ .rgb = try rgbOf(a, s), .width = s.width, .height = s.height };
-}
 
 /// Python's round() of a float: halves to even.
 fn roundEven(x: f64) usize {
@@ -112,46 +91,71 @@ const candidates = [_][2]usize{
     .{ 1, 15 }, .{ 5, 3 },  .{ 15, 1 }, .{ 3, 5 }, .{ 1, 16 }, .{ 2, 8 },  .{ 16, 1 }, .{ 8, 2 },  .{ 4, 4 },
 };
 
-/// A page's views from its RGB rows; `tiles` is gundam mode (the publisher's default for a single page).
-pub fn views(a: std.mem.Allocator, rgb: []const u8, width: usize, height: usize, tiles: bool) !Views {
-    if (width == 0 or height == 0) return error.EmptyPage;
-    const src = resample.View.of(rgb, width, height);
-    const B = cfg.base_size;
-    // ImageOps.contain then pad: the long side to 1024, the short one rounded, centred on gray
-    var rw: usize = B;
-    var rh: usize = B;
-    if (width > height) rh = roundEven(@as(f64, @floatFromInt(height)) / @as(f64, @floatFromInt(width)) * B);
-    if (width < height) rw = roundEven(@as(f64, @floatFromInt(width)) / @as(f64, @floatFromInt(height)) * B);
-    const canvas = try a.alloc(u8, B * B * 3);
-    defer a.free(canvas);
-    @memset(canvas, pad_gray);
-    if (rw > 0 and rh > 0) {
-        const fitted = try resample.resize(a, .pillow, src, rw, rh);
-        defer a.free(fitted);
-        const x0 = roundEven(@as(f64, @floatFromInt(B - rw)) * 0.5);
-        const y0 = roundEven(@as(f64, @floatFromInt(B - rh)) * 0.5);
-        for (0..rh) |y| @memcpy(canvas[((y0 + y) * B + x0) * 3 ..][0 .. rw * 3], fitted[y * rw * 3 ..][0 .. rw * 3]);
-    }
-    var v: Views = .{ .global = try a.alloc(u16, 3 * B * B), .tiles = &.{}, .across = 1, .down = 1 };
-    errdefer a.free(v.global);
-    normalize(canvas, B, v.global);
-    const T = cfg.tile_size;
-    if (!tiles or (width <= T and height <= T)) return v;
-    const g = grid(width, height);
-    v.across = g[0];
-    v.down = g[1];
-    const big = try resample.resize(a, .pillow, src, T * g[0], T * g[1]);
-    defer a.free(big);
-    v.tiles = try a.alloc(u16, g[0] * g[1] * 3 * T * T);
-    const crop = try a.alloc(u8, T * T * 3);
-    defer a.free(crop);
-    for (0..g[0] * g[1]) |t| {
-        const x0 = (t % g[0]) * T;
-        const y0 = (t / g[0]) * T;
-        for (0..T) |y| @memcpy(crop[y * T * 3 ..][0 .. T * 3], big[((y0 + y) * T * g[0] + x0) * 3 ..][0 .. T * 3]);
-        normalize(crop, T, v.tiles[t * 3 * T * T ..][0 .. 3 * T * T]);
-    }
-    return v;
+/// The steps that read a page through a picture decoder: core/picture on Metal, the core module's on CUDA.
+pub fn With(comptime picture: type) type {
+    const resample = picture.resample;
+    return struct {
+        /// RGB rows as Pillow's convert('RGB') gives them: alpha dropped, never composited, no EXIF transpose.
+        pub fn rgbOf(a: std.mem.Allocator, s: picture.Samples) ![]u8 {
+            const out = try a.alloc(u8, s.width * s.height * 3);
+            for (0..s.width * s.height) |i| @memcpy(out[i * 3 ..][0..3], s.data[i * s.channels ..][0..3]);
+            return out;
+        }
+
+        /// A PNG, JPEG or WebP file's page, taken as the publisher's Image.open(...).convert('RGB') takes it.
+        pub fn decode(io: std.Io, a: std.mem.Allocator, bytes: []const u8) picture.Error!Page {
+            const s = switch (picture.sniff(bytes)) {
+                .png => try picture.png.decodeWithLimits(a, bytes, .{}),
+                .jpeg => try picture.jpeg.decodeWithLimits(io, a, bytes, .{}),
+                .webp => try picture.webp.decodeWithLimits(io, a, bytes, .{}),
+                .unknown => return error.Invalid,
+            };
+            defer a.free(s.data);
+            return .{ .rgb = try rgbOf(a, s), .width = s.width, .height = s.height };
+        }
+
+        /// A page's views from its RGB rows; `tiles` is gundam mode (the publisher's default for a single page).
+        pub fn views(a: std.mem.Allocator, rgb: []const u8, width: usize, height: usize, tiles: bool) !Views {
+            if (width == 0 or height == 0) return error.EmptyPage;
+            const src = resample.View.of(rgb, width, height);
+            const B = cfg.base_size;
+            // ImageOps.contain then pad: the long side to 1024, the short one rounded, centred on gray
+            var rw: usize = B;
+            var rh: usize = B;
+            if (width > height) rh = roundEven(@as(f64, @floatFromInt(height)) / @as(f64, @floatFromInt(width)) * B);
+            if (width < height) rw = roundEven(@as(f64, @floatFromInt(width)) / @as(f64, @floatFromInt(height)) * B);
+            const canvas = try a.alloc(u8, B * B * 3);
+            defer a.free(canvas);
+            @memset(canvas, pad_gray);
+            if (rw > 0 and rh > 0) {
+                const fitted = try resample.resize(a, .pillow, src, rw, rh);
+                defer a.free(fitted);
+                const x0 = roundEven(@as(f64, @floatFromInt(B - rw)) * 0.5);
+                const y0 = roundEven(@as(f64, @floatFromInt(B - rh)) * 0.5);
+                for (0..rh) |y| @memcpy(canvas[((y0 + y) * B + x0) * 3 ..][0 .. rw * 3], fitted[y * rw * 3 ..][0 .. rw * 3]);
+            }
+            var v: Views = .{ .global = try a.alloc(u16, 3 * B * B), .tiles = &.{}, .across = 1, .down = 1 };
+            errdefer a.free(v.global);
+            normalize(canvas, B, v.global);
+            const T = cfg.tile_size;
+            if (!tiles or (width <= T and height <= T)) return v;
+            const g = grid(width, height);
+            v.across = g[0];
+            v.down = g[1];
+            const big = try resample.resize(a, .pillow, src, T * g[0], T * g[1]);
+            defer a.free(big);
+            v.tiles = try a.alloc(u16, g[0] * g[1] * 3 * T * T);
+            const crop = try a.alloc(u8, T * T * 3);
+            defer a.free(crop);
+            for (0..g[0] * g[1]) |t| {
+                const x0 = (t % g[0]) * T;
+                const y0 = (t / g[0]) * T;
+                for (0..T) |y| @memcpy(crop[y * T * 3 ..][0 .. T * 3], big[((y0 + y) * T * g[0] + x0) * 3 ..][0 .. T * 3]);
+                normalize(crop, T, v.tiles[t * 3 * T * T ..][0 .. 3 * T * T]);
+            }
+            return v;
+        }
+    };
 }
 
 test "uocr: Python's rounding, the tile grids the publisher's code picks, and the page's token counts" {
