@@ -20,13 +20,32 @@ const Call = struct {
     add: bool = false,
 };
 
-/// The 3 x 3 launches at 416 x 224: conv_in 32 to 384, the mid block's 384 + residual, the upsampler, conv_out to 3.
-const calls = [_]Call{
-    .{ .rows = 52, .cols = 28, .cin = 32, .cout = 384 },
-    .{ .rows = 52, .cols = 28, .cin = 384, .cout = 384, .add = true },
-    .{ .rows = 104, .cols = 56, .cin = 384, .cout = 384, .up = true },
-    .{ .rows = 416, .cols = 224, .cin = 96, .cout = 3 },
-};
+/// One decode's 3 x 3 launches at a picture of `rows` x `cols` (the latent grid's 8 x, its 2 x 2 patch unpacked),
+/// in the order `run` makes them: conv_in, the mid block's and up_blocks.0's 384s, then each level's upsampler and
+/// the blocks above it while the widths fall 384, 384, 192, 96.
+fn picture(rows: usize, cols: usize) [15]Call {
+    return .{
+        .{ .rows = rows, .cols = cols, .cin = 32, .cout = 384 },
+        .{ .rows = rows, .cols = cols, .cin = 384, .cout = 384 },
+        .{ .rows = rows, .cols = cols, .cin = 384, .cout = 384, .add = true },
+        .{ .rows = 2 * rows, .cols = 2 * cols, .cin = 384, .cout = 384, .up = true },
+        .{ .rows = 2 * rows, .cols = 2 * cols, .cin = 384, .cout = 384 },
+        .{ .rows = 2 * rows, .cols = 2 * cols, .cin = 384, .cout = 384, .add = true },
+        .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 384, .cout = 384, .up = true },
+        .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 384, .cout = 192 },
+        .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 192, .cout = 192 },
+        .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 192, .cout = 192, .add = true },
+        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 192, .cout = 192, .up = true },
+        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 192, .cout = 96 },
+        // conv_out's three outputs before the block's own 96: gate 3 runs one call a shape, and this one is served
+        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 96, .cout = 3 },
+        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 96, .cout = 96 },
+        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 96, .cout = 96, .add = true },
+    };
+}
+
+/// The decoder's launches at its three served pictures: 416 x 224, 512 x 640 and 1024 x 1024.
+const calls = picture(52, 28) ++ picture(64, 80) ++ picture(128, 128);
 
 fn servedShapes() [calls.len]c.Shape {
     var out: [calls.len]c.Shape = undefined;
@@ -175,17 +194,26 @@ pub const Conv = struct {
         const cols = t.shape.n;
         const cin = t.shape.k;
         const cout = t.call.cout;
-        for (0..t.shape.rows) |oy| for (0..cols) |ox| for (0..cout) |col| {
-            var sum: f64 = 0;
-            var terms: f64 = 0;
-            for (0..9) |tap| for (0..cin) |ch| {
-                const p = t.product(oy, ox, tap, ch, col);
-                sum += p;
-                terms += @abs(p);
-            };
-            const o = (oy * cols + ox) * cout + col;
-            want[o] = sum + t.v[col] + (if (t.call.add) t.v[cout + o] else 0);
-            mag[o] = terms;
+        // a pixel's nine taps once, then a sweep over the outputs: each output still sums its terms in tap, then
+        // channel order, so the value and its bound are the ones a per-output loop makes, at the served sizes' cost
+        for (0..t.shape.rows) |oy| for (0..cols) |ox| {
+            const o = (oy * cols + ox) * cout;
+            const sum = want[o..][0..cout];
+            const terms = mag[o..][0..cout];
+            @memset(sum, 0);
+            @memset(terms, 0);
+            for (0..9) |tap| {
+                const from = t.source(oy, ox, tap);
+                for (0..cin) |ch| {
+                    const x: f64 = if (from) |f| t.x[f + ch] else 0;
+                    for (sum, terms, t.u[(tap * cin + ch) * cout ..][0..cout]) |*s, *m, w| {
+                        const p = x * @as(f64, w);
+                        s.* += p;
+                        m.* += @abs(p);
+                    }
+                }
+            }
+            for (sum, 0..) |s, col| sum[col] = s + t.v[col] + (if (t.call.add) t.v[cout + o + col] else 0);
         };
     }
 
