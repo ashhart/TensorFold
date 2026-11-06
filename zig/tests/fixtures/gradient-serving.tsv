@@ -55,7 +55,7 @@ zig/kernels/cuda/common/qmm_frag.cuh	418dce9d64df0b8751c8ca982ae3f93c5fc54e4aecb
 zig/kernels/cuda/common/router_tiles.cuh	aab559bf104e3f47344deaa9ae10622b6962b8a77b398f572ba974055dfafd3c	raw
 zig/kernels/cuda/common/router_mma.cuh	3aca244a38f2e4b4f28bf74f333f384b1060b764c25b004cef4e6c636e7cc1dd	raw
 zig/kernels/cuda/qmm_group.cu	8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0	raw
-zig/kernels/cuda/qmm_prefill.cu	45ab2be277c7c17e6cdc6041db45611f2554c6e88f09a295e88751b1c51be1f5	raw
+zig/kernels/cuda/qmm_prefill.cu	77a5a7ec5addcaaaeef247a491049aacd5d6c849dfa85139ae9e78765de45a33	raw
 zig/kernels/cuda/qmmf.cu	af2e073a5b04317aff95bcef888750ccd9648093ed6d9efd802fabf1d47f36dd	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged)
 zig/kernels/cuda/qwen_vision.cu	eeab10300aae424fd957856e4ddba77a3543e9a86bc61701dd09687d7e3b5ea5	raw
 zig/kernels/cuda/rank_sum.cu	3781c3a4441cfef903c1d0712240ad4d7ab4aaf2d3fb18b323597bcec3587909	raw
