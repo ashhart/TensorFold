@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP: a skewed-row matrix tile on gfx1151, with the same results (#2087). Thanks to @AbrahamCete.
+
 - Internal: 14 more lean findings fixed in the core library's comments, with no change in behaviour (#2323).
 
 - Pipeline stages across machines: the stage protocol (boot description, round plan, rows layout and keep-alive) with golden bytes for every message, so a CUDA and a Metal stage can be built against the same bytes; nothing serves through it yet (#2060, part of #2005). Thanks to @jschmied.
