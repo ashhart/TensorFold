@@ -185,13 +185,12 @@ kernel void dsv41_dense_col(const device ushort* x [[buffer(0)]],
 
 struct GateTree { uint rows, k, n, x_stride, bf16_w; };
 static_assert(sizeof(GateTree) == 20, "GateTree must mirror mhc.zig's GateTree");
-// A bit-exact tiled twin of dsv41_dense_col. The shipped kernel spends one 512-thread threadgroup on one output
-// cell and rereads the activation row once a column (14 GB of x a layer at prompt rows). This kernel computes a
-// 4x4 cell tile per 128-thread threadgroup, stages a 512-k chunk of four activation rows and four weight rows in
-// threadgroup memory, and reproduces the shipped sum exactly: each lane owns the sixteen partials
-// t = lane + 32*i, so the four threadgroup tree levels over 512 become register adds (V[i] += V[i+8], then
-// V[i+4], V[i+2], V[i+1]), after which every lane holds the shipped sums[t] for t = lane, and the last five
-// levels are the shipped simd_shuffle_down over lanes 16, 8, 4, 2, 1. No barrier is in the reduction.
+// A bit-exact tiled twin of dsv41_dense_col. This kernel computes a 4x4 cell tile per 128-thread threadgroup,
+// stages a 512-k chunk of four activation rows and four weight rows in threadgroup memory, and reproduces the
+// shipped sum exactly: each lane owns the sixteen partials t = lane + 32*i, so the four threadgroup tree levels
+// over 512 become register adds (V[i] += V[i+8], then V[i+4], V[i+2], V[i+1]), after which every lane holds the
+// shipped sums[t] for t = lane, and the last five levels are the shipped simd_shuffle_down over lanes 16, 8, 4, 2,
+// 1. No barrier is in the reduction.
 kernel void dsv41_gate_tree(const device ushort* x [[buffer(0)]],
                             const device ushort* w [[buffer(1)]],
                             device float* y [[buffer(2)]],
@@ -258,16 +257,11 @@ inline ushort tf_h4(const uint4& v, uint j) {
   const uint w = (j >> 1) == 0u ? v.x : (j >> 1) == 1u ? v.y : (j >> 1) == 2u ? v.z : v.w;
   return ushort((j & 1u) ? (w >> 16) : (w & 0xffffu));
 }
-// ROUND-349: the same bit-exact gate on a wider threadgroup with the x and w tiles staged in threadgroup
-// memory. The shipped gate is a warp a 2x2 cell tile, so the whole x (37 MB) is re-read by each of the 192
-// column pairs and the whole w (3.93 MB) by each of the 1,810 row pairs: 14.2 GB a layer, 2.46 TB/s of L2 --
-// the box's L2 rate, while the arithmetic is 1.23 TMAC/s and the ALU floor is 0.55 ms. A threadgroup that covers
-// eight rows and four columns, with the tiles staged once, cuts that traffic 2.7x.
-//
-// The order is untouched: a lane still owns the sixteen consecutive partials t = 16*lane + i of every 512-k
-// chunk, still accumulates the chunks in order, and the tree is the same (simd_shuffle_xor 16/8/4/2 over the
-// sixteen registers, then shuffle_xor 1, then the register adds V[i] += V[i+8], V[i+4], V[i+2], V[i+1]). So the
-// gate's logits are bit-identical and the router's picks cannot move.
+// The same bit-exact gate on a wider threadgroup with the x and w tiles staged in threadgroup memory.
+// The order is untouched: a lane still owns the sixteen consecutive partials t = 16*lane + i of every 512-k chunk,
+// still accumulates the chunks in order, and the tree is the same (simd_shuffle_xor 16/8/4/2 over the sixteen
+// registers, then shuffle_xor 1, then the register adds V[i] += V[i+8], V[i+4], V[i+2], V[i+1]). So the gate's
+// logits are bit-identical and the router's picks cannot move.
 #define TF_GATE_R 8u
 #define TF_GATE_C 4u
 #define TF_GATE_BK 512u

@@ -16,7 +16,7 @@ pub fn load(device: mtl.Device) !mtl.Pipeline {
     return mtl.Pipeline.init(device, lib, "tf_cand", false);
 }
 
-/// ROUND-527: the kernel's `TfCandArgs` record, field for field (a positional payload until this round).
+/// The kernel's `TfCandArgs` record, field for field (a positional payload until this round).
 pub const Args = extern struct { keys: u32, blocks: u32, topk: u32 };
 
 /// Candidate blocks of scores [rows][keys] (vis[row] keys count): mask bytes, 1 = candidate; keyed u32 scratch.

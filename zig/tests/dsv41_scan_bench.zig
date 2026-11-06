@@ -1,12 +1,7 @@
-//! The prompt scan at its real shape, kernel by kernel — the instrument ROUND-275 named.
-//!
-//! Dispatches exactly what `csa2.Pipelines.encode` dispatches for a prompt chunk (the dense-key pass and the
-//! tensor-unit sparse attention `dsv41_sparse_nax`, plus the split merge), with the real buffer geometry and
-//! no engine around them, so the scan's cost stops being an inference from the 4.57 s prompt.
-//!
-//! Variants price the three suspects ROUND-275 listed: the packed-key decode (dense_kv alone, and the scan
-//! against an already-dense table), the exp/online-softmax and MMA work (the scan alone, swept by key count),
-//! and occupancy/latency (the split count, which is the same knob the decode layer's scan uses).
+// ! The prompt scan at its real shape, kernel by kernel — the instrument named. ! ! Variants price the three
+// suspects listed: the packed-key decode (dense_kv alone, and the scan ! against an already-dense table), the
+// exp/online-softmax and MMA work (the scan alone, swept by key count), ! and occupancy/latency (the split count,
+// which is the same knob the decode layer's scan uses).
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -227,7 +222,6 @@ pub fn main() !void {
     const scan = try mtl.Pipeline.init(device, lib, "dsv41_sparse_nax", false);
     const merge = try mtl.Pipeline.init(device, lib, "dsv41_sparse_merge", false);
 
-    // The prompt, and the pool layer's geometry: 3,619 tokens, ratio 2, 512 picks, window 128.
     const rows: u32 = 3619;
     const heads: u32 = 64;
     const width: u32 = 512;
@@ -324,7 +318,6 @@ pub fn main() !void {
         std.debug.print("  {s:<20} {d:>10.3} {d:>12.2} {d:>12.3}\n", .{ @tagName(v), got[i], got[i] * 1e3 / @as(f64, @floatFromInt(rows)), got[i] * 1e6 / (@as(f64, @floatFromInt(rows)) * keys) });
     }
 
-    // The 40 layers' weighted total, from the measured variants (2 SWA + 18 pool + 20 compressed).
     const pair_pool_ms = got[2];
     const pair_full_ms = got[8];
     const pair_swa_ms = got[9];

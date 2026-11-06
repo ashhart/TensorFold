@@ -19,21 +19,18 @@ pub const Pipelines = struct {
     /// MLX's bf16 tensor-unit GEMM for the router gate (TF_DSV41_ROUTE_GEMM): bf16 logits, N = 384.
     gate: ?mtl.Pipeline = null,
     /// The same gate GEMM with an fp32 destination: the router's own precision, so the picks and weights are the
-    /// shipped path's (the bf16 round changes routing; ROUND-314 measured the band at 41 % with it).
+    /// shipped path's.
     gate_f32: ?mtl.Pipeline = null,
-    /// The f16 twin of the same block: the released packs' router gate is f16, and rounding its weights to bf16 is
-    /// what moved the band (58 %). fp32 destination, same as gate_f32.
     gate_f16_f32: ?mtl.Pipeline = null,
     /// F16 -> BF16 for a pack whose gate is F16 (the GEMM's operands share one element type).
     cast_bf16: ?mtl.Pipeline = null,
     /// BF16 -> F16 for the f16 gate GEMM: the pack's gate keeps its 10 mantissa bits and the activation moves.
     cast_f16: ?mtl.Pipeline = null,
-    /// ROUND-482: the same dense arithmetic with one column a SIMDgroup (bit-identical), for a narrow n.
+    /// The same dense arithmetic with one column a SIMDgroup (bit-identical), for a narrow n.
     dense_col: ?mtl.Pipeline = null,
-    /// ROUND-546: the dtype-specialized twins of dense_col (same operations and order, loads hoisted).
+    /// The dtype-specialized twins of dense_col (same operations and order, loads hoisted).
     dense_col_bf16: ?mtl.Pipeline = null,
     dense_col_f16: ?mtl.Pipeline = null,
-    /// Measurement read-backs into a shared staging buffer.
     dump_f32: ?mtl.Pipeline = null,
     dump_bf16: ?mtl.Pipeline = null,
 
@@ -150,7 +147,6 @@ pub fn encodeF16ToBf16(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, y: V
     e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// Measurement: copy `n` elements of a buffer into a shared staging view the host can read.
 pub fn encodeDump(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, y: View, n: u32, bf16_src: bool) void {
     const pipe = if (bf16_src) p.dump_bf16 else p.dump_f32;
     const q = pipe orelse return;
@@ -224,7 +220,7 @@ pub const Dense = struct {
     y_dtype: Dtype = .bf16,
 };
 
-/// ROUND-527: the kernel's `Dense` record, field for field (it was a positional payload until this round).
+/// The kernel's `Dense` record, field for field (it was a positional payload until this round).
 pub const DenseArgs = extern struct { rows: u32, k: u32, n: u32, groups: u32, x_stride: u32, w_stride: u32, y_stride: u32, x_dtype: u32, w_dtype: u32, y_dtype: u32 };
 
 /// x[rows,groups,k], w[groups,n,k], y[rows,groups,n]; packed groups, padded token pitches, FP32 sums, final BF16.
@@ -234,9 +230,8 @@ pub fn encodeDense(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View,
     e.setValue(DenseArgs{ .rows = d.rows, .k = d.k, .n = d.n, .groups = d.groups, .x_stride = d.x_stride, .w_stride = d.w_stride, .y_stride = d.y_stride, .x_dtype = @backingInt(d.x_dtype), .w_dtype = @backingInt(d.w_dtype), .y_dtype = @backingInt(d.y_dtype) }, 3);
     e.dispatchGroups(mtl.Size.of((d.n + 15) / 16, d.rows, d.groups), mtl.Size.of(128, 1, 1));
 }
-/// ROUND-482: the same arithmetic and the same per-column sums, one column a SIMDgroup (bit-identical).
-/// ROUND-546: x=bf16, y=bf16 and k % 128 == 0 take the specialized twin (same sums, loads hoisted);
-/// every other shape takes the shipped kernel.
+/// The same arithmetic and the same per-column sums, one column a SIMDgroup (bit-identical). X=bf16, y=bf16 and k %
+/// 128 == 0 take the specialized twin (same sums, loads hoisted); every other shape takes the shipped kernel.
 pub fn encodeDenseCol(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: Dense) bool {
     if (!denseColSpecOff() and d.x_dtype == .bf16 and d.y_dtype == .bf16 and d.k % 128 == 0) {
         const spec = if (d.w_dtype == .bf16) p.dense_col_bf16 else if (d.w_dtype == .f16) p.dense_col_f16 else null;
@@ -289,7 +284,7 @@ pub const Activation = struct {
     input_f32: bool = false,
 };
 
-/// ROUND-527: the kernel's `Activation` record, field for field (`weighted`/`input_f32` as the kernel's uints).
+/// The kernel's `Activation` record, field for field (`weighted`/`input_f32` as the kernel's uints).
 pub const ActivationArgs = extern struct { rows: u32, width: u32, input_stride: u32, output_stride: u32, weighted: u32, input_f32: u32 };
 
 /// Separate gate/up; apply FP32 weights before BF16 cast/down. Unweighted calls borrow but never read weights.
@@ -301,7 +296,7 @@ pub fn encodeSwiGLU(e: mtl.ComputeEncoder, p: *const Pipelines, gate: View, up: 
 }
 pub const Copy = struct { rows: u32, width: u32, x_stride: u32, y_stride: u32 };
 
-/// ROUND-527: the kernel's `Copy` record, field for field.
+/// The kernel's `Copy` record, field for field.
 pub const CopyArgs = extern struct { rows: u32, width: u32, x_stride: u32, y_stride: u32 };
 
 /// BF16 rows copied verbatim: what the drafter's tap does to a layer's hidden state before the forward reuses it.
@@ -323,7 +318,7 @@ pub const Combine = struct {
     id_stride: u32 = 6,
 };
 
-/// ROUND-527: the kernel's `Combine` record, field for field (`input_f32` as the kernel's uint).
+/// The kernel's `Combine` record, field for field (`input_f32` as the kernel's uint).
 pub const CombineArgs = extern struct { rows: u32, width: u32, routed_row_stride: u32, slot_stride: u32, shared_stride: u32, y_stride: u32, input_f32: u32, id_stride: u32 };
 
 /// Sum six weighted down slots by ascending expert ID in FP32, then shared; final BF16, invalid IDs yield NaN.

@@ -79,8 +79,8 @@ pub const State = struct {
         self.history[1] = self.history[0];
         self.history[0] = id;
     }
-    /// ROUND-377: the Engram's own gate at the chain's precision T. The FP32 contract is unchanged; the FP64
-    /// chain keeps the two 5120-dot statistics and the gate in FP64.
+    /// The Engram's own gate at the chain's precision T. The FP32 contract is unchanged; the FP64 chain keeps the
+    /// two 5120-dot statistics and the gate in FP64.
     pub fn apply(self: *State, comptime T: type, e: Engram, layer: usize, id: u32, h: []u16, c: Config, scratch: *projection.Scratch, rows: ?RowSource) !void {
         @setFloatMode(.strict);
         const tokens = [4]u32{ id, self.history[0], self.history[1], self.history[2] };

@@ -6,10 +6,10 @@ const exl3 = @import("exl3_projection.zig");
 pub const Field = enum { counts, offsets, ranks, expert_ids, token_ids, slot_ids, destination };
 const field_count = std.enums.values(Field).len;
 
-/// The grouped plan's tile rows and the routed GEMM's tile rows are ONE number: the plan pads each expert's
-/// block to a multiple of it and the GEMM's tile must match it, or a tile would straddle two experts' weights.
-/// ROUND-348: 128 rows (TF_DSV41_MOE_TILE_ROWS=128) halves the number of tiles -- and so the number of weight
-/// decodes -- for the experts with more than sixty-four rows.
+/// The grouped plan's tile rows and the routed GEMM's tile rows are ONE number: the plan pads each expert's block
+/// to a multiple of it and the GEMM's tile must match it, or a tile would straddle two experts' weights. 128 rows
+/// (TF_DSV41_MOE_TILE_ROWS=128) halves the number of tiles -- and so the number of weight decodes -- for the
+/// experts with more than sixty-four rows.
 pub var tile_rows_cache: ?u32 = null;
 pub fn tileRows() u32 {
     if (tile_rows_cache) |v| return v;
@@ -112,9 +112,9 @@ test "expert grouping bounds padding without context-sized allocation" {
     const full = try Plan.init(1536, 384, 64);
     try std.testing.expectEqual(@as(u32, 25728), full.padded);
     try std.testing.expect(full.bytes < 512 * 1024);
-    // The parameterised grouping tile (8da7b80eb, the priced-out 128-row bench instrument) computes
-    // tile > 64 padding as its own plan: active rows group to the tile, the remainder adds one tile -
-    // 384 active + 9 tiles of 128 = 50,304. The shipped 64-row tile keeps the ROUND-348 bounds above.
+    // The parameterised grouping tile (8da7b80eb, the priced-out 128-row bench instrument) computes tile > 64
+    // padding as its own plan: active rows group to the tile, the remainder adds one tile - 384 active + 9 tiles of
+    // 128 = 50,304. The shipped 64-row tile keeps the bounds above.
     const tall = try Plan.init(1536, 384, 128);
     try std.testing.expectEqual(@as(u32, 50304), tall.padded);
     try std.testing.expectError(error.InvalidExpertGrouping, Plan.init(0, 384, 64));

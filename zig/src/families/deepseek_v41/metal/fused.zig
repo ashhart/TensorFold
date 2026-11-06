@@ -173,9 +173,9 @@ pub fn normq(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref,
 /// The kernel's `TfFKvArgs` and `TfFSwiArgs`.
 pub const KvArgs = extern struct { dim: u32, rows: u32, reps: u32, eps: f32 };
 pub const SwiArgs = extern struct { n: u32, limit: f32 };
-/// ROUND-527: the kernel's `TfFPostArgs` record, field for field.
+/// The kernel's `TfFPostArgs` record, field for field.
 pub const PostArgs = extern struct { dim: u32, rows: u32 };
-/// ROUND-527: the kernel's `TfFQuantArgs` record, field for field (glue.Strides' fields in the kernel's order).
+/// The kernel's `TfFQuantArgs` record, field for field (glue.Strides' fields in the kernel's order).
 pub const QuantArgs = extern struct { k: u32, nb: u32, na: u32, sa: u32, sb: u32, ta: u32, tb: u32 };
 
 pub const Kv = struct { kv: Ref, w: Ref, kvn: Ref, kvr: Ref, kvq: Ref, ring: Ref, pos: Ref, table: Ref, dest: Ref, reps: u32 };

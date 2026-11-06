@@ -46,7 +46,7 @@ fn bind(e: mtl.ComputeEncoder, refs: []const Ref) void {
 
 /// The routed experts' outputs [pair position][dim] (bf16), where, picks and weights; their fp32 sum goes to `sum`.
 pub const Routed = struct { out: Ref, where: Ref, weights: Ref, ids: Ref, sum: Ref, topk: u32, per_group: u32 };
-/// ROUND-527: the kernel's `TfOPostArgs` record, field for field.
+/// The kernel's `TfOPostArgs` record, field for field.
 pub const PostArgs = extern struct { dim: u32, rows: u32, topk: u32, per_group: u32, groups: u32 };
 
 /// Kimi's combine of `r` plus the shared expert sh into b (bf16), then hc_post of b and res by post and comb into y.

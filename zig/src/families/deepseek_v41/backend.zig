@@ -9,10 +9,7 @@ const greedy = @import("greedy.zig");
 
 const RING = 1024;
 
-/// ROUND-457: the verify's greedy sample.  The scalar loop costs ~0.34 ms a row on this box (129,280
-/// logits at ~10 cycles an element with the per-element finite check); `greedy.argmax` is the tree's
-/// 16-lane vector form and picks the same column on every finite row (the first column on ties, the
-/// same rule, per its own test).  TF_DSV41_FAST_ARGMAX=0 is the scalar control; unset is the fast form.
+/// The verify's greedy sample. TF_DSV41_FAST_ARGMAX=0 is the scalar control; unset is the fast form.
 var fast_argmax_cache: ?bool = null;
 fn fastArgmax() bool {
     if (fast_argmax_cache) |v| return v;
@@ -49,7 +46,7 @@ fn lookupTokens(p: []const u32, h: []const u32, out: []u32) usize {
     return 0;
 }
 
-/// ROUND-385: the hand-off's cap (the drafts a round); the default is the shipped three.
+/// The hand-off's cap (the drafts a round); the default is the shipped three.
 fn mtpDepthMax() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_DEPTH_MAX") orelse return 3;
     const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 3;
@@ -64,9 +61,6 @@ fn lookupDepth() u32 {
     if (std.c.getenv("TF_DSV41_LOOKUP_DRAFTS")) |v| {
         std.log.info("deepseek-v41: lookupDepth reads TF_DSV41_LOOKUP_DRAFTS={s}", .{std.mem.span(v)});
         out = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
-        // The exact window is eight rows (the split dispatch's row invariant), so seven is the deepest
-        // draft a round can verify: a deeper knob makes the depth rule build windows it cannot verify and
-        // segfaults the lanes table at long runs (round 270's receipt), so it is capped where the truth is.
         if (out > 7) out = 7;
     }
     lookup_depth = out;
@@ -74,10 +68,10 @@ fn lookupDepth() u32 {
 }
 
 var no_refeed: ?bool = null;
-/// TF_DSV41_NO_REFEED=0 restores the re-feed; the no-re-feed port is the default (ROUND-367). A rejected
-/// window's kept rows are the rows the verify already wrote, so the rollback restores the cache from the
-/// pool's capture instead of running the model a second time -- and the re-feed's own divergence from
-/// the verify (round 252: one reject in 22) goes with it.
+/// TF_DSV41_NO_REFEED=0 restores the re-feed; the no-re-feed port is the default. A rejected window's kept rows are
+/// the rows the verify already wrote, so the rollback restores the cache from the pool's capture instead of running
+/// the model a second time -- and the re-feed's own divergence from the verify (round 252: one reject in 22) goes
+/// with it.
 fn noRefeedOn() bool {
     if (no_refeed) |v| return v;
     const raw = std.c.getenv("TF_DSV41_NO_REFEED") orelse {
@@ -89,8 +83,8 @@ fn noRefeedOn() bool {
 }
 
 var draft_rows_follow: ?bool = null;
-/// ROUND-458: TF_DSV41_MTP_DRAFT_ROWS=0 restores the old form (the drafter always proposes three, four rows);
-/// the default sizes the proposer's own forward to the window the round will verify.
+/// TF_DSV41_MTP_DRAFT_ROWS=0 restores the old form (the drafter always proposes three, four rows); the default
+/// sizes the proposer's own forward to the window the round will verify.
 fn draftRowsFollowWindow() bool {
     if (draft_rows_follow) |v| return v;
     const raw = std.c.getenv("TF_DSV41_MTP_DRAFT_ROWS") orelse {
@@ -102,8 +96,8 @@ fn draftRowsFollowWindow() bool {
 }
 
 var round_signal: ?u8 = null; // 0 = first-draft (shipped), 1 = round, 2 = hybrid
-/// ROUND-459: TF_DSV41_MTP_ADAPT_SIGNAL=round feeds the policy the round's own per-draft acceptance
-/// (accepted / offered) instead of the first draft's hit.  Default off (the shipped first-draft signal).
+/// TF_DSV41_MTP_ADAPT_SIGNAL=round feeds the policy the round's own per-draft acceptance (accepted / offered)
+/// instead of the first draft's hit. Default off (the shipped first-draft signal).
 fn roundSignalMode() u8 {
     if (round_signal) |v| return v;
     const raw = std.c.getenv("TF_DSV41_MTP_ADAPT_SIGNAL") orelse {
@@ -124,11 +118,11 @@ fn roundSignalOn() bool {
 }
 
 var mtp_confirm: ?u32 = null;
-/// ROUND-459 (an arm first): TF_DSV41_MTP_ADAPT_CONFIRM=k requires the up-condition for k consecutive rounds
-/// before the deep window is taken.  R-386 named a confirmed switch-up as the policy's next item and it was
-/// never built: the signal is an EMA of a Bernoulli(0.62) on novel text, so a single spike above UP fires the
-/// deep window, and on the novel band those rounds accepted not one extra draft (179 accepted at depth 1 and at
-/// the policy's mix alike).  The default 1 is the shipped one-sample form.
+/// TF_DSV41_MTP_ADAPT_CONFIRM=k requires the up-condition for k consecutive rounds before the deep window is taken.
+/// Named a confirmed switch-up as the policy's next item and it was never built: the signal is an EMA of a
+/// Bernoulli(0.62) on novel text, so a single spike above UP fires the deep window, and on the novel band those
+/// rounds accepted not one extra draft (179 accepted at depth 1 and at the policy's mix alike). The default 1 is
+/// the shipped one-sample form.
 fn mtpConfirmRounds() u32 {
     if (mtp_confirm) |v| return v;
     const raw = std.c.getenv("TF_DSV41_MTP_ADAPT_CONFIRM") orelse {
@@ -140,17 +134,12 @@ fn mtpConfirmRounds() u32 {
     return mtp_confirm.?;
 }
 
-/// ROUND-494: THE DEPTH POLICY'S OWN RATCHET -- the deep window is kept while its measured per-draft
-/// acceptance stays above the crossover, and a request whose deep rounds fall below it twice in a row
-/// runs the shallow window for the rest of its life.  The shipped band's first-draft signal is
-/// depth-blind (at depth 3 the first draft usually lands even when drafts 2-3 do not), so on a long
-/// novel turn it re-enters the deep window round after round and pays 0.49 acceptance for it.  The
-/// round signal the policy already computes (`ratio`, kept/offered one round lagged) is the depth-aware
-/// one ROUND-459 named; this is the form that uses it as a one-way ratchet rather than as an EMA.
-/// The default is 0.90, the measured crossover: a deep round pays only when two of its three drafts
-/// land, i.e. kept/offered >= 0.897 at this tree's 61.6 ms deep / 39.7 ms shallow rounds.  `=0` restores
-/// the shipped band.  It is a POLICY (which window to verify), not a numerics change -- every depth is
-/// token-identical to the plain path (ROUND-494: 256 tokens at 21,966 read 5e071b6271bec4d3 at every arm).
+/// The shipped band's first-draft signal is depth-blind (at depth 3 the first draft usually lands even when drafts
+/// 2-3 do not), so on a long novel turn it re-enters the deep window round after round and pays 0.49 acceptance for
+/// it. The round signal the policy already computes (`ratio`, kept/offered one round lagged) is the depth-aware one
+/// named; this is the form that uses it as a one-way ratchet rather than as an EMA. `=0` restores the shipped band.
+/// It is a POLICY (which window to verify), not a numerics change -- every depth is token-identical to the plain
+/// path.
 var ratchet_cache: ?f64 = null;
 fn mtpRatchetDown() f64 {
     if (ratchet_cache) |v| return v;
@@ -164,18 +153,15 @@ fn mtpRatchetDown() f64 {
 }
 
 var draft_off_on: ?bool = null;
-/// ROUND-507: THE DRAFTING GOVERNOR.  A drafted round's break-even is (the verify's window + the drafter's
-/// own forward) / (the plain token).  That is NOT a constant: 1.72 at short context and 1.80 at 22k, because
-/// the two-row verify grows with the keys while the plain token grows less.  The first-draft signal the depth
-/// policy reads cannot see it either: on novel text its 0.62 is far from the predictable text's 0.99, yet at
-/// 22k the drafted round still yields only 1.48-1.63 tokens, i.e. it is a LOSS.  So the governor measures the
-/// request's OWN yield (the tokens the rounds have committed, over the rounds) and takes the request off the
-/// drafted path -- no MTP draft, no lookup draft, a plain one-row round -- once it is below the break-even.
-/// It is a POLICY: every drafted depth is token-identical to the plain path (ROUND-494), so a request that
-/// switches mid-turn reads the same stream.  `TF_DSV41_DRAFT_OFF=0` is the same-binary control;
-/// `TF_DSV41_DRAFT_OFF_BELOW` is the break-even (default 1.75); `TF_DSV41_DRAFT_OFF_AFTER` the rounds the
-/// estimate needs (default 24: a request shorter than this is left alone, because its opening is the
-/// least predictable part of any text and the loss is bounded by its length).
+/// THE DRAFTING GOVERNOR. A drafted round's break-even is (the verify's window + the drafter's own forward) / (the
+/// plain token). That is NOT a constant: 1.72 at short context and 1.80 at 22k, because the two-row verify grows
+/// with the keys while the plain token grows less. So the governor measures the request's OWN yield (the tokens the
+/// rounds have committed, over the rounds) and takes the request off the drafted path -- no MTP draft, no lookup
+/// draft, a plain one-row round -- once it is below the break-even. It is a POLICY: every drafted depth is
+/// token-identical to the plain path, so a request that switches mid-turn reads the same stream.
+/// `TF_DSV41_DRAFT_OFF=0` is the same-binary control; `TF_DSV41_DRAFT_OFF_BELOW` is the break-even (default 1.75);
+/// `TF_DSV41_DRAFT_OFF_AFTER` the rounds the estimate needs (default 24: a request shorter than this is left alone,
+/// because its opening is the least predictable part of any text and the loss is bounded by its length).
 fn draftOffArmed() bool {
     if (draft_off_on) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DRAFT_OFF") orelse {
@@ -211,13 +197,10 @@ fn draftOffAfter() u32 {
 }
 
 var draft_off_gate_ctx: ?f64 = null;
-/// ROUND-509: THE CONTEXT-GATED GOVERNOR SAMPLE.  ROUND-508 measured that an 8-round sample wins the
-/// real 22k novel chat by 1.5 % and loses 21 % on the 41k/62k rows, where the first eight rounds are the
-/// model reading the context and the request's own yield is 2.8+ tokens a round after them.  The gate
-/// takes the short sample only while the request's own CONTEXT is below this threshold and the flat
-/// 24 (opening-safe) sample at or above it.  It reads the cache cursor, not the prompt length: a resumed
-/// turn's prompt is a short suffix (a 41k conversation's would look short and take the losing arm).
-/// `TF_DSV41_DRAFT_OFF_GATE_CTX=0` disables the gate (the flat 24, ROUND-508's shipped policy).
+/// THE CONTEXT-GATED GOVERNOR SAMPLE. The gate takes the short sample only while the request's own CONTEXT is below
+/// this threshold and the flat 24 (opening-safe) sample at or above it. It reads the cache cursor, not the prompt
+/// length: a resumed turn's prompt is a short suffix (a 41k conversation's would look short and take the losing
+/// arm). `TF_DSV41_DRAFT_OFF_GATE_CTX=0` disables the gate (the flat 24, The shipped policy).
 fn draftOffGateCtx() f64 {
     if (draft_off_gate_ctx) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DRAFT_OFF_GATE_CTX") orelse {
@@ -230,8 +213,8 @@ fn draftOffGateCtx() f64 {
 }
 
 var draft_off_low: ?u32 = null;
-/// The short-context sample the gate arms below `draftOffGateCtx()` (default 8: ROUND-508's chat arm,
-/// same-binary A/B against the 24 default).  `TF_DSV41_DRAFT_OFF_SAMPLE_LOW` moves it.
+/// The short-context sample the gate arms below `draftOffGateCtx` (default 8: The chat arm, same-binary A/B against
+/// the 24 default). `TF_DSV41_DRAFT_OFF_SAMPLE_LOW` moves it.
 fn draftOffLow() u32 {
     if (draft_off_low) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DRAFT_OFF_SAMPLE_LOW") orelse {
@@ -254,11 +237,11 @@ fn draftOffAfterFor(b: *Backend, i: usize) u32 {
 
 const MtpPolicy = struct { on: bool, up: f64, down: f64 };
 var mtp_policy: ?MtpPolicy = null;
-/// ROUND-458: THE ADAPTIVE DEPTH POLICY, FACTORED OUT OF `tree()` SO THE DRAFTER CAN SIZE ITSELF TO IT.
-/// The early `draft()` hook runs before `tree()` and proposed three drafts (four rows) whatever the window;
-/// on the novel band 240 of 371 asks were depth 1 (a two-row window), so two of the four rows the drafter
-/// computed were never verified.  This reads `last_depth` exactly as `tree()` does and writes nothing: the
-/// policy's `prev` is the depth the last round ran at, and only `tree()` advances it.
+/// THE ADAPTIVE DEPTH POLICY, FACTORED OUT OF `tree` SO THE DRAFTER CAN SIZE ITSELF TO IT. The early `draft` hook
+/// runs before `tree` and proposed three drafts (four rows) whatever the window; on the novel band 240 of 371 asks
+/// were depth 1 (a two-row window), so two of the four rows the drafter computed were never verified. This reads
+/// `last_depth` exactly as `tree` does and writes nothing: the policy's `prev` is the depth the last round ran at,
+/// and only `tree` advances it.
 fn mtpDepthFor(b: *Backend, slot: u32) u32 {
     const p = mtp_policy orelse blk: {
         const raw = std.c.getenv("TF_DSV41_MTP_ADAPT");
@@ -284,9 +267,6 @@ fn mtpDepthFor(b: *Backend, slot: u32) u32 {
         1;
 }
 
-/// ROUND-507: whether this request's drafting is losing on its own measured yield.  The interlock
-/// (`first-draft < 0.9`) keeps a predictable text -- whose first draft lands 99 % of the time and whose
-/// yield is 2.2-2.9 -- out of the governor's reach even if the token accounting ever undercounts.
 fn draftGovernorOff(b: *Backend, i: usize) bool {
     if (!draftOffArmed()) return false;
     if (i >= b.gov_off.len) return false;
@@ -320,38 +300,37 @@ pub const Backend = struct {
     verify_len: []u32,
     /// The drafts the lookup proposes for each slot's next window (host tokens, verified like GPU-held ones).
     held: [][]u32,
-    /// ROUND-361: the trained proposer's last proposal, so the round runs the draft forward ONCE. The lane core
-    /// calls both draft() and tree() a round, and each of them ran proposeTokens -- the draft's own forward (its
-    /// three blocks, the conditioning and the head) twice, which is a quarter of the round's cost for one set of
-    /// drafts. The cache is keyed by the pending token the proposal was made for, so a different pending still runs
-    /// the forward.
+    /// The trained proposer's last proposal, so the round runs the draft forward ONCE. The lane core calls both
+    /// draft and tree a round, and each of them ran proposeTokens -- the draft's own forward (its three blocks, the
+    /// conditioning and the head) twice, which is a quarter of the round's cost for one set of drafts. The cache is
+    /// keyed by the pending token the proposal was made for, so a different pending still runs the forward.
     mtp_cache: [32]?MtpCache = @splat(null),
     /// Each slot's committed tokens after the prompt, for the lookup drafter's matches.
     history: []std.ArrayListUnmanaged(u32),
     /// What the last verify sampled per row, so a rejected window's re-feed can be compared with it.
     last_sampled: [8]u32 = @splat(0),
-    /// ROUND-385: the depth each slot's last round RAN -- the adaptive policy's state (the yield's scale
-    /// depends on the depth the round ran at, so the policy must know it).
+    /// The depth each slot's last round RAN -- the adaptive policy's state (the yield's scale depends on the depth
+    /// the round ran at, so the policy must know it).
     last_depth: []u32,
-    /// ROUND-459: consecutive rounds the up-condition has held, for the confirmed switch-up.
+    /// Consecutive rounds the up-condition has held, for the confirmed switch-up.
     up_streak: []u32,
-    /// ROUND-459: the last window's kept/offered, for the round-acceptance signal.  `keep_pending` says a
-    /// partial keep happened since the last verify; a full window (no keep call) means 1.0.
+    /// The last window's kept/offered, for the round-acceptance signal. `keep_pending` says a partial keep happened
+    /// since the last verify; a full window (no keep call) means 1.0.
     keep_pending: []bool,
     keep_ratio: []f64,
-    /// ROUND-494: the ratchet's per-slot state -- the request has fallen back to the shallow window,
-    /// and the consecutive deep rounds below the crossover that put it there.
+    /// The ratchet's per-slot state -- the request has fallen back to the shallow window, and the consecutive deep
+    /// rounds below the crossover that put it there.
     shallow: []bool,
     low_streak: []u32,
-    /// ROUND-507: the drafting governor's per-slot state -- the rounds this request has completed, the tokens
-    /// they committed, the window the last round ran, what its keep took, and whether drafting is now off.
+    /// The drafting governor's per-slot state -- the rounds this request has completed, the tokens they committed,
+    /// the window the last round ran, what its keep took, and whether drafting is now off.
     gov_rounds: []u32,
     gov_committed: []u32,
     gov_rows: []u32,
     gov_kept: []u32,
     gov_off: []bool,
-    /// ROUND-466: the current window's presence/frequency counts (the reply before it plus the row's path),
-    /// and one row's scratch copy because the model's logits slice is const.
+    /// The current window's presence/frequency counts (the reply before it plus the row's path), and one row's
+    /// scratch copy because the model's logits slice is const.
     pen_counts: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     pen_row: []f32 = &.{},
 
@@ -488,10 +467,10 @@ pub const Backend = struct {
     }
 
     /// The prefill's first draw and the queue's next (the queue is unreachable for this family: gpu_tokens is
-    /// false, so the lanes never pipeline). ROUND-466: a sampled stream samples HERE too -- the first token used
-    /// to be the greedy argmax under any temperature, which is the one draw the owner's echo-prone long system
-    /// prompts could seed a degenerate turn with. The key is the drawn token's absolute position (drawFirst
-    /// passes prompt_len; queueNext passes the new cache length), the same key verify's rows use.
+    /// false, so the lanes never pipeline). A sampled stream samples HERE too -- the first token used to be the
+    /// greedy argmax under any temperature, which is the one draw the owner's echo-prone long system prompts could
+    /// seed a degenerate turn with. The key is the drawn token's absolute position (drawFirst passes prompt_len;
+    /// queueNext passes the new cache length), the same key verify's rows use.
     fn draw(b: *Backend, slot: u32, s: *Stream, position: u64) !u32 {
         if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("draw: slot {d} pos {d}", .{ slot, b.model.caches[slot].position });
         const row = b.model.workspace.logits(1);
@@ -524,10 +503,10 @@ pub const Backend = struct {
         b.history[i].clearRetainingCapacity();
         s.cached = 0;
         var at: u32 = 0;
-        // ROUND-467: A KEPT PROMPT STATE RESUMES THE PASS WHERE IT STOOD. The store hands the family's copy of the
-        // state after `s.reuse.at` tokens; restoring it (the whole cache, its cursor, the Engram history and the
-        // taps) and starting the loop there is the same state a fresh pass would stand on, so `resumed` equals
-        // `fresh` token for token. A rejected copy falls back to the fresh pass, which is what `reuse_failed` says.
+        // A KEPT PROMPT STATE RESUMES THE PASS WHERE IT STOOD. The store hands the family's copy of the state after
+        // `s.reuse.at` tokens; restoring it (the whole cache, its cursor, the Engram history and the taps) and
+        // starting the loop there is the same state a fresh pass would stand on, so `resumed` equals `fresh` token
+        // for token. A rejected copy falls back to the fresh pass, which is what `reuse_failed` says.
         if (s.reuse.saved) |saved| {
             const snap: *ds.Model.Snapshot = @ptrCast(@alignCast(saved));
             const want = s.reuse.at;
@@ -543,16 +522,14 @@ pub const Backend = struct {
             }
         }
         const rows = b.model.workspace.plan.rows;
-        // ROUND-504: THE TAIL MARK IS SNAPSHOTTED INSIDE THE CHUNK THAT RUNS PAST IT, not cut into a second
-        // forward. The R-475 tail rule cuts the pass at the last whole tile before the prompt end so the next turn
-        // resumes near its own end; that cut costs a whole small-chunk intercept (~0.6 s at 22k, ~1.0 s at 49k)
-        // because a chunk pays the per-chunk term whatever its rows. The mark is a state, not a barrier: the
-        // merged chunk runs [at, end) at the same tensor-tile class, and the model keeps the window ring, the taps
-        // ring and the four-token Engram history at the mark for the copy (beginSnapTail). A tail in another class
-        // (the store leaves snap_at 0 there) keeps today's cut, as does an env control.
+        // THE TAIL MARK IS SNAPSHOTTED INSIDE THE CHUNK THAT RUNS PAST IT, not cut into a second forward. The mark
+        // is a state, not a barrier: the merged chunk runs [at, end) at the same tensor-tile class, and the model
+        // keeps the window ring, the taps ring and the four-token Engram history at the mark for the copy
+        // (beginSnapTail). A tail in another class (the store leaves snap_at 0 there) keeps today's cut, as does an
+        // env control.
         const merge_cold = std.c.getenv("TF_DSV41_SNAP_COLD") == null;
-        // ROUND-504 instrument: TF_DSV41_SNAP_TOGGLE + the file /tmp/r503-nomerge lets ONE process run both arms
-        // (the box's one serve at a time would otherwise need two boots to compare states).
+        // TF_DSV41_SNAP_TOGGLE + the file /tmp/r503-nomerge lets ONE process run both arms (the box's one serve at
+        // a time would otherwise need two boots to compare states).
         const toggled_off = std.c.getenv("TF_DSV41_SNAP_TOGGLE") != null and std.c.access("/tmp/r503-nomerge", 0) == 0;
         const snap_at: u32 = if (std.c.getenv("TF_DSV41_NO_TAIL_SNAP") == null and !toggled_off and b.model.snapTailAllowed() and (merge_cold or s.reuse.at > 0)) s.reuse.snap_at else 0;
         while (at < prompt.len) {
@@ -578,8 +555,8 @@ pub const Backend = struct {
                 b.model.endSnapTail();
             }
             at = end;
-            // ROUND-467: the prompt cache's keep hook, at the chunk end it asked to see. The forward committed and
-            // waited, so the state the family copies is exactly the one standing at `at`.
+            // The prompt cache's keep hook, at the chunk end it asked to see. The forward committed and waited, so
+            // the state the family copies is exactly the one standing at `at`.
             if (s.reuse.hook) |hook| if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) hook.at(hook.ptr, s, at);
         }
     }
@@ -713,12 +690,11 @@ pub const Backend = struct {
         return ids[0];
     }
 
-    /// ROUND-531/533/535: the shared-round batch; the one-row windows of a plain shared round are the
-    /// only admitted shape, at most four a forward, and a wider round runs consecutive four-window
-    /// groups. ROUND-532: ON by default -- the served shape of several cached conversations is exactly
-    /// those windows, and the batch is token-identical to solo on every lane (R-531's logits, R-532's
-    /// 256-token cached streams, R-534's 16/16 multi-turn turns). `TF_DSV41_BATCH=0` is the same-binary
-    /// control; any other value (or none) arms it.
+    /// /533/535: the shared-round batch; the one-row windows of a plain shared round are the only admitted shape,
+    /// at most four a forward, and a wider round runs consecutive four-window groups. ON by default -- the served
+    /// shape of several cached conversations is exactly those windows, and the batch is token-identical to solo on
+    /// every lane (The logits, The 256-token cached streams, The 16/16 multi-turn turns). `TF_DSV41_BATCH=0` is the
+    /// same-binary control; any other value (or none) arms it.
     var batch_on: ?bool = null;
     /// The instruments that read a forward's internals take the one-stream path; the batch (and its
     /// four-window grouping) never runs under them.
@@ -735,7 +711,7 @@ pub const Backend = struct {
         return batch_on.?;
     }
 
-    /// ROUND-466: one more occurrence of `t` in the window's penalty counts.
+    /// One more occurrence of `t` in the window's penalty counts.
     fn penBump(gpa: std.mem.Allocator, m: *std.AutoHashMapUnmanaged(u32, u32), t: u32) !void {
         const gop = try m.getOrPut(gpa, t);
         if (!gop.found_existing) gop.value_ptr.* = 0;
@@ -747,11 +723,11 @@ pub const Backend = struct {
         for (windows) |w| {
             if (w.parents != null or w.early or w.masks.len > 0) return error.TreeWindowsUnsupported;
         }
-        // ROUND-535: a round wider than the exact four-lane rung (the server's `--parallel auto` is 8) is
-        // verified as consecutive groups of at most four one-row windows. Each group is R-531/532's forward
-        // (token-identical to solo at 1/2/3/4 windows); a group of one takes the one-stream path. Before
-        // this, five to eight active windows fell back to ALL-single forwards, so the batch switched itself
-        // off exactly when the serving load was highest.
+        // A round wider than the exact four-lane rung (the server's `--parallel auto` is 8) is verified as
+        // consecutive groups of at most four one-row windows. Each group is /532's forward (token-identical to solo
+        // at 1/2/3/4 windows); a group of one takes the one-stream path. Before this, five to eight active windows
+        // fell back to ALL-single forwards, so the batch switched itself off exactly when the serving load was
+        // highest.
         if (windows.len > 4 and batchOn() and noBatchInstrument()) {
             var all_one = true;
             for (windows) |w| if (w.rows() != 1) {
@@ -768,10 +744,10 @@ pub const Backend = struct {
                 return;
             }
         }
-        // ROUND-531: a shared round's plain windows are one row each. When the batch is armed, every
-        // slot's row goes through ONE forward: the row-wise layers run once over the concatenated rows and
-        // the attention core once a segment against that slot's own state. The per-window transaction and
-        // the sampling below are unchanged; only the forward's launch is shared.
+        // A shared round's plain windows are one row each. When the batch is armed, every slot's row goes through
+        // ONE forward: the row-wise layers run once over the concatenated rows and the attention core once a
+        // segment against that slot's own state. The per-window transaction and the sampling below are unchanged;
+        // only the forward's launch is shared.
         const batch = batchOn() and windows.len > 1 and windows.len <= 4 and noBatchInstrument() and blk: {
             for (windows) |w| if (w.rows() != 1) break :blk false;
             break :blk true;
@@ -884,10 +860,10 @@ pub const Backend = struct {
                 (if (sp.temperature > 0) sp else null)
             else
                 null;
-            // ROUND-466: presence/frequency penalties, upstream's semantics (lanes.Penalties, the CUDA lane's
-            // tf_penalize_rows form): the reply's tokens before the window -- the stream's context after its
-            // prompt, which already carries the pending token -- plus the row's own path. The amount is
-            // presence + frequency * count, subtracted from the row's logits before every draw (greedy too).
+            // Presence/frequency penalties, upstream's semantics (lanes.Penalties, the CUDA lane's tf_penalize_rows
+            // form): the reply's tokens before the window -- the stream's context after its prompt, which already
+            // carries the pending token -- plus the row's own path. The amount is presence + frequency * count,
+            // subtracted from the row's logits before every draw (greedy too).
             const pen_on = w.stream.penalties.active();
             if (pen_on) {
                 b.pen_counts.clearRetainingCapacity();
@@ -900,9 +876,9 @@ pub const Backend = struct {
             }
             for (0..rows) |r| {
                 const logits_row = row[r * 129280 ..][0..129280];
-                // ROUND-466: with penalties on, row r draws from a penalized copy of its logits. Row r follows
-                // the token fed before it (feeds[r]); row 0's history is the context itself. The model's own
-                // logits slice is const, so the copy is the row scratch -- only when a request asks.
+                // With penalties on, row r draws from a penalized copy of its logits. Row r follows the token fed
+                // before it (feeds[r]); row 0's history is the context itself. The model's own logits slice is
+                // const, so the copy is the row scratch -- only when a request asks.
                 const target: []const f32 = if (pen_on) blk: {
                     if (r > 0) try penBump(b.gpa, &b.pen_counts, feeds[r]);
                     if (b.pen_row.len < 129280) {
@@ -914,10 +890,9 @@ pub const Backend = struct {
                     while (pen_it.next()) |e| b.pen_row[e.key_ptr.*] -= w.stream.penalties.of(e.value_ptr.*);
                     break :blk b.pen_row;
                 } else logits_row;
-                // ROUND-523 (instrument, default-inert): the row's own logits and its top-2, for the
-                // long-prompt equivalence gate. One 129,280-float file a row, named by position and a
-                // process counter; the serve's stderr carries the top-2 and the margin. Nothing in the
-                // default path reads this block.
+                // The row's own logits and its top-2, for the long-prompt equivalence gate. One 129,280-float file
+                // a row, named by position and a process counter; the serve's stderr carries the top-2 and the
+                // margin. Nothing in the default path reads this block.
                 if (std.c.getenv("TF_DSV41_LOGIT_DUMP")) |dv| {
                     const D = struct {
                         var n: u64 = 0;
@@ -959,41 +934,38 @@ pub const Backend = struct {
                     o.sampled[r] = best;
                 }
             }
-            // ROUND-522 (instrument, default-inert): the target's pick per row, joined to the proposal's
-            // top-2 by the round counter (proposal round R step s <-> verify round R row s).
+            // The target's pick per row, joined to the proposal's top-2 by the round counter (proposal round R step
+            // s <-> verify round R row s).
             if (std.c.getenv("TF_DSV41_TREE_PRICE") != null) {
                 std.log.info("treeprice verify round {d} rows {d} held {d} pending {d} sampled {any}", .{ ds.price_round, rows, w.held, w.pending, o.sampled[0..rows] });
                 ds.price_round += 1;
             }
-            // ROUND-386: THE ADAPTIVE DEPTH POLICY'S SIGNAL, FED FROM THE VERIFY (the one hook that runs
-            // every round -- the keep hook only runs when a draft was REJECTED).  THE WINDOW'S ROW 1 IS
-            // THE FIRST DRAFT: the host drafts (w.tokens) when the trained proposer is the drafter, the
-            // backend's held drafts (held[]) when they are on the device.  (ROUND-385's pending code
-            // compared against held[] only -- and on the MTP path held[] is EMPTY (the draft() hook is
-            // never called for this family), so the signal was always ZERO and the policy always ran
-            // the cheap window.)  The first draft was taken when the verify's row 1 sampled it.
+            // THE ADAPTIVE DEPTH POLICY'S SIGNAL, FED FROM THE VERIFY (the one hook that runs every round -- the
+            // keep hook only runs when a draft was REJECTED). THE WINDOW'S ROW 1 IS THE FIRST DRAFT: the host
+            // drafts (w.tokens) when the trained proposer is the drafter, the backend's held drafts (held[]) when
+            // they are on the device. (The pending code compared against held[] only -- and on the MTP path held[]
+            // is EMPTY (the draft hook is never called for this family), so the signal was always ZERO and the
+            // policy always ran the cheap window.) The first draft was taken when the verify's row 1 sampled it.
             const first_draft: ?u32 = if (w.held > 0)
                 (if (held.len > 0) held[0] else null)
             else if (w.tokens.len > 0)
                 w.tokens[0]
             else
                 null;
-            // ROUND-386: THE ACCEPTANCE TEST IS THE ENGINE'S OWN (core/lanes/accept.zig's acceptPath):
-            // the path's row `at` continues with the row whose parent is `at` and whose token equals
-            // `picks[at]` -- so the FIRST DRAFT (row 1, the pending's child) is accepted iff the
-            // model's ROW-0 argmax equals it.  The port's test compared `sampled[1]` (the model's
-            // prediction AFTER the first draft) with the draft itself: an off-by-one-row test that
-            // measures a coincidence, not the acceptance -- which is why the policy could not
-            // separate the novel text from the predictable one.
+            // THE ACCEPTANCE TEST IS THE ENGINE'S OWN (core/lanes/accept.zig's acceptPath): the path's row `at`
+            // continues with the row whose parent is `at` and whose token equals `picks[at]` -- so the FIRST DRAFT
+            // (row 1, the pending's child) is accepted iff the model's ROW-0 argmax equals it. The port's test
+            // compared `sampled[1]` (the model's prediction AFTER the first draft) with the draft itself: an
+            // off-by-one-row test that measures a coincidence, not the acceptance -- which is why the policy could
+            // not separate the novel text from the predictable one.
             const hit_dbg: bool = rows > 1 and first_draft != null and o.sampled[0] == first_draft.?;
-            // ROUND-459: the signal.  The round form consumes the PREVIOUS window's outcome (keep() sets it,
-            // a window that landed whole leaves `keep_pending` false and reads 1.0), so the policy sees the
-            // same one-round-lagged quantity the first-draft form sees.
-            // The ratio EMA is maintained in every mode (the hybrid's stay branch reads it); the first-draft
-            // EMA is the up signal, and in `round` mode it is not fed at all.
-            // ROUND-507: the governor's accounting.  The previous round's commit is not always seen by
-            // `keep` (a whole window landing skips it), so the totals are retired here, from the window
-            // that round ran and whether its keep fired -- the same one-round lag the ratio reads.
+            // The signal. The round form consumes the PREVIOUS window's outcome (keep sets it, a window that landed
+            // whole leaves `keep_pending` false and reads 1.0), so the policy sees the same one-round-lagged
+            // quantity the first-draft form sees. The ratio EMA is maintained in every mode (the hybrid's stay
+            // branch reads it); the first-draft EMA is the up signal, and in `round` mode it is not fed at all. The
+            // governor's accounting. The previous round's commit is not always seen by `keep` (a whole window
+            // landing skips it), so the totals are retired here, from the window that round ran and whether its
+            // keep fired -- the same one-round lag the ratio reads.
             if (i < b.gov_rounds.len) {
                 if (b.gov_rows[i] > 0) {
                     b.gov_rounds[i] += 1;
@@ -1003,8 +975,8 @@ pub const Backend = struct {
             }
             const ratio: f64 = if (b.keep_pending[i]) b.keep_ratio[i] else 1.0;
             b.keep_pending[i] = false;
-            // ROUND-494: the ratchet. Only a deep round can ratchet (a shallow round's ratio IS the
-            // first-draft hit); two in a row below the crossover put this request on the shallow window.
+            // The ratchet. Only a deep round can ratchet (a shallow round's ratio IS the first-draft hit); two in a
+            // row below the crossover put this request on the shallow window.
             const ratchet_down = mtpRatchetDown();
             if (ratchet_down > 0 and i < b.shallow.len and b.last_depth[i] > 1) {
                 if (ratio < ratchet_down) b.low_streak[i] += 1 else b.low_streak[i] = 0;
@@ -1033,16 +1005,14 @@ pub const Backend = struct {
             b.keep_pending[i] = true;
             b.keep_ratio[i] = if (rows > 1) @as(f64, @floatFromInt(kept)) / @as(f64, @floatFromInt(rows - 1)) else 1.0;
             if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("keep: slot {d} kept {d} of {d}", .{ i, kept, rows });
-            // ROUND-385: THE ADAPTIVE DEPTH POLICY'S SIGNAL, TAKEN WHERE THE KEPT COUNT IS KNOWN.  It was
-            // recorded in `portKeep`, which the whole-window case never reaches (`kept >= rows` returns
-            // early) -- and the whole window landing IS the high-yield case, so the policy never saw the
-            // predictable text's yield and never switched up.
+            // THE ADAPTIVE DEPTH POLICY'S SIGNAL, TAKEN WHERE THE KEPT COUNT IS KNOWN. It was recorded in
+            // `portKeep`, which the whole-window case never reaches (`kept >= rows` returns early) -- and the whole
+            // window landing IS the high-yield case, so the policy never saw the predictable text's yield and never
+            // switched up.
             if (kept >= rows) continue; // the whole window landed
-            // Open a transaction over the cursor, roll back before the window, re-feed kept rows; lanes receipt:
-            // re-fed rows bit-identical to pass one.
             try b.model.rollbackSlot(i);
-            // ROUND-398: the ring rows the window's rejected rows published are aliases the next
-            // forward can still read; put the stashed slots back before anything runs.
+            // The ring rows the window's rejected rows published are aliases the next forward can still read; put
+            // the stashed slots back before anything runs.
             try b.model.restoreRing(i, @intCast(kept), @intCast(rows));
             if (kept == 0) continue; // the rollback closed the transaction
             var feeds = try b.gpa.alloc(u32, kept);
@@ -1058,9 +1028,7 @@ pub const Backend = struct {
                 if (t.* >= 129280) t.* = feeds[0];
             }
             if (noRefeedOn()) {
-                // ROUND-367: the no-re-feed port. The verify's rows are the kept rows (the lanes'
-                // receipt: a re-fed row is bit-identical to the row the verify wrote), so the rollback
-                // restores the cache instead of running the model a second time.
+                // The no-re-feed port.
                 try b.model.portKeep(i, @intCast(kept));
                 b.model.commitSlot(i) catch {};
                 continue;
@@ -1105,11 +1073,8 @@ pub const Backend = struct {
             b.held[i] = &.{};
             if (r.depth == 0) continue;
             if (draftGovernorOff(b, i)) {
-                // ROUND-507: the switch must reach the lane planner, not only the held list.  On a legacy
-                // backend `DraftRequest.heldDepth` returns the request asked depth, not what `draft` filled,
-                // so an empty held set with a nonzero count plans a window whose verify has no drafts and
-                // fails `WindowOutOfStep` (measured).  `Stream.drafts` is what `windows.plan` reads before it
-                // queues a window at all: clearing it is the clean off switch.
+                // The switch must reach the lane planner, not only the held list. `Stream.drafts` is what
+                // `windows.plan` reads before it queues a window at all: clearing it is the clean off switch.
                 r.stream.drafts = false;
                 continue;
             }
@@ -1121,9 +1086,9 @@ pub const Backend = struct {
             if (std.c.getenv("TF_DSV41_MTP_DRAFTS") != null and b.model.weights.dspark != null and
                 last_tok != null and r.depth <= mtpDepthMax())
             mtp: {
-                // ROUND-458: the drafter's own forward is sized to the window the round will verify (the
-                // policy's depth), not a hardcoded three: its rows are `count + 1` (ROUND-368), so a depth-1
-                // window needs two rows.  TF_DSV41_MTP_DRAFT_ROWS=0 is the same-binary control.
+                // The drafter's own forward is sized to the window the round will verify (the policy's depth), not
+                // a hardcoded three: its rows are `count + 1`, so a depth-1 window needs two rows.
+                // TF_DSV41_MTP_DRAFT_ROWS=0 is the same-binary control.
                 const count: u32 = if (draftRowsFollowWindow()) mtpDepthFor(b, @intCast(i)) else 3;
                 if (count == 0) break :mtp;
                 const drafts = b.model.proposeTokens(@intCast(i), last_tok.?, count) catch |err| {
@@ -1137,7 +1102,7 @@ pub const Backend = struct {
                 @memcpy(out[0..n], drafts[0..n]);
                 for (out[n..]) |*t| t.* = drafts[n - 1];
                 b.held[i] = out;
-                // ROUND-361: the round's other hook (tree()) asks for the same drafts; keep them here.
+                // The round's other hook (tree) asks for the same drafts; keep them here.
                 if (i < b.mtp_cache.len) b.mtp_cache[i] = .{ .pending = last_tok.?, .drafts = drafts, .count = count };
                 continue;
             }
@@ -1164,7 +1129,7 @@ pub const Backend = struct {
     /// and rollback do the accepting. A wrong guess costs a round, never a different token.
     fn tree(ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?lanes.stream.Held {
         const b = self(ptr);
-        // ROUND-385: the proposer's forward needs the lane's slot (the trunk's key ring lives there).
+        // The proposer's forward needs the lane's slot (the trunk's key ring lives there).
         const slot_i = b.by.get(s) orelse return null;
         if (draftGovernorOff(b, slot_i)) {
             s.drafts = false;
@@ -1172,33 +1137,24 @@ pub const Backend = struct {
         }
         if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("tree() called: pending={?} depth={d}", .{ s.pending, lookupDepth() });
         var depth = lookupDepth();
-        // ROUND-385: THE ADAPTIVE DEPTH POLICY.  The engine measures the yield it just got (the accepted
-        // drafts a round) and runs the cheap depth-1 window when the yield is low (novel text) and the
-        // deep window when it is high (predictable text).  The rate is (the tokens a round)/(the round's
-        // cost): at a yield `a` the depths give (1+a)/43.6 ms and (1+3a)/61.5 ms, so depth 3 wins when
-        // a > 0.5 -- and the novel text yields 0.26-0.38 while the predictable text yields ~2.9.
-        // TF_DSV41_MTP_ADAPT=<threshold> arms the policy; the default is the fixed depth.
-        // ROUND-386 (THE LANDING): THE ADAPTIVE DEPTH POLICY IS THE DEFAULT.  THE SIGNAL is the first
-        // draft's acceptance -- an EMA over the request's rounds, reset at the request's start.  It does
-        // NOT scale with the depth (the YIELD does: the novel text yields 0.62 accepted drafts a round
-        // at depth 1 and 1.22 at depth 3, the predictable text 1.07 and 3.02), so ONE band separates
-        // the texts: the novel text takes its first draft 62.37 % of the time and the predictable text
-        // 99 %, at every depth.  THE BAND: the deep window when the signal passes UP, the cheap window
-        // otherwise, the deep window kept while the signal stays at least DOWN.
-        //   TF_DSV41_MTP_ADAPT=0        the fixed depth (the control arm)
-        //   TF_DSV41_MTP_ADAPT_UP=<up>   the band (the default 0.7: the measured crossover at 21.9k is
-        //                                a first-draft acceptance of 0.672, `1+p^2 > 64.4/44.35`; ROUND-477)
-        //   TF_DSV41_MTP_ADAPT_DOWN=<d>   the band's floor (the default 0.7)
-        //   TF_DSV41_MTP_ADAPT=<t>       the single-threshold form (the deep window while the signal > t)
+        // THE ADAPTIVE DEPTH POLICY. The engine measures the yield it just got (the accepted drafts a round) and
+        // runs the cheap depth-1 window when the yield is low (novel text) and the deep window when it is high
+        // (predictable text). TF_DSV41_MTP_ADAPT=<threshold> arms the policy; the default is the fixed depth. THE
+        // ADAPTIVE DEPTH POLICY IS THE DEFAULT. THE SIGNAL is the first draft's acceptance -- an EMA over the
+        // request's rounds, reset at the request's start. THE BAND: the deep window when the signal passes UP, the
+        // cheap window otherwise, the deep window kept while the signal stays at least DOWN. TF_DSV41_MTP_ADAPT=0
+        // the fixed depth (the control arm) TF_DSV41_MTP_ADAPT_UP=<up> the band TF_DSV41_MTP_ADAPT_DOWN=<d> the
+        // band's floor (the default 0.7) TF_DSV41_MTP_ADAPT=<t> the single-threshold form (the deep window while
+        // the signal > t)
         const adapt_raw = std.c.getenv("TF_DSV41_MTP_ADAPT");
         const adapt_off = adapt_raw != null and std.mem.eql(u8, std.mem.span(adapt_raw.?), "0");
         if (!adapt_off) {
             const prev: u32 = if (slot_i < b.last_depth.len) b.last_depth[slot_i] else 0;
             depth = mtpDepthFor(b, slot_i);
-            // ROUND-459: THE CONFIRMED SWITCH-UP.  A single sample above UP is not a change of text: on the
-            // novel band the deep rounds accepted not one extra draft, so the up-transition must hold for
-            // `confirm` consecutive rounds.  The deep-stay branch (prev >= 2) is not a transition and is not
-            // gated; a depth-1 round resets the streak.
+            // THE CONFIRMED SWITCH-UP. A single sample above UP is not a change of text: on the novel band the deep
+            // rounds accepted not one extra draft, so the up-transition must hold for `confirm` consecutive rounds.
+            // The deep-stay branch (prev >= 2) is not a transition and is not gated; a depth-1 round resets the
+            // streak.
             const confirm = mtpConfirmRounds();
             if (confirm > 1 and slot_i < b.up_streak.len) {
                 if (depth > 1 and prev < 2) {
@@ -1218,10 +1174,10 @@ pub const Backend = struct {
         // suffix lookup below stays the fallback. This is the hook the lane core actually calls (round 227: draft()
         // is never invoked for this family).
         if (depth > 0 and std.c.getenv("TF_DSV41_MTP_DRAFTS") != null and b.model.weights.dspark != null and s.pending != null) {
-            // ROUND-361: the round's other hook (draft()) already ran the proposer's forward for this pending
-            // token; reuse it instead of running the draft's three blocks, the conditioning and the head twice.
-            // ROUND-385: the hand-off's cap is three a round; TF_DSV41_MTP_DEPTH_MAX lifts it so the
-            // depth-4 window (five rows) can be offered.  The default is the shipped cap.
+            // The round's other hook (draft) already ran the proposer's forward for this pending token; reuse it
+            // instead of running the draft's three blocks, the conditioning and the head twice. The hand-off's cap
+            // is three a round; TF_DSV41_MTP_DEPTH_MAX lifts it so the depth-4 window (five rows) can be offered.
+            // The default is the shipped cap.
             const n: usize = @min(depth, mtpDepthMax());
             var drafts: [4]u32 = undefined;
             var cached = false;
@@ -1235,7 +1191,7 @@ pub const Backend = struct {
                     return null;
                 };
             }
-            // ROUND-385: the depth this round runs at, per slot: the adaptive policy's state.
+            // The depth this round runs at, per slot: the adaptive policy's state.
             if (slot_i < b.last_depth.len) b.last_depth[slot_i] = @intCast(n);
             const out = try gpa.alloc(u32, n);
             @memcpy(out, drafts[0..n]);
@@ -1269,9 +1225,6 @@ pub const Backend = struct {
             b.held[i] = &.{};
         }
         const entry = b.by.fetchRemove(s) orelse return;
-        // ROUND-386: the policy's signal is per REQUEST: a new request starts from a clean signal
-        // (the previous request's yield would decide this one's depth -- the warm probe's 99 % would
-        // keep the band in the deep window).
         b.model.resetAcceptSlot(entry.value);
         if (entry.value < b.last_depth.len) b.last_depth[entry.value] = 0;
         if (entry.value < b.shallow.len) {

@@ -1,5 +1,5 @@
-//! ROUND-525 (instrument, default-inert): the sparse scan's own input/output hash. The model owns the
-//! staging buffer (one per forward, reported after its wait); this module records a whole layer's rows.
+// ! The sparse scan's own input/output hash. The model owns the ! staging buffer (one per forward, reported after
+// its wait); this module records a whole layer's rows.
 const std = @import("std");
 const mtl = @import("metal");
 const ops = @import("ops.zig");

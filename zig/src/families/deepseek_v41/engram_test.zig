@@ -227,7 +227,7 @@ test "the host hash pass is byte-identical to the Metal kernels across chunks an
         try engram.encodeCommit(e, &p, view(ids), view(map), null, view(gh), rows);
         e.end();
         try completed(cb);
-        // ROUND-493: the pending-token peek must be the host pass row 0 and must not advance the record.
+        // The pending-token peek must be the host pass row 0 and must not advance the record.
         var peek: [2][hash.columns]u32 = undefined;
         const before: [engram.history_bytes]u8 = hh.contents()[0..engram.history_bytes].*;
         try engram.peekHashHost(view(hh), view(map), chunk[0], &peek);
