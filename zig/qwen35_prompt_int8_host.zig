@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const q = @import("qwen35");
 const fixture = @import("qwen35_verify_host.zig");
 const T = std.testing;
+
 const Trace = struct {
     var count: usize = 0;
     var ids: [600]usize = undefined;
@@ -120,7 +121,7 @@ test "prompt int8: enable allocates once, failure retains no owner, and deinit i
     try T.expectError(error.ScratchGrowFailed, e.int8.ensureRows(&e, 17));
     try T.expect(e.int8.buf != null and e.int8.ws != 0 and e.int8.capacity == 1);
     try T.expectEqual(cuda.w4a8.Kernels.scratch(1, 512), e.int8.buf.?.len);
-    try T.expectEqual(@as(usize, 5), Trace.allocations);
+    try T.expectEqual(@as(usize, 4), Trace.allocations);
     try T.expectEqual(@as(usize, 0), Trace.frees);
 
     Trace.fail = false;
@@ -128,10 +129,10 @@ test "prompt int8: enable allocates once, failure retains no owner, and deinit i
     try T.expect(e.int8.buf != null and e.int8.ws != 0);
     try T.expectEqual(@as(usize, 64), e.int8.capacity);
     try T.expectEqual(cuda.w4a8.Kernels.scratch(64, 512), e.int8.buf.?.len);
-    try T.expectEqual(@as(usize, 6), Trace.allocations);
+    try T.expectEqual(@as(usize, 5), Trace.allocations);
     try T.expectEqual(@as(usize, 1), Trace.frees);
     try e.int8.ensureRows(&e, 33);
-    try T.expectEqual(@as(usize, 6), Trace.allocations);
+    try T.expectEqual(@as(usize, 5), Trace.allocations);
 
     e.int8.deinit();
     try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
