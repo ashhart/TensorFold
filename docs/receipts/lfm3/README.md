@@ -4,6 +4,12 @@ These receipts cover native LFM3-1.7B and LFM3-VL-2B from the official MLX expor
 They distinguish implementation checks from the still-required maintainer model/performance gate.
 Checkpoint revisions and run instructions are in the [family recipe](../../recipes/lfm3-native.md).
 
+## Runner-only maintenance
+
+The follow-up to `1c45d29ed8bbaaa67acc5ebbd021302ff1f59066` inlines three import aliases at their use sites to keep the Metal contract runner at 600 lines; no suite, kernel or serving arithmetic changes.
+On the M4 Pro, the rebuilt runner with `--only LFM3 --no-limits` passed all 55 selected kernels and caught all 35 planted controls.
+This scoped smoke does not repeat gate 5 or replace the model/performance qualifications at the source versions recorded below.
+
 ## Builds and hardware
 
 - Initial corrected native: `a8df9730ee637237545311a6753dd4bdcb13e860700d65a01a033ae818ee0d18`.
