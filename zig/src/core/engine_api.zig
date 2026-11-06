@@ -253,19 +253,8 @@ pub const Ledger = struct {
     cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
 };
 
-pub const PromptCacheCapacity = struct { budget_bytes: u64, minimum_state_bytes: u64 };
-
-pub const PromptCachePlan = struct {
-    source: enum { physical_footprint, explicit, metal_working_set },
-    budget_bytes: u64,
-    explicit_budget: bool = false,
-    over_cap: ?bool = null,
-    ram_bytes: ?u64 = null,
-    ready_footprint_bytes: ?u64 = null,
-    cap_bytes: ?u64 = null,
-    room_bytes: ?u64 = null,
-    margin_bytes: ?u64 = null,
-};
+pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
+pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
 
 /// A native family's model type, weight formats and explicit raw-text capability.
 pub const Family = struct {
