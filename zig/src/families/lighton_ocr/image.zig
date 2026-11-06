@@ -161,4 +161,5 @@ fn number(value: ?std.json.Value) Error!f64 {
 
 test {
     _ = @import("image_test.zig");
+    _ = @import("pixels_test.zig");
 }
