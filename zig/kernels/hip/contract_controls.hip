@@ -181,6 +181,24 @@ extern "C" __global__ void __launch_bounds__(tf::rocm::W12Big::Threads) tf_ctl_w
     wmma12_gemm_tile<W12Big, IdentityAct<DotBF16>, GemmOut<DotBF16>, W12Step, TfCtlUnordered>(a);
 }
 
+// Gate 3: the fused silu product applying silu to the fp32 gate sum, not to the BF16 sum the plain product stores.
+struct TfCtlSiluUnrounded {
+    static constexpr bool pairs = true;
+    template <class Args>
+    __device__ static void store_pair(const Args& a, int row, int f, float g, float u) {
+        using namespace tf::rocm;
+        using Out = SiluPairOut<DotBF16>;
+        const float s = Out::widen(narrow<DotBF16>(g / (1.0f + expf(-g))));
+        const float ub = Out::widen(narrow<DotBF16>(u));
+        static_cast<DotBF16::elem*>(static_cast<void*>(a.out16))[out_row(a, row) * (a.n / 2) + f] = narrow<DotBF16>(s * ub);
+    }
+};
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Pair::Threads) tf_ctl_silu_unrounded(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_gemm_tile<W12Pair, IdentityAct<DotBF16>, TfCtlSiluUnrounded>(a);
+}
+
 // Not a control: the WMMA big block as served before #2264, the byte baseline the faster block replaces (gate 3).
 extern "C" __global__ void __launch_bounds__(256) tf_ref_wmma12_k32(tf::rocm::Affine a) {
     using namespace tf::rocm;

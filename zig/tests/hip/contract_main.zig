@@ -23,6 +23,7 @@ const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
 const dense_k = @import("contract_dense.zig");
 const dense12_k = @import("contract_dense_wmma12.zig");
+const silu_k = @import("contract_silu_fuse.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
 const kit = @import("contract_kit.zig");
@@ -240,6 +241,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
         for ([_]usize{ 2, 3, 5, 6 }) |i| dense12[i].baseline = k32;
         for (&dense12) |*d| try kernels.append(a, d.kernel());
     } else std.debug.print("N/A  hip dense_wmma12_gemm: not served off gfx12\n", .{});
+    // the fused silu product's pair and big blocks, then its control (silu on the fp32 gate sum, on the pair block)
+    var silu: [3]silu_k.SiluFuse = undefined;
+    for (&silu, [_]hip.launches.dense.PairShape{ .pair, .big, .pair }) |*d, geo| d.* = .init(a, &r, s, &l, geo);
+    defer for (&silu) |*d| d.deinit();
+    if (l.dense.wmma12) {
+        silu[2].planted = try ctl.function("tf_ctl_silu_unrounded");
+        for (&silu) |*d| try kernels.append(a, d.kernel());
+    } else std.debug.print("N/A  hip dense_wmma12_gemm_silu: not served off gfx12\n", .{});
     var gates: [3]gate_k.Gate = undefined;
     for (&gates, std.enums.values(gate_k.Which)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&gates) |*m| m.deinit();
