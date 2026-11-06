@@ -233,7 +233,7 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var kv_write = kv_k.KvWrite.init(a, &r, s, &l);
     defer kv_write.deinit();
     try kernels.append(a, kv_write.kernel());
-    var taps: [2]tap_k.Tap = undefined;
+    var taps: [std.enums.values(tap_k.Mode).len]tap_k.Tap = undefined;
     for (&taps, std.enums.values(tap_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&taps) |*m| m.deinit();
     for (&taps) |*m| try kernels.append(a, m.kernel());
