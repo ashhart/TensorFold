@@ -101,9 +101,9 @@ fn front(gpa: std.mem.Allocator, a: cfg.Audio, p: ops.Points, src: Source, feats
     defer gpa.free(b3);
     const wo = try src.take(gpa, t ++ "conv_out.weight");
     defer gpa.free(wo);
-    const cf = a.chunkFrames();
+    const cf = plan.chunk_frames; // the package pads every chunk to the longest one
     const bins = a.convBins();
-    const crow = chunks.rows(cf);
+    const crow = plan.chunk_rows;
     const pos = try positions(gpa, p, crow, a.d);
     defer gpa.free(pos);
     const out = try gpa.alloc(f64, plan.rows * a.d);
