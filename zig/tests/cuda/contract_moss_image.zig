@@ -14,6 +14,9 @@ const softmax = @import("contract_moss_image_decoder_softmax.zig");
 const group = @import("contract_moss_image_decoder_group.zig");
 const gemm = @import("contract_moss_image_decoder_gemm.zig");
 const conv = @import("contract_moss_image_decoder_conv3x3.zig");
+const enc_norm = @import("contract_moss_image_encoder_norm.zig");
+const enc_head = @import("contract_moss_image_encoder_head.zig");
+const enc_gate = @import("contract_moss_image_encoder_gate.zig");
 
 const g = core.contract.gates;
 
@@ -38,6 +41,9 @@ pub const Set = struct {
     group: *group.Set = undefined,
     gemm: *gemm.Set = undefined,
     conv: *conv.Set = undefined,
+    enc_norm: *enc_norm.Set = undefined,
+    enc_head: *enc_head.Set = undefined,
+    enc_gate: *enc_gate.Set = undefined,
 
     /// The set, its kernels appended to `list` (each control after the kernel it breaks).
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -83,10 +89,16 @@ pub const Set = struct {
         set.group = try group.Set.init(gpu, s, a, list, &set.ctl);
         set.gemm = try gemm.Set.init(gpu, s, a, list, &set.ctl);
         set.conv = try conv.Set.init(gpu, s, a, list, &set.ctl);
+        set.enc_norm = try enc_norm.Set.init(gpu, s, a, list, &set.ctl);
+        set.enc_head = try enc_head.Set.init(gpu, s, a, list, &set.ctl);
+        set.enc_gate = try enc_gate.Set.init(gpu, s, a, list, &set.ctl);
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        set.enc_gate.deinit();
+        set.enc_head.deinit();
+        set.enc_norm.deinit();
         set.conv.deinit();
         set.gemm.deinit();
         set.group.deinit();

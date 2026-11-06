@@ -20,9 +20,7 @@ const Call = struct {
     add: bool = false,
 };
 
-/// One decode's launches at a picture whose first level has `first` pixels: post_quant_conv's 1 x 1 at 32
-/// channels, the mid block's q | k | v, the scores of its packed q | k | v rows, the values' projection over them,
-/// the attention's out projection over the block's input, then the two block shortcuts the widths drop by.
+/// A picture's launches in `run`'s order: post_quant's 1 x 1, q | k | v, the scores, values, out projection, shortcuts.
 fn picture(first: usize) [7]Call {
     return .{
         .{ .shape = .{ .rows = first, .n = 32, .k = 32 }, .lda = 32, .ldb = 32 },
@@ -35,8 +33,7 @@ fn picture(first: usize) [7]Call {
     };
 }
 
-/// The 1024 x 1024 decode's launches without its attention: its scores are 16384 x 16384 (268M outputs, a GiB
-/// of them) and its values' projection sums 16384 terms an output, which stay at the smaller pictures.
+/// The 1024 x 1024 decode without its 16384 x 16384 scores and 16384-deep values: they stay at the smaller pictures.
 const big = [_]Call{
     .{ .shape = .{ .rows = 16384, .n = 32, .k = 32 }, .lda = 32, .ldb = 32 },
     .{ .shape = .{ .rows = 16384, .n = 1152, .k = 384 }, .lda = 384, .ldb = 1152 },
