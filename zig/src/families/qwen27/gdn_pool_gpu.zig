@@ -22,8 +22,14 @@ pub const Metadata = struct {
     keeps: Ref,
     kept_rows: Ref,
     slot_steps: Ref,
+    flows: ?Ref = null,
 
     pub fn upload(m: Metadata, plan: Plan) !void {
+        if (m.flows) |r| {
+            const bytes = std.mem.sliceAsBytes(plan.flows);
+            if (r.offset > r.buffer.length() or bytes.len > r.buffer.length() - r.offset) return error.ShortGdnMetadata;
+            @memcpy(r.buffer.contents()[r.offset..][0..bytes.len], bytes);
+        }
         inline for (.{ "parents", "windows", "row_slots", "segments", "keeps", "kept_rows", "slot_steps" }) |name| {
             const r = @field(m, name);
             const bytes = std.mem.sliceAsBytes(@field(plan, name));
@@ -323,6 +329,7 @@ pub const Pool = struct {
             .keeps = try refSpan(m.keeps, plan.keeps.len * @sizeOf(abi.Keep)),
             .kept_rows = try refSpan(m.kept_rows, plan.kept_rows.len * 4),
             .slot_steps = try refSpan(m.slot_steps, plan.slot_steps.len * @sizeOf(@import("core").tree_slots.Step)),
+            .flows = if (m.flows) |r| try refSpan(r, plan.flows.len * 4) else null,
         };
         var result = try gdn.Round.init(pool.budget.shape, refs.scalars.kinds, p, plan, b, pool.kernels.pipelines);
         result.tree_mode = pool.tree_mode;
