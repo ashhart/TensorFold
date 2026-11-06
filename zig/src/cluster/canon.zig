@@ -72,7 +72,7 @@ pub fn reduce(units: u32, parts: []const Part, out: []f32) void {
     for (out, 0..) |*o, i| o.* = eval(parts, 0, units, i);
 }
 
-/// Element `i` of aligned interval [lo, hi) from single slices (slices[k] is slice base + k), summed in the tree's order.
+/// Element `i` of aligned interval [lo, hi) from single slices (slices[k] is slice base + k), summed in tree order.
 pub fn subtree(slices: []const []const f32, base: u32, lo: u32, hi: u32, i: usize) f32 {
     if (hi - lo == 1) return slices[lo - base][i];
     const mid = lo + (hi - lo) / 2;
