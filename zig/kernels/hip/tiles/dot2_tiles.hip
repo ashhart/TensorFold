@@ -382,6 +382,8 @@ template __global__ void dense_gemm_block<DotBF16, GemmShape<DotBF16>::rt>(Affin
 // gfx12's WMMA dense tile on every build too (its body traps without gfx12 WMMA).
 template __global__ void dense_wmma12_gemm<DotBF16, W12Small>(Affine);
 template __global__ void dense_wmma12_gemm<DotBF16, W12Big>(Affine);
+template __global__ void dense_wmma12_gemm_silu<DotBF16, W12Pair>(Affine);
+template __global__ void dense_wmma12_gemm_silu<DotBF16, W12Big>(Affine);
 
 }  // namespace rocm
 }  // namespace tf

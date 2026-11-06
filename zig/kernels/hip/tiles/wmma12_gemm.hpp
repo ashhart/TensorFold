@@ -30,6 +30,8 @@ struct W12Geo {
 // The big block's 64-deep steps take 64 KiB unpadded (swizzled): half the barriers of 32-deep steps.
 using W12Small = W12Geo<16, 64, 64, 1, 4>;
 using W12Big = W12Geo<128, 128, 64, 2, 4>;
+// Few rows of a paired (gate/up) product: 16 x 64 with 2 waves, so each wave holds two 16-column fragments.
+using W12Pair = W12Geo<16, 64, 64, 1, 2>;
 constexpr int kW12Band = 4;  // row blocks a band of the launch order walks the column blocks with
 
 typedef __bf16 bf16x8 __attribute__((ext_vector_type(8)));
@@ -163,16 +165,36 @@ __device__ __forceinline__ void wmma12_gemm_tile(const Args& a) {
         if (s + 1 < steps) stash(buf ^ 1);
         if constexpr (Fault::ordered) w12_sync();
     }
+    if constexpr (requires { Epi::pairs; }) {
+        // weights packed in 16-row groups (gate f..f+15, then up f..f+15) and a wave's columns whole 32-column groups:
+        // fragments j and j + 1 hold the gate and the up sums of the same 16 features in the same lane and element
+        static_assert(TN % 2 == 0 && (kW12N / kW12WavesN) % 32 == 0, "a wave's columns are whole gate/up pairs");
 #pragma unroll
-    for (int i = 0; i < TM; ++i) {
+        for (int i = 0; i < TM; ++i) {
 #pragma unroll
-        for (int j = 0; j < TN; ++j) {
-            const int col = n0 + wc * (kW12N / kW12WavesN) + 16 * j + (lane & 15);
-            if (col >= a.n) continue;
+            for (int j = 0; j < TN; j += 2) {
+                const int col = n0 + wc * (kW12N / kW12WavesN) + 16 * j + (lane & 15);
+                if (col >= a.n) continue;
+                const int f = col / 32 * 16 + col % 32;
 #pragma unroll
-            for (int e = 0; e < 8; ++e) {
-                const int row = m0 + wr * (kW12M / kW12WavesM) + 16 * i + koff + e;
-                if (row < a.m) Epi::store(a, row, col, acc[i][j][e]);
+                for (int e = 0; e < 8; ++e) {
+                    const int row = m0 + wr * (kW12M / kW12WavesM) + 16 * i + koff + e;
+                    if (row < a.m) Epi::store_pair(a, row, f, acc[i][j][e], acc[i][j + 1][e]);
+                }
+            }
+        }
+    } else {
+#pragma unroll
+        for (int i = 0; i < TM; ++i) {
+#pragma unroll
+            for (int j = 0; j < TN; ++j) {
+                const int col = n0 + wc * (kW12N / kW12WavesN) + 16 * j + (lane & 15);
+                if (col >= a.n) continue;
+#pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    const int row = m0 + wr * (kW12M / kW12WavesM) + 16 * i + koff + e;
+                    if (row < a.m) Epi::store(a, row, col, acc[i][j][e]);
+                }
             }
         }
     }
