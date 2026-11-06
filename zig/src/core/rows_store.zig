@@ -9,6 +9,7 @@ pub const chain = @import("rows_chain.zig");
 pub const file = @import("rows_file.zig");
 pub const write = @import("rows_write.zig");
 pub const read = @import("rows_read.zig");
+const drops = @import("rows_dropped.zig");
 const dirs = @import("lanes").learned_dirs;
 const Admission = @import("lanes").learned_disk.Admission;
 const Allocator = std.mem.Allocator;
@@ -123,8 +124,10 @@ pub const Rows = struct {
         const r = try init(gpa, family, o);
         errdefer r.deinit();
         try makePath(gpa, r.dir);
-        try r.scan();
-        try r.settle();
+        var dropped: drops.Dropped = .{};
+        defer dropped.flush(); // said even when the open fails part way
+        try r.scan(&dropped);
+        try r.settle(&dropped);
         r.stamp();
         r.sync_writes = o.sync_writes or (if (platform.c.getenv("TENSORFOLD_ROWS_SYNC")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false);
         r.staging_bytes = o.staging_bytes;
@@ -412,7 +415,7 @@ pub const Rows = struct {
     }
 
     /// The files under the store's directory: states read back and checked by name, blocks by size; leftovers go.
-    fn scan(r: *Rows) !void {
+    fn scan(r: *Rows, dropped: *drops.Dropped) !void {
         const d = platform.c.opendir(r.dir) orelse return error.RowsDir;
         defer _ = platform.c.closedir(d);
         while (platform.c.readdir(d)) |ent| {
@@ -432,6 +435,7 @@ pub const Rows = struct {
                 r.readState(p) catch |err| {
                     if (err == error.OutOfMemory) return err;
                     _ = platform.c.unlink(p);
+                    dropped.add(err);
                 };
             }
         }
@@ -463,16 +467,17 @@ pub const Rows = struct {
     }
 
     /// Each state's blocks counted; a state missing one, or that its family cannot lay out, goes; then idle blocks.
-    fn settle(r: *Rows) !void {
+    fn settle(r: *Rows, dropped: *drops.Dropped) !void {
         var i: usize = 0;
         while (i < r.states.items.len) {
             const s = &r.states.items[i];
             var wants: std.ArrayList(write.Want) = .empty;
             defer wants.deinit(r.gpa);
-            const whole = if (r.wantsOf(r.gpa, s, &wants)) |_| for (wants.items) |w| {
-                if (!r.blocks.contains(chain.stem(w.name))) break false;
-            } else true else |err| if (err == error.OutOfMemory) return err else false;
-            if (!whole) {
+            const cause: ?anyerror = if (r.wantsOf(r.gpa, s, &wants)) |_| for (wants.items) |w| {
+                if (!r.blocks.contains(chain.stem(w.name))) break drops.missing;
+            } else null else |err| if (err == error.OutOfMemory) return err else err;
+            if (cause) |err| {
+                dropped.add(err);
                 var gone = r.states.orderedRemove(i);
                 unlinkName(r.dir, gone.name, ".st");
                 freeState(r.gpa, &gone);
