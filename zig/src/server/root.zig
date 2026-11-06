@@ -239,6 +239,7 @@ test {
 test {
     _ = @import("control_tokens_http_test.zig");
     _ = @import("request_provenance_test.zig");
+    _ = @import("quoted_markers_test.zig");
     _ = @import("request_cost_test.zig");
     _ = @import("prompt_tool_turn_test.zig");
 }
