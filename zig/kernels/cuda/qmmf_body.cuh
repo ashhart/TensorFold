@@ -41,6 +41,8 @@
         if constexpr (T::BARRIERS > 0) {
             if (tid == 0) {
                 const uint32_t bar = smem(ready + s);
+                // the stage's last ldmatrix reads (generic proxy, ordered by the CTA barrier) before the bulk writes
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
                              :: "r"(bar), "r"(T::W) : "memory");
 #pragma unroll
