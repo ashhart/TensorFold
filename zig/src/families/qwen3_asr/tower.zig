@@ -32,6 +32,7 @@ pub const Weights = struct {
 
     /// `src.expect(name, shape)` gives a bf16 tensor's bytes; `up.put(bytes)` and `up.taps(bytes, co, k)` place them.
     pub fn load(gpa: std.mem.Allocator, a: cfg.Audio, src: anytype, up: anytype, group: usize) !Weights {
+        if (group == 0) return error.EmptyChunkGroup; // encode steps through the chunks `group` at a time
         const t = names.tower;
         const k = cfg.conv_taps;
         var w: Weights = undefined;

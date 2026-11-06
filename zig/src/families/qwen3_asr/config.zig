@@ -114,8 +114,8 @@ fn audio(o: Object) !Audio {
         .conv_chunks = try integer(o, "conv_chunksize"),
     };
     if (a.d % a.heads != 0 or a.d % 8 != 0 or a.ffn % 8 != 0 or a.conv % 8 != 0) return error.UnsupportedQwen3AsrGeometry;
-    // the package's per-chunk lengths assume a chunk of 100 frames (13 rows) and windows of whole chunks
-    if (a.chunkFrames() != 100 or a.window_infer % a.chunkFrames() != 0) return error.UnsupportedQwen3AsrGeometry;
+    // the package's per-chunk lengths assume a chunk of 100 frames (13 rows) and windows of one or more whole chunks
+    if (a.chunkFrames() != 100 or a.window_infer < a.chunkFrames() or a.window_infer % a.chunkFrames() != 0) return error.UnsupportedQwen3AsrGeometry;
     if (a.mels != 128) return error.UnsupportedQwen3AsrGeometry;
     return a;
 }
@@ -162,13 +162,15 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     const root = try object(doc.value);
     try expect(root, "model_type", "qwen3_asr");
     const thinker = try object(root.get("thinker_config"));
-    return .{
+    const c: Config = .{
         .audio = try audio(try object(thinker.get("audio_config"))),
         .text = try text(try object(thinker.get("text_config"))),
         .audio_token = try id(thinker, "audio_token_id"),
         .audio_start = try id(thinker, "audio_start_token_id"),
         .audio_end = try id(thinker, "audio_end_token_id"),
     };
+    if (c.audio.out != c.text.hidden) return error.UnsupportedQwen3AsrGeometry; // the audio rows splice in at the LM's width
+    return c;
 }
 
 /// `dir`/config.json, parsed and admitted.
