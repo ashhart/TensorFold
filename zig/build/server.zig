@@ -101,10 +101,12 @@ pub fn plain(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, 
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize });
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = optimize });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "tokenizer", .module = tokenizer }} });
     const m = b.createModule(.{ .root_source_file = b.path(root), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{
         .{ .name = "engine_api", .module = api },
         .{ .name = "tokenizer", .module = tokenizer },
         .{ .name = "template", .module = template },
+        .{ .name = "core", .module = core },
     } });
     _ = addTo(b, m, target, optimize);
     testImports(b, m, target, optimize);
@@ -119,7 +121,7 @@ pub fn cpuArtefacts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const api = server_mod.import_table.get("engine_api").?;
     const tokenizer = server_mod.import_table.get("tokenizer").?;
     const template = server_mod.import_table.get("template").?;
-    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const core = server_mod.import_table.get("core").?;
     const none = b.createModule(.{ .root_source_file = b.path("zig/src/native/none.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "engine_api", .module = api }} });
     const fake = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/server/fake_serve.zig"),

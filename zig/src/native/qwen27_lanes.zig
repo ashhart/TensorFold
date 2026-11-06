@@ -23,7 +23,7 @@ pub fn windowRows(units: bool) !u32 {
     return @import("qwen27_window.zig").requested(units, if (platform.c.getenv("TF_QWEN27_WINDOW")) |v| std.mem.span(v) else null);
 }
 /// A shared round's rows at most: the frame's.
-pub const batch_rows = 128;
+pub const batch_rows = @import("qwen27_prompt_floor.zig").minimum;
 /// Streams a runner holds at most (the attention plan's).
 pub const max_streams = q.attention_plan.max_streams;
 const ring = 64;
@@ -90,7 +90,13 @@ pub const Metal = struct {
     slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
-        if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
+        if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
+        const floor = @import("qwen27_prompt_floor.zig");
+        floor.check(runner.model.frame.capacity) catch |err| {
+            var buffer: [320]u8 = undefined;
+            std.log.err("{s}", .{try floor.describe(&buffer, runner.model.frame.capacity, .frame)});
+            return err;
+        };
         const device = runner.model.device;
         const tensor_units = device.tensorUnits();
         const window = try windowRows(tensor_units);

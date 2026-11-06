@@ -10,6 +10,7 @@ const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
 const late = @import("cuda_batch_late.zig");
 const hc = @import("cuda_batch_hc.zig");
+const gdn_lanes = @import("cuda_batch_gdn_lanes.zig");
 const batch_lanes = @import("cuda_batch_lanes.zig");
 const tiles = @import("cuda_tiles.zig");
 const tk = @import("cuda_tile_kernels.zig");
@@ -273,7 +274,7 @@ pub fn Pass(comptime Tri: type) type {
             } else if (self.lanes.len == 0) {
                 try self.gdnFront(g, lw, s.proj, self.seq.conv[li].ptr, n, s.gq, s.gk, s.gv, s.ggb);
                 try self.gdnChain(g, h, s.gq, s.gk, s.gv, s.ggb, self.seq.state[li].ptr, keep.state_out, n, s.ys);
-            } else {
+            } else if (!try gdn_lanes.once(self, lw, layer, li)) {
                 // shared rounds: each lane's rows kept, fronted and chained on its own conv window and state
                 var row0: usize = 0;
                 for (self.lanes) |l| {

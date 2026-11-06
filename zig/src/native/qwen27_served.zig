@@ -287,6 +287,7 @@ fn laterBytes(h: *const Host) u64 {
 }
 
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
+    try @import("qwen27_prompt_floor.zig").environment(a, if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null, why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
@@ -312,6 +313,7 @@ fn drafterRefusal(a: Allocator, dir: []const u8, drafter: []const u8, err: anyer
 
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
 pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
+    try @import("qwen27_prompt_floor.zig").environment(a, if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null, why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const capacity = if (o.context == 0) @min(model.config.max_position, 32768) else o.context;

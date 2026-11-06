@@ -34,6 +34,11 @@ def f32(x):
     return struct.unpack('<f', struct.pack('<f', x))[0]
 
 
+def inverse_frequency(theta, width, i):
+    """transformers' FP32 word, as core's rope_freq: an FP32 exponent, theta^e rounded once, an FP32 reciprocal."""
+    return f32(1 / f32(theta ** f32(2 * i / width)))
+
+
 def sigmoid(x):
     return 1 / (1 + math.exp(-x)) if x >= 0 else math.exp(x) / (1 + math.exp(x))
 
@@ -209,8 +214,10 @@ class Oracle:
         half = width // 2
         out = list(x)
         for i in range(half):
-            frequency = params['rope_theta'] ** (-2 * i / width)
-            angle = f32(pos * f32(frequency)) if self.native_scalars else pos * frequency
+            if self.native_scalars:
+                angle = f32(pos * inverse_frequency(params['rope_theta'], width, i))
+            else:
+                angle = pos * params['rope_theta'] ** (-2 * i / width)
             cosine, sine = math.cos(angle), math.sin(angle)
             if self.native_scalars:
                 cosine, sine = f32(cosine), f32(sine)
