@@ -1,4 +1,4 @@
-//! A MoE layer's route on Metal in two launches for 1-16 rows (kernels/metal/core/moe_route.metal): sigmoid + bias routers.
+//! A MoE layer's Metal route, two launches, for 1-16 rows (kernels/metal/core/moe_route.metal): sigmoid + bias routers.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
