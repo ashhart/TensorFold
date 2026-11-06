@@ -64,7 +64,7 @@ fn parse(args: []const [:0]const u8) !Opts {
     return o;
 }
 
-const Reg = struct { v: affine_k.Variant, name: []const u8 };
+const Reg = affine_k.Reg;
 const common = [_]Reg{
     .{ .v = .{ .kind = .row, .bits = 4, .group = 64 }, .name = "metal row projection q4 g64" },
     .{ .v = .{ .kind = .row, .bits = 6, .group = 32 }, .name = "metal row projection q6 g32" },
@@ -80,7 +80,7 @@ const common = [_]Reg{
     .{ .v = .{ .kind = .simd_bits, .bits = 8, .group = 64 }, .name = "metal simd_qmm_bits q8 g64" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32 }, .name = "metal lane projection q6 g32 sk1" },
     .{ .v = .{ .kind = .lane, .bits = 6, .group = 32, .sk = 4, .f32_out = true }, .name = "metal lane projection q6 g32 sk4 fp32 out" },
-};
+} ++ affine_k.half;
 
 /// The lane kernel takes every format on the M5's tensor units, and 6-bit groups of 32 alone before them.
 const m5_only = [_]Reg{
