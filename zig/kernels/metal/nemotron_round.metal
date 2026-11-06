@@ -295,7 +295,7 @@ kernel void tf_round_top1(const device bfloat* x [[buffer(0)]],
   }
 }
 
-// One leaf: the head's guess with a copy's first row, or likeliest second choice (reach x chance, scaled) past the bar.
+// A leaf: head's guess with a copy's first row, else its likeliest second choice (reach x chance, scaled) past the bar.
 kernel void tf_round_sib(device uint* state [[buffer(0)]],
                          device uint* next_window [[buffer(1)]],
                          device int* args [[buffer(2)]],
