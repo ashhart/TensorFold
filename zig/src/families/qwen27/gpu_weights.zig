@@ -288,8 +288,8 @@ fn decayLog(t: Tensor, shape: []const usize) !Tensor {
     return checked(t, if (t.dtype == .f32) .f32 else .bf16, shape);
 }
 
-/// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
-pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths) !Weights {
+/// Graph from `checkpoint`, each Linear staged, repacked, dropped; `s` the rank's share; `owned_layers` a stage's only.
+pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths, owned_layers: ?[2]usize) !Weights {
     const c = s.local;
     const g = s.global;
     const prefix: []const u8 = if (checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else if (checkpoint.has("model.embed_tokens.weight")) "" else return error.MissingTextNamespace;
@@ -309,12 +309,20 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     var stage = cp.Stage{ .device = device };
     defer stage.deinit();
     const b = Builder{ .allocator = allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &owned, .stage = &stage, .runs = &runs, .widths = ws };
-    for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
+    for (layers, 0..) |*l, i| l.* = if (owned_layers) |o| (if (i >= o[0] and i < o[1]) try b.layer(s, i) else unowned(c.kind(i))) else try b.layer(s, i);
     const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
     const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
+}
+
+/// Another stage's layer: no tensors, only the kind its mixer's caches and keeps are counted by.
+fn unowned(kind: @import("config.zig").Kind) Layer {
+    return .{ .norm = undefined, .post_norm = undefined, .gu = undefined, .down = undefined, .mixer = switch (kind) {
+        .linear => .{ .linear = undefined },
+        .attention => .{ .attention = undefined },
+    } };
 }
 
 /// Tensor-unit projections leave load in lane_projection.reg_layout, the order quant_gpu's reg kernel reads.

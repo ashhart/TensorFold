@@ -121,6 +121,10 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } });
     const served: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_served", .module = host } };
+    // RFC #2005: the 27B as one Metal stage of a ring, fabric/stage's driver over its binding
+    const stage_link = @import("stage.zig").module(b, target, .ReleaseSafe);
+    const metal_stage = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_stage.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "stage", .module = stage_link } } });
+    _ = program(b, "tf-qwen27-stage", "Build the 27B stage check: one engine's logits, or rank N of a Metal stage ring", "zig/tests/qwen27/stage.zig", target, false, &.{ .{ .name = "metal", .module = metal }, .{ .name = "stage", .module = stage_link }, .{ .name = "qwen27_stage", .module = metal_stage } });
     _ = program(b, "tf-qwen27-speed-served", "Build long secondary-slot prompt and shared drafting checks", "zig/tests/qwen27/speed_served.zig", target, false, served);
     _ = program(b, "tf-qwen27-served-check", "Build synthetic CLI versus served-host token check", "zig/tests/qwen27/served.zig", target, false, served);
     _ = program(b, "tf-qwen27-dflash-served-check", "Build synthetic drafted CLI versus served-host token check", "zig/tests/qwen27/dflash_served.zig", target, false, served);

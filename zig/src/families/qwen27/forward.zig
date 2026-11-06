@@ -16,6 +16,21 @@ pub const Mixer = struct {
     tap: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, Ref, u32) anyerror!void = null,
 };
 
+/// A pipeline stage's part of the model (RFC #2005): layers [first, end); `heads` runs the final norm and head too.
+pub const Span = struct {
+    first: usize,
+    end: usize,
+    heads: bool,
+    /// The boundary rows: h (the stream) and r (the pending block output), bf16 rows of `hidden`, out then in.
+    hop: ?Hop = null,
+};
+/// Host hands for the boundary's two planes, h then r, `rows` rows each; the ring's give and take.
+pub const Hop = struct {
+    ptr: *anyopaque,
+    give: *const fn (*anyopaque, h: []const u8, r: []const u8, rows: u32) anyerror!void,
+    take: *const fn (*anyopaque, h: []u8, r: []u8, rows: u32) anyerror!void,
+};
+
 /// One exchange: `x` its index, `ref` this rank's `width` columns of the seam in the window's slot for x.
 pub const Seam = struct { x: u32, ref: Ref };
 
@@ -76,11 +91,43 @@ pub const Stages = struct {
     reduce: ?Reduce = null,
     /// Head seam picks (one u32 a row), required with `Reduce.argmax`: the ranks must pick the same token.
     picks: ?Ref = null,
+    /// A stage's layers and boundary; null runs the whole model.
+    span: ?Span = null,
+    fn owns(s: *const Stages, index: usize) bool {
+        const sp = s.span orelse return true;
+        return index >= sp.first and index < sp.end;
+    }
+    /// The boundary rows as host bytes of the shared frame (h, then r): the GPU is idle when the hop reads or writes.
+    fn boundaryRows(s: *const Stages, h: Ref, r: Ref) [2][]u8 {
+        const n = @as(usize, s.rows) * s.model.config.hidden * 2;
+        return .{ h.buffer.contents()[h.offset..][0..n], r.buffer.contents()[r.offset..][0..n] };
+    }
+    /// Ends and waits for the lane's command buffer (its boundary rows written), then opens the next behind the fence.
+    fn drain(s: *Stages, lane: *@import("core").segments.Lane) !void {
+        lane.fence.update(lane.enc);
+        lane.enc.end();
+        lane.cb.commit();
+        lane.cb.wait();
+        if (lane.cb.failure()) |msg| {
+            std.log.err("command buffer failed: {s}", .{msg});
+            return error.GpuFailed;
+        }
+        lane.cb = s.model.queue.commandBuffer();
+        lane.enc = lane.cb.compute(.concurrent);
+        lane.fence.wait(lane.enc);
+    }
     pub fn begin(s: *Stages, lane: *@import("core").segments.Lane) !void {
         const m = s.model;
         if (s.rows == 0 or s.rows > m.frame.capacity or lane.k != 0) return error.BadFrameRows;
         s.hidden = m.frame.get(.hidden);
         s.residual = m.frame.get(.residual);
+        if (s.span) |sp| if (sp.first > 0) { // a later stage: the rows come from the one before, h and r
+            const hop = sp.hop orelse return error.StageHopMissing;
+            s.pending = m.frame.get(.output);
+            const p = s.boundaryRows(s.hidden, s.pending.?);
+            try hop.take(hop.ptr, p[0], p[1], s.rows);
+            return;
+        };
         try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
         lane.enc.barrier();
         if (s.images) |rows| {
@@ -93,6 +140,7 @@ pub const Stages = struct {
     }
     pub fn handoff(_: *Stages, _: *@import("core").segments.Lane, _: usize) !void {}
     pub fn pre(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
+        if (!s.owns(index)) return;
         const m = s.model;
         const f = &m.frame;
         const e = lane.enc;
@@ -106,6 +154,7 @@ pub const Stages = struct {
         }
     }
     pub fn mixer(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
+        if (!s.owns(index)) return;
         const m = s.model;
         switch (m.weights.layers[index].mixer) {
             .linear => |g| try s.hooks.gdn(s.hooks.ptr, lane.enc, index, g, &m.frame, s.rows),
@@ -114,6 +163,7 @@ pub const Stages = struct {
         lane.enc.barrier();
     }
     pub fn post(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
+        if (!s.owns(index)) return;
         const m = s.model;
         const f = &m.frame;
         var e = lane.enc;
@@ -210,6 +260,18 @@ pub const Stages = struct {
     pub fn finish(s: *Stages, lane: *@import("core").segments.Lane) !void {
         const m = s.model;
         const f = &m.frame;
+        if (s.span) |sp| if (sp.hop) |hop| { // this stage's rows on to the next; rank 0 takes the last stage's back
+            try s.drain(lane);
+            const out = s.boundaryRows(s.hidden, s.pending orelse return error.StageNoRows);
+            try hop.give(hop.ptr, out[0], out[1], s.rows);
+            if (!sp.heads) return;
+            s.hidden = f.get(.hidden);
+            s.residual = f.get(.residual);
+            s.pending = f.get(.output);
+            const in = s.boundaryRows(s.hidden, s.pending.?);
+            try hop.take(hop.ptr, in[0], in[1], s.rows);
+        };
+        if (s.span) |sp| if (!sp.heads) return;
         // The head seam reopens the encoder, so it goes back in the lane; rank 0's half-vocab argmax is not a token.
         var e = lane.enc;
         try m.kernels.norm(e, s.hidden, s.pending, wts.ref(m.weights.norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), @intCast(m.config.hidden), s.rows);
