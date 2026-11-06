@@ -199,4 +199,5 @@ pub const usage =
     \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
     \\
     \\  ricursive-contract        Ripple's glue, attention prep and attention (group 10) through gates 1-4, controls red
+    \\  ripple-forward            Ripple's forward rounds (streams, verify windows, mixes) == one-row steps, bit for bit (synthetic)
 ;
