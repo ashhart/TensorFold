@@ -931,12 +931,13 @@ server sends the counters described under [Responses](#responses). For memory fi
 same handler and engine path. A response has that chat completion's prompt and tokens (the `tensorfold` block's
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
 
-- `input` is a string or a list of items: messages (`input_text`, and `input_image` on a server started with
-  `--vision` for a model that reads images), `function_call`, `function_call_output` (its
-  `output` text, or `input_text` and `input_image` parts, the images again only with `--vision`), and `reasoning`
-  items with their `content` text, which the template gets
-  back as the next assistant message's `reasoning_content`. `instructions` becomes the system message and is not
-  carried to a later turn.
+- `input` is a string or a list of items: messages (`input_text`, `output_text`, `text` and `refusal` parts, whose
+  text or refusal text becomes input text; `input_image` on a server started with `--vision` for a model that reads
+  images; `input_file` with inline PDFs on a server started with `--vision --vision-pdf`), `function_call`,
+  `function_call_output` (its `output` text, or `input_text`, `input_image` and `input_file` parts under the same
+  image and PDF rules), and `reasoning` items with their `content` text, which the template gets back as the next
+  assistant message's `reasoning_content`. `instructions` becomes the system message and is not carried to a later
+  turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
   `parallel_tool_calls` works as in chat.
 - `max_output_tokens` counts reasoning tokens too. `temperature`, `top_p`, `top_k`, `min_p` and `seed` sample as in
@@ -946,7 +947,8 @@ same handler and engine path. A response has that chat completion's prompt and t
 - `text.format` takes `json_schema` or `json_object` through the structured-output path, with drafts.
 - `stream`, `store` (default true) and `metadata` (up to 16 string pairs, keys up to 64 characters,
   values up to 512). The chat extensions `draft`, `thinking_budget`, `stop`, `ignore_eos`,
-  `chat_template_kwargs` and `priority` pass through.
+  `chat_template_kwargs`, `priority`, `return_token_ids` and
+  `grammar_budget` pass through.
 
 `output` holds a `reasoning` item (its text as `reasoning_text` content, with an empty `summary`), a `message` with
 `output_text`, and `function_call` items (`call_id`, `name` and JSON `arguments`). A reply cut by the token limit has
@@ -967,7 +969,7 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `conversation`, `prompt` templates, `truncation: "auto"`, `top_logprobs`, file IDs and
+others), `background`, `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, `top_logprobs`, file IDs and
 remote file URLs (`input_file` parts with inline `file_data` run on a model started with `--vision --vision-pdf`),
 `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
 `include` takes a list of OpenAI's names, which the server accepts and ignores (it has nothing to add for them):
