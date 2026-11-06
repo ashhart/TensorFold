@@ -7,3 +7,5 @@ pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const backend = @import("backend.zig");
 pub const snapshot = @import("snapshot.zig");
+
+pub const prompt_mask = @import("prompt_mask.zig");
