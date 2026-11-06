@@ -26,8 +26,8 @@ pub const MoeRouting = struct {
 /// an engine against the *envelope* of legal orders rather than against one member of it.
 pub const WeightOrder = enum { f64_sequential, f32_pairwise, f32_ascending };
 
-/// ROUND-377: the observer's read callback carries the chain as an untyped pointer, because the chain is now
-/// generic over its precision and cannot name itself inside its own declaration. The reader casts it back.
+/// The observer's read callback carries the chain as an untyped pointer, because the chain is now generic over its
+/// precision and cannot name itself inside its own declaration. The reader casts it back.
 pub const Observer = struct {
     ctx: *anyopaque,
     read: *const fn (*anyopaque, usize, Stage, *anyopaque) void,
@@ -37,8 +37,8 @@ pub fn moeWeights(c: config.Config, scores: *const [384]f32, ids: *const [6]u32,
     moeWeightsOf(f32, c, scores, ids, order, routing_weights);
 }
 
-/// ROUND-377: the six selected scores' normalisation at the chain's precision T. The FP32 contract is unchanged
-/// (bit-for-bit); the FP64 chain keeps the six in FP64 and widens once.
+/// The six selected scores' normalisation at the chain's precision T. The FP32 contract is unchanged (bit-for-bit);
+/// the FP64 chain keeps the six in FP64 and widens once.
 pub fn moeWeightsOf(comptime T: type, c: config.Config, scores: []const T, ids: *const [6]u32, order: WeightOrder, routing_weights: *[6]T) void {
     @setFloatMode(.strict);
     for (ids, 0..) |id, i| routing_weights[i] = scores[id];
@@ -80,7 +80,7 @@ pub fn selectionMargin(moe_weights: weights.Moe, scores: *const [384]f32, ids: *
     return selectionMarginOf(f32, moe_weights, scores, ids);
 }
 
-/// ROUND-377: the selection boundary at the chain's precision T, reported in FP32 (a diagnostic).
+/// The selection boundary at the chain's precision T, reported in FP32 (a diagnostic).
 pub fn selectionMarginOf(comptime T: type, moe_weights: weights.Moe, scores: []const T, ids: *const [6]u32) f32 {
     @setFloatMode(.strict);
     var lowest_selected = std.math.inf(f32);
@@ -97,17 +97,15 @@ pub fn selectionMarginOf(comptime T: type, moe_weights: weights.Moe, scores: []c
 }
 
 /// Which numerical form of the router's score transform this file uses. `libm` is Zig's `log1p(exp(z))`;
-/// `kernel_lp` is `route.metal`'s form verbatim (`u=1+e; u==1 ? e : e*(log(u)/(u-1))`). Both are legal f32
-/// implementations of the same equation, and the measured difference between them is the reason the legal-order
-/// envelope cannot be built from reduction order alone.
+/// `kernel_lp` is `route.metal`'s form verbatim (`u=1+e; u==1 ? e: e*(log(u)/(u-1))`).
 pub const ScoreForm = enum { libm, kernel_lp, stable };
 
 fn scoreOf(z: f32, form: ScoreForm) f32 {
     return scoreOfOf(f32, z, form);
 }
 
-/// ROUND-377: the router's score transform at the chain's precision T: FP32 is the source contract,
-/// bit-identical to the shipped path; FP64 is the ideal chain's form.
+/// The router's score transform at the chain's precision T: FP32 is the source contract, bit-identical to the
+/// shipped path; FP64 is the ideal chain's form.
 fn scoreOfOf(comptime T: type, z: T, form: ScoreForm) T {
     @setFloatMode(.strict);
     // `stable` is the formulation most numerical libraries ship: softplus(z) = max(z,0) + log1p(exp(-|z|)). It is a
@@ -131,7 +129,7 @@ pub fn moeSelectForm(moe_weights: weights.Moe, c: config.Config, logits: *const 
     moeSelectFormOf(f32, moe_weights, c, logits, scores, ids, routing_weights, order, form);
 }
 
-/// ROUND-377: the router's own selection at the chain's precision T. The FP32 contract is unchanged.
+/// The router's own selection at the chain's precision T. The FP32 contract is unchanged.
 pub fn moeSelectFormOf(comptime T: type, moe_weights: weights.Moe, c: config.Config, logits: []const T, scores: *[384]T, ids: *[6]u32, routing_weights: *[6]T, order: WeightOrder, form: ScoreForm) void {
     @setFloatMode(.strict);
     for (logits, scores) |z, *score| score.* = scoreOfOf(T, z, form);
@@ -160,7 +158,7 @@ pub fn moeActivation(gate: []const u16, up: []const u16, route: f32, c: config.C
     moeActivationOf(f32, gate, up, route, c, activation);
 }
 
-/// ROUND-377: the SwiGLU at the chain's precision T. The FP32 contract is unchanged (bit-for-bit).
+/// The SwiGLU at the chain's precision T. The FP32 contract is unchanged (bit-for-bit).
 pub fn moeActivationOf(comptime T: type, gate: []const u16, up: []const u16, route: T, c: config.Config, activation: []u16) void {
     @setFloatMode(.strict);
     for (activation, gate, up) |*v, g_value, u_value| {
@@ -174,10 +172,10 @@ pub fn moeActivationOf(comptime T: type, gate: []const u16, up: []const u16, rou
     }
 }
 
-/// ROUND-377: the reference chain at a chosen precision T. T == f32 is the source contract, bit-identical to the
-/// shipped chain; T == f64 is the ideal chain (every reduction class widened: the RMS norms, the per-head query
-/// RMS, the hyperconnection's affine/softmax/Sinkhorn stage, the router's dense projection, the attention's
-/// online softmax, the compressor's pooling, the indexer's scores and the MoE's own arithmetic).
+/// The reference chain at a chosen precision T. T == f32 is the source contract, bit-identical to the shipped
+/// chain; T == f64 is the ideal chain (every reduction class widened: the RMS norms, the per-head query RMS, the
+/// hyperconnection's affine/softmax/Sinkhorn stage, the router's dense projection, the attention's online softmax,
+/// the compressor's pooling, the indexer's scores and the MoE's own arithmetic).
 pub fn ReferenceOf(comptime T: type) type {
     return struct {
         pub const Pin = struct { ids: *const [40][6]u32 };

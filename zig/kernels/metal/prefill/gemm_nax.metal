@@ -217,8 +217,7 @@ inline void gemm_splitk_sum(const device float* C, device O* D, const device int
   tfp::gemm_nax<bfloat16_t, false, true, false, true, false, 64, 128, 256, 2, 4, float>(A, B, D, P, threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 
 }
-// Hand-added: the f16 twin of the same block, fp32 destination. The released packs store the router gate f16, so
-// an f16 A/B GEMM keeps the weight's 10 mantissa bits (a bf16 round of that weight moves the band to 41 %).
+// Hand-added: the f16 twin of the same block, fp32 destination.
 [[max_total_threads_per_threadgroup(256)]]
 [[kernel]] void custom_kernel_tf_gemm_nax_f16_f32out_n_t_n_t_n_64_128_256_2_4_float16_t_float16_t_int32_t_float(
   const device float16_t* A [[buffer(0)]],

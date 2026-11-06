@@ -1,17 +1,14 @@
-//! The shared Zig/Metal argument structs are HAND-WRITTEN mirrors. This module reads the embedded kernel
-//! source at COMPTIME and compares each Metal struct's field list, in order, to the Zig struct's own:
-//! a field added, removed, renamed, reordered or retyped on either side fails the build.
-//!
-//! ROUND-468's bug class: `Params` gained `layer`/`skip_mask` (ROUND-411) and the Metal struct did not, so
-//! the kernel's `scale` read `layer`'s bits -- a denormal -- and every index score came out 0.0 with no
-//! error anywhere. The 76/80-byte assertion catches a size change but not a reorder or a same-size swap.
-//! ROUND-473 added the field-list check for that one pair; ROUND-478 wired ten more; ROUND-480 points it at
-//! every shared pair in the family and models the C layout rather than a flat byte sum.
-//!
-//! ROUND-480: `enum(u32)` maps to `uint`, `i64` to `long`, `[N]T` to `T name[N]`, `device const uchar*` to an
-//! eight-byte address, and each field's offset (C alignment, trailing padding included) must equal
-//! `@offsetOf(T, name)`; the total must equal `@sizeOf(T)`. The runtime `static_assert`s in the .metal files
-//! say the same thing at boot; `tools/zig/check_dsv41_metal_mirrors.sh` compiles them at build time.
+// ! The shared Zig/Metal argument structs are HAND-WRITTEN mirrors. This module reads the embedded kernel ! source
+// at COMPTIME and compares each Metal struct's field list, in order, to the Zig struct's own: ! a field added,
+// removed, renamed, reordered or retyped on either side fails the build. ! ! The bug class: `Params` gained
+// `layer`/`skip_mask` and the Metal struct did not, so ! the kernel's `scale` read `layer`'s bits -- a denormal --
+// and every index score came out 0.0 with no ! error anywhere. The 76/80-byte assertion catches a size change but
+// not a reorder or a same-size swap. ! Added the field-list check for that one pair; wired ten more; points it at !
+// every shared pair in the family and models the C layout rather than a flat byte sum. ! ! `enum(u32)` maps to
+// `uint`, `i64` to `long`, `[N]T` to `T name[N]`, `device const uchar*` to an ! eight-byte address, and each
+// field's offset (C alignment, trailing padding included) must equal ! `@offsetOf(T, name)`; the total must equal
+// `@sizeOf(T)`. The runtime `static_assert`s in the .metal files ! say the same thing at boot;
+// `tools/zig/check_dsv41_metal_mirrors.sh` compiles them at build time.
 
 const std = @import("std");
 
@@ -182,7 +179,6 @@ test "the mirror check models enums, arrays, 64-bit fields, pointers and padding
         \\    float eps;
         \\};
     , "Wide");
-    // Trailing padding after a 4-byte tail: 3 x u64, 4 x u32, 1 x f32 = 44 bytes of fields, 48 aligned.
     const Padded = extern struct { a: u64, b: u64, c: u64, d: u32, e: u32, f: u32, g: u32, h: f32 };
     comptime check(Padded,
         \\struct Padded {

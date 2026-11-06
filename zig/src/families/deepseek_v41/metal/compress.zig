@@ -32,7 +32,7 @@ pub const Pipelines = struct {
 
 pub const threads = 32;
 
-/// ROUND-527: compress.metal's three argument records, field for field (positional payloads until this round).
+/// Compress.metal's three argument records, field for field (positional payloads until this round).
 pub const PoolArgs = extern struct { rows: u32, dim: u32 };
 pub const RtArgs = extern struct { blocks: u32, in_stride: u32, out_row: u32 };
 pub const PackArgs = extern struct { blocks: u32, in_stride: u32, code_row: u32, scale_row: u32, scale_off: u32, use_dest: u32 };

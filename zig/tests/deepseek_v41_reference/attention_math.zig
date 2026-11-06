@@ -22,8 +22,8 @@ pub const KeyTable = struct {
 fn narrow(comptime T: type, x: f64) T {
     return if (T == f32) @as(f32, @floatCast(x)) else x;
 }
-/// Compressor softmax pooling at reference precision T: FP32 is the source contract, FP64 the ideal.
-/// ROUND-376 instrument: a query row's per-head RMS (the min and the max over the 64 heads).
+/// Compressor softmax pooling at reference precision T: FP32 is the source contract, FP64 the ideal. A query row's
+/// per-head RMS (the min and the max over the 64 heads).
 fn headRmsRange(q: []const u16) [2]f64 {
     var mn: f64 = 1e30;
     var mx: f64 = -1e30;
@@ -52,8 +52,8 @@ pub fn poolOf(comptime T: type, kv: [2][]const T, gate: [2][]const T, out: []u16
         o.* = if (T == f32) m.b(pooled) else m.b64(pooled);
     }
 }
-/// ROUND-377: the attention's reference state at a chosen precision T. T == f32 is the source contract,
-/// bit-identical to the shipped path; T == f64 is the ideal chain (every reduction class widened).
+/// The attention's reference state at a chosen precision T. T == f32 is the source contract, bit-identical to the
+/// shipped path; T == f64 is the ideal chain (every reduction class widened).
 pub fn StateOf(comptime T: type) type {
     return struct {
         gpa: std.mem.Allocator,
@@ -333,12 +333,11 @@ pub fn StateOf(comptime T: type) type {
             self.observe(.qr_norm, &self.qr);
             try projection.applyOf(u16, T, .{ .trellis = a.wq_b }, &self.qr, &self.q, scratch);
             self.observe(.q_projection, &self.q);
-            // ROUND-376: the comparator's per-head UNWEIGHTED query RMS, before the rope (mlx-serve's
-            // attentionBatch: "wq_a -> q_norm -> wq_b -> per-head RMS -> rope"; the reference's own
-            // rmsNormRow(row, null, eps), MIT/Apache-2.0 -- the attribution rides the ported line). The port
-            // had no norm here, so its query reached the softmax with whatever scale wq_b produced.
-            // ROUND-376 instrument: the chain's OWN per-head RMS, before and after the norm (layer 0 only),
-            // so the two chains' query scales are read off the same ruler.
+            // The comparator's per-head UNWEIGHTED query RMS, before the rope (mlx-serve's attentionBatch: "wq_a ->
+            // q_norm -> wq_b -> per-head RMS -> rope"; the reference's own rmsNormRow(row, null, eps),
+            // MIT/Apache-2.0 -- the attribution rides the ported line). The port had no norm here, so its query
+            // reached the softmax with whatever scale wq_b produced. The chain's OWN per-head RMS, before and after
+            // the norm (layer 0 only), so the two chains' query scales are read off the same ruler.
             if (layer == 0) {
                 const before = headRmsRange(self.q[0..32768]);
                 for (0..64) |head| m.rmsUnweighted(T, self.q[head * 512 ..][0..512], c.eps, self.q[head * 512 ..][0..512]);

@@ -226,8 +226,8 @@ pub fn main(init: std.process.Init) !void {
     }
     if (std.c.getenv("TF_BENCH_ROUTE_DIAG") != null) try routeDiag(device, queue, gpa);
     if (!only_routed and !verify_only and !cmp_only) try oneRowBench(device, queue, gpa);
-    // ROUND-442: the lane-packing run is the one-row bench alone (the routed, multiset and prefill arms are
-    // priced elsewhere and their fixtures are heavy).
+    // The lane-packing run is the one-row bench alone (the routed, multiset and prefill arms are priced elsewhere
+    // and their fixtures are heavy).
     if (std.c.getenv("TF_BENCH_LANE") != null) return;
     if (std.c.getenv("TF_BENCH_WIDTH") != null) {
         try widthSweep(device, queue, gpa);
@@ -325,8 +325,8 @@ fn timeExl3(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl.
     return median(samples[0..nt]);
 }
 
-// ROUND-408: the same timing helper with the ROW COUNT as a parameter -- the grouped plan's shape (the engine
-// dispatches 685 tiles of sixty-four rows at the prompt's shape) is not the bench's default fixture (384 tiles).
+// The same timing helper with the ROW COUNT as a parameter -- the grouped plan's shape (the engine dispatches 685
+// tiles of sixty-four rows at the prompt's shape) is not the bench's default fixture (384 tiles).
 fn timeRows(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl.Buffer, trellis: mtl.Buffer, sums: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, table: mtl.Buffer, cols: usize, threads: usize, rows: usize, trials: usize) !f64 {
     const tn = (exl3_n + cols - 1) / cols;
     const tm = rows / 64;
@@ -356,9 +356,9 @@ fn timeRows(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl.
     return median(samples[0..nt]);
 }
 
-// ROUND-409: the same dispatch with the tile's ROW COUNT as a parameter. The sixty-four-row helper hard-coded
-// it, so the hundred-and-twenty-eight-row plans dispatched twice the tiles they need (half of them empty, and
-// the empty ones cost the same launch overhead the arm is measuring).
+// The same dispatch with the tile's ROW COUNT as a parameter. The sixty-four-row helper hard-coded it, so the
+// hundred-and-twenty-eight-row plans dispatched twice the tiles they need (half of them empty, and the empty ones
+// cost the same launch overhead the arm is measuring).
 fn timeRowsT(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl.Buffer, trellis: mtl.Buffer, sums: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, table: mtl.Buffer, cols: usize, threads: usize, rows: usize, rpt: usize, trials: usize) !f64 {
     const tn = (exl3_n + cols - 1) / cols;
     const tm = (rows + rpt - 1) / rpt;
@@ -388,9 +388,9 @@ fn timeRowsT(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl
     return median(samples[0..nt]);
 }
 
-// ROUND-409: the engine's grouped plan at a given tile granularity: each expert's block padded to a multiple of
-// the tile's rows, the blocks laid out consecutively (the GPU's own grouping rule). Returns the rows the plan
-// uses and writes each expert's first row.
+// The engine's grouped plan at a given tile granularity: each expert's block padded to a multiple of the tile's
+// rows, the blocks laid out consecutively (the GPU's own grouping rule). Returns the rows the plan uses and writes
+// each expert's first row.
 fn planOffsets(counts: []const u32, rpt: usize, offsets: []u32) usize {
     var used: usize = 0;
     for (counts, 0..) |c, i| {
@@ -400,8 +400,8 @@ fn planOffsets(counts: []const u32, rpt: usize, offsets: []u32) usize {
     return used;
 }
 
-// ROUND-409: the live rows' hash, expert by expert (each expert's live rows are contiguous in the plan), so two
-// plans at different granularities are compared ROW FOR ROW: the values must be the same bits.
+// The live rows' hash, expert by expert (each expert's live rows are contiguous in the plan), so two plans at
+// different granularities are compared ROW FOR ROW: the values must be the same bits.
 fn hashLiveRows(sums: mtl.Buffer, floats: usize, counts: []const u32, offsets: []const u32, n: usize) u64 {
     var h: u64 = 0;
     const s = sums.slice(f32, floats);
@@ -414,7 +414,7 @@ fn hashLiveRows(sums: mtl.Buffer, floats: usize, counts: []const u32, offsets: [
     return h;
 }
 
-// ROUND-409: the two plans' live rows, compared row for row (the first difference and where it is).
+// The two plans' live rows, compared row for row (the first difference and where it is).
 fn compareLiveRows(a_sums: mtl.Buffer, a_floats: usize, a_counts: []const u32, a_offsets: []const u32, b_sums: mtl.Buffer, b_floats: usize, b_offsets: []const u32, n: usize) void {
     const sa = a_sums.slice(f32, a_floats);
     const sb = b_sums.slice(f32, b_floats);
@@ -438,10 +438,10 @@ fn compareLiveRows(a_sums: mtl.Buffer, a_floats: usize, a_counts: []const u32, a
     std.debug.print("  the two plans' live rows: {d} differing rows\n", .{diffs});
 }
 
-// ROUND-408: the grouped plan's own histogram at the prompt's shape -- the engine's per-expert row counts, read
-// back from the GPU by its own instrument (TF_DSV41_ROUTE_HIST=1, ROUND-408). The plan pads EACH expert's block
-// to a multiple of the tile's sixty-four rows and lays the blocks out consecutively, so the tiles that do work are
-// the sum of the per-expert ceilings and the plan's tail is unused.
+// The grouped plan's own histogram at the prompt's shape -- the engine's per-expert row counts, read back from the
+// GPU by its own instrument. The plan pads EACH expert's block to a multiple of the tile's sixty-four rows and lays
+// the blocks out consecutively, so the tiles that do work are the sum of the per-expert ceilings and the plan's
+// tail is unused.
 const plan_counts = [_]u32{
     13,  7,   219, 2,   122, 13,  1,   9,   76,  10,  61,  37,  95,  0,   1,   7,
     17,  53,  6,   1,   21,  2,   4,   29,  16,  0,   7,   20,  163, 69,  36,  3,
@@ -469,8 +469,7 @@ const plan_counts = [_]u32{
     39,  197, 43,  49,  41,  0,   10,  70,  4,   1,   252, 94,  13,  59,  2,   9,
 };
 
-// ROUND-430: the dense arms at an arbitrary M -- the engine's prompt is 3,283 tokens, and a rate read at
-// 3,619 is a shape mismatch of 9 %. Default 3619 (the record's long-standing fixture).
+// Default 3619 (the record's long-standing fixture).
 fn benchDenseRows() usize {
     if (std.c.getenv("TF_BENCH_DENSE_ROWS")) |v| {
         if (std.fmt.parseInt(usize, std.mem.span(v), 10)) |n| {
@@ -496,7 +495,7 @@ fn timeShape(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl
         e.setBuffer(trellis, 0, 1);
         e.setBuffer(sums, 0, 2);
         e.setBytes(std.mem.asBytes(args), 3);
-        if (table) |tbl| e.setBuffer(tbl, 0, 7); // ROUND-431: the 128-column body's codebook table
+        if (table) |tbl| e.setBuffer(tbl, 0, 7); // The 128-column body's codebook table
         e.dispatchGroups(.{ .width = tn, .height = tm, .depth = 1 }, .{ .width = threads });
         e.end();
         cb.commit();
@@ -536,11 +535,7 @@ fn timeGrouped128(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x
     return median(samples[0..nt]);
 }
 
-// ROUND-433: the tap projection's width-8 funnel. `main_proj` is 15,360 x 5,120 at halves 8 and runs the dense
-// 128x64 tile at 128 rows; the shipped body reads four stream words a lane a block, but the dense tile's lane
-// owns four states, whose windows are four bits apart -- a 28-bit run, so two words cover it. This times the
-// shipped body (nax31) against the funnel body (nax51) at the tap's own shape and width, and hashes both
-// outputs: the funnel is bit-identical by construction, so IDENTICAL is the validity receipt.
+// The tap projection's width-8 funnel.
 fn benchTapFunnel(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline, p51: mtl.Pipeline, m: usize, n: usize, k: usize, halves: u32) !void {
     const tile_bytes = @as(usize, halves) * 8 * 2;
     const n_stride = tile_bytes;
@@ -584,7 +579,7 @@ fn benchTapFunnel(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline, p51: 
         .tile_n_stride = n_stride,
     };
     const macs = @as(f64, @floatFromInt(m)) * @as(f64, @floatFromInt(n)) * @as(f64, @floatFromInt(k));
-    std.debug.print("ROUND-433 tap projection {d}x{d}x{d} halves {d}, dense 128x64 tile, 128 rows a threadgroup:\n", .{ m, n, k, halves });
+    std.debug.print("tap projection {d}x{d}x{d} halves {d}, dense 128x64 tile, 128 rows a threadgroup:\n", .{ m, n, k, halves });
     _ = try timeShape(queue, p31, &args, x, tr, sums, null, m, n, 64, 256, 128, 1);
     const ms31 = try timeShape(queue, p31, &args, x, tr, sums, null, m, n, 64, 256, 128, 5);
     const h31 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, m * n)));
@@ -645,9 +640,7 @@ fn benchDenseShapeAt(device: mtl.Device, queue: mtl.Queue, pipe: mtl.Pipeline, m
     std.debug.print("  {d:>6}x{d:>6}x{d:>5} {d:>9.3} {d:>9.1}\n", .{ m, n, k, ms, macs / (ms * 1e-3) / 1e12 });
 }
 
-// ROUND-431: nax31 against the 128-column double-buffered bodies at one prompt shape. The 128-column tile
-// dispatches tn = n / 128 groups and 512 threads; the arithmetic per output must be nax31's, so the sums hash
-// is the validity receipt as well as the timing.
+// Nax31 against the 128-column double-buffered bodies at one prompt shape.
 fn benchDenseCompare128(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline, p79: ?mtl.Pipeline, p80: ?mtl.Pipeline, p82: ?mtl.Pipeline, p83: ?mtl.Pipeline, table: mtl.Buffer, m: usize, n: usize, k: usize) !void {
     const trellis_bytes = (k / 16) * (n / 16) * exl3_tile_bytes;
     const tr = try device.buffer(trellis_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -720,10 +713,7 @@ fn benchDenseCompare128(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline,
     std.debug.print("\n", .{});
 }
 
-// Is the dense bench's rate cache-inflated? `timeDense` repeats one trellis buffer, and at the attention shapes
-// that buffer is 12-16 MB, so dispatches after the first may read it from the SLC. This times the same dispatch
-// over `copies` distinct buffers in one command buffer (cold, 8x the footprint) against the same buffer repeated
-// (hot). The per-dispatch time is the number to compare with the in-situ stage.
+// Is the dense bench's rate cache-inflated? The per-dispatch time is the number to compare with the in-situ stage.
 fn timeShapeCold(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl.Buffer, trs: []const mtl.Buffer, sums: mtl.Buffer, m: usize, n: usize, cols: usize, threads: usize, tg_rows: usize, distinct: bool) !f64 {
     const tn = (n + cols - 1) / cols;
     const tm = (m + tg_rows - 1) / tg_rows;
@@ -801,10 +791,10 @@ fn benchDenseCold(device: mtl.Device, queue: mtl.Queue, pipe: mtl.Pipeline, m: u
     std.debug.print("  {d:>6}x{d:>6}x{d:>5} hot {d:>8.3} ms {d:>7.1} TMAC/s | cold x{0} {d:>8.3} ms {d:>7.1} TMAC/s\n", .{ m, n, k, hot, macs / (hot * 1e-3) / 1e12, cold, macs / (cold * 1e-3) / 1e12 });
 }
 
-// ROUND-437 (instrument): the routed prompt stream's one-cold-pass READ arm at the live plan's shape.
-// 388 row tiles x 36 column tiles, 384 distinct expert allocations, no decode / no activation / no MMA.
-// The arms vary the stream's prefetch width and the grid's scheduling; the shipped body's full time is the control
-// (the record's 384-tile nax59). Bench only: no engine path selects any of these kernels.
+// The routed prompt stream's one-cold-pass READ arm at the live plan's shape. 388 row tiles x 36 column tiles, 384
+// distinct expert allocations, no decode / no activation / no MMA. The arms vary the stream's prefetch width and
+// the grid's scheduling; the shipped body's full time is the control (the record's 384-tile nax59). Bench only: no
+// engine path selects any of these kernels.
 fn timeRead(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl.Buffer, trellis: mtl.Buffer, sink: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, gw: usize, gh: usize, threads: usize, trials: usize) !f64 {
     var samples: [8]f64 = undefined;
     const nt = @min(trials, samples.len);
@@ -893,8 +883,8 @@ fn routedReadBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator)
             dh[i].trellis = experts[0].gpuAddress();
         }
     }
-    // ROUND-437: the ENGINE's layout is one trellis buffer with the experts back to back (exl3_layout.zig), not
-    // 384 separate allocations. Copy the fixture into that layout so the read arms can price it.
+    // The ENGINE's layout is one trellis buffer with the experts back to back (exl3_layout.zig), not 384 separate
+    // allocations. Copy the fixture into that layout so the read arms can price it.
     const slab = try device.buffer(exl3_tiles * exl3_expert_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     defer slab.deinit();
     for (0..exl3_tiles) |i| {
@@ -963,7 +953,7 @@ fn routedReadBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator)
             v.* = rng;
         }
     }
-    std.debug.print("ROUND-437 routed stream read: {d} tiles x 36 columns, {d} live rows, {d:.3} GB a pass, 384 distinct experts\n", .{ tiles, plan_rows, bytes / 1e9 });
+    std.debug.print("routed stream read: {d} tiles x 36 columns, {d} live rows, {d:.3} GB a pass, 384 distinct experts\n", .{ tiles, plan_rows, bytes / 1e9 });
     for (arms) |a| {
         const trellis = if (std.mem.eql(u8, a.name, "read99 linear ceiling")) big else experts[0];
         const warm = try timeRead(queue, a.pipe, &args, x, trellis, sink, routes, descs, a.gw, a.gh, a.threads, 1);
@@ -976,7 +966,6 @@ fn routedReadBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator)
         const ms = try timeRead(queue, a.pipe, &args, x, experts[0], sink, routes, descs_slab, a.gw, a.gh, a.threads, 5);
         std.debug.print("  {s:>22} ENGINE-SLAB median5 {d:>7.3} ms  {d:>7.1} GB/s\n", .{ a.name, ms, bytes / (ms * 1e-3) / 1e9 });
     }
-    // The hot control: all descriptors name one 4.42 MB expert, so the same addresses repeat.
     for (arms[0..3]) |a| {
         const ms = try timeRead(queue, a.pipe, &args, x, experts[0], sink, routes, descs_hot, a.gw, a.gh, a.threads, 5);
         std.debug.print("  {s:>22} HOT median5 {d:>7.3} ms  {d:>7.1} GB/s\n", .{ a.name, ms, bytes / (ms * 1e-3) / 1e9 });
@@ -1019,16 +1008,15 @@ const one_row_shapes = [_]OneRow{
     .{ .m = 1, .k = 1280, .n = 32768, .halves = 10 }, // wq_b, short k
     .{ .m = 1, .k = 4096, .n = 1024, .halves = 12 }, // wo_a, narrow n
     .{ .m = 1, .k = 5120, .n = 8192, .halves = 12 }, // wo_b, long k
-    // ROUND-338: the shapes the engine's one-row dispatch names, at the widths it names them (the serve log's
-    // "one-row body" lines), so the arms are priced on the engine's own cases.
+    // The shapes the engine's one-row dispatch names, at the widths it names them (the serve log's "one-row body"
+    // lines), so the arms are priced on the engine's own cases.
     .{ .m = 1, .k = 8192, .n = 5120, .halves = 10 },
     .{ .m = 1, .k = 5120, .n = 2304, .halves = 10 },
     .{ .m = 1, .k = 2304, .n = 5120, .halves = 10 },
     .{ .m = 1, .k = 6144, .n = 25600, .halves = 10 },
     .{ .m = 1, .k = 5120, .n = 1280, .halves = 12 },
     .{ .m = 1, .k = 5120, .n = 512, .halves = 12 },
-    // ROUND-327: the rest of the dense set the prefill dispatch log names (rows = 3619, all take the one-row path
-    // at decode).
+    // The rest of the dense set the prefill dispatch log names (rows = 3619, all take the one-row path at decode).
     .{ .m = 1, .k = 8192, .n = 5120, .halves = 12 },
     .{ .m = 1, .k = 5120, .n = 2304, .halves = 12 },
     .{ .m = 1, .k = 5120, .n = 1280, .halves = 12 },
@@ -1080,10 +1068,10 @@ fn timeRow(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args: Ex
     return median(samples[0..nt]);
 }
 
-// ROUND-340: the register-only body (the comparator's structure, already the routed decode's) on the DENSE
-// one-row fixture. The body reads its weights through descriptors[expert], so a dense matrix needs a
-// descriptor of its own; the pointer is rewritten a trial at a time so the eight trellis copies rotate and
-// the weights are not resident when they come back (the same cold protocol as the other arms).
+// The register-only body (the comparator's structure, already the routed decode's) on the DENSE one-row fixture.
+// The body reads its weights through descriptors[expert], so a dense matrix needs a descriptor of its own; the
+// pointer is rewritten a trial at a time so the eight trellis copies rotate and the weights are not resident when
+// they come back (the same cold protocol as the other arms).
 fn timeRowDesc(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, trs: []const mtl.Buffer, sums: mtl.Buffer, partials: mtl.Buffer, table: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, d: RowDispatch, trials: usize, tile_bytes: u64, halves: u32) !f64 {
     var samples: [16]f64 = undefined;
     const nt = @max(1, @min(trials, samples.len));
@@ -1115,20 +1103,18 @@ fn timeRowDesc(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buff
     return median(samples[0..nt]);
 }
 
-// ROUND-442: THE COMPARATOR'S LANE PACKING, PRICED AS A BENCH ARM. ROUND-441's source spot-check found the
-// one structural difference left at the dense one-row shapes: the comparator gives a sixteen-column tile ONE
-// simdgroup whose thirty-two lanes split the whole K walk, while the engine gives it TF_FMA_WARPS = 16 warps
-// whose partials meet through threadgroup memory at the end. This helper selects the three shapes the decode
-// ledger names (wq_b, wo_a, wo_b) so a lane-only run prices exactly those.
+// THE COMPARATOR'S LANE PACKING, PRICED AS A BENCH ARM. The source spot-check found the one structural difference
+// left at the dense one-row shapes: the comparator gives a sixteen-column tile ONE simdgroup whose thirty-two lanes
+// split the whole K walk, while the engine gives it TF_FMA_WARPS = 16 warps whose partials meet through threadgroup
+// memory at the end. This helper selects the three shapes the decode ledger names (wq_b, wo_a, wo_b) so a lane-only
+// run prices exactly those.
 fn lanePackShape(s: OneRow) bool {
     return (s.n == 32768 and s.k == 1280) or (s.n == 8192 and s.k == 5120) or (s.n == 1024 and s.k == 4096);
 }
 
-// ROUND-442: THE DENSE PACK'S WIDTH, PRICED AT THE DECODE'S OWN SHAPES. The engine's dense pack is 5-bit
-// (halves 10: wq_b, wo_b, wo_a, shared) and 6-bit (halves 12: wq_a, wkv); the experts are 3-bit (halves 6).
-// ROUND-441's lane-packing arm showed why the comparator's one-warp structure is not the missing 2.1x: at
-// matched shapes the two bodies differ by BYTES A WEIGHT, not by lane packing. This sweeps the same three
-// one-row shapes over halves 6/8/10/12 on the shipped dense kernel at the engine's sixteen warps, with the
+// THE DENSE PACK'S WIDTH, PRICED AT THE DECODE'S OWN SHAPES. The engine's dense pack is 5-bit (halves 10: wq_b,
+// wo_b, wo_a, shared) and 6-bit (halves 12: wq_a, wkv); the experts are 3-bit (halves 6). This sweeps the same
+// three one-row shapes over halves 6/8/10/12 on the shipped dense kernel at the engine's sixteen warps, with the
 // same cold-copy protocol, so any repack's bytes term is read directly from the time and the GB/s.
 fn widthSweep(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void {
     var options = mtl.CompileOptions.mlx();
@@ -1167,7 +1153,7 @@ fn widthSweep(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !voi
         .{ .n = 8192, .k = 5120, .pack = 12 }, // wo_b
         .{ .n = 1024, .k = 4096, .pack = 12 }, // wo_a (one group)
     };
-    std.debug.print("ROUND-442 dense width sweep: the shipped dense kernel at sixteen warps, one row, the decode's shapes\n", .{});
+    std.debug.print("dense width sweep: the shipped dense kernel at sixteen warps, one row, the decode's shapes\n", .{});
     std.debug.print("  {s:>16} {s:>6} {s:>4} {s:>9} {s:>9} {s:>9} {s:>10}\n", .{ "shape", "halves", "bits", "ms", "weights/s", "GB/s", "vs pack" });
     for (shapes) |s| {
         const x = try device.buffer(s.k * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -1255,47 +1241,46 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         return;
     };
     defer wide.deinit();
-    // ROUND-327: the 32-k continuation of the wide body (two 16-k tiles decoded before one barrier).
+    // The 32-k continuation of the wide body (two 16-k tiles decoded before one barrier).
     const wide2 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide2_tab", false) catch |err| {
         std.debug.print("one-row bench: wide2 pipeline failed: {s}\n", .{@errorName(err)});
         return;
     };
     defer wide2.deinit();
-    // ROUND-327 diagnostic: the wide body with the decode removed (timing only; values meaningless).
+    // Diagnostic: the wide body with the decode removed (timing only; values meaningless).
     const noload = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_noload_tab", false) catch null;
     defer if (noload) |p| p.deinit();
-    // ROUND-338: the separation experiment's three arms at the dense one-row shapes: the codebook read from a
-    // 1024-entry threadgroup LUT (the dynamic selection left in), the static state selection with the table,
-    // and the static selection with the LUT.
+    // The separation experiment's three arms at the dense one-row shapes: the codebook read from a 1024-entry
+    // threadgroup LUT (the dynamic selection left in), the static state selection with the table, and the static
+    // selection with the LUT.
     const wide_lut = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_lut", false) catch null;
     defer if (wide_lut) |p| p.deinit();
     const wide_static = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_static_tab", false) catch null;
     defer if (wide_static) |p| p.deinit();
     const wide_static_lut = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_static_lut", false) catch null;
     defer if (wide_static_lut) |p| p.deinit();
-    // ROUND-339: the static one-row body with a deeper weight prefetch (PF blocks of stream words in flight
-    // a lane): the narrow one-row shapes have one wave of threadgroups, so a block's DRAM latency needs more
-    // than one block's compute to hide behind.
+    // The static one-row body with a deeper weight prefetch (PF blocks of stream words in flight a lane): the
+    // narrow one-row shapes have one wave of threadgroups, so a block's DRAM latency needs more than one block's
+    // compute to hide behind.
     const wide_static_lut_pf2 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_static_lut_pf2", false) catch null;
     defer if (wide_static_lut_pf2) |p| p.deinit();
     const wide_static_lut_pf4 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_static_lut_pf4", false) catch null;
     defer if (wide_static_lut_pf4) |p| p.deinit();
-    // ROUND-327: the direct-register one-row body (a lane owns a column; no threadgroup tile, no barrier).
+    // The direct-register one-row body (a lane owns a column; no threadgroup tile, no barrier).
     const direct = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_direct_tab", false) catch |err| {
         std.debug.print("one-row bench: direct pipeline failed: {s}\n", .{@errorName(err)});
         return;
     };
     defer direct.deinit();
-    // ROUND-331: the direct-register one-row body with a wider load width: the trellis stream word as one
-    // 32-bit load and the activation row as four half4 loads (the same bytes in the same order, so the output
-    // is bit-identical). The geometry sweep below is the narrow-shape lever the session-11 handoff names.
+    // The direct-register one-row body with a wider load width: the trellis stream word as one 32-bit load and the
+    // activation row as four half4 loads (the same bytes in the same order, so the output is bit-identical).
     const directv = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_direct_tab_v", false) catch null;
     defer if (directv) |p| p.deinit();
-    // ROUND-332: the direct body with its stream words named instead of an array indexed by the runtime
-    // cursor: the array could not live in registers, so the narrow body used thread-local memory.
+    // The direct body with its stream words named instead of an array indexed by the runtime cursor: the array
+    // could not live in registers, so the narrow body used thread-local memory.
     const directr = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_direct_tab_r", false) catch null;
     defer if (directr) |p| p.deinit();
-    // ROUND-335: the direct body loading only the words the map names (max(rel) + 2) instead of eight.
+    // The direct body loading only the words the map names (max(rel) + 2) instead of eight.
     const directnw_src = std.fmt.allocPrint(gpa, "#define TF_DIRECT_NW 1\n{s}", .{ks.core_exl3_projection}) catch null;
     defer if (directnw_src) |s| gpa.free(s);
     const directnw_lib = if (directnw_src) |s| (mtl.Library.fromSource(device, s, mtl.CompileOptions.mlx()) catch null) else null;
@@ -1312,26 +1297,24 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer if (nax_lib) |l| l.deinit();
     const mma = if (nax_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_nax", false) catch null) else null;
     defer if (mma) |p| p.deinit();
-    // ROUND-444: the register-direct MMA's decode-free floor (a bench-only arm; no engine path selects it).
+    // The register-direct MMA's decode-free floor (a bench-only arm; no engine path selects it).
     const regfloor = if (nax_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matvec_nax_regfloor", false) catch null) else null;
     defer if (regfloor) |p| p.deinit();
-    // ROUND-340: the register-only body on the dense one-row fixture. It is the routed decode's body (the
-    // comparator's structure: one warp a sixteen-column tile, the decoded weights in registers, no threadgroup
-    // tile, no barrier in the k loop, no split-K and no reduce dispatch), priced here on the DENSE shapes --
-    // the shared expert's gate/up and down and the attention's projections -- where the engine today runs the
-    // 128-column threadgroup-tile body at half the rate the routed stage reaches on the same shape class.
+    // The register-only body on the dense one-row fixture. It is the routed decode's body (the comparator's
+    // structure: one warp a sixteen-column tile, the decoded weights in registers, no threadgroup tile, no barrier
+    // in the k loop, no split-K and no reduce dispatch), priced here on the DENSE shapes -- the shared expert's
+    // gate/up and down and the attention's projections -- where the engine today runs the 128-column
+    // threadgroup-tile body at half the rate the routed stage reaches on the same shape class.
     const fma_dense_src = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 4\n{s}", .{nax_src});
     defer gpa.free(fma_dense_src);
     const fma_dense_lib = mtl.Library.fromSource(device, fma_dense_src, mtl.CompileOptions.mlx()) catch null;
     defer if (fma_dense_lib) |l| l.deinit();
     const fma_dense = if (fma_dense_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) else null;
     defer if (fma_dense) |p| p.deinit();
-    // ROUND-415 (the instrument): THE DECODE'S SHARE AT THE DECODE'S OWN SHAPES. The one-row bench had no arm
-    // that separates the register-only body's EXTRACTION from its arithmetic and its trellis read, so the
-    // decode's biggest term (the attention's dense, ~6.4 ms a token) had no roofline of its own. Two more
-    // libraries of the same source: TF_DIAG_DECODE = 1 keeps the state's extraction and the trellis read and drops
-    // the VALUE path (the hash, the byte sum, the index and the LUT load); = 2 drops the whole decode, so the
-    // trellis reads go too. The arm shape is the fma/4 arm's own, so the three are apples-to-apples.
+    // THE DECODE'S SHARE AT THE DECODE'S OWN SHAPES. Two more libraries of the same source: TF_DIAG_DECODE = 1
+    // keeps the state's extraction and the trellis read and drops the VALUE path (the hash, the byte sum, the index
+    // and the LUT load); = 2 drops the whole decode, so the trellis reads go too. The arm shape is the fma/4 arm's
+    // own, so the three are apples-to-apples.
     const diag1_src = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 4\n#define TF_DIAG_DECODE 1\n{s}", .{nax_src});
     defer gpa.free(diag1_src);
     const diag1_lib = mtl.Library.fromSource(device, diag1_src, mtl.CompileOptions.mlx()) catch null;
@@ -1344,12 +1327,12 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer if (diag2_lib) |l| l.deinit();
     const diag2 = if (diag2_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) else null;
     defer if (diag2) |p| p.deinit();
-    // ROUND-416 (the instrument): THREE MORE LEVELS OF THE SAME DIAGNOSTIC LADDER, on the same arm shape (the
-    // fma/4 arm's own source, the same dispatch, the same cold protocol). = 3 DOUBLES the per-weight FP op: a
-    // removal arm would let the compiler delete the decode (the weight would be dead), so the price of the
-    // arithmetic is read as the MARGINAL cost of one more FMA -- the record's doubling-arm discipline. = 4
-    // drops the ACTIVATION READ (the x row is not read; the FMA stays because the weight is still needed).
-    // = 5 drops the CROSS-WARP REDUCTION (the warps' partials through the threadgroup memory).
+    // THREE MORE LEVELS OF THE SAME DIAGNOSTIC LADDER, on the same arm shape (the fma/4 arm's own source, the same
+    // dispatch, the same cold protocol). = 3 DOUBLES the per-weight FP op: a removal arm would let the compiler
+    // delete the decode (the weight would be dead), so the price of the arithmetic is read as the MARGINAL cost of
+    // one more FMA -- the record's doubling-arm discipline. = 4 drops the ACTIVATION READ (the x row is not read;
+    // the FMA stays because the weight is still needed). = 5 drops the CROSS-WARP REDUCTION (the warps' partials
+    // through the threadgroup memory).
     const diag3_src = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 4\n#define TF_DIAG_DECODE 3\n{s}", .{nax_src});
     defer gpa.free(diag3_src);
     const diag3_lib = mtl.Library.fromSource(device, diag3_src, mtl.CompileOptions.mlx()) catch null;
@@ -1368,11 +1351,10 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer if (diag5_lib) |l| l.deinit();
     const diag5 = if (diag5_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) else null;
     defer if (diag5) |p| p.deinit();
-    // ROUND-416 (the mechanism): THE PREFETCH DEPTH OF THE REGISTER-ONLY BODY'S K-WALK. The shipped body keeps
-    // ONE block of stream words in flight, so a block's DRAM latency is exposed once a block unless the block's
-    // own work (eight states) hides it -- and it cannot. TF_FMA_PF blocks in flight hides it behind PF blocks of
-    // work. The values, their order and the arithmetic are untouched, so every arm is BIT-IDENTICAL to the
-    // shipped body (the bench's hash says so).
+    // THE PREFETCH DEPTH OF THE REGISTER-ONLY BODY'S K-WALK. The shipped body keeps ONE block of stream words in
+    // flight, so a block's DRAM latency is exposed once a block unless the block's own work (eight states) hides it
+    // -- and it cannot. TF_FMA_PF blocks in flight hides it behind PF blocks of work. The values, their order and
+    // the arithmetic are untouched, so every arm is BIT-IDENTICAL to the shipped body (the bench's hash says so).
     const PfArm = struct { name: []const u8, pf: u32, pipe: ?mtl.Pipeline, lib: ?mtl.Library };
     var pf_arms: [3]PfArm = undefined;
     var npf: usize = 0;
@@ -1395,11 +1377,10 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             npf += 1;
         }
     }
-    // ROUND-416 (the mechanism): THE ENGINE'S OWN CONFIGURATION AND THE COMPARATOR'S READ. The engine compiles
-    // the register-only body with SIXTEEN warps a threadgroup (the bench's fma arm is at four), and the body
-    // reads its stream words as TWO 2-byte loads a word, where the prefill tiles (and the comparator) read one
-    // 4-byte load a word. Both are the same bytes, the same values and the same order, so every arm here is
-    // BIT-IDENTICAL to the shipped body.
+    // THE ENGINE'S OWN CONFIGURATION AND THE COMPARATOR'S READ. The engine compiles the register-only body with
+    // SIXTEEN warps a threadgroup (the bench's fma arm is at four), and the body reads its stream words as TWO
+    // 2-byte loads a word, where the prefill tiles (and the comparator) read one 4-byte load a word. Both are the
+    // same bytes, the same values and the same order, so every arm here is BIT-IDENTICAL to the shipped body.
     const WideArm = struct { name: []const u8, warps: u32, pipe: ?mtl.Pipeline, lib: ?mtl.Library };
     var wide_arms: [8]WideArm = undefined;
     var nwide: usize = 0;
@@ -1430,15 +1411,11 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             nwide += 1;
         }
     }
-    // ROUND-341: the engine's OWN dense kernel (tf_exl3_matmul_decode_fma_dense): the same body, but the
-    // trellis is read from the buffer and the strides, the width and the codebook from the args (a dense
-    // matrix has no expert descriptor). The receipt below is taken against THIS kernel, not against the
-    // routed instantiation of the same body, so the receipt prices the kernel the engine dispatches.
+    // The engine's OWN dense kernel (tf_exl3_matmul_decode_fma_dense): the same body, but the trellis is read from
+    // the buffer and the strides, the width and the codebook from the args (a dense matrix has no expert
+    // descriptor).
     const fma_dense_kernel = if (fma_dense_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_dense", false) catch null) else null;
     defer if (fma_dense_kernel) |p| p.deinit();
-    // ROUND-356: the dense one-row body's receipt, PER WARP COUNT. The warps a threadgroup are the reduction
-    // class's chain length (each warp walks its own slice of the k blocks), so a landed warp count needs its
-    // own receipt against the fp64 truth, not the four-warp one.
     const DenseWarp = struct { warps: u32, pipe: ?mtl.Pipeline, lib: ?mtl.Library };
     var dense_warps: [4]DenseWarp = undefined;
     var ndense: usize = 0;
@@ -1456,12 +1433,11 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             ndense += 1;
         }
     }
-    // ROUND-442: THE LANE PACKING (the comparator's structure) AT THE DENSE ONE-ROW SHAPES. The body and the
-    // value path are the shipped dense kernel's; only TF_FMA_WARPS and the load form move, so every arm is the
-    // same arithmetic in a different lane packing. `w1` is the comparator's: one simdgroup a sixteen-column
-    // tile, its thirty-two lanes walking the whole k, no cross-warp reduction. The hash column prices whether
-    // an arm is bit-identical to the w16 control (a changed reduction order may differ; a changed load form
-    // may not).
+    // THE LANE PACKING (the comparator's structure) AT THE DENSE ONE-ROW SHAPES. The body and the value path are
+    // the shipped dense kernel's; only TF_FMA_WARPS and the load form move, so every arm is the same arithmetic in
+    // a different lane packing. `w1` is the comparator's: one simdgroup a sixteen-column tile, its thirty-two lanes
+    // walking the whole k, no cross-warp reduction. The hash column prices whether an arm is bit-identical to the
+    // w16 control (a changed reduction order may differ; a changed load form may not).
     const LaneArm = struct { name: []const u8, warps: u32, pipe: ?mtl.Pipeline, lib: ?mtl.Library };
     var lane_arms: [8]LaneArm = undefined;
     var nlane: usize = 0;
@@ -1489,10 +1465,10 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             nlane += 1;
         }
     }
-    // ROUND-443: THE SIXTEEN-STATE LANE PACKING (TF_FMA_S16). A lane owns sixteen consecutive states (two
-    // columns by eight k-rows) so one 16-k block's four stream words decode them all; lanes 0..15 walk one
-    // block and 16..31 the next of the same sixteen-column tile, so the dispatch geometry is the shipped
-    // body's. It is NOT bit-identical (the reduction order changes), so a landing owes the FP64 reference.
+    // THE SIXTEEN-STATE LANE PACKING (TF_FMA_S16). A lane owns sixteen consecutive states (two columns by eight
+    // k-rows) so one 16-k block's four stream words decode them all; lanes 0..15 walk one block and 16..31 the next
+    // of the same sixteen-column tile, so the dispatch geometry is the shipped body's. It is NOT bit-identical (the
+    // reduction order changes), so a landing owes the FP64 reference.
     const S16Arm = struct { name: []const u8, warps: u32, pipe: ?mtl.Pipeline, lib: ?mtl.Library };
     var s16_arms: [6]S16Arm = undefined;
     var ns16: usize = 0;
@@ -1534,11 +1510,11 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     const descs = try device.buffer(@sizeOf(Exl3Expert), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     defer descs.deinit();
 
-    // ROUND-338: the one-row fixture's visibility. A large shared buffer the CPU has just written can read as
-    // zeros on the GPU's first touch (ROUND-337's finding: the CPU's dirty lines are not yet in memory), so
-    // every copy is verified from the GPU and refilled until it lands. Without this the arms' value-level
-    // checks are made against a buffer the kernel never saw -- and every arm then reads the same zeros, so
-    // every pair of arms agrees for the wrong reason.
+    // The one-row fixture's visibility. A large shared buffer the CPU has just written can read as zeros on the
+    // GPU's first touch (The finding: the CPU's dirty lines are not yet in memory), so every copy is verified from
+    // the GPU and refilled until it lands. Without this the arms' value-level checks are made against a buffer the
+    // kernel never saw -- and every arm then reads the same zeros, so every pair of arms agrees for the wrong
+    // reason.
     const words_src = try std.mem.concat(gpa, u8, &.{
         \\kernel void tf_exl3_diag_words(const device ushort* t [[buffer(0)]], device uint* out [[buffer(1)]],
         \\                             uint gid [[thread_position_in_grid]]) {
@@ -1557,8 +1533,8 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     std.debug.print("  {s:>12} {s:>7} {s:>5} {s:>9} {s:>9} {s:>8} {s:>9}\n", .{ "N x K", "body", "splits", "ms", "weights/s", "GB/s", "hash" });
     const table = try device.buffer(3 * 65536 * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     defer table.deinit();
-    // ROUND-338: the codebook-2 region holds the format's own mul1 values, so the LUT arm (which builds the
-    // same values arithmetically) and the table arm are bit-identical by construction and checkable by hash.
+    // The codebook-2 region holds the format's own mul1 values, so the LUT arm (which builds the same values
+    // arithmetically) and the table arm are bit-identical by construction and checkable by hash.
     for (table.slice(u16, 3 * 65536), 0..) |*v, i| {
         if (i >= 2 * 65536 and i < 3 * 65536) {
             const state: u16 = @intCast(i - 2 * 65536);
@@ -1590,8 +1566,6 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         const macs = @as(f64, @floatFromInt(s.m)) * @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k));
         const gbs = @as(f64, @floatFromInt(trellis_bytes)) / 1e9;
         var base_hash: ?u64 = null;
-        // Two passes: the first ramps the box's clocks and the second is the number (a one-row dispatch is
-        // 0.03-0.3 ms, so a cold first sample reads up to 2.5x slow).
         for (0..2) |pass| {
             for (split_sweep) |splits| {
                 const args = Exl3Args{
@@ -1633,9 +1607,9 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
                 const t_wide2 = timeRow(queue, wide2, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
                 const h_wide2 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                // ROUND-338: the separation arms. The LUT arm reads the codebook from a 1024-entry threadgroup
-                // table (the dynamic selection left in), the static arm resolves the state's word pair and bit
-                // offset at compile time (the table left in), and the static+LUT arm has both.
+                // The separation arms. The LUT arm reads the codebook from a 1024-entry threadgroup table (the
+                // dynamic selection left in), the static arm resolves the state's word pair and bit offset at
+                // compile time (the table left in), and the static+LUT arm has both.
                 var t_wlut: f64 = 0;
                 var h_wlut: u64 = 0;
                 var t_wstat: f64 = 0;
@@ -1700,7 +1674,6 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     @memset(sums.slice(u32, n_out), 0);
                     @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
                     t_direct128 = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 128, .height = splits, .threads = 128 }, n_out, 7, 1) catch 0;
-                    // The geometry sweep: a group of 64 or 32 columns (two or one SIMDgroups) instead of 256.
                     if (s.n % 64 == 0) {
                         @memset(sums.slice(u32, n_out), 0);
                         @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
@@ -1719,7 +1692,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         t_directr = timeRow(queue, dr, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
                         h_directr = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     }
-                    // ROUND-335: the nw body at the engine's geometry.
+                    // The nw body at the engine's geometry.
                     if (directnw) |dnw| {
                         @memset(sums.slice(u32, n_out), 0);
                         @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
@@ -1742,11 +1715,8 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         }
                     }
                 }
-                // ROUND-340: the register-only body on this dense shape, against the same cold protocol (the eight
-                // trellis copies rotate a trial at a time). It has no split count: the k split lives inside the
-                // threadgroup (the warps walk their own slices and meet once), so its number does not move with the
-                // split sweep -- which is itself the point: the dense path's split-K round trip is what the routed
-                // body does not pay.
+                // The register-only body on this dense shape, against the same cold protocol (the eight trellis
+                // copies rotate a trial at a time).
                 var t_fma: f64 = 0;
                 var t_regfloor: f64 = 0;
                 var h_fma: u64 = 0;
@@ -1772,7 +1742,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         @memset(sums.slice(u32, n_out), 0);
                         t_regfloor = timeRowDesc(queue, rf, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = (s.n + 127) / 128, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
                     }
-                    // ROUND-415: the two diagnostics, on the same args and the same dispatch as the fma arm.
+                    // The two diagnostics, on the same args and the same dispatch as the fma arm.
                     if (diag1) |d1| {
                         @memset(sums.slice(u32, n_out), 0);
                         t_diag1 = timeRowDesc(queue, d1, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
@@ -1781,7 +1751,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         @memset(sums.slice(u32, n_out), 0);
                         t_diag2 = timeRowDesc(queue, d2, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
                     }
-                    // ROUND-416: the three new levels, on the same args and the same dispatch as the fma arm.
+                    // The three new levels, on the same args and the same dispatch as the fma arm.
                     if (diag3) |d3| {
                         @memset(sums.slice(u32, n_out), 0);
                         t_diag3 = timeRowDesc(queue, d3, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
@@ -1794,8 +1764,8 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         @memset(sums.slice(u32, n_out), 0);
                         t_diag5 = timeRowDesc(queue, d5, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
                     }
-                    // ROUND-416: the engine's own configuration (sixteen warps) and the wide-word read, on the
-                    // same args and the same dispatch as the fma arm (the thread count follows the warp count).
+                    // The engine's own configuration (sixteen warps) and the wide-word read, on the same args and
+                    // the same dispatch as the fma arm (the thread count follows the warp count).
                     for (wide_arms[0..nwide], 0..) |arm, ai| {
                         if (arm.pipe) |wp| {
                             @memset(sums.slice(u32, n_out), 0);
@@ -1803,7 +1773,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                             h_ww[ai] = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                         }
                     }
-                    // ROUND-416: the prefetch-depth arms, on the same args and the same dispatch as the fma arm.
+                    // The prefetch-depth arms, on the same args and the same dispatch as the fma arm.
                     for (pf_arms[0..npf]) |arm| {
                         if (arm.pipe) |pp| {
                             @memset(sums.slice(u32, n_out), 0);
@@ -1836,7 +1806,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}\n", .{ s.n, s.k, "shipped", splits, t_ship, macs / (t_ship * 1e-3), gbs / (t_ship * 1e-3), h_ship & 0xffffffff });
                     std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}\n", .{ s.n, s.k, "wide", splits, t_wide, macs / (t_wide * 1e-3), gbs / (t_wide * 1e-3), h_wide & 0xffffffff, if (h_ship == h_wide) "IDENTICAL" else "DIFFERS" });
                     std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}\n", .{ s.n, s.k, "wide2/32k", splits, t_wide2, macs / (t_wide2 * 1e-3), gbs / (t_wide2 * 1e-3), h_wide2 & 0xffffffff, if (h_ship == h_wide2) "IDENTICAL" else "DIFFERS" });
-                    // ROUND-338: the separation arms, each against the shipped body's hash.
+                    // The separation arms, each against the shipped body's hash.
                     if (pass == 1 and t_wlut > 0)
                         std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (lut, {d:.1} % of wide)\n", .{ s.n, s.k, "wide/lut", splits, t_wlut, macs / (t_wlut * 1e-3), gbs / (t_wlut * 1e-3), h_wlut & 0xffffffff, if (h_ship == h_wlut) "IDENTICAL" else "DIFFERS", 100.0 * t_wlut / t_wide });
                     if (pass == 1 and t_wstat > 0)
@@ -1874,14 +1844,14 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the ACTIVATION READ gone: the x row is not read)\n", .{ s.n, s.k, "fma/4 d4", 1, t_diag4, macs / (t_diag4 * 1e-3), gbs / (t_diag4 * 1e-3) });
                     if (pass == 1 and t_diag5 > 0)
                         std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the CROSS-WARP REDUCTION gone: the warps' partials)\n", .{ s.n, s.k, "fma/4 d5", 1, t_diag5, macs / (t_diag5 * 1e-3), gbs / (t_diag5 * 1e-3) });
-                    // ROUND-416: the engine's own warp count and the comparator's 4-byte stream word.
+                    // The engine's own warp count and the comparator's 4-byte stream word.
                     for (wide_arms[0..nwide], 0..) |arm, ai| {
                         const t = t_ww[ai];
                         if (pass == 1 and t > 0)
                             std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  ({d:.1} % of the fma/4 arm)\n", .{ s.n, s.k, arm.name, 1, t, macs / (t * 1e-3), gbs / (t * 1e-3), h_ww[ai] & 0xffffffff, if (h_fma == h_ww[ai]) "IDENTICAL" else "DIFFERS", 100.0 * t / t_fma });
                     }
-                    // ROUND-416: the prefetch depth, on the same dispatch. The hash says whether the arm is
-                    // bit-identical to the shipped body (it must be: the ring only moves the loads in time).
+                    // The prefetch depth, on the same dispatch. The hash says whether the arm is bit-identical to
+                    // the shipped body (it must be: the ring only moves the loads in time).
                     for (pf_arms[0..npf]) |arm| {
                         const t = t_pf[arm.pf];
                         if (pass == 1 and t > 0)
@@ -1890,13 +1860,9 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     if (pass == 1 and t_noload > 0)
                         std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (decode removed, {d:.0} % of wide)\n", .{ s.n, s.k, "noload", splits, t_noload, macs / (t_noload * 1e-3), gbs / (t_noload * 1e-3), 100.0 * (t_wide - t_noload) / t_wide });
                 }
-                // ROUND-341: the FP64 RECEIPT for the DENSE one-row class. The changed class is the k-sum of the
-                // dense one-row projection: the shipped body folds every k term into one fp32 accumulator in
-                // ascending k order (and pays a split-K partials round trip), the register-only body takes one
-                // accumulator a state and closes them in a tree. Both are measured against the SAME fp64 truth
-                // over the SAME fixture bytes (the trellis copy trs[0], one activation row), so the comparison is
-                // arithmetic and not a fixture artefact: GOAL-UNLOCK's band asks that the changed path's agreement
-                // with the fp64 truth be no worse than the shipped path's own.
+                // The changed class is the k-sum of the dense one-row projection: the shipped body folds every k
+                // term into one fp32 accumulator in ascending k order (and pays a split-K partials round trip), the
+                // register-only body takes one accumulator a state and closes them in a tree.
                 if (std.c.getenv("TF_BENCH_DENSE_FP64") != null and pass == 1 and splits == 8 and s.m == 1 and
                     wide_static_lut != null and fma_dense_kernel != null)
                 {
@@ -1989,8 +1955,6 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     std.debug.print("  {d:>7}x{d:>5} h{d} DENSE-FP64 detail |max| wide {d:.2} register-only {d:.2} direct {d:.2} ref {d:.2} | direct nrms {e:.3}\n", .{
                         s.n, s.k, s.halves, sa.maxv, sb.maxv, if (direct_ok) sd.maxv else 0, max_ref, nrms_d,
                     });
-                    // ROUND-356: the same receipt at every warp count: the landed count's own number is the one
-                    // that gates the promotion.
                     for (dense_warps[0..ndense]) |dw| {
                         if (dw.pipe) |dp| {
                             @memset(sums.slice(u32, rn_out), 0);
@@ -2013,8 +1977,6 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     }
                 }
             }
-            // ROUND-442: THE LANE PACKING, timed on the same cold fixture and the same args as the fma arms
-            // above, once a shape (outside the split sweep -- these bodies take no split count).
             if (pass == 1 and lane_only) {
                 const n_out = s.m * s.n;
                 const la = Exl3Args{
@@ -2059,7 +2021,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         if (ai == 0) "control" else if (h_ref == h) "IDENTICAL" else "DIFFERS", if (ai == 0) 100.0 else 100.0 * t / t_ref, t * 1e3 / @as(f64, @floatFromInt(s.n / 16)),
                     });
                 }
-                // ROUND-443: the sixteen-state body, timed on the same cold fixture and dispatch geometry.
+                // The sixteen-state body, timed on the same cold fixture and dispatch geometry.
                 std.debug.print("  {d:>7}x{d:>5} h{d} SIXTEEN-STATE LANE PACKING: four words for sixteen states, two lanes a column\n", .{ s.n, s.k, s.halves });
                 std.debug.print("  {s:>12} {s:>5} {s:>9} {s:>9} {s:>8} {s:>9}\n", .{ "body", "warps", "ms", "weights/s", "GB/s", "hash" });
                 for (s16_arms[0..ns16]) |arm| {
@@ -2073,7 +2035,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         if (h_ref == h) "IDENTICAL" else "DIFFERS", if (t_ref > 0) 100.0 * t / t_ref else 0.0, t * 1e3 / @as(f64, @floatFromInt(s.n / 16)),
                     });
                 }
-                // ROUND-443: a value-level cross-check of the s16 body against the shipped w16 on this fixture.
+                // A value-level cross-check of the s16 body against the shipped w16 on this fixture.
                 if (lane_arms[0].pipe != null and s16_arms[ns16 - 2].pipe != null) {
                     const hp = try gpa.alloc(f32, n_out);
                     defer gpa.free(hp);
@@ -2104,36 +2066,33 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     }
 }
 
-// -- the routed decode at the expert shapes: the shipped MMA body against the direct-register descriptor body ---
-// The routed stage is the one the record could not re-baseline (16.8 ms of a 47.8 ms token). Its weights come
-// through descriptors[expert], one row an expert, so the dense direct body does not apply to it. The pack's
-// expert matrices are three bits (the trellis tensors are [K/16, N/16, 48] int16, so width.halves = 6) at
-// the shapes the pack stores: gate/up K = 5120, N = 2304; down K = 2304, N = 5120. Six rows a token.
+// Its weights come through descriptors[expert], one row an expert, so the dense direct body does not apply to it.
+// The pack's expert matrices are three bits (the trellis tensors are [K/16, N/16, 48] int16, so width.halves = 6)
+// at the shapes the pack stores: gate/up K = 5120, N = 2304; down K = 2304, N = 5120. Six rows a token.
 const Routed = struct { n: u32, k: u32, halves: u32, rows: u32, name: []const u8 };
 const routed_shapes = [_]Routed{
     .{ .n = 2304, .k = 5120, .halves = 6, .rows = 6, .name = "gate/up" },
     .{ .n = 5120, .k = 2304, .halves = 6, .rows = 6, .name = "down" },
-    // ROUND-338: the routed calls the engine's own dispatch names (the serve log's "routed decode body"
-    // lines): the top-12 experts' gate/up, and the shared expert's own projection at the dense width.
+    // The routed calls the engine's own dispatch names (the serve log's "routed decode body" lines): the top-12
+    // experts' gate/up, and the shared expert's own projection at the dense width.
     .{ .n = 2304, .k = 5120, .halves = 6, .rows = 12, .name = "gate/up 12" },
     .{ .n = 1024, .k = 4096, .halves = 12, .rows = 8, .name = "shared" },
     .{ .n = 2304, .k = 5120, .halves = 12, .rows = 12, .name = "gate/up h12" },
-    // ROUND-443: the drafter's own routed shapes (halves = 8, two rows -- the depth-1 window's packed pair).
+    // The drafter's own routed shapes (halves = 8, two rows -- the depth-1 window's packed pair).
     .{ .n = 2304, .k = 5120, .halves = 8, .rows = 2, .name = "drafter gate/up h8" },
     .{ .n = 5120, .k = 2304, .halves = 8, .rows = 2, .name = "drafter down h8" },
-    // ROUND-417: THE VERIFY'S OWN DISPATCH SHAPE. The routed dispatch's height IS the slot count, so the
-    // four-row verify's dispatch is 24 slots (four rows x six picks) -- the shape the drafted path's routed
-    // stage actually runs.
+    // THE VERIFY'S OWN DISPATCH SHAPE. The routed dispatch's height IS the slot count, so the four-row verify's
+    // dispatch is 24 slots (four rows x six picks) -- the shape the drafted path's routed stage actually runs.
     .{ .n = 2304, .k = 5120, .halves = 6, .rows = 24, .name = "gate/up 24" },
-    // ROUND-417: THE VERIFY'S OWN DISPATCH SHAPES, CORRECTED. The engine's fused gate/up call's count is
-    // `rows * 2 * picks + (merge_up ? 2 * rows : 0)` (deepseek_v41/model.zig:2549-2550) -- TWO slots a pick
-    // (the gate and the up) -- so the four-row verify's gate/up dispatch is 4*2*6 + 2*4 = 56 slots, and the
-    // down's is `picks*r + r` = 24 + 4 = 28. The prior session's "24" shape counted only the picks, not the
-    // gate/up pair: it is the DOWN's routed count, and it is NOT the verify's gate/up.
+    // THE VERIFY'S OWN DISPATCH SHAPES, CORRECTED. The engine's fused gate/up call's count is `rows * 2 * picks +
+    // (merge_up ? 2 * rows: 0)` (deepseek_v41/model.zig:2549-2550) -- TWO slots a pick (the gate and the up) -- so
+    // the four-row verify's gate/up dispatch is 4*2*6 + 2*4 = 56 slots, and the down's is `picks*r + r` = 24 + 4 =
+    // 28. The prior session's "24" shape counted only the picks, not the gate/up pair: it is the DOWN's routed
+    // count, and it is NOT the verify's gate/up.
     .{ .n = 2304, .k = 5120, .halves = 6, .rows = 56, .name = "gate/up 56" },
     .{ .n = 5120, .k = 2304, .halves = 6, .rows = 28, .name = "down 28" },
-    // ROUND-428: THE STANDING NOVEL BAND-S OWN TWO-ROW DISPATCHES (depth 1: 2 rows x 6 picks -> 28 gate/up
-    // slots and 12 down slots). Without these the fma arms never see the shape the drafted path runs.
+    // THE STANDING NOVEL BAND-S OWN TWO-ROW DISPATCHES (depth 1: 2 rows x 6 picks -> 28 gate/up slots and 12 down
+    // slots). Without these the fma arms never see the shape the drafted path runs.
     .{ .n = 2304, .k = 5120, .halves = 6, .rows = 28, .name = "gate/up 28v" },
     .{ .n = 5120, .k = 2304, .halves = 6, .rows = 12, .name = "down 12v" },
 };
@@ -2182,7 +2141,7 @@ fn timeRouted(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args:
     return median(samples[0..nt]);
 }
 
-// ROUND-448: one dispatch of the fair affine tile body (or its scalar reference); descriptors are not rewritten.
+// One dispatch of the fair affine tile body (or its scalar reference); descriptors are not rewritten.
 fn runAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, codes: mtl.Buffer, sums: mtl.Buffer, scales: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, w: u32, h: u32, threads: u32) !void {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
@@ -2205,17 +2164,16 @@ fn runAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer
     }
 }
 
-// -- ROUND-337: the routed fixture's diagnostic ------------------------------------------------------------------
-// The routed bench's value-level checks are degenerate (ROUND-336's column probe: every column of a row reads
-// the same value, whatever the trellis holds), so the fixture, not the bodies, is what needs the answer. This
-// dumps what the GPU sees of the descriptor and of the words the routed body reads, beside the host's own
-// reading of the same buffers, so the divergence is local to a line.
-// ROUND-337: the fixture's visibility. A large shared buffer the CPU has just written can still read as
-// zeros on the GPU's first touch -- the CPU's dirty lines are not yet in memory -- so every fixture write is
-// verified from the GPU and repeated until it lands. Without this the bench's value-level checks are made
+// The routed fixture's diagnostic ------------------------------------------------------------------ The routed
+// bench's value-level checks are degenerate (The column probe: every column of a row reads the same value, whatever
+// the trellis holds), so the fixture, not the bodies, is what needs the answer. This dumps what the GPU sees of the
+// descriptor and of the words the routed body reads, beside the host's own reading of the same buffers, so the
+// divergence is local to a line. The fixture's visibility. A large shared buffer the CPU has just written can still
+// read as zeros on the GPU's first touch -- the CPU's dirty lines are not yet in memory -- so every fixture write
+// is verified from the GPU and repeated until it lands. Without this the bench's value-level checks are made
 // against a buffer the kernel never saw.
-/// ROUND-357: the fixture's fill is index-addressed, so the host and the GPU can write the SAME
-/// pattern independently (the GPU fill is what makes every page visible to the kernel).
+/// The fixture's fill is index-addressed, so the host and the GPU can write the SAME pattern independently (the GPU
+/// fill is what makes every page visible to the kernel).
 fn fillWord(seed: u64, i: u64) u16 {
     var x: u64 = seed +% i *% 0x9E3779B97F4A7C15;
     x = (x ^ (x >> 30)) *% 0xBF58476D1CE4E5B9;
@@ -2228,8 +2186,6 @@ fn fillTrellis(buf: mtl.Buffer, bytes: u32, seed: u64) void {
     for (buf.slice(u16, bytes / 2), 0..) |*v, i| v.* = fillWord(seed, @intCast(i));
 }
 
-/// The same pattern, written by the GPU: a GPU write is coherent for the next GPU read, where a
-/// large CPU fill can leave most of a 4.4 MB buffer reading as zeros after several arms.
 fn fillTrellisGpu(queue: mtl.Queue, pipe: mtl.Pipeline, buf: mtl.Buffer, bytes: u32, seed: u64) void {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
@@ -2470,8 +2426,8 @@ fn routeDiag(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
         .tile_n_stride = tile_bytes,
     };
 
-    // ROUND-337: the routed bench's own column probe, reproduced here: expert 0's trellis zeroed but for its
-    // first tile. If this is what makes a row's columns constant, the probe (not the fixture) is the degeneracy.
+    // The routed bench's own column probe, reproduced here: expert 0's trellis zeroed but for its first tile. If
+    // this is what makes a row's columns constant, the probe (not the fixture) is the degeneracy.
     {
         const bytes = trs[0].slice(u8, trellis_bytes);
         @memset(bytes, 0);
@@ -2617,12 +2573,9 @@ fn routeDiag(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     }
 }
 
-// -- ROUND-337: the fp64 reference for the routed decode's reduction class -------------------------------
-// The changed class is the k-sum: the tensor-unit body adds sixteen terms at a time, the register-only body
-// one at a time. The reference decodes the same weights the format's own decoder decodes (the values the
-// resident table holds) and sums them in fp64, so the two bodies' fp32 sums can be measured against a truth
-// that is not either of them. GOAL-UNLOCK's band: the changed path's agreement with the fp64 truth is no
-// worse than the shipped path's own.
+// The fp64 reference for the routed decode's reduction class ------------------------------- The changed class is
+// the k-sum: the tensor-unit body adds sixteen terms at a time, the register-only body one at a time. GOAL-UNLOCK's
+// band: the changed path's agreement with the fp64 truth is no worse than the shipped path's own.
 fn exl3TableValue(state: u16) f64 {
     // The mul1 codebook, exactly as the engine's table holds it: the byte sums collapse into one 16-bit
     // lane, the +1024 bias is added, and the value is the half.
@@ -2675,12 +2628,12 @@ fn exl3F64Row(trellis: []const u16, x: []const u16, n: u32, k: u32, halves: u32,
     }
 }
 
-// ROUND-445: THE AFFINE 4-BIT ROUTED DECODE, PRICED AT OUR OWN ROUTED SHAPES AND IN THE SAME RUN AS THE
-// EXL3 BODIES. The comparator's decode is affine (one simdgroup a column); our pack is a codebook. The
-// affine body already exists in this tree -- tile_qmv's indexed twin, ported whole from the sibling branch
-// (Apache-2.0, THIRD_PARTY_NOTICES) -- with 4/6/8-bit codes and group-64 bf16 scales and biases. It is
-// timed on synthetic codes: the access pattern is the same whatever the codes hold, and the question here
-// is the body's cost, not a repack's quality (that owes the band later).
+// THE AFFINE 4-BIT ROUTED DECODE, PRICED AT OUR OWN ROUTED SHAPES AND IN THE SAME RUN AS THE EXL3 BODIES. The
+// comparator's decode is affine (one simdgroup a column); our pack is a codebook. The affine body already exists in
+// this tree -- tile_qmv's indexed twin, ported whole from the sibling branch (Apache-2.0, THIRD_PARTY_NOTICES) --
+// with 4/6/8-bit codes and group-64 bf16 scales and biases. It is timed on synthetic codes: the access pattern is
+// the same whatever the codes hold, and the question here is the body's cost, not a repack's quality (that owes the
+// band later).
 fn timeAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: anytype, ws: []const mtl.Buffer, sc: mtl.Buffer, bi: mtl.Buffer, x: mtl.Buffer, y: mtl.Buffer, ids: mtl.Buffer, n: u32, slots: u32, trials: usize) !f64 {
     var samples: [16]f64 = undefined;
     const nt = @max(1, @min(trials, samples.len));
@@ -2709,12 +2662,11 @@ fn timeAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: anytype, ws: []const m
     return median(samples[0..nt]);
 }
 
-// ROUND-445: THE 3-BIT AFFINE PREFILL ROUTE PRICED AT THE ROUTED TILE'S SHAPE. The prefill's routed stage is
-// 1,260 ms of a 2,641 ms prompt (47.7 %) and its EXL3 tile is extraction-bound (the trellis decode is 36 % of
-// the tile). The affine_mm gather is the tensor-unit path with NO per-weight extraction (a 3-bit code and a
-// group-64 scale), and it is already in this tree (ported from the sibling, Apache-2.0). Priced here on the
-// plan's own geometry: 384 experts x one 64-row tile each, n = 2304, k = 5120. Synthetic codes and scales:
-// the access pattern is the body's, the values are not the question (a repack owes the band).
+// THE 3-BIT AFFINE PREFILL ROUTE PRICED AT THE ROUTED TILE'S SHAPE. The affine_mm gather is the tensor-unit path
+// with NO per-weight extraction (a 3-bit code and a group-64 scale), and it is already in this tree (ported from
+// the sibling, Apache-2.0). Priced here on the plan's own geometry: 384 experts x one 64-row tile each, n = 2304, k
+// = 5120. Synthetic codes and scales: the access pattern is the body's, the values are not the question (a repack
+// owes the band).
 fn affinePrefillPrice(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void {
     const experts: u32 = 384;
     const n: u32 = 2304;
@@ -2807,7 +2759,7 @@ fn affinePrefillPrice(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocat
     std.debug.print("  gather_64 3-bit: {d:.3} ms  {d:.1} TMAC/s  {d:.1} GB/s  ({d:.2} GB of weights a pass)\n", .{
         ms, macs / (ms * 1e-3) / 1e12, bytes / (ms * 1e-3) / 1e9, bytes / 1e9,
     });
-    std.debug.print("  (the EXL3 plan-shape tile: 537 tiles / 34,368 rows in 10.25-10.31 ms = 19.1 us a tile, ROUND-408/409)\n", .{});
+    std.debug.print("  (the EXL3 plan-shape tile: 537 tiles, 34,368 rows)\n", .{});
 }
 
 fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void {
@@ -2827,30 +2779,28 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer direct_arith.deinit();
     const reduce = mtl.Pipeline.init(device, lib, "tf_exl3_splitk_reduce", false) catch null;
     defer if (reduce) |p| p.deinit();
-    // The routed tensor-unit body: the shipped tile (four rows a threadgroup) and the compact tile the engine
-    // takes above one row (one row a threadgroup, 1 KB of threadgroup memory).
     const nax_src = try std.mem.replaceOwned(u8, gpa, ks.core_exl3_projection_nax, "#include \"../nax.h\"", ks.nax);
     defer gpa.free(nax_src);
     const nax_lib = mtl.Library.fromSource(device, nax_src, mtl.CompileOptions.mlx()) catch null;
     defer if (nax_lib) |l| l.deinit();
     const mma = if (nax_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_nax", false) catch null) else null;
     defer if (mma) |p| p.deinit();
-    // ROUND-445: the one-simdgroup-per-column routed decode (the comparator's plan) on our tile pack.
+    // The one-simdgroup-per-column routed decode (the comparator's plan) on our tile pack.
     const col_nax = if (nax_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matvec_col_nax", false) catch null) else null;
     defer if (col_nax) |p| p.deinit();
-    // ROUND-445: the affine 4-bit routed decode (the comparator's value path) on the tree's own tile_qmv body.
+    // The affine 4-bit routed decode (the comparator's value path) on the tree's own tile_qmv body.
     const a4_lib = mtl.Library.fromSource(device, ks.core_tile_qmm, mtl.CompileOptions.mlx()) catch null;
     defer if (a4_lib) |l| l.deinit();
     const affine4 = if (a4_lib) |l| (mtl.Pipeline.init(device, l, "tf_tile_qmv_indexed_q4", false) catch null) else null;
     defer if (affine4) |p| p.deinit();
-    // ROUND-445: the 3-bit affine TILE body (sixteen warps, our geometry) -- what a repack would dispatch.
+    // The 3-bit affine TILE body (sixteen warps, our geometry) -- what a repack would dispatch.
     const t3_src = try std.fmt.allocPrint(gpa, "#define TF_AFF_WARPS 16\n{s}", .{nax_src});
     defer gpa.free(t3_src);
     const t3_lib = mtl.Library.fromSource(device, t3_src, mtl.CompileOptions.mlx()) catch null;
     defer if (t3_lib) |l| l.deinit();
     const aff_tile3 = if (t3_lib) |l| (mtl.Pipeline.init(device, l, "tf_affine_tile3_nax", false) catch null) else null;
     defer if (aff_tile3) |p| p.deinit();
-    // ROUND-445: the 3-bit affine body on a COLUMN-SEQUENTIAL pack (the form the repack would build).
+    // The 3-bit affine body on a COLUMN-SEQUENTIAL pack (the form the repack would build).
     const col3 = if (nax_lib) |l| (mtl.Pipeline.init(device, l, "tf_affine_col3_nax", false) catch null) else null;
     defer if (col3) |p| p.deinit();
     const compact_src = try std.fmt.allocPrint(gpa, "#define TF_DECODE_COMPACT 1\n{s}", .{nax_src});
@@ -2867,9 +2817,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer if (tab_lib) |l| l.deinit();
     const mma_t = if (tab_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_nax", false) catch null) else null;
     defer if (mma_t) |p| p.deinit();
-    // ROUND-334: the two-word funnel read (TF_DECODE_FUNNEL), the routed pack's halves = 6. The four-row and
-    // compact bodies, arithmetic and table, so the port is priced on the engine's own arm and hash-checked
-    // against the shipped four-word body on the same buffers.
+    // The two-word funnel read (TF_DECODE_FUNNEL), the routed pack's halves = 6. The four-row and compact bodies,
+    // arithmetic and table, so the port is priced on the engine's own arm and hash-checked against the shipped
+    // four-word body on the same buffers.
     const funnel_src = try std.fmt.allocPrint(gpa, "#define TF_DECODE_FUNNEL 1\n#define TF_DECODE_FUNNEL_H8 1\n{s}", .{nax_src});
     defer gpa.free(funnel_src);
     const funnel_lib = mtl.Library.fromSource(device, funnel_src, mtl.CompileOptions.mlx()) catch null;
@@ -2888,16 +2838,16 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer if (funnel_t_lib) |l| l.deinit();
     const mma_tf = if (funnel_t_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_nax", false) catch null) else null;
     defer if (mma_tf) |p| p.deinit();
-    // ROUND-443: the two-word read at halves = 8 with the cursor's own extraction (TF_DECODE_TWO).
+    // The two-word read at halves = 8 with the cursor's own extraction (TF_DECODE_TWO).
     const two_src = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TWO 1\n#define TF_DECODE_TABLE 1\n#define TF_DECODE_COMPACT 1\n{s}", .{nax_src});
     defer gpa.free(two_src);
     const two_lib = mtl.Library.fromSource(device, two_src, mtl.CompileOptions.mlx()) catch null;
     defer if (two_lib) |l| l.deinit();
     const mma_t2 = if (two_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_nax", false) catch null) else null;
     defer if (mma_t2) |p| p.deinit();
-    // ROUND-448: THE FAIR 3-BIT AFFINE TILE BODY, rebuilt on its own 96-byte tile and its own cold fixture
-    // (ROUND-445's tile3 arm handed it a 288-byte stride and the EXL3 trellis copies, so it was never a price).
-    // One pipeline a warp count; `tf_affine_tile3_ref` is the scalar value check on the same bytes.
+    // THE FAIR 3-BIT AFFINE TILE BODY, rebuilt on its own 96-byte tile and its own cold fixture (The tile3 arm
+    // handed it a 288-byte stride and the EXL3 trellis copies, so it was never a price). One pipeline a warp count;
+    // `tf_affine_tile3_ref` is the scalar value check on the same bytes.
     var t3_warps_pipes: [5]?mtl.Pipeline = .{ null, null, null, null, null };
     var t3_libs: [5]?mtl.Library = .{ null, null, null, null, null };
     const t3_warps = [_]u32{ 1, 2, 4, 8, 16 };
@@ -2923,10 +2873,10 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer for (t3_warps_pipes) |maybe| if (maybe) |p| p.deinit();
     defer for (t3_libs) |maybe| if (maybe) |l| l.deinit();
 
-    // ROUND-336: the comparator's decode structure -- one warp a sixteen-column tile, one k walk, no split-K,
-    // no partials, no reduce dispatch, the decoded weights in registers (no threadgroup round trip). The warps
-    // a threadgroup are TF_FMA_WARPS: each warp walks its own slice of the k blocks and the partials meet once,
-    // at the end of the walk, so the parallelism of a split-K dispatch without its round trip.
+    // The comparator's decode structure -- one warp a sixteen-column tile, one k walk, no split-K, no partials, no
+    // reduce dispatch, the decoded weights in registers (no threadgroup round trip). The warps a threadgroup are
+    // TF_FMA_WARPS: each warp walks its own slice of the k blocks and the partials meet once, at the end of the
+    // walk, so the parallelism of a split-K dispatch without its round trip.
     const FmaArm = struct { name: []const u8, warps: u32, pipe: ?mtl.Pipeline };
     var fma_arms: [48]FmaArm = undefined;
     var nfma: usize = 0;
@@ -2936,8 +2886,6 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer for (fma_libs[0..nfma_libs]) |maybe| if (maybe) |l| l.deinit();
     defer for (fma_arms[0..nfma]) |arm| if (arm.pipe) |q| q.deinit();
     {
-        // ROUND-356: 32 warps a threadgroup (the device's 1,024-thread limit) joins the sweep: the warps are the
-        // k-parallelism per sixteen-column tile and the in-situ ranking on the engine's tree is 4 < 8 < 16.
         const warps = [_]u32{ 1, 2, 4, 8, 16, 32 };
         for (warps) |w| {
             const wsrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_FUNNEL 1\n#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS {d}\n{s}", .{ w, nax_src });
@@ -2996,8 +2944,8 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         const ap = if (alib2) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma", false) catch null) else null;
         fma_arms[nfma] = .{ .name = "fma w1 alu", .warps = 1, .pipe = ap };
         nfma += 1;
-        // ROUND-338: the static state selection in the register-only body (the engine's w4/table arm): the
-        // lane's eight windows at compile-time shifts, so the `rel[k]` cursor leaves the inner loop.
+        // The static state selection in the register-only body (the engine's w4/table arm): the lane's eight
+        // windows at compile-time shifts, so the `rel[k]` cursor leaves the inner loop.
         const ssrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_FUNNEL 1\n#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 4\n{s}", .{nax_src});
         defer gpa.free(ssrc);
         const slib = mtl.Library.fromSource(device, ssrc, mtl.CompileOptions.mlx()) catch null;
@@ -3008,13 +2956,13 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         const sp = if (slib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_static", false) catch null) else null;
         fma_arms[nfma] = .{ .name = "fma w4 stat", .warps = 4, .pipe = sp };
         nfma += 1;
-        // ROUND-338: the same arm with the codebook read from a 1024-entry threadgroup LUT.
+        // The same arm with the codebook read from a 1024-entry threadgroup LUT.
         const sl2 = if (slib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) else null;
         fma_arms[nfma] = .{ .name = "fma w4 st+lu", .warps = 4, .pipe = sl2 };
         nfma += 1;
-        // ROUND-416: THE ENGINE'S OWN ROUTED CONFIGURATION (sixteen warps, the same body form) AND THE
-        // COMPARATOR'S 4-BYTE STREAM WORD (the prefill tiles' read, ROUND-352's form). Both are the same bytes,
-        // the same values and the same order: every arm is BIT-IDENTICAL to the shipped body.
+        // THE ENGINE'S OWN ROUTED CONFIGURATION (sixteen warps, the same body form) AND THE COMPARATOR'S 4-BYTE
+        // STREAM WORD (the prefill tiles' read, The form). Both are the same bytes, the same values and the same
+        // order: every arm is BIT-IDENTICAL to the shipped body.
         for ([_]u32{ 4, 16 }) |w| {
             const wsrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_FUNNEL 1\n#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS {d}\n{s}", .{ w, nax_src });
             defer gpa.free(wsrc);
@@ -3028,11 +2976,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             fma_arms[nfma] = .{ .name = nm, .warps = w, .pipe = p };
             nfma += 1;
         }
-        // ROUND-428: THE TWO-WORD STATIC BODY (TF_FMA_TWO) at halves = 6 -- the routed stage's width. The
-        // shipped static body reads three stream words a lane a block; at halves = 6 two suffice by
-        // construction (ROUND-334's proof: every lane's run starts at off0 in {3,11,19,27} and spans 37 bits),
-        // so the third word is dropped. Same-run against the shipped `fma w16 st+lu` arm above; the hash is
-        // the bit-identity receipt.
+        // THE TWO-WORD STATIC BODY (TF_FMA_TWO) at halves = 6 -- the routed stage's width. The shipped static body
+        // reads three stream words a lane a block; at halves = 6 two suffice by construction (The proof: every
+        // lane's run starts at off0 in {3,11,19,27} and spans 37 bits), so the third word is dropped.
         for ([_]u32{ 4, 16 }) |w| {
             const wsrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS {d}\n#define TF_FMA_TWO 1\n{s}", .{ w, nax_src });
             defer gpa.free(wsrc);
@@ -3046,10 +2992,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             fma_arms[nfma] = .{ .name = nm, .warps = w, .pipe = p };
             nfma += 1;
         }
-        // ROUND-416: THE VALUE PATH'S FORM AT THE ROUTED SHAPES. The ladder prices the whole value path (the
-        // hash, the byte sum, the index and the shared load) at 27 % of the routed stage; this arm prices the
-        // ALTERNATIVE form -- the arithmetic one the format's own decoder uses, whose values are the LUT's
-        // entries entry for entry, so the two forms are BIT-IDENTICAL and the hash says so.
+        // THE VALUE PATH'S FORM AT THE ROUTED SHAPES.
         for ([_]u32{ 4, 16 }) |w| {
             const wsrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS {d}\n#define TF_FMA_VALUE_ARITH 1\n{s}", .{ w, nax_src });
             defer gpa.free(wsrc);
@@ -3063,15 +3006,15 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             fma_arms[nfma] = .{ .name = nm, .warps = w, .pipe = p };
             nfma += 1;
         }
-        // ROUND-418: THE PAIR BODY AT THE ROUTED SHAPES. The engine already HAS the comparator's pair form
-        // (tf_exl3_matmul_decode_fma_static_pair_lut: it scans the routes for the next slot naming the same
-        // expert, the even rank leads, and ONE weight decode serves the pair -- the engine's own comment says
-        // the pair's rows are bit-identical to the single-row body's). ROUND-370 priced it in the PLAIN path (one
-        // row: a mate never exists) and read a LOSS; the VERIFY is a different population (56 and 28 slots, and
-        // the shared expert's weights are decoded once a row). This arm prices the pair at the routed shapes.
-        // The bench's model gives every slot its own expert, so the pair finds NO mate here: the arm prices the
-        // pair's OVERHEAD (the mate scan over a.rows and the doubled body) ALONE, which is the upper bound on
-        // the pair's cost -- the saving (the duplicate decodes) can only be smaller.
+        // THE PAIR BODY AT THE ROUTED SHAPES. The engine already HAS the comparator's pair form
+        // (tf_exl3_matmul_decode_fma_static_pair_lut: it scans the routes for the next slot naming the same expert,
+        // the even rank leads, and ONE weight decode serves the pair -- the engine's own comment says the pair's
+        // rows are bit-identical to the single-row body's). Priced it in the PLAIN path (one row: a mate never
+        // exists) and read a LOSS; the VERIFY is a different population (56 and 28 slots, and the shared expert's
+        // weights are decoded once a row). This arm prices the pair at the routed shapes. The bench's model gives
+        // every slot its own expert, so the pair finds NO mate here: the arm prices the pair's OVERHEAD (the mate
+        // scan over a.rows and the doubled body) ALONE, which is the upper bound on the pair's cost -- the saving
+        // (the duplicate decodes) can only be smaller.
         {
             const qsrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 16\n{s}", .{nax_src});
             defer gpa.free(qsrc);
@@ -3084,12 +3027,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             fma_arms[nfma] = .{ .name = "pair st+lu w16", .warps = 16, .pipe = q };
             nfma += 1;
         }
-        // ROUND-417: THE PREFETCH DEPTH AT THE ROUTED SHAPES. ROUND-416 priced the ring (TF_FMA_PF) at the
-        // DENSE one-row shapes only, where the trellis reads are partly SLC-resident and the DRAM is not the
-        // constraint; the ROUTED shapes read the experts' 3-bit trellis from DRAM (the body's read term is at
-        // 87 % of the box's DRAM peak), so the ring's latency hiding is priced HERE for the first time. The
-        // ring only moves the loads in time: the values, their order and the arithmetic are untouched, so every
-        // arm is BIT-IDENTICAL to the shipped body (the bench's hash says so).
+        // THE PREFETCH DEPTH AT THE ROUTED SHAPES. The ring only moves the loads in time: the values, their order
+        // and the arithmetic are untouched, so every arm is BIT-IDENTICAL to the shipped body (the bench's hash
+        // says so).
         for ([_]u32{ 16, 4 }) |w| {
             for ([_]u32{ 2, 4, 8 }) |pf| {
                 const psrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS {d}\n#define TF_FMA_PF {d}\n{s}", .{ w, pf, nax_src });
@@ -3105,10 +3045,10 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 nfma += 1;
             }
         }
-        // ROUND-416: THE ROUTED STAGE'S OWN ROOFLINE -- the same separation ladder as the dense one-row bench,
-        // at the ENGINE'S dispatch shape (the static+LUT body at sixteen warps, six experts a dispatch).
-        // TF_DIAG_DECODE = 1 keeps the state's extraction and the trellis read and drops the VALUE path; = 2
-        // drops the whole decode (the trellis reads go with it); = 3 doubles the per-weight FP op.
+        // THE ROUTED STAGE'S OWN ROOFLINE -- the same separation ladder as the dense one-row bench, at the ENGINE'S
+        // dispatch shape (the static+LUT body at sixteen warps, six experts a dispatch). TF_DIAG_DECODE = 1 keeps
+        // the state's extraction and the trellis read and drops the VALUE path; = 2 drops the whole decode (the
+        // trellis reads go with it); = 3 doubles the per-weight FP op.
         for ([_]u32{ 1, 2, 3 }) |d| {
             const dsrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 16\n#define TF_DIAG_DECODE {d}\n{s}", .{ d, nax_src });
             defer gpa.free(dsrc);
@@ -3126,9 +3066,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             fma_arms[nfma] = .{ .name = nm, .warps = 16, .pipe = p };
             nfma += 1;
         }
-        // ROUND-417: THE VALUE PATH'S SPLIT AT THE ROUTED SHAPES. d6 keeps the LOAD and drops the index
-        // arithmetic; d7 keeps the index arithmetic and drops the LOAD. Neither is bit-exact (the value is a
-        // timing stand-in) and both are bench-only.
+        // THE VALUE PATH'S SPLIT AT THE ROUTED SHAPES. d6 keeps the LOAD and drops the index arithmetic; d7 keeps
+        // the index arithmetic and drops the LOAD. Neither is bit-exact (the value is a timing stand-in) and both
+        // are bench-only.
         for ([_]u32{ 6, 7 }) |d| {
             const dsrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 16\n#define TF_DIAG_DECODE {d}\n{s}", .{ d, nax_src });
             defer gpa.free(dsrc);
@@ -3142,9 +3082,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             fma_arms[nfma] = .{ .name = nm, .warps = 16, .pipe = p };
             nfma += 1;
         }
-        // ROUND-417: the ladder's last two levels at the routed shapes: d4 (the ACTIVATION READ gone) and d5
-        // (the CROSS-WARP REDUCTION gone -- the routed body reduces sixteen warps' partials through threadgroup
-        // memory, so its reduction is not the dense body's).
+        // The ladder's last two levels at the routed shapes: d4 (the ACTIVATION READ gone) and d5 (the CROSS-WARP
+        // REDUCTION gone -- the routed body reduces sixteen warps' partials through threadgroup memory, so its
+        // reduction is not the dense body's).
         for ([_]u32{ 4, 5 }) |d| {
             const dsrc = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 16\n#define TF_DIAG_DECODE {d}\n{s}", .{ d, nax_src });
             defer gpa.free(dsrc);
@@ -3158,9 +3098,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             fma_arms[nfma] = .{ .name = nm, .warps = 16, .pipe = p };
             nfma += 1;
         }
-        // ROUND-417: THE VALUE PATH'S FORM AT THE ENGINE'S OWN WARP COUNT -- the DEVICE TABLE (the 65536-entry
-        // half table, the static body's own form) against the threadgroup LUT and the arithmetic. The record has
-        // the w4 pair (ROUND-416); this is the w16 pair.
+        // THE VALUE PATH'S FORM AT THE ENGINE'S OWN WARP COUNT -- the DEVICE TABLE (the 65536-entry half table, the
+        // static body's own form) against the threadgroup LUT and the arithmetic. The record has the w4 pair; this
+        // is the w16 pair.
         {
             const ssrc16 = try std.fmt.allocPrint(gpa, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 16\n{s}", .{nax_src});
             defer gpa.free(ssrc16);
@@ -3188,8 +3128,8 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         }
     }
 
-    // ROUND-337: a one-word probe of the trellis as the GPU sees it (the fixture's visibility is the question
-    // the routed bench's own column probe raised).
+    // A one-word probe of the trellis as the GPU sees it (the fixture's visibility is the question the routed
+    // bench's own column probe raised).
     const words_src = try std.mem.concat(gpa, u8, &.{
         nax_src,
         \\kernel void tf_exl3_probe_words(const device ushort* t [[buffer(0)]], device uint* out [[buffer(1)]],
@@ -3227,9 +3167,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     const pone = if (words_lib) |l| (mtl.Pipeline.init(device, l, "tf_affine_fill_one", false) catch null) else null;
     defer if (pone) |p| p.deinit();
 
-    // ROUND-448: the body value certificate on a tiny shape (n 64, k 64, one row) where every byte is known
-    // and every buffer is small: the warp body and the scalar reference against a host FP64 decode of the same
-    // 3-bit codes, with all scales one. A mismatch here is a port bug, not a numerics class.
+    // The body value certificate on a tiny shape (n 64, k 64, one row) where every byte is known and every buffer
+    // is small: the warp body and the scalar reference against a host FP64 decode of the same 3-bit codes, with all
+    // scales one. A mismatch here is a port bug, not a numerics class.
     if (t3_ref != null and t3_warps_pipes[0] != null and pfill != null and pwords != null and pone != null) {
         const tn: usize = 64;
         const tk: usize = 64;
@@ -3321,7 +3261,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             sq += (@as(f64, rv64[col]) - @as(f64, wv64[col])) * (@as(f64, rv64[col]) - @as(f64, wv64[col]));
             sb += acc * acc;
         }
-        std.debug.print("  ROUND-448 tiny value check 64x64 scale1: worst host-ref {e:.4}, host-warp {e:.4}, ref-vs-warp NRMS {e:.4}\n", .{ max_ref, max_warp, @sqrt(sq / sb) });
+        std.debug.print("  tiny value check 64x64 scale1: worst host-ref {e:.4}, host-warp {e:.4}, ref-vs-warp NRMS {e:.4}\n", .{ max_ref, max_warp, @sqrt(sq / sb) });
     }
     const table = try device.buffer(3 * 65536 * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     defer table.deinit();
@@ -3345,15 +3285,15 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         const tile_bytes = s.halves * 8 * 2;
         const trellis_bytes = (s.k / 16) * (s.n / 16) * tile_bytes;
         const rows: usize = s.rows;
-        // ROUND-417: the verify-s own dispatch shapes need one fresh trellis copy a row (56 rows), so the
-        // pool grows from 48 to 80 copies -- the copies keep the experts- weights from being resident.
+        // The verify-s own dispatch shapes need one fresh trellis copy a row (56 rows), so the pool grows from 48
+        // to 80 copies -- the copies keep the experts- weights from being resident.
         var trs: [routed_copies * 10]mtl.Buffer = undefined;
         var made: usize = 0;
         defer for (trs[0..made]) |b| b.deinit();
         while (made < trs.len) : (made += 1) {
             trs[made] = try device.buffer(trellis_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         }
-        // ROUND-337: every fixture write is verified from the GPU before any value-level check reads it.
+        // Every fixture write is verified from the GPU before any value-level check reads it.
         const scratch = try device.buffer(64, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         defer scratch.deinit();
         var invisible: usize = 0;
@@ -3431,9 +3371,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             }
             std.debug.print("  {s:>10} vs direct: worst |diff| = {d:.6} on |max| = {d:.3} ({d} of {d} differ)\n", .{ s.name, worst, scale, differing, n_out });
         }
-        // ROUND-334: the two-word funnel body against the shipped four-word body, byte for byte, on the same
-        // buffers. The funnel is bit-identical by construction (the rel = 1 states' next word lies below the
-        // 16-bit state at halves = 6), so any differing byte is a port bug, not a numerics class.
+        // The two-word funnel body against the shipped four-word body, byte for byte, on the same buffers. The
+        // funnel is bit-identical by construction (the rel = 1 states' next word lies below the 16-bit state at
+        // halves = 6), so any differing byte is a port bug, not a numerics class.
         if (mma_t != null and mma_tf != null) {
             const host_a = try gpa.alloc(f32, n_out);
             defer gpa.free(host_a);
@@ -3474,9 +3414,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             };
             std.debug.print("  {s:>10} funnel vs shipped: {d} of {d} differ ({s})\n", .{ s.name, differing, n_out, if (differing == 0) "BIT-IDENTICAL" else "DIFFERS" });
         }
-        // ROUND-336: the register-only body (the comparator's structure) against the shipped tensor-unit body on
-        // the same buffers. The reduction order is the comparator's, so the two are not bit-identical: the check
-        // is the size of the difference against the size of the sums.
+        // The register-only body (the comparator's structure) against the shipped tensor-unit body on the same
+        // buffers. The reduction order is the comparator's, so the two are not bit-identical: the check is the size
+        // of the difference against the size of the sums.
         if (mma_tf != null and nfma > 0 and fma_arms[0].pipe != null) {
             const host_a = try gpa.alloc(f32, n_out);
             defer gpa.free(host_a);
@@ -3529,9 +3469,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             std.debug.print("  {s:>10} fma vs shipped: worst |diff| = {d:.6} on |max| = {d:.3} (NRMS {e:.2}), {d} of {d} differ\n", .{ s.name, worst, scale, @sqrt(sq / @max(sqref, 1e-30)), differing, n_out });
         }
 
-        // ROUND-445: the column plan's value-level agreement with the register-only body. The map inverse is the
-        // arm's only new arithmetic, so a wrong (row-in-tile, column) -> stream-position map would show as a large
-        // difference; the reduction order differs, so the check is the NRMS, not bit-equality.
+        // The column plan's value-level agreement with the register-only body. The map inverse is the arm's only
+        // new arithmetic, so a wrong (row-in-tile, column) -> stream-position map would show as a large difference;
+        // the reduction order differs, so the check is the NRMS, not bit-equality.
         if (col_nax != null and nfma > 0 and fma_arms[0].pipe != null) {
             const host_a = try gpa.alloc(f32, n_out);
             defer gpa.free(host_a);
@@ -3576,8 +3516,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             std.debug.print("  {s:>10} col plan vs fma w1: NRMS {e:.3}\n", .{ s.name, @sqrt(cq / @max(cre, 1e-30)) });
         }
 
-        // Two passes: the first ramps the box's clocks, the second is the number (one dispatch is 0.15-0.5 ms,
-        // so a cold first sample reads up to 2x slow). The results are collected per arm and printed after.
+        // The results are collected per arm and printed after.
         const Arm = struct { name: []const u8, splits: u32, ms: f64 = 0, hash: u64 = 0 };
         var arms: [64]Arm = undefined;
         var narms: usize = 0;
@@ -3673,8 +3612,8 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 arms[narms] = .{ .name = "direct table", .splits = splits, .ms = t_t, .hash = h_t };
                 narms += 1;
             }
-            // ROUND-336: the comparator's structure -- one warp a sixteen-column tile, one k walk, no split-K, no
-            // partials and no reduce dispatch -- timed as one dispatch of the routed stage for the same six experts.
+            // The comparator's structure -- one warp a sixteen-column tile, one k walk, no split-K, no partials and
+            // no reduce dispatch -- timed as one dispatch of the routed stage for the same six experts.
             {
                 const fargs = Exl3Args{
                     .k = s.k,
@@ -3708,8 +3647,8 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         narms += 1;
                     }
                 }
-                // ROUND-445: one simdgroup a column, the lanes walking k (the comparator's plan); one warp a
-                // column, four warps a threadgroup.
+                // One simdgroup a column, the lanes walking k (the comparator's plan); one warp a column, four
+                // warps a threadgroup.
                 if (col_nax) |cp| {
                     @memset(sums.slice(u32, n_out), 0);
                     const t = try timeRouted(queue, cp, reduce, fargs, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = (s.n + 3) / 4, .height = rows, .depth = 1, .threads = 128 }, n_out, 15);
@@ -3717,7 +3656,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     arms[narms] = .{ .name = "col plan", .splits = 1, .ms = t, .hash = h };
                     narms += 1;
                 }
-                // ROUND-445: the affine 4-bit routed decode (the comparator's value path), same shape, same run.
+                // The affine 4-bit routed decode (the comparator's value path), same shape, same run.
                 if (affine4) |ap| {
                     const ng = s.k / 64;
                     const wbytes: usize = @as(usize, rows) * s.n * s.k / 2;
@@ -3749,7 +3688,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     const a4macs = @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k)) * 2.0;
                     std.debug.print("  {s:>10} {s:>14} {d:>5} {d:>9.3} {d:>9.1} {d:>8.1}  (affine 4-bit, {d:.2} GB of codes+scales, 4.5 bits a weight)\n", .{ s.name, "affine4", 1, t4, a4macs / (t4 * 1e-3) / 1e12, a4bytes / (t4 * 1e-3) / 1e9, a4bytes / 1e9 });
                 }
-                // ROUND-445: the 3-bit affine TILE body (what a repack would dispatch), same shape, same run.
+                // The 3-bit affine TILE body (what a repack would dispatch), same shape, same run.
                 if (aff_tile3 != null) {
                     const tb = s.halves * 8 * s.halves; // 96 bytes a 16x16 tile (256 codes, 3 bits each)
                     const cbytes: usize = @as(usize, rows) * s.k * s.n * 3 / 8;
@@ -3791,7 +3730,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     const b3 = @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k)) * 3.25 / 8.0;
                     std.debug.print("  {s:>10} {s:>14} {d:>5} {d:>9.3} {d:>9.1} {d:>8.1} {x:>10}  (affine 3-bit tile, 3.25 bits a weight -- INSTRUMENT ONLY, NOT A PRICE: 4-5x the twin at the same shape, unexplained)\n", .{ s.name, "aff tile3 BROKEN", 1, t3, macs / (t3 * 1e-3) / 1e12, b3 / (t3 * 1e-3) / 1e9, h3 & 0xffffffff });
                 }
-                // ROUND-445: the 3-bit affine body on a column-sequential pack, same shape, same run.
+                // The 3-bit affine body on a column-sequential pack, same shape, same run.
                 if (col3 != null) {
                     const cb3: usize = @as(usize, rows) * s.n * ((s.k / 32) * 12);
                     const sb3: usize = @as(usize, rows) * s.n * (s.k / 64) * 2;
@@ -3832,8 +3771,8 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     const bc3 = @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k)) * 3.25 / 8.0;
                     std.debug.print("  {s:>10} {s:>14} {d:>5} {d:>9.3} {d:>9.1} {d:>8.1} {x:>10}  (affine 3-bit COLUMN-SEQUENTIAL, 3.25 bits a weight)\n", .{ s.name, "aff col3", 1, tc3, macs / (tc3 * 1e-3) / 1e12, bc3 / (tc3 * 1e-3) / 1e9, hc3 & 0xffffffff });
                 }
-                // ROUND-448: THE FAIR 3-BIT AFFINE TILE BODY -- its own 96-byte tile, its own per-expert cold
-                // copies, and the warp count swept in the same run (the control is the shipped fma w16 arm above).
+                // THE FAIR 3-BIT AFFINE TILE BODY -- its own 96-byte tile, its own per-expert cold copies, and the
+                // warp count swept in the same run (the control is the shipped fma w16 arm above).
                 if (pass == 1 and t3_warps_pipes[0] != null) {
                     const tb3: usize = 96;
                     const cbytes3: usize = @as(usize, s.k) * s.n * 3 / 8;
@@ -3937,7 +3876,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 }
             }
         }
-        // ROUND-337: what the GPU sees of the trellis the bench wrote (the fixture's visibility).
+        // What the GPU sees of the trellis the bench wrote (the fixture's visibility).
         if (pwords) |pw| {
             const pwout = try device.buffer(64, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             defer pwout.deinit();
@@ -3964,10 +3903,6 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             });
         }
 
-        // ROUND-337: the fp64 receipt for the changed reduction class. The shipped body (the tensor unit's
-        // sixteen terms at a time) and the register-only body (the comparator's one at a time) are measured
-        // against the same fp64 truth on the same fixture: the changed path's agreement with the truth must be
-        // no worse than the shipped path's own.
         if (std.c.getenv("TF_BENCH_ROUTE_FP64") != null and mma_tf != null and nfma > 0 and fma_arms[0].pipe != null) {
             const host_a = try gpa.alloc(f32, n_out);
             defer gpa.free(host_a);
@@ -4002,8 +3937,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             @memset(sums.slice(u32, n_out), 0);
             _ = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
             @memcpy(host_a, sums.slice(f32, n_out));
-            // The register-only body: one k walk, one term at a time. Each warp walks its own slice of the
-            // k blocks, so the warps a threadgroup are the chain length: the receipt is taken per arm.
+            // The register-only body: one k walk, one term at a time.
             var nargs = args;
             nargs.splits = 1;
             // The fp64 truth, row by row, over the same trellis each row reads.
@@ -4052,12 +3986,8 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             });
             for (fma_arms[0..nfma]) |arm| {
                 if (arm.pipe == null) continue;
-                // ROUND-356: the warps are the reduction class's chain length, so the receipt is taken at
-                // every count the engine can ship (the tree's landed count included).
                 if (arm.warps != 1 and arm.warps != 4 and arm.warps != 8 and arm.warps != 16 and arm.warps != 32) continue;
-                // ROUND-356: the fixture's visibility is re-verified PER ARM. The routed trellis copies can
-                // read as zeros to the GPU after the first arms (the record's known fixture fault), and a
-                // receipt taken on a zeroed trellis measures the fixture, not the reduction class.
+                // The fixture's visibility is re-verified PER ARM.
                 if (pwords) |pw| {
                     for (trs[0..rows], 0..) |b, i| {
                         const seed = 0xD1CEB00C ^ @as(u64, s.n) ^ @as(u64, s.k) ^ @as(u64, i);
@@ -4095,10 +4025,9 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             }
         }
 
-        // ROUND-336: does the routed body read the tile of its OWN column? Zero every tile of the first expert's
-        // trellis but the first one, dispatch, and read the row back: the columns that first tile covers must
-        // differ from the rest. If they do not, the routed path (or the fixture) is column-blind -- and the bench's
-        // routed absolute numbers and any fp64 receipt taken from it rest on the answer.
+        // Does the routed body read the tile of its OWN column? Zero every tile of the first expert's trellis but
+        // the first one, dispatch, and read the row back: the columns that first tile covers must differ from the
+        // rest.
         if (fma_arms[0].pipe != null) {
             const bytes = trs[0].slice(u8, trellis_bytes);
             @memset(bytes, 0);
@@ -4136,14 +4065,11 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     }
 }
 
-// -- ROUND-419: the verify's REAL multiset -----------------------------------------------------------------
-// ROUND-418 priced the pair kernel with every slot its own expert, so the mate scan found nothing and the arm
-// read the pair's OVERHEAD alone (whose sign flipped by shape: 56 -14.1 %, 28 +34 %). The engine's verify
-// dispatch is not that population: one indexed call whose route table names the ROUTED picks (four rows x six
-// picks x two matrices) AND the SHARED expert's two matrices four times each (the fused gate/up tail
-// fids[48..55], route.metal). Here the routes carry that multiset -- the duplicates point at the SAME
-// descriptor and hence the SAME trellis -- so the pair kernel finds its mates, and the shipped and pair bodies
-// are timed on the same buffers, in the same run, with the same-binary control.
+// The engine's verify dispatch is not that population: one indexed call whose route table names the ROUTED picks
+// (four rows x six picks x two matrices) AND the SHARED expert's two matrices four times each (the fused gate/up
+// tail fids[48..55], route.metal). Here the routes carry that multiset -- the duplicates point at the SAME
+// descriptor and hence the SAME trellis -- so the pair kernel finds its mates, and the shipped and pair bodies are
+// timed on the same buffers, in the same run, with the same-binary control.
 const VerifyShape = struct { n: u32, k: u32, halves: u32, rows: u32, name: []const u8, down: bool };
 
 const verify_shapes = [_]VerifyShape{
@@ -4185,9 +4111,8 @@ fn timeVerifySet(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Bu
     return (cb.gpuEnd() - cb.gpuStart()) * 1e3;
 }
 
-/// ROUND-429: the shared expert's gate/up as TWO dense multi-row calls (one matrix each) in one command
-/// buffer. The dense body decodes the matrix once for all the window's rows; the indexed call's shared slots
-/// decode it once a row.
+/// The shared expert's gate/up as TWO dense multi-row calls (one matrix each) in one command buffer. The dense body
+/// decodes the matrix once for all the window's rows; the indexed call's shared slots decode it once a row.
 fn timeDensePair(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, xoff: usize, xoff_up: usize, sums: mtl.Buffer, sums_off: usize, dummy: mtl.Buffer, table: mtl.Buffer, tr_gate: mtl.Buffer, tr_up: mtl.Buffer, d: RowDispatch) !f64 {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
@@ -4229,7 +4154,7 @@ fn verifyMultisetBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Alloca
     defer ship.deinit();
     const pair = try mtl.Pipeline.init(device, lib, "tf_exl3_matmul_decode_fma_static_pair_lut", false);
     defer pair.deinit();
-    // ROUND-429: the multi-row dense body for the shared-expert split's two matrices.
+    // The multi-row dense body for the shared-expert split's two matrices.
     const dense2 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_decode_fma_dense_multi2", false) catch null;
     defer if (dense2) |q| q.deinit();
     const dense4 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_decode_fma_dense_multi4", false) catch null;
@@ -4248,7 +4173,7 @@ fn verifyMultisetBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Alloca
         }
     }
 
-    std.debug.print("\nverify multiset bench (ROUND-419): the pair kernel on the verify's own routes\n", .{});
+    std.debug.print("\nverify multiset bench (): the pair kernel on the verify's own routes\n", .{});
     std.debug.print("  {s:>18} {s:>6} {s:>6} {s:>6} {s:>9} {s:>9} {s:>9} {s:>8} {s:>10}\n", .{ "shape", "slots", "dist", "saved", "ship ms", "ident ms", "pair ms", "pair", "hash" });
     for (verify_shapes) |s| {
         const tile_bytes = s.halves * 8 * 2;
@@ -4395,10 +4320,10 @@ fn verifyMultisetBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Alloca
         std.debug.print("  {s:>18} {d:>6} {d:>6} {d:>6} {d:>9.3} {d:>9.3} {d:>9.3} {d:>7.1}% {d:>10}  ({d} of {d} differ, worst {e:.2})\n", .{
             s.name, rows, distinct, saved, t_ship, t_ident, t_pair, 100.0 * (t_pair - t_ship) / t_ship, h & 0xffffffff, differing, n_out, worst,
         });
-        // ROUND-429: THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL, priced in the SAME interleaved
-        // run as the shipped call (ROUND-419's watch-out: an arm timed in another block is another cache
-        // regime). The fused call's tail names each shared matrix once a token row; the split runs the
-        // routed-only call plus two dense multi-row calls that decode each matrix ONCE for the window.
+        // THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL, priced in the SAME interleaved run as the
+        // shipped call (The watch-out: an arm timed in another block is another cache regime). The fused call's
+        // tail names each shared matrix once a token row; the split runs the routed-only call plus two dense
+        // multi-row calls that decode each matrix ONCE for the window.
         if (!s.down) {
             const r_tok: usize = rows / (2 * picks + 2);
             const routed_slots: usize = 2 * r_tok * picks;
@@ -4449,25 +4374,25 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     defer p5.deinit();
     const p37 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax37", false) catch null;
     defer if (p37) |q| q.deinit();
-    // ROUND-389: the occupancy-keeping form (nax61), its control (nax63) and the activation ablation (nax62).
+    // The occupancy-keeping form (nax61), its control (nax63) and the activation ablation (nax62).
     const p61 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax61", false) catch null;
     defer if (p61) |q| q.deinit();
     const p62 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax62", false) catch null;
     defer if (p62) |q| q.deinit();
     const p63 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax63", false) catch null;
     defer if (p63) |q| q.deinit();
-    // ROUND-389: the SHIPPED body (nax48) is the control the form must beat.
+    // The SHIPPED body (nax48) is the control the form must beat.
     const p48 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax48", false) catch null;
     defer if (p48) |q| q.deinit();
-    // ROUND-390: the ENGINE's routed body (nax59, the funnel path as its only path -- ROUND-352's landing) and
-    // the stream-read arms the bench never timed (nax57, the 32-bit word; nax53, the cooperative read).
+    // The ENGINE's routed body (nax59, the funnel path as its only path -- The landing) and the stream-read arms
+    // the bench never timed (nax57, the 32-bit word; nax53, the cooperative read).
     const p59 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax59", false) catch null;
     defer if (p59) |q| q.deinit();
     const p57 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax57", false) catch null;
     defer if (p57) |q| q.deinit();
     const p53 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax53", false) catch null;
     defer if (p53) |q| q.deinit();
-    // ROUND-390: the store path's modes on the engine's body.
+    // The store path's modes on the engine's body.
     const p69 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax69", false) catch null;
     defer if (p69) |q| q.deinit();
     const p70 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax70", false) catch null;
@@ -4477,17 +4402,17 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     const p72 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax72", false) catch null;
     defer if (p72) |q| q.deinit();
     const p73 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax73", false) catch null;
-    // ROUND-408: the 128-row x 64-column tile (RG=8, CG=1) -- the tile-height lever, at the plan's own shape.
+    // The 128-row x 64-column tile (RG=8, CG=1) -- the tile-height lever, at the plan's own shape.
     const p49 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax49", false) catch null;
     defer if (p49) |q| q.deinit();
-    // ROUND-409: THE EXPERT'S SLAB DECODED ONCE FOR THE TILE'S ROWS -- nax76 (128 rows, two row groups a warp,
-    // four warps) and nax77 (256 rows, four row groups a warp, four warps): the padding's term, addressed.
+    // THE EXPERT'S SLAB DECODED ONCE FOR THE TILE'S ROWS -- nax76 (128 rows, two row groups a warp, four warps) and
+    // nax77 (256 rows, four row groups a warp, four warps): the padding's term, addressed.
     const p76 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax76", false) catch null;
     defer if (p76) |q| q.deinit();
     const p77 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax77", false) catch null;
     defer if (p77) |q| q.deinit();
     defer if (p73) |q| q.deinit();
-    // ROUND-390: the routed tile's store path, priced.
+    // The routed tile's store path, priced.
     const p64 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax64", false) catch null;
     defer if (p64) |q| q.deinit();
     const p65 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax65", false) catch null;
@@ -4528,19 +4453,19 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     defer if (p20) |q| q.deinit();
     const p21 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax21", false) catch null;
     defer if (p21) |q| q.deinit();
-    // ROUND-346: the funnel read in the prompt body (the comparator's structure) and the no-value diagnostic.
+    // The funnel read in the prompt body (the comparator's structure) and the no-value diagnostic.
     const p40 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax40", false) catch null;
     defer if (p40) |q| q.deinit();
     const p41 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax41", false) catch null;
     defer if (p41) |q| q.deinit();
-    // ROUND-350: the funnel's extraction in 32-bit words (the comparator's dig_dec_job structure).
+    // The funnel's extraction in 32-bit words (the comparator's dig_dec_job structure).
     const p50 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax50", false) catch null;
     defer if (p50) |q| q.deinit();
-    // ROUND-350: the cooperative read (one lane a word) and the shuffle.
+    // The cooperative read (one lane a word) and the shuffle.
     const p52 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax52", false) catch null;
     defer if (p52) |q| q.deinit();
-    // ROUND-347: the funnel's value path -- the resident table, the threadgroup LUT, the cheap-value diagnostic --
-    // and the double-buffered body with the funnel.
+    // The funnel's value path -- the resident table, the threadgroup LUT, the cheap-value diagnostic -- and the
+    // double-buffered body with the funnel.
     const p43 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax43", false) catch null;
     defer if (p43) |q| q.deinit();
     const p44 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax44", false) catch null;
@@ -4571,7 +4496,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     defer if (p30) |q| q.deinit();
     const p31 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax31", false) catch null;
     defer if (p31) |q| q.deinit();
-    // ROUND-431: the double-buffered 128-column dense body (table and ALU).
+    // The double-buffered 128-column dense body (table and ALU).
     const p79 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax79", false) catch null;
     defer if (p79) |q| q.deinit();
     const p80 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax80", false) catch null;
@@ -4580,11 +4505,11 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     defer if (p82) |q| q.deinit();
     const p83 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax83", false) catch null;
     defer if (p83) |q| q.deinit();
-    // ROUND-435: the comparator's routed prefill geometry (BM 128, BN 64, BK 64, 8 SG x 32x32).
+    // The comparator's routed prefill geometry (BM 128, BN 64, BK 64, 8 SG x 32x32).
     const p84 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax84", false) catch null;
     defer if (p84) |q| q.deinit();
-    // ROUND-351: the dense 128x64 tile with a simdgroup that owns thirty-two rows (the comparator's NAXTile
-    // shape): the lane keeps eight states and the weight fragments are read once for two row groups.
+    // The dense 128x64 tile with a simdgroup that owns thirty-two rows (the comparator's NAXTile shape): the lane
+    // keeps eight states and the weight fragments are read once for two row groups.
     const p56 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax56", false) catch null;
     defer if (p56) |q| q.deinit();
     const p32 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax32", false) catch null;
@@ -4597,7 +4522,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     defer if (p35) |q| q.deinit();
     const p36 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax36", false) catch null;
     defer if (p36) |q| q.deinit();
-    // ROUND-433: the dense funnel body (nax51), timed against nax31 at the tap's shape and width.
+    // The dense funnel body (nax51), timed against nax31 at the tap's shape and width.
     if (std.c.getenv("TF_BENCH_TAP") != null) {
         const p51 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax51", false) catch null;
         defer if (p51) |q| q.deinit();
@@ -4685,10 +4610,8 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     const macs = @as(f64, exl3_rows) * @as(f64, exl3_n) * @as(f64, exl3_k);
     std.debug.print("exl3 bench: {d} tiles x 64 rows, N {d}, K {d}, halves {d}, indexed grouped\n", .{ exl3_tiles, exl3_n, exl3_k, exl3_halves });
     std.debug.print("  {s:>8} {s:>9} {s:>9}\n", .{ "kernel", "ms", "TMAC/s" });
-    // ROUND-435: THE COMPARATOR'S ROUTED PREFILL GEOMETRY (BM 128, BN 64, BK 64; eight simdgroups, 4 x 2, each a
-    // 32 x 32 tile; the eight decode the whole 64 x 64 stage cooperatively; one barrier pair a 64-k stage) at the
-    // plan's own shape (N 2304, K 5120, the 3,283-token prompt's 384-expert histogram). The 64-row plan on the
-    // shipped body (nax59) is the bit-identity reference; nax76 is the same-run control (the record's 128-row form).
+    // The 64-row plan on the shipped body (nax59) is the bit-identity reference; nax76 is the same-run control (the
+    // record's 128-row form).
     if (std.c.getenv("TF_BENCH_CMP") != null) {
         if (p84 == null or p59 == null) return error.NoCmpPipeline;
         var off64: [exl3_tiles]u32 = undefined;
@@ -4731,9 +4654,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                 for (0..c) |j| rr[base + j] = @intCast(i);
             }
         }
-        // Isolate the geometry from the routing: a DENSE 128 x 2304 x 5120 GEMM on one expert's trellis,
-        // nax31 against nax84, same input and same buffers. If this differs the body is wrong; if it matches,
-        // the plan comparison's only suspect is its reference.
+        // If this differs the body is wrong; if it matches, the plan comparison's only suspect is its reference.
         {
             var dargs = args;
             dargs.rows = 128;
@@ -4758,7 +4679,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
         args128.rows = @intCast(rows128);
         const lm = @as(f64, @floatFromInt(live)) * @as(f64, exl3_n) * @as(f64, exl3_k);
         const pm128 = @as(f64, @floatFromInt(rows128)) * @as(f64, exl3_n) * @as(f64, exl3_k);
-        std.debug.print("\nROUND-435 comparator routed prefill geometry: N {d} K {d}, live rows {d}; 64-row plan {d} rows; 128-row plan {d} rows ({d} tiles)\n", .{ exl3_n, exl3_k, live, rows64, rows128, tiles128 });
+        std.debug.print("\ncomparator routed prefill geometry: N {d} K {d}, live rows {d}; 64-row plan {d} rows; 128-row plan {d} rows ({d} tiles)\n", .{ exl3_n, exl3_k, live, rows64, rows128, tiles128 });
         _ = try timeRows(queue, p59.?, &args64, xb64, experts[0], sb64, rt64, descs, table, 64, 128, rows64, 1);
         const ms64 = try timeRows(queue, p59.?, &args64, xb64, experts[0], sb64, rt64, descs, table, 64, 128, rows64, 5);
         const h64 = hashLiveRows(sb64, rows64 * exl3_n, &plan_counts, &off64, exl3_n);
@@ -4790,29 +4711,28 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
         hash5 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, @as(usize, exl3_rows) * exl3_n)));
         std.debug.print("  sums: nax3 {x:0>16} nax5 {x:0>16} {s}\n", .{ hash3, hash5, if (hash3 == hash5) "IDENTICAL" else "DIFFER" });
     }
-    // ROUND-389: the routed tile's activation term -- the shipped body, the occupancy-keeping form against its
-    // control, and the ablation that prices the activation's per-block read.
+    // The routed tile's activation term -- the shipped body, the occupancy-keeping form against its control, and
+    // the ablation that prices the activation's per-block read.
     if (p48) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms48 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-389: the SHIPPED body, nax48)\n", .{ "nax48", ms48, macs / (ms48 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the SHIPPED body, nax48)\n", .{ "nax48", ms48, macs / (ms48 * 1e-3) / 1e12 });
     }
-    // ROUND-390: the routed tile's store path, priced. The SHIPPED body is the control (nax48).
+    // The routed tile's store path, priced. The SHIPPED body is the control (nax48).
     var hash48: u64 = 0;
     if (p48) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms48b = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
         hash48 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, @as(usize, exl3_rows) * exl3_n)));
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390 control: the SHIPPED body, nax48)\n", .{ "nax48", ms48b, macs / (ms48b * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (control: the SHIPPED body, nax48)\n", .{ "nax48", ms48b, macs / (ms48b * 1e-3) / 1e12 });
     }
-    // ROUND-408: THE PLAN'S OWN SHAPE. The engine's grouped plan at the prompt's shape: 384 experts' blocks,
-    // each padded to a multiple of the tile's sixty-four rows, the blocks laid out consecutively, the plan's tail
-    // unused. The weight decode is PER TILE, so the plan's padding is a direct multiplier on the routed tile's
-    // biggest term -- and the plan's tile count is the one number the record has never had. Three arms:
-    //   A: the plan's shape (the dispatched tiles, the padding, the live rows) -- the engine's own geometry;
-    //   B: the same live rows packed into the minimum number of tiles (the padding's price = A - B);
-    //   C: the plan's shape with the activation's read hoisted out of the k loop (the ablation) -- the activation's
-    //      share AT THE PLAN'S SHAPE.
+    // THE PLAN'S OWN SHAPE. The engine's grouped plan at the prompt's shape: 384 experts' blocks, each padded to a
+    // multiple of the tile's sixty-four rows, the blocks laid out consecutively, the plan's tail unused. The weight
+    // decode is PER TILE, so the plan's padding is a direct multiplier on the routed tile's biggest term -- and the
+    // plan's tile count is the one number the record has never had. Three arms: A: the plan's shape (the dispatched
+    // tiles, the padding, the live rows) -- the engine's own geometry; B: the same live rows packed into the
+    // minimum number of tiles (the padding's price = A - B); C: the plan's shape with the activation's read hoisted
+    // out of the k loop (the ablation) -- the activation's share AT THE PLAN'S SHAPE.
     {
         const live_rows: usize = blk: {
             var s2: usize = 0;
@@ -4830,7 +4750,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
         const pad_rows: usize = 685 * 64; // the plan's dispatched rows (the host's formula: 685 tiles)
         var live_tiles: usize = 0;
         for (plan_counts) |c| live_tiles += (c + 63) / 64;
-        std.debug.print("\nROUND-408 plan shape: live_rows {d} used_rows {d} (padded tiles {d}) live_tiles {d} packed_tiles {d}\n", .{ live_rows, plan_rows, pad_rows / 64, live_tiles, (live_rows + 63) / 64 });
+        std.debug.print("\nplan shape: live_rows {d} used_rows {d} (padded tiles {d}) live_tiles {d} packed_tiles {d}\n", .{ live_rows, plan_rows, pad_rows / 64, live_tiles, (live_rows + 63) / 64 });
         // The routes: the expert id on a live row, the padding sentinel on the rest (the engine's own sentinel).
         const px = try device.buffer(plan_rows * exl3_k * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         defer px.deinit();
@@ -4888,10 +4808,8 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                 const msD = try timeRows(queue, pipe3, &pargs, px, experts[0], psums, proutes, descs, table, 64, 128, plan_rows, 5);
                 std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (D: the extraction dropped at the plan's shape = {d:.3} ms = {d:.1} % of A)\n", .{ "nax73", msD, macs_live / (msD * 1e-3) / 1e12, msA - msD, 100.0 * (msA - msD) / msA });
             }
-            // ROUND-408: THE TILE-HEIGHT LEVER AT THE PLAN'S SHAPE. The plan's own histogram, grouped at 128 rows
-            // (each expert's block padded to a multiple of 128), gives 407 working tiles against the 64-row plan's
-            // 537 -- 24 % fewer tiles, so 24 % less weight decode. The body is nax49 (RG=8, CG=1): the same
-            // funnel + padded-rows-skipped family as nax48, with the tile one hundred and twenty-eight rows tall.
+            // THE TILE-HEIGHT LEVER AT THE PLAN'S SHAPE. The body is nax49 (RG=8, CG=1): the same funnel +
+            // padded-rows-skipped family as nax48, with the tile one hundred and twenty-eight rows tall.
             if (p49) |pipe4| {
                 var off128: [exl3_tiles]u32 = undefined;
                 var used128: usize = 0;
@@ -4929,29 +4847,23 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                     const msF = try timeRows(queue, pipe5, &pargs, px, experts[0], psums, proutes, descs, table, 64, 128, plan_rows, 5);
                     std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (F: the SAME BODY FAMILY at 64 rows (nax48) -- the tile height-s price = {d:.1} %)\n", .{ "nax48", msF, macs_live / (msF * 1e-3) / 1e12, 100.0 * (msE - msF) / msF });
                 }
-                // ROUND-409: does the EXISTING 128-row tile (nax49) give the same rows as the 64-row plan? The
-                // question the new forms raise: is a plan's row offset part of the result?
+                // Does the EXISTING 128-row tile (nax49) give the same rows as the 64-row plan? The question the
+                // new forms raise: is a plan's row offset part of the result?
                 {
                     const h49 = hashLiveRows(sums128p, rows128 * exl3_n, &plan_counts, &off128, exl3_n);
                     std.debug.print("  {s:>8} {x:>16}  (the 128-row plan-s live rows after nax49 -- the EXISTING 128-row tile)\n", .{ "HASH49", h49 });
                     compareLiveRows(psums, plan_rows * exl3_n, &plan_counts, &offsets, sums128p, rows128 * exl3_n, &off128, exl3_n);
                 }
-                // ROUND-409: arm E re-run with the CORRECT dispatch (the sixty-four-row helper dispatched twice
-                // the tiles the 128-row plan needs, so half of them were empty).
+                // Arm E re-run with the CORRECT dispatch (the sixty-four-row helper dispatched twice the tiles the
+                // 128-row plan needs, so half of them were empty).
                 if (p49) |pipe4b| {
                     _ = try timeRowsT(queue, pipe4b, &args128p, x128p, experts[0], sums128p, routes128p, descs, table, 64, 256, rows128, 128, 1);
                     const msE2 = try timeRowsT(queue, pipe4b, &args128p, x128p, experts[0], sums128p, routes128p, descs, table, 64, 256, rows128, 128, 5);
                     std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (E2: nax49, the 128-row tile, the CORRECT dispatch ({d} tiles) -- against the 64-row plan-s {d:.3} ms: {d:.1} %)\n", .{ "nax49", msE2, macs_live / (msE2 * 1e-3) / 1e12, tiles128, msA, 100.0 * (msE2 - msA) / msA });
                 }
             }
-            // ROUND-409: THE EXPERT'S SLAB DECODED ONCE FOR THE TILE-S ROWS -- the padding-s term, addressed. The
-            // weight decode is PER TILE, so an expert with more than sixty-four rows pays its slab again for every
-            // row block it has: the plan-s 537 tiles against 359 experts is 178 excess decodes (33 % of the tile-s
-            // biggest term). Two forms, both one threadgroup per (expert, column tile), both with the funnel and
-            // eight states a lane:
-            //   G: nax76 -- 128 rows a tile, TWO row groups a warp (four warps): 407 tiles (24 % less decode);
-            //   H: nax77 -- 256 rows a tile, FOUR row groups a warp (four warps): 370 tiles (31 % less decode).
-            // The ideal (one decode an expert) is 359 tiles; the packed arm (B, 308 tiles) is the ceiling.
+            // THE EXPERT'S SLAB DECODED ONCE FOR THE TILE-S ROWS -- the padding-s term, addressed. The ideal (one
+            // decode an expert) is 359 tiles; the packed arm (B, 308 tiles) is the ceiling.
             {
                 const hash64 = hashLiveRows(psums, plan_rows * exl3_n, &plan_counts, &offsets, exl3_n);
                 std.debug.print("  {s:>8} {x:>16}  (the 64-row plan-s LIVE ROWS (the exactness reference for the new forms))\n", .{ "HASH64", hash64 });
@@ -5020,94 +4932,94 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
             }
         }
     }
-    // ROUND-390: the ENGINE's body and the stream-read arms.
+    // The ENGINE's body and the stream-read arms.
     if (p59) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms59 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: THE ENGINE'S BODY -- nax59, the funnel path as its only path)\n", .{ "nax59", ms59, macs / (ms59 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (THE ENGINE'S BODY -- nax59, the funnel path as its only path)\n", .{ "nax59", ms59, macs / (ms59 * 1e-3) / 1e12 });
         const hash59 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, @as(usize, exl3_rows) * exl3_n)));
         std.debug.print("  sums: nax5 {x:0>16} nax59 {x:0>16} {s}\n", .{ hash5, hash59, if (hash5 == hash59) "IDENTICAL" else "DIFFER" });
     }
     if (p57) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms57 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: the 32-bit stream word -- the comparator's read)\n", .{ "nax57", ms57, macs / (ms57 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the 32-bit stream word -- the comparator's read)\n", .{ "nax57", ms57, macs / (ms57 * 1e-3) / 1e12 });
     }
     if (p53) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms53 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: the cooperative read, one lane a word + a shuffle)\n", .{ "nax53", ms53, macs / (ms53 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the cooperative read, one lane a word + a shuffle)\n", .{ "nax53", ms53, macs / (ms53 * 1e-3) / 1e12 });
     }
     if (p69) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms69 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: nax59 + the eight stores CONTIGUOUS -- the comparator's store form)\n", .{ "nax69", ms69, macs / (ms69 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (nax59 + the eight stores CONTIGUOUS -- the comparator's store form)\n", .{ "nax69", ms69, macs / (ms69 * 1e-3) / 1e12 });
     }
     if (p70) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms70 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: nax59 + the eight scattered stores GONE)\n", .{ "nax70", ms70, macs / (ms70 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (nax59 + the eight scattered stores GONE)\n", .{ "nax70", ms70, macs / (ms70 * 1e-3) / 1e12 });
     }
     if (p71) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms71 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: nax59 + the accumulator -- the calibration)\n", .{ "nax71", ms71, macs / (ms71 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (nax59 + the accumulator -- the calibration)\n", .{ "nax71", ms71, macs / (ms71 * 1e-3) / 1e12 });
     }
     if (p72) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms72 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: nax59 + the codebook arithmetic dropped)\n", .{ "nax72", ms72, macs / (ms72 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (nax59 + the codebook arithmetic dropped)\n", .{ "nax72", ms72, macs / (ms72 * 1e-3) / 1e12 });
     }
     if (p73) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms73 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: nax59 + the extraction dropped)\n", .{ "nax73", ms73, macs / (ms73 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (nax59 + the extraction dropped)\n", .{ "nax73", ms73, macs / (ms73 * 1e-3) / 1e12 });
     }
     if (p64) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms64 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: the eight stores CONTIGUOUS, one lane's run -- the comparator's store form)\n", .{ "nax64", ms64, macs / (ms64 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the eight stores CONTIGUOUS, one lane's run -- the comparator's store form)\n", .{ "nax64", ms64, macs / (ms64 * 1e-3) / 1e12 });
         const hash64 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, @as(usize, exl3_rows) * exl3_n)));
         std.debug.print("  sums: nax48 {x:0>16} nax64 {x:0>16} {s}\n", .{ hash48, hash64, if (hash48 == hash64) "IDENTICAL" else "DIFFER" });
     }
     if (p65) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms65 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: the DECODE KEPT, the eight scattered stores GONE)\n", .{ "nax65", ms65, macs / (ms65 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the DECODE KEPT, the eight scattered stores GONE)\n", .{ "nax65", ms65, macs / (ms65 * 1e-3) / 1e12 });
     }
     if (p66) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms66 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: the SHIPPED body + the accumulator -- the calibration)\n", .{ "nax66", ms66, macs / (ms66 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the SHIPPED body + the accumulator -- the calibration)\n", .{ "nax66", ms66, macs / (ms66 * 1e-3) / 1e12 });
     }
     if (p67) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms67 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: the codebook arithmetic dropped, the extraction and the stores kept)\n", .{ "nax67", ms67, macs / (ms67 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the codebook arithmetic dropped, the extraction and the stores kept)\n", .{ "nax67", ms67, macs / (ms67 * 1e-3) / 1e12 });
     }
     if (p68) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms68 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-390: the extraction dropped, the eight stores kept)\n", .{ "nax68", ms68, macs / (ms68 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the extraction dropped, the eight stores kept)\n", .{ "nax68", ms68, macs / (ms68 * 1e-3) / 1e12 });
     }
     if (p61) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 128, 256, 1);
         const ms61 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 128, 256, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-389: CG=2, the activation staged and shared)\n", .{ "nax61", ms61, macs / (ms61 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (CG=2, the activation staged and shared)\n", .{ "nax61", ms61, macs / (ms61 * 1e-3) / 1e12 });
         const hash61 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, @as(usize, exl3_rows) * exl3_n)));
         std.debug.print("  sums: nax5 {x:0>16} nax61 {x:0>16} {s}\n", .{ hash5, hash61, if (hash5 == hash61) "IDENTICAL" else "DIFFER" });
     }
     if (p63) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 128, 256, 1);
         const ms63 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 128, 256, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-389: CG=2, the shipped per-warp activation read)\n", .{ "nax63", ms63, macs / (ms63 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (CG=2, the shipped per-warp activation read)\n", .{ "nax63", ms63, macs / (ms63 * 1e-3) / 1e12 });
         const hash63 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, @as(usize, exl3_rows) * exl3_n)));
         std.debug.print("  sums: nax5 {x:0>16} nax63 {x:0>16} {s}\n", .{ hash5, hash63, if (hash5 == hash63) "IDENTICAL" else "DIFFER" });
     }
     if (p62) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms62 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ROUND-389: ABLATION, the activation read hoisted out of the k loop; the output differs by construction)\n", .{ "nax62", ms62, macs / (ms62 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (ABLATION, the activation read hoisted out of the k loop; the output differs by construction)\n", .{ "nax62", ms62, macs / (ms62 * 1e-3) / 1e12 });
     }
     if (p37) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 128, 128, 1);
@@ -5296,7 +5208,6 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
             const hash25 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, @as(usize, exl3_rows) * exl3_n)));
             std.debug.print("  sums: nax3 {x:0>16} nax25 {x:0>16} {s}\n", .{ hash3, hash25, if (hash3 == hash25) "IDENTICAL" else "DIFFER" });
         }
-        // The dense attention projections: 3,619 rows x 8,192 x 5,120, the 128x64 nax2 tile.
         const dense_trellis_bytes = (dense_k / 16) * (dense_n / 16) * exl3_tile_bytes;
         const dtr = try device.buffer(dense_trellis_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         defer dtr.deinit();
@@ -5421,7 +5332,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                     }
                 }
             }
-            // ROUND-431: the 128-column double-buffered body, priced before its fused epilogue is built.
+            // The 128-column double-buffered body, priced before its fused epilogue is built.
             if (p31) |q31| {
                 if (p79 != null or p80 != null) {
                     const dtable = try device.buffer(3 * 65536 * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -5433,7 +5344,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                             tw[cb * 65536 + st] = @bitCast(tf.exl3_format.codebookValue(e, @intCast(st)));
                         };
                     }
-                    std.debug.print("ROUND-431 128-column double-buffered dense body vs nax31, {d} rows:\n", .{dense_rows});
+                    std.debug.print("128-column double-buffered dense body vs nax31, {d} rows:\n", .{dense_rows});
                     std.debug.print("  {s:>5} {s:>16} {s:>10} {s:>8} {s:>8}\n", .{ "shape", "M x N x K", "body", "ms", "TMAC/s" });
                     try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 5120, 8192); // wo_b
                     try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 32768, 1280); // wq_b
@@ -5489,10 +5400,10 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     }
 }
 
-// ROUND-438: THE FP8/E4M3 DENSE ARM. nax31 reads the 5-6 bit EXL3 trellis and decodes it; this arm reads a
-// one-byte-a-weight E4M3 tensor already in the kernel's 16-k x 64-n block order and expands it to half with the
-// comparator's exact bit trick. Both are timed in one run at the attention's three shapes, and the fp8 path is
-// validated against a host fp32 sum on a fixed pattern (row 0, columns 0..7).
+// THE FP8/E4M3 DENSE ARM. nax31 reads the 5-6 bit EXL3 trellis and decodes it; this arm reads a one-byte-a-weight
+// E4M3 tensor already in the kernel's 16-k x 64-n block order and expands it to half with the comparator's exact
+// bit trick. Both are timed in one run at the attention's three shapes, and the fp8 path is validated against a
+// host fp32 sum on a fixed pattern (row 0, columns 0..7).
 fn fp8Value(b: u8) f32 {
     const bits: u16 = (@as(u16, b & 0x7F) << 7) | (@as(u16, b & 0x80) << 8);
     const h: f16 = @bitCast(bits);
@@ -5503,13 +5414,13 @@ fn fp8Code(n: usize, k: usize) u8 {
     return @intCast((n * 13 + k * 7) % 0x7E);
 }
 
-// ROUND-518: the engine's own release-fp8 prompt MMA (e4m3 weights, one e8m0 scale a 32-block) at the
-// attention's two big prompt shapes. R-517's first gate: the library rate is 95.3/75.5 TMAC/s; this
-// measures OUR kernel (`tf_dsv41_fp8_mma_bf16`) on synthetic weights, no pack and no serve.
+// The engine's own release-fp8 prompt MMA (e4m3 weights, one e8m0 scale a 32-block) at the attention's two big
+// prompt shapes. The first gate: the library rate is 95.3/75.5 TMAC/s; this measures OUR kernel
+// (`tf_dsv41_fp8_mma_bf16`) on synthetic weights, no pack and no serve.
 const MxShape = struct { name: []const u8, m: u32, k: u32, n: u32 };
 
-// ROUND-519: the same e4m3 x e8m0/32 body with bfloat16 MMA operands and fp32 accumulation (the fp8_mma arm's
-// fp32 simdgroup matrices are the rate question). Synthetic weights; no pack and no serve.
+// The same e4m3 x e8m0/32 body with bfloat16 MMA operands and fp32 accumulation (the fp8_mma arm's fp32 simdgroup
+// matrices are the rate question). Synthetic weights; no pack and no serve.
 const Bf16xArgs = extern struct { K: u32, N: u32, R: u32 };
 
 fn mxDenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void {
@@ -5520,7 +5431,7 @@ fn mxDenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !v
         .{ .name = "wq_b@1", .m = 1, .k = 1280, .n = 32768 },
         .{ .name = "wo_a@1", .m = 1, .k = 32768, .n = 1024 },
     };
-    std.debug.print("ROUND-518 engine fp8 MMA (e4m3 x e8m0/32, tf_dsv41_fp8_mma_bf16), synthetic weights\n", .{});
+    std.debug.print("engine fp8 MMA (e4m3 x e8m0/32, tf_dsv41_fp8_mma_bf16), synthetic weights\n", .{});
     std.debug.print("  {s:>10} {s:>5} {s:>15} {s:>9} {s:>9} {s:>9}\n", .{ "shape", "RS", "M x N x K", "ms", "TMAC/s", "GB/s" });
     for ([_]u32{ 4, 8, 16 }) |rs| {
         var pipes = if (rs == 4) try fp8.Pipelines.load(device) else blk: {
@@ -5653,10 +5564,9 @@ fn fp8DenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !
         std.debug.print("fp8 validity 128x1024x1280: worst relative |host sum - body| over 8 columns = {e:.3}\n", .{worst});
     }
 
-    // ROUND-439: the pack's OWN per-layer attention geometry (config: 40 layers, heads 64 x head_dim 512,
-    // q_lora 1280, o_lora 1024, o_groups 8, hidden 5120). ROUND-438 priced one wo_a group as if it were the
-    // layer (it is 8) and had wo_b's K/N swapped; the width is the projection's own halves (5-bit for the
-    // fused o/wq_b groups, 6-bit for wq_a/wkv), not the bench's old 6 (a 3-bit synthetic trellis).
+    // Priced one wo_a group as if it were the layer (it is 8) and had wo_b's K/N swapped; the width is the
+    // projection's own halves (5-bit for the fused o/wq_b groups, 6-bit for wq_a/wkv), not the bench's old 6 (a
+    // 3-bit synthetic trellis).
     const shapes = [_]Shape{
         .{ .m = @intCast(rows), .k = 1280, .n = 32768 }, // wq_b  K 1280 (q_lora)      N 32768 (heads*head_dim)
         .{ .m = @intCast(rows), .k = 4096, .n = 1024 }, // wo_a  K 4096 (q_width/8)   N 1024 (o_lora), one of 8 groups
@@ -5668,7 +5578,7 @@ fn fp8DenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !
     };
     const hals = [_]u32{ 10, 10, 10, 12, 12, 10, 10 }; // the pack's halves: 80,80,80,96,96,80,80 16-bit words a tile
     const names = [_][]const u8{ "wq_b", "wo_a", "wo_b", "wq_a", "wkv", "sh_w13", "sh_w2" };
-    std.debug.print("ROUND-439 fp8 dense arm at the PACK'S own shapes and widths: nax31 (EXL3) against the 1-byte int8/E4M3 body, {d} rows\n", .{rows});
+    std.debug.print("fp8 dense arm at the PACK'S own shapes and widths: nax31 (EXL3) against the 1-byte int8/E4M3 body, {d} rows\n", .{rows});
     std.debug.print("  {s:>6} {s:>17} {s:>4} {s:>9} {s:>9} {s:>9} {s:>9} {s:>8} {s:>8}\n", .{ "shape", "M x N x K", "half", "nax31 ms", "nax30 ms", "byte ms", "byte TMAC", "byte GB/s", "byte vs 31" });
     for (shapes, 0..) |s, si| {
         const m = s.m;
@@ -5737,7 +5647,7 @@ fn fp8DenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !
     }
 }
 
-// ROUND-438: the per-row-scaled fp8 timing helper (buffer 4 is the scale row).
+// The per-row-scaled fp8 timing helper (buffer 4 is the scale row).
 fn timeShapeSc(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl.Buffer, trellis: mtl.Buffer, sums: mtl.Buffer, scales: mtl.Buffer, m: usize, n: usize, cols: usize, threads: usize, tg_rows: usize, trials: usize) !f64 {
     const tn = (n + cols - 1) / cols;
     const tm = (m + tg_rows - 1) / tg_rows;
@@ -5765,8 +5675,7 @@ fn timeShapeSc(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: m
     return median(samples[0..nt]);
 }
 
-// ROUND-440: the pre-rotated int8 pack's GPU body against the exact CPU linear map of the stored codes/scales.
-// This is a kernel-correctness receipt, not the quality receipt (that is the repacker's FP64 layer NRMS).
+// The pre-rotated int8 pack's GPU body against the exact CPU linear map of the stored codes/scales.
 fn i8bBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator, k: usize, n: usize, fp8b: []const u8, scb: []const u8, block: usize) !void {
     if (k % block != 0) return error.BadMeta;
     const nb = k / block;
@@ -5878,14 +5787,14 @@ fn i8bBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator, k: usi
         }
     }
     const tmac = 2.0 * @as(f64, @floatFromInt(m * n * k)) / (ms * 1e9);
-    std.debug.print("ROUND-440 int8b kernel: K {d} N {d} block {d} {s}, {d} rows: i8b {d:.3} ms ({d:.1} TMAC/s), i8 single {d:.3} ms, overhead {d:.2}%\n", .{
+    std.debug.print("int8b kernel: K {d} N {d} block {d} {s}, {d} rows: i8b {d:.3} ms ({d:.1} TMAC/s), i8 single {d:.3} ms, overhead {d:.2}%\n", .{
         k, n, block, if (wide) "wide" else "narrow", m, ms, tmac, ms1, 100.0 * (ms - ms1) / ms1,
     });
     if (m <= 64) std.debug.print("  GPU-vs-CPU exact-map NRMS = {e:.4}; worst relative pointwise = {e:.4}\n", .{ std.math.sqrt(se / sb), worst });
 }
 
-// ROUND-438: the real-weight agreement harness. Reads one layer's repacked fp8 tensor + per-row scales and the
-// same projection's EXL3 trellis, runs both bodies on one fixed activation, and reports NRMS and per-row argmax
+// The real-weight agreement harness. Reads one layer's repacked fp8 tensor + per-row scales and the same
+// projection's EXL3 trellis, runs both bodies on one fixed activation, and reports NRMS and per-row argmax
 // agreement. Layer-level, no serve; the model-level 20-prompt gate stays for the flag-gated port.
 fn fp8RealBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator, io: std.Io) !void {
     const base_z = std.c.getenv("TF_FP8_BASE") orelse return error.NoFp8Base;
@@ -6012,10 +5921,10 @@ fn fp8RealBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator, io
         }
         if (b31 == b8) agree += 1;
     }
-    std.debug.print("ROUND-438 real-weight layer agreement: {s} K {d} N {d} halves {d}, {d} rows\n", .{ base, k, n, halves, m });
+    std.debug.print("real-weight layer agreement: {s} K {d} N {d} halves {d}, {d} rows\n", .{ base, k, n, halves, m });
     std.debug.print("  NRMS fp8-vs-EXL3 = {e:.4}; worst relative pointwise = {e:.4}; per-row argmax {d}/{d} = {d:.2}%\n", .{ std.math.sqrt(se / sb), worst, agree, m, 100.0 * @as(f64, @floatFromInt(agree)) / @as(f64, @floatFromInt(m)) });
-    // ROUND-520: the bf16-destination twin must be the same body with one cast at the end. Run it on the same
-    // bytes and activation and compare the bf16 output against the f32 body's own sums.
+    // The bf16-destination twin must be the same body with one cast at the end. Run it on the same bytes and
+    // activation and compare the bf16 output against the f32 body's own sums.
     if (std.c.getenv("TF_BENCH_FP8B") != null) {
         const pb = try mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_fp8b", false);
         defer pb.deinit();
@@ -6050,7 +5959,7 @@ fn fp8RealBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator, io
             bworst = @max(bworst, @abs(d) / @max(1.0, @abs(@as(f64, a8[i]))));
             if (d != 0) bad += 1;
         }
-        std.debug.print("  ROUND-520 fp8b vs fp8 f32: NRMS {e:.3}, worst {e:.3}, exact {d}/{d}\n", .{
+        std.debug.print("  fp8b vs fp8 f32: NRMS {e:.3}, worst {e:.3}, exact {d}/{d}\n", .{
             std.math.sqrt(bse / bsb), bworst, m * n - bad, m * n,
         });
     }

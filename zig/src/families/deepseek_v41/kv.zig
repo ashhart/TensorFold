@@ -27,8 +27,8 @@ pub const Pack = extern struct {
             return error.InvalidCachePackShape;
     }
 };
-/// ROUND-486: the window KV's RMS norm + RoPE + window-fp8 pack in one dispatch, at the pack's
-/// threadgroup geometry (16 a row) with the shipped rms reduction order recomputed per block.
+/// The window KV's RMS norm + RoPE + window-fp8 pack in one dispatch, at the pack's threadgroup geometry (16 a row)
+/// with the shipped rms reduction order recomputed per block.
 pub const Glue = extern struct {
     rows: u32,
     width: u32,
@@ -60,8 +60,8 @@ pub const Pool = extern struct {
     stride: u32,
     input_f32: u32,
     eps: f32 = 1e-20,
-    /// ROUND-367: the capture's slots (zero disables it): the pool writes every row it consumes, so a
-    /// rollback can re-cut the group that straddles the new position without another forward.
+    /// The capture's slots (zero disables it): the pool writes every row it consumes, so a rollback can re-cut the
+    /// group that straddles the new position without another forward.
     capture_rows: u32 = 0,
     comptime {
         @import("metal/index_mirror.zig").check(Pool, sources.deepseek_v41_kv, "Dsv41Pool");
@@ -134,9 +134,8 @@ pub const Pipelines = struct {
         enc.dispatchGroups(mtl.Size.of(args.width / args.block, args.rows, 1), mtl.Size.of(32, 1, 1));
         enc.barrier();
     }
-    /// ROUND-486: norm + rope + window-fp8 pack, one dispatch, bit-identical to the three shipped
-    /// kernels (kv_test's receipt). Y is written only when args.write_y is set; the engine passes the
-    /// packed buffer as an inert placeholder, so the raw rows are read-only and there is no race.
+    /// Y is written only when args.write_y is set; the engine passes the packed buffer as an inert placeholder, so
+    /// the raw rows are read-only and there is no race.
     pub fn encodeGlue(p: *const Pipelines, enc: mtl.ComputeEncoder, x: View, weight: View, factors: View, packed_view: View, y: View, args: Glue) !void {
         try args.validate();
         try x.requireRows(args.rows, args.stride, args.width, 2);
@@ -169,8 +168,8 @@ pub const Pipelines = struct {
     comptime {
         @import("metal/index_mirror.zig").check(RingMove, sources.deepseek_v41_kv, "Dsv41RingMove");
     }
-    /// ROUND-398: move `move_rows` of the window ring's slots to/from the stash. `first` is the absolute
-    /// row offset within the stash's max_rows; the ring slot is `(position + first + rr) % window`.
+    /// Move `move_rows` of the window ring's slots to/from the stash. `first` is the absolute row offset within the
+    /// stash's max_rows; the ring slot is `(position + first + rr) % window`.
     pub fn encodeRingMove(p: *const Pipelines, enc: mtl.ComputeEncoder, dst: View, src: View, args: RingMove) !void {
         if (args.layers == 0 or args.move_rows == 0 or args.stride_words == 0 or args.first + args.move_rows > args.max_rows) return;
         enc.setPipeline(p.ring_move);
@@ -181,9 +180,9 @@ pub const Pipelines = struct {
         enc.barrier();
     }
 
-    /// ratio2 values/gates are FP32; ratio1 values and RMS weight are BF16. Latent output is BF16.
-    /// ROUND-367: `capture` (zero slots disables it) receives every row the pool consumes -- the row's
-    /// own values and its gate -- so a rollback can re-cut the group that straddles the new position.
+    /// Ratio2 values/gates are FP32; ratio1 values and RMS weight are BF16. Latent output is BF16. `capture` (zero
+    /// slots disables it) receives every row the pool consumes -- the row's own values and its gate -- so a
+    /// rollback can re-cut the group that straddles the new position.
     pub fn encodePool(p: *const Pipelines, enc: mtl.ComputeEncoder, values: View, gates: View, partial: View, norm_weight: View, latent: View, capture: View, args: Pool) !void {
         try args.validate();
         try values.requireRows(args.rows, args.stride, args.width, if (args.input_f32 != 0) 4 else 2);
@@ -210,8 +209,8 @@ pub const Pipelines = struct {
             enc.barrier();
         }
     }
-    /// ROUND-367: the no-re-feed port's restore. The pool's open row comes back from the capture: the
-    /// tail dispatch with the captured row's own values and gate, at the row's own position.
+    /// The no-re-feed port's restore. The pool's open row comes back from the capture: the tail dispatch with the
+    /// captured row's own values and gate, at the row's own position.
     pub fn restorePool(p: *const Pipelines, enc: mtl.ComputeEncoder, values: View, gates: View, partial: View, args: Pool) !void {
         try args.validate();
         if (args.ratio <= 1) return;

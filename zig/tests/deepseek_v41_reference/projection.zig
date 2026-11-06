@@ -54,10 +54,10 @@ pub fn applyF32(matrix: weights.AnyMatrix, x: []const u16, y: []f32, scratch: *S
     return applyOf(f32, f32, matrix, x, y, scratch);
 }
 
-/// ROUND-377: the projection at a chosen internal precision P and a chosen output boundary T.
-/// P == f32 is the source contract, bit-identical to the shipped path; P == f64 is the ideal rotation.
-/// T is the output element type: u16 is the model's BF16 boundary, f32 the FP32 chain's logits, f64 the FP64
-/// chain's. The dot itself is FP64 in both chains -- it is already the widest form this file has.
+/// The projection at a chosen internal precision P and a chosen output boundary T. P == f32 is the source contract,
+/// bit-identical to the shipped path; P == f64 is the ideal rotation. T is the output element type: u16 is the
+/// model's BF16 boundary, f32 the FP32 chain's logits, f64 the FP64 chain's. The dot itself is FP64 in both chains
+/// -- it is already the widest form this file has.
 pub fn applyOf(comptime T: type, comptime P: type, matrix: weights.AnyMatrix, x: []const u16, y: []T, scratch: *Scratch) !void {
     switch (matrix) {
         .trellis => |mt| {
@@ -434,9 +434,9 @@ fn finish(comptime T: type, matrix: exl3.Matrix, y: []T, sums: []const f64) !voi
     return finishOf(T, f32, matrix, y, sums);
 }
 
-/// ROUND-377: the output rotation at internal precision P. P == f32 is the source contract (one FP64->FP32
-/// boundary replaces the GPU's FP32 dot-product accumulation, then the rotation in FP32); P == f64 keeps the
-/// rotation ideal and narrows only at the output boundary T.
+/// The output rotation at internal precision P. P == f32 is the source contract (one FP64->FP32 boundary replaces
+/// the GPU's FP32 dot-product accumulation, then the rotation in FP32); P == f64 keeps the rotation ideal and
+/// narrows only at the output boundary T.
 fn finishOf(comptime T: type, comptime P: type, matrix: exl3.Matrix, y: []T, sums: []const f64) !void {
     @setFloatMode(.strict);
     const sv = try borrowed(matrix.svh, try scaleBytes(matrix.n, matrix.svh_format));

@@ -70,8 +70,8 @@ const Capture = struct {
     }
     fn reference(ctx: *anyopaque, layer: usize, stage: Stage, chain: *anyopaque) void {
         const self: *Capture = @ptrCast(@alignCast(ctx));
-        // ROUND-377: the chain is generic over its precision now, so it cannot name itself in its own observer
-        // callback; the reader casts the untyped pointer back to the source-contract chain.
+        // The chain is generic over its precision now, so it cannot name itself in its own observer callback; the
+        // reader casts the untyped pointer back to the source-contract chain.
         const ref: *const Reference = @ptrCast(@alignCast(chain));
         const start = (layer * 2 + @intFromBool(stage == .moe)) * stride;
         var destination: []u8 = self.cpu[start..][0..stride];
@@ -157,8 +157,7 @@ pub fn runGate(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u
 
 fn runWith(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, token_map: []const u8, dir: []const u8, force_pin: bool) !void {
     if (ids.len == 0 or ids.len > 16) return error.InvalidOracleWindow;
-    // Diagnostic-only switches. None of them touches the engine; the order variants change the *reference's* own
-    // reduction order, which is what an envelope of legal f32 orders is measured with.
+    // Diagnostic-only switches.
     const pin_enabled = force_pin or env("TF_DSV41_PIN") != null;
     const pin_shift = env("TF_DSV41_PIN_SHIFT") != null;
     const form: reference_mod.ScoreForm =
@@ -264,7 +263,6 @@ fn runWith(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, 
             } else reference.pin = .{ .ids = &pin_ids };
         }
         const teacher = try reference.step(id);
-        // End-to-end agreement, the number the project's own gate pairs with its 1% trip-wire.
         if (argmax(actual) != argmax(teacher)) greedy += 1;
         std.debug.print("token {d}: engine={d} reference={d} {s}\n", .{ token, argmax(actual), argmax(teacher), if (argmax(actual) == argmax(teacher)) "agree" else "DISAGREE" });
         const gpu = buffer.contents()[0..bytes];
@@ -334,8 +332,7 @@ fn runWith(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, 
     }
     try report.appendSlice(gpa, "\n]\n");
     if (force_pin) {
-        // Exactness-only verdict. No stage tolerance: a clean engine's per-stage divergence ranges 0 to 1.0e-02
-        // depending on the token (receipt 2026-10-24-token-set-variance), so no constant separates correct from not.
+        // Exactness-only verdict.
         var engram_total: usize = 0;
         var engram_samples: usize = 0;
         for (0..40) |layer| {

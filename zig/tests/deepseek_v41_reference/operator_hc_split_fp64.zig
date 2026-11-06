@@ -195,7 +195,6 @@ test "mHC split unary boundaries against the FP64 ideal on retained arguments" {
         }
     }
     std.debug.print("HC64 {{\"case\":\"split_args\",\"summary\":true,\"max_ulp_metal_vs_f64\":{d:.4},\"worst_stage\":\"{s}\",\"max_ulp_f32_vs_f64\":{d:.4}}}\n", .{ max_ulp_metal, worst_name, max_ulp_f32 });
-    // Metal may exceed the FP32 reference by one exp ULP; cancelled Sinkhorn cells inflate ULPs, NRMS stays below 1e-7.
     try std.testing.expect(max_ulp_metal <= max_ulp_f32 + 2.0);
     try std.testing.expect(max_ulp_metal < 48.0);
 }

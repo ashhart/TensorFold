@@ -20,7 +20,7 @@ pub fn chunkClass(n: usize) u8 {
 }
 
 /// The rows a fresh pass's last chunk holds at `len` for a zero-anchored grid `grid`: `len % grid`, or one whole
-/// chunk when it divides. ROUND-502: the class of this is what a resumed suffix's last chunk must keep.
+/// chunk when it divides. The class of this is what a resumed suffix's last chunk must keep.
 pub fn freshLast(grid: u32, len: usize) usize {
     const g: usize = @max(1, grid);
     return if (len % g != 0) len % g else @min(len, g);
@@ -217,9 +217,9 @@ pub const Store = struct {
         return true;
     }
 
-    /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
-    /// ROUND-472: a `tail` family also keeps one off-grid state before a prompt's end, so a later turn resumes
-    /// at its own boundary instead of at the last grid chunk.
+    /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families. A
+    /// `tail` family also keeps one off-grid state before a prompt's end, so a later turn resumes at its own
+    /// boundary instead of at the last grid chunk.
     pub fn usable(s: *const Store, at: u32, starts: []const u32) bool {
         return at > 0 and (!s.rules.planned or (s.rules.tail_align > 1 and (s.rules.tail or s.rules.end_mark)) or s.startAt(starts, at) == at);
     }
@@ -340,9 +340,9 @@ pub const Store = struct {
         }
         s.reserve(prompt, born, e, marks_, spans);
         if (e) |entry| entry.borrowers += 1;
-        // ROUND-504: the tail mark this lookup planned, where the backend may snapshot it inside the chunk that
-        // runs past it. Only a tensor-tile tail (>= 64 rows) and only with a bulk piece behind it: the merged
-        // chunk then keeps the kernel class the cut's own tail chunk would have run.
+        // The tail mark this lookup planned, where the backend may snapshot it inside the chunk that runs past it.
+        // Only a tensor-tile tail (>= 64 rows) and only with a bulk piece behind it: the merged chunk then keeps
+        // the kernel class the cut's own tail chunk would have run.
         const snap_at: u32 = if (s.rules.tail_snap and tail_at > from and tail_at < prompt.len and
             prompt.len - tail_at >= 64 and std.mem.indexOfScalar(u32, marks_, tail_at) != null) tail_at else 0;
         return .{ .entry = e, .marks = marks_, .snap_at = snap_at };
@@ -444,35 +444,24 @@ pub const Store = struct {
         const repeat_at = s.repeat_log.mark(s.rules.repeat_min, prompt, from, s.rules.lookahead, s.rules.planned);
         const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else if (history_len == 0) repeat_at else history_len;
         try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
-        // ROUND-472: ONE off-grid state per conversation, at the pass's last whole tile before the end, so the
-        // next turn resumes at its own boundary and prefills only what it added. Tile-aligned (a resumed suffix
-        // must sit in the lanes a fresh pass gives it) and used only while its suffix is one chunk.
-        // ROUND-475: IT ADVANCES ON A RESUMED PASS. With the mark planned only on a pass from 0, a growing
-        // conversation's suffix grew by every turn's new rows until it passed the grid, and the store fell back to
-        // the oldest grid state (a 21k chat at 30k tokens re-prefilled 8k rows, and past 37.8k the 15,872 one).
-        // The mark is planned whenever the bulk piece from `from` is a tensor-tile chunk (>= 64 rows), so the
-        // pass splits where its own grid split would put a chunk end anyway and the next turn resumes near its end.
-        // ROUND-502: WITH THE END STATE KEPT, A RESUMED PASS NEEDS NO TAIL CUT. The cut exists so a later turn
-        // can start on a tile mark; the end state is the exact state a fresh pass stands on (receipt: on/off/
-        // fresh equal at 22,705) and a lookup may also fall back to an OLDER end state whose suffix keeps the
-        // class. What the cut costs is the second chunk itself: its all-expert read is ~0.5 s, whatever its row
-        // count (the 25-33 % block-filter round and the 1.86-2.64 s cached turn are both that term). So the
-        // tail is planned on a pass from 0, where no end state exists yet -- one extra chunk per
-        // conversation, not per turn. ROUND-506: ON A RESUMED PASS IT IS PLANNED AS A SNAPSHOT, not a cut:
-        // the R-504 stash captures it inside the chunk that runs past it, so the pass keeps both the tile
-        // state and its own end in one forward. It is planned only when its suffix is a tensor tile (>= 64
-        // rows), where `snap_at` can fire; a shorter suffix would make the mark a barrier again.
-        const resumed_tail = if (std.c.getenv("TF_DSV41_RESUMED_TAIL")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
+        // The tail mark: one off-grid state per conversation at the pass's last whole tile, so the next turn
+        // resumes at its own boundary and prefills only what it added. Tile-aligned (a resumed suffix must sit in
+        // the lanes a fresh pass gives it) and used only while its suffix is one chunk. It is planned whenever the
+        // bulk piece from `from` is a tensor-tile chunk (>= 64 rows), so the pass splits where its own grid split
+        // would put a chunk end anyway and the next turn resumes near its end. On a pass from 0 the mark is a cut;
+        // on a resumed pass it is a snapshot instead: the stash captures it inside the chunk that runs past it, so
+        // one forward keeps both the tile state and the pass's own end. It needs a tensor-tile suffix (>= 64 rows)
+        // for `snap_at` to fire; a shorter one would make the mark a barrier again.
+        const resumed_tail = s.rules.resumed_tail;
         const tail_at: u32 = if (s.rules.tail and s.rules.tail_align > 1 and !short and prompt.len > s.rules.min_prompt and
             (!s.rules.end_mark or from == 0 or (s.rules.tail_snap and resumed_tail)))
         blk: {
             const tile: usize = @max(1, s.rules.tail_align);
-            // ROUND-475: THE CUT'S LAST CHUNK KEEPS THE REFERENCE'S KERNEL CLASS. A pass with no marks ends on
-            // `prompt.len % grid` rows (the grid's whole chunks, then the remainder); the cut ends on
-            // `prompt.len % tile`. A chunk's class changes at 8 rows (decode) and 64 (shared body vs the tensor
-            // tile), so a remainder in the other class runs different arithmetic and can move the reply --
-            // ROUND-474's four-row failure (P_B = 184x128 + 4, the reference's last chunk 7,684 rows) is this
-            // rule, and so is its >= 9-row fix. Back the cut off whole tiles until the class matches.
+            // The cut's last chunk keeps the reference's kernel class. A pass with no marks ends on `prompt.len %
+            // grid` rows (the grid's whole chunks, then the remainder); the cut ends on `prompt.len % tile`. A
+            // chunk's class changes at 8 rows (decode) and 64 (shared body vs the tensor tile), so a remainder in
+            // the other class runs different arithmetic and can move the reply. Back the cut off whole tiles until
+            // the class matches.
             const fresh_last: usize = if (s.rules.grid > 0 and prompt.len % s.rules.grid != 0)
                 prompt.len % s.rules.grid
             else
@@ -492,12 +481,12 @@ pub const Store = struct {
         } else 0;
         tail_at_out.* = tail_at;
         if (tail_at != 0 and std.mem.indexOfScalar(u32, want.items, tail_at) == null) try want.append(a, tail_at);
-        // ROUND-502: THE PASS'S OWN END IS A STATE TOO, CLASS-CHECKED. The tile tail serves a turn that adds only
-        // a few rows; a turn that adds a tensor-tile chunk does not need the 128 rows behind it re-prefilled (one
-        // whole chunk's all-expert read, the cache turn's floor). A state at the very end is the state a fresh
-        // pass stands on when this pass's last chunk kept the fresh remainder's class: rows are boundary- and
-        // lane-invariant inside a class (ROUND-472 form 4: 176 rows against the reference's 6,192, exact).
-        // `find` re-checks the class against the next turn's own remainder, so a small turn still takes the tail.
+        // THE PASS'S OWN END IS A STATE TOO, CLASS-CHECKED. The tile tail serves a turn that adds only a few rows;
+        // a turn that adds a tensor-tile chunk does not need the 128 rows behind it re-prefilled (one whole chunk's
+        // all-expert read, the cache turn's floor). A state at the very end is the state a fresh pass stands on
+        // when this pass's last chunk kept the fresh remainder's class: rows are boundary- and lane-invariant
+        // inside a class. `find` re-checks the class against the next turn's own remainder, so a small turn still
+        // takes the tail.
         const end_at: u32 = if (s.rules.end_mark and !short and prompt.len > s.rules.min_prompt) @intCast(prompt.len) else 0;
         if (end_at != 0 and std.mem.indexOfScalar(u32, want.items, end_at) == null) try want.append(a, end_at);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);

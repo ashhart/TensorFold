@@ -60,7 +60,7 @@ pub const Rows = struct {
     io: std.Io,
     tables: []Table,
     clock: u64 = 0,
-    /// ROUND-495: rotates the residency probe's sample so it never re-samples pages it warmed itself.
+    /// Rotates the residency probe's sample so it never re-samples pages it warmed itself.
     probe_seq: u64 = 0,
     stats: Stats = .{},
     /// TF_DSV41_ENGRAM_TRACE: one read line a window, for the read-path measurements.
@@ -134,21 +134,16 @@ pub const Rows = struct {
         return !(v.len > 0 and v[0] == '0');
     }
 
-    /// ROUND-495 (TF_DSV41_ENGRAM_NOCACHE): a prompt chunk above this many ids reads ~4 GiB of pages
-    /// a layer, which cannot stay resident beside the model; letting those pages into the unified cache
-    /// evicts the model that the very next forward re-reads (measured: 22.6 s of stalls behind a 35k
-    /// prompt's gather). F_NOCACHE keeps such a read out of the cache, so the forward does not pay it
-    /// back. A smaller chunk keeps the cache: its pollution is bounded and its replay must stay warm.
-    /// The flag is set per gather and only on the positional path (a mapping has no such policy).
+    /// F_NOCACHE keeps such a read out of the cache, so the forward does not pay it back. A smaller chunk keeps the
+    /// cache: its pollution is bounded and its replay must stay warm. The flag is set per gather and only on the
+    /// positional path (a mapping has no such policy).
     pub const nocache_ids: usize = 256 * 1024;
     fn noCache() bool {
         const v = std.mem.span(std.c.getenv("TF_DSV41_ENGRAM_NOCACHE") orelse return true);
         return !(v.len > 0 and v[0] == '0');
     }
 
-    /// ROUND-495: the positional gather's own worker count. It is syscall-bound, not fault-bound, and
-    /// reads faster with more workers than the mapped path's 16 (35,271 tokens: gather 10.8 s at 16,
-    /// 8.8 s at 32, round 38.59 -> 36.44 s). The mapped path keeps 16, where 32 is a 2.3-4.8x loss.
+    /// The positional gather's own worker count.
     fn posThreads() usize {
         var v: usize = 32;
         if (std.c.getenv("TF_DSV41_ENGRAM_POS_THREADS")) |e| {
@@ -246,11 +241,10 @@ pub const Rows = struct {
         for (0..values) |j| out[j] = tab[(@as(u16, s[j / 32]) << 8) | w[j]];
     }
 
-    /// ROUND-463 (TF_DSV41_ENGRAM_PF): start the page-in for every row of a window before any row is
-    /// decoded. The mapped gather's cost is its major faults (ROUND-463 measured 44.5 us a fault at the
-    /// 16-worker decode gather against 10.2 for a sequential prompt's readahead), so the whole window's
-    /// I/Os are handed to the kernel at once and meet pages already in flight rather than faulting one
-    /// at a time. The bytes decoded are the same bytes, read the same way; only when the I/O starts moves.
+    /// Start the page-in for every row of a window before any row is decoded. The mapped gather's cost is its major
+    /// faults, so the whole window's I/Os are handed to the kernel at once and meet pages already in flight rather
+    /// than faulting one at a time. The bytes decoded are the same bytes, read the same way; only when the I/O
+    /// starts moves.
     pub fn prefetch(r: *Rows, li: usize, ids: []const u32) void {
         if (li >= r.tables.len) return;
         const t = &r.tables[li];
@@ -381,14 +375,7 @@ pub const Rows = struct {
         }
     }
 
-    /// ROUND-495: is this mapped gather cold? Below 64k ids (about 2,730 tokens, ~1 GiB of pages a layer) the
-    /// rows can stay resident beside the model, so the mapped path's warm case is real and the pollution is
-    /// bounded: it keeps the map. Above it the probe times up to 64 sampled weight pages (ids the gather reads
-    /// anyway, spread across the sorted list): a page-warm gather maps in ~50-16,000 ns a sample and keeps the
-    /// map (27-35 ms a prompt, no syscalls), a cold one pays 70-150 us on at least one sample and takes the
-    /// positional read -- cached below 256k ids so its replay is warm, uncached above them so the pages it
-    /// reads do not evict the model the next forward would re-read.
-    /// TF_DSV41_ENGRAM_LARGE=map|pos forces either path; unset is the probe.
+    /// Is this mapped gather cold? TF_DSV41_ENGRAM_LARGE=map|pos forces either path; unset is the probe.
     fn coldGather(r: *Rows, li: usize, ids: []const u32, order: []const u32) bool {
         const S = struct {
             var mode: i8 = 0;
@@ -408,14 +395,12 @@ pub const Rows = struct {
         const base = mm.memory;
         const n = ids.len;
         const step = @max(1, n / 64);
-        // The signal is the sampled reads' own latency, not the kernel's fault classification: a page
-        // already in the unified cache maps in a microsecond, a page that must be read costs 100+ us, and
-        // 64 samples span the whole list. A page-warm probe is ~0.1 ms; a cold one ~10 ms.
+        // The signal is the sampled reads' own latency, not the kernel's fault classification: a page already in
+        // the unified cache maps in a microsecond, a page that must be read costs 100+ us, and 64 samples span the
+        // whole list.
         var ts0: std.c.timespec = undefined;
         _ = std.c.clock_gettime(.MONOTONIC, &ts0);
         const t0: u64 = @as(u64, @intCast(ts0.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts0.nsec));
-        // The sample rotates: a probe touch faults its own page in, so a fixed set reads warm on the second
-        // call and lies about the rest of the list (measured: 46 ns a sample, then 1.37M faults).
         if (r.probe_seq == 0) {
             // Seed from the clock: the page cache outlives the process, so a per-process lattice of
             // samples would probe the same pages every serve and read the ones the last serve warmed.
@@ -448,9 +433,7 @@ pub const Rows = struct {
         const t1: u64 = @as(u64, @intCast(ts1.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts1.nsec));
         if (touched == 0) return false;
         const per: u64 = (t1 - t0) / touched;
-        // Strict: a list is warm only if NO sample had to leave the CPU. A sample that costs 20 us or
-        // more is a device read (a cached-but-unmapped page is 1-10 us, a TLB hit 50 ns), and its page
-        // is one of thousands: the mapped path would insert them all.
+        // Strict: a list is warm only if NO sample had to leave the CPU.
         const cold = slowest > 20_000;
         if (std.c.getenv("TF_DSV41_HOST_PROF") != null)
             std.log.info("engram large probe: li {d}, ids {d}, samples {d}, mean {d} ns, slowest {d} ns -> {s}", .{ li, ids.len, touched, per, slowest, if (cold) "positional" else "mapped" });
@@ -463,9 +446,7 @@ pub const Rows = struct {
     /// path, which is what a prompt chunk needs (its ids are nearly all distinct).
     pub fn rowsU32Parallel(r: *Rows, li: usize, ids: []const u32, dim: usize, out: []align(1) u16, threads: usize) !void {
         if (threads <= 1) return r.rowsU32(li, ids, dim, out);
-        // ROUND-462: a decode-sized list (24 ids a layer) may use the mapped path's workers when the
-        // caller has measured its rows cold; the positional path still falls back (its reads share one
-        // I/O context and serialise on it). The model decides by timing, so a warm replay stays single.
+        // The model decides by timing, so a warm replay stays single.
         if (ids.len < 512 and (li >= r.tables.len or r.tables[li].map == null)) return r.rowsU32(li, ids, dim, out);
         if (li >= r.tables.len) return error.BadEngramShard;
         if (dim != values or out.len != try std.math.mul(usize, ids.len, values)) return error.BadEngramShard;
@@ -481,12 +462,8 @@ pub const Rows = struct {
             }
         }.lessThan);
         r.setNoCache(li, ids.len >= nocache_ids);
-        // The mapped shard: the threads read by address, so the shared I/O context that serialised the
-        // positional reads is not in the path at all. ROUND-495: UNLESS the gather is cold -- a mapped
-        // cold gather inserts a 16 KiB page for every id it reads (a 264-byte record costs a page) and
-        // the prompt's thousands of ids evict the resident model, which the next forward then stalls
-        // re-reading (measured 17.8 s behind a 35k prompt against 2.8 s when the read was uncached) --
-        // so the residency probe picks the path and a cold gather takes the uncached positional read.
+        // The mapped shard: the threads read by address, so the shared I/O context that serialised the positional
+        // reads is not in the path at all.
         if (r.tables[li].map != null and !r.coldGather(li, ids, order)) return r.rowsMapped(li, ids, out, threads);
         const workers = @min(@max(threads, posThreads()), ids.len);
         const per = (ids.len + workers - 1) / workers;

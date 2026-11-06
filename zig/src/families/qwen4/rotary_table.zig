@@ -34,7 +34,6 @@ fn receipt(name: []const u8, before: []const f32, after: []const f32, differ: []
     return differ[0..n];
 }
 test "Qwen4 rotary table: native devices consume transformers' FP32 words after the three header words" {
-    // theta 1e4 over 64 (the native fixture: head 256, partial 0.25), each step correctly rounded (60-digit decimal)
     const expected = [_]u32{
         0x3f800000, 0x3f3ff911, 0x3f0ff59a, 0x3ed7e89b, 0x3ea1e89b, 0x3e72d423, 0x3e361887, 0x3e088d77,
         0x3dcccccd, 0x3d99940d, 0x3d6655c2, 0x3d2cba15, 0x3d0186e3, 0x3cc2434f, 0x3c91ad39, 0x3c5a7bf2,

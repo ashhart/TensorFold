@@ -7,19 +7,16 @@ const frags = @import("core").frags;
 const View = @import("view.zig").View;
 pub const score_tile_width = 4096;
 
-/// ROUND-411: the indexer select block's REMOVAL mask (TF_DSV41_SKIP_SELECT). A doubling arm prices a
-/// dispatch's MARGINAL cost -- the second copy runs on warm data, and the merge's second pass finds the
-/// heap already full, so its pushes are rejected at once -- so the block's true cost needs the dispatch
-/// REMOVED, not repeated. Bit 0 the clear, bit 1 the dense-key table, bit 2 the score, bit 3 the merge,
-/// bit 4 the finish.
+/// The indexer select block's REMOVAL mask (TF_DSV41_SKIP_SELECT). A doubling arm prices a dispatch's MARGINAL cost
+/// -- the second copy runs on warm data, and the merge's second pass finds the heap already full, so its pushes are
+/// rejected at once -- so the block's true cost needs the dispatch REMOVED, not repeated. Bit 0 the clear, bit 1
+/// the dense-key table, bit 2 the score, bit 3 the merge, bit 4 the finish.
 pub const skip_clear: u32 = 1;
 pub const skip_keys: u32 = 2;
 pub const skip_score: u32 = 4;
 pub const skip_merge: u32 = 8;
 pub const skip_finish: u32 = 16;
-/// Warps a score threadgroup holds and keys each warp evaluates (TF_DSV41_INDEX_WARPS). A wider group is 2 % on a
-/// prefill: the kernel is instruction-bound per key, so packing mostly saves dispatch. Four keys a warp, with the
-/// query hoisted, measured slower than one — the extra state per lane costs more than the loads it saves.
+/// Warps a score threadgroup holds and keys each warp evaluates (TF_DSV41_INDEX_WARPS).
 pub const warps_per_group_default = 8;
 pub const Params = extern struct {
     rows: u32,
@@ -40,16 +37,16 @@ pub const Params = extern struct {
     make_candidates: u32 = 0,
     layer: u32 = 0,
     skip_mask: u32 = 0,
-    /// ROUND-469: 0 = one tile a row (the heap path), 1 = tile-major, every tile resident (the decode select).
+    /// 0 = one tile a row (the heap path), 1 = tile-major, every tile resident (the decode select).
     score_layout: u32 = 0,
     scale: f32 = 0.015625,
-    // ROUND-468: the metal struct is a hand-written mirror of this one. `layer`/`skip_mask` were added here
-    // without that mirror, so the kernel's `scale` read `layer`'s bits and every score came out 0.0. The
-    // size is asserted on both sides; a field added here without the kernel fails the build, not the reply.
+    // The metal struct is a hand-written mirror of this one. `layer`/`skip_mask` were added here without that
+    // mirror, so the kernel's `scale` read `layer`'s bits and every score came out 0.0. The size is asserted on
+    // both sides; a field added here without the kernel fails the build, not the reply.
     comptime {
         if (@sizeOf(Params) != 80) @compileError("Dsv41Index (index_exl3.metal) must mirror Params");
-        // ROUND-473: and the field LIST, in order: a reorder or a same-size swap is caught by neither the
-        // size nor the reply. The check parses the embedded kernel source at comptime.
+        // And the field LIST, in order: a reorder or a same-size swap is caught by neither the size nor the reply.
+        // The check parses the embedded kernel source at comptime.
         @import("metal/index_mirror.zig").check(Params, @import("kernel_sources").deepseek_v41_index, "Dsv41Index");
     }
     pub fn validate(p: Params) !void {
@@ -85,7 +82,7 @@ pub const max_dense_keys: usize = 65536;
 pub const Scratch = struct {
     buffer: mtl.Buffer,
     rows: u32,
-    /// ROUND-531: the selection's cache key, so a batch's several segments can each keep their picks.
+    /// The selection's cache key, so a batch's several segments can each keep their picks.
     sel_layer: ?u32 = null,
     sel_position: u32 = 0,
     sel_rows: u32 = 0,
@@ -149,23 +146,23 @@ pub const Pipelines = struct {
     filter: mtl.Pipeline,
     insert: mtl.Pipeline,
     finish: mtl.Pipeline,
-    /// ROUND-411: the finish's parallel form (a threadgroup a row).
+    /// The finish's parallel form (a threadgroup a row).
     finish_par: mtl.Pipeline,
-    /// ROUND-469: the decode path's whole selection in one dispatch (a threadgroup a row).
+    /// The decode path's whole selection in one dispatch (a threadgroup a row).
     select_one: mtl.Pipeline,
-    /// ROUND-483: the same selection with float4 reads, a two-pass radix and the ties folded
-    /// into the filter (TF_DSV41_INDEX_SELECT_V=0 is the shipped form).
+    /// The same selection with float4 reads, a two-pass radix and the ties folded into the filter
+    /// (TF_DSV41_INDEX_SELECT_V=0 is the shipped form).
     select_one_v: mtl.Pipeline,
     /// The identity selection for a row whose every visible compressed key is kept.
     identity: mtl.Pipeline,
     /// The tensor-unit score tile (TF_DSV41_INDEX_NAX): the scalar scorer's term, one 128-dim MMA a head
     /// over a 64-key by 64-row tile. Null when the GPU has no tensor units.
     nax_score: ?mtl.Pipeline = null,
-    /// ROUND-470: the decode-shaped score -- the keys on the op M and the head queries on its N, so a
-    /// one-row step no longer pays a 64-row prompt tile tensor-unit work. Same MMA chain and epilogue.
+    /// The decode-shaped score -- the keys on the op M and the head queries on its N, so a one-row step no longer
+    /// pays a 64-row prompt tile tensor-unit work. Same MMA chain and epilogue.
     row_score: ?mtl.Pipeline = null,
-    /// ROUND-481: the keys themselves on M (four 16-key blocks, one a SIMDgroup) at one row, so every MMA
-    /// row is live; the head terms are summed 0..31 in order, so a score is bit-identical to row_score's.
+    /// The keys themselves on M (four 16-key blocks, one a SIMDgroup) at one row, so every MMA row is live; the
+    /// head terms are summed 0..31 in order, so a score is bit-identical to row_score's.
     keys_score: ?mtl.Pipeline = null,
     pub fn load(device: mtl.Device) !Pipelines {
         var options = mtl.CompileOptions.mlx();
@@ -233,25 +230,24 @@ pub const Pipelines = struct {
             try weights.requireRows(args.rows, args.weight_stride, args.heads, 2);
             try keys.requireRows(args.keys, args.key_stride, args.width / 2 + args.width / 32, 1);
         }
-        // ROUND-411: the block's removal mask (the caller keeps the first index-source layer's picks, so
-        // the downstream attention reads the same keys and the delta is the removed dispatch's own cost).
+        // The block's removal mask (the caller keeps the first index-source layer's picks, so the downstream
+        // attention reads the same keys and the delta is the removed dispatch's own cost).
         const mask: u32 = args.skip_mask;
         const count = if (args.use_candidates != 0) args.candidate_topk * args.block_size else args.keys;
-        // Measurement only (TF_DSV41_DOUBLE_SCORE / _MERGE): a second identical pass prices the dispatch in
-        // place. Both are idempotent in content, so the selection - and the canon reply - is unchanged.
+        // Both are idempotent in content, so the selection - and the canon reply - is unchanged.
         const score_passes: u32 = if (mask & skip_score != 0) 0 else if (std.c.getenv("TF_DSV41_DOUBLE_SCORE") != null) 2 else 1;
         const merge_passes: u32 = if (mask & skip_merge != 0) 0 else if (std.c.getenv("TF_DSV41_DOUBLE_MERGE") != null) 2 else 1;
         // The tensor-unit tile needs the dense key table to stage and the plain (non-candidate) slot map.
         const nax_ok = p.nax_score != null and args.use_candidates == 0 and args.width == 128 and args.heads == 32 and
             args.keys != 0 and args.ratio != 0 and std.c.getenv("TF_DSV41_NO_INDEX_NAX") == null;
-        // ROUND-470: the decode-shaped score (keys on M, heads on N). It needs the dense key table and the
-        // plain slot map; TF_DSV41_INDEX_ROW_SCORE=0 is the same-binary control.
+        // The decode-shaped score (keys on M, heads on N). It needs the dense key table and the plain slot map;
+        // TF_DSV41_INDEX_ROW_SCORE=0 is the same-binary control.
         const row_env = std.c.getenv("TF_DSV41_INDEX_ROW_SCORE");
         const row_ok = p.row_score != null and (row_env == null or
             !std.mem.eql(u8, std.mem.span(row_env.?), "0")) and args.use_candidates == 0 and
             args.width == 128 and args.heads == 32 and args.keys != 0 and args.ratio != 0;
-        // ROUND-481: the keys-on-M tile. Same inputs and slot map as row_score; TF_DSV41_INDEX_KEYS_SCORE=0
-        // is the same-binary control. Only the one-dispatch decode path (rows <= 8) reaches it.
+        // The keys-on-M tile. Same inputs and slot map as row_score; TF_DSV41_INDEX_KEYS_SCORE=0 is the same-binary
+        // control. Only the one-dispatch decode path (rows <= 8) reaches it.
         const keys_env = std.c.getenv("TF_DSV41_INDEX_KEYS_SCORE");
         const keys_ok = p.keys_score != null and (keys_env == null or
             !std.mem.eql(u8, std.mem.span(keys_env.?), "0")) and args.use_candidates == 0 and
@@ -271,17 +267,13 @@ pub const Pipelines = struct {
                 enc.barrier();
             }
         }
-        // ROUND-469: at decode rows the heap path is 27 dispatches and ~1,000 one-thread pushes a source. Score
-        // every tile into the tile-major layout (the scratch's score region is rows * 16 KB, only 16 KB live at
-        // rows = 1) and let one threadgroup a row do the whole selection. TF_DSV41_INDEX_SELECT_ONE=0 is the
-        // same-binary control; the removal arms (mask != 0) and the doubling arms stay on the heap path.
+        // At decode rows the heap path is 27 dispatches and ~1,000 one-thread pushes a source.
+        // TF_DSV41_INDEX_SELECT_ONE=0 is the same-binary control; the removal arms (mask != 0) and the doubling
+        // arms stay on the heap path.
         const one_env = std.c.getenv("TF_DSV41_INDEX_SELECT_ONE");
-        // ROUND 515: the one-dispatch select was decode-only (rows <= 8). The heap branch pays three
-        // merge dispatches a score tile -- 172 tiles at a 21.9k context -- and that is ~10 ms a source
-        // layer for a small chunk, where the one-shot path ranks the same scores (the same tile-major
-        // array, the same per-row visibility) with one radix select a row. The row bound the buffer
-        // actually imposes is the capacity check below, so it, not an arbitrary 8 -- governs; the env
-        // restores the old limit for a same-binary A/B and TF_DSV41_INDEX_SELECT_ONE=0 the heap path.
+        // ROUND 515: the one-dispatch select was decode-only (rows <= 8). The row bound the buffer actually imposes
+        // is the capacity check below, so it, not an arbitrary 8 -- governs; the env restores the old limit for a
+        // same-binary A/B and TF_DSV41_INDEX_SELECT_ONE=0 the heap path.
         const one_rows: u32 = blk: {
             const raw = std.c.getenv("TF_DSV41_INDEX_SELECT_ONE_ROWS") orelse break :blk 16384;
             break :blk std.fmt.parseInt(u32, std.mem.span(raw), 10) catch 8;
@@ -291,9 +283,9 @@ pub const Pipelines = struct {
             mask == 0 and score_passes == 1 and count != 0 and
             @as(u64, (count + score_tile_width - 1) / score_tile_width) * args.rows <= scratch.rows;
         if (one_shot) {
-            // ROUND-542: at one row the tile-major score layout is the key-major one, so the three
-            // 4,096-key launches are one -- the same kernel, the same 64-key threadgroups, tile_start 0,
-            // the grid over every key. TF_DSV41_INDEX_SCORE_ONE=0 is the same-binary control.
+            // At one row the tile-major score layout is the key-major one, so the three 4,096-key launches are one
+            // -- the same kernel, the same 64-key threadgroups, tile_start 0, the grid over every key.
+            // TF_DSV41_INDEX_SCORE_ONE=0 is the same-binary control.
             const score_one_env = std.c.getenv("TF_DSV41_INDEX_SCORE_ONE");
             const score_one = args.rows == 1 and keys_ok and
                 (score_one_env == null or !std.mem.eql(u8, std.mem.span(score_one_env.?), "0"));
@@ -357,9 +349,9 @@ pub const Pipelines = struct {
             enc.barrier();
             return;
         }
-        // ROUND-542: the heap/candidate clear is paid only by the heap path, which reads those regions.
-        // The one-shot select ranks the score array and writes positions; it never touches heap or
-        // candidates, so the branch below returns before this point and the dispatch is not launched.
+        // The heap/candidate clear is paid only by the heap path, which reads those regions. The one-shot select
+        // ranks the score array and writes positions; it never touches heap or candidates, so the branch below
+        // returns before this point and the dispatch is not launched.
         if (mask & skip_clear == 0) {
             enc.setPipeline(p.clear);
             for ([_]View{ scratch.heap(), scratch.candidates() }, 0..) |v, i| enc.setBuffer(v.buffer, v.offset, i);
@@ -367,9 +359,9 @@ pub const Pipelines = struct {
             enc.dispatchThreads(mtl.Size.of(@max(args.topk, args.candidate_topk), args.rows, 1), mtl.Size.of(128, 1, 1));
             enc.barrier();
         }
-        // ROUND-410: the indexer OTHER two dispatches, priced (the clear and the dense-key table). The
-        // selection whole-block duplicate (TF_DSV41_DOUBLE_INDEX) reads far more than the score and the
-        // merge, so the rest of the block needed names.
+        // The indexer OTHER two dispatches, priced (the clear and the dense-key table). The selection whole-block
+        // duplicate (TF_DSV41_DOUBLE_INDEX) reads far more than the score and the merge, so the rest of the block
+        // needed names.
         if (mask & skip_clear == 0 and std.c.getenv("TF_DSV41_DOUBLE_CLEAR") != null) {
             enc.setPipeline(p.clear);
             for ([_]View{ scratch.heap(), scratch.candidates() }, 0..) |v, i| enc.setBuffer(v.buffer, v.offset, i);
@@ -400,9 +392,7 @@ pub const Pipelines = struct {
                 enc.barrier();
             }
             for (0..merge_passes) |_| {
-                if (std.c.getenv("TF_DSV41_SKIP_MERGE") != null) continue; // measurement: price this path
-                // More keys than one tile is where the filter earns its atomics; a single tile fills an
-                // empty heap, so every key qualifies and the parallel path only adds cost (measured).
+                if (std.c.getenv("TF_DSV41_SKIP_MERGE") != null) continue;
                 const parallel_merge = (args.keys > score_tile_width or
                     std.c.getenv("TF_DSV41_INDEX_PARALLEL_MERGE") != null) and
                     std.c.getenv("TF_DSV41_INDEX_SERIAL_MERGE") == null;
@@ -436,9 +426,9 @@ pub const Pipelines = struct {
             }
         }
         const finish_passes: u32 = if (mask & skip_finish != 0) 0 else if (std.c.getenv("TF_DSV41_DOUBLE_FINISH") != null) 2 else 1;
-        // ROUND-411: the parallel finish (a threadgroup a row) -- the same positions array, the same
-        // order. It needs the slot map to be the identity (the candidate path maps the slots to
-        // positions the bitmap/sort would not know), so it is used only off the candidate path.
+        // The parallel finish (a threadgroup a row) -- the same positions array, the same order. It needs the slot
+        // map to be the identity (the candidate path maps the slots to positions the bitmap/sort would not know),
+        // so it is used only off the candidate path.
         const pf_flag = std.c.getenv("TF_DSV41_INDEX_PARALLEL_FINISH");
         const parallel_finish = !(pf_flag != null and std.mem.startsWith(u8, std.mem.span(pf_flag.?), "0")) and
             args.use_candidates == 0 and args.make_candidates == 0;

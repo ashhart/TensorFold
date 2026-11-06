@@ -1,8 +1,6 @@
-// Ported whole from BobClawblaw/TensorFold, branch deepseek-v41-main, commit 72a552ed
-// ("deepseek_v41: prompt chunks' routed experts in int8 x int8"), Apache-2.0; see THIRD_PARTY_NOTICES.md.
-// Unmodified below except for this header. The rest of the file is the sibling's own, so its fragment
-// layout and epilogue are the compiled code that carries their KL receipt.
-// x W^T for MLX affine W on the tensor units: exact codes (4-bit ones plus 128) in the MMAs, fp32 group sums scaled, bias times fp32 row sums.
+// Ported whole from BobClawblaw/TensorFold, branch deepseek-v41-main, commit 72a552ed ("deepseek_v41: prompt
+// chunks' routed experts in int8 x int8"), Apache-2.0; see THIRD_PARTY_NOTICES.md. Unmodified below except for this
+// header.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"

@@ -1,13 +1,10 @@
-//! ROUND-398: the two-forward stage diff, generalized to an N-row window. One seeded state, the
-//! sequential 1-row chain and an N-row window on the same token sequence, captured at the attention's
-//! operator boundaries and at the model's per-sublayer boundary -- every row separately. The first
-//! (row, layer, stage) that differs localises the drafted path's divergence from the plain path.
-//! Local diagnostics only: no performance measurement, no qualification.
-//!
-//! Usage: tf-dsv41-run stagediff MODEL TABLES IDS_JSON OUT_DIR [STEPS] [ROWS]
-//!   IDS_JSON is the prefix (prefilled as the serve prefills: one chunk up to the plan's rows).
-//!   STEPS is how many pending tokens to diff (default 8). ROWS is the window width (default 2;
-//!   the policy's depth d runs d+1 rows, so 3 and 4 are the interesting ones).
+// ! The two-forward stage diff, generalized to an N-row window. One seeded state, the ! sequential 1-row chain and
+// an N-row window on the same token sequence, captured at the attention's ! operator boundaries and at the model's
+// per-sublayer boundary -- every row separately. The first ! (row, layer, stage) that differs localises the drafted
+// path's divergence from the plain path. ! Usage: tf-dsv41-run stagediff MODEL TABLES IDS_JSON OUT_DIR [STEPS]
+// [ROWS] ! IDS_JSON is the prefix (prefilled as the serve prefills: one chunk up to the plan's rows). ! STEPS is
+// how many pending tokens to diff (default 8). ROWS is the window width (default 2; ! the policy's depth d runs d+1
+// rows, so 3 and 4 are the interesting ones).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -475,7 +472,7 @@ pub fn loop(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32,
     var diverged: ?usize = null;
     var first_detail: ?[]const u8 = null;
     var kept_hist: [max_rows]usize = @splat(0);
-    // ROUND-424: the drafted path's committed stream and the plain chain's own committed stream, as token ids.
+    // The drafted path's committed stream and the plain chain's own committed stream, as token ids.
     var committed = std.ArrayList(u32).empty;
     defer committed.deinit(gpa);
     var ref_committed = std.ArrayList(u32).empty;

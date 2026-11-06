@@ -1,6 +1,4 @@
-//! wo_a at the engine's real shape: the eight-slice fusion against the legacy loop, bit for bit and in time.
-//! The differential's earlier toy used k 640; the checkpoint's slice is k 4096 (q_width / o_groups) with
-//! x_stride 32768 and y_stride 8192, so both the exactness and the prize have to be measured there.
+// ! wo_a at the engine's real shape: the eight-slice fusion against the legacy loop, bit for bit and in time. !
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -13,8 +11,6 @@ fn view(v: anytype) exl3.View {
     return .{ .buffer = v.buffer, .offset = v.offset };
 }
 
-// TF_WO_REAL=1: 8 slices of k 4096 x n 1024, one row, the engine's strides; the fused call's 8 slots against
-// the eight legacy one-row calls, then 40 layers of each timed the way the engine submits them.
 test "wo_a fusion at the real shape, cells and time (TF_WO_REAL=1)" {
     if (std.c.getenv("TF_WO_REAL") == null) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;

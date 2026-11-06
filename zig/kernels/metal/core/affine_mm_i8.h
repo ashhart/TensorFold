@@ -1,8 +1,6 @@
-// Ported whole from BobClawblaw/TensorFold, branch deepseek-v41-main, commit 72a552ed
-// ("deepseek_v41: prompt chunks' routed experts in int8 x int8"), Apache-2.0; see THIRD_PARTY_NOTICES.md.
-// Unmodified below except for this header. The rest of the file is the sibling's own, so its fragment
-// layout and epilogue are the compiled code that carries their KL receipt.
-// int8 forms of affine_mm.metal's tile pieces (TF_I8), inlined there below AmRows: x and the codes as int8, int32 sums.
+// Ported whole from BobClawblaw/TensorFold, branch deepseek-v41-main, commit 72a552ed ("deepseek_v41: prompt
+// chunks' routed experts in int8 x int8"), Apache-2.0; see THIRD_PARTY_NOTICES.md. Unmodified below except for this
+// header.
 
 // The codes as int8 into the tile row (q - 128 at 8 bits): code i of the little-endian bit stream at byte i.
 inline void am_codes(thread const Codes& c, threadgroup int8_t* out) {

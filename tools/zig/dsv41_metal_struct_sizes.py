@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ROUND-527: the DeepSeek V4.1 Metal struct manifest.
+"""The DeepSeek V4.1 Metal struct manifest.
 
 Every struct the family's Metal sources define is compiled once, in the same translation unit the engine
 compiles it in (the three run-time joins plus one unit a source), and its C size is read from the Metal
@@ -7,7 +7,7 @@ compiler's own record-layout dump.  The result is a checked-in manifest (`struct
 tool fails the build when:
 
   * a struct's size differs from the manifest (a Metal-side edit, or a compiler layout change),
-  * a kernel argument struct has no `static_assert(sizeof(T) == N)` in its unit (the R-526 audit's 20),
+  * a kernel argument struct has no `static_assert(sizeof(T) == N)` in its unit,
   * a struct defined in a source has no record layout in the unit that compiles it.
 
 Usage: dsv41_metal_struct_sizes.py [--update] [DIR]
@@ -21,8 +21,8 @@ import subprocess
 import sys
 import tempfile
 
-# The engine's run-time joins (csa2.zig:91, csa2_index.zig:164, metal/pipelines.zig:122), by ROUND-480's
-# check_dsv41_metal_mirrors.sh.  A source that only compiles inside a join is assigned to it below.
+# The engine's run-time joins (csa2.zig:91, csa2_index.zig:164, metal/pipelines.zig:122), as
+# check_dsv41_metal_mirrors.sh reproduces them.  A source that only compiles inside a join is assigned to it below.
 JOINS = [
     ("csa2-kv-join", ["kv.metal", "csa2.metal", "csa2_nax.metal"], None),
     ("index-kv-join", ["kv.metal", "index_exl3.metal"], None),

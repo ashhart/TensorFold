@@ -1,6 +1,4 @@
-//! ROUND-502: the pass's own end as a kept state -- class-checked when it is saved and again when a later
-//! turn's suffix is measured, so a turn that adds a tensor-tile chunk resumes at the end and a small turn
-//! still falls back to the tile tail.
+// !
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const Fake = @import("prompt_cache_test.zig").Fake;
@@ -56,8 +54,8 @@ test "a small turn falls back to the tile tail: the end's 20 rows are the shared
     var b3: [500]u32 = undefined;
     const p3 = prompt(&b3);
     const plan = try s.begin(a, p3, @intCast(p3.len), &.{}, &.{}, null, &.{});
-    // ROUND-506: the resumed pass kept a tail at 384 (96 rows before 480), so the 20-row turn resumes there
-    // (116 rows, class 2) instead of the end two turns back (180 rows).
+    // The resumed pass kept a tail at 384 (96 rows before 480), so the 20-row turn resumes there (116 rows, class
+    // 2) instead of the end two turns back (180 rows).
     try std.testing.expectEqual(@as(u32, 384), plan.from);
     try std.testing.expectEqual(fresh(p3), f.pass(&s, p3, plan));
 }
@@ -80,8 +78,7 @@ test "a suffix past one chunk falls back to the grid state" {
     var b3: [800]u32 = undefined;
     const p3 = prompt(&b3);
     const plan = try s.begin(a, p3, @intCast(p3.len), &.{}, &.{}, null, &.{});
-    // ROUND-506: the resumed pass kept its last tile at 512 -- grid-aligned (512 % 256 == 0), so it is a grid
-    // state and the 288-row suffix is one chunk. The 256 grid is no longer the nearest; 512 serves.
+    // The 256 grid is no longer the nearest; 512 serves.
     try std.testing.expectEqual(@as(u32, 512), plan.from);
     try std.testing.expectEqual(fresh(p3), f.pass(&s, p3, plan));
 }
@@ -125,8 +122,8 @@ test "the real grid: the 21,966 -> 22,705 -> 22,742 conversation plans one chunk
     for (p2, 0..) |*t, i| t.* = @intCast(1 + (i * 7) % 9000);
     plan = try s.begin(a, p2, @intCast(p2.len), &.{}, &.{}, null, &.{});
     try std.testing.expectEqual(@as(u32, 21_966), plan.from); // the end, not 21,888
-    // ROUND-506: the resumed pass also plans its last tile as a SNAPSHOT, 177 rows before its end (22,528),
-    // so the next turn can start there without cutting this pass.
+    // The resumed pass also plans its last tile as a SNAPSHOT, 177 rows before its end (22,528), so the next turn
+    // can start there without cutting this pass.
     try std.testing.expectEqualSlices(u32, &.{ 22_528, 22_705 }, plan.marks);
     try std.testing.expectEqual(fresh(p2), f.pass(&s, p2, plan));
 

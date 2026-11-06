@@ -1,4 +1,4 @@
-//! DeepSeek V4.1's row glue (glue_rows.metal) as launched: each reserves its threads, so none needs a receipt.
+// !
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{

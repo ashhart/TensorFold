@@ -228,11 +228,9 @@ pub fn main(init: std.process.Init) !void {
     model.* = try ds.Model.open(a, io, .{
         .dir = args[2],
         .table_dir = args[3],
-        // LOCAL (receipt run): stream the Engram tables from the release, the class this machine can hold.
         .stream_dir = if (std.c.getenv("TF_DSV41_ENGRAM_STREAM_DIR")) |d| std.mem.span(d) else null,
         .token_map = map,
         .lanes = if (is_lanes or is_draftloop) 2 else 1,
-        // Two full-capacity caches sit at the machine's wired edge; the receipt needs only the prompt's window.
         .context = if (is_lanes and args.len > 7) try number(args[7]) else if (is_draftloop) 4096 else 0,
     });
     defer model.deinit();
@@ -305,7 +303,7 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
         try operators.run(a, io, model, dir);
         _ = try oracle.run(a, io, model, ids, map_blob, dir);
     } else if (is_oracle_fp64) {
-        // ROUND-377: the same window against the FP64 chain (the reference chain at its ideal contract).
+        // The same window against the FP64 chain (the reference chain at its ideal contract).
         try operators.run(a, io, model, dir);
         _ = try oracle.runF64(a, io, model, ids, map_blob, dir);
     } else if (std.mem.eql(u8, mode, "margins")) {
@@ -374,7 +372,6 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
         const outputs = try a.alloc(f32, ids.len * 129280);
         defer a.free(outputs);
         const elapsed = try teacher(model, ids, chunk, outputs);
-        // Capture execution before writing the receipt, not filesystem metadata reads from the receipt itself.
         if (is_seams) {
             const alternative = try a.alloc(f32, outputs.len);
             defer a.free(alternative);

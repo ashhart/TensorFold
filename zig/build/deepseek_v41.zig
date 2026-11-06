@@ -45,6 +45,11 @@ pub fn checks(
     }) });
     const device_step = b.step("test-deepseek-v41", "Experimental DS4.1 EXL3, Engram, mHC and sparse attention on Metal");
     device_step.dependOn(&b.addRunArtifact(device).step);
+    // The family's Metal sources carry struct-size static_asserts; compile them the way the engine joins
+    // them, on the family's own step (not on every native build).
+    const mirrors = b.addSystemCommand(&.{ "sh", "tools/zig/check_dsv41_metal_mirrors.sh" });
+    mirrors.setCwd(b.path("."));
+    device_step.dependOn(&mirrors.step);
     // A one-test slice of the same module: the index select's determinism probe, so a kernel-level
     // race can be iterated in seconds instead of a model boot.
     const probe = b.addTest(.{ .root_module = b.createModule(.{

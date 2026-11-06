@@ -31,8 +31,8 @@ pub const Params = extern struct {
     index_stride: u32 = 512,
     scale: f32 = 0.04419417382415922,
     splits: u32 = 1, // >1 only on a decode layer, where one threadgroup would scan every key alone
-    /// ROUND-365: the drafter's form -- every row sits at `position` and sees every chunk row, as the
-    /// comparator's dsparkAttention does (one position for the whole draft block, no mask over its rows).
+    /// The drafter's form -- every row sits at `position` and sees every chunk row, as the comparator's
+    /// dsparkAttention does (one position for the whole draft block, no mask over its rows).
     chunk_all: u32 = 0,
     comptime {
         @import("metal/index_mirror.zig").check(Params, sources.deepseek_v41_csa2, "Dsv41Attention");
@@ -56,7 +56,7 @@ pub const Params = extern struct {
 };
 var merge_split_cache: ?u32 = null;
 
-/// ROUND-402 (LANDED): the merge's chunk split, default ON.  Zero restores the four-threadgroup merge.
+/// The merge's chunk split, default ON. Zero restores the four-threadgroup merge.
 fn mergeSplitOn() bool {
     if (merge_split_cache == null) {
         var v: u32 = 1;
@@ -72,12 +72,12 @@ pub const Pipelines = struct {
     attention: mtl.Pipeline,
     nax: mtl.Pipeline, // the same attention over prompt chunks on the tensor units (csa2_nax.metal)
     tensor_units: bool,
-    nax_min_rows: u32, // TF_DSV41_NAX_MIN_ROWS, 1: decode takes the tensor-unit kernel too (measured faster, same bits)
+    nax_min_rows: u32,
 
     dense_kv: mtl.Pipeline = undefined,
     dense_picked: mtl.Pipeline = undefined,
     merge: mtl.Pipeline = undefined,
-    /// ROUND-402 (the arm): the merge with one accumulator chunk a threadgroup (four times the grid).
+    /// The merge with one accumulator chunk a threadgroup (four times the grid).
     merge_split: mtl.Pipeline = undefined,
     pub fn load(device: mtl.Device) !Pipelines {
         var options = mtl.CompileOptions.mlx();
@@ -184,11 +184,11 @@ pub const Pipelines = struct {
             a2.splits = splits;
             enc.setBuffer(partials.buffer, partials.offset, 9);
             enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, splits), mtl.Size.of(32, 4, 1));
-            // ROUND-401 (the instrument): TF_DSV41_DOUBLE_ATTN_SCANX -- the decode's OWN scan, duplicated IN
-            // PLACE (before the merge).  ROUND-400 put its scan arm in the non-NAX branch, but nax_min_rows
-            // defaults to ONE, so the decode runs the NAX branch: that arm never fired and "the decode's scan
-            // is free" was a false null.  THIS form is the diagnostic: an identical duplicate dispatch moved
-            // the reply (the sea canon a76509b819ce -> 0246825ea926), so it is NOT a same-output arm.
+            // TF_DSV41_DOUBLE_ATTN_SCANX -- the decode's OWN scan, duplicated IN PLACE (before the merge). Put its
+            // scan arm in the non-NAX branch, but nax_min_rows defaults to ONE, so the decode runs the NAX branch:
+            // that arm never fired and "the decode's scan is free" was a false null. THIS form is the diagnostic:
+            // an identical duplicate dispatch moved the reply (the sea canon a76509b819ce -> 0246825ea926), so it
+            // is NOT a same-output arm.
             if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_SCANX") != null) {
                 enc.setPipeline(p.nax);
                 for ([_]View{ q, ring, chunk, compressed, positions, sink, out }, 0..) |v, i|
@@ -198,14 +198,11 @@ pub const Pipelines = struct {
                 enc.setBuffer(partials.buffer, partials.offset, 9);
                 enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, splits), mtl.Size.of(32, 4, 1));
             }
-            // ROUND-401 (the instrument): TF_DSV41_ATTN_SCAN_BARRIER -- the explicit memory barrier the
-            // csa2 NAX branch has no other place for: every other kernel in this engine is followed by an
-            // enc.barrier(), but the scan -> merge handoff has none, and the parts the merge reads are the
-            // parts the scan just wrote.  The arm turns it on so the scan's duplicate (which moves the reply)
-            // can be read against it.
+            // TF_DSV41_ATTN_SCAN_BARRIER -- the explicit memory barrier the csa2 NAX branch has no other place for:
+            // every other kernel in this engine is followed by an enc.barrier, but the scan -> merge handoff has
+            // none, and the parts the merge reads are the parts the scan just wrote. The arm turns it on so the
+            // scan's duplicate (which moves the reply) can be read against it.
             if (std.c.getenv("TF_DSV41_ATTN_SCAN_BARRIER") != null) enc.barrier();
-            // Measurement only: a second identical scan, written past the real rows so the
-            // model's output is unchanged (no routing confound); the delta prices the scan's execution.
             if (std.c.getenv("TF_DSV41_DOUBLE_SPARSE") != null) {
                 const dr: u32 = args.rows;
                 var a3 = args;
@@ -218,10 +215,10 @@ pub const Pipelines = struct {
                 enc.setBuffer(out.buffer, out.offset, 6);
             }
             if (splits > 1) {
-                // ROUND-402 (the arm): TF_DSV41_SPARSE_MERGE_SPLIT -- the merge's own chunk split (four
-                // threadgroups a chunk, sixteen threadgroups a layer instead of four).  The grid is the only
-                // thing that changes: the kernel reads its own chunk's sixteen floats per split and writes
-                // its own fragment, so the output is bit-identical.
+                // TF_DSV41_SPARSE_MERGE_SPLIT -- the merge's own chunk split (four threadgroups a chunk, sixteen
+                // threadgroups a layer instead of four). The grid is the only thing that changes: the kernel reads
+                // its own chunk's sixteen floats per split and writes its own fragment, so the output is
+                // bit-identical.
                 const merge_split = mergeSplitOn();
                 enc.setPipeline(if (merge_split) p.merge_split else p.merge);
                 enc.setBuffer(partials.buffer, partials.offset, 0);
@@ -229,12 +226,12 @@ pub const Pipelines = struct {
                 enc.setBuffer(sink.buffer, sink.offset, 2);
                 enc.setValue(a2, 3);
                 enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, if (merge_split) 4 else 1), mtl.Size.of(32, 4, 1));
-                // ROUND-401 (the instrument): TF_DSV41_DOUBLE_ATTN_MERGE -- the split merge's same-output
-                // duplicate (the merge reduces the partials into the output; the second pass writes the same
-                // values).  This is the ONE dispatch of the decode's sparse block that no arm priced.
+                // TF_DSV41_DOUBLE_ATTN_MERGE -- the split merge's same-output duplicate (the merge reduces the
+                // partials into the output; the second pass writes the same values). This is the ONE dispatch of
+                // the decode's sparse block that no arm priced.
                 if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_MERGE") != null) {
-                    // ROUND-409: the duplicate must be the LANDED form (the split merge), or the arm prices
-                    // the four-threadgroup merge ROUND-402 replaced instead of what the engine now runs.
+                    // The duplicate must be the LANDED form (the split merge), or the arm prices the
+                    // four-threadgroup merge replaced instead of what the engine now runs.
                     enc.setPipeline(if (merge_split) p.merge_split else p.merge);
                     enc.setBuffer(partials.buffer, partials.offset, 0);
                     enc.setBuffer(out.buffer, out.offset, 1);
@@ -242,12 +239,11 @@ pub const Pipelines = struct {
                     enc.setValue(a2, 3);
                     enc.dispatchGroups(mtl.Size.of(args.heads / 16, args.rows, 1), mtl.Size.of(32, 4, 1));
                 }
-                // ROUND-401 (the instrument): TF_DSV41_DOUBLE_ATTN_SCAN -- the decode's OWN scan, duplicated
-                // AFTER the merge.  The merge has already consumed the parts, so the duplicate's write lands
-                // on values nobody reads: a same-output arm that prices the scan's execution.  It is placed
-                // after the merge because the IN-PLACE duplicate (TF_DSV41_DOUBLE_ATTN_SCANX) moves the reply:
-                // the scan -> merge handoff carries something the duplicate disturbs, and this form separates
-                // the two (the write itself is harmless here).
+                // TF_DSV41_DOUBLE_ATTN_SCAN -- the decode's OWN scan, duplicated AFTER the merge. The merge has
+                // already consumed the parts, so the duplicate's write lands on values nobody reads: a same-output
+                // arm that prices the scan's execution. It is placed after the merge because the IN-PLACE duplicate
+                // (TF_DSV41_DOUBLE_ATTN_SCANX) moves the reply: the scan -> merge handoff carries something the
+                // duplicate disturbs, and this form separates the two (the write itself is harmless here).
                 if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_SCAN") != null) {
                     enc.setPipeline(p.nax);
                     for ([_]View{ q, ring, chunk, compressed, positions, sink, out }, 0..) |v, i|
@@ -260,16 +256,15 @@ pub const Pipelines = struct {
             }
             return;
         }
-        // Measurement only: price the decode scan by removal (the NAX path has the same knob).
         if (std.c.getenv("TF_DSV41_SKIP_SPARSE") != null) return;
         enc.setPipeline(p.attention);
         for ([_]View{ q, ring, chunk, compressed, positions, sink, out }, 0..) |v, i|
             enc.setBuffer(v.buffer, v.offset, i);
         enc.setValue(args, 7);
         enc.dispatchGroups(mtl.Size.of(args.heads, args.rows, 1), mtl.Size.of(32, 1, 1));
-        // ROUND-400 (the instrument): TF_DSV41_DOUBLE_ATTN_SCAN -- the decode scan's same-output duplicate. The
-        // record's TF_DSV41_DOUBLE_SPARSE sits in the NAX (prompt) path, so the decode scan -- the attention's own
-        // math -- had no price at all; this prices it without touching a value.
+        // TF_DSV41_DOUBLE_ATTN_SCAN -- the decode scan's same-output duplicate. The record's TF_DSV41_DOUBLE_SPARSE
+        // sits in the NAX (prompt) path, so the decode scan -- the attention's own math -- had no price at all;
+        // this prices it without touching a value.
         if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_SCAN") != null) {
             enc.setValue(args, 7);
             enc.dispatchGroups(mtl.Size.of(args.heads, args.rows, 1), mtl.Size.of(32, 1, 1));

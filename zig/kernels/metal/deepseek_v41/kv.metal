@@ -102,9 +102,8 @@ kernel void dsv41_pool(device const uchar *values [[buffer(0)]], device const fl
             gslots[j] = score;
             exponent[j] = exp(score - mx); sum += exponent[j];
         }
-        // ROUND-367: the raw row's capture -- the row's own values and its gate, one slot a position.
-        // The rollback's open group is re-cut from it, so a rejected window's rows need no second
-        // forward (the no-re-feed port).
+        // The raw row's capture -- the row's own values and its gate, one slot a position. The rollback's open
+        // group is re-cut from it, so a rejected window's rows need no second forward (the no-re-feed port).
         if (p.capture_rows != 0) {
             for (uint j = 0; j < p.ratio; ++j) {
                 uint pos = start + j;
@@ -155,10 +154,10 @@ kernel void dsv41_unpack_rows(device const uchar *packed [[buffer(0)]], device u
         i.x, p.width, p.block, p.kind));
 }
 
-// ROUND-398: the window ring's slot stash/restore. A verify window publishes every row it writes,
-// including rows the round later rejects; once the ring has wrapped (position > 128) a rejected
-// row's slot aliases a position that is still visible to the next forward. `beginSlot` stashes the
-// slots the window is about to overwrite, and the keep path puts the rejected ones back.
+// The window ring's slot stash/restore. A verify window publishes every row it writes, including rows the round
+// later rejects; once the ring has wrapped (position > 128) a rejected row's slot aliases a position that is still
+// visible to the next forward. `beginSlot` stashes the slots the window is about to overwrite, and the keep path
+// puts the rejected ones back.
 struct Dsv41RingMove { uint layers, move_rows, max_rows, window, position, stride_words, first, to_stash; };
 static_assert(sizeof(Dsv41RingMove) == 32, "Dsv41RingMove must mirror kv.zig's RingMove");
 kernel void dsv41_ring_move(device uint *dst [[buffer(0)]], device const uint *src [[buffer(1)]],

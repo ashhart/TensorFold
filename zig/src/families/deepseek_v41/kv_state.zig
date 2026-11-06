@@ -28,9 +28,9 @@ pub fn isIndexSource(layer: u32) bool {
     return std.mem.indexOfScalar(u32, &index_sources, layer) != null;
 }
 pub const Source = struct { owner: u32, ratio: u32, rows: u32, main: View, index: View, partial: View, capture: View };
-/// ROUND-367: the compressed path's raw-row capture. The pool writes every row it consumes -- the
-/// row's own values and its gate -- into one slot a position, so a rollback can re-cut the group that
-/// straddles the new position without another forward (the no-re-feed port).
+/// The compressed path's raw-row capture. The pool writes every row it consumes -- the row's own values and its
+/// gate -- into one slot a position, so a rollback can re-cut the group that straddles the new position without
+/// another forward (the no-re-feed port).
 pub const capture_rows: u32 = 8;
 pub const capture_width: u32 = 512;
 /// One owner's capture: `capture_rows` slots of (values row, gate row), 512 f32 each.
@@ -63,7 +63,7 @@ pub const Plan = struct {
         _ = p;
         return 7 * 2 * 512 * 4;
     }
-    /// ROUND-367: the raw-row capture begins after the partial scratch.
+    /// The raw-row capture begins after the partial scratch.
     pub fn captureOffset(p: Plan) usize {
         return p.partialOffset() + p.partialBytes();
     }

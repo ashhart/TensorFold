@@ -1,5 +1,4 @@
-// Group routed slots into padded expert tiles (sixty-four rows, or the tile's own width -- ROUND-348);
-// scatter preserves original token and output IDs.
+// Group routed slots into padded expert tiles; scatter preserves original token and output IDs.
 #include <metal_stdlib>
 using namespace metal;
 struct TfExpertGroups { uint rows, experts, repeat, padded, block, tile; };
@@ -21,8 +20,8 @@ kernel void tf_expert_group_count(TF_GROUP_ARGS) {
 kernel void tf_expert_group_prefix(TF_GROUP_ARGS) {
     if (i != 0) return;
     uint offset = 0;
-    // ROUND-348: each expert's block is padded to a multiple of the tile's rows (the tile reads one expert's
-    // weights, so a tile may not straddle two experts); the tile's width is the plan's own.
+    // Each expert's block is padded to a multiple of the tile's rows (the tile reads one expert's weights, so a
+    // tile may not straddle two experts); the tile's width is the plan's own.
     const uint tile = d.tile == 0u ? 64u : d.tile;
     for (uint expert = 0; expert < d.experts; ++expert) {
         offsets[expert] = offset;
