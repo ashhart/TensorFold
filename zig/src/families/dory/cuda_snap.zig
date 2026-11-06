@@ -35,7 +35,7 @@ pub const Saved = struct {
 };
 
 /// Positions a sliding ring keeps at `at`: a later row at `at` or past reads keys from at - window + 1 on.
-fn tail(window: usize, at: usize) usize {
+pub fn tail(window: usize, at: usize) usize {
     return @min(at, window - 1);
 }
 
@@ -77,7 +77,7 @@ fn fullCache(m: *const fwd.Model, j: usize) usize {
 }
 
 /// Each cache, K then V, of `slot`: rings' last rows, full caches' [from, at), one copy a run, in order.
-fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
+pub fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
     const rb = m.c.kvDim() * 2;
     var off: usize = 0;
     for (0..m.sched.caches) |i| for ([_][]u64{ m.k, m.v }) |cache| {
@@ -133,6 +133,14 @@ const Piece = struct {
 fn pieceAt(m: *const fwd.Model, region: usize, id: u32) u64 {
     const i = fullCache(m, region / 2);
     return (if (region % 2 == 0) m.k else m.v)[i] + id * chunk(m);
+}
+
+/// A state of `at` positions with its storage unset: the disk store fills it (cuda_disk.zig).
+pub fn blank(gpa: std.mem.Allocator, m: *const fwd.Model, at: u32) !*Saved {
+    const k = try gpa.create(Saved);
+    errdefer gpa.destroy(k);
+    k.* = .{ .at = at, .key = keyOf(m.c), .buf = try cuda.DeviceBuffer.alloc(m.d, @max(bytes(m, at), 256)) };
+    return k;
 }
 
 /// Copy `slot`'s state at `at` into new storage, queued on `s` behind the chunk that ends there.
