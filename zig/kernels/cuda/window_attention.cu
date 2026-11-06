@@ -574,6 +574,10 @@ template __global__ void tf_window_prompt::wattn_kernel<128, 8, 4, 8>(const __nv
 template __global__ void tf_window_prompt::wattn_kernel<128, 8, 8, 8>(const __nv_bfloat16* __restrict__,
     const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
     int, int, float, int, int);
+// Ripple's group 10 (no multiple of 4): two query heads a block, so 64 rows a block; each warp's arithmetic as above.
+template __global__ void tf_window_prompt::wattn_kernel<128, 8, 2, 8>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int,
+    int, int, float, int, int);
 
 // Kolibri-1's full layers' prompt rows over pages: head dim 128, eight warps, four or eight query heads a block.
 #define TF_WATTN_PG(NAME, HPC)                                                                                       \
@@ -586,3 +590,5 @@ template __global__ void tf_window_prompt::wattn_kernel<128, 8, 8, 8>(const __nv
 
 TF_WATTN_PG(tf_window_prompt_h4_pg, 4)
 TF_WATTN_PG(tf_window_prompt_h8_pg, 8)
+// Ripple's global layers over pages: two query heads a block.
+TF_WATTN_PG(tf_window_prompt_h2_pg, 2)
