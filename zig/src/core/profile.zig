@@ -14,12 +14,33 @@ pub const Switch = enum {
     TF_GLM_KV_HOST,
     TF_GLM_KV_HOST_SHARED,
     TF_GLM_PROMPT_TAIL,
+    TF_DSV41_EXPERT_TOPP,
+    TF_DSV41_NUCLEUS,
+    TF_DSV41_CONTEXT,
+    TF_DSV41_LAYERS,
+    TF_DSV41_OWN_PREFILL,
+    TF_DSV41_PREFILL_PIECES,
+    TF_DSV41_SLOTS,
+    TF_DSV41_POOL_TOKENS,
+    TF_DSV41_KV_SPLIT,
+    TF_DSV41_KV_SPLIT_UNION_MIB,
+    TF_DSV41_NEEDS_POOL,
+    TF_DSV41_MHC_DEFER,
+    TF_DSV41_DRAFTS,
+    TF_DSV41_SAMPLING,
+    TF_DSV41_IMAGES,
+    TF_DSV41_BIAS_VL,
+    TF_DSV41_ENGRAM_DIR,
+    TF_DSV41_SCHEMA_PROMPT,
+    TF_DSV41_ROWS_CAP,
+    TF_DSV41_TOOL_GRAMMAR,
 };
-pub const Syntax = enum { count, one, auto };
+pub const Syntax = enum { count, one, auto, explicit };
 pub const Entry = struct {
     id: Switch,
     /// When present, these exact values alone differ from the family default; otherwise use syntax.
     report_values: ?[]const []const u8 = null,
+    redact: bool = false,
     families: []const []const u8,
     backend: []const u8 = "cuda",
     class: Class,
@@ -47,6 +68,7 @@ pub const Entry = struct {
             .one => std.mem.eql(u8, raw, "1"),
             .count => (std.fmt.parseInt(usize, raw, 10) catch return true) != 0,
             .auto => !std.mem.eql(u8, raw, "auto"),
+            .explicit => true,
         };
     }
 };
@@ -66,9 +88,30 @@ pub const entries = [_]Entry{
     .{ .id = .TF_GLM_KV_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
     .{ .id = .TF_GLM_KV_HOST_SHARED, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
     .{ .id = .TF_GLM_PROMPT_TAIL, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
+    .{ .id = .TF_DSV41_EXPERT_TOPP, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Expert top-p routing mass", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_NUCLEUS, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .explicit, .effect = "Nucleus candidate count", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_CONTEXT, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .explicit, .effect = "Slot position limit", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_LAYERS, .families = &.{"deepseek_v41"}, .class = .debug, .syntax = .explicit, .effect = "Loaded backbone layer subset", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_OWN_PREFILL, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Prompt prefill program; ranks must agree", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_PREFILL_PIECES, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Host prompt-piece scheduler", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_SLOTS, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Live serving slots", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_POOL_TOKENS, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .explicit, .effect = "Paged pool token capacity", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_KV_SPLIT, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .explicit, .effect = "Split ownership of pool rows", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_KV_SPLIT_UNION_MIB, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .explicit, .effect = "Split pool union capacity", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_NEEDS_POOL, .families = &.{"deepseek_v41"}, .class = .debug, .syntax = .explicit, .effect = "Force pool geometry in the AOT asset planner only", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_MHC_DEFER, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Deferred mHC coefficient launches", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_DRAFTS, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "DSpark drafting policy", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_SAMPLING, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Device sampler", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_IMAGES, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Native image segments in the AOT plan", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_BIAS_VL, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Vision-bias calls in the AOT plan", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_ENGRAM_DIR, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .redact = true, .effect = "Real Engram rows instead of synthetic rows", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_SCHEMA_PROMPT, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Response schema in the encoded prompt", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_ROWS_CAP, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .explicit, .effect = "Rows in each forward bucket", .evidence = "#2370" },
+    .{ .id = .TF_DSV41_TOOL_GRAMMAR, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .explicit, .effect = "Legacy alias of the server-wide auto-tool grammar policy", .evidence = "#2370" },
 };
 
 comptime {
+    @setEvalBranchQuota(10000);
     for (std.enums.values(Switch)) |id| {
         var found = false;
         for (entries) |e| if (e.id == id) {

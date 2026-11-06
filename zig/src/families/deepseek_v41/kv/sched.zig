@@ -180,54 +180,58 @@ pub const Settings = struct {
 
     pub fn fromEnv() !Settings {
         var s: Settings = .{};
-        if (envInt("TF_DSV41_PREFILL_ROWS")) |v| s.rows = v;
-        if (envInt("TF_DSV41_BATCH_SHORT")) |v| s.short = v;
-        if (envFloat("TF_DSV41_PREFILL_SHARE")) |v| s.share = v;
-        if (envInt("TF_DSV41_LONG_PROMPT")) |v| s.long_prompt = v;
-        if (envInt("TF_DSV41_PREFILL_CONCURRENT")) |v| s.concurrent = v;
+        if (try envInt("TF_DSV41_PREFILL_ROWS")) |v| s.rows = v;
+        if (try envInt("TF_DSV41_BATCH_SHORT")) |v| s.short = v;
+        if (try envFloat("TF_DSV41_PREFILL_SHARE")) |v| s.share = v;
+        if (try envInt("TF_DSV41_LONG_PROMPT")) |v| s.long_prompt = v;
+        if (try envInt("TF_DSV41_PREFILL_CONCURRENT")) |v| s.concurrent = v;
         if (!(s.share > 0.0 and s.share <= 1.0) or s.long_prompt < 1) return error.BadSettings;
-        if (envInt("TF_DSV41_INDEX_BUDGET_MIB")) |v| s.price.budget_mib = v;
-        if (envFloat("TF_DSV41_FLOOR_PF_CHUNK_GIB")) |v| s.price.chunk_gib = v;
-        if (envFloat("TF_DSV41_FLOOR_PF_INDEX_GIB")) |v| s.price.index_gib = v;
-        if (envFloat("TF_DSV41_FLOOR_PF_HOST_GIB")) |v| s.price.host_gib = v;
-        if (envFloat("TF_DSV41_FLOOR_PF_OTHER_GIB")) |v| s.price.other_gib = v;
-        if (std.c.getenv("TF_DSV41_FLOOR_PRICE")) |v| s.price.on = !std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "0");
+        if (try envInt("TF_DSV41_INDEX_BUDGET_MIB")) |v| s.price.budget_mib = v;
+        if (try envFloat("TF_DSV41_FLOOR_PF_CHUNK_GIB")) |v| s.price.chunk_gib = v;
+        if (try envFloat("TF_DSV41_FLOOR_PF_INDEX_GIB")) |v| s.price.index_gib = v;
+        if (try envFloat("TF_DSV41_FLOOR_PF_HOST_GIB")) |v| s.price.host_gib = v;
+        if (try envFloat("TF_DSV41_FLOOR_PF_OTHER_GIB")) |v| s.price.other_gib = v;
+        s.price.on = try @import("sys").strict_env.boolean("TF_DSV41_FLOOR_PRICE", s.price.on, .{ .trim = " " });
         return s;
     }
 
     /// The floor and adaptive rows from the environment.
     pub fn withFloorFromEnv(s: *Settings) !void {
         var f: Floor = .{};
-        if (envFloat("TF_DSV41_FLOOR_GIB")) |v| f.target_gib = v;
-        if (envFloat("TF_DSV41_FLOOR_HARD_GIB")) |v| f.hard_gib = v;
+        if (try envFloat("TF_DSV41_FLOOR_GIB")) |v| f.target_gib = v;
+        f.hard_gib = (try @import("budget.zig").hardFloorGiB());
         if (!(f.hard_gib > 0 and f.hard_gib <= f.target_gib)) return error.BadSettings;
-        if (envFloat("TF_DSV41_ADMIT_FREE_FLOOR_GIB")) |v| f.free_gib = v;
-        if (envFloat("TF_DSV41_FLOOR_REFUSE_S")) |v| f.refuse_s = v;
-        if (envFloat("TF_DSV41_ADMIT_CACHE_KEEP_GB")) |v| f.keep_gib = v;
+        if (try envFloat("TF_DSV41_ADMIT_FREE_FLOOR_GIB")) |v| f.free_gib = v;
+        if (try envFloat("TF_DSV41_FLOOR_REFUSE_S")) |v| f.refuse_s = v;
+        if (try envFloat("TF_DSV41_ADMIT_CACHE_KEEP_GB")) |v| f.keep_gib = v;
         s.floor = f;
-        const off = if (std.c.getenv("TF_DSV41_PREFILL_ADAPT")) |v| std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "0") else false;
+        const off = !try @import("sys").strict_env.boolean("TF_DSV41_PREFILL_ADAPT", true, .{ .trim = " " });
         if (off) return;
         var a: Adapt = .{ .gib = f.target_gib };
-        if (envFloat("TF_DSV41_PREFILL_ADAPT_GIB")) |v| a.gib = v;
-        if (envFloat("TF_DSV41_PREFILL_ADAPT_UP_GIB")) |v| a.up_gib = v;
-        if (envInt("TF_DSV41_PREFILL_ADAPT_MIN")) |v| a.min_rows = v;
+        if (try envFloat("TF_DSV41_PREFILL_ADAPT_GIB")) |v| a.gib = v;
+        if (try envFloat("TF_DSV41_PREFILL_ADAPT_UP_GIB")) |v| a.up_gib = v;
+        if (try envInt("TF_DSV41_PREFILL_ADAPT_MIN")) |v| a.min_rows = v;
         if (a.min_rows < 16) return error.BadSettings;
         s.adapt = a;
     }
 };
-
-fn envInt(name: [*:0]const u8) ?u64 {
-    const v = std.c.getenv(name) orelse return null;
-    const t = std.mem.trim(u8, std.mem.span(v), " ");
-    if (t.len == 0) return null;
-    return std.fmt.parseInt(u64, t, 10) catch null;
+fn envInt(name: [*:0]const u8) !?u64 {
+    const raw = @import("sys").strict_env.get(std.mem.span(name)) orelse return null;
+    var parser: @import("sys").strict_env.Parser = .{};
+    return parser.integer(u64, std.mem.span(name), std.mem.trim(u8, raw, " "), 0, 0, std.math.maxInt(u64), "whole nonnegative number") catch |e| {
+        parser.problem.?.value = raw;
+        parser.log();
+        return e;
+    };
 }
-
-fn envFloat(name: [*:0]const u8) ?f64 {
-    const v = std.c.getenv(name) orelse return null;
-    const t = std.mem.trim(u8, std.mem.span(v), " ");
-    if (t.len == 0) return null;
-    return std.fmt.parseFloat(f64, t) catch null;
+fn envFloat(name: [*:0]const u8) !?f64 {
+    const raw = @import("sys").strict_env.get(std.mem.span(name)) orelse return null;
+    var parser: @import("sys").strict_env.Parser = .{};
+    return parser.real(std.mem.span(name), std.mem.trim(u8, raw, " "), 0, 0, std.math.floatMax(f64), "finite number at least 0") catch |e| {
+        parser.problem.?.value = raw;
+        parser.log();
+        return e;
+    };
 }
 
 /// A queued request as the planner sees it (`key`: the host's handle for it).

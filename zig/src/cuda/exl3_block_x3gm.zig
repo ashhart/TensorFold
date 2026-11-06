@@ -92,9 +92,8 @@ pub fn v3Of(mats: u32, xm: u32, out: []usize) []usize {
 }
 
 /// TF_DSV41_GM_V3=1: prefill's x3gm through v3 (v3_default's variants); unset or 0: v2 (default; v3 is bit-identical).
-pub fn gmV3() bool {
-    const v = std.c.getenv("TF_DSV41_GM_V3") orelse return false;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+pub fn gmV3() !bool {
+    return @import("sys").strict_env.boolean("TF_DSV41_GM_V3", false, .{});
 }
 
 /// v3's default variant of a projection (from per-shape timing).

@@ -3,7 +3,7 @@
 `tensorfold serve MODEL --profile stable` explicitly selects today's defaults. Omitting `--profile` selects
 the same profile. It enables no additional optimization and supplies no new environment values.
 
-This is the foundation of [#1660](https://github.com/ashhart/TensorFold/issues/1660), beginning with the CUDA KV
+This implements the foundation of [#1660](https://github.com/ashhart/TensorFold/issues/1660), beginning with the CUDA KV
 switches in its first table, their `_ALL` companions, and GLM's and Nemotron's paging policies (seven variables).
 It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings continue through their existing readers. `fast-exact` and `fast`
 are refused by name; they are not aliases
@@ -37,15 +37,16 @@ readers. `profiles.registered_switches` covers the profile registry in this buil
 
 The `profiles` object contains `default`, `available`, and `registered_switches`. Every row identifies its switch,
 backend, model types, class, effect, evidence link number, syntax, and stable fallback. A null fallback means the
-profile supplies no value. Registry metadata comes directly from the same table the readers use.
+profile supplies no value. Registry metadata comes directly from the table. Registered readers can use its raw-value resolver; adding metadata does not migrate an existing reader.
 
-Initial coverage is:
+Coverage includes:
 
 - Qwen3.5 dense/MoE on CUDA: `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL`, `TF_QWEN_KV_SHARE`.
 - GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`.
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, Spark2.5 and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
+- DeepSeek V4.1 on CUDA: the settings below, with no stable fallback.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the
 switch is faster for every shape, device, or workload. The `*_ALL` checks stay `debug`; Flash Next paging remains
@@ -67,7 +68,7 @@ The serving process prints its profile and applicable registered overrides, for 
 [tensorfold] profile: stable; registered overrides: TF_QWEN_KV_PAGES=256 (identical, env); TF_QWEN_KV_SHARE=16 (identical, env)
 ```
 
-When no applicable registered setting differs from its default, it prints `registered overrides: none`. This is
+When no applicable registered setting meets its reporting rule, it prints `registered overrides: none`. This is
 explicitly the registry's coverage, not an assertion that the whole environment is at defaults. Settings for another
 model type/backend and arbitrary environment variables are omitted. Numeric zero for count switches and disabled exact-one
 flags do not count as changes. Dependency checks still determine whether a configured switch can be used.
@@ -92,6 +93,40 @@ can still select windows for learning or a Triton-backed engine; this line repor
 Values are bounded and terminal controls are escaped. Credentials, paths, server addresses, and unrelated environment
 variables are never enumerated by this report. Each process's environment remains authoritative on restart; idle
 reloads use the same existing family readers.
+
+## DeepSeek CUDA settings
+
+[Issue #2370](https://github.com/ashhart/TensorFold/issues/2370) adds these rows for `deepseek_v41` on CUDA.
+Their `explicit` syntax reports every configured value, including `0` and values equal to a current default.
+Defaults can depend on the caller or other settings, so this is a record of explicit configuration, not proof
+that each setting changed a reply. Each stable fallback is null. The release backend has separate readers.
+
+| Class | Variables |
+| --- | --- |
+| `arithmetic` | `TF_DSV41_NUCLEUS`, `TF_DSV41_CONTEXT`, `TF_DSV41_ROWS_CAP`, `TF_DSV41_POOL_TOKENS`, `TF_DSV41_KV_SPLIT`, `TF_DSV41_KV_SPLIT_UNION_MIB` |
+| `debug` | `TF_DSV41_LAYERS`, `TF_DSV41_NEEDS_POOL` |
+| `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR` |
+
+The pool settings have separate rows because each can be set independently. `NEEDS_POOL` forces pool geometry
+in the AOT asset planner; it does not select the served engine's pool. Its class is therefore `debug`.
+The other pool classes conservatively retain the audit's `arithmetic` classification, without claiming exactness.
+Images and vision bias also have independent rows. `ENGRAM_DIR` is reported as `<set>`; its path is never printed
+by the registry line. The legacy `TF_DSV41_TOOL_GRAMMAR` alias has a server-wide reader, although this row covers
+DeepSeek CUDA. A present `TENSORFOLD_TOOL_GRAMMAR` takes precedence and suppresses the masked legacy row.
+
+Malformed DeepSeek settings covered by the strict startup validator refuse before device or checkpoint work.
+The refusal names the variable, supplied value and accepted forms. Boolean settings accept `0` and `1`;
+existing word aliases remain only where a reader already supported them. `MHC_DEFER` and `COEF_LATE` retain
+`true`/`false` and `on`/`off`, ignoring case and surrounding spaces or tabs. `LOOKUP` and `LOOKUP_PLAN` also
+retain `yes`/`no`. Their existing empty-string off forms remain. Other boolean readers keep their existing
+whitespace rules. An absent value still uses that reader's own default.
+
+`BIAS_VL` retains its existing presence rule: unset or blank is off, while both `0` and `1` select vision bias.
+Other text is now refused. `IMAGES` accepts `native` or `0`. The hard memory floor has one shared reader;
+unset remains 4 GiB, and a malformed override no longer becomes 4 GiB silently. Engram queue depth remains
+64 by default and permits 0 for serial reads. The reader-thread setting remains 16 by default and accepts
+0 through 32; values above 32 are refused instead of clamped. Generation streams remain 1 by default.
+No parser change qualifies a new kernel, arithmetic mode or profile.
 
 ## GLM CUDA paging selection
 

@@ -126,7 +126,7 @@ pub const Served = struct {
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
         s.x.policy.depth.forward_rows = backend.forward_rows;
         // drafts sized from cost tables, not the wall clock, so HTTP == CLI replay (TF_DSV41_DRAFT_TIMED=1: measured)
-        s.cfg.timed = if (std.c.getenv("TF_DSV41_DRAFT_TIMED")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+        s.cfg.timed = try @import("sys").strict_env.boolean("TF_DSV41_DRAFT_TIMED", false, .{});
         // the depth policy as booted (the reference's "DSpark on (depth ...)"): what a check reads from the log
         const dset = s.x.policy.depth.set;
         std.log.info("dsv41 depth: {t}, cap {d}, skip {s}, joint {d}, drafts priced {s}", .{ dset.mode, dset.cap, if (dset.skip) "on" else "off", dset.joint, if (s.cfg.timed) "by the wall clock" else "from the cost tables" });

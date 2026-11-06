@@ -155,8 +155,8 @@ test "DeepSeek chat: response_format shows its schema unless TF_DSV41_SCHEMA_PRO
     try t.expectEqualStrings(none, (try hf.text().render(a, messages, .{ .response_format = plain }, &problem)).text);
     hf.schema_prompt = false;
     try t.expectEqualStrings(none, (try hf.text().render(a, messages, .{ .response_format = object }, &problem)).text);
-    try t.expect(@import("hf_text.zig").schemaPrompt(null) and @import("hf_text.zig").schemaPrompt("1"));
-    try t.expect(!@import("hf_text.zig").schemaPrompt(" 0 "));
+    try t.expect((try @import("hf_text.zig").schemaPrompt(null)) and (try @import("hf_text.zig").schemaPrompt("1")));
+    try t.expect(!(try @import("hf_text.zig").schemaPrompt(" 0 ")));
 }
 
 const Script = struct {
@@ -275,4 +275,31 @@ test "DeepSeek chat: tool-only Jinja metadata does not replace the native encode
     defer srv.deinit();
     try t.expect(!srv.needs_user_after_tool);
     try t.expect(srv.thinking_switch);
+}
+
+test "DeepSeek chat: schema and legacy tool grammar retain precedence and refuse malformed values" {
+    const env = @import("sys").env;
+    const grammar = @import("tool_grammar.zig");
+    const schema = @import("hf_text.zig").schemaPrompt;
+    defer {
+        _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
+        _ = env.unsetenv("TF_DSV41_TOOL_GRAMMAR");
+    }
+    _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
+    _ = env.unsetenv("TF_DSV41_TOOL_GRAMMAR");
+    try t.expect(!try grammar.autoAllEnv());
+    try t.expect(try schema(null));
+    for ([_][:0]const u8{ "0", "1", " 1 " }) |raw| {
+        _ = env.setenv("TF_DSV41_TOOL_GRAMMAR", raw, 1);
+        try t.expectEqual(!std.mem.eql(u8, raw, "0"), try grammar.autoAllEnv());
+    }
+    for ([_][:0]const u8{ "", "true", "bad" }) |raw| {
+        _ = env.setenv("TF_DSV41_TOOL_GRAMMAR", raw, 1);
+        try t.expectError(error.BadEnvironmentValue, grammar.autoAllEnv());
+        try t.expectError(error.BadEnvironmentValue, schema(raw));
+    }
+    _ = env.setenv("TENSORFOLD_TOOL_GRAMMAR", "0", 1);
+    try t.expect(!try grammar.autoAllEnv());
+    _ = env.setenv("TENSORFOLD_TOOL_GRAMMAR", "1", 1);
+    try t.expect(try grammar.autoAllEnv());
 }

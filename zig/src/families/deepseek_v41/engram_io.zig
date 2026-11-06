@@ -148,7 +148,7 @@ pub const Aio = struct {
     const Event = extern struct { data: u64, obj: u64, res: i64, res2: i64 };
 
     pub fn init() !Aio {
-        var a: Aio = .{ .poll = pollEnv() };
+        var a: Aio = .{ .poll = (try pollEnv()) };
         const rc = linux.syscall2(.io_setup, depth, @intFromPtr(&a.ctx));
         if (linux.errno(rc) != .SUCCESS) return error.AioRefused;
         return a;
@@ -160,21 +160,18 @@ pub const Aio = struct {
 };
 
 /// TF_DSV41_ENGRAM_POLL: 0 (default) | 1 (with TF_DSV41_ENGRAM_AIO=1).
-pub fn pollEnv() bool {
-    const v = std.c.getenv("TF_DSV41_ENGRAM_POLL") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn pollEnv() !bool {
+    return @import("sys").strict_env.boolean("TF_DSV41_ENGRAM_POLL", false, .{});
 }
 
 /// TF_DSV41_ENGRAM_AIO: 0 (default) | 1.
-pub fn aioEnv() bool {
-    const v = std.c.getenv("TF_DSV41_ENGRAM_AIO") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn aioEnv() !bool {
+    return @import("sys").strict_env.boolean("TF_DSV41_ENGRAM_AIO", false, .{});
 }
 
 /// TF_DSV41_ENGRAM_QD: the reader threads without io_uring (default 64; 0: none, reads serial).
-pub fn poolThreads() u32 {
-    const v = std.c.getenv("TF_DSV41_ENGRAM_QD") orelse return 64;
-    return std.fmt.parseInt(u32, std.mem.span(v), 10) catch 64;
+pub fn poolThreads() !u32 {
+    return @import("sys").strict_env.integer(u32, "TF_DSV41_ENGRAM_QD", 64, 0, std.math.maxInt(u32), "whole number 0..4294967295");
 }
 
 /// Native AIO in place of io_uring or the pool (tests, the probe): every read async through one context.

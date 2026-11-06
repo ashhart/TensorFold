@@ -75,9 +75,9 @@ fn probed(srv: *Server, cx: *Cx) errors.Refused![]const u8 {
 }
 
 /// TENSORFOLD_TOOL_GRAMMAR=1 (legacy TF_DSV41_TOOL_GRAMMAR): every auto tools request is held as strict tools are.
-pub fn autoAllEnv() bool {
-    const v = std.c.getenv("TENSORFOLD_TOOL_GRAMMAR") orelse std.c.getenv("TF_DSV41_TOOL_GRAMMAR") orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+pub fn autoAllEnv() !bool {
+    if (std.c.getenv("TENSORFOLD_TOOL_GRAMMAR")) |v| return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+    return @import("sys").strict_env.boolean("TF_DSV41_TOOL_GRAMMAR", false, .{ .trim = " " });
 }
 
 /// Whether an auto reply offering `tools` gets a grammar: a tool marked "strict": true, or `all` are held.

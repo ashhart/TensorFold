@@ -13,9 +13,8 @@ pub const op_reset: i64 = 42;
 pub const Error = error{ BadPlan, Group, Rows };
 
 /// TF_DSV41_SLOT_DRAFTS=1: DSpark drafts with several live slots (default off: drafts refused with TF_DSV41_SLOTS > 1).
-pub fn enabled() bool {
-    const v = std.c.getenv("TF_DSV41_SLOT_DRAFTS") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn enabled() !bool {
+    return @import("sys").strict_env.boolean("TF_DSV41_SLOT_DRAFTS", false, .{});
 }
 
 /// The most slots a pass: rows below 16, or within TF_DSV41_ROWS_CAP past 16; TF_DSV41_SLOT_DRAFT_GROUP lowers it.

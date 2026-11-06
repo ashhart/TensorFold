@@ -38,7 +38,7 @@ pub fn greedy(f: *Forward, out: []u32) !void {
     const dev = f.pick_dev.?;
     const logits = r.addressOf("w.logits") orelse return error.Unbound;
     if (f.grammar) |g| try g.apply(g.ptr, 0, @intCast(n));
-    if (f.greedy_gpu == null) f.greedy_gpu = if (std.c.getenv("TF_DSV41_GREEDY_GPU")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    if (f.greedy_gpu == null) f.greedy_gpu = try @import("sys").strict_env.boolean("TF_DSV41_GREEDY_GPU", false, .{});
     if (f.greedy_gpu.? and V <= 1 << 16) {
         // the device pick: topk_keys' best column a row, [n] fp32 values + [n] int64 columns back, not logits
         const vals_dev = try f.greedyScratch(r, n);

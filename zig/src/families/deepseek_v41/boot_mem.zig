@@ -109,9 +109,8 @@ pub const Trace = struct {
     /// the kernel keys at the last step (null before the first)
     kernel: ?[kernel_keys.len]?u64 = null,
 
-    pub fn fromEnv() Trace {
-        const v = std.c.getenv("TF_DSV41_BOOT_TRACE") orelse return .{};
-        return .{ .on = std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1") };
+    pub fn fromEnv() !Trace {
+        return .{ .on = try @import("sys").strict_env.boolean("TF_DSV41_BOOT_TRACE", false, .{ .trim = " " }) };
     }
 
     /// `u`: cuda.usage(false) (device, host, allocs).

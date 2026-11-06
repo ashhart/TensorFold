@@ -29,8 +29,8 @@ pub const Settings = struct {
 
     pub fn fromEnv() !Settings {
         var s: Settings = .{};
-        s.plan = try flag(std.c.getenv("TF_DSV41_LOOKUP_PLAN"), false);
-        s.lookup = try flag(std.c.getenv("TF_DSV41_LOOKUP"), true);
+        s.plan = try @import("sys").strict_env.boolean("TF_DSV41_LOOKUP_PLAN", false, .{ .trim = " \t", .words = true, .no = true, .empty_off = true });
+        s.lookup = try @import("sys").strict_env.boolean("TF_DSV41_LOOKUP", true, .{ .trim = " \t", .words = true, .no = true, .empty_off = true });
         if (std.c.getenv("TF_DSV41_LOOKUP_MIN")) |v| if (std.mem.span(v).len > 0) {
             s.min_match = std.fmt.parseInt(i64, std.mem.trim(u8, std.mem.span(v), " "), 10) catch return error.BadLookupMin;
         };
@@ -40,16 +40,6 @@ pub const Settings = struct {
         if (s.min_match < 1 or s.min_match > 64) return error.BadLookupMin;
         if (s.max_rows < 2 or s.max_rows > max_rows) return error.BadMaxRows;
         return s;
-    }
-
-    /// The lookup flag: anything but 0 / false / off / no / "" is on; unset is `default`.
-    fn flag(v: ?[*:0]const u8, default: bool) !bool {
-        const raw = std.mem.trim(u8, std.mem.span(v orelse return default), " \t");
-        var low: [8]u8 = undefined;
-        if (raw.len > low.len) return true;
-        const l = std.ascii.lowerString(&low, raw);
-        for ([_][]const u8{ "0", "false", "off", "no", "" }) |n| if (std.mem.eql(u8, l, n)) return false;
-        return true;
     }
 };
 

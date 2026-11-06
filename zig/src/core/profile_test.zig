@@ -126,3 +126,50 @@ test "stable profile: a runtime name lookup covers the registry and leaves every
     try t.expect(p.lookup("TF_PROFILE_FIXTURE_UNSET") == null);
     inline for (p.entries) |e| try t.expectEqual(p.get(e.id), p.lookup(e.name()));
 }
+
+test "stable profile: every DeepSeek audit group has independent scoped metadata" {
+    const Row = struct { id: p.Switch, class: p.Class };
+    const rows = [_]Row{
+        .{ .id = .TF_DSV41_EXPERT_TOPP, .class = .experimental },
+        .{ .id = .TF_DSV41_NUCLEUS, .class = .arithmetic },
+        .{ .id = .TF_DSV41_CONTEXT, .class = .arithmetic },
+        .{ .id = .TF_DSV41_LAYERS, .class = .debug },
+        .{ .id = .TF_DSV41_OWN_PREFILL, .class = .experimental },
+        .{ .id = .TF_DSV41_PREFILL_PIECES, .class = .experimental },
+        .{ .id = .TF_DSV41_SLOTS, .class = .experimental },
+        .{ .id = .TF_DSV41_POOL_TOKENS, .class = .arithmetic },
+        .{ .id = .TF_DSV41_KV_SPLIT, .class = .arithmetic },
+        .{ .id = .TF_DSV41_KV_SPLIT_UNION_MIB, .class = .arithmetic },
+        .{ .id = .TF_DSV41_NEEDS_POOL, .class = .debug },
+        .{ .id = .TF_DSV41_MHC_DEFER, .class = .experimental },
+        .{ .id = .TF_DSV41_DRAFTS, .class = .experimental },
+        .{ .id = .TF_DSV41_SAMPLING, .class = .experimental },
+        .{ .id = .TF_DSV41_IMAGES, .class = .experimental },
+        .{ .id = .TF_DSV41_BIAS_VL, .class = .experimental },
+        .{ .id = .TF_DSV41_ENGRAM_DIR, .class = .experimental },
+        .{ .id = .TF_DSV41_SCHEMA_PROMPT, .class = .experimental },
+        .{ .id = .TF_DSV41_ROWS_CAP, .class = .arithmetic },
+        .{ .id = .TF_DSV41_TOOL_GRAMMAR, .class = .experimental },
+    };
+    var count: usize = 0;
+    for (p.entries) |e| if (e.applies("deepseek_v41", "cuda")) {
+        count += 1;
+    };
+    try t.expectEqual(rows.len, count);
+    for (rows) |row| {
+        const e = p.entry(row.id);
+        try t.expectEqual(row.class, e.class);
+        try t.expectEqual(p.Syntax.explicit, e.syntax);
+        try t.expectEqualStrings("#2370", e.evidence);
+        try t.expectEqual(@as(usize, 1), e.families.len);
+        try t.expect(e.applies("deepseek_v41", "cuda"));
+        try t.expect(!e.applies("glm5_next", "cuda") and !e.applies("deepseek_v41", "metal"));
+        try t.expect(p.resolve(.stable, row.id, null) == null);
+        try t.expectEqual(row.id, p.registered(e.name()).?);
+        try t.expectEqual(row.id == .TF_DSV41_ENGRAM_DIR, e.redact);
+        for ([_][:0]const u8{ "0", "1", "", " 1 " }) |raw| {
+            try t.expect(e.differs(raw));
+            try t.expectEqual(raw.ptr, p.resolve(.stable, row.id, raw).?.ptr);
+        }
+    }
+}

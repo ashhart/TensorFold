@@ -515,3 +515,12 @@ test "the Zig check: measured at the end of boot, a measured rank 1 passes, a po
     try std.testing.expect(!afterBoot(14.94, pool, 7.33, 1.5, zig_dip_gib, k.hard_gib, 3_000_000, per).ok);
     try std.testing.expectEqual(@as(f64, 0), try reserveFromEnv());
 }
+
+/// The hard floor's only environment reader, shared by boot, prefill, graph capture and admission.
+pub fn hardFloorGiB() !f64 {
+    return @import("sys").strict_env.real("TF_DSV41_FLOOR_HARD_GIB", 4, 0x1p-1074, std.math.floatMax(f64), "finite number greater than 0");
+}
+
+pub fn workspaceFloorGiB() !f64 {
+    return @import("sys").strict_env.real("TF_DSV41_PF_WS_FLOOR_GIB", try hardFloorGiB(), 0, std.math.floatMax(f64), "finite number at least 0");
+}

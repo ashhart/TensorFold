@@ -56,3 +56,7 @@ test "slide admission: DeepSeek refuses before assets or checkpoint access" {
     try std.testing.expect(result == null);
     try std.testing.expectEqualStrings("--slide: deepseek_v41 checkpoints do not learn on CUDA yet", why);
 }
+
+test {
+    _ = @import("env_startup_test.zig");
+}

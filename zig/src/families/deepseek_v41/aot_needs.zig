@@ -154,9 +154,8 @@ fn envInt(name: [:0]const u8, default: i64) !i64 {
     return std.fmt.parseInt(i64, std.mem.span(v), 10);
 }
 
-fn envOn(name: [:0]const u8, default: bool) bool {
-    const v = std.c.getenv(name) orelse return default;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+fn envOn(name: [:0]const u8, default: bool) !bool {
+    return @import("sys").strict_env.boolean(name, default, .{});
 }
 
 pub const Served = struct {
@@ -178,8 +177,9 @@ pub const Served = struct {
 
     /// The engine's knobs as it reads them (PF_DENSE is CUDA, so the `_gemm` variants it replaces are listed too).
     pub fn fromEnv() !Served {
+        try @import("env_validate.zig").startup();
         const knobs = @import("serve_knobs.zig");
-        var o: block.Options = .{ .world = @intCast(try envInt("TF_TP_WORLD", 2)), .rank = @intCast(try envInt("TF_TP_RANK", 0)), .r1 = knobs.r1(&knobs.env) };
+        var o: block.Options = .{ .world = @intCast(try envInt("TF_TP_WORLD", 2)), .rank = @intCast(try envInt("TF_TP_RANK", 0)), .r1 = (try knobs.r1(&knobs.env)) };
         if (std.c.getenv("TF_DSV41_EXPERT_TOPP")) |v| o.expert_topp = try std.fmt.parseFloat(f64, std.mem.span(v));
         o.limit = try envInt("TF_DSV41_CONTEXT", o.limit);
         o.rope_rows = o.limit + 2048;
@@ -197,7 +197,7 @@ pub const Served = struct {
         if (try knobs.indexBudget(&knobs.env)) |b| o.index_budget = b;
         // TF_DSV41_MHC_PFDEC: its norm is `_finish_k` without COEF at the windows it covers
         o.mhc_pf_rows = try knobs.mhcPfRows(&knobs.env);
-        const drafts = envOn("TF_DSV41_DRAFTS", true);
+        const drafts = try envOn("TF_DSV41_DRAFTS", true);
         o.taps = drafts;
         o.pool = try poolFromEnv(o.limit, o.world);
         const slots: u32 = @intCast(try envInt("TF_DSV41_SLOTS", 1));
@@ -208,39 +208,38 @@ pub const Served = struct {
             .slots = slots,
             .cap = @intCast(try envInt("TF_DSV41_ROWS_CAP", 16)),
             .drafts = drafts,
-            .slot_drafts = drafts and slots > 1 and rows_mod.enabled(),
+            .slot_drafts = drafts and slots > 1 and (try rows_mod.enabled()),
             .group = try rows_mod.groupFromEnv((Config{}).dspark_block),
             .graphs = try graphs.Settings.fromEnvOr(true),
             .replay = try knobs.prefillMode(&knobs.env) == .replay,
-            .runs = slots > 1 and envOn("TF_DSV41_PIECE_RUNS", false) and try knobs.prefillMode(&knobs.env) == .replay,
-            .replay_runs = slots > 1 and envOn("TF_DSV41_REPLAY_RUNS", false) and try knobs.prefillMode(&knobs.env) == .replay,
+            .runs = slots > 1 and try envOn("TF_DSV41_PIECE_RUNS", false) and try knobs.prefillMode(&knobs.env) == .replay,
+            .replay_runs = slots > 1 and try envOn("TF_DSV41_REPLAY_RUNS", false) and try knobs.prefillMode(&knobs.env) == .replay,
             .images = if (std.c.getenv("TF_DSV41_IMAGES")) |v| std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "native") else false,
-            .image_bias = if (std.c.getenv("TF_DSV41_BIAS_VL")) |v| std.mem.trim(u8, std.mem.span(v), " ").len > 0 else false,
+            .image_bias = try @import("env_validate.zig").imageBiasEnv(),
         };
     }
 };
 
 /// The served pool as model.zig opens it (kv_state.optionsFromEnv; null: no pool); TF_DSV41_NEEDS_POOL=1 / 0 forces it.
 pub fn poolFromEnv(limit: i64, world: u32) !?block.Pool {
-    const force: ?bool = if (std.c.getenv("TF_DSV41_NEEDS_POOL")) |v| std.mem.eql(u8, std.mem.span(v), "1") else null;
+    const force: ?bool = if (@import("sys").strict_env.get("TF_DSV41_NEEDS_POOL")) |v| try @import("sys").strict_env.flag("TF_DSV41_NEEDS_POOL", v, false, .{}) else null;
     const ko = try kvs.optionsFromEnv(@intCast(limit), world);
     if (!(force orelse (ko != null))) return null;
     const pages = @divExact(limit, block.Pool.page);
-    const split = if (ko) |k| k.split else envOn("TF_DSV41_KV_SPLIT", false);
+    const split = if (ko) |k| k.split else try envOn("TF_DSV41_KV_SPLIT", false);
     return .{
         .comp_pages = if (split) @divExact(pages, 2) + 2 else pages + 1,
         .ik_pages = pages + 1,
         .pts = pages,
         .split = split,
-        .early = split and earlyOn(),
+        .early = split and (try earlyOn()),
         .union_cap = if (ko) |k| @intCast(k.union_cap) else 128 << 20,
     };
 }
 
 /// kv/split.zig's earlyOn (that file is the kv module's): TF_DSV41_KV_SPLIT_EARLY=1, blanks trimmed.
-fn earlyOn() bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_KV_SPLIT_EARLY") orelse return false);
-    return std.mem.eql(u8, std.mem.trim(u8, v, " \t"), "1");
+fn earlyOn() !bool {
+    return @import("sys").strict_env.boolean("TF_DSV41_KV_SPLIT_EARLY", false, .{ .trim = " \t" });
 }
 
 const period: i64 = 256;

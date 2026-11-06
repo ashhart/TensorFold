@@ -29,13 +29,17 @@ const Fake = struct {
 
 test "router grouping/rotation fusion is explicitly opt-in" {
     Fake.pairs = &.{};
-    try testing.expect(!pk.routerGroupRot(&Fake.get));
-    for ([_][]const u8{ "0", "false", "yes", "2", "" }) |value| {
+    try testing.expect(!(try pk.routerGroupRot(&Fake.get)));
+    for ([_][]const u8{"0"}) |value| {
         Fake.pairs = &.{.{ "TF_DSV41_ROUTER_GROUP_ROT", value }};
-        try testing.expect(!pk.routerGroupRot(&Fake.get));
+        try testing.expect(!(try pk.routerGroupRot(&Fake.get)));
+    }
+    for ([_][]const u8{ "false", "yes", "2", "" }) |value| {
+        Fake.pairs = &.{.{ "TF_DSV41_ROUTER_GROUP_ROT", value }};
+        try testing.expectError(error.BadEnvironmentValue, pk.routerGroupRot(&Fake.get));
     }
     Fake.pairs = &.{.{ "TF_DSV41_ROUTER_GROUP_ROT", " 1 " }};
-    try testing.expect(pk.routerGroupRot(&Fake.get));
+    try testing.expect((try pk.routerGroupRot(&Fake.get)));
     Fake.pairs = &.{};
 }
 
@@ -71,12 +75,12 @@ test "serve knob readers: PF_DENSE modes, prefill rows, prefetch ahead, prefill 
     Fake.pairs = &.{};
     try testing.expect(try pk.pfDense(aa, testing.io, &Fake.get) == null);
     try testing.expectEqual(@as(?u32, null), try pk.prefillRows(&Fake.get));
-    try testing.expect(!pk.prefetchAhead(&Fake.get));
+    try testing.expect(!(try pk.prefetchAhead(&Fake.get)));
     try testing.expectEqual(pk.PrefillMode.full, try pk.prefillMode(&Fake.get));
     Fake.pairs = &.{ .{ "TF_DSV41_PF_DENSE", "off" }, .{ "TF_DSV41_PREFILL_CHUNK", "2048" }, .{ "TF_DSV41_PREFILL_ROWS", "1024" }, .{ "TF_DSV41_PREFETCH_AHEAD", "1" }, .{ "TF_DSV41_PREFILL", "replay" } };
     try testing.expect(try pk.pfDense(aa, testing.io, &Fake.get) == null);
     try testing.expectEqual(@as(?u32, 1024), try pk.prefillRows(&Fake.get));
-    try testing.expect(pk.prefetchAhead(&Fake.get));
+    try testing.expect((try pk.prefetchAhead(&Fake.get)));
     try testing.expectEqual(pk.PrefillMode.replay, try pk.prefillMode(&Fake.get));
     Fake.pairs = &.{ .{ "TF_DSV41_PF_DENSE", "fused" }, .{ "TF_DSV41_PF_DENSE_CFG", "3,16" } };
     const p = (try pk.pfDense(aa, testing.io, &Fake.get)).?;
@@ -238,15 +242,19 @@ test "the stream top-k's resident scratch for the boot check: none under the thr
 
 test "KV producer norm/store fusion is separately opt-in" {
     Fake.pairs = &.{};
-    try testing.expect(!pk.kvNormStore(&Fake.get));
-    for ([_][]const u8{ "0", "false", "yes", "2", "" }) |value| {
+    try testing.expect(!(try pk.kvNormStore(&Fake.get)));
+    for ([_][]const u8{"0"}) |value| {
         Fake.pairs = &.{.{ "TF_DSV41_KV_NORM_STORE", value }};
-        try testing.expect(!pk.kvNormStore(&Fake.get));
+        try testing.expect(!(try pk.kvNormStore(&Fake.get)));
+    }
+    for ([_][]const u8{ "false", "yes", "2", "" }) |value| {
+        Fake.pairs = &.{.{ "TF_DSV41_KV_NORM_STORE", value }};
+        try testing.expectError(error.BadEnvironmentValue, pk.kvNormStore(&Fake.get));
     }
     Fake.pairs = &.{.{ "TF_DSV41_ROUTER_GROUP_ROT", "1" }};
-    try testing.expect(!pk.kvNormStore(&Fake.get));
+    try testing.expect(!(try pk.kvNormStore(&Fake.get)));
     Fake.pairs = &.{.{ "TF_DSV41_KV_NORM_STORE", " 1 " }};
-    try testing.expect(pk.kvNormStore(&Fake.get));
-    try testing.expect(!pk.routerGroupRot(&Fake.get));
+    try testing.expect((try pk.kvNormStore(&Fake.get)));
+    try testing.expect(!(try pk.routerGroupRot(&Fake.get)));
     Fake.pairs = &.{};
 }

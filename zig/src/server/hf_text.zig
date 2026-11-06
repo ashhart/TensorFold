@@ -20,8 +20,8 @@ pub fn glmClearThinking(value: ?[]const u8) ?bool {
 }
 
 /// ``TF_DSV41_SCHEMA_PROMPT``: on unless 0 (the published engine's default).
-pub fn schemaPrompt(value: ?[]const u8) bool {
-    return !std.mem.eql(u8, std.mem.trim(u8, value orelse "", " \t\r\n"), "0");
+pub fn schemaPrompt(value: ?[]const u8) !bool {
+    return @import("sys").strict_env.flag("TF_DSV41_SCHEMA_PROMPT", value, true, .{ .trim = " \t\r\n" });
 }
 
 pub const HfText = struct {
@@ -116,7 +116,7 @@ pub const HfText = struct {
             t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
             t.source = "";
             t.tool_source = "";
-            t.schema_prompt = schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
+            t.schema_prompt = try schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
         }
         t.specials = try specialsOf(a, config);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {

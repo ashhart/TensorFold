@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek CUDA refuses malformed environment settings by name before loading and reports its registered explicit settings without changing defaults (#2379, part of #2370).
+
 - CI: the portable-names check runs on every pull request again; since #2274 a reused pass could miss a newly added name
   Windows can't check out (#2311).
 

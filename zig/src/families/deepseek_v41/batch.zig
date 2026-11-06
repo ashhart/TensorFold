@@ -100,7 +100,7 @@ pub const Batch = struct {
         errdefer if (!assembled) gpa.free(pend);
         b.* = .{ .gpa = gpa, .f = f, .ss = ss, .cap = cap, .settings = s, .tab = tab, .pend = pend, .rg = try round_graph.current() };
         assembled = true;
-        if (WinProf.fromEnv()) b.prof = try gpa.create(WinProf);
+        if (try WinProf.fromEnv()) b.prof = try gpa.create(WinProf);
         if (b.prof) |p| p.* = .{};
         @memset(b.pend, null);
         {
@@ -295,7 +295,7 @@ pub const Batch = struct {
                         const ns = ph.nowNs() - t0;
                         b.stats.captures += 1;
                         b.stats.capture_ns += ns;
-                        if (graphLog()) std.log.scoped(.dsv41).info("row graphs: capture {d} ({d} rows, context bucket {d}, part {d}) in {d:.1} ms", .{ g.cache.stats.captured, pk.rows, pk.ctx, pk.part, @as(f64, @floatFromInt(ns)) / 1e6 });
+                        if ((try graphLog())) std.log.scoped(.dsv41).info("row graphs: capture {d} ({d} rows, context bucket {d}, part {d}) in {d:.1} ms", .{ g.cache.stats.captured, pk.rows, pk.ctx, pk.part, @as(f64, @floatFromInt(ns)) / 1e6 });
                     },
                     .eager => b.stats.eager += 1,
                     .replayed => {},

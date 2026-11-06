@@ -11,6 +11,8 @@ pub fn moduleAt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
 }
 pub fn steps(b: *std.Build) void {
+    const env_tests = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, "env_validate.zig") }));
+    b.step("test-dsv41-env-host", "Named DeepSeek environment refusals and unchanged valid forms").dependOn(&env_tests.step);
     const host = b.addTest(.{ .root_module = module(b, b.graph.host, "shared_test.zig") });
     b.step("test-dsv41-engram-alloc", "Actual Engram startup failure sweeps with varying remap behavior").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.root_module, .filters = &.{ "production batch", "engram alloc:" } })).step);
     const arm = b.addTest(.{ .root_module = module(b, b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }), "shared_test.zig"), .filters = &.{ "production batch", "engram alloc:" } });

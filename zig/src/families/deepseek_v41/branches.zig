@@ -72,9 +72,8 @@ fn sideWithMarks(d: *const cuda.Driver, prio: cuda.Stream.Priority) !run.Runner.
 }
 
 /// TF_DSV41_MHC_DEFER : on unless unset / 0.
-pub fn mhcDefer() bool {
-    const v = get("TF_DSV41_MHC_DEFER") orelse return false;
-    return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false"));
+pub fn mhcDefer() !bool {
+    return @import("sys").strict_env.boolean("TF_DSV41_MHC_DEFER", false, .{ .trim = " \t", .words = true, .empty_off = true });
 }
 
 /// TF_DSV41_MHC_DEFER_AT: `exchange` holds each deferred coef launch to the next exchange; unset / 0 / off: after site.
@@ -86,9 +85,8 @@ pub fn deferAt(v: ?[]const u8) !bool {
 }
 
 /// TF_DSV41_COEF_LATE (ours, default off; needs MHC_DEFER): block.Options.coef_late.
-pub fn coefLate() bool {
-    const v = get("TF_DSV41_COEF_LATE") orelse return false;
-    return !(std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off") or std.ascii.eqlIgnoreCase(v, "false"));
+pub fn coefLate() !bool {
+    return @import("sys").strict_env.boolean("TF_DSV41_COEF_LATE", false, .{ .trim = " \t", .words = true, .empty_off = true });
 }
 
 /// TF_DSV41_MHC_DEFER_AT_ROWS: hold only in programs of at most this many rows (1-64); unset / 0: every program.
@@ -114,7 +112,7 @@ pub const hooks_table: @import("forward_hooks.zig").Branches = .{ .close = close
 /// With TF_DSV41_BRANCHES and / or TF_DSV41_MHC_DEFER on: emitter options, side streams, runner; null when both off.
 pub fn install(gpa: std.mem.Allocator, f: *fwd.Forward, rank: u32) !?*Branches {
     const s = try settings();
-    const dfr = mhcDefer() and f.opts.r1;
+    const dfr = (try mhcDefer()) and f.opts.r1;
     if (!s.on and !dfr) return null;
     const r = f.runner;
     const b = try gpa.create(Branches);
@@ -131,7 +129,7 @@ pub fn install(gpa: std.mem.Allocator, f: *fwd.Forward, rank: u32) !?*Branches {
         b.deferred = try sideOf(r.d, .default); // mhc_cuda._side: torch's default priority
         f.opts.mhc_defer = true;
         f.opts.mhc_defer_hold = try deferAt(get("TF_DSV41_MHC_DEFER_AT"));
-        f.opts.coef_late = coefLate();
+        f.opts.coef_late = (try coefLate());
         f.opts.mhc_defer_hold_rows = try deferAtRows(get("TF_DSV41_MHC_DEFER_AT_ROWS"));
         r.dfr = &b.deferred.?;
     }
@@ -139,7 +137,7 @@ pub fn install(gpa: std.mem.Allocator, f: *fwd.Forward, rank: u32) !?*Branches {
         if (s.on and s.prio == .main) if (!quiet) log.warn("branches: TF_DSV41_BRANCHES_PRIO=main raises the main stream, the model's own here: run as equal", .{});
         if (s.on) log.info("branches: the indexer / compressor on a side stream (priority {s}), windows <= {d} rows", .{ if (s.prio == .side) "highest" else "default", s.rows });
         if (dfr) log.info("mhc defer: R1's coefficient launches on their own stream, issued {s}, joined by the next mHC call", .{if (!f.opts.mhc_defer_hold) "after their site" else if (f.opts.mhc_defer_hold_rows > 0) "at the next exchange in windows of at most TF_DSV41_MHC_DEFER_AT_ROWS rows" else "at the next exchange (TF_DSV41_MHC_DEFER_AT)"});
-        if (dfr and coefLate()) log.info("coef late: each deferred coefficient launch issued just before its sublayer's exchange", .{});
+        if (dfr and (try coefLate())) log.info("coef late: each deferred coefficient launch issued just before its sublayer's exchange", .{});
     }
     return b;
 }

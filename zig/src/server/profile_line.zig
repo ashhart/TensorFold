@@ -21,8 +21,9 @@ pub fn format(a: std.mem.Allocator, profile: p.Profile, family: []const u8, back
         if (!e.applies(family, backend)) continue;
         const raw = environment.get(e.name()) orelse continue;
         if (!e.differs(raw)) continue;
+        if (e.id == .TF_DSV41_TOOL_GRAMMAR and environment.get("TENSORFOLD_TOOL_GRAMMAR") != null) continue;
         try out.writer.print("{s} {s}=", .{ if (found) ";" else "", e.name() });
-        try shown(&out.writer, raw);
+        if (e.redact) try out.writer.writeAll("<set>") else try shown(&out.writer, raw);
         try out.writer.print(" ({s}, env)", .{@tagName(e.class)});
         found = true;
     }
@@ -44,7 +45,7 @@ const TestEnv = struct {
         if (std.mem.eql(u8, name, "TF_KV_PAGES")) return e.glm_pages;
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST")) return e.glm_host;
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST_SHARED")) return e.glm_shared;
-        if (std.mem.eql(u8, name, "TF_KV_SHARE")) return null;
+        if (std.mem.eql(u8, name, "TF_KV_SHARE") or std.mem.startsWith(u8, name, "TF_DSV41_")) return null;
         return "fixture-secret-must-not-be-read";
     }
 };
@@ -115,4 +116,32 @@ test "profile line: Nemotron paging reports exact off and all, independently of 
         for ([_][]const u8{ "metal", "hip", "xpu" }) |backend|
             try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, family, backend, TestEnv{ .glm_pages = "0" }));
     }
+}
+
+const DeepEnv = struct {
+    name: []const u8,
+    raw: []const u8 = "0",
+    canonical: ?[]const u8 = null,
+    pub fn get(e: @This(), key: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, key, "TENSORFOLD_TOOL_GRAMMAR")) return e.canonical;
+        return if (std.mem.eql(u8, e.name, key)) e.raw else null;
+    }
+};
+
+test "profile line: every independent DeepSeek override is scoped and paths are redacted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var count: usize = 0;
+    for (p.entries) |e| {
+        if (!e.applies("deepseek_v41", "cuda")) continue;
+        count += 1;
+        const env: DeepEnv = .{ .name = e.name(), .raw = if (e.redact) "fixture-private-directory" else "0" };
+        const expected = try std.fmt.allocPrint(a, "profile: stable; registered overrides: {s}={s} ({s}, env)", .{ e.name(), if (e.redact) "<set>" else "0", @tagName(e.class) });
+        try std.testing.expectEqualStrings(expected, try format(a, .stable, "deepseek_v41", "cuda", env));
+        for ([_][2][]const u8{ .{ "deepseek_v41", "metal" }, .{ "glm5_next", "cuda" } }) |scope|
+            try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], env));
+    }
+    try std.testing.expectEqual(@as(usize, 20), count);
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "deepseek_v41", "cuda", DeepEnv{ .name = "TF_DSV41_TOOL_GRAMMAR", .canonical = "0" }));
 }

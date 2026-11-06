@@ -199,7 +199,7 @@ pub const Runner = struct {
 
     /// Before a window's first launch: each Triton call of `cs` has a variant, else MissingTritonVariant (AOT guard).
     pub fn guard(r: *Runner, cs: []const calls.Call) !void {
-        if (!guardOn()) return;
+        if (!(try guardOn())) return;
         if (r.params == null) r.params = try paramsOf(r.gpa, r.triton);
         const k = programKey(cs, &r.params.?);
         if (r.verified.contains(k)) return;
@@ -345,7 +345,7 @@ pub const Runner = struct {
     /// Issues a window's calls in order (TF_DSV41_SYNC_EACH=1: synced after every call, a failing call named).
     pub fn window(r: *Runner, cs: []const calls.Call) !void {
         try r.guard(cs);
-        if (syncEach()) return r.windowChecked(cs);
+        if ((try syncEach())) return r.windowChecked(cs);
         errdefer r.dropForks(); // a failed window (or capture) leaves no fork for the next one to join
         const mark = r.markAt(cs);
         for (cs, 0..) |*c, i| {
@@ -402,7 +402,7 @@ pub const Runner = struct {
     pub fn timedWindow(r: *Runner, cs: []const calls.Call) !void {
         const p = r.prof orelse return r.window(cs);
         try r.guard(cs);
-        if (syncEach()) return r.windowChecked(cs);
+        if ((try syncEach())) return r.windowChecked(cs);
         p.begin();
         errdefer r.dropForks();
         const mark = r.markAt(cs);
@@ -528,16 +528,16 @@ fn hashArg(h: *std.hash.Wyhash, x: calls.Arg) void {
 
 var guard_on: ?bool = null;
 
-fn guardOn() bool {
+fn guardOn() !bool {
     if (guard_on) |v| return v;
-    const v = if (std.c.getenv("TF_DSV41_AOT_GUARD")) |x| !std.mem.eql(u8, std.mem.span(x), "0") else true;
+    const v = try @import("sys").strict_env.boolean("TF_DSV41_AOT_GUARD", true, .{});
     guard_on = v;
     return v;
 }
 
-fn syncEach() bool {
+fn syncEach() !bool {
     if (sync_each) |v| return v;
-    const v = if (std.c.getenv("TF_DSV41_SYNC_EACH")) |x| std.mem.eql(u8, std.mem.span(x), "1") else false;
+    const v = try @import("sys").strict_env.boolean("TF_DSV41_SYNC_EACH", false, .{});
     sync_each = v;
     return v;
 }

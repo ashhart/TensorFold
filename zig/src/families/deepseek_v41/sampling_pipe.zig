@@ -118,10 +118,7 @@ pub fn sampled(s: ?Sampling) bool {
 
 /// TF_DSV41_NUCLEUS (``nucleus.candidates``): candidates a nucleus row, default 512, 0 = off.
 pub fn nucleusEnv() !u32 {
-    const v = std.c.getenv("TF_DSV41_NUCLEUS") orelse return smp.nucleus_count;
-    const s = std.mem.span(v);
-    if (s.len == 0) return smp.nucleus_count;
-    return std.fmt.parseInt(u32, s, 10) catch error.BadNucleus;
+    return @import("sys").strict_env.integer(u32, "TF_DSV41_NUCLEUS", smp.nucleus_count, 0, std.math.maxInt(u32), "whole number 0..4294967295");
 }
 
 /// One rank's sampler: the host scratch, sized once for the whole vocabulary (picking allocates nothing).

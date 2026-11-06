@@ -6,9 +6,8 @@ const prepare = @import("prepare.zig");
 
 const log = std.log.scoped(.dsv41);
 
-pub fn enabled() bool {
-    const v = std.c.getenv("TF_DSV41_FORMS_INPLACE") orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+pub fn enabled() !bool {
+    return @import("sys").strict_env.boolean("TF_DSV41_FORMS_INPLACE", false, .{ .trim = " " });
 }
 
 pub const Bound = struct { roles: u32 = 0, bytes: u64 = 0 };

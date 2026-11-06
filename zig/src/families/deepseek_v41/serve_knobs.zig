@@ -164,21 +164,18 @@ pub fn indexBound(get: Get) !bool {
 }
 
 /// TF_DSV41_PREFETCH_AHEAD (0 by default): the next prompt segment's Engram reads before this one runs.
-pub fn prefetchAhead(get: Get) bool {
-    const v = get("TF_DSV41_PREFETCH_AHEAD") orelse return false;
-    return !std.mem.eql(u8, std.mem.trim(u8, v, " "), "0");
+pub fn prefetchAhead(get: Get) !bool {
+    return @import("sys").strict_env.flag("TF_DSV41_PREFETCH_AHEAD", get("TF_DSV41_PREFETCH_AHEAD"), false, .{ .trim = " " });
 }
 
 /// TF_DSV41_KV_NORM_STORE=1: KV-only RMS + SWA RoPE/FP8 store, default off.
-pub fn kvNormStore(get: Get) bool {
-    const v = get("TF_DSV41_KV_NORM_STORE") orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, v, " "), "1");
+pub fn kvNormStore(get: Get) !bool {
+    return @import("sys").strict_env.flag("TF_DSV41_KV_NORM_STORE", get("TF_DSV41_KV_NORM_STORE"), false, .{ .trim = " " });
 }
 
 /// TF_DSV41_ROUTER_GROUP_ROT=1: histogram grouping + input rotation, default off.
-pub fn routerGroupRot(get: Get) bool {
-    const v = get("TF_DSV41_ROUTER_GROUP_ROT") orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, v, " "), "1");
+pub fn routerGroupRot(get: Get) !bool {
+    return @import("sys").strict_env.flag("TF_DSV41_ROUTER_GROUP_ROT", get("TF_DSV41_ROUTER_GROUP_ROT"), false, .{ .trim = " " });
 }
 
 /// TF_DSV41_X3LD_EPI (unset / 0 off, 1 on, else refused): the decode MoE's expert epilogues in x3ld's tail.
@@ -191,8 +188,8 @@ pub fn x3ldEpi(get: Get) !bool {
 }
 
 /// The decode R1 set (ATTN_SPLIT=4 and seven switches at 1), or TF_DSV41_R1 (wins): R1 runs whole or not at all.
-pub fn r1(get: Get) bool {
-    if (get("TF_DSV41_R1")) |v| return std.mem.eql(u8, std.mem.trim(u8, v, " "), "1");
+pub fn r1(get: Get) !bool {
+    if (get("TF_DSV41_R1")) |v| return @import("sys").strict_env.flag("TF_DSV41_R1", v, false, .{ .trim = " " });
     const names = [_][]const u8{ "TF_DSV41_ATTN_SPLIT", "TF_DSV41_ATTN_ROPE", "TF_DSV41_MHC_TAIL", "TF_DSV41_MHC_DEFER", "TF_DSV41_MOE_BF16", "TF_DSV41_PRUNE_KIT", "TF_DSV41_RG_PRUNE", "TF_DSV41_RMS_FOLD" };
     var set: usize = 0;
     var served: usize = 0;
@@ -284,5 +281,5 @@ pub fn env(name: []const u8) ?[]const u8 {
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
     const v = std.mem.span(std.c.getenv(buf[0..name.len :0]) orelse return null);
-    return if (v.len == 0) null else v;
+    return v;
 }

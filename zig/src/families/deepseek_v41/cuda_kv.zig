@@ -36,7 +36,7 @@ pub const Options = struct {
 pub fn optionsFromEnv(capacity: u64, world: u32) !?Options {
     const t = std.c.getenv("TF_DSV41_POOL_TOKENS") orelse return null;
     const tokens = try std.fmt.parseInt(u64, std.mem.span(t), 10);
-    const split = if (std.c.getenv("TF_DSV41_KV_SPLIT")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    const split = try @import("sys").strict_env.boolean("TF_DSV41_KV_SPLIT", false, .{});
     if (split and world < 2) return error.SplitNeedsTp;
     const mib: u64 = if (std.c.getenv("TF_DSV41_KV_SPLIT_UNION_MIB")) |v| try std.fmt.parseInt(u64, std.mem.span(v), 10) else 128;
     // pool settings: rounded up to whole pages of every residue
@@ -58,7 +58,7 @@ pub fn bootCheck(ctx: *const cuda.Context, cfg: *const Config, o: Options, rank:
     const integrated = (ctx.attribute(.integrated) catch 0) != 0;
     if (!budget.measuredApplies(budget.modeFromEnv(), integrated, dev.total, mi.total)) return null;
     var knobs: budget.Knobs = .{};
-    if (std.c.getenv("TF_DSV41_FLOOR_HARD_GIB")) |v| knobs.hard_gib = try std.fmt.parseFloat(f64, std.mem.span(v));
+    knobs.hard_gib = (try budget.hardFloorGiB());
     // TF_DSV41_FLOOR_GIB (5): the floor target the load plans for (0 < hard <= target)
     const target: f64 = if (std.c.getenv("TF_DSV41_FLOOR_GIB")) |v| try std.fmt.parseFloat(f64, std.mem.span(v)) else @max(5.0, knobs.hard_gib);
     if (!(knobs.hard_gib > 0 and knobs.hard_gib <= target)) {
@@ -152,8 +152,8 @@ pub const Kv = struct {
             k.lens = try cuda.DeviceBuffer.alloc(d, 4 * @as(usize, world));
             // the compact mode's transport agreement happens here, once, outside any graph
             k.x = try kv.split.Exchange.init(comm, k.ops.kernels(), try kv.split.compactMode());
-            if (kv.split.dedupOn()) try k.initDedup(d, cfg.index_topk);
-            if (kv.split.historyOn()) {
+            if ((try kv.split.dedupOn())) try k.initDedup(d, cfg.index_topk);
+            if ((try kv.split.historyOn())) {
                 if (runner.kernels.ops.kv_hist == null) {
                     std.log.err("[tensorfold] TF_DSV41_KV_SPLIT_HISTORY=1: the kvsplit fatbin has no history kernels (rebuild it)", .{});
                     return error.MissingKernel;
@@ -210,14 +210,14 @@ pub const Kv = struct {
     }
 
     /// The emitter's view of the pool (block.Options.pool).
-    pub fn options(k: *Kv) block.Pool {
+    pub fn options(k: *Kv) !block.Pool {
         const fams = k.layout.families();
         return .{
             .comp_pages = k.pool.familyTensorPages(fams[0]),
             .ik_pages = k.pool.familyTensorPages(fams[1]),
             .pts = k.slot.max_pages,
             .split = k.layout.opts.split,
-            .early = k.layout.opts.split and kv.split.earlyOn(),
+            .early = k.layout.opts.split and (try kv.split.earlyOn()),
             .union_cap = @intCast(k.opts.union_cap),
         };
     }
