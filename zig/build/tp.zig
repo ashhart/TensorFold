@@ -64,6 +64,11 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     multi.has_side_effects = true;
     b.step("test-roce-multi-host", "Frozen two-rank posts and multirank fake-verbs byte and completion contracts").dependOn(&multi.step);
     tp_step.dependOn(&multi.step);
+    const focused = b.addRunArtifact(b.addTest(.{ .root_module = multi_root, .filters = &.{
+        "relay: a held", "relay sums:", "relay: dropped", "relay: real", "relay topology:", "relay custody:",
+    } }));
+    focused.has_side_effects = true;
+    b.step("test-roce-relay-controls-host", "Relay custody, fault and round-once controls without devices").dependOn(&focused.step);
     if (host.result.os.tag != .windows) test_step.dependOn(&multi.step);
     // the bootstrap and failure tests run over POSIX sockets: Windows checks only the Linux compile below
     if (host.result.os.tag != .windows) test_step.dependOn(&tests.step);
