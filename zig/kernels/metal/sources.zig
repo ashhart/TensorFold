@@ -180,6 +180,7 @@ pub const deepseek_v41_kv = @embedFile("deepseek_v41/kv.metal");
 pub const deepseek_v41_kv_glue = @embedFile("deepseek_v41/kv_glue.metal");
 pub const deepseek_v41_rope = @embedFile("deepseek_v41/rope.metal");
 pub const deepseek_v41_index = @embedFile("deepseek_v41/index_exl3.metal");
+pub const deepseek_v41_index_nax = @embedFile("deepseek_v41/index_exl3_nax.metal");
 pub const deepseek_v41_csa2 = @embedFile("deepseek_v41/csa2.metal");
 /// The same attention's prompt chunks on the tensor units (nax.h inlined at load, after kv's decoders).
 pub const deepseek_v41_csa2_nax = @embedFile("deepseek_v41/csa2_nax.metal");
