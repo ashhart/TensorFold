@@ -46,6 +46,7 @@ pub const all_metal = @import("attention_pv_records.zig").records ++
     @import("delta_slots_records.zig").records ++
     @import("flashnext_pending.zig").records ++
     @import("simd_pairs_records.zig").records ++
+    @import("simd_half_records.zig").records ++
     @import("metal_pair_records.zig").records ++
     @import("glm_rows_records.zig").records ++
     @import("weight_only_records.zig").metal ++
