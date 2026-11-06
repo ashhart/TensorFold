@@ -306,6 +306,7 @@ These follow a model's release code or a library's model code for their math, ro
 
 - `tools/lfm3/ref64.py` and `zig/kernels/xpu/lfm3.cl`: `modeling_lfm3.py` in [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B). Copyright Liquid AI, LFM Open License v1.0; see [the license text](LICENSES/LFM-Open-1.0.txt).
 - `zig/kernels/metal/minimax_m3/glue.metal`: the rounding points of `modeling_minimax_m3_vl.py` in [transformers](https://github.com/huggingface/transformers).
+- `zig/src/families/ricursive/` (its layer order and rounding points), `zig/kernels/metal/ricursive/glue.metal` and `tools/zig/ricursive_reference.py`: `modeling_ricursive.py` and the SGLang model `inference/server/model.py` in [ricursiveAI/Ripple-65B-Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) at revision `240d5966cbe00f0627c699e59ef58560b60303cf`. Copyright ricursiveAI, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt). The reference's `--release` mode imports the release's own file from the checkpoint at run time; TensorFold does not include it.
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
 - `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.

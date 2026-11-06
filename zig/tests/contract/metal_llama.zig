@@ -421,6 +421,9 @@ pub const Argmax = struct {
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
+    /// The label and shapes it registers at: llama's, or another family's that runs it.
+    name: []const u8 = "llama glue ll_argmax",
+    served: []const c.Shape = &.{ .{ .rows = 1, .n = 1, .k = G33.vocab }, .{ .rows = 1, .n = 1, .k = G3.vocab } },
     x: []u16 = &.{},
     in: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
@@ -442,7 +445,7 @@ pub const Argmax = struct {
     const vt = g.hooks(Argmax);
 
     pub fn kernel(p: *Argmax) g.Kernel {
-        return controls.mark(.{ .spec = .{ .name = "llama glue ll_argmax", .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = argmax_rule }, .tiles = .{ .{}, .{}, .{ .size = 1024, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 1, .n = 1, .k = G33.vocab }, .{ .rows = 1, .n = 1, .k = G3.vocab } }, .sums = no_sums }, .ctx = p, .vt = &vt }, p.mutation);
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = argmax_rule }, .tiles = .{ .{}, .{}, .{ .size = 1024, .step = 1, .min = 1 } }, .served = p.served, .sums = no_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// rows logits rows of k: NaNs and infinities as planted, two NaNs in row 3 and a tie in row 4.
