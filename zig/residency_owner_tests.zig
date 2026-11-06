@@ -13,6 +13,7 @@ pub const row_projection = @import("src/core/row_projection.zig");
 pub const lane_projection = @import("src/core/lane_projection.zig");
 pub const affine4 = @import("src/core/affine4.zig");
 pub const affine4_lane = @import("src/core/affine4_lane.zig");
+pub const affine_mm = @import("src/core/affine_mm.zig");
 pub const shared_attention = @import("src/core/shared_attention.zig");
 pub const segments = @import("src/core/segments.zig");
 pub const bf16_topk_gpu = @import("bf16_topk_gpu");
