@@ -1,4 +1,4 @@
-//! Ripple-65B's Metal launches (metal_ricursive*.zig): its glue, its prompt attention and the draw it runs.
+//! Ripple-65B's Metal launches (metal_ricursive*.zig): its glue, prompt attention, the draw and DFlash2's kernels.
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
     .{ .name = "ricursive glue rc_embed", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
@@ -24,4 +24,16 @@ pub const records = [_]M{
     .{ .name = "ricursive fp4 gemm rc_fp4_gemm_10", .threads = 256, .tg_memory = 0, .reserved = 256, .offline = false },
     .{ .name = "ricursive fp4 gemm rc_fp4_gemm_11", .threads = 256, .tg_memory = 0, .reserved = 256, .offline = false },
     .{ .name = "ricursive sample tf_sample_full", .threads = 1024, .tg_memory = 9760, .reserved = 1024, .m1 = 1024, .m2 = 1024 },
+    // dflash2.metal: the target's tap and the DFlash2 drafter's kernels
+    .{ .name = "ricursive dflash2 rc_tap", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "ricursive dflash2 rc_df_norm", .threads = 256, .tg_memory = 128, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "ricursive dflash2 rc_df_norm16", .threads = 256, .tg_memory = 128, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "ricursive dflash2 rc_df_embed", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "ricursive dflash2 rc_df_prep", .threads = 32, .tg_memory = 512, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "ricursive dflash2 rc_df_conv", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "ricursive dflash2 rc_df_silu", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    // a simdgroup for each of a key head's 10 query heads
+    .{ .name = "ricursive dflash2 rc_df_vec", .threads = 320, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "ricursive dflash2 rc_df_topk", .threads = 1024, .tg_memory = 16384, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "ricursive dflash2 rc_df_walk", .threads = 256, .tg_memory = 1040, .m1 = 1024, .m2 = 1024 },
 };

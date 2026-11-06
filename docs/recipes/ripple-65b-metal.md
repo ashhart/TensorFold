@@ -11,6 +11,11 @@ converted:
 - [`ricursiveAI/Ripple-65B-Preview`](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) (revision
   `240d5966cbe00f0627c699e59ef58560b60303cf`, 121 GiB): the bf16 release, the exact model.
 
+The publisher's DFlash2 drafter,
+[`ricursiveAI/Ripple-65B-Preview-DFlash2`](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-DFlash2) (revision
+`35609b3be3dd08a822b3ba1257c1ea5dd6f87632`, 7.5 GiB, bf16), drafts for either release with `--drafter`; a drafted
+reply equals the plain one bit for bit.
+
 It was brought up on an M5 Ultra (256 GB); other Macs are untested. Prompts run on Metal 4 tensor units, so it needs
 an M5 or later: M1 to M4 Macs are refused by name at load. Other `ricursive` checkpoints, and either release quantized
 any other way, are refused by name.
@@ -25,6 +30,12 @@ zig build grammar -Dxgrammar=PATH_TO_XGRAMMAR_v0.2.8 -Dcpu=native   # structured
 zig-out/native/bin/tensorfold-native serve models/ripple-65b-nvfp4 --name ripple --port 8888 \
   --context 262144 --parallel 2
 ```
+
+With the drafter (`hf download ricursiveAI/Ripple-65B-Preview-DFlash2 --revision
+35609b3be3dd08a822b3ba1257c1ea5dd6f87632 --local-dir models/ripple-65b-dflash2`), add `--drafter
+models/ripple-65b-dflash2`. It takes 7.7 GiB (its weights and its rings). With the drafter the server takes
+`--parallel` 2 at most and refuses more by name: each stream's block is its own pass through the drafter, so at 4
+and 7 streams drafted rounds decode slower than plain ones (the table under the drafter's speed below).
 
 The bf16 release serves the same way from its own directory. A stream's caches take 16.75 GiB at 262,144
 tokens: 64 of the 80 layers slide over 1,024 keys and keep a 3,072-slot ring each (the window and a 2,048-row prompt
@@ -55,6 +66,16 @@ reference:
 - **Attention.** Prompt chunks on the tensor units over the sliding ring or every key (`attention_nax.metal`); decode
   rows over key blocks at absolute positions, so a row's bits never depend on the rows beside it.
 - **Serving.** The lane host's shared rounds, greedy or `tf_sample_full` draws, copy drafts, the prompt cache.
+- **DFlash2 drafter** (`dflash2.zig`, `kernels/metal/ricursive/dflash2.metal`), as z-lab's `DFlash2DraftModel`
+  (`dflash/model.py`) defines it, with the release's own RMSNorm, rotary and SiLU MLP (`modeling_ricursive.py`), the
+  NoPE layer of the drafter's `config.json` (`no_rope_layers: [4]`) and the draft window of ricursiveAI's
+  `inference/server/README.md`. The target writes the residual after layers 1, 20, 39, 58 and 77; the drafter folds
+  the five into one row (`fc`, then a norm) and keeps its five layers' keys and values from it, in bf16 rings: four
+  layers slide over 4,096 keys, the fifth (NoPE) over the release's 16,384-key draft window. A round runs a 16-row block
+  (the pending token and 15 masks) through its layers, each with its causal convolutions (4 taps, per-row kernels)
+  around attention and the MLP, reads the target's head on the 15 mask rows, keeps each row's 32 best tokens, and walks
+  them with the selector's codebooks (rank 256) to the draft. The lane core verifies each draft in one target window, so
+  a reply equals the plain one; the drafter only changes how many tokens a round keeps.
 
 **Activations stay bf16.** The publisher serves the NVFP4 release with SGLang's `flashinfer_cutlass`, which also
 quantizes activations to fp4 (W4A4). TensorFold does not run reduced-precision activations, so the engine serves the
@@ -156,14 +177,54 @@ against 7.5 s cold, with the same reply as on a restarted server.
   back exactly; the cold prompts take 273 s and 790 s to the first token. The bf16 release found it too, at 120k and
   258k tokens.
 
+With the DFlash2 drafter (5 Nov 2026, the NVFP4 release, the same settings plus `--drafter`; speed run with no other
+model busy):
+
+| streams | prose | code | structured | list | first token | a round |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 15.5 | 27.5 | 17.8 | 19.8 | 0.53-0.65 s | 131.2 ms |
+| 2 | 22.5 | 37.7 | 26.6 | 40.6 | 0.82-0.98 s | 166.2 ms |
+
+1.5 to 2.7 times one plain stream, 1.2 to 2.2 times two. A round keeps 2.65 tokens on average with one stream (48% of
+its drafted tokens accepted) and 2.65 with two (56%). The drafted serving checks equal the plain ones: drafted == plain
+12/12 in the drafts suite and 12/12 under structured output, seeded sampling 9/9, the soak 60/60, concurrent 12/12,
+structured 18/18, tools 5/5, and a resumed turn equal to the cold one (0.59 s against 7.8 s).
+
+Past two streams the drafter stops paying (6 Nov 2026, the NVFP4 release, `--context 262144 --parallel 7`, the same binary
+with and without `--drafter`, no other model busy; tokens a second, all streams together):
+
+| streams | prose | code | structured | list | a round |
+|---:|---:|---:|---:|---:|---:|
+| 4, plain | 32.6 | 31.8 | 31.1 | 32.5 | 126.2 ms |
+| 4, drafted | 30.3 | 32.0 | 31.3 | 43.1 | 277.6 ms |
+| 7, plain | 43.2 | 42.9 | 41.6 | 43.4 | 165.5 ms |
+| 7, drafted | 40.2 | 34.7 | 22.9 | 34.1 | 406.4 ms |
+
+Each stream's block is its own pass through the drafter, so a round grows with the streams while the tokens it keeps
+fall (2.35 tokens a round at four, 1.89 at seven). At four it ties plain except on lists; at seven it is slower on
+every kind. With `--drafter`, `--parallel` above 2 is refused by name.
+
+With the bf16 release (6 Nov 2026, `--context 262144 --parallel 2`, greedy 256-token replies, no other model busy):
+
+| streams | prose | code | structured | list | first token | a round |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1, plain | 5.8 | 5.0 | 4.9 | 5.0 | 0.51-1.30 s | 194.7 ms |
+| 1, drafted | 13.4 | 30.7 | 13.3 | 18.7 | 0.39-1.06 s | 154.0 ms |
+| 2, plain | 11.5 | 11.0 | 10.5 | 11.8 | 0.86-1.81 s | 179.6 ms |
+| 2, drafted | 25.7 | 63.3 | 26.0 | 54.8 | 3.24-7.98 s | 148.4 ms |
+
+2.2 to 6.1 times plain with one or two streams; a round keeps 2.93 tokens with one stream and 3.15 with two. The
+plain rows are the bf16 table above (5 Nov). Drafted == plain 12/12 and concurrent 12/12 beside the bf16 release.
+
 ## Not done
 
 No quality suite was run. Contexts past 258,039 tokens were not run, so `--context` stops at 262,144 and refuses
 the card's 1M by name. Ripple's think markers are spelled from several tokens, not one each, so a thinking budget
 (which forces a close) and logprobs (which cut the reply at its close token) are refused by name, and a reply's
-`reasoning_tokens` reads 0. The family has no draft head: drafts come only from the lane core's copies. No images:
+`reasoning_tokens` reads 0. No images:
 Ripple has no vision tower. Only the M5's tensor units were checked; M1 to M4 Macs are refused at load, and smaller
-RAM is untested. The publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) is not served yet.
+RAM is untested. Beside the bf16 release the drafter was checked for drafted == plain, concurrency and speed only;
+its structured output, seeded sampling, soak and resumed turns were run beside the NVFP4 release.
 
 ## Licence
 

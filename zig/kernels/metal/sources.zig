@@ -210,6 +210,8 @@ pub const ricursive_fp4 = @embedFile("ricursive/fp4.metal");
 pub const ricursive_fp4_gemm = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("ricursive/fp4_gemm.metal");
 /// Ripple's prompt attention on the tensor units (llama's kernel over a window, keys in a ring; nax.h inlined at load).
 pub const ricursive_attention_nax = @embedFile("ricursive/attention_nax.metal");
+/// Ripple's DFlash2 drafter (norms, head prep, K-tap block convolution, block attention, selector) and its taps.
+pub const ricursive_dflash2 = @embedFile("ricursive/dflash2.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 
