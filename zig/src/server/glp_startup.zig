@@ -108,7 +108,7 @@ fn startupIo() std.Io {
 }
 
 /// The control vector the engine applies, after the checks that refuse one.
-pub fn engine(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, backend: []const u8, g: ?Vec) error{ OutOfMemory, GlpRefused }!?api.Glp {
+pub fn engine(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, backend: []const u8, g: ?Vec) error{ OutOfMemory, GlpRefused }!?api.glp.Glp {
     const v = g orelse return null;
     const vector = v.vector orelse return null;
     if (try refusal(a, dir, model_type, backend, v)) |why| {
@@ -116,7 +116,7 @@ pub fn engine(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, bac
         return error.GlpRefused;
     }
     report(a, v);
-    return api.Glp{ .vector = vector, .alpha = alphaOf(v) };
+    return api.glp.Glp{ .vector = vector, .alpha = alphaOf(v) };
 }
 
 /// Why this checkpoint cannot take the vector, as the operator reads it; null: it can.

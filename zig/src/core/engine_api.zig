@@ -273,9 +273,6 @@ pub const Family = struct {
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
 
-/// The control vector a serve applies to the residual stream (--glp).
-pub const Glp = glp.Glp;
-
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
     pub const slideRefusal = @import("engine_slide.zig").refusal;
@@ -309,7 +306,7 @@ pub const Open = struct {
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
     /// --glp: the control vector the engine applies to the residual stream (null: none).
-    glp: ?Glp = null,
+    glp: ?glp.Glp = null,
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,

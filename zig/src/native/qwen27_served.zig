@@ -32,7 +32,7 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
-    glp: ?api.Glp = null, // the control vector the model steers with (null: none)
+    glp: ?api.glp.Glp = null, // the control vector the model steers with (null: none)
 };
 
 pub const Host = struct {

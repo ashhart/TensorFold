@@ -5,7 +5,7 @@ const q = @import("tensorfold").qwen27;
 const Allocator = std.mem.Allocator;
 
 /// Check the vector against the model that loaded, then put its directions on the device.
-pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.Glp, a: Allocator, why: *[]const u8) !void {
+pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.Glp, a: Allocator, why: *[]const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var reason: api.glp.Why = .{};
@@ -32,7 +32,7 @@ pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.Glp,
 }
 
 /// The line that reports the control vector this model steers with.
-pub fn report(g: api.Glp) void {
+pub fn report(g: api.glp.Glp) void {
     const v = g.vector;
     const sha = std.fmt.bytesToHex(v.sha256, .lower);
     var first: u32 = 0;
