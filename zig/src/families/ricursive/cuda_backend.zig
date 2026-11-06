@@ -50,7 +50,7 @@ const Lane = struct {
 pub const Ripple = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
-    m: *const fwd.Model,
+    m: *fwd.Model, // mutable for setTaps (prepare_features)
     st: fwd.Seq = .{}, // slot 0's positions when the CLI drives the forward itself (cli/cuda_ricursive.zig)
     tok: cuda.DeviceBuffer, // int32 drawn tokens: the handle ring, then a round's rows
     meta: cuda.DeviceBuffer, // a draw's first position minus one, a window each
@@ -73,7 +73,7 @@ pub const Ripple = struct {
         return (ring + round_rows) * 4 + round_rows * 16 + word_rows * row_words * 4 + fwd.head_rows * 4 + slots * slotStride(vocab);
     }
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *const fwd.Model) !Ripple {
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model) !Ripple {
         const slots = m.arena.slots;
         const free = try gpa.alloc(bool, slots);
         errdefer gpa.free(free);
@@ -112,7 +112,7 @@ pub const Ripple = struct {
         return .{ .ptr = x, .vtable = &vtable, .chunk_invariant = true }; // M1: chunk cuts give the same bits
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_row = firstRow, .prompt_rows = true, .reports_fill = true };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_row = firstRow, .prepare_features = prepareFeatures, .features = features, .prompt_rows = true, .reports_fill = true };
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a round.
     pub fn facts(x: *const Ripple) lanes.Model {
@@ -434,6 +434,25 @@ pub const Ripple = struct {
     fn release(ptr: *anyopaque, s: *Stream) void {
         self(ptr).dropLane(s);
     }
+
+    /// A drafter's tapped layers, before any stream: each chunk and round writes their rows into its slot's ring after.
+    fn prepareFeatures(ptr: *anyopaque, taps: []const u32) anyerror!void {
+        const x = self(ptr);
+        if (x.lanes.count() != 0) return error.TapsAfterStreams;
+        try x.m.setTaps(taps);
+    }
+
+    /// Rows [start, start + count) of a stream's tap ring as Qwen's target gives them; the newest tap_rows are held.
+    fn features(ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        const x = self(ptr);
+        if (taps.len != x.m.n_taps or !std.mem.eql(u32, taps, x.m.taps[0..x.m.n_taps])) return error.TapsMismatch;
+        const l = try x.laneOf(s);
+        // `offset` is the position `start`; the drafter reads position p at row p % tap_rows of the slot's ring
+        const at = x.m.tapRing(l.slot) orelse return error.NoTaps;
+        const held_from = l.hi -| fwd.tap_rows;
+        if (count == 0 or start + count > l.hi or start + count <= held_from) return error.RowsNotHeld;
+        return .{ .buffer = at, .offset = start, .rows = count, .row_bytes = @intCast(x.m.tapRowBytes()), .space = .device, .dtype = .bf16 };
+    }
 };
 
 test "ricursive cuda backend: the verify reserve past a reply; positions opened for a context" {
@@ -459,6 +478,36 @@ test "ricursive cuda backend: windows of 16 rows, a stream a slot, rows a round"
     try std.testing.expect(f.hidden_rows and f.copy_drafts and !f.mtp and !f.gpu_tokens);
     try std.testing.expect(Ripple.slotStride(100352) >= 100352 * 2 + @sizeOf(cuda.sample.Rule));
     std.testing.refAllDecls(Ripple);
+}
+
+test "ricursive cuda backend: features name a stream's held tap rows by position; taps before streams" {
+    const a = std.testing.allocator;
+    var m: fwd.Model = undefined;
+    m.c.hidden = 5120;
+    m.n_taps = 0;
+    m.tap = null;
+    var x: Ripple = .{ .gpa = a, .d = undefined, .m = &m, .tok = undefined, .meta = undefined, .words = undefined, .picks = undefined, .slot_bufs = undefined, .sample = undefined, .draws = undefined, .free = &.{} };
+    defer x.lanes.deinit(a);
+    var s: Stream = undefined;
+    const taps = [_]u32{ 1, 20, 39, 58, 77 };
+    try std.testing.expectError(error.TapsMismatch, Ripple.features(&x, &s, &taps, 0, 1));
+    m.taps[0..5].* = taps;
+    m.n_taps = 5;
+    try std.testing.expectError(error.UnknownStream, Ripple.features(&x, &s, &taps, 0, 1));
+    try x.lanes.put(a, &s, .{ .slot = 2, .last = 0, .rule = 0, .hi = 3000 });
+    try std.testing.expectError(error.NoTaps, Ripple.features(&x, &s, &taps, 2990, 10));
+    m.tap = .{ .d = undefined, .ptr = 1 << 20, .len = 0 }; // features reads only the address
+    const f = try Ripple.features(&x, &s, &taps, 2990, 10);
+    try std.testing.expectEqual(@as(u64, (1 << 20) + 2 * fwd.tap_rows * 51200), f.buffer);
+    try std.testing.expectEqual(@as(u64, 2990), f.offset); // a position: the drafter reads row 2990 % 2064
+    try std.testing.expectEqual(@as(u32, 51200), f.row_bytes);
+    try std.testing.expect(f.space == .device and f.dtype == .bf16 and f.rows == 10);
+    _ = try Ripple.features(&x, &s, &taps, 900, 2048); // the newest rows of a chunk that reaches past the ring's oldest
+    try std.testing.expectError(error.RowsNotHeld, Ripple.features(&x, &s, &taps, 2995, 10)); // past what was written
+    try std.testing.expectError(error.RowsNotHeld, Ripple.features(&x, &s, &taps, 0, 936)); // every row overwritten
+    try std.testing.expectError(error.RowsNotHeld, Ripple.features(&x, &s, &taps, 2990, 0));
+    try std.testing.expectError(error.TapsMismatch, Ripple.features(&x, &s, &.{ 1, 20, 39, 58, 76 }, 2990, 10));
+    try std.testing.expectError(error.TapsAfterStreams, Ripple.prepareFeatures(&x, &taps));
 }
 
 test {

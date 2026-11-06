@@ -25,6 +25,7 @@ pub const Kernels = struct {
     add_norm: Function,
     gate: Function,
     silu_clamp: Function,
+    tap: Function, // a drafter's tap: residual rows into a slot's ring (dflash2.metal's rc_tap)
     // plug-in point: the prep and attention launches, a Function each, tf_rc_<field> in ricursive.cu
 
     pub fn load(d: *const cuda.Driver) !Kernels {
@@ -145,6 +146,44 @@ pub fn siluClampBy(f: Function, s: Stream, gu: u64, act: u64, rows: usize, width
     try go(f, s, grid, &a);
 }
 
+/// One tf_rc_tap launch: rows into tap column col at ring row pos % ring_rows; chunk: p0 + r of s0; round: pos, slot.
+pub const TapRows = struct {
+    resid: u64, // R [rows, width] bf16
+    ring: u64, // the rings from slot 0: [slots][ring_rows][taps][width] bf16
+    pos: u64 = 0, // int32 [rows]: a round's positions
+    slot: u64 = 0, // int32 [rows]: a round's slots
+    p0: usize = 0,
+    s0: usize = 0,
+    rows: usize,
+    width: usize,
+    taps: usize,
+    col: usize,
+    ring_rows: usize,
+};
+
+/// tf_rc_tap's layout: 16-byte rows (8 values a thread), a column of the taps, both or neither of pos and slot.
+pub fn tapLayout(p: TapRows) !void {
+    if (p.width == 0 or p.width % 8 != 0) return error.UnsupportedWidth;
+    if (p.rows == 0 or p.rows > 65535 or p.ring_rows == 0 or p.taps == 0 or p.col >= p.taps) return error.UnsupportedShape;
+    if ((p.pos == 0) != (p.slot == 0)) return error.MissingOperand;
+    if (p.pos == 0 and (p.p0 + p.rows > std.math.maxInt(i32) or p.s0 > std.math.maxInt(i32))) return error.UnsupportedShape;
+    for ([_]u64{ p.resid, p.ring }) |v| if (v % 16 != 0) return error.Misaligned;
+}
+
+/// T[slot][pos % ring_rows][col] = R[r] for each row r: a bf16 copy, no rounding.
+pub fn tap(k: *const Kernels, s: Stream, p: TapRows) !void {
+    return tapBy(k.tap, s, p);
+}
+
+/// `tap` through `f`: the served kernel or a control of it.
+pub fn tapBy(f: Function, s: Stream, p: TapRows) !void {
+    try tapLayout(p);
+    var a: cuda.Args = .{};
+    for ([_]u64{ p.resid, p.ring, p.pos, p.slot }) |v| a.add(v);
+    for ([_]usize{ p.p0, p.s0, p.rows, p.width, p.taps, p.col, p.ring_rows }) |v| a.add(int(v));
+    try go(f, s, .{ .x = ceil(p.width / 8, threads), .y = @intCast(p.rows) }, &a);
+}
+
 test "launch geometry: ceilings and the add-norm's layout" {
     try std.testing.expectEqual(@as(u32, 20), ceil(5120, threads));
     try std.testing.expectEqual(@as(u32, 40), ceil(10240, threads));
@@ -168,4 +207,27 @@ test "launch geometry: ceilings and the add-norm's layout" {
     bad = p;
     bad.x = 776;
     try std.testing.expectError(error.Misaligned, normLayout(bad));
+}
+
+test "launch geometry: the tap's layout" {
+    const p: TapRows = .{ .resid = 256, .ring = 4096, .rows = 2048, .width = 5120, .taps = 5, .col = 4, .ring_rows = 2064 };
+    try tapLayout(p);
+    try std.testing.expectEqual(@as(u32, 3), ceil(p.width / 8, threads)); // 640 chunks of 8
+    var bad = p;
+    bad.width = 5124;
+    try std.testing.expectError(error.UnsupportedWidth, tapLayout(bad));
+    bad = p;
+    bad.col = 5;
+    try std.testing.expectError(error.UnsupportedShape, tapLayout(bad));
+    bad = p;
+    bad.rows = 65536;
+    try std.testing.expectError(error.UnsupportedShape, tapLayout(bad));
+    bad = p;
+    bad.pos = 512;
+    try std.testing.expectError(error.MissingOperand, tapLayout(bad));
+    bad.slot = 768;
+    try tapLayout(bad);
+    bad = p;
+    bad.ring = 4104;
+    try std.testing.expectError(error.Misaligned, tapLayout(bad));
 }
