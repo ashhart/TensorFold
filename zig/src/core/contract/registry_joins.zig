@@ -74,6 +74,8 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("ricursive_cuda_records.zig").cuda ++
     @import("ricursive_prep_records.zig").cuda ++
     @import("ricursive_attn_records.zig").cuda ++
+    @import("ricursive_dflash2_attn_records.zig").cuda ++
+    @import("ricursive_dflash2_records.zig").cuda ++
     @import("registry_media.zig").cuda_pending ++
     @import("h3_image_cuda_records.zig").records;
 pub const metal_before = @import("fsr_records.zig").metal ++
