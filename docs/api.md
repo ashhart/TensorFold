@@ -613,6 +613,33 @@ On a discrete card (an RTX 3090, an A100) the server sizes its window from the c
 reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
 0.5 GiB up.
 
+## Compaction
+
+Without `--compact-at` nothing compacts: a conversation that outgrows the context is refused with the usual
+`context_length` error. With it, the server summarizes instead of refusing. `--compact-at auto` reserves room for
+the reply — the larger of 15% of the context window and 16,384 tokens — and compacts a conversation whose prompt
+plus wanted reply tokens would cross what is left, or one the plain prepare refuses for context length.
+`--compact-at F`, a fraction of the window in (0, 1], compacts when they would cross F × the window, rounded down.
+Any other value is refused at startup ("expected auto or a fraction in (0, 1]").
+
+Compaction keeps the conversation's leading messages and its recent tail whole and summarizes the middle into a
+memory note. The note is written by the model itself — greedy, thinking off, at most 1,024 tokens a chunk — under
+a task that asks for Markdown sections (Goal, Constraints and preferences, Progress, Decisions, Next steps,
+Critical context) and under 800 words. It replaces the summarized middle as one message that begins "Memory of
+the earlier conversation:". The tail is `--compact-keep` tokens of recent messages, an integer from 0; the
+default keeps the smaller of 20,000 tokens and a quarter of the window. If the rebuilt conversation still does
+not fit, the server summarizes again over a smaller tail until it does. A compacted request runs these extra
+generations before its reply.
+
+`--compact-memory DIR` stores each conversation's note under DIR as `<key>.md`, with a `<key>.json` recording how
+many leading messages the note covers and their hash. A later request whose leading messages hash the same reuses
+the stored note instead of regenerating it. Without the flag a note lives for one request.
+
+The reply's `tensorfold` object carries `context_window` and `context_used`, and when compaction ran also a
+`compaction` object: `messages_compacted`, `kept_messages`, `note_tokens` and the `note` text. Compaction applies
+to chat completions with a `messages` array, and to the Responses API, which runs as one; a completions request
+with a plain string prompt is never compacted.
+
 ## Embeddings
 
 `POST /v1/embeddings` takes OpenAI's body: `input` is one text, a list of texts, one list of token IDs or a list of
