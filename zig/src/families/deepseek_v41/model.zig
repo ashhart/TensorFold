@@ -23,8 +23,8 @@ const gpu_counters = @import("profiler.zig");
 const expert_groups = @import("core").expert_groups;
 const scan_probe = @import("scan_probe.zig");
 
-// ROUND-480: every shared Zig/Metal argument struct is checked against its Metal twin at comptime, from
-// one registry, so a struct no forward happens to touch is checked too. A drift is a build error.
+// Every shared Zig/Metal argument struct is checked against its Metal twin at comptime, from one registry, so a
+// struct no forward happens to touch is checked too. A drift is a build error.
 comptime {
     @import("mirror_checked.zig").force();
 }
@@ -40,14 +40,14 @@ fn nowNs() u64 {
 pub const prefill_step = 15872;
 pub const Logits = enum { none, last, all };
 
-/// ROUND-531: one slot's rows of a batched forward: the slot's window, its ids, and the position its
-/// first row lands at. The batch rung is one-row segments (the shared round's lanes).
+/// One slot's rows of a batched forward: the slot's window, its ids, and the position its first row lands at. The
+/// batch rung is one-row segments (the shared round's lanes).
 pub const Seg = struct { slot: u32, ids: []const u32, p0: u32 };
 
-/// ROUND-525 (instrument, default-inert): the forward-stage hidden-state hash. Repeated passes of one prompt
-/// in one process must read one hash a stage; the first tag that moves names the first divergent forward
-/// stage. `TF_DSV41_HID_HASH=1` enables it, `TF_DSV41_HID_ROWS=n` (default 16) samples n rows a stage,
-/// `TF_DSV41_HID_FULL=<layer>` copies every row of that layer's stages.
+/// The forward-stage hidden-state hash. Repeated passes of one prompt in one process must read one hash a stage;
+/// the first tag that moves names the first divergent forward stage. `TF_DSV41_HID_HASH=1` enables it,
+/// `TF_DSV41_HID_ROWS=n` (default 16) samples n rows a stage, `TF_DSV41_HID_FULL=<layer>` copies every row of that
+/// layer's stages.
 const HidHash = struct {
     const Kind = enum(u8) { embed, stream, attn_in, attn, ffn_in, moe, logits, a_qr, a_q, a_kv, a_vals, a_gates, a_latent, a_idxk, a_idxq, a_idxw, a_pos, a_grp, a_sco, a_pos1, a_chunk, a_main };
     const Event = struct { kind: Kind, layer: u32, off: usize, len: usize };
@@ -221,9 +221,9 @@ const HidHash = struct {
     }
 };
 
-// ROUND-362 instrument: the drafter's NaN filler rows. The dump's segments, in f32 units: the four the row
-// dump already had (embed, attn_in, attn_out, moe_in), then the draft's own key rows, its query's two stages,
-// the decoded key table the scan reads, and the attention's output.
+// The drafter's NaN filler rows. The dump's segments, in f32 units: the four the row dump already had (embed,
+// attn_in, attn_out, moe_in), then the draft's own key rows, its query's two stages, the decoded key table the scan
+// reads, and the attention's output.
 pub const mtp_dbg_raw = 4 * 5 * 5120;
 pub const mtp_dbg_qr = mtp_dbg_raw + 5 * 512;
 pub const mtp_dbg_qpre = mtp_dbg_qr + 5 * 1280;
@@ -308,10 +308,10 @@ fn tapsOn() bool {
 }
 
 var markov_bias_off: ?bool = null;
-/// TF_DSV41_NO_MARKOV=1 turns the Markov bigram bias OFF: the draft is the head-s own argmax over the
-/// logits row. The arm separates 'the head is weak' from 'the bias poisons the pick' (ROUND-374).
-/// ROUND-421: the drafter's stop point (0 = off). See `proposeTokens`: the arm ends the drafter's
-/// forward at a point and COMMITS what was encoded, so the arm's cost is the drafter's prefix.
+/// TF_DSV41_NO_MARKOV=1 turns the Markov bigram bias OFF: the draft is the head-s own argmax over the logits row.
+/// The arm separates 'the head is weak' from 'the bias poisons the pick'. The drafter's stop point (0 = off). See
+/// `proposeTokens`: the arm ends the drafter's forward at a point and COMMITS what was encoded, so the arm's cost
+/// is the drafter's prefix.
 fn mtpStopPoint() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_STOP") orelse return 0;
     return std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
@@ -328,12 +328,11 @@ fn markovBiasOffOn() bool {
 }
 
 var dspark_true_pos: ?bool = null;
-/// ROUND-375: TF_DSV41_DSPARK_TRUE_POS=1 puts the drafter's context at the TRUE positions (the
-/// comparator's form): the conditioning publishes the capture's rows at their OWN positions, and the
-/// drafter's own rows are roped at the next token's position. The port published the capture's valid
-/// PREFIX at the positions the capture's SUFFIX would have had, so every round shifted the whole
-/// context by (the window's rows - the kept rows) positions -- and the ring's slots (position mod 128)
-/// came out shuffled against the history. Default off (the port's form) until the arm prices it.
+/// TF_DSV41_DSPARK_TRUE_POS=1 publishes the drafter's context at the capture's own positions: each captured row
+/// keeps its position and the drafter's own rows are roped at the next token's. The release's DSparkAttention
+/// ropes the draft rows at the positions after the main sequence and writes each main row at its own ring slot
+/// (`start_pos % win`), so this is the release's form; unset keeps the earlier prefix/shifted placement for a
+/// same-binary A/B.
 fn dsparkTruePosOn() bool {
     if (dspark_true_pos) |v| return v;
     const raw = std.c.getenv("TF_DSV41_DSPARK_TRUE_POS") orelse {
@@ -345,9 +344,9 @@ fn dsparkTruePosOn() bool {
 }
 
 var taps_shared_base: ?bool = null;
-/// TF_DSV41_TAPS_SHARED_BASE=0 restores the port's form (the taps ring advances once a TARGET LAYER, so the
-/// three layers' rows land in three different ranges and the conditioning mixes three positions). Default on:
-/// the shared base is the correct form (ROUND-374).
+/// TF_DSV41_TAPS_SHARED_BASE=0 restores the port's form (the taps ring advances once a TARGET LAYER, so the three
+/// layers' rows land in three different ranges and the conditioning mixes three positions). Default on: the shared
+/// base is the correct form.
 fn tapsSharedBaseOn() bool {
     if (taps_shared_base) |v| return v;
     const raw = std.c.getenv("TF_DSV41_TAPS_SHARED_BASE") orelse {
@@ -368,11 +367,10 @@ fn partialTxnOn() bool {
     return partial_txn_on.?;
 }
 
-/// ROUND-398: the no-re-feed rollback also restores the window ring's slots that the verify's
-/// REJECTED rows overwrote. Past position `window` those slots alias positions that are still
-/// visible, so without this a partial keep corrupts the next forward's keys (depth 1 never does:
-/// its one rejected row's slot aliases a position outside the next window). Default on; the
-/// same-binary opt-out `TF_DSV41_RING_KEEP=0` restores the pre-fix behaviour for an A/B.
+/// The no-re-feed rollback also restores the window ring's slots that the verify's REJECTED rows overwrote. Past
+/// position `window` those slots alias positions that are still visible, so without this a partial keep corrupts
+/// the next forward's keys (depth 1 never does: its one rejected row's slot aliases a position outside the next
+/// window). Default on; the same-binary opt-out `TF_DSV41_RING_KEEP=0` restores the pre-fix behaviour for an A/B.
 var ring_keep_on: ?bool = null;
 fn ringKeepOn() bool {
     if (ring_keep_on) |v| return v;
@@ -384,64 +382,36 @@ fn ringKeepOn() bool {
 /// for TF_DSV41_MTP_DEPTH_MAX; the ring stash covers this many slots a layer.
 const max_ring_rows = 8;
 
-var q_rms_on: ?bool = null;
-/// ROUND-376: TF_DSV41_Q_RMS=1 arms the comparator's per-head UNWEIGHTED query RMS in the TRUNK's
-/// attention (mlx-serve's attentionBatch: "wq_a -> q_norm -> wq_b -> per-head RMS -> rope"; the
-/// reference calls it "unweighted per-head RMS", MIT/Apache-2.0 -- the attribution rides the ported
-/// line). The port had none: the query reached the softmax with whatever scale wq_b produced, so the
-/// attention's sharpness was the projection's accident, not the model's. Default off (the port's form).
-fn qRmsOn() bool {
-    if (q_rms_on) |v| return v;
-    q_rms_on = std.c.getenv("TF_DSV41_Q_RMS") != null;
-    return q_rms_on.?;
-}
-
-var mtp_q_rms_on: ?bool = null;
-/// ROUND-376: TF_DSV41_MTP_Q_RMS=1 arms the same per-head RMS in the DRAFTER's attention (the
-/// comparator's dsparkAttention, MIT/Apache-2.0). The drafter's wq_b is a different matrix, so its raw
-/// query's per-head scale is different too -- and the softmax over the ring's keys is what the drafter's
-/// context arrives through.
-/// ROUND-385: the drafter's published ring rows must all carry their rope phase.
+/// TF_DSV41_MTP_ROPE_ALL=1|2: publish the drafter's ring rows with their rope phase (0: the earlier
+/// unroped form). A same-binary A/B for the MTP rewrite; the release's draft attention ropes its queries
+/// and keys at their own positions.
 fn mtpRopeAllOn() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_ROPE_ALL") orelse return 0;
     const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
     return @min(n, 2);
 }
 
-/// ROUND-385 (THE LANDING): the windowed context's keys carry their rope phase, at their own positions.
-/// TF_DSV41_COND_NOROPE=1 restores the port's unroped publish.
+/// TF_DSV41_COND_NOROPE=1 republishes the drafter's conditioning rows without their rope phase.
 fn condRopeOn() bool {
     const v = std.c.getenv("TF_DSV41_COND_NOROPE") orelse return true;
     return std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// ROUND-385: the drafter's attention can read the MAIN model's key ring (the trunk's own layer ring)
-/// instead of the drafter's own ring -- the comparator's commitMain form.  1: the block's tap layer
-/// (37+k); 2: the trunk's last layer (39) for every block.
+/// TF_DSV41_MTP_TRUNK_RING: the drafter's attention reads the main model's key ring instead of its own
+/// (1: the block's tap layer; 2: the trunk's last layer), which is the release's draft-attention input.
 fn mtpTrunkRing() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_TRUNK_RING") orelse return 0;
     const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
     return @min(n, 2);
 }
 
-/// ROUND-385 (THE LANDING): the taps ring's slots ARE the token positions (the capture writes at
-/// position % 128).  TF_DSV41_COND_NOALIGN=1 restores the port's advancing cursor.
+/// TF_DSV41_COND_NOALIGN=1 restores the earlier advancing cursor; the taps ring's slots are the token
+/// positions (the capture writes at position % 128).
 fn condAlignOn() bool {
     const v = std.c.getenv("TF_DSV41_COND_NOALIGN") orelse return true;
     return std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// ROUND-385 (THE LANDING): the windowed context's row count; 0 is the port's one-row form.
-/// TF_DSV41_COND_ROWS=<n> narrows the window; TF_DSV41_COND_ONE=1 is the one-row form.
-///
-/// ROUND-399 (THE LANDING): THE STANDING IS THE 128-ROW WINDOW; THE ONE-ROW FORM IS A MEASURED LOSS.
-/// The same-binary A/B (one serve at a time, the 20-prompt novel band, the tree at b06cb5a9): the standing
-/// 128-row window reads the band's first-draft acceptance 174/279 = 62.37 % and the NOVEL rate 36.7 tok/s;
-/// the port's one-row form reads 94/356 = 26.40 % and 31.1 tok/s -- 18 % of the rate. The handoff-48 and
-/// handoff-49 watch-outs prescribed `TF_DSV41_COND_ROWS=1` as part of the "standard MTP environment", so
-/// three rounds of band measurements were taken on the degraded path. The tree now says so out loud, and
-/// `TF_DSV41_COND_ONE=1` is the explicit spelling of the same arm (the doc comment above promised it and it
-/// did not exist). The DEFAULT path is unchanged: byte for byte.
 var cond_rows_cache: ?u32 = null;
 fn condRowsWanted() u32 {
     if (cond_rows_cache) |v| return v;
@@ -458,22 +428,18 @@ fn condRowsWanted() u32 {
         }
     };
     if (out == 0) {
-        std.log.warn("dsv41: the drafter's conditioning is the PORT'S ONE-ROW FORM (TF_DSV41_COND_ONE=1, or TF_DSV41_COND_ROWS=1): the first-draft acceptance falls to 26.40 % from the standing 62.37 % and the NOVEL rate to 31.1 tok/s from 36.7 (ROUND-399). The STANDING is the 128-row window: leave TF_DSV41_COND_ROWS unset.", .{});
+        std.log.warn("dsv41: the drafter's conditioning is the one-row form (TF_DSV41_COND_ONE=1, or TF_DSV41_COND_ROWS=1): the first-draft acceptance and the novel rate fall. The standing is the 128-row window: leave TF_DSV41_COND_ROWS unset.", .{});
     } else if (out != 128) {
-        std.log.warn("dsv41: the drafter's conditioning is narrowed to {d} rows; the standing is 128 and the NOVEL rate falls with the window (ROUND-399's sweep: 4 -> 31.0, 16 -> 28.4, 32 -> 28.6, 64 -> 29.5, 128 -> 36.7 tok/s).", .{out});
+        std.log.warn("dsv41: the drafter's conditioning is narrowed to {d} rows; the standing is 128 and the novel rate falls with the window.", .{out});
     }
     cond_rows_cache = out;
     return out;
 }
 
-/// ROUND-424 (THE ARM): THE ENGINE'S COMPUTE ENCODER IN CONCURRENT DISPATCH MODE.  Every phase of the
-/// engine is encoded into a SERIAL encoder, so each dispatch waits for the previous one's completion: the
-/// record's own ledger prices the token's 1,717 dispatches at ~1.9 us a dispatch -- 3.05 ms of a 23.35 ms
-/// token (13.1 %) -- as LAUNCH LATENCY (ROUND-407), and the glue is "launch-bound, not starved"
-/// (ROUND-403).  Metal's concurrent dispatch type lets the GPU run independent dispatches at once, and the
-/// tree's barrier is already written for that semantics (metal/command.zig: "Later dispatches see every
-/// buffer write before this point (concurrent encoders)").  TF_DSV41_CONCURRENT=1 arms it; unset or =0 is
-/// the shipped serial path, byte for byte.
+/// THE ENGINE'S COMPUTE ENCODER IN CONCURRENT DISPATCH MODE. Metal's concurrent dispatch type lets the GPU run
+/// independent dispatches at once, and the tree's barrier is already written for that semantics (metal/command.zig:
+/// "Later dispatches see every buffer write before this point (concurrent encoders)"). TF_DSV41_CONCURRENT=1 arms
+/// it; unset or =0 is the shipped serial path, byte for byte.
 var concurrent_cache: ?bool = null;
 fn concurrentOn() bool {
     if (concurrent_cache) |v| return v;
@@ -482,24 +448,9 @@ fn concurrentOn() bool {
     return concurrent_cache.?;
 }
 
-fn mtpQRmsOn() bool {
-    if (mtp_q_rms_on) |v| return v;
-    mtp_q_rms_on = std.c.getenv("TF_DSV41_MTP_Q_RMS") != null;
-    return mtp_q_rms_on.?;
-}
-
-var q_rms_debug: ?bool = null;
-/// ROUND-376 instrument: TF_DSV41_Q_RMS_DEBUG=1 dumps the trunk's query row (layer 0) and prints the
-/// per-head RMS of both the trunk's and the drafter's query -- the scale the softmax saw.
-fn qRmsDebugOn() bool {
-    if (q_rms_debug) |v| return v;
-    q_rms_debug = std.c.getenv("TF_DSV41_Q_RMS_DEBUG") != null;
-    return q_rms_debug.?;
-}
-
-/// ROUND-376 instrument: a query row's per-head RMS (the comparator's per-head scale, read off the
-/// query's own heads). The query's rows are its heads, so the flat [heads, head_dim] layout is the
-/// [rows, heads, head_dim] one.
+/// A query row's per-head RMS, for the instrument that compares the engine's query scale with the release's
+/// per-head query normalization (the release normalizes `qr` before `wq_b`). The query's rows are its heads, so
+/// the flat [heads, head_dim] layout is the [rows, heads, head_dim] one.
 fn headRms(f: [*]const f32, heads: u32, width: u32) struct { min: f32, max: f32, mean: f32 } {
     var mn: f32 = 1e30;
     var mx: f32 = -1e30;
@@ -520,11 +471,10 @@ fn headRms(f: [*]const f32, heads: u32, width: u32) struct { min: f32, max: f32,
     return .{ .min = mn, .max = mx, .mean = @floatCast(sum / @as(f64, heads)) };
 }
 
-/// Serialized unique owner; submissions finish before return/release, cancellation is between bounded chunks.
-/// ROUND-375: the top-k of a logits row (the instrument): the drafter's row 0 against the trunk's own
-/// row 0 at the same position. The MTP module is trained to predict the trunk's next-token
-/// distribution, so a healthy drafter's row 0 must be CLOSE to the trunk's -- a different argmax is
-/// fine, a different scale is not.
+/// Serialized unique owner; submissions finish before return/release, cancellation is between bounded chunks. The
+/// top-k of a logits row (the instrument): the drafter's row 0 against the trunk's own row 0 at the same position.
+/// The MTP module is trained to predict the trunk's next-token distribution, so a healthy drafter's row 0 must be
+/// CLOSE to the trunk's -- a different argmax is fine, a different scale is not.
 fn logitsTopK(f: [*]const f32, n: usize, out: *[5]u32, vals: *[5]f32) void {
     @memset(out, 0);
     @memset(vals, 0);
@@ -550,7 +500,6 @@ fn logitsTopK(f: [*]const f32, n: usize, out: *[5]u32, vals: *[5]f32) void {
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
-    /// The io the model was opened with; a stage's measurement capture writes through it.
     io: std.Io,
     device: mtl.Device,
     /// The gate GEMM's f16 activation copy when the pack's router gate is f16 (TF_DSV41_ROUTE_GEMM). One buffer
@@ -583,40 +532,36 @@ pub const Model = struct {
     taps_row: u32 = 0,
     /// Rows the last tap capture kept (1..128): the draft conditioning's row count.
     taps_n: u32 = 0,
-    /// ROUND-366: the rows the LAST tap capture kept. They are the tail of the taps ring and they are
-    /// consecutive positions, so the conditioning can publish the window's missing positions at once.
+    /// The rows the LAST tap capture kept. They are the tail of the taps ring and they are consecutive positions,
+    /// so the conditioning can publish the window's missing positions at once.
     taps_rows_last: u32 = 0,
-    /// ROUND-367: the rows of the LAST tap capture that are valid (0 = all of them). The no-re-feed
-    /// port's rollback keeps a prefix of the verify's capture: the rejected rows' taps are not the
-    /// committed history, so the conditioning publishes the prefix, not the capture's tail.
+    /// The rows of the LAST tap capture that are valid (0 = all of them). The no-re-feed port's rollback keeps a
+    /// prefix of the verify's capture: the rejected rows' taps are not the committed history, so the conditioning
+    /// publishes the prefix, not the capture's tail.
     taps_rows_valid: u32 = 0,
-    /// ROUND-385: the adaptive depth policy's signal -- the accepted drafts a round, smoothed.
-    /// ROUND-385: the per-lane signal (the first draft's acceptance) and its counters.
+    /// The adaptive depth policy's signal -- the accepted drafts a round, smoothed. The per-lane signal (the first
+    /// draft's acceptance) and its counters.
     mtp_accept_slot: [32]f64 = @splat(0.0),
     mtp_accept_seen_slot: [32]u32 = @splat(0),
-    /// ROUND-459: the round's per-draft acceptance (kept/offered), the hybrid policy's stay-deep signal.
+    /// The round's per-draft acceptance (kept/offered), the hybrid policy's stay-deep signal.
     mtp_round_slot: [32]f64 = @splat(0.0),
     mtp_round_seen_slot: [32]u32 = @splat(0),
-    /// ROUND-374: the ring's write row for the CURRENT forward. The three target layers SHARE it: the taps
-    /// buffer is interleaved by position (row p = the three layers' values), so the capture's ring advances
-    /// ONCE a forward. The port advanced it once a TARGET LAYER, so the three layers' rows landed in three
-    /// different ranges and the conditioning's row p mixed three positions (or stale rows).
+    /// The ring's write row for the CURRENT forward. The three target layers SHARE it: the taps buffer is
+    /// interleaved by position (row p = the three layers' values), so the capture's ring advances ONCE a forward.
+    /// The port advanced it once a TARGET LAYER, so the three layers' rows landed in three different ranges and the
+    /// conditioning's row p mixed three positions (or stale rows).
     taps_base: u32 = 0,
     /// The 128-row conditioning scratch (rows x 5120 bf16) and its packed keys (rows x 528), allocated with the taps.
     cond: ?mtl.Buffer = null,
-    /// ROUND-426: the fused three-block `wkv` dispatch's scratch: three copies of the window (3 x 128 x 5120 bf16),
-    /// three output windows (3 x 128 x 512 halves) and the route / input / output ids (3 x 384 u32).
     cond_wkv: ?mtl.Buffer = null,
-    /// The trained proposer's last drafts (TF_DSV41_MTP_DRAFTS): the backend's draft() hands them to the engine's
-    /// verify, which is the only place acceptance is actually measured.
     mtp_drafts: [4]u32 = .{ 0, 0, 0, 0 },
     mtp_count: u32 = 0,
     /// The draft round's own logits scratch (eight rows), so its forward never writes the workspace's logits field.
     mtp_logits: ?mtl.Buffer = null,
-    /// ROUND-364: the drafter's router logits (its own 128 columns a row; the backbone's 384-wide rows would
-    /// overlap the drafter's five).
+    /// The drafter's router logits (its own 128 columns a row; the backbone's 384-wide rows would overlap the
+    /// drafter's five).
     dspark_logits: ?mtl.Buffer = null,
-    /// ROUND-375: the trunk's own head input (the verify's row 0), for the drafter-vs-trunk hidden probe.
+    /// The trunk's own head input (the verify's row 0), for the drafter-vs-trunk hidden probe.
     mtp_trunk_hidden: ?mtl.Buffer = null,
     /// Each slot's Engram cursor as of its beginSlot, restored by rollbackSlot.
     engram_stash: []u8,
@@ -624,14 +569,14 @@ pub const Model = struct {
     /// rollbackSlot: a rejected window leaves the half-block accumulator holding its last draft row, and the
     /// re-feed of the block that straddles the rollback position would read it.
     partial_stash: []u8,
-    /// ROUND-398: each slot's stash of the window ring's next `max_ring_rows` slots, taken before a verify
-    /// and put back for the rows the round rejects. `lanes * layers * max_ring_rows * ring_stride` bytes.
+    /// Each slot's stash of the window ring's next `max_ring_rows` slots, taken before a verify and put back for
+    /// the rows the round rejects. `lanes * layers * max_ring_rows * ring_stride` bytes.
     ring_stash: mtl.Buffer,
-    /// ROUND-504: A MERGED TAIL CHUNK'S STASH. When a pass runs its tail mark inside the chunk (no second
-    /// forward), the chunk publishes its PREFIX -- the rows before the mark -- into this slot's copy of the
-    /// window ring and the taps ring, then publishes the whole chunk into the live ones as usual; the state at
-    /// the mark is then copied from the stash. `publish_limit` is the prefix row count while such a chunk runs
-    /// (0: no merged chunk), and `snap_pos`/`snap_hist`/`snap_taps_*` are the mark's re-pointed metadata.
+    /// A MERGED TAIL CHUNK'S STASH. When a pass runs its tail mark inside the chunk (no second forward), the chunk
+    /// publishes its PREFIX -- the rows before the mark -- into this slot's copy of the window ring and the taps
+    /// ring, then publishes the whole chunk into the live ones as usual; the state at the mark is then copied from
+    /// the stash. `publish_limit` is the prefix row count while such a chunk runs (0: no merged chunk), and
+    /// `snap_pos`/`snap_hist`/`snap_taps_*` are the mark's re-pointed metadata.
     snap_ring: mtl.Buffer,
     taps_stash: mtl.Buffer,
     publish_limit: u32 = 0,
@@ -649,13 +594,10 @@ pub const Model = struct {
     attention_workspace: attention.Workspace,
     /// The drafter's taps: three backbone layers' hidden states, a row's worth of positions at a time.
     taps: mtl.Buffer,
-    /// ROUND-376: the ones vector for the comparator's unweighted per-head query RMS (512 f32), and the
-    /// instrument's query dump (32768 f32). Both null unless an arm or the instrument is on.
-    q_ones: ?mtl.Buffer = null,
-    q_debug: ?mtl.Buffer = null,
-    /// ROUND-455 instrument: layer 0's wq_b input (the GPTQ calibration dump).
+    /// Layer 0's wq_b input (the post-q_norm `qr`), for the GPTQ calibration dump. Null unless
+    /// TF_DSV41_DUMP_WQB_X is set.
     wqb_x_debug: ?mtl.Buffer = null,
-    /// ROUND-455 instrument: layer 0's MoE input (the experts' output-error dump).
+    /// Layer 0's MoE input (the experts' output-error dump).
     moe_x_debug: ?mtl.Buffer = null,
     moe_x_rows: u32 = 0,
     pipelines: Pipelines,
@@ -668,43 +610,35 @@ pub const Model = struct {
     /// The fused boundary's stream parity and the pending expand (TF_DSV41_HC_BOUNDARY).
     stream_alt: bool = false,
     pending_expand: bool = false,
-    /// Measurement only (TF_DSV41_HOST_PROF): host nanoseconds of the Engram hash pass and of stageRows.
     host_prof: bool = false,
     host_hash_ns: u64 = 0,
     host_stage_ns: u64 = 0,
-    /// ROUND-463: the same stage's read count (the gather's own miss counter) and its major page
-    /// faults, so a receipt can divide the stage time by the rows that actually paid an I/O fault
-    /// instead of by the id count (the id count varies with the text's duplicate structure).
     host_stage_misses: u64 = 0,
     host_stage_faults: u64 = 0,
     host_stage_pf: u8 = 0,
     host_stage_thr: u16 = 0,
-    /// ROUND-462: the adaptive Engram gather's state. The decode-sized list starts single-threaded; two
-    /// consecutive slow small gathers (cold pages) switch it to the mapped path's workers, and every
-    /// 16th parallel call one single-threaded gather probes whether the stream has turned warm. So the
-    /// warm band never leaves the old path. TF_DSV41_ENGRAM_ADAPT=0 is the same-binary control.
+    /// The adaptive Engram gather's state. The decode-sized list starts single-threaded; two consecutive slow small
+    /// gathers (cold pages) switch it to the mapped path's workers, and every 16th parallel call one
+    /// single-threaded gather probes whether the stream has turned warm. So the warm band never leaves the old
+    /// path. TF_DSV41_ENGRAM_ADAPT=0 is the same-binary control.
     engram_par: bool = false,
-    /// ROUND-463: the window page-in's latch, driven by the stage's own clock with hysteresis (on over
-    /// 1.5 ms, off under 0.4) so the warm band (0.18 ms) never pays the madvise pass and a cold stream
-    /// keeps it once it is on. The thread state machine's probe is not the arbiter: a prefetched
-    /// window makes the next window's probe look warm. TF_DSV41_ENGRAM_PF=0 disables the whole arm.
+    /// The thread state machine's probe is not the arbiter: a prefetched window makes the next window's probe look
+    /// warm. TF_DSV41_ENGRAM_PF=0 disables the whole arm.
     engram_pf_on: bool = false,
     engram_pf_off: u8 = 0,
     engram_probe_in: u8 = 0,
     engram_probe_every: u8 = 16,
     engram_slow_n: u8 = 0,
-    /// ROUND-496: the second Engram layer's prompt gather is deferred to its own layer, so the GPU runs
-    /// the earlier layers while the read happens. Set by `stageRows` on a prompt-sized chunk.
+    /// The second Engram layer's prompt gather is deferred to its own layer, so the GPU runs the earlier layers
+    /// while the read happens. Set by `stageRows` on a prompt-sized chunk.
     engram_pending: bool = false,
-    /// Measurement only (TF_DSV41_PROFILE_GPU): dispatches encoded per recorded stage and the counter
-    /// position the open stage started at.
     profile_stage_dispatch: [gpu_counters.stage_count]u64 = @splat(0),
     profile_last_count: u64 = 0,
     profile_open_stage: ?gpu_counters.Stage = null,
     grouped_prefill: bool = true,
     observer: ?Observer = null,
-    /// ROUND-398 instrument: the attention's own per-stage observer (the `stagediff` harness). Null on
-    /// every default path; installing it only adds captures, never arithmetic.
+    /// The attention's own per-stage observer (the `stagediff` harness). Null on every default path; installing it
+    /// only adds captures, never arithmetic.
     attention_observer: ?attention.DiagnosticObserver = null,
     pub const Observer = struct {
         ctx: *anyopaque,
@@ -772,8 +706,8 @@ pub const Model = struct {
         errdefer cp.deinit();
         var bound = try weights.bind(device, &cp, streaming);
         errdefer bound.deinit();
-        // ROUND-520: the prompt-row int8 sidecar. Flag-gated; the trellis matrices stay bound for decode and for
-        // any chunk under the rows gate.
+        // The prompt-row int8 sidecar. Flag-gated; the trellis matrices stay bound for decode and for any chunk
+        // under the rows gate.
         if (std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
             const sidecar = std.c.getenv("TF_DSV41_I8_DIR") orelse return error.MissingInt8Sidecar;
             try weights.attachInt8(gpa, io, device, &bound, std.mem.span(sidecar));
@@ -812,9 +746,9 @@ pub const Model = struct {
         const mtp_logits = try device.buffer(8 * 129280 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         const cond_bytes = 128 * 5120 * 2 + 128 * 512 * 2 + 128 * 528;
         const cond = try device.buffer(cond_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        // ROUND-426: the fused `wkv` dispatch's scratch. The input window is written three times (one per block),
-        // the output comes back as three 128-row windows, and the ids are constant: routes name the block, the
-        // input and output maps are the identity (the grouped tile's rows are the descriptors' own rows).
+        // The fused `wkv` dispatch's scratch. The input window is written three times (one per block), the output
+        // comes back as three 128-row windows, and the ids are constant: routes name the block, the input and
+        // output maps are the identity (the grouped tile's rows are the descriptors' own rows).
         const cond_wkv_bytes = 3 * 128 * 5120 * 2 + 3 * 128 * 512 * 2 + 3 * 3 * 128 * 4;
         const cond_wkv = try device.buffer(cond_wkv_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         @memset(cond_wkv.contents()[0..cond_wkv_bytes], 0);
@@ -852,20 +786,7 @@ pub const Model = struct {
         if (stream_stage) |buf| residency.add(buf);
         residency.add(ring_stash);
         pipelines.attention.registerResidency(residency);
-        // ROUND-376: the comparator's per-head UNWEIGHTED query RMS. The ones vector (512 f32) is the
-        // weight the RMS multiplies by; the trunk's attention reads it through the attention module's
-        // global, and the drafter's attention reads the model's own copy.
-        var q_ones: ?mtl.Buffer = null;
-        if (qRmsOn() or mtpQRmsOn() or qRmsDebugOn()) {
-            const b = try device.buffer(512 * 4, mtl.ResourceOptions.shared);
-            errdefer b.deinit();
-            const ones_map: [*]f32 = @ptrCast(@alignCast(b.contents()));
-            for (0..512) |i| ones_map[i] = 1.0;
-            q_ones = b;
-            residency.add(b);
-            if (qRmsOn()) attention.q_rms_weight = .{ .buffer = b, .offset = 0 };
-        }
-        // ROUND-455 instrument: layer 0's MoE input, 2,048 rows x 5,120 f32.
+        // Layer 0's MoE input, 2,048 rows x 5,120 f32.
         var moe_x_debug: ?mtl.Buffer = null;
         if (std.c.getenv("TF_DSV41_DUMP_MOE_X") != null) {
             const b = try device.buffer(2048 * 5120 * 4, mtl.ResourceOptions.shared);
@@ -873,7 +794,7 @@ pub const Model = struct {
             moe_x_debug = b;
             residency.add(b);
         }
-        // ROUND-455 instrument: layer 0's wq_b input, 2,048 rows x 1,280 f32, for the GPTQ Hessian.
+        // Layer 0's wq_b input, 2,048 rows x 1,280 f32, for the GPTQ Hessian.
         var wqb_x_debug: ?mtl.Buffer = null;
         if (std.c.getenv("TF_DSV41_DUMP_WQB_X") != null) {
             const b = try device.buffer(2048 * 1280 * 4, mtl.ResourceOptions.shared);
@@ -882,19 +803,10 @@ pub const Model = struct {
             residency.add(b);
             attention.wqb_x_debug = b;
         }
-        // ROUND-376 instrument: the trunk's query row (layer 0), dumped for the host-side per-head RMS.
-        var q_debug: ?mtl.Buffer = null;
-        if (qRmsDebugOn()) {
-            const b = try device.buffer(2 * 32768 * 4, mtl.ResourceOptions.shared);
-            errdefer b.deinit();
-            q_debug = b;
-            residency.add(b);
-            attention.q_debug = b;
-        }
         residency.commit();
         residency.requestResidency();
         queue.addResidencySet(residency);
-        return .{ .gpa = gpa, .io = io, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .partial_stash = partial_stash, .ring_stash = ring_stash, .snap_ring = snap_ring, .taps_stash = taps_stash, .stream = stream_rows, .stream_stage = stream_stage, .workspace = workspace, .attention_workspace = aw, .taps = taps, .cond = cond, .cond_wkv = cond_wkv, .q_ones = q_ones, .q_debug = q_debug, .wqb_x_debug = wqb_x_debug, .moe_x_debug = moe_x_debug, .mtp_logits = mtp_logits, .pipelines = pipelines, .admitted_bytes = needed, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
+        return .{ .gpa = gpa, .io = io, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .partial_stash = partial_stash, .ring_stash = ring_stash, .snap_ring = snap_ring, .taps_stash = taps_stash, .stream = stream_rows, .stream_stage = stream_stage, .workspace = workspace, .attention_workspace = aw, .taps = taps, .cond = cond, .cond_wkv = cond_wkv, .wqb_x_debug = wqb_x_debug, .moe_x_debug = moe_x_debug, .mtp_logits = mtp_logits, .pipelines = pipelines, .admitted_bytes = needed, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
     }
 
     pub fn deinit(m: *Model) void {
@@ -920,16 +832,6 @@ pub const Model = struct {
         if (m.gate_x) |b| b.deinit();
         if (m.dspark_logits) |b| b.deinit();
         if (m.cond_wkv) |b| b.deinit();
-        // ROUND-376: the per-head RMS's ones vector and the instrument's query dump; the attention
-        // module's globals go with them.
-        if (m.q_ones) |b| {
-            b.deinit();
-            attention.q_rms_weight = null;
-        }
-        if (m.q_debug) |b| {
-            b.deinit();
-            attention.q_debug = null;
-        }
         if (m.wqb_x_debug) |b| {
             b.deinit();
             attention.wqb_x_debug = null;
@@ -973,12 +875,12 @@ pub const Model = struct {
         m.logits_rows = 0;
     }
 
-    /// ROUND-467: A KEPT PROMPT STATE. One slot's whole cache -- the packed main/index tables and the
-    /// mutable bytes (the window rings, the compressed path's partials and the raw-row captures) -- plus its
-    /// cursor, the four-token Engram history the next chunk's hash pass reads, and the taps ring's rows and
-    /// cursor (the drafter's conditioning). Every copied buffer is `shared` and every forward that wrote it
-    /// committed and waited, so the copy is exactly the state a pass at `position` stands on: a restored
-    /// state continues the prompt where the saved one stood, and `resumed` equals `fresh` token for token.
+    /// A KEPT PROMPT STATE. One slot's whole cache -- the packed main/index tables and the mutable bytes (the
+    /// window rings, the compressed path's partials and the raw-row captures) -- plus its cursor, the four-token
+    /// Engram history the next chunk's hash pass reads, and the taps ring's rows and cursor (the drafter's
+    /// conditioning). Every copied buffer is `shared` and every forward that wrote it committed and waited, so the
+    /// copy is exactly the state a pass at `position` stands on: a restored state continues the prompt where the
+    /// saved one stood, and `resumed` equals `fresh` token for token.
     pub const Snapshot = struct {
         storage: []u8,
         live: []u8,
@@ -992,20 +894,20 @@ pub const Model = struct {
         taps_base: u32,
     };
 
-    /// ROUND-504: START A MERGED TAIL CHUNK. `hist` ends at `at` (the last prompt tokens, newest last), the chunk
-    /// starts at `from` and runs past `at`. The stash is primed with the live ring and taps -- a prefix shorter
-    /// than the window keeps the older slots -- the mark's metadata is recorded, and `publish_limit` makes the
-    /// chunk's per-layer publish and tap capture also write its PREFIX into the stash.
-    /// Returns false when the mark's history cannot be built; the caller then keeps the cut.
+    /// START A MERGED TAIL CHUNK. `hist` ends at `at` (the last prompt tokens, newest last), the chunk starts at
+    /// `from` and runs past `at`. The stash is primed with the live ring and taps -- a prefix shorter than the
+    /// window keeps the older slots -- the mark's metadata is recorded, and `publish_limit` makes the chunk's
+    /// per-layer publish and tap capture also write its PREFIX into the stash. Returns false when the mark's
+    /// history cannot be built; the caller then keeps the cut.
     pub fn beginSnapTail(m: *Model, slot: u32, hist: []const u32, at: u32, from: u32) bool {
         if (hist.len < 3) return false;
         const state = &m.caches[slot];
         const q = at - from;
         const n: u32 = @min(q, kv.cache.window);
-        // THE RECORD IS THE HASH PASS'S, NOT RAW TOKENS: `int tail[3]` of COMPRESSED ids, newest first, then
-        // `uint available` (saturates at 3). A pass standing at `at` holds the three tokens before it through the
-        // same token map the hash pass reads (ROUND-504's first form wrote raw prompt tokens here: the Engram
-        // history at the resumed position then read 77/304/223 instead of 2460/174/259 and the turn diverged).
+        // THE RECORD IS THE HASH PASS'S, NOT RAW TOKENS: `int tail[3]` of COMPRESSED ids, newest first, then `uint
+        // available` (saturates at 3). A pass standing at `at` holds the three tokens before it through the same
+        // token map the hash pass reads (The first form wrote raw prompt tokens here: the Engram history at the
+        // resumed position then read 77/304/223 instead of 2460/174/259 and the turn diverged).
         const tm = m.workspace.view(.token_map);
         const map = engram.hash.TokenMap{ .bytes = (tm.buffer.contents() + tm.offset)[0 .. engram.hash.raw_vocab * 4] };
         var tail: [3]u32 = .{ 0, 0, 0 };
@@ -1025,8 +927,8 @@ pub const Model = struct {
         return true;
     }
 
-    /// ROUND-504: a merged tail chunk re-points the taps ring BY POSITION; the cursor arm
-    /// (TF_DSV41_COND_NOALIGN=1) is not position-addressed, so the merge stays off there.
+    /// A merged tail chunk re-points the taps ring BY POSITION; the cursor arm (TF_DSV41_COND_NOALIGN=1) is not
+    /// position-addressed, so the merge stays off there.
     pub fn snapTailAllowed(m: *const Model) bool {
         _ = m;
         return condAlignOn();
@@ -1053,9 +955,9 @@ pub const Model = struct {
         errdefer m.gpa.free(storage);
         const live = try m.gpa.dupe(u8, state.live.contents()[0..state.plan.mutableBytes()]);
         errdefer m.gpa.free(live);
-        // ROUND-504: a merged tail chunk's copy is THE STATE AT THE MARK, not at the chunk end: the taps ring and
-        // the window ring come from the stash the chunk's prefix published, the four-token history is the
-        // caller's, and the compressed partials at a tile mark are empty.
+        // A merged tail chunk's copy is THE STATE AT THE MARK, not at the chunk end: the taps ring and the window
+        // ring come from the stash the chunk's prefix published, the four-token history is the caller's, and the
+        // compressed partials at a tile mark are empty.
         const merging = m.publish_limit != 0;
         const taps_src = if (merging) m.taps_stash else m.taps;
         const taps = try m.gpa.dupe(u8, taps_src.contents()[0..m.taps.length()]);
@@ -1138,9 +1040,8 @@ pub const Model = struct {
         const history: [*]u8 = @ptrCast(@alignCast(view.buffer.contents() + view.offset));
         @memcpy(m.engram_stash[slot * 16 ..][0..16], history[0..16]);
         try m.caches[slot].begin();
-        // ROUND-398: stash the window ring's next slots before the verify writes them. The keep path
-        // puts back the rows the round rejects; without it a wrapped ring's stale slots alias
-        // positions the next forward still reads.
+        // Stash the window ring's next slots before the verify writes them. The keep path puts back the rows the
+        // round rejects; without it a wrapped ring's stale slots alias positions the next forward still reads.
         if (ringKeepOn()) {
             const state = &m.caches[slot];
             const stash_bytes = @as(usize, state.plan.layers) * max_ring_rows * kv.cache.ring_stride;
@@ -1184,17 +1085,15 @@ pub const Model = struct {
         @memcpy(history[0..16], m.engram_stash[slot * 16 ..][0..16]);
     }
 
-    /// ROUND-367: the no-re-feed port. The verify's own rows ARE the kept rows -- the lanes' receipt:
-    /// a re-fed row is bit-identical to the row the verify wrote -- so the rollback does not need a
-    /// second forward. It restores the compressed path's open row from the capture (the group that
-    /// straddles the new position), advances the Engram's cursor over the kept rows, and marks the
-    /// taps' valid prefix (the rejected rows' taps are not the committed history).
+    /// The no-re-feed port. It restores the compressed path's open row from the capture (the group that straddles
+    /// the new position), advances the Engram's cursor over the kept rows, and marks the taps' valid prefix (the
+    /// rejected rows' taps are not the committed history).
     pub fn portKeep(m: *Model, slot: u32, kept: u32) !void {
         if (slot >= m.lanes) return error.InvalidLaneSlot;
-        // ROUND-385: the adaptive depth policy's signal.  The verify's kept rows are the accepted drafts
-        // plus the pending token, so `kept - 1` is the accepted drafts this round.  The policy is a
-        // POLICY (which depth to run), not a numerics change: it picks between two already-characterised
-        // windows (depth 1 is token-for-token identical to the plain path; depth 3 is the standing one).
+        // The adaptive depth policy's signal. The verify's kept rows are the accepted drafts plus the pending
+        // token, so `kept - 1` is the accepted drafts this round. The policy is a POLICY (which depth to run), not
+        // a numerics change: it picks between two already-characterised windows (depth 1 is token-for-token
+        // identical to the plain path; depth 3 is the standing one).
         const state = &m.caches[slot];
         // The rollback put the cursor back before the window; the re-feed's forward is what advanced it
         // over the kept rows, so the port advances it the same way.
@@ -1224,9 +1123,9 @@ pub const Model = struct {
         m.taps_rows_valid = kept;
     }
 
-    /// ROUND-398: put back the window ring slots that the verify's rejected rows wrote. Called after
-    /// `rollbackSlot` (so `position` is the window's start) and before the next forward. The stash was
-    /// taken by `beginSlot`; rows `kept..rows-1` are the rejected ones.
+    /// Put back the window ring slots that the verify's rejected rows wrote. Called after `rollbackSlot` (so
+    /// `position` is the window's start) and before the next forward. The stash was taken by `beginSlot`; rows
+    /// `kept..rows-1` are the rejected ones.
     pub fn restoreRing(m: *Model, slot: u32, kept: u32, rows: u32) !void {
         if (!ringKeepOn()) return;
         if (slot >= m.lanes or rows > max_ring_rows or kept > rows) return;
@@ -1260,10 +1159,10 @@ pub const Model = struct {
         return m.forwardSegs(&.{.{ .slot = slot, .ids = ids, .p0 = m.caches[slot].position }}, logits);
     }
 
-    /// ROUND-531: one forward over several slots' one-row windows (a shared round's lanes). The row-wise
-    /// layers run once over every segment's rows; the attention core runs once a segment against its own
-    /// slot state. One-row segments only, and no instruments: the rung exists to amortise the dense
-    /// attention weights, not to batch prefill or to run a profiler.
+    /// One forward over several slots' one-row windows (a shared round's lanes). The row-wise layers run once over
+    /// every segment's rows; the attention core runs once a segment against its own slot state. One-row segments
+    /// only, and no instruments: the rung exists to amortise the dense attention weights, not to batch prefill or
+    /// to run a profiler.
     pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         if (!m.valid) return error.InvalidModelState;
         if (segs.len == 0 or segs.len > 4) return error.InvalidLaneSlot;
@@ -1312,7 +1211,7 @@ pub const Model = struct {
         }
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        // ROUND-525 (instrument, default-inert): the forward-stage hash's staging buffer, one forward's life.
+        // The forward-stage hash's staging buffer, one forward's life.
         var hid = HidHash{};
         var hid_stage: ?mtl.Buffer = null;
         defer if (hid_stage) |b| b.deinit();
@@ -1321,7 +1220,7 @@ pub const Model = struct {
             hid_stage = try m.device.buffer(hid.bytes, mtl.ResourceOptions.shared);
             hid.stage = hid_stage.?;
         }
-        // ROUND-525 probe: the sparse scan's own input and output, one layer, one forward's staging.
+        // Probe: the sparse scan's own input and output, one layer, one forward's staging.
         var sp_stage: ?mtl.Buffer = null;
         defer if (sp_stage) |b| {
             b.deinit();
@@ -1343,19 +1242,15 @@ pub const Model = struct {
         }
         const host_enc_start: u64 = nowNs();
         const dispatches_before = mtl.command.dispatch_count.load(.monotonic);
-        // TF_DSV41_LAYER_CB: one command buffer a layer, with the GPU's own seconds for each (the counter
-        // recorder is broken on this build). A measurement instrument: the split drains the GPU per layer.
+        // TF_DSV41_LAYER_CB: one command buffer a layer, with the GPU's own seconds for each (the counter recorder
+        // is broken on this build).
         const layer_cb = std.c.getenv("TF_DSV41_LAYER_CB") != null;
-        // ROUND-487: THE PIPELINED FORWARD. A decode/verify forward is ~1,700 dispatches and its host encode
-        // (~0.6 ms) is serial with the GPU because Metal needs the whole command buffer before commit. When
-        // TF_DSV41_PIPE_LAYERS=n (default 2; 0 = the shipped single buffer) the first n layers are committed as
-        // their own command buffer WITHOUT a wait, so the GPU starts on them while the host encodes the rest.
-        // The landed 2 is the A/B's best (ROUND-487: 0.67 ms off a plain token, 0.47 for 1; the 2 layers' GPU
-        // window is 1.16 ms against the remaining 0.67 ms of encode, so the CPU clears CB2 before CB1 retires).
-        // The dispatch order, every dispatch's arguments and every kernel's arithmetic are unchanged; only the
-        // command buffer boundary moves, and command buffers on one queue run in commit order. Instruments that
-        // own the command buffer (the layer/stage split, the attention profiler, the GPU recorder, a diagnostic
-        // observer) keep the shipped single-buffer form.
+        // THE PIPELINED FORWARD. When TF_DSV41_PIPE_LAYERS=n (default 2; 0 = the shipped single buffer) the first n
+        // layers are committed as their own command buffer WITHOUT a wait, so the GPU starts on them while the host
+        // encodes the rest. The landed 2 is the A/B's best. The dispatch order, every dispatch's arguments and
+        // every kernel's arithmetic are unchanged; only the command buffer boundary moves, and command buffers on
+        // one queue run in commit order. Instruments that own the command buffer (the layer/stage split, the
+        // attention profiler, the GPU recorder, a diagnostic observer) keep the shipped single-buffer form.
         const pipe_layers: u32 = if (rows <= 8 and m.profile == null and m.observer == null and
             std.c.getenv("TF_DSV41_LAYER_CB") == null and std.c.getenv("TF_DSV41_STAGE_CB") == null and
             std.c.getenv("TF_DSV41_ATTN_PROF") == null)
@@ -1368,7 +1263,7 @@ pub const Model = struct {
         var pipe_prev: mtl.CommandBuffer = undefined;
         var pipe_prev_set = false;
         var pipe_gpu_extra: f64 = 0;
-        // ROUND-496: the command buffers committed before the second Engram layer's staged read.
+        // The command buffers committed before the second Engram layer's staged read.
         var engram_prev: [4]mtl.CommandBuffer = undefined;
         var engram_prev_n: usize = 0;
         var e = m.queue.commandBufferUnretained();
@@ -1419,14 +1314,13 @@ pub const Model = struct {
                 enc = e.compute(if (concurrentOn()) .concurrent else .serial);
                 for (m.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
             }
-            // ROUND-378: THE ENGRAM GATE READS THE EXPANDED STREAM. The fused boundary defers the
-            // previous stage's branch expand to this layer's boundary (below), but the Engram gate runs
-            // first and is a consumer of the EXPANDED stream: the reference's order is expand -> gate ->
-            // collapse. Flush the pending expand here, before the gate, so the gate sees the post-branch
-            // hidden and the expand's residual is the pre-Engram stream; the boundary below then runs
-            // expand=false and computes the same mixes over the post-Engram stream. encodePost is the
-            // same arithmetic as expand_mix's expand (post[k]*branch + sum_j comb[j*4+k]*old[j]).
-            // TF_DSV41_NO_ENGRAM_FLUSH=1 restores the port's old order (the receipt).
+            // THE ENGRAM GATE READS THE EXPANDED STREAM. The fused boundary defers the previous stage's branch
+            // expand to this layer's boundary (below), but the Engram gate runs first and is a consumer of the
+            // EXPANDED stream: the reference's order is expand -> gate -> collapse. Flush the pending expand here,
+            // before the gate, so the gate sees the post-branch hidden and the expand's residual is the pre-Engram
+            // stream; the boundary below then runs expand=false and computes the same mixes over the post-Engram
+            // stream. encodePost is the same arithmetic as expand_mix's expand (post[k]*branch + sum_j
+            // comb[j*4+k]*old[j]).
             if (layer.engram != null and m.pending_expand and
                 std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null and
                 std.c.getenv("TF_DSV41_NO_ENGRAM_FLUSH") == null)
@@ -1444,9 +1338,9 @@ pub const Model = struct {
             if (layer.engram != null and std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null) {
                 const g = &layer.engram.?;
                 if (m.engram_pending and @as(u32, @intCast(index)) == engram.hash.layers[1].layer_id and engramPipeRows(m, rows)) {
-                    // ROUND-496: commit the layers encoded so far, so the GPU is running them while the
-                    // second layer's rows are read. The queue is in order and a command-buffer boundary
-                    // is a full barrier, so the next buffer sees everything this one wrote.
+                    // Commit the layers encoded so far, so the GPU is running them while the second layer's rows
+                    // are read. The queue is in order and a command-buffer boundary is a full barrier, so the next
+                    // buffer sees everything this one wrote.
                     enc.end();
                     e.commit();
                     if (engram_prev_n < engram_prev.len) {
@@ -1463,7 +1357,6 @@ pub const Model = struct {
                     m.stageHash(rows, "l1");
                 }
                 try m.profileSpan(&enc, .engram);
-                // Measurement: the gather and the projection write their own outputs, so a second pass prices them.
                 const engram_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ENGRAM") != null) 2 else 1;
                 for (0..engram_passes) |_| if (m.stream_stage) |staged| {
                     const at = @as(usize, if (index == 1) 0 else 1) * @as(usize, rows) * engram.gather_dim * @sizeOf(u16);
@@ -1485,42 +1378,41 @@ pub const Model = struct {
                 // one summary (TF_DSV41_COND_ROWS).
                 const n: u32 = @min(rows, 128);
                 const skip = @as(usize, rows - n) * 20480 * 2;
-                // ROUND-504: THE CAPTURED ROWS' OWN FIRST POSITION. Every shipped chunk skips a multiple of 128
-                // rows, so the forward's start position was the same slot; a merged tail chunk's length is not a
-                // multiple of 128, and its live capture must still land on the rows it holds.
+                // THE CAPTURED ROWS' OWN FIRST POSITION. Every shipped chunk skips a multiple of 128 rows, so the
+                // forward's start position was the same slot; a merged tail chunk's length is not a multiple of
+                // 128, and its live capture must still land on the rows it holds.
                 const base = (state.position + (rows - n)) % 128;
-                // ROUND-504: A MERGED TAIL CHUNK ALSO STASHES THE PREFIX -- the taps ring as it stands at the mark.
+                // A MERGED TAIL CHUNK ALSO STASHES THE PREFIX -- the taps ring as it stands at the mark.
                 if (m.publish_limit != 0) {
                     const q = @min(m.publish_limit, rows);
                     const sn: u32 = @min(q, 128);
                     ops.encodeStreamMean(enc, &p.ops, m.streamView().shifted(@as(usize, q - sn) * 20480 * 2), .{ .buffer = m.taps_stash }, .{ .rows = sn, .width = 5120, .stream_stride = 20480, .out_stride = 5120, .slot = @intCast(index - 37), .row_base = (state.position + q - sn) % 128 });
                 }
-                // ROUND-374: THE THREE TARGET LAYERS SHARE ONE row_base. The taps buffer is interleaved by
-                // position (row p = the three layers' values), so the ring advances ONCE a forward. The port
-                // advanced it once a TARGET LAYER: layer 37 wrote rows [B, B+n), layer 38 rows [B+n, B+2n) and
-                // layer 39 rows [B+2n, B+3n), so the conditioning's row p mixed three positions (and, at the
-                // first capture, two stale slices). The receipt: taps_n = 3 x the positions (90 rows captured
-                // at position 28) -- the debug's own line.
+                // THE THREE TARGET LAYERS SHARE ONE row_base. The taps buffer is interleaved by position (row p =
+                // the three layers' values), so the ring advances ONCE a forward. The port advanced it once a
+                // TARGET LAYER: layer 37 wrote rows [B, B+n), layer 38 rows [B+n, B+2n) and layer 39 rows [B+2n,
+                // B+3n), so the conditioning's row p mixed three positions (and, at the first capture, two stale
+                // slices).
                 const shared = tapsSharedBaseOn();
                 if (shared and index == 37) {
-                    // ROUND-385 (the arm): THE TAPS RING'S SLOT IS THE TOKEN POSITION.  The cursor
-                    // advanced by the CAPTURED rows (the verify's window, four a round) while the
-                    // position advanced by the KEPT rows (about 1.3 a round), so the ring's rows drifted
-                    // out of alignment with the positions -- 2.7 rows a round.  The stream-mean kernel
-                    // writes modulo the ring, so the aligned base is the forward's start position.
+                    // THE TAPS RING'S SLOT IS THE TOKEN POSITION. The cursor advanced by the CAPTURED rows (the
+                    // verify's window, four a round) while the position advanced by the KEPT rows (about 1.3 a
+                    // round), so the ring's rows drifted out of alignment with the positions -- 2.7 rows a round.
+                    // The stream-mean kernel writes modulo the ring, so the aligned base is the forward's start
+                    // position.
                     m.taps_base = if (condAlignOn()) state.position % 128 else m.taps_row;
-                    // ROUND-367: a fresh capture's rows are all valid; the port's rollback sets the prefix.
+                    // A fresh capture's rows are all valid; the port's rollback sets the prefix.
                     m.taps_rows_valid = 0;
                     m.taps_row = (m.taps_row + n) % 128;
                     m.taps_n = @min(m.taps_n + n, 128);
                 }
                 ops.encodeStreamMean(enc, &p.ops, m.streamView().shifted(skip), .{ .buffer = m.taps }, .{ .rows = n, .width = 5120, .stream_stride = 20480, .out_stride = 5120, .slot = @intCast(index - 37), .row_base = if (shared) base else m.taps_row });
-                // ROUND-366: the capture's row count, so the conditioning knows how many tail rows of the taps
-                // ring are consecutive positions (the last capture is the verify's or the re-feed's, and its
-                // rows are the positions the window is missing).
+                // The capture's row count, so the conditioning knows how many tail rows of the taps ring are
+                // consecutive positions (the last capture is the verify's or the re-feed's, and its rows are the
+                // positions the window is missing).
                 m.taps_rows_last = n;
                 if (!shared) {
-                    // ROUND-367: a fresh capture's rows are all valid; the port's rollback sets the prefix.
+                    // A fresh capture's rows are all valid; the port's rollback sets the prefix.
                     m.taps_rows_valid = 0;
                     m.taps_row = (m.taps_row + n) % 128;
                     m.taps_n = @min(m.taps_n + n, 128);
@@ -1557,8 +1449,8 @@ pub const Model = struct {
             enc.barrier();
             hid.record(enc, &p.ops, ws.view(.branch), rows, .attn, @intCast(index));
             if (hid.full_layer >= 0 and index == @as(usize, @intCast(hid.full_layer))) {
-                // ROUND-525: the attention block's own regions, in execution order, so the first one that moves
-                // names the kernel. The row widths are attention.Workspace's fixed per-row region sizes.
+                // The attention block's own regions, in execution order, so the first one that moves names the
+                // kernel. The row widths are attention.Workspace's fixed per-row region sizes.
                 const aw = &m.attention_workspace;
                 const li: u32 = @intCast(index);
                 hid.recordBytes(enc, &p.ops, aw.view(.qr), rows, 1280 * 2, .a_qr, li);
@@ -1584,9 +1476,6 @@ pub const Model = struct {
                     hid.recordBytes(enc, &p.ops, aw.selection.positions().shifted(@as(usize, r0) * 512 * 4), nb, 512 * 4, .a_pos, 200000 + band);
                 }
                 hid.recordBytes(enc, &p.ops, aw.selection.positions().shifted(@as(usize, rows - 1) * 512 * 4), 1, 512 * 4, .a_pos1, li);
-                // Sixteen rows' score arrays, each only its own visible columns and each its own report line
-                // (the row rides in the layer id): the scorer's own receipt, so a moved pick can be read
-                // against a moved score.
                 hid.recordBytes(enc, &p.ops, aw.selection.windowChunk(), rows, 528, .a_chunk, li);
                 if (aratio != 0) {
                     const srcv = try state.source(@intCast(index), aratio);
@@ -1671,8 +1560,8 @@ pub const Model = struct {
             mhc.encodeCollapse(enc, &p.mhc, m.streamView().shifted(first * 20480 * 2), ws.view(.previous_pre).shifted(first * 4 * 4), ws.view(.collapsed), .{ .rows = output_rows, .width = 5120, .stream_stride = 20480, .y_stride = 5120 });
             enc.barrier();
             m.normalize(enc, ws.view(.collapsed), m.weights.norm, ws.view(.normalized), output_rows);
-            // ROUND-375: the trunk's own head input (the row 0 of the window), so the drafter's head input
-            // can be compared with it (the cosine): the MTP module's hidden must live in the trunk's space.
+            // The trunk's own head input (the row 0 of the window), so the drafter's head input can be compared
+            // with it (the cosine): the MTP module's hidden must live in the trunk's space.
             if (std.c.getenv("TF_DSV41_MTP_DEBUG_TOP") != null) {
                 if (m.mtp_trunk_hidden == null) {
                     m.mtp_trunk_hidden = try m.device.buffer(5120 * 4, mtl.ResourceOptions.shared);
@@ -1722,20 +1611,7 @@ pub const Model = struct {
             try completed(cb);
             pipe_gpu_extra += cb.gpuSeconds() * 1e3;
         }
-        // ROUND-376 instrument: the trunk's query row's per-head RMS (the scale the trunk's softmax saw;
-        // the comparator normalizes each head before the rope, the port did not). The dump is layer 0's
-        // first row, so every forward prints one line (the prompt's and the verify's).
-        if (m.q_debug) |b| {
-            const qf: [*]const f32 = @ptrCast(@alignCast(b.contents()));
-            const r = headRms(qf, m.cfg.heads, m.cfg.head_dim);
-            std.log.info("trunk q head rms: min={d:.5} max={d:.5} mean={d:.5}", .{ r.min, r.max, r.mean });
-            if (qRmsOn()) {
-                const q2 = qf + m.cfg.heads * m.cfg.head_dim;
-                const r2 = headRms(q2, m.cfg.heads, m.cfg.head_dim);
-                std.log.info("trunk q head rms (after the norm): min={d:.5} max={d:.5} mean={d:.5}", .{ r2.min, r2.max, r2.mean });
-            }
-        }
-        // ROUND-455: the same prefill's layer-0 MoE input to /tmp/moe_x.f32.
+        // The same prefill's layer-0 MoE input to /tmp/moe_x.f32.
         if (m.moe_x_debug) |b| {
             if (m.moe_x_rows > 0) {
                 const n = @as(usize, m.moe_x_rows) * 5120 * 4;
@@ -1750,7 +1626,7 @@ pub const Model = struct {
                 m.moe_x_rows = 0;
             }
         }
-        // ROUND-455: one 2,048-row prefill's wq_b input to /tmp/wqb_x.f32 (a 16-byte K,R header, then f32).
+        // One 2,048-row prefill's wq_b input to /tmp/wqb_x.f32 (a 16-byte K,R header, then f32).
         if (m.wqb_x_debug) |b| {
             if (attention.wqb_x_rows > 0) {
                 const n = @as(usize, attention.wqb_x_rows) * @as(usize, m.cfg.q_lora) * 4;
@@ -1836,10 +1712,10 @@ pub const Model = struct {
         return ws.logits(m.logits_rows);
     }
 
-    /// ROUND-488: the rows the host may hash. The decode/verify window (<= 8 rows) pays the GPU's
-    /// commit+wait before its ids are readable on the host; its hash is 48 integer reductions a row, so
-    /// the host computes it where the staging reads it and the round trip disappears. The prompt's
-    /// thousands-row chunks are cheaper on the GPU. `TF_DSV41_CPU_HASH=0` is the shipped GPU pass.
+    /// The rows the host may hash. The decode/verify window (<= 8 rows) pays the GPU's commit+wait before its ids
+    /// are readable on the host; its hash is 48 integer reductions a row, so the host computes it where the staging
+    /// reads it and the round trip disappears. The prompt's thousands-row chunks are cheaper on the GPU.
+    /// `TF_DSV41_CPU_HASH=0` is the shipped GPU pass.
     fn cpuHashRows() u32 {
         const S = struct {
             var cached: i64 = -1;
@@ -1876,8 +1752,8 @@ pub const Model = struct {
         try m.stageRows(rows);
     }
 
-    /// ROUND-531: the batch's hash pass -- each segment's ids at its own rows, against its own slot's
-    /// Engram history, then the one staging read over all rows.
+    /// The batch's hash pass -- each segment's ids at its own rows, against its own slot's Engram history, then the
+    /// one staging read over all rows.
     fn hashPassSegs(m: *Model, segs: []const Seg, rows: u32) !void {
         const ws = &m.workspace;
         var r0: usize = 0;
@@ -1894,14 +1770,8 @@ pub const Model = struct {
     /// The default follows the read path: the mapped gather reads by address, so its workers scale; the
     /// positional reads share one I/O context and serialise on it, and one thread is their best case.
     fn engramThreads(m: *Model) usize {
-        // ROUND-463: the mapped default is sixteen for the large gather too. The prompt's rows are
-        // contiguous and readahead-served, but the per-fault cost still halves at sixteen (10.2 us
-        // against 18.0 on the 547-row prompt of the same sweep), and its warm gather is 35 ms of a
-        // 2.72 s prefill, so the spawn count is not the term.
+        // The mapped default is sixteen for the large gather too.
         var v: usize = if (m.stream) |s| (if (s.mapped()) 16 else 1) else 1;
-        // ROUND-495: the large gather is bound by the faults' random 16 KiB page reads, not by the
-        // rows' bytes (a 264-byte record costs a page), so the arm is read per forward and reaches 64:
-        // the first-touch prompt's gather is the one term a page-warm receipt never shows.
         if (std.c.getenv("TF_DSV41_ENGRAM_THREADS")) |e| {
             v = std.fmt.parseInt(usize, std.mem.span(e), 10) catch v;
             if (v == 0 or v > 64) v = 1;
@@ -1909,8 +1779,8 @@ pub const Model = struct {
         return v;
     }
 
-    /// ROUND-464: the latch's coldness clock. Default: the whole stage (prefetch + gather). `=gather`
-    /// restores ROUND-463's post-prefetch signal (the same-binary control).
+    /// The latch's coldness clock. Default: the whole stage (prefetch + gather). `=gather` restores The
+    /// post-prefetch signal (the same-binary control).
     fn latchStage() bool {
         const S = struct {
             var cached: i8 = 0;
@@ -1922,8 +1792,7 @@ pub const Model = struct {
         return S.cached > 0;
     }
 
-    /// ROUND-463: the whole-window page-in (TF_DSV41_ENGRAM_PF). Default on; =0 is the same-binary
-    /// control.
+    /// The whole-window page-in (TF_DSV41_ENGRAM_PF). Default on; =0 is the same-binary control.
     fn engramPrefetch() bool {
         const S = struct {
             var cached: i8 = 0;
@@ -1935,9 +1804,7 @@ pub const Model = struct {
         return S.cached > 0;
     }
 
-    /// ROUND-463: the decode-sized list's workers. The gather is fault-bound, so its rate scales with the
-    /// concurrent faults: 38.4 us a fault at 16 against 55.5 at eight (the 96-id verify call), and with
-    /// the window prefetched 11.5 at eight. Sixteen is the gather's own thread table's height.
+    /// The decode-sized list's workers. Sixteen is the gather's own thread table's height.
     /// TF_DSV41_ENGRAM_SMALL_THREADS is the arm (1..16).
     fn engramSmallThreads() usize {
         const S = struct {
@@ -1964,11 +1831,11 @@ pub const Model = struct {
         return S.cached > 0;
     }
 
-    /// ROUND-493: warm the pending row's Engram pages while the drafter's own forward runs. The pending
-    /// token is known before `proposeTokens` and is the verify window's FIRST row, so its ids can be hashed
-    /// from the standing record (a peek that does not advance it) and its pages handed to madvise now; the
-    /// next verify's `stageRows` recomputes the same ids and finds the pages resident. Only the page-in
-    /// moves: no id, byte, reduction or reply changes. `TF_DSV41_ENGRAM_PEND=0` is the same-binary control.
+    /// Warm the pending row's Engram pages while the drafter's own forward runs. The pending token is known before
+    /// `proposeTokens` and is the verify window's FIRST row, so its ids can be hashed from the standing record (a
+    /// peek that does not advance it) and its pages handed to madvise now; the next verify's `stageRows` recomputes
+    /// the same ids and finds the pages resident. Only the page-in moves: no id, byte, reduction or reply changes.
+    /// `TF_DSV41_ENGRAM_PEND=0` is the same-binary control.
     fn engramPendingOn() bool {
         const S = struct {
             var cached: i8 = 0;
@@ -1980,8 +1847,8 @@ pub const Model = struct {
         return S.cached > 0;
     }
 
-    /// ROUND-496: stage the second Engram layer's rows at its own layer instead of before the forward.
-    /// The ids are already known (the hash pass ran); only the read's clock moves. `=0` is the control.
+    /// Stage the second Engram layer's rows at its own layer instead of before the forward. The ids are already
+    /// known (the hash pass ran); only the read's clock moves. `=0` is the control.
     fn engramPipeOn() bool {
         // Read per forward: the same process can run the control and the arm.
         if (std.c.getenv("TF_DSV41_ENGRAM_PIPE")) |e| return !std.mem.eql(u8, std.mem.span(e), "0");
@@ -2018,10 +1885,7 @@ pub const Model = struct {
         return h;
     }
 
-    /// ROUND-524 (instrument, default-inert): the Engram staging receipt -- the hash pass's two id arrays and
-    /// the two staged regions, so repeated passes of one prompt say whether the nondeterminism is in the
-    /// inputs (the hash/gather) or in the forward's read of the staged buffer. `TF_DSV41_ENGRAM_STAGE_HASH=1`;
-    /// nothing in the default path reads this.
+    /// `TF_DSV41_ENGRAM_STAGE_HASH=1`; nothing in the default path reads this.
     fn stageHash(m: *Model, rows: u32, tag: []const u8) void {
         if (std.c.getenv("TF_DSV41_ENGRAM_STAGE_HASH") == null) return;
         const buf = m.stream_stage orelse return;
@@ -2067,10 +1931,7 @@ pub const Model = struct {
         const base: [*]u8 = buf.contents();
         const n_ids: usize = @as(usize, rows) * cols;
         const small = n_ids < 512;
-        // ROUND-464: the latch's clock is taken HERE, before the page-in. The shipped signal is `g0`
-        // (after the prefetch), so a prefetched cold window's own gather reads <0.2 ms -- the I/O it
-        // paid for is outside the clock -- and three of those turn the prefetch off; the next cold
-        // window then pays the 7-10 ms fault path. This clock sees prefetch + gather.
+        // The latch's clock is taken HERE, before the page-in. This clock sees prefetch + gather.
         const w0: u64 = if (small and latchStage()) nowNs() else 0;
         const adapt = small and engramAdapt();
         var threads: usize = engramThreads(m);
@@ -2086,12 +1947,9 @@ pub const Model = struct {
                 probed = true;
             }
         }
-        // ROUND-463: the window's page-ins, only where they pay. The decode's rows are random single
-        // pages (44.5 us a fault at 16 workers against 10.2 for a sequential prompt's readahead), so
-        // starting the whole window's I/Os first takes the cold gather 2.62 -> 0.63 ms a two-row call
-        // and 5.75 -> 1.06 a four-row one. The prompt's rows are contiguous and the kernel already
-        // readahead-s them, so the large path is left alone; a single-threaded probe must not be
-        // prefetched (its time is the page-cache test); the warm band never reaches here.
+        // The window's page-ins, only where they pay. The prompt's rows are contiguous and the kernel already
+        // readahead-s them, so the large path is left alone; a single-threaded probe must not be prefetched (its
+        // time is the page-cache test); the warm band never reaches here.
         const pf_start: u64 = if (small and engramPrefetch()) nowNs() else 0;
         // The stage's own major faults, for the HOST_PROF line; the latch below uses the gather's clock.
         const ru0 = std.posix.getrusage(std.posix.rusage.SELF);
@@ -2111,8 +1969,8 @@ pub const Model = struct {
         const g0: u64 = if (small) nowNs() else 0;
         const misses0: u64 = if (m.host_prof) src.stats.misses else 0;
         if (!small and engramPipeRows(m, rows)) {
-            // ROUND-496: the first layer now, the second at its own layer (the GPU runs the earlier
-            // layers while that read happens). Same ids, same bytes, same decode -- only the clock moves.
+            // The first layer now, the second at its own layer (the GPU runs the earlier layers while that read
+            // happens). Same ids, same bytes, same decode -- only the clock moves.
             try m.stageLayer(rows, 0);
             m.engram_pending = true;
         } else {
@@ -2128,8 +1986,6 @@ pub const Model = struct {
         if (adapt) {
             const dt = nowNs() - t0;
             if (probed) {
-                // The single-threaded measurement is the page-cache probe: two slow ones in a row are a
-                // cold stream, and the workers take over for the next 16 calls.
                 if (dt > 1_500_000) {
                     m.engram_slow_n += 1;
                     if (m.engram_slow_n >= 2) {
@@ -2147,12 +2003,11 @@ pub const Model = struct {
             }
         }
         if (g0 != 0) {
-            // The latch's signal is the gather's own clock, taken AFTER the prefetch: the fault counters
-            // cannot serve, because a prefetched window's I/O is the madvise call and its reads are then
-            // minor faults, so the page-in hides the very coldness the latch must see. The off-side is
-            // delayed three windows: consecutive decode windows share most of their n-grams, so one
-            // resident window between two cold ones is the norm, not the stream turning warm. The warm
-            // band's gather is 0.05-0.19 ms and the prefetched cold window 0.4-1.0, so the gap is wide.
+            // The latch's signal is the gather's own clock, taken AFTER the prefetch: the fault counters cannot
+            // serve, because a prefetched window's I/O is the madvise call and its reads are then minor faults, so
+            // the page-in hides the very coldness the latch must see. The off-side is delayed three windows:
+            // consecutive decode windows share most of their n-grams, so one resident window between two cold ones
+            // is the norm, not the stream turning warm.
             const gather = nowNs() - (if (w0 != 0) w0 else g0);
             if (gather > 400_000) {
                 m.engram_pf_on = true;
@@ -2189,8 +2044,8 @@ pub const Model = struct {
     fn drafterRound(m: *Model, pending: u32, rows: u32) !View {
         if (m.drafter_ids == null) {
             if (m.drafter_ids) |old| old.deinit();
-            // ROUND-368: the buffer is sized for the widest form (the five-row arm), not for the rows
-            // the first call happened to use, so the arm cannot overflow it.
+            // The buffer is sized for the widest form (the five-row arm), not for the rows the first call happened
+            // to use, so the arm cannot overflow it.
             m.drafter_ids = try m.device.buffer(@max((rows + 1) * 4, 6 * 4), mtl.ResourceOptions.shared);
             m.residency.add(m.drafter_ids.?);
         }
@@ -2269,8 +2124,8 @@ pub const Model = struct {
     }
 
     fn project(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output) !void {
-        // ROUND-520: the prompt-row int8 twin. Decode and every small chunk keep the trellis, so the gate is the
-        // call's own row count; the sidecar is attached only for the attention's dense projections.
+        // The prompt-row int8 twin. Decode and every small chunk keep the trellis, so the gate is the call's own
+        // row count; the sidecar is attached only for the attention's dense projections.
         if (matrix.int8) |side| {
             if (rows >= 1024 and std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
                 try exl3.encodePrefillInt8(&m.pipelines.projection, enc, matrix, side, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output }, matrix.int8_direct);
@@ -2282,18 +2137,16 @@ pub const Model = struct {
         enc.barrier();
     }
 
-    /// ROUND-422 (the lever): the same projection with the CALLER's eight-row dense hint -- the
-    /// tensor-unit dense tile from eight rows up instead of the shipped sixty-four. The drafter's
-    /// conditioning tap projection is the one caller that asks: its 128-row window wraps, so half the
-    /// rounds ran the smaller piece on the general/shared body (2.353 ms) instead of the tile (0.869 ms).
+    /// The same projection with the CALLER's eight-row dense hint -- the tensor-unit dense tile from eight rows up
+    /// instead of the shipped sixty-four.
     fn projectDense8(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output) !void {
         try exl3.encode(&m.pipelines.projection, enc, matrix, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output, .dense8 = true });
         enc.barrier();
     }
 
-    /// ROUND-362 instrument: the projection's own three views -- the input it reads, the rotated input it
-    /// leaves in the scratch, and the sums the GEMM wrote -- dumped where the call made them, so a row's
-    /// fault is localised to the stage that produced it.
+    /// The projection's own three views -- the input it reads, the rotated input it leaves in the scratch, and the
+    /// sums the GEMM wrote -- dumped where the call made them, so a row's fault is localised to the stage that
+    /// produced it.
     fn projectDebug(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output, b: mtl.Buffer) !void {
         try exl3.encode(&m.pipelines.projection, enc, matrix, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output });
         enc.barrier();
@@ -2307,7 +2160,7 @@ pub const Model = struct {
         enc.barrier();
     }
 
-    /// ROUND-362: the wo_a group's own GEMM sums, before the inverse rotation, where the overflow is born.
+    /// The wo_a group's own GEMM sums, before the inverse rotation, where the overflow is born.
     fn projectDebugSums(m: *Model, enc: mtl.ComputeEncoder, matrix: exl3.Matrix, x: View, y: View, rows: u32, xs: usize, ys: usize, output: exl3.Output, b: mtl.Buffer) !void {
         try exl3.encode(&m.pipelines.projection, enc, matrix, convert(x), convert(y), m.workspace.projection(), .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output });
         enc.barrier();
@@ -2318,9 +2171,8 @@ pub const Model = struct {
         enc.barrier();
     }
 
-    /// Rows a routed expert's tensor-unit tile covers (TF_DSV41_MOE_TILE_ROWS, 0 = the kernel's 64).
-    /// A taller tile decodes each weight once for more rows; it is the routed stage's one free shape.
-    /// Passes a routed dispatch runs for measurement: TF_DSV41_DOUBLE_EXPERTS=N (2 when set without a value).
+    /// Rows a routed expert's tensor-unit tile covers (TF_DSV41_MOE_TILE_ROWS, 0 = the kernel's 64). A taller tile
+    /// decodes each weight once for more rows; it is the routed stage's one free shape.
     fn expertPasses() u32 {
         const v = std.c.getenv("TF_DSV41_DOUBLE_EXPERTS") orelse return 1;
         const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 2;
@@ -2328,8 +2180,8 @@ pub const Model = struct {
     }
 
     fn moeTileRows() u32 {
-        // ROUND-348: the grouped plan pads each expert's block to the tile's own width, so the plan's tile
-        // and the routed GEMM's tile are one number (64 by default, 128 for the taller tile).
+        // The grouped plan pads each expert's block to the tile's own width, so the plan's tile and the routed
+        // GEMM's tile are one number (64 by default, 128 for the taller tile).
         return expert_groups.tileRows();
     }
 
@@ -2337,16 +2189,15 @@ pub const Model = struct {
     /// the chunk, the scan over the stage's ring plus that chunk with no compressor and no indexer, the eight `wo_a`
     /// slices, `wo_b`, and the publish. Its big scratch lives in `.logits` from row 1 on.
     fn draftAttention(m: *Model, enc0: mtl.ComputeEncoder, blk: *const weights.Layer, state: *kv.cache.State, slot: u32, layer: u32, rows: u32, position: u32, dbg: ?mtl.Buffer, prof: ?*CondProf) !void {
-        // ROUND-423 (the instrument): the local copy of the encoder -- the split replaces it, so the
-        // parts below encode into the fresh one.
+        // The local copy of the encoder -- the split replaces it, so the parts below encode into the fresh one.
         var enc = enc0;
         const p = &m.pipelines;
         const c = m.cfg;
         const ws = &m.workspace;
         const aw = &m.attention_workspace;
         const q_width = c.heads * c.head_dim;
-        // ROUND-385: the trunk's layer rope spectrum -- the tap layers (37..39) pool with ratio 2, so
-        // their keys carry the COMPRESSED spectrum; the drafter's query and its own rows must match it.
+        // The trunk's layer rope spectrum -- the tap layers (37..39) pool with ratio 2, so their keys carry the
+        // COMPRESSED spectrum; the drafter's query and its own rows must match it.
         const tl0: u32 = if (37 + layer < m.weights.layers.len) 37 + layer else m.weights.layers.len - 1;
         const ring_spectrum: rope.Spectrum = if (mtpTrunkRing() == 0)
             .normal
@@ -2357,30 +2208,21 @@ pub const Model = struct {
         const qr = aw.view(.qr);
         const raw = aw.view(.raw_kv);
         const query = aw.view(.query);
-        // ROUND-362: the comparator's draft attention takes the rope forward on q and k, the inverse on the
-        // output, and the score scale 1/sqrt(head_dim) (mlx-serve's dsparkAttention, MIT/Apache-2.0, attribution
-        // required). The draft had neither; TF_DSV41_DSPARK_ROPE=1 arms the port.
-        // ROUND-363: the comparator's dsparkAttention always ropes the drafter's q and k, inverse-ropes its
-        // output and scales the scores by 1/sqrt(head_dim) -- the engine's own default for the sparse attention.
-        // The port had none of the three; TF_DSV41_DSPARK_NO_ROPE / _SCALE1 restore the port's forms.
+        // The release's DSparkAttention ropes the draft queries and keys at their own positions, inverse-ropes the
+        // output and scales the scores by 1/sqrt(head_dim). TF_DSV41_DSPARK_NO_ROPE / _SCALE1 restore the earlier
+        // forms for a same-binary A/B.
         const dspark_rope = std.c.getenv("TF_DSV41_DSPARK_NO_ROPE") == null;
-        // ROUND-363: the comparator's dsparkAttention scales the scores by 1/sqrt(head_dim) -- the engine's own
-        // default for the sparse attention -- but the port passed 1.0, so the drafter's softmax was 22.6x too
-        // sharp. TF_DSV41_DSPARK_SCALE arms the correct scale on its own (the rope flag keeps its old coupling).
+        // TF_DSV41_DSPARK_SCALE arms the correct scale on its own (the rope flag keeps its old coupling).
         const dspark_scale = std.c.getenv("TF_DSV41_DSPARK_SCALE1") == null;
-        // ROUND-365: the comparator's dsparkAttention gives every draft row ONE position (a scalar p0) and no
-        // mask over the draft rows, so its four noise rows are the same row -- a fixed base distribution the
-        // Markov bigram bias then shifts per step. Ours gave row k the position position+k and the sparse
-        // kernel masked the chunk causally, so the four noise rows were four different rows.
+        // The release gives every draft row its own consecutive position (its rope slice starts after the main
+        // sequence) and its draft rows attend to all of the block's draft keys (the top-k index list carries every
+        // draft key for every draft row). TF_DSV41_DSPARK_CHUNK_ALL shares one rope step and drops the draft mask,
+        // the earlier one-position/whole-block form, for a same-binary A/B.
         const dspark_chunk_all = std.c.getenv("TF_DSV41_DSPARK_CHUNK_ALL") != null;
-        // ROUND-375: THE COMPARATOR'S DRAFT ROWS ARE AT CONSECUTIVE POSITIONS (`row + off` in its rope
-        // kernel) AND ITS ATTENTION OVER THE DRAFT ROWS IS NONCAUSAL (its dsparkAttention concatenates the
-        // main rows' keys with the draft rows' own keys and takes the softmax over all of them). ROUND-365
-        // read the comparator as giving every draft row ONE position, and armed both halves together
-        // (TF_DSV41_DSPARK_CHUNK_ALL: the rope's step 0 AND the mask off) -- so the mask was never priced
-        // on its own. TF_DSV41_DSPARK_NO_CHUNK_MASK arms the mask alone (the comparator's form).
+        // The draft rows' own mask: the release's draft attention is noncausal across the block, so the mask
+        // (TF_DSV41_DSPARK_NO_CHUNK_MASK unset) is the earlier causal form; the arm drops it alone.
         const dspark_no_chunk_mask = std.c.getenv("TF_DSV41_DSPARK_NO_CHUNK_MASK") != null;
-        // ROUND-362 instrument: the drafter block's own matrix shapes and the config's strides.
+        // The drafter block's own matrix shapes and the config's strides.
         if (std.c.getenv("TF_DSV41_MTP_DEBUG_ROWS") != null) std.log.info(
             "mtp shapes: wq_a k={d} n={d} halves={d} cb={d} | wkv k={d} n={d} halves={d} cb={d} | wq_b k={d} n={d} halves={d} cb={d} || hidden={d} head_dim={d} q_lora={d} heads={d} eps={d}",
             .{ blk.attn.wq_a.k, blk.attn.wq_a.n, blk.attn.wq_a.width.halves, @backingInt(blk.attn.wq_a.codebook), blk.attn.wkv.k, blk.attn.wkv.n, blk.attn.wkv.width.halves, @backingInt(blk.attn.wkv.codebook), blk.attn.wq_b.k, blk.attn.wq_b.n, blk.attn.wq_b.width.halves, @backingInt(blk.attn.wq_b.codebook), c.hidden, c.head_dim, c.q_lora, c.heads, c.eps },
@@ -2409,7 +2251,7 @@ pub const Model = struct {
         if (prof) |pf| {
             if (pf.blk_on) pf.split("blk", "attn/rope_k", layer, &enc);
         }
-        // ROUND-362 instrument: the key rows the pack reads, and the query's low-rank stage.
+        // The key rows the pack reads, and the query's low-rank stage.
         if (dbg) |b| {
             if (layer == 0) {
                 ops.encodeDump(enc, &p.ops, raw, .{ .buffer = b, .offset = mtp_dbg_raw * 4 }, rows * c.head_dim, true);
@@ -2424,17 +2266,6 @@ pub const Model = struct {
         if (dbg) |b| {
             if (layer == 0) ops.encodeDump(enc, &p.ops, query, .{ .buffer = b, .offset = mtp_dbg_qpre * 4 }, rows * q_width, true);
         }
-        // ROUND-376: the comparator's per-head UNWEIGHTED query RMS (mlx-serve's dsparkAttention: the
-        // query's heads are normalized before the rope; MIT/Apache-2.0 -- the attribution rides the ported
-        // line). The port had none, so the drafter's softmax ran over whatever scale wq_b produced -- and
-        // the drafter's wq_b is a different matrix from the trunk's, so its scale is different too. The
-        // rows are the query's heads, so the flat [rows*heads, head_dim] layout is the [rows, heads,
-        // head_dim] one: one dispatch, in place.
-        if (mtpQRmsOn()) {
-            const ones = m.q_ones orelse return error.MissingQueryOnes;
-            ops.encodeRms(enc, &p.ops, query, .{ .buffer = ones, .offset = 0 }, query, .{ .rows = rows * c.heads, .width = c.head_dim, .x_stride = c.head_dim, .y_stride = c.head_dim, .eps = c.eps, .weight_f32 = true });
-            enc.barrier();
-        }
         if (dspark_rope) {
             try p.attention.rotary.encode(enc, query, .{ .rows = rows, .heads = c.heads, .width = c.head_dim, .rotary = c.rope_dim, .stride = q_width, .position = position, .step = if (dspark_chunk_all) 0 else 1, .inverse = @intFromBool(false), .spectrum = ring_spectrum });
         }
@@ -2447,11 +2278,9 @@ pub const Model = struct {
         if (prof) |pf| {
             if (pf.blk_on) pf.split("blk", "attn/pack", layer, &enc);
         }
-        // ROUND-385 (the arm): THE DRAFTER'S ATTENTION CAN READ THE MAIN MODEL'S KEY RING.  The trunk's
-        // layer ring holds the main model's keys for the last 128 positions, roped at their own positions
-        // -- the comparator's commitMain form (its draft attention reads the MAIN rows' keys).  Ours read
-        // the DRAFTER's own ring: three projected conditioning rows plus the drafter's own four rows -- a
-        // context of seven rows against the main model's 128.
+        // The release's DSparkAttention reads the main model's keys for the window (`wkv(main_x)`, roped at the
+        // main positions, written one row a step into its ring). The drafter's own ring carries three projected
+        // conditioning rows plus the drafter's own rows; TF_DSV41_MTP_TRUNK_RING selects the main ring instead.
         const ring_view: View = switch (mtpTrunkRing()) {
             1 => blk: {
                 if (slot >= m.caches.len) return error.InvalidLaneSlot;
@@ -2474,8 +2303,8 @@ pub const Model = struct {
         if (prof) |pf| {
             if (pf.blk_on) pf.split("blk", "attn/invrope", layer, &enc);
         }
-        // ROUND-362 instrument: the decoded key table the scan read (the ring's 128 rows, then the chunk's five)
-        // and the attention's own output.
+        // The decoded key table the scan read (the ring's 128 rows, then the chunk's five) and the attention's own
+        // output.
         if (dbg) |b| {
             if (layer == 0) {
                 ops.encodeDump(enc, &p.ops, aw.dense(), .{ .buffer = b, .offset = mtp_dbg_dense * 4 }, 133 * c.head_dim, true);
@@ -2484,14 +2313,11 @@ pub const Model = struct {
         }
         const grouped = ws.view(.logits).shifted(129280 * 4);
         const per_group = q_width / blk.attn.wo_a.len;
-        // ROUND-423 (the LEVER): THE EIGHT OUTPUT GROUPS IN ONE INDEXED DISPATCH -- the trunk's own form
-        // (attention.zig's `wo_a_descriptors` path, shipped since ROUND-45 and bit-identical to the eight
-        // separate projections, ROUND-45's receipt and the `wo_a_fusion` reference test). The drafter's
-        // layout is the trunk's: q is row-major, so `rows * o_groups` rows of `per_group` are exactly the
-        // (row, group) slices, and `grouped` is the same row-major layout at `o_lora`. The drafter's eight
-        // slices are the same shape as the trunk's (k 4096, n 1024). The eight separate calls were the
-        // drafter's single biggest term (0.329 ms a block, 20 % of the block).
-        // TF_DSV41_NO_FUSE_DRAFT_WO_A=1 restores the eight separate projections for a same-binary A/B.
+        // THE EIGHT OUTPUT GROUPS IN ONE INDEXED DISPATCH -- the trunk's own form. The drafter's layout is the
+        // trunk's: q is row-major, so `rows * o_groups` rows of `per_group` are exactly the (row, group) slices,
+        // and `grouped` is the same row-major layout at `o_lora`. The drafter's eight slices are the same shape as
+        // the trunk's (k 4096, n 1024). TF_DSV41_NO_FUSE_DRAFT_WO_A=1 restores the eight separate projections for a
+        // same-binary A/B.
         const fuse_wo_a = blk.attn.wo_a_descriptors != null and rows <= 8 and dbg == null and
             std.c.getenv("TF_DSV41_NO_FUSE_DRAFT_WO_A") == null;
         if (fuse_wo_a) {
@@ -2505,9 +2331,9 @@ pub const Model = struct {
                 .routes = .{ .ids = convert(aw.idMap()), .repeat = 1 },
             });
         } else for (blk.attn.wo_a, 0..) |matrix, group| {
-            // ROUND-362: the grouped output is row-major at group_output (eight o_lora groups a row), as the
-            // backbone's call has it; the row stride was c.o_lora here, so the groups overlapped and the wo_b
-            // read stale rows -- the drafter's filler rows went NaN. Fixed.
+            // The grouped output is row-major at group_output (eight o_lora groups a row), as the backbone's call
+            // has it; the row stride was c.o_lora here, so the groups overlapped and the wo_b read stale rows --
+            // the drafter's filler rows went NaN. Fixed.
             if (dbg) |b| {
                 if (layer == 0 and group == 0)
                     try m.projectDebugSums(enc, matrix, query.shifted(group * per_group * 2), grouped.shifted(group * c.o_lora * 2), rows, q_width, c.o_groups * c.o_lora, .bf16, b)
@@ -2521,7 +2347,7 @@ pub const Model = struct {
         if (prof) |pf| {
             if (pf.blk_on) pf.split("blk", "attn/wo_a", layer, &enc);
         }
-        // ROUND-362 instrument: the wo_a output (the wo_b input) where the NaN is born.
+        // The wo_a output (the wo_b input) where the NaN is born.
         if (dbg) |b| {
             if (layer == 0) ops.encodeDump(enc, &p.ops, grouped, .{ .buffer = b, .offset = mtp_dbg_grouped * 4 }, rows * c.o_groups * c.o_lora, true);
         }
@@ -2530,12 +2356,9 @@ pub const Model = struct {
         if (prof) |pf| {
             if (pf.blk_on) pf.split("blk", "attn/wo_b", layer, &enc);
         }
-        // ROUND-382 (arm): THE DRAFT'S OWN ROWS MUST NOT BE PUBLISHED INTO THE MAIN RING. The comparator's
-        // DSpark ring holds ONLY the committed main rows (mlx-serve's commitMain); the draft rows are never
-        // written into it. Ours writes the draft's own rows (the pending token and the chain's noise rows) into
-        // the MAIN model's KV ring at the positions they would occupy, so they displace the main history the
-        // drafter attends over -- and a REJECTED draft leaves its noise rows there. TF_DSV41_NO_DRAFT_PUBLISH=1
-        // skips the publish (the arm).
+        // The release publishes only the main rows into the draft ring: each step writes `main_kv` at
+        // `start_pos % win`, never the draft rows. Ours also publishes the draft's own rows into the main ring at
+        // the positions they would occupy; TF_DSV41_NO_DRAFT_PUBLISH=1 skips that publish (the arm).
         if (std.c.getenv("TF_DSV41_NO_DRAFT_PUBLISH") == null)
             try p.attention.cache.publishWindow(enc, chunk, try state.ring(layer), rows, position);
         enc.barrier();
@@ -2544,29 +2367,25 @@ pub const Model = struct {
         }
     }
 
-    /// ROUND-422 (an INSTRUMENT, default-inert): the drafter's conditioning, split into its own command
-    /// buffers so that each part's GPU window can be read on its own. The record's conditioning price is
-    /// ONE number for seventeen dispatches (the tap projection, the norm, and three blocks of {wkv, the
-    /// kv-norm, the rope, the pack, the publish}), so the split asks WHICH of them carries the 4.37 ms
-    /// -- and, because the split's own waits expose the host's encode time per part, whether the
-    /// conditioning's cost is GPU work at all.
+    /// The drafter's conditioning, split into its own command buffers so that each part's GPU window can be read on
+    /// its own.
     const CondProf = struct {
         queue: mtl.Queue,
         cb: mtl.CommandBuffer,
         enc: mtl.ComputeEncoder,
         on: bool,
-        /// ROUND-423: the BLOCKS' split (TF_DSV41_BLOCK_PROF=1) -- the drafter's three blocks have never
-        /// been split, and they are the larger half of the drafter's forward.
+        /// The BLOCKS' split (TF_DSV41_BLOCK_PROF=1) -- the drafter's three blocks have never been split, and they
+        /// are the larger half of the drafter's forward.
         blk_on: bool = false,
-        /// ROUND-423: the block the parts belong to (the MoE's own calls do not know it).
+        /// The block the parts belong to (the MoE's own calls do not know it).
         block: u32 = 0,
         total_ms: f64 = 0,
         parts: u32 = 0,
 
-        /// End the buffer, commit it, wait, print the part's GPU window, and start a fresh buffer.
-        /// ROUND-423: the encoder comes by POINTER, so the caller's own copy is updated too -- the blocks'
-        /// parts are cut from inside the attention and the MoE, whose callers encode into the fresh
-        /// encoder. The tag names the section ("cond" or "blk"), the label the part.
+        /// End the buffer, commit it, wait, print the part's GPU window, and start a fresh buffer. The encoder
+        /// comes by POINTER, so the caller's own copy is updated too -- the blocks' parts are cut from inside the
+        /// attention and the MoE, whose callers encode into the fresh encoder. The tag names the section ("cond" or
+        /// "blk"), the label the part.
         fn split(self: *CondProf, tag: []const u8, label: []const u8, block: u32, enc: *mtl.ComputeEncoder) void {
             enc.end();
             self.cb.commit();
@@ -2583,18 +2402,13 @@ pub const Model = struct {
     };
 
     /// TF_DSV41_MTP_DRAFTS: five rows a round (the pending token and four fillers) through three blocks of the
-    /// drafter's own weights, then the shared head; the head writes from `.logits` row 2 on.
-    /// ROUND-385: THE FIRST DRAFT's ACCEPTANCE, smoothed -- the adaptive depth policy's signal.  It is
-    /// the fraction of rounds whose kept count is at least two (the pending token plus the first
-    /// draft), and it is the SAME at every depth (the yield is not: it scales with the depth, so the
-    /// novel text yields 0.62 at depth 1 and 1.22 at depth 3 while the predictable text yields 1.07 and
-    /// 3.02 -- one threshold cannot separate the texts).  The novel text takes its first draft 62.37 %
-    /// of the time and the predictable text 99 %.
-    /// ROUND-479: the policy's warm-up length -- a running mean over the first `k` samples, then the
-    /// shipped EMA.  ROUND-477 traced a first-draft miss at the request's start putting the EMA ten
-    /// accepted rounds behind (21.9k: shipped 43.80 tok/s against fixed depth 3's 48.10); two hits read
-    /// 0.67 and three 0.75, so the band is crossed by round 4.  `TF_DSV41_MTP_ADAPT_WARM=0` is the pure
-    /// EMA (the same-binary control).
+    /// drafter's own weights, then the shared head; the head writes from `.logits` row 2 on. THE FIRST DRAFT's
+    /// ACCEPTANCE, smoothed -- the adaptive depth policy's signal. It is the fraction of rounds whose kept count is
+    /// at least two (the pending token plus the first draft), and it is the SAME at every depth (the yield is not:
+    /// it scales with the depth, so the novel text yields 0.62 at depth 1 and 1.22 at depth 3 while the predictable
+    /// text yields 1.07 and 3.02 -- one threshold cannot separate the texts). The policy's warm-up length -- a
+    /// running mean over the first `k` samples, then the shipped EMA. `TF_DSV41_MTP_ADAPT_WARM=0` is the pure EMA
+    /// (the same-binary control).
     var mtp_warm_cache: ?u32 = null;
     fn mtpWarmRounds() u32 {
         if (mtp_warm_cache) |v| return v;
@@ -2607,16 +2421,13 @@ pub const Model = struct {
         return mtp_warm_cache.?;
     }
 
-    /// ROUND-385: the lane's first-draft acceptance (the adaptive depth policy's signal), smoothed.
+    /// The lane's first-draft acceptance (the adaptive depth policy's signal), smoothed.
     pub fn noteAcceptSlot(m: *Model, slot: u32, hit: bool) void {
         if (slot >= m.mtp_accept_slot.len) return;
         const v: f64 = if (hit) 1.0 else 0.0;
-        // ROUND-386: THE FIRST SAMPLE SETS THE SIGNAL (a request's first round is a valid
-        // observation of the first draft's acceptance).  The pure-EMA form (the signal starts at zero)
-        // costs the PREDICTABLE text ten rounds of the cheap window before it passes UP -- a tenth of
-        // the warm probe's rounds at the cheap rate.  With the corrected acceptance test the first
-        // sample IS the signal's value: the predictable text's first round hits 99 % of the time (the
-        // deep window at once) and the novel text's misses 38 % of the time (the cheap window at once).
+        // THE FIRST SAMPLE SETS THE SIGNAL (a request's first round is a valid observation of the first draft's
+        // acceptance). The pure-EMA form (the signal starts at zero) costs the PREDICTABLE text ten rounds of the
+        // cheap window before it passes UP -- a tenth of the warm probe's rounds at the cheap rate.
         if (m.mtp_accept_seen_slot[slot] == 0) {
             m.mtp_accept_slot[slot] = v;
         } else if (m.mtp_accept_seen_slot[slot] < mtpWarmRounds()) {
@@ -2628,11 +2439,11 @@ pub const Model = struct {
         m.mtp_accept_seen_slot[slot] += 1;
     }
 
-    /// ROUND-459: THE ROUND'S OWN PER-DRAFT ACCEPTANCE as the policy's signal (the same EMA and the same
-    /// first-sample rule as `noteAcceptSlot`).  At depth 1 it IS the first-draft hit (kept/1); at depth 3 it
-    /// falls to ~0.41 on novel text -- where the first-draft sample stays ~0.99 because a deep window's first
-    /// draft is usually accepted while its second and third are not.  That is the depth-awareness the policy
-    /// needs to leave the deep window when the deep window stops paying.
+    /// THE ROUND'S OWN PER-DRAFT ACCEPTANCE as the policy's signal (the same EMA and the same first-sample rule as
+    /// `noteAcceptSlot`). At depth 1 it IS the first-draft hit (kept/1); at depth 3 it falls to ~0.41 on novel text
+    /// -- where the first-draft sample stays ~0.99 because a deep window's first draft is usually accepted while
+    /// its second and third are not. That is the depth-awareness the policy needs to leave the deep window when the
+    /// deep window stops paying.
     pub fn noteAcceptRatioSlot(m: *Model, slot: u32, ratio: f64) void {
         if (slot >= m.mtp_round_slot.len) return;
         const v = std.math.clamp(ratio, 0.0, 1.0);
@@ -2644,19 +2455,19 @@ pub const Model = struct {
         m.mtp_round_seen_slot[slot] += 1;
     }
 
-    /// ROUND-459: the round's per-draft acceptance (the hybrid policy's stay-deep signal).
+    /// The round's per-draft acceptance (the hybrid policy's stay-deep signal).
     pub fn mtpRoundSlot(m: *Model, slot: u32) f64 {
         if (slot >= m.mtp_round_slot.len) return 0;
         return m.mtp_round_slot[slot];
     }
 
-    /// ROUND-385: the lane's first-draft acceptance (the adaptive depth policy's signal).
+    /// The lane's first-draft acceptance (the adaptive depth policy's signal).
     pub fn mtpAcceptSlot(m: *Model, slot: u32) f64 {
         if (slot >= m.mtp_accept_slot.len) return 0;
         return m.mtp_accept_slot[slot];
     }
 
-    /// ROUND-386: the signal is per REQUEST -- a new request starts from a clean signal.
+    /// The signal is per REQUEST -- a new request starts from a clean signal.
     pub fn resetAcceptSlot(m: *Model, slot: u32) void {
         if (slot >= m.mtp_accept_slot.len) return;
         m.mtp_accept_slot[slot] = 0;
@@ -2671,8 +2482,8 @@ pub const Model = struct {
         // conditioning. Both leave the engine's hand-off and verify in place, so they separate the machinery
         // from the draft round's own execution.
         if (std.c.getenv("TF_DSV41_MTP_STUB") != null) return .{ 0, 0, 0, 0 };
-        // ROUND-493: the pending row is this round's first verified row; start its page-in now, under the
-        // drafter's own GPU window, instead of at the verify's stageRows.
+        // The pending row is this round's first verified row; start its page-in now, under the drafter's own GPU
+        // window, instead of at the verify's stageRows.
         if (engramPendingOn()) prefetchPending(m, slot, pending);
         // The draft round runs its own boundaries through the shared coefficient views and the stream parity: a
         // main forward re-initialises them, but the *parity* chooses which stream the next boundary reads, so the
@@ -2690,18 +2501,14 @@ pub const Model = struct {
         // ROUND 529: the conditioning's cursor is THIS slot's committed position, not lane 0's.
         const slot_pos = m.caches[slot].position;
         state.position = slot_pos;
-        // ROUND-368: THE DRAFTER RUNS `depth + 1` ROWS, NOT FIVE.
-        // The chain's step s reads the logits row s and the bias of the token before it, and writes the pick
-        // into IDS[s+1]; the hand-off takes picks 0..count-1 (the lane's depth, at most three). The five-row
-        // form computed two rows whose picks (the fourth and the fifth) the hand-off never read, and every
-        // extra row the drafter runs is published into its own 128-row attention window at its own position --
-        // so the extra rows are not free: they displace the real history the drafter's rows attend over.
-        // The rows are also NOT independent (a later row sees the earlier rows' filler keys in the ring), so
-        // the row count moves the picks: the measured acceptance is 0.689 (3 rows), 0.906 (4) and 0.756 (5)
-        // accepted drafts a round, and the rate follows it (26.50 / 30.13 / 27.50 tok/s).
-        // ⇒ FOUR ROWS (depth + 1) IS THE LANDING: +9.6 % on the MTP decode rate. The rows are the ones the
-        // chain reads plus the one the chain's own step needs, so `depth + 1` rows is the form.
-        // TF_DSV41_MTP_ROWS restores the five-row form for a same-binary A/B.
+        // THE DRAFTER RUNS `depth + 1` ROWS, NOT FIVE. The chain's step s reads the logits row s and the bias of
+        // the token before it, and writes the pick into IDS[s+1]; the hand-off takes picks 0..count-1 (the lane's
+        // depth, at most three). The five-row form computed two rows whose picks (the fourth and the fifth) the
+        // hand-off never read, and every extra row the drafter runs is published into its own 128-row attention
+        // window at its own position -- so the extra rows are not free: they displace the real history the
+        // drafter's rows attend over. The rows are the ones the chain reads plus the one the chain's own step
+        // needs, so `depth + 1` rows is the form. TF_DSV41_MTP_ROWS restores the five-row form for a same-binary
+        // A/B.
         const n: u32 = if (std.c.getenv("TF_DSV41_MTP_ROWS")) |v|
             (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 5)
         else
@@ -2709,8 +2516,8 @@ pub const Model = struct {
         var out: [4]u32 = @splat(0);
         var cb = m.queue.commandBuffer();
         var enc = cb.compute(if (concurrentOn()) .concurrent else .serial);
-        // ROUND-422 (an INSTRUMENT, default-inert): the conditioning's per-part GPU split, and the host's
-        // own encode time against the GPU's window. Neither flag changes a byte of the shipped path.
+        // The conditioning's per-part GPU split, and the host's own encode time against the GPU's window. Neither
+        // flag changes a byte of the shipped path.
         var cond_prof = CondProf{ .queue = m.queue, .cb = cb, .enc = enc, .on = std.c.getenv("TF_DSV41_COND_PROF") != null, .blk_on = std.c.getenv("TF_DSV41_BLOCK_PROF") != null };
         const host_prof = std.c.getenv("TF_DSV41_HOST_PROF") != null;
         const t_start: f64 = if (host_prof) mtl.clock.seconds() else 0;
@@ -2721,30 +2528,19 @@ pub const Model = struct {
         // ring used to hold only the current pass's row (`taps_n = rows = 1` at decode), so 127 of the 128 window
         // slots the draft rows read were uninitialised packed cache and the filler rows went NaN.
         const pos_now = slot_pos;
-        // ROUND-375: THE CAPTURE'S ROWS ARE THE LAST `taps_rows_last` ROWS OF THE LAST FORWARD, so their
-        // OWN positions are [pos_now - cap_n, pos_now). The port published the capture's valid PREFIX at
-        // [pos_now - tail, pos_now) -- the positions the capture's SUFFIX would have had -- so a round
-        // that kept one row of a four-row window shifted the whole context (the conditioning's rows, the
-        // ring's slots, and the drafter's own rows' rope) by three positions, and the shift VARIED with
-        // the round (the rows kept), so the ring's history was mutually mispositioned. The comparator's
-        // form (mlx-serve's commitMain/dsparkFinish, MIT/Apache-2.0, attribution required) commits the
-        // main rows at THEIR positions (its kv_row kernel ropes row l at l + off) and ropes the draft
-        // rows at the next token's position.
+        // The captured rows are the last `taps_rows_last` rows of the last forward, at their own positions
+        // [pos_now - cap_n, pos_now). The release writes each main row at its own position and ropes the draft
+        // rows at the positions after the sequence; the earlier form published the valid prefix at the suffix's
+        // positions, shifting the context by the rows the round kept.
         const cap_n: u32 = @min(m.taps_rows_last, 128);
         const cap_pos: u32 = pos_now -| cap_n;
         const true_pos = dsparkTruePosOn();
         // The capture's valid rows: the rollback's prefix (the rejected rows' taps are not the committed
         // history), or the whole capture when no rollback ran (the whole window landed).
         const cap_rows: u32 = @min(@min(m.taps_rows_last, m.taps_n), 128);
-        // ROUND-383 (THE LANDING): THE CONDITIONING PUBLISHES THE CAPTURE'S WHOLE ROWS. The port published only
-        // the KEPT PREFIX of the capture (the comparator's commitMain form: mlx-serve writes the kept rows at
-        // their own positions, deepseek_v41.zig:5102), so the drafter's ring had a HOLE at every rejected
-        // position -- the slot then held whatever row was published 128 positions earlier. The landing publishes
-        // the CAPTURE'S WHOLE (the verify's rows, the rejected ones included) at their own positions: the ring
-        // holds the MAIN model's rows everywhere, dense.
-        // TF_DSV41_DSPARK_CAPTURE_ALL=0 restores the port's prefix form (the receipt); =2 is the bisect arm
-        // (the capture's whole rows computed, the prefix published -- it is bit-identical to the port's form,
-        // so the landing's whole effect is the RING'S CONTENT).
+        // The conditioning publishes the capture's whole rows at their own positions, so the ring holds the main
+        // model's rows everywhere; the earlier form published only the kept prefix, leaving a hole at every
+        // rejected position. TF_DSV41_DSPARK_CAPTURE_ALL=0 restores the prefix form.
         const dspark_capture_all: u32 = if (std.c.getenv("TF_DSV41_DSPARK_CAPTURE_ALL")) |v|
             (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1)
         else
@@ -2755,22 +2551,14 @@ pub const Model = struct {
             @min(m.taps_rows_valid, cap_rows)
         else
             cap_rows;
-        // The published rows' positions: the capture's own (the comparator's form) or the port's.
+        // The published rows' positions: the capture's own (the release's form) or the earlier shifted form.
         const pub_pos: u32 = if (true_pos) cap_pos else pos_now - tail;
-        // The drafter's own rows' rope position: the next token's position (the comparator ropes every
-        // draft row at st.n, the count of committed tokens) or the port's m.cache.position.
+        // The drafter's own rows' rope position: the next token's position (the release ropes every draft row at
+        // start_pos + seqlen + i) or the earlier slot position.
         const draft_pos: u32 = if (true_pos) cap_pos + tail else slot_pos;
-        // ROUND-361: the one-row conditioning is the default and the measured-best form: it is what mlx-serve's
-        // commitMain does (one row a main forward, at the current position, so the drafter's ring holds the history
-        // one row per position; MIT/Apache-2.0, attribution required). TF_DSV41_COND_ROWS rewrites the ring's whole
-        // window from the tap ring every round, and it MEASURES A LOSS: the accepted drafts a round 0.335 against
-        // 0.260 and the drafted rate 12.3-12.9 tok/s against 10.8, with the same reply. Its round-320 purpose (the
-        // drafter reading uninitialised ring slots) is void: the dense form does NOT remove the drafter's NaN
-        // filler rows, which are the acceptance's real root cause. The flag stays as an arm; do not set it.
-        // ROUND-385 (the arm): the windowed context's row count, and (with the aligned ring) the rows
-        // are the positions' own -- the ring's slots ARE the positions.  The count is rounded DOWN to a
-        // multiple of four so the dense multi-row body takes it (the one-row body would decode the
-        // weights once a row: the depth-2 parity hole, ROUND-384 section 5).
+        // The windowed context's row count. With the aligned ring the rows are the positions' own -- the ring's
+        // slots are the positions. The count is rounded down to a multiple of four so the dense multi-row body
+        // takes it; 1 keeps the one-row body.
         var nc: u32 = 1;
         if (condRowsWanted() != 0) {
             const have: u32 = if (condAlignOn()) @min(pos_now, 128) else @min(m.taps_n, pos_now);
@@ -2783,25 +2571,23 @@ pub const Model = struct {
             const raw = View{ .buffer = base, .offset = 128 * 5120 * 2 };
             const chunk = View{ .buffer = base, .offset = 128 * 5120 * 2 + 128 * 512 * 2 };
             // The ring is circular: the oldest live row is `first`, and the last `nA` rows are contiguous there.
-            // ROUND-385 (the arm): with the aligned ring the window's first row is the slot of the
-            // position pos_now - nc.
+            // With the aligned ring the window's first row is the slot of the position pos_now - nc.
             const first: u32 = if (condAlignOn()) (pos_now - nc) % 128 else (m.taps_row + 128 - nc) % 128;
             const n_a: u32 = @min(nc, 128 - first);
-            // ROUND-422: the eight-row dense hint -- this projection's window wraps, so the smaller of
-            // its two pieces runs on 1..63 rows, and the tile's gate is 64.
+            // The eight-row dense hint -- this projection's window wraps, so the smaller of its two pieces runs on
+            // 1..63 rows, and the tile's gate is 64.
             try m.projectDense8(enc, dspark.main_proj, .{ .buffer = m.taps, .offset = @as(usize, first) * 3 * 5120 * 2 }, cond, n_a, 3 * 5120, 5120, .bf16);
             if (n_a < nc)
                 try m.projectDense8(enc, dspark.main_proj, .{ .buffer = m.taps, .offset = 0 }, View{ .buffer = cond.buffer, .offset = cond.offset + @as(usize, n_a) * 5120 * 2 }, nc - n_a, 3 * 5120, 5120, .bf16);
             m.normalize(enc, cond, dspark.main_norm, cond, nc);
             enc.barrier();
-            // ROUND-422 (the instrument): the conditioning's parts, one command buffer each.
+            // The conditioning's parts, one command buffer each.
             if (cond_prof.on) cond_prof.split("cond", "tapproj+norm", 0, &enc);
             cb = cond_prof.cb;
-            // ROUND-426: THE THREE PER-BLOCK `wkv` PROJECTIONS AS ONE GROUPED INDEXED DISPATCH. The three
-            // matrices share the input window and k; each is 1.31 MB of trellis, and the shipped form makes
-            // three 8-threadgroup decodes in sequence. The grouped form lays the window out three times (one
-            // expert a 128-row tile group) and takes one dispatch with three times the threadgroups, so the
-            // same bytes decode in parallel. TF_DSV41_NO_COND_WKV_FUSE=1 restores the three calls (the A/B).
+            // THE THREE PER-BLOCK `wkv` PROJECTIONS AS ONE GROUPED INDEXED DISPATCH. The grouped form lays the
+            // window out three times (one expert a 128-row tile group) and takes one dispatch with three times the
+            // threadgroups, so the same bytes decode in parallel. TF_DSV41_NO_COND_WKV_FUSE=1 restores the three
+            // calls (the A/B).
             const hd = m.cfg.head_dim;
             const fuse_wkv = m.cond_wkv != null and dspark.cond_wkv_descriptors != null and
                 std.c.getenv("TF_DSV41_NO_COND_WKV_FUSE") == null;
@@ -2837,7 +2623,7 @@ pub const Model = struct {
                 if (!fuse_wkv) {
                     const cond_wkv_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_COND_WKV") != null) 2 else 1;
                     for (0..cond_wkv_passes) |_| try m.project(enc, blk.attn.wkv, cond, raw, nc, 5120, hd, .bf16);
-                    // ROUND-422 (the instrument): the conditioning's parts, one command buffer each.
+                    // The conditioning's parts, one command buffer each.
                     if (cond_prof.on) cond_prof.split("cond", "wkv", s_i, &enc);
                     cb = cond_prof.cb;
                 }
@@ -2846,18 +2632,17 @@ pub const Model = struct {
                 enc.barrier();
                 if (cond_prof.on) cond_prof.split("cond", "rms", s_i, &enc);
                 cb = cond_prof.cb;
-                // ROUND-385 (the arm): the 128-row conditioning branch roped NOTHING -- the comparator
-                // ropes the main rows' keys at their own positions before they enter the draft ring.
+                // The release roped the main rows' keys at their own positions before they enter the draft ring.
                 if (condRopeOn()) {
                     try p.attention.rotary.encode(enc, raw_g, .{ .rows = nc, .heads = 1, .width = hd, .rotary = m.cfg.rope_dim, .stride = hd, .position = pos_now - nc, .step = 1, .inverse = 0, .spectrum = .normal });
                     enc.barrier();
                 }
-                // ROUND-422 (the instrument): the conditioning's parts, one command buffer each.
+                // The conditioning's parts, one command buffer each.
                 if (cond_prof.on) cond_prof.split("cond", "rope", s_i, &enc);
                 cb = cond_prof.cb;
                 try p.attention.cache.encodePack(enc, raw_g, chunk, .{ .rows = nc, .width = hd, .stride = hd, .packed_stride = kv.cache.ring_stride, .block = 32, .kind = .window_fp8 });
                 enc.barrier();
-                // ROUND-422 (the instrument): the conditioning's parts, one command buffer each.
+                // The conditioning's parts, one command buffer each.
                 if (cond_prof.on) cond_prof.split("cond", "pack", s_i, &enc);
                 cb = cond_prof.cb;
                 try p.attention.cache.publishWindow(enc, chunk, try state.ring(s_i), nc, pos_now - nc);
@@ -2866,30 +2651,27 @@ pub const Model = struct {
                 cb = cond_prof.cb;
             }
         } else {
-            // ROUND-363: the comparator's commitMain ropes the committed main rows' keys at their own position
-            // before they enter the stage's ring (mlx-serve's kvRow with rope_plain.fwd, MIT/Apache-2.0). The
-            // port wrote them unroped, so the drafter attended over unroped keys while its own query was roped.
+            // The release ropes the committed main rows' keys at their own position before they enter the stage's
+            // ring (its DSparkAttention applies the rotary to `main_kv`); TF_DSV41_DSPARK_NO_RING_ROPE=1 restores
+            // the earlier unroped publish.
             const dspark_ring_rope = std.c.getenv("TF_DSV41_DSPARK_NO_RING_ROPE") == null;
             if (std.c.getenv("TF_DSV41_MTP_DEBUG_ROWS") != null) std.log.info(
-                "mtp cond: taps_row={d} taps_n={d} pos_now={d} publish_pos={d} tap_row={d} ring_rope={} || ROUND-375 cap_n={d} cap_pos={d} tail={d} valid={d} pub_pos={d} draft_pos={d} true_pos={}",
+                "mtp cond: taps_row={d} taps_n={d} pos_now={d} publish_pos={d} tap_row={d} ring_rope={} || cap_n={d} cap_pos={d} tail={d} valid={d} pub_pos={d} draft_pos={d} true_pos={}",
                 .{ m.taps_row, m.taps_n, pos_now, pos_now -| 1, (m.taps_row + 127) % 128, dspark_ring_rope, cap_n, cap_pos, tail, m.taps_rows_valid, pub_pos, draft_pos, true_pos },
             );
-            // ROUND-366: the conditioning publishes the taps ring's whole tail -- the rows the last capture
-            // kept, which are consecutive positions -- at their own positions. The port published ONE row a
-            // round, so a round that landed two tokens advanced the position by two and left the position
-            // between them unwritten: the drafter's 128-row window then held a row published 128 positions
-            // ago (with that old position's rope phase). After a prompt the first round published one of the
-            // prompt's 128 tail rows, so the window was uninitialised for the first 128 rounds.
-            // TF_DSV41_DSPARK_COND_ONE restores the port's one-row form.
-            // ROUND-367: the capture's rows are the ring's tail, but the no-re-feed port's rollback keeps
-            // only a PREFIX of the capture: the rejected rows' taps are not the committed history, so
-            // the conditioning publishes the prefix, not the tail.
-            // ROUND-375: the prefix's rows are the capture's FIRST rows, so their positions are the
-            // capture's own -- [cap_pos, cap_pos + tail) -- and the ring's slots follow from them. The
-            // port's [pos_now - tail, pos_now) are the SUFFIX's positions.
-            // The published rows are the ring's [base, base+tail); the capture's first row is its base,
-            // and the rows may wrap the ring's end -- then the second piece starts at row zero.
-            // ROUND-385 (the arm): with the aligned ring the capture's first row is the slot of the
+            // The conditioning publishes the taps ring's whole tail -- the rows the last capture kept, which are
+            // consecutive positions -- at their own positions. The port published ONE row a round, so a round that
+            // landed two tokens advanced the position by two and left the position between them unwritten: the
+            // drafter's 128-row window then held a row published 128 positions ago (with that old position's rope
+            // phase). After a prompt the first round published one of the prompt's 128 tail rows, so the window was
+            // uninitialised for the first 128 rounds. TF_DSV41_DSPARK_COND_ONE restores the port's one-row form.
+            // The capture's rows are the ring's tail, but the no-re-feed port's rollback keeps only a PREFIX of the
+            // capture: the rejected rows' taps are not the committed history, so the conditioning publishes the
+            // prefix, not the tail. The prefix's rows are the capture's FIRST rows, so their positions are the
+            // capture's own -- [cap_pos, cap_pos + tail) -- and the ring's slots follow from them. The port's
+            // [pos_now - tail, pos_now) are the SUFFIX's positions. The published rows are the ring's [base,
+            // base+tail); the capture's first row is its base, and the rows may wrap the ring's end -- then the
+            // second piece starts at row zero. With the aligned ring the capture's first row is the slot of the
             // position pos_now - tail (the kept prefix's first position).
             const base: u32 = if (condAlignOn())
                 (pos_now - tail) % 128
@@ -2897,14 +2679,13 @@ pub const Model = struct {
                 (m.taps_row + 128 - cap_rows) % 128
             else
                 (m.taps_row + 128 - tail) % 128;
-            // ROUND-383 (arm): the published rows are the capture's WHOLE (the main model's rows at their own
-            // positions, the rejected ones included) or only the kept prefix (the port's form, and the
-            // comparator's commitMain form). The publish's position is the capture's first row's position either
-            // way, so the rows land where they belong.
+            // The published rows are the capture's whole (the main model's rows at their own positions, the
+            // rejected ones included) or only the kept prefix (the earlier form). The publish's position is the
+            // capture's first row's position either way, so the rows land where they belong.
             const pub_rows: u32 = if (dspark_capture_all != 0) cap_rows else tail;
             const n_a: u32 = @min(pub_rows, 128 - base);
-            // ROUND-385: the doubling arm for the conditioning's tap projection (idempotent: the same
-            // input gives the same output, so the reply is unchanged and only the cost doubles).
+            // The doubling arm for the conditioning's tap projection (idempotent: the same input gives the same
+            // output, so the reply is unchanged and only the cost doubles).
             const cond_proj_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_COND_PROWS") != null) 2 else 1;
             for (0..cond_proj_passes) |_| try m.project(enc, dspark.main_proj, .{ .buffer = m.taps, .offset = @as(u64, base) * 3 * 5120 * 2 }, ws.view(.shared_down), n_a, 3 * 5120, 5120, .bf16);
             if (n_a < pub_rows) {
@@ -2922,12 +2703,10 @@ pub const Model = struct {
                 ops.encodeRms(enc, &p.ops, raw, tensor(blk.attn.kv_norm), raw, .{ .rows = pub_rows, .width = m.cfg.head_dim, .x_stride = m.cfg.head_dim, .y_stride = m.cfg.head_dim, .eps = m.cfg.eps });
                 enc.barrier();
                 if (dspark_ring_rope) {
-                    // ROUND-385 (the arm): THE PUBLISHED ROWS MUST ALL CARRY THEIR ROPE PHASE. The rope
-                    // covered `tail` rows (the kept prefix) while the pack wrote `pub_rows` rows (the
-                    // ROUND-383 landing publishes the capture's WHOLE rows), so every row past the first
-                    // was packed UNROPED: the drafter's attention read unroped keys against a roped query.
-                    // =1 ropes the published rows at pub_pos (the port's positions); =2 ropes them at
-                    // cap_pos (their OWN positions -- the comparator's form).
+                    // Every published row carries its rope phase. The rope covered `tail` rows (the kept prefix)
+                    // while the pack wrote `pub_rows`, so rows past the first were packed unroped and the drafter's
+                    // attention read unroped keys against a roped query. =1 ropes at pub_pos (the earlier
+                    // positions); =2 ropes at cap_pos (their own positions, the release's form).
                     const rope_mode = mtpRopeAllOn();
                     const rope_rows: u32 = if (rope_mode != 0) pub_rows else tail;
                     const rope_pos: u32 = if (rope_mode == 2) cap_pos else pub_pos;
@@ -2936,19 +2715,18 @@ pub const Model = struct {
                 }
                 try p.attention.cache.encodePack(enc, raw, chunk, .{ .rows = pub_rows, .width = m.cfg.head_dim, .stride = m.cfg.head_dim, .packed_stride = kv.cache.ring_stride, .block = 32, .kind = .window_fp8 });
                 enc.barrier();
-                // ROUND-375: the instrument arm TF_DSV41_DSPARK_NO_COND skips the publish, so the drafter's
-                // ring keeps whatever it held (the prompt's tail) -- a STALE context. If the drafter's head
-                // input and the trunk's barely move, the ring's contents never reach the drafter's output.
+                // The instrument arm TF_DSV41_DSPARK_NO_COND skips the publish, so the drafter's ring keeps
+                // whatever it held (the prompt's tail) -- a STALE context. If the drafter's head input and the
+                // trunk's barely move, the ring's contents never reach the drafter's output.
                 if (std.c.getenv("TF_DSV41_DSPARK_NO_COND") == null)
-                    // ROUND-383 (bisect): the value 2 computes the capture's whole rows but publishes only the
-                    // kept prefix, so the arm separates the ring's CONTENT from the extra rows' COMPUTATION.
+                    // The value 2 computes the capture's whole rows but publishes only the kept prefix, so the arm
+                    // separates the ring's CONTENT from the extra rows' COMPUTATION.
                     try p.attention.cache.publishWindow(enc, chunk, try state.ring(s_i), if (dspark_capture_all == 2) tail else pub_rows, pub_pos);
                 enc.barrier();
             }
         }
-        // ROUND-421: THE DRAFTER'S STOP POINT 1 (after the conditioning). The arm commits what was encoded, so the
-        // command buffer's completion fires (the old stub returned WITHOUT committing: the
-        // completion never came and the 224-token probe hung -- ROUND-420).
+        // THE DRAFTER'S STOP POINT 1 (after the conditioning). The arm commits what was encoded, so the command
+        // buffer's completion fires.
         if (mtpStopPoint() == 1 or std.c.getenv("TF_DSV41_MTP_STUB_COND") != null) {
             enc.end();
             cb.commit();
@@ -2957,12 +2735,10 @@ pub const Model = struct {
             try completed(cb);
             return .{ 0, 0, 0, 0 };
         }
-        // ROUND-489: THE DRAFTER'S OWN EARLY COMMIT. Its conditioning is ~1.1 ms of GPU and is encoded
-        // before the three blocks, the head and the chain; committing it without a wait lets the GPU run
-        // while the host encodes the rest (~0.15 ms). Same mechanism and same guarantees as ROUND-487:
-        // a command-buffer boundary is a full barrier, the queue is in-order, and the final wait implies
-        // the earlier buffer. `TF_DSV41_MTP_PIPE=0` is the same-binary control; an instrument that owns
-        // the buffer (`COND_PROF`, `BLOCK_PROF`) keeps the shipped single-buffer form.
+        // THE DRAFTER'S OWN EARLY COMMIT. Same mechanism and same guarantees as: a command-buffer boundary is a
+        // full barrier, the queue is in-order, and the final wait implies the earlier buffer. `TF_DSV41_MTP_PIPE=0`
+        // is the same-binary control; an instrument that owns the buffer (`COND_PROF`, `BLOCK_PROF`) keeps the
+        // shipped single-buffer form.
         var pipe_prev: mtl.CommandBuffer = undefined;
         var pipe_prev_set = false;
         const mtp_pipe: bool = blk: {
@@ -2987,10 +2763,9 @@ pub const Model = struct {
         const dbg: ?mtl.Buffer = if (std.c.getenv("TF_DSV41_MTP_DEBUG_ROWS") != null) try m.device.buffer(mtp_dbg_total3 * 4, mtl.ResourceOptions.shared) else null;
         defer if (dbg) |b| b.deinit();
         if (dbg) |b| ops.encodeDump(enc, &p.ops, ws.view(.branch), .{ .buffer = b, .offset = 0 }, 5 * 5120, true);
-        // ROUND-364: the mHC's expanded stream and its `pre` vector carry ACROSS the drafter's three blocks, as
-        // the trunk does (the expand is once, before the layer loop) and as the comparator's block() chain does
-        // (mlx-serve's draftRows, MIT/Apache-2.0). Inside the loop the expand reset the stream to the branch and
-        // the pre to one-hot at every block, so the residual machinery never crossed a stage.
+        // The mHC's expanded stream and its `pre` vector carry across the drafter's blocks, as the trunk's do (the
+        // expand is once, before the loop, and the release's DSparkBlock threads `pre_mix` through each stage).
+        // Expanding inside the loop reset the stream to the branch and the pre to one-hot at every block.
         mhc.encodeExpand(enc, &p.mhc, ws.view(.branch), ws.view(.stream), ws.view(.previous_pre), .{ .rows = n, .width = 5120, .x_stride = 5120, .stream_stride = 20480, .pre_stride = 4 });
         if (cond_prof.blk_on) cond_prof.split("blk", "prologue/expand", 0, &enc);
         var k: u32 = 0;
@@ -3001,7 +2776,7 @@ pub const Model = struct {
             mhc.encodeCollapse(enc, &p.mhc, ws.view(.stream), ws.view(.previous_pre), ws.view(.collapsed), .{ .rows = n, .width = 5120, .stream_stride = 20480, .y_stride = 5120 });
             enc.barrier();
             if (cond_prof.blk_on) cond_prof.split("blk", "mhc_attn", k, &enc);
-            // ROUND-362 instrument: the mHC's collapsed rows (the norm's input) and their magnitudes.
+            // The mHC's collapsed rows (the norm's input) and their magnitudes.
             if (dbg) |b| {
                 if (k == 0) {
                     ops.encodeDump(enc, &p.ops, ws.view(.collapsed), .{ .buffer = b, .offset = mtp_dbg_coll * 4 }, n * 5120, true);
@@ -3024,15 +2799,14 @@ pub const Model = struct {
             if (dbg) |b| if (k == 0) ops.encodeDump(enc, &p.ops, ws.view(.normalized), .{ .buffer = b, .offset = 3 * 5 * 5120 * 4 }, 5 * 5120, true);
             try m.moe(&enc, null, &blk.moe, n, 0, m.cfg.dspark_topk, &cond_prof);
             m.post(enc, n);
-            // ROUND-375: the branch after the MoE (the stage contributions: the attention's output against the
-            // MoE's), so the row's composition is read off the magnitudes.
+            // The branch after the MoE (the stage contributions: the attention's output against the MoE's), so the
+            // row's composition is read off the magnitudes.
             if (dbg) |b| if (k == 0) ops.encodeDump(enc, &p.ops, ws.view(.branch), .{ .buffer = b, .offset = 4 * 5 * 5120 * 4 }, 5 * 5120, true);
             enc = cond_prof.enc;
             cb = cond_prof.cb;
         }
-        // ROUND-421: THE DRAFTER'S STOP POINT 2 (after the three blocks). The arm commits what was encoded, so the
-        // command buffer's completion fires (the old stub returned WITHOUT committing: the
-        // completion never came and the 224-token probe hung -- ROUND-420).
+        // THE DRAFTER'S STOP POINT 2 (after the three blocks). The arm commits what was encoded, so the command
+        // buffer's completion fires.
         if (mtpStopPoint() == 2 or std.c.getenv("TF_DSV41_MTP_STUB_BLOCKS") != null) {
             enc.end();
             cb.commit();
@@ -3047,9 +2821,8 @@ pub const Model = struct {
         const logits = View{ .buffer = m.mtp_logits.?, .offset = 2 * 129280 * 4 };
         try m.project(enc, m.weights.head, ws.view(.normalized), logits, n, 5120, 129280, .f32);
         enc.barrier();
-        // ROUND-421: THE DRAFTER'S STOP POINT 3 (after the head projection). The arm commits what was encoded, so the
-        // command buffer's completion fires (the old stub returned WITHOUT committing: the
-        // completion never came and the 224-token probe hung -- ROUND-420).
+        // THE DRAFTER'S STOP POINT 3 (after the head projection). The arm commits what was encoded, so the command
+        // buffer's completion fires.
         if (mtpStopPoint() == 3 or std.c.getenv("TF_DSV41_MTP_STUB_HEAD") != null) {
             enc.end();
             cb.commit();
@@ -3071,9 +2844,9 @@ pub const Model = struct {
         const ids_view = View{ .buffer = m.markov_ids.?, .offset = 0 };
         const part = try m.markovPart();
         const groups: u32 = (129280 + 255) / 256;
-        // ROUND-522 (instrument, default-inert): the tree price needs the *biased* logits' top-2, and PART
-        // is the only place the biased logits survive (the pick consumes them). PART is overwritten by the
-        // next step, so each step's 505 float2 bests are copied into its own region before the barrier.
+        // The tree price needs the *biased* logits' top-2, and PART is the only place the biased logits survive
+        // (the pick consumes them). PART is overwritten by the next step, so each step's 505 float2 bests are
+        // copied into its own region before the barrier.
         const price_dbg: ?mtl.Buffer = if (std.c.getenv("TF_DSV41_TREE_PRICE") != null)
             try m.device.buffer(5 * 505 * 8, mtl.ResourceOptions.shared)
         else
@@ -3087,10 +2860,9 @@ pub const Model = struct {
             ops.encodeMarkovPick(enc, &p.ops, part, ids_view, groups, step);
             enc.barrier();
         }
-        // ROUND-375: the drafter's logits row 0 against the trunk's own row-0 logits (the verify's
-        // first row -- the same prediction the drafter's row 0 makes). The drafter's forward runs after
-        // the verify, so the workspace's `.logits` row 0 still holds the trunk's row-0 logits (the
-        // drafter's own wo_a writes from row 1 on).
+        // The drafter's logits row 0 against the trunk's own row-0 logits (the verify's first row -- the same
+        // prediction the drafter's row 0 makes). The drafter's forward runs after the verify, so the workspace's
+        // `.logits` row 0 still holds the trunk's row-0 logits (the drafter's own wo_a writes from row 1 on).
         const top_buf: ?mtl.Buffer = if (std.c.getenv("TF_DSV41_MTP_DEBUG_TOP") != null)
             try m.device.buffer(2 * 129280 * 4 + 5120 * 4, mtl.ResourceOptions.shared)
         else
@@ -3102,9 +2874,8 @@ pub const Model = struct {
             ops.encodeDump(enc, &p.ops, ws.view(.normalized), .{ .buffer = b, .offset = 2 * 129280 * 4 }, 5120, false);
             enc.barrier();
         }
-        // ROUND-422 (the instrument): the host's own encode time, the wait, and the GPU's window -- so the
-        // drafter's cost can be split into "the GPU's work" and "the host's encoding" (and, under the
-        // conditioning's split, the gap between them).
+        // The host's own encode time, the wait, and the GPU's window -- so the drafter's cost can be split into
+        // "the GPU's work" and "the host's encoding" (and, under the conditioning's split, the gap between them).
         const t_encoded: f64 = if (host_prof) mtl.clock.seconds() else 0;
         enc.end();
         cb.commit();
@@ -3136,16 +2907,16 @@ pub const Model = struct {
                 std.log.info("treeprice propose round {d} step {d} top2 {d} {d}", .{ price_round, ps, id1, id2 });
             }
         }
-        // ROUND-489: the early buffer completed in queue order; check it and count its GPU time so the
-        // `mtp forward` line keeps meaning the whole drafter forward.
+        // The early buffer completed in queue order; check it and count its GPU time so the `mtp forward` line
+        // keeps meaning the whole drafter forward.
         var gpu_extra_ms: f64 = 0;
         if (pipe_prev_set) {
             try completed(pipe_prev);
             gpu_extra_ms = pipe_prev.gpuSeconds() * 1e3;
         }
-        // ROUND-385: the drafter's own forward's GPU time and wall.  The stage timer covers the trunk's
-        // layers, not this forward -- and the conditioning's cost (the windowed context's projection, the
-        // keys, the rope and the publish) lives here.
+        // The drafter's own forward's GPU time and wall. The stage timer covers the trunk's layers, not this
+        // forward -- and the conditioning's cost (the windowed context's projection, the keys, the rope and the
+        // publish) lives here.
         if (host_prof) {
             const encode_ms = (t_encoded - t_start) * 1e3;
             const wait_ms = (t_done - t_encoded) * 1e3;
@@ -3171,8 +2942,8 @@ pub const Model = struct {
             std.log.info("mtp top: drafter argmax={d} vals={d:.4} {d:.4} {d:.4} ids={d} {d} {d} {d} {d}", .{ dout[0], dval[0], dval[1], dval[2], dout[0], dout[1], dout[2], dout[3], dout[4] });
             std.log.info("mtp top: trunk   argmax={d} vals={d:.4} {d:.4} {d:.4} ids={d} {d} {d} {d} {d}", .{ tout[0], tval[0], tval[1], tval[2], tout[0], tout[1], tout[2], tout[3], tout[4] });
             std.log.info("mtp top: agree={} drafter@trunk_argmax={d:.4} trunk@drafter_argmax={d:.4}", .{ dout[0] == tout[0], f[@intCast(tout[0])], f[129280 + @as(usize, @intCast(dout[0]))] });
-            // ROUND-375: the drafter's head input against the trunk's own head input (the verify's row 0):
-            // the cosine says whether the MTP module's hidden lives in the trunk's hidden space at all.
+            // The drafter's head input against the trunk's own head input (the verify's row 0): the cosine says
+            // whether the MTP module's hidden lives in the trunk's hidden space at all.
             if (m.mtp_trunk_hidden) |tb| {
                 const t: [*]const f32 = @ptrCast(@alignCast(tb.contents()));
                 const dh = f + 2 * 129280;
@@ -3215,14 +2986,14 @@ pub const Model = struct {
                             if (!std.math.isFinite(f[(seg * 5 + rr) * 5120 + cc])) bad += 1;
                             acc += @as(f64, f[(seg * 5 + rr) * 5120 + cc]) * @as(f64, f[(seg * 5 + rr) * 5120 + cc]);
                         }
-                        // ROUND-375: the row's RMS: the attention's contribution (attn_out - embed) and the MoE's
-                        // are read off the row magnitudes -- a drafter whose attention contributes nothing reads
-                        // a flat logits row (the round's instrument).
+                        // The row's RMS: the attention's contribution (attn_out - embed) and the MoE's are read off
+                        // the row magnitudes -- a drafter whose attention contributes nothing reads a flat logits
+                        // row (the round's instrument).
                         std.log.info("mtp {s} row {d}: nonfinite={d} rms={d:.5} first={d:.5} {d:.5}", .{ name, rr, bad, @sqrt(acc / 5120.0), f[(seg * 5 + rr) * 5120], f[(seg * 5 + rr) * 5120 + 1] });
                     }
                 }
-                // ROUND-362: the drafter's key rows (the pack's input), its query's two stages, the decoded key
-                // table the scan reads, and the attention's output: a row's first non-finite column localises it.
+                // The drafter's key rows (the pack's input), its query's two stages, the decoded key table the scan
+                // reads, and the attention's output: a row's first non-finite column localises it.
                 {
                     var rrk: usize = 0;
                     while (rrk < 5) : (rrk += 1) {
@@ -3257,10 +3028,8 @@ pub const Model = struct {
                         }
                         std.log.info("mtp qpre row {d}: nonfinite={d} maxabs={d:.5}", .{ rrp, bad, mx });
                     }
-                    // ROUND-376: the drafter's query's per-head RMS -- the scale the softmax saw. The
-                    // comparator normalizes each head before the rope; the port did not, so this is the
-                    // number that says whether the drafter's softmax was flat (all the heads tiny) or
-                    // saturated (one head huge).
+                    // The drafter's query's per-head RMS -- the instrument's read of the scale the softmax saw
+                    // (flat when every head is tiny, saturated when one is huge).
                     {
                         const r = headRms(f + mtp_dbg_qpre, 64, 512);
                         std.log.info("mtp qpre head rms: min={d:.5} max={d:.5} mean={d:.5}", .{ r.min, r.max, r.mean });
@@ -3276,9 +3045,9 @@ pub const Model = struct {
                         }
                         if (bad != 0 or rrd >= 126) std.log.info("mtp dense row {d}: nonfinite={d} maxabs={d:.5}", .{ rrd, bad, mx });
                     }
-                    // ROUND-375: THE RING'S DECODED KEYS: the RMS of a ring row and the cosine between two
-                    // ADJACENT positions (the slots 127 and 0 are one position apart across the ring's wrap).
-                    // If the ring's keys are one vector, the drafter's softmax cannot discriminate the history.
+                    // THE RING'S DECODED KEYS: the RMS of a ring row and the cosine between two ADJACENT positions
+                    // (the slots 127 and 0 are one position apart across the ring's wrap). If the ring's keys are
+                    // one vector, the drafter's softmax cannot discriminate the history.
                     {
                         const ring0 = mtp_dbg_dense;
                         const ring1 = mtp_dbg_dense + 127 * 512;
@@ -3479,7 +3248,7 @@ pub const Model = struct {
     /// One fused boundary: the pending branch expanded into the other stream buffer, its mix partials, then the
     /// split: this boundary's pre/post/comb from the partials and the lagged `pre_in` collapse into `normed`.
     fn boundary(m: *Model, enc: mtl.ComputeEncoder, bp: *const mhc.BoundaryPipelines, w: weights.Hc, pre_in: View, pre_out: View, norm: checkpoint.Tensor, rows: u32, with_mixes: bool) void {
-        if (std.c.getenv("TF_DSV41_SKIP_MHC") != null) return; // measurement: price the fused boundary
+        if (std.c.getenv("TF_DSV41_SKIP_MHC") != null) return;
         const ws = &m.workspace;
         const cur = if (m.stream_alt) ws.view(.stream_next) else ws.view(.stream);
         const next = if (m.stream_alt) ws.view(.stream) else ws.view(.stream_next);
@@ -3517,9 +3286,7 @@ pub const Model = struct {
         return v;
     }
 
-    /// TF_DSV41_GATE_WIDE=1 takes the wide (staged) gate of ROUND-349, whose order and logits are the shipped
-    /// ones. It is a measurement arm, NOT the default: the shipped one-warp gate is faster (5.78 against 8.44 ms
-    /// a layer), because the gate is load-bound (two loads a FMA) and not L2-bound.
+    /// TF_DSV41_GATE_WIDE=1 takes the wide (staged) gate of, whose order and logits are the shipped ones.
     fn gateWideOn() bool {
         const S = struct {
             var cached: ?bool = null;
@@ -3538,11 +3305,10 @@ pub const Model = struct {
         const experts: u32 = @intCast(w.descriptors[0].length() / @sizeOf(exl3.ExpertDescriptor));
         const ws = &m.workspace;
         const p = &m.pipelines;
-        // ROUND-364: a block's own router geometry: the backbone's 384 experts and six picks, the drafter's 128
-        // experts and three picks (the pack's dspark_n_routed_experts / dspark_num_experts_per_tok, the comparator's
-        // c.dsv41_dspark_experts / c.dsv41_dspark_top_k). The port used the backbone's for both, so 256 of the
-        // drafter's 384 router logits were read past the end of its 128-row gate matrix and its picks could name
-        // experts outside its 128-entry descriptor table.
+        // A block's own router geometry: the backbone's 384 experts and six picks, the drafter's 128 experts and
+        // three picks, read from the pack (`dspark_n_routed_experts` / `dspark_num_experts_per_tok`) and the
+        // config. Reading the backbone's geometry for both would read past the drafter's 128-row gate matrix and
+        // let its picks name experts outside its descriptor table.
         const picks: u32 = if (topk == 0) m.cfg.topk else topk;
         const dspark_block: bool = experts != m.cfg.experts;
         // The drafter's logits live in their own buffer: its gate has 128 columns, so the backbone's 384-wide rows
@@ -3551,30 +3317,25 @@ pub const Model = struct {
             if (m.dspark_logits == null) m.dspark_logits = try m.device.buffer(256 * @as(usize, experts) * 4, mtl.ResourceOptions.shared);
             break :blk View{ .buffer = m.dspark_logits.?, .offset = 0 };
         } else ws.view(.router_logits);
-        // tf-dense-col reads the input rows once a column (384 columns), which is 14 GB of x a layer at prompt
-        // rows; the tiled dense reads them once a sixteen-column block. TF_DSV41_ROUTE_TENSOR: the tiled path.
+        // TF_DSV41_ROUTE_TENSOR: the tiled path.
         const route_tensor = std.c.getenv("TF_DSV41_ROUTE_TENSOR") != null;
         // TF_DSV41_ROUTE_GEMM: the gate on the tensor units (MLX's gemm_nax, bf16 logits the route kernel reads).
         // The bf16 twin is built a layer at load (weights.bind), not cached once for the model: the gate is per
         // layer, and the single model-level copy made every layer route with layer 0's gate.
         // TF_DSV41_ROUTE_GEMM_MINROWS: the row count the gate GEMM needs before it engages (64 = the shipped
-        // condition). The band receipt drives it to 1 so the one-row oracle forwards exercise the same path the
-        // prompt rows take; the default path is unchanged.
+        // condition).
         const gemm_min_rows: u32 = if (std.c.getenv("TF_DSV41_ROUTE_GEMM_MINROWS")) |v|
             (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 64)
         else
             64;
-        // The gate GEMM is the promoted default for prompt rows (ROUND-349: +6.6 % of the prompt, the route
-        // stage 5.787 -> 0.350 ms a layer). TF_DSV41_ROUTE_GEMM=0 restores the shipped tree.
+        // The gate GEMM is the promoted default for prompt rows. TF_DSV41_ROUTE_GEMM=0 restores the shipped tree.
         const gemm_raw = std.c.getenv("TF_DSV41_ROUTE_GEMM");
         const gemm_on = if (gemm_raw) |r| !std.mem.eql(u8, std.mem.span(r), "0") else true;
         const gemm_env = gemm_on and rows >= gemm_min_rows;
         // The f16 entry is the one that ships for these packs: their router gate is f16, and the GEMM binds both
         // operands to one element type, so the *activation* is converted (bf16 -> f16, exact) and the weight keeps
-        // its 10 mantissa bits. Rounding the weight to bf16 instead moved the band to 58 %. A pack whose gate is
-        // already bf16 takes the bf16 entry. Both write fp32 logits, so route sees tf-dense-col's precision.
-        // No bf16 twin is built any more: the f16 operand is the pack's own tensor, so a layer needs no copy
-        // (the earlier per-layer twins cost 158 MB and were not needed).
+        // its 10 mantissa bits. A pack whose gate is already bf16 takes the bf16 entry. Both write fp32 logits, so
+        // route sees tf-dense-col's precision.
         const gate_f16_gemm = gemm_env and p.ops.gate_f16_f32 != null and w.gate.dtype == .f16;
         const gate_bf16_gemm = !gate_f16_gemm and gemm_env and p.ops.gate_f32 != null and w.gate.dtype == .bf16;
         const route_gemm = gate_f16_gemm or gate_bf16_gemm;
@@ -3587,8 +3348,8 @@ pub const Model = struct {
         // TF_DSV41_ROUTE_GEMM_SCRATCH: the GEMM runs but writes a scratch, and the shipped kernel still feeds
         // route — the test that separates "the GEMM's output is wrong" from "the GEMM's presence poisons".
         const gate_scratch = route_gemm and std.c.getenv("TF_DSV41_ROUTE_GEMM_SCRATCH") != null;
-        // TF_DSV41_ROUTE_GEMM_PRIVATE: the GEMM writes its own buffer and route reads it there — the arm that
-        // keeps the workspace's logits region untouched (the aliasing suspicion of ROUND-306).
+        // TF_DSV41_ROUTE_GEMM_PRIVATE: the GEMM writes its own buffer and route reads it there — the arm that keeps
+        // the workspace's logits region untouched.
         const gate_private = route_gemm and std.c.getenv("TF_DSV41_ROUTE_GEMM_PRIVATE") != null;
         var gate_pdest: ?mtl.Buffer = null;
         if (route_gemm) {
@@ -3608,17 +3369,13 @@ pub const Model = struct {
             }
             encoder.barrier();
         }
-        // The bit-exact tiled gate (a warp a 2x2 cell tile, the shipped tree order in registers): bit-for-bit
-        // against tf-dense-col in the bench and 1.93x at the gate shape. Default on for prompt rows; TF_DSV41_GATE_TREE=0
-        // forces the shipped tf-dense-col back. Decode keeps the shipped kernel until its own receipt.
+        // Default on for prompt rows; TF_DSV41_GATE_TREE=0 forces the shipped tf-dense-col back.
         const gate_tree = rows >= 64 and !gateTreeOff();
-        // TF_DSV41_GATE_WIDE: the wide gate (ROUND-349). Same order, same logits; eight rows and four columns a
-        // threadgroup with the x and w tiles staged in threadgroup memory.
+        // TF_DSV41_GATE_WIDE: the wide gate. Same order, same logits; eight rows and four columns a threadgroup
+        // with the x and w tiles staged in threadgroup memory.
         const gate_wide = gate_tree and gateWideOn();
-        // ROUND-349: the wide gate -- eight rows and four columns a threadgroup with the tiles staged in
-        // threadgroup memory. The shipped gate is a warp a 2x2 cell tile, so the whole x is re-read by each of
-        // the 192 column pairs: 14.2 GB a layer, the box's L2 rate, while the arithmetic is 1.23 TMAC/s. The
-        // order is the shipped one's (the lane's sixteen consecutive partials, the chunk order, the xor tree),
+        // The wide gate -- eight rows and four columns a threadgroup with the tiles staged in threadgroup memory.
+        // The order is the shipped one's (the lane's sixteen consecutive partials, the chunk order, the xor tree),
         // so the logits are bit-identical and the router's picks cannot move.
         if (!route_gemm or gate_scratch) if (gate_wide and (w.gate.dtype == .bf16 or w.gate.dtype == .f16)) {
             mhc.encodeGateTree8(encoder, &p.mhc, ws.view(.normalized), tensor(w.gate), logits_dest, .{ .rows = rows, .k = 5120, .n = experts, .x_stride = 5120, .bf16_w = @intFromBool(w.gate.dtype == .bf16) });
@@ -3629,9 +3386,7 @@ pub const Model = struct {
         } else ops.encodeDense(encoder, &p.ops, ws.view(.normalized), tensor(w.gate), logits_dest, .{ .rows = rows, .k = 5120, .n = experts, .x_stride = 5120, .w_stride = 5120, .y_stride = experts, .w_dtype = if (w.gate.dtype == .bf16) .bf16 else .f16, .y_dtype = .f32 });
         encoder.barrier();
         // TF_DSV41_GATE_DUMP=<dir>: the gate stage's own input and the logits it produced, copied out of the
-        // workspace before the route kernel reads them. The numerics band receipt needs the real operands (the
-        // prompt's rows and the pack's gate matrix), not synthetic ones: the fp64 oracle for the gate's reduction
-        // class is computed over exactly these bytes. The copy changes no value the engine computes.
+        // workspace before the route kernel reads them. The copy changes no value the engine computes.
         if (std.c.getenv("TF_DSV41_GATE_DUMP")) |dump_dir| {
             const want: u32 = if (std.c.getenv("TF_DSV41_GATE_DUMP_ROWS")) |v|
                 (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 512)
@@ -3666,9 +3421,7 @@ pub const Model = struct {
             }
         }
         const skip_experts = std.c.getenv("TF_DSV41_SKIP_EXPERTS") != null;
-        // A drafted window's rows route to far fewer distinct experts than slots (round 172: 15-19 of 30 at five
-        // rows), so the grouped plan is worth 1.76x of the weight reads there too. TF_DSV41_GROUP_MIN_ROWS lowers the
-        // threshold below a prompt chunk's eight rows so windows can use it.
+        // TF_DSV41_GROUP_MIN_ROWS lowers the threshold below a prompt chunk's eight rows so windows can use it.
         const group_min: u32 = if (std.c.getenv("TF_DSV41_GROUP_MIN_ROWS")) |v|
             (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8)
         else
@@ -3676,32 +3429,22 @@ pub const Model = struct {
         const grouped: ?expert_groups.Scratch = if (m.grouped_prefill and rows >= group_min and rows >= 2) try ws.grouping(rows, picks, experts) else null;
         // The fused gate+up call: one indexed dispatch over a table of 2E descriptors -- a token's six gate picks
         // then its six up picks one table entry further -- so the layer's two expert dispatches become one and
-        // every output row keeps the shipped per-row arithmetic, split order and rounding.
-        // The fused call composes with the grouped plan: the fused pick table gets its own twelve-slot plan, so a
-        // window's gate+up dispatch dedups experts AND pays one launch. Measurement only: a grouped tile is
-        // sixty-four rows of MMA whatever its live count, so it is slower here (151.0 against 126.7 ms at three
-        // rows), and its k order is not the per-row one, so its bits are not `drafted == plain` (round 269).
+        // every output row keeps the shipped per-row arithmetic, split order and rounding. The fused call composes
+        // with the grouped plan: the fused pick table gets its own twelve-slot plan, so a window's gate+up dispatch
+        // dedups experts AND pays one launch.
         const fuse = w.fused != null and rows < 8 and std.c.getenv("TF_DSV41_NO_GATE_UP_FUSION") == null;
         const fused_grouped: ?expert_groups.Scratch = if (fuse and grouped != null) try ws.groupingFused(rows, picks, experts) else null;
-        // ROUND-391: the merged MoE up dispatch is possible when the fused table carries the two shared
-        // descriptors and the call is the ungrouped (window) path; the route kernel writes the tail of the pick
-        // maps itself, so no host write touches a GPU-written buffer range.
+        // The merged MoE up dispatch is possible when the fused table carries the two shared descriptors and the
+        // call is the ungrouped (window) path; the route kernel writes the tail of the pick maps itself, so no host
+        // write touches a GPU-written buffer range.
         const moe_up_merged = fuse and fused_grouped == null and
             w.fused.?.length() / @sizeOf(exl3.ExpertDescriptor) == 2 * experts + 2 and
             std.c.getenv("TF_DSV41_NO_FUSE_MOE_UP") == null;
-        // ROUND-429 (the arm): THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL. The fused
-        // gate/up dispatch's tail (fids[2*r*picks .. +2*r]) names each shared matrix once a token row, so
-        // the indexed body decodes the same shared matrix once a row. The split runs the routed-only
-        // indexed call and dispatches the two shared matrices as dense multi-row calls, which decode each
-        // matrix ONCE for the window (the multi body is bit-identical per row, ROUND-369/388). The bench's
-        // same-run price at the band's two-row window: routed 24 + dense shared = -12.4 % of the fused 28;
-        // at the four-row window -1.7 %. IN SITU THE BENCH'S SIGN IS WRONG: the arm is a REPRODUCIBLE LOSS
-        // at the band's two-row window -- novel drafted 42.90/42.98 -> 41.98/41.91 tok/s (39.13/39.06 ->
-        // 39.99/40.05 ms a round, +0.9 ms, -2.2 %), the warm probe 51.24 -> 50.10, the token stream
-        // IDENTICAL (465 tokens / 277 rounds / 179 of 277, band 329/329, sea canon d64fb121623a). The
-        // bench's 28-slot call is cold there (0.582 ms against the in-situ gate/up's 0.250 ms a layer), so
-        // its shared tail is overpriced; in situ the two extra launches + epilogues cost more than the two
-        // decodes saved. TF_DSV41_SHARED_DENSE=1 arms it; unset is the shipped call.
+        // THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL. The fused gate/up dispatch's tail
+        // (fids[2*r*picks .. +2*r]) names each shared matrix once a token row, so the indexed body decodes the same
+        // shared matrix once a row. The split runs the routed-only indexed call and dispatches the two shared
+        // matrices as dense multi-row calls, which decode each matrix ONCE for the window. TF_DSV41_SHARED_DENSE=1
+        // arms it; unset is the shipped call.
         const shared_split = moe_up_merged and rows >= 2 and std.c.getenv("TF_DSV41_SHARED_DENSE") != null;
         // TF_DSV41_ROUTE_GEMM_F32: the GEMM's bf16 logits decoded into a private f32 buffer, so the route kernel
         // takes its shipped path — the test that separates a bad read from a bad write.
@@ -3718,8 +3461,8 @@ pub const Model = struct {
             logits_view = .{ .buffer = f32buf, .offset = 0 };
             logit_dtype = 0;
         }
-        // ROUND-423 (the instrument): the MoE's parts -- the gate, the route, the gate/up, the SwiGLU, the
-        // down and the shared expert, each in its own command buffer.
+        // The MoE's parts -- the gate, the route, the gate/up, the SwiGLU, the down and the shared expert, each in
+        // its own command buffer.
         if (prof) |pf| {
             if (pf.blk_on) {
                 pf.split("blk", "moe/gate", pf.block, enc);
@@ -3816,11 +3559,11 @@ pub const Model = struct {
             std.log.info("picks ids {d} {d} {d} {d} {d} {d}", .{ @as(u32, @bitCast(id6[0])), @as(u32, @bitCast(id6[1])), @as(u32, @bitCast(id6[2])), @as(u32, @bitCast(id6[3])), @as(u32, @bitCast(id6[4])), @as(u32, @bitCast(id6[5])) });
             std.log.info("picks weights {d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}", .{ w6[0], w6[1], w6[2], w6[3], w6[4], w6[5] });
         }
-        // ROUND-408 INSTRUMENT (inert unless TF_DSV41_ROUTE_IDS=1): the last rows' route ids, read back from the
-        // GPU. The drafted path's second row picks its own six experts, so the overlap between a row's picks and
-        // the next row's picks is the "localisation" the record wants: the two-row window's twelve slots against
-        // the distinct experts. The record has it for the four-row window (seventeen distinct of twenty-four) and
-        // for five rows, never for the standing two-row window the NOVEL rate runs on.
+        // (inert unless TF_DSV41_ROUTE_IDS=1): the last rows' route ids, read back from the GPU. The drafted path's
+        // second row picks its own six experts, so the overlap between a row's picks and the next row's picks is
+        // the "localisation" the record wants: the two-row window's twelve slots against the distinct experts. The
+        // record has it for the four-row window (seventeen distinct of twenty-four) and for five rows, never for
+        // the standing two-row window the NOVEL rate runs on.
         const want_ids = std.c.getenv("TF_DSV41_ROUTE_IDS") != null and
             ((rows == 2 and !route_ids_done_pair) or (rows > 8 and !route_ids_done_prompt));
         if (want_ids) {
@@ -3862,12 +3605,12 @@ pub const Model = struct {
             routed_rows.output_ids = g.view(.slot_ids);
             routed_rows.routes = .{ .ids = g.view(.expert_ids) };
             routed_rows.grouped = true;
-            // ROUND-408 INSTRUMENT (inert unless TF_DSV41_ROUTE_HIST=1): the grouped plan's own geometry, read
-            // back from the GPU -- the per-expert counts and the per-expert block offsets. The host's plan sizes
-            // the row buffer with a formula (experts + (rows - experts) / tile tiles); the GPU's grouping pads
-            // EACH expert's block to a multiple of the tile and lays the blocks out consecutively, so the tiles
-            // that do work are the sum of the per-expert ceilings, and the plan's tail is unused. The weight
-            // decode is per tile, so the plan's padding is a direct multiplier on the routed stage's biggest term.
+            // (inert unless TF_DSV41_ROUTE_HIST=1): the grouped plan's own geometry, read back from the GPU -- the
+            // per-expert counts and the per-expert block offsets. The host's plan sizes the row buffer with a
+            // formula (experts + (rows - experts) / tile tiles); the GPU's grouping pads EACH expert's block to a
+            // multiple of the tile and lays the blocks out consecutively, so the tiles that do work are the sum of
+            // the per-expert ceilings, and the plan's tail is unused. The weight decode is per tile, so the plan's
+            // padding is a direct multiplier on the routed stage's biggest term.
             if (std.c.getenv("TF_DSV41_ROUTE_HIST") != null and !plan_hist_done) {
                 plan_hist_done = true;
                 const stg_cnt = try m.device.buffer(384 * 4, mtl.ResourceOptions.shared);
@@ -3933,13 +3676,12 @@ pub const Model = struct {
                 both.input_ids = convert(ws.view(.fused_sources));
                 both.routes = .{ .ids = convert(ws.view(.fused_ids)), .repeat = 1 };
                 both.output_rows = both.count;
-                // ROUND-419: the shared expert's tail (fids[2*r*picks .. +2r], route.metal) names each of
-                // the two shared matrices r times, so with two or more token rows the routes carry the
-                // duplicates the paired body shares a decode by. One row has none (the plain path).
+                // The shared expert's tail (fids[2*r*picks .. +2r], route.metal) names each of the two shared
+                // matrices r times, so with two or more token rows the routes carry the duplicates the paired body
+                // shares a decode by. One row has none (the plain path).
                 both.pair = r >= 2;
             }
             if (fused_grouped != null) both.output_rows = @as(usize, rows) * 2 * picks;
-            // Measurement: the fused call is idempotent (same inputs, same outputs), so a second launch prices it.
             const fused_passes: u32 = expertPasses();
             const fused_experts: u32 = 2 * experts + 2 * @as(u32, @intFromBool(moe_up_merged));
             for (0..fused_passes) |_| if (!skip_experts) try exl3.encodeIndexed(&p.projection, encoder, .{ .descriptors = .{ .buffer = w.fused.? }, .count = fused_experts, .k = 5120, .n = 2304 }, convert(ws.view(.normalized)), convert(ws.view(.gate)), ws.projection(), both);
@@ -3958,17 +3700,10 @@ pub const Model = struct {
             encoder.barrier();
         }
         const mlp_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_MLP") != null) 2 else 1;
-        // ROUND-380: THE FUSED CALL'S UP HALF IS AT THE BLOCK'S OWN PICK COUNT. The fused call writes every
-        // token's gate picks then every token's up picks, so the up half starts at row `rows * picks` -- the
-        // backbone's six or the DRAFTER'S THREE. The port hard-coded the backbone's six, so the drafter's
-        // SwiGLU multiplied its own gate activation by a STALE up activation (one block past its own output):
-        // the drafter's routed FFN output was garbage-but-finite, its hidden pointed in the wrong direction
-        // (the head inputs' cosine 0.09-0.16) and its logits row was flat (the top-1 gap 1.5 %), so the
-        // proposer proposed noise. The receipt: with the fusion off (the two-pass path, where the gate and the
-        // up are the same pair) the MTP arm reads 52.50 -> 62.16 tok/s and the band's acceptance
-        // 13.69 % -> 25.84 %. This landing keeps the fusion and fixes the offset; the backbone's six picks
-        // make the offset identical, so the trunk's canon does not move.
-        // TF_DSV41_FUSE_UP_SIX=1 restores the port's hard-coded six (the receipt).
+        // THE FUSED CALL'S UP HALF IS AT THE BLOCK'S OWN PICK COUNT. The fused call writes every token's gate picks
+        // then every token's up picks, so the up half starts at row `rows * picks` -- the backbone's six or the
+        // DRAFTER'S THREE. This landing keeps the fusion and fixes the offset; the backbone's six picks make the
+        // offset identical, so the trunk's canon does not move.
         const fuse_up_picks: u32 = if (std.c.getenv("TF_DSV41_FUSE_UP_SIX") != null) 6 else picks;
         const up_view = if (fuse) View{ .buffer = ws.view(.gate).buffer, .offset = ws.view(.gate).offset + @as(usize, rows) * fuse_up_picks * 2304 * 2 } else ws.view(.up);
         // The routed SwiGLU writes the down projection's rotated input in the same pass (the same su scale and
@@ -3992,7 +3727,7 @@ pub const Model = struct {
         routed_rows.x_stride = 2304;
         routed_rows.y_stride = 5120;
         routed_rows.routes.?.repeat = 1;
-        routed_rows.input_rows = @as(usize, rows) * picks; // ROUND-380: the block's own pick count, not the backbone's six
+        routed_rows.input_rows = @as(usize, rows) * picks; // The block's own pick count, not the backbone's six
         if (grouped) |g| routed_rows.input_ids = g.view(.slot_ids);
         const down_passes: u32 = expertPasses();
         routed_rows.prerotated = swiglu_rot;
@@ -4010,17 +3745,16 @@ pub const Model = struct {
         encoder.barrier();
         const skip_shared = std.c.getenv("TF_DSV41_SKIP_SHARED") != null;
         if (!skip_shared) {
-            // ROUND-359: the shared expert's gate and up in one indexed dispatch. The two matrices share the
-            // input row, so the gather map repeats it (`r % rows`) and the route map picks descriptor 0 (w1)
-            // for the first `rows` output rows and 1 (w3) for the next; the output is gate rows then up rows
-            // in the `up` region, which the routed SwiGLU has already consumed. The per-row body is the
-            // register-only static body the routed decode runs, and the dense one-row path runs its Dense
-            // twin, so the arithmetic per row is the same.
+            // The shared expert's gate and up in one indexed dispatch. The two matrices share the input row, so the
+            // gather map repeats it (`r % rows`) and the route map picks descriptor 0 (w1) for the first `rows`
+            // output rows and 1 (w3) for the next; the output is gate rows then up rows in the `up` region, which
+            // the routed SwiGLU has already consumed. The per-row body is the register-only static body the routed
+            // decode runs, and the dense one-row path runs its Dense twin, so the arithmetic per row is the same.
             const shared_fuse = rows <= 8 and w.shared_fused != null and std.c.getenv("TF_DSV41_NO_FUSE_SHARED") == null;
-            // ROUND-392: the shared SwiGLU writes the down projection's ROTATED input in the same pass (the same
-            // arithmetic as the routed path's encodeSwiGLUPreRotate, ROUND-318's GPU differential), so the shared
-            // down skips its own rotate_in dispatch. The dense down keeps its body and k order -- same values,
-            // same bits. TF_DSV41_NO_FUSE_SHARED_ROT=1 restores the two-pass arm.
+            // The shared SwiGLU writes the down projection's ROTATED input in the same pass (the same arithmetic as
+            // the routed path's encodeSwiGLUPreRotate, The GPU differential), so the shared down skips its own
+            // rotate_in dispatch. The dense down keeps its body and k order -- same values, same bits.
+            // TF_DSV41_NO_FUSE_SHARED_ROT=1 restores the two-pass arm.
             const shared_rot = moe_up_merged and w.shared_down != null and w.shared_down_ids != null and
                 std.c.getenv("TF_DSV41_NO_FUSE_SHARED_ROT") == null;
             for (0..mlp_passes) |_| {
@@ -4101,8 +3835,7 @@ fn convert(v: View) exl3.View {
 }
 
 /// TF_DSV41_STAGE_CB: close the command buffer at a stage boundary, log its GPU seconds under `label`, and start
-/// the next one. Measurement only — the counter recorder is broken on this build, and the GPU's own per-command
-/// seconds are the attribution that is left.
+/// the next one.
 var split_stage_dispatches: u64 = 0;
 var split_stage_threadgroups: u64 = 0;
 var gate_dump_done: bool = false;
@@ -4111,7 +3844,7 @@ var route_ids_done_prompt: bool = false;
 var plan_hist_done: bool = false;
 var shared_split_logged: bool = false;
 var gate_dump_done2: bool = false;
-/// ROUND-522: the tree-price instrument's round join (verify round R <-> proposal round R).
+/// The tree-price instrument's round join (verify round R <-> proposal round R).
 pub var price_round: u64 = 0;
 var gate_dump_done3: bool = false;
 fn splitStage(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, label: []const u8, index: usize) !void {
@@ -4123,7 +3856,7 @@ fn splitStage(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, label
     e.?.commit();
     e.?.wait();
     try completed(e.?.*);
-    // ROUND-403 (the instrument): the threadgroup count beside the dispatch count -- the parallelism ledger.
+    // The threadgroup count beside the dispatch count -- the parallelism ledger.
     const groups = mtl.command.dispatch_threadgroups.load(.monotonic);
     std.log.info("stage {s} layer {d}: gpu {d:7.2} ms, dispatches {d}, threadgroups {d}", .{ label, index, e.?.gpuSeconds() * 1e3, dispatches - split_stage_dispatches, groups - split_stage_threadgroups });
     split_stage_dispatches = dispatches;
