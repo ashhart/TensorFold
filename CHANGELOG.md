@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5 and 3.6 on CUDA: a prompt chunk's last layer runs q, attention, o and the MLP over the kept row's 128-row tile only, and k and v over every row, so the cache is unchanged and the last row's logits stay bit-equal; on a GB10 first tokens come 1 to 3% sooner. A model served with an MTP head, int8 or images keeps the full last layer (#2229, closes #2165). Thanks to @jschmied and @jungjipdo.
+
 - An engine can refuse a request it cannot serve as asked in words the client can use: the server asks one optional `Engine.VTable.refusal` when the request is whole and answers 400 `invalid_request_error` before any header on chat, completions, Responses and Messages, streamed or not. An engine without the entry behaves exactly as today (#2082). Thanks to @shuuul.
 
 - DeepSeek-V4.1 DSML calls whose first parameter is the long one now stream from the invoke name instead of waiting for that parameter to close, as XML and GLM calls already do; a block that breaks after its name leaves the call it began while the whole reply keeps its text (#2191, #1975).
