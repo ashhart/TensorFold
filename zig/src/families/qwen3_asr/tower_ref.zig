@@ -226,9 +226,9 @@ fn addLinear(gpa: std.mem.Allocator, p: ops.Points, src: Source, buf: []u8, i: u
     for (x, y) |*v, o| v.* = ops.round(p, v.* + ops.round(p, o));
 }
 
-/// The tower over `feats`: every stage to `sink`, the audio rows [plan.rows][out] returned.
-pub fn run(gpa: std.mem.Allocator, a: cfg.Audio, p: ops.Points, src: Source, feats: mel.Features, sink: Sink) ![]f64 {
-    const plan = try chunks.Plan.init(a, feats.frames);
+/// The tower over `feats`, attending as `how` says: every stage to `sink`, the audio rows [plan.rows][out] returned.
+pub fn run(gpa: std.mem.Allocator, a: cfg.Audio, p: ops.Points, how: chunks.Attention, src: Source, feats: mel.Features, sink: Sink) ![]f64 {
+    const plan = (try chunks.Plan.init(a, feats.frames)).attending(how);
     const x = try front(gpa, a, p, src, feats, plan, sink);
     defer gpa.free(x);
     try sink.put(sink.ctx, "embed", 0, x);
