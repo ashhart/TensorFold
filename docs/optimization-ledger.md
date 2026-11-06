@@ -48,7 +48,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 1. Prompt tail | open [#2229] | yes | yes | yes | yes |
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
 | 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | open M[#1850] |
-| 4. iGPU states | open [#2113] | yes | yes | yes | yes |
+| 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
 | 5. State walk | yes | yes | open [#2215] | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
 | 7. Host KV tier | yes | open [#1501] | done [#1795] | yes | yes |
@@ -68,7 +68,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | open [#2033] |
 | 22. Direct load | open [#2282] | done [#1901] | yes | open [#2282] | done [#458] |
 | 23. Page drop | done [#1884] | done [#1880] | done [#600] | done [#1884] | done [#1884] |
-| 24. L2 prefetch | failed [#2014] | yes | open [#2162] | yes | failed [#2014] |
+| 24. L2 prefetch | failed [#2014] | no (null) | open [#2162] | no (null) | failed [#2014] |
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
 | 26. Pipeline | open [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
@@ -398,6 +398,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | qwen3_5 (27B), nemotron | −3.5 % (a cost) with exact tokens, closed | [#2014] |
     | glm | decode +3.0..+4.1 % at TP=3, +0.8..+1.9 % at TP=2 | [#2162] |
+    | flashnext, gemma4 | null: +0.45 % and +0.15 % at one stream, inside the runs' spread, same replies; not proposed | measured on a GB10, no PR |
 
 25. **Tensor parallel ranks.** A model splits over two or more GPUs or hosts, so a model that doesn't fit one box
     runs, and decode reads each rank's share of the weights. Mixed Metal and CUDA ranks are tracked in [#1236].
