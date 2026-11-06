@@ -5,4 +5,5 @@ test {
     _ = @import("contract_idol_steps.zig");
     _ = @import("contract_idol_rotary.zig");
     _ = @import("contract_idol_case.zig");
+    _ = @import("contract_idol_attn.zig");
 }
