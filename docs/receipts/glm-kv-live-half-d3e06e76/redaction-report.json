@@ -1,0 +1,45 @@
+{
+ "launch-pr.sh": {
+  "RING_IP": 1,
+  "MODEL_PATH": 1
+ },
+ "start-ranks-pr.sh": {
+  "RING_IP": 3,
+  "NODE": 3
+ },
+ "stop-ranks.sh": {
+  "RING_IP": 5
+ },
+ "validate-pr.log": {
+  "HOME": 8,
+  "NODE": 1
+ },
+ "validate-pr.sh": {
+  "RING_IP": 2,
+  "NODE": 1
+ },
+ "records/live-drafts/server-r0.log": {
+  "HOME": 1
+ },
+ "records/live-drafts/server-r1.log": {
+  "HOME": 1
+ },
+ "records/both-drafts/server-r0.log": {
+  "HOME": 1
+ },
+ "records/both-drafts/server-r1.log": {
+  "HOME": 1
+ },
+ "records/live/server-r0.log": {
+  "HOME": 1
+ },
+ "records/live/server-r1.log": {
+  "HOME": 1
+ },
+ "records/both/server-r0.log": {
+  "HOME": 1
+ },
+ "records/both/server-r1.log": {
+  "HOME": 1
+ }
+}

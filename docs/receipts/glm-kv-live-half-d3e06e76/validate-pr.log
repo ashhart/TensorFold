@@ -1,0 +1,117 @@
+=== binary 4bd1d64f94e18214 node1 4bd1d64f94e18214 06:13:22
+=== stop production 06:13:22
+[glm53-tf] stopped
+=== config both 06:13:49
+rank0 process seen after 4 s: 1301407 at 06:13:54
+READY after 230 s
+[tensorfold] serving kvprobe-native at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_p 0.95; drafts: off; context: 65536; loaded in 226.0s)
+turn  1 main     ttft 5.80 total 11.62 cached 0 tokens 48 sha ea582398230c form none (first turn)
+turn  2 main     ttft 5.57 total 11.35 cached 2048 tokens 48 sha 25d3cf4c723b form raw-or-partial
+turn  3 main     ttft 5.63 total 11.56 cached 4096 tokens 48 sha 4bbd2f8df0b6 form raw-or-partial
+turn  4 main     ttft 6.15 total 11.93 cached 6144 tokens 48 sha 0dbcac0b9d7a form raw-or-partial
+turn  5 main     ttft 6.19 total 11.89 cached 8192 tokens 48 sha 73e33772a797 form raw-or-partial
+turn  6 main     ttft 6.27 total 11.98 cached 10240 tokens 48 sha 1c313dc54dee form raw-or-partial
+turn  7 raw-keep ttft 7.18 total 13.03 cached 12288 tokens 48 sha 450d3bec5a69 form raw-or-partial
+turn  8 raw      ttft 4.47 total 10.39 cached 16384 tokens 48 sha 6d615174db62 form raw-or-partial
+turn  9 partial  ttft 4.53 total 10.30 cached 18432 tokens 48 sha 921fc4b0e3f2 form raw-or-partial
+wrote $HOME/kvprobe/receipt-pr/both/turns.json; stop the server (SIGINT to rank 0), then: collect $HOME/kvprobe/receipt-pr/both --log ...
+both ranks stopped, GPUs and locks free after 4 s
+log 0: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
+log 1: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
+=== config live 06:20:00
+rank0 process seen after 4 s: 1306225 at 06:20:05
+READY after 231 s
+[tensorfold] serving kvprobe-native at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_p 0.95; drafts: off; context: 65536; loaded in 225.8s)
+turn  1 main     ttft 5.78 total 11.50 cached 0 tokens 48 sha ea582398230c form none (first turn)
+turn  2 main     ttft 5.52 total 11.24 cached 2048 tokens 48 sha 25d3cf4c723b form raw-or-partial
+turn  3 main     ttft 5.65 total 11.40 cached 4096 tokens 48 sha 4bbd2f8df0b6 form raw-or-partial
+turn  4 main     ttft 6.08 total 11.73 cached 6144 tokens 48 sha 0dbcac0b9d7a form raw-or-partial
+turn  5 main     ttft 6.20 total 11.94 cached 8192 tokens 48 sha 73e33772a797 form raw-or-partial
+turn  6 main     ttft 6.22 total 11.93 cached 10240 tokens 48 sha 1c313dc54dee form raw-or-partial
+turn  7 raw-keep ttft 6.97 total 12.72 cached 12288 tokens 48 sha 450d3bec5a69 form raw-or-partial
+turn  8 raw      ttft 4.43 total 10.21 cached 16384 tokens 48 sha 6d615174db62 form raw-or-partial
+turn  9 partial  ttft 4.44 total 10.28 cached 18432 tokens 48 sha 921fc4b0e3f2 form raw-or-partial
+wrote $HOME/kvprobe/receipt-pr/live/turns.json; stop the server (SIGINT to rank 0), then: collect $HOME/kvprobe/receipt-pr/live --log ...
+both ranks stopped, GPUs and locks free after 4 s
+log 0: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
+log 1: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
+=== config both-drafts 06:26:11
+rank0 process seen after 4 s: 1311009 at 06:26:16
+READY after 230 s
+[tensorfold] serving kvprobe-native at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 65536; loaded in 226.6s)
+turn  1 main     ttft 5.28 total 8.40 cached 0 tokens 48 sha ea582398230c form none (first turn)
+turn  2 main     ttft 5.56 total 8.43 cached 2048 tokens 48 sha 25d3cf4c723b form raw-or-partial
+turn  3 main     ttft 5.59 total 9.25 cached 4096 tokens 48 sha 4bbd2f8df0b6 form raw-or-partial
+turn  4 main     ttft 6.14 total 10.08 cached 6144 tokens 48 sha 0dbcac0b9d7a form raw-or-partial
+turn  5 main     ttft 6.29 total 9.64 cached 8192 tokens 48 sha 73e33772a797 form raw-or-partial
+turn  6 main     ttft 6.13 total 10.25 cached 10240 tokens 48 sha 1c313dc54dee form raw-or-partial
+turn  7 raw-keep ttft 6.97 total 9.61 cached 12288 tokens 48 sha 450d3bec5a69 form raw-or-partial
+turn  8 raw      ttft 4.44 total 9.07 cached 16384 tokens 48 sha 6d615174db62 form raw-or-partial
+turn  9 partial  ttft 4.46 total 7.84 cached 18432 tokens 48 sha 921fc4b0e3f2 form raw-or-partial
+wrote $HOME/kvprobe/receipt-pr/both-drafts/turns.json; stop the server (SIGINT to rank 0), then: collect $HOME/kvprobe/receipt-pr/both-drafts --log ...
+both ranks stopped, GPUs and locks free after 4 s
+log 0: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
+log 1: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
+=== config live-drafts 06:32:01
+rank0 process seen after 4 s: 1315560 at 06:32:06
+READY after 231 s
+[tensorfold] serving kvprobe-native at http://127.0.0.1:18080/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 65536; loaded in 227.6s)
+turn  1 main     ttft 5.24 total 8.39 cached 0 tokens 48 sha ea582398230c form none (first turn)
+turn  2 main     ttft 5.70 total 8.53 cached 2048 tokens 48 sha 25d3cf4c723b form raw-or-partial
+turn  3 main     ttft 5.55 total 9.01 cached 4096 tokens 48 sha 4bbd2f8df0b6 form raw-or-partial
+turn  4 main     ttft 6.13 total 9.96 cached 6144 tokens 48 sha 0dbcac0b9d7a form raw-or-partial
+turn  5 main     ttft 6.32 total 9.54 cached 8192 tokens 48 sha 73e33772a797 form raw-or-partial
+turn  6 main     ttft 6.22 total 10.15 cached 10240 tokens 48 sha 1c313dc54dee form raw-or-partial
+turn  7 raw-keep ttft 7.11 total 9.70 cached 12288 tokens 48 sha 450d3bec5a69 form raw-or-partial
+turn  8 raw      ttft 4.43 total 8.78 cached 16384 tokens 48 sha 6d615174db62 form raw-or-partial
+turn  9 partial  ttft 4.55 total 7.69 cached 18432 tokens 48 sha 921fc4b0e3f2 form raw-or-partial
+wrote $HOME/kvprobe/receipt-pr/live-drafts/turns.json; stop the server (SIGINT to rank 0), then: collect $HOME/kvprobe/receipt-pr/live-drafts --log ...
+both ranks stopped, GPUs and locks free after 4 s
+log 0: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
+log 1: no KVCODEC totals line (stop rank 0 with SIGINT so the ranks tear down and print them)
+=== compare 06:37:51
+| turn | kind | prompt | cached both/live/both-drafts/live-drafts | TTFT s both / live / both-drafts / live-drafts | reply sha256 | same |
+|---|---|---|---|---|---|---|
+| 1 | main | 3102 | 0 / 0 / 0 / 0 | 5.80 / 5.78 / 5.28 / 5.24 | `ea582398230c` | yes |
+| 2 | main | 5322 | 2048 / 2048 / 2048 / 2048 | 5.57 / 5.52 / 5.56 / 5.70 | `25d3cf4c723b` | yes |
+| 3 | main | 7544 | 4096 / 4096 / 4096 / 4096 | 5.63 / 5.65 / 5.59 / 5.55 | `4bbd2f8df0b6` | yes |
+| 4 | main | 9775 | 6144 / 6144 / 6144 / 6144 | 6.15 / 6.08 / 6.14 / 6.13 | `0dbcac0b9d7a` | yes |
+| 5 | main | 11999 | 8192 / 8192 / 8192 / 8192 | 6.19 / 6.20 / 6.29 / 6.32 | `73e33772a797` | yes |
+| 6 | main | 14218 | 10240 / 10240 / 10240 / 10240 | 6.27 / 6.22 / 6.13 / 6.22 | `1c313dc54dee` | yes |
+| 7 | raw-keep | 16440 | 12288 / 12288 / 12288 / 12288 | 7.18 / 6.97 / 6.97 / 7.11 | `450d3bec5a69` | yes |
+| 8 | raw | 18661 | 16384 / 16384 / 16384 / 16384 | 4.47 / 4.43 / 4.44 / 4.43 | `6d615174db62` | yes |
+| 9 | partial | 20881 | 18432 / 18432 / 18432 / 18432 | 4.53 / 4.44 / 4.46 / 4.55 | `921fc4b0e3f2` | yes |
+
+replies identical in every turn
+
+| config | rank | keeps | restores (raw / partial) | ratio | pages | encode_ms | lazy_encode_ms | decode_ms | copy_ms | lazy_copy_ms | keep_io_ms | wait_ms |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| both | 0 | (no totals) | | | | | | | | | | |
+| both | 1 | (no totals) | | | | | | | | | | |
+| live | 0 | (no totals) | | | | | | | | | | |
+| live | 1 | (no totals) | | | | | | | | | | |
+| both-drafts | 0 | (no totals) | | | | | | | | | | |
+| both-drafts | 1 | (no totals) | | | | | | | | | | |
+| live-drafts | 0 | (no totals) | | | | | | | | | | |
+| live-drafts | 1 | (no totals) | | | | | | | | | | |
+
+| config | rank | trimmed | pages freed | free= last | held / spare MiB last |
+|---|---|---|---|---|---|
+| both | 0 | 0 | 0 | None | 2716 / 12652 |
+| both | 1 | 0 | 0 | None | None / None |
+| live | 0 | 0 | 0 | None | 2104 / 13298 |
+| live | 1 | 0 | 0 | None | None / None |
+| both-drafts | 0 | 0 | 0 | None | 2838 / 11450 |
+| both-drafts | 1 | 0 | 0 | None | None / None |
+| live-drafts | 0 | 0 | 0 | None | 2226 / 12062 |
+| live-drafts | 1 | 0 | 0 | None | None / None |
+
+restore forms (log-inferred, extra cases): both: {'raw': 'raw-or-partial', 'partial': 'raw-or-partial'}; live: {'raw': 'raw-or-partial', 'partial': 'raw-or-partial'}; both-drafts: {'raw': 'raw-or-partial', 'partial': 'raw-or-partial'}; live-drafts: {'raw': 'raw-or-partial', 'partial': 'raw-or-partial'}
+=== restore production 06:37:51
+[glm53-tf] request slots: 4 (GLM53_TF_BATCH=4)
+[canary] ok: 3 probes, tokens/round 5.71, decode 55.5 tok/s
+[canary] warmup 4096: 4112 prompt tokens, prefill 4.5412 s (4.78 s)
+[canary] warmup 16384: 16399 prompt tokens, prefill 13.2048 s (13.6 s)
+glm53-tf-r0 Up 2 minutes
+context_length": 1048576}]}
+=== DONE 06:39:57
