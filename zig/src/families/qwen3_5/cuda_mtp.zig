@@ -119,7 +119,7 @@ pub const Mtp = struct {
         const d = try gpa.create(Mtp);
         errdefer gpa.destroy(d);
         d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = platform.c.getenv("TF_MTP_TREES") != null, .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined, .tab = 0 };
-        if (platform.c.getenv("TF_MTP_DRAFTS")) |v| d.depth = std.fmt.parseInt(u32, std.mem.span(v), 10) catch default_depth;
+        d.depth = try platform.environment.read(u32, "TF_MTP_DRAFTS", default_depth);
         d.depth = @min(@max(d.depth, 1), most_window - 1);
         if (platform.c.getenv("TF_MTP_BATCH")) |v| d.batch = !std.mem.eql(u8, std.mem.span(v), "0");
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen36_mtp);

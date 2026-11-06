@@ -67,8 +67,8 @@ margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch 
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
 Admission counts both banks.
 `TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 128 to 2,048 for native serving.
-A smaller numeric value refuses startup and names the setting and its value; it is never raised silently. Each chunk takes at most 512 rows beside
-a decoding request, including with an override, and still respects the frame, attention and request boundaries.
+Any other explicit value is refused at startup with its name, supplied text and accepted range; unset keeps the device default.
+The internal model test interface can still use 16-row frames, which native shared serving does not admit.
 
 Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
 from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
