@@ -621,9 +621,10 @@ TensorFold also reports generation statistics such as decode rate, time to first
 
 Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enable_thinking`,
 `reasoning_effort`, `tokens_per_second`, `seconds`, `time_to_first_token`, `prefill_seconds`,
-`prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and the draft counters
-`rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A request that sends
-`return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
+`prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and a `speculative` object beside
+the block with the draft counters `rounds`, `drafted`, `accepted`, `acceptance_rate`, and
+`tokens_per_round` (the drafter's own counters arrive as `proposer`).
+A request that sends `return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
 `token_sha256` hash — on the whole reply and on the streamed finish event alike. A loop-guarded reply adds
 `runtime.loop.period`, and `runtime.loop.stopped` when `--loop-guard-stop` ended it; these fields describe the native
 reply and are absent from Python replies that do not provide them.
