@@ -265,6 +265,7 @@ pub const Gemma = struct {
         const k = try snap.save(x.gpa, x.m, x.s, l.slot, at);
         errdefer snap.drop(x.gpa, x.s, k);
         if (x.keeper) |kp| try kp.keep(kp.ctx, s, k);
+        for (s.images) |im| k.images = k.images or im.at < at;
         return k;
     }
 

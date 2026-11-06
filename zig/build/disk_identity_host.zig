@@ -4,6 +4,9 @@ pub fn steps(b: *std.Build, native: *std.Build.Module, all: *std.Build.Step) voi
     const open = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA disk open:"} }));
     b.step("test-cuda-disk-open-host", "CUDA's disk store takes --spill-gib's mode and --checkpoint-slots").dependOn(&open.step);
     all.dependOn(&open.step);
+    const kept = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA kept:"} }));
+    b.step("test-cuda-kept-host", "The shared kept image over host memory, stale keys through the real store").dependOn(&kept.step);
+    all.dependOn(&kept.step);
     const identity = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"disk identity:"} }));
     b.step("test-disk-identity-host", "Actual CUDA identity, resolved profile values and stale disk misses").dependOn(&identity.step);
     all.dependOn(&identity.step);
