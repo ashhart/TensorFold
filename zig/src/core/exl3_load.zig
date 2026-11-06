@@ -316,5 +316,7 @@ test "a scan that fails an allocation frees every group prefix it held" {
     var admitted = try scan(a, io, dir);
     defer admitted.deinit();
     try std.testing.expectEqual(@as(usize, 2), admitted.groups.len);
-    try std.testing.checkAllAllocationFailures(a, scanFault, .{ io, dir });
+    // resizes refused: the header arena grows in place only while its bucket has room, so on macOS the count varied
+    var growth = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(growth.allocator(), scanFault, .{ io, dir });
 }
