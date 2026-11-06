@@ -64,7 +64,7 @@ pub fn spec(out: q.Out, fused: bool, control: bool) c.Spec {
 
 pub const Product = struct {
     rig: Rig,
-    lane: *const q.Lane,
+    lane: q.Lane, // a copy with the tile loaded: other sets sharing the module keep the lane alone
     format: q.Out,
     fused: bool,
     control: bool = false,
@@ -124,10 +124,10 @@ pub const Product = struct {
         const shape = self.d.?.shape;
         var w = self.w;
         if (self.control) w.scale = 1.5;
-        if (shape.rows >= q.prompt_rows) {
+        if (self.lane.usesPrompt(shape.rows, w)) {
             try self.lane.matmulOut(self.rig.s, self.x, shape.k, shape.rows, w, self.out, self.format, self.part);
         } else {
-            // The harness shrinks single-shape gates; force the same instance instead of silently testing decode.
+            // Shrunk gates and grids under the SM gate would take the lane: force the instance instead.
             const band: usize = @max(1, @min((shape.rows + 127) / 128, (12 << 20) / (128 * shape.k * 2)));
             var args: cuda.Args = .{};
             args.add(self.x);
@@ -146,7 +146,7 @@ pub const Product = struct {
         try self.rig.s.synchronize();
     }
     pub fn replaced(self: *Product) ![]const u8 {
-        var lane = self.lane.*;
+        var lane = self.lane;
         lane.prompt = null;
         const shape = self.d.?.shape;
         try lane.matmulOut(self.rig.s, self.x, shape.k, shape.rows, self.w, self.base, self.format, self.part);
@@ -165,7 +165,7 @@ pub const Product = struct {
 
 pub const Registrations = struct {
     products: [5]Product,
-    pub fn init(gpu: check.Gpu, s: cuda.Stream, lane: *const q.Lane) Registrations {
+    pub fn init(gpu: check.Gpu, s: cuda.Stream, lane: q.Lane) Registrations {
         var r: Registrations = undefined;
         for ([_]q.Out{ .bf16, .f32 }, 0..) |out, oi| for ([_]bool{ false, true }, 0..) |fused, fi| {
             r.products[oi * 2 + fi] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = lane, .format = out, .fused = fused };
@@ -189,7 +189,8 @@ pub fn run(gpu: check.Gpu) !void {
     defer s.deinit();
     var lane = try q.Lane.load(gpu.d, cap / 10);
     defer lane.unload();
-    var regs = Registrations.init(gpu, s, &lane);
+    try lane.loadPrompt(gpu.d);
+    var regs = Registrations.init(gpu, s, lane);
     defer regs.deinit();
     var kernels: std.ArrayList(g.Kernel) = .empty;
     defer kernels.deinit(gpu.gpa);
@@ -202,8 +203,8 @@ pub fn run(gpu: check.Gpu) !void {
 
 test "qmmf prompt contract registers four production instances, served prompts and a replacement control" {
     const a = std.testing.allocator;
-    var lane: q.Lane = undefined;
-    var regs = Registrations.init(undefined, undefined, &lane);
+    const lane: q.Lane = undefined;
+    var regs = Registrations.init(undefined, undefined, lane);
     var kernels: std.ArrayList(g.Kernel) = .empty;
     defer kernels.deinit(a);
     try regs.append(89, a, &kernels);

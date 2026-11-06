@@ -20,12 +20,22 @@ qualification.
 
 # BF16 prompt tiles
 
-On sm_12x, BF16 calls with at least 512 rows, N >= 128, K >= 512 and
-128-column padded weights use a 128x128 CTA: WM=2, WN=4, 256 threads,
-three K64 stages. Dynamic shared memory is 98,432 bytes, including the
-stage barriers. Other formats, smaller grids and older devices use the
-existing tiles. This threshold is a conservative screening choice; the
-GB10 timing receipt must confirm that it pays.
+A family opts in with `Lane.loadPrompt`, which loads the tile only on
+sm_12x and reads the device's multiprocessor count. Only Flash Next
+calls it today, so other families keep the existing tiles. On sm_12x,
+BF16 calls with at least 512 rows, N >= 128, K >= 512 and 128-column
+padded weights use a 128x128 CTA: WM=2, WN=4, 256 threads, three K64
+stages. Dynamic shared memory is 98,432 bytes, including the stage
+barriers. Other formats, smaller grids and older devices use the
+existing tiles.
+
+The tile also needs more blocks than half the multiprocessors. Its K
+slices meet inside a block, so a call has one block for each 128x128
+output tile. A tile block makes four times the output of a 64-row lane
+block in about twice the time, so the lane wins while the tile's blocks
+fill half the device or less. On a GB10 (48 SMs), HC down (N=324) takes
+the tile from 1,025 rows and shared gate/up (N=640) from 513 rows.
+`qmmf-prompt-bench` times both sides of each threshold.
 
 Each stage copies two independent packed 64-column weight tiles with
 `cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes`. Their
@@ -94,10 +104,11 @@ Inputs use varied BF16 exponents and signs to expose a changed sum order.
 A separate N=129 tail fixture plants NaNs, infinities, signed zeros and
 subnormals in the inputs, and checks that inputs and weights stay unchanged.
 
-The benchmark checks equality first, prints loaded register/shared-memory
-usage and occupancy, then measures three A-B-A rounds with CUDA timing
-events, three warmups and twenty calls per sample. It prints median
-old/new times for all three shapes and a weighted 36/12/48-layer total.
+The benchmark checks equality first, then times four ways: the 64-row
+lane, prompt16, the forced tile and the lane's own gated choice. Each
+row count runs four rounds that rotate the ways' order, with CUDA timing
+events, three warmups and twenty calls per sample. It prints each way's
+median for the nine Flash Next shapes and a total weighted by calls.
 Run on an idle GB10. These warm microbenchmarks do not prove the full
 served mixer time or the complete kernel contract.
 
