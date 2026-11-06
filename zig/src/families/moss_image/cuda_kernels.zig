@@ -5,6 +5,9 @@ const cuda = @import("cuda");
 /// The image decoder's kernels (moss_image_decoder.cu), which the kernel contract's unpack suite launches.
 pub const decoder = @import("cuda_decoder_kernels.zig");
 
+/// The prompt encoder's kernels (moss_image_encoder.cu), which the kernel contract's encoder suites launch.
+pub const encoder = @import("cuda_encoder_kernels.zig");
+
 fn int(x: usize) c_int {
     return @intCast(x);
 }
