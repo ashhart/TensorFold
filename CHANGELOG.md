@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- An engine can refuse a request it cannot serve as asked in words the client can use: the server asks one optional `Engine.VTable.refusal` when the request is whole and answers 400 `invalid_request_error` before any header on chat, completions, Responses and Messages, streamed or not. An engine without the entry behaves exactly as today (#2082). Thanks to @shuuul.
+
 - DeepSeek-V4.1 DSML calls whose first parameter is the long one now stream from the invoke name instead of waiting for that parameter to close, as XML and GLM calls already do; a block that breaks after its name leaves the call it began while the whole reply keeps its text (#2191, #1975).
 
 - DeepSeek-V4.1 DSML calls now stream from the invoke name, DSML's own tag, unlike GLM and XML calls, which have none; before, the header waited for the first parameter to close, so a call whose first parameter is the long one now streams while it is written. A DSML call malformed after its name may stream before the whole reply keeps it as text (#2191, #1975).
@@ -75,7 +77,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on CUDA: `TF_GLM_CHUNK_SOLO=4096` now serves beside `--drafter` (DFlash2), 80 MiB more on each rank; a cold 64K prompt's first token comes about 7% sooner at TP=2 with the same tokens (#2219). Thanks to @Bizuayeu and @MiaAI-Lab.
 
 - Every retryable 503 on the OpenAI-shaped inference routes names its wait in a fixed `code` (`server_restarting`, `engine_loading`, `engine_reload_failed`, `engine_busy`, `engine_unavailable`, `memory_pressure`); a parked model's reload was reported as `server_restarting` with the drain's message and now answers `engine_loading` or `engine_reload_failed` with the model's own words, while capacity refusals gain the code and keep their status and absent `Retry-After` — an embeddings request that finds the engine busy now names `engine_busy` and says busy instead of unavailable. The drain's body bytes, every status code and every other message are unchanged, and the Messages routes' Anthropic envelope has no code field (#2135). Thanks to @devopsfortunato.
-- An engine can refuse a request it cannot serve as asked in words the client can use: the server asks one optional `Engine.VTable.refusal` when the request is whole and answers 400 `invalid_request_error` before any header on chat, completions, Responses and Messages, streamed or not. An engine without the entry behaves exactly as today (#2082). Thanks to @shuuul.
 
 - GLM on CUDA: `TF_GLM_COPIES=1` adds opt-in context copies, verified and priced with the same row costs as drafts. Off by default; tokens are unchanged (#2146).
 
