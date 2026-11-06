@@ -61,6 +61,7 @@ pub const Runner = struct {
     /// The running pass's prompt tail start (prompt_tail.zig): its last layer's q, o and MLP run from this row on.
     tail_from: ?u32 = null,
     last_gpu_seconds: f64 = 0,
+    span: ?forward.StageSpan = null, // a pipeline stage's layers and boundary hop (RFC #2005); null: the whole model
     gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
     trace: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE's: each pass run while it is enabled is a round
     current_round: ?*const Round = null,
@@ -317,12 +318,9 @@ pub const Runner = struct {
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
-        const tail_facts = @import("prompt_tail.zig").facts(r, head, accepted, placed.images != null or r.images != null);
-        r.tail_from = @import("prompt_tail.zig").first(tail_facts, round.ids.len, round.windows.len);
+        const keys = prompt_tail.begin(r, head, accepted, placed.images != null or r.images != null, round.ids.len, round.windows.len);
         defer r.tail_from = null;
-        if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
-        const keys = @import("prompt_tail.zig").keysOnly(tail_facts);
-        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from };
+        var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (keys) prompt_tail.keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks, .tail_from = r.tail_from, .span = r.span };
         r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
@@ -367,19 +365,19 @@ pub const Runner = struct {
         const e = cb.compute(.serial);
         var ended = false;
         errdefer if (!ended) e.end(); // an encoder the pool releases unended aborts the process, and the error is lost
-        var gi: usize = 0;
-        var ai: usize = 0;
-        for (r.model.weights.layers) |layer| switch (layer.mixer) {
-            .linear => {
-                try r.gdn.commit(gi, .{ .host = recurrent, .metadata = r.metadata() }, e);
+        var gi: usize, var ai: usize = .{ 0, 0 };
+        for (r.model.weights.layers, 0..) |layer, index| switch (layer.mixer) {
+            .linear => { // another stage's layer: that stage keeps its rows
+                if (forward.holds(r.span, index)) try r.gdn.commit(gi, .{ .host = recurrent, .metadata = r.metadata() }, e);
                 gi += 1;
             },
             .attention => {
+                defer ai += 1;
+                if (!forward.holds(r.span, index)) continue;
                 var views: [attn.planning.max_streams]attn.Cache = undefined;
                 const caches = r.layerCaches(ai, round, &views);
                 const kept = try r.bindings[ai].uploadKeep(attention_plan, caches, paths);
                 try r.attention.keep(e, &r.scratch, &r.bindings[ai], kept, caches);
-                ai += 1;
             },
         };
         e.end();
@@ -399,6 +397,7 @@ pub const Runner = struct {
 
     /// A validated single-window round consumes authoritative GPU keep metadata without host path selection.
     pub fn keepDevice(r: *Runner, round: *const Round, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
+        if (r.span != null) return error.StageKeepDevice; // a stage keeps on the host path, its own layers only
         try r.checkDeviceKeep(round);
         var recurrent = try round.recurrent(try r.params(round.ids.len), &.{&.{}});
         defer recurrent.deinit();

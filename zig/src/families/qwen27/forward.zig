@@ -18,6 +18,26 @@ pub const Mixer = struct {
     keys: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Attention, *Frame, u32) anyerror!void = null,
 };
 
+/// A pipeline stage's part of the model (RFC #2005): layers [first, end); `heads` runs the final norm and head too.
+pub const StageSpan = struct {
+    first: usize,
+    end: usize,
+    heads: bool,
+    /// The boundary rows: h (the stream) and r (the pending block output), bf16 rows of `hidden`, out then in.
+    hop: ?Hop = null,
+};
+/// Whether a pass over `span` runs layer `index` (null: the whole model runs every layer).
+pub fn holds(span: ?StageSpan, index: usize) bool {
+    const sp = span orelse return true;
+    return index >= sp.first and index < sp.end;
+}
+/// Host hands for the boundary's two planes, h then r, `rows` rows each; the ring's give and take.
+pub const Hop = struct {
+    ptr: *anyopaque,
+    give: *const fn (*anyopaque, h: []const u8, r: []const u8, rows: u32) anyerror!void,
+    take: *const fn (*anyopaque, h: []u8, r: []u8, rows: u32) anyerror!void,
+};
+
 /// One exchange: `x` its index, `ref` this rank's `width` columns of the seam in the window's slot for x.
 pub const Seam = struct { x: u32, ref: Ref };
 
@@ -84,17 +104,45 @@ pub const Stages = struct {
     norm: ?wts.Tensor = null,
     /// Where the head writes its logits: the frame's, or the MTP head's own (the target's last row stays readable).
     logits: ?Ref = null,
+    /// A stage's layers and boundary; null runs the whole model.
+    span: ?StageSpan = null,
     /// The rows layer `index`'s post and the final norm run: the tail's on the last layer, else every row.
     fn rowsAt(s: *const Stages, index: usize) Span {
         const f = &s.model.frame;
         if (s.tail_from) |t0| if (index + 1 == s.model.config.layers) return .{ .t0 = t0, .n = s.rows - t0, .dims = f.get(.tail_dims) };
         return .{ .t0 = 0, .n = s.rows, .dims = f.get(.dims) };
     }
+    /// The boundary rows as host bytes of the shared frame (h, then r): the GPU is idle when the hop reads or writes.
+    fn boundaryRows(s: *const Stages, h: Ref, r: Ref) [2][]u8 {
+        const n = @as(usize, s.rows) * s.model.config.hidden * 2;
+        return .{ h.buffer.contents()[h.offset..][0..n], r.buffer.contents()[r.offset..][0..n] };
+    }
+    /// Ends and waits for the lane's command buffer (its boundary rows written), then opens the next behind the fence.
+    fn drain(s: *Stages, lane: *@import("core").segments.Lane) !void {
+        lane.fence.update(lane.enc);
+        lane.enc.end();
+        lane.cb.commit();
+        lane.cb.wait();
+        if (lane.cb.failure()) |msg| {
+            std.log.err("command buffer failed: {s}", .{msg});
+            return error.GpuFailed;
+        }
+        lane.cb = s.model.queue.commandBuffer();
+        lane.enc = lane.cb.compute(.concurrent);
+        lane.fence.wait(lane.enc);
+    }
     pub fn begin(s: *Stages, lane: *@import("core").segments.Lane) !void {
         const m = s.model;
         if (s.rows == 0 or s.rows > m.frame.capacity or lane.k != 0) return error.BadFrameRows;
         s.hidden = m.frame.get(.hidden);
         s.residual = m.frame.get(.residual);
+        if (s.span) |sp| if (sp.first > 0) { // a later stage: the rows come from the one before, h and r
+            const hop = sp.hop orelse return error.StageHopMissing;
+            s.pending = m.frame.get(.output);
+            const p = s.boundaryRows(s.hidden, s.pending.?);
+            try hop.take(hop.ptr, p[0], p[1], s.rows);
+            return;
+        };
         try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
         lane.enc.barrier();
         if (s.images) |rows| {
@@ -107,6 +155,7 @@ pub const Stages = struct {
     }
     pub fn handoff(_: *Stages, _: *@import("core").segments.Lane, _: usize) !void {}
     pub fn pre(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
+        if (!holds(s.span, index)) return;
         const m = s.model;
         const f = &m.frame;
         const e = lane.enc;
@@ -124,6 +173,7 @@ pub const Stages = struct {
         return s.hooks.keys != null and s.head == .none and index + 1 == s.model.config.layers;
     }
     pub fn mixer(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
+        if (!holds(s.span, index)) return;
         const m = s.model;
         if (s.keysOnly(index)) {
             try s.hooks.keys.?(s.hooks.ptr, lane.enc, index, layerAt(m, index).mixer.attention, &m.frame, s.rows);
@@ -137,6 +187,7 @@ pub const Stages = struct {
         lane.enc.barrier();
     }
     pub fn post(s: *Stages, lane: *@import("core").segments.Lane, index: usize) !void {
+        if (!holds(s.span, index)) return;
         if (s.keysOnly(index)) return;
         const m = s.model;
         const f = &m.frame;
@@ -254,6 +305,18 @@ pub const Stages = struct {
     pub fn finish(s: *Stages, lane: *@import("core").segments.Lane) !void {
         const m = s.model;
         const f = &m.frame;
+        if (s.span) |sp| if (sp.hop) |hop| { // this stage's rows on to the next; rank 0 takes the last stage's back
+            try s.drain(lane);
+            const out = s.boundaryRows(s.hidden, s.pending orelse return error.StageNoRows);
+            try hop.give(hop.ptr, out[0], out[1], s.rows);
+            if (!sp.heads) return;
+            s.hidden = f.get(.hidden);
+            s.residual = f.get(.residual);
+            s.pending = f.get(.output);
+            const in = s.boundaryRows(s.hidden, s.pending.?);
+            try hop.take(hop.ptr, in[0], in[1], s.rows);
+        };
+        if (s.span) |sp| if (!sp.heads) return;
         // The head seam reopens the encoder, so it goes back in the lane; rank 0's half-vocab argmax is not a token.
         var e = lane.enc;
         if (s.keysOnly(m.config.layers - 1)) return if (s.tail) |tail| tail.encode(tail.ptr, e);
