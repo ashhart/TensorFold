@@ -617,7 +617,7 @@ reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD
 
 Without `--compact-at` nothing compacts: a conversation that outgrows the context is refused with the usual
 `context_length` error. With it, the server summarizes instead of refusing. `--compact-at auto` reserves room for
-the reply — the larger of 15% of the context window and 16,384 tokens — and compacts a conversation whose prompt
+the reply — the larger of 15% of the context window and 16,384 tokens, or 15% when the window can't hold 16,384 — and compacts a conversation whose prompt
 plus wanted reply tokens would cross what is left, or one the plain prepare refuses for context length.
 `--compact-at F`, a fraction of the window in (0, 1], compacts when they would cross F × the window, rounded down.
 Any other value is refused at startup ("expected auto or a fraction in (0, 1]").
