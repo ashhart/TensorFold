@@ -35,7 +35,7 @@ pub const Traffic = struct {
     ms: f64 = 0,
     reduce_scatters: u32 = 0,
 
-    /// `steps` steps, each a message of `largest` bytes or less to each peer; a message past `max_write` goes in pieces.
+    /// `steps` steps, each a message of `largest` bytes or less per peer; a message past `max_write` goes in pieces.
     fn add(t: *Traffic, link: Link, peers: u32, steps: u32, peer_bytes: u64, largest: u64) void {
         const pieces = std.math.divCeil(u64, @max(largest, 1), max_write) catch unreachable;
         t.steps += steps;
