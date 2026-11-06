@@ -14,6 +14,7 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
         .{ "zig/src/core/contract/rows.zig", "core/contract/rows.zig" },
         .{ "zig/src/core/contract/limits.zig", "core/contract/limits.zig" },
         .{ "zig/src/core/norms_ref.zig", "core/norms_ref.zig" },
+        .{ "zig/src/core/act_ref.zig", "core/act_ref.zig" },
     };
     for (sources) |pair| _ = files.addCopyFile(b.path(pair[0]), pair[1]);
     const root = files.add("core/steer_root.zig",
