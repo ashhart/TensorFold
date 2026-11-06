@@ -108,7 +108,7 @@ format ([prompt precision](#prompt-precision)):
 
 ## Native prompt controls
 
-For Nemotron, the native `tensorfold run` command accepts `--device N` to choose a CUDA ordinal. If
+For Nemotron, the native `tensorfold run` command on a CUDA build accepts `--device N` to choose a CUDA ordinal. If
 the flag is absent, it uses `TF_CUDA_DEVICE`, then device 0. `--segments N` enables
 staggered prompt work for 1 through 4 whole 2,048-row chunks; without the flag it
 uses `TF_CUDA_SEGMENTS`, then 1. The `tensorfold segments` command compares the
@@ -123,7 +123,7 @@ at two and 96 at four. A saved state records its loop count and never crosses to
 parse. The other CUDA families, the HIP engines and Kimi on Metal refuse the flag by name, and `tensorfold run`
 refuses it for any model that is not Dory.
 
-Experimental: on a DGX Spark (GB10), `tensorfold run --carveout`, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
+Experimental: on a DGX Spark (GB10), `tensorfold run --carveout` on a CUDA build, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
 `tensorfold-native`, puts Nemotron's KV caches in the memory the display controller reserves, which
 MemAvailable never counts. The native engine maps a
 DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
