@@ -163,7 +163,7 @@ pub const Checkpoint = struct {
 
     /// The MTP layer from `mtp*.safetensors` or the model's own shards; null when absent.
     pub fn mtp(c: *const Checkpoint) !?host.Mtp {
-        if (c.config.quant == .bf16) {
+        if (c.config.quant == .bf16 and !c.config.modelopt) {
             if (c.spec().mtp_layers == 0) return null;
             std.log.err("a bf16 checkpoint's MTP head is not read: its config declares {d} MTP layers", .{c.spec().mtp_layers});
             return error.UnexpectedTensor;
