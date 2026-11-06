@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CI: the portable-names check runs on every pull request again; since #2274 a reused pass could miss a newly added name
   Windows can't check out (#2311).
+- Tests: the Metal kernel contract checks a masked key's non-finite value across every family's prompt attention, with
+  the families that still give hidden rows NaN registered as known (#2308, refs #1009).
 
 - Tests: the Qwen3.8-27B decode control in the Metal kernel contract edits the line #2106 changed, so contract runs on
   M5 reach their summary again (#2303, fixes #2301). Thanks to @BobClawblaw.
