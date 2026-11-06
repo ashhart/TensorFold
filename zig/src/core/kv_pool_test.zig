@@ -497,3 +497,29 @@ test "a hold past the free pages asks the store to reclaim first, as a promise d
     for (ids) |id| p.release(id);
     try expect(p.idle());
 }
+
+test "TF_KV_SHARE's slots alone (GLM): the cache keeps the slots it holds, the named count at most, and the rest is pages" {
+    const g: u64 = 1 << 30;
+    const glm: kv.Layout = .{ .fixed_bytes = 180 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 180 * mib };
+    const b: kv.Budget = .{ .room = 80 * g, .engine = 0, .lanes = 4, .cache = g, .snaps = 16, .window = 262_144 + 8, .engine_paged = true, .slots_only = true };
+    const p = try kv.plan(glm, b);
+    try expectEqual(@as(usize, 5), p.snaps); // a GiB holds five of the sixteen named
+    try expectEqual(@as(u64, 0), p.copied);
+    try expectEqual(g - 5 * 180 * mib, p.kept);
+    var two = b;
+    two.snaps = 2;
+    const q = try kv.plan(glm, two);
+    try expectEqual(@as(usize, 2), q.snaps);
+    try expectEqual(g - 2 * 180 * mib, q.kept);
+    var copies = two; // the split without the flag: the slots' rest stays copied rows
+    copies.slots_only = false;
+    const r = try kv.plan(glm, copies);
+    try expectEqual(@as(usize, 2), r.snaps);
+    try expectEqual(g - 2 * 180 * mib, r.copied);
+    try expectEqual(@as(u64, 0), r.kept);
+    try expect(q.pages > r.pages and q.pages > p.pages); // what the slots leave is pages, past the windows' bound
+    var many = b;
+    many.snaps = 100;
+    many.cache = 16 * g;
+    try expectEqual(@as(usize, kv.most_snaps), (try kv.plan(glm, many)).snaps);
+}
