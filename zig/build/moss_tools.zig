@@ -11,8 +11,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .link_libc = true,
         .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } },
     });
-    // tf-moss-image: the transformer on a reference case (tools/zig/moss_image_case.py), compared and timed; its own
-    // prompt encoder and image decoder run from the same checkpoint, so it imports the tokenizer for --prompt's ids
+    // tf-moss-image: the transformer on a reference case, its own prompt encoder and image decoder from that folder
     const transformer = b.createModule(.{
         .root_source_file = b.path("zig/tests/moss_image_cuda.zig"),
         .target = target,
