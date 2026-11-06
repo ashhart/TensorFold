@@ -41,10 +41,10 @@ pub const records = [_]Record{
     .{
         .launch = .{ .name = "BF16 full image attention", .symbol = "tf_fa_full_bf16", .image = "prefill", .threads = 256 },
         .usage = .{
-            .{ .vgprs = 246, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 230, .sgprs = 49, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 245, .sgprs = 45, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 229, .sgprs = 46, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 229, .sgprs = 46, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 229, .sgprs = 48, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
         },
     },
 };
