@@ -97,6 +97,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Internal: 15 more lean findings fixed in the CLI, cluster and CUDA comments, with no change in behaviour (#2320).
 
 - Internal: 15 more lean findings fixed in the Metal kernels' comments, with no change in behaviour (#2318).
+- Kept prompt states: a state saved to disk is reused only by the same build and the same checkpoint files, so a rewritten checkpoint or a new build starts cold instead of reusing an old state; the first long prompt after an upgrade prefills again (#2163, #2131).
 
 - Internal: 42 more lean findings fixed in the tests' comments and the tools' docstrings, with no change in behaviour (#2315).
 
