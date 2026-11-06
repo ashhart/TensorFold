@@ -4,6 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: with `TF_KV_SHARE=n`, the startup plan sets a slot aside in the prompt cache for each kept
+  state, so the cache keeps as many states as its slots hold, up to n, and the rest of it goes to the KV pool's pages;
+  the startup line names the slots and, when fewer than n fit, the `--prompt-cache-gib` that holds them all. A value
+  over 64 now stops the server, and a cache too small for one slot (for example `--prompt-cache-gib 0`) keeps none,
+  where before it kept them outside the plan (#2358). Thanks to @Bizuayeu.
+
 - CI: the portable-names check runs on every pull request again; since #2274 a reused pass could miss a newly added name
   Windows can't check out (#2311).
 
