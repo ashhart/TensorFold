@@ -22,6 +22,7 @@ pub const max_window = 16;
 pub const pagesFor = shared.pagesFor;
 /// Drawn tokens a handle names (a ring; read before the round loop could wrap it).
 const ring = 1024;
+const max_injects = 8; // images one prompt pass can take; a solo pass stays under it
 
 const Lane = struct {
     slot: usize,
@@ -344,7 +345,7 @@ pub const Gemma = struct {
         if (s.isCancelled()) return error.Cancelled;
         // solo passes (TF_GEMMA4_CHUNK_SOLO) only without a drafter's taps, at most `injects` images a pass
         const solo = lanes.solo_chunk.passRows(&x.lanes, s, "fill", x.m.prompt_most, prompt_rows);
-        const rows = if (x.tapped or s.images.len > 8) prompt_rows else solo;
+        const rows = if (x.tapped or s.images.len > max_injects) prompt_rows else solo;
         var end = @min(p.len, at / prompt_rows * prompt_rows + rows);
         for (if (l.shared) l.marks else s.reuse.marks) |mk| if (mk > at and mk < end and !insideImage(s, mk)) {
             end = mk;
@@ -353,7 +354,7 @@ pub const Gemma = struct {
         for (s.images) |im| if (im.at < end and end < im.at + im.tokens) {
             end = if (im.at > at) im.at else im.at + im.tokens;
         };
-        var injects: [8]fwd.Inject = undefined;
+        var injects: [max_injects]fwd.Inject = undefined;
         var n: usize = 0;
         var off: usize = 0;
         for (s.images) |im| {
