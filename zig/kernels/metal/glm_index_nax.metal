@@ -24,7 +24,7 @@ inline frag<bfloat> ix_frag(const device bfloat* r0, const device bfloat* r1, in
 #endif
 }
 
-// Grid (64-block tiles, 64-row tiles): 4 simdgroups of 32 rows x 32 blocks; only blocks a row reads are stored, whole tiles past them skipped.
+// Grid: 64-block, 64-row tiles; 4 simdgroups, 32 rows x 32 blocks; only read blocks stored, whole tiles beyond skipped.
 [[kernel]] void glm_index_scores_nax(const device bfloat* iq [[buffer(0)]], const device bfloat* iw [[buffer(1)]],
                                      const device bfloat* pool [[buffer(2)]], device float* scores [[buffer(3)]],
                                      constant GlmScoreArgs& a [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
