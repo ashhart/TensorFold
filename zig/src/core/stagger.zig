@@ -141,7 +141,7 @@ const Recorder = struct {
     }
 };
 
-// The schedule on simulated queues: a wait blocks until the segment before signalled its layer; each hook after its waits.
+// Schedule on simulated queues: a wait blocks until the segment before signalled its layer; each hook after its waits.
 test "the schedule runs to the end on queues and keeps each layer's dependencies" {
     for (1..MAX + 1) |n| {
         var rec: Recorder = .{ .early = 1 };
