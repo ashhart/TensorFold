@@ -131,7 +131,7 @@ template <int H, int DH, int NG, int DS, int XD, int PROJ, int DTOFF, int SSZ>
   }
 }
 
-// A lane's 16 x n tensor-op results by layout (TF_SIMD_LAYOUT before the M5, as simd_attention.zig checks): rows, columns.
+// A lane's 16 x n tensor-op results by layout (TF_SIMD_LAYOUT pre-M5, as simd_attention.zig checks): rows, columns.
 #ifdef TF_SIMD_LAYOUT
 #define TT_FN(lane) short((((lane) & 8) >> 1) | (((lane) & 1) << 1))
 #define TT_COL(i, n) (((i) & 1) + 8 * (((i) >> 1) % ((n) / 8)))
