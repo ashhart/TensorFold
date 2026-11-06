@@ -5,7 +5,7 @@ typedef bfloat bfloat16_t;
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
 
-// A segment's 8 ints: real first row, replayed rows, state slot in, replay id, parity in, save inputs, first virtual row.
+// Segment's 8 ints: real first row, replayed rows, state slot in, replay id, parity in, save inputs, first virtual row.
 #define SEG_B 0
 #define SEG_K 1
 #define SEG_IN 2
