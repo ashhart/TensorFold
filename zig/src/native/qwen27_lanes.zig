@@ -278,7 +278,7 @@ pub const Metal = struct {
         var at = first;
         while (at < first + rows) : (at += contract.max_rows) {
             const n = @min(first + rows - at, contract.max_rows);
-            try b.ops.argmax(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
+            try b.ops.argmaxChunks(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
         }
         e.end();
         cb.commit();
