@@ -1,5 +1,4 @@
-//! Host pins for the limits docs/api.md and the README state: each limit gets one accepted bound
-//! and one refused neighbour, with the refusal text the code answers.
+//! Pins for the limits docs/api.md and the README state: one accepted bound and one refused neighbour each.
 const std = @import("std");
 const json = @import("json");
 const cli = @import("cli.zig");
