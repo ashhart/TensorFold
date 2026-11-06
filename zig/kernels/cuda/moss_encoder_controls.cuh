@@ -59,6 +59,58 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_me_head_weight(const __
   }
 }
 
+// Gate 3: tf_me_silu_mul without its up projection: bf16(silu g) where float64 multiplies it by u.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_me_silu_mul_up(const __nv_bfloat16* __restrict__ G,
+                                                                       const __nv_bfloat16* __restrict__ U,
+                                                                       __nv_bfloat16* __restrict__ O, int width) {
+  (void)U;
+  const int row = blockIdx.y, col = blockIdx.x * 256 + threadIdx.x;
+  if (col >= width) return;
+  const size_t i = (size_t)row * width + col;
+  const float g = __bfloat162float(G[i]);
+  O[i] = __float2bfloat16_rn(__bfloat162float(__float2bfloat16_rn(__fdiv_rn(g, 1.0f + expf(-g)))));
+}
+
+// Gate 3: tf_me_conv without its silu: bf16(the taps' bf16 sum) where float64 takes the silu of it.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_me_conv_silu(const __nv_bfloat16* __restrict__ X,
+                                                                     const __nv_bfloat16* __restrict__ W,
+                                                                     __nv_bfloat16* __restrict__ Y, int width) {
+  const int row = blockIdx.y, col = blockIdx.x * 256 + threadIdx.x;
+  if (col >= width) return;
+  float s = 0.0f;
+#pragma unroll
+  for (int k = 0; k < 4; ++k) {
+    if (row + k >= 3) s += __bfloat162float(W[col * 4 + k]) * __bfloat162float(X[(size_t)(row + k - 3) * width + col]);
+  }
+  Y[(size_t)row * width + col] = __float2bfloat16_rn(__bfloat162float(__float2bfloat16_rn(s)));
+}
+
+// Gate 3: tf_me_gated_norm without its learned weight: bf16(bf16(x inv) silu z) where float64 takes w's product.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_me_gated_norm_weight(const __nv_bfloat16* __restrict__ X,
+                                                                             const __nv_bfloat16* __restrict__ Z,
+                                                                             const __nv_bfloat16* __restrict__ W,
+                                                                             __nv_bfloat16* __restrict__ Y,
+                                                                             int width, float eps) {
+  (void)W;
+  const int r = blockIdx.x, h = blockIdx.y * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+  if (h * 128 >= width) return;
+  const size_t at = (size_t)r * width + h * 128 + lane * 4;
+  float v[4];
+  float ss = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    v[i] = __bfloat162float(X[at + i]);
+    ss += v[i] * v[i];
+  }
+  const float inv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(tf_common::warp_sum(ss), 128.0f), eps)));
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const float n = __bfloat162float(__float2bfloat16_rn(v[i] * inv));
+    const float z = __bfloat162float(Z[at + i]);
+    Y[at + i] = __float2bfloat16_rn(n * __fdiv_rn(z, 1.0f + expf(-z)));
+  }
+}
+
 // Gate 3: tf_me_gate with its sigmoid left in fp32: a bf16(sigmoid g) where float64 rounds the sigmoid first.
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_me_gate_sigmoid(const __nv_bfloat16* __restrict__ A,
                                                                         const __nv_bfloat16* __restrict__ QG,
