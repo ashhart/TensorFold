@@ -95,7 +95,7 @@ pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
     var a = arguments(e, sg, layer, rows, from * g.q_heads * head_dim * 2);
     const ids = if (p256(e, sg)) pageIds(sg, rows) else 0;
     const cfg: cuda.Config = .{ .grid = .{ .x = @intCast((rows + block_rows - 1) / block_rows), .y = @intCast(g.kv_heads * (group / hpc)) }, .block = .{ .x = 256 }, .shared = smem + 4 * ids };
-    // 256-position pages (the default): the kernel with the page size a constant, page ids in shared memory if they fit
+    // 256-position pages: the kernel with the page size a constant, page ids in shared memory if they fit
     const f = if (paged) (if (e.kv8) e.prompt_attn.fp8 else if (sg.ptok == 256) (if (ids > 0) e.prompt_attn.bf16_p256_ids else e.prompt_attn.bf16_p256) else e.prompt_attn.bf16) else (if (e.kv8) e.prompt_attn.fp8_whole else e.prompt_attn.bf16_whole);
     try cuda.launch.launch(f, cfg, e.stream, &a);
 }

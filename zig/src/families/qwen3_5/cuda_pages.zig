@@ -11,16 +11,16 @@ const Cache = caches.Cache;
 /// Rows past a request's prompt and reply its pages hold: one more forward's (a verify window or a prompt chunk).
 pub const window_rows: u32 = engine.max_rows;
 
-/// TF_QWEN_KV_PAGES unset: windows for a dense model and a MoE alike, as on main, until #2043 closes the page cost.
-pub const unset_pages: struct { dense: usize, moe: usize } = .{ .dense = 0, .moe = 0 };
+/// TF_QWEN_KV_PAGES unset: a window each, dense or MoE, as on main, until #2043 closes the page cost.
+pub const unset_pages: usize = 0;
 
 /// TF_QWEN_KV_PAGES=n: n-position pages from one pool, --parallel a cap (0 or unset: a window each, as on main).
-pub fn paging(slide: bool, moe: bool) !usize {
-    return pagingOf(@import("core").profile.get(.TF_QWEN_KV_PAGES), slide, moe);
+pub fn paging() !usize {
+    return pagingOf(@import("core").profile.get(.TF_QWEN_KV_PAGES));
 }
 
-pub fn pagingOf(v: ?[]const u8, slide: bool, moe: bool) !usize {
-    return parsePaging(v orelse return if (slide) 0 else if (moe) unset_pages.moe else unset_pages.dense);
+pub fn pagingOf(v: ?[]const u8) !usize {
+    return parsePaging(v orelse return unset_pages);
 }
 
 pub fn parsePaging(v: []const u8) !usize {
@@ -235,15 +235,13 @@ test "KV page dimensions: pool rows fit the signed kernel argument and zero disa
     try std.testing.expectError(error.BadQwenKvPages, parsePaging("18446744073709551615"));
 }
 
-test "Qwen pages default: unset or 0 keeps windows on a dense model and a MoE, a set size pages either" {
-    for ([_]bool{ false, true }) |moe| for ([_]bool{ false, true }) |slide| {
-        try std.testing.expectEqual(@as(usize, 0), try pagingOf(null, slide, moe));
-        try std.testing.expectEqual(@as(usize, 0), try pagingOf("0", slide, moe));
-        try std.testing.expectEqual(@as(usize, 256), try pagingOf("256", slide, moe));
-        try std.testing.expectEqual(@as(usize, 128), try pagingOf("128", slide, moe));
-        try std.testing.expectEqual(@as(usize, 1), try pagingOf("1", slide, moe));
-        try std.testing.expectError(error.BadQwenKvPages, pagingOf("", slide, moe));
-    };
+test "Qwen pages default: unset or 0 keeps windows, a set size pages" {
+    try std.testing.expectEqual(@as(usize, 0), try pagingOf(null));
+    try std.testing.expectEqual(@as(usize, 0), try pagingOf("0"));
+    try std.testing.expectEqual(@as(usize, 256), try pagingOf("256"));
+    try std.testing.expectEqual(@as(usize, 128), try pagingOf("128"));
+    try std.testing.expectEqual(@as(usize, 1), try pagingOf("1"));
+    try std.testing.expectError(error.BadQwenKvPages, pagingOf(""));
 }
 
 test "Qwen pages default: TF_QWEN_KV_PAGES_ALL unset keeps the engine's stream a window, as on main; 1 pages it" {

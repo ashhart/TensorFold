@@ -95,3 +95,20 @@ pub fn caps(comptime Lanes: type) !void {
     try t.expect(native.pagedLayout(&l, 0) == null); // no pool: the plan reserves a window for each of --parallel's
     try t.expect(native.fits(&l, capacity, 16));
 }
+
+/// The refusal `open` gives with these switches: no model at the path, so reaching the load names another error.
+fn refused(slide: bool, kv_pages: ?[:0]const u8, share: ?[:0]const u8) !void {
+    defer _ = env.unsetenv("TF_QWEN_KV_PAGES");
+    defer _ = env.unsetenv("TF_QWEN_KV_SHARE");
+    if (kv_pages) |v| _ = env.setenv("TF_QWEN_KV_PAGES", v, 1);
+    if (share) |v| _ = env.setenv("TF_QWEN_KV_SHARE", v, 1);
+    const o: native.Options = .{ .context = capacity, .drafts = false, .slide = slide };
+    _ = try native.open(t.allocator, t.io, undefined, "/nonexistent", null, o);
+}
+
+/// A set switch's refusal needs no model: it stops before the weights load, as the other switch checks do.
+pub fn refusals() !void {
+    try t.expectError(error.QwenPagesNoLearner, refused(true, "256", null));
+    try t.expectError(error.QwenShareNeedsPages, refused(false, null, "16"));
+    try t.expectError(error.QwenShareNeedsPages, refused(false, "100", "16"));
+}
