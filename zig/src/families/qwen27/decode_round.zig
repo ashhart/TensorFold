@@ -297,6 +297,8 @@ pub const Runner = struct {
         defer pool.pop();
         const cb = r.model.queue.commandBuffer();
         const e = cb.compute(.serial);
+        var ended = false;
+        errdefer if (!ended) e.end(); // an encoder the pool releases unended aborts the process, and the error is lost
         var gi: usize = 0;
         var ai: usize = 0;
         for (r.model.weights.layers) |layer| switch (layer.mixer) {
@@ -313,6 +315,7 @@ pub const Runner = struct {
             },
         };
         e.end();
+        ended = true;
         cb.commit();
         cb.wait();
         if (gpuFailed(cb, "a round's keep")) {
