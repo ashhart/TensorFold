@@ -1,4 +1,4 @@
-//! `tensorfold segments`: prompts prefilled at 1-4 segments a call, interleaved, every result hashed against one segment's.
+//! `tensorfold segments`: prompts prefilled at 1-4 segments a call, interleaved, results hashed against one segment's.
 
 const std = @import("std");
 const cuda = @import("cuda");
