@@ -24,8 +24,7 @@ fn isSilu(shape: c.Shape) ?bool {
     };
 }
 
-/// The (pixels, channels) pairs the decoder's SiLU norms run at: a picture's four levels at the widths its blocks
-/// hold there, 384 to the mid block and up_blocks.0, then up_blocks.2's 192 and up_blocks.3's 96 down the levels.
+/// The (pixels, channels) pairs its SiLU norms run at: each picture's four levels at 384, 384, then 192 and 96.
 const pairs = [_][2]usize{
     .{ 1456, 384 }, .{ 5824, 384 }, .{ 23296, 384 }, .{ 23296, 192 }, .{ 93184, 192 }, .{ 93184, 96 }, // 416 x 224
     .{ 5120, 384 },  .{ 20480, 384 }, .{ 81920, 384 },  .{ 81920, 192 },  .{ 327680, 192 },  .{ 327680, 96 }, // 512 x 640
