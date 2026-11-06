@@ -153,7 +153,7 @@ pub const usage =
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
     \\  flashnext-modelopt-contract  Flash Next NVFP4's BF16 dense and FP8 MTP-expert downs through gates 1-4
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
-    \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
+    \\  moss-contract             MOSS-Image's own kernels, its decoder's unpack and its full attention through gates 1-4, controls red
     \\  idol-decoder-contract     Idol's decoders' stem, to_kv, head norms and attention through gates 1-4, controls red
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red
     \\  glm-exl3 | glm-exl3-items  GLM's EXL3 routed experts, decode and prompt, against float64, and the item plan's decode against the plain decode, byte for byte (synthetic)
