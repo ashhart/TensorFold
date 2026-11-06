@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The fabric's tests on this machine (CPU, in-process fakes) and the link test build; TF_MCDMA_SRC names an MCDMA checkout.
+# The fabric's tests here (CPU, in-process fakes) and the link test build; TF_MCDMA_SRC names an MCDMA checkout.
 set -euo pipefail
 zig="${ZIG:-zig}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
