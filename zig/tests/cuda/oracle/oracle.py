@@ -1,4 +1,4 @@
-"""Dev-time oracle (runs in the PyTorch image, never at runtime): fixtures for the Zig bit checks from the Python engine's own ops."""
+"""Dev-time oracle (PyTorch image, never at runtime): fixtures for the Zig bit checks from the Python engine's ops."""
 
 from __future__ import annotations
 
