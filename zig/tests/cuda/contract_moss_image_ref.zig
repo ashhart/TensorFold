@@ -138,8 +138,11 @@ pub const nan16 = 0x7fc0;
 pub const inf16 = 0x7f80;
 pub const ninf16 = 0xff80;
 
+/// A sum of squares in float64 and its range.
+pub const Squares = struct { ss: f64, r: Range };
+
 /// A row's sum of squares in float64 and its range from fp32 sums `depth` deep (exact for gate 4's integers).
-pub fn squares(x: []const u16, depth: usize, exact: bool) struct { ss: f64, r: Range } {
+pub fn squares(x: []const u16, depth: usize, exact: bool) Squares {
     var ss: f64 = 0;
     for (x) |v| {
         const f: f64 = c.fromBf16(v);
