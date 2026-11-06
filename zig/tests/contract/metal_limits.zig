@@ -32,8 +32,8 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         }
     }.f;
     if (std.mem.eql(u8, d.name, "contract masked values tf_masked_control")) {
-        const text = @import("masked_value_probe.zig").control_source;
-        return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
+        const control_text = @import("masked_value_probe.zig").control_source;
+        return .{ .decl = d, .function = fun, .here = control_text, .pre_m5 = control_text };
     }
     if (std.mem.startsWith(u8, d.name, "nemotron masked prompt ")) {
         const raw = if (std.mem.indexOf(u8, fun, "paged") != null) sources.nemotron_prompt_masked.paged_source else sources.nemotron_prompt_masked.contiguous;
