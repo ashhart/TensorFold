@@ -15,7 +15,7 @@ const prefill_many_k = @import("contract_qmm_prefill_many.zig");
 const prefill_tile22_k = @import("contract_qmm_prefill_tile22.zig");
 const mx_k = @import("contract_mxfp8.zig");
 const half_k = @import("contract_lane_half.zig");
-const wide_k = @import("contract_projection_f32.zig");
+const projection_set = @import("contract_projection_set.zig");
 const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
 const hcnorm_k = @import("contract_hc_normalize.zig");
@@ -41,6 +41,8 @@ const w4a8_k = @import("contract_w4a8.zig");
 const round_k = @import("contract_tree_round.zig");
 const act_k = @import("contract_act.zig");
 const vit_g4_group = @import("contract_gemma_group.zig");
+const moe_router_k = @import("contract_moe_router.zig");
+const chain_k = @import("contract_gdn_chain.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 const wrows_k = @import("contract_window_rows.zig");
@@ -223,21 +225,15 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     };
     defer for (&halves) |*h| h.deinit();
     for (&halves) |*h| try kernels.append(a, h.kernel());
-    var wide: [wide_k.modes.len * 2]wide_k.Product = undefined;
-    for (wide_k.modes, 0..) |mode, i| {
-        wide[i * 2] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = mode, .clusters = true };
-        wide[i * 2 + 1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .mode = mode, .clusters = false };
-    }
-    defer for (&wide) |*m| m.deinit();
-    for (&wide) |*m| try kernels.append(a, m.kernel());
-    var narrow: [wide_k.bf16_modes.len * 2 + 3]wide_k.Product = undefined; // bf16 out (the 27B's ModelOpt layers)
-    for (wide_k.bf16_modes, 0..) |mode, i| {
-        narrow[i * 2] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = mode, .clusters = true, .out_kind = .bf16 };
-        narrow[i * 2 + 1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .mode = mode, .clusters = false, .out_kind = .bf16 };
-    }
-    for ([_]cuda.qmmf.Mode{ .fp8, .bf16, .bf16 }, [_]cuda.qmmf.Out{ .bf16, .bf16, .f32 }, narrow[narrow.len - 3 ..]) |mode, out, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = mode, .clusters = true, .out_kind = out, .prompt = &prompt };
-    defer for (&narrow) |*m| m.deinit();
-    for (&narrow) |*m| try kernels.append(a, m.kernel());
+    var router_suite = try moe_router_k.Suite.init(gpu, s, mods[5]);
+    defer router_suite.deinit();
+    try router_suite.append(a, &kernels);
+    var chain_suite = try chain_k.Suite.init(gpu, s, mods[5]);
+    defer chain_suite.deinit();
+    try chain_suite.append(a, &kernels);
+    var projections = try projection_set.Set.init(gpu, s, &lane, &lane_reduce, &prompt);
+    defer projections.deinit();
+    try projections.append(a, &kernels);
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
