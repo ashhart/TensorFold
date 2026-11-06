@@ -70,7 +70,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []cons
     for (chats) |c| steps = @min(steps, @as(u32, @intCast(c.tokens.len)));
     const msg: usize = @intCast(try envInt("TF_DSV41_SESSION_SLOTS_MSG", 48));
     var rng = std.Random.DefaultPrng.init(try envInt("TF_DSV41_SESSION_SLOTS_SEED", 4141));
-    const drafts = try @import("sys").strict_env.boolean("TF_DSV41_DRAFTS", false, .{});
+    const drafts = try @import("sys").strict_env.boolean("TF_DSV41_DRAFTS", false, .{ .words = true, .no = true });
     const s = try se.Served.open(gpa, io, pack, assets, drafts, null, null);
     defer se.Served.close(s);
     const eng = s.engine();

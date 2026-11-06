@@ -73,7 +73,7 @@ fn sideWithMarks(d: *const cuda.Driver, prio: cuda.Stream.Priority) !run.Runner.
 
 /// TF_DSV41_MHC_DEFER : on unless unset / 0.
 pub fn mhcDefer() !bool {
-    return @import("sys").strict_env.boolean("TF_DSV41_MHC_DEFER", false, .{ .trim = " \t", .words = true, .empty_off = true });
+    return @import("sys").strict_env.boolean("TF_DSV41_MHC_DEFER", false, .{ .trim = " \t", .words = true, .empty_off = true, .no = true });
 }
 
 /// TF_DSV41_MHC_DEFER_AT: `exchange` holds each deferred coef launch to the next exchange; unset / 0 / off: after site.
@@ -86,7 +86,7 @@ pub fn deferAt(v: ?[]const u8) !bool {
 
 /// TF_DSV41_COEF_LATE (ours, default off; needs MHC_DEFER): block.Options.coef_late.
 pub fn coefLate() !bool {
-    return @import("sys").strict_env.boolean("TF_DSV41_COEF_LATE", false, .{ .trim = " \t", .words = true, .empty_off = true });
+    return @import("sys").strict_env.boolean("TF_DSV41_COEF_LATE", false, .{ .trim = " \t", .words = true, .empty_off = true, .no = true });
 }
 
 /// TF_DSV41_MHC_DEFER_AT_ROWS: hold only in programs of at most this many rows (1-64); unset / 0: every program.

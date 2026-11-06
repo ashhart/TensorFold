@@ -524,3 +524,15 @@ pub fn hardFloorGiB() !f64 {
 pub fn workspaceFloorGiB() !f64 {
     return @import("sys").strict_env.real("TF_DSV41_PF_WS_FLOOR_GIB", try hardFloorGiB(), 0, std.math.floatMax(f64), "finite number at least 0");
 }
+
+/// The pool boot check uses the startup validator's space trim and named refusal.
+pub fn targetFloorGiB(hard: f64) !f64 {
+    const strict = @import("sys").strict_env;
+    const raw = strict.get("TF_DSV41_FLOOR_GIB") orelse return @max(5.0, hard);
+    var p: strict.Parser = .{};
+    return p.real("TF_DSV41_FLOOR_GIB", std.mem.trim(u8, raw, " "), 0, 0x1p-1074, std.math.floatMax(f64), "finite number greater than 0") catch |err| {
+        p.problem.?.value = raw;
+        p.log();
+        return err;
+    };
+}

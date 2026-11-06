@@ -115,17 +115,39 @@ by the registry line. The legacy `TF_DSV41_TOOL_GRAMMAR` alias has a server-wide
 DeepSeek CUDA. A present `TENSORFOLD_TOOL_GRAMMAR` takes precedence and suppresses the masked legacy row.
 
 Malformed DeepSeek settings covered by the strict startup validator refuse before device or checkpoint work.
-The refusal names the variable, supplied value and accepted forms. Boolean settings accept `0` and `1`;
-existing word aliases remain only where a reader already supported them. `MHC_DEFER` and `COEF_LATE` retain
-`true`/`false` and `on`/`off`, ignoring case and surrounding spaces or tabs. `LOOKUP` and `LOOKUP_PLAN` also
-retain `yes`/`no`. Their existing empty-string off forms remain. Other boolean readers keep their existing
-whitespace rules. An absent value still uses that reader's own default.
+The refusal names the variable, supplied value and accepted forms. Unset defaults and canonical `0`/`1` values
+remain unchanged. The former nonzero switches accept case-insensitive `true`/`on`/`yes` and
+`false`/`off`/`no`: `GRAPHS`, `OWN_PREFILL`, `DRAFTS`, `AOT_GUARD`, `ENGRAM_PREFETCH`, `FLOOR_PRICE`,
+`PREFILL_ADAPT`, `SESSIONS`, `SCHEMA_PROMPT`, `GM_V3`, `ENGRAM_URING`, `PREFETCH_AHEAD`, and the AOT
+`PIECE_RUNS`, `REPLAY_RUNS` and `KV_SPLIT` settings. Their shared runtime readers now accept those words too.
+This intentionally reads false/off/no as off rather than the old nonzero interpretation. Arbitrary text refuses.
+Their blank startup values refuse. Direct nonzero readers formerly treated a blank as on; the served-knob
+accessor still treats empty as absent outside startup validation. Existing whitespace rules remain. `MHC_DEFER` and `COEF_LATE` also accept yes/no and retain empty-string off, with their existing
+space/tab trim. `LOOKUP` and `LOOKUP_PLAN` keep all their existing aliases and empty-string off.
 
-`BIAS_VL` retains its existing presence rule: unset or blank is off, while both `0` and `1` select vision bias.
-Other text is now refused. `IMAGES` accepts `native` or `0`. The hard memory floor has one shared reader;
-unset remains 4 GiB, and a malformed override no longer becomes 4 GiB silently. Engram queue depth remains
-64 by default and permits 0 for serial reads. The reader-thread setting remains 16 by default and accepts
-0 through 32; values above 32 are refused instead of clamped. Generation streams remain 1 by default.
+The generic served-knob accessor treats empty values as absent again. Knobs outside the strict startup table,
+such as `PF_TBO`, `PREFILL` and `PROMPT_TAIL`, therefore keep their defaults. This does not bypass validation
+for settings in that table. Its intentional early refusals include blank scheduler numerics and nucleus values,
+generation streams 0, an extra layer-range tail, and image modes other than `native` or `0`.
+
+`ROWS_CAP` accepts the existing reader buckets: 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 and 64.
+The startup validator and batch reader use the same bucket rule. The pool target floor uses the startup
+validator's space trim and named numeric refusal. The hard floor has one shared reader used by the pool,
+graph room, scheduler and prefill path; its unset value remains 4 GiB.
+
+`BIAS_VL` retains its accepted presence forms: unset/blank off, while both `0` and `1` select vision bias.
+Other text refuses. Engram queue depth remains 64 by default and permits 0 for serial reads. Reader threads
+remain 16 by default and accept 0 through 32; larger values refuse instead of clamping. Generation streams
+remain 1 by default.
+
+The server validates the legacy tool-grammar alias once at startup for every family. The canonical variable
+still masks it when present, so an invalid masked alias is ignored as before. A bad unmasked alias refuses at
+startup, rather than failing each later auto-tools request. Both `deepseek_v41` and `deepseek_v4` model-type
+names show the same CUDA registry rows on the startup line.
+
+Explicit values are length-delimited raw bytes in the shared identity helper, scoped to `deepseek_v41`/CUDA.
+Other family/backend identities keep their existing serialization. These registry rows do not claim to bind
+a current DeepSeek disk cache. This change adds no DeepSeek prompt-disk integration.
 No parser change qualifies a new kernel, arithmetic mode or profile.
 
 ## GLM CUDA paging selection

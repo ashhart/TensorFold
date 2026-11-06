@@ -37,7 +37,7 @@ pub const Settings = struct {
     /// The knobs; graphs `on_default` when TF_DSV41_GRAPHS is unset (every rank must agree).
     pub fn fromEnvOr(on_default: bool) !Settings {
         var s: Settings = .{ .on = on_default };
-        s.on = try @import("sys").strict_env.boolean("TF_DSV41_GRAPHS", on_default, .{});
+        s.on = try @import("sys").strict_env.boolean("TF_DSV41_GRAPHS", on_default, .{ .words = true, .no = true });
         if (std.c.getenv("TF_DSV41_GRAPHS_MAX")) |v| s.max = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("TF_DSV41_GRAPH_BUCKET")) |v| s.bucket = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("TF_DSV41_GRAPH_BUCKET_GROW")) |v| s.grow = try std.fmt.parseFloat(f64, std.mem.span(v));

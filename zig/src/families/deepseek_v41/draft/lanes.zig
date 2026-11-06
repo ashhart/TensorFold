@@ -129,7 +129,8 @@ pub const Lanes = struct {
 
     /// TF_DSV41_PIECE_RUNS=1: a round's prompt pieces of several slots in one forward (default off).
     fn envOn(name: [:0]const u8) !bool {
-        return @import("sys").strict_env.boolean(name, false, .{});
+        const words = std.mem.eql(u8, name, "TF_DSV41_PIECE_RUNS") or std.mem.eql(u8, name, "TF_DSV41_REPLAY_RUNS");
+        return @import("sys").strict_env.boolean(name, false, if (words) .{ .words = true, .no = true } else .{});
     }
 
     pub fn state(x: *Lanes, s: *Stream) ?*St {

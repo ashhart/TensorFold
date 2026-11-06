@@ -4,7 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek CUDA refuses malformed environment settings by name before loading and reports its registered explicit settings without changing defaults (#2379, part of #2370).
+- DeepSeek-V4.1 on CUDA: a malformed `TF_DSV41_*` setting is refused by name before loading, and explicit settings
+  show on the startup line through 20 profile rows; unset defaults are unchanged. Switches take `0`/`1`,
+  `true`/`on`/`yes` and `false`/`off`/`no`, and other text is refused. A blank default-on switch (`GRAPHS`,
+  `OWN_PREFILL`, `DRAFTS` and the others listed in `docs/profiles.md`), which read as on, is now refused, and a malformed
+  `TF_DSV41_TOOL_GRAMMAR` (the old alias of `TENSORFOLD_TOOL_GRAMMAR`) is refused at start on every family (#2379,
+  part of #2370).
 
 - CI: the portable-names check runs on every pull request again; since #2274 a reused pass could miss a newly added name
   Windows can't check out (#2311).

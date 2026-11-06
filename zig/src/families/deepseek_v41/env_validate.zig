@@ -4,19 +4,19 @@ const strict = @import("sys").strict_env;
 pub const Get = *const fn ([:0]const u8) ?[]const u8;
 const Flag = struct { name: [:0]const u8, mode: strict.Flag = .{}, sample: []const u8 = "1" };
 pub const flags = [_]Flag{
-    .{ .name = "TF_DSV41_MHC_DEFER", .mode = .{ .trim = " \t", .words = true, .empty_off = true } },
-    .{ .name = "TF_DSV41_COEF_LATE", .mode = .{ .trim = " \t", .words = true, .empty_off = true } },
+    .{ .name = "TF_DSV41_MHC_DEFER", .mode = .{ .trim = " \t", .words = true, .empty_off = true, .no = true } },
+    .{ .name = "TF_DSV41_COEF_LATE", .mode = .{ .trim = " \t", .words = true, .empty_off = true, .no = true } },
     .{ .name = "TF_DSV41_LOOKUP", .mode = .{ .trim = " \t", .words = true, .no = true, .empty_off = true } },
     .{ .name = "TF_DSV41_LOOKUP_PLAN", .mode = .{ .trim = " \t", .words = true, .no = true, .empty_off = true } },
-    .{ .name = "TF_DSV41_GM_V3" },
-    .{ .name = "TF_DSV41_OWN_PREFILL" },
-    .{ .name = "TF_DSV41_DRAFTS" },
-    .{ .name = "TF_DSV41_GRAPHS" },
-    .{ .name = "TF_DSV41_AOT_GUARD" },
-    .{ .name = "TF_DSV41_ENGRAM_PREFETCH" },
+    .{ .name = "TF_DSV41_GM_V3", .mode = .{ .words = true, .no = true } },
+    .{ .name = "TF_DSV41_OWN_PREFILL", .mode = .{ .words = true, .no = true } },
+    .{ .name = "TF_DSV41_DRAFTS", .mode = .{ .words = true, .no = true } },
+    .{ .name = "TF_DSV41_GRAPHS", .mode = .{ .words = true, .no = true } },
+    .{ .name = "TF_DSV41_AOT_GUARD", .mode = .{ .words = true, .no = true } },
+    .{ .name = "TF_DSV41_ENGRAM_PREFETCH", .mode = .{ .words = true, .no = true } },
     .{ .name = "TF_DSV41_BIAS_VL", .mode = .{ .trim = " ", .empty_off = true } },
-    .{ .name = "TF_DSV41_FLOOR_PRICE", .mode = .{ .trim = " " } },
-    .{ .name = "TF_DSV41_SESSIONS", .mode = .{ .trim = " " } },
+    .{ .name = "TF_DSV41_FLOOR_PRICE", .mode = .{ .trim = " ", .words = true, .no = true } },
+    .{ .name = "TF_DSV41_SESSIONS", .mode = .{ .trim = " ", .words = true, .no = true } },
     .{ .name = "TF_DSV41_SAMPLING" },
     .{ .name = "TF_DSV41_SLOT_DRAFTS" },
     .{ .name = "TF_DSV41_FORMS_INPLACE", .mode = .{ .trim = " " } },
@@ -31,21 +31,21 @@ pub const flags = [_]Flag{
     .{ .name = "TF_DSV41_SYNC_EACH" },
     .{ .name = "TF_DSV41_ENGRAM_POLL" },
     .{ .name = "TF_DSV41_ENGRAM_AIO" },
-    .{ .name = "TF_DSV41_ENGRAM_URING" },
-    .{ .name = "TF_DSV41_KV_SPLIT" },
+    .{ .name = "TF_DSV41_ENGRAM_URING", .mode = .{ .words = true, .no = true } },
+    .{ .name = "TF_DSV41_KV_SPLIT", .mode = .{ .words = true, .no = true } },
     .{ .name = "TF_DSV41_NEEDS_POOL" },
     .{ .name = "TF_DSV41_KV_SPLIT_DEDUP", .mode = .{ .trim = " \t" } },
     .{ .name = "TF_DSV41_KV_SPLIT_EARLY", .mode = .{ .trim = " \t" } },
     .{ .name = "TF_DSV41_KV_SPLIT_HISTORY", .mode = .{ .trim = " \t" } },
-    .{ .name = "TF_DSV41_PREFILL_ADAPT", .mode = .{ .trim = " " } },
+    .{ .name = "TF_DSV41_PREFILL_ADAPT", .mode = .{ .trim = " ", .words = true, .no = true } },
     .{ .name = "TF_DSV41_R1", .mode = .{ .trim = " " } },
-    .{ .name = "TF_DSV41_PREFETCH_AHEAD", .mode = .{ .trim = " " } },
+    .{ .name = "TF_DSV41_PREFETCH_AHEAD", .mode = .{ .trim = " ", .words = true, .no = true } },
     .{ .name = "TF_DSV41_KV_NORM_STORE", .mode = .{ .trim = " " } },
     .{ .name = "TF_DSV41_ROUTER_GROUP_ROT", .mode = .{ .trim = " " } },
-    .{ .name = "TF_DSV41_SCHEMA_PROMPT", .mode = .{ .trim = " \t\r\n" } },
+    .{ .name = "TF_DSV41_SCHEMA_PROMPT", .mode = .{ .trim = " \t\r\n", .words = true, .no = true } },
     .{ .name = "TF_DSV41_TOOL_GRAMMAR", .mode = .{ .trim = " " } },
-    .{ .name = "TF_DSV41_PIECE_RUNS" },
-    .{ .name = "TF_DSV41_REPLAY_RUNS" },
+    .{ .name = "TF_DSV41_PIECE_RUNS", .mode = .{ .words = true, .no = true } },
+    .{ .name = "TF_DSV41_REPLAY_RUNS", .mode = .{ .words = true, .no = true } },
     .{ .name = "TF_DSV41_JOIN_DRAFTS" },
     .{ .name = "TF_DSV41_TAIL_JOIN" },
     .{ .name = "TF_DSV41_PF_WS_SHARE" },
@@ -118,9 +118,15 @@ pub fn validate(p: *strict.Parser, get: Get) !void {
     }
     if (get("TF_DSV41_LAYERS")) |raw| _ = try layerRange(p, raw);
     if (get("TF_DSV41_ROWS_CAP")) |raw| {
-        const v = try p.integer(u32, "TF_DSV41_ROWS_CAP", raw, 16, 1, 64, "1, 2, 4, 8, 16, 32 or 64");
-        if (v & (v - 1) != 0) return p.reject("TF_DSV41_ROWS_CAP", raw, "1, 2, 4, 8, 16, 32 or 64");
+        _ = try rowsCap(p, raw);
     }
+}
+
+pub fn rowsCap(p: *strict.Parser, raw: ?[]const u8) !u32 {
+    const accepted = "1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 or 64";
+    const n = try p.integer(u32, "TF_DSV41_ROWS_CAP", raw, 16, 1, 64, accepted);
+    if (@import("rowtab.zig").bucketRows(n, 64) != n) return p.reject("TF_DSV41_ROWS_CAP", raw.?, accepted);
+    return n;
 }
 
 pub fn layerRange(p: *strict.Parser, raw: []const u8) ![2]u32 {

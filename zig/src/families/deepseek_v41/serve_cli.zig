@@ -6,7 +6,7 @@ const model = @import("cuda_model.zig");
 const se = @import("serve_engine.zig");
 
 fn drafts() !bool {
-    return @import("sys").strict_env.boolean("TF_DSV41_DRAFTS", true, .{});
+    return @import("sys").strict_env.boolean("TF_DSV41_DRAFTS", true, .{ .words = true, .no = true });
 }
 
 pub fn follow(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8) !u8 {

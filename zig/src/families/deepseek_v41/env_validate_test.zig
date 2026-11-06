@@ -88,10 +88,30 @@ test "DeepSeek strict env: every numeric refusal is named, not defaulted or clam
 test "DeepSeek strict env: layer ranges, row buckets and image modes refuse ignored tails" {
     for ([_][]const u8{ "0-0", "0-24", "1-2" }) |raw| try check("TF_DSV41_LAYERS", raw, true);
     for ([_][]const u8{ "", "0", "0-1-tail", "0--1", "2-1", "a-b" }) |raw| try check("TF_DSV41_LAYERS", raw, false);
-    for ([_][]const u8{ "1", "2", "4", "8", "16", "32", "64" }) |raw| try check("TF_DSV41_ROWS_CAP", raw, true);
-    for ([_][]const u8{ "0", "3", "65", "bad" }) |raw| try check("TF_DSV41_ROWS_CAP", raw, false);
+    for ([_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "12", "16", "24", "32", "48", "64" }) |raw| try check("TF_DSV41_ROWS_CAP", raw, true);
+    for ([_][]const u8{ "0", "9", "11", "17", "25", "49", "65", "bad" }) |raw| try check("TF_DSV41_ROWS_CAP", raw, false);
     for ([_][]const u8{ "native", " native ", "0" }) |raw| try check("TF_DSV41_IMAGES", raw, true);
     for ([_][]const u8{ "", "nativee", "1" }) |raw| try check("TF_DSV41_IMAGES", raw, false);
+}
+
+test "DeepSeek strict env: nonzero flags keep on words and recognize off words" {
+    for ([_][]const u8{ "MHC_DEFER", "COEF_LATE", "GM_V3", "OWN_PREFILL", "DRAFTS", "GRAPHS", "AOT_GUARD", "ENGRAM_PREFETCH", "FLOOR_PRICE", "SESSIONS", "PREFILL_ADAPT", "ENGRAM_URING", "PREFETCH_AHEAD", "SCHEMA_PROMPT", "PIECE_RUNS", "REPLAY_RUNS", "KV_SPLIT" }) |suffix| {
+        var buf: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buf, "TF_DSV41_{s}", .{suffix});
+        const flag = for (v.flags) |f| {
+            if (std.mem.eql(u8, name, f.name)) break f;
+        } else return error.MissingFlag;
+        var p: strict.Parser = .{};
+        for ([_][]const u8{ "1", "true", "on", "yes", "TRUE", "On", "YES" }) |raw| {
+            try check(name, raw, true);
+            try t.expect(try p.flag(name, raw, false, flag.mode));
+        }
+        for ([_][]const u8{ "0", "false", "off", "no", "FALSE", "Off", "NO" }) |raw| {
+            try check(name, raw, true);
+            try t.expect(!try p.flag(name, raw, true, flag.mode));
+        }
+        try check(name, "mistyped", false);
+    }
 }
 
 test "DeepSeek strict env: trimmed numeric refusals retain raw text and canonical tool grammar masks its alias" {

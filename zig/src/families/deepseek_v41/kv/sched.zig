@@ -191,7 +191,7 @@ pub const Settings = struct {
         if (try envFloat("TF_DSV41_FLOOR_PF_INDEX_GIB")) |v| s.price.index_gib = v;
         if (try envFloat("TF_DSV41_FLOOR_PF_HOST_GIB")) |v| s.price.host_gib = v;
         if (try envFloat("TF_DSV41_FLOOR_PF_OTHER_GIB")) |v| s.price.other_gib = v;
-        s.price.on = try @import("sys").strict_env.boolean("TF_DSV41_FLOOR_PRICE", s.price.on, .{ .trim = " " });
+        s.price.on = try @import("sys").strict_env.boolean("TF_DSV41_FLOOR_PRICE", s.price.on, .{ .trim = " ", .words = true, .no = true });
         return s;
     }
 
@@ -205,7 +205,7 @@ pub const Settings = struct {
         if (try envFloat("TF_DSV41_FLOOR_REFUSE_S")) |v| f.refuse_s = v;
         if (try envFloat("TF_DSV41_ADMIT_CACHE_KEEP_GB")) |v| f.keep_gib = v;
         s.floor = f;
-        const off = !try @import("sys").strict_env.boolean("TF_DSV41_PREFILL_ADAPT", true, .{ .trim = " " });
+        const off = !try @import("sys").strict_env.boolean("TF_DSV41_PREFILL_ADAPT", true, .{ .trim = " ", .words = true, .no = true });
         if (off) return;
         var a: Adapt = .{ .gib = f.target_gib };
         if (try envFloat("TF_DSV41_PREFILL_ADAPT_GIB")) |v| a.gib = v;

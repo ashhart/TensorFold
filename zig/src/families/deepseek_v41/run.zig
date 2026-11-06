@@ -530,7 +530,7 @@ var guard_on: ?bool = null;
 
 fn guardOn() !bool {
     if (guard_on) |v| return v;
-    const v = try @import("sys").strict_env.boolean("TF_DSV41_AOT_GUARD", true, .{});
+    const v = try @import("sys").strict_env.boolean("TF_DSV41_AOT_GUARD", true, .{ .words = true, .no = true });
     guard_on = v;
     return v;
 }

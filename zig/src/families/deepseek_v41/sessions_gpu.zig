@@ -60,7 +60,7 @@ test "the default session options keep idle chats unlimited; an explicit 0 keeps
 
 pub fn optionsFromEnv() !Options {
     var o: Options = .{};
-    o.enabled = try @import("sys").strict_env.boolean("TF_DSV41_SESSIONS", o.enabled, .{ .trim = " " });
+    o.enabled = try @import("sys").strict_env.boolean("TF_DSV41_SESSIONS", o.enabled, .{ .trim = " ", .words = true, .no = true });
     if (std.c.getenv("TF_DSV41_SESSION_DISK")) |v| if (std.mem.trim(u8, std.mem.span(v), " ").len > 0) {
         o.disk = std.mem.trim(u8, std.mem.span(v), " ");
     };

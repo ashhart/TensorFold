@@ -165,7 +165,7 @@ pub fn indexBound(get: Get) !bool {
 
 /// TF_DSV41_PREFETCH_AHEAD (0 by default): the next prompt segment's Engram reads before this one runs.
 pub fn prefetchAhead(get: Get) !bool {
-    return @import("sys").strict_env.flag("TF_DSV41_PREFETCH_AHEAD", get("TF_DSV41_PREFETCH_AHEAD"), false, .{ .trim = " " });
+    return @import("sys").strict_env.flag("TF_DSV41_PREFETCH_AHEAD", get("TF_DSV41_PREFETCH_AHEAD"), false, .{ .trim = " ", .words = true, .no = true });
 }
 
 /// TF_DSV41_KV_NORM_STORE=1: KV-only RMS + SWA RoPE/FP8 store, default off.
@@ -281,5 +281,5 @@ pub fn env(name: []const u8) ?[]const u8 {
     @memcpy(buf[0..name.len], name);
     buf[name.len] = 0;
     const v = std.mem.span(std.c.getenv(buf[0..name.len :0]) orelse return null);
-    return v;
+    return if (v.len == 0) null else v;
 }

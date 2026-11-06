@@ -123,7 +123,12 @@ const ProfileEnvironment = struct {
 };
 
 /// Serves until a stop signal; the process exit status.
+pub fn validateEnvironment() !void {
+    _ = try @import("tool_grammar.zig").autoAllEnv();
+}
+
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+    validateEnvironment() catch return 1;
     stop_requested.store(false, .release);
     stop_count.store(0, .release);
     stop_signal.store(0, .release);

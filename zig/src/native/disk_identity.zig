@@ -71,6 +71,7 @@ pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
             continue;
         }
         switch (e.syntax) {
+            .explicit => field(h, value orelse ""),
             .one => field(h, if (value != null and std.mem.eql(u8, value.?, "1")) "1" else "0"),
             .auto => field(h, value orelse "auto"),
             .count => {

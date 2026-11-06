@@ -68,7 +68,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []cons
     while (it.next()) |l| try lines.append(a, try std.json.parseFromSliceLeaky(Line, a, l, .{ .ignore_unknown_fields = true }));
     const n = lines.items.len;
     if (n == 0 or n > 16) return error.BadTrace;
-    const drafts = try @import("sys").strict_env.boolean("TF_DSV41_DRAFTS", false, .{});
+    const drafts = try @import("sys").strict_env.boolean("TF_DSV41_DRAFTS", false, .{ .words = true, .no = true });
     const s = try se.Served.open(gpa, io, pack, assets, drafts, null, null);
     defer se.Served.close(s);
     const eng = s.engine();

@@ -17,8 +17,9 @@ pub fn format(a: std.mem.Allocator, profile: p.Profile, family: []const u8, back
     errdefer out.deinit();
     try out.writer.print("profile: {s}; registered overrides:", .{@tagName(profile)});
     var found = false;
+    const scope = if (std.mem.eql(u8, family, "deepseek_v4")) "deepseek_v41" else family;
     for (p.entries) |e| {
-        if (!e.applies(family, backend)) continue;
+        if (!e.applies(scope, backend)) continue;
         const raw = environment.get(e.name()) orelse continue;
         if (!e.differs(raw)) continue;
         if (e.id == .TF_DSV41_TOOL_GRAMMAR and environment.get("TENSORFOLD_TOOL_GRAMMAR") != null) continue;
@@ -144,4 +145,22 @@ test "profile line: every independent DeepSeek override is scoped and paths are 
     }
     try std.testing.expectEqual(@as(usize, 20), count);
     try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "deepseek_v41", "cuda", DeepEnv{ .name = "TF_DSV41_TOOL_GRAMMAR", .canonical = "0" }));
+}
+
+test "profile line: both DeepSeek model type names report the same CUDA registry rows" {
+    const Environment = struct {
+        pub fn get(_: @This(), name: []const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, name, "TF_DSV41_OWN_PREFILL")) "on" else null;
+        }
+    };
+    const a = std.testing.allocator;
+    const canonical = try format(a, .stable, "deepseek_v41", "cuda", Environment{});
+    defer a.free(canonical);
+    const alias = try format(a, .stable, "deepseek_v4", "cuda", Environment{});
+    defer a.free(alias);
+    try std.testing.expectEqualStrings(canonical, alias);
+    try std.testing.expect(std.mem.indexOf(u8, alias, "TF_DSV41_OWN_PREFILL=on") != null);
+    const metal = try format(a, .stable, "deepseek_v4", "metal", Environment{});
+    defer a.free(metal);
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: none", metal);
 }

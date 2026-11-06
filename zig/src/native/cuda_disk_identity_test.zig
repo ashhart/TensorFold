@@ -156,3 +156,26 @@ test "disk identity: the shared helper also binds applicable Metal profile value
     try t.expect(unset != profileHash(&.{entry}, "nemotron_h", "metal", &.{.{ entry.id, "1" }}));
     try t.expectEqual(@as(usize, 1), Values.lookups);
 }
+
+test "disk identity: explicit values hash their exact bytes for DeepSeek alone" {
+    const entries = api.profile.entries;
+    var legacy: std.ArrayList(api.profile.Entry) = .empty;
+    defer legacy.deinit(t.allocator);
+    for (entries) |e| if (e.syntax != .explicit) try legacy.append(t.allocator, e);
+    for (entries) |e| {
+        if (e.syntax != .explicit) continue;
+        const empty = profileHash(&entries, "deepseek_v41", "cuda", &.{});
+        const zero = profileHash(&entries, "deepseek_v41", "cuda", &.{.{ e.id, "0" }});
+        const one = profileHash(&entries, "deepseek_v41", "cuda", &.{.{ e.id, "1" }});
+        try t.expect(empty != zero and zero != one);
+        try t.expect(one != profileHash(&entries, "deepseek_v41", "cuda", &.{.{ e.id, "01" }}));
+        for (entries) |other| for (other.families) |family| {
+            if (std.mem.eql(u8, family, "deepseek_v41")) continue;
+            for ([_][]const u8{ "cuda", "metal", "hip" }) |backend| {
+                const before = profileHash(legacy.items, family, backend, &.{});
+                try t.expectEqual(before, profileHash(&entries, family, backend, &.{}));
+                try t.expectEqual(before, profileHash(&entries, family, backend, &.{.{ e.id, "1" }}));
+            }
+        };
+    }
+}

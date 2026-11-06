@@ -80,7 +80,7 @@ pub fn contextEnv() !?i64 {
 
 /// TF_DSV41_OWN_PREFILL=0: prompts as 16-row decode windows (every rank must agree: the plans differ)
 pub fn ownPrefillEnv() !bool {
-    return @import("sys").strict_env.boolean("TF_DSV41_OWN_PREFILL", true, .{});
+    return @import("sys").strict_env.boolean("TF_DSV41_OWN_PREFILL", true, .{ .words = true, .no = true });
 }
 
 pub const Model = struct {

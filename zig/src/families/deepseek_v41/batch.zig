@@ -32,10 +32,12 @@ pub const taps_stash_role = "s.rows.taps";
 
 /// TF_DSV41_ROWS_CAP: rows one forward takes (a bucket; default 16).
 pub fn capFromEnv() !u32 {
-    const v = std.c.getenv("TF_DSV41_ROWS_CAP") orelse return 16;
-    const n = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-    if (rowtab.bucketRows(n, 64) != n) return error.RowsCap;
-    return n;
+    const strict = @import("sys").strict_env;
+    var p: strict.Parser = .{};
+    return @import("env_validate.zig").rowsCap(&p, strict.get("TF_DSV41_ROWS_CAP")) catch |err| {
+        p.log();
+        return err;
+    };
 }
 
 /// A slot's rows in the last row window; `stashed`: its ratio-2 projection rows were copied aside, its taps gone.

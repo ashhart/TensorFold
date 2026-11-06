@@ -67,7 +67,7 @@ pub const Rows = struct {
             if (t.h.layer != l) return error.BadEngramShard;
         }
         // TF_DSV41_ENGRAM_URING=0: the reader threads even where io_uring works (a container that allows it, A/B)
-        const uring_off = !try @import("sys").strict_env.boolean("TF_DSV41_ENGRAM_URING", true, .{});
+        const uring_off = !try @import("sys").strict_env.boolean("TF_DSV41_ENGRAM_URING", true, .{ .words = true, .no = true });
         r.ring = (if (uring_off) error.PermissionDenied else linux.IoUring.init(256, 0)) catch |e| blk: {
             if ((try aioEnv())) {
                 if (Aio.init()) |a| {

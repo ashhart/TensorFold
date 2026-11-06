@@ -93,7 +93,7 @@ pub fn v3Of(mats: u32, xm: u32, out: []usize) []usize {
 
 /// TF_DSV41_GM_V3=1: prefill's x3gm through v3 (v3_default's variants); unset or 0: v2 (default; v3 is bit-identical).
 pub fn gmV3() !bool {
-    return @import("sys").strict_env.boolean("TF_DSV41_GM_V3", false, .{});
+    return @import("sys").strict_env.boolean("TF_DSV41_GM_V3", false, .{ .words = true, .no = true });
 }
 
 /// v3's default variant of a projection (from per-shape timing).

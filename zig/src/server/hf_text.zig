@@ -19,9 +19,9 @@ pub fn glmClearThinking(value: ?[]const u8) ?bool {
     return if (std.mem.eql(u8, v, "1")) true else null;
 }
 
-/// ``TF_DSV41_SCHEMA_PROMPT``: on unless 0 (the published engine's default).
+/// ``TF_DSV41_SCHEMA_PROMPT``: named on/off forms; unset keeps the published engine's schema inclusion.
 pub fn schemaPrompt(value: ?[]const u8) !bool {
-    return @import("sys").strict_env.flag("TF_DSV41_SCHEMA_PROMPT", value, true, .{ .trim = " \t\r\n" });
+    return @import("sys").strict_env.flag("TF_DSV41_SCHEMA_PROMPT", value, true, .{ .trim = " \t\r\n", .words = true, .no = true });
 }
 
 pub const HfText = struct {

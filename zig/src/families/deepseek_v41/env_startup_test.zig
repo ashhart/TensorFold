@@ -21,6 +21,18 @@ test "DeepSeek strict env: every malformed setting stops the real loader before 
     for ([_][:0]const u8{ "TF_DSV41_LAYERS", "TF_DSV41_ROWS_CAP", "TF_DSV41_IMAGES" }) |name| try refused(name);
 }
 
+test "DeepSeek strict env: empty served-knob reads retain their local defaults" {
+    const knobs = @import("serve_knobs.zig");
+    for ([_][:0]const u8{ "TF_DSV41_PF_DENSE", "TF_DSV41_PF_DENSE_CFG", "TF_DSV41_PF_DENSE_TABLE", "TF_DSV41_PF_4K", "TF_DSV41_PF_OVERLAP", "TF_DSV41_MHC_SITE_ROWS", "TF_DSV41_GM_GU2", "TF_DSV41_PF_OVERLAP_SITE", "TF_DSV41_PF_TBO", "TF_DSV41_PF_TBO_GM_SMS", "TF_DSV41_STREAM_RB", "TF_DSV41_INDEX_BOUND", "TF_DSV41_X3LD_EPI", "TF_DSV41_MHC_PFDEC", "TF_DSV41_INDEX_BUDGET_MIB", "TF_DSV41_PREFILL", "TF_DSV41_PROMPT_TAIL" }) |name| {
+        _ = env.setenv(name, "", 1);
+        defer _ = env.unsetenv(name);
+        try t.expect(knobs.env(name) == null);
+        if (std.mem.eql(u8, name, "TF_DSV41_PF_TBO")) try t.expect(!(try knobs.pfTbo(knobs.env)));
+        if (std.mem.eql(u8, name, "TF_DSV41_PREFILL")) try t.expectEqual(knobs.PrefillMode.full, try knobs.prefillMode(knobs.env));
+        if (std.mem.eql(u8, name, "TF_DSV41_PROMPT_TAIL")) try t.expectEqual(knobs.PromptTail.verify, try knobs.promptTail(knobs.env));
+    }
+}
+
 test "DeepSeek strict env: actual flag readers keep defaults, zero, one and named refusals" {
     const Case = struct { name: [:0]const u8, default: bool, read: *const fn () anyerror!bool };
     const cases = [_]Case{
@@ -111,5 +123,39 @@ test "DeepSeek strict env: default-on graphs and lookup, nucleus and layer value
     for ([_][:0]const u8{ "false", "OFF", "no", "" }) |raw| {
         _ = env.setenv("TF_DSV41_LOOKUP", raw, 1);
         try t.expect(!(try lookup.Settings.fromEnv()).lookup);
+    }
+}
+
+test "DeepSeek strict env: actual rows-cap reader accepts all existing buckets" {
+    const batch = @import("batch.zig");
+    const name = "TF_DSV41_ROWS_CAP";
+    defer _ = env.unsetenv(name);
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(u32, 16), try batch.capFromEnv());
+    for ([_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64 }) |rows| {
+        var buf: [16]u8 = undefined;
+        const raw = try std.fmt.bufPrint(&buf, "{d}", .{rows});
+        buf[raw.len] = 0;
+        _ = env.setenv(name, buf[0..raw.len :0], 1);
+        try t.expectEqual(rows, try batch.capFromEnv());
+    }
+    for ([_][:0]const u8{ "0", "9", "63", "65", "bad" }) |raw| {
+        _ = env.setenv(name, raw, 1);
+        try t.expectError(error.BadEnvironmentValue, batch.capFromEnv());
+    }
+}
+
+test "DeepSeek strict env: pool boot target uses the same floor trim and named parser" {
+    const budget = @import("kv").budget;
+    const name = "TF_DSV41_FLOOR_GIB";
+    defer _ = env.unsetenv(name);
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(f64, 5), try budget.targetFloorGiB(4));
+    try t.expectEqual(@as(f64, 7), try budget.targetFloorGiB(7));
+    _ = env.setenv(name, " 6.5 ", 1);
+    try t.expectEqual(@as(f64, 6.5), try budget.targetFloorGiB(4));
+    for ([_][:0]const u8{ "", "bad", "nan", "0", "-1" }) |raw| {
+        _ = env.setenv(name, raw, 1);
+        try t.expectError(error.BadEnvironmentValue, budget.targetFloorGiB(4));
     }
 }

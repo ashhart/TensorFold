@@ -155,7 +155,7 @@ fn envInt(name: [:0]const u8, default: i64) !i64 {
 }
 
 fn envOn(name: [:0]const u8, default: bool) !bool {
-    return @import("sys").strict_env.boolean(name, default, .{});
+    return @import("sys").strict_env.boolean(name, default, .{ .words = true, .no = true });
 }
 
 pub const Served = struct {
