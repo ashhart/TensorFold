@@ -113,6 +113,19 @@ const Probe = struct {
     pub fn run(p: *Probe) !void {
         p.inner.prompt_run.baseline = p.case == .masked_control;
         try p.inner.run();
+        const in = &p.inner;
+        if (p.case != .masked_control and in.rows > 1) {
+            const words = std.mem.bytesAsSlice(u32, p.rig.bytes(in.prompt_run.pick, 40));
+            if (words[0] != 0) return error.PromptSelectorFlagDidNotClear;
+            var exceptional = false;
+            for (0..old.kvh) |h| for (in.len + 1..in.len + in.rows) |key| for (0..D) |d| {
+                exceptional = exceptional or ((in.host[in.at(true, h, key) + d] & 0x7f80) == 0x7f80);
+            };
+            const at: usize = if (exceptional) 7 else 4;
+            const off: usize = if (exceptional) 4 else 7;
+            if (words[at] != (in.rows + 63) / 64 or words[at + 1] != old.heads or words[at + 2] != 1 or
+                words[off] != 0 or words[off + 1] != 0 or words[off + 2] != 0) return error.PromptSelectorGridMismatch;
+        }
     }
 
     pub fn replaced(p: *Probe) ![]const u8 {
