@@ -20,19 +20,33 @@ const Call = struct {
     add: bool = false,
 };
 
-/// The decoder's launches at 1456 and 16384 pixels; the 16384-squared scores stay at the smaller pictures (4 GiB).
-const calls = [_]Call{
-    // post_quant_conv's 1 x 1 at 416 x 224: 32 channels to 32
-    .{ .shape = .{ .rows = 1456, .n = 32, .k = 32 }, .lda = 32, .ldb = 32 },
-    // the mid block's q | k | v at 416 x 224: 384 to 1152
-    .{ .shape = .{ .rows = 1456, .n = 1152, .k = 384 }, .lda = 384, .ldb = 1152 },
-    // the attention's out projection at 416 x 224, over the block's input
-    .{ .shape = .{ .rows = 1456, .n = 384, .k = 384 }, .lda = 384, .ldb = 384, .add = true },
-    // the scores at 416 x 224: q k^T of the packed q | k | v rows
-    .{ .shape = .{ .rows = 1456, .n = 1456, .k = 384 }, .lda = 1152, .ldb = 1152, .transposed = true },
-    // the attention's out projection at 1024 x 1024, over the block's input
+/// One decode's launches at a picture whose first level has `first` pixels: post_quant_conv's 1 x 1 at 32
+/// channels, the mid block's q | k | v, the scores of its packed q | k | v rows, the values' projection over them,
+/// the attention's out projection over the block's input, then the two block shortcuts the widths drop by.
+fn picture(first: usize) [7]Call {
+    return .{
+        .{ .shape = .{ .rows = first, .n = 32, .k = 32 }, .lda = 32, .ldb = 32 },
+        .{ .shape = .{ .rows = first, .n = 1152, .k = 384 }, .lda = 384, .ldb = 1152 },
+        .{ .shape = .{ .rows = first, .n = first, .k = 384 }, .lda = 1152, .ldb = 1152, .transposed = true },
+        .{ .shape = .{ .rows = first, .n = 384, .k = first }, .lda = first, .ldb = 1152 },
+        .{ .shape = .{ .rows = first, .n = 384, .k = 384 }, .lda = 384, .ldb = 384, .add = true },
+        .{ .shape = .{ .rows = 16 * first, .n = 192, .k = 384 }, .lda = 384, .ldb = 192 },
+        .{ .shape = .{ .rows = 64 * first, .n = 96, .k = 192 }, .lda = 192, .ldb = 96 },
+    };
+}
+
+/// The 1024 x 1024 decode's launches without its attention: its scores are 16384 x 16384 (268M outputs, a GiB
+/// of them) and its values' projection sums 16384 terms an output, which stay at the smaller pictures.
+const big = [_]Call{
+    .{ .shape = .{ .rows = 16384, .n = 32, .k = 32 }, .lda = 32, .ldb = 32 },
+    .{ .shape = .{ .rows = 16384, .n = 1152, .k = 384 }, .lda = 384, .ldb = 1152 },
     .{ .shape = .{ .rows = 16384, .n = 384, .k = 384 }, .lda = 384, .ldb = 384, .add = true },
+    .{ .shape = .{ .rows = 262144, .n = 192, .k = 384 }, .lda = 384, .ldb = 192 },
+    .{ .shape = .{ .rows = 1048576, .n = 96, .k = 192 }, .lda = 192, .ldb = 96 },
 };
+
+/// The decoder's launches at its three served pictures.
+const calls = picture(1456) ++ picture(5120) ++ big;
 
 fn servedShapes() [calls.len]c.Shape {
     var out: [calls.len]c.Shape = undefined;
@@ -114,7 +128,7 @@ pub const Gemm = struct {
         const w = if (call.transposed) (shape.n - 1) * call.ldb + shape.k else (shape.k - 1) * call.ldb + shape.n;
         t.x = try a.alloc(f32, (m - 1) * call.lda + shape.k);
         t.w = try a.alloc(f32, w);
-        t.v = try a.alloc(f32, 2 * shape.n + m * shape.n);
+        t.v = try a.alloc(f32, shape.n + m * shape.n);
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         // gate 4 needs whole values: whole products of whole values sum exactly in fp32, in any order

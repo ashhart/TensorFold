@@ -80,7 +80,7 @@ pub const Unpack = struct {
         t.m = try a.alloc(f32, channels);
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        // the transformer's latents about N(0, 1), the batch norm's scale and mean as the checkpoint's
+        // the latents four times a unit normal (the transformer's widths), the batch norm's as the checkpoint's
         for (t.x) |*v| v.* = 4 * rng.floatNorm(f32);
         for (t.s) |*v| v.* = 0.25 + rng.float(f32) * 1.75;
         for (t.m) |*v| v.* = 2 * rng.float(f32) - 1;

@@ -22,14 +22,25 @@ fn isCentered(shape: c.Shape) ?bool {
     };
 }
 
-/// The GroupNorm launches: the mid block's 384 at 52 x 28 and 128 x 128, up_blocks.2's 192, up_blocks.3's 96.
-const served = [_]c.Shape{
-    .{ .rows = 1456, .n = 384, .k = centered },
-    .{ .rows = 1456, .n = 384, .k = plain },
-    .{ .rows = 16384, .n = 384, .k = centered },
-    .{ .rows = 23296, .n = 192, .k = centered },
-    .{ .rows = 93184, .n = 96, .k = plain },
+/// The (pixels, channels) pairs the decoder's GroupNorm runs at: a picture's four levels at the widths its blocks
+/// hold there, 384 to the mid block and up_blocks.0, then up_blocks.2's 192 and up_blocks.3's 96 down the levels.
+const pairs = [_][2]usize{
+    .{ 1456, 384 }, .{ 5824, 384 }, .{ 23296, 384 }, .{ 23296, 192 }, .{ 93184, 192 }, .{ 93184, 96 }, // 416 x 224
+    .{ 5120, 384 },  .{ 20480, 384 }, .{ 81920, 384 },  .{ 81920, 192 },  .{ 327680, 192 },  .{ 327680, 96 }, // 512 x 640
+    .{ 16384, 384 }, .{ 65536, 384 }, .{ 262144, 384 }, .{ 262144, 192 }, .{ 1048576, 192 }, .{ 1048576, 96 },
 };
+
+/// The GroupNorm launches: both passes of every pair, the mean's before the rstd's as the decoder makes them.
+const served = servedShapes();
+
+fn servedShapes() [2 * pairs.len]c.Shape {
+    var out: [2 * pairs.len]c.Shape = undefined;
+    for (pairs, 0..) |p, i| {
+        out[2 * i] = .{ .rows = p[0], .n = p[1], .k = plain };
+        out[2 * i + 1] = .{ .rows = p[0], .n = p[1], .k = centered };
+    }
+    return out;
+}
 
 /// A chunk's pixels of a group, summed a term at a time in fp32: the chunk's own values then its channels.
 fn partDepth(s: c.Shape) usize {

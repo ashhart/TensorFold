@@ -104,14 +104,14 @@ pub const Softmax = struct {
     }
 
     /// The row's scaled scores, its maximum over the ones that are not NaN (fmaxf drops those), and each exponential.
-    fn exponentials(t: *Softmax, r: usize, most: *f64, terms: []f64) void {
+    fn exponentials(t: *Softmax, r: usize, terms: []f64) void {
         const row = t.scores[r * t.shape.n ..][0..t.shape.n];
-        most.* = -std.math.inf(f64);
+        var most: f64 = -std.math.inf(f64);
         for (row) |e| {
             const v: f64 = @as(f32, e * scale);
-            if (!std.math.isNan(v)) most.* = @max(most.*, v);
+            if (!std.math.isNan(v)) most = @max(most, v);
         }
-        const highest: f32 = @floatCast(most.*);
+        const highest: f32 = @floatCast(most);
         for (terms, row) |*v, e| {
             // the kernel's own arithmetic: the score times the scale, the maximum's subtraction, then expf
             const down: f32 = e * scale - highest;
@@ -124,8 +124,7 @@ pub const Softmax = struct {
         const terms = try a.alloc(f64, t.shape.n);
         defer a.free(terms);
         for (0..t.shape.n) |r| {
-            var most: f64 = undefined;
-            t.exponentials(r, &most, terms);
+            t.exponentials(r, terms);
             var total: f64 = 0;
             for (terms) |e| total += e;
             for (terms, 0..) |e, j| {
@@ -142,8 +141,7 @@ pub const Softmax = struct {
         const terms = try a.alloc(f64, t.shape.n);
         defer a.free(terms);
         for (0..t.shape.n) |r| {
-            var most: f64 = undefined;
-            t.exponentials(r, &most, terms);
+            t.exponentials(r, terms);
             const total = mi.rows.sumIn(acc, order, terms);
             for (terms, 0..) |e, j| out[r * t.shape.n + j] = e / total;
         }
