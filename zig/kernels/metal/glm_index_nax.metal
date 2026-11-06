@@ -1,4 +1,4 @@
-// GLM's index scores for prompt chunks on the tensor units: row r's fp32 score of pooled block b, the sum over heads in order of w_h relu(q_h . pool_b).
+// GLM prompt-chunk index scores, tensor units: row r's fp32 pool_b score, ordered head sum of w_h relu(q_h . pool_b).
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
