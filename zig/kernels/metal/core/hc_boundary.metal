@@ -10,7 +10,7 @@ inline float hc_sq_acc(float acc, float v) { return v * v + acc; }
 inline float hc_add_nc(float a, float b) { return a + b; }
 #pragma clang fp contract(on)
 
-// Grid (SLICES, rows) of 256 threads: thread t of slice j takes columns 1024 j + 4 t.. of the streams, expands them (the family's per-element arithmetic) and sums their squares and 24 mix products into PART [rows, SLICES, 25].
+// (SLICES, rows) of 256: slice j's thread t expands 1024 j + 4 t..; squares + 24 mixes into PART [rows, SLICES, 25].
 template <bool EXPAND>
 [[kernel]] void tf_hc_expand_mix(const device bfloat* XOLD [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
                              const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
