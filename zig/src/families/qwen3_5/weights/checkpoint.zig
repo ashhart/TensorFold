@@ -57,7 +57,8 @@ pub const Checkpoint = struct {
             std.log.err("{s}", .{why});
             return error.UnexpectedTensor;
         }
-        if (bf16) if (mixed(&main, names)) |key| {
+        // ModelOpt stores FP8 and NVFP4 tensors beside bf16 ones; the loader dequantizes them on the way in.
+        if (bf16 and !cfg.modelopt) if (mixed(&main, names)) |key| {
             std.log.err("{s}: {t} in a bf16 checkpoint, whose text tensors are all BF16", .{ key, (try main.get(key)).dtype });
             return error.UnexpectedTensor;
         };
