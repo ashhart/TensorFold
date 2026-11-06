@@ -94,7 +94,7 @@ fn appendIndex(a: Allocator, root: []const u8, into: u64, from: u64) !void {
 }
 
 /// One record learned alone under identity `from`, then appended to identity `into`'s index.
-fn donate(a: Allocator, root: []const u8, into: u64, from: u64, tokens: []const u32, at: u32, starts: []const u32, bytes: u64) !void {
+pub fn donate(a: Allocator, root: []const u8, into: u64, from: u64, tokens: []const u32, at: u32, starts: []const u32, bytes: u64) !void {
     {
         var m = try Imprint.open(a, root, from, cap);
         defer m.deinit();
