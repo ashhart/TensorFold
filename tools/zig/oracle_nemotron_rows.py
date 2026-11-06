@@ -35,7 +35,7 @@ class Table:
 
 
 def quantized(experts: int, n: int, k: int, seed: int) -> Linear:
-    """Random bf16 weights [experts, n, k] (std 0.02) quantized to 4 bits in groups of gen.GROUP, one expert at a time."""
+    """Random bf16 weights [experts,n,k] (std 0.02) quantized to 4 bits in gen.GROUP groups, one expert a time."""
 
     parts = []
     for e in range(experts):
