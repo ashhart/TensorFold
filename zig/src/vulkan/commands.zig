@@ -23,6 +23,8 @@ pub const Commands = struct {
     hazards: Hazards = .{},
     /// Set by a state-corrupting failure (signaled fence or invalid buffer): later begin and submit refuse.
     poison: ?Error = null,
+    /// Set by a successful queue submit; the next begin records one barrier that fences that batch.
+    submitted_before: bool = false,
 
     pub fn init(dev: *const Device) Error!Commands {
         const api = &dev.api;
@@ -75,6 +77,10 @@ pub const Commands = struct {
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
         try check(self.dev.api.vkBeginCommandBuffer(self.cmd, &info));
+        if (self.submitted_before) {
+            dispatchBarrier(self.dev, self.cmd);
+            self.submitted_before = false;
+        }
         self.recording = true;
         return self.cmd;
     }
@@ -114,6 +120,7 @@ pub const Commands = struct {
             std.log.err("vulkan: vkQueueSubmit returned {d}", .{queued});
             return e;
         };
+        self.submitted_before = true;
         const waited_on = api.vkWaitForFences(self.dev.handle, 1, &self.fence, 1, timeout_ns);
         waited(waited_on) catch |e| {
             std.log.err("vulkan: vkWaitForFences returned {d} within {d} ns of a submission", .{ waited_on, timeout_ns });
@@ -415,6 +422,65 @@ test "a failed vkEndCommandBuffer poisons the stream: a caught error cannot reac
     // And submit refuses without queueing the poisoned records.
     try std.testing.expectError(error.CommandBufferInvalid, cmds.submit(0));
     try std.testing.expectEqual(@as(usize, 0), Calls.queues);
+}
+
+test "a batch begun after a submission starts with one barrier that fences the earlier batch" {
+    const Calls = struct {
+        var barriers: usize = 0;
+        var begins: usize = 0;
+        var queues: usize = 0;
+        fn begin(_: c.VkCommandBuffer, _: [*c]const c.VkCommandBufferBeginInfo) callconv(.c) c.VkResult {
+            begins += 1;
+            return c.VK_SUCCESS;
+        }
+        fn reset(_: c.VkCommandBuffer, _: c.VkCommandBufferResetFlags) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn end(_: c.VkCommandBuffer) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn queueSubmit(_: c.VkQueue, _: c_uint, _: [*c]const c.VkSubmitInfo, _: c.VkFence) callconv(.c) c.VkResult {
+            queues += 1;
+            return c.VK_SUCCESS;
+        }
+        fn wait(_: c.VkDevice, _: c_uint, _: [*c]const c.VkFence, _: c.VkBool32, _: c_ulonglong) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn resetFences(_: c.VkDevice, _: c_uint, _: [*c]const c.VkFence) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn barrier(_: c.VkCommandBuffer, _: c.VkPipelineStageFlags, _: c.VkPipelineStageFlags, _: c.VkDependencyFlags, _: u32, _: [*c]const c.VkMemoryBarrier, _: u32, _: [*c]const c.VkBufferMemoryBarrier, _: u32, _: [*c]const c.VkImageMemoryBarrier) callconv(.c) void {
+            barriers += 1;
+        }
+    };
+    var api: @import("device.zig").DeviceApi = undefined;
+    api.vkResetCommandBuffer = Calls.reset;
+    api.vkBeginCommandBuffer = Calls.begin;
+    api.vkEndCommandBuffer = Calls.end;
+    api.vkQueueSubmit = Calls.queueSubmit;
+    api.vkWaitForFences = Calls.wait;
+    api.vkResetFences = Calls.resetFences;
+    api.vkCmdPipelineBarrier = Calls.barrier;
+    var dev: Device = undefined;
+    dev.api = api;
+    dev.handle = @ptrFromInt(0x2000);
+    dev.queue = @ptrFromInt(0x3000);
+    var cmds: Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = @ptrFromInt(0x4000) };
+    // The first batch has no earlier submission, so its begin records no barrier.
+    _ = try cmds.begin();
+    try std.testing.expectEqual(@as(usize, 0), Calls.barriers);
+    try cmds.submit(0);
+    // The next batch opens with exactly one barrier that fences the submitted batch.
+    _ = try cmds.begin();
+    try std.testing.expectEqual(@as(usize, 1), Calls.barriers);
+    // A begin on an open batch returns it unchanged and records nothing more.
+    _ = try cmds.begin();
+    try std.testing.expectEqual(@as(usize, 1), Calls.barriers);
+    try cmds.submit(0);
+    try std.testing.expectEqual(@as(usize, 2), Calls.queues);
+    _ = try cmds.begin();
+    try std.testing.expectEqual(@as(usize, 2), Calls.barriers);
+    try std.testing.expectEqual(@as(usize, 3), Calls.begins);
 }
 
 test "fill geometry refuses torn, empty and out-of-range fills" {
