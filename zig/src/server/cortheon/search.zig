@@ -106,7 +106,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         last = tag_end;
         const block = std.mem.lastIndexOf(u8, page[lo..tag_start], "class=\"result ");
         const block_start = if (block) |b| lo + b else tag_start;
-        if (std.mem.indexOf(u8, page[block_start..tag_start], "result--ad") != null) continue;
+        if (std.ascii.findIgnoreCase(page[block_start..tag_start], "result--ad") != null) continue; // Result--ad is still an ad
         const tag = page[tag_start..tag_end];
         const href_at = std.ascii.findIgnoreCase(tag, "href=") orelse continue; // HREF= is the same attribute
         var v = tag[href_at + 5 ..];
@@ -206,6 +206,19 @@ test "a search ad is skipped when the host's letters differ" {
     const a = arena.allocator();
     const page =
         \\<div class="result results_links web-result"><h2><a class="result__a" href="https://DuckDuckGo.com/y.js?ad=1">Buy now</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search ad is skipped when the mark's letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links Result--ad"><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
         \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
     ;
     const results = try parseDuckDuckGo(a, page, 5);
