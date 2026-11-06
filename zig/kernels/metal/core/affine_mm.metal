@@ -1,4 +1,4 @@
-// x W^T for MLX affine W on tensor units: exact 4-bit/128 codes in MMAs, fp32 group sums scaled, bias x fp32 row sums.
+// x W^T, MLX affine W, tensor units: exact codes (4-bit + 128) in MMAs, fp32 group sums scaled, bias x fp32 row sums.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
