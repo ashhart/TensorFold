@@ -15,6 +15,11 @@ pub const Fixture = struct {
     r: *rows.Rows,
 
     pub fn open(tag: []const u8, spill: rows.Spill, synchronous: bool, limit: u64) !*Fixture {
+        return sized(tag, spill, synchronous, limit, 0);
+    }
+
+    /// A store whose permit also takes one state of `longest` tokens whole (rows.Options.longest).
+    pub fn sized(tag: []const u8, spill: rows.Spill, synchronous: bool, limit: u64, longest: u32) !*Fixture {
         const x = try a.create(Fixture);
         errdefer a.destroy(x);
         const tmp = if (platform.c.getenv("TMPDIR")) |p| std.mem.span(p) else ".";
@@ -22,7 +27,7 @@ pub const Fixture = struct {
         errdefer a.free(root);
         x.* = .{ .root = root, .f = .{ .gpa = a }, .s = undefined, .r = undefined };
         x.s = pc.Store.init(a, x.f.snapshots(), .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 }, 1 << 30);
-        x.r = try rows.attach(a, &x.s, .{ .root = root, .identity = 7, .cap = 1 << 30, .floor = 0, .daily = 1 << 30, .lookahead = 1, .spill = spill, .sync_writes = synchronous, .staging_bytes = limit });
+        x.r = try rows.attach(a, &x.s, .{ .root = root, .identity = 7, .cap = 1 << 30, .floor = 0, .daily = 1 << 30, .lookahead = 1, .spill = spill, .sync_writes = synchronous, .staging_bytes = limit, .longest = longest });
         return x;
     }
 
