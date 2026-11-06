@@ -214,7 +214,6 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const runtime_host = b.step("test-runtime-host", "Shared CUDA runtime and graph host regressions");
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .ReleaseSafe, cuda, draft_ids);
-    const mods = family(b, host, .debug, cuda, draft_ids);
     inline for (.{ @import("prompt_bf16_host.zig"), @import("gdn_chain_host.zig"), @import("moe_router_host.zig") }) |suite|
         suite.tests(b, step, cuda, runtime(b, host, .fast, &.{}), mods.core);
     @import("cuda_checkpoint_cache_host.zig").steps(b, step);
