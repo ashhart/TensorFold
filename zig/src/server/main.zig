@@ -14,6 +14,7 @@ const api = @import("engine_api");
 const recall_open = @import("recall_open.zig");
 const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
+const pdf_worker = @import("pdf_worker.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
@@ -51,6 +52,7 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const a = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(a);
+    if (comptime @import("builtin").os.tag != .windows) if (argv.len == 2 and std.mem.eql(u8, argv[1], pdf_worker.arg)) pdf_worker.serve();
     // These commands must work without a model, driver, GPU or checkout.
     if (argv.len == 2 and std.mem.eql(u8, argv[1], "--version")) {
         try std.Io.File.stdout().writeStreamingAll(io, "tensorfold-native " ++ @import("build_options").version ++ "\n");
