@@ -1,4 +1,4 @@
-//! cluster.json (schema tensorfold-cluster/1): the nodes, how to reach them, their MCDMA links, per model its layout and budgets.
+//! cluster.json (tensorfold-cluster/1): nodes, how to reach them, their MCDMA links, per model its layout and budgets.
 const std = @import("std");
 const fabric = @import("fabric");
 const node = @import("node.zig");
