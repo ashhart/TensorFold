@@ -1,4 +1,4 @@
-//! The lanes backend for a cluster: the leader plans each round and broadcasts it; every rank runs its shard of every row.
+//! The cluster's lanes backend: the leader plans each round and broadcasts it; every rank runs its shard of every row.
 const std = @import("std");
 const lanes = @import("lanes");
 const exchange = @import("exchange.zig");
