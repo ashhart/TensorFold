@@ -518,7 +518,7 @@ inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* 
     int expert, row, rows;                                                                                             \
     if (!am_tile<BM>(OFFS, a.experts, a.rows, int(tg.y), lane, expert, row, rows)) return;                            \
     const int c0 = int(tg.x) * 32, t = int(sg) * 32 + int(lane), tr = t / 2;                                         \
-    const bool up = ((tr >> 4) & 1) != 0; /* tile rows by 16: gate, up, gate, up for columns c0.., c0 + 16.. */        \
+    const bool up = ((tr >> 4) & 1) != 0;                                                                             \
     const long wrow = long(expert) * a.n + c0 + (tr >> 5) * 16 + (tr & 15);                                           \
     const int tm = SM * int(sg / 2), tn = 32 * int(sg % 2), live = clamp(rows - tm, 0, SM);                           \
     const short2 home = frag_home(ushort(lane));                                                                       \
@@ -530,5 +530,6 @@ inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* 
                   uint(t), home);                                                                                      \
     am_store_glu<TM>(acc, Y + long(row + tm) * a.n + c0 + tn / 2, a.n, live, home, glu.y);                            \
   }
+// Tile rows by 16: gate, up, gate, up for columns c0.., c0 + 16..
 TF_GATHER_GLU(32)
 TF_GATHER_GLU(64)
