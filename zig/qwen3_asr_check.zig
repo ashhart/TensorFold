@@ -4,7 +4,8 @@ const qa = @import("qwen3_asr");
 const core = @import("core");
 const tok = @import("tokenizer");
 
-const usage = "usage: tf-qwen3-asr-check MODEL_DIR CLIP.wav CASE_DIR [--points exact|torch] [--no-tower]\n";
+const usage = "usage: tf-qwen3-asr-check MODEL_DIR CLIP.wav CASE_DIR [--points exact|torch] [--no-tower] [--min-cos X]\n" ++
+    "  a gate: exit 1 when a stage's cosine to the case is under X (default 0.995) or the tokens differ\n";
 
 /// The checkpoint's shards as one name space (core.Checkpoint, as the CUDA load opens them).
 const Mapped = struct {
@@ -104,11 +105,15 @@ pub fn main(init: std.process.Init) !u8 {
     }
     var points: qa.ref_ops.Points = .torch;
     var tower = true;
+    var min_cos: f64 = 0.995;
     var i: usize = 4;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--no-tower")) tower = false else if (std.mem.eql(u8, args[i], "--points") and i + 1 < args.len) {
             i += 1;
             points = std.meta.stringToEnum(qa.ref_ops.Points, args[i]) orelse return 2;
+        } else if (std.mem.eql(u8, args[i], "--min-cos") and i + 1 < args.len) {
+            i += 1;
+            min_cos = std.fmt.parseFloat(f64, args[i]) catch return 2;
         } else {
             std.debug.print(usage, .{});
             return 2;
@@ -141,6 +146,7 @@ pub fn main(init: std.process.Init) !u8 {
         gpa.free(out);
     }
     try cmp.finish();
-    std.debug.print("SUMMARY qwen3-asr host ({t} points): worst stage cosine {d:.9}\n", .{ points, cmp.worst_cos });
-    return 0;
+    const pass = cmp.worst_cos >= min_cos; // NaN fails
+    std.debug.print("SUMMARY qwen3-asr host ({t} points): worst stage cosine {d:.9} (gate {d}): {s}\n", .{ points, cmp.worst_cos, min_cos, if (pass) "PASS" else "FAIL" });
+    return if (pass) 0 else 1;
 }
