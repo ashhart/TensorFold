@@ -92,8 +92,10 @@ turn = user(PROMPTS[0]) + [{"role": "assistant", "content": first}, {"role": "us
 # the fresh side on a server that keeps no prompts; a fresh reply that restored tokens fails by name
 fresh, fresh_details = ask(turn, False, url=FRESH_URL)
 resumed, details = ask(turn, True)
-restored = fresh_details.get("cached_tokens")
-if restored != 0:
+restored = (fresh_details or {}).get("cached_tokens")
+if restored is None:
+    check("resumed == fresh: the fresh reply has no prompt_tokens_details.cached_tokens", False)
+elif restored != 0:
     check(f"resumed == fresh: the fresh request resumed {restored} tokens (FRESH_URL: --prompt-cache-gib 0)", False)
 else:
     check(f"resumed == fresh (cached {details})", resumed == fresh)
