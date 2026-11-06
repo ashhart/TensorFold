@@ -236,7 +236,7 @@ pub inline fn decodeAt(s: []const u8, i: usize) Decoded {
     return .{ .cp = @as(u21, b & 0x07) << 18 | @as(u21, s[i + 1] & 0x3F) << 12 | @as(u21, s[i + 2] & 0x3F) << 6 | (s[i + 3] & 0x3F), .len = 4 };
 }
 
-/// Length of the well-formed sequence at `i`, or of its maximal invalid subpart (Unicode 3.9, Table 3-7) when `cp` is null.
+/// Length of the well-formed sequence at `i`, or its maximal invalid subpart (Unicode 3.9 Table 3-7) when `cp` is null.
 pub fn scan(s: []const u8, i: usize) struct { len: usize, cp: ?u21 } {
     const b = s[i];
     if (b < 0x80) return .{ .len = 1, .cp = b };
