@@ -124,18 +124,14 @@ pub fn check(comptime T: type, comptime src: []const u8, comptime name: []const 
     const field_names = info.field_names;
     const field_types = info.field_types;
 
-    if (n != field_names.len) @compileError(std.fmt.comptimePrint(
-        "index mirror: `{s}` declares {d} fields, `{s}` has {d} -- the kernel and the Zig struct are out of step",
-        .{ name, n, @typeName(T), field_names.len }));
+    if (n != field_names.len) @compileError(std.fmt.comptimePrint("index mirror: `{s}` declares {d} fields, `{s}` has {d} -- the kernel and the Zig struct are out of step", .{ name, n, @typeName(T), field_names.len }));
 
     var off: usize = 0;
     var max_align: usize = 1;
     inline for (0..field_names.len) |i| {
         const fname = field_names[i];
         const ft = field_types[i];
-        if (!std.mem.eql(u8, names[i], fname)) @compileError(std.fmt.comptimePrint(
-            "index mirror: field {d} is `{s}` in the kernel and `{s}` in `{s}`",
-            .{ i, names[i], fname, @typeName(T) }));
+        if (!std.mem.eql(u8, names[i], fname)) @compileError(std.fmt.comptimePrint("index mirror: field {d} is `{s}` in the kernel and `{s}` in `{s}`", .{ i, names[i], fname, @typeName(T) }));
 
         const want = zigSpelling(ft, @typeName(T), fname);
         const is_address = types[i].len > 0 and types[i][types[i].len - 1] == '*';
@@ -145,26 +141,18 @@ pub fn check(comptime T: type, comptime src: []const u8, comptime name: []const 
             std.mem.eql(u8, want, "ulong")
         else
             std.mem.eql(u8, types[i], want);
-        if (!type_ok) @compileError(std.fmt.comptimePrint(
-            "index mirror: field `{s}.{s}` is `{s}` in the kernel and `{s}` here",
-            .{ @typeName(T), fname, types[i], want }));
+        if (!type_ok) @compileError(std.fmt.comptimePrint("index mirror: field `{s}.{s}` is `{s}` in the kernel and `{s}` here", .{ @typeName(T), fname, types[i], want }));
 
-        if (counts[i] != zigCount(ft)) @compileError(std.fmt.comptimePrint(
-            "index mirror: field `{s}.{s}` is `{s}[{d}]` in the kernel and an array of {d} here",
-            .{ @typeName(T), fname, types[i], counts[i], zigCount(ft) }));
+        if (counts[i] != zigCount(ft)) @compileError(std.fmt.comptimePrint("index mirror: field `{s}.{s}` is `{s}[{d}]` in the kernel and an array of {d} here", .{ @typeName(T), fname, types[i], counts[i], zigCount(ft) }));
 
         const align_of = @alignOf(ft);
         off = roundUp(off, align_of);
-        if (off != @offsetOf(T, fname)) @compileError(std.fmt.comptimePrint(
-            "index mirror: field `{s}.{s}` sits at offset {d} in the kernel's layout and {d} here",
-            .{ @typeName(T), fname, off, @offsetOf(T, fname) }));
+        if (off != @offsetOf(T, fname)) @compileError(std.fmt.comptimePrint("index mirror: field `{s}.{s}` sits at offset {d} in the kernel's layout and {d} here", .{ @typeName(T), fname, off, @offsetOf(T, fname) }));
         off += @sizeOf(ft);
         if (align_of > max_align) max_align = align_of;
     }
     const total = roundUp(off, max_align);
-    if (total != @sizeOf(T)) @compileError(std.fmt.comptimePrint(
-        "index mirror: `{s}`'s fields laid out as the kernel declares them take {d} bytes, `{s}` is {d}",
-        .{ name, total, @typeName(T), @sizeOf(T) }));
+    if (total != @sizeOf(T)) @compileError(std.fmt.comptimePrint("index mirror: `{s}`'s fields laid out as the kernel declares them take {d} bytes, `{s}` is {d}", .{ name, total, @typeName(T), @sizeOf(T) }));
 }
 
 test "the mirror check reads the landed struct" {

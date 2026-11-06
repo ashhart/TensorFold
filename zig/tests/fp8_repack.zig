@@ -70,11 +70,10 @@ fn layerCheck(gpa: std.mem.Allocator, k: usize, n: usize, int8: bool, ref: []con
         if (br == bh) agree += 1;
     }
     std.debug.print("  check rot={s}: NRMS {e:.4}, per-row argmax {d}/{d} = {d:.2}%\n", .{
-        if (rot) "yes" else "none", std.math.sqrt(se / sb), agree, m,
+        if (rot) "yes" else "none",                                          std.math.sqrt(se / sb), agree, m,
         100.0 * @as(f64, @floatFromInt(agree)) / @as(f64, @floatFromInt(m)),
     });
 }
-
 
 /// NRMS of a reconstructed weight's GEMM against the FP64 target on the fixed 64-row activation.
 fn gemmNrms(gpa: std.mem.Allocator, ref: []const f64, what: []const f64, k: usize, n: usize) !f64 {
@@ -145,7 +144,6 @@ fn blockCheck(gpa: std.mem.Allocator, k: usize, n: usize, int8: bool, ref: []con
     }
     std.debug.print("  block {d}{s}: NRMS {e:.4}\n", .{ block, if (half) " half" else "", try gemmNrms(gpa, ref, what, k, n) });
 }
-
 
 /// ROUND-448: the 3-bit affine requantization's layer price on a real routed-expert projection. Per output
 /// column, per 64-k group, eight uniform levels spanning the group's [min, max] (scale + bias, the quality-

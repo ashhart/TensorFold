@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
     const src = try std.mem.replaceOwned(u8, arena, f.bytes[0..f.size], "#include \"mlx_steel.h\"", ks.core_mlx_steel);
     const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
     defer lib.deinit();
-        const entry: []const u8 = if (std.c.getenv("MLX_ENTRY")) |v| try arena.dupe(u8, std.mem.span(v)) else "tf_gather_qmm_f32_gs64_b4";
+    const entry: []const u8 = if (std.c.getenv("MLX_ENTRY")) |v| try arena.dupe(u8, std.mem.span(v)) else "tf_gather_qmm_f32_gs64_b4";
     const threads: u32 = if (std.c.getenv("MLX_THREADS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 128 else 128;
     const bmv: u32 = if (std.c.getenv("MLX_BM")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 64 else 64;
     const bnv: u32 = if (std.c.getenv("MLX_BN")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 64 else 64;
@@ -92,10 +92,10 @@ pub fn main(init: std.process.Init) !void {
             e.setBuffer(off, 0, 4);
             e.setBuffer(y, 0, 5);
             // The kernel takes four separate `constant int&` buffers, not one struct: each is bound on its own.
-        e.setValue(@as(i32, @intCast(M)), 6);
-        e.setValue(@as(i32, @intCast(N)), 7);
-        e.setValue(@as(i32, @intCast(K)), 8);
-        e.setValue(@as(i32, @intCast(banks)), 9);
+            e.setValue(@as(i32, @intCast(M)), 6);
+            e.setValue(@as(i32, @intCast(N)), 7);
+            e.setValue(@as(i32, @intCast(K)), 8);
+            e.setValue(@as(i32, @intCast(banks)), 9);
             e.dispatchGroups(mtl.Size.of(N / bnv, (M + bmv - 1) / bmv, 1), mtl.Size.of(threads, 1, 1));
             e.end();
             cb.commit();

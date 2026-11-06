@@ -126,7 +126,12 @@ test "the routed MoE's row at one row against a window (TF_ROW_INV=1)" {
         errdefer enc.end();
         exl3.useMatrix(enc, matrix);
         try exl3.encodeIndexed(&p, enc, .{ .descriptors = .{ .buffer = desc, .offset = 0 }, .count = 1, .k = k, .n = n }, view(h.view(x_gpu)), view(h.view(solo_gpu)), view(h.view(scratch)), .{
-            .count = 1, .x_stride = k, .y_stride = n, .input_rows = 1, .output_rows = 1, .output = .bf16,
+            .count = 1,
+            .x_stride = k,
+            .y_stride = n,
+            .input_rows = 1,
+            .output_rows = 1,
+            .output = .bf16,
             .routes = .{ .ids = view(h.view(routes)), .repeat = 1 },
         });
         enc.end();
@@ -140,7 +145,12 @@ test "the routed MoE's row at one row against a window (TF_ROW_INV=1)" {
         errdefer enc.end();
         exl3.useMatrix(enc, matrix);
         try exl3.encodeIndexed(&p, enc, .{ .descriptors = .{ .buffer = desc, .offset = 0 }, .count = 1, .k = k, .n = n }, view(h.view(x_gpu)), view(h.view(win_gpu)), view(h.view(scratch)), .{
-            .count = window, .x_stride = k, .y_stride = n, .input_rows = window, .output_rows = window, .output = .bf16,
+            .count = window,
+            .x_stride = k,
+            .y_stride = n,
+            .input_rows = window,
+            .output_rows = window,
+            .output = .bf16,
             .input_ids = view(h.view(ids)),
             .output_ids = view(h.view(ids)),
             .routes = .{ .ids = view(h.view(routes)), .repeat = 1 },

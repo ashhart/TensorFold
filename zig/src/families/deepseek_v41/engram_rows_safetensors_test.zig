@@ -33,11 +33,8 @@ fn writeShard(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, scale_dtype: []
         j = 0;
         while (j < 8) : (j += 1) data[@intCast(weight_bytes + r * 8 + j)] = scaleByte(r, j);
     }
-    const header = try std.fmt.allocPrint(a,
-        "{{\"layers.{d}.engram.embed.weight\":{{\"dtype\":\"F8_E4M3\",\"shape\":[{d},{d}],\"data_offsets\":[0,{d}]}}," ++
-            "\"layers.{d}.engram.embed.scale\":{{\"dtype\":\"{s}\",\"shape\":[{d},8],\"data_offsets\":[{d},{d}]}}}}",
-        .{ layer, row_count, f.values, weight_bytes, layer, scale_dtype, row_count, weight_bytes,
-            weight_bytes + row_count * 8 });
+    const header = try std.fmt.allocPrint(a, "{{\"layers.{d}.engram.embed.weight\":{{\"dtype\":\"F8_E4M3\",\"shape\":[{d},{d}],\"data_offsets\":[0,{d}]}}," ++
+        "\"layers.{d}.engram.embed.scale\":{{\"dtype\":\"{s}\",\"shape\":[{d},8],\"data_offsets\":[{d},{d}]}}}}", .{ layer, row_count, f.values, weight_bytes, layer, scale_dtype, row_count, weight_bytes, weight_bytes + row_count * 8 });
     defer a.free(header);
 
     // One buffer: the 8-byte header length, the JSON header, then the two tensors.

@@ -60,7 +60,6 @@ pub const GEmbedArgs = extern struct { dim: u32, rows: u32, vocab: u32 };
 pub const GMeanArgs = extern struct { dim: u32, rows: u32, stride: u32 };
 pub const TopkArgs = extern struct { width: u32 };
 
-
 /// RMSNorm of `rows` bf16 rows of `dim` with an fp32 weight, bf16 out.
 pub fn rmsnorm(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref, rows: u32, dim: u32, eps: f32) void {
     e.setPipeline(p.of(.rmsnorm));

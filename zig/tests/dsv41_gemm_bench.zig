@@ -66,10 +66,22 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const device = try mtl.Device.init();
     const queue = try device.queue();
-    if (std.c.getenv("TF_BENCH_FP8") != null) { try fp8DenseBench(device, queue, gpa); return; }
-    if (std.c.getenv("TF_BENCH_FP8_REAL") != null) { try fp8RealBench(device, queue, gpa, io); return; }
-    if (std.c.getenv("TF_BENCH_MMA8") != null) { try mxDenseBench(device, queue, gpa); return; }
-    if (std.c.getenv("TF_BENCH_MMA16") != null) { try bf16xBench(device, queue, gpa); return; }
+    if (std.c.getenv("TF_BENCH_FP8") != null) {
+        try fp8DenseBench(device, queue, gpa);
+        return;
+    }
+    if (std.c.getenv("TF_BENCH_FP8_REAL") != null) {
+        try fp8RealBench(device, queue, gpa, io);
+        return;
+    }
+    if (std.c.getenv("TF_BENCH_MMA8") != null) {
+        try mxDenseBench(device, queue, gpa);
+        return;
+    }
+    if (std.c.getenv("TF_BENCH_MMA16") != null) {
+        try bf16xBench(device, queue, gpa);
+        return;
+    }
     var options = mtl.CompileOptions.mlx();
     options.math_functions = .precise;
     var gemm_src: ?[]const u8 = null;
@@ -212,14 +224,23 @@ pub fn main(init: std.process.Init) !void {
     const only_routed = std.c.getenv("TF_BENCH_ROUTED_ONLY") != null;
     const verify_only = std.c.getenv("TF_BENCH_VERIFY_ONLY") != null;
     const cmp_only = std.c.getenv("TF_BENCH_CMP") != null;
-    if (std.c.getenv("TF_BENCH_READ") != null) { try routedReadBench(device, queue, gpa); return; }
+    if (std.c.getenv("TF_BENCH_READ") != null) {
+        try routedReadBench(device, queue, gpa);
+        return;
+    }
     if (std.c.getenv("TF_BENCH_ROUTE_DIAG") != null) try routeDiag(device, queue, gpa);
     if (!only_routed and !verify_only and !cmp_only) try oneRowBench(device, queue, gpa);
     // ROUND-442: the lane-packing run is the one-row bench alone (the routed, multiset and prefill arms are
     // priced elsewhere and their fixtures are heavy).
     if (std.c.getenv("TF_BENCH_LANE") != null) return;
-    if (std.c.getenv("TF_BENCH_WIDTH") != null) { try widthSweep(device, queue, gpa); return; }
-    if (std.c.getenv("TF_BENCH_AFFINE_PREFILL") != null) { try affinePrefillPrice(device, queue, gpa); return; }
+    if (std.c.getenv("TF_BENCH_WIDTH") != null) {
+        try widthSweep(device, queue, gpa);
+        return;
+    }
+    if (std.c.getenv("TF_BENCH_AFFINE_PREFILL") != null) {
+        try affinePrefillPrice(device, queue, gpa);
+        return;
+    }
     if (!verify_only and !cmp_only) try routedBench(device, queue, gpa);
     if (!cmp_only and std.c.getenv("TF_BENCH_NO_VERIFY") == null) try verifyMultisetBench(device, queue, gpa);
     if (!only_routed and std.c.getenv("TF_BENCH_ONE_ROW_ONLY") == null) try exl3Bench(device, queue, gpa);
@@ -231,17 +252,42 @@ pub fn main(init: std.process.Init) !void {
 // 18.7 TMAC/s term in the prefill ledger; the double-buffered candidate is nax7 below it.
 
 const Exl3Args = extern struct {
-    k: u32, n: u32, rows: u32, halves: u32,
-    codebook: u32, su_signs: u32, sv_signs: u32, has_bias: u32,
-    output_f32: u32, input_ids: u32, output_ids: u32, routed: u32,
-    expert_id: u32, repeat: u32, indexed: u32 = 0, experts: u32 = 0, splits: u32 = 1,
-    x_stride: u64, y_stride: u64, tile_k_stride: u64, tile_n_stride: u64,
+    k: u32,
+    n: u32,
+    rows: u32,
+    halves: u32,
+    codebook: u32,
+    su_signs: u32,
+    sv_signs: u32,
+    has_bias: u32,
+    output_f32: u32,
+    input_ids: u32,
+    output_ids: u32,
+    routed: u32,
+    expert_id: u32,
+    repeat: u32,
+    indexed: u32 = 0,
+    experts: u32 = 0,
+    splits: u32 = 1,
+    x_stride: u64,
+    y_stride: u64,
+    tile_k_stride: u64,
+    tile_n_stride: u64,
 };
 
 const Exl3Expert = extern struct {
-    trellis: u64, suh: u64, svh: u64, bias: u64,
-    tile_k_stride: u64, tile_n_stride: u64,
-    halves: u32, codebook: u32, suh_signs: u32, svh_signs: u32, has_bias: u32, reserved: u32 = 0,
+    trellis: u64,
+    suh: u64,
+    svh: u64,
+    bias: u64,
+    tile_k_stride: u64,
+    tile_n_stride: u64,
+    halves: u32,
+    codebook: u32,
+    suh_signs: u32,
+    svh_signs: u32,
+    has_bias: u32,
+    reserved: u32 = 0,
 };
 
 const exl3_tiles = 384;
@@ -401,30 +447,30 @@ fn compareLiveRows(a_sums: mtl.Buffer, a_floats: usize, a_counts: []const u32, a
 // to a multiple of the tile's sixty-four rows and lays the blocks out consecutively, so the tiles that do work are
 // the sum of the per-expert ceilings and the plan's tail is unused.
 const plan_counts = [_]u32{
-    13, 7, 219, 2, 122, 13, 1, 9, 76, 10, 61, 37, 95, 0, 1, 7,
-    17, 53, 6, 1, 21, 2, 4, 29, 16, 0, 7, 20, 163, 69, 36, 3,
-    29, 50, 15, 857, 15, 0, 21, 109, 193, 71, 22, 56, 73, 31, 7, 13,
-    128, 121, 0, 1, 7, 20, 16, 148, 29, 12, 1, 36, 2, 147, 32, 5,
-    126, 5, 76, 117, 223, 294, 24, 31, 23, 113, 20, 7, 69, 84, 4, 0,
-    7, 10, 49, 4, 101, 128, 119, 116, 6, 42, 7, 3, 37, 0, 12, 59,
-    32, 11, 27, 1, 2, 21, 4, 0, 22, 105, 2, 49, 56, 12, 66, 14,
-    230, 2, 10, 147, 400, 15, 41, 54, 17, 34, 0, 7, 38, 9, 53, 133,
-    100, 4, 0, 17, 117, 25, 93, 28, 38, 1, 15, 2, 0, 80, 221, 7,
-    1, 53, 48, 35, 0, 59, 0, 45, 37, 81, 5, 50, 95, 22, 0, 74,
-    6, 21, 355, 0, 0, 28, 74, 34, 9, 23, 140, 27, 61, 18, 33, 2,
-    44, 41, 5, 12, 50, 102, 63, 136, 53, 61, 13, 0, 75, 6, 16, 8,
-    5, 21, 26, 3, 70, 133, 150, 10, 52, 69, 0, 181, 3, 12, 11, 21,
-    126, 54, 0, 14, 4, 16, 8, 4, 41, 71, 1, 37, 2, 1, 49, 11,
-    4, 74, 0, 30, 57, 152, 79, 21, 65, 0, 5, 4, 83, 838, 163, 12,
-    20, 55, 653, 6, 19, 7, 2, 10, 88, 0, 10, 18, 6, 17, 20, 15,
-    92, 49, 2, 121, 69, 47, 54, 34, 93, 1, 32, 13, 42, 118, 55, 9,
-    23, 10, 111, 39, 48, 99, 38, 10, 16, 14, 105, 81, 0, 47, 105, 79,
-    6, 73, 118, 5, 0, 11, 85, 8, 153, 60, 7, 254, 18, 58, 125, 11,
-    28, 33, 68, 100, 44, 1, 40, 33, 1, 6, 85, 19, 14, 62, 122, 34,
-    19, 28, 81, 165, 3, 78, 9, 40, 23, 1, 30, 1, 90, 71, 8, 44,
-    10, 78, 142, 1, 78, 59, 26, 17, 5, 44, 13, 158, 20, 49, 92, 12,
-    37, 101, 21, 84, 8, 24, 4, 16, 2, 40, 5, 0, 16, 3, 30, 66,
-    39, 197, 43, 49, 41, 0, 10, 70, 4, 1, 252, 94, 13, 59, 2, 9,
+    13,  7,   219, 2,   122, 13,  1,   9,   76,  10,  61,  37,  95,  0,   1,   7,
+    17,  53,  6,   1,   21,  2,   4,   29,  16,  0,   7,   20,  163, 69,  36,  3,
+    29,  50,  15,  857, 15,  0,   21,  109, 193, 71,  22,  56,  73,  31,  7,   13,
+    128, 121, 0,   1,   7,   20,  16,  148, 29,  12,  1,   36,  2,   147, 32,  5,
+    126, 5,   76,  117, 223, 294, 24,  31,  23,  113, 20,  7,   69,  84,  4,   0,
+    7,   10,  49,  4,   101, 128, 119, 116, 6,   42,  7,   3,   37,  0,   12,  59,
+    32,  11,  27,  1,   2,   21,  4,   0,   22,  105, 2,   49,  56,  12,  66,  14,
+    230, 2,   10,  147, 400, 15,  41,  54,  17,  34,  0,   7,   38,  9,   53,  133,
+    100, 4,   0,   17,  117, 25,  93,  28,  38,  1,   15,  2,   0,   80,  221, 7,
+    1,   53,  48,  35,  0,   59,  0,   45,  37,  81,  5,   50,  95,  22,  0,   74,
+    6,   21,  355, 0,   0,   28,  74,  34,  9,   23,  140, 27,  61,  18,  33,  2,
+    44,  41,  5,   12,  50,  102, 63,  136, 53,  61,  13,  0,   75,  6,   16,  8,
+    5,   21,  26,  3,   70,  133, 150, 10,  52,  69,  0,   181, 3,   12,  11,  21,
+    126, 54,  0,   14,  4,   16,  8,   4,   41,  71,  1,   37,  2,   1,   49,  11,
+    4,   74,  0,   30,  57,  152, 79,  21,  65,  0,   5,   4,   83,  838, 163, 12,
+    20,  55,  653, 6,   19,  7,   2,   10,  88,  0,   10,  18,  6,   17,  20,  15,
+    92,  49,  2,   121, 69,  47,  54,  34,  93,  1,   32,  13,  42,  118, 55,  9,
+    23,  10,  111, 39,  48,  99,  38,  10,  16,  14,  105, 81,  0,   47,  105, 79,
+    6,   73,  118, 5,   0,   11,  85,  8,   153, 60,  7,   254, 18,  58,  125, 11,
+    28,  33,  68,  100, 44,  1,   40,  33,  1,   6,   85,  19,  14,  62,  122, 34,
+    19,  28,  81,  165, 3,   78,  9,   40,  23,  1,   30,  1,   90,  71,  8,   44,
+    10,  78,  142, 1,   78,  59,  26,  17,  5,   44,  13,  158, 20,  49,  92,  12,
+    37,  101, 21,  84,  8,   24,  4,   16,  2,   40,  5,   0,   16,  3,   30,  66,
+    39,  197, 43,  49,  41,  0,   10,  70,  4,   1,   252, 94,  13,  59,  2,   9,
 };
 
 // ROUND-430: the dense arms at an arbitrary M -- the engine's prompt is 3,283 tokens, and a rate read at
@@ -494,14 +540,12 @@ fn timeGrouped128(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x
     return median(samples[0..nt]);
 }
 
-
 // ROUND-433: the tap projection's width-8 funnel. `main_proj` is 15,360 x 5,120 at halves 8 and runs the dense
 // 128x64 tile at 128 rows; the shipped body reads four stream words a lane a block, but the dense tile's lane
 // owns four states, whose windows are four bits apart -- a 28-bit run, so two words cover it. This times the
 // shipped body (nax31) against the funnel body (nax51) at the tap's own shape and width, and hashes both
 // outputs: the funnel is bit-identical by construction, so IDENTICAL is the validity receipt.
-fn benchTapFunnel(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline, p51: mtl.Pipeline,
-                  m: usize, n: usize, k: usize, halves: u32) !void {
+fn benchTapFunnel(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline, p51: mtl.Pipeline, m: usize, n: usize, k: usize, halves: u32) !void {
     const tile_bytes = @as(usize, halves) * 8 * 2;
     const n_stride = tile_bytes;
     const trellis_bytes = (k / 16) * (n / 16) * tile_bytes;
@@ -521,10 +565,27 @@ fn benchTapFunnel(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline, p51: 
     defer sums.deinit();
     @memset(sums.slice(u32, m * n), 0);
     const args = Exl3Args{
-        .k = @intCast(k), .n = @intCast(n), .rows = @intCast(m), .halves = halves, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-        .x_stride = @intCast(k), .y_stride = @intCast(n), .tile_k_stride = (n / 16) * n_stride, .tile_n_stride = n_stride,
+        .k = @intCast(k),
+        .n = @intCast(n),
+        .rows = @intCast(m),
+        .halves = halves,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 0,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 0,
+        .experts = 0,
+        .splits = 1,
+        .x_stride = @intCast(k),
+        .y_stride = @intCast(n),
+        .tile_k_stride = (n / 16) * n_stride,
+        .tile_n_stride = n_stride,
     };
     const macs = @as(f64, @floatFromInt(m)) * @as(f64, @floatFromInt(n)) * @as(f64, @floatFromInt(k));
     std.debug.print("ROUND-433 tap projection {d}x{d}x{d} halves {d}, dense 128x64 tile, 128 rows a threadgroup:\n", .{ m, n, k, halves });
@@ -560,17 +621,33 @@ fn benchDenseShapeAt(device: mtl.Device, queue: mtl.Queue, pipe: mtl.Pipeline, m
     defer sums.deinit();
     @memset(sums.slice(u32, m * n), 0);
     const args = Exl3Args{
-        .k = @intCast(k), .n = @intCast(n), .rows = @intCast(m), .halves = exl3_halves, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-        .x_stride = @intCast(k), .y_stride = @intCast(n), .tile_k_stride = (n / 16) * exl3_n_stride, .tile_n_stride = exl3_n_stride,
+        .k = @intCast(k),
+        .n = @intCast(n),
+        .rows = @intCast(m),
+        .halves = exl3_halves,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 0,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 0,
+        .experts = 0,
+        .splits = 1,
+        .x_stride = @intCast(k),
+        .y_stride = @intCast(n),
+        .tile_k_stride = (n / 16) * exl3_n_stride,
+        .tile_n_stride = exl3_n_stride,
     };
     _ = try timeShape(queue, pipe, &args, x, tr, sums, null, m, n, 64, threads, tg_rows, 1);
     const ms = try timeShape(queue, pipe, &args, x, tr, sums, null, m, n, 64, threads, tg_rows, 5);
     const macs = @as(f64, @floatFromInt(m)) * @as(f64, @floatFromInt(n)) * @as(f64, @floatFromInt(k));
     std.debug.print("  {d:>6}x{d:>6}x{d:>5} {d:>9.3} {d:>9.1}\n", .{ m, n, k, ms, macs / (ms * 1e-3) / 1e12 });
 }
-
 
 // ROUND-431: nax31 against the 128-column double-buffered bodies at one prompt shape. The 128-column tile
 // dispatches tn = n / 128 groups and 512 threads; the arithmetic per output must be nax31's, so the sums hash
@@ -593,10 +670,27 @@ fn benchDenseCompare128(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline,
     defer sums.deinit();
     @memset(sums.slice(u32, m * n), 0);
     const args = Exl3Args{
-        .k = @intCast(k), .n = @intCast(n), .rows = @intCast(m), .halves = exl3_halves, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-        .x_stride = @intCast(k), .y_stride = @intCast(n), .tile_k_stride = (n / 16) * exl3_n_stride, .tile_n_stride = exl3_n_stride,
+        .k = @intCast(k),
+        .n = @intCast(n),
+        .rows = @intCast(m),
+        .halves = exl3_halves,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 0,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 0,
+        .experts = 0,
+        .splits = 1,
+        .x_stride = @intCast(k),
+        .y_stride = @intCast(n),
+        .tile_k_stride = (n / 16) * exl3_n_stride,
+        .tile_n_stride = exl3_n_stride,
     };
     const macs = @as(f64, @floatFromInt(m)) * @as(f64, @floatFromInt(n)) * @as(f64, @floatFromInt(k));
     _ = try timeShape(queue, p31, &args, x, tr, sums, null, m, n, 64, 256, 128, 1);
@@ -629,7 +723,6 @@ fn benchDenseCompare128(device: mtl.Device, queue: mtl.Queue, p31: mtl.Pipeline,
     }
     std.debug.print("\n", .{});
 }
-
 
 // Is the dense bench's rate cache-inflated? `timeDense` repeats one trellis buffer, and at the attention shapes
 // that buffer is 12-16 MB, so dispatches after the first may read it from the SLC. This times the same dispatch
@@ -683,10 +776,27 @@ fn benchDenseCold(device: mtl.Device, queue: mtl.Queue, pipe: mtl.Pipeline, m: u
     defer sums.deinit();
     @memset(sums.slice(u32, m * n), 0);
     const args = Exl3Args{
-        .k = @intCast(k), .n = @intCast(n), .rows = @intCast(m), .halves = exl3_halves, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-        .x_stride = @intCast(k), .y_stride = @intCast(n), .tile_k_stride = (n / 16) * exl3_n_stride, .tile_n_stride = exl3_n_stride,
+        .k = @intCast(k),
+        .n = @intCast(n),
+        .rows = @intCast(m),
+        .halves = exl3_halves,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 0,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 0,
+        .experts = 0,
+        .splits = 1,
+        .x_stride = @intCast(k),
+        .y_stride = @intCast(n),
+        .tile_k_stride = (n / 16) * exl3_n_stride,
+        .tile_n_stride = exl3_n_stride,
     };
     _ = try timeShapeCold(queue, pipe, &args, x, bufs[0..made], sums, m, n, 64, 256, 128, false);
     const hot = try timeShapeCold(queue, pipe, &args, x, bufs[0..made], sums, m, n, 64, 256, 128, false);
@@ -694,7 +804,6 @@ fn benchDenseCold(device: mtl.Device, queue: mtl.Queue, pipe: mtl.Pipeline, m: u
     const macs = @as(f64, @floatFromInt(m)) * @as(f64, @floatFromInt(n)) * @as(f64, @floatFromInt(k));
     std.debug.print("  {d:>6}x{d:>6}x{d:>5} hot {d:>8.3} ms {d:>7.1} TMAC/s | cold x{0} {d:>8.3} ms {d:>7.1} TMAC/s\n", .{ m, n, k, hot, macs / (hot * 1e-3) / 1e12, cold, macs / (cold * 1e-3) / 1e12 });
 }
-
 
 // ROUND-437 (instrument): the routed prompt stream's one-cold-pass READ arm at the live plan's shape.
 // 388 row tiles x 36 column tiles, 384 distinct expert allocations, no decode / no activation / no MMA.
@@ -772,9 +881,17 @@ fn routedReadBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator)
         const dh: [*]Exl3Expert = @ptrCast(@alignCast(descs_hot.contents()));
         for (0..exl3_tiles) |i| {
             d[i] = .{
-                .trellis = experts[i].gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                .tile_k_stride = exl3_k_stride, .tile_n_stride = exl3_n_stride,
-                .halves = exl3_halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0,
+                .trellis = experts[i].gpuAddress(),
+                .suh = 0,
+                .svh = 0,
+                .bias = 0,
+                .tile_k_stride = exl3_k_stride,
+                .tile_n_stride = exl3_n_stride,
+                .halves = exl3_halves,
+                .codebook = 2,
+                .suh_signs = 0,
+                .svh_signs = 0,
+                .has_bias = 0,
             };
             dh[i] = d[i];
             dh[i].trellis = experts[0].gpuAddress();
@@ -803,10 +920,27 @@ fn routedReadBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator)
     defer sink.deinit();
     @memset(sink.slice(u32, 388 * 8192), 0);
     var args = Exl3Args{
-        .k = exl3_k, .n = exl3_n, .rows = @intCast(plan_rows), .halves = exl3_halves, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 2, .experts = exl3_tiles, .splits = 1,
-        .x_stride = exl3_k, .y_stride = exl3_n, .tile_k_stride = exl3_k_stride, .tile_n_stride = exl3_n_stride,
+        .k = exl3_k,
+        .n = exl3_n,
+        .rows = @intCast(plan_rows),
+        .halves = exl3_halves,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 0,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 2,
+        .experts = exl3_tiles,
+        .splits = 1,
+        .x_stride = exl3_k,
+        .y_stride = exl3_n,
+        .tile_k_stride = exl3_k_stride,
+        .tile_n_stride = exl3_n_stride,
     };
     const bytes = @as(f64, @floatFromInt(tiles)) * 36.0 * (64.0 * 5120.0 * 3.0 / 8.0);
     // The same-run FULL control: the engine's body (nax59) on the same 388-tile plan and the same contiguous
@@ -827,7 +961,9 @@ fn routedReadBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator)
     {
         var rng: u64 = 0x51A7E5C3D2B19F47;
         for (big.slice(u64, @as(usize, @intFromFloat(bytes)) / 8)) |*v| {
-            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
             v.* = rng;
         }
     }
@@ -850,7 +986,6 @@ fn routedReadBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator)
         std.debug.print("  {s:>22} HOT median5 {d:>7.3} ms  {d:>7.1} GB/s\n", .{ a.name, ms, bytes / (ms * 1e-3) / 1e9 });
     }
 }
-
 
 fn timeDense(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: mtl.Buffer, trellis: mtl.Buffer, sums: mtl.Buffer, cols: usize, threads: usize, trials: usize) !f64 {
     const tn = (dense_n + cols - 1) / cols;
@@ -911,10 +1046,7 @@ const one_row_shapes = [_]OneRow{
 
 const RowDispatch = struct { width: usize, height: usize, threads: usize, depth: usize = 1 };
 
-fn timeRow(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args: Exl3Args,
-            x: mtl.Buffer, trs: []const mtl.Buffer, sums: mtl.Buffer, partials: mtl.Buffer, table: mtl.Buffer,
-            routes: mtl.Buffer, descs: mtl.Buffer,
-            d: RowDispatch, n_out: usize, trials: usize, reps: usize) !f64 {
+fn timeRow(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, trs: []const mtl.Buffer, sums: mtl.Buffer, partials: mtl.Buffer, table: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, d: RowDispatch, n_out: usize, trials: usize, reps: usize) !f64 {
     var samples: [16]f64 = undefined;
     const nt = @max(1, @min(trials, samples.len));
     for (0..nt) |t| {
@@ -956,18 +1088,13 @@ fn timeRow(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args: Ex
 // one-row fixture. The body reads its weights through descriptors[expert], so a dense matrix needs a
 // descriptor of its own; the pointer is rewritten a trial at a time so the eight trellis copies rotate and
 // the weights are not resident when they come back (the same cold protocol as the other arms).
-fn timeRowDesc(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args,
-               x: mtl.Buffer, trs: []const mtl.Buffer, sums: mtl.Buffer, partials: mtl.Buffer, table: mtl.Buffer,
-               routes: mtl.Buffer, descs: mtl.Buffer,
-               d: RowDispatch, trials: usize, tile_bytes: u64, halves: u32) !f64 {
+fn timeRowDesc(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, trs: []const mtl.Buffer, sums: mtl.Buffer, partials: mtl.Buffer, table: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, d: RowDispatch, trials: usize, tile_bytes: u64, halves: u32) !f64 {
     var samples: [16]f64 = undefined;
     const nt = @max(1, @min(trials, samples.len));
     const dp: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
     for (0..nt) |t| {
         const src = trs[t % trs.len];
-        dp[0] = .{ .trellis = src.gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-            .tile_k_stride = args.tile_k_stride, .tile_n_stride = tile_bytes,
-            .halves = halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+        dp[0] = .{ .trellis = src.gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = args.tile_k_stride, .tile_n_stride = tile_bytes, .halves = halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
         e.setPipeline(pipe);
@@ -1075,14 +1202,30 @@ fn widthSweep(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !voi
             for (hs, 0..) |h, hi| {
                 const tile_bytes = h * 16;
                 const args = Exl3Args{
-                    .k = s.k, .n = s.n, .rows = 1, .halves = h, .codebook = 2,
-                    .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                    .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-                    .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                    .k = s.k,
+                    .n = s.n,
+                    .rows = 1,
+                    .halves = h,
+                    .codebook = 2,
+                    .su_signs = 0,
+                    .sv_signs = 0,
+                    .has_bias = 0,
+                    .output_f32 = 1,
+                    .input_ids = 0,
+                    .output_ids = 0,
+                    .routed = 0,
+                    .expert_id = 0,
+                    .repeat = 1,
+                    .indexed = 0,
+                    .experts = 0,
+                    .splits = 1,
+                    .x_stride = s.k,
+                    .y_stride = s.n,
+                    .tile_k_stride = (s.n / 16) * tile_bytes,
+                    .tile_n_stride = tile_bytes,
                 };
                 @memset(sums.slice(u32, s.n), 0);
-                const t = timeRow(queue, pipe, null, args, x, sets[hi][0..], sums, sums, table, x, x,
-                    .{ .width = s.n / 16, .height = 1, .threads = 512 }, s.n, if (pass == 0) 1 else 7, 1) catch 0;
+                const t = timeRow(queue, pipe, null, args, x, sets[hi][0..], sums, sums, table, x, x, .{ .width = s.n / 16, .height = 1, .threads = 512 }, s.n, if (pass == 0) 1 else 7, 1) catch 0;
                 if (pass == 1) t_by[hi] = t;
             }
         }
@@ -1097,7 +1240,7 @@ fn widthSweep(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !voi
             const gbs = @as(f64, @floatFromInt(trellis_bytes)) / 1e9;
             const weights = @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k));
             std.debug.print("  {d:>7}x{d:>6} {d:>6} {d:>4} {d:>9.3} {d:>9.0} {d:>8.1} {d:>9.0}%\n", .{
-                s.n, s.k, h, h / 2, t, weights / (t * 1e-3), gbs / (t * 1e-3),
+                s.n,                                           s.k, h, h / 2, t, weights / (t * 1e-3), gbs / (t * 1e-3),
                 if (t_pack > 0) 100.0 * t / t_pack else 100.0,
             });
         }
@@ -1247,7 +1390,11 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             defer gpa.free(psrc);
             const plib = mtl.Library.fromSource(device, psrc, mtl.CompileOptions.mlx()) catch null;
             const ppipe = if (plib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) else null;
-            const nm = switch (pf) { 2 => "fma/4 pf2", 4 => "fma/4 pf4", else => "fma/4 pf8" };
+            const nm = switch (pf) {
+                2 => "fma/4 pf2",
+                4 => "fma/4 pf4",
+                else => "fma/4 pf8",
+            };
             pf_arms[npf] = .{ .name = nm, .pf = pf, .pipe = ppipe, .lib = plib };
             npf += 1;
         }
@@ -1450,457 +1597,452 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         // Two passes: the first ramps the box's clocks and the second is the number (a one-row dispatch is
         // 0.03-0.3 ms, so a cold first sample reads up to 2.5x slow).
         for (0..2) |pass| {
-          for (split_sweep) |splits| {
-            const args = Exl3Args{
-                .k = @intCast(s.k), .n = @intCast(s.n), .rows = @intCast(s.m), .halves = s.halves, .codebook = 2,
-                .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = splits,
-                .x_stride = @intCast(s.k), .y_stride = @intCast(s.n), .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
-            };
-            const n_out = s.m * s.n;
-            @memset(sums.slice(u32, n_out), 0);
-            @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-            _ = timeRow(queue, shipped, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                .{ .width = s.n / 16, .height = splits, .threads = 32 }, n_out, 1, 1) catch 0;
-            _ = timeRow(queue, wide, reduce, args, x, trs[1..], sums, partials, table, x, x,
-                .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 1, 1) catch 0;
-            const t_ship = timeRow(queue, shipped, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                .{ .width = s.n / 16, .height = splits, .threads = 32 }, n_out, 7, 1) catch 0;
-            const h_ship = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-            @memset(sums.slice(u32, n_out), 0);
-            @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-            const t_wide = timeRow(queue, wide, reduce, args, x, trs[4..], sums, partials, table, x, x,
-                .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-            const h_wide = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-            if (base_hash == null) base_hash = h_wide;
-            @memset(sums.slice(u32, n_out), 0);
-            @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-            const t_wide2 = timeRow(queue, wide2, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-            const h_wide2 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-            // ROUND-338: the separation arms. The LUT arm reads the codebook from a 1024-entry threadgroup
-            // table (the dynamic selection left in), the static arm resolves the state's word pair and bit
-            // offset at compile time (the table left in), and the static+LUT arm has both.
-            var t_wlut: f64 = 0;
-            var h_wlut: u64 = 0;
-            var t_wstat: f64 = 0;
-            var h_wstat: u64 = 0;
-            var t_wstatlut: f64 = 0;
-            var h_wstatlut: u64 = 0;
-            var t_pf2: f64 = 0;
-            var h_pf2: u64 = 0;
-            var t_pf4: f64 = 0;
-            var h_pf4: u64 = 0;
-            if (pass == 1) {
-                if (wide_lut) |wl| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_wlut = timeRow(queue, wl, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                    h_wlut = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                }
-                if (wide_static) |ws| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_wstat = timeRow(queue, ws, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                    h_wstat = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                }
-                if (wide_static_lut) |wsl| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_wstatlut = timeRow(queue, wsl, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                    h_wstatlut = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                }
-                if (wide_static_lut_pf2) |w2| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_pf2 = timeRow(queue, w2, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                    h_pf2 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                }
-                if (wide_static_lut_pf4) |w4| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_pf4 = timeRow(queue, w4, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                    h_pf4 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                }
-            }
-            var t_direct: f64 = 0;
-            var t_direct128: f64 = 0;
-            var t_direct64: f64 = 0;
-            var h_direct64: u64 = 0;
-            var t_direct32: f64 = 0;
-            var t_directv: f64 = 0;
-            var t_directv128: f64 = 0;
-            var t_directv64: f64 = 0;
-            var t_directr: f64 = 0;
-            var t_directnw: f64 = 0;
-            var h_directnw: u64 = 0;
-            var h_directr: u64 = 0;
-            var h_direct: u64 = 0;
-            var h_directv: u64 = 0;
-            if (pass == 1) {
+            for (split_sweep) |splits| {
+                const args = Exl3Args{
+                    .k = @intCast(s.k),
+                    .n = @intCast(s.n),
+                    .rows = @intCast(s.m),
+                    .halves = s.halves,
+                    .codebook = 2,
+                    .su_signs = 0,
+                    .sv_signs = 0,
+                    .has_bias = 0,
+                    .output_f32 = 1,
+                    .input_ids = 0,
+                    .output_ids = 0,
+                    .routed = 0,
+                    .expert_id = 0,
+                    .repeat = 1,
+                    .indexed = 0,
+                    .experts = 0,
+                    .splits = splits,
+                    .x_stride = @intCast(s.k),
+                    .y_stride = @intCast(s.n),
+                    .tile_k_stride = (s.n / 16) * tile_bytes,
+                    .tile_n_stride = tile_bytes,
+                };
+                const n_out = s.m * s.n;
                 @memset(sums.slice(u32, n_out), 0);
                 @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                t_direct = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                    .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                h_direct = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                _ = timeRow(queue, shipped, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 16, .height = splits, .threads = 32 }, n_out, 1, 1) catch 0;
+                _ = timeRow(queue, wide, reduce, args, x, trs[1..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 1, 1) catch 0;
+                const t_ship = timeRow(queue, shipped, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 16, .height = splits, .threads = 32 }, n_out, 7, 1) catch 0;
+                const h_ship = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                 @memset(sums.slice(u32, n_out), 0);
                 @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                t_direct128 = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                    .{ .width = s.n / 128, .height = splits, .threads = 128 }, n_out, 7, 1) catch 0;
-                // The geometry sweep: a group of 64 or 32 columns (two or one SIMDgroups) instead of 256.
-                if (s.n % 64 == 0) {
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_direct64 = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 64, .height = splits, .threads = 64 }, n_out, 7, 1) catch 0;
-                    h_direct64 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                const t_wide = timeRow(queue, wide, reduce, args, x, trs[4..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                const h_wide = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                if (base_hash == null) base_hash = h_wide;
+                @memset(sums.slice(u32, n_out), 0);
+                @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                const t_wide2 = timeRow(queue, wide2, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                const h_wide2 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                // ROUND-338: the separation arms. The LUT arm reads the codebook from a 1024-entry threadgroup
+                // table (the dynamic selection left in), the static arm resolves the state's word pair and bit
+                // offset at compile time (the table left in), and the static+LUT arm has both.
+                var t_wlut: f64 = 0;
+                var h_wlut: u64 = 0;
+                var t_wstat: f64 = 0;
+                var h_wstat: u64 = 0;
+                var t_wstatlut: f64 = 0;
+                var h_wstatlut: u64 = 0;
+                var t_pf2: f64 = 0;
+                var h_pf2: u64 = 0;
+                var t_pf4: f64 = 0;
+                var h_pf4: u64 = 0;
+                if (pass == 1) {
+                    if (wide_lut) |wl| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_wlut = timeRow(queue, wl, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                        h_wlut = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                    }
+                    if (wide_static) |ws| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_wstat = timeRow(queue, ws, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                        h_wstat = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                    }
+                    if (wide_static_lut) |wsl| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_wstatlut = timeRow(queue, wsl, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                        h_wstatlut = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                    }
+                    if (wide_static_lut_pf2) |w2| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_pf2 = timeRow(queue, w2, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                        h_pf2 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                    }
+                    if (wide_static_lut_pf4) |w4| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_pf4 = timeRow(queue, w4, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                        h_pf4 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                    }
                 }
-                if (s.n % 32 == 0) {
+                var t_direct: f64 = 0;
+                var t_direct128: f64 = 0;
+                var t_direct64: f64 = 0;
+                var h_direct64: u64 = 0;
+                var t_direct32: f64 = 0;
+                var t_directv: f64 = 0;
+                var t_directv128: f64 = 0;
+                var t_directv64: f64 = 0;
+                var t_directr: f64 = 0;
+                var t_directnw: f64 = 0;
+                var h_directnw: u64 = 0;
+                var h_directr: u64 = 0;
+                var h_direct: u64 = 0;
+                var h_directv: u64 = 0;
+                if (pass == 1) {
                     @memset(sums.slice(u32, n_out), 0);
                     @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_direct32 = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 32, .height = splits, .threads = 32 }, n_out, 7, 1) catch 0;
-                }
-                // The register-named body at the engine's geometry.
-                if (directr) |dr| {
+                    t_direct = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                    h_direct = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     @memset(sums.slice(u32, n_out), 0);
                     @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_directr = timeRow(queue, dr, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                    h_directr = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                }
-                // ROUND-335: the nw body at the engine's geometry.
-                if (directnw) |dnw| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_directnw = timeRow(queue, dnw, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                    h_directnw = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                }
-                // The wider-load body at the same three geometries.
-                if (directv) |dv| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_directv = timeRow(queue, dv, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                    h_directv = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                    @memset(sums.slice(u32, n_out), 0);
-                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                    t_directv128 = timeRow(queue, dv, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 128, .height = splits, .threads = 128 }, n_out, 7, 1) catch 0;
+                    t_direct128 = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 128, .height = splits, .threads = 128 }, n_out, 7, 1) catch 0;
+                    // The geometry sweep: a group of 64 or 32 columns (two or one SIMDgroups) instead of 256.
                     if (s.n % 64 == 0) {
                         @memset(sums.slice(u32, n_out), 0);
                         @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                        t_directv64 = timeRow(queue, dv, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                            .{ .width = s.n / 64, .height = splits, .threads = 64 }, n_out, 7, 1) catch 0;
+                        t_direct64 = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 64, .height = splits, .threads = 64 }, n_out, 7, 1) catch 0;
+                        h_direct64 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     }
-                }
-            }
-            // ROUND-340: the register-only body on this dense shape, against the same cold protocol (the eight
-            // trellis copies rotate a trial at a time). It has no split count: the k split lives inside the
-            // threadgroup (the warps walk their own slices and meet once), so its number does not move with the
-            // split sweep -- which is itself the point: the dense path's split-K round trip is what the routed
-            // body does not pay.
-            var t_fma: f64 = 0;
-            var t_regfloor: f64 = 0;
-            var h_fma: u64 = 0;
-            var t_diag1: f64 = 0;
-            var t_diag2: f64 = 0;
-            var t_diag3: f64 = 0;
-            var t_diag4: f64 = 0;
-            var t_diag5: f64 = 0;
-            var t_pf: [9]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            var h_pf: [9]u64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            var t_ww: [8]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
-            var h_ww: [8]u64 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
-            if (pass == 1 and fma_dense != null) {
-                var fa = args;
-                fa.indexed = 1;
-                fa.experts = 1;
-                fa.routed = 1;
-                fa.splits = 1;
-                @memset(sums.slice(u32, n_out), 0);
-                t_fma = timeRowDesc(queue, fma_dense.?, fa, x, trs[0..], sums, partials, table, routes, descs,
-                    .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
-                h_fma = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
-                if (regfloor) |rf| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    t_regfloor = timeRowDesc(queue, rf, fa, x, trs[0..], sums, partials, table, routes, descs,
-                        .{ .width = (s.n + 127) / 128, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
-                }
-                // ROUND-415: the two diagnostics, on the same args and the same dispatch as the fma arm.
-                if (diag1) |d1| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    t_diag1 = timeRowDesc(queue, d1, fa, x, trs[0..], sums, partials, table, routes, descs,
-                        .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
-                }
-                if (diag2) |d2| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    t_diag2 = timeRowDesc(queue, d2, fa, x, trs[0..], sums, partials, table, routes, descs,
-                        .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
-                }
-                // ROUND-416: the three new levels, on the same args and the same dispatch as the fma arm.
-                if (diag3) |d3| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    t_diag3 = timeRowDesc(queue, d3, fa, x, trs[0..], sums, partials, table, routes, descs,
-                        .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
-                }
-                if (diag4) |d4| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    t_diag4 = timeRowDesc(queue, d4, fa, x, trs[0..], sums, partials, table, routes, descs,
-                        .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
-                }
-                if (diag5) |d5| {
-                    @memset(sums.slice(u32, n_out), 0);
-                    t_diag5 = timeRowDesc(queue, d5, fa, x, trs[0..], sums, partials, table, routes, descs,
-                        .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
-                }
-                // ROUND-416: the engine's own configuration (sixteen warps) and the wide-word read, on the
-                // same args and the same dispatch as the fma arm (the thread count follows the warp count).
-                for (wide_arms[0..nwide], 0..) |arm, ai| {
-                    if (arm.pipe) |wp| {
+                    if (s.n % 32 == 0) {
                         @memset(sums.slice(u32, n_out), 0);
-                        t_ww[ai] = timeRowDesc(queue, wp, fa, x, trs[0..], sums, partials, table, routes, descs,
-                            .{ .width = s.n / 16, .height = 1, .threads = 32 * arm.warps }, 7, tile_bytes, s.halves) catch 0;
-                        h_ww[ai] = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_direct32 = timeRow(queue, direct, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 32, .height = splits, .threads = 32 }, n_out, 7, 1) catch 0;
                     }
-                }
-                // ROUND-416: the prefetch-depth arms, on the same args and the same dispatch as the fma arm.
-                for (pf_arms[0..npf]) |arm| {
-                    if (arm.pipe) |pp| {
+                    // The register-named body at the engine's geometry.
+                    if (directr) |dr| {
                         @memset(sums.slice(u32, n_out), 0);
-                        t_pf[arm.pf] = timeRowDesc(queue, pp, fa, x, trs[0..], sums, partials, table, routes, descs,
-                            .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
-                        h_pf[arm.pf] = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_directr = timeRow(queue, dr, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                        h_directr = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                    }
+                    // ROUND-335: the nw body at the engine's geometry.
+                    if (directnw) |dnw| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_directnw = timeRow(queue, dnw, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                        h_directnw = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                    }
+                    // The wider-load body at the same three geometries.
+                    if (directv) |dv| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_directv = timeRow(queue, dv, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 256, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                        h_directv = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                        @memset(sums.slice(u32, n_out), 0);
+                        @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                        t_directv128 = timeRow(queue, dv, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 128, .height = splits, .threads = 128 }, n_out, 7, 1) catch 0;
+                        if (s.n % 64 == 0) {
+                            @memset(sums.slice(u32, n_out), 0);
+                            @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                            t_directv64 = timeRow(queue, dv, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 64, .height = splits, .threads = 64 }, n_out, 7, 1) catch 0;
+                        }
                     }
                 }
-            }
-            var t_noload: f64 = 0;
-            if (pass == 1) if (noload) |nl| {
-                @memset(sums.slice(u32, n_out), 0);
-                @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
-                t_noload = timeRow(queue, nl, reduce, args, x, trs[0..], sums, partials, table, x, x,
-                    .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-            };
-            if (pass == 1 and s.m == 1 and mma != null and splits == 8) {
-                const d: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
-                d[0] = .{ .trellis = trs[0].gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                    .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
-                    .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
-                var ia = args;
-                ia.indexed = 1;
-                ia.experts = 1;
-                @memset(sums.slice(u32, n_out), 0);
-                @memset(partials.slice(u32, 8 * n_out), 0);
-                const t_mma = timeRow(queue, mma.?, reduce, ia, x, trs[0..1], sums, partials, table, routes, descs,
-                    .{ .width = s.n / 32, .height = 1, .threads = 64, .depth = 8 }, n_out, 7, 1) catch 0;
-                @memset(sums.slice(u32, n_out), 0);
-                const t_wh = timeRow(queue, wide, reduce, args, x, trs[0..1], sums, partials, table, x, x,
-                    .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
-                std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}\n", .{ s.n, s.k, "mma/8", 8, t_mma, macs / (t_mma * 1e-3), gbs / (t_mma * 1e-3) });
-                std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (wide, one hot buffer)\n", .{ s.n, s.k, "wide/h", 8, t_wh, macs / (t_wh * 1e-3), gbs / (t_wh * 1e-3) });
-            }
-            if (pass == 1) {
-                std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}\n", .{ s.n, s.k, "shipped", splits, t_ship, macs / (t_ship * 1e-3), gbs / (t_ship * 1e-3), h_ship & 0xffffffff });
-                std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}\n", .{ s.n, s.k, "wide", splits, t_wide, macs / (t_wide * 1e-3), gbs / (t_wide * 1e-3), h_wide & 0xffffffff, if (h_ship == h_wide) "IDENTICAL" else "DIFFERS" });
-                std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}\n", .{ s.n, s.k, "wide2/32k", splits, t_wide2, macs / (t_wide2 * 1e-3), gbs / (t_wide2 * 1e-3), h_wide2 & 0xffffffff, if (h_ship == h_wide2) "IDENTICAL" else "DIFFERS" });
-                // ROUND-338: the separation arms, each against the shipped body's hash.
-                if (pass == 1 and t_wlut > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (lut, {d:.1} % of wide)\n", .{ s.n, s.k, "wide/lut", splits, t_wlut, macs / (t_wlut * 1e-3), gbs / (t_wlut * 1e-3), h_wlut & 0xffffffff, if (h_ship == h_wlut) "IDENTICAL" else "DIFFERS", 100.0 * t_wlut / t_wide });
-                if (pass == 1 and t_wstat > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (static, {d:.1} % of wide)\n", .{ s.n, s.k, "wide/st", splits, t_wstat, macs / (t_wstat * 1e-3), gbs / (t_wstat * 1e-3), h_wstat & 0xffffffff, if (h_ship == h_wstat) "IDENTICAL" else "DIFFERS", 100.0 * t_wstat / t_wide });
-                if (pass == 1 and t_wstatlut > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (static+lut, {d:.1} % of wide)\n", .{ s.n, s.k, "wide/st+lu", splits, t_wstatlut, macs / (t_wstatlut * 1e-3), gbs / (t_wstatlut * 1e-3), h_wstatlut & 0xffffffff, if (h_ship == h_wstatlut) "IDENTICAL" else "DIFFERS", 100.0 * t_wstatlut / t_wide });
-                if (pass == 1 and t_pf2 > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (static+lut, prefetch 2, {d:.1} % of static+lut)\n", .{ s.n, s.k, "st+lu/pf2", splits, t_pf2, macs / (t_pf2 * 1e-3), gbs / (t_pf2 * 1e-3), h_pf2 & 0xffffffff, if (h_ship == h_pf2) "IDENTICAL" else "DIFFERS", 100.0 * t_pf2 / t_wstatlut });
-                if (pass == 1 and t_pf4 > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (static+lut, prefetch 4, {d:.1} % of static+lut)\n", .{ s.n, s.k, "st+lu/pf4", splits, t_pf4, macs / (t_pf4 * 1e-3), gbs / (t_pf4 * 1e-3), h_pf4 & 0xffffffff, if (h_ship == h_pf4) "IDENTICAL" else "DIFFERS", 100.0 * t_pf4 / t_wstatlut });
-                if (pass == 1 and t_direct > 0) {
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}\n", .{ s.n, s.k, "direct", splits, t_direct, macs / (t_direct * 1e-3), gbs / (t_direct * 1e-3), h_direct & 0xffffffff, if (h_ship == h_direct) "IDENTICAL" else "DIFFERS" });
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (direct, 128 threads)\n", .{ s.n, s.k, "direct/128", splits, t_direct128, macs / (t_direct128 * 1e-3), gbs / (t_direct128 * 1e-3) });
-                    if (t_directr > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  (named words, 256 threads) {s}\n", .{ s.n, s.k, "directr", splits, t_directr, macs / (t_directr * 1e-3), gbs / (t_directr * 1e-3), h_directr & 0xffffffff, if (h_ship == h_directr) "IDENTICAL" else "DIFFERS" });
-                    if (t_directnw > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  (nw words, 256 threads) {s}\n", .{ s.n, s.k, "directnw", splits, t_directnw, macs / (t_directnw * 1e-3), gbs / (t_directnw * 1e-3), h_directnw & 0xffffffff, if (h_ship == h_directnw) "IDENTICAL" else "DIFFERS" });
-                    if (t_direct64 > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  (direct, 64 threads) {s}\n", .{ s.n, s.k, "direct/64", splits, t_direct64, macs / (t_direct64 * 1e-3), gbs / (t_direct64 * 1e-3), h_direct64 & 0xffffffff, if (h_ship == h_direct64) "IDENTICAL" else "DIFFERS" });
-                    if (t_direct32 > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (direct, 32 threads)\n", .{ s.n, s.k, "direct/32", splits, t_direct32, macs / (t_direct32 * 1e-3), gbs / (t_direct32 * 1e-3) });
-                    if (t_directv > 0) {
-                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  (wide loads, 256 threads) {s}\n", .{ s.n, s.k, "directv", splits, t_directv, macs / (t_directv * 1e-3), gbs / (t_directv * 1e-3), h_directv & 0xffffffff, if (h_ship == h_directv) "IDENTICAL" else "DIFFERS" });
-                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (wide loads, 128 threads)\n", .{ s.n, s.k, "directv/128", splits, t_directv128, macs / (t_directv128 * 1e-3), gbs / (t_directv128 * 1e-3) });
-                        if (t_directv64 > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (wide loads, 64 threads)\n", .{ s.n, s.k, "directv/64", splits, t_directv64, macs / (t_directv64 * 1e-3), gbs / (t_directv64 * 1e-3) });
+                // ROUND-340: the register-only body on this dense shape, against the same cold protocol (the eight
+                // trellis copies rotate a trial at a time). It has no split count: the k split lives inside the
+                // threadgroup (the warps walk their own slices and meet once), so its number does not move with the
+                // split sweep -- which is itself the point: the dense path's split-K round trip is what the routed
+                // body does not pay.
+                var t_fma: f64 = 0;
+                var t_regfloor: f64 = 0;
+                var h_fma: u64 = 0;
+                var t_diag1: f64 = 0;
+                var t_diag2: f64 = 0;
+                var t_diag3: f64 = 0;
+                var t_diag4: f64 = 0;
+                var t_diag5: f64 = 0;
+                var t_pf: [9]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                var h_pf: [9]u64 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+                var t_ww: [8]f64 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+                var h_ww: [8]u64 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+                if (pass == 1 and fma_dense != null) {
+                    var fa = args;
+                    fa.indexed = 1;
+                    fa.experts = 1;
+                    fa.routed = 1;
+                    fa.splits = 1;
+                    @memset(sums.slice(u32, n_out), 0);
+                    t_fma = timeRowDesc(queue, fma_dense.?, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
+                    h_fma = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                    if (regfloor) |rf| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        t_regfloor = timeRowDesc(queue, rf, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = (s.n + 127) / 128, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
+                    }
+                    // ROUND-415: the two diagnostics, on the same args and the same dispatch as the fma arm.
+                    if (diag1) |d1| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        t_diag1 = timeRowDesc(queue, d1, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
+                    }
+                    if (diag2) |d2| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        t_diag2 = timeRowDesc(queue, d2, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
+                    }
+                    // ROUND-416: the three new levels, on the same args and the same dispatch as the fma arm.
+                    if (diag3) |d3| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        t_diag3 = timeRowDesc(queue, d3, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
+                    }
+                    if (diag4) |d4| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        t_diag4 = timeRowDesc(queue, d4, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
+                    }
+                    if (diag5) |d5| {
+                        @memset(sums.slice(u32, n_out), 0);
+                        t_diag5 = timeRowDesc(queue, d5, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
+                    }
+                    // ROUND-416: the engine's own configuration (sixteen warps) and the wide-word read, on the
+                    // same args and the same dispatch as the fma arm (the thread count follows the warp count).
+                    for (wide_arms[0..nwide], 0..) |arm, ai| {
+                        if (arm.pipe) |wp| {
+                            @memset(sums.slice(u32, n_out), 0);
+                            t_ww[ai] = timeRowDesc(queue, wp, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 32 * arm.warps }, 7, tile_bytes, s.halves) catch 0;
+                            h_ww[ai] = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                        }
+                    }
+                    // ROUND-416: the prefetch-depth arms, on the same args and the same dispatch as the fma arm.
+                    for (pf_arms[0..npf]) |arm| {
+                        if (arm.pipe) |pp| {
+                            @memset(sums.slice(u32, n_out), 0);
+                            t_pf[arm.pf] = timeRowDesc(queue, pp, fa, x, trs[0..], sums, partials, table, routes, descs, .{ .width = s.n / 16, .height = 1, .threads = 128 }, 7, tile_bytes, s.halves) catch 0;
+                            h_pf[arm.pf] = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
+                        }
                     }
                 }
-                if (pass == 1 and t_fma > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (register-only, {d:.1} % of static+lut)\n", .{ s.n, s.k, "fma/4", 1, t_fma, macs / (t_fma * 1e-3), gbs / (t_fma * 1e-3), h_fma & 0xffffffff, if (h_ship == h_fma) "IDENTICAL" else "DIFFERS", 100.0 * t_fma / t_wstatlut });
-                if (pass == 1 and t_regfloor > 0 and t_fma > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (register-direct MMA floor: B fragment constant, no B staging/decode, {d:.1} % of the fma/4 body)\n", .{ s.n, s.k, "regfloor", 1, t_regfloor, macs / (t_regfloor * 1e-3), gbs / (t_regfloor * 1e-3), 100.0 * t_regfloor / t_fma });
-                if (pass == 1 and t_diag1 > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (VALUE path gone: the value = the state's low byte)\n", .{ s.n, s.k, "fma/4 d1", 1, t_diag1, macs / (t_diag1 * 1e-3), gbs / (t_diag1 * 1e-3) });
-                if (pass == 1 and t_diag2 > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the WHOLE decode gone: the weight = 1)\n", .{ s.n, s.k, "fma/4 d2", 1, t_diag2, macs / (t_diag2 * 1e-3), gbs / (t_diag2 * 1e-3) });
-                if (pass == 1 and t_diag3 > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the per-weight FP op DOUBLED: the arithmetic's marginal)\n", .{ s.n, s.k, "fma/4 d3", 1, t_diag3, macs / (t_diag3 * 1e-3), gbs / (t_diag3 * 1e-3) });
-                if (pass == 1 and t_diag4 > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the ACTIVATION READ gone: the x row is not read)\n", .{ s.n, s.k, "fma/4 d4", 1, t_diag4, macs / (t_diag4 * 1e-3), gbs / (t_diag4 * 1e-3) });
-                if (pass == 1 and t_diag5 > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the CROSS-WARP REDUCTION gone: the warps' partials)\n", .{ s.n, s.k, "fma/4 d5", 1, t_diag5, macs / (t_diag5 * 1e-3), gbs / (t_diag5 * 1e-3) });
-                // ROUND-416: the engine's own warp count and the comparator's 4-byte stream word.
-                for (wide_arms[0..nwide], 0..) |arm, ai| {
-                    const t = t_ww[ai];
-                    if (pass == 1 and t > 0)
-                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  ({d:.1} % of the fma/4 arm)\n", .{ s.n, s.k, arm.name, 1, t, macs / (t * 1e-3), gbs / (t * 1e-3), h_ww[ai] & 0xffffffff, if (h_fma == h_ww[ai]) "IDENTICAL" else "DIFFERS", 100.0 * t / t_fma });
+                var t_noload: f64 = 0;
+                if (pass == 1) if (noload) |nl| {
+                    @memset(sums.slice(u32, n_out), 0);
+                    @memset(partials.slice(u32, @as(usize, splits) * n_out), 0);
+                    t_noload = timeRow(queue, nl, reduce, args, x, trs[0..], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                };
+                if (pass == 1 and s.m == 1 and mma != null and splits == 8) {
+                    const d: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
+                    d[0] = .{ .trellis = trs[0].gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes, .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+                    var ia = args;
+                    ia.indexed = 1;
+                    ia.experts = 1;
+                    @memset(sums.slice(u32, n_out), 0);
+                    @memset(partials.slice(u32, 8 * n_out), 0);
+                    const t_mma = timeRow(queue, mma.?, reduce, ia, x, trs[0..1], sums, partials, table, routes, descs, .{ .width = s.n / 32, .height = 1, .threads = 64, .depth = 8 }, n_out, 7, 1) catch 0;
+                    @memset(sums.slice(u32, n_out), 0);
+                    const t_wh = timeRow(queue, wide, reduce, args, x, trs[0..1], sums, partials, table, x, x, .{ .width = (s.n + 127) / 128, .height = splits, .threads = 256 }, n_out, 7, 1) catch 0;
+                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}\n", .{ s.n, s.k, "mma/8", 8, t_mma, macs / (t_mma * 1e-3), gbs / (t_mma * 1e-3) });
+                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (wide, one hot buffer)\n", .{ s.n, s.k, "wide/h", 8, t_wh, macs / (t_wh * 1e-3), gbs / (t_wh * 1e-3) });
                 }
-                // ROUND-416: the prefetch depth, on the same dispatch. The hash says whether the arm is
-                // bit-identical to the shipped body (it must be: the ring only moves the loads in time).
-                for (pf_arms[0..npf]) |arm| {
-                    const t = t_pf[arm.pf];
-                    if (pass == 1 and t > 0)
-                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (prefetch {d} blocks in flight, {d:.1} % of the shipped body)\n", .{ s.n, s.k, arm.name, 1, t, macs / (t * 1e-3), gbs / (t * 1e-3), h_pf[arm.pf] & 0xffffffff, if (h_fma == h_pf[arm.pf]) "IDENTICAL" else "DIFFERS", arm.pf, 100.0 * t / t_fma });
+                if (pass == 1) {
+                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}\n", .{ s.n, s.k, "shipped", splits, t_ship, macs / (t_ship * 1e-3), gbs / (t_ship * 1e-3), h_ship & 0xffffffff });
+                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}\n", .{ s.n, s.k, "wide", splits, t_wide, macs / (t_wide * 1e-3), gbs / (t_wide * 1e-3), h_wide & 0xffffffff, if (h_ship == h_wide) "IDENTICAL" else "DIFFERS" });
+                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}\n", .{ s.n, s.k, "wide2/32k", splits, t_wide2, macs / (t_wide2 * 1e-3), gbs / (t_wide2 * 1e-3), h_wide2 & 0xffffffff, if (h_ship == h_wide2) "IDENTICAL" else "DIFFERS" });
+                    // ROUND-338: the separation arms, each against the shipped body's hash.
+                    if (pass == 1 and t_wlut > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (lut, {d:.1} % of wide)\n", .{ s.n, s.k, "wide/lut", splits, t_wlut, macs / (t_wlut * 1e-3), gbs / (t_wlut * 1e-3), h_wlut & 0xffffffff, if (h_ship == h_wlut) "IDENTICAL" else "DIFFERS", 100.0 * t_wlut / t_wide });
+                    if (pass == 1 and t_wstat > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (static, {d:.1} % of wide)\n", .{ s.n, s.k, "wide/st", splits, t_wstat, macs / (t_wstat * 1e-3), gbs / (t_wstat * 1e-3), h_wstat & 0xffffffff, if (h_ship == h_wstat) "IDENTICAL" else "DIFFERS", 100.0 * t_wstat / t_wide });
+                    if (pass == 1 and t_wstatlut > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (static+lut, {d:.1} % of wide)\n", .{ s.n, s.k, "wide/st+lu", splits, t_wstatlut, macs / (t_wstatlut * 1e-3), gbs / (t_wstatlut * 1e-3), h_wstatlut & 0xffffffff, if (h_ship == h_wstatlut) "IDENTICAL" else "DIFFERS", 100.0 * t_wstatlut / t_wide });
+                    if (pass == 1 and t_pf2 > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (static+lut, prefetch 2, {d:.1} % of static+lut)\n", .{ s.n, s.k, "st+lu/pf2", splits, t_pf2, macs / (t_pf2 * 1e-3), gbs / (t_pf2 * 1e-3), h_pf2 & 0xffffffff, if (h_ship == h_pf2) "IDENTICAL" else "DIFFERS", 100.0 * t_pf2 / t_wstatlut });
+                    if (pass == 1 and t_pf4 > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (static+lut, prefetch 4, {d:.1} % of static+lut)\n", .{ s.n, s.k, "st+lu/pf4", splits, t_pf4, macs / (t_pf4 * 1e-3), gbs / (t_pf4 * 1e-3), h_pf4 & 0xffffffff, if (h_ship == h_pf4) "IDENTICAL" else "DIFFERS", 100.0 * t_pf4 / t_wstatlut });
+                    if (pass == 1 and t_direct > 0) {
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}\n", .{ s.n, s.k, "direct", splits, t_direct, macs / (t_direct * 1e-3), gbs / (t_direct * 1e-3), h_direct & 0xffffffff, if (h_ship == h_direct) "IDENTICAL" else "DIFFERS" });
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (direct, 128 threads)\n", .{ s.n, s.k, "direct/128", splits, t_direct128, macs / (t_direct128 * 1e-3), gbs / (t_direct128 * 1e-3) });
+                        if (t_directr > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  (named words, 256 threads) {s}\n", .{ s.n, s.k, "directr", splits, t_directr, macs / (t_directr * 1e-3), gbs / (t_directr * 1e-3), h_directr & 0xffffffff, if (h_ship == h_directr) "IDENTICAL" else "DIFFERS" });
+                        if (t_directnw > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  (nw words, 256 threads) {s}\n", .{ s.n, s.k, "directnw", splits, t_directnw, macs / (t_directnw * 1e-3), gbs / (t_directnw * 1e-3), h_directnw & 0xffffffff, if (h_ship == h_directnw) "IDENTICAL" else "DIFFERS" });
+                        if (t_direct64 > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  (direct, 64 threads) {s}\n", .{ s.n, s.k, "direct/64", splits, t_direct64, macs / (t_direct64 * 1e-3), gbs / (t_direct64 * 1e-3), h_direct64 & 0xffffffff, if (h_ship == h_direct64) "IDENTICAL" else "DIFFERS" });
+                        if (t_direct32 > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (direct, 32 threads)\n", .{ s.n, s.k, "direct/32", splits, t_direct32, macs / (t_direct32 * 1e-3), gbs / (t_direct32 * 1e-3) });
+                        if (t_directv > 0) {
+                            std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  (wide loads, 256 threads) {s}\n", .{ s.n, s.k, "directv", splits, t_directv, macs / (t_directv * 1e-3), gbs / (t_directv * 1e-3), h_directv & 0xffffffff, if (h_ship == h_directv) "IDENTICAL" else "DIFFERS" });
+                            std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (wide loads, 128 threads)\n", .{ s.n, s.k, "directv/128", splits, t_directv128, macs / (t_directv128 * 1e-3), gbs / (t_directv128 * 1e-3) });
+                            if (t_directv64 > 0) std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (wide loads, 64 threads)\n", .{ s.n, s.k, "directv/64", splits, t_directv64, macs / (t_directv64 * 1e-3), gbs / (t_directv64 * 1e-3) });
+                        }
+                    }
+                    if (pass == 1 and t_fma > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (register-only, {d:.1} % of static+lut)\n", .{ s.n, s.k, "fma/4", 1, t_fma, macs / (t_fma * 1e-3), gbs / (t_fma * 1e-3), h_fma & 0xffffffff, if (h_ship == h_fma) "IDENTICAL" else "DIFFERS", 100.0 * t_fma / t_wstatlut });
+                    if (pass == 1 and t_regfloor > 0 and t_fma > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (register-direct MMA floor: B fragment constant, no B staging/decode, {d:.1} % of the fma/4 body)\n", .{ s.n, s.k, "regfloor", 1, t_regfloor, macs / (t_regfloor * 1e-3), gbs / (t_regfloor * 1e-3), 100.0 * t_regfloor / t_fma });
+                    if (pass == 1 and t_diag1 > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (VALUE path gone: the value = the state's low byte)\n", .{ s.n, s.k, "fma/4 d1", 1, t_diag1, macs / (t_diag1 * 1e-3), gbs / (t_diag1 * 1e-3) });
+                    if (pass == 1 and t_diag2 > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the WHOLE decode gone: the weight = 1)\n", .{ s.n, s.k, "fma/4 d2", 1, t_diag2, macs / (t_diag2 * 1e-3), gbs / (t_diag2 * 1e-3) });
+                    if (pass == 1 and t_diag3 > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the per-weight FP op DOUBLED: the arithmetic's marginal)\n", .{ s.n, s.k, "fma/4 d3", 1, t_diag3, macs / (t_diag3 * 1e-3), gbs / (t_diag3 * 1e-3) });
+                    if (pass == 1 and t_diag4 > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the ACTIVATION READ gone: the x row is not read)\n", .{ s.n, s.k, "fma/4 d4", 1, t_diag4, macs / (t_diag4 * 1e-3), gbs / (t_diag4 * 1e-3) });
+                    if (pass == 1 and t_diag5 > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the CROSS-WARP REDUCTION gone: the warps' partials)\n", .{ s.n, s.k, "fma/4 d5", 1, t_diag5, macs / (t_diag5 * 1e-3), gbs / (t_diag5 * 1e-3) });
+                    // ROUND-416: the engine's own warp count and the comparator's 4-byte stream word.
+                    for (wide_arms[0..nwide], 0..) |arm, ai| {
+                        const t = t_ww[ai];
+                        if (pass == 1 and t > 0)
+                            std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  ({d:.1} % of the fma/4 arm)\n", .{ s.n, s.k, arm.name, 1, t, macs / (t * 1e-3), gbs / (t * 1e-3), h_ww[ai] & 0xffffffff, if (h_fma == h_ww[ai]) "IDENTICAL" else "DIFFERS", 100.0 * t / t_fma });
+                    }
+                    // ROUND-416: the prefetch depth, on the same dispatch. The hash says whether the arm is
+                    // bit-identical to the shipped body (it must be: the ring only moves the loads in time).
+                    for (pf_arms[0..npf]) |arm| {
+                        const t = t_pf[arm.pf];
+                        if (pass == 1 and t > 0)
+                            std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  (prefetch {d} blocks in flight, {d:.1} % of the shipped body)\n", .{ s.n, s.k, arm.name, 1, t, macs / (t * 1e-3), gbs / (t * 1e-3), h_pf[arm.pf] & 0xffffffff, if (h_fma == h_pf[arm.pf]) "IDENTICAL" else "DIFFERS", arm.pf, 100.0 * t / t_fma });
+                    }
+                    if (pass == 1 and t_noload > 0)
+                        std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (decode removed, {d:.0} % of wide)\n", .{ s.n, s.k, "noload", splits, t_noload, macs / (t_noload * 1e-3), gbs / (t_noload * 1e-3), 100.0 * (t_wide - t_noload) / t_wide });
                 }
-                if (pass == 1 and t_noload > 0)
-                    std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (decode removed, {d:.0} % of wide)\n", .{ s.n, s.k, "noload", splits, t_noload, macs / (t_noload * 1e-3), gbs / (t_noload * 1e-3), 100.0 * (t_wide - t_noload) / t_wide });
-            }
-            // ROUND-341: the FP64 RECEIPT for the DENSE one-row class. The changed class is the k-sum of the
-            // dense one-row projection: the shipped body folds every k term into one fp32 accumulator in
-            // ascending k order (and pays a split-K partials round trip), the register-only body takes one
-            // accumulator a state and closes them in a tree. Both are measured against the SAME fp64 truth
-            // over the SAME fixture bytes (the trellis copy trs[0], one activation row), so the comparison is
-            // arithmetic and not a fixture artefact: GOAL-UNLOCK's band asks that the changed path's agreement
-            // with the fp64 truth be no worse than the shipped path's own.
-            if (std.c.getenv("TF_BENCH_DENSE_FP64") != null and pass == 1 and splits == 8 and s.m == 1 and
-                wide_static_lut != null and fma_dense_kernel != null)
-            {
-                const rn_out = s.n;
-                const host_a = try gpa.alloc(f32, rn_out);
-                defer gpa.free(host_a);
-                const host_b = try gpa.alloc(f32, rn_out);
-                defer gpa.free(host_b);
-                const host_d = try gpa.alloc(f32, rn_out);
-                defer gpa.free(host_d);
-                const host_ref = try gpa.alloc(f64, rn_out);
-                defer gpa.free(host_ref);
-                // A varied activation row: the shipped fixture's all-ones row would make every product equal
-                // and hide the cancellation the two orders differ in.
-                const xr = try device.buffer(s.m * s.k * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-                defer xr.deinit();
-                for (xr.slice(u16, s.m * s.k), 0..) |*v, i| {
-                    const f: f32 = @as(f32, @floatFromInt(@as(i32, @intCast(i % 23)) - 11)) / 32.0;
-                    v.* = @bitCast(@as(f16, @floatCast(f)));
-                }
-                // The engine's own split count for this shape (16 narrow, 8 wide n).
-                var sargs = args;
-                sargs.splits = if (s.n >= 16384) @as(u32, 8) else @as(u32, 16);
-                // The shipped dense body: the 128-column threadgroup tile with the static state selection and
-                // the codebook LUT. One dispatch over trs[0], the copy the truth is taken over.
-                @memset(sums.slice(u32, rn_out), 0);
-                @memset(partials.slice(u32, @as(usize, sargs.splits) * rn_out), 0);
-                _ = try timeRow(queue, wide_static_lut.?, reduce, sargs, xr, trs[0..], sums, partials, table, xr, xr,
-                    .{ .width = (s.n + 127) / 128, .height = sargs.splits, .threads = 256 }, rn_out, 1, 1);
-                @memcpy(host_a, sums.slice(f32, rn_out));
-                // The engine's other dense body: the direct-register one-row body (the head's shape).
-                var direct_ok = false;
-                if (s.n >= 4096 and s.n % 256 == 0 and s.halves <= 14) {
+                // ROUND-341: the FP64 RECEIPT for the DENSE one-row class. The changed class is the k-sum of the
+                // dense one-row projection: the shipped body folds every k term into one fp32 accumulator in
+                // ascending k order (and pays a split-K partials round trip), the register-only body takes one
+                // accumulator a state and closes them in a tree. Both are measured against the SAME fp64 truth
+                // over the SAME fixture bytes (the trellis copy trs[0], one activation row), so the comparison is
+                // arithmetic and not a fixture artefact: GOAL-UNLOCK's band asks that the changed path's agreement
+                // with the fp64 truth be no worse than the shipped path's own.
+                if (std.c.getenv("TF_BENCH_DENSE_FP64") != null and pass == 1 and splits == 8 and s.m == 1 and
+                    wide_static_lut != null and fma_dense_kernel != null)
+                {
+                    const rn_out = s.n;
+                    const host_a = try gpa.alloc(f32, rn_out);
+                    defer gpa.free(host_a);
+                    const host_b = try gpa.alloc(f32, rn_out);
+                    defer gpa.free(host_b);
+                    const host_d = try gpa.alloc(f32, rn_out);
+                    defer gpa.free(host_d);
+                    const host_ref = try gpa.alloc(f64, rn_out);
+                    defer gpa.free(host_ref);
+                    // A varied activation row: the shipped fixture's all-ones row would make every product equal
+                    // and hide the cancellation the two orders differ in.
+                    const xr = try device.buffer(s.m * s.k * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+                    defer xr.deinit();
+                    for (xr.slice(u16, s.m * s.k), 0..) |*v, i| {
+                        const f: f32 = @as(f32, @floatFromInt(@as(i32, @intCast(i % 23)) - 11)) / 32.0;
+                        v.* = @bitCast(@as(f16, @floatCast(f)));
+                    }
+                    // The engine's own split count for this shape (16 narrow, 8 wide n).
+                    var sargs = args;
+                    sargs.splits = if (s.n >= 16384) @as(u32, 8) else @as(u32, 16);
+                    // The shipped dense body: the 128-column threadgroup tile with the static state selection and
+                    // the codebook LUT. One dispatch over trs[0], the copy the truth is taken over.
                     @memset(sums.slice(u32, rn_out), 0);
                     @memset(partials.slice(u32, @as(usize, sargs.splits) * rn_out), 0);
-                    _ = try timeRow(queue, direct, reduce, sargs, xr, trs[0..], sums, partials, table, xr, xr,
-                        .{ .width = s.n / 256, .height = sargs.splits, .threads = 256 }, rn_out, 1, 1);
-                    @memcpy(host_d, sums.slice(f32, rn_out));
-                    direct_ok = true;
-                }
-                // The changed path: the engine's own dense register-only kernel. One k walk, one term at a
-                // time, no split-K and no partials round trip.
-                var fargs = args;
-                fargs.splits = 1;
-                @memset(sums.slice(u32, rn_out), 0);
-                _ = try timeRow(queue, fma_dense_kernel.?, reduce, fargs, xr, trs[0..], sums, partials, table, xr, xr,
-                    .{ .width = s.n / 16, .height = 1, .threads = 128 }, rn_out, 1, 1);
-                @memcpy(host_b, sums.slice(f32, rn_out));
-                // The FP64 truth: the same trellis bytes, the same products, summed in fp64.
-                exl3F64Row(trs[0].slice(u16, trellis_bytes / 2), xr.slice(u16, s.k), s.n, s.k, s.halves, 0, host_ref);
-                var sq_ref: f64 = 0;
-                var max_ref: f64 = 0;
-                for (host_ref) |v| {
-                    sq_ref += v * v;
-                    max_ref = @max(max_ref, @abs(v));
-                }
-                const Stat = struct { worst: f64 = 0, sq: f64 = 0, maxv: f64 = 0 };
-                var sa = Stat{};
-                var sb = Stat{};
-                var sd = Stat{};
-                var differing: usize = 0;
-                for (host_ref, 0..) |ref, j| {
-                    const va = @as(f64, host_a[j]);
-                    const vb = @as(f64, host_b[j]);
-                    const da = @abs(va - ref);
-                    const db = @abs(vb - ref);
-                    sa.worst = @max(sa.worst, da);
-                    sa.sq += da * da;
-                    sa.maxv = @max(sa.maxv, @abs(va));
-                    sb.worst = @max(sb.worst, db);
-                    sb.sq += db * db;
-                    sb.maxv = @max(sb.maxv, @abs(vb));
-                    if (@as(u32, @bitCast(@as(f32, @floatCast(host_a[j])))) !=
-                        @as(u32, @bitCast(@as(f32, @floatCast(host_b[j]))))) differing += 1;
-                    if (direct_ok) {
-                        const vd = @as(f64, host_d[j]);
-                        const dd = @abs(vd - ref);
-                        sd.worst = @max(sd.worst, dd);
-                        sd.sq += dd * dd;
-                        sd.maxv = @max(sd.maxv, @abs(vd));
-                    }
-                }
-                const nrms_a = @sqrt(sa.sq / @max(sq_ref, 1e-30));
-                const nrms_b = @sqrt(sb.sq / @max(sq_ref, 1e-30));
-                const nrms_d = if (direct_ok) @sqrt(sd.sq / @max(sq_ref, 1e-30)) else 0;
-                // The engine dispatches the 128-column wide body for n <= 32768 and the direct body above it.
-                const shipped_is_wide = s.n <= 32768;
-                const nrms_shipped = if (shipped_is_wide) nrms_a else nrms_d;
-                std.debug.print("  {d:>7}x{d:>5} h{d} DENSE-FP64 shipped({s}) worst {e:.3} nrms {e:.3} | register-only worst {e:.3} nrms {e:.3} | bitdiff {d}/{d} -> {s}\n", .{
-                    s.n, s.k, s.halves, if (shipped_is_wide) "wide" else "direct", sa.worst, nrms_a,
-                    sb.worst, nrms_b, differing, rn_out,
-                    if (nrms_b <= nrms_shipped) "NO-WORSE" else "WORSE",
-                });
-                std.debug.print("  {d:>7}x{d:>5} h{d} DENSE-FP64 detail |max| wide {d:.2} register-only {d:.2} direct {d:.2} ref {d:.2} | direct nrms {e:.3}\n", .{
-                    s.n, s.k, s.halves, sa.maxv, sb.maxv, if (direct_ok) sd.maxv else 0, max_ref, nrms_d,
-                });
-                // ROUND-356: the same receipt at every warp count: the landed count's own number is the one
-                // that gates the promotion.
-                for (dense_warps[0..ndense]) |dw| {
-                    if (dw.pipe) |dp| {
+                    _ = try timeRow(queue, wide_static_lut.?, reduce, sargs, xr, trs[0..], sums, partials, table, xr, xr, .{ .width = (s.n + 127) / 128, .height = sargs.splits, .threads = 256 }, rn_out, 1, 1);
+                    @memcpy(host_a, sums.slice(f32, rn_out));
+                    // The engine's other dense body: the direct-register one-row body (the head's shape).
+                    var direct_ok = false;
+                    if (s.n >= 4096 and s.n % 256 == 0 and s.halves <= 14) {
                         @memset(sums.slice(u32, rn_out), 0);
-                        _ = try timeRow(queue, dp, reduce, fargs, xr, trs[0..], sums, partials, table, xr, xr,
-                            .{ .width = s.n / 16, .height = 1, .threads = 32 * dw.warps }, rn_out, 1, 1);
-                        @memcpy(host_b, sums.slice(f32, rn_out));
-                        var wb: f64 = 0;
-                        var sbw: f64 = 0;
-                        for (host_ref, 0..) |ref, j| {
-                            const vb = @as(f64, host_b[j]);
-                            const db = @abs(vb - ref);
-                            wb = @max(wb, db);
-                            sbw += db * db;
+                        @memset(partials.slice(u32, @as(usize, sargs.splits) * rn_out), 0);
+                        _ = try timeRow(queue, direct, reduce, sargs, xr, trs[0..], sums, partials, table, xr, xr, .{ .width = s.n / 256, .height = sargs.splits, .threads = 256 }, rn_out, 1, 1);
+                        @memcpy(host_d, sums.slice(f32, rn_out));
+                        direct_ok = true;
+                    }
+                    // The changed path: the engine's own dense register-only kernel. One k walk, one term at a
+                    // time, no split-K and no partials round trip.
+                    var fargs = args;
+                    fargs.splits = 1;
+                    @memset(sums.slice(u32, rn_out), 0);
+                    _ = try timeRow(queue, fma_dense_kernel.?, reduce, fargs, xr, trs[0..], sums, partials, table, xr, xr, .{ .width = s.n / 16, .height = 1, .threads = 128 }, rn_out, 1, 1);
+                    @memcpy(host_b, sums.slice(f32, rn_out));
+                    // The FP64 truth: the same trellis bytes, the same products, summed in fp64.
+                    exl3F64Row(trs[0].slice(u16, trellis_bytes / 2), xr.slice(u16, s.k), s.n, s.k, s.halves, 0, host_ref);
+                    var sq_ref: f64 = 0;
+                    var max_ref: f64 = 0;
+                    for (host_ref) |v| {
+                        sq_ref += v * v;
+                        max_ref = @max(max_ref, @abs(v));
+                    }
+                    const Stat = struct { worst: f64 = 0, sq: f64 = 0, maxv: f64 = 0 };
+                    var sa = Stat{};
+                    var sb = Stat{};
+                    var sd = Stat{};
+                    var differing: usize = 0;
+                    for (host_ref, 0..) |ref, j| {
+                        const va = @as(f64, host_a[j]);
+                        const vb = @as(f64, host_b[j]);
+                        const da = @abs(va - ref);
+                        const db = @abs(vb - ref);
+                        sa.worst = @max(sa.worst, da);
+                        sa.sq += da * da;
+                        sa.maxv = @max(sa.maxv, @abs(va));
+                        sb.worst = @max(sb.worst, db);
+                        sb.sq += db * db;
+                        sb.maxv = @max(sb.maxv, @abs(vb));
+                        if (@as(u32, @bitCast(@as(f32, @floatCast(host_a[j])))) !=
+                            @as(u32, @bitCast(@as(f32, @floatCast(host_b[j]))))) differing += 1;
+                        if (direct_ok) {
+                            const vd = @as(f64, host_d[j]);
+                            const dd = @abs(vd - ref);
+                            sd.worst = @max(sd.worst, dd);
+                            sd.sq += dd * dd;
+                            sd.maxv = @max(sd.maxv, @abs(vd));
                         }
-                        const nrms_dw = @sqrt(sbw / @max(sq_ref, 1e-30));
-                        std.debug.print("  {d:>7}x{d:>5} h{d} DENSE-FP64 w{d}: worst {e:.3} nrms {e:.3} -> {s}\n", .{
-                            s.n, s.k, s.halves, dw.warps, wb, nrms_dw,
-                            if (nrms_dw <= nrms_shipped) "NO-WORSE than the shipped path" else "worse than the shipped path",
-                        });
+                    }
+                    const nrms_a = @sqrt(sa.sq / @max(sq_ref, 1e-30));
+                    const nrms_b = @sqrt(sb.sq / @max(sq_ref, 1e-30));
+                    const nrms_d = if (direct_ok) @sqrt(sd.sq / @max(sq_ref, 1e-30)) else 0;
+                    // The engine dispatches the 128-column wide body for n <= 32768 and the direct body above it.
+                    const shipped_is_wide = s.n <= 32768;
+                    const nrms_shipped = if (shipped_is_wide) nrms_a else nrms_d;
+                    std.debug.print("  {d:>7}x{d:>5} h{d} DENSE-FP64 shipped({s}) worst {e:.3} nrms {e:.3} | register-only worst {e:.3} nrms {e:.3} | bitdiff {d}/{d} -> {s}\n", .{
+                        s.n,      s.k,    s.halves,  if (shipped_is_wide) "wide" else "direct", sa.worst,                                            nrms_a,
+                        sb.worst, nrms_b, differing, rn_out,                                    if (nrms_b <= nrms_shipped) "NO-WORSE" else "WORSE",
+                    });
+                    std.debug.print("  {d:>7}x{d:>5} h{d} DENSE-FP64 detail |max| wide {d:.2} register-only {d:.2} direct {d:.2} ref {d:.2} | direct nrms {e:.3}\n", .{
+                        s.n, s.k, s.halves, sa.maxv, sb.maxv, if (direct_ok) sd.maxv else 0, max_ref, nrms_d,
+                    });
+                    // ROUND-356: the same receipt at every warp count: the landed count's own number is the one
+                    // that gates the promotion.
+                    for (dense_warps[0..ndense]) |dw| {
+                        if (dw.pipe) |dp| {
+                            @memset(sums.slice(u32, rn_out), 0);
+                            _ = try timeRow(queue, dp, reduce, fargs, xr, trs[0..], sums, partials, table, xr, xr, .{ .width = s.n / 16, .height = 1, .threads = 32 * dw.warps }, rn_out, 1, 1);
+                            @memcpy(host_b, sums.slice(f32, rn_out));
+                            var wb: f64 = 0;
+                            var sbw: f64 = 0;
+                            for (host_ref, 0..) |ref, j| {
+                                const vb = @as(f64, host_b[j]);
+                                const db = @abs(vb - ref);
+                                wb = @max(wb, db);
+                                sbw += db * db;
+                            }
+                            const nrms_dw = @sqrt(sbw / @max(sq_ref, 1e-30));
+                            std.debug.print("  {d:>7}x{d:>5} h{d} DENSE-FP64 w{d}: worst {e:.3} nrms {e:.3} -> {s}\n", .{
+                                s.n,                                                                                              s.k, s.halves, dw.warps, wb, nrms_dw,
+                                if (nrms_dw <= nrms_shipped) "NO-WORSE than the shipped path" else "worse than the shipped path",
+                            });
+                        }
                     }
                 }
             }
-          }
             // ROUND-442: THE LANE PACKING, timed on the same cold fixture and the same args as the fma arms
             // above, once a shape (outside the split sweep -- these bodies take no split count).
             if (pass == 1 and lane_only) {
                 const n_out = s.m * s.n;
                 const la = Exl3Args{
-                    .k = @intCast(s.k), .n = @intCast(s.n), .rows = @intCast(s.m), .halves = s.halves, .codebook = 2,
-                    .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                    .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-                    .x_stride = @intCast(s.k), .y_stride = @intCast(s.n),
-                    .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                    .k = @intCast(s.k),
+                    .n = @intCast(s.n),
+                    .rows = @intCast(s.m),
+                    .halves = s.halves,
+                    .codebook = 2,
+                    .su_signs = 0,
+                    .sv_signs = 0,
+                    .has_bias = 0,
+                    .output_f32 = 1,
+                    .input_ids = 0,
+                    .output_ids = 0,
+                    .routed = 0,
+                    .expert_id = 0,
+                    .repeat = 1,
+                    .indexed = 0,
+                    .experts = 0,
+                    .splits = 1,
+                    .x_stride = @intCast(s.k),
+                    .y_stride = @intCast(s.n),
+                    .tile_k_stride = (s.n / 16) * tile_bytes,
+                    .tile_n_stride = tile_bytes,
                 };
                 std.debug.print("  {d:>7}x{d:>5} h{d} LANE PACKING: one simdgroup a 16-column tile, the whole k walk (the comparator's structure)\n", .{ s.n, s.k, s.halves });
                 std.debug.print("  {s:>12} {s:>5} {s:>9} {s:>9} {s:>8} {s:>9}\n", .{ "body", "warps", "ms", "weights/s", "GB/s", "hash" });
@@ -1909,8 +2051,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 for (lane_arms[0..nlane], 0..) |arm, ai| {
                     const p = arm.pipe orelse continue;
                     @memset(sums.slice(u32, n_out), 0);
-                    const t = timeRow(queue, p, null, la, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 16, .height = 1, .threads = 32 * arm.warps }, n_out, 7, 1) catch 0;
+                    const t = timeRow(queue, p, null, la, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 16, .height = 1, .threads = 32 * arm.warps }, n_out, 7, 1) catch 0;
                     if (t <= 0) continue;
                     const h = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     if (ai == 0) {
@@ -1918,10 +2059,8 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         t_ref = t;
                     }
                     std.debug.print("  {s:>12} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  ({d:.1} % of w16, {d:.1} us a tile)\n", .{
-                        arm.name, arm.warps, t, macs / (t * 1e-3), gbs / (t * 1e-3), h & 0xffffffff,
-                        if (ai == 0) "control" else if (h_ref == h) "IDENTICAL" else "DIFFERS",
-                        if (ai == 0) 100.0 else 100.0 * t / t_ref,
-                        t * 1e3 / @as(f64, @floatFromInt(s.n / 16)),
+                        arm.name,                                                               arm.warps,                                 t,                                           macs / (t * 1e-3), gbs / (t * 1e-3), h & 0xffffffff,
+                        if (ai == 0) "control" else if (h_ref == h) "IDENTICAL" else "DIFFERS", if (ai == 0) 100.0 else 100.0 * t / t_ref, t * 1e3 / @as(f64, @floatFromInt(s.n / 16)),
                     });
                 }
                 // ROUND-443: the sixteen-state body, timed on the same cold fixture and dispatch geometry.
@@ -1930,15 +2069,12 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 for (s16_arms[0..ns16]) |arm| {
                     const p = arm.pipe orelse continue;
                     @memset(sums.slice(u32, n_out), 0);
-                    const t = timeRow(queue, p, null, la, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 16, .height = 1, .threads = 32 * arm.warps }, n_out, 7, 1) catch 0;
+                    const t = timeRow(queue, p, null, la, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 16, .height = 1, .threads = 32 * arm.warps }, n_out, 7, 1) catch 0;
                     if (t <= 0) continue;
                     const h = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     std.debug.print("  {s:>12} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1} {x:>8}  {s}  ({d:.1} % of w16, {d:.1} us a tile)\n", .{
-                        arm.name, arm.warps, t, macs / (t * 1e-3), gbs / (t * 1e-3), h & 0xffffffff,
-                        if (h_ref == h) "IDENTICAL" else "DIFFERS",
-                        if (t_ref > 0) 100.0 * t / t_ref else 0.0,
-                        t * 1e3 / @as(f64, @floatFromInt(s.n / 16)),
+                        arm.name,                                   arm.warps,                                 t,                                           macs / (t * 1e-3), gbs / (t * 1e-3), h & 0xffffffff,
+                        if (h_ref == h) "IDENTICAL" else "DIFFERS", if (t_ref > 0) 100.0 * t / t_ref else 0.0, t * 1e3 / @as(f64, @floatFromInt(s.n / 16)),
                     });
                 }
                 // ROUND-443: a value-level cross-check of the s16 body against the shipped w16 on this fixture.
@@ -1948,12 +2084,10 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     const hq = try gpa.alloc(f32, n_out);
                     defer gpa.free(hq);
                     @memset(sums.slice(u32, n_out), 0);
-                    _ = timeRow(queue, lane_arms[0].pipe.?, null, la, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 16, .height = 1, .threads = 512 }, n_out, 1, 1) catch 0;
+                    _ = timeRow(queue, lane_arms[0].pipe.?, null, la, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 16, .height = 1, .threads = 512 }, n_out, 1, 1) catch 0;
                     @memcpy(hp, sums.slice(f32, n_out));
                     @memset(sums.slice(u32, n_out), 0);
-                    _ = timeRow(queue, s16_arms[ns16 - 2].pipe.?, null, la, x, trs[0..], sums, partials, table, x, x,
-                        .{ .width = s.n / 16, .height = 1, .threads = 512 }, n_out, 1, 1) catch 0;
+                    _ = timeRow(queue, s16_arms[ns16 - 2].pipe.?, null, la, x, trs[0..], sums, partials, table, x, x, .{ .width = s.n / 16, .height = 1, .threads = 512 }, n_out, 1, 1) catch 0;
                     @memcpy(hq, sums.slice(f32, n_out));
                     var mx: f64 = 0;
                     var cnt: usize = 0;
@@ -1965,8 +2099,8 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         if (v != 0 or hq[i] != 0) nz += 1;
                     }
                     std.debug.print("  s16 CROSS-CHECK {d}x{d} h{d}: max|w16-s16| {e:.3}, {d}/{d} differ >1e-4, nonzero {d}; w16[0..3] {e:.4} {e:.4} {e:.4} | s16 {e:.4} {e:.4} {e:.4}\n", .{
-                        s.n, s.k, s.halves, mx, cnt, n_out, nz,
-                        hp[0], hp[1], hp[2], hq[0], hq[1], hq[2],
+                        s.n,   s.k,   s.halves, mx,    cnt,   n_out, nz,
+                        hp[0], hp[1], hp[2],    hq[0], hq[1], hq[2],
                     });
                 }
             }
@@ -2011,20 +2145,14 @@ const routed_copies = 8;
 
 // One routed dispatch, timed: every expert points at a fresh copy of its trellis, so the weights are not
 // resident when they come back (the routed stage reads each expert once a layer).
-fn timeRouted(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args: Exl3Args,
-               x: mtl.Buffer, sums: mtl.Buffer, partials: mtl.Buffer, table: mtl.Buffer,
-               routes: mtl.Buffer, descs: mtl.Buffer, trs: []const mtl.Buffer, experts: usize,
-               d: RowDispatch, n_out: usize, trials: usize) !f64 {
+fn timeRouted(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, sums: mtl.Buffer, partials: mtl.Buffer, table: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, trs: []const mtl.Buffer, experts: usize, d: RowDispatch, n_out: usize, trials: usize) !f64 {
     var samples: [16]f64 = undefined;
     const nt = @max(1, @min(trials, samples.len));
     const dp: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
     for (0..nt) |t| {
         for (0..experts) |e| {
             const src = trs[(t * experts + e) % trs.len];
-            dp[e] = .{ .trellis = src.gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                .tile_k_stride = dp[e].tile_k_stride, .tile_n_stride = dp[e].tile_n_stride,
-                .halves = dp[e].halves, .codebook = dp[e].codebook,
-                .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+            dp[e] = .{ .trellis = src.gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = dp[e].tile_k_stride, .tile_n_stride = dp[e].tile_n_stride, .halves = dp[e].halves, .codebook = dp[e].codebook, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
         }
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
@@ -2059,9 +2187,7 @@ fn timeRouted(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args:
 }
 
 // ROUND-448: one dispatch of the fair affine tile body (or its scalar reference); descriptors are not rewritten.
-fn runAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, codes: mtl.Buffer,
-             sums: mtl.Buffer, scales: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer,
-             w: u32, h: u32, threads: u32) !void {
+fn runAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, codes: mtl.Buffer, sums: mtl.Buffer, scales: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, w: u32, h: u32, threads: u32) !void {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
     e.setPipeline(pipe);
@@ -2206,7 +2332,8 @@ fn routeDiag(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     const trellis_bytes: u32 = (k / 16) * (n / 16) * tile_bytes;
     const nax_src = try std.mem.replaceOwned(u8, gpa, ks.core_exl3_projection_nax, "#include \"../nax.h\"", ks.nax);
     defer gpa.free(nax_src);
-    const diag_src = try std.mem.concat(gpa, u8, &.{ nax_src,
+    const diag_src = try std.mem.concat(gpa, u8, &.{
+        nax_src,
         \\kernel void tf_exl3_diag_desc(const device TfExl3Expert* d [[buffer(0)]], device uint* out [[buffer(1)]],
         \\                              uint gid [[thread_position_in_grid]]) {
         \\  if (gid != 0) return;
@@ -2295,9 +2422,7 @@ fn routeDiag(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     defer descs.deinit();
     {
         const dp: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
-        for (0..rows) |e| dp[e] = .{ .trellis = trs[e].gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-            .tile_k_stride = (n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
-            .halves = halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+        for (0..rows) |e| dp[e] = .{ .trellis = trs[e].gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = (n / 16) * tile_bytes, .tile_n_stride = tile_bytes, .halves = halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
     }
     const x = try device.buffer(rows * k * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     defer x.deinit();
@@ -2326,10 +2451,27 @@ fn routeDiag(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
 
     const nstates: u32 = 32 * 8 * 8;
     const args = Exl3Args{
-        .k = k, .n = n, .rows = rows, .halves = halves, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = rows, .splits = 1,
-        .x_stride = k, .y_stride = n, .tile_k_stride = (n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+        .k = k,
+        .n = n,
+        .rows = rows,
+        .halves = halves,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 1,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 1,
+        .experts = rows,
+        .splits = 1,
+        .x_stride = k,
+        .y_stride = n,
+        .tile_k_stride = (n / 16) * tile_bytes,
+        .tile_n_stride = tile_bytes,
     };
 
     // ROUND-337: the routed bench's own column probe, reproduced here: expert 0's trellis zeroed but for its
@@ -2521,7 +2663,7 @@ fn exl3F64Row(trellis: []const u16, x: []const u16, n: u32, k: u32, halves: u32,
     for (0..blocks) |kb| {
         for (0..n / 16) |nb| {
             const base = (kb * kstride + nb * nstride) / 2;
-            const tile = trellis[base ..];
+            const tile = trellis[base..];
             for (0..256) |p| {
                 const l = p / 8;
                 const e = p % 8;
@@ -2543,8 +2685,7 @@ fn exl3F64Row(trellis: []const u16, x: []const u16, n: u32, k: u32, halves: u32,
 // (Apache-2.0, THIRD_PARTY_NOTICES) -- with 4/6/8-bit codes and group-64 bf16 scales and biases. It is
 // timed on synthetic codes: the access pattern is the same whatever the codes hold, and the question here
 // is the body's cost, not a repack's quality (that owes the band later).
-fn timeAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: anytype, ws: []const mtl.Buffer, sc: mtl.Buffer, bi: mtl.Buffer,
-              x: mtl.Buffer, y: mtl.Buffer, ids: mtl.Buffer, n: u32, slots: u32, trials: usize) !f64 {
+fn timeAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: anytype, ws: []const mtl.Buffer, sc: mtl.Buffer, bi: mtl.Buffer, x: mtl.Buffer, y: mtl.Buffer, ids: mtl.Buffer, n: u32, slots: u32, trials: usize) !f64 {
     var samples: [16]f64 = undefined;
     const nt = @max(1, @min(trials, samples.len));
     for (0..nt) |t| {
@@ -2633,11 +2774,7 @@ fn affinePrefillPrice(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocat
         const op = offs.slice(i32, experts + 1);
         for (op, 0..) |*v, j| v.* = @intCast(j * bm);
     }
-    std.debug.print("  fixture {d:.2} GB (w {d:.2}, scales+biases {d:.2}, x {d:.2})\n", .{
-        @as(f64, @floatFromInt(wbytes + 2 * sbytes + xbytes + xsbytes + ybytes)) / 1e9,
-        @as(f64, @floatFromInt(wbytes)) / 1e9, @as(f64, @floatFromInt(2 * sbytes)) / 1e9,
-        @as(f64, @floatFromInt(xbytes)) / 1e9
-    });
+    std.debug.print("  fixture {d:.2} GB (w {d:.2}, scales+biases {d:.2}, x {d:.2})\n", .{ @as(f64, @floatFromInt(wbytes + 2 * sbytes + xbytes + xsbytes + ybytes)) / 1e9, @as(f64, @floatFromInt(wbytes)) / 1e9, @as(f64, @floatFromInt(2 * sbytes)) / 1e9, @as(f64, @floatFromInt(xbytes)) / 1e9 });
     const args = extern struct { rows: i32, n: i32, k: i32, experts: i32 }{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(k), .experts = @intCast(experts) };
     var samples: [5]f64 = undefined;
     for (&samples) |*t| {
@@ -2815,7 +2952,14 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 nfma_libs += 1;
             }
             const p = if (wlib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma", false) catch null) else null;
-            const nm = switch (w) { 1 => "fma w1", 2 => "fma w2", 4 => "fma w4", 8 => "fma w8", 16 => "fma w16", else => "fma w32" };
+            const nm = switch (w) {
+                1 => "fma w1",
+                2 => "fma w2",
+                4 => "fma w4",
+                8 => "fma w8",
+                16 => "fma w16",
+                else => "fma w32",
+            };
             fma_arms[nfma] = .{ .name = nm, .warps = w, .pipe = p };
             nfma += 1;
         }
@@ -2829,7 +2973,11 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 nfma_libs += 1;
             }
             const p = if (wlib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma", false) catch null) else null;
-            const nm = switch (w) { 4 => "fma w4 4wd", 8 => "fma w8 4wd", else => "fma w16 4wd" };
+            const nm = switch (w) {
+                4 => "fma w4 4wd",
+                8 => "fma w8 4wd",
+                else => "fma w16 4wd",
+            };
             fma_arms[nfma] = .{ .name = nm, .warps = w, .pipe = p };
             nfma += 1;
         }
@@ -2974,7 +3122,11 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 nfma_libs += 1;
             }
             const p = if (dlib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) else null;
-            const nm = switch (d) { 1 => "d1 st+lu w16", 2 => "d2 st+lu w16", else => "d3 st+lu w16" };
+            const nm = switch (d) {
+                1 => "d1 st+lu w16",
+                2 => "d2 st+lu w16",
+                else => "d3 st+lu w16",
+            };
             fma_arms[nfma] = .{ .name = nm, .warps = 16, .pipe = p };
             nfma += 1;
         }
@@ -3040,10 +3192,10 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         }
     }
 
-
     // ROUND-337: a one-word probe of the trellis as the GPU sees it (the fixture's visibility is the question
     // the routed bench's own column probe raised).
-    const words_src = try std.mem.concat(gpa, u8, &.{ nax_src,
+    const words_src = try std.mem.concat(gpa, u8, &.{
+        nax_src,
         \\kernel void tf_exl3_probe_words(const device ushort* t [[buffer(0)]], device uint* out [[buffer(1)]],
         \\                             uint gid [[thread_position_in_grid]]) {
         \\  out[gid] = (uint)t[2 * gid] | ((uint)t[2 * gid + 1] << 16);
@@ -3114,18 +3266,33 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         defer d64.deinit();
         {
             const dp: [*]Exl3Expert = @ptrCast(@alignCast(d64.contents()));
-            dp[0] = .{ .trellis = codes.gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                .tile_k_stride = (tn / 16) * 96, .tile_n_stride = 96,
-                .halves = 6, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+            dp[0] = .{ .trellis = codes.gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = (tn / 16) * 96, .tile_n_stride = 96, .halves = 6, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
         }
         const rt64 = try device.buffer(4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         defer rt64.deinit();
         rt64.slice(u32, 1)[0] = 0;
         const args64 = Exl3Args{
-            .k = tk, .n = tn, .rows = 1, .halves = 6, .codebook = 2,
-            .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-            .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = 1, .splits = 1,
-            .x_stride = tk, .y_stride = tn, .tile_k_stride = (tn / 16) * 96, .tile_n_stride = 96,
+            .k = tk,
+            .n = tn,
+            .rows = 1,
+            .halves = 6,
+            .codebook = 2,
+            .su_signs = 0,
+            .sv_signs = 0,
+            .has_bias = 0,
+            .output_f32 = 1,
+            .input_ids = 0,
+            .output_ids = 0,
+            .routed = 1,
+            .expert_id = 0,
+            .repeat = 1,
+            .indexed = 1,
+            .experts = 1,
+            .splits = 1,
+            .x_stride = tk,
+            .y_stride = tn,
+            .tile_k_stride = (tn / 16) * 96,
+            .tile_n_stride = 96,
         };
         try runAffine(queue, t3_ref.?, args64, x64, codes, r64, scl, rt64, d64, 1, 1, 64);
         try runAffine(queue, t3_warps_pipes[0].?, args64, x64, codes, w64, scl, rt64, d64, tn / 16, 1, 32);
@@ -3216,9 +3383,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         defer descs.deinit();
         {
             const dp: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
-            for (0..rows) |e| dp[e] = .{ .trellis = trs[e].gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
-                .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+            for (0..rows) |e| dp[e] = .{ .trellis = trs[e].gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes, .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
         }
         const n_out = rows * s.n;
         const macs = @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k)) * 2.0;
@@ -3231,18 +3396,33 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             const host_b = try gpa.alloc(f32, n_out);
             defer gpa.free(host_b);
             const args = Exl3Args{
-                .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 8,
-                .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                .k = s.k,
+                .n = s.n,
+                .rows = s.rows,
+                .halves = s.halves,
+                .codebook = 2,
+                .su_signs = 0,
+                .sv_signs = 0,
+                .has_bias = 0,
+                .output_f32 = 1,
+                .input_ids = 0,
+                .output_ids = 0,
+                .routed = 1,
+                .expert_id = 0,
+                .repeat = 1,
+                .indexed = 1,
+                .experts = s.rows,
+                .splits = 8,
+                .x_stride = s.k,
+                .y_stride = s.n,
+                .tile_k_stride = (s.n / 16) * tile_bytes,
+                .tile_n_stride = tile_bytes,
             };
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, mma_c.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
+            _ = try timeRouted(queue, mma_c.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
             @memcpy(host_a, sums.slice(f32, n_out));
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, direct_arith, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = (s.n + 255) / 256, .height = rows, .depth = 8, .threads = 256 }, n_out, 1);
+            _ = try timeRouted(queue, direct_arith, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = (s.n + 255) / 256, .height = rows, .depth = 8, .threads = 256 }, n_out, 1);
             @memcpy(host_b, sums.slice(f32, n_out));
             var worst: f64 = 0;
             var scale: f64 = 0;
@@ -3264,18 +3444,33 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             const host_b = try gpa.alloc(f32, n_out);
             defer gpa.free(host_b);
             const args = Exl3Args{
-                .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 8,
-                .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                .k = s.k,
+                .n = s.n,
+                .rows = s.rows,
+                .halves = s.halves,
+                .codebook = 2,
+                .su_signs = 0,
+                .sv_signs = 0,
+                .has_bias = 0,
+                .output_f32 = 1,
+                .input_ids = 0,
+                .output_ids = 0,
+                .routed = 1,
+                .expert_id = 0,
+                .repeat = 1,
+                .indexed = 1,
+                .experts = s.rows,
+                .splits = 8,
+                .x_stride = s.k,
+                .y_stride = s.n,
+                .tile_k_stride = (s.n / 16) * tile_bytes,
+                .tile_n_stride = tile_bytes,
             };
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, mma_t.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
+            _ = try timeRouted(queue, mma_t.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
             @memcpy(host_a, sums.slice(f32, n_out));
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
+            _ = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
             @memcpy(host_b, sums.slice(f32, n_out));
             var differing: usize = 0;
             for (host_a, host_b) |va, vb| if (va != vb) {
@@ -3292,20 +3487,35 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             const host_b = try gpa.alloc(f32, n_out);
             defer gpa.free(host_b);
             const args = Exl3Args{
-                .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 8,
-                .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                .k = s.k,
+                .n = s.n,
+                .rows = s.rows,
+                .halves = s.halves,
+                .codebook = 2,
+                .su_signs = 0,
+                .sv_signs = 0,
+                .has_bias = 0,
+                .output_f32 = 1,
+                .input_ids = 0,
+                .output_ids = 0,
+                .routed = 1,
+                .expert_id = 0,
+                .repeat = 1,
+                .indexed = 1,
+                .experts = s.rows,
+                .splits = 8,
+                .x_stride = s.k,
+                .y_stride = s.n,
+                .tile_k_stride = (s.n / 16) * tile_bytes,
+                .tile_n_stride = tile_bytes,
             };
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
+            _ = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
             @memcpy(host_a, sums.slice(f32, n_out));
             var nargs = args;
             nargs.splits = 1;
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, fma_arms[0].pipe.?, reduce, nargs, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 }, n_out, 1);
+            _ = try timeRouted(queue, fma_arms[0].pipe.?, reduce, nargs, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 }, n_out, 1);
             @memcpy(host_b, sums.slice(f32, n_out));
             var worst: f64 = 0;
             var scale: f64 = 0;
@@ -3332,18 +3542,33 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             const host_b = try gpa.alloc(f32, n_out);
             defer gpa.free(host_b);
             const cargs = Exl3Args{
-                .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 1,
-                .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                .k = s.k,
+                .n = s.n,
+                .rows = s.rows,
+                .halves = s.halves,
+                .codebook = 2,
+                .su_signs = 0,
+                .sv_signs = 0,
+                .has_bias = 0,
+                .output_f32 = 1,
+                .input_ids = 0,
+                .output_ids = 0,
+                .routed = 1,
+                .expert_id = 0,
+                .repeat = 1,
+                .indexed = 1,
+                .experts = s.rows,
+                .splits = 1,
+                .x_stride = s.k,
+                .y_stride = s.n,
+                .tile_k_stride = (s.n / 16) * tile_bytes,
+                .tile_n_stride = tile_bytes,
             };
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, fma_arms[0].pipe.?, reduce, cargs, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 }, n_out, 1);
+            _ = try timeRouted(queue, fma_arms[0].pipe.?, reduce, cargs, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 }, n_out, 1);
             @memcpy(host_a, sums.slice(f32, n_out));
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, col_nax.?, reduce, cargs, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = (s.n + 3) / 4, .height = rows, .depth = 1, .threads = 128 }, n_out, 1);
+            _ = try timeRouted(queue, col_nax.?, reduce, cargs, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = (s.n + 3) / 4, .height = rows, .depth = 1, .threads = 128 }, n_out, 1);
             @memcpy(host_b, sums.slice(f32, n_out));
             var cq: f64 = 0;
             var cre: f64 = 0;
@@ -3364,83 +3589,90 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             narms = 0;
             for ([_]u32{ 8, 16, 32, 1 }) |splits| {
                 const args = Exl3Args{
-                    .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                    .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                    .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = splits,
-                    .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                    .k = s.k,
+                    .n = s.n,
+                    .rows = s.rows,
+                    .halves = s.halves,
+                    .codebook = 2,
+                    .su_signs = 0,
+                    .sv_signs = 0,
+                    .has_bias = 0,
+                    .output_f32 = 1,
+                    .input_ids = 0,
+                    .output_ids = 0,
+                    .routed = 1,
+                    .expert_id = 0,
+                    .repeat = 1,
+                    .indexed = 1,
+                    .experts = s.rows,
+                    .splits = splits,
+                    .x_stride = s.k,
+                    .y_stride = s.n,
+                    .tile_k_stride = (s.n / 16) * tile_bytes,
+                    .tile_n_stride = tile_bytes,
                 };
                 const depth: usize = if (splits > 1) splits else 1;
                 if (mma != null) {
                     @memset(sums.slice(u32, n_out), 0);
-                    const t = try timeRouted(queue, mma.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                        .{ .width = s.n / 32, .height = (rows + 3) / 4, .depth = depth, .threads = 128 }, n_out, 15);
+                    const t = try timeRouted(queue, mma.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = (rows + 3) / 4, .depth = depth, .threads = 128 }, n_out, 15);
                     const h = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     arms[narms] = .{ .name = "mma 4row", .splits = splits, .ms = t, .hash = h };
                     narms += 1;
                 }
                 if (mma_c != null) {
                     @memset(sums.slice(u32, n_out), 0);
-                    const t = try timeRouted(queue, mma_c.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                        .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
+                    const t = try timeRouted(queue, mma_c.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
                     const h = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     arms[narms] = .{ .name = "mma compact", .splits = splits, .ms = t, .hash = h };
                     narms += 1;
                 }
                 if (mma_t != null) {
                     @memset(sums.slice(u32, n_out), 0);
-                    const t_tb = try timeRouted(queue, mma_t.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                        .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
+                    const t_tb = try timeRouted(queue, mma_t.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
                     const h_tb = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     arms[narms] = .{ .name = "mma compact+tab", .splits = splits, .ms = t_tb, .hash = h_tb };
                     narms += 1;
                 }
                 if (mma_f != null) {
                     @memset(sums.slice(u32, n_out), 0);
-                    const t_f = try timeRouted(queue, mma_f.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                        .{ .width = s.n / 32, .height = (rows + 3) / 4, .depth = depth, .threads = 128 }, n_out, 15);
+                    const t_f = try timeRouted(queue, mma_f.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = (rows + 3) / 4, .depth = depth, .threads = 128 }, n_out, 15);
                     const h_f = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     arms[narms] = .{ .name = "mma 4row funnel", .splits = splits, .ms = t_f, .hash = h_f };
                     narms += 1;
                 }
                 if (mma_cf != null) {
                     @memset(sums.slice(u32, n_out), 0);
-                    const t_cf = try timeRouted(queue, mma_cf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                        .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
+                    const t_cf = try timeRouted(queue, mma_cf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
                     const h_cf = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     arms[narms] = .{ .name = "mma compact funnel", .splits = splits, .ms = t_cf, .hash = h_cf };
                     narms += 1;
                 }
                 if (mma_tf != null) {
                     @memset(sums.slice(u32, n_out), 0);
-                    const t_tf = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                        .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
+                    const t_tf = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
                     const h_tf = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     arms[narms] = .{ .name = "mma compact+tab funnel", .splits = splits, .ms = t_tf, .hash = h_tf };
                     narms += 1;
                 }
                 if (mma_t2 != null) {
                     @memset(sums.slice(u32, n_out), 0);
-                    const t_t2 = try timeRouted(queue, mma_t2.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                        .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
+                    const t_t2 = try timeRouted(queue, mma_t2.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = depth, .threads = 32 }, n_out, 15);
                     const h_t2 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     arms[narms] = .{ .name = "mma compact+tab 2wd", .splits = splits, .ms = t_t2, .hash = h_t2 };
                     narms += 1;
                 }
                 @memset(sums.slice(u32, n_out), 0);
-                const t_a = try timeRouted(queue, direct_arith, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                    .{ .width = (s.n + 255) / 256, .height = rows, .depth = depth, .threads = 256 }, n_out, 15);
+                const t_a = try timeRouted(queue, direct_arith, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = (s.n + 255) / 256, .height = rows, .depth = depth, .threads = 256 }, n_out, 15);
                 const h_a = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                 arms[narms] = .{ .name = "direct arith", .splits = splits, .ms = t_a, .hash = h_a };
                 narms += 1;
                 @memset(sums.slice(u32, n_out), 0);
-                const t_128 = try timeRouted(queue, direct, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                    .{ .width = (s.n + 127) / 128, .height = rows, .depth = depth, .threads = 128 }, n_out, 15);
+                const t_128 = try timeRouted(queue, direct, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = (s.n + 127) / 128, .height = rows, .depth = depth, .threads = 128 }, n_out, 15);
                 const h_128 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                 arms[narms] = .{ .name = "direct tbl/128", .splits = splits, .ms = t_128, .hash = h_128 };
                 narms += 1;
                 @memset(sums.slice(u32, n_out), 0);
-                const t_t = try timeRouted(queue, direct, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                    .{ .width = (s.n + 255) / 256, .height = rows, .depth = depth, .threads = 256 }, n_out, 15);
+                const t_t = try timeRouted(queue, direct, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = (s.n + 255) / 256, .height = rows, .depth = depth, .threads = 256 }, n_out, 15);
                 const h_t = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                 arms[narms] = .{ .name = "direct table", .splits = splits, .ms = t_t, .hash = h_t };
                 narms += 1;
@@ -3449,16 +3681,32 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             // partials and no reduce dispatch -- timed as one dispatch of the routed stage for the same six experts.
             {
                 const fargs = Exl3Args{
-                    .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                    .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                    .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 1,
-                    .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                    .k = s.k,
+                    .n = s.n,
+                    .rows = s.rows,
+                    .halves = s.halves,
+                    .codebook = 2,
+                    .su_signs = 0,
+                    .sv_signs = 0,
+                    .has_bias = 0,
+                    .output_f32 = 1,
+                    .input_ids = 0,
+                    .output_ids = 0,
+                    .routed = 1,
+                    .expert_id = 0,
+                    .repeat = 1,
+                    .indexed = 1,
+                    .experts = s.rows,
+                    .splits = 1,
+                    .x_stride = s.k,
+                    .y_stride = s.n,
+                    .tile_k_stride = (s.n / 16) * tile_bytes,
+                    .tile_n_stride = tile_bytes,
                 };
                 for (fma_arms[0..nfma]) |arm| {
                     if (arm.pipe) |p| {
                         @memset(sums.slice(u32, n_out), 0);
-                        const t = try timeRouted(queue, p, reduce, fargs, x, sums, partials, table, routes, descs, trs[0..], rows,
-                            .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * arm.warps }, n_out, 15);
+                        const t = try timeRouted(queue, p, reduce, fargs, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * arm.warps }, n_out, 15);
                         const h = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                         arms[narms] = .{ .name = arm.name, .splits = 1, .ms = t, .hash = h };
                         narms += 1;
@@ -3468,8 +3716,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 // column, four warps a threadgroup.
                 if (col_nax) |cp| {
                     @memset(sums.slice(u32, n_out), 0);
-                    const t = try timeRouted(queue, cp, reduce, fargs, x, sums, partials, table, routes, descs, trs[0..], rows,
-                        .{ .width = (s.n + 3) / 4, .height = rows, .depth = 1, .threads = 128 }, n_out, 15);
+                    const t = try timeRouted(queue, cp, reduce, fargs, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = (s.n + 3) / 4, .height = rows, .depth = 1, .threads = 128 }, n_out, 15);
                     const h = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     arms[narms] = .{ .name = "col plan", .splits = 1, .ms = t, .hash = h };
                     narms += 1;
@@ -3518,18 +3765,32 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     defer scales3.deinit();
                     for (scales3.slice(u16, sbytes3 / 2), 0..) |*v, i| v.* = @truncate(@as(u32, 0x3B00) +% (fillWord(5, i) & 63));
                     const t3args = Exl3Args{
-                        .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                        .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 1,
-                        .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tb, .tile_n_stride = tb,
+                        .k = s.k,
+                        .n = s.n,
+                        .rows = s.rows,
+                        .halves = s.halves,
+                        .codebook = 2,
+                        .su_signs = 0,
+                        .sv_signs = 0,
+                        .has_bias = 0,
+                        .output_f32 = 1,
+                        .input_ids = 0,
+                        .output_ids = 0,
+                        .routed = 1,
+                        .expert_id = 0,
+                        .repeat = 1,
+                        .indexed = 1,
+                        .experts = s.rows,
+                        .splits = 1,
+                        .x_stride = s.k,
+                        .y_stride = s.n,
+                        .tile_k_stride = (s.n / 16) * tb,
+                        .tile_n_stride = tb,
                     };
                     const dp3: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
-                    for (0..rows) |e| dp3[e] = .{ .trellis = codes.gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                        .tile_k_stride = (s.n / 16) * tb, .tile_n_stride = tb,
-                        .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+                    for (0..rows) |e| dp3[e] = .{ .trellis = codes.gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = (s.n / 16) * tb, .tile_n_stride = tb, .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
                     @memset(sums.slice(u32, n_out), 0);
-                    const t3 = try timeRouted(queue, aff_tile3.?, reduce, t3args, x, sums, partials, scales3, routes, descs, trs[0..], rows,
-                        .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * 16 }, n_out, 15);
+                    const t3 = try timeRouted(queue, aff_tile3.?, reduce, t3args, x, sums, partials, scales3, routes, descs, trs[0..], rows, .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * 16 }, n_out, 15);
                     const h3 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     const b3 = @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k)) * 3.25 / 8.0;
                     std.debug.print("  {s:>10} {s:>14} {d:>5} {d:>9.3} {d:>9.1} {d:>8.1} {x:>10}  (affine 3-bit tile, 3.25 bits a weight -- INSTRUMENT ONLY, NOT A PRICE: 4-5x the twin at the same shape, unexplained)\n", .{ s.name, "aff tile3 BROKEN", 1, t3, macs / (t3 * 1e-3) / 1e12, b3 / (t3 * 1e-3) / 1e9, h3 & 0xffffffff });
@@ -3545,18 +3806,32 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     defer scales3b.deinit();
                     for (scales3b.slice(u16, sb3 / 2), 0..) |*v, i| v.* = @truncate(@as(u32, 0x3B00) +% (fillWord(17, i) & 63));
                     const c3args = Exl3Args{
-                        .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                        .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 1,
-                        .x_stride = s.k, .y_stride = s.n, .tile_k_stride = 0, .tile_n_stride = 0,
+                        .k = s.k,
+                        .n = s.n,
+                        .rows = s.rows,
+                        .halves = s.halves,
+                        .codebook = 2,
+                        .su_signs = 0,
+                        .sv_signs = 0,
+                        .has_bias = 0,
+                        .output_f32 = 1,
+                        .input_ids = 0,
+                        .output_ids = 0,
+                        .routed = 1,
+                        .expert_id = 0,
+                        .repeat = 1,
+                        .indexed = 1,
+                        .experts = s.rows,
+                        .splits = 1,
+                        .x_stride = s.k,
+                        .y_stride = s.n,
+                        .tile_k_stride = 0,
+                        .tile_n_stride = 0,
                     };
                     const dpc: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
-                    for (0..rows) |e| dpc[e] = .{ .trellis = codes3.gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                        .tile_k_stride = 0, .tile_n_stride = 0,
-                        .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+                    for (0..rows) |e| dpc[e] = .{ .trellis = codes3.gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = 0, .tile_n_stride = 0, .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
                     @memset(sums.slice(u32, n_out), 0);
-                    const tc3 = try timeRouted(queue, col3.?, reduce, c3args, x, sums, partials, scales3b, routes, descs, trs[0..], rows,
-                        .{ .width = (s.n + 3) / 4, .height = rows, .depth = 1, .threads = 128 }, n_out, 15);
+                    const tc3 = try timeRouted(queue, col3.?, reduce, c3args, x, sums, partials, scales3b, routes, descs, trs[0..], rows, .{ .width = (s.n + 3) / 4, .height = rows, .depth = 1, .threads = 128 }, n_out, 15);
                     const hc3 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                     const bc3 = @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k)) * 3.25 / 8.0;
                     std.debug.print("  {s:>10} {s:>14} {d:>5} {d:>9.3} {d:>9.1} {d:>8.1} {x:>10}  (affine 3-bit COLUMN-SEQUENTIAL, 3.25 bits a weight)\n", .{ s.name, "aff col3", 1, tc3, macs / (tc3 * 1e-3) / 1e12, bc3 / (tc3 * 1e-3) / 1e9, hc3 & 0xffffffff });
@@ -3575,8 +3850,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     }
                     var invis3: usize = 0;
                     for (cps[0..cmade], 0..) |b, ci| {
-                        if (!fillTrellisGpuVisible(queue, pfill.?, pwords.?, b, @intCast(cbytes3),
-                            0xAFF3C0DE ^ @as(u64, s.n) ^ (@as(u64, ci) << 17), scratch)) invis3 += 1;
+                        if (!fillTrellisGpuVisible(queue, pfill.?, pwords.?, b, @intCast(cbytes3), 0xAFF3C0DE ^ @as(u64, s.n) ^ (@as(u64, ci) << 17), scratch)) invis3 += 1;
                     }
                     if (invis3 > 0) std.debug.print("  {s:>10} WARNING: {d} affine code copies did not become visible\n", .{ s.name, invis3 });
                     const scl3 = try device.buffer(sbytes3, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -3598,22 +3872,36 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     defer adescs.deinit();
                     {
                         const dp3: [*]Exl3Expert = @ptrCast(@alignCast(adescs.contents()));
-                        for (0..rows) |e| dp3[e] = .{ .trellis = cps[e % cmade].gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                            .tile_k_stride = (s.n / 16) * tb3, .tile_n_stride = tb3,
-                            .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+                        for (0..rows) |e| dp3[e] = .{ .trellis = cps[e % cmade].gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = (s.n / 16) * tb3, .tile_n_stride = tb3, .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
                     }
                     const a3args = Exl3Args{
-                        .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                        .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 1,
-                        .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tb3, .tile_n_stride = tb3,
+                        .k = s.k,
+                        .n = s.n,
+                        .rows = s.rows,
+                        .halves = s.halves,
+                        .codebook = 2,
+                        .su_signs = 0,
+                        .sv_signs = 0,
+                        .has_bias = 0,
+                        .output_f32 = 1,
+                        .input_ids = 0,
+                        .output_ids = 0,
+                        .routed = 1,
+                        .expert_id = 0,
+                        .repeat = 1,
+                        .indexed = 1,
+                        .experts = s.rows,
+                        .splits = 1,
+                        .x_stride = s.k,
+                        .y_stride = s.n,
+                        .tile_k_stride = (s.n / 16) * tb3,
+                        .tile_n_stride = tb3,
                     };
                     const b3 = @as(f64, @floatFromInt(rows)) * @as(f64, @floatFromInt(s.n)) * @as(f64, @floatFromInt(s.k)) * 3.25 / 8.0;
                     for (t3_warps_pipes, 0..) |maybe, wi| {
                         if (maybe) |p| {
                             @memset(sums.slice(u32, n_out), 0);
-                            const t3b = try timeRouted(queue, p, null, a3args, x, sums, partials, scl3, routes, adescs, cps[0..], rows,
-                                .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * t3_warps[wi] }, n_out, 15);
+                            const t3b = try timeRouted(queue, p, null, a3args, x, sums, partials, scl3, routes, adescs, cps[0..], rows, .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * t3_warps[wi] }, n_out, 15);
                             const h3b = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                             var nm: [24]u8 = undefined;
                             const nm3 = try std.fmt.bufPrint(&nm, "aff t3 fair w{d}", .{t3_warps[wi]});
@@ -3638,8 +3926,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     for (t3_bias_pipes, 0..) |maybe, wi| {
                         if (maybe) |p| {
                             @memset(sums.slice(u32, n_out), 0);
-                            const tb = try timeRouted(queue, p, null, a3args, x, sums, partials, sclb, routes, adescs, cps[0..], rows,
-                                .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * t3_bias_warps[wi] }, n_out, 15);
+                            const tb = try timeRouted(queue, p, null, a3args, x, sums, partials, sclb, routes, adescs, cps[0..], rows, .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * t3_bias_warps[wi] }, n_out, 15);
                             const hb = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out)));
                             var nmb: [26]u8 = undefined;
                             const nmb3 = try std.fmt.bufPrint(&nmb, "aff t3 bias w{d}", .{t3_bias_warps[wi]});
@@ -3672,7 +3959,12 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             const ht = trs[0].slice(u16, 8);
             std.debug.print("  {s:>10} trellis words (host | gpu): {x:0>8}|{x:0>8} {x:0>8}|{x:0>8} {x:0>8}|{x:0>8}\n", .{
                 s.name,
-                exl3WordHost(ht, 0), w[0], exl3WordHost(ht, 1), w[1], exl3WordHost(ht, 2), w[2],
+                exl3WordHost(ht, 0),
+                w[0],
+                exl3WordHost(ht, 1),
+                w[1],
+                exl3WordHost(ht, 2),
+                w[2],
             });
         }
 
@@ -3688,15 +3980,31 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             const host_ref = try gpa.alloc(f64, s.n);
             defer gpa.free(host_ref);
             const args = Exl3Args{
-                .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 8,
-                .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                .k = s.k,
+                .n = s.n,
+                .rows = s.rows,
+                .halves = s.halves,
+                .codebook = 2,
+                .su_signs = 0,
+                .sv_signs = 0,
+                .has_bias = 0,
+                .output_f32 = 1,
+                .input_ids = 0,
+                .output_ids = 0,
+                .routed = 1,
+                .expert_id = 0,
+                .repeat = 1,
+                .indexed = 1,
+                .experts = s.rows,
+                .splits = 8,
+                .x_stride = s.k,
+                .y_stride = s.n,
+                .tile_k_stride = (s.n / 16) * tile_bytes,
+                .tile_n_stride = tile_bytes,
             };
             // The shipped body: the engine's routed default (compact tile, the table, the funnel read).
             @memset(sums.slice(u32, n_out), 0);
-            _ = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
+            _ = try timeRouted(queue, mma_tf.?, reduce, args, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 32, .height = rows, .depth = 8, .threads = 32 }, n_out, 1);
             @memcpy(host_a, sums.slice(f32, n_out));
             // The register-only body: one k walk, one term at a time. Each warp walks its own slice of the
             // k blocks, so the warps a threadgroup are the chain length: the receipt is taken per arm.
@@ -3766,8 +4074,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     }
                 }
                 @memset(sums.slice(u32, n_out), 0);
-                _ = try timeRouted(queue, arm.pipe.?, reduce, nargs, x, sums, partials, table, routes, descs, trs[0..], rows,
-                    .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * arm.warps }, n_out, 1);
+                _ = try timeRouted(queue, arm.pipe.?, reduce, nargs, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * arm.warps }, n_out, 1);
                 @memcpy(host_b, sums.slice(f32, n_out));
                 var wb: f64 = 0;
                 var sb: f64 = 0;
@@ -3786,7 +4093,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 const nrms_b = @sqrt(sb / @max(sq_ref, 1e-30));
                 const nrms_a = @sqrt(sq_a / @max(sq_ref, 1e-30));
                 std.debug.print("  {s:>10} FP64 RECEIPT: {s:>10} worst {d:.6} NRMS {e:.3} | |max| {d:.1} hash {x} -> {s}\n", .{
-                    s.name, arm.name, wb, nrms_b, mb, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out))),
+                    s.name,                                                                                    arm.name, wb, nrms_b, mb, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, n_out))),
                     if (nrms_b <= nrms_a) "NO WORSE than the shipped path" else "worse than the shipped path",
                 });
             }
@@ -3801,14 +4108,30 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             @memset(bytes, 0);
             for (trs[0].slice(u16, tile_bytes / 2), 0..) |*v, i| v.* = @truncate(@as(u64, i) * 2654435761);
             const fargs = Exl3Args{
-                .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-                .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = s.rows, .splits = 1,
-                .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+                .k = s.k,
+                .n = s.n,
+                .rows = s.rows,
+                .halves = s.halves,
+                .codebook = 2,
+                .su_signs = 0,
+                .sv_signs = 0,
+                .has_bias = 0,
+                .output_f32 = 1,
+                .input_ids = 0,
+                .output_ids = 0,
+                .routed = 1,
+                .expert_id = 0,
+                .repeat = 1,
+                .indexed = 1,
+                .experts = s.rows,
+                .splits = 1,
+                .x_stride = s.k,
+                .y_stride = s.n,
+                .tile_k_stride = (s.n / 16) * tile_bytes,
+                .tile_n_stride = tile_bytes,
             };
             @memset(sums.slice(u32, n_out), 0);
-            _ = timeRouted(queue, fma_arms[0].pipe.?, reduce, fargs, x, sums, partials, table, routes, descs, trs[0..], rows,
-                .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 }, n_out, 1) catch 0;
+            _ = timeRouted(queue, fma_arms[0].pipe.?, reduce, fargs, x, sums, partials, table, routes, descs, trs[0..], rows, .{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 }, n_out, 1) catch 0;
             const col: []const f32 = sums.slice(f32, n_out);
             std.debug.print("  {s:>10} COLUMN PROBE (only tile 0 of expert 0 has data): row0 cols 0..5 = {d:.2} {d:.2} {d:.2} {d:.2} {d:.2} {d:.2} | cols 16..19 = {d:.2} {d:.2} {d:.2} {d:.2} | col 100 = {d:.2} | row1 col0 = {d:.2}\n", .{
                 s.name, col[0], col[1], col[2], col[3], col[4], col[5], col[16], col[17], col[18], col[19], col[100], col[s.n],
@@ -3843,9 +4166,7 @@ fn verifyPick(row: usize, p: usize) u32 {
     return @intCast((row * 6 + p) % 24);
 }
 
-fn timeVerifySet(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args,
-                 x: mtl.Buffer, sums: mtl.Buffer, dummy: mtl.Buffer, table: mtl.Buffer,
-                 routes: mtl.Buffer, descs: mtl.Buffer, d: RowDispatch) !f64 {
+fn timeVerifySet(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, sums: mtl.Buffer, dummy: mtl.Buffer, table: mtl.Buffer, routes: mtl.Buffer, descs: mtl.Buffer, d: RowDispatch) !f64 {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
     e.setPipeline(pipe);
@@ -3871,9 +4192,7 @@ fn timeVerifySet(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args,
 /// ROUND-429: the shared expert's gate/up as TWO dense multi-row calls (one matrix each) in one command
 /// buffer. The dense body decodes the matrix once for all the window's rows; the indexed call's shared slots
 /// decode it once a row.
-fn timeDensePair(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args,
-                 x: mtl.Buffer, xoff: usize, xoff_up: usize, sums: mtl.Buffer, sums_off: usize, dummy: mtl.Buffer,
-                 table: mtl.Buffer, tr_gate: mtl.Buffer, tr_up: mtl.Buffer, d: RowDispatch) !f64 {
+fn timeDensePair(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buffer, xoff: usize, xoff_up: usize, sums: mtl.Buffer, sums_off: usize, dummy: mtl.Buffer, table: mtl.Buffer, tr_gate: mtl.Buffer, tr_up: mtl.Buffer, d: RowDispatch) !f64 {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
     e.setPipeline(pipe);
@@ -3993,9 +4312,7 @@ fn verifyMultisetBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Alloca
         descs[1] = try device.buffer(n_ids * @sizeOf(Exl3Expert), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         for (0..2) |set| {
             const dp: [*]Exl3Expert = @ptrCast(@alignCast(descs[set].contents()));
-            for (0..n_ids) |id| dp[id] = .{ .trellis = trs[set * n_ids + id].gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
-                .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+            for (0..n_ids) |id| dp[id] = .{ .trellis = trs[set * n_ids + id].gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes, .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
         }
         // The same-run identity control: every slot its own descriptor (the routed bench's no-reuse model),
         // timed interleaved with the multiset arm so a clock drift lands on both.
@@ -4003,9 +4320,7 @@ fn verifyMultisetBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Alloca
         defer descs_i.deinit();
         {
             const dp: [*]Exl3Expert = @ptrCast(@alignCast(descs_i.contents()));
-            for (0..n_ids) |id| dp[id] = .{ .trellis = trs[id].gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-                .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
-                .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
+            for (0..n_ids) |id| dp[id] = .{ .trellis = trs[id].gpuAddress(), .suh = 0, .svh = 0, .bias = 0, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes, .halves = s.halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0 };
         }
         const routes_i = try device.buffer(rows * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         defer routes_i.deinit();
@@ -4022,10 +4337,27 @@ fn verifyMultisetBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Alloca
         @memcpy(routes.slice(u32, rows), routes_h);
         const n_out = rows * s.n;
         const args = Exl3Args{
-            .k = s.k, .n = s.n, .rows = s.rows, .halves = s.halves, .codebook = 2,
-            .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-            .routed = 1, .expert_id = 0, .repeat = 1, .indexed = 1, .experts = n_ids, .splits = 1,
-            .x_stride = s.k, .y_stride = s.n, .tile_k_stride = (s.n / 16) * tile_bytes, .tile_n_stride = tile_bytes,
+            .k = s.k,
+            .n = s.n,
+            .rows = s.rows,
+            .halves = s.halves,
+            .codebook = 2,
+            .su_signs = 0,
+            .sv_signs = 0,
+            .has_bias = 0,
+            .output_f32 = 1,
+            .input_ids = 0,
+            .output_ids = 0,
+            .routed = 1,
+            .expert_id = 0,
+            .repeat = 1,
+            .indexed = 1,
+            .experts = n_ids,
+            .splits = 1,
+            .x_stride = s.k,
+            .y_stride = s.n,
+            .tile_k_stride = (s.n / 16) * tile_bytes,
+            .tile_n_stride = tile_bytes,
         };
         const d = RowDispatch{ .width = s.n / 16, .height = rows, .depth = 1, .threads = 32 * 16 };
         // The numerics check: the pair's rows must be bit-identical to the shipped body's (its own comment).
@@ -4102,7 +4434,6 @@ fn verifyMultisetBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Alloca
         }
     }
 }
-
 
 fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void {
     const src = try std.mem.replaceOwned(u8, gpa, ks.core_exl3_projection_nax, "#include \"../nax.h\"", ks.nax);
@@ -4312,23 +4643,48 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     {
         const tw: [*]u16 = @ptrCast(@alignCast(table.contents()));
         for (0..3) |cb| for (0..65536) |st| {
-            const e: tf.exl3_format.Codebook = @enumFromInt(cb);
+            const e: tf.exl3_format.Codebook = @fromBackingInt(@intCast(cb));
             tw[cb * 65536 + st] = @bitCast(tf.exl3_format.codebookValue(e, @intCast(st)));
         };
     }
     {
         const d: [*]Exl3Expert = @ptrCast(@alignCast(descs.contents()));
         for (0..exl3_tiles) |i| d[i] = .{
-            .trellis = experts[i].gpuAddress(), .suh = 0, .svh = 0, .bias = 0,
-            .tile_k_stride = exl3_k_stride, .tile_n_stride = exl3_n_stride,
-            .halves = exl3_halves, .codebook = 2, .suh_signs = 0, .svh_signs = 0, .has_bias = 0,
+            .trellis = experts[i].gpuAddress(),
+            .suh = 0,
+            .svh = 0,
+            .bias = 0,
+            .tile_k_stride = exl3_k_stride,
+            .tile_n_stride = exl3_n_stride,
+            .halves = exl3_halves,
+            .codebook = 2,
+            .suh_signs = 0,
+            .svh_signs = 0,
+            .has_bias = 0,
         };
     }
     var args = Exl3Args{
-        .k = exl3_k, .n = exl3_n, .rows = exl3_rows, .halves = exl3_halves, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 2, .experts = exl3_tiles, .splits = 1,
-        .x_stride = exl3_k, .y_stride = exl3_n, .tile_k_stride = exl3_k_stride, .tile_n_stride = exl3_n_stride,
+        .k = exl3_k,
+        .n = exl3_n,
+        .rows = exl3_rows,
+        .halves = exl3_halves,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 0,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 2,
+        .experts = exl3_tiles,
+        .splits = 1,
+        .x_stride = exl3_k,
+        .y_stride = exl3_n,
+        .tile_k_stride = exl3_k_stride,
+        .tile_n_stride = exl3_n_stride,
     };
     const macs = @as(f64, exl3_rows) * @as(f64, exl3_n) * @as(f64, exl3_k);
     std.debug.print("exl3 bench: {d} tiles x 64 rows, N {d}, K {d}, halves {d}, indexed grouped\n", .{ exl3_tiles, exl3_n, exl3_k, exl3_halves });
@@ -4962,10 +5318,27 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
         defer dsums.deinit();
         @memset(dsums.slice(u32, @as(usize, dense_rows) * dense_n), 0);
         const dargs = Exl3Args{
-            .k = dense_k, .n = dense_n, .rows = @intCast(dense_rows), .halves = exl3_halves, .codebook = 2,
-            .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-            .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-            .x_stride = dense_k, .y_stride = dense_n, .tile_k_stride = exl3_k_stride, .tile_n_stride = exl3_n_stride,
+            .k = dense_k,
+            .n = dense_n,
+            .rows = @intCast(dense_rows),
+            .halves = exl3_halves,
+            .codebook = 2,
+            .su_signs = 0,
+            .sv_signs = 0,
+            .has_bias = 0,
+            .output_f32 = 1,
+            .input_ids = 0,
+            .output_ids = 0,
+            .routed = 0,
+            .expert_id = 0,
+            .repeat = 1,
+            .indexed = 0,
+            .experts = 0,
+            .splits = 1,
+            .x_stride = dense_k,
+            .y_stride = dense_n,
+            .tile_k_stride = exl3_k_stride,
+            .tile_n_stride = exl3_n_stride,
         };
         const dmacs = @as(f64, @floatFromInt(dense_rows)) * @as(f64, dense_n) * @as(f64, dense_k);
         std.debug.print("exl3 dense bench: {d} rows x {d} x {d}, 128x64 tile\n", .{ dense_rows, dense_n, dense_k });
@@ -5006,8 +5379,8 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                 std.debug.print("exl3 attention shapes, shipped nax2 128x64 tile:\n", .{});
                 std.debug.print("  {s:>18} {s:>9} {s:>9}\n", .{ "M x N x K", "ms", "TMAC/s" });
                 try benchDenseShape(device, queue, pipe2b, dense_rows, 32768, 1280); // wq_b, short k
-                try benchDenseShape(device, queue, pipe2b, dense_rows, 1024, 4096);  // wo_a, narrow n
-                try benchDenseShape(device, queue, pipe2b, dense_rows, 5120, 8192);  // wo_b, long k
+                try benchDenseShape(device, queue, pipe2b, dense_rows, 1024, 4096); // wo_a, narrow n
+                try benchDenseShape(device, queue, pipe2b, dense_rows, 5120, 8192); // wo_b, long k
                 std.debug.print("  cold-vs-hot (8 distinct 12-16 MB trellis buffers against one repeated):\n", .{});
                 try benchDenseCold(device, queue, pipe2b, dense_rows, 32768, 1280, 8);
                 try benchDenseCold(device, queue, pipe2b, dense_rows, 1024, 4096, 8);
@@ -5034,30 +5407,42 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                     }
                     if (p30) |q30| try benchDenseShape(device, queue, q30, d.m, d.n, d.k);
                     if (p32) |q32| try benchDenseShape(device, queue, q32, d.m, d.n, d.k);
-                    if (p33) |q33| { std.debug.print("    nax33 RG=16 decode+MMA\n", .{}); try benchDenseShapeAt(device, queue, q33, d.m, d.n, d.k, 256, 512); }
-                    if (p34) |q34| { std.debug.print("    nax34 RG=32 decode+MMA\n", .{}); try benchDenseShapeAt(device, queue, q34, d.m, d.n, d.k, 512, 1024); }
-                    if (p35) |q35| { std.debug.print("    nax35 RG=4 two-ahead\n", .{}); try benchDenseShapeAt(device, queue, q35, d.m, d.n, d.k, 64, 128); }
-                    if (p36) |q36| { std.debug.print("    nax36 RG=8 two-ahead\n", .{}); try benchDenseShapeAt(device, queue, q36, d.m, d.n, d.k, 128, 256); }
+                    if (p33) |q33| {
+                        std.debug.print("    nax33 RG=16 decode+MMA\n", .{});
+                        try benchDenseShapeAt(device, queue, q33, d.m, d.n, d.k, 256, 512);
+                    }
+                    if (p34) |q34| {
+                        std.debug.print("    nax34 RG=32 decode+MMA\n", .{});
+                        try benchDenseShapeAt(device, queue, q34, d.m, d.n, d.k, 512, 1024);
+                    }
+                    if (p35) |q35| {
+                        std.debug.print("    nax35 RG=4 two-ahead\n", .{});
+                        try benchDenseShapeAt(device, queue, q35, d.m, d.n, d.k, 64, 128);
+                    }
+                    if (p36) |q36| {
+                        std.debug.print("    nax36 RG=8 two-ahead\n", .{});
+                        try benchDenseShapeAt(device, queue, q36, d.m, d.n, d.k, 128, 256);
+                    }
                 }
             }
             // ROUND-431: the 128-column double-buffered body, priced before its fused epilogue is built.
             if (p31) |q31| {
-              if (p79 != null or p80 != null) {
-                const dtable = try device.buffer(3 * 65536 * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-                defer dtable.deinit();
-                {
-                    const tw: [*]u16 = @ptrCast(@alignCast(dtable.contents()));
-                    for (0..3) |cb| for (0..65536) |st| {
-                        const e: tf.exl3_format.Codebook = @enumFromInt(cb);
-                        tw[cb * 65536 + st] = @bitCast(tf.exl3_format.codebookValue(e, @intCast(st)));
-                    };
+                if (p79 != null or p80 != null) {
+                    const dtable = try device.buffer(3 * 65536 * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+                    defer dtable.deinit();
+                    {
+                        const tw: [*]u16 = @ptrCast(@alignCast(dtable.contents()));
+                        for (0..3) |cb| for (0..65536) |st| {
+                            const e: tf.exl3_format.Codebook = @fromBackingInt(@intCast(cb));
+                            tw[cb * 65536 + st] = @bitCast(tf.exl3_format.codebookValue(e, @intCast(st)));
+                        };
+                    }
+                    std.debug.print("ROUND-431 128-column double-buffered dense body vs nax31, {d} rows:\n", .{dense_rows});
+                    std.debug.print("  {s:>5} {s:>16} {s:>10} {s:>8} {s:>8}\n", .{ "shape", "M x N x K", "body", "ms", "TMAC/s" });
+                    try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 5120, 8192); // wo_b
+                    try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 32768, 1280); // wq_b
+                    try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 1024, 4096); // wo_a
                 }
-                std.debug.print("ROUND-431 128-column double-buffered dense body vs nax31, {d} rows:\n", .{dense_rows});
-                std.debug.print("  {s:>5} {s:>16} {s:>10} {s:>8} {s:>8}\n", .{ "shape", "M x N x K", "body", "ms", "TMAC/s" });
-                try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 5120, 8192); // wo_b
-                try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 32768, 1280); // wq_b
-                try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 1024, 4096); // wo_a
-              }
             }
             // The 128-row grouped tile: one expert a 128-row block, 384 tiles, the comparator's shape. The decode is
             // once a tile; the MMA rows double (mostly padding), which is the trade this prices.
@@ -5073,10 +5458,27 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                 defer routes128.deinit();
                 for (routes128.slice(u32, rows128), 0..) |*r, i| r.* = @intCast(i / 128);
                 const args128 = Exl3Args{
-                    .k = exl3_k, .n = exl3_n, .rows = @intCast(rows128), .halves = exl3_halves, .codebook = 2,
-                    .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-                    .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 2, .experts = exl3_tiles, .splits = 1,
-                    .x_stride = exl3_k, .y_stride = exl3_n, .tile_k_stride = exl3_k_stride, .tile_n_stride = exl3_n_stride,
+                    .k = exl3_k,
+                    .n = exl3_n,
+                    .rows = @intCast(rows128),
+                    .halves = exl3_halves,
+                    .codebook = 2,
+                    .su_signs = 0,
+                    .sv_signs = 0,
+                    .has_bias = 0,
+                    .output_f32 = 1,
+                    .input_ids = 0,
+                    .output_ids = 0,
+                    .routed = 0,
+                    .expert_id = 0,
+                    .repeat = 1,
+                    .indexed = 2,
+                    .experts = exl3_tiles,
+                    .splits = 1,
+                    .x_stride = exl3_k,
+                    .y_stride = exl3_n,
+                    .tile_k_stride = exl3_k_stride,
+                    .tile_n_stride = exl3_n_stride,
                 };
                 _ = try timeGrouped128(queue, pipe128, &args128, x128, experts[0], sums128, routes128, descs, 1);
                 const ms128 = try timeGrouped128(queue, pipe128, &args128, x128, experts[0], sums128, routes128, descs, 5);
@@ -5105,12 +5507,10 @@ fn fp8Code(n: usize, k: usize) u8 {
     return @intCast((n * 13 + k * 7) % 0x7E);
 }
 
-
 // ROUND-518: the engine's own release-fp8 prompt MMA (e4m3 weights, one e8m0 scale a 32-block) at the
 // attention's two big prompt shapes. R-517's first gate: the library rate is 95.3/75.5 TMAC/s; this
 // measures OUR kernel (`tf_dsv41_fp8_mma_bf16`) on synthetic weights, no pack and no serve.
 const MxShape = struct { name: []const u8, m: u32, k: u32, n: u32 };
-
 
 // ROUND-519: the same e4m3 x e8m0/32 body with bfloat16 MMA operands and fp32 accumulation (the fp8_mma arm's
 // fp32 simdgroup matrices are the rate question). Synthetic weights; no pack and no serve.
@@ -5150,7 +5550,9 @@ fn bf16xBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !voi
         const px = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_mma_bf16x", false);
         defer px.deinit();
         for (shapes) |sh| {
-            const m: usize = sh.m; const n: usize = sh.n; const k: usize = sh.k;
+            const m: usize = sh.m;
+            const n: usize = sh.n;
+            const k: usize = sh.k;
             const x = try device.buffer(m * k * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             defer x.deinit();
             const w = try device.buffer(n * k, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -5176,8 +5578,13 @@ fn bf16xBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !voi
                     } else {
                         try bf16xEncode(e, px, x, w, sc, y, sh.k, sh.n, sh.m);
                     }
-                    e.end(); cb.commit(); cb.wait();
-                    if (cb.failure()) |msg| { std.debug.print("  {s} rs{d}: failed: {s}\n", .{ sh.name, rs, msg }); return error.DispatchFailed; }
+                    e.end();
+                    cb.commit();
+                    cb.wait();
+                    if (cb.failure()) |msg| {
+                        std.debug.print("  {s} rs{d}: failed: {s}\n", .{ sh.name, rs, msg });
+                        return error.DispatchFailed;
+                    }
                     samples[t] = (cb.gpuEnd() - cb.gpuStart()) * 1e3;
                 }
                 std.mem.sort(f64, samples[0..9], {}, std.sort.asc(f64));
@@ -5295,10 +5702,27 @@ fn fp8DenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !
             w8.slice(u8, n * k)[at] = fp8Code(nn, kk);
         };
         const args = Exl3Args{
-            .k = @intCast(k), .n = @intCast(n), .rows = @intCast(m), .halves = 1, .codebook = 0,
-            .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-            .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-            .x_stride = @intCast(k), .y_stride = @intCast(n), .tile_k_stride = 0, .tile_n_stride = 0,
+            .k = @intCast(k),
+            .n = @intCast(n),
+            .rows = @intCast(m),
+            .halves = 1,
+            .codebook = 0,
+            .su_signs = 0,
+            .sv_signs = 0,
+            .has_bias = 0,
+            .output_f32 = 1,
+            .input_ids = 0,
+            .output_ids = 0,
+            .routed = 0,
+            .expert_id = 0,
+            .repeat = 1,
+            .indexed = 0,
+            .experts = 0,
+            .splits = 1,
+            .x_stride = @intCast(k),
+            .y_stride = @intCast(n),
+            .tile_k_stride = 0,
+            .tile_n_stride = 0,
         };
         _ = try timeShapeSc(queue, pf8, &args, x, w8, sums, sc1, m, n, 64, 256, 128, 1);
         var worst: f32 = 0;
@@ -5322,7 +5746,7 @@ fn fp8DenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !
         .{ .m = @intCast(rows), .k = 4096, .n = 1024 }, // wo_a  K 4096 (q_width/8)   N 1024 (o_lora), one of 8 groups
         .{ .m = @intCast(rows), .k = 8192, .n = 5120 }, // wo_b  K 8192 (8*o_lora)    N 5120 (hidden)
         .{ .m = @intCast(rows), .k = 5120, .n = 1280 }, // wq_a  K 5120 (hidden)      N 1280 (q_lora)
-        .{ .m = @intCast(rows), .k = 5120, .n = 512 },  // wkv   K 5120 (hidden)      N 512 (one kv head x 512)
+        .{ .m = @intCast(rows), .k = 5120, .n = 512 }, // wkv   K 5120 (hidden)      N 512 (one kv head x 512)
         .{ .m = @intCast(rows), .k = 5120, .n = 2304 }, // shared w1/w3  K 5120 (hidden) N 2304 (moe_intermediate), x2
         .{ .m = @intCast(rows), .k = 2304, .n = 5120 }, // shared w2     K 2304          N 5120 (hidden)
     };
@@ -5342,10 +5766,27 @@ fn fp8DenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !
         defer sums.deinit();
         @memset(sums.slice(u32, @as(usize, m) * n), 0);
         var args = Exl3Args{
-            .k = @intCast(k), .n = @intCast(n), .rows = @intCast(m), .halves = hv, .codebook = 2,
-            .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-            .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-            .x_stride = @intCast(k), .y_stride = @intCast(n), .tile_k_stride = (n / 16) * exl3_n_stride, .tile_n_stride = exl3_n_stride,
+            .k = @intCast(k),
+            .n = @intCast(n),
+            .rows = @intCast(m),
+            .halves = hv,
+            .codebook = 2,
+            .su_signs = 0,
+            .sv_signs = 0,
+            .has_bias = 0,
+            .output_f32 = 1,
+            .input_ids = 0,
+            .output_ids = 0,
+            .routed = 0,
+            .expert_id = 0,
+            .repeat = 1,
+            .indexed = 0,
+            .experts = 0,
+            .splits = 1,
+            .x_stride = @intCast(k),
+            .y_stride = @intCast(n),
+            .tile_k_stride = (n / 16) * exl3_n_stride,
+            .tile_n_stride = exl3_n_stride,
         };
         const trellis_bytes = (k / 16) * (n / 16) * hv * 16;
         const tr = try device.buffer(trellis_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -5408,7 +5849,6 @@ fn timeShapeSc(queue: mtl.Queue, pipe: mtl.Pipeline, args: *const Exl3Args, x: m
     return median(samples[0..nt]);
 }
 
-
 // ROUND-440: the pre-rotated int8 pack's GPU body against the exact CPU linear map of the stored codes/scales.
 // This is a kernel-correctness receipt, not the quality receipt (that is the repacker's FP64 layer NRMS).
 fn i8bBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator, k: usize, n: usize, fp8b: []const u8, scb: []const u8, block: usize) !void {
@@ -5458,10 +5898,27 @@ fn i8bBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator, k: usi
     defer sc1.deinit();
     @memcpy(sc1.contents()[0 .. n * 4], scb[0 .. n * 4]);
     var args = Exl3Args{
-        .k = @intCast(k), .n = @intCast(n), .rows = @intCast(m), .halves = 0, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-        .x_stride = @intCast(k), .y_stride = @intCast(n), .tile_k_stride = (n / 16) * 16, .tile_n_stride = 16,
+        .k = @intCast(k),
+        .n = @intCast(n),
+        .rows = @intCast(m),
+        .halves = 0,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 0,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 0,
+        .experts = 0,
+        .splits = 1,
+        .x_stride = @intCast(k),
+        .y_stride = @intCast(n),
+        .tile_k_stride = (n / 16) * 16,
+        .tile_n_stride = 16,
     };
     @memset(sums.slice(u32, m * n), 0);
     const ms = try timeShapeSc(queue, pipe, &args, x, w8, sums, sc, m, n, 64, 256, 128, 5);
@@ -5590,10 +6047,27 @@ fn fp8RealBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator, io
     defer sc.deinit();
     @memcpy(sc.contents()[0 .. n * 4], scb);
     var args = Exl3Args{
-        .k = @intCast(k), .n = @intCast(n), .rows = @intCast(m), .halves = halves, .codebook = 2,
-        .su_signs = 0, .sv_signs = 0, .has_bias = 0, .output_f32 = 1, .input_ids = 0, .output_ids = 0,
-        .routed = 0, .expert_id = 0, .repeat = 1, .indexed = 0, .experts = 0, .splits = 1,
-        .x_stride = @intCast(k), .y_stride = @intCast(n), .tile_k_stride = (n / 16) * (halves * 16), .tile_n_stride = halves * 16,
+        .k = @intCast(k),
+        .n = @intCast(n),
+        .rows = @intCast(m),
+        .halves = halves,
+        .codebook = 2,
+        .su_signs = 0,
+        .sv_signs = 0,
+        .has_bias = 0,
+        .output_f32 = 1,
+        .input_ids = 0,
+        .output_ids = 0,
+        .routed = 0,
+        .expert_id = 0,
+        .repeat = 1,
+        .indexed = 0,
+        .experts = 0,
+        .splits = 1,
+        .x_stride = @intCast(k),
+        .y_stride = @intCast(n),
+        .tile_k_stride = (n / 16) * (halves * 16),
+        .tile_n_stride = halves * 16,
     };
     @memset(sums31.slice(u32, m * n), 0);
     _ = try timeShape(queue, p31, &args, x, tr, sums31, null, m, n, 64, 256, 128, 2);

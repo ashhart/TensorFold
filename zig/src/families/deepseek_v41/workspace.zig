@@ -82,11 +82,12 @@ pub const Plan = struct {
         const fused_scratch = if (fused_group) |g| @max(try exl3.scratchBytes(5120, 2304, g.padded), try exl3.scratchBytes(2304, 5120, g.padded)) else 0;
         const projection_bytes = @max(dense_scratch, @max(grouped_scratch, fused_scratch));
         const sizes = [_]usize{
-            t * 4,            hash.raw_vocab * 4, @as(usize, lanes) * 16,          t * 20480 * 2, t * 5120 * 2, t * 5120 * 2, t * 5120 * 2,
-            t * 4 * 4,        t * 4 * 4,          t * 4 * 4,                       t * 16 * 4,    t * 24 * 4,   t * 4,        t * 24 * 4,
-            t * 24 * 4,       t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,   t * 6 * 4,    t * 6 * 4,    t * 6 * 2304 * 2,
-            t * 6 * 2304 * 2, t * 6 * 2304 * 2,   t * 6 * 5120 * 2,                t * 2304 * 2,  t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
-            t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0, if (fused_group) |g| g.bytes else 0, t * 12 * 4, t * 12 * 4, t * 20480 * 2, t * 2000,
+            t * 4,            hash.raw_vocab * 4, @as(usize, lanes) * 16,          t * 20480 * 2,                       t * 5120 * 2, t * 5120 * 2, t * 5120 * 2,
+            t * 4 * 4,        t * 4 * 4,          t * 4 * 4,                       t * 16 * 4,                          t * 24 * 4,   t * 4,        t * 24 * 4,
+            t * 24 * 4,       t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,                         t * 6 * 4,    t * 6 * 4,    t * 6 * 2304 * 2,
+            t * 6 * 2304 * 2, t * 6 * 2304 * 2,   t * 6 * 5120 * 2,                t * 2304 * 2,                        t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
+            t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0, if (fused_group) |g| g.bytes else 0, t * 12 * 4,   t * 12 * 4,   t * 20480 * 2,
+            t * 2000,
         };
         var out = Plan{ .rows = rows, .lanes = lanes, .offsets = undefined, .bytes = 0 };
         for (sizes, 0..) |size, i| {

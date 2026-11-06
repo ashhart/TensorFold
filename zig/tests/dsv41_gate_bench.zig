@@ -299,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
         if (id_g16 == id_ref) agree_g16 += 1;
         if (id_gb == id_ref) agree_gb += 1;
         std.debug.print("row {d:>5}: argmax fp64 {d:>3} col {d:>3} f16 {d:>3} bf16 {d:>3}  nrmse col {e:.3} f16 {e:.3} bf16 {e:.3}\n", .{
-            r, id_ref, id_col, id_g16, id_gb,
+            r,                      id_ref,                 id_col,                id_g16, id_gb,
             @sqrt(rmse_col / norm), @sqrt(rmse_g16 / norm), @sqrt(rmse_gb / norm),
         });
     }

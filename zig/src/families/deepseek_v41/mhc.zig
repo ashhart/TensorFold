@@ -52,9 +52,9 @@ pub const Pipelines = struct {
         p.expand.deinit();
         p.mix_dense.deinit();
         p.dense_col.deinit();
-    p.gate_tree.deinit();
-    p.gate_tree4.deinit();
-    p.gate_tree8.deinit();
+        p.gate_tree.deinit();
+        p.gate_tree4.deinit();
+        p.gate_tree8.deinit();
     }
 };
 /// The fused boundary (kernels/metal/deepseek_v41/hc_boundary.metal): expand+mix+squares in one pass over
@@ -123,15 +123,15 @@ pub const Boundary = struct { rows: u32, expand: bool, mixes: bool = true, eps: 
 pub fn encodeBoundary(e: mtl.ComputeEncoder, p: *const BoundaryPipelines, d: Boundary, v: anytype) void {
     const expand_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_HC_EXPAND") != null) 2 else 1;
     for (0..expand_passes) |_| {
-    if (d.expand) {
-        e.setPipeline(p.expand_mix);
-        inline for (.{ v.x_old, v.branch, v.post, v.comb, v.fn_, v.part, v.x_new }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
-        e.dispatchGroups(.{ .width = 20, .height = d.rows }, .{ .width = 256 });
-    } else {
-        e.setPipeline(p.mix_part);
-        inline for (.{ v.x_old, v.fn_, v.part }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
-        e.dispatchGroups(.{ .width = 20, .height = d.rows }, .{ .width = 256 });
-    }
+        if (d.expand) {
+            e.setPipeline(p.expand_mix);
+            inline for (.{ v.x_old, v.branch, v.post, v.comb, v.fn_, v.part, v.x_new }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+            e.dispatchGroups(.{ .width = 20, .height = d.rows }, .{ .width = 256 });
+        } else {
+            e.setPipeline(p.mix_part);
+            inline for (.{ v.x_old, v.fn_, v.part }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+            e.dispatchGroups(.{ .width = 20, .height = d.rows }, .{ .width = 256 });
+        }
     }
     // ROUND-407: THE LAUNCH-OVERHEAD PROBE. N work-free dispatches on the boundary's own critical path:
     // the slope against N is the GPU's dispatch latency, the piece every glue fusion would save.

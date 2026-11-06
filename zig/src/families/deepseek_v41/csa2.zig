@@ -149,24 +149,24 @@ pub const Pipelines = struct {
             const repeats: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_DENSEKV") != null) 2 else 1;
             if (std.c.getenv("TF_DSV41_SKIP_DENSEKV") == null) {
                 for (0..repeats) |_| {
-                // A one-row window reads only its picks, so the compressed section decodes those and no more.
-                const picked = args.rows == 1 and args.ratio != 0 and args.topk != 0 and args.compressed_rows > args.topk;
-                for (sections) |sec| {
-                    if (sec.source == 1 and picked) {
-                        enc.setPipeline(p.dense_picked);
+                    // A one-row window reads only its picks, so the compressed section decodes those and no more.
+                    const picked = args.rows == 1 and args.ratio != 0 and args.topk != 0 and args.compressed_rows > args.topk;
+                    for (sections) |sec| {
+                        if (sec.source == 1 and picked) {
+                            enc.setPipeline(p.dense_picked);
+                            enc.setBuffer(sec.src.buffer, sec.src.offset, 0);
+                            enc.setBuffer(dense.buffer, dense.offset, 1);
+                            enc.setValue(DenseKv{ .rows = @min(args.topk, args.compressed_rows), .width = args.width, .stride = sec.stride, .first_row = sec.first, .source = 1 }, 2);
+                            enc.setBuffer(positions.buffer, positions.offset, 3);
+                            enc.dispatchThreads(mtl.Size.of(@min(args.topk, args.compressed_rows), args.width / 4, 1), mtl.Size.of(32, 4, 1));
+                            continue;
+                        }
+                        if (sec.rows == 0) continue;
                         enc.setBuffer(sec.src.buffer, sec.src.offset, 0);
                         enc.setBuffer(dense.buffer, dense.offset, 1);
-                        enc.setValue(DenseKv{ .rows = @min(args.topk, args.compressed_rows), .width = args.width, .stride = sec.stride, .first_row = sec.first, .source = 1 }, 2);
-                        enc.setBuffer(positions.buffer, positions.offset, 3);
-                        enc.dispatchThreads(mtl.Size.of(@min(args.topk, args.compressed_rows), args.width / 4, 1), mtl.Size.of(32, 4, 1));
-                        continue;
+                        enc.setValue(DenseKv{ .rows = sec.rows, .width = args.width, .stride = sec.stride, .first_row = sec.first, .source = sec.source }, 2);
+                        enc.dispatchThreads(mtl.Size.of(sec.rows, args.width / 4, 1), mtl.Size.of(32, 4, 1));
                     }
-                    if (sec.rows == 0) continue;
-                    enc.setBuffer(sec.src.buffer, sec.src.offset, 0);
-                    enc.setBuffer(dense.buffer, dense.offset, 1);
-                    enc.setValue(DenseKv{ .rows = sec.rows, .width = args.width, .stride = sec.stride, .first_row = sec.first, .source = sec.source }, 2);
-                    enc.dispatchThreads(mtl.Size.of(sec.rows, args.width / 4, 1), mtl.Size.of(32, 4, 1));
-                }
                 }
             }
             if (std.c.getenv("TF_DSV41_SKIP_SPARSE") != null) return;
