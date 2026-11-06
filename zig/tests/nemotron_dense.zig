@@ -8,7 +8,7 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 const MP = 16; // every window of up to 16 rows pads to one 16-row tile
 const GS = 64;
 
-/// A projection: its kernel, shape, how many a forward runs, and weight copies streamed per timing (so no copy stays cached).
+/// A projection: kernel, shape, how many a forward runs, and weight copies streamed per timing (so none stays cached).
 const Shape = struct { key: []const u8, kernel: []const u8, n: usize, k: usize, per_step: usize, per_level: usize, copies: usize, split: bool, relu2: bool = false };
 const shapes = [_]Shape{
     .{ .key = "in", .kernel = "coop_in_1_0_sk", .n = 10304, .k = 2688, .per_step = 23, .per_level = 0, .copies = 23, .split = true },
