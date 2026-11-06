@@ -488,7 +488,9 @@ pub const Rows = struct {
             for (wants.items) |w| s.rows += w.bytes;
             i += 1;
         }
+        const named = r.blocks.count();
         r.collect();
+        dropped.blocks += named - r.blocks.count();
     }
 
     /// This identity was opened (and wrote): the newest under the root for every identity's sweep.
