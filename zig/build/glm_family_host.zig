@@ -25,6 +25,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const kv8_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM FP8 KV:"} }));
     b.step("test-glm-fp8-kv-host", "GLM latent cache layout, mode agreement and recorded CUDA launches without devices").dependOn(&kv8_run.step);
     step.dependOn(&kv8_run.step);
+    const graphs_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM graphs:"} }));
+    b.step("test-glm-graphs-host", "TF_GLM_GRAPHS keys: what replays, what moves a graph in place, what takes another").dependOn(&graphs_run.step);
+    step.dependOn(&graphs_run.step);
     const profile_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prompt profile:"} }));
     b.step("test-glm-prompt-profile-host", "Paired prompt-stage event timing, overlap, failure and disabled controls without devices").dependOn(&profile_run.step);
     step.dependOn(&profile_run.step);

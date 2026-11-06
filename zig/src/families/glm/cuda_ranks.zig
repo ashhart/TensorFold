@@ -25,6 +25,7 @@ pub const Settings = struct {
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
+    graphs: bool = false, // TF_GLM_GRAPHS: 1 (verify windows as CUDA graphs, cuda_window_graph) or 0
 
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
@@ -124,6 +125,12 @@ pub const Settings = struct {
         if (s.prompt_fixed_k and !s.tiled) {
             problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
             return error.BadSetting;
+        }
+        if (get("TF_GLM_GRAPHS")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.graphs = true else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_GRAPHS: 0 or 1";
+                return error.BadSetting;
+            }
         }
         if (get("TF_GLM_KV_HOST")) |v| {
             if (std.mem.eql(u8, v, "1")) s.kv_host = 1 else if (!std.mem.eql(u8, v, "0")) {

@@ -14,6 +14,7 @@ pub const Switch = enum {
     TF_GLM_KV_HOST,
     TF_GLM_KV_HOST_SHARED,
     TF_GLM_PROMPT_TAIL,
+    TF_GLM_GRAPHS,
 };
 pub const Syntax = enum { count, one, auto };
 pub const Entry = struct {
@@ -66,6 +67,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_GLM_KV_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
     .{ .id = .TF_GLM_KV_HOST_SHARED, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
     .{ .id = .TF_GLM_PROMPT_TAIL, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
+    .{ .id = .TF_GLM_GRAPHS, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Replay verify windows as CUDA graphs on each rank", .evidence = "#1490" },
 };
 
 comptime {

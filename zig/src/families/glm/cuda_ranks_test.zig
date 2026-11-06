@@ -18,6 +18,7 @@ fn fake(name: [:0]const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "TF_HEAT_LOW")) return "88";
     if (std.mem.eql(u8, name, "TF_GLM_DENSE_BITS")) return "4";
     if (std.mem.eql(u8, name, "TF_GLM_HEAD_BITS")) return "8";
+    if (std.mem.eql(u8, name, "TF_GLM_GRAPHS")) return "1";
     return null;
 }
 
@@ -31,6 +32,11 @@ fn bad(name: [:0]const u8) ?[]const u8 {
     return null;
 }
 
+fn graphsTypo(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_GRAPHS")) return "on";
+    return null;
+}
+
 fn typo(name: [:0]const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "TF_GLM_DENSE_BITS")) return "abc";
     return null;
@@ -40,7 +46,10 @@ test "settings from the environment: the defaults, the choices, and a refusal na
     var problem: []const u8 = "";
     const s = try Settings.read(&fake, &problem);
     try std.testing.expect(!s.split and s.kda_wide and s.pieces == 2 and s.heat.?.high_c == 92 and s.heat.?.low_c == 88);
-    try std.testing.expect(s.dense_bits == 4 and s.head_bits == 8);
+    try std.testing.expect(s.dense_bits == 4 and s.head_bits == 8 and s.graphs);
+    try std.testing.expect(!(try Settings.read(&ringed, &problem)).graphs);
+    try std.testing.expectError(error.BadSetting, Settings.read(&graphsTypo, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_GRAPHS: 0 or 1", problem);
     try std.testing.expectError(error.BadSetting, Settings.read(&bad, &problem));
     try std.testing.expectEqualStrings("TF_GLM_PREFILL_REDUCE: split, ring or gather", problem);
     const r = try Settings.read(&ringed, &problem);
