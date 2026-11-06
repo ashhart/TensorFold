@@ -1,6 +1,11 @@
 // ! Borrowed resident EXL3 projections; fixed tiles keep each row independent of its surrounding window. The !
 // model-facing order follows the release's inference/model.py, revision 314113f8; the trellis arithmetic and the !
 // kernel shapes are the lane's own pack format.
+// Status: the Metal bodies named in the lane notes are re-expressed from the
+// release's inference/model.py (revision 314113f8). The host glue for the paired
+// decode and the drafter's conditioning still follows the earlier ported shape
+// (mlx-serve's dsv41_exl3_guone_k3 / dsv41_exl3_mul1h_k3, MIT/Apache-2.0), and is
+// not claimed as rewritten; its rewrite is scheduled.
 const std = @import("std");
 pub const checkpoint = @import("exl3_load.zig");
 pub const load = @import("exl3_metal_load.zig");
@@ -866,9 +871,8 @@ fn fmaStaticOn() bool {
 /// TF_DSV41_EXL3_FMA_DENSE: the register-only body on the dense one-row path. `=0` restores the shipped 128-column
 /// threadgroup-tile body for a same-binary A/B. The reduction class is the routed body's (the register-only body's),
 /// not the dense body's, so the arm needed the FP64 reference for the dense one-row class before it could default on:
-/// it stands (the register-only body reads NRMS 1.23e-7 against the shipped body's 2.26e-7 at the pack's width 10,
-/// and 1.38e-7 against 2.22e-7 at width 12 -- the register-only body is the more accurate of the two, as it was for
-/// the routed class in ), so it defaults on.
+/// it stands (the register-only body is the more accurate of the two at the pack's widths 10 and 12, as it was
+/// for the routed class), so it defaults on.
 fn fmaDenseOn() bool {
     const v = std.c.getenv("TF_DSV41_EXL3_FMA_DENSE") orelse return true;
     return !std.mem.eql(u8, std.mem.span(v), "0");

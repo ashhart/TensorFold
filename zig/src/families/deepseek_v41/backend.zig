@@ -441,7 +441,7 @@ pub const Backend = struct {
         return ids[0];
     }
 
-    /// /533/535: the shared-round batch; the one-row windows of a plain shared round are the only admitted shape,
+    /// The shared-round batch; the one-row windows of a plain shared round are the only admitted shape,
     /// at most four a forward, and a wider round runs consecutive four-window groups. ON by default -- the served
     /// shape of several cached conversations is exactly those windows, and the batch is token-identical to solo on
     /// every lane (The logits, The 256-token cached streams, The 16/16 multi-turn turns). `TF_DSV41_BATCH=0` is the

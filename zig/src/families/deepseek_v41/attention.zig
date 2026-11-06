@@ -772,8 +772,7 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
                     else => .f16,
                 } };
                 // The one-column form is the same per-column arithmetic (same lane k-stride, same compensated order,
-                // same 16..1 butterfly) so it is bit-identical, and it reads 0.067. TF_DSV41_DENSE_COL=0 is the
-                // same-binary control.
+                // same 16..1 butterfly), so it is bit-identical. TF_DSV41_DENSE_COL=0 is the same-binary control.
                 const dense_col_env = std.c.getenv("TF_DSV41_DENSE_COL");
                 const dense_col = (dense_col_env == null or
                     !std.mem.eql(u8, std.mem.span(dense_col_env.?), "0")) and
@@ -936,7 +935,7 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
                     }
                     std.log.info("select ref l{d}: visible={d} diffs={d} ref0..7={d},{d},{d},{d},{d},{d},{d},{d} got0..7={d},{d},{d},{d},{d},{d},{d},{d} ref_thr={d} ref_minpos={d}", .{ layer, visible, diff, refpos[0], refpos[1], refpos[2], refpos[3], refpos[4], refpos[5], refpos[6], refpos[7], pos[0], pos[1], pos[2], pos[3], pos[4], pos[5], pos[6], pos[7], ref[0].score, ref[0].pos });
                 }
-                // ROUND 515: the picks of EVERY row, not just row 0's: the small-chunk one-shot selection is a
+                // The picks of EVERY row, not just row 0's: the small-chunk one-shot selection is a
                 // per-row path, and the row-0 array alone cannot see a later row's move.
                 var all_hash: u64 = 1469598103934665603;
                 {

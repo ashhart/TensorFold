@@ -2,6 +2,14 @@
 // cooperative matmul instead of per-lane scalar FMAs. The decode is unchanged; only the reduction moves. The
 // model-facing order follows the release's inference/model.py, revision 314113f8; the trellis arithmetic and the
 // kernel shapes are the lane's own pack format.
+// Status: the default tensor-unit prompt body, the grouped table body, the
+// register-only single and pair decode, and the funnel, 128-column wide and
+// multi-row routed decode are re-expressed from the release's inference/model.py
+// and inference/engram.py (revision 314113f8). The experimental prefill variants
+// below (_pf, _wide, _ws, _db2) are not yet re-expressed and still follow the
+// earlier ported structure (mlx-serve's dsv41_exl3_mul1h_k3 /
+// dsv41_prefill_dig_gemm, MIT/Apache-2.0); their rewrite is scheduled. This file
+// is not claimed as fully rewritten.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -513,7 +521,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   // The store path's accumulator (the decode's values kept live in a register).
   uint sacc = 0;
   // The cooperative read -- this lane holds the block's word at its own index and the two words it needs arrive by a
-  // shuffle, so the warp reads the block's ninety-six bytes once instead of 2.67 times over.
+  // shuffle, so the warp reads the block's ninety-six bytes once instead of once per lane that needs them.
   uint mine = 0, wi1s = 0;
   if (Funnel and Coop and decodes) {
     const device ushort* tile0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
@@ -2085,8 +2093,8 @@ kernel void tf_exl3_matmul_prefill_nax46(const device half* x [[buffer(0)]],
 }
 
 // The routed 64 x 64 prompt tile with the funnel read and the padded rows skipped. The engine's grouping pads each
-// expert's block to sixty-four rows, so a 3,619-token prompt's 21,714 routed rows are dispatched as 45,888 rows --
-// 2.11 times the real work; the padding rows carry the sentinel expert id, so a warp reads its own sixteen route ids
+// expert's block to sixty-four rows, so the routed rows are dispatched with padding; the padding rows carry the
+// sentinel expert id, so a warp reads its own sixteen route ids
 // and skips its multiply when they are all padding. The real rows' values, their order and the k order are the
 // shipped body's, so the reply is bit-identical. The tile's contents change, so the output differs by construction.
 kernel void tf_exl3_matmul_prefill_nax64(const device half* x [[buffer(0)]],
