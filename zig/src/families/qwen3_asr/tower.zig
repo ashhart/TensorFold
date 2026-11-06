@@ -146,8 +146,7 @@ fn input(a: cfg.Audio, feats: mel.Features, cf: usize, first: usize, n: usize, h
     return out;
 }
 
-/// The convolutions over a group of chunks into rows of b.x from first * 13 on, positions added; each chunk is
-/// convolved at the plan's chunk length (a lone short chunk at its own, as the package pads to the longest chunk).
+/// The convolutions over a group of chunks, `cf` frames each, into rows of b.x from first * 13 on, positions added.
 fn front(r: anytype, a: cfg.Audio, w: *const Weights, b: Buffers, feats: mel.Features, cf: usize, first: usize, n: usize, host: []u16) !void {
     try r.upload(b.in, std.mem.sliceAsBytes(input(a, feats, cf, first, n, host)));
     const f1 = (a.mels - 1) / 2 + 1;
