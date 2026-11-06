@@ -105,7 +105,7 @@ fn runCalls(t: *Turn, a: Allocator, input: *chat.Input, calls: []const Value, si
     try t.hide(a, input, try research.assistantCalls(a, allowed));
     for (allowed) |c| {
         if (gone.check()) return error.Cancelled;
-        const is_search = std.ascii.eqlIgnoreCase(tools.callName(c), tools.search_name);
+        const is_search = std.mem.eql(u8, tools.callName(c), tools.search_name);
         const subject = (try tools.argument(a, c, if (is_search) "query" else "url")) orelse "";
         if (is_search) try t.progress(a, sink, "searching the web for \"{s}\"", .{subject}) else try t.progress(a, sink, "reading {s}", .{subject});
         if (is_search) t.focus = subject;
