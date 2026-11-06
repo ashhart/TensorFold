@@ -11,14 +11,15 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .link_libc = true,
         .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } },
     });
-    // tf-moss-image: the transformer on a reference case (tools/zig/moss_image_case.py), compared and timed
+    // tf-moss-image: the transformer on a reference case (tools/zig/moss_image_case.py), compared and timed; its own
+    // prompt encoder and image decoder run from the same checkpoint, so it imports the tokenizer for --prompt's ids
     const transformer = b.createModule(.{
         .root_source_file = b.path("zig/tests/moss_image_cuda.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .strip = strip,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "moss_image", .module = moss } },
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "moss_image", .module = moss } },
     });
     b.installArtifact(b.addExecutable(.{ .name = "tf-moss-image", .root_module = transformer }));
     // tf-moss-image-decoder: the family's vae/ decoder, a latents file to its raw float32 picture before the clamp
