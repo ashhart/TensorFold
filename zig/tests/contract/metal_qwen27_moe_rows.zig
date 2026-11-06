@@ -174,7 +174,8 @@ pub const Gather = struct {
             .out = .raw,
             .nan = .{ .stated = "each sorted slot's row is its token's input row, bit for bit" },
             .tiles = .{ .{ .size = 8, .step = 8, .min = 8 }, .{ .size = 256, .step = 64, .min = 64 }, .{} },
-            .served = &.{ .{ .rows = 8192, .n = 3072, .k = 1 }, .{ .rows = 128, .n = 3072, .k = 1 }, .{ .rows = 8, .n = 3072, .k = 1 } },
+            // Ornith's hidden width, then the 35B-A3B's
+            .served = &.{ .{ .rows = 8192, .n = 3072, .k = 1 }, .{ .rows = 128, .n = 3072, .k = 1 }, .{ .rows = 8, .n = 3072, .k = 1 }, .{ .rows = 8192, .n = 2048, .k = 1 }, .{ .rows = 8, .n = 2048, .k = 1 } },
         };
     }
 
@@ -266,7 +267,8 @@ pub const Glu = struct {
             .ops = 12,
             .out = .bf16,
             .tiles = .{ .{ .size = 1 }, .{ .size = 256, .step = 1, .min = 1 }, .{} },
-            .served = &.{ .{ .rows = 9216, .n = 1024, .k = 1 }, .{ .rows = 144, .n = 1024, .k = 1 }, .{ .rows = 9, .n = 1024, .k = 1 } },
+            // Ornith's experts' width, then the 35B-A3B's
+            .served = &.{ .{ .rows = 9216, .n = 1024, .k = 1 }, .{ .rows = 144, .n = 1024, .k = 1 }, .{ .rows = 9, .n = 1024, .k = 1 }, .{ .rows = 9216, .n = 512, .k = 1 }, .{ .rows = 9, .n = 512, .k = 1 } },
         };
     }
 
@@ -364,7 +366,8 @@ pub const Combine = struct {
             .out = .bf16,
             .in_place = in_out,
             .tiles = .{ .{ .size = 1 }, .{ .size = 256, .step = 1, .min = 1 }, .{} },
-            .served = &.{ .{ .rows = 16, .n = 3072, .k = route_topk }, .{ .rows = 1, .n = 3072, .k = route_topk }, .{ .rows = 1024, .n = 3072, .k = route_topk } },
+            // Ornith's hidden width, then the 35B-A3B's
+            .served = &.{ .{ .rows = 16, .n = 3072, .k = route_topk }, .{ .rows = 1, .n = 3072, .k = route_topk }, .{ .rows = 1024, .n = 3072, .k = route_topk }, .{ .rows = 16, .n = 2048, .k = route_topk }, .{ .rows = 1024, .n = 2048, .k = route_topk } },
         };
     }
 
