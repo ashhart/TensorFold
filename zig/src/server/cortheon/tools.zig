@@ -31,7 +31,7 @@ pub fn specs(a: Allocator) Allocator.Error![]Value {
 }
 
 pub fn isServer(name: []const u8) bool {
-    return std.mem.eql(u8, name, search_name) or std.mem.eql(u8, name, fetch_name);
+    return std.ascii.eqlIgnoreCase(name, search_name) or std.ascii.eqlIgnoreCase(name, fetch_name); // Cortheon_Search is the same tool
 }
 
 /// A tool call's function name, or "".
@@ -88,7 +88,7 @@ pub const Ran = struct { kind: Kind, subject: []const u8, text: []const u8, ok: 
 /// Runs one server tool call: fetches read only what `seen` allows, and add what they show; failures become text.
 pub fn run(web: Web, a: Allocator, call: Value, today: []const u8, max_chars: usize, focus: []const u8, seen: *Seen) Allocator.Error!Ran {
     const name = callName(call);
-    if (std.mem.eql(u8, name, search_name)) {
+    if (std.ascii.eqlIgnoreCase(name, search_name)) {
         const asked = (try argument(a, call, "query")) orelse return .{ .kind = .search, .subject = "", .ok = false, .text = "cortheon_search needs a non-empty \"query\" string." };
         const query = asked[0..@import("html.zig").cutAt(asked, 200)]; // a search names a topic; longer is data leaving
         const found = web.search(web.ctx, a, query, 6) catch |e| return .{ .kind = .search, .subject = query, .ok = false, .text = try std.fmt.allocPrint(a, "cortheon_search could not search for \"{s}\": {s}.", .{ query, why(e) }) };
@@ -154,6 +154,7 @@ test "specs parse, calls are recognised and arguments read from either form" {
     try std.testing.expect(isServer(callName(call)));
     try std.testing.expectEqualStrings("https://x.org", (try argument(a, call, "url")).?);
     try std.testing.expect(!isServer("bash"));
+    try std.testing.expect(isServer("Cortheon_Search"));
     try std.testing.expectEqualStrings("https://raw.githubusercontent.com/o/r/main/src/a.zig", try rawGithub(a, "https://github.com/o/r/blob/main/src/a.zig"));
     try std.testing.expectEqualStrings("https://github.com/o/r", try rawGithub(a, "https://github.com/o/r"));
 }
