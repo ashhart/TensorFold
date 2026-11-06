@@ -1,4 +1,4 @@
-//! A small model split by heads (tensor parallel) and expert groups (expert parallel) for the cluster's exactness tests.
+//! Small model split by heads (tensor parallel) and expert groups (expert parallel) for the cluster's exactness tests.
 const std = @import("std");
 const canon = @import("canon.zig");
 const exchange = @import("exchange.zig");
