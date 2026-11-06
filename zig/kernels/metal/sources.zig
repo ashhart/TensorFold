@@ -152,7 +152,6 @@ pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal");
-pub const core_affine_mm_i8 = @embedFile("core/affine_mm_i8.h");
 
 /// The int8 routed body: the trellis skeleton (`core/exl3_projection_nax.metal`) with the tile and the x block
 /// quantised per 16x16 fragment and multiplied on the tensor units as int8 x int8 (TF_DSV41_INT8_BODY).
@@ -172,6 +171,8 @@ pub const core_expert_groups = @embedFile("core/expert_groups.metal");
 /// DeepSeek V4.1 Flash: Engram hash/commit, CSA attention, mHC mix, routed experts, shared projections, cache/rotary.
 pub const deepseek_v41_engram = @embedFile("deepseek_v41/engram_exl3.metal");
 pub const deepseek_v41_ops = @embedFile("deepseek_v41/ops.metal");
+/// The router gate's GEMM: the prefill block with an fp32 destination, the lane's own copy (ops.zig).
+pub const deepseek_v41_gate_gemm = @embedFile("deepseek_v41/gate_gemm.metal");
 pub const deepseek_v41_mhc = @embedFile("deepseek_v41/mhc.metal");
 pub const deepseek_v41_hc_boundary = @embedFile("deepseek_v41/hc_boundary.metal");
 pub const deepseek_v41_route = @embedFile("deepseek_v41/route_exl3.metal");
