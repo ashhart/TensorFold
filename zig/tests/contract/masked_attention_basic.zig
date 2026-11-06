@@ -14,7 +14,7 @@ pub fn output(_: Kind) @import("contract").spec.Elem {
     return .bf16;
 }
 pub fn known(k: Kind, _: data.Poison) bool {
-    return k != .qwen35;
+    return k != .qwen35 and k != .nemotron;
 }
 pub fn finding(_: Kind) []const u8 {
     return "#1009: a later causal key's non-finite V reaches the preceding row as NaN through zero P x V";
@@ -95,8 +95,8 @@ pub fn load(p: anytype) !void {
             };
         },
         .nemotron => {
-            text = try prefill();
-            name = "custom_kernel_tf_attention_nax_bf16_n_n_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t";
+            text = sources.nemotron_prompt_masked.contiguous;
+            name = sources.nemotron_prompt_masked.name(false, 0);
         },
         .lfm2 => {
             text = try std.mem.concat(a, u8, &.{ sources.lfm2, sources.lfm2_attn_nax });
