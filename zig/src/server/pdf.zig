@@ -231,11 +231,11 @@ const PauseState = struct {
     }
 };
 
+pub const render_flags: c_int = 0x01; // FPDF_ANNOT; 0x10 is REVERSE_BYTE_ORDER, RGBA where the JPEG reads BGRA
 fn renderPageWithDeadline(cx: *Cx, f: PdfiumFns, bmp: ?*anyopaque, page: ?*anyopaque, w: c_int, h: c_int, idx: usize, deadline_ns: i96) errors.Refused!void {
-    const flags: c_int = 0x01 | 0x10; // FPDF_ANNOT | FPDF_PRINTING
     if (f.FPDF_RenderPageBitmap_Start != null and f.FPDF_RenderPage_Continue != null and f.FPDF_RenderPage_Close != null) {
         var state: PauseState = .{ .pause = .{ .version = 1, .NeedToPauseNow = PauseState.check }, .deadline_ns = deadline_ns };
-        var status = f.FPDF_RenderPageBitmap_Start.?(bmp, page, 0, 0, w, h, 0, flags, &state.pause);
+        var status = f.FPDF_RenderPageBitmap_Start.?(bmp, page, 0, 0, w, h, 0, render_flags, &state.pause);
         while (status == 1) {
             if (state.timed_out or std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) {
                 f.FPDF_RenderPage_Close.?(page);
@@ -248,7 +248,7 @@ fn renderPageWithDeadline(cx: *Cx, f: PdfiumFns, bmp: ?*anyopaque, page: ?*anyop
         if (status == 3) return cx.refuse(try std.fmt.allocPrint(cx.a, "PDF page {d} could not be rendered", .{idx + 1}));
         return;
     }
-    f.FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, flags);
+    f.FPDF_RenderPageBitmap(bmp, page, 0, 0, w, h, 0, render_flags);
     if (std.Io.Clock.awake.now(log.io()).toNanoseconds() >= deadline_ns) return cx.refuse("PDF rendering timed out");
 }
 
