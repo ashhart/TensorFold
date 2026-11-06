@@ -17,8 +17,7 @@ const Fixture = struct {
     }
 
     fn of(world: usize, t: collective.DType) Fixture {
-        // Column 0: 1 + half-ulp + half-ulp [+ half-ulp]. Each intermediate storage tie loses the increment.
-        // Column 1: large + tiny - large [+ 2*tiny]. In fp32, tiny is below half an ulp at large.
+        // Column 0 loses half-ulps if rounded per rank; column 1 loses tiny addends in fp32 until large cancels.
         const bf = t == .bf16;
         const one: u16 = if (bf) 0x3f80 else 0x3c00;
         const half: u16 = if (bf) 0x3b80 else 0x1000;
