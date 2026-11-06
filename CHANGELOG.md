@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: compare Living Weights keep rates between two native binaries with fresh checkpoint copies, retained refusal receipts and exact unrelated-token controls (#2027, #1587).
+
 - Tests: the stale serving source pins are re-baselined to current sources; no device re-qualification is claimed.
 
 - Qwen 3.5 on CUDA: an integrated GPU keeps prompt states in device memory instead of pinning a host copy at each save, still on the host cache budget, and the startup line names device memory; on a GB10, 8k and 32k prompts start 1.6 to 2.1% sooner with the same replies (#2043). Thanks to @jschmied.
