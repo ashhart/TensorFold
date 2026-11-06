@@ -891,7 +891,8 @@ the conversations. `DELETE /v1/imprint` clears one model's states; deleting the 
 ## Health
 
 The native server answers `GET /health` (and `GET /`) from one handler on Metal and CUDA, without a key. With keys
-configured the body is only `{"status": "ok"}`. Without keys it has these fields, in this order:
+configured the body is only `{"status": "ok"}`. An engine that reports unhealthy answers 503 with
+`{"status": "unavailable"}`. Without keys it has these fields, in this order:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -901,7 +902,7 @@ configured the body is only `{"status": "ok"}`. Without keys it has these fields
 | `max_batch_size` | integer | The lanes the engine serves at once |
 | `policy` | string | The engine's policy line; absent when the engine reports none |
 | `warming` | boolean | Always `false` on the native engines |
-| `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0). Metal: `{}` |
+| `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0), plus `limit` when the engine reports one. Metal: `{}` |
 | `live` | object | `connections`, `waiting`, `decode_tokens_per_second`, `prefill_tokens_per_second` |
 | `version` | string | The release this server was built from |
 | `backend` | string | The backend built in: `metal`, `cuda`, `hip` or `xpu`; absent from a build without one |
@@ -912,6 +913,12 @@ configured the body is only `{"status": "ok"}`. Without keys it has these fields
 last prompt pass's uncached tokens over its time, shown for 2 s after the pass ends and 0 otherwise. Both rates are
 rounded to one decimal. Public health never resets the peak, with or without keys. Reset queries on `/health` and `/`
 are ignored. The separate `/memory` route also reports memory without resetting it and requires a key when keys are configured.
+
+`GET /v1/models` (and `/models`) answers `object: "list"` with one `data` entry per served ID and alias: `id`,
+`object: "model"`, `created` (the current unix time), `owned_by: "tensorfold"`, and, when the engine reports a
+context window, `context_length` and `max_model_len`, both that window. A model the engine reports as reasoning
+adds `reasoning`: `default_enabled`, `default_effort` when the template consumes `reasoning_effort`, and
+`supported_efforts`, the template's levels plus `none` when the template has a thinking switch.
 
 The Python 0.6.6 server's body differs: its MLX `memory` can add `budget`, `mlx_budget` and `footprint`, and its CUDA
 server sends the counters described under [Responses](#responses). For memory figures on a Mac, use
