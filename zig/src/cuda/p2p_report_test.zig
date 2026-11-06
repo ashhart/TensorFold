@@ -334,3 +334,152 @@ test "p2p compact: two GPUs give the driver, both GPUs and their pair; one GPU g
     FakeNvml.count = 1;
     try std.testing.expect(report.compactWith(std.testing.allocator, &FakeNvml.api) == null);
 }
+
+const ProbeFake = struct {
+    const abi = @import("abi.zig");
+    var warm_done = false;
+    var gathers: usize = 0;
+    fn alloc(p: *u64, _: usize) callconv(.c) c_int {
+        p.* = 0x10000;
+        return 0;
+    }
+    fn free(_: u64) callconv(.c) c_int {
+        return 0;
+    }
+    fn fill8(_: u64, _: u8, _: usize) callconv(.c) c_int {
+        return 0;
+    }
+    fn stream(p: *abi.Stream, _: c_uint) callconv(.c) c_int {
+        p.* = @ptrFromInt(0x20000);
+        return 0;
+    }
+    fn one(_: abi.Stream) callconv(.c) c_int {
+        return 0;
+    }
+    fn event(p: *abi.Event, _: c_uint) callconv(.c) c_int {
+        p.* = @ptrFromInt(0x30000);
+        return 0;
+    }
+    fn eventOne(_: abi.Event) callconv(.c) c_int {
+        return 0;
+    }
+    fn record(_: abi.Event, _: abi.Stream) callconv(.c) c_int {
+        return 0;
+    }
+    fn elapsed(ms: *f32, _: abi.Event, _: abi.Event) callconv(.c) c_int {
+        ms.* = 5;
+        return 0;
+    }
+    fn gather(_: u64, _: u64, _: usize, _: nccl.DataType, _: nccl.Comm, _: @import("abi.zig").Stream) callconv(.c) c_int {
+        if (!warm_done or !Lines.has("p2p: peer access:")) return 1;
+        gathers += 1;
+        Lines.sink(.info, "fake optional probe transfer");
+        return 0;
+    }
+    fn driver() @import("driver.zig").Driver {
+        var d: @import("driver.zig").Driver = undefined;
+        d.api.cuMemAlloc_v2 = alloc;
+        d.api.cuMemFree_v2 = free;
+        d.api.cuMemsetD8_v2 = fill8;
+        d.api.cuStreamCreate = stream;
+        d.api.cuStreamSynchronize = one;
+        d.api.cuStreamDestroy_v2 = one;
+        d.api.cuEventCreate = event;
+        d.api.cuEventRecord = record;
+        d.api.cuEventSynchronize = eventOne;
+        d.api.cuEventDestroy_v2 = eventOne;
+        d.api.cuEventElapsedTime = elapsed;
+        return d;
+    }
+};
+
+test "startup log: early report precedes transfers, keeps the named log, and leaves the opt-in probe after warm-up" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    reset();
+    FakeEnv.reset();
+    FakeEnv.put("TMPDIR", ".");
+    Lines.reset();
+    FakeEnv.put("TENSORFOLD_P2P_PROBE", "1");
+    ProbeFake.warm_done = false;
+    ProbeFake.gathers = 0;
+    var lib: nccl.Library = undefined;
+    lib.api.ncclGetVersion = ncclVersion;
+    lib.api.ncclAllGather = ProbeFake.gather;
+    var s = report.beginWith(FakeEnv.env, Lines.sink, 0, 2);
+    defer s.end();
+    const path = try std.testing.allocator.dupe(u8, std.mem.span(FakeEnv.get("NCCL_DEBUG_FILE").?));
+    defer std.testing.allocator.free(path);
+    try std.testing.expect(Lines.has(path));
+    try log_test.writeLog("NCCL INFO Channel 00 : 0[0] -> 1[1] via P2P/IPC/read\n");
+    const d = ProbeFake.driver();
+    const a: report.After = .{ .lib = &lib, .comm = null, .d = &d, .later = true };
+    report.beforePeersWith(&s, a, &FakeNvml.api, &FakeCuda.api);
+    try std.testing.expect(Lines.has("p2p: rank 0 of 2: GPU 0"));
+    try std.testing.expect(Lines.has("rank 1 P2P read"));
+    try std.testing.expectEqual(@as(usize, 0), ProbeFake.gathers);
+    try std.testing.expect(s.active and s.capture.state == .on);
+    try std.testing.expectEqualStrings(path, std.mem.span(FakeEnv.get("NCCL_DEBUG_FILE").?));
+    var logbuf: [256]u8 = undefined;
+    try std.testing.expect(s.capture.read(&logbuf).len > 0);
+    const early_len = Lines.len;
+    report.beforePeersWith(&s, a, &FakeNvml.api, &FakeCuda.api);
+    try std.testing.expectEqual(early_len, Lines.len);
+    Lines.sink(.info, "fake peer warm-up transfer");
+    ProbeFake.warm_done = true;
+    report.afterInitWith(&s, a, &FakeNvml.api, &FakeCuda.api);
+    try std.testing.expectEqual(@as(usize, 7), ProbeFake.gathers);
+    try std.testing.expect(Lines.has("p2p: probe: all-gather of 32 MiB"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, Lines.text(), "p2p: peer access:"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, Lines.text(), "NCCL transport"));
+    const warm = std.mem.indexOf(u8, Lines.text(), "fake peer warm-up transfer").?;
+    const probe = std.mem.indexOf(u8, Lines.text(), "fake optional probe transfer").?;
+    try std.testing.expect(early_len < warm and warm < probe);
+    try std.testing.expect(s.capture.state == .off and FakeEnv.get("NCCL_DEBUG_FILE") == null);
+}
+
+test "startup log: deferred connections print after warm-up without duplicating the early facts" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |at_warm| {
+        reset();
+        FakeEnv.reset();
+        FakeEnv.put("TMPDIR", ".");
+        Lines.reset();
+        var lib: nccl.Library = undefined;
+        lib.api.ncclGetVersion = ncclVersion;
+        var s = report.beginWith(FakeEnv.env, Lines.sink, 0, 2);
+        defer s.end();
+        const a: report.After = .{ .lib = &lib, .comm = null, .later = true };
+        const path = try std.testing.allocator.dupe(u8, std.mem.span(FakeEnv.get("NCCL_DEBUG_FILE").?));
+        defer std.testing.allocator.free(path);
+        report.beforePeersWith(&s, a, null, null);
+        try std.testing.expect(!Lines.has("NCCL transport"));
+        Lines.sink(.info, "fake peer warm-up transfer");
+        if (at_warm) try log_test.writeLog("NCCL INFO Channel 00 : 0[0] -> 1[1] via SHM/direct/direct\n");
+        report.afterInitWith(&s, a, null, null);
+        if (!at_warm) {
+            try std.testing.expect(!Lines.has("NCCL transport"));
+            FakeEnv.put("NCCL_DEBUG_FILE", path);
+            try log_test.writeLog("NCCL INFO Channel 00 : 0[0] -> 1[1] via SHM/direct/direct\n");
+            report.ready();
+        }
+        try std.testing.expect(Lines.has("rank 1 SHM"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, Lines.text(), "NCCL transport"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, Lines.text(), "p2p: peer access:"));
+    }
+}
+
+test "startup log: a disabled or single-rank report does not query any diagnostic library or transfer" {
+    for ([_]usize{ 1, 2, 8 }) |world| {
+        reset();
+        FakeEnv.reset();
+        FakeEnv.put("TMPDIR", ".");
+        Lines.reset();
+        if (world > 1) FakeEnv.put(report.off_variable, "0");
+        var s = report.beginWith(FakeEnv.env, Lines.sink, 0, world);
+        defer s.end();
+        const a: report.After = .{ .lib = undefined, .comm = null, .d = undefined };
+        report.beforePeersWith(&s, a, undefined, undefined);
+        report.afterInitWith(&s, a, undefined, undefined);
+        try std.testing.expectEqual(@as(usize, 0), Lines.len + FakeEnv.sets);
+    }
+}

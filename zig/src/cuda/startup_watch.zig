@@ -25,7 +25,7 @@ pub const Phase = enum(u3) {
         return p == .nccl_init or p == .peer_warmup;
     }
 };
-pub const Event = struct { world: usize = 1, rank: usize, phase: Phase, elapsed_s: u64 = 0, transport: u3 = 0 };
+pub const Event = struct { world: usize = 1, rank: usize, phase: Phase, elapsed_s: u64 = 0, transport: u3 = 0, log_path: [256:0]u8 = @splat(0) };
 pub const Sink = *const fn (bool, Event) void;
 fn log(waiting: bool, e: Event) void {
     if (!waiting) {
@@ -33,8 +33,7 @@ fn log(waiting: bool, e: Event) void {
         std.log.info("rank {d} startup: {s}{s}", .{ e.rank, entering, e.phase.name() });
         return;
     }
-    const kinds = [_][]const u8{ "unknown", "P2P", "SHM", "P2P+SHM", "NET", "P2P+NET", "SHM+NET", "P2P+SHM+NET" };
-    std.log.warn("rank {d} startup: still in {s} after {d} s; transport {s}; {s}waiting without changing the transfer", .{ e.rank, e.phase.name(), e.elapsed_s, kinds[e.transport], advice(e) });
+    std.log.warn("rank {d} startup: still in {s} after {d} s; transport {s}; {s}waiting without changing the transfer; NCCL log {s}", .{ e.rank, e.phase.name(), e.elapsed_s, transportName(e.transport), advice(e), if (e.log_path[0] == 0) "not captured" else std.mem.sliceTo(&e.log_path, 0) });
 }
 
 /// NCCL's direct P2P setting is relevant only to an observed P2P link on a two-rank start.
@@ -72,7 +71,9 @@ pub const Monitor = struct {
         const how = transport(m.capture.read(&buf), @intCast(m.rank));
         if (m.state.load(.acquire) != state or m.done.load(.acquire)) return;
         m.last_ms = now_ms;
-        m.sink(true, .{ .world = m.world, .rank = m.rank, .phase = phase, .elapsed_s = (now_ms - since) / 1000, .transport = how });
+        var path: [256:0]u8 = @splat(0);
+        if (m.capture.state == .on) _ = m.capture.path(&path);
+        m.sink(true, .{ .world = m.world, .rank = m.rank, .phase = phase, .elapsed_s = (now_ms - since) / 1000, .transport = how, .log_path = path });
     }
 };
 
@@ -82,6 +83,11 @@ pub fn drive(m: *Monitor, clock: anytype) void {
         m.poll(clock.now());
         clock.pause();
     }
+}
+
+pub fn transportName(bits: u3) []const u8 {
+    const kinds = [_][]const u8{ "unknown", "P2P", "SHM", "P2P+SHM", "NET", "P2P+NET", "SHM+NET", "P2P+SHM+NET" };
+    return kinds[bits];
 }
 
 pub fn transport(text: []const u8, rank: u32) u3 {

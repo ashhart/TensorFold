@@ -105,3 +105,18 @@ test "startup watcher: P2P advice requires two ranks and an observed P2P transpo
     };
     try t.expectEqual(@as(usize, 0), watch.advice(.{ .rank = 0, .phase = .nccl_init }).len);
 }
+
+test "startup log: minute warnings retain the active capture pathname" {
+    Seen.clear();
+    var m: watch.Monitor = .{ .rank = 1, .world = 2, .sink = Seen.sink };
+    m.capture.state = .on;
+    m.capture.dir[0] = '.';
+    m.capture.dir_len = 1;
+    m.enter(.peer_warmup, 0);
+    m.poll(60_000);
+    try t.expectEqual(@as(u32, 1), Seen.warnings.load(.acquire));
+    try t.expectEqualStrings("./nccl.log", std.mem.sliceTo(&Seen.last.log_path, 0));
+    m.poll(120_000);
+    try t.expectEqual(@as(u32, 2), Seen.warnings.load(.acquire));
+    try t.expectEqualStrings("./nccl.log", std.mem.sliceTo(&Seen.last.log_path, 0));
+}
