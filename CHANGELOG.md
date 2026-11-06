@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on CUDA: the whole shared expert's down projection writes straight into its output slot, without a scatter, so NVFP4 prompts run about 0.7% faster on a GB10 with the same tokens (#1792). Thanks to @laudney.
 
+- The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501). Thanks to @BlivionIaG.
+
 - Qwen3.8-27B on Metal: a NaN or infinity in a value a row must not see no longer turns that row's attention output into NaN on the prompt kernels (before M5 and on M5) or the M5 decode prefix. Replies change only where such a value already sits in a masked key, and finite inputs keep their bytes (#2106). Thanks to @cshintov.
 
 - Flash Next on Metal: a lone `"draft": false` reply at `--parallel` above one runs as it does at `--parallel 1`, 17-18% faster on an M3 Ultra with the same tokens (#2272).
@@ -170,8 +172,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks (#1441).
 
 - The CPU-only server build shares its existing core module with the server adapter, resolving the slide-model import after integration (#1441).
-
-- The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501).
 
 - `TF_KV_SHARE=n` keeps a paged CUDA family's prompts as its core pool's pages (Gemma 4, Kolibri-1), with replies equal to a fresh prefill; it's opt-in, and costs about 3.5% decode after a short cold prompt on Kolibri-1 (#1755, part of #1657). Thanks to @jschmied.
 - Qwen3.5's attention-layer pattern (`layer_types`, `full_attention_interval`) is read by one shared reader on Metal, CUDA, HIP and XPU, so a config gets the same pattern or the same refusal everywhere; a `layer_types` list that contradicts the interval is refused naming both keys, and XPU checks a present `config.json` at load (#2086, fixes #1863).
