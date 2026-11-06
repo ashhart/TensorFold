@@ -7,8 +7,8 @@ const model_text = @import("model_text.zig");
 const openai = @import("openai.zig");
 const Conn = @import("http_conn.zig").Conn;
 
-const think_end: u32 = 300; // the close marker as one token
-const eos: u32 = 301;
+pub const think_end: u32 = 300; // the close marker as one token
+pub const eos: u32 = 301;
 const quote_open: u32 = 302; // the quoted tag, in the three pieces a reply writes it
 const quote_mid: u32 = 303;
 const quote_close: u32 = 304;
@@ -19,8 +19,9 @@ const all_bytes = blk: {
 };
 
 /// Bytes as tokens, `</think>` as token 300 and an end token 301; every prompt renders as "prompt".
-const Text = struct {
+pub const Text = struct {
     real: ?*@import("tokenizer").Tokenizer = null,
+    markers: @import("reply_text.zig").Markers = @import("reply_text.zig").think_markers,
     close_token: bool = true, // false: the close marker is not a token, so the text's spelling is what closes
 
     fn text(t: *@This()) model_text.Text {
@@ -28,8 +29,8 @@ const Text = struct {
     }
 
     /// The close marker is one token; the quoted tag is three, so the text spells the same and the tokens differ.
-    fn piece(id: u32) []const u8 {
-        if (id == think_end) return "</think>";
+    fn piece(t: *const Text, id: u32) []const u8 {
+        if (id == think_end) return t.markers.close;
         if (id == eos) return "";
         if (id == quote_open) return "</";
         if (id == quote_mid) return "think";
@@ -47,21 +48,25 @@ const Text = struct {
         const t: *Text = @ptrCast(@alignCast(ctx));
         if (t.real) |tok| return tok.decode(a, ids, false) catch return error.OutOfMemory;
         var out: std.ArrayList(u8) = .empty;
-        for (ids) |id| try out.appendSlice(a, piece(id));
-        return out.items;
+        for (ids) |id| try out.appendSlice(a, piece(t, id));
+        if (std.unicode.utf8ValidateSlice(out.items)) return out.items;
+        defer out.deinit(a);
+        var valid: std.ArrayList(u8) = .empty;
+        try @import("tokenizer").unicode.appendLossy(&valid, a, out.items);
+        return valid.items;
     }
 
     fn tokenBytes(ctx: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error!?[]u8 {
         const t: *Text = @ptrCast(@alignCast(ctx));
         if (t.real != null) return null;
-        return try a.dupe(u8, piece(id));
+        return try a.dupe(u8, piece(t, id));
     }
 
     fn tokenId(ctx: *anyopaque, p: []const u8) ?u32 {
         const t: *Text = @ptrCast(@alignCast(ctx));
         if (t.real) |tok| return tok.specialTokenId(p);
         if (!t.close_token) return null;
-        return if (std.mem.eql(u8, p, "</think>")) think_end else null;
+        return if (std.mem.eql(u8, p, t.markers.close)) think_end else null;
     }
 
     fn tokenString(ctx: *anyopaque, a: std.mem.Allocator, id: u32) std.mem.Allocator.Error![]u8 {
@@ -95,7 +100,7 @@ const Script = struct {
     }
 
     fn info(_: *anyopaque) api.Info {
-        return .{ .context_window = 64 };
+        return .{ .context_window = 8192 };
     }
 
     fn submit(ctx: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
@@ -124,7 +129,7 @@ const Script = struct {
 };
 
 /// The reply the route wrote: its status and body, or a stream's events, as JSON text (testing-allocator owned).
-const Got = struct {
+pub const Got = struct {
     status: u16 = 0,
     body: []u8 = &.{},
     events: std.ArrayList([]u8) = .empty,
@@ -133,7 +138,7 @@ const Got = struct {
         return .{ .ctx = g, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
 
-    fn deinit(g: *Got) void {
+    pub fn deinit(g: *Got) void {
         std.testing.allocator.free(g.body);
         for (g.events.items) |e| std.testing.allocator.free(e);
         g.events.deinit(std.testing.allocator);
@@ -167,7 +172,7 @@ fn sendWith(reply: []const u32, thinking: bool, body: []const u8, close_token: b
     return sendText(reply, thinking, body, .{ .close_token = close_token }, null);
 }
 
-fn sendText(reply: []const u32, thinking: bool, body: []const u8, settings: Text, stride: ?usize) !Got {
+pub fn sendText(reply: []const u32, thinking: bool, body: []const u8, settings: Text, stride: ?usize) !Got {
     var text = settings;
     var backend: Script = .{ .reply = reply, .stride = stride };
     var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
@@ -177,6 +182,7 @@ fn sendText(reply: []const u32, thinking: bool, body: []const u8, settings: Text
         .use_drafts = false,
     }, null);
     defer srv.deinit();
+    srv.markers = settings.markers;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

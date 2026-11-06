@@ -28,6 +28,17 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value) Allocator.Erro
     return out.items;
 }
 
+/// The close token's byte offset after complete MiniMax call blocks before it have been rewritten.
+pub fn closeAfterRewrite(a: Allocator, raw: []const u8, tools: []const Value, where: reply_text.Close) Allocator.Error!reply_text.Close {
+    return switch (where) {
+        .token => |at| if (at <= raw.len and std.mem.indexOf(u8, raw[0..at], open) != null)
+            .{ .token = (try dsml(a, raw[0..at], tools)).len }
+        else
+            where,
+        else => where,
+    };
+}
+
 /// An element `ns<tag>inner ns</tag>` at `at` (same-named children nest): its tag, inner text and end.
 const Element = struct { tag: []const u8, inner: []const u8, end: usize };
 
