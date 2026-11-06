@@ -20,6 +20,9 @@ const enc_gate = @import("contract_moss_image_encoder_gate.zig");
 const enc_mul = @import("contract_moss_image_encoder_mul.zig");
 const enc_conv = @import("contract_moss_image_encoder_conv.zig");
 const enc_gated = @import("contract_moss_image_encoder_gated.zig");
+const enc_attn = @import("contract_moss_image_encoder_attn.zig");
+const enc_prep = @import("contract_moss_image_encoder_prep.zig");
+const enc_gdn = @import("contract_moss_image_encoder_gdn.zig");
 
 const g = core.contract.gates;
 
@@ -50,6 +53,9 @@ pub const Set = struct {
     enc_mul: *enc_mul.Set = undefined,
     enc_conv: *enc_conv.Set = undefined,
     enc_gated: *enc_gated.Set = undefined,
+    enc_attn: *enc_attn.Set = undefined,
+    enc_prep: *enc_prep.Set = undefined,
+    enc_gdn: *enc_gdn.Set = undefined,
 
     /// The set, its kernels appended to `list` (each control after the kernel it breaks).
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -101,10 +107,16 @@ pub const Set = struct {
         set.enc_mul = try enc_mul.Set.init(gpu, s, a, list, &set.ctl);
         set.enc_conv = try enc_conv.Set.init(gpu, s, a, list, &set.ctl);
         set.enc_gated = try enc_gated.Set.init(gpu, s, a, list, &set.ctl);
+        set.enc_attn = try enc_attn.Set.init(gpu, s, a, list, &set.ctl);
+        set.enc_prep = try enc_prep.Set.init(gpu, s, a, list, &set.ctl);
+        set.enc_gdn = try enc_gdn.Set.init(gpu, s, a, list, &set.ctl);
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        set.enc_gdn.deinit();
+        set.enc_prep.deinit();
+        set.enc_attn.deinit();
         set.enc_gated.deinit();
         set.enc_conv.deinit();
         set.enc_mul.deinit();
@@ -129,8 +141,8 @@ pub const Set = struct {
     }
 };
 
-/// The MOSS-Image kernels' gates 1-4 and their controls alone.
-pub fn run(gpu: check.Gpu) !void {
+/// The MOSS-Image kernels' gates 1-4 and their controls alone; `only`: the kernels so named.
+pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     const a = gpu.gpa;
     var s = try cuda.Stream.init(gpu.d, false);
     defer s.deinit();
@@ -138,8 +150,9 @@ pub fn run(gpu: check.Gpu) !void {
     defer list.deinit(a);
     const set = try Set.init(gpu, s, a, &list);
     defer set.deinit();
+    @import("contract_after.zig").keep(&list, only);
     var t: g.Tally = .{};
     try g.runAll(a, list.items, 0x6d6f7373, &t);
-    std.debug.print("SUMMARY moss image: {d} kernels, {d} pass gates 1-4, {d} fail; {d} controls: {d} red as planted, {d} missed\n", .{ t.kernels, t.passed, t.failed, t.controls, t.caught, t.missed });
+    std.debug.print("SUMMARY moss image: {s}{d} kernels, {d} pass gates 1-4, {d} fail; {d} controls: {d} red as planted, {d} missed\n", .{ if (only.len > 0) "(filtered) " else "", t.kernels, t.passed, t.failed, t.controls, t.caught, t.missed });
     try check.expect(t.problems() == 0, "moss-contract: {d} gate failures, {d} controls missed", .{ t.failed, t.missed });
 }

@@ -121,3 +121,105 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_me_gate_sigmoid(const _
   const float g = __bfloat162float(QG[(size_t)row * 2 * width + (col / 256) * 512 + 256 + col % 256]);
   O[i] = __float2bfloat16_rn(__bfloat162float(A[i]) * __fdiv_rn(1.0f, 1.0f + expf(-g)));
 }
+
+// Gate 3: tf_me_attention without its score scale: 16x sharper weights where float64 multiplies the dot by 1/16.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_me_attention_scale(const __nv_bfloat16* __restrict__ Q,
+                                                                           const __nv_bfloat16* __restrict__ K,
+                                                                           const __nv_bfloat16* __restrict__ V,
+                                                                           __nv_bfloat16* __restrict__ O, int rows,
+                                                                           int heads, int kv_heads, float scale) {
+  (void)scale;
+  __shared__ float part[8];
+  const int t = blockIdx.x, h = blockIdx.y, d = threadIdx.x;
+  const int group = heads / kv_heads, kvh = h / group;
+  const float q = __bfloat162float(Q[((size_t)h * rows + t) * 256 + d]);
+  float m = -INFINITY, l = 0.0f, acc = 0.0f;
+  for (int j = 0; j <= t; ++j) {
+    const size_t at = ((size_t)kvh * rows + j) * 256 + d;
+    const float s = tf_common::block_sum_tree(q * __bfloat162float(K[at]), part, 8);
+    const float top = fmaxf(m, s);
+    const float old = expf(m - top), e = expf(s - top);
+    l = l * old + e;
+    acc = acc * old + e * __bfloat162float(V[at]);
+    m = top;
+  }
+  O[((size_t)t * heads + h) * 256 + d] = __float2bfloat16_rn(__fdiv_rn(acc, l));
+}
+
+// Gate 3: tf_me_gdn_prep leaving beta's sigmoid in fp32: bf16(sigmoid b) where float64 rounds the sigmoid first.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_me_gdn_prep_beta(const __nv_bfloat16* __restrict__ MIX,
+                                                                         const __nv_bfloat16* __restrict__ A,
+                                                                         const __nv_bfloat16* __restrict__ B,
+                                                                         const __nv_bfloat16* __restrict__ A_LOG,
+                                                                         const __nv_bfloat16* __restrict__ DT_BIAS,
+                                                                         float* __restrict__ QN, float* __restrict__ KN,
+                                                                         float* __restrict__ G, float* __restrict__ BETA,
+                                                                         int rows, int kheads, int vheads, int mix_stride,
+                                                                         float scale) {
+  const int r = blockIdx.x, h = blockIdx.y * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+  if (h >= kheads) return;
+  const size_t row = (size_t)r * mix_stride;
+  const int kdim = kheads * 128;
+  float q[4], k[4];
+  float qq = 0.0f, kk = 0.0f;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    q[i] = __bfloat162float(MIX[row + h * 128 + lane * 4 + i]);
+    k[i] = __bfloat162float(MIX[row + kdim + h * 128 + lane * 4 + i]);
+    qq += q[i] * q[i];
+    kk += k[i] * k[i];
+  }
+  const float qi = __fdiv_rn(1.0f, __fsqrt_rn(tf_common::warp_sum(qq) + 1e-6f));
+  const float ki = __fdiv_rn(1.0f, __fsqrt_rn(tf_common::warp_sum(kk) + 1e-6f));
+  const size_t to = ((size_t)r * kheads + h) * 128 + lane * 4;
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    QN[to + i] = q[i] * qi * scale;
+    KN[to + i] = k[i] * ki;
+  }
+  const int per = vheads / kheads;
+  if (lane < per) {
+    const int v = h * per + lane;
+    const size_t at = (size_t)r * vheads + v;
+    BETA[at] = __fdiv_rn(1.0f, 1.0f + expf(-__bfloat162float(B[at])));
+    const float x = __bfloat162float(A[at]) + __bfloat162float(DT_BIAS[v]);
+    const float soft = x > 20.0f ? x : logf(1.0f + expf(x));
+    G[at] = -expf(__bfloat162float(A_LOG[v])) * soft;
+  }
+}
+
+// Gate 3: tf_me_gdn without its decay: the state never forgets where float64 multiplies it by exp g a row.
+extern "C" __global__ void __launch_bounds__(128) tf_ctl_me_gdn_decay(const float* __restrict__ QN,
+                                                                      const float* __restrict__ KN,
+                                                                      const __nv_bfloat16* __restrict__ MIX,
+                                                                      const float* __restrict__ G,
+                                                                      const float* __restrict__ BETA,
+                                                                      __nv_bfloat16* __restrict__ OUT, int rows,
+                                                                      int kheads, int vheads, int mix_stride) {
+  __shared__ float kq[256];
+  const int h = blockIdx.x, j = threadIdx.x;
+  const int per = vheads / kheads, kh = h / per;
+  const size_t voff = (size_t)2 * kheads * 128 + (size_t)h * 128 + j;
+  float s[128];
+#pragma unroll
+  for (int i = 0; i < 128; ++i) s[i] = 0.0f;
+  for (int t = 0; t < rows; ++t) {
+    const size_t at = ((size_t)t * kheads + kh) * 128 + j;
+    kq[j] = KN[at];
+    kq[128 + j] = QN[at];
+    __syncthreads();
+    const float v = __bfloat162float(MIX[(size_t)t * mix_stride + voff]);
+    float kv = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 128; ++i) kv += s[i] * kq[i];
+    const float delta = (v - kv) * BETA[(size_t)t * vheads + h];
+    float o = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 128; ++i) {
+      s[i] += kq[i] * delta;
+      o += s[i] * kq[128 + i];
+    }
+    OUT[((size_t)t * vheads + h) * 128 + j] = __float2bfloat16_rn(o);
+    __syncthreads();
+  }
+}
