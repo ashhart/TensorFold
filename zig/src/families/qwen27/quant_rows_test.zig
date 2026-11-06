@@ -120,3 +120,52 @@ test "a 300-row prompt pass through a 5-bit matrix on simd_qmm_bits tiles equals
     if (r.device.tensorUnits()) return error.SkipZigTest;
     try expectRowsEqual(r.device, &r.kern, try r.matrix(64, 5, 1));
 }
+
+test "half operands keep simd_qmm's fp32 bits; planted inputs past half's range take the fp32 path, or the bits turn" {
+    const a = std.testing.allocator;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    if (device.tensorUnits()) return error.SkipZigTest; // tensor units take lane kernels, never these tiles
+    const sq = @import("core").row_projection.simd;
+    var p = try sq.Pipelines.load(device);
+    defer p.deinit();
+    var owned: std.ArrayList(mtl.Buffer) = .empty;
+    defer {
+        for (owned.items) |b| b.deinit();
+        owned.deinit(a);
+    }
+    const n = 6240; // z | b | a: 8 chunks
+    const t = try synth(device, &owned, n, 4, 0x2089);
+    const m = sq.Matrix{ .w = t.weight.buffer, .scales = t.scales.buffer, .biases = t.biases.buffer, .n = n, .k = k };
+    try std.testing.expect(try sq.halfExact(&p, device, m));
+    const r = 32;
+    const x = try device.buffer(r * k * 2, opts);
+    try owned.append(a, x);
+    var prng = std.Random.DefaultPrng.init(7);
+    for (x.slice(u16, r * k)) |*v| v.* = toBf(std.math.copysign(0.01 + prng.random().float(f32) * 2, prng.random().float(f32) - 0.5));
+    x.slice(u16, r * k)[20 * k + 64 + 3] = toBf(0x1p20); // tile 1, group 1: past half's range
+    const flags = try device.buffer(sq.fitsBytes(k, r), opts);
+    try owned.append(a, flags);
+    var outs: [3]mtl.Buffer = undefined;
+    for (&outs) |*o| {
+        o.* = try device.buffer(r * n * 2, opts);
+        try owned.append(a, o.*);
+    }
+    const queue = try device.queue();
+    defer queue.deinit();
+    for (0..2) |pass| {
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.serial);
+        if (pass == 0) sq.encodeFits(e, &p, k, r, x, 0, flags, 0) else @memset(flags.slice(u32, 2 * (k / 64)), 1);
+        e.barrier();
+        if (pass == 0) sq.encode(e, try sq.call(&p, n, k, r, false, false, 0), m, x, 0, outs[0], 0);
+        sq.encodeHalf(e, (try sq.callHalf(&p, n, k, r, 0)).?, m, x, 0, outs[1 + pass], 0, flags, 0);
+        e.end();
+        cb.commit();
+        cb.wait();
+        if (pass == 0) try std.testing.expectEqualSlices(u32, &.{ 1, 1, 1, 1, 1, 0, 1, 1 }, flags.slice(u32, 8));
+    }
+    try std.testing.expectEqualSlices(u16, outs[0].slice(u16, r * n), outs[1].slice(u16, r * n));
+    // the control: every tile marked as fitting, so the planted row's group runs in half and its outputs move
+    try std.testing.expect(!std.mem.eql(u16, outs[0].slice(u16, r * n)[20 * n ..][0..n], outs[2].slice(u16, r * n)[20 * n ..][0..n]));
+}
