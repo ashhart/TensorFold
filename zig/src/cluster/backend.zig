@@ -98,7 +98,7 @@ pub const Leader = struct {
         _ = try l.send(.{ .kind = .stop }, null);
     }
 
-    /// One round on every rank: the command (with pending rollbacks), then this rank's shard; sampled rows' logits back.
+    /// One round on every rank: the command (with pending rollbacks), then the rank's shard; sampled rows' logits back.
     pub fn run(l: *Leader, rows: []const round.Row) ![]f32 {
         var sampled: usize = 0;
         for (rows) |r| sampled += @intFromBool(r.sample);
