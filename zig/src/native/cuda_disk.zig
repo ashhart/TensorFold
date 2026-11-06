@@ -241,6 +241,7 @@ fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_ca
 test {
     std.testing.refAllDecls(@This());
     _ = @import("disk_spill.zig");
+    _ = @import("cuda_kept.zig");
 }
 
 test "a disk module that declares attach opens the store itself" {
