@@ -1,5 +1,6 @@
 //! A reference case from tools/zig/qwen3_asr_case.py: manifest.json and one float32 or int32 file a stage.
 const std = @import("std");
+const Attention = @import("chunks.zig").Attention;
 
 pub const Stage = struct { shape: []const usize, int: bool };
 
@@ -10,6 +11,7 @@ pub const Case = struct {
     stages: std.StringArrayHashMapUnmanaged(Stage) = .empty,
     frames: usize = 0,
     text: []const u8 = "",
+    attention: Attention = .windows, // the tool's default; --global-attention cases say "global"
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Case {
         var c: Case = .{ .arena = .init(gpa), .dir = undefined, .io = io };
@@ -33,6 +35,7 @@ pub const Case = struct {
         }
         if (doc.object.get("frames")) |f| c.frames = if (f == .integer and f.integer >= 0) @intCast(f.integer) else return error.BadCase;
         if (doc.object.get("text")) |t| c.text = if (t == .string) t.string else return error.BadCase;
+        if (doc.object.get("attention")) |t| c.attention = if (t == .string) std.meta.stringToEnum(Attention, t.string) orelse return error.BadCase else return error.BadCase;
         return c;
     }
 

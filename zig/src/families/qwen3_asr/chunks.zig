@@ -1,6 +1,9 @@
 //! The tower's chunk and window plan: 100-frame chunks through the convolutions, then attention over whole windows.
 //! The package pads every chunk to the longest one, so a clip of one chunk under 100 frames is convolved at its own
 //! length, and a clip of more chunks at 100 frames a chunk, the last one zero-padded.
+//! Attention runs within windows of n_window_infer frames, as the package's vLLM backend and its flash-attention-2
+//! path do; tf-qwen3-asr runs that. The package's stock transformers SDPA path attends over every row instead
+//! (`Attention.global`); the float64 reference and tf-qwen3-asr-check run either, so both kinds of case stay checkable.
 const std = @import("std");
 const Audio = @import("config.zig").Audio;
 
@@ -20,6 +23,9 @@ pub fn rows(len: usize) usize {
     return @as(usize, @intCast(tail)) + (len / 100) * 13;
 }
 
+/// How the tower's layers attend: within the plan's windows, or over every row.
+pub const Attention = enum { windows, global };
+
 /// A clip's plan: its chunks' frames and rows, and the attention windows over the rows.
 pub const Plan = struct {
     frames: usize,
@@ -37,6 +43,13 @@ pub const Plan = struct {
         const last = if (n % cf == 0) cf else n % cf;
         const longest = if (chunks > 1) cf else last;
         return .{ .frames = n, .chunks = chunks, .last_frames = last, .chunk_frames = longest, .rows = rows(n), .chunk_rows = rows(longest), .window_rows = rows(longest) * (a.window_infer / cf) };
+    }
+
+    /// The plan with its attention as given: `global` is one window over every row.
+    pub fn attending(p: Plan, how: Attention) Plan {
+        var g = p;
+        if (how == .global) g.window_rows = p.rows;
+        return g;
     }
 
     /// Rows chunk `i` leaves.
@@ -80,4 +93,8 @@ test "plan: chunks, the short last chunk, windows of eight chunks" {
     try std.testing.expectEqual(@as(usize, 64), short.window_rows);
     try std.testing.expectEqual(@as(usize, 1), short.windows());
     try std.testing.expectError(error.EmptyClip, Plan.init(a, 0));
+    const g = p.attending(.global);
+    try std.testing.expectEqual(@as(usize, 1), g.windows());
+    try std.testing.expectEqual(p.rows, g.window(0).len);
+    try std.testing.expectEqual(p.window_rows, p.attending(.windows).window_rows);
 }
