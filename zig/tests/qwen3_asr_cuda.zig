@@ -144,6 +144,10 @@ pub fn main(init: std.process.Init) !u8 {
 
     var case: ?host.case.Case = if (case_dir) |dir| try host.case.Case.open(gpa, io, dir) else null;
     defer if (case) |*c| c.deinit();
+    if (case) |c| if (c.attention != .windows) { // the tower here runs the windows: a global case is the host check's
+        std.debug.print("the case attends over every row (--global-attention); tf-qwen3-asr runs the windows\n", .{});
+        return 2;
+    };
     var cmp: ?Compare = if (case) |*c| .{ .gpa = gpa, .case = c, .s = s, .d = &driver } else null;
     var same_prompt = true;
     if (cmp) |*c| {
