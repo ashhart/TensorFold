@@ -8,7 +8,7 @@ const pull_exlr8 = @import("pull_exlr8.zig");
 const lora_merge = @import("core").lora_merge;
 
 const usage =
-    \\usage: tensorfold models
+    \\usage: tensorfold models [--json]
     \\       tensorfold info MODEL
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
@@ -38,11 +38,12 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     for (args, argv) |*x, y| x.* = y;
     const env = init.environ_map;
     if (std.mem.eql(u8, args[0], "models")) {
-        if (args.len != 1) {
+        const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
+        if (args.len != 1 and !json) {
             try err.interface.writeAll(usage);
             return 2;
         }
-        return models.run(a, init.io, &out.interface, env, null);
+        return models.run(a, init.io, &out.interface, env, null, json);
     }
     if (std.mem.eql(u8, args[0], "pull")) {
         if (args.len < 2) {
