@@ -49,6 +49,10 @@ const TestEnv = struct {
     glm_pages: ?[]const u8 = null,
     glm_host: ?[]const u8 = null,
     glm_shared: ?[]const u8 = null,
+    dory: ?[]const u8 = null,
+    gemma4: ?[]const u8 = null,
+    spark25: ?[]const u8 = null,
+    nemotron_metal: ?[]const u8 = null,
     pub fn get(e: @This(), name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "TF_QWEN_KV_PAGES")) return e.qwen;
         if (std.mem.eql(u8, name, "TF_QWEN_KV_PAGES_ALL")) return e.all;
@@ -57,6 +61,10 @@ const TestEnv = struct {
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST")) return e.glm_host;
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST_SHARED")) return e.glm_shared;
         if (std.mem.eql(u8, name, "TF_KV_SHARE")) return null;
+        if (std.mem.eql(u8, name, "TENSORFOLD_DORY_KV_PAGES")) return e.dory;
+        if (std.mem.eql(u8, name, "TENSORFOLD_GEMMA4_KV_PAGES")) return e.gemma4;
+        if (std.mem.eql(u8, name, "TENSORFOLD_SPARK25_KV_PAGES")) return e.spark25;
+        if (std.mem.eql(u8, name, "TF_NEMOTRON_METAL_KV_PAGES")) return e.nemotron_metal;
         if (p.registered(name) != null) return null;
         return "fixture-secret-must-not-be-read";
     }
@@ -133,6 +141,10 @@ test "profile line: Nemotron paging reports exact off and all, independently of 
 const ExtraEnv = struct {
     name: []const u8,
     value: []const u8,
+    dory: ?[]const u8 = null,
+    gemma4: ?[]const u8 = null,
+    spark25: ?[]const u8 = null,
+    nemotron_metal: ?[]const u8 = null,
     pub fn get(e: @This(), name: []const u8) ?[]const u8 {
         return if (std.mem.eql(u8, name, e.name)) e.value else null;
     }
@@ -174,4 +186,17 @@ test "profile line: Qwen CUDA does not advertise Nemotron-only learning modes" {
     const line = try format(a, .stable, "qwen3_5", "cuda", ExtraEnv{ .name = "TF_SLIDE_POCKET_KEY", .value = "both" });
     defer a.free(line);
     try std.testing.expectEqualStrings("profile: stable; registered overrides: TF_SLIDE_POCKET_KEY=both (experimental, env)", line);
+}
+
+test "profile line: the pool-page switches and Nemotron's Metal paging report for their own scopes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, env)", try format(a, .stable, "dory", "cuda", TestEnv{ .dory = "1" }));
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "dory", "cuda", TestEnv{ .dory = "0" }));
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: TENSORFOLD_GEMMA4_KV_PAGES=0 (identical, env)", try format(a, .stable, "gemma4", "cuda", TestEnv{ .gemma4 = "0" }));
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "gemma4", "cuda", TestEnv{ .gemma4 = "1" }));
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: TENSORFOLD_SPARK25_KV_PAGES=0 (identical, env)", try format(a, .stable, "spark2_5", "cuda", TestEnv{ .spark25 = "0" }));
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: TF_NEMOTRON_METAL_KV_PAGES=1 (identical, env)", try format(a, .stable, "nemotron_h", "metal", TestEnv{ .nemotron_metal = "1" }));
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "nemotron_h", "cuda", TestEnv{ .nemotron_metal = "1" }));
 }
