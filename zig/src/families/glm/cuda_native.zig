@@ -98,6 +98,13 @@ fn share(own: *Owned, parallel: u32) !void {
     );
 }
 
+/// Rank 0, its pool attached: this machine's window prices, timed or kept from an earlier load of this build.
+pub fn priceWindows(p: *anyopaque, io: std.Io, ctx: *const cuda.Context, dir: []const u8, facts: lanes.Model) !lanes.Model {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    own.lanes.costs = try @import("cuda_lane_costs.zig").price(own.gpa, io, ctx, dir, own.lanes.x) orelse return facts;
+    return own.lanes.factsWithCopies(own.copies);
+}
+
 /// Whether a request's caches fit now (the lane host's admission, on its engine thread).
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const own: *Owned = @ptrCast(@alignCast(p));
@@ -158,6 +165,7 @@ const Owned = struct {
     lanes: glm_lanes.Lanes,
     layout: ?kv.Layout,
     share: usize, // TF_GLM_KV_SHARE: states the prompt cache over the pool's pages keeps (0: the host store)
+    copies: bool, // TF_GLM_COPIES=1: verified root and context copies
 };
 
 const env = @import("sys").env;
@@ -220,6 +228,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     own.gpa = gpa;
     own.benchmark_group = null;
     own.share = a.share;
+    own.copies = copies;
     // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
     if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
     // NCCL's cuMem host buffers wore out GB10's driver pool under load (NV_ERR_NO_MEMORY; next ranks failed to start)
@@ -262,12 +271,10 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
         .cap = cap,
         .roce_bytes = roce_bytes,
         .load_cache = &load_cache,
-        .copies = copies,
     }, finishRank);
 }
 
 const OpenArgs = struct {
-    copies: bool,
     load_cache: *@import("core").checkpoint.cache.Load,
     own: *Owned,
     io: std.Io,
@@ -341,7 +348,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     return .{
         .draft_kind = if (own.e.drafter != null) "DFlash2" else null,
         .backend = own.lanes.backend(),
-        .facts = own.lanes.factsWithCopies(a.copies),
+        .facts = own.lanes.factsWithCopies(own.copies),
         .rows = glm_lanes.max_rows,
         .stream_bytes = own.e.seqBytes() + extra, // each stream past the first makes its own sequence on every rank
         .free_streams = 1, // the first is the sequence the engine made
@@ -508,13 +515,13 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
 
 test "capacity keeps a verify window past the context and a multiple of 64" {
     try std.testing.expectEqual(@as(usize, 8256), capacity(8192));
-    try std.testing.expectEqual(@as(usize, 330560), capacity(330529));
+    try std.testing.expectEqual(@as(usize, 330624), capacity(330529));
     try std.testing.expect(capacity(330529) % 64 == 0);
 }
 
 test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {
     const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = @import("cuda_state.zig").page_rows, .snap_bytes = 0 };
-    for ([_]usize{ 8192, 8191, 245_760, 524_288 - 9, 524_288 - 8, 524_288 - 7, 1_048_576 }) |context| {
+    for ([_]usize{ 8192, 8191, 245_760, 524_288 - 33, 524_288 - 32, 524_288 - 31, 1_048_576 }) |context| {
         try std.testing.expectEqual(pages_mod.tableLen(capacity(context)), l.pages(context + window_rows));
     }
 }
