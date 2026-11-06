@@ -454,7 +454,7 @@ The native server enforces the same fields with the same grammars through `libtf
 xgrammar v0.2.8's C++ library (`zig/src/grammar/tf_grammar.cc`). Release archives ship it in `lib/` beside `bin/` for
 macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dxgrammar=DIR` builds it from an xgrammar
 v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
-`zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
+`zig-out/native/lib` on macOS, Linux and Windows. The server looks in `../lib` beside its binary, then beside
 it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
 structured request gets HTTP 400. The native engines listed below expose token grammar support; other engines
 refuse structured requests. Drafting stays on: the drafts the head holds on the GPU come
