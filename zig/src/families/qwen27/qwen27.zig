@@ -41,12 +41,16 @@ pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
 pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
+/// Staged references: a round's stage rows copied to their planes (tf-qwen27-run --stages).
+pub const stage_planes = @import("stage_planes.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
     _ = disk;
     _ = @import("core").gpu_profile;
+    _ = @import("core").qwen35_stages;
+    _ = stage_planes;
     _ = session;
     _ = @import("gdn_test.zig");
     _ = @import("simd_attention.zig");
