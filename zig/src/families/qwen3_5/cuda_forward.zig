@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const sig = @import("cuda_signatures.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const geometry = @import("cuda_geometry.zig");
+const modelopt_many = @import("cuda_modelopt_many.zig");
 const head_dim = geometry.head_dim;
 const max_chunks = 64;
 /// Prompt experts keep the shipped arithmetic boundary, independently of verification capacity.
@@ -123,8 +124,14 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
                 } else {
-                    try e.projAgain(m.gate, x0, e.gate, rows, prompt);
-                    try e.projAgain(m.up, x0, e.up, rows, prompt);
+                    // the ModelOpt NVFP4 pair on the screened GB10 geometries: one prompt grid for both
+                    var fused = false;
+                    if (prompt and m.gate == .ql and m.up == .ql)
+                        fused = try modelopt_many.pair(e, m.gate.ql, m.up.ql, x0, e.gate, e.up, rows);
+                    if (!fused) {
+                        try e.projAgain(m.gate, x0, e.gate, rows, prompt);
+                        try e.projAgain(m.up, x0, e.up, rows, prompt);
+                    }
                 }
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
                 const n: c_longlong = @intCast(rows * g.intermediate);
