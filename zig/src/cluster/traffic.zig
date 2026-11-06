@@ -46,7 +46,7 @@ pub const Traffic = struct {
         t.ms += (fixed + @as(f64, @floatFromInt(peer_bytes)) / link.bandwidth * 1e9) / 1e6;
     }
 
-    /// An exact sum of fp32 partials over `rows` x `width`: one-shot, or reduce-scatter then all-gather, whichever is faster.
+    /// Exact sum of fp32 partials over rows x width: one-shot, or reduce-scatter then all-gather, whichever is faster.
     fn allReduce(t: *Traffic, link: Link, ranks: u32, rows: u64, width: u64, residual: u64) void {
         const one = rows * width * 4;
         const part = rows * (width / ranks);
