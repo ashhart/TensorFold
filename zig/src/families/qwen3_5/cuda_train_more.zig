@@ -35,7 +35,7 @@ pub fn fitDevice(t: anytype, jobs: []const living.pocket_fit.DeviceFit) !void {
     const m = jobs[0].kinds.len;
     for (jobs) |j| if (j.d != d or j.kinds.len != m or j.steps != jobs[0].steps or j.below != jobs[0].below or j.rows.len < m * j.slots * d) return error.BadFit;
     const tree = if (@import("sys").c.getenv("TF_SLIDE_FIT_REDUCE")) |v| std.mem.eql(u8, std.mem.span(v), "tree") else false;
-    const gib: usize = if (@import("sys").c.getenv("TF_SLIDE_FIT_GIB")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 4 else 4;
+    const gib = try @import("sys").environment.read(usize, "TF_SLIDE_FIT_GIB", 4);
     const per = m * d * 2;
     const L = @max(1, @min(jobs.len, (gib << 30) / per));
     const drv = t.e.d;

@@ -5,16 +5,16 @@ const Allocator = std.mem.Allocator;
 
 /// The chip class gate entries name ("nvidia-sm121" for a GB10) of the device TF_CUDA_DEVICE picks; null without one.
 pub fn chip(a: Allocator) ?[]const u8 {
-    const ordinal = envNumber(getenv("TF_CUDA_DEVICE")) catch return null;
+    const ordinal = @import("sys").environment.device(null, getenv("TF_CUDA_DEVICE")) catch return null;
     var driver = cuda.Driver.open() catch return null;
     defer driver.close();
-    if (ordinal orelse 0 >= driver.deviceCount() catch return null) return null;
-    return chipClass(a, driver.capability(@intCast(ordinal orelse 0)) catch return null);
+    if (ordinal >= driver.deviceCount() catch return null) return null;
+    return chipClass(a, driver.capability(@intCast(ordinal)) catch return null);
 }
 
 /// The name of the GPU a serve opens ("NVIDIA GB10"): --device, else TF_CUDA_DEVICE, else 0; null without one.
 pub fn deviceName(a: Allocator, flag: ?u32) ?[]const u8 {
-    const ordinal = flag orelse (envNumber(getenv("TF_CUDA_DEVICE")) catch return null) orelse 0;
+    const ordinal = @import("sys").environment.device(flag, getenv("TF_CUDA_DEVICE")) catch return null;
     var driver = cuda.Driver.open() catch return null;
     defer driver.close();
     var buf: [256]u8 = undefined;
@@ -30,21 +30,16 @@ pub fn getenv(name: [:0]const u8) ?[]const u8 {
     return std.mem.span(std.c.getenv(name) orelse return null);
 }
 
-/// A variable's whole number: null when unset or empty, an error for anything else that is not one.
-fn envNumber(text: ?[]const u8) error{Invalid}!?u32 {
-    const t = std.mem.trim(u8, text orelse return null, " ");
-    if (t.len == 0) return null;
-    return std.fmt.parseInt(u32, t, 10) catch error.Invalid;
-}
-
-/// The flag's value, else the variable's, else `default`; `problem` names a variable that is not a whole number.
+/// The same strict setting contract as the direct CLI, with flags taking precedence over environment text.
 pub fn setting(a: Allocator, flag: ?u32, name: [:0]const u8, default: u32, problem: *[]const u8) !?u32 {
     if (flag) |v| return v;
-    const v = envNumber(getenv(name)) catch {
-        problem.* = try std.fmt.allocPrint(a, "{s}={s}: a whole number", .{ name, getenv(name).? });
+    const settings = @import("sys").environment;
+    const raw = getenv(name);
+    const n = settings.parse(name, raw) catch {
+        problem.* = try settings.describe(a, name, raw.?);
         return null;
     };
-    return v orelse default;
+    return @intCast(n orelse default);
 }
 
 test "chip classes name the compute capability as gate entries do" {
@@ -54,10 +49,11 @@ test "chip classes name the compute capability as gate entries do" {
     try std.testing.expectEqualStrings("nvidia-sm121", name);
 }
 
-test "variables: unset or empty means the default, anything but a whole number is refused" {
-    try std.testing.expectEqual(@as(?u32, null), try envNumber(null));
-    try std.testing.expectEqual(@as(?u32, null), try envNumber(""));
-    try std.testing.expectEqual(@as(?u32, 3), try envNumber(" 3"));
-    try std.testing.expectError(error.Invalid, envNumber("one"));
-    try std.testing.expectError(error.Invalid, envNumber("-1"));
+test "variables: device settings share raw parsing without opening the driver" {
+    const settings = @import("sys").environment;
+    try std.testing.expectEqual(@as(?u64, null), try settings.parse("TF_CUDA_DEVICE", null));
+    try std.testing.expectEqual(@as(?u64, null), try settings.parse("TF_CUDA_DEVICE", ""));
+    try std.testing.expectEqual(@as(?u64, 3), try settings.parse("TF_CUDA_DEVICE", " 3"));
+    try std.testing.expectError(error.InvalidEnvironment, settings.parse("TF_CUDA_DEVICE", "one"));
+    try std.testing.expectError(error.InvalidEnvironment, settings.parse("TF_CUDA_DEVICE", "-1"));
 }
