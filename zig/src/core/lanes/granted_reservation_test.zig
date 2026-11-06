@@ -178,7 +178,8 @@ test "the drafter's own chances decide a bounded reservation, not the generic ra
     var s: Setup = .{};
     try s.init(.{}, 1);
     defer s.deinit();
-    @memset(try s.e.rule.rates(win.who(&s.streams[0])), 0.95); // rates that would carry every draft
+    // rates that would carry every draft
+    @memset(try s.e.rule.rates(win.who(&s.streams[0], s.e.rule.k.hold_costs.len > 0)), 0.95);
     s.history(0, 6, false, null);
     try s.chain(0, &.{ 0.9, 0.3, 0.05, 0.04, 0.03, 0.02 }, 0.01); // a second draft this seldom landing, then none
     try t.expectEqualSlices(i64, &.{2}, try s.budgets());

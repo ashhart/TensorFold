@@ -1,4 +1,4 @@
-//! Price next-round head rows before proposing; keep that window's owned copy decision and the last full node prices.
+//! Price next-round head rows; costed holds own copy decisions, and all routes retain full node prices.
 const std = @import("std");
 const win = @import("windows.zig");
 const alloc = @import("allocate.zig");
@@ -48,7 +48,7 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
             const prices = try a.alloc(f64, most);
             const known = @min(cached.len, most);
             @memcpy(prices[0..known], cached[0..known]);
-            const rates = try e.rule.rates(win.who(s));
+            const rates = try e.rule.rates(win.who(s, e.cfg.k.hold_costs.len > 0));
             var chance = cached[known - 1];
             for (known..most) |j| {
                 chance *= rates[@min(j, rates.len - 1)];
@@ -56,7 +56,7 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
             }
             pr.* = prices;
         } else {
-            pr.* = try alloc.chainProbabilities(a, try e.rule.rates(win.who(s)), most);
+            pr.* = try alloc.chainProbabilities(a, try e.rule.rates(win.who(s, e.cfg.k.hold_costs.len > 0)), most);
         }
     }
     if (live == 0) {
@@ -106,7 +106,7 @@ fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize, sampled
     if (!e.cfg.granted_depth and !e.cfg.limit_shared_drafts) return null;
     const a = e.arena.allocator();
     const who = try a.alloc(depth.Who, heads.len);
-    for (heads, who) |i, *w| w.* = win.who(plans[i].stream);
+    for (heads, who) |i, *w| w.* = win.who(plans[i].stream, e.cfg.k.hold_costs.len > 0);
     const probe: depth.Probe = .{ .ptr = e, .copy = noCopy };
     if (e.cfg.granted_depth) {
         for (who, out) |*w, *d| d.* = try e.rule.reserveDepth(w, null, probe); // each stream's grant plus slack, once

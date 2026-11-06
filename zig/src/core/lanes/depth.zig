@@ -256,7 +256,7 @@ pub const Rule = struct {
                 r.probePlain(st);
             return if (due) @min(most, r.k.draft_slack) else 0;
         }
-        if (!st.hold_capped) {
+        if (r.k.hold_costs.len == 0 or !st.hold_capped) {
             st.plain = 0;
             st.wait = r.k.depth_probe_every;
         }
@@ -274,13 +274,14 @@ pub const Rule = struct {
     }
 
     fn nextDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe, reserving: bool) !i64 {
-        if (who.finished or who.forced) return 0;
-        const d: i64 = if (budget) |b| b else if (r.granted_depth)
+        if (r.k.hold_costs.len > 0 and who.forced) return 0;
+        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.granted_depth)
             try r.grantDepth(who.*, reserving)
         else if (r.node_probabilities and !(who.sampled and r.confidence_floor != null))
             @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
         else
             try r.depth(who.*);
+        if (who.forced) return 0;
         if (d != 0 and probe.copy(probe.ptr, who)) return @intFromBool(!r.k.copy_first);
         return d;
     }
@@ -327,6 +328,7 @@ pub const Rule = struct {
             }
             return;
         }
+        const priced_holds = r.k.hold_costs.len > 0;
         const most = try r.gpa.alloc(i64, whos.len);
         defer r.gpa.free(most);
         const probs = try r.gpa.alloc([]f64, whos.len);
@@ -334,8 +336,9 @@ pub const Rule = struct {
         var made: usize = 0;
         defer for (probs[0..made]) |p| r.gpa.free(p);
         for (whos, most, probs) |w, *m, *p| {
-            m.* = if (w.finished or w.forced) 0 else @min(@as(i64, r.most_drafts), @max(1, w.draft_room - 1));
-            p.* = try alloc.chainProbabilities(r.gpa, if (w.finished or w.forced) r.prior else try r.rates(w), @intCast(m.*));
+            const excluded = priced_holds and (w.finished or w.forced);
+            m.* = if (excluded) 0 else @min(@as(i64, r.most_drafts), @max(1, w.draft_room - 1));
+            p.* = try alloc.chainProbabilities(r.gpa, if (excluded) r.prior else try r.rates(w), @intCast(m.*));
             made += 1;
         }
         const work = try r.gpa.alloc(u32, whos.len * @as(usize, if (r.k.hold_context_costs.len > 0) 2 else 1));
@@ -343,10 +346,10 @@ pub const Rule = struct {
         const ones = work[0..whos.len];
         var row_ms: []f64 = &.{};
         defer r.gpa.free(row_ms);
-        var live: usize = 0;
+        var cost_streams: usize = 0;
         for (whos, ones, 0..) |w, *fixed, i| {
-            fixed.* = @intFromBool(!w.finished);
-            live += fixed.*;
+            fixed.* = @intFromBool(!priced_holds or !w.finished);
+            cost_streams += fixed.*;
             if (w.finished) continue;
             if (w.row_ms > 0 and row_ms.len == 0) {
                 row_ms = try r.gpa.alloc(f64, whos.len);
@@ -357,20 +360,23 @@ pub const Rule = struct {
         const own_steps = r.draft_step_ms != 0; // the backend's own draft step prices a stream's drafts past its first
         const context_rows = work[whos.len..];
         for (context_rows, 0..) |*rows, i| rows.* = whos[i].hold_context_rows;
-        const extra_row_ms = r.row_cost.extraMs(live, sampled);
+        const extra_row_ms = r.row_cost.extraMs(cost_streams, sampled);
         const head: alloc.HeadCost = if (own_steps)
             .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .hold_costs = r.k.hold_costs, .hold_context_costs = r.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = r.k.hold_rows, .hold_block_rows = r.k.hold_block_rows, .host_row_ms = row_ms, .row_ms = extra_row_ms }
         else
             .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads, .hold_costs = r.k.hold_costs, .hold_context_costs = r.k.hold_context_costs, .hold_context_rows = context_rows, .hold_rows = r.k.hold_rows, .hold_block_rows = r.k.hold_block_rows, .host_row_ms = row_ms, .row_ms = extra_row_ms };
         // a timed hold grid prices the pass itself: the overhead beyond it is the fixed one either way
-        const overhead = if (own_steps and r.k.hold_costs.len == 0) r.overheadMs(live, sampled) else r.fixedMs(live, sampled);
-        const counts = try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, overhead, r.row_cost.capRows(live, sampled, @max(live, r.batch_rows)), head);
+        const overhead = if (own_steps and !priced_holds)
+            r.overheadMs(cost_streams, sampled)
+        else
+            r.fixedMs(cost_streams, sampled);
+        const counts = try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, overhead, r.row_cost.capRows(cost_streams, sampled, @max(cost_streams, r.batch_rows)), head);
         defer r.gpa.free(counts);
         r.probeShared(whos, most, counts);
         if (r.plain_guard) {
             // no draft where none pays; a probe after a growing run of plain rounds
             for (whos, counts) |w, *c| {
-                if (w.finished or w.forced) continue;
+                if (priced_holds and (w.finished or w.forced)) continue;
                 const st = &w.state.*.?;
                 st.rounds += 1;
                 if (c.* != 0) {
@@ -389,8 +395,11 @@ pub const Rule = struct {
         r.shared_rounds +%= 1;
         const every = r.k.depth_probe_every;
         if (whos.len == 0 or every == 0 or r.shared_rounds % every != 0) return;
-        var rows: u64 = 0;
-        for (whos) |w| rows += @intFromBool(!w.finished);
+        var rows: u64 = whos.len;
+        if (r.k.hold_costs.len > 0) {
+            rows = 0;
+            for (whos) |w| rows += @intFromBool(!w.finished);
+        }
         for (counts) |c| rows += c;
         if (rows >= @max(whos.len, r.batch_rows)) return;
         const first: usize = @intCast((r.shared_rounds / every -% 1) % whos.len);

@@ -131,18 +131,18 @@ test "host accounting removes only quotable draws and excludes failed stale and 
         // Depth selection still uses complete measured lone rounds, not an additional row quote.
         if (live == 1) {
             const s = &streams[0];
-            for (0..4) |drafts| try engine.rule.observeCost(@intCast(drafts), 20, false, win.who(s));
-            const before = try engine.rule.depth(win.who(s));
+            for (0..4) |drafts| try engine.rule.observeCost(@intCast(drafts), 20, false, win.who(s, engine.rule.k.hold_costs.len > 0));
+            const before = try engine.rule.depth(win.who(s, engine.rule.k.hold_costs.len > 0));
             s.verify_row_ms = 1_000_000;
-            try std.testing.expectEqual(before, try engine.rule.depth(win.who(s)));
+            try std.testing.expectEqual(before, try engine.rule.depth(win.who(s, engine.rule.k.hold_costs.len > 0)));
         }
     };
 }
 
-test "generic budgets price live host rows without borrowing finished streams' baseline work" {
+test "costed budgets price live host rows without borrowing finished streams' baseline work" {
     var shared = try alloc.extendCosts(gpa, &.{.{ .width = 8, .ms = 10 }}, 8);
     defer shared.deinit(gpa);
-    var rule: Rule = .{ .gpa = gpa, .prior = &.{ 0.9, 0.5, 0.2 }, .most_drafts = 3, .family_costs = &shared, .shared_costs = &shared, .mtp_step_ms = 0, .plain_guard = true, .node_probabilities = false, .batch_rows = 8 };
+    var rule: Rule = .{ .gpa = gpa, .k = .{ .hold_costs = &.{.{ .streams = 1, .depth = 1, .ms = 0 }} }, .prior = &.{ 0.9, 0.5, 0.2 }, .most_drafts = 3, .family_costs = &shared, .shared_costs = &shared, .mtp_step_ms = 0, .plain_guard = true, .node_probabilities = false, .batch_rows = 8 };
     defer rule.deinit();
     try rule.observeOverhead(1, 1, 10, true, 0);
     var states: [2]?State = @splat(null);

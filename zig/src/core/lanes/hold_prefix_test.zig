@@ -132,7 +132,7 @@ test "a profitable observed head prefix survives when the full reserved hold can
         defer s.deinit(gpa);
         s.granted = 2;
         try s.draft_chances.appendSlice(gpa, &.{ 0.95, 0.9025 });
-        try f.engine.rule.observeDepth(win.who(&s), 2, 1);
+        try f.engine.rule.observeDepth(win.who(&s, f.engine.rule.k.hold_costs.len > 0), 2, 1);
         const plans = [_]win.Plan{.{ .stream = &s, .position = 0, .kind = .none }};
         try f.expectBudget(&plans, 1); // raw chances reserve two; only the first draft's hold pays
         f.holds[0].ms = 1000; // neither prefix pays now; retaining one draft would also be wrong
@@ -160,12 +160,12 @@ test "a futile exploration never fires, and a real recovery is available the mom
         defer s.deinit(gpa);
         s.granted = 1;
         try s.draft_chances.appendSlice(gpa, &.{0.99});
-        try f.engine.rule.observeDepth(win.who(&s), 1, 0);
+        try f.engine.rule.observeDepth(win.who(&s, f.engine.rule.k.hold_costs.len > 0), 1, 0);
         const plans = [_]win.Plan{.{ .stream = &s, .position = 0, .kind = .none }};
         for (0..40) |_| try f.expectBudget(&plans, 0); // well past the 8 / 16 round probe cadence
         f.holds[0].ms = 0.1;
         try f.expectBudget(&plans, 1); // the saved recovery proposes at once: impossible rounds did not spend or reset it
-        try f.engine.rule.observeDepth(win.who(&s), 1, 1); // the proposal landed
+        try f.engine.rule.observeDepth(win.who(&s, f.engine.rule.k.hold_costs.len > 0), 1, 1); // the proposal landed
         try f.expectBudget(&plans, 1); // and the recovered hold stays profitable
     }
 }
@@ -285,8 +285,8 @@ test "a due exploration is feasible when a deeper padded hold is cheaper than a 
         try streams[0].draft_chances.appendSlice(gpa, &.{ 0.99, 0.98, 0.97 });
         try streams[1].draft_chances.appendSlice(gpa, &.{0.99});
         // each head's actual first draft missed: its observed gain is zero, so the normal hold stands aside
-        try f.engine.rule.observeDepth(win.who(&streams[0]), 3, 0);
-        try f.engine.rule.observeDepth(win.who(&streams[1]), 1, 0);
+        try f.engine.rule.observeDepth(win.who(&streams[0], f.engine.rule.k.hold_costs.len > 0), 3, 0);
+        try f.engine.rule.observeDepth(win.who(&streams[1], f.engine.rule.k.hold_costs.len > 0), 1, 0);
         var plans: [4]win.Plan = undefined;
         for (&plans, &streams) |*p, *s| p.* = .{ .stream = s, .position = 0, .kind = .none };
         const heads = [_]usize{ 0, 1 };
@@ -305,7 +305,7 @@ test "a due exploration is feasible when a deeper padded hold is cheaper than a 
             }
             try std.testing.expect(probed);
             for (out, streams[0..2]) |offered, *s| {
-                if (offered > 0) try f.engine.rule.observeDepth(win.who(s), offered, 0);
+                if (offered > 0) try f.engine.rule.observeDepth(win.who(s, f.engine.rule.k.hold_costs.len > 0), offered, 0);
             }
         }
     }
@@ -410,7 +410,10 @@ test "a live host quote invalidates futile recovery while an unknown route prese
     head.granted = 0;
     head.verify_row_ms = 20;
     try forced.force.append(gpa, 11);
-    var whos = [_]depth.Who{ win.who(&head), win.who(&forced) };
+    var whos = [_]depth.Who{
+        win.who(&head, f.engine.rule.k.hold_costs.len > 0),
+        win.who(&forced, f.engine.rule.k.hold_costs.len > 0),
+    };
     var out: [2]i64 = undefined;
     const probe = win.probe(&f.engine);
     // Even a perfect first row loses: 3 / 51 < 2 / 30. These intervals cannot spend the saved trial.
@@ -419,7 +422,7 @@ test "a live host quote invalidates futile recovery while an unknown route prese
         try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out);
     }
     head.verify_row_ms = null;
-    whos[0] = win.who(&head);
+    whos[0] = win.who(&head, f.engine.rule.k.hold_costs.len > 0);
     out = .{ 0, 0 };
     try f.engine.rule.payHolds(&whos, true, &out, @import("hold_price.zig").Base.pending(2));
     try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out); // no fresh rows means no trial, even with an optimistic quote
@@ -429,7 +432,10 @@ test "a live host quote invalidates futile recovery while an unknown route prese
     head.verify_row_ms = 20;
     forced.force.clearRetainingCapacity();
     forced.granted = 0;
-    whos = .{ win.who(&head), win.who(&forced) };
+    whos = .{
+        win.who(&head, f.engine.rule.k.hold_costs.len > 0),
+        win.who(&forced, f.engine.rule.k.hold_costs.len > 0),
+    };
     try f.engine.rule.budgets(&whos, probe, true, &out);
     try std.testing.expectEqual(@as(i64, 1), out[1]);
 }

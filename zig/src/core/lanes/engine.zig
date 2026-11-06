@@ -224,7 +224,7 @@ pub const Engine = struct {
         const held_levels = s.held_levels;
         if (e.cfg.family_mtp and s.headDrafts()) {
             if (early and o.cut == null) {
-                var w = win.who(s);
+                var w = win.who(s, e.cfg.k.hold_costs.len > 0);
                 const d: u32 = @intCast(try e.rule.headDepth(&w, null, win.probe(e)));
                 try e.askDrafts(&.{.{ .stream = s, .follow = o.follow, .rows = o.path, .start = plan.position, .position = s.cache_len + 1, .depth = d, .early = true }});
             } else {
@@ -235,7 +235,7 @@ pub const Engine = struct {
                 const ms = e.clock.elapsedMs(.cost);
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
-                try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
+                try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s, e.cfg.k.hold_costs.len > 0));
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
@@ -313,9 +313,9 @@ pub const Engine = struct {
         const sampled = win.anySampled(plans);
         if (heads.items.len > 0 and e.cfg.allocate_shared_drafts) {
             try @import("shared_drafts.zig").budgets(e, plans, heads.items, budgets);
-        } else if (heads.items.len > 0) {
+        } else if (heads.items.len > 0 or e.cfg.k.hold_costs.len == 0) {
             const whos = try a.alloc(depth.Who, heads.items.len);
-            for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream);
+            for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream, e.cfg.k.hold_costs.len > 0);
             try e.rule.budgets(whos, win.probe(e), sampled, budgets);
         }
         const ids = try a.alloc(ev.Value, heads.items.len);
@@ -327,7 +327,7 @@ pub const Engine = struct {
             try e.askDrafts(requests);
         } else if (requests.len > 0) {
             for (requests, budgets, 0..) |*r, d, i| {
-                var who = win.who(r.stream);
+                var who = win.who(r.stream, e.cfg.k.hold_costs.len > 0);
                 r.depth = @intCast(try e.rule.headDepth(&who, d, win.probe(e)));
                 try e.askDrafts(requests[i..][0..1]);
             }
@@ -405,7 +405,7 @@ pub const Engine = struct {
                     var chain_kept: usize = 0;
                     for (path[1..]) |r| chain_kept += @intFromBool((p.branch_from == 0 or r < p.branch_from) and r < own_end);
                     const proposed = std.mem.max(u32, chain);
-                    try e.rule.observeDepth(win.who(s), proposed, @intCast(chain_kept));
+                    try e.rule.observeDepth(win.who(s, e.cfg.k.hold_costs.len > 0), proposed, @intCast(chain_kept));
                     if (e.backend.vtable.observe_head) |observe| observe(e.backend.ptr, s, proposed, @intCast(chain_kept));
                 }
                 var kept_branch: u64 = 0; // the context's graft rows kept, then Recall's
@@ -489,7 +489,7 @@ pub const Engine = struct {
             try prepare(e.backend.ptr, &.{request});
             request.prepared = true;
         }
-        var w = win.who(s);
+        var w = win.who(s, e.cfg.k.hold_costs.len > 0);
         request.depth = @intCast(try e.rule.headDepth(&w, budget, win.probe(e)));
         if (!e.late.put(e.backend.defer_lone_draft and e.alone, request)) try e.askDrafts(&.{request});
     }

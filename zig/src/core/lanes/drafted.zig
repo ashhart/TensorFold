@@ -174,9 +174,11 @@ pub const Drafted = struct {
     fn enroll(x: *Drafted, s: *Stream) !void {
         if (x.lanes.contains(s)) return;
         try x.lanes.ensureUnusedCapacity(x.gpa, 1);
-        // Only providers offering enrollment may skip context; legacy feature-prefill stays intact.
-        s.head_context = if (x.drafter.vtable.enroll != null)
-            s.drafts and x.drafter.enroll(s, .{ .streams = @max(x.lanes.count() + 1, s.prefill_cohort), .heads = x.heads + 1 })
+        // Disabled drafts never own head context; enabled legacy providers keep their feature-prefill path.
+        s.head_context = if (!s.drafts)
+            false
+        else if (x.drafter.vtable.enroll != null)
+            x.drafter.enroll(s, .{ .streams = @max(x.lanes.count() + 1, s.prefill_cohort), .heads = x.heads + 1 })
         else
             null;
         if (s.head_context == false) s.head_prior = &.{};

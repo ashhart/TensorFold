@@ -144,7 +144,7 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
 
 /// Priced heads wait for the first funded grant; prompt context is still owned at open.
 pub fn firstDepth(e: *Engine, s: *Stream, reach: Reach) !u32 {
-    var who = win.who(s);
+    var who = win.who(s, e.cfg.k.hold_costs.len > 0);
     if (who.granted == null and @import("hold_price.zig").pricesPasses(e)) return 0;
     if (reach == .head and e.cfg.node_probabilities) return @intCast(try e.rule.headDepth(&who, null, win.probe(e)));
     return @intCast(try e.rule.depth(who));

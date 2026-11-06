@@ -8,7 +8,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: Metal GLM draft-source facts use a defined host capability receiver, removing a random crash from an uninitialized device. Serving is unchanged (#2268).
 
-- LFM2 DSpark keeps context and host-draw prices separate from learned shared-row costs when integrated with current main. CLI GPU admission tests live in their own module to keep the shared CLI test file below 600 lines.
+- LFM2 DSpark scopes live-stream budget prices, forced-depth fast returns, retained copy decisions, empty-round probe suppression and paused-stream exclusion to configured hold costs. Other drafters retain their original scheduling. Requests with `draft:false` never open or absorb legacy drafters without an enrollment hook. Context and host-draw prices remain separate from learned shared-row costs; CLI GPU admission tests stay in their own module below 600 lines.
 
 - LFM2 DSpark stands aside on pre-M5 or unrecognized Metal device names before neural loading, calibration and admission charges. Those requests retain the canonical target-only path and cheap copies; recognized M5-or-newer names keep the funded neural path. Independent native FP32 diagnostics and other families' drafters are unchanged.
 
@@ -16,7 +16,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - LFM2 DSpark's native diagnostic releases independent target-control caches after their last forward, creates the main tap buffer and comparison cache after capture controls, and separates independent stage buffers. Context lengths, capture layouts, FP32 references and numerical bounds are unchanged; serving code is unaffected.
 
-- Lane reservations retain the next window's copy decision, including silence and source evidence, until verification consumes it. Planning no longer advances suffix-lookup backoff twice, and shared borrowed proposals survive another stream's lookup.
+- Costed-hold lane reservations retain the next window's copy decision, including silence and source evidence, until verification consumes it. Planning no longer advances suffix-lookup backoff twice, and shared borrowed proposals survive another stream's lookup.
 
 - LFM2 DSpark retains the configured bidirectional query block when the scheduler asks for a shorter proposal prefix. Physical packing, clean calibration, context funding and the FP32 reference use the same fixed query width; larger logical cohorts still run as bounded passes. This corrects grant-dependent model inputs, not a claim of higher acceptance or throughput.
 
