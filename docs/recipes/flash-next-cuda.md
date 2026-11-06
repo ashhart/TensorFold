@@ -89,7 +89,9 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 - `TF_FLASHNEXT_CHUNK_SOLO` (`TF_FLASHNEXT_CHUNK` to 16,384) is the chunk a pass takes when no other stream
   is decoding as it starts; with one decoding, the pass takes `TF_FLASHNEXT_CHUNK`. Unset, it's 8,192 at `--parallel 1`
   on one GPU, and every other server's passes take `TF_FLASHNEXT_CHUNK`. See [Prompt chunk size](#prompt-chunk-size).
-- `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default 0.60) set the head's chain.
+- `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default -0.4) set the head's chain. A
+  negative value keeps drafting while the drafts' probabilities multiply to at least its size (0.4 by default), a
+  positive value keeps a later draft only at or above it, and 0 keeps every draft.
 - `TF_FLASHNEXT_LOAD_THREADS` (1 to 32, default 8) packs the routed NVFP4 experts on that many threads at load, staged
   through at most 192 MiB of pinned memory: every layer on one GPU, and the MTP head's layer on rank 0 at `--tp 2`.
   1 keeps the one-expert loop. Other values are refused.
