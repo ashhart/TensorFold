@@ -4,9 +4,9 @@ const math = @import("neuron.zig");
 pub fn layer(comptime F: @import("family.zig").Family, gpa: std.mem.Allocator, d: usize, neurons: usize, gate: []f32, up: []f32, down: []f32) !void {
     if (d == 0 or d % F.quant.group != 0 or neurons % F.quant.group != 0 or up.len != neurons * d or down.len != up.len)
         return error.BadPocket;
-    if (F.neuron.act == .swiglu and gate.len != up.len) return error.BadPocket;
+    if (F.neuron.inputs() == 2 and gate.len != up.len) return error.BadPocket;
     for ([_][]f32{ gate, up, down }) |xs| for (xs) |x| if (!std.math.isFinite(x)) return error.NonFinitePocket;
-    try @import("shards.zig").roundFixed(F, gpa, d, if (F.neuron.act == .swiglu) &.{ gate, up } else &.{up}, down);
+    try @import("shards.zig").roundFixed(F, gpa, d, if (F.neuron.inputs() == 2) &.{ gate, up } else &.{up}, down);
     for ([_][]f32{ gate, up, down }) |xs| for (xs) |x| if (!std.math.isFinite(x)) return error.NonFinitePocket;
 }
 pub fn asWritten(p: anytype, t: anytype, host: anytype) !void {

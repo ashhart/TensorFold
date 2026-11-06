@@ -20,6 +20,7 @@ pub fn State(comptime B: type) type {
         rows: usize = 0,
         phase: Phase = .empty,
         base_valid: bool = false,
+        untaught: bool = false,
         recorded: [cfg.max_layers]bool = @splat(false),
         /// Allocation alone queues no writes; reset initializes the frame after ownership has transferred.
         pub fn open(a: std.mem.Allocator, backend: *B, c: *const cfg.Config, capacity: usize, window: usize, budget: u64) !Self {

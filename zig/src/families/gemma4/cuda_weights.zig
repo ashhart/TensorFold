@@ -156,15 +156,24 @@ const Ctx = struct {
     /// An n-by-k MLX affine projection of `bits` codes (words, scales, biases) staged and packed into qlinear's tiles.
     fn linear(x: *Ctx, prefix: []const u8, n: usize, k: usize, bits: u8) !Proj {
         var buf: [192]u8 = undefined;
-        const specs = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k * bits / 32 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
+        const matrix = @import("living").dense_matrix;
+        const role = matrix.role(prefix);
+        const extra = if (role != null) x.w.config.learned else 0;
+        if (extra != 0 and bits != 4) return error.DensePocketFormat;
+        const stored_n = n + if (role != null and role.? != .down) extra else @as(usize, 0);
+        const stored_k = k + if (role != null and role.? == .down) extra else @as(usize, 0);
+        const specs = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, stored_k * bits / 32 }, .{ "scales", .bf16, stored_k / 64 }, .{ "biases", .bf16, stored_k / 64 } };
         var raw: [3]u64 = undefined;
         var at: usize = 0;
-        for (specs, &raw) |sp, *r| {
-            const t = try x.ck.expect(try std.fmt.bufPrint(&buf, "{s}.{s}", .{ prefix, sp[0] }), sp[1], &.{ n, sp[2] });
-            if (at + t.bytes.len > x.stage.len) return error.StageTooSmall;
-            try x.stage.upload(at, t.bytes);
+        var temporary: std.heap.ArenaAllocator = .init(x.w.gpa);
+        defer temporary.deinit();
+        for (specs, &raw, 0..) |sp, *r, index| {
+            const t = try x.ck.expect(try std.fmt.bufPrint(&buf, "{s}.{s}", .{ prefix, sp[0] }), sp[1], &.{ stored_n, sp[2] });
+            const bytes = if (extra == 0) t.bytes else try matrix.base(temporary.allocator(), x.w.config.geo.hidden, x.w.config.geo.intermediate, extra, role.?, @fromBackingInt(@intCast(index)), matrix.View.of(t));
+            if (at + bytes.len > x.stage.len) return error.StageTooSmall;
+            try x.stage.upload(at, bytes);
             r.* = x.stage.ptr + at;
-            at += t.bytes.len;
+            at += bytes.len;
         }
         const served = cuda.qlinear.servedBits(bits);
         const out: Proj = if (served == 4) blk: {
@@ -205,6 +214,7 @@ pub fn requireAffineInputs(c: cfg.Config) !void {
 }
 
 fn loadConfig(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, k: *const kern.Kernels, dir: []const u8, c: cfg.Config, layers: ?usize, images: bool) !Weights {
+    if (c.learned != 0) try @import("learning_profile.zig").check(c);
     const geo = c.geo;
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();

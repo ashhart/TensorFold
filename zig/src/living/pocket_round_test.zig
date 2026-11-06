@@ -152,8 +152,8 @@ test "learned fixed point: exponent seams subnormals and finite overflow stay sa
         var gate = up;
         up[0] = -std.math.floatMax(f32);
         up[1] = std.math.floatMax(f32);
-        try t.expectError(error.NonFinitePocket, @import("pocket_round.zig").layer(f, t.allocator, q.group, f.neurons, if (f.neuron.act == .swiglu) &gate else &.{}, &up, &down));
-        if (f.neuron.act == .swiglu) {
+        try t.expectError(error.NonFinitePocket, @import("pocket_round.zig").layer(f, t.allocator, q.group, f.neurons, if (f.neuron.inputs() == 2) &gate else &.{}, &up, &down));
+        if (f.neuron.inputs() == 2) {
             const P = @import("pocket.zig").Pocket(struct {}, f);
             var p: P = .{ .gpa = t.allocator, .mode = .reply, .hidden = q.group };
             defer p.deinit();

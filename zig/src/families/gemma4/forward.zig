@@ -7,6 +7,7 @@ const kernels = @import("kernels.zig");
 const weights = @import("weights.zig");
 const lane = @import("../../core/lane_projection.zig");
 const Model = @import("model.zig").Model;
+const learning = @import("learning_metal_hooks.zig");
 
 const Kind = kernels.Kind;
 
@@ -98,10 +99,13 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
         while (sub < seg.rows) : (sub += attend_rows) for (chunks[at + sub]) |n| if (geo.query_heads * attend_rows * n > s.slots) return error.ContextFull;
         at += seg.rows;
     }
+    try learning.begin(m, segments, rows);
     const w = &m.weights;
     const ks = &m.kernels.sliding;
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
+    var ended = false;
+    defer if (!ended) e.end();
     e.setPipeline(ks.embed);
     bind(e, &.{s.ids}, 0);
     bindRef(e, w.embed_w, 1);
@@ -110,6 +114,7 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     bind(e, &.{s.h[0]}, 4);
     e.setValue(embedScale(geo.hidden), 5);
     e.dispatchThreads(.{ .width = geo.hidden / 2, .height = rows }, .{ .width = 256 });
+    try learning.note(m, e, null, .input, s.h[0], rows, geo.hidden);
     e.setPipeline(ks.rms);
     bind(e, &.{s.h[0]}, 0);
     bindRef(e, w.layers[0].input_norm, 1);
@@ -117,18 +122,21 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     e.setValue(cfg.eps, 3);
     sumsOut(e, s, rows, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
+    try learning.note(m, e, null, .normed, s.normed[0], rows, geo.hidden);
     var cur: usize = 0;
-    const fused = rows == 1 and m.fuse;
+    const fused = rows == 1 and m.fuse and !learning.active(m);
     for (0..geo.layers) |i| {
         try layer(m, e, s, segments, &chunks, i, cur, rows, .{}, fused);
         cur = 1 - cur;
     }
     if (fused) denseTail(m, e, s, geo.layers - 1, 1 - cur, rows); // the last layer's tail, no projection to carry it
     try project(m, s, e, w.head, s.normed[cur], s.logits, rows);
+    try learning.note(m, e, null, .head_raw, s.logits, rows, cfg.vocab);
     e.setPipeline(ks.softcap);
     bind(e, &.{s.logits}, 0);
     e.setValue(cfg.softcap, 1);
     e.dispatchThreads(.{ .width = rows * cfg.vocab }, .{ .width = 256 });
+    try learning.note(m, e, null, .head, s.logits, rows, cfg.vocab);
     // each row's greedy token (the softcap keeps the order): tree_round's argmax in 16-row pieces
     var first: usize = 0;
     while (first < rows) : (first += 16) {
@@ -136,6 +144,7 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
         try m.picks.argmax(e, .{ .buf = s.logits, .off = first * cfg.vocab * 2 }, .{ .buf = s.picks, .off = first * 8 }, .{ .rows = @intCast(n), .vocab = cfg.vocab, .stride = cfg.vocab });
     }
     e.end();
+    ended = true;
     cb.commit();
     cb.wait();
     if (cb.failure()) |msg| {
@@ -208,6 +217,9 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
         const tap = tapRef(m, s.taps, s.hn, i - 1);
         try projectFused(m, e, l.qkv.runs[0], 1, s.y, s.qkv, .{ .{ .buf = s.hn }, .{ .buf = s.y }, pl.post_feedforward, pl.scalar, l.input_norm, l.input_norm }, .{ .{ .buf = s.h[cur] }, tap.ref }, tap.stride);
     } else if (st.mm) try projectStack(m, s, e, &l.qkv, s.normed[cur], s.qkv, rows);
+    try learning.columns(m, e, i, .q_raw, s.qkv, rows, geo.query_heads * dh, width, 0, false);
+    try learning.columns(m, e, i, .k_raw, s.qkv, rows, nk * dh, width, geo.query_heads * dh, false);
+    try learning.columns(m, e, i, .v_raw, s.qkv, rows, nk * dh, width, geo.query_heads * dh + (if (global) @as(usize, 0) else nk * dh), false);
     var at: usize = 0;
     for (segments) |seg| {
         const n = seg.rows;
@@ -233,6 +245,11 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
             bind(e, &.{ c.k[i], c.v[i] }, 9); // keys and values straight into the cache at each row's slot
             e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
             e.dispatchGroups(.{ .width = geo.query_heads + 2 * nk, .height = n }, .{ .width = 32 });
+        }
+        if (prep) {
+            if (m.learning) |h| try h.note(e, i, .query, .{ .buffer = s.q, .offset = q_off, .len = n * geo.query_heads * dh * 2, .rows = n, .width = geo.query_heads * dh });
+            try learning.heads(m, e, i, .key, s.k, n, nk, dh, kv_off);
+            try learning.heads(m, e, i, .value, s.v, n, nk, dh, kv_off);
         }
         var sub: usize = 0;
         while (sub < n) : (sub += attend_rows) {
@@ -287,6 +304,8 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
         at += n;
     }
     if (st.mm) try project(m, s, e, l.o, s.attn, s.o, rows);
+    try learning.note(m, e, i, .attention, s.attn, rows, geo.query_heads * dh);
+    try learning.note(m, e, i, .attn_output, s.o, rows, geo.hidden);
     if (!st.glue) {
         if (st.mm) try projectStack(m, s, e, &l.gate_up, s.n_mlp, s.gate_up, rows);
         if (st.mm) try project(m, s, e, l.down, s.act, s.y, rows);
@@ -305,13 +324,23 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
     bind(e, &.{ s.hn, s.n_mlp }, 5);
     sumsOut(e, s, rows, 7);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
+    try learning.note(m, e, i, .mid, s.hn, rows, geo.hidden);
+    try learning.note(m, e, i, .mlp_input, s.n_mlp, rows, geo.hidden);
     if (st.mm) try projectStack(m, s, e, &l.gate_up, s.n_mlp, s.gate_up, rows);
+    try learning.columns(m, e, i, .gate, s.gate_up, rows, geo.intermediate, 2 * geo.intermediate, 0, l.gate_up.interleaved);
+    try learning.columns(m, e, i, .up, s.gate_up, rows, geo.intermediate, 2 * geo.intermediate, if (l.gate_up.interleaved) @as(usize, 16) else geo.intermediate, l.gate_up.interleaved);
     e.setPipeline(kd.geglu);
     bind(e, &.{ s.gate_up, s.act }, 0);
     e.setValue(@as(u32, @intCast(geo.intermediate)), 2);
     sumsOut(e, s, rows, 3);
     e.setValue(@as(i32, @intFromBool(l.gate_up.interleaved)), 5); // one run: its rows interleaved in 16-row blocks
     e.dispatchGroups(.{ .width = geo.intermediate / 64, .height = rows }, .{ .width = 64 });
+    try learning.note(m, e, i, .act, s.act, rows, geo.intermediate);
     if (st.mm) try project(m, s, e, l.down, s.act, s.y, rows);
+    try learning.note(m, e, i, .mlp_base, s.y, rows, geo.hidden);
+    try learning.dense(m, e, i, s.n_mlp, s.y, rows);
+    try learning.note(m, e, i, .mlp_output, s.y, rows, geo.hidden);
     denseTail(m, e, s, i, cur, rows);
+    try learning.note(m, e, i, .residual, s.h[1 - cur], rows, geo.hidden);
+    try learning.note(m, e, i, .next, s.normed[1 - cur], rows, geo.hidden);
 }

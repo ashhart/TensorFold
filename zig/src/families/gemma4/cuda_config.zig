@@ -88,6 +88,8 @@ pub const Config = struct {
     /// Each linear's MLX affine width (the config's quantization table).
     widths: widths.Widths = .{},
     context: usize,
+    learned: usize = 0,
+    wrapped: bool = true,
     eos: [4]u32 = .{ 0, 0, 0, 0 },
     eos_count: usize = 0,
 
@@ -230,10 +232,12 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     if (isTrue(text, "use_double_wide_mlp") or isTrue(text, "attention_bias")) return error.UnsupportedGemmaGeometry;
     if (!isString(text.get("hidden_activation"), "gelu_pytorch_tanh")) return error.UnsupportedGemmaGeometry;
     if (!isTrue(text, "tie_word_embeddings")) return error.UnsupportedGemmaGeometry;
+    const learned = optionalInt(text, "tensorfold_learned_neurons");
+    if (learned != 0 and learned != 64) return error.UnsupportedGemmaGeometry;
     const dims = .{
-        .{ "hidden_size", geo.hidden },             .{ "vocab_size", vocab },                    .{ "num_hidden_layers", geo.layers },
-        .{ "intermediate_size", geo.intermediate }, .{ "num_attention_heads", geo.query_heads }, .{ "num_key_value_heads", geo.sliding_kv_heads },
-        .{ "head_dim", sliding_dim },               .{ "global_head_dim", global_dim },          .{ "sliding_window", geo.sliding_window },
+        .{ "hidden_size", geo.hidden },                                             .{ "vocab_size", vocab },                    .{ "num_hidden_layers", geo.layers },
+        .{ "intermediate_size", geo.intermediate + @as(usize, @intCast(learned)) }, .{ "num_attention_heads", geo.query_heads }, .{ "num_key_value_heads", geo.sliding_kv_heads },
+        .{ "head_dim", sliding_dim },                                               .{ "global_head_dim", global_dim },          .{ "sliding_window", geo.sliding_window },
     };
     inline for (dims) |d| if (try integer(text, d[0]) != @as(i64, @intCast(d[1]))) return error.UnsupportedGemmaGeometry;
     if (optionalInt(text, "hidden_size_per_layer_input") != geo.layer_input) return error.UnsupportedGemmaGeometry;
@@ -256,7 +260,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     const ws = try quantization(gpa, root, geo);
     const context = try integer(text, "max_position_embeddings");
     if (context < 1 or context > 262144) return error.BadGemmaContext;
-    var c: Config = .{ .geo = geo, .widths = ws, .context = @intCast(context) };
+    var c: Config = .{ .geo = geo, .widths = ws, .context = @intCast(context), .wrapped = root.contains("text_config"), .learned = @intCast(learned) };
     try eosIds(root.get("eos_token_id") orelse try field(text, "eos_token_id"), &c);
     if (c.eos_count == 0) return error.BadGemmaEos;
     return c;

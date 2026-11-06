@@ -48,7 +48,7 @@ fn check(comptime f: living.Family) !void {
         for (x.*, 0..) |*v, i| v.* = (-1499.9329 + 47.0843 * @as(f32, @floatFromInt(i % d)) / (d - 1)) * @as(f32, if (p == 0) 1 else -1);
     }
     for (down, 0..) |*v, i| v.* = 1499.9329 - 47.0843 * @as(f32, @floatFromInt(i / d % d)) / (d - 1);
-    try living.pocket_round.layer(f, gpa, d, f.neurons, if (f.neuron.act == .swiglu) inputs[0] else &.{}, inputs[inputs.len - 1], down);
+    try living.pocket_round.layer(f, gpa, d, f.neurons, if (f.neuron.inputs() == 2) inputs[0] else &.{}, inputs[inputs.len - 1], down);
     var expected: [inputs.len][]f32 = undefined;
     for (&expected, inputs) |*x, v| x.* = try a.dupe(f32, v);
     const down0 = try a.dupe(f32, down);

@@ -190,10 +190,11 @@ pub const Metal = struct {
         const cache = try self.createCache(capacity);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
+        cache.untaught = stream.untaught;
         try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
         errdefer _ = self.caches.remove(stream);
         stream.cached = 0;
-        if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
+        if (!stream.untaught) if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
             var inside = false; // an image's rows see each other: a state inside one is not resumed
             for (stream.images) |im| inside = inside or (im.at < snap.at and snap.at < im.at + im.tokens);
@@ -202,7 +203,7 @@ pub const Metal = struct {
             if (snap.at < ids.len and !inside and !drafter_less) {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
-        }
+        };
         var spans: std.ArrayList(prompt.Span) = .empty;
         defer spans.deinit(self.gpa);
         const rows_buf = try self.encodeImages(stream, cache.len, &spans);

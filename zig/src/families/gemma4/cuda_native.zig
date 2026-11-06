@@ -12,12 +12,18 @@ const cv = @import("cuda_vision.zig");
 const tw = @import("cuda_tower.zig");
 const kv = @import("core").kv_pool;
 const shared = @import("cuda_shared.zig");
+const learn = @import("learning_cuda.zig");
+const learning_profile = @import("learning_profile.zig");
 const dfl = @import("cuda_dflash.zig");
 
 /// The registry's entry for one model_type: gemma4_unified (12B) or gemma4 (31B).
 pub fn Family(comptime name: []const u8) type {
     return struct {
         pub const model_type = name;
+        pub const slide = @import("learning_slide.zig").Slide(learn.Owner);
+        pub const linked = @import("core").shard_edit.linked;
+        pub const learnModel = native.learnModel;
+        pub const prepareClose = native.prepareClose;
         pub const formats: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
         pub const default_context: i64 = 32768;
         pub const max_segments: u32 = 1;
@@ -56,6 +62,8 @@ pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null, kv_pages: bool = true };
 
 pub const Loaded = struct {
+    learns: ?*learn.Owner = null,
+    learn_bytes: usize = 0,
     backend: lanes.backend.Backend,
     facts: lanes.Model,
     rows: u32,
@@ -70,7 +78,7 @@ pub const Loaded = struct {
     vision: ?*cv.Vision = null,
 };
 
-const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, gb: be.Gemma, v: ?*cv.Vision = null, room: ?Room = null };
+const Owned = struct { learning: ?*learn.Owner = null, gpa: std.mem.Allocator, w: wts.Weights, k: kern.Kernels, s: cuda.Stream, m: fwd.Model, gb: be.Gemma, v: ?*cv.Vision = null, room: ?Room = null };
 
 /// Streams to allocate in `room`: as asked, else (auto) the most that fit; a fixed count past them or a round refuses.
 fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
@@ -127,6 +135,7 @@ fn positions(context: usize) usize {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     const priority_copies = try cuda.priority_copies.read("TF_GEMMA4_COPIES", o.drafts);
+    if (o.slide) try learning_profile.check(try @import("cuda_config.zig").Config.read(gpa, io, dir));
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound;
     // TF_KV_SHARE keeps prompts as the pool's pages, so it pages too; otherwise the default, unless turned off
@@ -144,7 +153,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     // pages alias a shared layer's owner (cuda_pages.alias); the TF_KV_SHARE store is not checked with them yet
     if (try @import("core").kv_prompts.sharing() > 0 and own.w.config.geo.shared_layers > 0) return error.SharedCacheOwnersNotServed;
     const context = @min(positions(o.context), own.w.config.context);
-    const beside = visionBytes(o.vision != null, own.w.tower != null) + if (o.drafter) |dd| (if (o.drafts) try drafterBytes(gpa, io, dd) else 0) else 0;
+    const need_learning = o.slide or own.w.config.learned != 0;
+    if (need_learning) try learning_profile.check(&own.w.config);
+    const learn_bytes = if (need_learning) try learningBytes(gpa, ctx.d, own.s, &own.w, o.slide) else 0;
+    const beside = learn_bytes + visionBytes(o.vision != null, own.w.tower != null) + if (o.drafter) |dd| (if (o.drafts) try drafterBytes(gpa, io, dd) else 0) else 0;
     const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .beside = beside, .paged = paged };
     own.room = o.room;
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
@@ -168,7 +180,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         own.v = v;
         own.gb.vision = v;
     }
+    if (need_learning) own.learning = try learn.Owner.open(gpa, io, ctx, &own.m, own.s, &own.k, dir, learn_bytes);
     return .{
+        .learns = if (o.slide) own.learning else null,
+        .learn_bytes = learn_bytes,
         .backend = own.gb.backend(),
         .facts = own.gb.facts(),
         .rows = be.max_window,
@@ -315,6 +330,7 @@ fn reserveNone(_: *anyopaque, _: u32) anyerror!void {}
 
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
+    if (own.learning) |l| l.close() catch return;
     own.gb.deinit();
     if (own.v) |v| {
         v.deinit();
@@ -362,4 +378,22 @@ test "admission counts the vision workspace: more bytes per open, fewer streams 
     const room = 4 * g + visionBytes(true, true) / 2;
     try std.testing.expectEqual(@as(usize, 4), try fit(room, 8, false, plain));
     try std.testing.expectEqual(@as(usize, 3), try fit(room, 8, false, with));
+}
+
+pub fn learnModel(p: *anyopaque, dir: []const u8) @import("learning_slide.zig").Slide(learn.Owner).Model {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    const e = own.learning.?;
+    return .{ .e = e, .pockets = &e.r.pockets, .dir = dir, .trainer = e };
+}
+pub fn prepareClose(p: *anyopaque) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    if (own.learning) |l| try l.prepareClose();
+}
+fn learningBytes(a: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, w: *const wts.Weights, enabled: bool) !usize {
+    const shape = learning_profile.Shape.from(&w.config);
+    const row_bytes = 3 * 64 * shape.hidden * 4;
+    const pockets = row_bytes * 2 * (shape.layers + 1) + 512 * 64 * 4;
+    if (!enabled) return pockets;
+    const plan = try @import("learning_buffers.zig").Plan(learn.Owner.Runtime.Backend).make(shape, 256);
+    return pockets + plan.bytes + try plan.hostBytes() + try fwd.Model.openBytes(a, d, stream, w, 256, 1);
 }

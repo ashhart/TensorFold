@@ -10,11 +10,16 @@ pub fn silu(y: f32) f32 {
     return y * sigmoid(y);
 }
 
+pub fn gelu(y: f32) f32 {
+    return 0.5 * y * (1 + std.math.tanh(0.7978845608028654 * (y + 0.044715 * y * y * y)));
+}
+
 /// The activation of a neuron of kind `n` at input x: `z` is u x (u as fitted), `zg` its gate row's g x (SwiGLU).
 pub fn act(n: Neuron, z: f32, zg: f32) f32 {
     return switch (n.act) {
         .relu2 => if (z > 0) z * z else 0,
-        .swiglu => silu(zg) * (z / n.sharp), // its up row is u / sharp
+        .swiglu => silu(zg) * (z / n.sharp),
+        .geglu => gelu(zg) * (z / n.sharp), // its up row is u / sharp
     };
 }
 

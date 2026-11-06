@@ -161,6 +161,10 @@ const Host = struct {
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const report = @import("sys").optional_libraries.atBoundary();
     defer report.deinit();
+    if (o.slide and (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))) if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    };
     if (fsr_options.refuse(o, problem)) return null;
     if (o.prompt_int8 or o.rope_yarn != null) {
         problem.* = if (o.prompt_int8) prompt_int8_refusal else "--rope-yarn: the Metal engine has no YaRN rope; serve without --rope-yarn";
@@ -320,7 +324,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const t = o.model_type;
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
-    if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
+    if (!learners.supports(t) and !isGemma4(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
     if (o.drafter != null and !dense and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), Gemma 4 dense and Llama (a smaller Llama on the same tokenizer)";
     const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
@@ -569,7 +573,7 @@ test "slide admission: Metal entry points refuse before checkpoint or device acc
         } else try check(open, "Macs", &.{f.model_type});
     }
     try check(@import("qwen35.zig").open, "Macs", &.{"qwen3_5"});
-    try check(@import("gemma4.zig").open, "Macs", &.{"gemma4"});
+    try check(@import("gemma4.zig").open, "Macs", &.{ "gemma4", "gemma4_unified" });
     try check(@import("lfm2_moe.zig").open, "Macs", &.{"lfm2_moe"});
     try check(@import("step5.zig").open, "Macs", &.{"step5_vl"});
     try check(@import("spark25.zig").open, "Macs", &.{"spark2_5"});

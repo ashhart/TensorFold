@@ -3,6 +3,32 @@ const failed_load = @import("cuda_load_gpu.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 pub fn close(h: anytype) void {
     h.host.stop();
+    if (comptime @hasField(@typeInfo(@TypeOf(h)).pointer.child, "before_close")) {
+        wait(h) catch {
+            Guard(@typeInfo(@TypeOf(h)).pointer.child).keep(h);
+            return;
+        };
+    }
+    finish(h);
+}
+fn wait(h: anytype) !void {
+    if (h.before_close) |f| try f(h.family);
+}
+fn Guard(comptime H: type) type {
+    return @import("close_guard.zig").Queue(H, struct {
+        fn f(h: *H) anyerror!void {
+            try wait(h);
+        }
+    }.f, struct {
+        fn f(h: *H) void {
+            finish(h);
+        }
+    }.f);
+}
+pub fn recover(comptime H: type) void {
+    Guard(H).recover();
+}
+fn finish(h: anytype) void {
     kv_pages.unwatch(&h.kv); // the engine thread is joined: the pool's teardown below reports to no one
     h.core.deinit();
     h.cfg.deinit(h.gpa);

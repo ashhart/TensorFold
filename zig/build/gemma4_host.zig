@@ -17,6 +17,10 @@ pub fn tests(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
     const family_run = b.addRunArtifact(b.addTest(.{ .root_module = family_test, .filters = if (contract_filter) |f| &.{f} else &.{} }));
     family_run.has_side_effects = true;
     const family_step = b.step("test-gemma4-contract-host", "Family contract registration and launch declarations without a GPU");
+    const load_mod = b.createModule(.{ .root_source_file = b.path("zig/gemma4_learning_load_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = owner_fake }, .{ .name = "living", .module = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = b.graph.host }) } } });
+    const load_run = b.addRunArtifact(b.addTest(.{ .root_module = load_mod, .filters = &.{"Gemma4 learning:"} }));
+    b.step("test-gemma4-learning-load-host", "The actual learned Metal reader and allocation failures without devices").dependOn(&load_run.step);
+    family_step.dependOn(&load_run.step);
     family_step.dependOn(&family_run.step);
     const config_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/gemma4_config_test.zig"), .target = b.graph.host, .link_libc = true }) }));
     config_run.has_side_effects = true;

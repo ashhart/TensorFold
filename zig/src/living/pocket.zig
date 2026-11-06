@@ -94,7 +94,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         /// A pocket's neurons at each layer it sits at: a whole number of quantization groups of the expert's width.
         pub const neurons = F.neurons;
         pub const of = F; // the family it learns into
-        pub const swiglu = F.neuron.act == .swiglu;
+        pub const swiglu = F.neuron.inputs() == 2;
         pub const gated = F.neuron.gated;
 
         gpa: std.mem.Allocator,

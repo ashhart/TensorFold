@@ -60,10 +60,8 @@ const route_k = @import("contract_route_rows.zig");
 const fexp_k = @import("contract_flashnext_fexp.zig");
 const fn_groups_k = @import("contract_flashnext_groups.zig");
 const q35_contiguous = @import("contract_q35_contiguous.zig");
-const contract = core.contract;
-const g = contract.gates;
+const g = core.contract.gates;
 const kk = cuda.kernels;
-
 const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
     pub const h3 align(16) = @embedFile("fatbin_h3").*;
@@ -562,6 +560,8 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     defer weight_only.destroy(a);
     const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels, &affine4, cap);
     defer families.deinit();
+    const living = try @import("contract_living_native.zig").Sets.create(a, gpu, s, &kernels);
+    defer living.destroy();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

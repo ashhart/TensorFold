@@ -129,7 +129,7 @@ pub const Weights = struct {
 };
 
 /// A linear's three tensors copied into one aligned buffer: checkpoint tensors can sit at any byte offset in a shard.
-fn mlxCopy(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), prefix: []const u8, member: []const u8, width: cfg.widths.Width) !Mlx {
+fn mlxCopy(gpa: std.mem.Allocator, device: mtl.Device, c: anytype, owned: *std.ArrayList(mtl.Buffer), prefix: []const u8, member: []const u8, width: cfg.widths.Width) !Mlx {
     var name: [160]u8 = undefined;
     const w = try c.get(try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, member }));
     const k = try storedK(c, prefix, member, width);
@@ -148,7 +148,7 @@ fn mlxCopy(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint
 }
 
 /// A member's K at its config width (words [N, K * bits / 32], tables [N, K / group]); other storage refused.
-fn storedK(c: *const ckpt.Checkpoint, prefix: []const u8, member: []const u8, width: cfg.widths.Width) !usize {
+fn storedK(c: anytype, prefix: []const u8, member: []const u8, width: cfg.widths.Width) !usize {
     var name: [160]u8 = undefined;
     const w = try c.get(try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, member }));
     const s = try c.get(try std.fmt.bufPrint(&name, "{s}{s}.scales", .{ prefix, member }));
@@ -164,13 +164,13 @@ fn storedK(c: *const ckpt.Checkpoint, prefix: []const u8, member: []const u8, wi
     return k;
 }
 
-fn ref(c: *const ckpt.Checkpoint, name: []const u8) !Ref {
+fn ref(c: anytype, name: []const u8) !Ref {
     const t = try c.get(name);
     return .{ .buf = t.buffer, .off = t.offset };
 }
 
 /// Members of one width stacked along N into the lane layout; `interleave`: two members in alternate 16-row blocks.
-fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8, width: cfg.widths.Width, interleave: bool) !Linear {
+fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: anytype, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8, width: cfg.widths.Width, interleave: bool) !Linear {
     var name: [160]u8 = undefined;
     var n: usize = 0;
     var k: usize = 0;
@@ -208,7 +208,7 @@ fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, o
 }
 
 /// A q|k|v or gate|up stack: each run of members of one width packed as one linear writing its columns of the rows.
-fn stack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8, ws: []const cfg.widths.Width, glu: bool) !Stack {
+fn stack(gpa: std.mem.Allocator, device: mtl.Device, c: anytype, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8, ws: []const cfg.widths.Width, glu: bool) !Stack {
     var s: Stack = .{};
     var first: usize = 0;
     while (first < members.len) {
@@ -271,6 +271,10 @@ pub fn packRows(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayLis
 }
 
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, geo: cfg.Geometry, ws: *const cfg.widths.Widths) !Weights {
+    return loadImpl(gpa, device, c, geo, ws);
+}
+
+fn loadImpl(gpa: std.mem.Allocator, device: mtl.Device, c: anytype, geo: cfg.Geometry, ws: *const cfg.widths.Widths) !Weights {
     var w: Weights = undefined;
     w.owned = .empty;
     errdefer w.deinit(gpa);
@@ -361,3 +365,13 @@ pub const Projections = struct {
         ps.follow = hook;
     }
 };
+
+pub fn loadLearned(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, config: cfg.Config) !Weights {
+    var proxy: @import("learning_weights.zig").Proxy = .{ .a = gpa, .device = device, .checkpoint = c, .config = config };
+    defer proxy.deinit();
+    var out = try loadImpl(gpa, device, &proxy, config.geo, &config.widths);
+    errdefer out.deinit(gpa);
+    try out.owned.appendSlice(gpa, proxy.owned.items);
+    proxy.owned.clearRetainingCapacity();
+    return out;
+}

@@ -29,6 +29,7 @@ pub fn Engine(comptime G: type) type {
         model: Model = undefined,
         gpu: G = undefined,
         trace: ?@import("node_trace.zig").Sink(B) = null,
+        learning: ?@import("learning_hook.zig").Hook(G) = null,
         scratch: Scratch = undefined,
         plan: admission.Plan = undefined,
         slots: []Slot = undefined,
@@ -57,6 +58,7 @@ pub fn Engine(comptime G: type) type {
             _ = try admission.check(&e.c, G.kind, p);
             e.reader = try @import("reader.zig").Reader.open(a, io, dir, &e.c, p);
             e.stage = .reader;
+            if (o.learning) try @import("learning_profile.zig").checkpoint(&e.c, &e.reader, p);
             const bytes = try Placed.measure(a, &e.reader, &e.c, p);
             e.plan = try admission.Plan.make(&e.c, G.kind, bytes, o, p);
             e.weights = try Placed.open(a, b, &e.reader, &e.c, e.plan.weights, p);
@@ -118,6 +120,7 @@ pub fn Engine(comptime G: type) type {
             for (e.slots) |*slot| if (!slot.leased) {
                 slot.leased = true;
                 slot.has_logits = false;
+                slot.state.untaught = false;
                 slot.state.reset() catch |err| {
                     e.fail();
                     return err;
@@ -142,6 +145,16 @@ pub fn Engine(comptime G: type) type {
                 try item.state.canBegin(item.tokens.len);
                 for (item.tokens) |token| if (token >= e.c.vocab) return error.TokenOutOfRange;
             }
+            if (e.learning) |hook| {
+                if (items.len > 128) return error.Qwen4LearningRows;
+                var runs: [128]@import("learning_hook.zig").Run = undefined;
+                var first: usize = 0;
+                for (items, runs[0..items.len]) |item, *run| {
+                    run.* = .{ .first = first, .rows = item.tokens.len, .untaught = item.state.untaught };
+                    first += item.tokens.len;
+                }
+                try hook.begin(hook.ctx, runs[0..items.len], count);
+            }
             const tokens = try e.a.alloc(u32, count);
             defer e.a.free(tokens);
             var off: usize = 0;
@@ -163,7 +176,7 @@ pub fn Engine(comptime G: type) type {
             }
             try e.scratch.rewind(0);
             try batch.begin();
-            var ops: @import("gpu_ops.zig").Ops(G) = .{ .gpu = &e.gpu, .model = &e.model, .scratch = &e.scratch, .host = e.a, .problem = p, .trace = e.trace };
+            var ops: @import("gpu_ops.zig").Ops(G) = .{ .gpu = &e.gpu, .model = &e.model, .scratch = &e.scratch, .host = e.a, .problem = p, .trace = e.trace, .learning = e.learning };
             const logits = try graph.forward(&ops, geometry, &batch, tokens);
             off = 0;
             for (items) |item| {
