@@ -1,4 +1,4 @@
-//! The link measurements over Thunderbolt's two-sided UC: opcodes, ping-pong, bandwidth, integrity, barrier, all-reduce.
+//! Link measurements over Thunderbolt's two-sided UC: opcodes, ping-pong, bandwidth, integrity, barrier, all-reduce.
 const std = @import("std");
 const platform = @import("sys");
 const fabric = @import("fabric");
