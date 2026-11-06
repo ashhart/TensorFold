@@ -231,12 +231,24 @@ pub fn supported(c: cfg.Config) !void {
     const dense = qualifiedSize(c) and c.kv_heads == 4 and c.k_heads == 16 and !c.moe();
     // Ornith-1.5-122B: 256 experts of 1,024 and a shared expert of 1,024 over 3,072, 32 heads over 2 of 256
     const routed = c.hidden == 3072 and c.intermediate == 1024 and c.layers == 48 and c.heads == 32 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 64 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 1024;
-    if (!(dense or routed) or c.vocab != 248320) return error.UnqualifiedQwenShape;
+    // Qwen3.6-35B-A3B: 256 experts of 512 and a shared expert of 512 over 2,048, 16 heads over 2 of 256
+    const a3b = c.hidden == 2048 and c.intermediate == 512 and c.layers == 40 and c.heads == 16 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 32 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 512;
+    if (!(dense or routed or a3b) or c.vocab != 248320) return error.UnqualifiedQwenShape;
     try @import("geometry.zig").supported(c);
 }
 
 fn qualifiedGeneration(generation: u32) bool {
     return generation >= 13 and generation <= 18;
+}
+
+test "the qualified shapes: the dense 27B, Ornith-1.5-122B and Qwen3.6-35B-A3B; a 35B of other widths is refused" {
+    var c = try cfg.parse(std.testing.allocator, @import("config_test.zig").a3b_json, null);
+    try supported(c);
+    c.moe_intermediate = 1024;
+    try std.testing.expectError(error.UnqualifiedQwenShape, supported(c));
+    c.moe_intermediate = 512;
+    c.top_k = 10;
+    try std.testing.expectError(error.UnqualifiedQwenShape, supported(c));
 }
 
 test "unknown and older GPU generations refuse before any weight load" {

@@ -123,6 +123,28 @@ test "a routed config reads its experts, the shared expert's width as the layer'
     try std.testing.expectError(error.NotQwenDense, parse(a, dense_typed, null));
 }
 
+/// mlx-community/Qwen3.6-35B-A3B-4bit's text_config (its MTP and vision fields left out): no intermediate_size.
+pub const a3b_json =
+    \\{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":2048,
+    \\"moe_intermediate_size":512,"shared_expert_intermediate_size":512,"num_experts":256,"num_experts_per_tok":8,
+    \\"num_hidden_layers":40,"num_attention_heads":16,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+    \\"linear_num_key_heads":16,"linear_num_value_heads":32,"linear_key_head_dim":128,"linear_value_head_dim":128,
+    \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"attn_output_gate":true,"eos_token_id":248044}}
+;
+
+test "Qwen3.6-35B-A3B's config reads as routed experts of 512 over 2,048, the shared expert's width as the layer's" {
+    const c = try parse(std.testing.allocator, a3b_json, null);
+    try std.testing.expect(c.moe());
+    try std.testing.expectEqual(@as(usize, 2048), c.hidden);
+    try std.testing.expectEqual(@as(usize, 512), c.intermediate);
+    try std.testing.expectEqual(@as(usize, 512), c.moe_intermediate);
+    try std.testing.expectEqual(@as(usize, 8), c.top_k);
+    try std.testing.expectEqual(@as(usize, 32), c.v_heads);
+    try std.testing.expect(c.renorm); // absent: renormalized
+    try std.testing.expectEqual(Kind.attention, c.kind(39));
+    try std.testing.expectEqual(Kind.linear, c.kind(38));
+}
+
 test "a routed config refuses a rank split" {
     var c = model27();
     c.experts = 256;
