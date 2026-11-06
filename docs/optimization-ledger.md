@@ -269,7 +269,7 @@ below; these are estimates for planning a port, not results.
 
 2. **KV pages from the core pool.** Streams lease KV pages from one `kv_pool` as their rows grow, instead of each
    reserving a whole `--context` window, so more streams fit and a short request holds little ([#1156], [#781]'s
-   follow-ups). Sliding layers keep their rings. Qwen's pages are opt-in (`TF_QWEN_KV_PAGES`, `_ALL`); [#2011] keeps
+   follow-ups). Sliding layers keep their rings. Qwen's pages are opt-in (`TF_QWEN_KV_PAGES`, `_ALL`); [#2011] (open) keeps
    them opt-in, makes `--parallel` a cap with pages set, and brings them to the window path's speed (2k to 32k prompts
    within +0.3..+0.7 %). Dory's are opt-in
    (`TENSORFOLD_DORY_KV_PAGES=1`), Flash Next's experimental. Metal's port is tracked in [#1293].
