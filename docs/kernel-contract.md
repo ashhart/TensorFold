@@ -287,6 +287,14 @@ softmax over FP32 scores to 16,384 keys, GELU, BF16 widening and rounding, the s
 rows by id (FP32 in prompt row order) and their means, step 5's option summary, and step 7's logits (prior, cosine and
 the scorer's input rows) and their gate, each within float64's bound at the head's BF16 points. Two controls: a layer
 norm summed in bf16 and a softmax that skips non-finite scores.
+CUDA also checks Ling-3.1-flash's kernels (`tf-cuda-test ling-contract`): ling_glue's residual add, MoE combine (by
+slot and by expert) and row copy; ling_act's SwiGLU in Ling's order at both blocks with its 64-sums; the mla image's
+head-wise gate, rope (plain and with YaRN's attention factor at 900,000 positions), 128-wide absorb_q and expand_v,
+and its chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear cache, through `tf_glm_merge`; the split
+form with `tf_mla_merge_part`); modelopt_pack's FP8 expert packing; the EXL3 grouped finish (`tf_exl3_plan_finish_after`:
+gate-up with the limit on silu's output and without, and the fp32 down epilogue), and the Ling-order FP8 gate-up
+instances (decode and prompt, with and without the limit; their clamps compare, so a NaN stays NaN). The group-limited
+top-k is moe_glue's (`contract_moe`).
 
 HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf_router_bf16`, and its fp16-activation
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1

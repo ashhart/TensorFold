@@ -1,6 +1,7 @@
 //! Ling-3.1-flash's shape from config.json (bailing_hybrid), refusing what the engine does not run.
 const std = @import("std");
 const route = @import("route.zig");
+const rope = @import("rope.zig");
 
 /// Backbone plus MTP layers the per-layer tables hold (Ling-3.1-flash: 72 + 1).
 pub const max_layers = 80;
@@ -16,8 +17,8 @@ pub const Limits = struct { routed: f32, shared: f32, dense: f32 };
 /// MLA's rope pairs: rope_interleave true is exllamav3's RopeStyle.GPTJ (adjacent pairs), false NeoX (halves).
 pub const RopeStyle = enum { gptj, neox };
 
-/// A linear's format: bf16, FP8 128x128 blocks, ModelOpt NVFP4; EXL3 (#832) adds a variant and a weights_proj reader.
-pub const Quant = enum { bf16, fp8_block128, nvfp4 };
+/// A linear's format: bf16, FP8 128x128 blocks, ModelOpt NVFP4, or EXL3 (exllamav3's trellis, main's shared kernels).
+pub const Quant = enum { bf16, fp8_block128, nvfp4, exl3 };
 
 /// Why parse refused the config, one sentence for the caller's log line (tests read it too).
 pub const Why = struct {
@@ -43,6 +44,9 @@ pub const Config = struct {
     rope_theta: f64,
     rope_dim: u32, // qk_rope_head_dim: the modeling's rotary embedding takes it whole (partial factor 1)
     rope_style: RopeStyle,
+    max_pos: u32, // max_position_embeddings: the native window when rope_scaling is null
+    rope_scaling: ?rope.Yarn, // config.json's (yarn only)
+    yarn: ?rope.Yarn, // what the forward applies (the engine's YaRN mode; parse leaves it null)
     group: u32, // layer_group_size: MLA on each group's last layer and on the tail past the last full group
     dense_layers: u32, // first_k_dense_replace
     dense_inter: u32,
@@ -100,9 +104,10 @@ pub const Config = struct {
         return c.nope + c.rope_dim;
     }
 
-    /// MLA's softmax scale, qk_head_dim^-0.5 (no rope_scaling mscale: parse refuses rope_scaling).
+    /// MLA's softmax scale, qk_head_dim^-0.5, times YaRN's mscale_all_dim factor squared as the modeling applies it.
     pub fn smScale(c: *const Config) f32 {
-        return @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(c.qkDim()))));
+        const s = 1.0 / @sqrt(@as(f64, @floatFromInt(c.qkDim())));
+        return @floatCast(if (c.yarn) |y| s * rope.smFactor(y) else s);
     }
 
     /// Group-limited routing: n_group groups, the best topk_group kept (parse holds those bounds).
@@ -304,12 +309,19 @@ fn quantization(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
     const method = text(q, "quant_method") orelse "";
     if (std.mem.eql(u8, method, "fp8")) return fp8Block(q, c, why);
     if (std.ascii.eqlIgnoreCase(method, "modelopt")) return modelopt(q, c, why);
-    if (std.ascii.eqlIgnoreCase(method, "exl3")) {
-        why.set("EXL3: Ling's EXL3 weights need the shared EXL3 module (tracker #832), not this loader yet", .{});
+    if (std.ascii.eqlIgnoreCase(method, "exl3")) return exl3(q, c, why);
+    why.set("quantization {s}: the loader reads bf16, FP8 128x128 blocks, ModelOpt NVFP4 or EXL3", .{if (method.len > 0) method else "without quant_method"});
+    return error.Quant;
+}
+
+/// exllamav3's packs: a quantized linear holds `.trellis` (bits in its shape); the loader tells which by the tensors.
+fn exl3(q: std.json.ObjectMap, c: *Config, why: *Why) !void {
+    const book = text(q, "codebook") orelse "mcg";
+    if (!std.mem.eql(u8, book, "mul1") and !std.mem.eql(u8, book, "mcg") and !std.mem.eql(u8, book, "3inst")) {
+        why.set("EXL3 codebook {s}: the shared EXL3 kernels take mul1, mcg or 3inst", .{book});
         return error.Exl3;
     }
-    why.set("quantization {s}: the loader reads bf16, FP8 128x128 blocks or ModelOpt NVFP4", .{if (method.len > 0) method else "without quant_method"});
-    return error.Quant;
+    c.quant = .exl3;
 }
 
 fn tokens(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
@@ -422,10 +434,8 @@ fn parseConfig(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
     c.v_dim = try int(o, "v_head_dim", why);
     c.rope_theta = try float(o, "rope_theta", why);
     c.rope_style = if (try flag(o, "rope_interleave", true, why)) .gptj else .neox;
-    if (o.get("rope_scaling")) |r| if (r != .null) {
-        why.set("rope_scaling: the engine's MLA has plain rope only", .{});
-        return error.RopeScaling;
-    };
+    c.max_pos = if (o.get("max_position_embeddings")) |_| try int(o, "max_position_embeddings", why) else 262144;
+    c.rope_scaling = try rope.parse(o, c.rope_theta, c.max_pos, why);
     const gate = o.get("gated_attention_proj_granularity_type") orelse std.json.Value.null;
     c.head_gate = gate == .string and std.mem.eql(u8, gate.string, "head_wise");
     if (gate != .null and !c.head_gate) {

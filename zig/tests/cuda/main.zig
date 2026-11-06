@@ -299,7 +299,7 @@ const usage =
     \\  glm-fp8g-shares          block-FP8 TP shares packed as GLM's loader packs them, on the lane, against FP64 of the cut
     \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
     \\
-;
+++ @import("ling_cmds.zig").usage;
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -345,6 +345,7 @@ fn compileContractGlue() !void {
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+    if (try @import("ling_cmds.zig").run(gpu, cmd, rest)) return;
     if (std.mem.eql(u8, cmd, "qwen4")) {
         if (rest.len != 0) return error.Qwen4DeviceArguments;
         return @import("qwen4_tests.zig").run(gpu);

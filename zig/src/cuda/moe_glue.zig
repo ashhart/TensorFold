@@ -22,7 +22,10 @@ const per_lane = 16;
 pub const most_slices = 8;
 
 /// Sigmoid routing: top `topk` by logit (score: sigmoid of `slices` partials summed) + bias, weights scaled.
-pub const Route = struct { experts: usize, topk: usize, shared: bool, normalize: bool = false, scale: f32 = 1, score: bool = false, shared_slots: usize = 1, slices: usize = 1 };
+pub const Route = struct { experts: usize, topk: usize, shared: bool, normalize: bool = false, scale: f32 = 1, score: bool = false, shared_slots: usize = 1, slices: usize = 1, groups: usize = 1, keep: usize = 1 }; // groups > 1: the score form ranks only the `keep` groups of best top-2 sums
+
+/// Groups a group-limited route holds at most (a warp's lanes).
+pub const most_groups = 32;
 
 pub const MoeGlue = struct {
     mod: Module,
@@ -30,13 +33,14 @@ pub const MoeGlue = struct {
     topk_warp_fn: Function,
     topk_score_fn: Function,
     topk_score128_fn: Function, // the score form up to 128 experts
+    topk_groups_fn: Function, // the score form, group-limited
     combine_fn: Function,
 
     pub fn load(d: *const Driver) !MoeGlue {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.moe_glue);
         errdefer mod.unload();
-        return .{ .mod = mod, .topk_fn = try mod.function("tf_moe_topk_sigmoid"), .topk_warp_fn = try mod.function("tf_moe_topk_sigmoid_warp"), .topk_score_fn = try mod.function("tf_moe_topk_sigmoid_score_warp"), .topk_score128_fn = try mod.function("tf_moe_topk_sigmoid_score_warp_128"), .combine_fn = try mod.function("tf_moe_combine") };
+        return .{ .mod = mod, .topk_fn = try mod.function("tf_moe_topk_sigmoid"), .topk_warp_fn = try mod.function("tf_moe_topk_sigmoid_warp"), .topk_score_fn = try mod.function("tf_moe_topk_sigmoid_score_warp"), .topk_score128_fn = try mod.function("tf_moe_topk_sigmoid_score_warp_128"), .topk_groups_fn = try mod.function("tf_moe_topk_sigmoid_score_groups"), .combine_fn = try mod.function("tf_moe_combine") };
     }
 
     pub fn unload(g: *MoeGlue) void {
@@ -46,6 +50,7 @@ pub const MoeGlue = struct {
     /// fp32 logits [rows, experts] (+ fp32 bias) into int32 picks and fp32 weights [rows, topk (+1 with shared)].
     pub fn topk(g: *const MoeGlue, s: Stream, logits: u64, bias: ?u64, r: Route, pick: u64, wts: u64, rows: usize) !void {
         if (r.experts > most_experts or r.topk == 0 or r.topk > most_topk or r.topk > r.experts) return error.RouteOutOfRange;
+        try checkGroups(r);
         if (rows == 0) return;
         const warp = r.experts <= 32 * per_lane and r.topk <= 32;
         if (r.score and (!warp or r.shared_slots > 32)) return error.RouteOutOfRange;
@@ -64,6 +69,11 @@ pub const MoeGlue = struct {
         a.add(@as(i32, @intFromBool(r.normalize)));
         a.add(r.scale);
         if (r.score) a.add(@as(i32, @intCast(r.slices)));
+        if (r.groups > 1) {
+            a.add(@as(i32, @intCast(r.groups)));
+            a.add(@as(i32, @intCast(r.keep)));
+            return launch_.launch(g.topk_groups_fn, .{ .grid = .{ .x = @intCast((rows + 7) / 8), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
+        }
         if (warp) return launch_.launch(if (!r.score) g.topk_warp_fn else if (r.experts <= 128) g.topk_score128_fn else g.topk_score_fn, .{ .grid = .{ .x = @intCast((rows + 7) / 8), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);
         try launch_.launch(g.topk_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
     }
@@ -83,3 +93,32 @@ pub const MoeGlue = struct {
         try launch_.launch(g.combine_fn, .{ .grid = .{ .x = @intCast(rows), .y = cols, .z = 1 }, .block = .{ .x = threads } }, s, &a);
     }
 };
+
+/// A group-limited route: the score form's warp, equal groups of at least two, and room in the kept groups for top-k.
+fn checkGroups(r: Route) !void {
+    if (r.groups == 1 and r.keep == 1) return;
+    if (!r.score or r.groups < 2 or r.groups > most_groups or r.experts > 32 * per_lane or r.experts % r.groups != 0) return error.RouteOutOfRange;
+    if (r.experts / r.groups < 2 or r.keep == 0 or r.keep > r.groups or r.topk > r.keep * (r.experts / r.groups)) return error.RouteOutOfRange;
+}
+
+test "moe glue: group-limited routes outside the grouped kernel's form are refused" {
+    const ling: Route = .{ .experts = 256, .topk = 8, .shared = true, .normalize = true, .scale = 2.5, .score = true, .groups = 8, .keep = 4 };
+    try checkGroups(ling);
+    try checkGroups(.{ .experts = 256, .topk = 8, .shared = false });
+    var r = ling;
+    r.score = false;
+    try std.testing.expectError(error.RouteOutOfRange, checkGroups(r));
+    for ([_][2]usize{ .{ 3, 2 }, .{ 64, 1 }, .{ 256, 2 }, .{ 8, 0 }, .{ 8, 9 }, .{ 128, 1 } }) |gk| {
+        r = ling;
+        r.groups = gk[0];
+        r.keep = gk[1];
+        try std.testing.expectError(error.RouteOutOfRange, checkGroups(r));
+    }
+    r = ling;
+    r.experts = 1024;
+    try std.testing.expectError(error.RouteOutOfRange, checkGroups(r));
+    r = ling;
+    r.keep = 1;
+    r.topk = 33;
+    try std.testing.expectError(error.RouteOutOfRange, checkGroups(r));
+}

@@ -135,10 +135,13 @@ pub const kernels = [_]Kernel{
     .{ .name = "window_rows", .flags = &.{"-O3"} }, // ours: window attention at head dims 256 and 512 (cuda/window_attention.zig)
     .{ .name = "window_pages", .flags = &.{"-O3"} }, // ours: window_rows.cuh over paged caches (Dory, Gemma 4, Spark)
     .{ .name = "moe_glue", .flags = &.{"-O3"} }, // ours: sigmoid top-k and the weighted combine (cuda/moe_glue.zig)
+    .{ .name = "mla", .flags = &.{"-O3"} }, // ours: MLA, 64 roped columns and 128-wide heads, on GLM's chunk bodies
     .{ .name = "dense_rows", .flags = &.{"-O3"} }, // ours: bf16 rows times weight rows into fp32 (cuda/dense_rows.zig)
     .{ .name = "modelopt_pack", .flags = &.{"-O3"} }, // ours: ModelOpt tensors into the lane, prompt and expert layouts
     .{ .name = "glm_kda", .flags = &.{ "-O3", "--fmad=false" } }, // GLM: the Python family's glm5_next/cuda/kda.cu
     .{ .name = "glm_glue", .flags = &.{"-O3"} }, // ours: the Python family's Triton glue by hand, its PTX op for op
+    .{ .name = "ling_glue", .flags = glue }, // ours: Ling-3.1's bf16 glue at the HF model's rounding points
+    .{ .name = "ling_act", .flags = &.{"-O3"} }, // ours: Ling-3.1's dense SwiGLU in its clamp order (glm_swiglu.cuh)
     .{ .name = "glm_ops", .flags = &.{"-O3"} }, // ours: GLM's integer work the Python family did in torch (the DSA token lists)
     .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)

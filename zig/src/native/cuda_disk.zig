@@ -155,7 +155,7 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     loaded.target.ctx = ctx;
     const id = try identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target, o.model_type);
-    try open(o, root, id.id, id.rate, store, "nemotron");
+    try open(o, root, id.id, id.rate, store, "nemotron", 1 << 30);
 }
 
 /// The disk module of a family's kept states (image, probe, facts), or null: Nemotron's is this file's own.
@@ -171,18 +171,24 @@ pub fn attachKept(comptime K: type, name: []const u8, a: Allocator, io: std.Io, 
         const p = try K.probe(a, io, loaded.backend, loaded.target);
         const facts = K.facts(loaded.target); // an array, or a slice
         const list: []const u64 = if (@typeInfo(@TypeOf(facts)) == .pointer) facts else &facts;
-        try open(o, root, try identityOf(a, io, ctx, o.dir, kernels, list, p.hash, .{ .family = name, .backend = "cuda" }), p.rate, store, name);
+        const staging = stagingOf(K, loaded.target);
+        try open(o, root, try identityOf(a, io, ctx, o.dir, kernels, list, p.hash, .{ .family = name, .backend = "cuda" }), p.rate, store, name, staging);
     }
 }
 
-fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8) !void {
+/// Host bytes the store may stage at once: the family's permit when its disk module declares `staging`, else 1 GiB.
+fn stagingOf(comptime K: type, t: anytype) u64 {
+    return if (@hasDecl(K, "staging")) K.staging(t) else 1 << 30;
+}
+
+fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8, staging: u64) !void {
     const gibs = struct {
         fn bytes(g: f64) u64 {
             return @intFromFloat(g * (1 << 30));
         }
     }.bytes;
     // --spill-gib: evicted states only (or with --learn-conversations, both); --checkpoint-slots bounds RAM beside it
-    const r = try api.prompt_cache.rows.attach(store.gpa, store, .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid, .spill = o.spill, .slots = @import("disk_spill.zig").slots(o) });
+    const r = try api.prompt_cache.rows.attach(store.gpa, store, .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid, .spill = o.spill, .slots = @import("disk_spill.zig").slots(o), .staging_bytes = staging });
     r.prefill_rate = rate;
     std.log.info("{s}: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ name, r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
 }
@@ -210,7 +216,7 @@ test "CUDA disk open: --spill-gib's mode and --checkpoint-slots reach the store"
     // a disk module that opens the store itself, through this file's open, under a fixed identity and no device
     const K = struct {
         pub fn attach(_: Allocator, _: std.Io, _: *const cuda.Context, o: api.Open, root: []const u8, _: ?[]const u8, _: anytype, store: *api.prompt_cache.Store) !void {
-            try open(o, root, 7, 1.0, store, "fake");
+            try open(o, root, 7, 1.0, store, "fake", 3 << 30);
         }
         fn bytes(_: *anyopaque, _: u32) u64 {
             return 0;
@@ -238,6 +244,18 @@ test "CUDA disk open: --spill-gib's mode and --checkpoint-slots reach the store"
         defer r.deinit();
         defer store.deinit(); // the store before its disk, as the rows fixtures close them
         try std.testing.expectEqual(mode, r.spill);
+        try std.testing.expectEqual(@as(u64, 3 << 30), r.staging_bytes);
         try std.testing.expectEqual(if (keep) |n| @as(usize, @intCast(n)) else std.math.maxInt(usize), store.most);
     }
+}
+
+test "CUDA disk open: a disk module's staging permit, else 1 GiB" {
+    const With = struct {
+        pub fn staging(t: *const u64) u64 {
+            return t.*;
+        }
+    };
+    const t: u64 = 4 << 30;
+    try std.testing.expectEqual(@as(u64, 4 << 30), stagingOf(With, &t));
+    try std.testing.expectEqual(@as(u64, 1 << 30), stagingOf(struct {}, &t));
 }
