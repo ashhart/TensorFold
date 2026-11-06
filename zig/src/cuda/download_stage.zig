@@ -42,10 +42,20 @@ pub fn take(d: *const Driver, len: usize) Error![]align(16) u8 {
 /// Frees this thread's buffer, if one is held.
 pub fn drop() void {
     if (held) |h| {
+        // best-effort: teardown frees after the context, so only the pointer clearing below matters
         _ = h.d.api.cuMemFreeHost(h.bytes.ptr);
         memory.releaseRetainedHost(h.bytes.len);
         held = null;
     }
+}
+
+/// Frees this thread's buffer when it is `d`'s: a driver leaves the stage before its own struct goes away.
+pub fn release(d: *const Driver) void {
+    // the cached reading goes too: a replacement driver may reuse the address, and never query again
+    if (device) |one| {
+        if (one.d == d) device = null;
+    }
+    if (held) |h| if (h.d == d) drop();
 }
 
 /// Forgets the cached device reading (tests use distinct drivers, but a fake may reuse one).

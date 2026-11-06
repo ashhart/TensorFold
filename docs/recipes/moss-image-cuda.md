@@ -9,14 +9,21 @@ same `tf-moss-image` tool and checked against the same publisher pipeline.
   over both.
 - The card's guidance: two passes a step, the prompt and the empty negative prompt with block 22 skipped.
 
-The prompt encoder and the image decoder are not ported; `tools/zig/moss_image_case.py` runs them in torch, as on
-Metal. It is a denoiser, not a token family: it does not register with the lane engine, the server or
-`families.detect`.
+The prompt encoder is ported (`cuda_encoder.zig`, `moss_image_encoder.cu`): the checkpoint's Qwen3.5-9B text model,
+the chat-formatted prompt to the final-norm rows `[tokens, 4096]` the refiner takes, driven by
+`tf-moss-image-encoder`. It is a denoiser's front end, not a token family: neither it nor the decoder appears in
+`families.detect`, and neither answers a text route. The checkpoint is served all the same: `moss_image_host.zig`
+opens the checkpoint whose `model_index.json` names `MOSSImagePipeline` ahead of the family table, the encoder, the
+transformer and the decoder resident on CUDA, and `POST /v1/images/generations` answers one picture a request.
+
+The image decoder is ported (`cuda_decoder.zig`, `moss_image_decoder.cu`): the checkpoint's `vae/` in float32, the
+latents to the raw `[height, width, 3]` picture the pipeline clamps afterwards, driven by `tf-moss-image-decoder`.
 
 The config, the rotary tables and the timestep's modulation (`config.zig`, `host.zig`) are shared with Metal. The
 weights are checked as on Metal: the released geometry only, and no tensor left unread.
 
-It runs on the two GPUs it was checked on, sm_120 (RTX 5090) and sm_121 (GB10): `Model.load` refuses any other.
+It runs on the two GPUs it was checked on, sm_120 (RTX 5090) and sm_121 (GB10): `Model.load` and `Decoder.load` refuse
+any other.
 
 ## Precision
 
@@ -41,27 +48,98 @@ ones as they were: their SASS is identical before and after (sm_80, 86, 89, 120 
 - `tf_moss_situ`: the situ gate, over the MLP's (hidden | gate) rows or two buffers;
 - `tf_moss_gate_add`: the gated residual add (ones for the refiner's plain residual).
 
+## Decoder
+
+`cuda_decoder.zig` runs the checkpoint's `vae/` decoder, float32 throughout as the pipeline decodes it, before any
+8-bit step:
+
+- the latents' batch norm undone and the 2 x 2 patches unpacked (`tf_md_unpack`);
+- 1x1 convolutions as one fp32 tiled GEMM (`tf_md_gemm`), the mid block's attention projections included;
+- 3x3 convolutions direct (`tf_md_conv3x3`: 8 x 16 output pixels by 32 channels a block), not Winograd: fewer fp32
+  sums than the transform's and the same class of accuracy;
+- GroupNorm's statistics in two fp32 passes over chunks of 256 pixels (`tf_md_group_part`, `tf_md_group_finish`), then
+  the scale and the SiLU (`tf_md_norm`);
+- attention as a materialized fp32 score matrix: `tf_md_gemm` for q k^T, `tf_md_softmax` for the rows, `tf_md_gemm`
+  for the values, one head of 384 scaled by 1/sqrt(384).
+
+Its scratch is Metal's five picture tensors at the widest stage (4.0 GB at 1024x1024) and the score matrix (1.0 GB).
+`tf-moss-image-decoder VAE_DIR LATENTS OUT WIDTH HEIGHT` writes the picture before the clamp.
+
+`moss_image_decoder_records.zig` holds the seven kernels' thirteen launches' geometry and five-SM usage receipts,
+measured. `zig/tests/cuda/contract_moss_image_decoder_*.zig` puts each kernel under gates 1-4, with its outputs
+against float64 at its rounding points and a planted control that gate 3 must catch.
+
+## Prompt encoder
+
+`cuda_encoder.zig` runs the text model as the Metal encoder does: 32 layers, full attention every fourth (`isFull`),
+Gated DeltaNet elsewhere, then the final norm. Its own kernels are `moss_image_encoder.cu`'s, each a port of
+`moss_image_encoder.metal`'s:
+
+- `tf_me_norm`: Qwen3.5's zero-centered RMSNorm, `bf16(x rsqrt(mean x^2 + eps) (1 + w))`, one rounding;
+- `tf_me_head`: each 256-wide head's RMSNorm, then the first 64 channels turned by the bf16 rotary tables
+  (`bf16(v cos) + bf16(partner sin)`), or the head copied for v;
+- `tf_me_attention`: causal GQA (16 heads over 4), head dim 256, fp32 scores and online softmax;
+- `tf_me_gate`: the attention rows gated by the second half of each 512-wide `q_proj` head;
+- `tf_me_silu_mul`, `tf_me_conv`: the MLP's product and the 4-tap causal conv with its SiLU;
+- `tf_me_gdn_prep`, `tf_me_gdn`: the delta rule's q/k norms, `beta` and `g`, then the recurrence in fp32;
+- `tf_me_gated_norm`: the delta net's gated norm over each 128-wide head.
+
+The projections are cuBLASLt bf16 GEMMs with fp32 sums, as the transformer's are; the rotary tables, the epsilons and
+the rounding points are Metal's, computed on the host where Metal computes them there.
+
+`tf-moss-image-encoder MODEL_DIR CASE [PROMPT_FILE]` takes a case from `moss_image_case.py encode`: it checks the ids,
+then runs each layer and the final norm alone on the float32 run's input, each gated against float32 within twice
+torch bf16's own cosine and worst-row distance on the same input, then encodes the whole prompt twice and compares it
+with both torch runs and itself.
+
+On a GB10 (sm_121, nvcc 13.0), the 33-row prompt of `~/moss-case/prompt.txt`:
+
+```
+NVIDIA GB10: 33 tokens, the same ids as the tokenizer's: true; loaded in 5.6 s
+layer  0 alone (delta    ): float32 1-cosine 4.52e-6 of 9.06e-6, worst row 0.00628 (row 30) of 0.01252, torch bf16 0.00626 (row 30): pass
+...
+layer 31 alone (attention): float32 1-cosine 7.95e-6 of 1.63e-5, worst row 0.00555 (row 0) of 0.01110, torch bf16 0.00555 (row 0): pass
+final norm alone: float32 1-cosine 2.80e-6 of 5.59e-6, worst row 0.00264 (row 7) of 0.00528, torch bf16 0.00264 (row 7): pass
+whole prompt, not gated: each layer against torch bf16's, cosine 0.999865 or more; the final rows against float32, 1-cosine 8.99e-5, worst row 0.03532 (row 0), torch bf16's 8.40e-5, 0.03301 (row 30)
+encoded again in 0.078 s, the same bytes: true
+PASS every step within its gate, repeated byte for byte
+```
+
+`moss_image_encoder_records.zig` holds the nine launches' geometry and five-SM usage receipts, measured.
+`zig/tests/cuda/contract_moss_image_encoder_*.zig` puts each kernel under gates 1-4, with its outputs against float64
+at its rounding points and a planted control that gate 3 must catch.
+
 ## Kernel contract
 
-`zig/tests/cuda/contract_moss_image*.zig` registers the four kernels in each form the family launches, and the head-128
-attention:
+`zig/tests/cuda/contract_moss_image*.zig` registers all 24 kernels the family launches: the transformer's eight (the
+norm plain and modulated, q and k's RMSNorm and rotary over separate projections and over packed rows, the situ gate
+over (hidden | gate) rows and over two buffers, the gate add, and the head-128 attention), the decoder's seven
+(`tf_md_unpack`, `tf_md_gemm`, `tf_md_conv3x3`, `tf_md_group_part`, `tf_md_group_finish`, `tf_md_norm`,
+`tf_md_softmax`) and the encoder's nine, one suite each (`tf_me_norm`, `tf_me_head`, `tf_me_attention`, `tf_me_gate`,
+`tf_me_silu_mul`, `tf_me_conv`, `tf_me_gdn_prep`, `tf_me_gdn`, `tf_me_gated_norm`):
 
-- each output is checked against float64 at the kernel's bf16 points, in the range its fp32 steps allow (IEEE division
-  and square root, two ulps for `expf` and `tanhf`);
-- shapes are the served ones (4,106 to 4,188 joint rows, 10 to 63 prompt rows, widths 3,072 and 8,192) and the tiles'
-  edges; the attention runs all 24 heads at the prompt lengths and two at the joint lengths;
-- five controls each drop one bf16 rounding point (the norm's, the modulation's, the rotary's, the sigmoid's and the
-  gate's), and gate 3 must catch each;
-- the attention is checked against `contract_attn.zig`'s float64 reference; its gate 4 uses P x V sums that fp16 or bf16
-  sums would miss.
+- each output is checked against float64 at its rounding points, in the range its fp32 steps allow (IEEE division
+  and square root, two ulps for `expf`, `logf` and `tanhf`);
+- shapes are the served ones: the transformer's 4,106 to 4,188 joint rows, 10 to 63 prompt rows and 3,072 and 8,192
+  widths, its attention all 24 heads at the prompt lengths and two at the joint lengths; the encoder's 10 to 33 prompt
+  rows, 16 query heads of 256 over 4 key-value heads and 16 key heads of 128 over 32 value heads; the tiles' edges as
+  well;
+- 21 controls each drop or move one step of the kernel's arithmetic, and gate 3 must catch each: the transformer's
+  five (the norm's, the modulation's, the rotary's, the sigmoid's and the gate add's), the decoder's seven (its two
+  biases, the unpack's mean, the group's centred squares and dropped channels, beta and the score scale), and the
+  encoder's nine (its two `(1 + w)`, the score scale, the silu, the gated norm's weight, the decay, the up projection,
+  and beta's and the sigmoid's fp32);
+- the transformer's and the encoder's attention are checked against `contract_attn.zig`'s float64 reference; their
+  gate 4 uses P x V sums that fp16 or bf16 sums would miss.
 
-Gate 5's records are in `moss_image_cuda_records.zig` (sm_80, 86, 89, 120 and 121; the same on nvcc 13.0, 13.2 and
-13.3, so no later release needs a set of its own).
+Gate 5's records are in `moss_image_cuda_records.zig` for the transformer (sm_80, 86, 89, 120 and 121; the same on nvcc
+13.0, 13.2 and 13.3, so no later release needs a set of its own), `moss_image_decoder_records.zig` for the decoder and
+`moss_image_encoder_records.zig` for the encoder, all of them measured.
 
 `tf-cuda-test moss-contract` on a GB10 (nvcc 13.0 and 13.2) and an RTX 5090 (nvcc 13.3):
 
 ```
-SUMMARY moss image: 8 kernels, 8 pass gates 1-4, 0 fail; 5 controls: 5 red as planted, 0 missed
+SUMMARY moss image: 24 kernels, 24 pass gates 1-4, 0 fail; 21 controls: 21 red as planted, 0 missed
 ```
 
 ## Run a case
@@ -70,7 +148,9 @@ SUMMARY moss image: 8 kernels, 8 pass gates 1-4, 0 fail; 5 controls: 5 red as pl
 hf download OpenMOSS-Team/MOSS-Image-Base --revision 85975793d8b3d432f1b6e27f352abaa4c2a4c0d3 --local-dir MODEL_DIR
 python3 tools/zig/moss_image_case.py case MODEL_DIR case/ --prompt-file prompt.txt --device cuda
 zig build install -Doptimize=ReleaseFast -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121   # -Dsm=120 for an RTX 5090
+zig-out/bin/tf-moss-image-encoder MODEL_DIR case/encoder.safetensors prompt.txt
 zig-out/bin/tf-moss-image MODEL_DIR/transformer case/case.safetensors case/
+zig-out/bin/tf-moss-image-decoder MODEL_DIR/vae case/latents.f32 case/zig_vae.f32 1024 1024
 python3 tools/zig/moss_image_case.py decode MODEL_DIR case/latents.f32 case/zig.png --device cuda
 python3 tools/zig/moss_image_case.py compare case/reference.png case/zig.png case/side.png
 ```
@@ -98,7 +178,15 @@ Results on a DGX Spark (GB10, sm_121, 121 GB unified memory, nvcc 13.2):
 - **Image:** our latents through the pipeline's decoder are 45.93 dB PSNR from the pipeline's own picture for the fox
   and 32.76 dB for the sticky note (its handwritten text the same; fine detail such as cabinet handles differs, as on
   Metal: 50 guided steps magnify bf16 rounding).
-- **Repeat:** the same step twice, another between, gives identical bytes; two runs of a case give identical latents.
+- **Repeat:** the same step twice, another between, gives identical bytes; two runs of a case give identical latents,
+  and two decodes of one latents file give identical bytes.
+- **Decoder**, the fox's final latents (1024x1024), against the publisher's decode of the same latents in float64 on the
+  CPU and in float32 on this card:
+  - Ours: mean |diff| 3.766e-7 and max 1.568e-5 from float64 before the clamp; 138 of 3,145,728 8-bit values differ
+    from float64's, each by 1.
+  - torch's own float32 decode here (its convolutions at TF32's noise level): mean |diff| 8.288e-5 from float64's,
+    33,300 of 3,145,728 8-bit values differ by 1. Ours differs from it by what it differs from float64 by.
+  - Speed, one session: 3.67 s a decode (3.67 s on the GPU), 0.4 s loading.
 - **Speed**, the GPU otherwise idle, the median of a case's 100 forwards:
   - torch bf16: 1.402 s a forward for the fox, 1.477 s for the sticky note.
   - Ours: 0.690 s and 0.700 s, 2.03x and 2.11x torch's (69.6 s and 70.6 s for 50 guided steps). 0.2 s for both

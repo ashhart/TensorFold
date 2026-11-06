@@ -3,16 +3,19 @@ const std = @import("std");
 const gate = @import("moss_image_teacher.zig");
 
 const usage =
-    \\tf-moss-image TRANSFORMER_DIR CASE OUT_DIR [--prompt FILE [--negative FILE]]
+    \\tf-moss-image TRANSFORMER_DIR CASE OUT_DIR [--prompt FILE [--negative FILE]] [--picture FILE] [--seed SEED]
     \\CASE (tools/zig/moss_image_case.py) holds the prompt's and the empty negative prompt's encoder rows, the timesteps
     \\and noise levels and the starting latents. A `case` also holds a reference run (each step's input and both
     \\branches' velocities): each step then runs both branches on the reference's input and compares them (max |diff|,
     \\cosine, worst row). Then the whole schedule runs from the starting latents with the card's guidance (scale 3, the
-    \\negative branch skipping block 22), timed, and OUT_DIR gets latents.f32 (rows x columns x 128) and run.json. On
-    \\Metal the transformer is then freed and the checkpoint's image decoder (the vae/ folder beside TRANSFORMER_DIR)
-    \\turns the latents into OUT_DIR's picture.png. With --prompt, the encoder in TRANSFORMER_DIR's checkpoint folder
-    \\makes both prompts' rows (the negative from --negative's file, else empty) in place of the case's; only the Metal
-    \\build has the encoder. Exit 0 means every teacher step and the repeat passed, 1 failed, 2 is INCONCLUSIVE.
+    \\negative branch skipping block 22), timed, and OUT_DIR gets latents.f32 (rows x columns x 128) and run.json. With
+    \\--prompt, the encoder in TRANSFORMER_DIR's checkpoint folder makes both prompts' rows (the negative from
+    \\--negative's file, else empty) in place of the case's. With --picture, the checkpoint's image decoder (the vae/
+    \\folder beside TRANSFORMER_DIR) turns the latents into that file's PNG, quantised as the serving host does. Metal
+    \\decodes on every run, its picture going to OUT_DIR's picture.png unless --picture names a file. --seed starts from
+    \\the seeded noise the serving host makes (noise.zig) in place of the case's latents, whose torch stream is the CPU
+    \\the case was dumped on: a case made on ARM torch starts elsewhere than the host's x86-matched noise.
+    \\Exit 0 means every teacher step and the repeat passed, 1 failed, 2 is INCONCLUSIVE.
     \\Per element the bound is 2 * max(|bf16 teacher - fp32 teacher|, half a bf16 ULP at the fp32 value).
     \\Missing or partial fp32 teacher coverage cannot pass. A start-only case still produces a picture with exit 2.
 ;
@@ -155,16 +158,33 @@ pub fn run(comptime B: type, init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(a);
     var prompt_file: ?[]const u8 = null;
     var negative_file: ?[]const u8 = null;
+    var picture_file: ?[]const u8 = null;
+    var seed: ?u64 = null;
     var i: usize = 4;
     while (i + 1 < args.len) : (i += 2) {
-        if (std.mem.eql(u8, args[i], "--prompt")) prompt_file = args[i + 1] else if (std.mem.eql(u8, args[i], "--negative")) negative_file = args[i + 1] else break;
+        if (std.mem.eql(u8, args[i], "--prompt")) {
+            prompt_file = args[i + 1];
+        } else if (std.mem.eql(u8, args[i], "--negative")) {
+            negative_file = args[i + 1];
+        } else if (std.mem.eql(u8, args[i], "--picture")) {
+            picture_file = args[i + 1];
+        } else if (std.mem.eql(u8, args[i], "--seed")) {
+            seed = std.fmt.parseInt(u64, args[i + 1], 10) catch {
+                std.debug.print("--seed: {s} is not a seed\n", .{args[i + 1]});
+                return 2;
+            };
+        } else break;
     }
     if (args.len < 4 or i != args.len or (negative_file != null and prompt_file == null)) {
         std.debug.print("{s}\n", .{usage});
         return 2;
     }
     if (prompt_file != null and !@hasDecl(B.Device, "encode")) {
-        std.debug.print("--prompt: this build has no prompt encoder (the Metal build does)\n", .{});
+        std.debug.print("--prompt: this build has no prompt encoder\n", .{});
+        return 2;
+    }
+    if (picture_file != null and !@hasDecl(B.Device, "decode")) {
+        std.debug.print("--picture: this build has no image decoder\n", .{});
         return 2;
     }
     var case = B.st.File.open(a, io, args[2]) catch |err| switch (err) {
@@ -181,7 +201,12 @@ pub fn run(comptime B: type, init: std.process.Init) !u8 {
     const count = try std.math.mul(usize, rows, mi.config.channels);
     const timesteps = try take(f32, B.st, a, &case, "timesteps", .f32);
     const sigmas = try take(f32, B.st, a, &case, "sigmas", .f32);
-    const start = try take(f32, B.st, a, &case, "latents", .f32);
+    // the serving host's own seeded noise, or the case's recorded latents (torch's stream on the CPU it was dumped on)
+    const start = if (seed) |s| seeded: {
+        const x = try a.alloc(f32, count);
+        try mi.noise.latents(a, s, grid[0], grid[1], x);
+        break :seeded x;
+    } else try take(f32, B.st, a, &case, "latents", .f32);
     const steps = timesteps.len;
     if (steps == 0 or count == 0 or sigmas.len != steps + 1 or start.len != count) return error.BadCaseTensor;
 
@@ -221,6 +246,7 @@ pub fn run(comptime B: type, init: std.process.Init) !u8 {
         std.debug.print("both prompts refined: {d:.3} s\n", .{refine_s});
         try print(&out, a, "{{\"device\": \"{s}\", \"image_rows\": {d}, \"prompt_rows\": {d}, \"negative_rows\": {d}, \"load_s\": {d:.2}, \"refine_s\": {d:.4}", .{ device, rows, text, negative_rows, load_s, refine_s });
         if (encode_s) |s| try print(&out, a, ", \"native_encoder\": true, \"encode_s\": {d:.4}", .{s});
+        if (seed) |s| try print(&out, a, ", \"seed\": {d}", .{s});
         const verdict = try teacher(B, a, &case, model, &branches, timesteps, grid, count, &out);
         try print(&out, a, ", \"teacher_status\": \"{s}\", \"status\": \"{s}\"", .{ verdict.status.label(), verdict.overall().label() });
         std.debug.print("teacher {s}; overall {s}\n", .{ verdict.status.label(), verdict.overall().label() });
@@ -244,13 +270,19 @@ pub fn run(comptime B: type, init: std.process.Init) !u8 {
         std.debug.print("denoise: {d:.2} s for {d} steps ({d} forwards)\n", .{ total, steps, 2 * steps });
         break :denoise .{ x, verdict };
     };
+    // Metal's last stage is its picture, which --picture may send elsewhere; CUDA decodes only when it asks.
     if (comptime @hasDecl(B.Device, "decode")) {
-        const width = grid[1] * 16;
-        const height = grid[0] * 16;
-        const picture = try gpu.decode(a, io, std.fs.path.dirname(args[1]) orelse ".", x, width, height);
-        std.debug.print("decoded {d}x{d}: {d:.3} s ({d:.3} s on the GPU), the decoder loaded in {d:.2} s\n", .{ width, height, picture.wall, picture.gpu, picture.load_s });
-        try print(&out, a, ", \"decoder_load_s\": {d:.3}, \"decode_s\": {d:.4}", .{ picture.load_s, picture.wall });
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/picture.png", .{args[3]}), .data = picture.png });
+        const decode_always = if (@hasDecl(B.Device, "decode_always")) B.Device.decode_always else true;
+        var picture_path: ?[]const u8 = picture_file;
+        if (picture_path == null and decode_always) picture_path = try std.fmt.allocPrint(a, "{s}/picture.png", .{args[3]});
+        if (picture_path) |path| {
+            const width = grid[1] * 16;
+            const height = grid[0] * 16;
+            const picture = try gpu.decode(a, io, std.fs.path.dirname(args[1]) orelse ".", x, width, height);
+            std.debug.print("decoded {d}x{d}: {d:.3} s ({d:.3} s on the GPU), the decoder loaded in {d:.2} s\n", .{ width, height, picture.wall, picture.gpu, picture.load_s });
+            try print(&out, a, ", \"decoder_load_s\": {d:.3}, \"decode_s\": {d:.4}", .{ picture.load_s, picture.wall });
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = picture.png });
+        }
     }
     try print(&out, a, "}}\n", .{});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/latents.f32", .{args[3]}), .data = std.mem.sliceAsBytes(x) });

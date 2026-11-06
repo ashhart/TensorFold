@@ -23,8 +23,9 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
 fn compileCuda(b: *std.Build) void {
     const cuda = @import("cuda_runtime.zig").runtime(b, b.graph.host, .Debug, &.{});
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = b.graph.host, .link_libc = true });
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
     const moss = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
-    const root = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_cuda.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "moss_image", .module = moss } } });
+    const root = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_cuda.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "moss_image", .module = moss } } });
     const exe = b.addExecutable(.{ .name = "moss-teacher-cuda-compile", .root_module = root });
     b.step("compile-moss-teacher-cuda", "Compile the MOSS CUDA teacher CLI without kernel images or execution").dependOn(&exe.step);
 }
