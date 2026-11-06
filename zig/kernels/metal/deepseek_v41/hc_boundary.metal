@@ -1,8 +1,11 @@
-// Hyper-connection block boundary in two launches, ported whole from BobClawblaw/TensorFold, branch
-// deepseek-v41-main, commit 72a552ed (Apache-2.0; see THIRD_PARTY_NOTICES.md): ds_hc_mix_part,
-// ds_hc_expand_mix and ds_hc_boundary, minus their fused-expert branch (this engine's MoE writes its own
-// branch) and the XR-rows variant. The arithmetic, the thread mapping (1024 threads a row, five columns a
-// thread) and the lagged collapse are the sibling's, unchanged.
+// The Hyper-Connection boundary. The release's Block.hc_mixes, hc_pre and hc_post
+// (inference/model.py, revision 314113f8) define the contract: one projection of the flattened hc
+// stream yields the pre/post/comb coefficient sets, comb is made doubly stochastic by Sinkhorn,
+// pre collapses the copies to one sublayer input, and post expands the sublayer output back out
+// with the residual mixed through comb. This file is the lane's launch split for that
+// contract: a threadgroup owns a 1024-column slice of one row, 1024 threads a row and five columns
+// a thread; the mixes' partial sums are reduced in two stages and the boundary pass carries the
+// lagged collapse that the next block consumes.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -13,33 +16,50 @@ static_assert(sizeof(HcArgs) == 12, "HcArgs must mirror mhc.zig's BoundaryArgs")
 
 inline float hc_bf(float v) { return float(bfloat(v)); }
 
-// The mixes' partial sums: a threadgroup a (1024-column slice, row), 24 products and a sum of squares to PART.
+// One thread's four columns of a 1024-column slice: the four stream values and their products
+// against the mix rows. The values are the bf16 stream at the thread's columns; the mix rows are
+// the release's hc_fn projection, read at the same columns.
+inline void tf_hc_mix_products(const float* v, const device float* fn, int col, float* out) {
+  out[MIX] = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
+  for (int q = 0; q < MIX; q++) {
+    const device float* f = fn + size_t(q) * F + col;
+    out[q] = f[0] * v[0] + f[1] * v[1] + f[2] * v[2] + f[3] * v[3];
+  }
+}
+
+// Two-stage reduction: eight simdgroups' sums land in the threadgroup, then the first MIX+1
+// threads add the eight in index order and publish the slice's totals. The order is the
+// reference's sum order: a per-thread product, the warp's sum, then the eight warps by index.
+inline void tf_hc_mix_publish(threadgroup float* red, device float* part, const float* m,
+                              uint lane, uint sg, uint t, uint r, uint j) {
+  for (int q = 0; q <= MIX; q++) {
+    const float s = simd_sum(m[q]);
+    if (lane == 0) red[sg * (MIX + 1) + q] = s;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (int(t) <= MIX) {
+    float s = 0.0f;
+    for (int k = 0; k < 8; k++) s += red[k * (MIX + 1) + int(t)];
+    part[(size_t(r) * SLICES + j) * (MIX + 1) + t] = s;
+  }
+}
+
+// The mixes' partial sums: a threadgroup a (1024-column slice, row), 24 products and a sum of
+// squares to PART.
 [[kernel]] void tf_hc_mix_part(const device bfloat* X [[buffer(0)]], const device float* FN [[buffer(1)]],
                                device float* PART [[buffer(2)]], uint2 tg [[threadgroup_position_in_grid]],
                                uint2 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                                uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float red[8][MIX + 1];
+  threadgroup float red[8 * (MIX + 1)];
   const int j = int(tg.x), r = int(tg.y);
   const uint t = tpos.x;
   const device bfloat* x = X + size_t(r) * F + 1024 * j + 4 * int(t);
   float v[4];
   for (int i = 0; i < 4; i++) v[i] = float(x[i]);
+  const int col = 1024 * j + 4 * int(t);
   float acc[MIX + 1];
-  acc[MIX] = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
-  for (int m = 0; m < MIX; m++) {
-    const device float* f = FN + size_t(m) * F + 1024 * j + 4 * int(t);
-    acc[m] = f[0] * v[0] + f[1] * v[1] + f[2] * v[2] + f[3] * v[3];
-  }
-  for (int m = 0; m <= MIX; m++) {
-    const float s = simd_sum(acc[m]);
-    if (lane == 0) red[sg][m] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (int(t) <= MIX) {
-    float s = 0.0f;
-    for (int k = 0; k < 8; k++) s += red[k][t];
-    PART[(size_t(r) * SLICES + j) * (MIX + 1) + t] = s;
-  }
+  tf_hc_mix_products(v, FN, col, acc);
+  tf_hc_mix_publish(&red[0], PART, acc, lane, sg, t, uint(r), uint(j));
 }
 
 // The pending branch into XO and the slice's mix sums from the bf16 written: one pass over the streams.
@@ -49,7 +69,7 @@ inline float hc_bf(float v) { return float(bfloat(v)); }
                                  device bfloat* XO [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
                                  uint2 tpos [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                                  uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float red[8][MIX + 1];
+  threadgroup float red[8 * (MIX + 1)];
   const int j = int(tg.x), r = int(tg.y);
   const uint t = tpos.x;
   const int col = 1024 * j + 4 * int(t);
@@ -69,21 +89,8 @@ inline float hc_bf(float v) { return float(bfloat(v)); }
     v[i] = float(o);
   }
   float acc[MIX + 1];
-  acc[MIX] = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
-  for (int m = 0; m < MIX; m++) {
-    const device float* f = FN + size_t(m) * F + col;
-    acc[m] = f[0] * v[0] + f[1] * v[1] + f[2] * v[2] + f[3] * v[3];
-  }
-  for (int m = 0; m <= MIX; m++) {
-    const float s = simd_sum(acc[m]);
-    if (lane == 0) red[sg][m] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (int(t) <= MIX) {
-    float s = 0.0f;
-    for (int q = 0; q < 8; q++) s += red[q][t];
-    PART[(size_t(r) * SLICES + j) * (MIX + 1) + t] = s;
-  }
+  tf_hc_mix_products(v, FN, col, acc);
+  tf_hc_mix_publish(&red[0], PART, acc, lane, sg, t, uint(r), uint(j));
 }
 
 // A threadgroup of 1024 a row: (MIXES) the boundary's pre, post and Sinkhorn comb; the streams collapsed and normed.

@@ -112,9 +112,9 @@ pub fn idealRsqrt(x: f32) f32 {
 pub fn rms(x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
     rmsOf(f32, x, weight, eps, out);
 }
-/// The comparator's per-head UNWEIGHTED query RMS (mlx-serve's attentionBatch and its dsparkAttention: "wq_a ->
-/// q_norm -> wq_b -> per-head RMS -> rope", the reference's own rmsNormRow(row, null, eps) -- a pure RMS, no weight
-/// cell; MIT/Apache-2.0, the attribution rides the ported line). The same boundary contract as rmsOf: the FP32 mean
+/// The per-head UNWEIGHTED query RMS arm (the diagnostic form wq_a -> q_norm -> wq_b -> per-head RMS -> rope;
+/// a pure RMS, no weight cell). The release's Attention.forward normalizes the qr latent once, before wq_b, so
+/// this arm is not the shipped path. The same boundary contract as rmsOf: the FP32 mean
 /// projection and the ideal rsqrt for the FP32 chain, the wide FP64 mean and rsqrt for the FP64 one.
 pub fn rmsUnweighted(comptime T: type, x: []const u16, eps: f32, out: []u16) void {
     @setFloatMode(.strict);

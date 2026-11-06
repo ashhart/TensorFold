@@ -170,7 +170,7 @@ kernel void dsv41_index_seed(device const float *scores [[buffer(0)]], device Ds
     seed_end[row] = at;
 }
 
-// One thread a key: the merge's scan, in parallel. The comparator is a total order (score, then
+// One thread a key: the merge's scan, in parallel. The order is total (score, then
 // position), so which keys reach the heap does not depend on the order they arrive in and the compacted
 // list needs no ordering of its own. Keys the running worst already beats are dropped here; the insert
 // re-checks anyway, so a permissive filter changes nothing.

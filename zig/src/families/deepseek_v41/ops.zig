@@ -16,7 +16,7 @@ pub const Pipelines = struct {
     copy: mtl.Pipeline,
     markov: mtl.Pipeline,
     markov_pick: mtl.Pipeline,
-    /// MLX's bf16 tensor-unit GEMM for the router gate (TF_DSV41_ROUTE_GEMM): bf16 logits, N = 384.
+    /// The tree's bf16 tensor-unit GEMM for the router gate (TF_DSV41_ROUTE_GEMM): bf16 logits, N = 384.
     gate: ?mtl.Pipeline = null,
     /// The same gate GEMM with an fp32 destination: the router's own precision, so the picks and weights are the
     /// shipped path's.
@@ -155,7 +155,7 @@ pub fn encodeDump(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, y: View, 
 }
 
 pub const Gate = struct { rows: u32, k: u32, n: u32 = 384 };
-/// x[rows, k] bf16 @ gate[n, k] bf16 -> y[rows, n] bf16 on the tensor units (MLX's gemm_nax, fp32 sums). The
+/// x[rows, k] bf16 @ gate[n, k] bf16 -> y[rows, n] bf16 on the tensor units (TensorFold's gemm_nax, fp32 sums). The
 /// same dispatch step5/vision.zig uses: P carries the shapes, the strides, the tile counts and the swizzle.
 pub fn encodeGateGemm(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: Gate) void {
     const pipe = p.gate orelse return;

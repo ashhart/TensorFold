@@ -31,8 +31,7 @@ pub const Params = extern struct {
     index_stride: u32 = 512,
     scale: f32 = 0.04419417382415922,
     splits: u32 = 1, // >1 only on a decode layer, where one threadgroup would scan every key alone
-    /// The drafter's form -- every row sits at `position` and sees every chunk row, as the comparator's
-    /// dsparkAttention does (one position for the whole draft block, no mask over its rows).
+    /// The drafter's form -- every row sits at `position` and sees every chunk row, as the release's DSparkAttention.forward does (one position for the whole draft block, no mask over its rows).
     chunk_all: u32 = 0,
     comptime {
         @import("metal/index_mirror.zig").check(Params, sources.deepseek_v41_csa2, "Dsv41Attention");

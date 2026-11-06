@@ -333,11 +333,11 @@ pub fn StateOf(comptime T: type) type {
             self.observe(.qr_norm, &self.qr);
             try projection.applyOf(u16, T, .{ .trellis = a.wq_b }, &self.qr, &self.q, scratch);
             self.observe(.q_projection, &self.q);
-            // The comparator's per-head UNWEIGHTED query RMS, before the rope (mlx-serve's attentionBatch: "wq_a ->
-            // q_norm -> wq_b -> per-head RMS -> rope"; the reference's own rmsNormRow(row, null, eps),
-            // MIT/Apache-2.0 -- the attribution rides the ported line). The port had no norm here, so its query
-            // reached the softmax with whatever scale wq_b produced. The chain's OWN per-head RMS, before and after
-            // the norm (layer 0 only), so the two chains' query scales are read off the same ruler.
+            // The per-head UNWEIGHTED query RMS arm, before the rope (the diagnostic form
+            // wq_a -> q_norm -> wq_b -> per-head RMS -> rope; the release's Attention.forward normalizes the qr
+            // latent once, before wq_b). This arm has no norm here, so its query reaches the softmax with whatever
+            // scale wq_b produced. The chain's OWN per-head RMS, before and after the norm (layer 0 only), so the
+            // two chains' query scales are read off the same ruler.
             if (layer == 0) {
                 const before = headRmsRange(self.q[0..32768]);
                 for (0..64) |head| m.rmsUnweighted(T, self.q[head * 512 ..][0..512], c.eps, self.q[head * 512 ..][0..512]);
