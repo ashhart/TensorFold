@@ -999,8 +999,8 @@ deleted and its tokens are prefilled, and a write cut off midway leaves nothing 
 needs `--spill-gib` or `--learn-conversations`. With `--learn-conversations` too, every state is still written
 behind, a staged write survives eviction of its RAM entry, and the cap is the smaller of `--learn-gib` and
 `--spill-gib`. `--learn-min-free-gib` and `--learn-daily-gib` apply to spilled states as well. The same four Mac
-families take both flags, and so do three CUDA ones; the others refuse them at startup. Without either flag nothing
-changes, and the routes below stay off. `TENSORFOLD_ROWS_SYNC=1` selects the previous synchronous writer for
+families take both flags, and so do Nemotron, the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 on CUDA; the
+others refuse them at startup. Without either flag nothing changes, and the routes below stay off. `TENSORFOLD_ROWS_SYNC=1` selects the previous synchronous writer for
 comparisons; its block and state files have the same bytes. That comparison writer retains blocking I/O; the bounded
 disk wait uses the threaded writer. `TF_IMPRINT_VERIFY=1` reads threaded writes back against their owned staging before
 publication.

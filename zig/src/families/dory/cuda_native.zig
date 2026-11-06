@@ -18,6 +18,7 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = be.prompt_rows;
 /// A kept state is the caches through its position and nothing past it (no draft head reads a token on).
 pub const snap_lookahead: u32 = 0;
+pub const kept_view = @import("cuda_disk.zig"); // the disk store's image (native/cuda_kept.zig)
 pub const takes_drafter = false;
 pub const drafter_refusal = "--drafter: Dory on CUDA loads no drafter; drafts come from the prompt's own text";
 pub const explains_open = true;

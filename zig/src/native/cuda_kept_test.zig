@@ -291,10 +291,13 @@ test "CUDA kept: a saved state resumes under its own key, and a stale key misses
     try t.expectEqual(@as(u32, 1404), try turn(a, root, id, &target, second, 1404));
 }
 
-test "CUDA kept: Gemma 4 takes the store, a family without a view still refuses" {
+test "CUDA kept: Gemma 4, Dory and Spark2.5 take the store, a family without a view still refuses" {
     const gemma = @import("gemma4_cuda");
-    inline for (.{ gemma.native, gemma.native31 }) |F| try t.expect(comptime disk.keptDisk(F) != null);
-    const open: api.Open = .{ .dir = "d", .model_type = "gemma4", .learn_conversations = true };
-    try t.expect(@import("cuda_refusal.zig").family(gemma.native31, open) == null);
+    const dory = @import("dory");
+    inline for (.{ gemma.native, gemma.native31, dory.native, @import("spark25").native }) |F| {
+        try t.expect(comptime disk.keptDisk(F) != null);
+    }
+    const open: api.Open = .{ .dir = "d", .model_type = "dory", .learn_conversations = true };
+    try t.expect(@import("cuda_refusal.zig").family(dory.native, open) == null);
     try t.expect(comptime disk.keptDisk(@import("kolibri1").native) == null);
 }
