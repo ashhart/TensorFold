@@ -1,4 +1,4 @@
-//! MOSS-Image's CUDA kernels under the contract (moss-contract): the glue, attention and the decoder's unpack.
+//! MOSS-Image's CUDA kernels under the contract (moss-contract): the glue, attention and the decoder's steps.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -9,6 +9,11 @@ const norms = @import("contract_moss_image_norms.zig");
 const steps = @import("contract_moss_image_steps.zig");
 const full = @import("contract_moss_image_attn.zig");
 const unpack = @import("contract_moss_image_decoder_unpack.zig");
+const norm = @import("contract_moss_image_decoder_norm.zig");
+const softmax = @import("contract_moss_image_decoder_softmax.zig");
+const group = @import("contract_moss_image_decoder_group.zig");
+const gemm = @import("contract_moss_image_decoder_gemm.zig");
+const conv = @import("contract_moss_image_decoder_conv3x3.zig");
 
 const g = core.contract.gates;
 
@@ -28,6 +33,11 @@ pub const Set = struct {
     adds: [2]steps.GateAdd = undefined,
     full: full.Full = undefined,
     decoder: *unpack.Set = undefined,
+    norm: *norm.Set = undefined,
+    softmax: *softmax.Set = undefined,
+    group: *group.Set = undefined,
+    gemm: *gemm.Set = undefined,
+    conv: *conv.Set = undefined,
 
     /// The set, its kernels appended to `list` (each control after the kernel it breaks).
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -68,10 +78,20 @@ pub const Set = struct {
         for (&set.adds) |*x| try list.append(a, x.kernel());
         try list.append(a, set.full.kernel());
         set.decoder = try unpack.Set.init(gpu, s, a, list, &set.ctl);
+        set.norm = try norm.Set.init(gpu, s, a, list, &set.ctl);
+        set.softmax = try softmax.Set.init(gpu, s, a, list, &set.ctl);
+        set.group = try group.Set.init(gpu, s, a, list, &set.ctl);
+        set.gemm = try gemm.Set.init(gpu, s, a, list, &set.ctl);
+        set.conv = try conv.Set.init(gpu, s, a, list, &set.ctl);
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        set.conv.deinit();
+        set.gemm.deinit();
+        set.group.deinit();
+        set.softmax.deinit();
+        set.norm.deinit();
         set.decoder.deinit();
         for (&set.norms) |*x| x.deinit();
         for (&set.qks) |*x| x.deinit();

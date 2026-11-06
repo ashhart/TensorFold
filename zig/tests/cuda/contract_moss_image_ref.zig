@@ -67,6 +67,10 @@ pub fn tanh(x: f64) f64 {
     return std.math.tanh(x);
 }
 
+pub fn exp(x: f64) f64 {
+    return @exp(x);
+}
+
 fn sqrt(x: f64) f64 {
     return @sqrt(x);
 }
