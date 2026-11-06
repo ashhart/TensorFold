@@ -129,6 +129,7 @@ pub fn build(b: *std.Build) void {
     // every tracked path checks out on Windows too
     const names_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/portable_names.zig"), .target = target }) }));
     names_run.setCwd(b.path("."));
+    names_run.has_side_effects = true; // it lists the tracked trees, and a reused pass can't see a name added since
     test_step.dependOn(&names_run.step);
     // the XPU server's stream admission, a pure function of the card's memory
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu_admit.zig"), .target = target }) })).step);
