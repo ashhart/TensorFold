@@ -1,4 +1,6 @@
 //! The tower's chunk and window plan: 100-frame chunks through the convolutions, then attention over whole windows.
+//! The package pads every chunk to the longest one, so a clip of one chunk under 100 frames is convolved at its own
+//! length, and a clip of more chunks at 100 frames a chunk, the last one zero-padded.
 const std = @import("std");
 const Audio = @import("config.zig").Audio;
 
@@ -23,6 +25,7 @@ pub const Plan = struct {
     frames: usize,
     chunks: usize,
     last_frames: usize, // the last chunk's frames (a full chunk when frames divide)
+    chunk_frames: usize, // frames of the longest chunk: the convolutions' time length, every chunk padded to it
     rows: usize,
     chunk_rows: usize, // rows of the longest chunk: a row's position inside its chunk runs to this
     window_rows: usize, // rows an attention window spans
@@ -32,8 +35,8 @@ pub const Plan = struct {
         const cf = a.chunkFrames();
         const chunks = (n + cf - 1) / cf;
         const last = if (n % cf == 0) cf else n % cf;
-        const longest = if (chunks > 1) rows(cf) else rows(last);
-        return .{ .frames = n, .chunks = chunks, .last_frames = last, .rows = rows(n), .chunk_rows = longest, .window_rows = longest * (a.window_infer / cf) };
+        const longest = if (chunks > 1) cf else last;
+        return .{ .frames = n, .chunks = chunks, .last_frames = last, .chunk_frames = longest, .rows = rows(n), .chunk_rows = rows(longest), .window_rows = rows(longest) * (a.window_infer / cf) };
     }
 
     /// Rows chunk `i` leaves.
@@ -70,7 +73,9 @@ test "plan: chunks, the short last chunk, windows of eight chunks" {
     var sum: usize = 0;
     for (0..p.chunks) |i| sum += p.rowsOf(i);
     try std.testing.expectEqual(p.rows, sum);
+    try std.testing.expectEqual(@as(usize, 100), p.chunk_frames);
     const short = try Plan.init(a, 60);
+    try std.testing.expectEqual(@as(usize, 60), short.chunk_frames); // a lone short chunk is not padded
     try std.testing.expectEqual(@as(usize, 8), short.chunk_rows);
     try std.testing.expectEqual(@as(usize, 64), short.window_rows);
     try std.testing.expectEqual(@as(usize, 1), short.windows());
