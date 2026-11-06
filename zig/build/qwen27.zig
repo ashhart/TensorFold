@@ -129,6 +129,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-bench", "Build the projection-split, one-row floor and shared-round timing bench on real weights", "zig/tests/qwen27/bench.zig", target, false, served);
     _ = program(b, "tf-qwen27-qk-ab", "Build tf_lane_reg against qk, interleaved on real weights", "zig/tests/qwen27/qk_ab.zig", target, false, served);
     _ = program(b, "tf-qwen27-glue-ab", "Build the general glue against the flat kernels, interleaved on real weights", "zig/tests/qwen27/glue_ab.zig", target, false, served);
+    _ = program(b, "tf-qwen27-metal4-ab", "Build Metal 3 against Metal 4 verify passes, interleaved on real weights", "zig/tests/qwen27/metal4_ab.zig", target, false, served);
     _ = program(b, "tf-qwen27-classes", "Build the per-class projection GPU time against the weight-bytes roofline on real weights", "zig/tests/qwen27/classes.zig", target, false, served);
     _ = program(b, "tf-qwen27-streams", "Build the real-weight check that shared rounds keep each stream's logits alone", "zig/tests/qwen27/streams.zig", target, false, served);
     _ = program(b, "tf-qwen27-reuse", "Qwen27 prompt reuse through the served host against fresh prompt passes: states and replies", "zig/tests/qwen27/reuse.zig", target, false, served);
