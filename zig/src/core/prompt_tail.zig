@@ -22,6 +22,25 @@ pub fn start(f: Facts) ?usize {
     return f.total - rows;
 }
 
+/// What reads a prompt chunk's last layers past their state writes.
+pub const Reads = struct {
+    /// The chunk's logits are wanted: the prompt's last chunk.
+    logits: bool,
+    /// Something else reads its rows: taps, a head that absorbs them, prompt logprobs, dumps, lessons.
+    readers: bool,
+};
+
+/// True when no row of the chunk is read: its last layers stop at their state writes.
+pub fn unread(r: Reads) bool {
+    return !r.logits and !r.readers;
+}
+
+test "prompt tail: a chunk stops at its state writes only when nothing reads it" {
+    try std.testing.expect(unread(.{ .logits = false, .readers = false }));
+    try std.testing.expect(!unread(.{ .logits = true, .readers = false }));
+    try std.testing.expect(!unread(.{ .logits = false, .readers = true }));
+}
+
 test "prompt tail: a plain chunk past one tile ends on the tile that holds its kept row" {
     for ([_]usize{ 129, 512, 2048, 4096, 4097 }) |total| {
         const s = start(.{ .total = total, .nseg = 1 }).?;

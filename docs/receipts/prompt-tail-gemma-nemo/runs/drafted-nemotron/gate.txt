@@ -1,0 +1,36 @@
+main 2k 0 2099 accepted 33/47 sha 9a3c3e292856
+main 2k 1 2114 accepted 36/47 sha 671b5faf66b3
+main 2k 2 2087 accepted 29/48 sha 0bd6e9b4fddd
+main 16k 0 16333 accepted 32/49 sha 63907e77d3ea
+main 16k 1 16310 accepted 30/39 sha 5137037fa234
+main 16k 2 16294 accepted 32/39 sha 7445ea0296ea
+main 32k 0 32545 accepted 33/48 sha 04b876a76472
+main 32k 1 32606 accepted 30/47 sha cb730837783c
+main 32k 2 32522 accepted 31/46 sha 8c109c5ff992
+ARM-DONE main
+STEP main rc=0
+branch 2k 0 2099 accepted 33/47 sha 9a3c3e292856
+branch 2k 1 2114 accepted 36/47 sha 671b5faf66b3
+branch 2k 2 2087 accepted 29/48 sha 0bd6e9b4fddd
+branch 16k 0 16333 accepted 31/49 sha 63907e77d3ea
+branch 16k 1 16310 accepted 30/39 sha 5137037fa234
+branch 16k 2 16294 accepted 32/39 sha 7445ea0296ea
+branch 32k 0 32545 accepted 33/48 sha 04b876a76472
+branch 32k 1 32606 accepted 30/47 sha cb730837783c
+branch 32k 2 32522 accepted 31/46 sha 8c109c5ff992
+ARM-DONE branch
+STEP branch rc=0
+main 651968f9570a676045f2b797aadaec1e sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 40960; loaded in 14.0s)
+branch d82474b68bc50db2d520941ad54143d8 sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 40960; loaded in 13.7s)
+2k/0 prompt 2099 tokens 64 sha 9a3c3e292856 == 9a3c3e292856 accepted main 33/47 branch 33/47 ttft 0.293 0.290
+2k/1 prompt 2114 tokens 64 sha 671b5faf66b3 == 671b5faf66b3 accepted main 36/47 branch 36/47 ttft 0.293 0.294
+2k/2 prompt 2087 tokens 64 sha 0bd6e9b4fddd == 0bd6e9b4fddd accepted main 29/48 branch 29/48 ttft 0.290 0.289
+16k/0 prompt 16333 tokens 64 sha 63907e77d3ea == 63907e77d3ea accepted main 32/49 branch 31/49 ttft 2.247 2.255
+16k/1 prompt 16310 tokens 64 sha 5137037fa234 == 5137037fa234 accepted main 30/39 branch 30/39 ttft 2.245 2.245
+16k/2 prompt 16294 tokens 63 sha 7445ea0296ea == 7445ea0296ea accepted main 32/39 branch 32/39 ttft 2.246 2.244
+32k/0 prompt 32545 tokens 64 sha 04b876a76472 == 04b876a76472 accepted main 33/48 branch 33/48 ttft 4.957 4.955
+32k/1 prompt 32606 tokens 64 sha cb730837783c == cb730837783c accepted main 30/47 branch 30/47 ttft 4.969 4.957
+32k/2 prompt 32522 tokens 64 sha 8c109c5ff992 == 8c109c5ff992 accepted main 31/46 branch 31/46 ttft 4.966 4.947
+equal 9/9
+GATE in
+STEP gate rc=0

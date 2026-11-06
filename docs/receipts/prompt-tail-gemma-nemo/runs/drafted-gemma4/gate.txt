@@ -1,0 +1,36 @@
+main 2k 0 2045 accepted 49/170 sha 1b28b05b0809
+main 2k 1 2068 accepted 48/97 sha aebe26a7c718
+main 2k 2 2041 accepted 44/181 sha 6befc70d6fa8
+main 16k 0 15965 accepted 42/192 sha fd12e8fdcb33
+main 16k 1 15974 accepted 45/173 sha 27806c28c8a5
+main 16k 2 15944 accepted 48/150 sha 09ade4cf42aa
+main 32k 0 31902 accepted 48/130 sha 684614dd561e
+main 32k 1 31905 accepted 40/166 sha dd928c24823b
+main 32k 2 31826 accepted 41/120 sha ba413c62f83d
+ARM-DONE main
+STEP main rc=0
+branch 2k 0 2045 accepted 49/168 sha 1b28b05b0809
+branch 2k 1 2068 accepted 47/84 sha aebe26a7c718
+branch 2k 2 2041 accepted 43/200 sha 6befc70d6fa8
+branch 16k 0 15965 accepted 43/182 sha fd12e8fdcb33
+branch 16k 1 15974 accepted 44/187 sha 27806c28c8a5
+branch 16k 2 15944 accepted 48/138 sha 09ade4cf42aa
+branch 32k 0 31902 accepted 47/145 sha 684614dd561e
+branch 32k 1 31905 accepted 39/150 sha dd928c24823b
+branch 32k 2 31826 accepted 42/129 sha ba413c62f83d
+ARM-DONE branch
+STEP branch rc=0
+main 651968f9570a676045f2b797aadaec1e sampling: temperature 1.0, top_k 64, top_p 0.95; drafts: DFlash (z-lab/gemma-4-31B-it-DFlash) + copies; context: 40960; loaded in 19.6s)
+branch d82474b68bc50db2d520941ad54143d8 sampling: temperature 1.0, top_k 64, top_p 0.95; drafts: DFlash (z-lab/gemma-4-31B-it-DFlash) + copies; context: 40960; loaded in 17.3s)
+2k/0 prompt 2045 tokens 64 sha 1b28b05b0809 == 1b28b05b0809 accepted main 49/170 branch 49/168 ttft 2.337 2.122
+2k/1 prompt 2068 tokens 64 sha aebe26a7c718 == aebe26a7c718 accepted main 48/97 branch 47/84 ttft 2.542 2.245
+2k/2 prompt 2041 tokens 64 sha 6befc70d6fa8 == 6befc70d6fa8 accepted main 44/181 branch 43/200 ttft 2.361 2.115
+16k/0 prompt 15965 tokens 64 sha fd12e8fdcb33 == fd12e8fdcb33 accepted main 42/192 branch 43/182 ttft 20.629 19.224
+16k/1 prompt 15974 tokens 64 sha 27806c28c8a5 == 27806c28c8a5 accepted main 45/173 branch 44/187 ttft 19.811 19.228
+16k/2 prompt 15944 tokens 64 sha 09ade4cf42aa == 09ade4cf42aa accepted main 48/150 branch 48/138 ttft 19.821 19.199
+32k/0 prompt 31902 tokens 64 sha 684614dd561e == 684614dd561e accepted main 48/130 branch 47/145 ttft 46.209 44.379
+32k/1 prompt 31905 tokens 64 sha dd928c24823b == dd928c24823b accepted main 40/166 branch 39/150 ttft 46.214 44.411
+32k/2 prompt 31826 tokens 64 sha ba413c62f83d == ba413c62f83d accepted main 41/120 branch 42/129 ttft 45.996 44.242
+equal 9/9
+GATE in
+STEP gate rc=0

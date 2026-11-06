@@ -16,6 +16,7 @@ const prompt_rows = @import("cuda_prompt_rows.zig");
 const reuse = @import("cuda_reuse.zig");
 const lesson_route = @import("living").lesson_route;
 const heat = @import("heat");
+const prompt_tail = @import("core").prompt_tail;
 const pin_sampled = engine.pin_sampled;
 const pin_prompt = engine.pin_prompt;
 
@@ -91,6 +92,9 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         if (keep) |k| arm(e, k, s, end);
         defer e.armed.n = 0;
         f.captures = e.armed.marks();
+        const lessons = shared != null or e.decide != lesson_route.none;
+        const readers = head != null or dump != null or e.taps != null or e.prompt_rows != null or lessons;
+        f.unread = prompt_tail.unread(.{ .logits = end == prompt.len, .readers = readers });
         f.route = .{};
         f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
         try e.copied.synchronize();
