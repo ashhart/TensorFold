@@ -143,7 +143,7 @@ pub fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize) v
     const strides = [12]usize{ L * q_row, D, q_row, kvh, cap * D, D, kvh, cap * D, D, L * row, D, row };
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(D), -0.5));
     const paged: ?pl.Paged = if (kv.paged) |pg| .{ .pipes = x.f.k.paged.?, .table = tableOf(pg) } else null;
-    l.attention(qkv, cacheAt(kv, false), cacheAt(kv, true), At.of(s.ya), L, x.cache.len + L, c.heads, c.kv_heads, strides, scale, paged);
+    l.attention(qkv, cacheAt(kv, false), cacheAt(kv, true), At.of(s.ya), L, x.cache.len + L, c.heads, c.kv_heads, strides, scale, paged, At.of(s.attention_pick));
     x.linear("out", "xsum_4096", lin.o_proj, a.o, s.ya, s.out);
     if (lin.slide) |r| layers.rest(x.f, x.e, r, s.ya, s.out, L, row);
     if (lin.adapter) |ad| layers.adapt(x.f, x.e, ad, s.ya, s.out, L);

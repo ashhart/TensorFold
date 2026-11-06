@@ -27,7 +27,6 @@ const attn_k = @import("metal_q27_attn.zig");
 const io_k = @import("metal_q27_attn_io.zig");
 const q27_moe = @import("metal_qwen27_moe.zig");
 const q27_rows = @import("metal_qwen27_moe_rows.zig");
-
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
 const fsr = @import("metal_fsr.zig");
@@ -41,7 +40,6 @@ const lfm2_controls = @import("metal_lfm2_controls.zig");
 const llama_k = @import("metal_llama_all.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
-
 const Opts = struct { only: ?[]const u8 = null, gates: bool = true, limits: bool = true, offline: ?[]const u8 = null, seed: u64 = 0x6b63, repro: bool = false, rotary_long: bool = false, rotary_accuracy: ?[]const u8 = null };
 
 fn parse(args: []const [:0]const u8) !Opts {
@@ -70,7 +68,6 @@ fn parse(args: []const [:0]const u8) !Opts {
 }
 
 const Reg = struct { v: affine_k.Variant, name: []const u8 };
-
 const common = [_]Reg{
     .{ .v = .{ .kind = .row, .bits = 4, .group = 64 }, .name = "metal row projection q4 g64" },
     .{ .v = .{ .kind = .row, .bits = 6, .group = 32 }, .name = "metal row projection q6 g32" },
@@ -438,6 +435,9 @@ pub fn main(init: std.process.Init) !u8 {
     var llama_set = llama_k.Set{};
     defer llama_set.deinit(a);
     try llama_set.collect(a, device, queue, tensor, &kernels, o.only);
+    var masked_values = @import("metal_masked_values.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer masked_values.deinit();
+    try masked_values.collect(o.only);
     if (tensor) for (std.enums.values(h3_k.Which)) |w| {
         if (!wanted(o, h3_k.spec(w).name)) continue;
         const x = try a.create(h3_k.H3);

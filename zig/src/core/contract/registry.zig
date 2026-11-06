@@ -381,6 +381,7 @@ pub fn checkCuda(a: std.mem.Allocator, list: []const CudaRecord, quiet: bool) !u
 }
 /// Metal pipelines as the engine launches them; tg_memory is the most any chip reflects, m1 and m2 the compiled limits.
 pub const metal = @import("fsr_records.zig").metal ++ [_]M{
+    .{ .name = "contract masked values tf_masked_control", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "softmax tf_softmax_bf16", .threads = 1024, .tg_memory = 256, .m1 = 1024, .m2 = 1024 },
     .{ .name = "rms tf_rms_norm_bf16", .threads = 1024, .tg_memory = 144, .m1 = 1024, .m2 = 1024 },
     .{ .name = "top-k tf_bf16_topk", .threads = 256, .tg_memory = 4096, .m1 = 768, .m2 = 768 },
@@ -569,7 +570,7 @@ test {
 const paging = @import("paging_pending.zig");
 /// The Metal collector keeps measured slots and the restored vision declarations.
 pub const all_metal = @import("attention_pv_records.zig").records ++ metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records ++ @import("simd_pairs_records.zig").records ++ @import("metal_pair_records.zig").records ++ @import("glm_rows_records.zig").records ++ @import("weight_only_records.zig").metal ++ @import("hc_activation_records.zig").metal ++ @import("qwen4_records.zig").metal ++ @import("lfm2_records.zig").records ++ @import("nemotron_experts_records.zig").records ++ @import("nemotron_pages_records.zig").records ++ @import("nemotron_attention_records.zig").records ++
-    @import("nemotron_ssd_records.zig").records ++ @import("flashnext_attention_records.zig").records ++ @import("spark25_records.zig").records ++ @import("gemma_attention_records.zig").records ++ @import("moss_image_records.zig").records ++ @import("dsv41_metal_records.zig").records ++ @import("minimax_records.zig").records ++ @import("ling_route_records.zig").records ++ @import("qwen27_moe_records.zig").records ++ @import("affine_gather_records.zig").records;
+    @import("nemotron_prompt_mask_records.zig").records ++ @import("nemotron_ssd_records.zig").records ++ @import("flashnext_attention_records.zig").records ++ @import("spark25_records.zig").records ++ @import("gemma_attention_records.zig").records ++ @import("moss_image_records.zig").records ++ @import("dsv41_metal_records.zig").records ++ @import("minimax_records.zig").records ++ @import("ling_route_records.zig").records ++ @import("qwen27_moe_records.zig").records ++ @import("affine_gather_records.zig").records;
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
