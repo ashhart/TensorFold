@@ -350,7 +350,9 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
         e.embed_b = try tensor(e, ck, "{s}embed_tokens.biases", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
         e.head = if (g.tied) try linear(e, e, ck, stage, m, "embed_tokens", g.vocab, g.hidden, g.bits.head) else try linear(e, e, ck, stage, "language_model.", "lm_head", g.vocab, g.hidden, g.bits.head);
     }
-    e.final_norm = try normVec(e, ck, mo, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
+    // a plain BF16 checkpoint keeps HF's raw w: its norm kernels (the _shift ones) scale by 1 + w in FP32
+    const shift = mo and !g.bf16;
+    e.final_norm = try normVec(e, ck, shift, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
     const conv = g.convWidth();
     const taps_shape: []const usize = if (mo) &.{ conv, 1, geometry.taps } else &.{ conv, geometry.taps, 1 }; // the same bytes
     const readers = try core.checkpoint.loadReaders();
@@ -367,8 +369,8 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
             ps.set(slot, if (mo) try modelopt.linear(e, ck, stage, p, name, nk[0], nk[1], g.kinds.of(i, slot)) else try linear(e, e, ck, stage, p, name, nk[0], nk[1], g.bits.of(i, slot)));
         }
         l.* = .{
-            .input_norm = try normVec(e, ck, mo, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
-            .post_norm = try normVec(e, ck, mo, "{s}post_attention_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
+            .input_norm = try normVec(e, ck, shift, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
+            .post_norm = try normVec(e, ck, shift, "{s}post_attention_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
             .mlp = if (g.moe() and mo) try modelopt_experts.routed(e, ck, stage, p) else if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
             .mixer = undefined,
         };
@@ -391,8 +393,8 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
                 .k = ps.get(.k),
                 .v = ps.get(.v),
                 .o = ps.get(.o),
-                .q_norm = try normVec(e, ck, mo, "{s}self_attn.q_norm.weight", .{p}, .bf16, &.{head_dim}),
-                .k_norm = try normVec(e, ck, mo, "{s}self_attn.k_norm.weight", .{p}, .bf16, &.{head_dim}),
+                .q_norm = try normVec(e, ck, shift, "{s}self_attn.q_norm.weight", .{p}, .bf16, &.{head_dim}),
+                .k_norm = try normVec(e, ck, shift, "{s}self_attn.k_norm.weight", .{p}, .bf16, &.{head_dim}),
             } };
         }
     }
