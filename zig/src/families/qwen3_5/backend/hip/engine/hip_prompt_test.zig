@@ -393,3 +393,37 @@ test "readouts are refused under tensor parallelism and reported on one rank" {
     try h.useReadout(r);
     try T.expectEqual(@as(u32, 16384), h.readouts().?.max_rows);
 }
+
+test "a resumed lane's features start at its resume point; a fresh lane's at row 0" {
+    var bridge: @import("../model/bridge.zig").Bridge = undefined;
+    bridge.model.taps = .{ .n = 2, .rows = 2064 };
+    bridge.model.taps.layers[0..2].* = .{ 5, 19 };
+    bridge.model.spec.hidden = 8;
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{};
+    e.act = .bf16;
+    e.bridge = &bridge;
+    var h: source.Hip = undefined;
+    h.e = &e;
+    var ring: [1]u8 = undefined;
+    var lane: source.Lane = undefined;
+    lane.caches.tap = .{ .r = undefined, .ptr = &ring, .len = ring.len };
+    lane.len = 200; // a 200-row prompt, every row still in the ring
+    lane.pending = null;
+    const taps = [_]u32{ 5, 19 };
+    lane.tapped_from = 0;
+    try T.expectEqual(@as(u32, 16), (try h.features(&lane, &taps, 0, 16)).rows);
+    try T.expectError(error.RowsNotHeld, h.features(&lane, &taps, 196, 5)); // its last row is not written
+    // resumed at row 64: the ring holds zeros below it, which no pass tapped
+    lane.tapped_from = 64;
+    const f = try h.features(&lane, &taps, 64, 136);
+    try T.expectEqual(@as(u64, 64), f.offset);
+    try T.expectEqual(@as(u32, 136), f.rows);
+    const refused = [_][2]u64{
+        .{ 63, 1 }, // the row before the resume point
+        .{ 0, 16 }, // rows all below it
+        .{ 60, 8 }, // rows across it
+        .{ 196, 5 }, // its last row is not written
+    };
+    for (refused) |r| try T.expectError(error.RowsNotHeld, h.features(&lane, &taps, r[0], @intCast(r[1])));
+}
