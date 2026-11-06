@@ -19,6 +19,13 @@ pub const Phase = union(enum) {
     pub fn ends(p: Phase, ignore_eos: bool, eos: []const u32, t: u32) bool {
         return (!ignore_eos or p == .on) and std.mem.indexOfScalar(u32, eos, t) != null;
     }
+
+    /// Whether the reply keeps a trailing end token as content, the negation of the condition `ends` applies.
+    /// An end token the grammar takes ends the reply, so it is not content: the reply's content tokens, its
+    /// logprob rows and its stream all read it the same way.
+    pub fn keepsTrailing(p: Phase, ignore_eos: bool) bool {
+        return ignore_eos and p != .on;
+    }
 };
 
 /// A chunk's tokens that stream, and whether one of them ended the reply (it does not stream).
@@ -48,6 +55,26 @@ test "EOS policy: a chunk's end token is judged at its own grammar phase, so one
     try std.testing.expect(last == .on and last.ends(true, &eos, chunk[1]));
     const wrong = streamed(last, true, &eos, &chunk);
     try std.testing.expectEqualSlices(u32, chunk[0..1], wrong.tokens);
+}
+
+test "EOS policy: the content tokens keep a trailing end token exactly when it does not end the reply" {
+    const eos = [_]u32{ 2, 3 };
+    const t: u32 = 2; // an end token
+    // keepsTrailing is the negation of the condition ends applies, at every phase and either ignore_eos.
+    for ([_]Phase{ .none, .{ .after = 9 }, .on }) |p| {
+        for ([_]bool{ false, true }) |ignore_eos| {
+            try std.testing.expectEqual(!p.ends(ignore_eos, &eos, t), p.keepsTrailing(ignore_eos));
+        }
+    }
+    // The case this pins: with ignore_eos, a grammar's own stop ends the reply, so it is not content.
+    const on: Phase = .on;
+    const none: Phase = .none;
+    const waiting: Phase = .{ .after = 9 };
+    try std.testing.expect(!on.keepsTrailing(true));
+    try std.testing.expect(none.keepsTrailing(true));
+    try std.testing.expect(waiting.keepsTrailing(true));
+    // Without ignore_eos nothing keeps a trailing end token.
+    for ([_]Phase{ .none, .{ .after = 9 }, .on }) |p| try std.testing.expect(!p.keepsTrailing(false));
 }
 
 test "EOS policy: without ignore_eos any end token ends the stream; without a grammar ignore_eos keeps them all" {
