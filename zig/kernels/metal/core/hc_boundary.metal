@@ -2,7 +2,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Defines: TF_D (stream width, a multiple of 1024), TF_ITERS (Sinkhorn iterations), TF_HC_EPS_INT (the split's eps in 1e-9).
+// Defines: TF_D (stream width, multiple of 1024), TF_ITERS (Sinkhorn iterations), TF_HC_EPS_INT (split's eps in 1e-9).
 constant constexpr int S = 4, F = S * TF_D, MIX = (2 + S) * S, SLICES = F / 1024, PARTS = MIX + 1;
 
 #pragma clang fp contract(off)
