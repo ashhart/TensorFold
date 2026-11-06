@@ -1,4 +1,4 @@
-//! The core row projection on synthetic 2-, 4-, 6- and 8-bit matrices: every width equals one row, a CPU reference, indexed experts.
+//! Core row projection on synthetic 2-, 4-, 6-, 8-bit matrices: every width = one row, CPU reference, indexed experts.
 const std = @import("std");
 const mtl = @import("metal");
 const row = @import("row_projection");
