@@ -473,6 +473,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_moss_gate_add_product(_
 }
 // Gate 3: the image decoder's tf_md_unpack with its batch norm mean dropped.
 #include "moss_decoder_controls.cuh"
+// Gate 3: the prompt encoder's tf_me_norm, tf_me_head and tf_me_gate, each with one rounding dropped.
+#include "moss_encoder_controls.cuh"
 // Gate 3: main's tf_exl3_plan_finish (PlanStage without alpha), the baseline, and two SwiGLU-OAI faults that go red.
 #include "exl3_plan.cuh"
 

@@ -1,11 +1,11 @@
-//! MOSS-Image's prompt encoder launches (moss_image_encoder.cu): geometry recorded, five-SM usage receipts owed.
+//! MOSS-Image's prompt encoder launches (moss_image_encoder.cu): geometry recorded; three of nine usages measured.
 const CudaRecord = @import("registry.zig").CudaRecord;
 const none = @import("registry.zig").none;
 pub const records = [_]CudaRecord{
-    .{ .launch = .{ .name = "moss image encoder tf_me_norm", .symbol = "tf_me_norm", .image = "moss_image_encoder", .threads = 256 }, .usage = none },
-    .{ .launch = .{ .name = "moss image encoder tf_me_head", .symbol = "tf_me_head", .image = "moss_image_encoder", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "moss image encoder tf_me_norm", .symbol = "tf_me_norm", .image = "moss_image_encoder", .threads = 256 }, .usage = .{ .{ .regs = 27, .static = 32, .bound = 256 }, .{ .regs = 27, .static = 32, .bound = 256 }, .{ .regs = 27, .static = 32, .bound = 256 }, .{ .regs = 27, .static = 32, .bound = 256 }, .{ .regs = 27, .static = 32, .bound = 256 } } },
+    .{ .launch = .{ .name = "moss image encoder tf_me_head", .symbol = "tf_me_head", .image = "moss_image_encoder", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "moss image encoder tf_me_attention", .symbol = "tf_me_attention", .image = "moss_image_encoder", .threads = 256 }, .usage = none },
-    .{ .launch = .{ .name = "moss image encoder tf_me_gate", .symbol = "tf_me_gate", .image = "moss_image_encoder", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "moss image encoder tf_me_gate", .symbol = "tf_me_gate", .image = "moss_image_encoder", .threads = 256 }, .usage = .{ .{ .regs = 16, .static = 0, .bound = 256 }, .{ .regs = 15, .static = 0, .bound = 256 }, .{ .regs = 15, .static = 0, .bound = 256 }, .{ .regs = 15, .static = 0, .bound = 256 }, .{ .regs = 15, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "moss image encoder tf_me_silu_mul", .symbol = "tf_me_silu_mul", .image = "moss_image_encoder", .threads = 256 }, .usage = none },
     .{ .launch = .{ .name = "moss image encoder tf_me_conv", .symbol = "tf_me_conv", .image = "moss_image_encoder", .threads = 256 }, .usage = none },
     .{ .launch = .{ .name = "moss image encoder tf_me_gdn_prep", .symbol = "tf_me_gdn_prep", .image = "moss_image_encoder", .threads = 256 }, .usage = none },

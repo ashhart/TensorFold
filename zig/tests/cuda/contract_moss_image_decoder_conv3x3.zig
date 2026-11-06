@@ -20,27 +20,26 @@ const Call = struct {
     add: bool = false,
 };
 
-/// One decode's 3 x 3 launches at a picture of `rows` x `cols` (the latent grid's 8 x, its 2 x 2 patch unpacked),
-/// in the order `run` makes them: conv_in, the mid block's and up_blocks.0's 384s, then each level's upsampler and
-/// the blocks above it while the widths fall 384, 384, 192, 96.
+/// A picture's (the latent grid's 8 x) launches in `run`'s order: conv_in, the 384 blocks, each level's up and blocks.
 fn picture(rows: usize, cols: usize) [15]Call {
     return .{
         .{ .rows = rows, .cols = cols, .cin = 32, .cout = 384 },
-        .{ .rows = rows, .cols = cols, .cin = 384, .cout = 384 },
+        // a block's residual-adding call comes first: a shape carries no flags, and callFor takes the first match
         .{ .rows = rows, .cols = cols, .cin = 384, .cout = 384, .add = true },
+        .{ .rows = rows, .cols = cols, .cin = 384, .cout = 384 },
         .{ .rows = 2 * rows, .cols = 2 * cols, .cin = 384, .cout = 384, .up = true },
-        .{ .rows = 2 * rows, .cols = 2 * cols, .cin = 384, .cout = 384 },
         .{ .rows = 2 * rows, .cols = 2 * cols, .cin = 384, .cout = 384, .add = true },
+        .{ .rows = 2 * rows, .cols = 2 * cols, .cin = 384, .cout = 384 },
         .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 384, .cout = 384, .up = true },
         .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 384, .cout = 192 },
-        .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 192, .cout = 192 },
         .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 192, .cout = 192, .add = true },
+        .{ .rows = 4 * rows, .cols = 4 * cols, .cin = 192, .cout = 192 },
         .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 192, .cout = 192, .up = true },
         .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 192, .cout = 96 },
-        // conv_out's three outputs before the block's own 96: gate 3 runs one call a shape, and this one is served
-        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 96, .cout = 3 },
-        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 96, .cout = 96 },
         .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 96, .cout = 96, .add = true },
+        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 96, .cout = 96 },
+        // conv_out's three outputs, the same shape: with one call a shape gate 3 runs the block's 96 above, not this
+        .{ .rows = 8 * rows, .cols = 8 * cols, .cin = 96, .cout = 3 },
     };
 }
 
@@ -194,8 +193,7 @@ pub const Conv = struct {
         const cols = t.shape.n;
         const cin = t.shape.k;
         const cout = t.call.cout;
-        // a pixel's nine taps once, then a sweep over the outputs: each output still sums its terms in tap, then
-        // channel order, so the value and its bound are the ones a per-output loop makes, at the served sizes' cost
+        // a pixel's taps once then a sweep over the outputs: each output sums in tap, then channel order, as before
         for (0..t.shape.rows) |oy| for (0..cols) |ox| {
             const o = (oy * cols + ox) * cout;
             const sum = want[o..][0..cout];
