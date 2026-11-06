@@ -1,7 +1,8 @@
 # Checkpoint thinking fixtures
 
 These are unmodified checkpoint assets supplied for the GLM-5.3-Flash-NVFP4
-revision `da920bb0b9f4` and `lfm2.5-24b-a2b-4bit` (revision not supplied).
+revision `da920bb0b9f4` (nvidia/GLM-5.3-Flash-NVFP4, MIT) and LiquidAI/LFM2.5-24B-A2B-MLX-4bit at revision
+`667408d494bde191c2cb9dd4f4549827816b9275` (LFM Open License v1.0); `THIRD_PARTY_NOTICES.md` records both.
 They exercise the native template loader, renderer and thinking-off request path.
 
 The test vocabulary is deliberately small. Its marker IDs are fixture IDs,
