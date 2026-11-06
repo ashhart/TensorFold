@@ -61,4 +61,7 @@ On a DGX Spark (GB10) with TensorFold 1.2.3 serving `nvidia/Qwen3.8-Flash-Next-F
 | The server stopped, then started again | Hermes reports the server unavailable after its retries, then answers once it is back |
 | Dashboard tab against `/stats` | the same prompt, generated and round totals |
 
-Not run yet: an Apple Silicon Mac serving the model, and the M3 Ultra run the release checklist asks for.
+On an M1 Max (64 GB) with the macOS release archive serving `TensorFold/Qwen3.8-27B-MLX-4bit` on loopback with a
+scoped `inference,read` key, the same checks passed, with the endpoint and key only in Hermes' `.env`.
+
+Not run yet: the M3 Ultra run the release checklist asks for.
