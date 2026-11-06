@@ -17,9 +17,8 @@ pub const Mixer = struct {
     /// A pass that keeps no row and has no other reader of the last layer: that layer writes keys and values only.
     keys: ?*const fn (*anyopaque, mtl.ComputeEncoder, usize, wts.Attention, *Frame, u32) anyerror!void = null,
     /// Staged references (off unless asked for): the stream after each stage, the final norm and the head's rows.
-    stage: ?*const fn (*anyopaque, mtl.ComputeEncoder, Point, Ref, u32) anyerror!void = null,
+    stage: ?@import("stage_planes.zig").Hook = null,
 };
-pub const Point = @import("core").qwen35_stages.Point;
 
 /// One exchange: `x` its index, `ref` this rank's `width` columns of the seam in the window's slot for x.
 pub const Seam = struct { x: u32, ref: Ref };
@@ -92,7 +91,7 @@ pub const Stages = struct {
             m.glue.imageRows(lane.enc, s.hidden, rows, m.frame.get(.takes), @intCast(m.config.hidden), s.rows);
             lane.enc.barrier();
         }
-        if (s.hooks.stage) |stage| try stage(s.hooks.ptr, lane.enc, .embed, s.hidden, s.rows);
+        if (s.hooks.stage) |stage| try stage.record(lane.enc, .embed, s.hidden, s.rows);
     }
     pub fn wait(_: *Stages, _: usize) @import("core").segments.Wait {
         return .mixer;
@@ -109,7 +108,7 @@ pub const Stages = struct {
         if (s.pending != null) {
             std.mem.swap(Ref, &s.hidden, &s.residual);
             if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, index - 1, s.hidden, s.rows);
-            if (s.hooks.stage) |stage| try stage(s.hooks.ptr, e, .{ .block = index - 1 }, s.hidden, s.rows);
+            if (s.hooks.stage) |stage| try stage.record(e, .{ .block = index - 1 }, s.hidden, s.rows);
         }
     }
     /// The last layer of a pass whose other rows nothing reads: q, attention, o and the MLP have no reader.
@@ -165,7 +164,7 @@ pub const Stages = struct {
         try m.kernels.norm(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
-        if (s.hooks.stage) |stage| try stage(s.hooks.ptr, e, .{ .mixer = index }, s.hidden, s.rows);
+        if (s.hooks.stage) |stage| try stage.record(e, .{ .mixer = index }, s.hidden, s.rows);
         if (layer.moe) |*mo| if (!m.moe.?.sorted(mo, m.kernels.prompt)) {
             // decode rows: the routed block runs the shared expert as one more slot of the experts' kernel
             try m.moe.?.block(lane.enc, m.config, mo, f, s.rows, m.kernels.prompt);
@@ -253,8 +252,8 @@ pub const Stages = struct {
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
         if (s.hooks.stage) |stage| {
             // the last block is the residual stream; final is the normed rows the head reads (f.input)
-            try stage(s.hooks.ptr, e, .{ .block = m.config.layers - 1 }, s.hidden, s.rows);
-            try stage(s.hooks.ptr, e, .final, f.get(.input), s.rows);
+            try stage.record(e, .{ .block = m.config.layers - 1 }, s.hidden, s.rows);
+            try stage.record(e, .final, f.get(.input), s.rows);
         }
         if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
@@ -267,7 +266,7 @@ pub const Stages = struct {
             try m.kernels.quant(e, m.weights.head, input, head_sums, f.get(.dims), f.get(.logits), if (s.head == .last) 1 else s.rows);
             if (s.hooks.stage) |stage| {
                 e.barrier();
-                try stage(s.hooks.ptr, e, .logits, f.get(.logits), if (s.head == .last) 1 else s.rows);
+                try stage.record(e, .logits, f.get(.logits), if (s.head == .last) 1 else s.rows);
             }
         }
         e.barrier();
