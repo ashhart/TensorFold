@@ -88,20 +88,20 @@ hyper-connection boundary.
   uncached above 256k ids. The probe warms on its own sample byte, so the FIRST pass over
   novel text pays the cold path by construction (a 35k-token first touch measured 968
   tok/s vs ~1,300 page-warm); repeats keep the mapped path. This is the measured trade
-  that removed a 24 GB page-cache pollution stall (R-495), not a defect to tune around.
+  that removed a 24 GB page-cache pollution stall, not a defect to tune around.
 - **Shared rounds decode plain.** A multi-lane batch round runs the exact plain window for
   every lane (drafted requests in a shared round answer `"draft": false` with the same
-  tokens); drafting is a solo-lane property (R-529/543).
+  tokens); drafting is a solo-lane property.
 - **Cold concurrent prefill serializes.** Four simultaneous cold 22k prefills put up to
-  ~73 s of first-token wait on the last lane (R-543); only a prompt merge would compress
-  it, and the merge moves the reply (R-538), so it stays closed.
+  ~73 s of first-token wait on the last lane; only a prompt merge would compress
+  it, and the merge moves the reply, so it stays closed.
 - **Long-context decode falls with context.** Drafted decode holds the 30+ tok/s bar to
-  ~41k and reads ~25 tok/s at 62k (R-466); the collapse is context length, not sampling.
+  ~41k and reads ~25 tok/s at 62k; the collapse is context length, not sampling.
 - **The 2.8 bpw pack's duplicated tensors** are owned by the index, so a shard contributes
   only the tensors the index maps to it.
 - **The pack-format ceiling is a decision, not a kernel.** The measured path to ~1,400
   prefill / 70 decode is a 3-bit affine expert repack whose quality ratio (1.095) misses
-  the 1.05 band; it ships only if the maintainer accepts that band (R-448/456).
+  the 1.05 band; it ships only if the maintainer accepts that band.
 
 ## The numbers
 

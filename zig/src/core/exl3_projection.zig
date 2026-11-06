@@ -515,8 +515,8 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax18", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_db64 = pf else pf.deinit();
                         } else |err| std.log.err("exl3: nax18 pipeline init failed: {s}", .{@errorName(err)});
-                        // The dense 128x64 prompt tile on the double-buffered body ('s diagnostic, 38.0 against 28.8
-                        // TMAC/s at the same shape, bit-identical to 's k/MMA order).
+                        // The dense 128x64 prompt tile on the double-buffered body: the same k order and MMA order as
+                        // the single-tile body, so the output is bit-identical.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax31", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_dense_db = pf else pf.deinit();
                         } else |err| std.log.err("exl3: nax31 pipeline init failed: {s}", .{@errorName(err)});
@@ -539,7 +539,7 @@ pub const Pipelines = struct {
                         // The dense 128x64 tile with a simdgroup that owns thirty-two rows: the NAXTile shape. The
                         // lane keeps eight states, so the stream words it reads cover twice the states, and the
                         // weight fragments are read once for two row groups. The values, the k order and the MMA
-                        // order per output are 's, so the output is bit-identical.
+                        // order per output are the single-tile body's, so the output is bit-identical.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax56", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_dense_rpg2 = pf else pf.deinit();
                         } else |err| std.log.err("exl3: nax56 pipeline init failed: {s}", .{@errorName(err)});
@@ -900,7 +900,7 @@ var dense_rpg2_cache: ?u32 = null;
 /// TF_DSV41_EXL3_DENSE_RPG2: the dense prompt tile on the thirty-two-row simdgroup body: the NAXTile shape. The lane
 /// owns eight states instead of four, so the stream words it reads cover twice the states, and the weight fragments
 /// are read once for two row groups, so the tile's threadgroup traffic per row halves. The values, their order, the k
-/// order and the MMA order per output are 's, so the output is bit-identical.
+/// order and the MMA order per output are the single-tile body's, so the output is bit-identical.
 fn denseRpg2() bool {
     return envRows("TF_DSV41_EXL3_DENSE_RPG2", 0, &dense_rpg2_cache) != 0;
 }
@@ -964,8 +964,8 @@ fn coopPrefillOn() bool {
 }
 
 /// TF_DSV41_EXL3_WARP32: the 128-row routed tile with the thirty-two-row warp: a warp owns two sixteen-row groups, so
-/// the block is decoded by one warp and the lane keeps eight states and eight bits a weight. `=0` restores 's (the
-/// four-state lane) for the A/B.
+/// the block is decoded by one warp and the lane keeps eight states and eight bits a weight. `=0` restores the
+/// four-state lane for the A/B.
 fn warp32On() bool {
     const v = std.c.getenv("TF_DSV41_EXL3_WARP32") orelse return true;
     return !std.mem.eql(u8, std.mem.span(v), "0");
@@ -1789,8 +1789,7 @@ test "EXL3 scratch is row compact and bounded independently of full matrices" {
     try std.testing.expectError(error.InvalidExl3Rows, scratchBytes(128, 128, 0));
     try std.testing.expectError(error.UnsupportedExl3Shape, scratchBytes(129, 128, 1));
     try std.testing.expectEqual(@as(usize, 72), @sizeOf(ExpertDescriptor));
-    // 104 predates the defaulted fields (2026-10-11, standalone resident EXL3 projections) and 's pair hint;
-    // test-exl3 was not among the suites the record ran.
+    // The Args record counts the defaulted fields and the pair hint.
     try std.testing.expectEqual(@as(usize, 112), @sizeOf(Args));
 }
 
