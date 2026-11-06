@@ -51,7 +51,7 @@ inline void glm_values_run(thread frag<float>& c0, thread frag<float>& c1, const
   }
 }
 
-// O [64, 512] = P K in 16-wide steps (simdgroup g: heads 16 g.., a threadgroup 32 dims); arg.y > 0: keys [0, arg.y) apart.
+// O[64,512] = PK in 16-wide steps (simdgroup g: heads 16 g.., a threadgroup 32 dims); arg.y > 0: keys [0, arg.y) apart.
 [[kernel]] void glm_latent_values(const device bfloat* p [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
                                   device bfloat* o [[buffer(2)]], constant int2& arg [[buffer(3)]],
                                   uint3 tg [[threadgroup_position_in_grid]], uint g [[simdgroup_index_in_threadgroup]],
