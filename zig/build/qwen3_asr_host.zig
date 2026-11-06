@@ -7,14 +7,17 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     const checks = b.step("test-qwen3-asr-host", "Qwen3-ASR config, tensor names, mel rows and reference ops");
     checks.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family })).step);
     all.dependOn(checks);
-    const st = b.createModule(.{ .root_source_file = b.path("zig/src/core/safetensors.zig"), .target = host, .link_libc = true });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = host, .link_libc = true });
+    // core for its Checkpoint: one checkpoint folder's shards (the 1.7B's two) as one name space, as the CUDA load opens it
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = host, .link_libc = true });
+    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, host));
+    core.addImport("tokenizer", tokenizer);
     const tool = b.addExecutable(.{ .name = "tf-qwen3-asr-check", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/qwen3_asr_check.zig"),
         .target = host,
         .optimize = .ReleaseFast,
         .link_libc = true,
-        .imports = &.{ .{ .name = "qwen3_asr", .module = family }, .{ .name = "safetensors", .module = st }, .{ .name = "tokenizer", .module = tokenizer } },
+        .imports = &.{ .{ .name = "qwen3_asr", .module = family }, .{ .name = "core", .module = core }, .{ .name = "tokenizer", .module = tokenizer } },
     }) });
     b.installArtifact(tool);
     b.step("tf-qwen3-asr-check", "Check a Qwen3-ASR checkpoint and its float64 tower against a tools/zig/qwen3_asr_case.py case")
