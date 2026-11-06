@@ -524,7 +524,7 @@ fn encodeJpegBgra(a: Allocator, jf: JpegFns, bgra: []const u8, width: usize, hei
     _ = jf.tj3Set(handle, 4, 2); // TJPARAM_SUBSAMP = 4, TJSAMP_420 = 2
     var out_buf: ?[*]u8 = null;
     var out_size: usize = 0;
-    const rc = jf.tj3Compress8(handle, bgra.ptr, @intCast(width), @intCast(stride), @intCast(height), 8, &out_buf, &out_size);
+    const rc = jf.tj3Compress8(handle, bgra.ptr, @intCast(width), @intCast(stride), @intCast(height), 8, &out_buf, &out_size); // 8: TJPF_BGRA, PDFium's BGRx bitmap
     defer if (out_buf) |p| jf.tj3Free(p);
     if (rc != 0 or out_buf == null or out_size == 0) return error.EncodeFailed;
     return a.dupe(u8, out_buf.?[0..out_size]);
