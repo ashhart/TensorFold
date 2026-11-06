@@ -206,27 +206,34 @@ inline TfExl3DigJob tf_exl3_dig_job(const device uchar* trellis, constant TfExl3
 
 // The lane's window walk over one pack tile: the stream is a ring of 128*halves sixteen-bit states, and a lane owns
 // `States` consecutive states from p0. State k starts halves/2 bits after state k-1 and wraps at the ring. `at[k]` is
-// the threadgroup slot that state's weight lands in; `off`, `sh` and `rel` are the general read's cursor: the bit
-// offset in the state's first word, the shift that brings the second word down, and the word's distance from the
-// lane's first word. The arithmetic is fixed by the pack format; the walk is our own cursor.
+// the threadgroup slot that state's weight lands in; `Cols` is the tile's column stride and `hg`/`h` place a column
+// group. `off`, `sh` and `rel` are the general read's cursor: the bit offset in the state's first word, the shift that
+// brings the second word down, and the word's distance from the lane's first word. `next1..3` are the ring words after
+// the first. The arithmetic is fixed by the pack format; the walk is our own cursor.
 struct TfExl3DigWindows {
   uint at[8], off[8], sh[8], rel[8];
-  uint first_word, first_bit, words;
+  uint first_word, first_bit, words, next1, next2, next3;
 };
 
-template <uint States, uint CG>
+template <uint States, uint CG, uint Cols>
 inline TfExl3DigWindows tf_exl3_dig_windows(uint p0, uint halves, uint hg, uint h, bool cursor) {
   TfExl3DigWindows walk;
   walk.words = 4u * halves;
   const uint map = tf_exl3_map_for(p0, halves);
   walk.first_word = map & 63u;
   walk.first_bit = (map >> 6) & 31u;
+  walk.next1 = walk.first_word + 1u;
+  if (walk.next1 >= walk.words) walk.next1 -= walk.words;
+  walk.next2 = walk.first_word + 2u;
+  if (walk.next2 >= walk.words) walk.next2 -= walk.words;
+  walk.next3 = walk.first_word + 3u;
+  if (walk.next3 >= walk.words) walk.next3 -= walk.words;
   const uint ring = 128u * halves;
   const uint origin = (walk.first_word << 5) | walk.first_bit;
   TF_UNROLL
   for (uint k = 0; k < States; ++k) {
     const uint p = p0 + k, l = p / 8, e = p % 8;
-    walk.at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * (64u * CG) + hg + h * 16u + (l / 4 + 8 * (e >> 2));
+    walk.at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * Cols + hg + h * 16u + (l / 4 + 8 * (e >> 2));
     if (cursor) {
       uint c8 = origin + k * (halves >> 1);
       if (c8 >= ring) c8 -= ring;
@@ -236,6 +243,61 @@ inline TfExl3DigWindows tf_exl3_dig_windows(uint p0, uint halves, uint hg, uint 
       walk.rel[k] = wi >= walk.first_word ? wi - walk.first_word : wi + walk.words - walk.first_word;
     }
   }
+  return walk;
+}
+
+// One routed or dense row's decode job: the pack slice a route names (or the dense call's own trellis), its k/n
+// strides, width and codebook, and the row's output width. The release's MTP and draft rounds feed the same EXL3
+// projection shapes (inference/model.py, revision 314113f8); the pack layout and the row walk are our own.
+struct TfExl3DecodeJob {
+  const device uchar* trellis;
+  ulong tile_k_stride, tile_n_stride;
+  uint halves, codebook, width;
+};
+
+inline TfExl3DecodeJob tf_exl3_dense_decode_job(const device uchar* trellis, constant TfExl3Args& a) {
+  TfExl3DecodeJob job;
+  job.trellis = trellis;
+  job.tile_k_stride = a.tile_k_stride;
+  job.tile_n_stride = a.tile_n_stride;
+  job.halves = a.halves;
+  job.codebook = a.codebook;
+  job.width = a.n;
+  return job;
+}
+
+inline TfExl3DecodeJob tf_exl3_routed_decode_job(const device uchar* trellis, constant TfExl3Args& a,
+                                                const device TfExl3Expert* descriptors, uint expert) {
+  (void)trellis;
+  TfExl3DecodeJob job;
+  job.trellis = descriptors[expert].trellis;
+  job.tile_k_stride = descriptors[expert].tile_k_stride;
+  job.tile_n_stride = descriptors[expert].tile_n_stride;
+  job.halves = descriptors[expert].halves;
+  job.codebook = descriptors[expert].codebook;
+  job.width = descriptors[expert].reserved != 0 ? descriptors[expert].reserved : a.n;
+  return job;
+}
+
+// The lane's row walk through one pack tile: its first word, the bit offset in it and the shift/mask that bring the
+// next word down, and the next two words. One runtime funnel shift a block puts the lane's window at a known place;
+// the eight states then sit at compile-time shifts. The pack's ring fixes this arithmetic.
+struct TfExl3RowWalk {
+  uint words, first_word, first_bit, shift, mask, next1, next2;
+};
+
+inline TfExl3RowWalk tf_exl3_row_walk(uint lane, uint halves) {
+  TfExl3RowWalk walk;
+  walk.words = 4u * halves;
+  const uint map = tf_exl3_map_for(lane * 8u, halves);
+  walk.first_word = map & 63u;
+  walk.first_bit = (map >> 6) & 31u;
+  walk.shift = (32u - walk.first_bit) & 31u;
+  walk.mask = 0u - uint(walk.first_bit != 0u);
+  walk.next1 = walk.first_word + 1u;
+  if (walk.next1 >= walk.words) walk.next1 -= walk.words;
+  walk.next2 = walk.first_word + 2u;
+  if (walk.next2 >= walk.words) walk.next2 -= walk.words;
   return walk;
 }
 
@@ -413,7 +475,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   // The Fast path's cursor is the shared walk; with F6 the funnel path is the only one, and the cursor arrays it
   // does not read stay uncomputed, because they would be live registers across the whole k loop.
   TfExl3DigWindows walk;
-  if (Fast) walk = tf_exl3_dig_windows<states, CG>(p0, job.halves, hg, h, !F6);
+  if (Fast) walk = tf_exl3_dig_windows<states, CG, 64u * CG>(p0, job.halves, hg, h, !F6);
   // This SIMDgroup's row groups (Rpg of them) and its column group.
   const uint sgr = Rpg * (sg % (RG / Rpg)), sgc = sg / (RG / Rpg);
   // The routed tile's padded rows need no multiply. Each expert's block is padded to sixty-four rows (the padding
@@ -807,7 +869,7 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
     tf_exl3_prefill_body<true, RG, CG, UseTable, false, false, false, false, false, false, Rpg>(wx, x, trellis, sums, a, routes, descriptors, table, nullptr, lane, sg, tid, tptg, tg);
     return;
   }
-  const TfExl3DigWindows walk = tf_exl3_dig_windows<states, CG>(p0, job.halves, hg, h, true);
+  const TfExl3DigWindows walk = tf_exl3_dig_windows<states, CG, 64u * CG>(p0, job.halves, hg, h, true);
   const uint words = walk.words;
   const uint wi0 = walk.first_word;
   const uint sgr = Rpg * (sg % (RG / Rpg)), sgc = sg / (RG / Rpg);
@@ -949,7 +1011,7 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
   // decoded tile -- and the product -- is bit-identical.
 #if defined(TF_DECODE_COMPACT)
   // Compact: one row a threadgroup, two 16x32 tiles only (1 KB), so many more groups fit the threadgroup memory and
-  // the decode's issue rate is not occupancy-bound (probe: 0.84 against 0.50e12).
+  // the decode's issue rate is not occupancy-bound.
   threadgroup half wx[2 * 16 * 32];
 #else
   threadgroup half wx[2 * 4 * 16 * 32];
@@ -971,11 +1033,9 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
   if (row >= a.rows) return;
   const uint expert = routes[row];
   if (expert >= a.experts) return;
-  const device uchar* data = descriptors[expert].trellis;
-  const ulong ks = descriptors[expert].tile_k_stride;
-  const ulong ns = descriptors[expert].tile_n_stride;
-  const uint halves = descriptors[expert].halves;
-  const uint codebook = descriptors[expert].codebook;
+  // One routed row's pack slice: the expert's trellis, k/n strides, width and codebook. The release's MTP and draft
+  // rounds feed the same EXL3 projection shapes (inference/model.py, revision 314113f8); the pack layout is our own.
+  const TfExl3DecodeJob job = tf_exl3_routed_decode_job(trellis, a, descriptors, expert);
   const short2 home = frag_home(ushort(lane));
   const uint cols_here = min(32u, a.n - nb);
   // A decode tile has a handful of rows and one threadgroup a layer for the whole k range, so a split takes a slice
@@ -984,25 +1044,22 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
   const uint blocks = a.k / 16;
   const uint b0 = a.splits > 1 ? blocks * split / a.splits : 0;
   const uint b1 = a.splits > 1 ? blocks * (split + 1) / a.splits : blocks;
-  // Eight consecutive states a thread of each sixteen-column tile, so the three stream words they can touch are read
-  // once and the cursor and the tile slot come from registers (the prompt kernel's inner loop).
-  uint at[8], off[8], sh[8], rel[8];
-  const uint words = 4 * halves;
-  const uint wi0 = tf_exl3_map_for(lane * 8u, halves) & 63u;
+  // Eight consecutive states a thread of each sixteen-column tile, so the stream words they can touch are read once.
+  // The walk names the lane's first words and its window; the cursor and the tile slot come from registers.
+  const TfExl3DigWindows walk = tf_exl3_dig_windows<8u, 1u, 32u>(lane * 8u, job.halves, 0u, 0u, true);
   // TF_DECODE_FUNNEL: the routed pack's halves = 6. Eight consecutive states a lane span 37 bits from start + 16, so
   // two 32-bit stream words cover all eight and the per-state word-pair selection collapses to a two-way select. For
   // halves = 6 the rel = 1 states always start at bit offset <= 16, so the next word after the pair contributes only
-  // below the 16-bit state and can be dropped. Bit-identical to the four-word path (verified against
-  // tf_exl3_mapped_state for every lane and state); halves ! = 6 keeps the general path.
+  // below the 16-bit state and can be dropped. The two-word and four-word paths agree state for state; halves ! = 6
+  // keeps the general path.
 #if defined(TF_DECODE_FUNNEL)
   // Halves = 8 (the drafter's routed pack) joins halves = 6 ONLY under TF_DECODE_FUNNEL_H8, an optional arm. At
-  // halves = 8 every lane's run starts at off0 = 20 (the map's start is 1012 + 32*lane mod 1024), so eight
-  // four-bit-spaced states span exactly 44 bits and sit in two words with every rel = 1 state at an offset <= 16 --
-  // the same two-word form.
+  // halves = 8 every lane's run starts at the same bit offset, so eight four-bit-spaced states span exactly 44 bits
+  // and sit in two words with every rel = 1 state at an offset <= 16 -- the same two-word form.
 #if defined(TF_DECODE_FUNNEL_H8)
-  const bool funnel = halves == 6u or halves == 8u;
+  const bool funnel = job.halves == 6u or job.halves == 8u;
 #else
-  const bool funnel = halves == 6u;
+  const bool funnel = job.halves == 6u;
 #endif
 #else
   const bool funnel = false;
@@ -1012,45 +1069,29 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
 // and keeps the cursor's select-chain extraction. Bit-identical by construction (the two words it drops feed only rel
 // >= 2, which does not occur at halves = 8).
 #if defined(TF_DECODE_TWO)
-  const bool two_word = halves == 8u;
+  const bool two_word = job.halves == 8u;
 #else
   const bool two_word = false;
 #endif
-  {
-    const uint ring = 128 * halves;
-    const uint cur = (wi0 << 5) | ((tf_exl3_map_for(lane * 8u, halves) >> 6) & 31u);
-    TF_UNROLL
-    for (uint k = 0; k < 8; ++k) {
-      const uint p = lane * 8u + k, l = p / 8, e = p % 8;
-      off[k] = (cur + k * (halves >> 1)) % ring & 31u;
-      const uint c8 = (cur + k * (halves >> 1)) % ring;
-      sh[k] = (32u - off[k]) & 31u;
-      rel[k] = (c8 >> 5) >= wi0 ? (c8 >> 5) - wi0 : (c8 >> 5) + words - wi0;
-      at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * 32u + (l / 4 + 8 * (e >> 2));
-    }
-  }
   frag<float> lo = frag<float>(0), hi = frag<float>(0);
   // The words a block needs are loaded a block early, so their latency overlaps the multiply instead of stalling.
   uint pre[2][4];
-  const bool pipeline = (halves & 1u) == 0 and halves <= 16;
-  uint a1 = wi0 + 1; if (a1 >= words) a1 -= words;
-  uint a2 = wi0 + 2; if (a2 >= words) a2 -= words;
-  uint a3 = wi0 + 3; if (a3 >= words) a3 -= words;
+  const bool pipeline = (job.halves & 1u) == 0 and job.halves <= 16;
   if (pipeline) {
-    const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(b0) * ks + ulong(nb / 16) * ns);
-    pre[0][0] = tf_exl3_word(t0, wi0);
-    pre[0][1] = tf_exl3_word(t0, a1);
+    const device ushort* t0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(b0) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
+    pre[0][0] = tf_exl3_word(t0, walk.first_word);
+    pre[0][1] = tf_exl3_word(t0, walk.next1);
     if (!funnel and !two_word) {
-      pre[0][2] = tf_exl3_word(t0, a2);
-      pre[0][3] = tf_exl3_word(t0, a3);
+      pre[0][2] = tf_exl3_word(t0, walk.next2);
+      pre[0][3] = tf_exl3_word(t0, walk.next3);
     }
     if (nb + 16 < a.n) {
-      const device ushort* t1 = reinterpret_cast<const device ushort*>(data + ulong(b0) * ks + ulong(nb / 16 + 1) * ns);
-      pre[1][0] = tf_exl3_word(t1, wi0);
-      pre[1][1] = tf_exl3_word(t1, a1);
+      const device ushort* t1 = reinterpret_cast<const device ushort*>(job.trellis + ulong(b0) * job.tile_k_stride + ulong(nb / 16 + 1) * job.tile_n_stride);
+      pre[1][0] = tf_exl3_word(t1, walk.first_word);
+      pre[1][1] = tf_exl3_word(t1, walk.next1);
       if (!funnel and !two_word) {
-        pre[1][2] = tf_exl3_word(t1, a2);
-        pre[1][3] = tf_exl3_word(t1, a3);
+        pre[1][2] = tf_exl3_word(t1, walk.next2);
+        pre[1][3] = tf_exl3_word(t1, walk.next3);
       }
     }
   }
@@ -1069,12 +1110,12 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
         }
         const uint nxt = bb + 1;
         if (nxt < b1) {
-          const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(nxt) * ks + ulong(nb / 16 + h) * ns);
-          pre[h][0] = tf_exl3_word(tn, wi0);
-          pre[h][1] = tf_exl3_word(tn, a1);
+          const device ushort* tn = reinterpret_cast<const device ushort*>(job.trellis + ulong(nxt) * job.tile_k_stride + ulong(nb / 16 + h) * job.tile_n_stride);
+          pre[h][0] = tf_exl3_word(tn, walk.first_word);
+          pre[h][1] = tf_exl3_word(tn, walk.next1);
           if (!funnel and !two_word) {
-            pre[h][2] = tf_exl3_word(tn, a2);
-            pre[h][3] = tf_exl3_word(tn, a3);
+            pre[h][2] = tf_exl3_word(tn, walk.next2);
+            pre[h][3] = tf_exl3_word(tn, walk.next3);
           }
         }
         if (funnel) {
@@ -1082,25 +1123,25 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
           // at halves = 6, so the second word's carry is the whole state's source.
           TF_UNROLL
           for (uint k = 0; k < 8; ++k) {
-            const uint lo8 = rel[k] == 0 ? w0 : w1;
-            const uint hi8 = rel[k] == 0 ? w1 : 0;
-            const uint carry = (hi8 >> sh[k]) & (0u - uint(off[k] != 0));
+            const uint lo8 = walk.rel[k] == 0 ? w0 : w1;
+            const uint hi8 = walk.rel[k] == 0 ? w1 : 0;
+            const uint carry = (hi8 >> walk.sh[k]) & (0u - uint(walk.off[k] != 0));
 #if defined(TF_DECODE_TABLE)
-            wxc[at[k] + h * 16] = tf_exl3_table_value(table, ushort(((lo8 << off[k]) | carry) >> 16), codebook);
+            wxc[walk.at[k] + h * 16] = tf_exl3_table_value(table, ushort(((lo8 << walk.off[k]) | carry) >> 16), job.codebook);
 #else
-            wxc[at[k] + h * 16] = tf_exl3_value(ushort(((lo8 << off[k]) | carry) >> 16), codebook);
+            wxc[walk.at[k] + h * 16] = tf_exl3_value(ushort(((lo8 << walk.off[k]) | carry) >> 16), job.codebook);
 #endif
           }
         } else {
           TF_UNROLL
           for (uint k = 0; k < 8; ++k) {
-            const uint lo8 = rel[k] == 0 ? w0 : rel[k] == 1 ? w1 : w2;
-            const uint hi8 = rel[k] == 0 ? w1 : rel[k] == 1 ? w2 : w3;
-            const uint carry = (hi8 >> sh[k]) & (0u - uint(off[k] != 0));
+            const uint lo8 = walk.rel[k] == 0 ? w0 : walk.rel[k] == 1 ? w1 : w2;
+            const uint hi8 = walk.rel[k] == 0 ? w1 : walk.rel[k] == 1 ? w2 : w3;
+            const uint carry = (hi8 >> walk.sh[k]) & (0u - uint(walk.off[k] != 0));
 #if defined(TF_DECODE_TABLE)
-            wxc[at[k] + h * 16] = tf_exl3_table_value(table, ushort(((lo8 << off[k]) | carry) >> 16), codebook);
+            wxc[walk.at[k] + h * 16] = tf_exl3_table_value(table, ushort(((lo8 << walk.off[k]) | carry) >> 16), job.codebook);
 #else
-            wxc[at[k] + h * 16] = tf_exl3_value(ushort(((lo8 << off[k]) | carry) >> 16), codebook);
+            wxc[walk.at[k] + h * 16] = tf_exl3_value(ushort(((lo8 << walk.off[k]) | carry) >> 16), job.codebook);
 #endif
           }
         }
@@ -1111,14 +1152,14 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
         const uint idx = lane + 32 * t, h = idx / 256, p = idx % 256;
         if (nb + h * 16 >= a.n) continue;
         const device ushort* tile = reinterpret_cast<const device ushort*>(
-            data + ulong(kb / 16) * ks + ulong(nb / 16 + h) * ns);
+            job.trellis + ulong(kb / 16) * job.tile_k_stride + ulong(nb / 16 + h) * job.tile_n_stride);
         const uint l = p / 8, e = p % 8;
         const uint r = 2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u);
         const uint c = l / 4 + 8 * (e >> 2);
 #if defined(TF_DECODE_TABLE)
-        wxc[r * 32 + h * 16 + c] = tf_exl3_table_value(table, tf_exl3_mapped_state(tile, tf_exl3_map_for(p, halves)), codebook);
+        wxc[r * 32 + h * 16 + c] = tf_exl3_table_value(table, tf_exl3_mapped_state(tile, tf_exl3_map_for(p, job.halves)), job.codebook);
 #else
-        wxc[r * 32 + h * 16 + c] = tf_exl3_value(tf_exl3_mapped_state(tile, tf_exl3_map_for(p, halves)), codebook);
+        wxc[r * 32 + h * 16 + c] = tf_exl3_value(tf_exl3_mapped_state(tile, tf_exl3_map_for(p, job.halves)), job.codebook);
 #endif
       }
     }
@@ -1156,7 +1197,7 @@ kernel void tf_exl3_matvec_nax(const device half* x [[buffer(0)]],
   threadgroup half xx[16 * 16];
   const uint nb = tg.x * 128 + sg * 32;
   if (nb >= a.n || a.rows == 0) return;
-  const device uchar* base = trellis;
+  const TfExl3DecodeJob job = tf_exl3_dense_decode_job(trellis, a);
   const uint cols_here = min(32u, a.n - nb);
   const short2 home = frag_home(ushort(lane));
   threadgroup half* wxg = wx + sg * (16 * 32);
@@ -1167,11 +1208,11 @@ kernel void tf_exl3_matvec_nax(const device half* x [[buffer(0)]],
       const uint idx = lane + 32 * t, h = idx / 256, p = idx % 256;
       if (nb + h * 16 >= a.n) continue;
       const device ushort* tile = reinterpret_cast<const device ushort*>(
-          base + ulong(kb / 16) * a.tile_k_stride + ulong(nb / 16 + h) * a.tile_n_stride);
+          job.trellis + ulong(kb / 16) * job.tile_k_stride + ulong(nb / 16 + h) * job.tile_n_stride);
       const uint l = p / 8, e = p % 8;
       const uint r = 2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u);
       const uint c = l / 4 + 8 * (e >> 2);
-      wxg[r * 32 + h * 16 + c] = tf_exl3_value(tf_exl3_mapped_state(tile, tf_exl3_map_for(p, a.halves)), a.codebook);
+      wxg[r * 32 + h * 16 + c] = tf_exl3_value(tf_exl3_mapped_state(tile, tf_exl3_map_for(p, job.halves)), job.codebook);
     }
     TF_UNROLL
     for (uint t = 0; t < 8; ++t) {
@@ -1247,11 +1288,8 @@ kernel void tf_exl3_matvec_col_nax(const device half* x [[buffer(0)]],
   if (row >= a.rows || col >= a.n) return;
   const uint expert = routes[row];
   if (expert >= a.experts) return;
-  const device uchar* data = descriptors[expert].trellis;
-  const ulong ks = descriptors[expert].tile_k_stride;
-  const ulong ns = descriptors[expert].tile_n_stride;
-  const uint halves = descriptors[expert].halves;
-  const uint codebook = descriptors[expert].codebook;
+  // One routed row's pack slice; a column reads the tiles its sixteen states share.
+  const TfExl3DecodeJob job = tf_exl3_routed_decode_job(trellis, a, descriptors, expert);
   const uint cb = col / 16u, cc = col & 15u, q = cc & 7u;
   const device half* xr = x + ulong(row) * a.k;
   float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
@@ -1262,9 +1300,9 @@ kernel void tf_exl3_matvec_col_nax(const device half* x [[buffer(0)]],
     const uint u = (r >> 3) & 1u, m = (r >> 1) & 3u, rb = r & 1u;
     const uint e = 2u * u + rb + 4u * (cc >> 3);
     const uint p = 8u * (4u * q + m) + e;
-    const device ushort* tile = reinterpret_cast<const device ushort*>(data + ulong(b) * ks + ulong(cb) * ns);
-    const ushort s = tf_exl3_mapped_state(tile, tf_exl3_map_for(p, halves));
-    const float v = float(tf_exl3_table_value(table, s, codebook));
+    const device ushort* tile = reinterpret_cast<const device ushort*>(job.trellis + ulong(b) * job.tile_k_stride + ulong(cb) * job.tile_n_stride);
+    const ushort s = tf_exl3_mapped_state(tile, tf_exl3_map_for(p, job.halves));
+    const float v = float(tf_exl3_table_value(table, s, job.codebook));
     acc[slot] = fma(float(xr[k]), v, acc[slot]);
     slot = (slot + 1u) & 7u;
   }
@@ -1692,8 +1730,9 @@ kernel void tf_affine_col3_nax(const device half* x [[buffer(0)]],
   if (lane == 0u) sums[ulong(row) * a.n + col] = t;
 }
 
-// Queue item 2: the routed 64 x 128 tile on four warps. Eight accumulator fragments a lane (64 float registers). k
-// order, MMA order and per-value arithmetic are 's, so the output is bit-identical; only the dispatch geometry moves.
+// The routed 64 x 128 tile on four warps: eight accumulator fragments a lane (64 float registers). The k order, the
+// MMA order and the per-value arithmetic are the single-tile body's, so the output is bit-identical; only the
+// dispatch geometry moves.
 template <bool Fast>
 inline void tf_exl3_prefill_body_wide(threadgroup half* wx, const device half* x, const device uchar* trellis,
                                       device float* sums, constant TfExl3Args& a, const device uint* routes,
@@ -2150,8 +2189,9 @@ kernel void tf_exl3_matmul_prefill_nax48(const device half* x [[buffer(0)]],
 
 // The routed 64x64 prompt tile with the stream word read as one 4-byte load -- the wide form's read (its lane reads
 // 32-bit stream words; ours read the same bytes as two 2-byte loads, so a lane issued four memory instructions a
-// block where it now issues two). The values, their order, the k order and the MMA order are 's, so the output is
-// bit-identical. The kernel falls back to the shipped read when the tile's byte address is not 4-byte aligned.
+// block where it now issues two). The values, their order, the k order and the MMA order are the single-tile body's,
+// so the output is bit-identical. The kernel falls back to the two-load read when the tile's byte address is not
+// 4-byte aligned.
 kernel void tf_exl3_matmul_prefill_nax57(const device half* x [[buffer(0)]],
                                          const device uchar* trellis [[buffer(1)]],
                                          device float* sums [[buffer(2)]],
@@ -2264,10 +2304,10 @@ kernel void tf_exl3_matmul_prefill_nax73(const device half* x [[buffer(0)]],
   tf_exl3_prefill_body<true, 4, 1, false, true, false, false, true, false, false, 1, false, true, 0, 2>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
-// The routed 64x64 prompt tile with the funnel path as the only path . The cursor arrays the Fast path needs -- off,
-// sh and rel, twenty-four registers -- are dead in the funnel path but live across the k loop, so the shipped body
-// carries them for nothing. Here they are not computed. The values, their order, the k order and the MMA order are
-// 's, so the output is bit-identical.
+// The routed 64x64 prompt tile with the funnel path as the only path. The cursor arrays the Fast path needs -- off,
+// sh and rel, twenty-four registers -- are dead in the funnel path but live across the k loop, so a body that always
+// takes the funnel path would carry them for nothing. Here they are not computed. The values, their order, the k
+// order and the MMA order are the general body's, so the output is bit-identical.
 kernel void tf_exl3_matmul_prefill_nax59(const device half* x [[buffer(0)]],
                                         const device uchar* trellis [[buffer(1)]],
                                         device float* sums [[buffer(2)]],
@@ -2441,7 +2481,7 @@ kernel void tf_exl3_matmul_prefill_nax54(const device half* x [[buffer(0)]],
   tf_exl3_prefill_body<true, 8, 1, false, true, false, false, true, false, false, 2>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
-// The routed 64 x 128 tile on four warps ('s ); 128 threads, one 16 x 128 threadgroup tile.
+// The routed 64 x 128 tile on four warps; 128 threads, one 16 x 128 threadgroup tile.
 kernel void tf_exl3_matmul_prefill_nax37(const device half* x [[buffer(0)]],
                                         const device uchar* trellis [[buffer(1)]],
                                         device float* sums [[buffer(2)]],
@@ -2740,7 +2780,7 @@ kernel void tf_exl3_matmul_prefill_nax17(const device half* const x [[buffer(0)]
   tf_exl3_prefill_body_db<4, 2, true, 0, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
-// The 64x64 grouped tile the engine actually selects ('s tile): table decode and double buffer.
+// The 64x64 grouped tile with the table decode and the double buffer.
 kernel void tf_exl3_matmul_prefill_nax18(const device half* const x [[buffer(0)]],
                                         const device uchar* const trellis [[buffer(1)]],
                                         device float* const sums [[buffer(2)]],
@@ -2965,7 +3005,7 @@ kernel void tf_exl3_matmul_prefill_nax25(const device half* const x [[buffer(0)]
   tf_exl3_prefill_body<true, 4, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lut, lane, sg, tid, tptg.x, tg);
 }
 
-// Dense 128x64 tile ('s shape): double-buffered + codebook table, and single-buffer + threadgroup LUT.
+// Dense 128x64 tile: double-buffered with the codebook table, and single-buffer with the threadgroup LUT.
 kernel void tf_exl3_matmul_prefill_nax26(const device half* const x [[buffer(0)]],
                                         const device uchar* const trellis [[buffer(1)]],
                                         device float* const sums [[buffer(2)]],
@@ -3074,10 +3114,10 @@ kernel void tf_exl3_matmul_prefill_nax31(const device half* const x [[buffer(0)]
   tf_exl3_prefill_body_db<8, 1, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
-// THE DOUBLE-BUFFERED 128-COLUMN DENSE BODY. 's decode, k order and MMA order per output, at twice the tile width:
-// one activation block is read for 128 columns instead of 64 and one barrier covers twice the multiply. reads the
-// codebook from the resident device table (buffer 7); is the same body on the ALU codebook. Both must agree with
-// bit-for-bit at every output.
+// THE DOUBLE-BUFFERED 128-COLUMN DENSE BODY. The per-output decode, k order and MMA order are the single-tile body's,
+// at twice the tile width: one activation block is read for 128 columns instead of 64 and one barrier covers twice
+// the multiply. The first kernel reads the codebook from the resident device table (buffer 7); the second is the
+// same body on the ALU codebook. Both must agree with the single-tile body bit for bit at every output.
 kernel void tf_exl3_matmul_prefill_nax79(const device half* const x [[buffer(0)]],
                                         const device uchar* const trellis [[buffer(1)]],
                                         device float* const sums [[buffer(2)]],
@@ -3109,9 +3149,9 @@ kernel void tf_exl3_matmul_prefill_nax80(const device half* const x [[buffer(0)]
   tf_exl3_prefill_body_db<8, 2, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
-// The 64-row x 128-column double-buffered dense body: the same 8,192-element tile area as, eight warps / 256 threads
-// ('s occupancy), eight decode groups so one threadgroup owns all 128 columns the fused output transform needs. 's k
-// order and MMA order per output.
+// The 64-row x 128-column double-buffered dense body: the same 8,192-element tile area as the 128-row form, eight
+// warps / 256 threads, eight decode groups so one threadgroup owns all 128 columns the fused output transform needs.
+// The k order and MMA order per output are the single-tile body's.
 kernel void tf_exl3_matmul_prefill_nax82(const device half* const x [[buffer(0)]],
                                         const device uchar* const trellis [[buffer(1)]],
                                         device float* const sums [[buffer(2)]],
@@ -3129,8 +3169,8 @@ kernel void tf_exl3_matmul_prefill_nax82(const device half* const x [[buffer(0)]
 
 // ONE 8-WARP THREADGROUP OVER 128 ROWS AND BOTH 64-COLUMN HALVES. Two accumulator sets (eight fragments, 64 f32 a
 // lane) and two double-buffered 16x64 tiles; the activation block is loaded once and multiplied into both halves. Per
-// output this is 's weight-decode amortisation (128 rows) and 's eight-warp threadgroup, with half its activation
-// reads. 's k order and MMA order per output, so `sums` is bit-identical.
+// output this is the single-tile body's weight-decode amortisation (128 rows) and its eight-warp threadgroup, with
+// half its activation reads. The k order and MMA order per output are the same, so `sums` is bit-identical.
 template <bool UseTable>
 inline void tf_exl3_prefill_body_db2(threadgroup half* wx, const device half* x, const device uchar* trellis,
                                      device float* sums, constant TfExl3Args& a, const device uint* routes,
@@ -3264,10 +3304,10 @@ kernel void tf_exl3_matmul_prefill_nax83(const device half* const x [[buffer(0)]
   tf_exl3_prefill_body_db2<false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
 }
 
-// The dense 128x64 prompt tile ('s geometry) with the funnel read. The dense tile is 128 rows (eight row groups), so
+// The dense 128x64 prompt tile with the funnel read. The dense tile is 128 rows (eight row groups), so
 // a lane owns four states and the funnel reads a twenty-five-bit run -- two words, where the cursor path reads four.
-// The values, their order, the k order and the MMA order are 's, so the output is bit-identical; only the word
-// traffic and the select chain leave.
+// The values, their order, the k order and the MMA order are the single-tile body's, so the output is bit-identical;
+// only the word traffic and the select chain leave.
 kernel void tf_exl3_matmul_prefill_nax51(const device half* const x [[buffer(0)]],
                                          const device uchar* const trellis [[buffer(1)]],
                                          device float* const sums [[buffer(2)]],
@@ -3287,7 +3327,7 @@ kernel void tf_exl3_matmul_prefill_nax51(const device half* const x [[buffer(0)]
 // simdgroup owns thirty-two rows, so one threadgroup's eight row groups become four groups of two). The lane keeps
 // eight states, so the stream words it reads cover twice the states, and the weight fragments are read once for two
 // row groups, so the tile's threadgroup traffic per row halves. The values, their order, the k order and the MMA
-// order per output are 's, so the output is bit-identical.
+// order per output are the single-tile body's, so the output is bit-identical.
 kernel void tf_exl3_matmul_prefill_nax56(const device half* const x [[buffer(0)]],
                                          const device uchar* const trellis [[buffer(1)]],
                                          device float* const sums [[buffer(2)]],
@@ -3406,10 +3446,10 @@ kernel void tf_exl3_matmul_prefill_nax36(const device half* const x [[buffer(0)]
 #ifndef TF_FMA_PF
 #define TF_FMA_PF 1
 #endif
-// THE STREAM WORD AS ONE 4-BYTE LOAD (the read, 's form). The shipped read is two 2-byte loads a word (a stream word
-// is a little-endian pair of int16s), so the decode's lane issues SIX load instructions a k-block where the wide form
-// issues three; the bytes, the values and the order are the same, so the arm is BIT-IDENTICAL. The prefill tiles
-// already read their words this way (tf_exl3_word_t<W> with W = true); the register-only decode body did not.
+// THE STREAM WORD AS ONE 4-BYTE LOAD. The default read is two 2-byte loads a word (a stream word is a little-endian
+// pair of int16s), so the decode's lane issues SIX load instructions a k-block where the wide form issues three; the
+// bytes, the values and the order are the same, so the arm is BIT-IDENTICAL. The prefill tiles already read their
+// words this way (tf_exl3_word_t<W> with W = true); the register-only decode body did not.
 // TF_FMA_WIDE_WORD = 1 turns it on there.
 #ifndef TF_FMA_WIDE_WORD
 #define TF_FMA_WIDE_WORD 0
@@ -3664,61 +3704,6 @@ inline void tf_exl3_fma_step(float* acc_j, uint c_cur, uint c_next, const device
                              float x0, float x1, float x2, float x3, const threadgroup half* lut = nullptr) {
   const float w = tf_exl3_fma_weight<S, J, Lut>(c_cur, c_next, table, codebook, lut);
   tf_exl3_fma_step_w<J>(acc_j, w, x0, x1, x2, x3);
-}
-
-// One routed or dense row's decode job: the pack slice a route names (or the dense call's own trellis), its k/n
-// strides, width and codebook, and the row's output width. The release's MTP and draft rounds feed the same EXL3
-// projection shapes (inference/model.py, revision 314113f8); the pack layout and the row walk are our own.
-struct TfExl3DecodeJob {
-  const device uchar* trellis;
-  ulong tile_k_stride, tile_n_stride;
-  uint halves, codebook, width;
-};
-
-inline TfExl3DecodeJob tf_exl3_dense_decode_job(const device uchar* trellis, constant TfExl3Args& a) {
-  TfExl3DecodeJob job;
-  job.trellis = trellis;
-  job.tile_k_stride = a.tile_k_stride;
-  job.tile_n_stride = a.tile_n_stride;
-  job.halves = a.halves;
-  job.codebook = a.codebook;
-  job.width = a.n;
-  return job;
-}
-
-inline TfExl3DecodeJob tf_exl3_routed_decode_job(const device uchar* trellis, constant TfExl3Args& a,
-                                                const device TfExl3Expert* descriptors, uint expert) {
-  (void)trellis;
-  TfExl3DecodeJob job;
-  job.trellis = descriptors[expert].trellis;
-  job.tile_k_stride = descriptors[expert].tile_k_stride;
-  job.tile_n_stride = descriptors[expert].tile_n_stride;
-  job.halves = descriptors[expert].halves;
-  job.codebook = descriptors[expert].codebook;
-  job.width = descriptors[expert].reserved != 0 ? descriptors[expert].reserved : a.n;
-  return job;
-}
-
-// The lane's row walk through one pack tile: its first word, the bit offset in it and the shift/mask that bring the
-// next word down, and the next two words. One runtime funnel shift a block puts the lane's window at a known place;
-// the eight states then sit at compile-time shifts. The pack's ring fixes this arithmetic.
-struct TfExl3RowWalk {
-  uint words, first_word, first_bit, shift, mask, next1, next2;
-};
-
-inline TfExl3RowWalk tf_exl3_row_walk(uint lane, uint halves) {
-  TfExl3RowWalk walk;
-  walk.words = 4u * halves;
-  const uint map = tf_exl3_map_for(lane * 8u, halves);
-  walk.first_word = map & 63u;
-  walk.first_bit = (map >> 6) & 31u;
-  walk.shift = (32u - walk.first_bit) & 31u;
-  walk.mask = 0u - uint(walk.first_bit != 0u);
-  walk.next1 = walk.first_word + 1u;
-  if (walk.next1 >= walk.words) walk.next1 -= walk.words;
-  walk.next2 = walk.first_word + 2u;
-  if (walk.next2 >= walk.words) walk.next2 -= walk.words;
-  return walk;
 }
 
 // The register-only routed decode with the static state selection. The shipped body picks each state's word pair and
@@ -4884,7 +4869,8 @@ kernel void tf_exl3_matmul_decode_fma_static(const device half* x [[buffer(0)]],
 // THE ROUTED PREFILL GEOMETRY. BM 128, BN 64, BK 64: eight simdgroups (WM 4 x WN 2), each owning a 32 x 32 output
 // tile; the eight simdgroups cooperatively decode the whole 64 x 64 weight stage (two 16x16 trellis tiles each) into
 // one row-major B tile, and every simdgroup multiplies the shared stage. Per output the k order and the MMA order are
-// 's, so `sums` is bit-identical; only the stage depth, the warp tile and the cooperative decode differ. The stage is
+// the single-tile body's, so `sums` is bit-identical; only the stage depth, the warp tile and the cooperative decode
+// differ. The stage is
 // DOUBLE-BUFFERED and the next stage's decode is issued before the current stage's multiply, so the codebook ALU and
 // the stream loads overlap the tensor units (the deeper stage, our overlap).
 template <bool UseTable>
