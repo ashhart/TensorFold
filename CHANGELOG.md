@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kernel contract: an XPU limits backend with gate 5, a `.ze_info` reader and planted controls; no GPU needed (#2155). Thanks to @tolewis.
+
 - Flash Next on Metal enforces `response_format` (`json_schema`, `json_object`) and `tool_choice` `"required"` or a named function at `--parallel 1` too, through the same grammar path `--parallel 2` uses; unconstrained requests take exactly the single-stream path as before (#1894).
 
 - Prompt cache: a restore the backend refuses now tries the next shorter state kept in memory before prefilling from the start (#2144).
