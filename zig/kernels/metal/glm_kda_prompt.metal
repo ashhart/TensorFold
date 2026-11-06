@@ -62,7 +62,7 @@ template <int H, int D, int TAPS, int HB>
   }
 }
 
-// The recurrence over R rows: 8 lanes a value column (16 key dims each, sums over the 8 by xor shuffles), rows staged B at a time.
+// Recurrence over R rows: 8 lanes a value column (16 key dims each, 8-way xor-shuffle sums), rows staged B at a time.
 template <int H, int D, int SG, int B>
 [[kernel]] void glm_kda_scan(const device bfloat* QO [[buffer(0)]], const device bfloat* KO [[buffer(1)]],
                              const device bfloat* VO [[buffer(2)]], const device float* GO [[buffer(3)]],
