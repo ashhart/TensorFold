@@ -39,7 +39,7 @@ pub const Softmax = struct {
     src: u64 = 0,
     out: u64 = 0,
 
-    /// n: the row's length and the rows there are (a square score matrix); rows and k unused.
+    /// n: the row's length and the rows there are (a square score matrix); rows unused.
     pub fn spec(name: []const u8) c.Spec {
         return .{
             .name = name,
