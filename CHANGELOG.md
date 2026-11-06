@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 reads its pack's weight spans past the page cache with O_DIRECT, so a load no longer fills the cache first (`TF_LOAD_DIRECT=0` keeps buffered reads; part of #1857).
+
 - Metal: a request's finished stats list its prompt pass widths (`tensorfold.prefill_widths`, one entry per completed
   target pass) on every Metal text family. Telemetry only (#2293).
 
@@ -447,7 +449,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek V4.1 packs refuse a shard whose header length runs past its file or past 100 MB before anything is allocated, instead of allocating up to 1 GiB first (#1903, part of #1872). Thanks to @jschmied.
 
 - EAQ containers refuse a shard whose header length runs past its file or past 100 MB before anything is allocated (#1902, part of #1872). Thanks to @jschmied.
-- DeepSeek-V4.1 reads its pack's weight spans past the page cache with O_DIRECT, so a load no longer fills the cache first (`TF_LOAD_DIRECT=0` keeps buffered reads; part of #1857).
 
 - With `TF_NEMOTRON_METAL_KV_PAGES=1`, Nemotron on Metal takes KV pages as a reply grows instead of for its whole context at the start, so a short chat holds 1 page instead of 17. It is off by default (#1837, part of #1293). Thanks to @jschmied.
 
