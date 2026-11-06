@@ -161,8 +161,8 @@ const Job = struct {
 /// The members' bf16 rows stacked along N, quantized to 4-bit groups of 64 on every core, packed for the reg kernel.
 fn quantizeStack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8) !Linear {
     _ = try stackShape(c, prefix, members);
-    const bf16_env = std.c.getenv("GEMMA_DRAFT_BF16");
-    if (bf16_env != null and (std.mem.eql(u8, std.mem.span(bf16_env.?), "all") or std.mem.eql(u8, std.mem.span(bf16_env.?), members[0]))) return bf16Stack(gpa, device, c, owned, prefix, members);
+    const bf16_env = @import("profile").lookup("GEMMA_DRAFT_BF16");
+    if (bf16_env != null and (std.mem.eql(u8, bf16_env.?, "all") or std.mem.eql(u8, bf16_env.?, members[0]))) return bf16Stack(gpa, device, c, owned, prefix, members);
     return quantized(gpa, device, c, owned, geo, prefix, members);
 }
 
