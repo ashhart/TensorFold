@@ -65,14 +65,18 @@ fn attnOrder(layers: usize, at: usize, h: Heads) [4]Piece {
     };
 }
 
-/// Each piece of the sequence (and the head's cache, with `d`) to or from its place in the buffer at `base`.
-fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize, way: Way) !void {
-    const dr = stream.d;
-    var off: u64 = 0;
+const W = @import("core").state_walk.Device;
+
+/// A state's parts at most: every layer of the 11 pieces `order` names.
+const max_parts = 2 * wt.linear_n + 4 * wt.attn_n + 1 + 4;
+
+/// The sequence's pieces (the head's too, with `d`) as walk parts in `order`'s order: whole, or rows on its pages.
+fn parts(seq: *prompt.Seq, d: ?*Draft, at: usize, out: *[max_parts]W.Part) ![]const W.Part {
     const o = order(at, d != null, seq.heads);
     var bufs: [11][]cuda.DeviceBuffer = undefined;
     bufs[0..7].* = .{ seq.conv, seq.state, seq.kc, seq.vc, seq.ikc, seq.pooled, (&seq.tail)[0..1] };
     if (d) |h| bufs[7..11].* = .{ (&h.kc)[0..1], (&h.vc)[0..1], (&h.ikc)[0..1], (&h.pooled)[0..1] };
+    var n: usize = 0;
     for (o.p[0..o.len], bufs[0..o.len], 0..) |p, layers, pi| {
         if (layers.len != p.layers) return error.SnapShape;
         for (layers, 0..) |b, layer| {
@@ -80,31 +84,39 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
             // the model's caches on the stream's pages; the head's too in a pool lane (the layer after the model's)
             const head = pi >= 7 and d != null and d.?.pg.pt != 0;
             if ((pi >= 2 and pi < 6) or head) if (seq.paged) |*pg| {
-                // the same bytes in the same order as a contiguous cache's, a run a page
                 const part: pages.Part = @fromBackingInt(@intCast(if (head) pi - 7 else pi - 2));
-                const at_layer = if (head) wt.attn_n else layer;
                 const row = pages.rowBytes(part);
                 if (row != p.row) return error.SnapShape;
-                const per = pages.rows(part, pg.tokens);
-                const n = p.n / row;
-                var r: usize = 0;
-                while (r < n) {
-                    const run = @min(per - r % per, n - r);
-                    const at_row = pg.rowAt(at_layer, part, r);
-                    const dst, const src = if (way == .save) .{ base + off, at_row } else .{ at_row, base + off };
-                    try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
-                    off += run * row;
-                    r += run;
-                }
+                const span = pages.rows(part, pg.tokens) * row;
+                const live = pg.at(if (head) wt.attn_n else layer, part);
+                out[n] = .{ .live = live, .len = p.n, .span = span, .page = pages.pageBytesOf(pg.tokens, pg.layers) };
+                n += 1;
                 continue;
             };
-            const dst, const src = if (way == .save) .{ base + off, b.ptr } else .{ b.ptr, base + off };
-            try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, p.n, stream.handle), "cuMemcpyDtoDAsync");
-            off += p.n;
+            out[n] = .{ .live = b.ptr, .len = p.n };
+            n += 1;
         }
     }
-    std.debug.assert(off == bytes(at, d != null, seq.heads));
+    return out[0..n];
 }
+
+/// The parts to (`save`) or from the buffer at `base`, queued on `stream`: the core walk, a copy a piece.
+fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize, way: Way) !void {
+    var store: [max_parts]W.Part = undefined;
+    const ps = try parts(seq, d, at, &store);
+    std.debug.assert(W.total(ps) == bytes(at, d != null, seq.heads));
+    const ids: []const u32 = if (seq.paged) |*pg| pg.ids else &.{};
+    try W.each(ps, ids, .{ .base = base }, Copy{ .s = stream, .save = way == .save }, Copy.run);
+}
+
+const Copy = struct {
+    s: cuda.Stream,
+    save: bool,
+    fn run(c: Copy, live: u64, kept: u64, n: usize) anyerror!void {
+        const dst, const src = if (c.save) .{ kept, live } else .{ live, kept };
+        try c.s.d.check(c.s.d.api.cuMemcpyDtoDAsync_v2(dst, src, n, c.s.handle), "cuMemcpyDtoDAsync");
+    }
+};
 
 /// A copy of `seq` (and of the head's cache, with `d`) as it stands after `seq.fed` tokens.
 pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft) !*Snap {
