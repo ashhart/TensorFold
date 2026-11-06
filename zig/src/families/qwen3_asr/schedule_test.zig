@@ -253,6 +253,15 @@ test "tower schedule: a host binding matches the float64 reference at torch's po
     try towerCase(350, 3, 2); // groups of 3 over 4 chunks: one short group, a 50-frame last chunk padded to 100
 }
 
+test "tower weights: a group of no chunks is refused" {
+    const gpa = std.testing.allocator;
+    var mem: Mem = .{ .gpa = gpa };
+    defer mem.deinit();
+    var fake: Fake = .{ .gpa = gpa };
+    defer fake.deinit();
+    try std.testing.expectError(error.EmptyChunkGroup, tower.Weights.load(gpa, small, &fake, &mem, 0));
+}
+
 test "tower schedule: a lone chunk of 50 or 99 frames, convolved at its own length" {
     try towerCase(50, 3, 1);
     try towerCase(99, 3, 1);
