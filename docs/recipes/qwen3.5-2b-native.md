@@ -74,7 +74,7 @@ checks also require the checkpoint's tokenizer and `mlx-lm`.
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[test,tui]'
-zig build test test-native check-generated -Dcpu=apple_m1
+zig build test test-native -Dcpu=apple_m1
 zig build tf-qwen35-check tf-qwen35-forward tf-qwen35-exact -Dcpu=apple_m1
 python tools/zig/capture_qwen35.py "$HOME/models/qwen35-2b" /tmp/qwen35-ops
 zig-out/bin/tf-qwen35-check "$HOME/models/qwen35-2b" /tmp/qwen35-ops
