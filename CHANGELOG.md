@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Developers: `-Dnative-fp-decode=true` (off by default, nvcc 13.2 or later) builds CUDA's prompt16 FP4 tile and FP8 expert prompt tile with the hardware FP4 and FP8 decode on sm_120 and later. Outputs are bit-equal to the default build, and on a GB10 the FP4 prompt projections took 0.95 to 0.96 of the time. Default builds are unchanged (#2238, refs #1448). Thanks to @jschmied.
+
 - DeepSeek-V4.1 on CUDA with `TF_DSV41_PREFILL=replay`: a conversation saved to the NVMe session tier now restores instead of being refused as `BadBlob` and prefilled again. On two GB10s at TP=2, recalling a 319K-token conversation took 1.2 to 1.4 s instead of 155 to 178 s, with replies byte-identical to a cold prefill (#2182). Thanks to @goshi.
 
 - Docs: `CONTRIBUTING.md` and the pull request template ask authors for their own main-against-branch numbers first; our run follows once the review has no open asks (#2179).
