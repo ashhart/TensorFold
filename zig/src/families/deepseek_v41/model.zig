@@ -1,4 +1,5 @@
 //! Plain V4.1 execution over resident EXL3 weights and source-owned packed caches.
+const builtin = @import("builtin");
 const std = @import("std");
 const mtl = @import("metal");
 const checkpoint = @import("core").checkpoint_metal;
@@ -30,6 +31,7 @@ comptime {
 
 /// Monotonic host nanoseconds (the family's own clock, as batch_prof.zig reads it).
 fn nowNs() u64 {
+    if (comptime builtin.os.tag == .windows) return 0;
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
