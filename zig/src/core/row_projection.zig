@@ -93,7 +93,7 @@ pub const Pipelines = struct {
     }
 };
 
-/// One dispatch: its pipeline, dims (K, N, group, rows or slots, experts, repeat) and the grid; buffers x, W, S, B, dims, out at 0-5, ids at 6.
+/// Dispatch: pipeline, dims (K, N, group, rows/slots, experts, repeat), grid; buffers x, W, S, B, dims, out 0-5, ids 6.
 pub const Call = struct { pipeline: mtl.Pipeline, dims: [6]i32, groups: usize, slots: usize = 1, threads: usize = 32 * groups };
 
 /// y[rows, n] = x[rows, k] W^T (relu squared with `relu2`), x and y bf16 rows.
