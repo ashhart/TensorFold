@@ -1,16 +1,18 @@
-//! Routed gate-off lessons match the pre-metrics graph, event payloads and engine call counts.
+//! Routed gate-off lessons match the current-main graph, event payloads and engine call counts.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
 const fixture = @import("slide_learn_path_test.zig");
 const Server = @import("server.zig").Server;
 const t = std.testing;
-const Capture = struct { calls: usize, learns: usize, writes: usize, graph: []const u8, events: []const u8 };
+const Capture = struct { calls: usize, learns: usize, writes: usize, requests_sha256: []const u8, replies_sha256: []const u8, graph: []const u8, events: []const u8 };
 
 const Counted = struct {
     inner: fixture.Model = .{},
     calls: usize = 0,
     learns: usize = 0,
+    requests: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    replies: std.crypto.hash.sha2.Sha256 = .init(.{}),
     fn engine(m: *@This()) api.Engine {
         return .{ .ctx = m, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
@@ -20,8 +22,30 @@ const Counted = struct {
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const m: *@This() = @ptrCast(@alignCast(ctx));
         m.calls += 1;
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, request.prompt.len, .little);
+        m.requests.update(&length);
+        m.requests.update(std.mem.sliceAsBytes(request.prompt));
+        const Forward = struct {
+            model: *Counted,
+            sink: api.Sink,
+            fn event(raw: *anyopaque, which: api.Id, value: *const api.Event) void {
+                const f: *@This() = @ptrCast(@alignCast(raw));
+                switch (value.*) {
+                    .tokens => |ids| {
+                        var size: [8]u8 = undefined;
+                        std.mem.writeInt(u64, &size, ids.len, .little);
+                        f.model.replies.update(&size);
+                        f.model.replies.update(std.mem.sliceAsBytes(ids));
+                    },
+                    else => {},
+                }
+                f.sink.event(f.sink.ctx, which, value);
+            }
+        };
+        var forward: Forward = .{ .model = m, .sink = sink };
         const e = m.inner.engine();
-        return e.vtable.submit(e.ctx, id, request, sink);
+        return e.vtable.submit(e.ctx, id, request, .{ .ctx = &forward, .event = Forward.event });
     }
     fn learn(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
         const m: *@This() = @ptrCast(@alignCast(ctx));
@@ -88,10 +112,14 @@ fn capture(a: std.mem.Allocator, case: usize, extra: []const u8) !Capture {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .limited(1 << 20));
     const graph = (try json.parse(a, bytes)).ok;
     for (graph.field("facts").?.array) |fact| try fact.object.put(a, "at", try json.intValue(a, 0));
-    return .{ .calls = m.calls, .learns = m.learns, .writes = srv.slide.test_persist_calls, .graph = try json.stringify(a, graph, .{ .compact = true }), .events = try events(a, wire) };
+    var request_hash: [32]u8 = undefined;
+    var reply_hash: [32]u8 = undefined;
+    m.requests.final(&request_hash);
+    m.replies.final(&reply_hash);
+    return .{ .requests_sha256 = try std.fmt.allocPrint(a, "{x}", .{request_hash}), .replies_sha256 = try std.fmt.allocPrint(a, "{x}", .{reply_hash}), .calls = m.calls, .learns = m.learns, .writes = srv.slide.test_persist_calls, .graph = try json.stringify(a, graph, .{ .compact = true }), .events = try events(a, wire) };
 }
 
-test "Slide metrics: off matches the pre-metrics kept refused and early-refused routes" {
+test "Slide metrics: off matches the current-main kept refused and early-refused routes" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -104,6 +132,8 @@ test "Slide metrics: off matches the pre-metrics kept refused and early-refused 
         try t.expectEqual(base.calls, actual.calls);
         try t.expectEqual(base.learns, actual.learns);
         try t.expectEqual(base.writes, actual.writes);
+        try t.expectEqualStrings(base.requests_sha256, actual.requests_sha256);
+        try t.expectEqualStrings(base.replies_sha256, actual.replies_sha256);
         try t.expectEqualStrings(base.graph, actual.graph);
         try t.expectEqualStrings(base.events, actual.events);
     };

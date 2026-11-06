@@ -15,9 +15,9 @@ pub fn read(srv: *Server, conn: *Conn, a: Allocator, body: json.Value) ?[]const 
     };
 }
 
-pub fn prepare(srv: *Server, out: *slide.Out, a: Allocator, id: u32, fact: []const u8, recall: []const input.Item) bool {
+pub fn prepare(srv: *Server, out: *slide.Out, a: Allocator, id: u32, fact: []const u8, recall: []const input.Item) !bool {
     if (!srv.config.slide_drift_gate) return true;
-    const external = input.select(a, recall, fact) catch return false;
+    const external = try input.select(a, recall, fact);
     srv.slide.suppliedRecall(id, external) catch {
         slide.missed(srv, out, id, "the supplied recall set could not be saved");
         return false;

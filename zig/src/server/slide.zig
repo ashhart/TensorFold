@@ -126,7 +126,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.slide.phase(id, .writing);
         out.event("learning", .{ .id = id });
         out.stage(id, "writing");
-        if (!metrics_route.prepare(srv, &out, a, id, fact, recall)) continue;
+        if (!(metrics_route.prepare(srv, &out, a, id, fact, recall) catch return)) continue;
         var kept = [1]bool{false};
         const written = now(srv);
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
