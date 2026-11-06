@@ -142,8 +142,8 @@ pub const Model = struct {
         defer m.checkpoint.closeFiles();
         const c = m.config;
         const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
-        // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
-        const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and mtl.ane.available() and m.weights.uniformMlp();
+        // The share is every layer's whole MLP: tensor parallel ranks and stages hold less and run prompts on the GPU.
+        const share = m.shard.ranks == 1 and m.weights.stage == null and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
         const bytes = ane_mlp.Share.bytes(c, columns);
         const slices = (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width;

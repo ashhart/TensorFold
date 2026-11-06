@@ -45,6 +45,7 @@ pub const tap_ring = @import("tap_ring.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
+    _ = @import("gpu_weights.zig");
     _ = dflash;
     _ = disk;
     _ = @import("core").gpu_profile;
