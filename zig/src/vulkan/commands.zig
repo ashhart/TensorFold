@@ -23,8 +23,7 @@ pub const Commands = struct {
     hazards: Hazards = .{},
     /// Set by a state-corrupting failure (signaled fence or invalid buffer): later begin and submit refuse.
     poison: ?Error = null,
-    /// Set by the first successful submit and never cleared: every later begin records a fence barrier.
-    /// A discarded begin keeps the barrier owed, so the next begin still records it.
+    /// Set by the first successful submit, never cleared: a later begin records a fence barrier, even after a discard.
     submitted_before: bool = false,
 
     pub fn init(dev: *const Device) Error!Commands {
