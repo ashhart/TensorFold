@@ -33,7 +33,7 @@ jobs:
         run: python -m unittest discover -s tools/tests -p "test_bench*.py" -v
   zig:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -96,10 +96,26 @@ jobs:
             exit 0
           fi
           python3 -m unittest discover -s tools/zig -p zig_cache_restat_test.py -v
-      # zig build test is the host unit tests. No GPU. The Python suite is not this check.
-      # A unit test that hangs fails by name after 10 minutes instead of holding the runner until the job's limit.
-      - name: zig build test
-        run: zig build -Dfixed-cpu test --test-timeout 10m
+      - name: Host test graph regressions
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            base=$(git merge-base HEAD "origin/$BASE_REF" 2> /dev/null || true)
+          else
+            base=$(git rev-parse --verify "$PUSH_BASE^{commit}" 2> /dev/null || true)
+          fi
+          if [ -n "$base" ] && git diff --quiet "$base" HEAD -- \
+              build.zig zig/build/host_tests.zig tools/zig/host_tests_test.py; then
+            echo "Host test graph inputs are unchanged."
+            exit 0
+          fi
+          python3 -m unittest discover -s tools/zig -p host_tests_test.py -v
+      # Keep per-test timeouts while allowing the DeepSeek AOT enumeration to finish on hosted runners.
+      - name: zig build test-host
+        run: zig build -Dfixed-cpu test-host --test-timeout 20m
       # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
       - name: zig build test-kernel-contract
         run: zig build -Dfixed-cpu test-kernel-contract
