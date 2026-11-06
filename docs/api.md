@@ -975,8 +975,9 @@ That install is the Python 0.6.6 engine's; the native server uses `libtfgrammar`
 Usage separates uncached `input_tokens` from `cache_read_input_tokens` and reports `output_tokens_details.thinking_tokens`
 when the backend counts them. Prefix caching remains automatic,
 so `cache_control` hints do not allocate an Anthropic cache or report cache-creation tokens. Errors use the
-Anthropic error envelope, including after an SSE stream opens. Server-side tools, documents/file IDs,
-redacted thinking and other context edits return HTTP 400.
+Anthropic error envelope, including after an SSE stream opens. Server-side tools, file IDs,
+redacted thinking and other context edits return HTTP 400. A `document` block takes an inline base64 or
+data-URL PDF on a model started with `--vision --vision-pdf`, like image blocks on a vision model.
 
 Connect Claude Code using the ID from `/v1/models`:
 
