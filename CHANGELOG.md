@@ -65,7 +65,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Kernel contract: a CPU affine projection (Qwen3.5-2B's 4-bit, group-64 `qmm` arithmetic on the host's cores, at the 2B's widths and chain counts) and a CPU RMS norm are registered and run through gates 1 to 4 with eight planted controls on any host with no device (`zig build cpu-contract`; CI's `test-kernel-contract`), and their output bytes are pinned the same at 1 to 16 threads and at column splits every 8 columns to 256 and every 256 beyond on x86_64 and arm64 (#2478, part of #2448). Thanks to @Whq02.
 - Docs: `WINDOWS.md` says what the host suite needs on a Windows machine with no usable GPU (Zig alone), how to read the build runner's `failed command:` lines, which tests skip there and why, and how to unzip the Zig download quickly (#2479). Thanks to @Whq02.
 - The CUDA Qwen3.5 lanes fill readout prompts in pieces for the joint schema head that follows: from row 0, each
-  piece's final-norm rows to the readout, 1,024 rows a piece unless the lane host caps it, as on HIP (#2324).
+  piece's final-norm rows to the readout, 1,024 rows a piece unless the lane host caps it, as on HIP (#2384, part of
+  #2324). Thanks to @laudney.
 
 ## 1.2.4
 
