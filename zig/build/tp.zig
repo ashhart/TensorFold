@@ -65,7 +65,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     b.step("test-roce-multi-host", "Frozen two-rank posts and multirank fake-verbs byte and completion contracts").dependOn(&multi.step);
     tp_step.dependOn(&multi.step);
     const focused = b.addRunArtifact(b.addTest(.{ .root_module = multi_root, .filters = &.{
-        "relay: a held", "relay sums:", "relay: dropped", "relay: real", "relay topology:", "relay custody:",
+        "relay: a held", "relay sums:", "relay: dropped", "relay: real", "relay topology:", "relay custody:", "relay probe vote:",
     } }));
     focused.has_side_effects = true;
     b.step("test-roce-relay-controls-host", "Relay custody, fault and round-once controls without devices").dependOn(&focused.step);
