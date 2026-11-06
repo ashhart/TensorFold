@@ -32,6 +32,13 @@ pub const desc_bias_pointer: c_int = 8;
 pub const layout_order: c_int = 1;
 pub const pref_max_workspace_bytes: c_int = 1;
 
+/// cublasLtMatrixLayoutAttribute_t's CUBLASLT_MATRIX_LAYOUT_COLS (cublasLt.h), a uint64_t.
+pub const layout_cols: c_int = 3;
+
+/// cublasLtMatmulAlgoConfigAttributes_t's split-K factor and reduction scheme, as ints.
+pub const algo_config_splitk: c_int = 2;
+pub const algo_config_reduction: c_int = 3;
+
 /// What D gets after the product: nothing, or a bias over its columns added in f32 before D's one rounding.
 pub const Epilogue = enum(u32) { none = 1, bias = 4 };
 
@@ -57,6 +64,7 @@ pub const Api = struct {
     cublasLtMatmulPreferenceSetAttribute: *const fn (Preference, c_int, CPtr, usize) callconv(.c) S,
     cublasLtMatmulAlgoGetHeuristic: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, Preference, c_int, [*]Heuristic, *c_int) callconv(.c) S,
     cublasLtMatmulAlgoCheck: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, *const Algo, *Heuristic) callconv(.c) S,
+    cublasLtMatmulAlgoConfigGetAttribute: *const fn (*const Algo, c_int, ?*anyopaque, usize, ?*usize) callconv(.c) S,
     cublasLtMatmul: *const fn (Handle, MatmulDesc, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, ?*const Algo, abi.DevicePtr, usize, abi.Stream) callconv(.c) S,
 };
 

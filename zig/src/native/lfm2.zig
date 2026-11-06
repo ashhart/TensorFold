@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lfm2 = @import("lfm2");
 const core = @import("core");
+const refusals = @import("cuda_refusal.zig");
 const Allocator = std.mem.Allocator;
 
 pub const family: api.Family = .{ .model_type = "lfm2_vl", .formats = &.{"bf16"} };
@@ -146,6 +147,11 @@ const Engine = struct {
 };
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    // cuda.zig dispatches d1 directly, so the branch's tp and --vision refusals travel with its open
+    if (refusals.lfm2(o)) |why| {
+        problem.* = why;
+        return null;
+    }
     if (try o.slideRefusal(a, "CUDA")) |why| {
         problem.* = why;
         return null;
