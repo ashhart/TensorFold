@@ -68,7 +68,11 @@ test "wo_a fusion at the real shape, cells and time (TF_WO_REAL=1)" {
         for (&matrices) |*m| exl3.useMatrix(enc, m.*);
         for (&matrices, 0..) |*m, g| try exl3.encode(&p, enc, m.*, .{ .buffer = q_gpu, .offset = g * k * 2 }, .{ .buffer = legacy_gpu, .offset = g * n * 2 }, view(h.view(scratch)), .{ .count = 1, .x_stride = q_width, .y_stride = group_output, .output = .bf16 });
         try exl3.encodeIndexed(&p, enc, .{ .descriptors = .{ .buffer = desc_gpu }, .count = slices, .k = k, .n = n }, view(h.view(q_gpu)), view(h.view(fused_gpu)), view(h.view(scratch)), .{
-            .count = slices, .x_stride = k, .y_stride = n, .output_rows = slices, .output = .bf16,
+            .count = slices,
+            .x_stride = k,
+            .y_stride = n,
+            .output_rows = slices,
+            .output = .bf16,
             .routes = .{ .ids = view(h.view(routes_gpu)), .repeat = 1 },
         });
         enc.end();
@@ -133,7 +137,11 @@ test "wo_a fusion at the real shape, cells and time (TF_WO_REAL=1)" {
             for (0..layers) |_| {
                 for (&matrices) |*m| exl3.useMatrix(enc, m.*);
                 try exl3.encodeIndexed(&p, enc, .{ .descriptors = .{ .buffer = desc_gpu }, .count = slices, .k = k, .n = n }, view(h.view(q_gpu)), view(h.view(fused_gpu)), view(h.view(scratch)), .{
-                    .count = slices, .x_stride = k, .y_stride = n, .output_rows = slices, .output = .bf16,
+                    .count = slices,
+                    .x_stride = k,
+                    .y_stride = n,
+                    .output_rows = slices,
+                    .output = .bf16,
                     .routes = .{ .ids = view(h.view(routes_gpu)), .repeat = 1 },
                 });
             }

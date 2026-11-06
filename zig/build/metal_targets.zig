@@ -216,7 +216,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     {
         const run_mod = b.createModule(.{
             .root_source_file = b.path("zig/deepseek_v41_run.zig"),
-            .target = target, .optimize = optimize, .link_libc = true,
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "tensorfold", .module = mods.engine },
                 .{ .name = "metal", .module = metal },
@@ -229,7 +231,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
         const ids_mod = b.createModule(.{
             .root_source_file = b.path("zig/tf_ids_tmp.zig"),
-            .target = target, .optimize = optimize, .link_libc = true,
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
             .imports = &.{.{ .name = "tokenizer", .module = tokenizer }},
         });
         const ids_exe = b.addExecutable(.{ .name = "tf-ids", .root_module = ids_mod });

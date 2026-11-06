@@ -124,7 +124,6 @@ const Case = struct {
             e.dispatchGroups(mtl.Size.of(ct.heads / 16, p.rows, 1), mtl.Size.of(BLOCK_W, 4, 1));
         }
     }
-
 };
 
 const Variant = enum {

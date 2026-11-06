@@ -311,8 +311,7 @@ test "RoPE retained source pair rounds the position-five imaginary consumer to p
 // -- the tensor-unit prompt kernel against the scalar one -----------------------------------------------------
 
 /// The scalar reference arm: the same dispatch the non-NAX branch issues.
-fn scalar_dispatch(p: *const csa2.Pipelines, enc: mtl.ComputeEncoder, q: View, ring: View, chunk: View,
-    main: View, positions: View, sink: View, out: View, args: csa2.Params) !void {
+fn scalar_dispatch(p: *const csa2.Pipelines, enc: mtl.ComputeEncoder, q: View, ring: View, chunk: View, main: View, positions: View, sink: View, out: View, args: csa2.Params) !void {
     try args.validate();
     enc.setPipeline(p.attention);
     for ([_]View{ q, ring, chunk, main, positions, sink, out }, 0..) |v, i| enc.setBuffer(v.buffer, v.offset, i);
@@ -470,13 +469,6 @@ test "the tensor-unit prompt kernel matches the scalar kernel on random packed k
     try std.testing.expect(r.worst < 0.02);
 }
 
-
-
-
-
-
-
-
 const IndexProbeRef = struct {
     score: f32,
     pos: i32,
@@ -546,11 +538,17 @@ test "index one-shot select is deterministic on unchanged scores" {
                     const visible: u32 = @intCast((r + 1) / 2);
                     if (visible <= 512) continue;
                     var n: u32 = 0;
-                    for (0..visible) |c| { ref[n] = .{ .score = sf[r * tile + c], .pos = @intCast(c) }; n += 1; }
+                    for (0..visible) |c| {
+                        ref[n] = .{ .score = sf[r * tile + c], .pos = @intCast(c) };
+                        n += 1;
+                    }
                     std.mem.sort(IndexProbeRef, ref[0..n], {}, IndexProbeRef.less);
                     for (ref[0..512]) |want| {
                         var found = false;
-                        for (0..512) |j| if (pos_arr[r * 512 + j] == want.pos) { found = true; break; };
+                        for (0..512) |j| if (pos_arr[r * 512 + j] == want.pos) {
+                            found = true;
+                            break;
+                        };
                         if (!found) {
                             std.debug.print("index select {s}: row {d} missed key {d}\n", .{ if (k == 0) "v" else "4-pass", r, want.pos });
                         }
