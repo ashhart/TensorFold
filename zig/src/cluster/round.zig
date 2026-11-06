@@ -1,4 +1,4 @@
-//! What the leader broadcasts each round: last round's rollbacks and releases, then every row (decode windows and prompt rows).
+//! The leader's broadcast a round: last round's rollbacks and releases, then every row (decode windows, prompt rows).
 const std = @import("std");
 
 /// One row: feed `token` into slot `slot`'s cache at `index`; `sample` rows come back as logits for the leader to draw.

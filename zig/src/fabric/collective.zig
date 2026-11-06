@@ -1,4 +1,4 @@
-//! Lockstep collectives over one-sided writes: per peer one chunk write, then a flag word (step << 32 | bytes); no atomics.
+//! Lockstep collectives over one-sided writes: per peer one chunk write, then a flag (step << 32 | bytes); no atomics.
 const std = @import("std");
 const rdma = @import("rdma.zig");
 const words = @import("words.zig");
@@ -128,7 +128,7 @@ pub const Elem = enum {
     }
 };
 
-/// Sum every rank's partial rows in rank order 0..n-1, each element alone: the same bits on every rank, at any row count.
+/// Sum every rank's partial rows in rank order 0..n-1, each element alone: same bits on every rank, at any row count.
 pub fn allReduce(ch: anytype, elem: Elem, partial: []const u8, out: []u8, scratch: [][]const u8) !void {
     std.debug.assert(partial.len == out.len and partial.len % elem.size() == 0);
     var chunks: [max_ranks][]const u8 = @splat(&.{});
@@ -177,7 +177,7 @@ pub fn gather(ch: anytype, root: u32, chunk: []const u8, out: [][]const u8) !voi
     try ch.exchange(chunks[0..ch.ranks()], out);
 }
 
-/// One direction of a pipeline link: a flag per slot (step << 32 | bytes), a credit word the receiver returns, two slots.
+/// One direction of a pipeline link: a flag per slot (step << 32 | bytes), a credit the receiver returns, two slots.
 pub const Pipe = struct {
     ep: Rdma,
     base: usize,

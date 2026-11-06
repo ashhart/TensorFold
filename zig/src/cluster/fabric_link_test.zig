@@ -1,4 +1,4 @@
-//! The cluster on the fabric's own in-process endpoints: membership on its pipes, exact sums on its channel, rounds on its words.
+//! The cluster on the fabric's in-process endpoints: membership, exact sums and rounds on its pipes, channel and words.
 const std = @import("std");
 const fabric = @import("fabric");
 const node = @import("node.zig");

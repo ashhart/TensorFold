@@ -1,4 +1,4 @@
-//! The placement planner: every tensor to ranks under one layout (pipeline x tensor, experts spread or split), deterministically.
+//! The planner: every tensor to ranks under one layout (pipeline x tensor, experts spread or split), deterministically.
 const std = @import("std");
 const node = @import("node.zig");
 const checkpoint = @import("checkpoint.zig");
@@ -9,10 +9,10 @@ const canon = @import("canon.zig");
 const Allocator = std.mem.Allocator;
 const Range = canon.Range;
 
-/// Converged: one lane round spans every node, prompt rows and decode rows together. Disaggregated: prefill and decode sets.
+/// Converged: one lane round spans every node, prompt and decode rows together. Disaggregated: prefill and decode sets.
 pub const Mode = enum { converged, disaggregated };
 
-/// Degrees; 0 means the planner chooses. nodes = pipeline x tensor; expert divides tensor (1: every expert split by TP).
+/// Degrees; 0 lets the planner choose. nodes = pipeline x tensor; expert divides tensor (1: every expert split by TP).
 pub const Layout = struct {
     tensor: u32 = 0,
     pipeline: u32 = 0,
@@ -113,7 +113,7 @@ pub fn share(bytes: u64, r: Range, units: u32) u64 {
 
 pub const Error = error{ NoNodes, BadLayout, BadSlices, BadGroups, TooManyStages };
 
-/// The layout the planner chooses when a degree is 0: one stage with tensor parallelism over every node, experts spread over all.
+/// The planner's choice for a degree of 0: one stage with tensor parallelism over every node, experts spread over all.
 pub fn resolve(s: *const model.Shape, n: u32, want: Layout) Error!Layout {
     if (n == 0) return error.NoNodes;
     var l = want;
@@ -173,7 +173,7 @@ fn stages(a: Allocator, p: *Plan, c: checkpoint.Checkpoint, s: *const model.Shap
     }
 }
 
-/// Contiguous layer ranges with each stage's bytes in proportion to its weight (greedy on the running sum, deterministic).
+/// Contiguous layer ranges, each stage's bytes in proportion to its weight (greedy on the running sum, deterministic).
 fn splitLayers(bytes: []const u64, weights: []const u64, out: []Range) void {
     var total: u128 = 0;
     for (bytes) |b| total += b;

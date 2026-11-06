@@ -1,4 +1,4 @@
-//! Synthetic tool output in the exact formats macOS 27 prints, with made-up UUIDs and GIDs, for the probe and topology tests.
+//! Synthetic tool output in the exact formats macOS 27 prints, with fake UUIDs and GIDs, for probe and topology tests.
 const std = @import("std");
 const probe = @import("probe.zig");
 

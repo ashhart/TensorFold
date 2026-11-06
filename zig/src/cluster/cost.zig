@@ -1,4 +1,4 @@
-//! A converged round's cost on the slowest rank: weights, picked experts (deduplicated over rows), caches, FLOPs, collectives.
+//! Converged round cost on the slowest rank: weights, picked experts (deduped over rows), caches, FLOPs, collectives.
 const std = @import("std");
 const node = @import("node.zig");
 const model = @import("model.zig");

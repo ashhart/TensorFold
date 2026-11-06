@@ -95,7 +95,7 @@ pub fn planModel(src: Source, m: config.Model, invs: []const node.Inventory) !Pl
     return .{ .shape = shape, .ck = ck, .p = p, .needs = needs.items[i], .fits = try budget.fits(src.a, &p, needs.items[i]), .chosen = plans.items.len > 1 };
 }
 
-/// What admission allows under the plan: streams at the model's context, context at its streams, rows and prompt rows a round.
+/// What the plan admits: streams at the model's context, context at its streams, rows and prompt rows a round.
 pub fn summary(w: *std.Io.Writer, pl: *const Planned, m: config.Model) !void {
     const o = pl.p.opts;
     const most = admission.maxStreams(&pl.p, pl.needs, &pl.shape, o.context);

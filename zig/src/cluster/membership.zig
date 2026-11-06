@@ -1,4 +1,4 @@
-//! Who is in the cluster: hellos and heartbeats over the RDMA links, gossip for nodes further away, one leader, agreed views.
+//! Who is in the cluster: hellos and heartbeats over RDMA links, gossip for distant nodes, one leader, agreed views.
 const std = @import("std");
 const node = @import("node.zig");
 const wire = @import("wire.zig");
