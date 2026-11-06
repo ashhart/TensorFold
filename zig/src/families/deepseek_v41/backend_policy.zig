@@ -110,10 +110,9 @@ pub fn roundSignalOn() bool {
 
 var mtp_confirm: ?u32 = null;
 /// TF_DSV41_MTP_ADAPT_CONFIRM=k requires the up-condition for k consecutive rounds before the deep window is taken.
-/// Named a confirmed switch-up as the policy's next item and it was never built: the signal is an EMA of a
-/// Bernoulli(0.62) on novel text, so a single spike above UP fires the deep window, and on the novel band those
-/// rounds accepted not one extra draft (179 accepted at depth 1 and at the policy's mix alike). The default 1 is
-/// the shipped one-sample form.
+/// A confirmed switch-up was named as the policy's next item and it was never built: the signal is an EMA of a
+/// Bernoulli draw, so a single spike above UP fires the deep window, and on the novel band those rounds accepted
+/// not one extra draft. The default 1 is the shipped one-sample form.
 pub fn mtpConfirmRounds() u32 {
     if (mtp_confirm) |v| return v;
     const raw = std.c.getenv("TF_DSV41_MTP_ADAPT_CONFIRM") orelse {
@@ -126,8 +125,8 @@ pub fn mtpConfirmRounds() u32 {
 }
 
 /// The shipped band's first-draft signal is depth-blind (at depth 3 the first draft usually lands even when drafts
-/// 2-3 do not), so on a long novel turn it re-enters the deep window round after round and pays 0.49 acceptance for
-/// it. The round signal the policy already computes (`ratio`, kept/offered one round lagged) is the depth-aware one
+/// 2-3 do not), so on a long novel turn it re-enters the deep window round after round and pays its lower
+/// acceptance for it. The round signal the policy already computes (`ratio`, kept/offered one round lagged) is the depth-aware one
 /// named; this is the form that uses it as a one-way ratchet rather than as an EMA. `=0` restores the shipped band.
 /// It is a POLICY (which window to verify), not a numerics change -- every depth is token-identical to the plain
 /// path.
@@ -145,8 +144,8 @@ pub fn mtpRatchetDown() f64 {
 
 var draft_off_on: ?bool = null;
 /// THE DRAFTING GOVERNOR. A drafted round's break-even is (the verify's window + the drafter's own forward) / (the
-/// plain token). That is NOT a constant: 1.72 at short context and 1.80 at 22k, because the two-row verify grows
-/// with the keys while the plain token grows less. So the governor measures the request's OWN yield (the tokens the
+/// plain token). That is NOT a constant: it grows with context, because the two-row verify grows with the keys
+/// while the plain token grows less. So the governor measures the request's OWN yield (the tokens the
 /// rounds have committed, over the rounds) and takes the request off the drafted path -- no MTP draft, no lookup
 /// draft, a plain one-row round -- once it is below the break-even. It is a POLICY: every drafted depth is
 /// token-identical to the plain path, so a request that switches mid-turn reads the same stream.

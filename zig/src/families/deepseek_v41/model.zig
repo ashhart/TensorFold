@@ -1384,10 +1384,10 @@ pub const Model = struct {
                 // three layers' values), so the ring advances ONCE a forward.
                 const shared = tapsSharedBaseOn();
                 if (shared and index == 37) {
-                    // THE TAPS RING'S SLOT IS THE TOKEN POSITION. The cursor advanced by the CAPTURED rows (the
-                    // verify's window, four a round) while the position advanced by the KEPT rows (about 1.3 a
-                    // round), so the ring's rows drifted out of alignment with the positions -- 2.7 rows a round. The
-                    // stream-mean kernel writes modulo the ring, so the aligned base is the forward's start position.
+                    // THE TAPS RING'S SLOT IS THE TOKEN POSITION. The cursor advances by the CAPTURED rows (the
+                    // verify's window), while the position advances by the KEPT rows; the two rates differ, so a
+                    // base that follows the cursor drifts out of alignment with the positions. The stream-mean
+                    // kernel writes modulo the ring, so the aligned base is the forward's start position.
                     m.taps_base = if (condAlignOn()) state.position % 128 else m.taps_row;
                     // A fresh capture's rows are all valid; a rollback sets the prefix.
                     m.taps_rows_valid = 0;
@@ -2394,10 +2394,9 @@ pub const Model = struct {
     /// TF_DSV41_MTP_DRAFTS: five rows a round (the pending token and four fillers) through three blocks of the
     /// drafter's own weights, then the shared head; the head writes from `.logits` row 2 on. THE FIRST DRAFT's
     /// ACCEPTANCE, smoothed -- the adaptive depth policy's signal. It is the fraction of rounds whose kept count is
-    /// at least two (the pending token plus the first draft), and it is the SAME at every depth (the yield is not: it
-    /// scales with the depth, so the novel text yields 0.62 at depth 1 and 1.22 at depth 3 while the predictable text
-    /// yields 1.07 and 3.02 -- one threshold cannot separate the texts). The policy's warm-up length -- a running
-    /// mean over the first `k` samples, then the shipped EMA. `TF_DSV41_MTP_ADAPT_WARM=0` is the pure EMA (the
+    /// at least two (the pending token plus the first draft), and it is the SAME at every depth, while the yield is
+    /// not: the yield scales with the depth, so one threshold cannot separate the novel text from the predictable
+    /// text. The policy's warm-up length -- a running mean over the first `k` samples, then the shipped EMA. `TF_DSV41_MTP_ADAPT_WARM=0` is the pure EMA (the
     /// same-binary control).
     var mtp_warm_cache: ?u32 = null;
     fn mtpWarmRounds() u32 {
@@ -2430,10 +2429,10 @@ pub const Model = struct {
     }
 
     /// THE ROUND'S OWN PER-DRAFT ACCEPTANCE as the policy's signal (the same EMA and the same first-sample rule as
-    /// `noteAcceptSlot`). At depth 1 it IS the first-draft hit (kept/1); at depth 3 it falls to ~0.41 on novel text
-    /// -- where the first-draft sample stays ~0.99 because a deep window's first draft is usually accepted while its
-    /// second and third are not. That is the depth-awareness the policy needs to leave the deep window when the deep
-    /// window stops paying.
+    /// `noteAcceptSlot`). At depth 1 it IS the first-draft hit (kept/1); at depth 3 it falls well below that on novel
+    /// text -- where the first-draft sample stays high because a deep window's first draft is usually accepted while
+    /// its second and third are not. That is the depth-awareness the policy needs to leave the deep window when the
+    /// deep window stops paying.
     pub fn noteAcceptRatioSlot(m: *Model, slot: u32, ratio: f64) void {
         if (slot >= m.mtp_round_slot.len) return;
         const v = std.math.clamp(ratio, 0.0, 1.0);
@@ -2515,8 +2514,8 @@ pub const Model = struct {
         // `Transformer.forward_spec` (inference/model.py, revision 314113f8) is the same pass: `forward_embed` makes
         // the noise-token draft rows and `DSparkBlock.forward` threads `pre_mix` and `main_x` through the stage. The
         // conditioning: the last `nc` rows of the rolling tap ring (the decode window's own rows, captured a token a
-        // forward) through main_proj and main_norm, then each stage's keys into its ring. Round 320: the ring used to
-        // hold only the current pass's row (`taps_n = rows = 1` at decode), so 127 of the 128 window slots the draft
+        // forward) through main_proj and main_norm, then each stage's keys into its ring. The ring once
+        // held only the current pass's row (`taps_n = rows = 1` at decode), so 127 of the 128 window slots the draft
         // rows read were uninitialised packed cache and the filler rows went NaN.
         const pos_now = slot_pos;
         // The captured rows are the last `taps_rows_last` rows of the last forward, at their own positions [pos_now -
