@@ -377,6 +377,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Developers: `tf-xpu-contract-run` runs the kernel contract's gates 1 to 4 on an Intel GPU through Level Zero, with
   planted controls and gate 5 checked live against the card; its first run covers the Qwen3.8-27B glue on an Arc Pro B70
   (#2269, part of #2080). Thanks to @tolewis.
+- Tests: host pins for the request and flag limits `docs/api.md` and the README state, and a rerunnable replay of the
+  prompt cache's eviction on agent-shaped traces (#2305).
 
 - Flash Next on CUDA: a shared round's DeltaNet steps run in one launch each across its lanes instead of one launch a lane, so 8 streams decode 3-6% faster on a GB10 with the same tokens; one stream keeps its own launches (#1942). Thanks to @Arminova.
 
