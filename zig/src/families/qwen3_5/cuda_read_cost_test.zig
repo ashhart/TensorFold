@@ -36,11 +36,15 @@ const Recorder = struct {
 };
 test "dense read cost: hidden taps skip only the output tail and a scoring pass retains it" {
     var r: Recorder = .{};
-    try @import("cuda_forward.zig").finish(&r, 3, 1, true);
+    try @import("cuda_forward.zig").finish(&r, 3, 1, true, false);
     try t.expectEqual(@as(usize, 0), r.norms);
     try t.expectEqual(@as(usize, 0), r.heads);
-    try @import("cuda_forward.zig").finish(&r, 3, 1, false);
+    try @import("cuda_forward.zig").finish(&r, 3, 1, false, false);
     try t.expectEqual(@as(usize, 1), r.norms);
+    try t.expectEqual(@as(usize, 1), r.heads);
+    // a readout piece's rows: the final norm, and no head
+    try @import("cuda_forward.zig").finish(&r, 3, 1, false, true);
+    try t.expectEqual(@as(usize, 2), r.norms);
     try t.expectEqual(@as(usize, 1), r.heads);
     try t.expectEqual(@as(u64, 456), r.src);
 }
