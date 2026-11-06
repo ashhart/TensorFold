@@ -310,7 +310,7 @@ template <int G, int D, int CK>
   for (int i = 0; i < DP; i++) OUT[((int64_t)h * NT + node) * D + lane * DP + i] = static_cast<bfloat>(o[i] / l);
 }
 
-// The kept path's keys and values to the cache's next rows (len + path[j] -> len + j); rows in order, never read after written.
+// Kept path's keys/values to the cache's next rows (len + path[j] -> len + j); rows in order, never read after written.
 kernel void tf_kv_compact(device bfloat* K [[buffer(0)]],
                           device bfloat* V [[buffer(1)]],
                           const device int32_t* path [[buffer(2)]],
