@@ -142,7 +142,7 @@ inline Top top_keys(thread const Row& r, uint want, thread const Shared& s) {
   return {prefix, above, need, idcut};
 }
 
-// tf_gpu_sample's candidates, sorted (value desc, id asc): a window near the max holding the rule's tokens, else the C largest.
+// tf_gpu_sample's candidates sorted (value desc, id asc): a window near the max with the rule's tokens, else C largest.
 inline uint first_block(thread const Row& r, float m, float top_p, float near, uint kw, thread float& z, thread const Shared& s) {
   const uint t = r.t;
   float ls = 0.0f, lnear[3] = {0.0f, 0.0f, 0.0f};
