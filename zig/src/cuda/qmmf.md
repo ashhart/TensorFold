@@ -26,8 +26,12 @@ calls it today, so other families keep the existing tiles. On sm_12x,
 BF16 calls with at least 512 rows, N >= 128, K >= 512 and 128-column
 padded weights use a 128x128 CTA: WM=2, WN=4, 256 threads, three K64
 stages. Dynamic shared memory is 98,432 bytes, including the stage
-barriers. Other formats, smaller grids and older devices use the
-existing tiles.
+barriers. Unsplit calls (SK=1) take the K32 entries instead: the same
+128x128 CTA reads each K64 weight pack in two K32 halves with 16-byte
+copies and no stage barriers, in 49,152 bytes of dynamic shared memory,
+and keeps the K16 MMA order and the rounding. Fused slices keep the K64
+tile. Other formats, smaller grids and older devices use the existing
+tiles.
 
 The tile also needs more blocks than half the multiprocessors. Its K
 slices meet inside a block, so a call has one block for each 128x128
@@ -96,8 +100,8 @@ zig-out/bin/tf-cuda-test qmmf-prompt
 zig-out/bin/tf-cuda-test qmmf-prompt-bench
 ```
 
-The device test compares all bytes against the unchanged lane kernels
-for current whole-layer N/K = 16480/2560, 13952/2560, 2560/6144,
+The device test compares all bytes against the forced parent K64 tile
+(itself byte-equal to the lane kernels) for current whole-layer N/K = 16480/2560, 13952/2560, 2560/6144,
 640/2560, 2560/640 and HC up 10240/320, both output types, SK=1 and the shape-driven split,
 and M=1/16/64/65/127/128/129/511/512/1536/4218. It forces the new CTA
 below the production threshold, checks production dispatch separately,
