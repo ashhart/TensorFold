@@ -18,7 +18,7 @@ const u = 0x1p-24;
 const scale = 0.0625;
 
 /// One Mac's head counts (a rank's 12 over 2 merges as a pair, so its rows are not one call's).
-pub const heads = [_]at_.Heads{ .q27b, .gqa16, .q9b };
+pub const heads = [_]at_.Heads{ .q27b, .gqa16, .q9b, .q35b };
 
 /// decode: a round's trees and chains as decode_round.zig plans them; prompt: one chain through the prompt kernel.
 pub const Which = enum { decode, prompt };
