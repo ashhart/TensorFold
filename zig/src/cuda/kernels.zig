@@ -60,6 +60,7 @@ pub const dots_mocr: []const u8 = if (available) &Blob("fatbin_dots_mocr").bytes
 pub const vit: []const u8 = if (available) &Blob("fatbin_vit").bytes else &.{};
 pub const moss_image: []const u8 = if (available) &Blob("fatbin_moss_image").bytes else &.{};
 pub const nemo_audio: []const u8 = if (available) &Blob("fatbin_nemo_audio").bytes else &.{};
+pub const uocr: []const u8 = if (available) &Blob("fatbin_uocr").bytes else &.{};
 pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes else &.{};
 pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops").bytes else &.{};
 pub const lane_gemv: []const u8 = if (available) &Blob("fatbin_lane_gemv").bytes else &.{};
