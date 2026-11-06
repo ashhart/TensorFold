@@ -232,7 +232,7 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
   }
 }
 
-// Decode rows: heads' blocks merged in block order, out [rows,64,512] bf16; grid (64 heads, rows), 128 threads, 4 dims.
+// Decode rows: heads' blocks merged in order, out [rows,64,512] bf16; grid (64 heads, rows), 128 threads x 4 dims.
 [[kernel]] void glm_sparse_combine(const device float* po [[buffer(0)]], const device float* pm [[buffer(1)]],
                                    const device float* pl [[buffer(2)]], constant int& blocks [[buffer(3)]],
                                    device bfloat* out [[buffer(4)]], uint t [[thread_index_in_threadgroup]],
