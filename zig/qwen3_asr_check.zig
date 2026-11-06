@@ -133,8 +133,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer gpa.free(bytes);
     const samples = try qa.wav.decode(gpa, bytes);
     defer gpa.free(samples);
-    const plan = try qa.chunks.Plan.init(cfg.audio, qa.chunks.frames(samples.len));
-    std.debug.print("CLIP {d} samples, {d} frames ({d} in the case), {d} chunks, {d} rows, {d} windows of {d}\n", .{ samples.len, plan.frames, case.frames, plan.chunks, plan.rows, plan.windows(), plan.window_rows });
+    const plan = (try qa.chunks.Plan.init(cfg.audio, qa.chunks.frames(samples.len))).attending(case.attention);
+    std.debug.print("CLIP {d} samples, {d} frames ({d} in the case), {d} chunks, {d} rows, {d} windows of {d} ({t} attention, as the case)\n", .{ samples.len, plan.frames, case.frames, plan.chunks, plan.rows, plan.windows(), plan.window_rows, case.attention });
     if (plan.frames != case.frames) return error.FrameCount;
     try checkTokens(gpa, io, args[1], &case, plan.rows);
     var cmp: Compare = .{ .gpa = gpa, .case = &case };
@@ -147,7 +147,7 @@ pub fn main(init: std.process.Init) !u8 {
         try Compare.put(&cmp, "mel", 0, wide);
         if (tower) {
             const src: qa.tower_ref.Source = .{ .ctx = &mapped, .get = Mapped.get };
-            const out = try qa.tower_ref.run(gpa, cfg.audio, points, src, feats, .{ .ctx = &cmp, .put = Compare.put });
+            const out = try qa.tower_ref.run(gpa, cfg.audio, points, case.attention, src, feats, .{ .ctx = &cmp, .put = Compare.put });
             gpa.free(out);
         }
     }

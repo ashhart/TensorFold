@@ -244,7 +244,7 @@ fn towerCase(frames: usize, group: usize, want_windows: usize) !void {
     try std.testing.expectEqual(if (frames < small.chunkFrames()) frames else small.chunkFrames(), host.conv1_frames);
     var ref: Ref = .{ .gpa = gpa };
     defer ref.deinit();
-    const want = try tower_ref.run(gpa, small, .torch, .{ .ctx = &fake, .get = Fake.get }, feats, .{ .ctx = &ref, .put = Ref.put });
+    const want = try tower_ref.run(gpa, small, .torch, .windows, .{ .ctx = &fake, .get = Fake.get }, feats, .{ .ctx = &ref, .put = Ref.put });
     defer gpa.free(want);
     var it = ref.stages.iterator();
     var seen: usize = 0;
