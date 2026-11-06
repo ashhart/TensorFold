@@ -288,6 +288,7 @@ test {
     _ = @import("models_idle_audit_test.zig");
     _ = @import("penalty_request_test.zig");
     _ = @import("deepseek_fixture_test.zig");
+    _ = @import("uocr_chat_test.zig");
 }
 
 test {

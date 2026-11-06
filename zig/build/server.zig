@@ -39,6 +39,7 @@ pub fn addTo(
         .optimize = optimize,
         .imports = &.{.{ .name = "json", .module = j }},
     }));
+    m.addImport("uocr_chat", b.createModule(.{ .root_source_file = b.path("zig/src/families/uocr/chat.zig"), .target = target, .optimize = optimize }));
     const family = if (m.import_table.get("native_engines")) |engines| engines.import_table.get("drama3") else null;
     if (family) |drama3| {
         const source = b.addWriteFiles().add("drama_prompt.zig",
