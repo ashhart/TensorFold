@@ -635,6 +635,9 @@ reply and are absent from Python replies that do not provide them.
 In the native block, `seconds` is the reply's decode time, from the end of its prompt pass to its last token, and
 `tokens_per_second` divides the reply's tokens after the first by it. `prefill_seconds` is the prompt pass, and
 `time_to_first_token` counts from the request's arrival, so a queued or long prompt shows there, not in `seconds`.
+`min_rows` is the smallest row count any of the request's engine calls ran with. A reply whose lane measured
+grammar windows adds `grammar_windows` and `grammar_fills`, counts, and `grammar_window_seconds` and
+`grammar_fill_seconds`, in seconds.
 The Python 0.6 server's `seconds` is the whole request, prompt included.
 A native Metal Qwen3.8-27B server started with `TF_Q27_PROFILE=N` logs each kernel class's GPU time, the DFlash2
 drafter's included, every N decode rounds (`1` means 64; unset, empty or `0` is off, and any other value leaves it off
@@ -642,6 +645,11 @@ with a warning). Prompt passes run unprofiled, and a profiled round runs slower 
 add `gpu_seconds` to the block: the GPU-busy time of the target model's forward passes the reply ran in, its prompt
 pass included. A round shared with other streams counts whole in each of their replies, and the drafter's passes
 are not included. Without `TF_Q27_PROFILE` the field is absent and replies are unchanged.
+
+Beside the block, native replies carry top-level `exact_mode`, always `"exact"`, and `stop_sequence`, the matched
+stop string, when a stop string ended the reply. A server started with `--cortheon` adds a top-level `cortheon`
+object summarizing the turn for requests Cortheon runs ([Cortheon](cortheon.md)). These ride on the whole reply and
+the streamed finish event alike.
 
 The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,
 `thinking`, `effort`, `tokens`, `sha`, `finish`, `rounds`, and draft acceptance; a refused request reports
