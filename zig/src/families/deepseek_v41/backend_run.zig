@@ -132,7 +132,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
             if (std.c.getenv("TF_DSV41_BATCH_DEBUG") != null) std.log.info("single fwd: slot={d} rows={d} gpu={d:.3} ms", .{ i, rows, b.model.last_gpu_seconds * 1e3 });
         }
         // TF_DSV41_ROUTE_DUMP=N: the last layer's routes of the first N windows, for the window's
-        // expert-distinct count (round 169's question: the five-row MoE's cost is routing-dependent).
+        // expert-distinct count (the five-row MoE's cost is routing-dependent).
         if (std.c.getenv("TF_DSV41_ROUTE_DUMP")) |raw| {
             const S = struct {
                 var n: u32 = 0;
@@ -481,8 +481,8 @@ pub fn tree(ptr: *anyopaque, s: *Stream, gpa: std.mem.Allocator) anyerror!?lanes
         );
     }
     // The trained proposer (TF_DSV41_MTP_DRAFTS) is the drafter when it is bound and has a pending token; the
-    // suffix lookup below stays the fallback. This is the hook the lane core actually calls (round 227: draft()
-    // is never invoked for this family).
+    // suffix lookup below stays the fallback. This is the hook the lane core actually calls, and the other draft
+    // hook is never invoked for this family.
     if (depth > 0 and std.c.getenv("TF_DSV41_MTP_DRAFTS") != null and b.model.weights.dspark != null and s.pending != null) {
         // The round's other hook (draft) already ran the proposer's forward for this pending token; reuse it
         // instead of running the draft's three blocks, the conditioning and the head twice. The hand-off's cap

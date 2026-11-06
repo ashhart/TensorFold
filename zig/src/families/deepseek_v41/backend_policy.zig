@@ -62,8 +62,7 @@ pub fn lookupDepth() u32 {
 var no_refeed: ?bool = null;
 /// TF_DSV41_NO_REFEED=0 restores the re-feed; the no-re-feed port is the default. A rejected window's kept rows are
 /// the rows the verify already wrote, so the rollback restores the cache from the pool's capture instead of running
-/// the model a second time -- and the re-feed's own divergence from the verify (round 252: one reject in 22) goes
-/// with it.
+/// the model a second time -- and the re-feed's own divergence from the verify goes with it.
 pub fn noRefeedOn() bool {
     if (no_refeed) |v| return v;
     const raw = std.c.getenv("TF_DSV41_NO_REFEED") orelse {
