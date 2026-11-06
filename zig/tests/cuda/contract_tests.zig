@@ -414,6 +414,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     for (&blocks) |*x| try kernels.append(a, x.kernel());
     var q35_mod = try cuda.Module.load(gpu.d, kk.qwen35);
     defer q35_mod.unload();
+    const norm_shift = try @import("contract_q35_norm_shift.zig").Group.create(a, gpu, s, q35_mod, &kernels);
+    defer norm_shift.destroy();
     var q35_kv8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
     defer q35_kv8.unload();
     var q35s: [q35_k.forms.len]q35_k.Q35 = undefined;
