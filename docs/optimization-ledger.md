@@ -47,7 +47,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | --- | --- | --- | --- | --- | --- |
 | 1. Prompt tail | done [#2229] | yes | yes | yes | yes |
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
-| 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | open M[#1850] |
+| 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | yes C open M[#1850] |
 | 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
 | 5. State walk | yes | yes | open [#2215] | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
@@ -58,7 +58,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
 | 13. MoE grouped | done [#605] | done [#1351] | done [#864] | no (dense) | done [#558] |
-| 14. CUDA graphs | done¹ | done [#1786] | yes [#1490] | done [#1174] | done [#615] |
+| 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
 | 15. MTP | done [#1562] | done [#1925] | done [#1585] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done [#979] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
@@ -78,7 +78,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 1. Prompt tail | yes | yes | yes | yes | yes |
 | 2. Paged KV | done [#1620] | done [#1653] | done [#1284] | yes | yes (own pool) |
 | 3. Prompt store | done [#1755] | done [#1756] | yes | yes | yes |
-| 4. iGPU states | yes | yes | yes | yes | yes |
+| 4. iGPU states | done¹ | done¹ | done¹ | done¹ | yes |
 | 5. State walk | yes | yes | yes | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | yes | yes |
 | 7. Host KV tier | yes | yes | yes | yes | yes |
@@ -86,22 +86,22 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 9. FP8 KV | yes | yes | yes | yes | no (FP8 by design) |
 | 10. FP4/FP8 decode | failed [#1448] | no (bf16) | yes | no (EXL3) | yes |
 | 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹ |
-| 12. Add + norm | done¹ | done¹ | yes | done¹ | ? |
+| 12. Add + norm | done¹ | done¹ | done [#1256] | done¹ | done M[#1714] ? C |
 | 13. MoE grouped | done¹ | no (dense) | no (dense) | done [#1388] | done M[#1707] |
 | 14. CUDA graphs | done¹ | done¹ | done¹ | yes | done¹ |
 | 15. MTP | no (no head) | no (no head) | no (no head) | no (DSpark) | no (DSpark) |
 | 16. DFlash(2) | yes | yes | yes | done¹ | yes |
 | 17. DSpark | yes | yes | yes | done¹ | done [#1751] |
-| 18. Copy drafts | done [#2022] | done [#2022] | done [#2022] | done [#2022] | yes |
-| 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | ? |
+| 18. Copy drafts | done [#2022] | done [#2022] | done [#2022] | done [#2022] | done¹ |
+| 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | done¹ (opt-in) |
 | 20. Solo chunks | yes | yes | yes | yes | yes |
 | 21. Read-ahead | done [#2033] | done [#2033] | yes | done [#2033] | done [#2033] |
 | 22. Direct load | yes | yes | yes | yes | open [#1924] |
-| 23. Page drop | done [#1884] | done [#1884] | done [#1884] | done [#1884] | yes |
+| 23. Page drop | done [#1884] | done [#1884] | done [#1884] | done [#1884] | done [#1884] |
 | 24. L2 prefetch | yes | yes | yes | yes | done¹ |
 | 25. TP ranks | yes | no (4B) | yes | done [#1388] | done¹ |
 | 26. Pipeline | yes | no (4B) | yes | yes | yes |
-| 27. Profiles | done [#1944] | done [#1944] | yes | yes | yes |
+| 27. Profiles | done [#1944] | done [#1944] | open [#2306] | yes | yes |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -116,18 +116,18 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 9. FP8 KV | yes | yes | yes | yes |
 | 10. FP4/FP8 decode | no (affine) | yes | yes | no (EXL3) |
 | 11. Fused proj. | yes | done¹ | done¹ | yes |
-| 12. Add + norm | yes | ? | yes | yes |
+| 12. Add + norm | done M[#822] | done X[#1696] | yes | yes |
 | 13. MoE grouped | done M[#822] | no (dense) | no (dense) | done M[#1836] |
 | 14. CUDA graphs | yes | yes | yes | yes |
 | 15. MTP | no (no head) | no (no head) | no (no head) | yes |
 | 16. DFlash(2) | yes | yes | yes | yes |
 | 17. DSpark | open [#1394] | yes | yes | yes |
-| 18. Copy drafts | done M¹ | yes | yes | yes |
-| 19. Shared drafts | done [#1779] | yes | no (no head) | yes |
+| 18. Copy drafts | done M¹ | done X[#1696] | done¹ | yes |
+| 19. Shared drafts | done [#1779] | no (no head) | no (no head) | yes |
 | 20. Solo chunks | yes | yes | yes | yes |
-| 21. Read-ahead | yes | yes | yes | yes |
+| 21. Read-ahead | no (no CUDA) | yes | yes | yes |
 | 22. Direct load | yes | yes | yes | yes |
-| 23. Page drop | yes | yes | done [#1887] | yes |
+| 23. Page drop | done M[#1885] | yes | done [#1887] | yes |
 | 24. L2 prefetch | yes | yes | yes | yes |
 | 25. TP ranks | yes | no (1.7B) | yes | yes [#850] |
 | 26. Pipeline | yes | no (1.7B) | yes | yes |
@@ -152,18 +152,18 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 9. FP8 KV | yes | no (scores) | yes | yes |
 | 10. FP4/FP8 decode | no (Metal) | no (bf16) | no (Metal) | no (Metal) |
 | 11. Fused proj. | done¹ | yes | yes | done¹ |
-| 12. Add + norm | yes | done¹ | done¹ | yes |
+| 12. Add + norm | done M¹ | done¹ | done¹ | yes |
 | 13. MoE grouped | done [#1125] | no (dense) | no (dense) | done¹ |
 | 14. CUDA graphs | no (Metal) | no (scores) | no (Metal) | no (Metal) |
 | 15. MTP | yes | no (scores) | no (no head) | done¹ |
 | 16. DFlash(2) | done [#578] | no (scores) | yes | yes |
 | 17. DSpark | yes | no (scores) | yes | yes |
-| 18. Copy drafts | done¹ | no (scores) | yes | yes |
+| 18. Copy drafts | done¹ | no (scores) | done M¹ | done M¹ |
 | 19. Shared drafts | done [#578] | no (scores) | no (no head) | yes |
 | 20. Solo chunks | yes | no (scores) | yes | yes |
-| 21. Read-ahead | yes | yes | yes | yes |
+| 21. Read-ahead | no (Metal) | yes | no (Metal) | no (Metal) |
 | 22. Direct load | yes | yes | yes | yes |
-| 23. Page drop | yes | done [#1884] | yes | yes |
+| 23. Page drop | done M[#1885] | done [#1884] | done M[#1885] | done M[#1885] |
 | 24. L2 prefetch | no (Metal) | no (scores) | no (Metal) | no (Metal) |
 | 25. TP ranks | open [#1434] | no (small) | yes | yes |
 | 26. Pipeline | yes | no (small) | yes | yes |
@@ -182,18 +182,18 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 9. FP8 KV | yes | yes | no (prompt) |
 | 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) |
 | 11. Fused proj. | yes | yes | yes |
-| 12. Add + norm | done¹ | ? | yes |
+| 12. Add + norm | done¹ | done M¹ | yes |
 | 13. MoE grouped | done¹ | done¹ | no (dense) |
 | 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) |
 | 15. MTP | done¹ | no (DSpark) | no (prompt) |
 | 16. DFlash(2) | yes | yes | no (prompt) |
 | 17. DSpark | yes | yes | no (prompt) |
-| 18. Copy drafts | yes | done [#2221] | no (prompt) |
+| 18. Copy drafts | done M¹ | done [#2221] | no (prompt) |
 | 19. Shared drafts | yes | yes | no (prompt) |
 | 20. Solo chunks | yes | yes | no (prompt) |
-| 21. Read-ahead | yes | yes | yes |
+| 21. Read-ahead | no (Metal) | no (Metal) | yes |
 | 22. Direct load | yes | yes | yes |
-| 23. Page drop | yes | yes | yes |
+| 23. Page drop | done M[#1888] | yes | yes |
 | 24. L2 prefetch | no (Metal) | no (Metal) | no (prompt) |
 | 25. TP ranks | yes | yes | no (small) |
 | 26. Pipeline | yes | yes | no (small) |
@@ -333,7 +333,7 @@ below; these are estimates for planning a port, not results.
 
 14. **CUDA graphs for decode and verify.** Each decode or verify shape is captured once and replayed, which removes the
     host's launch cost from every step. `TENSORFOLD_GEMMA4_GRAPHS=0` (and the same switch for Kolibri, Spark
-    and Dory) keeps those eager. GLM's capture is [#1490].
+    and Dory) keeps those eager. GLM's capture is [#2279] (open), for [#1490].
 
 15. **MTP drafts.** The checkpoint's own MTP head drafts tokens that the target verifies in one pass, with the same
     replies as serial decode. `--mtp-drafts` and `--mtp-confidence` size the drafts on Nemotron and GLM.
@@ -376,7 +376,8 @@ below; these are estimates for planning a port, not results.
 
 21. **Load read-ahead.** Reader threads read a layer's checkpoint into the page cache while the loader packs the
     previous one (`TF_LOAD_PREFETCH`, 16 readers, on by default where it landed). [#2033] ports it to six more
-    loaders, opt-in.
+    loaders, opt-in. The readers start only on Linux, so a family on Metal alone is `no`; Metal's shared loader
+    reads large tensors on eight threads of its own.
 
     | Family | Gain (measured) | Where |
     | --- | --- | --- |
@@ -394,7 +395,7 @@ below; these are estimates for planning a port, not results.
 
 23. **Page-cache drop after load.** Every CUDA loader drops its checkpoint's pages once the weights are up, so the
     memory goes back to KV and the prompt cache on unified-memory boxes ([#1884]). TP loaders wait for every rank
-    ([#1887]).
+    ([#1887]). Metal's loaders drop theirs from the file cache ([#1885], [#1888]).
 
 24. **L2 prefetch.** A side stream reads a decode window's next weights into L2 ahead of the kernels that use them.
 
@@ -445,6 +446,7 @@ below; these are estimates for planning a port, not results.
 [#1169]: https://github.com/ashhart/TensorFold/pull/1169
 [#1174]: https://github.com/ashhart/TensorFold/pull/1174
 [#1236]: https://github.com/ashhart/TensorFold/issues/1236
+[#1256]: https://github.com/ashhart/TensorFold/pull/1256
 [#1284]: https://github.com/ashhart/TensorFold/pull/1284
 [#1293]: https://github.com/ashhart/TensorFold/issues/1293
 [#1294]: https://github.com/ashhart/TensorFold/pull/1294
@@ -480,7 +482,9 @@ below; these are estimates for planning a port, not results.
 [#1653]: https://github.com/ashhart/TensorFold/pull/1653
 [#1657]: https://github.com/ashhart/TensorFold/issues/1657
 [#1660]: https://github.com/ashhart/TensorFold/issues/1660
+[#1696]: https://github.com/ashhart/TensorFold/pull/1696
 [#1707]: https://github.com/ashhart/TensorFold/pull/1707
+[#1714]: https://github.com/ashhart/TensorFold/pull/1714
 [#1732]: https://github.com/ashhart/TensorFold/pull/1732
 [#1733]: https://github.com/ashhart/TensorFold/pull/1733
 [#1736]: https://github.com/ashhart/TensorFold/pull/1736
@@ -501,7 +505,9 @@ below; these are estimates for planning a port, not results.
 [#1880]: https://github.com/ashhart/TensorFold/pull/1880
 [#1883]: https://github.com/ashhart/TensorFold/pull/1883
 [#1884]: https://github.com/ashhart/TensorFold/pull/1884
+[#1885]: https://github.com/ashhart/TensorFold/pull/1885
 [#1887]: https://github.com/ashhart/TensorFold/pull/1887
+[#1888]: https://github.com/ashhart/TensorFold/pull/1888
 [#1901]: https://github.com/ashhart/TensorFold/pull/1901
 [#1910]: https://github.com/ashhart/TensorFold/issues/1910
 [#1924]: https://github.com/ashhart/TensorFold/pull/1924
@@ -536,6 +542,8 @@ below; these are estimates for planning a port, not results.
 [#2229]: https://github.com/ashhart/TensorFold/pull/2229
 [#2238]: https://github.com/ashhart/TensorFold/pull/2238
 [#2246]: https://github.com/ashhart/TensorFold/pull/2246
+[#2279]: https://github.com/ashhart/TensorFold/pull/2279
 [#2282]: https://github.com/ashhart/TensorFold/pull/2282
 [#2283]: https://github.com/ashhart/TensorFold/pull/2283
 [#2288]: https://github.com/ashhart/TensorFold/pull/2288
+[#2306]: https://github.com/ashhart/TensorFold/pull/2306
