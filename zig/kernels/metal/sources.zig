@@ -154,12 +154,6 @@ pub const core_moe_route = @embedFile("core/moe_route.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal");
 pub const core_affine_mm_i8 = @embedFile("core/affine_mm_i8.h");
 
-/// The reference's quantised GEMM skeleton (ml-explore/mlx v0.32.4, MIT): `steel/gemm`'s BlockMMA, BlockLoader
-/// and QuantizedBlockLoader with `affine_gather_qmm_rhs`, flattened from seventeen MLX headers with their includes
-/// resolved (see the file's own list). It is the composition the sibling engine dispatches for its expert bodies;
-/// our trellis decode is grafted where their quantised loader sits.
-pub const core_mlx_steel = @embedFile("core/mlx/mlx_steel.h");
-
 /// The int8 routed body: the trellis skeleton (`core/exl3_projection_nax.metal`) with the tile and the x block
 /// quantised per 16x16 fragment and multiplied on the tensor units as int8 x int8 (TF_DSV41_INT8_BODY).
 pub const core_exl3_projection_nax_i8 = @embedFile("core/exl3_projection_nax_i8.metal");
