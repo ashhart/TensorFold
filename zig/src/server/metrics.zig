@@ -416,8 +416,8 @@ test "metrics snapshot allocation failure releases the mutex" {
     try std.testing.expectError(error.OutOfMemory, m.render(io, &out.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096));
     const available = m.mutex.tryLock();
     // No other thread uses m: either tryLock acquired it, or render retained it.
-    // Release before asserting so the unfixed regression terminates without blocking.
     m.mutex.unlock(io);
+    // Release before asserting so the unfixed regression terminates without blocking.
     try std.testing.expect(available);
     try std.testing.expect(failing.has_induced_failure);
     failing.fail_index = std.math.maxInt(usize);
