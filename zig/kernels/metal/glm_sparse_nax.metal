@@ -38,7 +38,7 @@ inline void sparse_queries(thread frag<bfloat> (&q)[8], const device bfloat* qba
   for (short t = 0; t < 8; t++) frag_get(q[t], qbase, RANK, 0, 16 * t, home);
 }
 
-// List entries [lo, hi) of one row (an entry outside [0, key_length) is no key): scores, the online softmax, values into `acc`.
+// One row's entries [lo, hi) (an entry outside [0, key_length) is no key): scores, online softmax, values into `acc`.
 inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], thread float (&l)[2], thread const frag<bfloat> (&q)[8],
                         const device bfloat* keys, const device int32_t* list, int lo, int hi, int key_length, float scale,
                         threadgroup float (&partial)[4][32][16], threadgroup int (&keyrow)[BLOCK], uint s, uint lane, short2 home, int d0) {
