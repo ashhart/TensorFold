@@ -1,4 +1,4 @@
-//! Ordering: concurrent dispatch with memory barriers, and an indirect command buffer chain replayed with new arguments.
+//! Ordering: concurrent dispatch with memory barriers, an indirect command buffer chain replayed with new arguments.
 const std = @import("std");
 const mtl = @import("metal");
 const common = @import("common.zig");
