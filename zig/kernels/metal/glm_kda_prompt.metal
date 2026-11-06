@@ -1,5 +1,5 @@
 
-// A prompt chunk's KDA layer (appended to kda_rows' source): f_b and g_b on the tensor units, then prep, the recurrence and the output norm.
+// Prompt chunk's KDA layer (appended to kda_rows' source): f_b, g_b on tensor units, prep, recurrence, output norm.
 
 // A prompt block's KDA inputs, a head a simdgroup (conv, SiLU, q/k norms, f_b's decay, beta); P_shape: rows, pitch, block start (FB, outputs by block row).
 template <int H, int D, int TAPS, int HB>
