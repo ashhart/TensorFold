@@ -4,7 +4,8 @@ const qa = @import("qwen3_asr");
 const core = @import("core");
 const tok = @import("tokenizer");
 
-const usage = "usage: tf-qwen3-asr-check MODEL_DIR CLIP.wav CASE_DIR [--points exact|torch] [--no-tower] [--min-cos X]\n" ++
+const usage = "usage: tf-qwen3-asr-check MODEL_DIR CLIP.wav CASE_DIR [--points exact|torch] [--no-tower | --ids-only] [--min-cos X]\n" ++
+    "  --ids-only: a case of ids only (qwen3_asr_case.py --ids-only): the weights and tokens, no stage\n" ++
     "  a gate: exit 1 when a stage's cosine to the case is under X (default 0.995) or the tokens differ\n";
 
 /// The checkpoint's shards as one name space (core.Checkpoint, as the CUDA load opens them).
@@ -106,9 +107,12 @@ pub fn main(init: std.process.Init) !u8 {
     var points: qa.ref_ops.Points = .torch;
     var tower = true;
     var min_cos: f64 = 0.995;
+    var ids_only = false;
     var i: usize = 4;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--no-tower")) tower = false else if (std.mem.eql(u8, args[i], "--points") and i + 1 < args.len) {
+        if (std.mem.eql(u8, args[i], "--no-tower")) tower = false else if (std.mem.eql(u8, args[i], "--ids-only")) {
+            ids_only = true;
+        } else if (std.mem.eql(u8, args[i], "--points") and i + 1 < args.len) {
             i += 1;
             points = std.meta.stringToEnum(qa.ref_ops.Points, args[i]) orelse return 2;
         } else if (std.mem.eql(u8, args[i], "--min-cos") and i + 1 < args.len) {
@@ -133,20 +137,24 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("CLIP {d} samples, {d} frames ({d} in the case), {d} chunks, {d} rows, {d} windows of {d}\n", .{ samples.len, plan.frames, case.frames, plan.chunks, plan.rows, plan.windows(), plan.window_rows });
     if (plan.frames != case.frames) return error.FrameCount;
     try checkTokens(gpa, io, args[1], &case, plan.rows);
-    var feats = try qa.mel.features(gpa, samples, cfg.audio.mels);
-    defer feats.deinit(gpa);
     var cmp: Compare = .{ .gpa = gpa, .case = &case };
-    const wide = try gpa.alloc(f64, feats.data.len);
-    defer gpa.free(wide);
-    for (wide, feats.data) |*w, f| w.* = f;
-    try Compare.put(&cmp, "mel", 0, wide);
-    if (tower) {
-        const src: qa.tower_ref.Source = .{ .ctx = &mapped, .get = Mapped.get };
-        const out = try qa.tower_ref.run(gpa, cfg.audio, points, src, feats, .{ .ctx = &cmp, .put = Compare.put });
-        gpa.free(out);
+    if (!ids_only) { // an ids-only case holds no stage: the weights and tokens above are its check
+        var feats = try qa.mel.features(gpa, samples, cfg.audio.mels);
+        defer feats.deinit(gpa);
+        const wide = try gpa.alloc(f64, feats.data.len);
+        defer gpa.free(wide);
+        for (wide, feats.data) |*w, f| w.* = f;
+        try Compare.put(&cmp, "mel", 0, wide);
+        if (tower) {
+            const src: qa.tower_ref.Source = .{ .ctx = &mapped, .get = Mapped.get };
+            const out = try qa.tower_ref.run(gpa, cfg.audio, points, src, feats, .{ .ctx = &cmp, .put = Compare.put });
+            gpa.free(out);
+        }
     }
     try cmp.finish();
     const pass = cmp.worst_cos >= min_cos; // NaN fails
-    std.debug.print("SUMMARY qwen3-asr host ({t} points): worst stage cosine {d:.9} (gate {d}): {s}\n", .{ points, cmp.worst_cos, min_cos, if (pass) "PASS" else "FAIL" });
+    if (ids_only) {
+        std.debug.print("SUMMARY qwen3-asr host (ids only): weights and tokens: PASS\n", .{});
+    } else std.debug.print("SUMMARY qwen3-asr host ({t} points): worst stage cosine {d:.9} (gate {d}): {s}\n", .{ points, cmp.worst_cos, min_cos, if (pass) "PASS" else "FAIL" });
     return if (pass) 0 else 1;
 }
