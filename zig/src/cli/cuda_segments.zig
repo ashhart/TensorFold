@@ -19,7 +19,7 @@ const max_repeat = 16;
 const checks = 2; // hashed prefills an arm
 const R = nemotron.state.prefill_rows;
 
-/// What a prefill leaves: hashes of the caches and states, the head's caches, the last logits and hidden states; the token.
+/// What a prefill leaves: cache and state hashes, the head's caches, the last logits and hidden states; the token.
 const Digest = struct {
     state: [64]u8,
     head: [64]u8,
