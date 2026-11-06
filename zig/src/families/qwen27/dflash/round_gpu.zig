@@ -29,7 +29,7 @@ pub const Matcher = struct {
         @memcpy(m.buffers[1].slice(i32, parents.len), parents);
         @memcpy(m.buffers[3].slice(u32, eos.len), eos);
         const shape = contract.Match{ .rows = @intCast(ids.len), .vocab = vocab, .budget = budget, .eos_count = @intCast(eos.len) };
-        try m.ops.argmax(e, logits, .{ .buf = m.buffers[2] }, .{ .rows = shape.rows, .vocab = vocab, .stride = vocab });
+        try m.ops.argmaxChunks(e, logits, .{ .buf = m.buffers[2] }, .{ .rows = shape.rows, .vocab = vocab, .stride = vocab });
         e.barrier();
         try m.ops.match(e, .{ .buf = m.buffers[0] }, .{ .buf = m.buffers[1] }, .{ .buf = m.buffers[2] }, if (eos.len == 0) null else .{ .buf = m.buffers[3] }, .{ .buf = m.buffers[4] }, shape);
         e.barrier();
