@@ -81,6 +81,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Internal: 42 more lean findings fixed in the tests' comments and the tools' docstrings, with no change in behaviour (#2315).
 
 - HIP: the decode round's residual-add and norm tail issues each row's loads before its branches, and a MoE tail loads its slots' rows together, with output bytes unchanged. On a gfx1151, one-stream decode is 2.7% faster on Qwen3.6-35B-A3B and 1.1% on the 27B. `tf_tail` is now under the kernel contract (#2247). Thanks to @AbrahamCete.
+- Qwen3.8-27B on Metal: a round's keep that fails part way (an allocation, a refused keep or path) returns its error instead of aborting the process on an unended command encoder, and after a failed allocation the round can keep again; `tf-qwen27-keep-error` fails each of the keep's allocations in turn and refuses a path after the encoder has ended (#2376). Thanks to @jschmied.
 
 - Docs: `docs/optimization-ledger.md` lists which speed and memory optimizations apply to which native family, and where each stands, with links to the PRs that measured them (#2232). Thanks to @jschmied.
 
