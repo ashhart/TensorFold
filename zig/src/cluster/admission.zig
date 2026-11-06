@@ -1,4 +1,4 @@
-//! Admission for converged rounds: the streams and context that fit, rows a round, and prompt chunks riding decode rounds.
+//! Admission for converged rounds: the streams and context that fit, rows a round, prompt chunks riding decode rounds.
 const std = @import("std");
 const model = @import("model.zig");
 const plan_mod = @import("plan.zig");
