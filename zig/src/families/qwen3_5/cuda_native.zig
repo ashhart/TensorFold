@@ -30,8 +30,6 @@ pub const formats: []const []const u8 = &.{ "mlx-q4g64", "exl3" };
 pub const default_context: i64 = 32768;
 /// A plain BF16 checkpoint's preflight counts its text tensors, not the tower and MTP in its shards.
 pub const textWeightBytes = @import("cuda_bf16_bytes.zig").textWeightBytes;
-/// BF16 serves decisions only, with a joint schema head (joint_head_config.json); chat refuses it.
-pub const decision_formats: []const []const u8 = &.{"bf16"};
 const decide = @import("cuda_decide.zig");
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = E.max_rows;
