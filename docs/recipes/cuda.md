@@ -361,7 +361,7 @@ window. It accounts for stream count and retained caches where concurrency is en
 
 Two-rank Flash Next, Nemotron and GLM requests finish on both ranks after a client disconnects, keeping the
 collective sequence aligned. MLX disk snapshots and cache-budget flags do not configure these CUDA
-caches. The CUDA CLI also does not apply `--alias`; use `--name` for the served model ID. `--thinking`,
+caches. The CUDA CLI applies `--alias` too; `--name` sets the served model ID. `--thinking`,
 `--reasoning-effort` and `--thinking-budget` set the defaults a request's `chat_template_kwargs.enable_thinking`,
 `reasoning_effort` and `thinking_budget` override, as on the Mac.
 
