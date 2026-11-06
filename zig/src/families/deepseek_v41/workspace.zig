@@ -101,10 +101,9 @@ pub const Plan = struct {
 
 pub const Workspace = struct {
     buffer: mtl.Buffer,
-    /// ROUND-359: the shared gate/up fusion's two maps (input row and descriptor id), precomputed for every
-    /// window size 1..8 at init so no host write happens while a command buffer is in flight. The first
-    /// `shared_map_slots` u32 are the input maps, the second the route maps; window `r` starts at
-    /// `r*(r-1)` (the sum of 2*1..2*(r-1)).
+    /// The shared gate/up fusion's two maps (input row and descriptor id), precomputed for every window size 1..8
+    /// at init so no host write happens while a command buffer is in flight. The first `shared_map_slots` u32 are
+    /// the input maps, the second the route maps; window `r` starts at `r*(r-1)` (the sum of 2*1..2*(r-1)).
     shared_maps: mtl.Buffer,
     plan: Plan,
 

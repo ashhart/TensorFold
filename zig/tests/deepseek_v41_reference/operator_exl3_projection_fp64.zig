@@ -79,10 +79,8 @@ fn projectionCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halv
     if (differing > n / 32 and worst > 0.01) return error.Exl3ProjectionDiverges;
 }
 
-// ROUND-340: the dense one-row class's receipt. The dense path's body folds a block's sixteen products into
-// the running sum in k order; the register-only body keeps one accumulator a state and meets them in a tree.
-// Which of the two is closer to the FP64 truth is the question, and it is measured here over the same resident
-// bytes the oracle decodes -- the receipt the routed class got in ROUND-337, for the dense class.
+// The dense path's body folds a block's sixteen products into the running sum in k order; the register-only body
+// keeps one accumulator a state and meets them in a tree.
 extern "c" fn setenv(key: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(key: [*:0]const u8) c_int;
 
@@ -154,21 +152,16 @@ fn denseRegisterOnlyCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usiz
     if (nrms_register_only > 1e-3) return error.Exl3ProjectionDiverges;
 }
 
-// ROUND-421: THE DRAFTER'S DENSE CLASS. The drafter's three blocks are packed at halves = 8 (the
-// pack's `mtp_bits: 4`: the trellis's third dim is 64 and the width's halves are that over 8), and
-// the register-only dense body -- the routed decode's own structure (one warp a sixteen-column tile,
-// the decoded weights in registers, no threadgroup weight tile, no barrier in the k walk, no split-K
-// and no partials round trip) -- has a halves == 8 branch that TF_DSV41_EXL3_FMA_DENSE_H8 arms.
-//
-// At the drafter's own TWO-row window the flag also puts the call on the MULTI-ROW body, so one
-// weight decode serves the two rows: the shipped dense body is one row a threadgroup, so a two-row
-// drafter decodes its dense weights twice over the same bytes. The multi body's gate is
-// `fma_dense_ok` ALONE -- it does not consult TF_DSV41_EXL3_FMA_DENSE -- so at two rows the H8 flag
-// is the only thing that selects it, and the receipt's shipped arm must UNSET it.
-//
-// This is that class's receipt, the ROUND-340 template at the drafter's width: the shipped body and
-// the register-only body over the SAME resident bytes and the SAME FP64 oracle. GOAL-UNLOCK's band
-// asks that the changed path's agreement with the FP64 truth be no worse than the shipped path's.
+// THE DRAFTER'S DENSE CLASS. The drafter's three blocks are packed at halves = 8 (the pack's `mtp_bits: 4`: the
+// trellis's third dim is 64 and the width's halves are that over 8), and the register-only dense body -- the routed
+// decode's own structure (one warp a sixteen-column tile, the decoded weights in registers, no threadgroup weight
+// tile, no barrier in the k walk, no split-K and no partials round trip) -- has a halves == 8 branch that
+// TF_DSV41_EXL3_FMA_DENSE_H8 arms.
+// At the drafter's own TWO-row window the flag also puts the call on the MULTI-ROW body, so one weight decode
+// serves the two rows: the shipped dense body is one row a threadgroup, so a two-row drafter decodes its dense
+// weights twice over the same bytes.
+// GOAL-UNLOCK's band asks that the changed path's agreement with the FP64 truth be no worse than the shipped
+// path's.
 fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -255,11 +248,9 @@ fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usiz
     if (nrms_register_only > 1e-3) return error.Exl3ProjectionDiverges;
 }
 
-/// ROUND-422: THE CONDITIONING'S TAP PROJECTION -- THE SHIPPED BODY AGAINST THE TENSOR-UNIT TILE.
-/// The conditioning's 128-row window wraps, so half the rounds run the smaller piece on 1..63 rows, and
-/// the tile's gate is 64 rows: that piece ran on the general/shared body. The lever (the caller's
-/// eight-row hint) puts it on the tile. Both arms run over the same resident bytes against the same
-/// float64 oracle, so the comparison is the class's receipt.
+/// THE CONDITIONING'S TAP PROJECTION -- THE SHIPPED BODY AGAINST THE TENSOR-UNIT TILE. The conditioning's 128-row
+/// window wraps, so half the rounds run the smaller piece on 1..63 rows, and the tile's gate is 64 rows: that piece
+/// ran on the general/shared body. The lever (the caller's eight-row hint) puts it on the tile.
 fn denseTileRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -351,11 +342,9 @@ fn denseTileRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halve
     if (nrms_tile > 1e-3) return error.Exl3ProjectionDiverges;
 }
 
-/// ROUND-426: THE CONDITIONING'S THREE PER-BLOCK `wkv` PROJECTIONS -- THE SHIPPED THREE DENSE CALLS AGAINST
-/// THE ONE GROUPED INDEXED DISPATCH. Both arms run over the same resident bytes, the same input window and the
-/// same float64 oracle, so the comparison is the class's receipt. The fused call pads each block's rows to the
-/// tile's 64-row groups, so the shipped arm's rows are compared with the fused arm's first `rows` rows of each
-/// group (the engine reads no other rows).
+/// THE CONDITIONING'S THREE PER-BLOCK `wkv` PROJECTIONS -- THE SHIPPED THREE DENSE CALLS AGAINST THE ONE GROUPED
+/// INDEXED DISPATCH. The fused call pads each block's rows to the tile's 64-row groups, so the shipped arm's rows
+/// are compared with the fused arm's first `rows` rows of each group (the engine reads no other rows).
 fn condWkvFusion(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -534,8 +523,6 @@ test "EXL3 dense one-row projection: the register-only body against the float64 
     defer pool.pop();
     const queue = try device.queue();
     defer queue.deinit();
-    // The pack's dense widths and its mul1 codebook, at a narrow width (the reduction class is what the
-    // receipt is about, and the k fold is the same at every n).
     try denseRegisterOnlyCase(device, queue, 5120, 512, 10, .mul1, 0x51ed_1a2b);
     try denseRegisterOnlyCase(device, queue, 4096, 512, 12, .mul1, 0x2b1a_ed51);
 }
@@ -564,11 +551,8 @@ fn orderedBits(bits: u32) i64 {
     return if ((bits & 0x8000_0000) != 0) -@as(i64, @intCast(bits & 0x7fff_ffff)) else @as(i64, @intCast(bits));
 }
 
-/// The one-row split-K receipt (STATUS.md item 4): at the engine's own split count a one-row projection's
-/// FP32 output reproduces the documented order — per split a serial FP32 sum over its k range, then the
-/// serial FP32 reduce over the splits — bit for bit, and that order sits at rounding level against the
-/// FP64 ideal. The canon hashes could not see this: a split order can differ in the last bits of every
-/// logit and still answer "Paris".
+/// The canon hashes could not see this: a split order can differ in the last bits of every logit and still answer
+/// "Paris".
 fn splitOrderCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -653,10 +637,8 @@ test "the one-row split order reproduces the engine's k-split and reduce bit for
     try splitOrderCase(device, queue, 1024, 128, 8, 0x5eed_0004);
 }
 
-/// The decode MoE split-K receipt (STATUS.md item 4, class 2): one expert, `rows` routed rows, through
-/// the indexed path (which is the NAX decode kernel plus an 8-way k-split and the split-order reduce),
-/// with an FP32 output compared row by row against the FP64 oracle. The reduce's own order is pinned by
-/// the one-row case; what this bounds is the decode kernel's accumulation on top of it.
+/// The reduce's own order is pinned by the one-row case; what this bounds is the decode kernel's accumulation on
+/// top of it.
 fn expertSplitCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, seed: u64, rows: usize) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
@@ -756,11 +738,9 @@ test "the decode expert split-K sits at rounding level against the float64 oracl
     try expertSplitCase(device, queue, 2304, 128, 4, 0x5eed_1003, 4);
 }
 
-// Item 5's roofline (TF_ROOFLINE=1): the engine's grouped prefill shape in isolation — 384 expert tiles of
-// 64 rows through one trellis matrix, timed on the GPU. MAC/s and unique-weight GB/s, so the engine's
-// 74 GB/s can be read against what the kernel can do when nothing else is in flight.
-// Item 5's other prerequisite (TF_ROOFLINE_PAIR=1): two dispatches of 384 experts against one of 768,
-// same MACs and same bytes, so only the dispatch granularity differs.
+// Item 5's roofline (TF_ROOFLINE=1): the engine's grouped prefill shape in isolation — 384 expert tiles of 64 rows
+// through one trellis matrix, timed on the GPU. Item 5's other prerequisite (TF_ROOFLINE_PAIR=1): two dispatches of
+// 384 experts against one of 768, same MACs and same bytes, so only the dispatch granularity differs.
 test "one wide dispatch against two narrow ones (TF_ROOFLINE_PAIR=1)" {
     if (std.c.getenv("TF_ROOFLINE_PAIR") == null) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;
@@ -870,9 +850,6 @@ test "routed trellis roofline at the engine prefill shape (TF_ROOFLINE=1)" {
     };
     const width = exl3.format.Width{ .halves = roof_halves };
     const tile_bytes = width.tileWords() * 2;
-    // 384 experts, each its own matrix, so the pass streams 1.6 GB from memory instead of reading one
-    // matrix out of L2. (Before this fix the descriptors addressed 1.6 GB past a 4 MB allocation, so the
-    // round-18 "126.6 GB/s" was a compute rate over out-of-bounds reads, not a streamed one.)
     const per_expert = (k / 16) * (n / 16) * tile_bytes;
     var b = h.Buffers{ .device = device };
     defer b.deinit();
@@ -954,8 +931,6 @@ test "routed trellis roofline at the engine prefill shape (TF_ROOFLINE=1)" {
     std.debug.print("ROOFLINE {{\"k\":{d},\"n\":{d},\"experts\":{d},\"slot_rows\":{d},\"gpu_ms\":{d:.2},\"tmac_s\":{d:.3},\"tflops\":{d:.1},\"gbs\":{d:.1}}}\n", .{ k, n, experts, slots, seconds * 1e3, macs / seconds / 1e12, 2.0 * macs / seconds / 1e12, weight_bytes / seconds / 1e9 });
 }
 
-// Item 15's gate, first half: the quality cost of an int8 MMA path at the routed experts' shape, measured
-// against the FP64 ideal on the reference decoder's own tiles (per-tile int8 scale, int8 activations).
 test "int8 weight quantization at the routed shape, against the float64 ideal" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
@@ -1181,9 +1156,7 @@ test "int8 mma rate against bf16 at the routed tile shape (TF_INT8_RATE=1)" {
     std.debug.print("INT8RATE {{\"rows\":{d},\"n\":{d},\"k\":{d},\"gpu_ms\":{d:.2},\"tmac_s\":{d:.3},\"tflops\":{d:.1}}}\\n", .{ rows, n, k, seconds * 1e3, macs / seconds / 1e12, 2.0 * macs / seconds / 1e12 });
 }
 
-// The decode fusion's prize, measured: one grouped dispatch carrying a layer's eight wo_a slices for forty
-// layers, against the engine's measured 26.3 ms for the ten separate projection passes (8/10 of which are
-// the wo_a slices: 21.0 ms). TF_FUSE_PROBE=1.
+// TF_FUSE_PROBE=1.
 test "a layer's eight wo_a slices as one grouped dispatch (TF_FUSE_PROBE=1)" {
     if (std.c.getenv("TF_FUSE_PROBE") == null) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;
@@ -1622,10 +1595,6 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
     }
 }
 
-// Round 166's instrument (TF_ROOFLINE_DEC=1): the decode MoE exactly as one token runs it — one row, six
-// experts a layer, gate/up/down, 120 dispatches — but over 384 distinct matrices a projection, so the pass
-// streams 3.2 GB instead of reading one matrix out of L2. Reports ms, GB/s and weights/s, so the engine's
-// in-situ 114 GB/s (0.31e12 weights/s) can be read against the same kernel with nothing else in flight.
 test "decode MoE at one row, 120 dispatches, isolated (TF_ROOFLINE_DEC=1)" {
     if (std.c.getenv("TF_ROOFLINE_DEC") == null) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;
@@ -1649,9 +1618,8 @@ test "decode MoE at one row, 120 dispatches, isolated (TF_ROOFLINE_DEC=1)" {
     var b = h.Buffers{ .device = device };
     defer b.deinit();
 
-    // TF_ROOFLINE_DEC_CACHED=1: every descriptor points at one 4.4 MB matrix, so the pass reads it out of
-    // cache. If the rate rises toward the ALU ceiling the kernel is memory-latency-bound; if it does not, the
-    // decode's own instruction stream is the wall.
+    // If the rate rises toward the ALU ceiling the kernel is memory-latency-bound; if it does not, the decode's own
+    // instruction stream is the wall.
     const cached = std.c.getenv("TF_ROOFLINE_DEC_CACHED") != null;
     const pool_mats: usize = if (cached) 1 else experts;
     const up_trellis = try b.get(u8, per_expert * pool_mats);

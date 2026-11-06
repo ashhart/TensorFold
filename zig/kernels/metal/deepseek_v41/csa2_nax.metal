@@ -200,7 +200,7 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   TF_UNROLL
   for (short t = 0; t < 8; t++) frag_get(qf[t], qb, RANK, 0, 16 * t, home);
   frag<float> acc[4][2];
-  float m[2], l[2]; // the running max and sum of this lane's two heads (the scalar's -1e30 start)
+  float m[2], l[2];
   TF_UNROLL
   for (short c = 0; c < 4; c++) {
     acc[c][0] = frag<float>(0);
@@ -378,12 +378,10 @@ kernel void dsv41_dense_kv_picked(const device uchar *src [[buffer(0)]], device 
   *(device bfloat4 *)o = v;
 }
 
-// ROUND-402 (the arm): THE MERGE'S GRID IS FOUR THREADGROUPS.  The shipped merge gives each threadgroup
-// sixteen heads and all four simdgroups' dims, so the whole layer's reduction runs on 4 x 128 = 512 threads
-// -- and it costs 35 us a layer (1.40 ms a token, priced by the round's doubling arm).  This form gives each
-// threadgroup ONE of the four accumulator chunks: the grid is four times wider (16 threadgroups), each lane
-// reads its own chunk's sixteen floats per split (the same traffic, the same split order, the same per
-// output sums) and the fragment's dim offset is the chunk's own -- so the output is BIT-IDENTICAL.
+// THE MERGE'S GRID IS FOUR THREADGROUPS. This form gives each threadgroup ONE of the four accumulator chunks: the
+// grid is four times wider (16 threadgroups), each lane reads its own chunk's sixteen floats per split (the same
+// traffic, the same split order, the same per output sums) and the fragment's dim offset is the chunk's own -- so
+// the output is BIT-IDENTICAL.
 [[kernel]] void dsv41_sparse_merge_split(device const float *parts [[buffer(0)]], device ushort *out [[buffer(1)]],
                                          device const float *sink [[buffer(2)]], constant Dsv41Attention &p [[buffer(3)]],
                                          uint s [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],

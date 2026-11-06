@@ -1,5 +1,5 @@
 // Native EXL3 on the tensor units: the same stored trellis, decoded into a threadgroup tile and reduced by
-// cooperative matmul instead of per-lane scalar FMAs. The decode is unchanged (measured free); only the reduction moves.
+// cooperative matmul instead of per-lane scalar FMAs.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -493,8 +493,6 @@ kernel void tf_exl3_matmul_decode_nax(const device half* x [[buffer(0)]],
   // Two weight tiles a SIMDgroup: the next block decodes while this one multiplies, and one barrier a block
   // replaces two because the tile a multiply reads is never the tile a decode writes.
 #if defined(TF_DECODE_COMPACT)
-  // Compact: one row a threadgroup, two 16x32 tiles only (1 KB), so many more groups fit the threadgroup
-  // memory and the decode's issue rate is not occupancy-bound (round 173's probe: 0.84 against 0.50e12).
   threadgroup half wx[2 * 16 * 32];
 #else
   threadgroup half wx[2 * 4 * 16 * 32];

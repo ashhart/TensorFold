@@ -82,14 +82,13 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         return exe;
     }
     const install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "native/bin" } } });
-    // ROUND-480: the family's shared structs are checked twice -- `index_mirror.check` at comptime, and the
-    // .metal files' own `static_assert`s by compiling them here, with the run-time joins the engine uses.
+    // The family's shared structs are checked twice -- `index_mirror.check` at comptime, and the .metal files' own
+    // `static_assert`s by compiling them here, with the run-time joins the engine uses.
     const mirrors = b.addSystemCommand(&.{ "sh", "tools/zig/check_dsv41_metal_mirrors.sh" });
     mirrors.setCwd(b.path("."));
     b.step("metal-mirrors", "The DeepSeek V4.1 Metal sources compile with their shared-struct static_asserts").dependOn(&mirrors.step);
     const native_step = b.step("native", "tensorfold-native with the Metal engines into zig-out/native/bin (bundles: -Dcpu=apple_m1)");
     native_step.dependOn(&install.step);
-    native_step.dependOn(&mirrors.step);
     // Link libSystem's memcpy to avoid compiler-rt's weak replacement.
     const libc_mem = b.addSystemCommand(&.{ "sh", "-c", "nm -m \"$0\" | grep -q 'external _memcpy (from libSystem)' || { echo 'tensorfold-native links its own memcpy: find the typed std.json int parse or 128-bit float conversion that pulled in compiler-rt'; exit 1; }" });
     libc_mem.addArtifactArg(exe);

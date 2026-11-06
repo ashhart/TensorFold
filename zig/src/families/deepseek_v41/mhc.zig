@@ -13,8 +13,8 @@ pub const Pipelines = struct {
     dense_col: mtl.Pipeline,
     gate_tree: mtl.Pipeline,
     gate_tree4: mtl.Pipeline,
-    /// ROUND-349: the wide gate -- eight rows and four columns a threadgroup, the tiles staged in threadgroup
-    /// memory. The order is the shipped one's, so the logits are bit-identical.
+    /// The wide gate -- eight rows and four columns a threadgroup, the tiles staged in threadgroup memory. The
+    /// order is the shipped one's, so the logits are bit-identical.
     gate_tree8: mtl.Pipeline,
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -64,10 +64,10 @@ pub const BoundaryPipelines = struct {
     mix_part: mtl.Pipeline,
     boundary: mtl.Pipeline,
     plain: mtl.Pipeline,
-    /// ROUND-407: the launch-overhead probe (a dependent, work-free dispatch).
+    /// The launch-overhead probe (a dependent, work-free dispatch).
     probe: mtl.Pipeline,
-    /// ROUND-407: the INDEPENDENT form of the same probe (each dispatch its own sink buffer, so the
-    /// chain carries no dependency between the probe dispatches) and the sinks it writes into.
+    /// The INDEPENDENT form of the same probe (each dispatch its own sink buffer, so the chain carries no
+    /// dependency between the probe dispatches) and the sinks it writes into.
     probe_indep: mtl.Pipeline,
     probe_sinks: [64]mtl.Buffer,
     pub fn load(device: mtl.Device) !BoundaryPipelines {
@@ -133,12 +133,12 @@ pub fn encodeBoundary(e: mtl.ComputeEncoder, p: *const BoundaryPipelines, d: Bou
             e.dispatchGroups(.{ .width = 20, .height = d.rows }, .{ .width = 256 });
         }
     }
-    // ROUND-407: THE LAUNCH-OVERHEAD PROBE. N work-free dispatches on the boundary's own critical path:
-    // the slope against N is the GPU's dispatch latency, the piece every glue fusion would save.
-    // TF_DSV41_HC_PROBE_THREADS sweeps the probe's threadgroup size, so the setup cost's shape (the mHC's
-    // split runs 1024 threads on ONE threadgroup) is priced too. TF_DSV41_HC_PROBE_INDEP=1 gives each
-    // probe dispatch its OWN sink buffer, so the probe dispatches carry no dependency between them: the
-    // difference between the two forms is the DEPENDENT-dispatch latency (the part only a fold removes).
+    // THE LAUNCH-OVERHEAD PROBE. N work-free dispatches on the boundary's own critical path: the slope against N is
+    // the GPU's dispatch latency, the piece every glue fusion would save. TF_DSV41_HC_PROBE_THREADS sweeps the
+    // probe's threadgroup size, so the setup cost's shape (the mHC's split runs 1024 threads on ONE threadgroup) is
+    // priced too. TF_DSV41_HC_PROBE_INDEP=1 gives each probe dispatch its OWN sink buffer, so the probe dispatches
+    // carry no dependency between them: the difference between the two forms is the DEPENDENT-dispatch latency (the
+    // part only a fold removes).
     if (probeDispatches()) |n| {
         if (probeIndependent()) {
             e.setPipeline(p.probe_indep);
@@ -163,18 +163,16 @@ pub fn encodeBoundary(e: mtl.ComputeEncoder, p: *const BoundaryPipelines, d: Bou
     inline for (.{ if (d.expand) v.x_new else v.x_old, v.part, v.base, v.scale, v.pre_in, v.norm }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
     e.setValue(BoundaryArgs{ .eps = d.eps, .hc_eps = d.hc_eps, .iters = @intCast(d.iters) }, 6);
     inline for (.{ v.pre_out, v.post_out, v.comb_out, v.normed }, 7..) |r, i| e.setBuffer(r.buffer, r.offset, i);
-    // Measurement: the split is idempotent (it reads X/PART and writes the same outputs), so a second launch
-    // prices it without changing a value.
     const split_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_HC_SPLIT") != null) 2 else 1;
     for (0..split_passes) |_| if (std.c.getenv("TF_DSV41_SKIP_HC_SPLIT") == null) e.dispatchGroups(.{ .width = d.rows }, .{ .width = 1024 });
     e.barrier();
 }
 pub const BoundaryArgs = extern struct { eps: f32, hc_eps: f32, iters: i32 };
 
-/// ROUND-407: the probe's dispatch count (zero = off) and its threadgroup size.
+/// The probe's dispatch count (zero = off) and its threadgroup size.
 var probe_count: ?u32 = null;
 var probe_threads: ?u32 = null;
-/// ROUND-407: the independent form (each probe dispatch its own sink buffer).
+/// The independent form (each probe dispatch its own sink buffer).
 var probe_indep_flag: ?bool = null;
 fn probeIndependent() bool {
     if (probe_indep_flag == null) probe_indep_flag = std.c.getenv("TF_DSV41_HC_PROBE_INDEP") != null;
@@ -239,8 +237,6 @@ pub fn encodeGateTree(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: Vi
 }
 
 pub const GateTree4 = extern struct { rows: u32, k: u32, n: u32, x_stride: u32, bf16_w: u32 };
-/// The vectorized bit-exact gate: one warp a 2x2 cell tile, the shipped reduction order in registers, 1.93x the
-/// shipped kernel at 3,619 x 5,120 x 384 and bit-identical to it (tf-gate-bench).
 pub fn encodeGateTree4(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: GateTree4) void {
     e.setPipeline(p.gate_tree4);
     bind(e, .{ x, w, y });
@@ -248,7 +244,7 @@ pub fn encodeGateTree4(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: V
     e.dispatchGroups(mtl.Size.of((d.n + 1) / 2, (d.rows + 1) / 2, 1), mtl.Size.of(32, 1, 1));
 }
 
-/// ROUND-349: the wide gate's dispatch: eight rows and four columns a threadgroup, eight warps.
+/// The wide gate's dispatch: eight rows and four columns a threadgroup, eight warps.
 pub fn encodeGateTree8(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View, y: View, d: GateTree4) void {
     e.setPipeline(p.gate_tree8);
     bind(e, .{ x, w, y });

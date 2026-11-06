@@ -34,20 +34,20 @@ pub const Shape = struct {
     fused: u32 = 0,
     /// 0: FP32 logits (every shipped caller); 1: BF16 logits (TF_DSV41_ROUTE_GEMM's gate GEMM writes them).
     logit_dtype: u32 = 0,
-    /// ROUND-364: the block's own router geometry: the backbone's 384 experts and six picks, the drafter's 128
-    /// experts and three picks (the pack's dspark_n_routed_experts / dspark_num_experts_per_tok).
+    /// The block's own router geometry: the backbone's 384 experts and six picks, the drafter's 128 experts and
+    /// three picks (the pack's dspark_n_routed_experts / dspark_num_experts_per_tok).
     experts: u32 = 384,
     topk: u32 = 6,
-    /// ROUND-391: nonzero writes the shared expert's two pick blocks into the fused tables after the routed
-    /// twelve a token, so the routed gate/up and the shared gate/up are ONE indexed dispatch (the comparator's
-    /// moe_up form). The kernel writes them, not the host, so no CPU/GPU buffer range is shared.
+    /// Nonzero writes the shared expert's two pick blocks into the fused tables after the routed twelve a token, so
+    /// the routed gate/up and the shared gate/up are ONE indexed dispatch (the comparator's moe_up form). The
+    /// kernel writes them, not the host, so no CPU/GPU buffer range is shared.
     moe_up: u32 = 0,
 };
 /// FP32 logits[rows,384], bias F16/BF16/FP32 -> u32 IDs and FP32 weights[rows,6]; lower ID wins biased-score ties.
 
 // Nonzero rows, logit/output pitches >=384/6, finite positive temperature, complete storage are caller invariants.
 
-// All six execute; weights use unbiased scores / (sum+1e-20) * 1.5. Invalid comparisons emit invalid IDs/NaNs.
+// Invalid comparisons emit invalid IDs/NaNs.
 pub fn encode(e: mtl.ComputeEncoder, p: *const Pipelines, logits: View, bias: View, ids: View, weights: View, fused: Fused, d: Shape) void {
     e.setPipeline(p.select);
     inline for (.{ logits, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);

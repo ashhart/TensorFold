@@ -140,7 +140,6 @@ pub fn view(buffer: mtl.Buffer) View {
     return .{ .buffer = buffer };
 }
 
-/// One named pool case and the deltas it measured, kept so the test asserts after printing.
 const PoolCase = struct {
     name: []const u8,
     delta: PoolDelta,
@@ -273,7 +272,6 @@ test "compressor pool stage sits at rounding level against the FP64 ideal" {
         cases[case_count] = .{ .name = "wide_range", .delta = try poolCase(device, queue, &p, "wide_range", values, gates, try weightCells(gpa, &rng)) };
         case_count += 1;
     }
-    // Case 4: deep cancellation, 1e-7 of the terms it cancels: FP32 error is a visible fraction.
     {
         const values = try gpa.alloc(f32, 2 * width);
         const gates = try gpa.alloc(f32, 2 * width);
@@ -319,7 +317,6 @@ test "compressor pool stage sits at rounding level against the FP64 ideal" {
     try std.testing.expectEqual(@as(usize, 6), case_count);
     for (cases) |case| {
         try std.testing.expectEqual(width, case.delta.metal.count);
-        // Five cases match cell for cell; balanced_cancel leaves a few cells at 1.7e-5 NRMS, so 1e-3 holds both sides.
         try std.testing.expect(case.delta.metal.nrms < 1e-3);
         try std.testing.expect(case.delta.f32_reference.nrms < 1e-3);
         // The kernel may not drift from the FP32 source contract by more than it drifts from the ideal.

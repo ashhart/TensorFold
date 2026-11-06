@@ -29,11 +29,11 @@ kernel void dsv41_route(const device float* logits [[buffer(0)]], const device u
   for (uint slot=0;slot<d.topk;slot++) {
     float v=-INFINITY;
     uint id=0xffffffffu;
-    // ROUND-380: THE SELECTION SCANS THE BLOCK'S OWN EXPERT COUNT. The scan read 384 slots while only
-    // `d.experts` of them were written, so a block with fewer experts (the drafter's 128) ranked the STALE
-    // threadgroup memory of the slots past its own count: a stale score can win the rank and a stale id
-    // names an expert the block does not have. The comparator guards it (its route.metal: `e < E`). The
-    // backbone's 384 make the loop identical, so the trunk's picks do not move.
+    // THE SELECTION SCANS THE BLOCK'S OWN EXPERT COUNT. The scan read 384 slots while only `d.experts` of them were
+    // written, so a block with fewer experts (the drafter's 128) ranked the STALE threadgroup memory of the slots
+    // past its own count: a stale score can win the rank and a stale id names an expert the block does not have.
+    // The comparator guards it (its route.metal: `e < E`). The backbone's 384 make the loop identical, so the
+    // trunk's picks do not move.
     for (uint e=t;e<d.experts;e+=128) if (select[e]>v || (select[e]==v && e<id)) { v=select[e]; id=e; }
     float mx=simd_max(v);
     uint ix=simd_min(v==mx?id:0xffffffffu);
@@ -54,8 +54,8 @@ kernel void dsv41_route(const device float* logits [[buffer(0)]], const device u
           fids[ulong(d.rows+row)*d.output_stride+slot]=q+d.fused;
           fsrc[ulong(row)*d.output_stride+slot]=row;
           fsrc[ulong(d.rows+row)*d.output_stride+slot]=row;
-          // ROUND-391: the shared expert's two blocks after the routed twelve picks a token (gate rows then up
-          // rows), so the same indexed dispatch carries both projections. Written once, by the GPU.
+          // The shared expert's two blocks after the routed twelve picks a token (gate rows then up rows), so the
+          // same indexed dispatch carries both projections. Written once, by the GPU.
           if (d.moe_up!=0 && row==0 && slot==0) {
             const uint tail = 2u*d.rows*d.output_stride;
             for (uint t2=0;t2<d.rows;++t2) {

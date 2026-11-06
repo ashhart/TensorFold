@@ -1,18 +1,15 @@
-//! tf-fp8-repack: one EXL3 projection's trellis decoded to W_q [K, N] (or, with TF_REPACK_ROT=both, to the
-//! fully pre-rotated W_target = diag(suh) H_K W_q H_N diag(svh)), requantized per output row, and packed in the
-//! fp8 dense body's 16-k x 64-n block order. A bench tool: no engine path reads this format yet.
-//! Usage: tf-fp8-repack PACK PREFIX OUT_BASE -> OUT_BASE.fp8, OUT_BASE.scale, OUT_BASE.meta (+ .trellis control).
-//!   TF_REPACK_INT8=1   per-row int8 instead of E4M3.
-//!   TF_REPACK_ROT=both bake both Hadamards and suh/svh into the weight, so the runtime needs no transform pass.
-//!   TF_REPACK_CHECK=1  FP64 layer receipt: NRMS and per-row argmax against the same-domain FP64 target.
+// ! tf-fp8-repack: one EXL3 projection's trellis decoded to W_q [K, N] (or, with TF_REPACK_ROT=both, to the ! fully
+// pre-rotated W_target = diag(suh) H_K W_q H_N diag(svh)), requantized per output row, and packed in the ! fp8
+// dense body's 16-k x 64-n block order. A bench tool: no engine path reads this format yet. ! Usage: tf-fp8-repack
+// PACK PREFIX OUT_BASE -> OUT_BASE.fp8, OUT_BASE.scale, OUT_BASE.meta (+ .trellis control). ! TF_REPACK_INT8=1
+// per-row int8 instead of E4M3. ! TF_REPACK_ROT=both bake both Hadamards and suh/svh into the weight, so the
+// runtime needs no transform pass. !
 const std = @import("std");
 const tf = @import("tensorfold");
 const pk = tf.deepseek_v41_pack;
 const exl3 = tf.exl3_format;
 const codec = tf.exlr8.codec;
 
-/// The layer receipt the record uses for a quantization domain: a fixed 64-row activation, FP64 dot products,
-/// NRMS of the reconstructed weight's GEMM against the domain's FP64 target, and per-row argmax agreement.
 fn layerCheck(gpa: std.mem.Allocator, k: usize, n: usize, int8: bool, ref: []const f64, bytes: []const u8, scales: []const f32, rot: bool) !void {
     const what = try gpa.alloc(f64, k * n);
     defer gpa.free(what);
@@ -145,10 +142,10 @@ fn blockCheck(gpa: std.mem.Allocator, k: usize, n: usize, int8: bool, ref: []con
     std.debug.print("  block {d}{s}: NRMS {e:.4}\n", .{ block, if (half) " half" else "", try gemmNrms(gpa, ref, what, k, n) });
 }
 
-/// ROUND-448: the 3-bit affine requantization's layer price on a real routed-expert projection. Per output
-/// column, per 64-k group, eight uniform levels spanning the group's [min, max] (scale + bias, the quality-
-/// viable form the fair `tf_affine_tile3s_nax` body dispatches), against the decoded EXL3 weight as the FP64
-/// target: the NRMS the model band would see from this projection alone.
+/// The 3-bit affine requantization's layer price on a real routed-expert projection. Per output column, per 64-k
+/// group, eight uniform levels spanning the group's [min, max] (scale + bias, the quality- viable form the fair
+/// `tf_affine_tile3s_nax` body dispatches), against the decoded EXL3 weight as the FP64 target: the NRMS the model
+/// band would see from this projection alone.
 fn affine3Check(gpa: std.mem.Allocator, k: usize, n: usize, ref: []const f64) !void {
     const G: usize = 64;
     const nb = k / G;
@@ -188,8 +185,7 @@ pub fn main(init: std.process.Init) !u8 {
     const prefix = args[2];
     const out_base = args[3];
     const int8 = std.c.getenv("TF_REPACK_INT8") != null;
-    // ROUND-519 instrument: TF_REPACK_CLIP scales the per-row max grid (1.0 = max/127). The N-only int8 sweep
-    // found 1.0 best (9.0042e-3 at 1.0, 9.1390 at 0.95, 1.1124e-2 at 0.90), so clipping is not a quality lever.
+    // TF_REPACK_CLIP scales the per-row max grid (1.0 = max/127).
     const clip: f64 = if (std.c.getenv("TF_REPACK_CLIP")) |v| (std.fmt.parseFloat(f64, std.mem.span(v)) catch 1.0) else 1.0;
     const block: usize = if (std.c.getenv("TF_REPACK_BLOCK")) |v| (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0) else 0;
     const rot_env = std.c.getenv("TF_REPACK_ROT");

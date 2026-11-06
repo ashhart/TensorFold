@@ -4,7 +4,7 @@ struct Dsv41Attention {
     uint chunk_stride, main_stride, main_block, ratio, compressed_rows, topk, index_stride;
     float scale;
     uint splits; // 1 unless a decode layer's key scan is split across threadgroups
-    uint chunk_all; // ROUND-365: every row sits at p.position and sees every chunk row (the drafter's form)
+    uint chunk_all; // Every row sits at p.position and sees every chunk row (the drafter's form)
 };
 static_assert(sizeof(Dsv41Attention) == 72, "Dsv41Attention must mirror csa2.zig's Params");
 // BF16 query/key products are exact in FP32; compensate accumulation and lane reduction.

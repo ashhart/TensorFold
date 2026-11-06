@@ -1,4 +1,4 @@
-//! V4.1 lane slots on the native server: greedy, drafts off; load under 70% RAM unless GLM_LOAD_LIMIT_GB opts past.
+// !
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -18,7 +18,7 @@ pub const Host = struct {
     host: api.LaneHost,
     warm: mtl.keepalive.Target,
     rec: ?tf.deepseek_v41_profiler.Recorder,
-    /// ROUND-467: kept prompt states (the retained prompt cache); null when no budget was asked for.
+    /// Kept prompt states (the retained prompt cache); null when no budget was asked for.
     cache: ?api.prompt_cache.Store = null,
 
     pub fn engine(h: *Host) api.Engine {
@@ -62,7 +62,6 @@ fn ensureTokenMap(a: Allocator, io: std.Io, map: []const u8, table_dir: ?[]const
     std.log.info("deepseek-v41: built the engram token map from {s} at {s}", .{ src, map });
 }
 
-/// 70% of RAM, or GLM_LOAD_LIMIT_GB's GB up to the GPU's working set; the same opt-in pattern GLM's load uses.
 fn loadLimit(device: mtl.Device) !struct { bytes: u64, asked: bool } {
     var mem: u64 = 0;
     var len: usize = @sizeOf(u64);
@@ -145,9 +144,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     h.back = try tf.deepseek_v41_backend.Backend.init(gpa, model_ptr);
     errdefer h.back.deinit();
-    // Measurement only. The family's stage recorder exists but nothing on the served path enabled it, so there was
-    // no way to attribute a prompt's GPU time to engram / mhc / attention / moe / head. Off unless the variable is set;
-    // when off no span storage is allocated and profileSpan returns on its first line.
+    // The family's stage recorder exists but nothing on the served path enabled it, so there was no way to
+    // attribute a prompt's GPU time to engram / mhc / attention / moe / head. Off unless the variable is set; when
+    // off no span storage is allocated and profileSpan returns on its first line.
     if (std.c.getenv("TF_DSV41_HOST_PROF") != null) model_ptr.host_prof = true;
     if (std.c.getenv("TF_DSV41_PROFILE_GPU") != null) {
         h.rec = try tf.deepseek_v41_profiler.Recorder.init(gpa, model_ptr.device, .{ .enabled = true, .max_spans = 2048 });
@@ -172,16 +171,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .context_window = window,
         .prefill_step = chunk,
         .greedy_only = false, // the port samples: temperature, top_k, top_p, min_p (backend.sampleRow)
-        .penalties = true, // ROUND-466: presence/frequency, applied in backend.verify over each row s path
+        .penalties = true, // Presence/frequency, applied in backend.verify over each row s path
     });
-    // ROUND-467: THE RETAINED PROMPT CACHE. The framework keys states by their token prefix, asks the family for a
-    // copy at the chunk ends it marks (backend.snapSave / snapDrop) and hands the copy back as the stream's `reuse`,
-    // which the family's prefill restores before its first chunk. A state is one slot's whole cache plus its cursor,
-    // the four-token Engram history and the taps, so a resumed pass equals a fresh one; the budget is admitted under
+    // THE RETAINED PROMPT CACHE. The framework keys states by their token prefix, asks the family for a copy at the
+    // chunk ends it marks (backend.snapSave / snapDrop) and hands the copy back as the stream's `reuse`, which the
+    // family's prefill restores before its first chunk. A state is one slot's whole cache plus its cursor, the
+    // four-token Engram history and the taps, so a resumed pass equals a fresh one; the budget is admitted under
     // the same load limit the model loaded with, and states are keyed by the prompt's own chunk grid.
-    // ROUND-502: and the pass keeps a state at its own END (`.end_mark`, default on), so a later turn resumes at
-    // its predecessor's exact boundary and reads its new rows as ONE chunk instead of the tile tail's extra
-    // chunk (0.666 s off a 739-row turn at 22k, token-identical). TF_DSV41_END_MARK=0 is the same-binary opt-out.
+    // TF_DSV41_END_MARK=0 is the same-binary opt-out.
     if (o.prompt_cache_gib) |gib| if (gib > 0) {
         var why: []const u8 = "";
         const plan = cache_fit.budgetUnder(limit, gib, o.prompt_cache_over_cap, 0, a, &why, "") catch |e| {
@@ -191,7 +188,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         h.host.info_.prompt_cache_plan = plan;
         if (plan.budget_bytes > 0) {
             const B = tf.deepseek_v41_backend.Backend;
-            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop } }, .{ .lookahead = 0, .planned = true, .grid = model_ptr.workspace.plan.rows, .tail = true, .tail_align = 128, .end_mark = if (std.c.getenv("TF_DSV41_END_MARK")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true }, plan.budget_bytes);
+            h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop } }, .{ .lookahead = 0, .planned = true, .grid = model_ptr.workspace.plan.rows, .tail = true, .tail_align = 128, .end_mark = if (std.c.getenv("TF_DSV41_END_MARK")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true, .resumed_tail = if (std.c.getenv("TF_DSV41_RESUMED_TAIL")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true }, plan.budget_bytes);
             h.host.cache = &h.cache.?;
             h.host.info_.prompt_cache = true;
         }

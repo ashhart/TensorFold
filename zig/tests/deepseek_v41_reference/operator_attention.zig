@@ -16,7 +16,6 @@ const attention_elements = diagnostic.attention_elements;
 const attentionProjection = diagnostic.attentionProjection;
 const hyperconnections = @import("operator_hc.zig").hyperconnections;
 
-/// Local isolation receipt, not a replacement for the full eight-token oracle or its 1% gate.
 pub fn runAttention(gpa: std.mem.Allocator, io: std.Io, model: *Model, snapshot: []const u8, dir: []const u8, layer: usize) !void {
     const blob = try std.Io.Dir.cwd().readFileAlloc(io, snapshot, gpa, .limited(8 << 20));
     defer gpa.free(blob);

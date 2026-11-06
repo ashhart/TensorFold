@@ -46,12 +46,6 @@ inline void dense_add(thread float& high, thread float& low, float value) {
 }
 struct Dense { uint rows, k, n, groups, x_stride, w_stride, y_stride, x_dtype, w_dtype, y_dtype; };
 static_assert(sizeof(Dense) == 40, "Dense must mirror ops.zig's Dense");
-// ---------------------------------------------------------------- one column a SIMDgroup (ROUND-482)
-// The four-column form above gives a 2-threadgroup grid for a 32-wide projection (the indexer's
-// weights_proj), and at 1 row it reads as 0.26 ms: 128 threads each chain four columns' 160 k-steps and the
-// loads sit inside rd()'s dtype branch. This is the SAME per-column work (lane k-stride 32, the 16..1
-// butterfly, dense_add's compensated order) with one column a SIMDgroup and one load a step, so its output is
-// BIT-IDENTICAL and the grid is ceil(n/4) threadgroups; measured 203 -> 39 us at n=32, k=5120.
 kernel void dsv41_dense_col1(const device uchar* x [[buffer(0)]], const device uchar* w [[buffer(1)]],
                              device uchar* y [[buffer(2)]], constant Dense& d [[buffer(3)]],
                              uint3 g [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
@@ -81,9 +75,9 @@ kernel void dsv41_dense_col1(const device uchar* x [[buffer(0)]], const device u
   }
 }
 
-// ROUND-546: the one-column dot with the weight dtype resolved at compile time and four k-steps of loads
-// hoisted. The dense_add sequence is the shipped one (lane, lane+32, lane+64, lane+96, ...), so the output is
-// bit-identical; only the loads move ahead of the adds. The caller picks k % 128 == 0.
+// The one-column dot with the weight dtype resolved at compile time and four k-steps of loads hoisted. The
+// dense_add sequence is the shipped one (lane, lane+32, lane+64, lane+96, ...), so the output is bit-identical;
+// only the loads move ahead of the adds. The caller picks k % 128 == 0.
 inline float dsv41_hf(ushort u) { return float(as_type<half>(u)); }
 #define DSV41_DENSE_COL1_SPEC(NAME, LOADW) \
 kernel void NAME(const device uchar* x [[buffer(0)]], const device uchar* w [[buffer(1)]], \
@@ -262,7 +256,7 @@ kernel void dsv41_markov(const device float* LOGITS [[buffer(0)]], const device 
   if (v < a.vocab) {
     const device half* h = HEAD + size_t(v) * a.rank;
     float bias = 0.0f;
-    // ROUND-374: a.pad = 1 turns the Markov bigram bias OFF (the arm: the head-s own argmax).
+    // A.pad = 1 turns the Markov bigram bias OFF (the arm: the head-s own argmax).
     if (a.pad == 0) for (int j = 0; j < a.rank; j++) bias += e[j] * float(h[j]);
     val = LOGITS[size_t(a.step) * a.vocab + v] + bias;
     id = v;
@@ -314,7 +308,6 @@ kernel void dsv41_bf16_to_f16(const device ushort *x [[buffer(0)]], device ushor
   y[i] = as_type<ushort>(half(as_type<float>(uint(x[i]) << 16)));
 }
 
-// A read-back for measurement: copy n elements into a staging buffer the host can see.
 kernel void dsv41_dump_f32(const device float *x [[buffer(0)]], device float *y [[buffer(1)]],
                            constant uint &n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
   if (i < n) y[i] = x[i];

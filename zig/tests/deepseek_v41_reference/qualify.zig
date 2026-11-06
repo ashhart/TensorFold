@@ -127,8 +127,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, 
     return runOf(f32, gpa, io, model, ids, token_map, dir);
 }
 
-/// ROUND-377: the same oracle against the FP64 chain -- the reference chain at its ideal contract (every reduction
-/// class widened). The goal's band is written against that chain, not against the FP32 source contract.
+/// The same oracle against the FP64 chain -- the reference chain at its ideal contract (every reduction class
+/// widened). The goal's band is written against that chain, not against the FP32 source contract.
 pub fn runF64(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, token_map: []const u8, dir: []const u8) !Result {
     return runOf(f64, gpa, io, model, ids, token_map, dir);
 }
@@ -154,8 +154,8 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     var result = Result{ .tokens = ids.len, .max_absolute_error = 0, .rms_error = 0, .normalized_rms_error = 0, .greedy_disagreements = 0, .gpu_seconds = 0, .cpu_seconds = 0 };
     var squared_error: f64 = 0;
     var squared_reference: f64 = 0;
-    // ROUND-379 instrument: the engine's logits only. The FP64 teacher is deterministic and stored;
-    // the band reads this file against it, so an arm does not pay the CPU chain again.
+    // The engine's logits only. The FP64 teacher is deterministic and stored; the band reads this file against it,
+    // so an arm does not pay the CPU chain again.
     if (std.c.getenv("TF_DSV41_ORACLE_GPU_ONLY") != null) {
         for (ids, 0..) |id, i| {
             const actual = try model.forward(&.{id}, .all);

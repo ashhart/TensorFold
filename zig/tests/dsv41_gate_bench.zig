@@ -1,6 +1,5 @@
-//! The router gate's numerics, model-free: `tf-dense-col` (the shipped fp32 column path) against the tensor-unit
-//! gate GEMM's f16 and bf16 operands (fp32 destination), each against an fp64 reference of its own operands.
-//! The band receipt TF_DSV41_ROUTE_GEMM needs: NRMS, max absolute error, and the 384-way argmax of every path.
+// ! The router gate's numerics, model-free: `tf-dense-col` (the shipped fp32 column path) against the tensor-unit !
+// gate GEMM's f16 and bf16 operands (fp32 destination), each against an fp64 reference of its own operands. !
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");

@@ -176,7 +176,7 @@ pub const deepseek_v41_mhc = @embedFile("deepseek_v41/mhc.metal");
 pub const deepseek_v41_hc_boundary = @embedFile("deepseek_v41/hc_boundary.metal");
 pub const deepseek_v41_route = @embedFile("deepseek_v41/route_exl3.metal");
 pub const deepseek_v41_kv = @embedFile("deepseek_v41/kv.metal");
-/// ROUND-486: the served window KV norm+rope+pack fusion (its own TU, so rope.metal's contraction is kept).
+/// The served window KV norm+rope+pack fusion (its own TU, so rope.metal's contraction is kept).
 pub const deepseek_v41_kv_glue = @embedFile("deepseek_v41/kv_glue.metal");
 pub const deepseek_v41_rope = @embedFile("deepseek_v41/rope.metal");
 pub const deepseek_v41_index = @embedFile("deepseek_v41/index_exl3.metal");

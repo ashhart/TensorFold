@@ -23,9 +23,9 @@ pub const Attention = struct {
     wo_a: [8]Matrix,
     /// The eight output-group descriptors of wo_a, for the one indexed decode dispatch.
     wo_a_descriptors: ?mtl.Buffer = null,
-    /// ROUND-394: wq_a (n 1280) and wkv (n 512) as one indexed call's two-entry table. They read the same input
-    /// row and the same k, so one rotate_in, one GEMM and one rotate_out carry both; each entry keeps its own
-    /// per-column scales (suh/svh) and its own output width (descriptor.reserved).
+    /// Wq_a (n 1280) and wkv (n 512) as one indexed call's two-entry table. They read the same input row and the
+    /// same k, so one rotate_in, one GEMM and one rotate_out carry both; each entry keeps its own per-column scales
+    /// (suh/svh) and its own output width (descriptor.reserved).
     qkv_descriptors: ?mtl.Buffer = null,
     sink: Tensor,
     q_norm: Tensor,
@@ -39,19 +39,16 @@ pub const Moe = struct {
     bias: Tensor,
     shared: [3]Matrix,
     descriptors: [3]mtl.Buffer,
-    /// One table the fused gate+up dispatch indexes: the gate experts at 0..E-1, the up experts at E..2E-1. It
-    /// holds copies of the descriptors, not of any weight, so it costs 96 bytes an expert.
+    /// It holds copies of the descriptors, not of any weight, so it costs 96 bytes an expert.
     fused: ?mtl.Buffer = null,
-    /// ROUND-359: the shared expert's gate and up as one indexed dispatch: descriptor 0 is `shared[0]` (w1),
-    /// descriptor 1 is `shared[1]` (w3), both read the same input row (the gather map repeats it).
+    /// The shared expert's gate and up as one indexed dispatch: descriptor 0 is `shared[0]` (w1), descriptor 1 is
+    /// `shared[1]` (w3), both read the same input row (the gather map repeats it).
     shared_fused: ?mtl.Buffer = null,
-    /// ROUND-392: the shared down projection's one-descriptor table and a zero pick map, so the shared SwiGLU's
-    /// prerotate (which reads the row's su/sv) and the dense down with a prerotated input can skip the rotate_in
-    /// dispatch. Descriptor 0 = `shared[2]`; the map is eight zeros.
+    /// The shared down projection's one-descriptor table and a zero pick map, so the shared SwiGLU's prerotate
+    /// (which reads the row's su/sv) and the dense down with a prerotated input can skip the rotate_in dispatch.
+    /// Descriptor 0 = `shared[2]`; the map is eight zeros.
     shared_down: ?mtl.Buffer = null,
     shared_down_ids: ?mtl.Buffer = null,
-    /// The gate as BF16 when the pack stores it F16: the tensor-unit gate GEMM (MLX's gemm_nax) binds A, B and D
-    /// to one element type, so an F16 gate cannot feed it. 2.9 MB at 384 x 5,120; null when the gate is BF16 already.
     gate_bf16: ?Tensor = null,
 };
 
@@ -100,9 +97,9 @@ pub const Dspark = struct {
     main_norm: Tensor,
     norm: Tensor,
     blocks: [3]Layer,
-    /// ROUND-426: the three blocks' `wkv` as ONE grouped indexed call's three-entry descriptor table. The three
-    /// matrices share the conditioning's input rows and k, so one rotate_in, one GEMM (three 128-row groups, one
-    /// expert a group) and one rotate_out carry all three; each entry keeps its own per-column scales.
+    /// The three blocks' `wkv` as ONE grouped indexed call's three-entry descriptor table. The three matrices share
+    /// the conditioning's input rows and k, so one rotate_in, one GEMM (three 128-row groups, one expert a group)
+    /// and one rotate_out carry all three; each entry keeps its own per-column scales.
     cond_wkv_descriptors: ?mtl.Buffer = null,
     /// The last stage's Markov pair (`mtp.2.markov_head.embed/head` [vocab, rank] bf16): the draft chain's
     /// rank-256 bias of the token before each row. Optional so an older pack without the chain still loads.
@@ -114,8 +111,8 @@ pub const Model = struct {
     head: Matrix,
     norm: Tensor,
     layers: [40]Layer,
-    /// ROUND-520: whether an attached int8 sidecar was packed pre-rotated (its call is one byte body into the
-    /// caller's bf16 output). False = the unrotated pack, which keeps rotate_in/rotate_out. Off without the sidecar.
+    /// Whether an attached int8 sidecar was packed pre-rotated (its call is one byte body into the caller's bf16
+    /// output). False = the unrotated pack, which keeps rotate_in/rotate_out. Off without the sidecar.
     int8_direct: bool = false,
     dspark: ?Dspark = null,
 
@@ -188,8 +185,8 @@ pub fn sizeofDescriptors() usize {
 /// One table the fused gate+up dispatch indexes: the gate experts then the up experts, descriptor copies only,
 /// so the two projections are one indexed call and each output row still runs the shipped per-row arithmetic.
 fn fusedTable(device: mtl.Device, gate: mtl.Buffer, up: mtl.Buffer, count: usize, shared_gate: exl3.Matrix, shared_up: exl3.Matrix) !mtl.Buffer {
-    // ROUND-391: the table carries the two shared-expert matrices after the 2E routed entries, so the SAME
-    // indexed dispatch can carry the shared gate/up rows (the comparator's moe_up form). Entries 2E and 2E+1.
+    // The table carries the two shared-expert matrices after the 2E routed entries, so the SAME indexed dispatch
+    // can carry the shared gate/up rows (the comparator's moe_up form).
     const table = try device.buffer((2 * count + 2) * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     const dst: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
     const gate_src: [*]const exl3.ExpertDescriptor = @ptrCast(@alignCast(gate.contents()));
@@ -201,8 +198,8 @@ fn fusedTable(device: mtl.Device, gate: mtl.Buffer, up: mtl.Buffer, count: usize
     return table;
 }
 
-/// ROUND-394: the attention's wq_a and wkv as one indexed call's two-entry table. Descriptor copies only; the
-/// entries' own n rides descriptor.reserved, so the GEMM and the epilogue bound each row by its own width.
+/// The attention's wq_a and wkv as one indexed call's two-entry table. Descriptor copies only; the entries' own n
+/// rides descriptor.reserved, so the GEMM and the epilogue bound each row by its own width.
 fn qkvTable(device: mtl.Device, a: exl3.Matrix, b: exl3.Matrix) !mtl.Buffer {
     const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     errdefer table.deinit();
@@ -329,7 +326,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
             }
         }
         layer.moe.fused = try fusedTable(device, layer.moe.descriptors[0], layer.moe.descriptors[1], 128, layer.moe.shared[0], layer.moe.shared[1]);
-        // ROUND-359: the drafter's shared expert takes the same two-entry gate/up table (its own matrices).
+        // The drafter's shared expert takes the same two-entry gate/up table (its own matrices).
         {
             const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             errdefer table.deinit();
@@ -338,7 +335,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
             out[0] = try exl3.descriptor(layer.moe.shared[0]);
             out[1] = try exl3.descriptor(layer.moe.shared[1]);
         }
-        // ROUND-392: the shared down's descriptor (one entry) and its zero pick map.
+        // The shared down's descriptor (one entry) and its zero pick map.
         {
             const table = try device.buffer(@sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             errdefer table.deinit();
@@ -350,7 +347,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
             @memset(ids.contents()[0 .. 8 * 4], 0);
             layer.moe.shared_down_ids = ids;
         }
-        // ROUND-392: the shared down's descriptor (one entry) and its zero pick map.
+        // The shared down's descriptor (one entry) and its zero pick map.
         {
             const table = try device.buffer(@sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             errdefer table.deinit();
@@ -362,10 +359,9 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
             @memset(ids.contents()[0 .. 8 * 4], 0);
             layer.moe.shared_down_ids = ids;
         }
-        // ROUND-423: THE DRAFTER'S EIGHT wo_a OUTPUT GROUPS AS ONE INDEXED DECODE PROJECTION'S DESCRIPTOR
-        // TABLE -- the trunk's own fused form (attention.zig's `wo_a_descriptors` path, shipped since
-        // ROUND-45 and bit-identical to the eight separate projections). The drafter's eight slices are the
-        // same shape as the trunk's (k 4096, n 1024), so the table is the same table.
+        // THE DRAFTER'S EIGHT wo_a OUTPUT GROUPS AS ONE INDEXED DECODE PROJECTION'S DESCRIPTOR TABLE -- the trunk's
+        // own fused form. The drafter's eight slices are the same shape as the trunk's (k 4096, n 1024), so the
+        // table is the same table.
         {
             const groups = try device.buffer(8 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             errdefer groups.deinit();
@@ -374,7 +370,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
             for (0..8) |slice| table[slice] = try exl3.descriptor(layer.attn.wo_a[slice]);
         }
     };
-    // ROUND-426: the drafter's three per-block `wkv` in one grouped indexed dispatch's three-entry table.
+    // The drafter's three per-block `wkv` in one grouped indexed dispatch's three-entry table.
     if (model.dspark) |*d| {
         const table = try device.buffer(3 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer table.deinit();
@@ -399,7 +395,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
             }
         }
         layer.moe.fused = try fusedTable(device, layer.moe.descriptors[0], layer.moe.descriptors[1], 384, layer.moe.shared[0], layer.moe.shared[1]);
-        // ROUND-359: the shared expert's gate (w1) and up (w3) as one indexed dispatch's two-entry table.
+        // The shared expert's gate (w1) and up (w3) as one indexed dispatch's two-entry table.
         {
             const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             errdefer table.deinit();
@@ -421,7 +417,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
                 table[slice] = try exl3.descriptor(m);
             }
         }
-        // ROUND-394: the attention's wq_a + wkv in one indexed call's two-entry table.
+        // The attention's wq_a + wkv in one indexed call's two-entry table.
         layer.attn.qkv_descriptors = try qkvTable(device, layer.attn.wq_a, layer.attn.wkv);
         owned_qkv += 1;
     }
@@ -577,9 +573,9 @@ fn matrix(comptime binding: bool, source: anytype, prefix: []const u8, k: usize,
     }
 }
 
-/// ROUND-520: bind a prompt-row int8 sidecar. The files are the repacker's own per-projection output
-/// (`layers.<L>.<proj>.fp8`, `.scale`); one GPU buffer a tensor, resident, and the trellis matrices are untouched
-/// so decode keeps its path. Off unless the caller sets TF_DSV41_I8_PREFILL.
+/// Bind a prompt-row int8 sidecar. The files are the repacker's own per-projection output (`layers.<L>.<proj>.fp8`,
+/// `.scale`); one GPU buffer a tensor, resident, and the trellis matrices are untouched so decode keeps its path.
+/// Off unless the caller sets TF_DSV41_I8_PREFILL.
 pub fn attachInt8(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, model: *Model, dir: []const u8) !void {
     const direct = std.c.getenv("TF_DSV41_I8_ROT") != null;
     // An instrument: attach one projection at a time to localise a numerics fault (TF_DSV41_I8_ONLY=wo_a).

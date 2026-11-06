@@ -25,7 +25,7 @@ test "cache owners and one million token storage match the released layout" {
     try std.testing.expectError(error.NoCompressedCache, cache.ownerFor(0, 0));
     const plan = cache.Plan{ .capacity = 1048576, .layers = 40 };
     try std.testing.expectEqual(@as(usize, 1048576 * 890), plan.packedBytes());
-    try std.testing.expectEqual(@as(usize, 2863104), plan.mutableBytes()); // ROUND-367: the capture region
+    try std.testing.expectEqual(@as(usize, 2863104), plan.mutableBytes()); // The capture region
     try plan.validate();
     try std.testing.expectError(error.InvalidCacheCapacity, (cache.Plan{ .capacity = 1, .layers = 41 }).validate());
     try std.testing.expectError(error.InvalidCacheLayer, cache.ownerFor(40, 1));
@@ -300,7 +300,7 @@ test "a plan with the drafter's three blocks allocates and rings at layer 42" {
     try std.testing.expectError(error.InvalidCacheCapacity, cache.State.init(device, .{ .capacity = 1024, .layers = 41 }));
 }
 
-test "ROUND-486: the fused window KV glue is bit-identical to rms+rope+pack" {
+test "the fused window KV glue is bit-identical to rms+rope+pack" {
     const ops = @import("ops.zig");
     const rope = @import("rope.zig");
     const pool = mtl.objc.Pool.push();

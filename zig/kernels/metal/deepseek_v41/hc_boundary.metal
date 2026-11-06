@@ -164,21 +164,21 @@ template <bool MIXES>
 template [[host_name("tf_hc_boundary_mix")]] [[kernel]] decltype(tf_hc_boundary<true>) tf_hc_boundary<true>;
 template [[host_name("tf_hc_boundary_plain")]] [[kernel]] decltype(tf_hc_boundary<false>) tf_hc_boundary<false>;
 
-// ROUND-407: THE LAUNCH-OVERHEAD PROBE. A dispatch that reads the boundary's own partial sums and
-// writes them back, so the split that follows DEPENDS on it: a chain of them prices the GPU's
-// dependent-dispatch latency -- the piece every glue fusion would save -- and the probe's threadgroup
-// size sweeps that latency's shape. The values are unchanged, so the reply cannot move.
+// THE LAUNCH-OVERHEAD PROBE. A dispatch that reads the boundary's own partial sums and writes them back, so the
+// split that follows DEPENDS on it: a chain of them prices the GPU's dependent-dispatch latency -- the piece every
+// glue fusion would save -- and the probe's threadgroup size sweeps that latency's shape. The values are unchanged,
+// so the reply cannot move.
 kernel void tf_hc_probe(const device float *part [[buffer(0)]], device float *sink [[buffer(1)]],
                         uint g [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
   const uint at = g * (SLICES * (MIX + 1)) + tid;
   if (tid <= uint(MIX)) sink[at] = part[at];
 }
 
-// ROUND-407: THE INDEPENDENT-DISPATCH PROBE. The same work-free dispatch, but each one writes its OWN
-// sink (the host binds a different buffer a dispatch), so the chain carries no memory dependency between
-// the probe dispatches: the GPU may run them concurrently. The gap between this form and tf_hc_probe is
-// the GPU's DEPENDENT-dispatch latency -- the part of the launch cost that only a FOLD (not a reorder)
-// can remove. The values the boundary reads are untouched, so the reply cannot move.
+// THE INDEPENDENT-DISPATCH PROBE. The same work-free dispatch, but each one writes its OWN sink (the host binds a
+// different buffer a dispatch), so the chain carries no memory dependency between the probe dispatches: the GPU may
+// run them concurrently. The gap between this form and tf_hc_probe is the GPU's DEPENDENT-dispatch latency -- the
+// part of the launch cost that only a FOLD (not a reorder) can remove. The values the boundary reads are untouched,
+// so the reply cannot move.
 kernel void tf_hc_probe_indep(const device float *part [[buffer(0)]], device float *sink [[buffer(1)]],
                               uint g [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
   if (tid <= uint(MIX)) sink[tid] = part[tid];
