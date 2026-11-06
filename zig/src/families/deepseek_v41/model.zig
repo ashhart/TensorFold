@@ -344,7 +344,7 @@ fn dsparkTruePosOn() bool {
 }
 
 var taps_shared_base: ?bool = null;
-/// TF_DSV41_TAPS_SHARED_BASE=0 restores the port's form (the taps ring advances once a TARGET LAYER, so the three
+/// TF_DSV41_TAPS_SHARED_BASE=0 restores the earlier per-layer form (the taps ring advances once a TARGET LAYER, so the three
 /// layers' rows land in three different ranges and the conditioning mixes three positions). Default on: the shared
 /// base is the correct form.
 fn tapsSharedBaseOn() bool {
@@ -535,7 +535,7 @@ pub const Model = struct {
     /// The rows the LAST tap capture kept. They are the tail of the taps ring and they are consecutive positions,
     /// so the conditioning can publish the window's missing positions at once.
     taps_rows_last: u32 = 0,
-    /// The rows of the LAST tap capture that are valid (0 = all of them). The no-re-feed port's rollback keeps a
+    /// The rows of the LAST tap capture that are valid (0 = all of them). The rollback keeps a
     /// prefix of the verify's capture: the rejected rows' taps are not the committed history, so the conditioning
     /// publishes the prefix, not the capture's tail.
     taps_rows_valid: u32 = 0,
@@ -742,7 +742,7 @@ pub const Model = struct {
         @memset(taps_stash.contents()[0..taps_stash.length()], 0);
         // The conditioning scratch: 128 rows of 5120 bf16, then 128 rows of 512 bf16 keys, then 128 packed rows.
         // The draft round's own logits scratch: a five-row forward keeps its head rows and Markov reads here, not
-        // in the workspace's logits field (one row at decode, which a draft forward overran -- round 212).
+        // in the workspace's logits field (one row at decode, which a draft forward overran).
         const mtp_logits = try device.buffer(8 * 129280 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         const cond_bytes = 128 * 5120 * 2 + 128 * 512 * 2 + 128 * 528;
         const cond = try device.buffer(cond_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -1370,7 +1370,7 @@ pub const Model = struct {
                     else => .f32,
                 }, .hidden_stride = 20480, .kv_stride = 25600, .output_stride = 20480, .eps = m.cfg.eps }, m.streamView(), ws.view(.engram_kv), null, m.streamView(), rows);
             }
-            // The drafter reads the mean of this layer's input streams at its three target layers (round 127).
+            // The drafter reads the mean of this layer's input streams at its three target layers.
             // The taps buffer holds sixteen rows a layer: only a decode step or a draft round fits, and a prompt's
             // rows would run past it (the original tap guard).
             if (segs.len == 1 and tapsOn() and index >= 37 and index <= 39) {
@@ -1401,7 +1401,7 @@ pub const Model = struct {
                     // The stream-mean kernel writes modulo the ring, so the aligned base is the forward's start
                     // position.
                     m.taps_base = if (condAlignOn()) state.position % 128 else m.taps_row;
-                    // A fresh capture's rows are all valid; the port's rollback sets the prefix.
+                    // A fresh capture's rows are all valid; a rollback sets the prefix.
                     m.taps_rows_valid = 0;
                     m.taps_row = (m.taps_row + n) % 128;
                     m.taps_n = @min(m.taps_n + n, 128);
@@ -1412,7 +1412,7 @@ pub const Model = struct {
                 // positions the window is missing).
                 m.taps_rows_last = n;
                 if (!shared) {
-                    // A fresh capture's rows are all valid; the port's rollback sets the prefix.
+                    // A fresh capture's rows are all valid; a rollback sets the prefix.
                     m.taps_rows_valid = 0;
                     m.taps_row = (m.taps_row + n) % 128;
                     m.taps_n = @min(m.taps_n + n, 128);
@@ -2040,7 +2040,8 @@ pub const Model = struct {
         return .{ .buffer = m.drafter_ids.? };
     }
 
-    /// The drafter's round of ids: the pending token, then the port's noise filler (128799) a row.
+    /// The drafter's round of ids: the pending token, then the release's noise token (128799) a row, as `DSparkBlock.forward_embed` fills
+    /// `draft_input_ids` (inference/model.py, revision 314113f8).
     fn drafterRound(m: *Model, pending: u32, rows: u32) !View {
         if (m.drafter_ids == null) {
             if (m.drafter_ids) |old| old.deinit();
@@ -2187,7 +2188,8 @@ pub const Model = struct {
 
     /// The drafter block's attention: the four projections with their two norms, the round's own keys packed into
     /// the chunk, the scan over the stage's ring plus that chunk with no compressor and no indexer, the eight `wo_a`
-    /// slices, `wo_b`, and the publish. Its big scratch lives in `.logits` from row 1 on.
+    /// slices, `wo_b`, and the publish. The order is the release's `DSparkAttention.forward` (inference/model.py,
+    /// revision 314113f8) with our own ring and shapes; its big scratch lives in `.logits` from row 1 on.
     fn draftAttention(m: *Model, enc0: mtl.ComputeEncoder, blk: *const weights.Layer, state: *kv.cache.State, slot: u32, layer: u32, rows: u32, position: u32, dbg: ?mtl.Buffer, prof: ?*CondProf) !void {
         // The local copy of the encoder -- the split replaces it, so the parts below encode into the fresh one.
         var enc = enc0;
@@ -2498,7 +2500,7 @@ pub const Model = struct {
         const p = &m.pipelines;
         const aw = &m.attention_workspace;
         const state = try m.drafterState();
-        // ROUND 529: the conditioning's cursor is THIS slot's committed position, not lane 0's.
+        // The conditioning's cursor is THIS slot's committed position, not lane 0's.
         const slot_pos = m.caches[slot].position;
         state.position = slot_pos;
         // THE DRAFTER RUNS `depth + 1` ROWS, NOT FIVE. The chain's step s reads the logits row s and the bias of
@@ -2522,7 +2524,10 @@ pub const Model = struct {
         const host_prof = std.c.getenv("TF_DSV41_HOST_PROF") != null;
         const t_start: f64 = if (host_prof) mtl.clock.seconds() else 0;
         // The conditioning: the three target layers' stream means (the taps, one 15,360-wide row) through
-        // main_proj and main_norm, then each stage's keys into its ring -- what the draft rows attend to.
+        // main_proj and main_norm, then each stage's keys into its ring -- what the draft rows attend to. The
+        // release's `Transformer.forward_spec` (inference/model.py, revision 314113f8) is the same pass:
+        // `forward_embed` makes the noise-token draft rows and `DSparkBlock.forward` threads `pre_mix` and
+        // `main_x` through the stage.
         // The conditioning: the last `nc` rows of the rolling tap ring (the decode window's own rows, captured a
         // token a forward) through main_proj and main_norm, then each stage's keys into its ring. Round 320: the
         // ring used to hold only the current pass's row (`taps_n = rows = 1` at decode), so 127 of the 128 window
@@ -2664,11 +2669,11 @@ pub const Model = struct {
             // landed two tokens advanced the position by two and left the position between them unwritten: the
             // drafter's 128-row window then held a row published 128 positions ago (with that old position's rope
             // phase). After a prompt the first round published one of the prompt's 128 tail rows, so the window was
-            // uninitialised for the first 128 rounds. TF_DSV41_DSPARK_COND_ONE restores the port's one-row form.
-            // The capture's rows are the ring's tail, but the no-re-feed port's rollback keeps only a PREFIX of the
+            // uninitialised for the first 128 rounds. TF_DSV41_DSPARK_COND_ONE restores the earlier one-row form.
+            // The capture's rows are the ring's tail, but the rollback keeps only a PREFIX of the
             // capture: the rejected rows' taps are not the committed history, so the conditioning publishes the
             // prefix, not the tail. The prefix's rows are the capture's FIRST rows, so their positions are the
-            // capture's own -- [cap_pos, cap_pos + tail) -- and the ring's slots follow from them. The port's
+            // capture's own -- [cap_pos, cap_pos + tail) -- and the ring's slots follow from them. The earlier form's
             // [pos_now - tail, pos_now) are the SUFFIX's positions. The published rows are the ring's [base,
             // base+tail); the capture's first row is its base, and the rows may wrap the ring's end -- then the
             // second piece starts at row zero. With the aligned ring the capture's first row is the slot of the
@@ -2831,8 +2836,9 @@ pub const Model = struct {
             try completed(cb);
             return .{ 0, 0, 0, 0 };
         }
-        // The Markov-biased chain (the port's head chain): row k's logits plus the rank-256 bias of the token
-        // before it, its argmax the next token; five steps from the pending token to four drafts.
+        // The Markov-biased chain (the head chain): row k's logits plus the rank-256 bias of the token
+        // before it, its argmax the next token; five steps from the pending token to four drafts. The release's
+        // `DSparkBlock.forward_head` runs the same loop (inference/model.py, revision 314113f8).
         const emb = dspark.markov_embed orelse return error.NoMarkov;
         const head_embed = dspark.markov_head orelse return error.NoMarkov;
         if (m.markov_ids == null) {
