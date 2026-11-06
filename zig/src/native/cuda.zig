@@ -510,13 +510,13 @@ test {
     _ = @import("copy_drafts_nemotron_test.zig");
     _ = windows;
     _ = @import("cuda_startup_test.zig");
+    _ = @import("copy_drafts_cuda_test.zig");
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
     _ = refusals;
     _ = lane_backend;
     _ = snaps;
     _ = prompt_pages;
     _ = cuda_device; // the device and variable tests
-    _ = windows;
 }
 
 test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {
@@ -585,10 +585,6 @@ test "Save recovery: real native close drains the dense trainer before any child
 test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
     try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni" });
-}
-
-test {
-    _ = @import("copy_drafts_cuda_test.zig");
 }
 
 test "GLM capabilities: CUDA offers the EXL3 format its loader accepts" {
