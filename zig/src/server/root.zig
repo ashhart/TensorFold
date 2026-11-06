@@ -95,6 +95,7 @@ test {
     _ = @import("messages.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
+    _ = @import("pdf_worker.zig");
     _ = @import("images.zig");
     _ = @import("images_video_marker_test.zig");
     _ = @import("image_key.zig");

@@ -105,6 +105,15 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const server_json = server_build.addTo(b, server_tests, target, .Debug);
     server_build.testImports(b, server_tests, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
+    // the PDF render worker as tensorfold-native spawns it, which the server tests' runner cannot be
+    const worker_exe = b.addOptions();
+    worker_exe.addOptionPath("path", exe.getEmittedBin());
+    const pdf_worker = b.createModule(.{ .root_source_file = b.path("zig/src/server/pdf_worker_test.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+    for (server_tests.import_table.keys(), server_tests.import_table.values()) |name, module| pdf_worker.addImport(name, module);
+    pdf_worker.addOptions("pdf_worker_exe", worker_exe);
+    const pdf_worker_run = b.addRunArtifact(b.addTest(.{ .root_module = pdf_worker, .filters = &.{"tensorfold-native PDF render worker:"} }));
+    test_step.?.dependOn(&pdf_worker_run.step);
+    b.step("test-pdf-worker", "The PDF render worker spawned from tensorfold-native, rendering where libpdfium is found").dependOn(&pdf_worker_run.step);
     const kimi_text = b.addExecutable(.{ .name = "tf-k3-text-golden", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/kimi_golden_main.zig"),
         .target = target,
