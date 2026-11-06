@@ -925,8 +925,9 @@ same handler and engine path. A response has that chat completion's prompt and t
 - `reasoning.effort` follows the chat effort rule: unset is the template's default and `none` turns thinking off.
   `reasoning.summary` is accepted, but no summary is written.
 - `text.format` takes `json_schema` or `json_object` through the structured-output path, with drafts.
-- `stream`, `store` (default true) and `metadata` (up to 16 string pairs). The chat extensions `draft`,
-  `thinking_budget`, `stop`, `ignore_eos`, `chat_template_kwargs` and `priority` pass through.
+- `stream`, `store` (default true) and `metadata` (up to 16 string pairs, keys up to 64 characters,
+  values up to 512). The chat extensions `draft`, `thinking_budget`, `stop`, `ignore_eos`,
+  `chat_template_kwargs` and `priority` pass through.
 
 `output` holds a `reasoning` item (its text as `reasoning_text` content, with an empty `summary`), a `message` with
 `output_text`, and `function_call` items (`call_id`, `name` and JSON `arguments`). A reply cut by the token limit has
@@ -947,8 +948,9 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `conversation`, `prompt` templates, `truncation: "auto"`, `top_logprobs`, `input_file` parts
-and file IDs, `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
+others), `background`, `conversation`, `prompt` templates, `truncation: "auto"`, `top_logprobs`, file IDs and
+remote file URLs (`input_file` parts with inline `file_data` run on a model started with `--vision --vision-pdf`),
+`item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
 `include` takes a list of OpenAI's names, which the server accepts and ignores (it has nothing to add for them):
 `code_interpreter_call.outputs`, `computer_call_output.output.image_url`, `file_search_call.results`,
 `message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
