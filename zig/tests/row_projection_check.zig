@@ -16,7 +16,7 @@ fn fromBf(v: u16) f32 {
 
 const Case = struct { n: usize, k: usize, experts: usize, rows: usize, repeat: usize, bits: u8 = 4, sum: row.Sum = .f32 };
 
-/// Code `i` of a row's bit stream (value i at bits i*bits and up, bytes little-endian; 6-bit: four values in three bytes).
+/// Code `i` of a row's bit stream (value i from bit i*bits up, bytes little-endian; 6-bit: four values in three bytes).
 fn code(bytes: []const u8, bits: u8, i: usize) u32 {
     const off = i * @as(usize, bits);
     const lo: u32 = bytes[off / 8];
