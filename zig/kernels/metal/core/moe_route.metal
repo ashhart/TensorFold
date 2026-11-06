@@ -1,4 +1,4 @@
-// A MoE layer's route for 1-16 rows: router logits in the one-row kernel's order, then the top-k and this Mac's expert groups.
+// A MoE layer's route, 1-16 rows: router logits in the one-row kernel's order, then top-k and this Mac's expert groups.
 #include <metal_stdlib>
 using namespace metal;
 
