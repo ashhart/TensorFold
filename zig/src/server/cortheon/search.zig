@@ -92,7 +92,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
     var from: usize = 0;
     var last: usize = 0; // where the previous link ended: every search back stops there, so each byte is read once
     while (out.items.len < limit) {
-        const at = std.mem.indexOfPos(u8, page, from, marker) orelse break;
+        const at = std.ascii.findIgnoreCasePos(page, from, marker) orelse break; // CLASS="result__a" is the same mark
         const lt = std.mem.lastIndexOfScalar(u8, page[last..at], '<') orelse { // a mark outside any tag: skip it
             from = at + marker.len;
             last = at;
@@ -100,7 +100,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         };
         const tag_start = last + lt;
         const tag_end = std.mem.indexOfScalarPos(u8, page, at, '>') orelse break;
-        const next = std.mem.indexOfPos(u8, page, tag_end, marker) orelse page.len;
+        const next = std.ascii.findIgnoreCasePos(page, tag_end, marker) orelse page.len;
         from = tag_end;
         const lo = last;
         last = tag_end;
@@ -221,6 +221,16 @@ test "a search ad is skipped when the mark's letters differ" {
         \\<div class="result results_links Result--ad"><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
         \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
     ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result is found when its class letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a CLASS=\"result__a\" href=\"https://example.org/page\">Example</a></h2></div>";
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
