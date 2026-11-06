@@ -530,6 +530,6 @@ pub fn run(gpu: check.Gpu) !void {
         }
         const red = red_table and red_bound and red_tc and red_tail and red_p256 and red_ids;
         try check.expect(red, "qwen35 pages {t}: a control never fired", .{format});
-        std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row, uncounted tail keys, swapped table on 256-position pages)\n", .{format});
+        std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row, uncounted tail keys, swapped table on 256-position pages, swapped table with page ids in shared memory)\n", .{format});
     }
 }
