@@ -1,4 +1,4 @@
-// Decode attention partials over 64-key tiles, SG tiles a threadgroup; kernels.zig appends one instantiation a key.
+// Decode attention partials over 64-key tiles, SG tiles a threadgroup; the kernel list adds one instance a key.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
