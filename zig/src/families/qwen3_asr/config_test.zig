@@ -37,10 +37,36 @@ test "refusals: another activation, M-RoPE sections not spanning the head, biase
         .{ "\"num_mel_bins\": 128", "\"num_mel_bins\": 80", "UnsupportedQwen3AsrGeometry" },
         .{ "\"n_window\": 50", "\"n_window\": 40", "UnsupportedQwen3AsrGeometry" },
         .{ "\"model_type\": \"qwen3_asr\"", "\"model_type\": \"qwen3\"", "UnsupportedQwen3AsrConfig" },
+        .{ "\"output_dim\": 1024", "\"output_dim\": 2048", "UnsupportedQwen3AsrGeometry" }, // the tower's rows wider than the LM's
+        .{ "\"n_window_infer\": 800", "\"n_window_infer\": 50", "UnsupportedQwen3AsrGeometry" }, // a window under one chunk
+        .{ "\"n_window_infer\": 800", "\"n_window_infer\": 850", "UnsupportedQwen3AsrGeometry" },
     };
     for (cases) |x| {
         const text = try swapped(a, x[0], x[1]);
         defer a.free(text);
         if (c.parse(a, text)) |_| return error.TestExpectedError else |err| try std.testing.expectEqualStrings(x[2], @errorName(err));
     }
+}
+
+/// The released Qwen3-ASR-1.7B's config.json values where they differ from the 0.6B's.
+const big_swaps = [_][2][]const u8{
+    .{ "\"d_model\": 896", "\"d_model\": 1024" },                              .{ "\"encoder_layers\": 18", "\"encoder_layers\": 24" },
+    .{ "\"encoder_attention_heads\": 14", "\"encoder_attention_heads\": 16" }, .{ "\"encoder_ffn_dim\": 3584", "\"encoder_ffn_dim\": 4096" },
+    .{ "\"output_dim\": 1024", "\"output_dim\": 2048" },                       .{ "\"hidden_size\": 1024", "\"hidden_size\": 2048" },
+    .{ "\"intermediate_size\": 3072", "\"intermediate_size\": 6144" },
+};
+
+test "the 1.7B: admitted, the tower's rows at the LM's width" {
+    const a = std.testing.allocator;
+    var text = try a.dupe(u8, base);
+    defer a.free(text);
+    for (big_swaps) |s| {
+        const next = try std.mem.replaceOwned(u8, a, text, s[0], s[1]);
+        a.free(text);
+        text = next;
+    }
+    const cfg = try c.parse(a, text);
+    try std.testing.expectEqual(@as(usize, 64), cfg.audio.headDim());
+    try std.testing.expectEqual(cfg.audio.out, cfg.text.hidden);
+    try std.testing.expectEqual(@as(usize, 128), cfg.text.head_dim);
 }
