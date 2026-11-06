@@ -201,7 +201,6 @@ fn fusedTable(device: mtl.Device, gate: mtl.Buffer, up: mtl.Buffer, count: usize
     return table;
 }
 
-
 /// ROUND-394: the attention's wq_a and wkv as one indexed call's two-entry table. Descriptor copies only; the
 /// entries' own n rides descriptor.reserved, so the GEMM and the epilogue bound each row by its own width.
 fn qkvTable(device: mtl.Device, a: exl3.Matrix, b: exl3.Matrix) !mtl.Buffer {
@@ -291,7 +290,6 @@ fn hasDspark(source: anytype) bool {
     return true;
 }
 
-
 /// Every executed tensor is checked using headers only, before checkpoint materialization or model allocation.
 pub fn validate(plan: *const load.Plan, stream: bool) !void {
     try populate(false, plan, null, stream);
@@ -333,24 +331,24 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) 
         layer.moe.fused = try fusedTable(device, layer.moe.descriptors[0], layer.moe.descriptors[1], 128, layer.moe.shared[0], layer.moe.shared[1]);
         // ROUND-359: the drafter's shared expert takes the same two-entry gate/up table (its own matrices).
         {
-        const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        errdefer table.deinit();
-        layer.moe.shared_fused = table;
-        const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
-        out[0] = try exl3.descriptor(layer.moe.shared[0]);
-        out[1] = try exl3.descriptor(layer.moe.shared[1]);
+            const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer table.deinit();
+            layer.moe.shared_fused = table;
+            const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+            out[0] = try exl3.descriptor(layer.moe.shared[0]);
+            out[1] = try exl3.descriptor(layer.moe.shared[1]);
         }
         // ROUND-392: the shared down's descriptor (one entry) and its zero pick map.
         {
-        const table = try device.buffer(@sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        errdefer table.deinit();
-        layer.moe.shared_down = table;
-        const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
-        out[0] = try exl3.descriptor(layer.moe.shared[2]);
-        const ids = try device.buffer(8 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        errdefer ids.deinit();
-        @memset(ids.contents()[0 .. 8 * 4], 0);
-        layer.moe.shared_down_ids = ids;
+            const table = try device.buffer(@sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer table.deinit();
+            layer.moe.shared_down = table;
+            const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+            out[0] = try exl3.descriptor(layer.moe.shared[2]);
+            const ids = try device.buffer(8 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer ids.deinit();
+            @memset(ids.contents()[0 .. 8 * 4], 0);
+            layer.moe.shared_down_ids = ids;
         }
         // ROUND-392: the shared down's descriptor (one entry) and its zero pick map.
         {
@@ -599,9 +597,12 @@ pub fn attachInt8(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, model:
     std.log.info("exl3: int8 sidecar attached from {s}: {d} layers, {d} x {d} + {d} x {d} + 8 x {d} x {d}, direct={}", .{
         dir,
         model.layers.len,
-        model.layers[0].attn.wq_b.k, model.layers[0].attn.wq_b.n,
-        model.layers[0].attn.wo_b.k, model.layers[0].attn.wo_b.n,
-        model.layers[0].attn.wo_a[0].k, model.layers[0].attn.wo_a[0].n,
+        model.layers[0].attn.wq_b.k,
+        model.layers[0].attn.wq_b.n,
+        model.layers[0].attn.wo_b.k,
+        model.layers[0].attn.wo_b.n,
+        model.layers[0].attn.wo_a[0].k,
+        model.layers[0].attn.wo_a[0].n,
         direct,
     });
 }

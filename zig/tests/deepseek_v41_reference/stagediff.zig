@@ -23,7 +23,7 @@ const attention_elements = blk: {
 };
 fn attentionOffset(stage: attention.DiagnosticStage) usize {
     var offset: usize = 0;
-    for (attention_widths[0..@intFromEnum(stage)]) |width| offset += width;
+    for (attention_widths[0..@backingInt(stage)]) |width| offset += width;
     return offset;
 }
 /// One per-layer slot in the model observer's record: stream (20480), normalized (5120), branch
@@ -57,7 +57,7 @@ const Capture = struct {
         // kv_rope, which this capture compares directly, so it is skipped rather than copied wrong.
         if (stage == .kv_quantized) return;
         if (layer >= layer_count) return error.InvalidLayer;
-        const width = attention_widths[@intFromEnum(stage)];
+        const width = attention_widths[@backingInt(stage)];
         for (0..self.active) |r| {
             const slot = self.row_base + r;
             const destination = ((@as(usize, layer) * self.rows + slot) * attention_elements + attentionOffset(stage)) * 2;
@@ -208,7 +208,7 @@ fn firstCaptureDifference(a_attn: []const u16, b_attn: []const u16, a_coarse: []
             inline for (std.enums.values(attention.DiagnosticStage)) |stage| {
                 if (stage != .kv_quantized) {
                     const base = (layer * rows + row) * attention_elements + attentionOffset(stage);
-                    const width = attention_widths[@intFromEnum(stage)];
+                    const width = attention_widths[@backingInt(stage)];
                     const a = a_attn[base..][0..width];
                     const b = b_attn[base..][0..width];
                     if (!std.mem.eql(u16, a, b)) {

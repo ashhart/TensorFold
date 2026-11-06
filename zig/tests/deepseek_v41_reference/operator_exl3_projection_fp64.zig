@@ -86,8 +86,7 @@ fn projectionCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halv
 extern "c" fn setenv(key: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(key: [*:0]const u8) c_int;
 
-fn denseRegisterOnlyCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8,
-                          codebook: exl3.format.Codebook, seed: u64) !void {
+fn denseRegisterOnlyCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     var rng = h.Lcg{ .state = seed };
@@ -150,7 +149,7 @@ fn denseRegisterOnlyCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usiz
     _ = setenv("TF_DSV41_EXL3_FMA_DENSE", "0", 1);
     const nrms_shipped = @sqrt(error_energy[0] / magnitude);
     const nrms_register_only = @sqrt(error_energy[1] / magnitude);
-    std.debug.print("EXL3 dense one-row k={d} n={d} halves={d} codebook={d}: shipped nrms {e:.3} | register-only nrms {e:.3}\n", .{ k, n, halves, @intFromEnum(codebook), nrms_shipped, nrms_register_only });
+    std.debug.print("EXL3 dense one-row k={d} n={d} halves={d} codebook={d}: shipped nrms {e:.3} | register-only nrms {e:.3}\n", .{ k, n, halves, @backingInt(codebook), nrms_shipped, nrms_register_only });
     if (!std.math.isFinite(nrms_shipped) or !std.math.isFinite(nrms_register_only)) return error.Exl3ProjectionDiverges;
     if (nrms_register_only > 1e-3) return error.Exl3ProjectionDiverges;
 }
@@ -170,8 +169,7 @@ fn denseRegisterOnlyCase(device: mtl.Device, queue: mtl.Queue, k: usize, n: usiz
 // This is that class's receipt, the ROUND-340 template at the drafter's width: the shipped body and
 // the register-only body over the SAME resident bytes and the SAME FP64 oracle. GOAL-UNLOCK's band
 // asks that the changed path's agreement with the FP64 truth be no worse than the shipped path's.
-fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8,
-                          codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
+fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     var rng = h.Lcg{ .state = seed };
@@ -250,7 +248,7 @@ fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usiz
     const nrms_shipped = @sqrt(error_energy[0] / magnitude);
     const nrms_register_only = @sqrt(error_energy[1] / magnitude);
     std.debug.print("EXL3 dense rows={d} k={d} n={d} halves={d} codebook={d}: shipped nrms {e:.3} | register-only nrms {e:.3} -> {s}\n", .{
-        rows, k, n, halves, @intFromEnum(codebook), nrms_shipped, nrms_register_only,
+        rows,                                                            k, n, halves, @backingInt(codebook), nrms_shipped, nrms_register_only,
         if (nrms_register_only <= nrms_shipped) "NO-WORSE" else "WORSE",
     });
     if (!std.math.isFinite(nrms_shipped) or !std.math.isFinite(nrms_register_only)) return error.Exl3ProjectionDiverges;
@@ -262,8 +260,7 @@ fn denseRegisterOnlyRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usiz
 /// the tile's gate is 64 rows: that piece ran on the general/shared body. The lever (the caller's
 /// eight-row hint) puts it on the tile. Both arms run over the same resident bytes against the same
 /// float64 oracle, so the comparison is the class's receipt.
-fn denseTileRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8,
-                  codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
+fn denseTileRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     var rng = h.Lcg{ .state = seed };
@@ -347,22 +344,19 @@ fn denseTileRows(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halve
     const nrms_shipped = @sqrt(error_energy[0] / magnitude);
     const nrms_tile = @sqrt(error_energy[1] / magnitude);
     std.debug.print("EXL3 conditioning tap projection rows={d} k={d} n={d} halves={d} codebook={d}: shipped nrms {e:.3} | tile nrms {e:.3} -> {s} | the arms differ in {d} of {d} outputs\n", .{
-        rows, k, n, halves, @intFromEnum(codebook), nrms_shipped, nrms_tile,
-        if (nrms_tile <= nrms_shipped) "NO-WORSE" else "WORSE",
-        differing_elements, rows * n,
+        rows,                                                   k,                  n,        halves, @backingInt(codebook), nrms_shipped, nrms_tile,
+        if (nrms_tile <= nrms_shipped) "NO-WORSE" else "WORSE", differing_elements, rows * n,
     });
     if (!std.math.isFinite(nrms_shipped) or !std.math.isFinite(nrms_tile)) return error.Exl3ProjectionDiverges;
     if (nrms_tile > 1e-3) return error.Exl3ProjectionDiverges;
 }
-
 
 /// ROUND-426: THE CONDITIONING'S THREE PER-BLOCK `wkv` PROJECTIONS -- THE SHIPPED THREE DENSE CALLS AGAINST
 /// THE ONE GROUPED INDEXED DISPATCH. Both arms run over the same resident bytes, the same input window and the
 /// same float64 oracle, so the comparison is the class's receipt. The fused call pads each block's rows to the
 /// tile's 64-row groups, so the shipped arm's rows are compared with the fused arm's first `rows` rows of each
 /// group (the engine reads no other rows).
-fn condWkvFusion(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8,
-                 codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
+fn condWkvFusion(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halves: u8, codebook: exl3.format.Codebook, rows: usize, seed: u64) !void {
     var p = try exl3.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     var rng = h.Lcg{ .state = seed };
@@ -485,9 +479,8 @@ fn condWkvFusion(device: mtl.Device, queue: mtl.Queue, k: usize, n: usize, halve
     const nrms_ship = @sqrt(energy[0] / magnitude);
     const nrms_fused = @sqrt(energy[1] / magnitude);
     std.debug.print("EXL3 conditioning wkv rows={d} k={d} n={d} halves={d} codebook={d}: shipped nrms {e:.3} | fused nrms {e:.3} -> {s} | the arms differ in {d} of {d} outputs\n", .{
-        rows, k, n, halves, @intFromEnum(codebook), nrms_ship, nrms_fused,
-        if (nrms_fused <= nrms_ship) "NO-WORSE" else "WORSE",
-        differing, 3 * rows * n,
+        rows,                                                 k,         n,            halves, @backingInt(codebook), nrms_ship, nrms_fused,
+        if (nrms_fused <= nrms_ship) "NO-WORSE" else "WORSE", differing, 3 * rows * n,
     });
     if (!std.math.isFinite(nrms_ship) or !std.math.isFinite(nrms_fused)) return error.Exl3ProjectionDiverges;
     if (nrms_fused > 1e-3) return error.Exl3ProjectionDiverges;
@@ -501,7 +494,6 @@ test "EXL3 the conditioning's wkv: the three dense calls against the one grouped
     try condWkvFusion(device, queue, 5120, 512, 8, .mul1, 128, 0x7c3a_1b2d); // the window, 128 rows
     try condWkvFusion(device, queue, 5120, 512, 8, .mul1, 12, 0x7c3a_1b2d); // a short window, 12 rows
 }
-
 
 test "EXL3 the conditioning's tap projection: the shipped body against the tensor-unit tile (float64)" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
@@ -1409,7 +1401,12 @@ test "encodes on one encoder before the harness fails (TF_BISECT=1)" {
         const enc = cb.compute(.serial);
         exl3.useMatrix(enc, m2);
         try exl3.encodeIndexed(&p, enc, .{ .descriptors = .{ .buffer = desc2 }, .count = 8, .k = k2, .n = n2 }, view(h.view(x2)), view(h.view(y2)), view(h.view(sc2)), .{
-            .count = 8, .x_stride = k2, .y_stride = n2, .input_rows = 8, .output_rows = 8, .output = .bf16,
+            .count = 8,
+            .x_stride = k2,
+            .y_stride = n2,
+            .input_rows = 8,
+            .output_rows = 8,
+            .output = .bf16,
             .routes = .{ .ids = view(h.view(rr2)), .repeat = 1 },
         });
         enc.end();
@@ -1493,7 +1490,12 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
     for (&matrices, 0..) |*m, g| try exl3.encode(&p, enc, m.*, .{ .buffer = q_gpu, .offset = g * k * 2 }, .{ .buffer = legacy_gpu, .offset = g * n * 2 }, view(h.view(scratch)), .{ .count = 1, .x_stride = q_width, .y_stride = group_output, .output = .bf16 });
     enc.barrier();
     try exl3.encodeIndexed(&p, enc, .{ .descriptors = .{ .buffer = desc_gpu }, .count = slices, .k = k, .n = n }, view(h.view(q_gpu)), view(h.view(fused_gpu)), view(h.view(scratch)), .{
-        .count = slices, .x_stride = k, .y_stride = n, .input_rows = slices, .output_rows = slices, .output = .bf16,
+        .count = slices,
+        .x_stride = k,
+        .y_stride = n,
+        .input_rows = slices,
+        .output_rows = slices,
+        .output = .bf16,
         .routes = .{ .ids = view(h.view(routes_gpu)), .repeat = 1 },
     });
     enc.end();
@@ -1530,7 +1532,12 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
         errdefer enc2.end();
         for (&matrices) |*m| exl3.useMatrix(enc2, m.*);
         try exl3.encodeIndexed(&p, enc2, .{ .descriptors = .{ .buffer = desc_gpu }, .count = slices, .k = k, .n = n }, view(h.view(q_gpu)), view(h.view(fused_ids)), view(h.view(scratch)), .{
-            .count = slices, .x_stride = k, .y_stride = n, .input_rows = slices, .output_rows = slices, .output = .bf16,
+            .count = slices,
+            .x_stride = k,
+            .y_stride = n,
+            .input_rows = slices,
+            .output_rows = slices,
+            .output = .bf16,
             .input_ids = view(h.view(in_ids)),
             .output_ids = view(h.view(out_ids)),
             .routes = .{ .ids = view(h.view(routes_gpu)), .repeat = 1 },
@@ -1581,7 +1588,12 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
             errdefer enc8.end();
             for (&matrices) |*m| exl3.useMatrix(enc8, m.*);
             try exl3.encodeIndexed(&p, enc8, .{ .descriptors = .{ .buffer = desc_gpu }, .count = slices, .k = k, .n = n }, view(h.view(q8)), view(h.view(fused8)), view(h.view(scratch)), .{
-                .count = slots, .x_stride = k, .y_stride = n, .input_rows = slots, .output_rows = slots, .output = .bf16,
+                .count = slots,
+                .x_stride = k,
+                .y_stride = n,
+                .input_rows = slots,
+                .output_rows = slots,
+                .output = .bf16,
                 .tile_rows = 64,
                 .grouped = true,
                 .input_ids = view(h.view(slot_ids)),
@@ -1724,7 +1736,6 @@ test "decode MoE at one row, 120 dispatches, isolated (TF_ROOFLINE_DEC=1)" {
     std.debug.print("ROOFLINE_DEC {{\"layers\":{d},\"gpu_ms\":{d:.2},\"gbs\":{d:.1},\"e12_weights_s\":{d:.3}}}\n", .{ layers, seconds * 1e3, bytes / seconds / 1e9, weights / seconds / 1e12 });
 }
 
-
 // Round 268: the grouped window path at the shape a drafted round actually runs -- three rows, six slots a row,
 // experts deduplicated across slots, and the plan's sixty-four-row padding -- against the shipped per-row call
 // (indexed == 1). Hand-builds the arrays the group plan produces (offsets sixty-four-aligned a expert, scatter in
@@ -1798,7 +1809,12 @@ test "grouped window: dedup and padding against the per-row path (TF_GRP_WIN=1)"
         errdefer enc.end();
         for (&matrices) |*m| exl3.useMatrix(enc, m.*);
         try exl3.encodeIndexed(&p, enc, .{ .descriptors = .{ .buffer = desc_gpu }, .count = experts, .k = k, .n = n }, view(h.view(x)), view(h.view(legacy)), view(h.view(scratch)), .{
-            .count = slots, .x_stride = k, .y_stride = n, .input_rows = rows, .output_rows = slots, .output = .bf16,
+            .count = slots,
+            .x_stride = k,
+            .y_stride = n,
+            .input_rows = rows,
+            .output_rows = slots,
+            .output = .bf16,
             .input_ids = view(h.view(sources)),
             .routes = .{ .ids = view(h.view(ids)), .repeat = 6 },
         });
@@ -1813,7 +1829,12 @@ test "grouped window: dedup and padding against the per-row path (TF_GRP_WIN=1)"
         errdefer enc.end();
         for (&matrices) |*m| exl3.useMatrix(enc, m.*);
         try exl3.encodeIndexed(&p, enc, .{ .descriptors = .{ .buffer = desc_gpu }, .count = experts, .k = k, .n = n }, view(h.view(x)), view(h.view(grouped_y)), view(h.view(scratch)), .{
-            .count = padded, .x_stride = k, .y_stride = n, .input_rows = rows, .output_rows = slots, .output = .bf16,
+            .count = padded,
+            .x_stride = k,
+            .y_stride = n,
+            .input_rows = rows,
+            .output_rows = slots,
+            .output = .bf16,
             .tile_rows = 64,
             .grouped = true,
             .input_ids = view(h.view(token_ids)),
