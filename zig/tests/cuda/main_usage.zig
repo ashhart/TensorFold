@@ -173,6 +173,7 @@ pub const usage =
     \\  ripple-serve              Ripple's lane backend: shared rounds, copied drafts, kept states, logprob rows (synthetic)
     \\  ricursive-dflash2-attn-contract  Ripple's draft attention and top-32 through gates 1-4, controls red; timings
     \\  ricursive-dflash2-contract Ripple's DFlash2 drafter glue (norms, prep, conv, SiLU) through gates 1-4, controls red
+    \\  ripple-drafted            Ripple drafted by DFlash2: drafted == plain at 1, 2 and 8 streams, admission (synthetic)
     \\  moss-contract [ONLY..]    MOSS-Image's own kernels, its decoder's unpack and its encoder's mixer, gates 1-4, controls red
     \\  idol-decoder-contract     Idol's decoders' stem, to_kv, head norms and attention through gates 1-4, controls red
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red

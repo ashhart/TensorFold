@@ -10,6 +10,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8) !bool {
         try @import("contract_ricursive_dflash2.zig").run(gpu);
     } else if (std.mem.eql(u8, cmd, "ricursive-dflash2-attn-contract")) {
         try @import("contract_ricursive_dflash2_attn.zig").run(gpu);
+    } else if (std.mem.eql(u8, cmd, "ripple-drafted")) {
+        try @import("ripple_drafted_tests.zig").run(gpu);
     } else if (std.mem.eql(u8, cmd, "ripple-forward")) {
         try @import("ripple_forward_tests.zig").run(gpu);
     } else if (std.mem.eql(u8, cmd, "ripple-serve")) {
