@@ -1,4 +1,4 @@
-//! Prompt-cache tests: a fake family with running-sum state, so a resumed pass equals a fresh one exactly as expected.
+//! Prompt-cache tests: a fake running-sum family, so a resumed pass equals a fresh one exactly when it should.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const Snapshots = pc.Snapshots;

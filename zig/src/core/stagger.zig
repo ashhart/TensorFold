@@ -19,7 +19,7 @@ pub fn start(n: usize, parts: usize, k: usize) usize {
 
 pub const Call = struct { rows: usize, parts: usize };
 
-/// A prompt's next call: `left` rows over the fewest calls of two segments up to `step`, each `min_rows` or more.
+/// Prompt's next call: `left` rows evenly over the fewest calls of two segments up to `step`, each `min_rows` or more.
 pub fn next(left: usize, step: usize, min_rows: usize) Call {
     const calls = @max(1, (left + 2 * step - 1) / (2 * step));
     const rows_ = (left + calls - 1) / calls;
