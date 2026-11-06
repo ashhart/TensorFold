@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try qwen.Engine.init(a, io, &ctx, args[1], false);
+    const e = try qwen.Engine.init(a, io, &ctx, args[1], false, null);
     defer e.deinit();
     if (!e.g.moe()) return error.MoeCheckpointRequired;
     const D = e.g.hidden;
