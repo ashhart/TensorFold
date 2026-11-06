@@ -395,6 +395,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - The prompt cache can let a family count repeated image or keyed prompts as repeats, under the cache's own key. No family uses it yet (#1929, part of #1927). Thanks to @laudney.
 
+- The prompt cache can keep a bounded ladder of intermediate checkpoints under a long prompt's history mark, so a later, compacted prompt resumes inside its retained prefix instead of the shared cut. On one GB10 with `nvidia/Qwen3.8-Flash-Next-NVFP4`, a 104K-token request that kept its first 100K resumed 65,536 tokens instead of 2, cutting TTFT from 50.7 s to 19.9 s with the same tokens; a cold 165K prompt paid 0.9 s more, and the 8 GiB cache held two more states. A follow-up after that turn resumed 65,536 tokens too, because the compacted turn evicted the larger states. `TF_PROMPT_INTERMEDIATE=1` enables it for Flash Next on CUDA; it stays off by default (#1909). Thanks to @javierbits.
+
 - HIP Qwen3.5-family servers price shared draft rounds at the row bucket they actually run, so Qwen3.6-35B-A3B with MTP at four streams no longer drops into a slower drafting mode, and models load faster. Tokens are unchanged (#1830, fixes #1695). Thanks to @AbrahamCete.
 
 - The Living Weights view reads a shard's header with core's safetensors reader, so a malformed header, length word or offset is refused with an error instead of a panic or a 64 GiB allocation, and its sums and row counts are checked (#1923, part of #1872). Thanks to @jschmied.

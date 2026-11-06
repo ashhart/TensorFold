@@ -1,6 +1,7 @@
 //! A CUDA family's prompt cache in the native server: rules, budget and copies from the family's `snap_*` decls.
 const std = @import("std");
 const api = @import("engine_api");
+const env = @import("sys").env;
 
 /// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet and snap_fork if set.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
@@ -8,6 +9,10 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
+    if (@hasDecl(F, "snap_intermediate")) { // a chunk-invariant family's opt-in ladder of intermediate checkpoints
+        rules.intermediate = F.snap_intermediate.tokens;
+        rules.intermediate_most = F.snap_intermediate.most;
+    }
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;
         rules.grid = F.snap_grid;
@@ -20,6 +25,8 @@ pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
     var rules = cacheRules(F);
     rules.chunk = prompt_rows;
     if (@hasDecl(F, "snap_repeat_min")) rules.repeat_min = if (std.c.getenv("TF_FLASHNEXT_REPEAT_CACHE")) |v| (if (std.mem.eql(u8, std.mem.span(v), "0")) 0 else F.snap_repeat_min) else F.snap_repeat_min;
+    // Opt-in until a served A/B shows the extra marks pay: TF_PROMPT_INTERMEDIATE=1 enables the family's ladder.
+    if (rules.intermediate > 0) rules.intermediate = if (std.c.getenv("TF_PROMPT_INTERMEDIATE")) |v| (if (std.mem.eql(u8, std.mem.span(v), "0")) 0 else rules.intermediate) else 0;
     rules.chunk_starts = false;
     return rules;
 }
@@ -56,10 +63,16 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     const Headless = struct {
         pub const snap_lookahead: u32 = 0;
     };
+    const Ladder = struct {
+        pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
+    };
     try std.testing.expectEqual(@as(u32, 0), cacheRules(Headless).lookahead);
     const any = cacheRules(Other);
     try std.testing.expect(!any.planned and any.min_prompt == 0 and any.lookahead == 1 and any.warm == .off);
     try std.testing.expect(cacheRules(Warm).warm == .waits and cacheRules(Glm).warm == .off);
+    try std.testing.expect(!any.planned and any.intermediate == 0);
+    try std.testing.expectEqual(@as(u32, 8192), cacheRules(Ladder).intermediate);
+    try std.testing.expectEqual(@as(u8, 4), cacheRules(Ladder).intermediate_most);
     const Stub = struct {
         fn bytes(_: *anyopaque, _: u32) u64 {
             return 0;
@@ -86,6 +99,19 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     defer store.deinit();
     const marks = try store.marks(arena.allocator(), prompt, 0, 3540, &.{}, &.{}, &.{});
     try std.testing.expectEqualSlices(u32, &[_]u32{2048}, marks);
+}
+
+test "the ladder stays off unless TF_PROMPT_INTERMEDIATE is set" {
+    const Ladder = struct {
+        pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
+    };
+    _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    _ = env.setenv("TF_PROMPT_INTERMEDIATE", "0", 1);
+    defer _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    _ = env.setenv("TF_PROMPT_INTERMEDIATE", "1", 1);
+    try std.testing.expectEqual(@as(u32, 8192), passRules(Ladder, 512).intermediate);
 }
 
 test {
