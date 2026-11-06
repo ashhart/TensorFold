@@ -14,6 +14,17 @@ const forks = @import("prompt_cache_fork.zig");
 pub const rows = @import("rows_store.zig");
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
+/// A prefill chunk's kernel class by rows: the decode path (<= 8), the shared body (9..63), the tensor tile (>= 64).
+pub fn chunkClass(n: usize) u8 {
+    return if (n <= 8) 0 else if (n < 64) 1 else 2;
+}
+
+/// The rows a fresh pass's last chunk holds at `len` for a zero-anchored grid `grid`: `len % grid`, or one whole
+/// chunk when it divides. ROUND-502: the class of this is what a resumed suffix's last chunk must keep.
+pub fn freshLast(grid: u32, len: usize) usize {
+    const g: usize = @max(1, grid);
+    return if (len % g != 0) len % g else @min(len, g);
+}
 pub const singleReclaim = imprint.singleReclaim; // the learned-state file helpers, beside the Imprint that owns them
 pub const singleForgetChecked = imprint.singleForgetChecked;
 /// What a family gives the cache: copies of its state while the prompt pass stands at a chunk end.
@@ -99,7 +110,7 @@ pub const RestoreLog = @import("prompt_cache_restore.zig").Log;
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 /// The borrowed entry a backend restores; the caller must report resumed or release it, even on cancellation.
-pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
+pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{}, snap_at: u32 = 0 };
 pub const Store = struct {
     image_frame: u32 = 0,
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
@@ -207,8 +218,15 @@ pub const Store = struct {
     }
 
     /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
+    /// ROUND-472: a `tail` family also keeps one off-grid state before a prompt's end, so a later turn resumes
+    /// at its own boundary instead of at the last grid chunk.
     pub fn usable(s: *const Store, at: u32, starts: []const u32) bool {
-        return at > 0 and (!s.rules.planned or s.startAt(starts, at) == at);
+        return at > 0 and (!s.rules.planned or (s.rules.tail_align > 1 and (s.rules.tail or s.rules.end_mark)) or s.startAt(starts, at) == at);
+    }
+
+    /// Whether `at` is a chunk start of this pass (every position for a family without a planned grid).
+    pub fn aligned(s: *const Store, at: u32, starts: []const u32) bool {
+        return !s.rules.planned or s.startAt(starts, at) == at;
     }
 
     /// The chunk start at or before `at`: the request's, else the family's grid (0 when none).
@@ -306,10 +324,11 @@ pub const Store = struct {
             s.find(prompt, starts, spans);
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
+        var tail_at: u32 = 0;
         const ordinary = if (s.active_rewind_at == 0)
-            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
+            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}, &tail_at))
         else
-            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
+            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{}, &tail_at)), endpoint, s.active_rewind_at, endpoint_bytes);
         const known_end = if (user_end <= history_len) user_end else 0;
         const marks_ = interior.add(s, a, prompt, from, known_end, rewind_len, starts, spans, ordinary, endpoint, endpoint_bytes, e) catch |err| {
             a.free(ordinary);
@@ -321,7 +340,12 @@ pub const Store = struct {
         }
         s.reserve(prompt, born, e, marks_, spans);
         if (e) |entry| entry.borrowers += 1;
-        return .{ .entry = e, .marks = marks_ };
+        // ROUND-504: the tail mark this lookup planned, where the backend may snapshot it inside the chunk that
+        // runs past it. Only a tensor-tile tail (>= 64 rows) and only with a bulk piece behind it: the merged
+        // chunk then keeps the kernel class the cut's own tail chunk would have run.
+        const snap_at: u32 = if (s.rules.tail_snap and tail_at > from and tail_at < prompt.len and
+            prompt.len - tail_at >= 64 and std.mem.indexOfScalar(u32, marks_, tail_at) != null) tail_at else 0;
+        return .{ .entry = e, .marks = marks_, .snap_at = snap_at };
     }
 
     /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
@@ -402,11 +426,14 @@ pub const Store = struct {
 
     /// Where a pass from `from` keeps states: the history, then min_gap apart the stable prefix and shared blocks.
     pub fn marks(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
-        return s.marksRewind(a, prompt, from, history_len, 0, shared, starts, &.{}, previous);
+        var tail_at: u32 = 0;
+        return s.marksRewind(a, prompt, from, history_len, 0, shared, starts, &.{}, previous, &tail_at);
     }
 
     /// `marks` with the active rewind second: kept however near the other marks, never at or before the resume point.
-    fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, previous: []const u32) ![]const u32 {
+    /// `tail_at_out` is the tail mark it planned (0: none), which a backend may snapshot inside a chunk (tail_snap).
+    fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, previous: []const u32, tail_at_out: *u32) ![]const u32 {
+        tail_at_out.* = 0;
         const short = !s.rules.planned and prompt.len < s.rules.min_prompt; // the history's mark only, where the pass cuts a chunk anyway
         if (short and s.rules.chunk == 0) return &.{};
         var out: std.ArrayList(u32) = .empty;
@@ -417,6 +444,62 @@ pub const Store = struct {
         const repeat_at = s.repeat_log.mark(s.rules.repeat_min, prompt, from, s.rules.lookahead, s.rules.planned);
         const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else if (history_len == 0) repeat_at else history_len;
         try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
+        // ROUND-472: ONE off-grid state per conversation, at the pass's last whole tile before the end, so the
+        // next turn resumes at its own boundary and prefills only what it added. Tile-aligned (a resumed suffix
+        // must sit in the lanes a fresh pass gives it) and used only while its suffix is one chunk.
+        // ROUND-475: IT ADVANCES ON A RESUMED PASS. With the mark planned only on a pass from 0, a growing
+        // conversation's suffix grew by every turn's new rows until it passed the grid, and the store fell back to
+        // the oldest grid state (a 21k chat at 30k tokens re-prefilled 8k rows, and past 37.8k the 15,872 one).
+        // The mark is planned whenever the bulk piece from `from` is a tensor-tile chunk (>= 64 rows), so the
+        // pass splits where its own grid split would put a chunk end anyway and the next turn resumes near its end.
+        // ROUND-502: WITH THE END STATE KEPT, A RESUMED PASS NEEDS NO TAIL CUT. The cut exists so a later turn
+        // can start on a tile mark; the end state is the exact state a fresh pass stands on (receipt: on/off/
+        // fresh equal at 22,705) and a lookup may also fall back to an OLDER end state whose suffix keeps the
+        // class. What the cut costs is the second chunk itself: its all-expert read is ~0.5 s, whatever its row
+        // count (the 25-33 % block-filter round and the 1.86-2.64 s cached turn are both that term). So the
+        // tail is planned on a pass from 0, where no end state exists yet -- one extra chunk per
+        // conversation, not per turn. ROUND-506: ON A RESUMED PASS IT IS PLANNED AS A SNAPSHOT, not a cut:
+        // the R-504 stash captures it inside the chunk that runs past it, so the pass keeps both the tile
+        // state and its own end in one forward. It is planned only when its suffix is a tensor tile (>= 64
+        // rows), where `snap_at` can fire; a shorter suffix would make the mark a barrier again.
+        const resumed_tail = if (std.c.getenv("TF_DSV41_RESUMED_TAIL")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
+        const tail_at: u32 = if (s.rules.tail and s.rules.tail_align > 1 and !short and prompt.len > s.rules.min_prompt and
+            (!s.rules.end_mark or from == 0 or (s.rules.tail_snap and resumed_tail)))
+        blk: {
+            const tile: usize = @max(1, s.rules.tail_align);
+            // ROUND-475: THE CUT'S LAST CHUNK KEEPS THE REFERENCE'S KERNEL CLASS. A pass with no marks ends on
+            // `prompt.len % grid` rows (the grid's whole chunks, then the remainder); the cut ends on
+            // `prompt.len % tile`. A chunk's class changes at 8 rows (decode) and 64 (shared body vs the tensor
+            // tile), so a remainder in the other class runs different arithmetic and can move the reply --
+            // ROUND-474's four-row failure (P_B = 184x128 + 4, the reference's last chunk 7,684 rows) is this
+            // rule, and so is its >= 9-row fix. Back the cut off whole tiles until the class matches.
+            const fresh_last: usize = if (s.rules.grid > 0 and prompt.len % s.rules.grid != 0)
+                prompt.len % s.rules.grid
+            else
+                @min(prompt.len, @as(usize, @max(1, s.rules.grid)));
+            const class_want = chunkClass(fresh_last);
+            var f: usize = prompt.len % tile;
+            if (f == 0) f = tile;
+            var guard: u32 = 0;
+            while (chunkClass(f) != class_want and guard < 4) : (guard += 1) f += tile;
+            if (chunkClass(f) != class_want or f > prompt.len) break :blk 0;
+            const at: u32 = @intCast(prompt.len - f);
+            // A resumed pass advances only when its bulk piece is a tensor-tile chunk (the reference's own
+            // intermediate chunks are) and the new state is past the point this pass resumed at.
+            if (from > 0 and (at <= from or at - from < 64)) break :blk 0;
+            if (from > 0 and prompt.len - at < 64) break :blk 0; // a resumed tail must be snapshottable, never a cut
+            break :blk at;
+        } else 0;
+        tail_at_out.* = tail_at;
+        if (tail_at != 0 and std.mem.indexOfScalar(u32, want.items, tail_at) == null) try want.append(a, tail_at);
+        // ROUND-502: THE PASS'S OWN END IS A STATE TOO, CLASS-CHECKED. The tile tail serves a turn that adds only
+        // a few rows; a turn that adds a tensor-tile chunk does not need the 128 rows behind it re-prefilled (one
+        // whole chunk's all-expert read, the cache turn's floor). A state at the very end is the state a fresh
+        // pass stands on when this pass's last chunk kept the fresh remainder's class: rows are boundary- and
+        // lane-invariant inside a class (ROUND-472 form 4: 176 rows against the reference's 6,192, exact).
+        // `find` re-checks the class against the next turn's own remainder, so a small turn still takes the tail.
+        const end_at: u32 = if (s.rules.end_mark and !short and prompt.len > s.rules.min_prompt) @intCast(prompt.len) else 0;
+        if (end_at != 0 and std.mem.indexOfScalar(u32, want.items, end_at) == null) try want.append(a, end_at);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
         // the prompt this one parts from: the one it resumed, or (fork rule) on a miss the kept one sharing the most
         const kept = if (previous.len > 0 or !s.rules.fork) previous else forks.longestShared(Entry, s.entries.items, prompt);
@@ -429,9 +512,11 @@ pub const Store = struct {
         if (!short and s.rules.tail and history_len == 0) try want.append(a, @intCast(prompt.len -| @max(1, s.rules.lookahead)));
         const fork_at = if (s.rules.fork and s.rules.planned) s.startAt(starts, stable) else stable; // where the loop snaps it
         for (want.items, 0..) |w, k| {
-            const at = if (s.rules.planned) s.startAt(starts, w) else w;
-            if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
-            const priority = (rewind > 0 and k == 1 and at == rewind) or (s.rules.fork and at == fork_at);
+            const tail = tail_at != 0 and w == tail_at;
+            const end = end_at != 0 and w == end_at;
+            const at = if (s.rules.planned and !tail and !end) s.startAt(starts, w) else w;
+            if (at <= from or at + s.rules.lookahead > prompt.len or at > prompt.len or (at >= prompt.len and !tail and !end) or !s.usable(at, starts)) continue;
+            const priority = tail or end or (rewind > 0 and k == 1 and at == rewind) or (s.rules.fork and at == fork_at);
             if (!priority and !(k == 0 and warm_pass) and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm == .on))) continue; // near the resume point
             if (k > 0 and !priority) { // the history's mark always (warm families: away from the resume point); the others away from it and each other
                 const near = for (out.items) |o| {
@@ -442,6 +527,19 @@ pub const Store = struct {
             if (std.mem.indexOfScalar(u32, out.items, at) == null) try out.append(a, at);
         }
         std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
+        if (end_at != 0) { // the last chunk this pass actually runs must keep the fresh remainder's class
+            var last_from: u32 = from;
+            for (out.items) |o| {
+                if (o > last_from and o < end_at) last_from = o;
+            }
+            const span: usize = end_at - last_from;
+            const fresh: usize = freshLast(s.rules.grid, end_at);
+            if (s.rules.grid < 64 or span < 64 or chunkClass(span) != chunkClass(fresh)) {
+                if (std.mem.indexOfScalar(u32, out.items, end_at)) |i| {
+                    _ = out.orderedRemove(i);
+                }
+            }
+        }
         return out.toOwnedSlice(a);
     }
 
@@ -582,6 +680,7 @@ test {
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
+    _ = @import("prompt_cache_end_test.zig");
     _ = @import("prompt_cache_interior_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_fork_test.zig");

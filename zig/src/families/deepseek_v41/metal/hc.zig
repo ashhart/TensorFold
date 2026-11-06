@@ -7,8 +7,8 @@ pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const tg = 256;
 pub const mult = 4;
 
-const MixArgs = extern struct { dim: u32, rows: u32, iters: u32, eps: f32, hc_eps: f32, alpha: f32 };
-const RowArgs = extern struct { dim: u32, rows: u32 };
+pub const MixArgs = extern struct { dim: u32, rows: u32, iters: u32, eps: f32, hc_eps: f32, alpha: f32 };
+pub const RowArgs = extern struct { dim: u32, rows: u32 };
 
 /// The coefficients one sublayer makes, and the ones it consumes (made by the sublayer before it).
 pub const Hc = struct {

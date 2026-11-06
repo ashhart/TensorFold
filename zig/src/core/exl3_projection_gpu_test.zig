@@ -570,3 +570,91 @@ test "shared prefill preserves gather and scatter maps across a partial tile" {
         try std.testing.expectEqualSlices(u8, original.slice(u8, bytes), actual.slice(u8, bytes));
     }
 }
+
+test "the fused SwiGLU + down rotate writes the two-pass rotated rows bit for bit" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
+    defer p.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const w = try Owned.init(device, 6, .mul1, 0x53574752);
+    defer w.deinit();
+    const count = 6;
+    const descriptors = try device.buffer(@sizeOf(ex.ExpertDescriptor), mtl.ResourceOptions.shared);
+    defer descriptors.deinit();
+    descriptors.slice(ex.ExpertDescriptor, 1)[0] = try ex.descriptor(w.matrix);
+    // Gate and up rows span the sigmoid's linear and saturating ranges; the weights are not one.
+    const gate = try device.buffer(count * (k + 8) * 2 + 32, mtl.ResourceOptions.shared);
+    defer gate.deinit();
+    const up = try device.buffer(count * (k + 8) * 2 + 32, mtl.ResourceOptions.shared);
+    defer up.deinit();
+    for (0..count) |row| {
+        for (0..k) |i| {
+            const a: f32 = @as(f32, @floatFromInt(@as(i32, @intCast((i * 37 + row * 11) % 29)) - 14)) / 16;
+            const b: f32 = @as(f32, @floatFromInt(@as(i32, @intCast((i * 53 + row * 7) % 31)) - 15)) / 8;
+            gate.slice(u16, count * (k + 8) + 16)[16 + row * (k + 8) + i] = bf16(a);
+            up.slice(u16, count * (k + 8) + 16)[16 + row * (k + 8) + i] = bf16(b);
+        }
+    }
+    const weights = try device.buffer(count * 4 + 16, mtl.ResourceOptions.shared);
+    defer weights.deinit();
+    for (0..count) |row| weights.slice(f32, count + 4)[4 + row] = 0.25 + 0.1 * @as(f32, @floatFromInt(row));
+    const routes = try device.buffer(count * 4, mtl.ResourceOptions.shared);
+    defer routes.deinit();
+    @memset(routes.slice(u32, count), 0);
+    // A destination permutation: the fused pass scatters a token-major row into its expert tile's slot, and the
+    // down call's GEMM reads the dispatch row.
+    const destinations = try device.buffer(count * 4, mtl.ResourceOptions.shared);
+    defer destinations.deinit();
+    const dest = [_]u32{ 3, 0, 4, 1, 5, 2 };
+    @memcpy(destinations.slice(u32, count), &dest);
+    const activation = try device.buffer(count * k * 2, mtl.ResourceOptions.shared);
+    defer activation.deinit();
+    const plain = try device.buffer(count * n * 2, mtl.ResourceOptions.shared);
+    defer plain.deinit();
+    const fused = try device.buffer(count * n * 2, mtl.ResourceOptions.shared);
+    defer fused.deinit();
+    const scratch_plain = try device.buffer(try ex.scratchBytes(k, n, count), mtl.ResourceOptions.shared);
+    defer scratch_plain.deinit();
+    const scratch_fused = try device.buffer(try ex.scratchBytes(k, n, count), mtl.ResourceOptions.shared);
+    defer scratch_fused.deinit();
+    var opts = mtl.CompileOptions.mlx();
+    opts.math_functions = .precise;
+    const lib = try mtl.Library.fromSource(device, sources.deepseek_v41_ops, opts);
+    defer lib.deinit();
+    const swiglu = try mtl.Pipeline.init(device, lib, "dsv41_swiglu", false);
+    defer swiglu.deinit();
+    const dims = ex.Experts{ .descriptors = .{ .buffer = descriptors }, .count = 1, .k = k, .n = n };
+    // The shipped two-pass path: swiglu into the activation buffer, then the down call's own rotate_in.
+    {
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.concurrent);
+        ex.useMatrix(e, w.matrix);
+        e.setPipeline(swiglu);
+        e.setBuffer(gate, 16, 0);
+        e.setBuffer(up, 16, 1);
+        e.setBuffer(weights, 16, 2);
+        e.setBuffer(activation, 0, 3);
+        e.setValue([6]u32{ count, k, k + 8, k, 1, 0 }, 4);
+        e.dispatchThreads(.{ .width = k, .height = count }, .{ .width = 256 });
+        e.barrier();
+        try ex.encodeIndexed(&p, e, dims, .{ .buffer = activation }, .{ .buffer = plain }, .{ .buffer = scratch_plain }, .{ .count = count, .x_stride = k, .y_stride = n, .routes = .{ .ids = .{ .buffer = routes } } });
+        try complete(cb, e);
+    }
+    // The fused path: one pass writes the rotated rows at their destinations, the down call skips rotate_in.
+    {
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.concurrent);
+        ex.useMatrix(e, w.matrix);
+        ex.encodeSwiGLUPreRotate(&p, e, .{ .buffer = gate, .offset = 16 }, .{ .buffer = up, .offset = 16 }, .{ .buffer = weights, .offset = 16 }, .{ .buffer = routes }, .{ .buffer = destinations }, .{ .buffer = descriptors }, .{ .buffer = scratch_fused }, .{ .rows = count, .k = k, .input_stride = k + 8, .output_stride = k, .experts = 1 });
+        e.barrier();
+        try ex.encodeIndexed(&p, e, dims, .{ .buffer = scratch_fused }, .{ .buffer = fused }, .{ .buffer = scratch_fused }, .{ .count = count, .x_stride = k, .y_stride = n, .routes = .{ .ids = .{ .buffer = routes } }, .prerotated = true });
+        try complete(cb, e);
+    }
+    var inverse: [count]usize = undefined;
+    for (dest, 0..) |d, r| inverse[d] = r;
+    const plain_rows = plain.slice(u16, count * n);
+    const fused_rows = fused.slice(u16, count * n);
+    for (0..count) |r| try std.testing.expectEqualSlices(u16, plain_rows[inverse[r] * n ..][0..n], fused_rows[r * n ..][0..n]);
+}

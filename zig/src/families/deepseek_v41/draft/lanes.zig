@@ -119,7 +119,7 @@ pub const Lanes = struct {
         for (window, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
         const shared = try arena.alloc(lanes.config.Cost, @min(v.len, batch_rows));
         for (shared, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
-        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .join_tail = x.target.vtable.tail != null and joinTail(), .piece_runs = envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = envOn("TF_DSV41_REPLAY_RUNS") };
+        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .shared_plain = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .join_tail = x.target.vtable.tail != null and joinTail(), .piece_runs = envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = envOn("TF_DSV41_REPLAY_RUNS") };
     }
 
     /// TF_DSV41_TAIL_JOIN=1: a prompt in pieces leaves its last token to its first round's shared window (default off).
@@ -321,6 +321,7 @@ pub const Lanes = struct {
     }
 
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
+        if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("lanes.verify called", .{});
         const x = self(ptr);
         try x.settle();
         _ = x.scratch.reset(.retain_capacity);
@@ -428,6 +429,11 @@ pub const Lanes = struct {
 
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
+        const t0 = std.time.Instant.now() catch unreachable;
+        defer if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) {
+            const t1 = std.time.Instant.now() catch unreachable;
+            std.log.info("draft pass: {d:.2} ms for {d} request(s)", .{ @as(f64, @floatFromInt(t1.since(t0))) / 1e6, requests.len });
+        };
         try x.settle();
         _ = x.scratch.reset(.retain_capacity);
         const a = x.scratch.allocator();
@@ -516,6 +522,7 @@ pub const Lanes = struct {
 
     /// The held drafts as host tokens: the main chain, then each sibling's root and its chain (gpa-owned).
     fn heldTree(ptr: *anyopaque, s: *Stream, gpa: Allocator) anyerror!?lanes.stream.Held {
+        if (std.c.getenv("TF_DSV41_DRAFT_DEBUG") != null) std.log.info("lanes.heldTree called", .{});
         const x = self(ptr);
         const st = try x.get(s);
         if (st.n == 0) return null;

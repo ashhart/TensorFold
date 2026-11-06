@@ -25,6 +25,7 @@ struct TfFHcArgs {
   uint dim, rows, iters;
   float eps, hc_eps, alpha;
 };
+static_assert(sizeof(TfFHcArgs) == 24, "TfFHcArgs must mirror metal/fused.zig's FhcArgs");
 
 // The hc mix's sums by simdgroup: group (m, sg, row) is simdgroup sg of matvec m's 256-thread sum (m 24: squares).
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_f_hcmix_part(
@@ -138,6 +139,7 @@ struct TfFNormArgs {
   uint dim, rows;
   float eps;
 };
+static_assert(sizeof(TfFNormArgs) == 12, "TfFNormArgs must mirror metal/fused.zig's NormArgs");
 
 // glue_tmp's (hcpre with COLLAPSE,) rmsnorm and actq of a row in a group of 256; dim a multiple of 32, <= 256 NV.
 template <bool COLLAPSE, uint NV>
@@ -199,6 +201,7 @@ struct TfFKvArgs {
   uint dim, rows, reps;
   float eps;
 };
+static_assert(sizeof(TfFKvArgs) == 16, "TfFKvArgs must mirror metal/fused.zig's KvArgs");
 
 // glue_tmp's rmsnorm, rope, actq and scatter of a window key row (dim 512) in a group of 256, into D[reps r + k].
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_f_kv(
@@ -246,6 +249,7 @@ struct TfFSwiArgs {
   uint n;
   float limit;
 };
+static_assert(sizeof(TfFSwiArgs) == 8, "TfFSwiArgs must mirror metal/fused.zig's SwiArgs");
 
 // The shared expert's clamped SwiGLU (glue_tmp's swiglu) and its act_quant, a block of 32 a simdgroup; n % 32 == 0.
 kernel void tf_dsv41_f_swiglu(const device bfloat* G [[buffer(0)]], const device bfloat* U [[buffer(1)]],
@@ -262,6 +266,7 @@ kernel void tf_dsv41_f_swiglu(const device bfloat* G [[buffer(0)]], const device
 struct TfFPostArgs {
   uint dim, rows;
 };
+static_assert(sizeof(TfFPostArgs) == 8, "TfFPostArgs must mirror metal/fused.zig's PostArgs");
 
 // The MoE join (routed fp32 plus shared bf16, one rounding, into B) and hc_post of it (glue_tmp's join and hcpost).
 kernel void tf_dsv41_f_joinpost(const device float* RT [[buffer(0)]], const device bfloat* SH [[buffer(1)]],
@@ -335,6 +340,7 @@ template [[host_name("tf_dsv41_f_pre_a_v32")]] [[kernel]] decltype(tf_dsv41_f_pr
 struct TfFQuantArgs {
   uint k, nb, na, sa, sb, ta, tb;
 };
+static_assert(sizeof(TfFQuantArgs) == 28, "TfFQuantArgs must mirror metal/fused.zig's QuantArgs");
 
 // glue_tmp's actq a thread a value (its strides), a block of 32 on one simdgroup's lanes; k a multiple of 32.
 kernel void tf_dsv41_f_actq(const device bfloat* X [[buffer(0)]], device bfloat* Y [[buffer(1)]],
