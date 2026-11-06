@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Vision: image patch preparation is rewritten from published model cards and tested behaviour, with byte-equal grid sizes, normalized pixels and cache identities in 55,503 host cases (#2271).
+
 - GLM on CUDA: the recipe notes that `TF_GLM_CHUNK_SOLO=4096` made prompts 12-14% slower with NVIDIA's NVFP4 checkpoint on two GB10s at `--parallel 1`, so leave it unset there (#2288).
 
 - Flash Next on CUDA at `--tp 2` with drafts keeps prompt states, and no longer needs `--prompt-cache-gib 0` to start. On two GB10s, a chat with about 28,500 tokens of history replies in 1.5 s resumed against 21.2 s fresh, with the same replies (#2214, fixes #1829).
