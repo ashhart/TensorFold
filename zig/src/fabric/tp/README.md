@@ -70,3 +70,22 @@ A rank whose transport fails moves its queue pairs to the error state and keeps 
 
 `run_transport.sh MASTER_ADDR PEER_SSH OUTDIR` checks that failure path on two hosts with `tf-tp-test failfast V
 transport` and stops at the first kernel log line or HCA error counter that grows; run it with no arguments for help.
+
+## Experimental four-rank ring
+
+The multirank wire supports gathers for three through eight ranks. Its reductions and exchange use NCCL.
+For exactly four ranks, `TF_TP_ROCE_RELAY=1` opts into a ring with one HCA to each neighbour and no opposite link.
+Name both neighbour HCAs explicitly. The rank order follows the physical ring. All four ranks must opt in;
+the connection table and the existing NCCL byte probe must agree before the wire is retained.
+Default mesh and two- and three-rank paths keep their existing protocol.
+
+Each neighbour receives both halves and forwards one to the opposite rank. Consumers wait for six flags.
+The proxy completes each forward before posting the other direction and posts sequence s only after consuming
+s-2 and receiving every rank's s-1. Variable-length shards carry their padded length beside each half flag.
+A producer must use the existing sequential stream contract: its preceding consumer completes before staging
+another collective. One proxy owns every QP. Wait failures report the source rank and sequence.
+
+`zig build test-roce-multi-host` runs 100,000 random collectives on each of the fake-verbs and shared-memory
+wires, checks every payload word, and covers held readers, full slot boundaries and sequence wrap.
+`zig build test-roce-relay-controls-host` runs the focused custody, fault and arithmetic controls.
+These are host protocol checks. Four-rank CUDA/RDMA execution and performance remain unqualified.

@@ -62,6 +62,8 @@ pub const Config = struct {
     /// `shm` runs the RoCE protocol on one host without RDMA (tests); `verbs` is the real wire.
     roce_wire: enum { verbs, shm } = .verbs,
     roce_fallback: Fallback = .nccl,
+    /// Four-rank neighbour relay only (TF_TP_ROCE_RELAY); mesh and two-rank defaults keep their wire.
+    roce_relay: bool = false,
     /// TF_TP_PLAN_LINK=rdma: the follower polls the plan socket this long before blocking (TF_TP_PLAN_SPIN_US).
     plan_spin_ns: u64 = 0,
     plan_pin: ?PlanPin = null,
@@ -103,6 +105,11 @@ pub const Config = struct {
             const pollers = try int(u32, get, "TF_TP_ROCE_POLLERS", 1, 1, 8);
             const stagger = try int(u32, get, "TF_TP_ROCE_STAGGER_NS", 150, 0, 65535);
             c.roce_fast = 1 | (pollers << 8) | (stagger << 16);
+        }
+        c.roce_relay = try int(u8, get, "TF_TP_ROCE_RELAY", 0, 0, 1) == 1;
+        if (c.roce_relay and c.world != 4) {
+            log.warn("TF_TP_ROCE_RELAY=1 needs TF_TP_WORLD=4 (given {d})", .{c.world});
+            return error.BadSetting;
         }
         c.roce_blocks = try int(u32, get, "TF_TP_ROCE_BLOCKS", 16, 1, 16);
         if (c.roce_blocks & (c.roce_blocks - 1) != 0) {
@@ -160,6 +167,7 @@ pub const Config = struct {
         h.update(std.mem.asBytes(&c.failfast));
         h.update(std.mem.asBytes(&c.roce_wire));
         h.update(std.mem.asBytes(&c.roce_fallback));
+        if (c.roce_relay) h.update("four-rank-relay");
         if (c.graph_cache) |g| h.update(&g.effective(c.graph_cache_env).digest());
         var out: [32]u8 = undefined;
         h.final(&out);
@@ -291,4 +299,23 @@ test "the digest holds the graph cache's effective settings: 0, off and OFF agre
     var family_off = upper;
     family_off.graph_cache = family.graph_cache;
     try std.testing.expectEqualSlices(u8, &zero.digest(), &family_off.digest());
+}
+
+test "relay setting is opt-in, agreed in the digest, and refuses other worlds" {
+    Fake.pairs = &.{};
+    const plain = try Config.parse(&Fake.get);
+    try std.testing.expect(!plain.roce_relay);
+    Fake.pairs = &.{ .{ "TF_TP_WORLD", "4" }, .{ "TF_TP_ROCE_RELAY", "1" } };
+    const ring = try Config.parse(&Fake.get);
+    try std.testing.expect(ring.roce_relay);
+    var mesh = ring;
+    mesh.roce_relay = false;
+    try std.testing.expect(!std.mem.eql(u8, &ring.digest(), &mesh.digest()));
+    Fake.pairs = &.{.{ "TF_TP_ROCE_RELAY", "1" }};
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
+    Fake.pairs = &.{ .{ "TF_TP_WORLD", "3" }, .{ "TF_TP_ROCE_RELAY", "1" } };
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
+    Fake.pairs = &.{ .{ "TF_TP_WORLD", "4" }, .{ "TF_TP_ROCE_RELAY", "2" } };
+    try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
+    Fake.pairs = &.{};
 }

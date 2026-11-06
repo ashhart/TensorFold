@@ -1,4 +1,5 @@
 test {
+    _ = @import("roce_relay_test.zig");
     _ = @import("roce_legacy_posts_test.zig");
     _ = @import("roce_multi_guard.zig");
     _ = @import("roce_multi_pairs.zig");
