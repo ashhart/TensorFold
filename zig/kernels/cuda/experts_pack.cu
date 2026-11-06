@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/experts_pack.cu (lines 1-42, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
+// Device code: src/tensorfold/cuda/experts_pack.cu (lines 1-42, comments, ATen includes dropped), checked by copies.py.
 
 #include <stdint.h>
 
