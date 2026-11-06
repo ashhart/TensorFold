@@ -469,7 +469,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
     p3v = tf_exl3_word_t<W>(tile0, a3);
   }
   for (uint kb = 0; kb < a.k; kb += 16) {
-    // One thread owns 8 consecutive states of one 16x16 tile. The bit cursor advances by `job.halves` a state, so it
+    // One thread owns 8 consecutive states of one 16x16 tile. The bit cursor advances by a half-width a state, so it
     // rolls forward with one add and one conditional subtract instead of recomputing the map formula.
     if (decodes) {
       {
@@ -644,8 +644,8 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   const int r0 = int(rb + sgr * 16);
   const int c0 = int(nb + sgc * 64u);
   // `sums` is the whole [rows, n] buffer and frag_put_in indexes it absolutely (rr, cc), so the bounds must be
-  // absolute too: the last live row is rb + job.rows_here and the last live column is nb + job.cols_here. The relative counts
-  // (job.rows_here - sg*16, job.cols_here) left every row past 32 and every column past 16 unwritten, which is what made this
+  // absolute too: the last live row is rb + rows_here and the last live column is nb + cols_here. The relative counts
+  // (rows_here - sg*16, cols_here) left every row past 32 and every column past 16 unwritten, which is what made this
   // kernel's answers wrong.
   TF_UNROLL
   for (uint r = 0; r < Rpg; ++r) {
@@ -3666,6 +3666,61 @@ inline void tf_exl3_fma_step(float* acc_j, uint c_cur, uint c_next, const device
   tf_exl3_fma_step_w<J>(acc_j, w, x0, x1, x2, x3);
 }
 
+// One routed or dense row's decode job: the pack slice a route names (or the dense call's own trellis), its k/n
+// strides, width and codebook, and the row's output width. The release's MTP and draft rounds feed the same EXL3
+// projection shapes (inference/model.py, revision 314113f8); the pack layout and the row walk are our own.
+struct TfExl3DecodeJob {
+  const device uchar* trellis;
+  ulong tile_k_stride, tile_n_stride;
+  uint halves, codebook, width;
+};
+
+inline TfExl3DecodeJob tf_exl3_dense_decode_job(const device uchar* trellis, constant TfExl3Args& a) {
+  TfExl3DecodeJob job;
+  job.trellis = trellis;
+  job.tile_k_stride = a.tile_k_stride;
+  job.tile_n_stride = a.tile_n_stride;
+  job.halves = a.halves;
+  job.codebook = a.codebook;
+  job.width = a.n;
+  return job;
+}
+
+inline TfExl3DecodeJob tf_exl3_routed_decode_job(const device uchar* trellis, constant TfExl3Args& a,
+                                                const device TfExl3Expert* descriptors, uint expert) {
+  (void)trellis;
+  TfExl3DecodeJob job;
+  job.trellis = descriptors[expert].trellis;
+  job.tile_k_stride = descriptors[expert].tile_k_stride;
+  job.tile_n_stride = descriptors[expert].tile_n_stride;
+  job.halves = descriptors[expert].halves;
+  job.codebook = descriptors[expert].codebook;
+  job.width = descriptors[expert].reserved != 0 ? descriptors[expert].reserved : a.n;
+  return job;
+}
+
+// The lane's row walk through one pack tile: its first word, the bit offset in it and the shift/mask that bring the
+// next word down, and the next two words. One runtime funnel shift a block puts the lane's window at a known place;
+// the eight states then sit at compile-time shifts. The pack's ring fixes this arithmetic.
+struct TfExl3RowWalk {
+  uint words, first_word, first_bit, shift, mask, next1, next2;
+};
+
+inline TfExl3RowWalk tf_exl3_row_walk(uint lane, uint halves) {
+  TfExl3RowWalk walk;
+  walk.words = 4u * halves;
+  const uint map = tf_exl3_map_for(lane * 8u, halves);
+  walk.first_word = map & 63u;
+  walk.first_bit = (map >> 6) & 31u;
+  walk.shift = (32u - walk.first_bit) & 31u;
+  walk.mask = 0u - uint(walk.first_bit != 0u);
+  walk.next1 = walk.first_word + 1u;
+  if (walk.next1 >= walk.words) walk.next1 -= walk.words;
+  walk.next2 = walk.first_word + 2u;
+  if (walk.next2 >= walk.words) walk.next2 -= walk.words;
+  return walk;
+}
+
 // The register-only routed decode with the static state selection. The shipped body picks each state's word pair and
 // bit offset at run time (the `rel[k]` cursor); here one funnel shift a block puts the lane's window at a known place
 // and the eight windows then sit at compile-time shifts, so the cursor and the per-state bit offset leave the inner
@@ -3686,63 +3741,40 @@ inline void tf_exl3_decode_fma_static_body(const device half* x, const device uc
   const uint row = tg.y;
   const uint nb = tg.x * 16u;
   if (row >= a.rows) return;
-  const device uchar* data;
-  ulong ks;
-  ulong ns;
-  uint halves;
-  uint codebook;
-  uint width = a.n;
-  if (Dense) {
-    data = trellis;
-    ks = a.tile_k_stride;
-    ns = a.tile_n_stride;
-    halves = a.halves;
-    codebook = a.codebook;
-  } else {
+  if (!Dense) {
     const uint expert = routes[row];
     if (expert >= a.experts) return;
-    data = descriptors[expert].trellis;
-    ks = descriptors[expert].tile_k_stride;
-    ns = descriptors[expert].tile_n_stride;
-    halves = descriptors[expert].halves;
-    codebook = descriptors[expert].codebook;
-    // The entry own output width (0 = the call n), for a batch of entries that differ in n.
-    if (descriptors[expert].reserved != 0) width = descriptors[expert].reserved;
   }
-  if (nb >= width) return;
+  TfExl3DecodeJob job;
+  if (Dense) job = tf_exl3_dense_decode_job(trellis, a);
+  else job = tf_exl3_routed_decode_job(trellis, a, descriptors, routes[row]);
+  if (nb >= job.width) return;
   const uint blocks = a.k / 16;
   const uint W = TF_FMA_WARPS;
   const uint b0 = blocks * sg / W, b1 = blocks * (sg + 1u) / W;
-  const uint words = 4 * halves;
-  const uint wi0 = tf_exl3_map_for(lane * 8u, halves) & 63u;
-  // The lane's bit offset inside its first word: the one runtime shift of the body.
-  const uint off0 = (tf_exl3_map_for(lane * 8u, halves) >> 6) & 31u;
-  const uint sh0 = (32u - off0) & 31u;
-  const uint m0 = 0u - uint(off0 != 0u);
-  uint a1 = wi0 + 1; if (a1 >= words) a1 -= words;
-  uint a2 = wi0 + 2; if (a2 >= words) a2 -= words;
+  const TfExl3RowWalk walk = tf_exl3_row_walk(lane, job.halves);
   // Three stream words: the lane's window spans at most 7*S + 16 bits from its first state. The ring of TF_FMA_PF
-  // triples (one block in flight is the shipped form).
+  // triples (one block in flight is the one-block-in-flight form).
   uint pre[TF_FMA_PF][3];
   {
-    const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(b0) * ks + ulong(nb / 16) * ns);
+    const device ushort* t0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(b0) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
 #if TF_FMA_WIDE_WORD
-    pre[0][0] = tf_exl3_word_t<true>(t0, wi0);
-    pre[0][1] = tf_exl3_word_t<true>(t0, a1);
-    pre[0][2] = Two ? 0u : tf_exl3_word_t<true>(t0, a2);
+    pre[0][0] = tf_exl3_word_t<true>(t0, walk.first_word);
+    pre[0][1] = tf_exl3_word_t<true>(t0, walk.next1);
+    pre[0][2] = Two ? 0u : tf_exl3_word_t<true>(t0, walk.next2);
 #else
-    pre[0][0] = tf_exl3_word(t0, wi0);
-    pre[0][1] = tf_exl3_word(t0, a1);
-    pre[0][2] = Two ? 0u : tf_exl3_word(t0, a2);
+    pre[0][0] = tf_exl3_word(t0, walk.first_word);
+    pre[0][1] = tf_exl3_word(t0, walk.next1);
+    pre[0][2] = Two ? 0u : tf_exl3_word(t0, walk.next2);
 #endif
 #if TF_FMA_PF > 1
     // The ring is primed: the first TF_FMA_PF blocks' words are in flight before the walk starts.
     for (uint p = 1; p < TF_FMA_PF; ++p) {
       if (b0 + p < b1) {
-        const device ushort* tp = reinterpret_cast<const device ushort*>(data + ulong(b0 + p) * ks + ulong(nb / 16) * ns);
-        pre[p][0] = tf_exl3_word(tp, wi0);
-        pre[p][1] = tf_exl3_word(tp, a1);
-        pre[p][2] = Two ? 0u : tf_exl3_word(tp, a2);
+        const device ushort* tp = reinterpret_cast<const device ushort*>(job.trellis + ulong(b0 + p) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
+        pre[p][0] = tf_exl3_word(tp, walk.first_word);
+        pre[p][1] = tf_exl3_word(tp, walk.next1);
+        pre[p][2] = Two ? 0u : tf_exl3_word(tp, walk.next2);
       }
     }
 #endif
@@ -3755,35 +3787,35 @@ inline void tf_exl3_decode_fma_static_body(const device half* x, const device uc
     const uint w0 = pre[slot][0], w1 = pre[slot][1], w2 = pre[slot][2];
     // The block TF_FMA_PF ahead takes this slot: its words are in flight while PF blocks are walked.
     if (bb + TF_FMA_PF < b1) {
-      const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(bb + TF_FMA_PF) * ks + ulong(nb / 16) * ns);
+      const device ushort* tn = reinterpret_cast<const device ushort*>(job.trellis + ulong(bb + TF_FMA_PF) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
 #if TF_FMA_WIDE_WORD
-      pre[slot][0] = tf_exl3_word_t<true>(tn, wi0);
-      pre[slot][1] = tf_exl3_word_t<true>(tn, a1);
-      pre[slot][2] = Two ? 0u : tf_exl3_word_t<true>(tn, a2);
+      pre[slot][0] = tf_exl3_word_t<true>(tn, walk.first_word);
+      pre[slot][1] = tf_exl3_word_t<true>(tn, walk.next1);
+      pre[slot][2] = Two ? 0u : tf_exl3_word_t<true>(tn, walk.next2);
 #else
-      pre[slot][0] = tf_exl3_word(tn, wi0);
-      pre[slot][1] = tf_exl3_word(tn, a1);
-      pre[slot][2] = Two ? 0u : tf_exl3_word(tn, a2);
+      pre[slot][0] = tf_exl3_word(tn, walk.first_word);
+      pre[slot][1] = tf_exl3_word(tn, walk.next1);
+      pre[slot][2] = Two ? 0u : tf_exl3_word(tn, walk.next2);
 #endif
     }
 #else
     const uint w0 = pre[0][0], w1 = pre[0][1], w2 = pre[0][2];
     if (bb + 1 < b1) {
-      const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(bb + 1) * ks + ulong(nb / 16) * ns);
+      const device ushort* tn = reinterpret_cast<const device ushort*>(job.trellis + ulong(bb + 1) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
 #if TF_FMA_WIDE_WORD
-      pre[0][0] = tf_exl3_word_t<true>(tn, wi0);
-      pre[0][1] = tf_exl3_word_t<true>(tn, a1);
-      pre[0][2] = Two ? 0u : tf_exl3_word_t<true>(tn, a2);
+      pre[0][0] = tf_exl3_word_t<true>(tn, walk.first_word);
+      pre[0][1] = tf_exl3_word_t<true>(tn, walk.next1);
+      pre[0][2] = Two ? 0u : tf_exl3_word_t<true>(tn, walk.next2);
 #else
-      pre[0][0] = tf_exl3_word(tn, wi0);
-      pre[0][1] = tf_exl3_word(tn, a1);
-      pre[0][2] = Two ? 0u : tf_exl3_word(tn, a2);
+      pre[0][0] = tf_exl3_word(tn, walk.first_word);
+      pre[0][1] = tf_exl3_word(tn, walk.next1);
+      pre[0][2] = Two ? 0u : tf_exl3_word(tn, walk.next2);
 #endif
     }
 #endif
     // The lane's window: one runtime funnel shift, then the eight windows at compile-time shifts.
-    const uint c_cur = (w0 << off0) | ((w1 >> sh0) & m0);
-    const uint c_next = Two ? (w1 << off0) : ((w1 << off0) | ((w2 >> sh0) & m0));
+    const uint c_cur = (w0 << walk.first_bit) | ((w1 >> walk.shift) & walk.mask);
+    const uint c_next = Two ? (w1 << walk.first_bit) : ((w1 << walk.first_bit) | ((w2 >> walk.shift) & walk.mask));
     // The lane's four k rows of this block, read as two halves each (the rows are adjacent in pairs).
 #if defined(TF_DIAG_DECODE) && TF_DIAG_DECODE == 4
     // The FMA stays (the weight is still needed) and the constant is a RUNTIME value (the args' rows), so the
@@ -3795,14 +3827,14 @@ inline void tf_exl3_decode_fma_static_body(const device half* x, const device uc
     const half2 xb = *(const device half2*)(xr + 8);
     const float x0 = float(xa.x), x1 = float(xa.y), x2 = float(xb.x), x3 = float(xb.y);
 #endif
-    tf_exl3_fma_step<S, 0, Lut>(&acc[0], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 1, Lut>(&acc[1], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 2, Lut>(&acc[2], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 3, Lut>(&acc[3], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 4, Lut>(&acc[4], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 5, Lut>(&acc[5], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 6, Lut>(&acc[6], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 7, Lut>(&acc[7], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 0, Lut>(&acc[0], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 1, Lut>(&acc[1], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 2, Lut>(&acc[2], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 3, Lut>(&acc[3], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 4, Lut>(&acc[4], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 5, Lut>(&acc[5], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 6, Lut>(&acc[6], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 7, Lut>(&acc[7], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
   }
   // The eight accumulators meet in a tree: the first four are the near column, the last four the far one.
   float acc0 = (acc[0] + acc[1]) + (acc[2] + acc[3]);
@@ -4497,7 +4529,7 @@ inline void tf_exl3_decode_fma_static_pair_body(const device half* x, const devi
   if (row >= a.rows or nb >= a.n) return;
   // THE PAIR. The entries that name the same expert, in entry order, are ranked; the even ranks lead a pair (their
   // entry and the next one with the same expert) and the odd ranks exit, so the weight decode -- and the weight
-  // traffic -- is paid once for the pair.: one decode for the rows that share a weight. Each row keeps the shipped
+  // traffic -- is paid once for the pair.: one decode for the rows that share a weight. Each row keeps the single-row body's
   // per-row arithmetic, so the pair's rows are bit-identical to the single-row body's.
   const uint slot = routes[row];
   uint rank = 0u;
@@ -4509,38 +4541,19 @@ inline void tf_exl3_decode_fma_static_pair_body(const device half* x, const devi
   }
   if ((rank & 1u) != 0u) return;   // the odd rank's row is computed by its leader
   const bool paired = mate != row;
-  const device uchar* data;
-  ulong ks;
-  ulong ns;
-  uint halves;
-  uint codebook;
-  {
-    const uint expert = slot;
-    if (expert >= a.experts) return;
-    data = descriptors[expert].trellis;
-    ks = descriptors[expert].tile_k_stride;
-    ns = descriptors[expert].tile_n_stride;
-    halves = descriptors[expert].halves;
-    codebook = descriptors[expert].codebook;
-  }
+  if (slot >= a.experts) return;
+  const TfExl3DecodeJob job = tf_exl3_routed_decode_job(trellis, a, descriptors, slot);
   const uint blocks = a.k / 16;
   const uint W = TF_FMA_WARPS;
   const uint b0 = blocks * sg / W, b1 = blocks * (sg + 1u) / W;
-  const uint words = 4 * halves;
-  const uint wi0 = tf_exl3_map_for(lane * 8u, halves) & 63u;
-  // The lane's bit offset inside its first word: the one runtime shift of the body.
-  const uint off0 = (tf_exl3_map_for(lane * 8u, halves) >> 6) & 31u;
-  const uint sh0 = (32u - off0) & 31u;
-  const uint m0 = 0u - uint(off0 != 0u);
-  uint a1 = wi0 + 1; if (a1 >= words) a1 -= words;
-  uint a2 = wi0 + 2; if (a2 >= words) a2 -= words;
+  const TfExl3RowWalk walk = tf_exl3_row_walk(lane, job.halves);
   // Three stream words: the lane's window spans at most 7*S + 16 bits from its first state.
   uint pre[3];
   {
-    const device ushort* t0 = reinterpret_cast<const device ushort*>(data + ulong(b0) * ks + ulong(nb / 16) * ns);
-    pre[0] = tf_exl3_word(t0, wi0);
-    pre[1] = tf_exl3_word(t0, a1);
-    pre[2] = tf_exl3_word(t0, a2);
+    const device ushort* t0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(b0) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
+    pre[0] = tf_exl3_word(t0, walk.first_word);
+    pre[1] = tf_exl3_word(t0, walk.next1);
+    pre[2] = tf_exl3_word(t0, walk.next2);
   }
   float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
   float accb[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
@@ -4548,14 +4561,14 @@ inline void tf_exl3_decode_fma_static_pair_body(const device half* x, const devi
     const uint kb = bb * 16;
     const uint w0 = pre[0], w1 = pre[1], w2 = pre[2];
     if (bb + 1 < b1) {
-      const device ushort* tn = reinterpret_cast<const device ushort*>(data + ulong(bb + 1) * ks + ulong(nb / 16) * ns);
-      pre[0] = tf_exl3_word(tn, wi0);
-      pre[1] = tf_exl3_word(tn, a1);
-      pre[2] = tf_exl3_word(tn, a2);
+      const device ushort* tn = reinterpret_cast<const device ushort*>(job.trellis + ulong(bb + 1) * job.tile_k_stride + ulong(nb / 16) * job.tile_n_stride);
+      pre[0] = tf_exl3_word(tn, walk.first_word);
+      pre[1] = tf_exl3_word(tn, walk.next1);
+      pre[2] = tf_exl3_word(tn, walk.next2);
     }
     // The lane's window: one runtime funnel shift, then the eight windows at compile-time shifts.
-    const uint c_cur = (w0 << off0) | ((w1 >> sh0) & m0);
-    const uint c_next = (w1 << off0) | ((w2 >> sh0) & m0);
+    const uint c_cur = (w0 << walk.first_bit) | ((w1 >> walk.shift) & walk.mask);
+    const uint c_next = (w1 << walk.first_bit) | ((w2 >> walk.shift) & walk.mask);
     // The lane's four k rows of this block, read as two halves each (the rows are adjacent in pairs).
 #if defined(TF_DIAG_DECODE) && TF_DIAG_DECODE == 4
     // The FMA stays (the weight is still needed) and the constant is a RUNTIME value (the args' rows), so the
@@ -4567,28 +4580,28 @@ inline void tf_exl3_decode_fma_static_pair_body(const device half* x, const devi
     const half2 xb = *(const device half2*)(xr + 8);
     const float x0 = float(xa.x), x1 = float(xa.y), x2 = float(xb.x), x3 = float(xb.y);
 #endif
-    tf_exl3_fma_step<S, 0, Lut>(&acc[0], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 1, Lut>(&acc[1], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 2, Lut>(&acc[2], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 3, Lut>(&acc[3], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 4, Lut>(&acc[4], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 5, Lut>(&acc[5], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 6, Lut>(&acc[6], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
-    tf_exl3_fma_step<S, 7, Lut>(&acc[7], c_cur, c_next, table, codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 0, Lut>(&acc[0], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 1, Lut>(&acc[1], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 2, Lut>(&acc[2], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 3, Lut>(&acc[3], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 4, Lut>(&acc[4], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 5, Lut>(&acc[5], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 6, Lut>(&acc[6], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
+    tf_exl3_fma_step<S, 7, Lut>(&acc[7], c_cur, c_next, table, job.codebook, x0, x1, x2, x3, lut);
     if (paired) {
       // The mate's row: the same weights, the same products, the mate's own activations.
       const device half* xm = x + ulong(mate) * a.k + kb + 2 * (lane & 3u);
       const half2 ma = *(const device half2*)xm;
       const half2 mb = *(const device half2*)(xm + 8);
       const float y0 = float(ma.x), y1 = float(ma.y), y2 = float(mb.x), y3 = float(mb.y);
-      tf_exl3_fma_step<S, 0, Lut>(&accb[0], c_cur, c_next, table, codebook, y0, y1, y2, y3, lut);
-      tf_exl3_fma_step<S, 1, Lut>(&accb[1], c_cur, c_next, table, codebook, y0, y1, y2, y3, lut);
-      tf_exl3_fma_step<S, 2, Lut>(&accb[2], c_cur, c_next, table, codebook, y0, y1, y2, y3, lut);
-      tf_exl3_fma_step<S, 3, Lut>(&accb[3], c_cur, c_next, table, codebook, y0, y1, y2, y3, lut);
-      tf_exl3_fma_step<S, 4, Lut>(&accb[4], c_cur, c_next, table, codebook, y0, y1, y2, y3, lut);
-      tf_exl3_fma_step<S, 5, Lut>(&accb[5], c_cur, c_next, table, codebook, y0, y1, y2, y3, lut);
-      tf_exl3_fma_step<S, 6, Lut>(&accb[6], c_cur, c_next, table, codebook, y0, y1, y2, y3, lut);
-      tf_exl3_fma_step<S, 7, Lut>(&accb[7], c_cur, c_next, table, codebook, y0, y1, y2, y3, lut);
+      tf_exl3_fma_step<S, 0, Lut>(&accb[0], c_cur, c_next, table, job.codebook, y0, y1, y2, y3, lut);
+      tf_exl3_fma_step<S, 1, Lut>(&accb[1], c_cur, c_next, table, job.codebook, y0, y1, y2, y3, lut);
+      tf_exl3_fma_step<S, 2, Lut>(&accb[2], c_cur, c_next, table, job.codebook, y0, y1, y2, y3, lut);
+      tf_exl3_fma_step<S, 3, Lut>(&accb[3], c_cur, c_next, table, job.codebook, y0, y1, y2, y3, lut);
+      tf_exl3_fma_step<S, 4, Lut>(&accb[4], c_cur, c_next, table, job.codebook, y0, y1, y2, y3, lut);
+      tf_exl3_fma_step<S, 5, Lut>(&accb[5], c_cur, c_next, table, job.codebook, y0, y1, y2, y3, lut);
+      tf_exl3_fma_step<S, 6, Lut>(&accb[6], c_cur, c_next, table, job.codebook, y0, y1, y2, y3, lut);
+      tf_exl3_fma_step<S, 7, Lut>(&accb[7], c_cur, c_next, table, job.codebook, y0, y1, y2, y3, lut);
     }
   }
   // The eight accumulators meet in a tree: the first four are the near column, the last four the far one. The shipped
