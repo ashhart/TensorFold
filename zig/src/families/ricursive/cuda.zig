@@ -11,6 +11,8 @@ pub const native = @import("cuda_native.zig");
 pub const dflash2_weights = @import("cuda_dflash2_weights.zig");
 pub const dflash2_select = @import("cuda_dflash2_select.zig");
 pub const dflash2_attn = @import("cuda_dflash2_attn.zig");
+pub const dflash2 = @import("cuda_dflash2.zig");
+pub const dflash2_config = @import("cuda_dflash2_config.zig");
 
 test {
     _ = kernels;
@@ -24,4 +26,6 @@ test {
     _ = dflash2_weights;
     _ = dflash2_select;
     _ = dflash2_attn;
+    _ = dflash2;
+    _ = dflash2_config;
 }
