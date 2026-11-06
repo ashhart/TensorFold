@@ -371,6 +371,7 @@ below; these are estimates for planning a port, not results.
     | glm (C) | cold first token −6..−7 % at TP=2, −7..−8 % at TP=3 | [#1823] |
     | flashnext (M) | 1,024-token reply beside a 64K prompt 48 → 8 s, prompt's first token 90 → 54 s | [#2167] |
     | flashnext (C), one GPU | prompts 15–23 % faster at `--parallel 1`, up to 8,192 rows a pass | [#2246] |
+    | glm (C), TP=2 | prompts about 2 % sooner at 8K–128K, two chunks a step, replies unchanged | [#1423] |
 
     `TF_GLM_CHUNK_SOLO=4096` is slower with GLM's NVFP4 checkpoint on two GB10s ([#2288]).
 
@@ -460,6 +461,7 @@ below; these are estimates for planning a port, not results.
 [#1394]: https://github.com/ashhart/TensorFold/pull/1394
 [#1411]: https://github.com/ashhart/TensorFold/pull/1411
 [#1413]: https://github.com/ashhart/TensorFold/pull/1413
+[#1423]: https://github.com/ashhart/TensorFold/pull/1423
 [#1426]: https://github.com/ashhart/TensorFold/pull/1426
 [#1434]: https://github.com/ashhart/TensorFold/pull/1434
 [#1439]: https://github.com/ashhart/TensorFold/pull/1439
