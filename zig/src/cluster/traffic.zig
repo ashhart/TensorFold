@@ -15,7 +15,7 @@ pub const Link = struct {
     }
 };
 
-/// Thunderbolt 5 as the fabric measured it (3.5 us one way, 9.38 GB/s); the GPU polls its receive ring (gate Q3, unverified).
+/// TB5 as the fabric measured it (3.5 us one way, 9.38 GB/s); the GPU polls its receive ring (gate Q3, unverified).
 pub const tb5_polled: Link = .from(fabric.cost.tb5, fabric.cost.polled_handoff);
 /// The same link when every step wakes the GPU through a shared event (90-115 us measured on the M5).
 pub const tb5_event: Link = .from(fabric.cost.tb5, fabric.cost.event_handoff);
