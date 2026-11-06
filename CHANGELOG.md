@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on CUDA with `TF_DSV41_PREFILL=replay`: a conversation saved to the NVMe session tier now restores instead of being refused as `BadBlob` and prefilled again. On two GB10s at TP=2, recalling a 319K-token conversation took 1.2 to 1.4 s instead of 155 to 178 s, with replies byte-identical to a cold prefill (#2182). Thanks to @goshi.
+
 - Docs: `CONTRIBUTING.md` and the pull request template ask authors for their own main-against-branch numbers first; our run follows once the review has no open asks (#2179).
 
 - DeepSeek-V4.x chat renders with its own encoder and schema prompt on the native server, a served image part becomes the image token, and the start-up line names the chat renderer (#1698). Thanks to @jayleaton.
