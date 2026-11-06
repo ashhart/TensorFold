@@ -500,7 +500,7 @@ inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* 
   }
 }
 
-// The routed experts' gate and up over token rows read through ORDER (pair / topk), SwiGLU'd into act [rows, n]: 32 columns a tile.
+// The routed experts' gate and up over ORDER's token rows (pair / topk), SwiGLU'd to act [rows, n]: 32 columns a tile.
 #define TF_GATHER_GLU(BM)                                                                                               \
   [[kernel]] void tf_affine_gather_glu_##BM(                                                                            \
       const device bfloat* X [[buffer(0)]], const device uint32_t* WG [[buffer(1)]],                                   \
