@@ -132,7 +132,7 @@ const flash = @import("flashnext").native;
 fn flashKey(x: *Fixture, c: *flash.Cuda) !u64 {
     const g = x.gpu();
     const profile: @import("disk_identity.zig").Profile = .{ .family = flash.model_type, .backend = "cuda" };
-    return disk.keptKey(flash.kept_disk, x.arena.allocator(), t.io, &g, x.dir, null, @as(*anyopaque, c), 42, profile);
+    return disk.keptKey(disk.keptDisk(flash).?, x.arena.allocator(), t.io, &g, x.dir, null, @as(*anyopaque, c), 42, profile);
 }
 
 test "disk identity: Flash Next CUDA resolved prompt rows, kernel forms and expert grids miss with the same probe" {
