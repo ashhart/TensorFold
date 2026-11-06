@@ -111,7 +111,7 @@ pub const HfText = struct {
             };
             t.overridden = true;
         } else try t.readTemplates(io, a, dir, config);
-        if (template_override == null) t.source = @import("hf_text_parse.zig").template(model_config) orelse t.source;
+        if (template_override == null) t.source = @import("hf_text_parse.zig").builtIn(model_config, t.source) orelse t.source;
         // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's Jinja is a third party's (--chat-template)
         if (t.native_deepseek) {
             t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
