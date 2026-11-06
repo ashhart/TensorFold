@@ -1,4 +1,4 @@
-//! The cluster's control messages: a 40-byte little-endian header (magic, kind, sender, addressee, CRC-32) and kind bodies.
+//! Cluster control messages: a 40-byte little-endian header (magic, kind, sender, addressee, CRC-32) and kind bodies.
 const std = @import("std");
 const node = @import("node.zig");
 
