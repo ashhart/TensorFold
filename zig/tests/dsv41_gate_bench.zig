@@ -156,11 +156,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Two libraries: gemm_nax (nax.h inlined) and the family's mhc kernels (self-contained).
-    var gemm_src: ?[]const u8 = null;
-    inline for (ks.prefill) |f| {
-        if (comptime std.mem.eql(u8, f.name, "gemm_nax")) gemm_src = f.text;
-    }
-    const nax_text = try std.mem.replaceOwned(u8, gpa, gemm_src orelse return error.NoGemmSource, "#include \"../nax.h\"", ks.nax);
+    const gemm_src: []const u8 = ks.deepseek_v41_gate_gemm;
+    const nax_text = try std.mem.replaceOwned(u8, gpa, gemm_src, "#include \"../nax.h\"", ks.nax);
     defer gpa.free(nax_text);
     var options = mtl.CompileOptions.mlx();
     options.math_functions = .precise;

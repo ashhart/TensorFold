@@ -431,14 +431,6 @@ No external reference, captured cubin, model shard or CUDA compiler is bundled b
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
 with the common EXL3 and DeepSeek contributor credits preserved.
 
-## BobClawblaw/TensorFold: the int8 affine kernels
-
-`zig/kernels/metal/core/affine_mm.metal` and `affine_mm_i8.h` are copied whole from
-[BobClawblaw/TensorFold](https://github.com/BobClawblaw/TensorFold), branch `deepseek-v41-main`, commit
-`72a552ed` ("deepseek_v41: prompt chunks' routed experts in int8 x int8"), Apache License 2.0,
-Copyright 2026 Bob. They are the working int8 ground truth for the DeepSeek-V4.1 gated int8 expert path:
-the compiled code settles the fragment packing and the store mapping. With `TF_I8` undefined they reduce
-to the bf16 kernels this tree already carried.
 ## MiaAI-Lab Flash Next prompt expert staging
 
 `zig/kernels/cuda/nvfp4_experts_tile.cu` adapts the K32 shared-memory pipeline in patch0014 of

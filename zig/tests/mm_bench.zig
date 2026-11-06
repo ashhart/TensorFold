@@ -85,19 +85,14 @@ pub fn main(init: std.process.Init) !void {
         b.* = bf16(-7.5 * scale * (0.9 + 0.2 * rnd.float(f32)));
     }
 
-    // MM_BITS / MM_I8 / MM_QG override the 4-bit affine default, so the same bench prices an int8 body.
+    // MM_BITS overrides the 4-bit affine default, so the same bench prices another width.
     const bits = envInt("MM_BITS", 4);
-    const i8_on = std.c.getenv("MM_I8") != null;
-    const qg = envInt("MM_QG", 32);
-    const i8_def = if (i8_on) try std.fmt.allocPrint(arena, "#define TF_I8 1\n#define TF_QG {d}\n", .{qg}) else "";
-    const defines = try std.fmt.allocPrint(arena, "#define TF_BITS {d}\n#define TF_GROUP 64\n#define TF_OUT_T {s}\n{s}", .{ bits, if (out_f32) "float" else "bfloat", i8_def });
+    const defines = try std.fmt.allocPrint(arena, "#define TF_BITS {d}\n#define TF_GROUP 64\n#define TF_OUT_T {s}\n", .{ bits, if (out_f32) "float" else "bfloat" });
     for (kernels) |*k| {
         const f = try mtl.MappedFile.open(try arena.dupeSentinel(u8, k.path, 0));
         defer f.deinit();
         const body = try std.mem.replaceOwned(u8, arena, f.bytes[0..f.size], "#include \"../nax.h\"", ks.nax);
-        // The int8 header is inlined the way affine_mm.zig does it (the runtime has no include path).
-        const body_i8 = if (i8_on) try std.mem.replaceOwned(u8, arena, body, "#include \"affine_mm_i8.h\"", ks.core_affine_mm_i8) else body;
-        const src = try std.mem.concat(arena, u8, &.{ defines, body_i8 });
+        const src = try std.mem.concat(arena, u8, &.{ defines, body });
         k.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         k.pipe = try mtl.Pipeline.init(device, k.lib, k.entry, false);
         k.y = try device.buffer(@as(usize, M) * N * ob, opts);
