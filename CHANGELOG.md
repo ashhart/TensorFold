@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: a request's finished stats list its prompt pass widths (`tensorfold.prefill_widths`, one entry per completed
+  target pass) on every Metal text family. Telemetry only (#2293).
+
 - Internal: 100 lean findings fixed in core, the server, cluster and the model families (comments reworded to fit one
   line, and Kolibri-1's page geometry in its own file), with no change in behaviour (#2292).
 
