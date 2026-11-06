@@ -140,14 +140,13 @@ fn planes(t: *const Target) Planes {
 
 /// Copies between the bound sequence and `copy` on the engine's stream (`into`: live to copy); the bytes moved.
 fn move(t: *const Target, at: usize, copy: *const Copy, into: bool, mamba: bool) !usize {
-    const o = t.e.ops();
+    const c: DeviceCopy = .{ .o = t.e.ops(), .into = into };
     var store: [max_parts]Part = undefined;
     var off = [2]usize{ 0, 0 }; // into the key and value buffer, into the Mamba buffer
     for (parts(t.e.c, t.e.max_len, planes(t), at, &store)) |p| {
         if (p.mamba) {
-            const buf = copy.mamba.ptr + off[1];
-            if (mamba) if (into) try o.copy(buf, p.live, p.len) else try o.copy(p.live, buf, p.len);
-        } else try deviceRows(t, p, copy.kv.ptr + off[0], into);
+            if (mamba) try walkOne(t, p, p.live, copy.mamba.ptr + off[1], c, DeviceCopy.run);
+        } else try walkOne(t, p, p.live, copy.kv.ptr + off[0], c, DeviceCopy.run);
         off[@intFromBool(p.mamba)] += p.len;
     }
     return off[0] + off[1];
@@ -156,23 +155,19 @@ fn move(t: *const Target, at: usize, copy: *const Copy, into: bool, mamba: bool)
 /// Bound sequence <-> host copy (`into`: to host), rows first; Mamba states too if `mamba`, else from `staging`.
 fn hostMove(t: *const Target, at: usize, host: []u8, into: bool, mamba: bool, staging: ?u64) !void {
     errdefer drain(t);
-    const o = t.e.ops();
+    const c: HostCopy = .{ .o = t.e.ops(), .into = into };
     var store: [max_parts]Part = undefined;
-    var off = [2]usize{ 0, kvBytes(t.e.c, at, t.head != null) };
+    const rows = kvBytes(t.e.c, at, t.head != null);
+    var off = [2]usize{ 0, rows };
     for (parts(t.e.c, t.e.max_len, planes(t), at, &store)) |p| {
         const at_host = off[@intFromBool(p.mamba)];
         const buf = host[at_host..][0..p.len];
-        if (!p.mamba) {
-            var done: usize = 0;
-            while (done < p.len) {
-                const span = try rowSpan(t, p, done);
-                const fragment = buf[done..][0..span.len];
-                if (into) try o.download(fragment, span.live) else try o.upload(span.live, fragment);
-                done += span.len;
-            }
-        } else if (mamba) {
-            if (into) try o.download(buf, p.live) else try o.upload(p.live, buf);
-        } else if (staging) |st| try o.download(buf, st + (at_host - kvBytes(t.e.c, at, t.head != null))); // SSM, then conv
+        if (!p.mamba or mamba) {
+            try walkOne(t, p, p.live, @intFromPtr(buf.ptr), c, HostCopy.run);
+        } else if (staging) |st| { // SSM, then conv
+            const down: HostCopy = .{ .o = c.o, .into = true }; // staging only ever goes down to the host
+            try walkOne(t, p, st + (at_host - rows), @intFromPtr(buf.ptr), down, HostCopy.run);
+        }
         off[@intFromBool(p.mamba)] += p.len;
     }
 }
@@ -452,19 +447,43 @@ test {
 fn drain(t: *const Target) void {
     cuda.completion.drain(t.e.ctx.d, t.e.stream, "a snapshot stream and context did not drain; its owners stay alive");
 }
-const Span = struct { live: u64, len: usize };
-fn rowSpan(t: *const Target, p: Part, done: usize) !Span {
-    if (t.e.b.table == 0) return .{ .live = p.live + done, .len = p.len - done };
-    const page_bytes = state.chunk_keys * state.kvRowBytes(t.e.c);
-    const at = done / page_bytes;
-    if (at >= t.e.bound.pages.len) return error.PastPages;
-    return .{ .live = p.live + t.e.bound.pages[at] * t.e.pageBytes(), .len = @min(page_bytes, p.len - done) };
-}
-fn deviceRows(t: *const Target, p: Part, buf: u64, into: bool) !void {
-    var done: usize = 0;
-    while (done < p.len) {
-        const span = try rowSpan(t, p, done);
-        if (into) try t.e.ops().copy(buf + done, span.live, span.len) else try t.e.ops().copy(span.live, buf + done, span.len);
-        done += span.len;
+const W = @import("core").state_walk.Device;
+
+/// Part `p` from `live` (its place, or staging) against `kept` through the core walk: rows on the bound pages if any.
+fn walkOne(
+    t: *const Target,
+    p: Part,
+    live: u64,
+    kept: u64,
+    ctx: anytype,
+    comptime f: fn (@TypeOf(ctx), u64, u64, usize) anyerror!void,
+) !void {
+    var part: W.Part = .{ .live = live, .len = p.len };
+    var ids: []const u32 = &.{};
+    if (!p.mamba and t.e.b.table != 0) {
+        part.span = state.chunk_keys * state.kvRowBytes(t.e.c);
+        part.page = t.e.pageBytes();
+        ids = t.e.bound.pages;
+        if (p.len > ids.len * part.span) return error.PastPages; // refused before the part's first copy
     }
+    try W.each((&part)[0..1], ids, .{ .base = kept }, ctx, f);
 }
+
+/// The walk's hook between the device and a device copy (`into`: to the copy).
+const DeviceCopy = struct {
+    o: @import("cuda_kernels.zig").Ops,
+    into: bool,
+    fn run(c: DeviceCopy, live: u64, kept: u64, n: usize) anyerror!void {
+        if (c.into) try c.o.copy(kept, live, n) else try c.o.copy(live, kept, n);
+    }
+};
+
+/// The walk's hook between the device and pinned host bytes (`into`: to the host).
+const HostCopy = struct {
+    o: @import("cuda_kernels.zig").Ops,
+    into: bool,
+    fn run(c: HostCopy, live: u64, kept: u64, n: usize) anyerror!void {
+        const host = @as([*]u8, @ptrFromInt(kept))[0..n];
+        if (c.into) try c.o.download(host, live) else try c.o.upload(live, host);
+    }
+};
