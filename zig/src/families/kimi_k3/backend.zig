@@ -165,6 +165,7 @@ pub const Metal = struct {
         };
         const rows: u32 = @intCast(end - pos);
         try m.run(&.{.{ .slot = slot, .rows = rows, .commit = true }}, s.prompt()[pos..end]);
+        lanes.prefill_widths.completed(m.a, s, rows);
         m.storeLast(slot, rows - 1);
         m.state.advance(slot, rows, true, rows);
         s.fill_at.store(@intCast(end), .release);

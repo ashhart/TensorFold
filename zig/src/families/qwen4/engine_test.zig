@@ -44,7 +44,7 @@ const Arena = @import("arena.zig").Arena(B);
 const Tensor = Arena.Tensor;
 pub const G = struct {
     pub const Storage = B;
-    pub const kind = @import("native_admission.zig").Backend.cuda;
+    pub const kind: @import("native_admission.zig").Backend = if (@hasDecl(@import("root"), "metal_prefill_widths")) .metal else .cuda;
     b: *B,
     project_rows: usize = 0,
     begins: usize = 0,
