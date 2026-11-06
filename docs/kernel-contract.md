@@ -155,6 +155,28 @@ independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every
 float64 output class, without an inherited exception.
 
+## Isolated masked-value panels
+
+`metal masked-V` entries isolate one hidden +Inf or NaN in otherwise finite Q/K/V. Every output class and every
+finite output is checked against binary64 over the actual visible set, including a visible exceptional-value control.
+The fixtures cover causal tiles, sliding rings, indexed/padded lists, page mappings and shared-context masks.
+Latent MLA treats its shared K/V storage as both key and value; a visible poisoned latent can also make its score NaN.
+The tensor kernels' dropped visible NaN scores and zero residual probability parts times visible Inf are separate
+known findings from hidden-value leakage. No production kernel is repaired by these registrations.
+
+The source-only focused runner builds without an offline Metal compiler:
+
+```sh
+zig build --build-file build.masked-values.zig tf-masked-values test-masked-values-host -Dcpu=apple_m1
+./zig-out/bin/tf-masked-values
+```
+
+It runs the same entries registered in the main Metal runner. Its equal-score/unit-value panels do not discriminate
+accumulator precision, so gate 4 states that limitation instead of claiming a stress proof. The two device controls
+plant a hidden NaN leak and erase a visible infinity; each must fail gate 1. A known finding must still reproduce.
+LFM3 entries register only on a tree that actually contains its source. DeepSeek CSA2 and H3 are operator checks,
+not new native serving paths. Flash Next is excluded. This focused run does not replace the complete backend gates.
+
 ## Coverage
 
 Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm (4
