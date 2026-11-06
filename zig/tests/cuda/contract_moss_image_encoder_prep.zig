@@ -38,8 +38,6 @@ fn servedShapes() [tokens.len]c.Shape {
     return out;
 }
 
-const why = "the outputs are normed and rounded once: a bf16 sum's error in the sum of squares is a fraction of an output ulp";
-
 /// A head's four squares a lane in turn, then the warp's five shuffles.
 const depth = 9;
 
@@ -84,7 +82,6 @@ pub const Prep = struct {
             .out = .f32,
             .tiles = .{ .{ .size = 8 }, .{}, .{} },
             .served = &served,
-            .sums = .{ .bf16 = 0, .why = why },
         };
     }
     fn expectDepth(_: c.Shape) usize {
