@@ -35,6 +35,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const text = @import("masked_value_probe.zig").control_source;
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
+    if (std.mem.startsWith(u8, d.name, "nemotron masked prompt ")) {
+        const raw = if (std.mem.indexOf(u8, fun, "paged") != null) sources.nemotron_prompt_masked.paged_source else sources.nemotron_prompt_masked.contiguous;
+        const body = try tf.frags.sourceMode(device, a, raw, std.mem.indexOf(u8, d.name, " fp32 ") != null);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "attention pv ")) {
         const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
         const probe = @import("metal_attention_pv.zig");

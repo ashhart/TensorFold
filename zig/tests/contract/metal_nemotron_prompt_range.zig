@@ -10,7 +10,7 @@ const ar = contract.attention_range;
 const D = old.D;
 
 /// P with the tensor units' cut; P spread over [0, 1]; that case without the cut; a non-finite value at a masked key.
-const Case = enum { cut, spread, cutless, masked };
+const Case = enum { cut, spread, cutless, masked, masked_control };
 
 fn name(k: Case, full: bool) []const u8 {
     if (full) return switch (k) {
@@ -18,12 +18,14 @@ fn name(k: Case, full: bool) []const u8 {
         .spread => "metal nemotron attention prompt nax, full fp32 P spread over [0, 1]",
         .cutless => "control: metal nemotron attention prompt nax, full fp32 P range with tensor-cut product",
         .masked => "metal nemotron attention prompt nax, full fp32 P with a non-finite value at a masked key",
+        .masked_control => "control: metal nemotron attention prompt full fp32 P without the exceptional selector",
     };
     return switch (k) {
         .cut => "metal nemotron attention prompt nax",
         .spread => "metal nemotron attention prompt nax, P spread over [0, 1]",
         .cutless => "control: metal nemotron attention prompt nax, P spread, its range without the operand cut",
         .masked => "metal nemotron attention prompt nax, a non-finite value at a key masked in its tile",
+        .masked_control => "control: metal nemotron attention prompt nax without the exceptional selector",
     };
 }
 
@@ -52,7 +54,7 @@ const Probe = struct {
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (!try p.inner.prepare(shape, fill, seed)) return false;
         if ((p.case == .spread or p.case == .cutless) and fill == .random) p.spread(seed);
-        if (p.case == .masked and fill == .nonfinite) p.maskedInf();
+        if ((p.case == .masked or p.case == .masked_control) and fill == .nonfinite) p.maskedInf();
         return true;
     }
 
@@ -84,6 +86,7 @@ const Probe = struct {
     }
 
     pub fn run(p: *Probe) !void {
+        p.inner.prompt_run.baseline = p.case == .masked_control;
         try p.inner.run();
     }
 
@@ -169,11 +172,10 @@ pub const Suite = struct {
             try s.probes.append(s.a, p);
             var spec = old.spec(.prompt, 1, false);
             spec.name = name(k, full);
-            if (k == .masked) {
+            if (k == .masked or k == .masked_control) {
                 spec.served = spec.served[0..1];
-                spec.known = .{ .gate = .nonfinite, .finding = "a non-finite value at a key masked for a row of its tile reaches that row as NaN (P = 0 times Inf inside the P x V mma)" };
             }
-            try s.kernels.append(s.a, .{ .spec = spec, .ctx = p, .vt = &vt, .control = if (k == .cutless) .shapes else null });
+            try s.kernels.append(s.a, .{ .spec = spec, .ctx = p, .vt = &vt, .control = if (k == .cutless) .shapes else if (k == .masked_control) .nonfinite else null });
         }
     }
 

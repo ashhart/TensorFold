@@ -101,7 +101,7 @@ pub const Launch = struct {
     }
 
     /// Causal NAX attention (bq64 bk32 d128) of L queries on kL keys; strides: (batch, head, row) of Q, K, V, O.
-    pub fn attention(l: Launch, q: At, k: At, v: At, o: At, L: usize, kL: usize, heads: usize, kv_heads: usize, strides: [12]usize, scale: f32, paged: ?Paged) void {
+    pub fn attention(l: Launch, q: At, k: At, v: At, o: At, L: usize, kL: usize, heads: usize, kv_heads: usize, strides: [12]usize, scale: f32, paged: ?Paged, pick: At) void {
         const nq = (L + 63) / 64;
         const nk = (kL + 31) / 32;
         var name: [160]u8 = undefined;
@@ -111,7 +111,40 @@ pub const Launch = struct {
         var f: [16]f32 = @splat(0);
         f[0] = scale;
         const pipe = if (paged) |pg| pg.pipes.promptFor(L % 64 == 0, kL % 32 == 0) else l.k.get(full);
-        l.goWith(pipe, &.{ q, k, v }, &p, 32, std.mem.sliceAsBytes(&f), &.{o}, .{ nq * 32, heads * 4, 1 }, .{ 32, 4, 1 }, if (paged) |pg| pg.table else null);
+        const table: ?Table = if (paged) |pg| pg.table else null;
+        if (L == 1) return l.goWith(pipe, &.{ q, k, v }, &p, 32, std.mem.sliceAsBytes(&f), &.{o}, .{ nq * 32, heads * 4, 1 }, .{ 32, 4, 1 }, table);
+        const mask = l.k.mask.?;
+        const page: usize = @intFromBool(paged != null);
+        var params: [32]i32 = @splat(0);
+        for (p, 0..) |value, i| params[i] = @intCast(value);
+        l.e.pipe(mask.scan[page]);
+        l.e.buf(v.b, v.off, 0);
+        l.e.bytes(params, 1);
+        l.e.buf(pick.b, pick.off, 2);
+        if (table) |t| {
+            l.e.buf(t.b, t.off, 3);
+            l.e.bytes(t.page_bytes, 4);
+        }
+        l.e.run(.{ 128, @min((L + 2) / 4, 32), kv_heads }, .{ 128, 1, 1 });
+        l.e.pipe(mask.pick);
+        l.e.buf(pick.b, pick.off, 0);
+        l.e.bytes([3]u32{ @intCast(nq), @intCast(heads), 1 }, 1);
+        l.e.buf(pick.b, pick.off + 16, 2);
+        l.e.run(.{ 1, 1, 1 }, .{ 1, 1, 1 });
+        const variant = @as(usize, @intFromBool(L % 64 == 0)) * 2 + @intFromBool(kL % 32 == 0);
+        for ([_]mtl.Pipeline{ pipe, mask.masked[page][variant] }, [_]usize{ 16, 28 }, 0..) |chosen, offset, i| {
+            l.e.pipe(chosen);
+            for ([_]At{ q, k, v }, 0..) |input, slot| l.e.buf(input.b, input.off, slot);
+            l.e.bytes(params, 3);
+            l.e.bytes(f, 4);
+            l.e.buf(o.b, o.off, 5);
+            if (table) |t| {
+                l.e.buf(t.b, t.off, 6);
+                l.e.bytes(t.page_bytes, 7);
+            }
+            if (i == 1) l.e.alongside();
+            l.e.runIndirect(pick.b, pick.off + offset, .{ 32, 4, 1 });
+        }
     }
 
     /// Inclusive fp32 cumsum along the middle axis of a contiguous [outer, axis, stride] array from `offset`.

@@ -140,6 +140,7 @@ pub const Probe = struct {
     tiles: usize,
     control: bool,
     prompt_full: ?bool = null, // an explicit contract mode; null uses the serving process mode
+    prompt_run: @import("metal_nemotron_prompt_launch.zig").State = .{},
     pipes: [3]?mtl.Pipeline = .{ null, null, null }, // decode: partial, merge; tree: tail, merge; glue: the kernel
     partials: [16]?mtl.Pipeline = @splat(null), // the tree's prefix partial at 1 to 16 tiles
     prompts: [4]?mtl.Pipeline = @splat(null), // tf_attention_nax by (whole query blocks, whole key blocks)
@@ -198,6 +199,7 @@ pub const Probe = struct {
     }
 
     pub fn deinit(p: *Probe) void {
+        p.prompt_run.deinit();
         p.drop();
         p.rig.deinit();
         for (&p.pipes) |x| if (x) |q| q.deinit();
@@ -207,7 +209,19 @@ pub const Probe = struct {
 
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .ctx = p, .vt = &vt, .spec = spec(p.which, p.tiles, p.control), .control = if (p.control) .shapes else null };
+        var s = spec(p.which, p.tiles, p.control);
+        if (p.which == .prompt and !p.control and p.rig.device.tensorUnits()) {
+            s.name = "metal nemotron attention prompt selector finite bytes";
+            s.replaces = "main's unchanged direct prompt pipeline";
+        }
+        return .{ .ctx = p, .vt = &vt, .spec = s, .control = if (p.control) .shapes else null };
+    }
+
+    pub fn replaced(p: *Probe) ![]const u8 {
+        p.prompt_run.baseline = true;
+        defer p.prompt_run.baseline = false;
+        try p.run();
+        return p.rig.bytes(p.out, p.out_bytes);
     }
 
     pub fn at(p: *const Probe, values: bool, h: usize, pos: usize) usize {
@@ -350,6 +364,7 @@ pub const Probe = struct {
                 }
             },
             .prompt => {
+                try @import("metal_nemotron_prompt_launch.zig").prepare(p);
                 const v = p.variant();
                 if (p.prompts[v] == null) {
                     var buf: [160]u8 = undefined;
@@ -424,25 +439,7 @@ pub const Probe = struct {
                 e.setBuffer(p.out.buf, p.out.off, 7);
                 e.dispatchThreads(mtl.Size.of(kvh * 32, G * t, 1), mtl.Size.of(32, 1, 1));
             },
-            .prompt => {
-                const kl = p.len + t;
-                const row = heads * D;
-                const kvs = kvh * p.cap * D;
-                var pr: [32]i32 = @splat(0);
-                const head = [_]usize{ 1, heads, t, kl, G, (t + 63) / 64, (kl + 31) / 32, t / 64, kl / 32, t % 64, kl % 32, kl - t };
-                const st = [12]usize{ t * row, D, row, kvs, p.cap * D, D, kvs, p.cap * D, D, t * row, D, row };
-                for (head ++ st, 0..) |x, i| pr[i] = @intCast(x);
-                var fl: [16]f32 = @splat(0);
-                fl[0] = scale;
-                e.setPipeline(p.prompts[p.variant()].?);
-                e.setBuffer(p.qref.buf, p.qref.off, 0);
-                e.setBuffer(p.kv[0].buf, p.kv[0].off, 1);
-                e.setBuffer(p.kv[1].buf, p.kv[1].off, 2);
-                e.setBytes(std.mem.sliceAsBytes(&pr), 3);
-                e.setBytes(std.mem.sliceAsBytes(&fl), 4);
-                e.setBuffer(p.out.buf, p.out.off, 5);
-                e.dispatchThreads(mtl.Size.of((t + 63) / 64 * 32, heads * 4, 1), mtl.Size.of(32, 4, 1));
-            },
+            .prompt => try @import("metal_nemotron_prompt_launch.zig").run(p, e),
             .write => {
                 e.setPipeline(p.pipes[0].?);
                 e.setBuffer(p.srcs[0].buf, p.srcs[0].off, 0);
@@ -581,7 +578,6 @@ pub const Suite = struct {
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         for (std.enums.values(Which)) |w| for (1..if (w == .decode) 17 else 2) |tiles| for ([_]bool{ false, true }) |control| {
             if (only) |o| if (std.mem.indexOf(u8, name(w, tiles, control), o) == null) continue;
-            if (w == .prompt and !control and s.device.tensorUnits()) continue; // M5: metal_nemotron_prompt_range.zig
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
             p.* = try Probe.init(s.a, s.device, s.queue, w, tiles, control);
