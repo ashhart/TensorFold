@@ -117,7 +117,7 @@ pub fn closedJson(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
     return try std.mem.concat(a, u8, &.{ reply_text.pyRstrip(text), closers.items });
 }
 
-/// ``decode_parameter``: the schema's type when the text spells one, else the text; ``python`` also reads Python's spelling.
+/// ``decode_parameter``: the schema's type if the text spells one, else the text; ``python`` reads Python's spellings.
 pub fn decode(a: Allocator, value: []const u8, schema: Schema, python: bool) Allocator.Error!Value {
     const kinds = (try tool_kinds.schemaKinds(a, schema.value, schema.root)) orelse return .{ .string = value };
     if (!tool_kinds.takesJson(kinds)) return .{ .string = value };
