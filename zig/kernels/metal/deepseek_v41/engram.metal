@@ -15,6 +15,7 @@ struct TfEngramArgs {
   uint R, cols, dim;
   float eps, dscale;
 };
+static_assert(sizeof(TfEngramArgs) == 20, "TfEngramArgs must mirror metal/engram.zig's Args");
 
 // Exact: the seven magnitude bits of E4M3 placed as a half's exponent and mantissa, then scaled by 2^8.
 inline float tf_engram_e4m3(uint code) {

@@ -28,6 +28,7 @@ pub const Model = struct {
     draft_prior: []const f64 = &.{}, // the head's acceptance by depth until a stream has its own
     depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
     plain_guard: bool = false, // plain rounds compete with drafted depths
+    shared_plain: bool = false, // A shared round runs every stream's exact plain window
     draft_confidence: ?f64 = null,
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
@@ -66,6 +67,7 @@ pub const Config = struct {
     first_copy: u32,
     base_width: u32,
     family_mtp: bool,
+    shared_plain: bool = false,
     speculate_early: bool,
     pipelined: bool,
     plain_guard: bool,
@@ -152,6 +154,7 @@ pub const Config = struct {
             .first_copy = first_copy,
             .base_width = @min(width, first_copy + 1),
             .family_mtp = m.mtp and width >= 2 and m.speculate,
+            .shared_plain = m.shared_plain,
             .speculate_early = m.speculate_early and !(m.root_copies and m.copy_drafts),
             .pipelined = m.gpu_tokens,
             .plain_guard = m.plain_guard,

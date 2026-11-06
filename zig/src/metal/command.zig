@@ -12,6 +12,28 @@ const ResidencySet = @import("residency.zig").ResidencySet;
 const Id = objc.Id;
 const Size = types.Size;
 
+/// One relaxed atomic add a dispatch, a few nanoseconds. Set by the stage recorder's init: the counters cost one
+/// branch a dispatch when off.
+pub var count_enabled: bool = false;
+pub var dispatch_count: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+pub var dispatch_indirect: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+pub var dispatch_threadgroups: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
+pub var dispatch_hist: [20]std.atomic.Value(u64) = blk: {
+    var v: [20]std.atomic.Value(u64) = undefined;
+    for (&v) |*e| e.* = std.atomic.Value(u64).init(0);
+    break :blk v;
+};
+
+fn countDispatch(groups: usize) void {
+    if (!count_enabled) return;
+    _ = dispatch_count.fetchAdd(1, .monotonic);
+    _ = dispatch_threadgroups.fetchAdd(@intCast(groups), .monotonic);
+    var b: usize = 0;
+    var g = groups;
+    while (g > 1 and b + 1 < 20) : (g >>= 1) b += 1;
+    _ = dispatch_hist[b].fetchAdd(1, .monotonic);
+}
+
 pub const Queue = struct {
     id: Id,
 
@@ -169,16 +191,28 @@ pub const ComputeEncoder = struct {
 
     /// Whole threadgroups: `groups` of `threads` each.
     pub fn dispatchGroups(self: ComputeEncoder, groups: Size, threads: Size) void {
+        countDispatch(@as(usize, groups.width) * @as(usize, groups.height) * @as(usize, groups.depth));
         objc.msg(void, self.id, "dispatchThreadgroups:threadsPerThreadgroup:", .{ groups, threads });
     }
 
     /// Whole threadgroups of `threads` each, their counts (3 u32) read from `args` at `offset` when the dispatch runs.
     pub fn dispatchIndirect(self: ComputeEncoder, args: Buffer, offset: usize, threads: Size) void {
+        if (count_enabled) {
+            _ = dispatch_indirect.fetchAdd(1, .monotonic);
+            _ = dispatch_count.fetchAdd(1, .monotonic);
+        }
         objc.msg(void, self.id, "dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:", .{ args.id, offset, threads });
     }
 
     /// A grid of `grid` threads in groups of `threads` (edge groups may be partial), as MLX dispatches.
     pub fn dispatchThreads(self: ComputeEncoder, grid: Size, threads: Size) void {
+        const tw = @max(@as(usize, threads.width), 1);
+        const th = @max(@as(usize, threads.height), 1);
+        const td = @max(@as(usize, threads.depth), 1);
+        const gw = (@as(usize, grid.width) + tw - 1) / tw;
+        const gh = (@as(usize, grid.height) + th - 1) / th;
+        const gd = (@as(usize, grid.depth) + td - 1) / td;
+        countDispatch(@max(gw * gh * gd, 1));
         objc.msg(void, self.id, "dispatchThreads:threadsPerThreadgroup:", .{ grid, threads });
     }
 

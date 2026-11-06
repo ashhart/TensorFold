@@ -3,6 +3,7 @@ test {
     _ = @import("engram_host.zig");
     _ = @import("engram_tables.zig");
     _ = @import("engram_shared_test.zig");
+    _ = @import("engram_rows_safetensors_test.zig");
     if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) _ = @import("engram_rows_test.zig");
     if (@import("builtin").os.tag == .macos) _ = @import("engram_rows_darwin_test.zig");
     if (@import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos) _ = @import("engram_pack_test.zig");

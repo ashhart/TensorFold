@@ -1,4 +1,4 @@
-//! Same-command-buffer GPU timestamps, bounded resources and no per-span CPU waits.
+//! Bounded same-command GPU timestamps; disabled init allocates nothing, no per-span CPU waits or CPU timing fallback.
 const std = @import("std");
 const mtl = @import("metal");
 const counters = mtl.counters;
@@ -9,6 +9,8 @@ pub const max_span_capacity: usize = 65536;
 pub const Options = struct { enabled: bool = false, max_spans: usize = 512 };
 pub const Span = struct {
     kind: Class = .dense,
+    /// Caller-owned diagnostic label; does not affect sampling or generic class aggregation.
+    metadata: u32 = 0,
     begin_timestamp: u64 = 0,
     end_timestamp: u64 = 0,
     gpu_seconds: f64 = 0,
@@ -16,7 +18,7 @@ pub const Span = struct {
 pub const Aggregate = struct { calls: u64 = 0, gpu_seconds: f64 = 0 };
 const State = enum { idle, recording, resolved, read, broken };
 
-/// Two reference samples convert GPU ticks to nanoseconds; never use CPU span time.
+/// Apple's paired reference samples convert GPU ticks to CPU nanoseconds, not elapsed operator time.
 pub const Calibration = struct {
     before: counters.ClockSample,
     after: counters.ClockSample,
@@ -29,7 +31,8 @@ pub const Calibration = struct {
     }
 
     pub fn duration(self: Calibration, begin: u64, end: u64) !f64 {
-        if (begin == 0 or end == 0 or begin == counters.error_value or end == counters.error_value) return error.InvalidCounterSample;
+        if (begin == 0 or end == 0 or begin == counters.error_value or end == counters.error_value)
+            return error.InvalidCounterSample;
         if (end < begin) return error.ReversedCounterSample;
         if (begin < self.before.gpu or end > self.after.gpu) return error.CounterOutsideCalibration;
         const ticks: f64 = @floatFromInt(end - begin);
@@ -79,7 +82,7 @@ pub const Recorder = struct {
     calibration: ?Calibration = null,
     totals: [class_count]Aggregate = @splat(.{}),
 
-    /// Init-only bounded storage; disabled init allocates nothing.
+    /// Init-only storage, descriptors and fence; 1..65536 spans, at most 16 CPU-resolve bytes per span.
     pub fn init(allocator: std.mem.Allocator, device: mtl.Device, options: Options) !Recorder {
         var self = Recorder{ .allocator = allocator };
         if (!options.enabled) return self;
@@ -120,8 +123,8 @@ pub const Recorder = struct {
         self.state = .recording;
     }
 
-    /// Non-nested spans; stage mode rotates fenced encoders, requiring resource and pipeline rebinding.
-    pub fn beginSpan(self: *Recorder, encoder: *mtl.ComputeEncoder, kind: Class) !void {
+    /// No nesting; stage sampling rotates fenced serial encoders: callers must rebind and redeclare resources.
+    pub fn beginSpan(self: *Recorder, encoder: *mtl.ComputeEncoder, kind: Class, metadata: u32) !void {
         if (!self.enabled()) return;
         if (self.state != .recording or !self.encoder_open) return error.CounterNotRecording;
         if (self.active_span != null) return error.NestedCounterSpan;
@@ -141,7 +144,7 @@ pub const Recorder = struct {
             self.encoder_open = true;
             resources.fence.waitCompute(encoder.*);
         }
-        self.spans[index] = .{ .kind = kind };
+        self.spans[index] = .{ .kind = kind, .metadata = metadata };
         self.span_count += 1;
         self.active_span = index;
     }
@@ -172,7 +175,7 @@ pub const Recorder = struct {
         self.active_span = null;
     }
 
-    /// Ends the final encoder before the caller's existing commit/wait; resolution requires completion.
+    /// End the final encoder before existing commit/wait; resolve counters only after command completion.
     pub fn finishEncoding(self: *Recorder, encoder: *mtl.ComputeEncoder) !void {
         if (!self.enabled()) {
             encoder.end();
@@ -186,7 +189,7 @@ pub const Recorder = struct {
         self.state = .resolved;
     }
 
-    /// Cancels unsubmitted work, closing any surviving encoder, including after encoder creation failure.
+    /// Close and discard failed, unsubmitted encoding without committing; safe after encoder creation failure.
     pub fn cancelEncoding(self: *Recorder, encoder: *mtl.ComputeEncoder) !void {
         if (self.command_buffer) |cb| {
             if (cb.status() != .not_enqueued) return error.CounterCommandAlreadySubmitted;
@@ -198,7 +201,7 @@ pub const Recorder = struct {
         try self.discardAfterCompletion();
     }
 
-    /// No wait or fallback; results are borrowed until beginCommand, discardAfterCompletion or deinit.
+    /// No wait or fallback; results are borrowed until reuse/discard/deinit, errors and invalid calibration propagate.
     pub fn readAfterCompletion(self: *Recorder) ![]const Span {
         if (!self.enabled()) return &.{};
         if (self.state == .read) return self.spans[0..self.span_count];
@@ -244,7 +247,7 @@ pub const Recorder = struct {
         return self.totals;
     }
 
-    /// Discards closed, unsubmitted or completed recordings; in-flight resources are never reused.
+    /// Discard completed/unsubmitted recordings after closing encoders; in-flight reuse is rejected, never waited.
     pub fn discardAfterCompletion(self: *Recorder) !void {
         if (self.encoder_open) return error.CounterEncoderStillOpen;
         if (self.command_buffer) |cb| {
@@ -288,14 +291,14 @@ test "disabled recorder allocates nothing and never touches a device or encoder 
     var recorder = try Recorder.init(std.testing.failing_allocator, undefined, .{ .enabled = false });
     defer recorder.deinit() catch unreachable;
     var encoder: mtl.ComputeEncoder = undefined;
-    try recorder.beginSpan(&encoder, .attention);
+    try recorder.beginSpan(&encoder, .attention, 0);
     try recorder.endSpan(&encoder);
     try std.testing.expect(!recorder.enabled());
     try std.testing.expectEqual(@as(usize, 0), (try recorder.readAfterCompletion()).len);
     for (recorder.aggregates()) |aggregate| try std.testing.expectEqual(@as(u64, 0), aggregate.calls);
 }
 
-test "calibration rejects missing samples, both reversed clocks and both range boundaries" {
+test "calibration rejects missing samples and both clock and range boundaries" {
     const c = Calibration{ .before = .{ .cpu = 1000, .gpu = 100 }, .after = .{ .cpu = 5000, .gpu = 300 } };
     try std.testing.expectError(error.InvalidCounterSample, c.duration(0, 200));
     try std.testing.expectError(error.InvalidCounterSample, c.duration(100, counters.error_value));
@@ -308,12 +311,45 @@ test "calibration rejects missing samples, both reversed clocks and both range b
 }
 
 test "enabled capacity validation occurs before any device access" {
-    try std.testing.expectError(error.InvalidSpanCapacity, Recorder.init(std.testing.failing_allocator, undefined, .{
-        .enabled = true,
-        .max_spans = 0,
-    }));
-    try std.testing.expectError(error.InvalidSpanCapacity, Recorder.init(std.testing.failing_allocator, undefined, .{
-        .enabled = true,
-        .max_spans = max_span_capacity + 1,
-    }));
+    try std.testing.expectError(error.InvalidSpanCapacity, Recorder.init(std.testing.failing_allocator, undefined, .{ .enabled = true, .max_spans = 0 }));
+    try std.testing.expectError(error.InvalidSpanCapacity, Recorder.init(std.testing.failing_allocator, undefined, .{ .enabled = true, .max_spans = max_span_capacity + 1 }));
+}
+
+test "counter ownership rejects open and in-flight reuse without a CPU span wait" {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    if (counters.query(device).mode() == .unsupported) return error.SkipZigTest;
+    const queue = try device.queue();
+    defer queue.deinit();
+    const gate = try device.sharedEvent();
+    defer gate.deinit();
+    var recorder = try Recorder.init(std.testing.allocator, device, .{ .enabled = true, .max_spans = 1 });
+    defer recorder.deinit() catch unreachable;
+    const cb = queue.commandBuffer();
+    cb.waitFor(gate, 1);
+    var encoder = cb.compute(.serial);
+    try recorder.beginCommand(cb);
+    var submitted = false;
+    defer {
+        if (submitted) {
+            gate.set(1);
+            cb.wait();
+            recorder.discardAfterCompletion() catch unreachable;
+        } else recorder.cancelEncoding(&encoder) catch unreachable;
+    }
+    try std.testing.expectError(error.CounterEncoderStillOpen, recorder.deinit());
+    try recorder.beginSpan(&encoder, .dense, 42);
+    try std.testing.expectError(error.NestedCounterSpan, recorder.beginSpan(&encoder, .copy, 43));
+    try std.testing.expectError(error.UnclosedCounterSpan, recorder.finishEncoding(&encoder));
+    try recorder.endSpan(&encoder);
+    try std.testing.expectError(error.CounterSpanCapacityExceeded, recorder.beginSpan(&encoder, .copy, 43));
+    try recorder.finishEncoding(&encoder);
+    cb.commit();
+    submitted = true;
+    try std.testing.expectError(error.CounterCommandNotCompleted, recorder.readAfterCompletion());
+    try std.testing.expectError(error.CounterRecordingInFlight, recorder.beginCommand(cb));
+    try std.testing.expectError(error.CounterCommandNotCompleted, recorder.discardAfterCompletion());
+    try std.testing.expectError(error.CounterCommandNotCompleted, recorder.deinit());
 }

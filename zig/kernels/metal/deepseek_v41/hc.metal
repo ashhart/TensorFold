@@ -59,6 +59,7 @@ struct TfHcMixArgs {
   uint dim, rows, iters;
   float eps, hc_eps, alpha;
 };
+static_assert(sizeof(TfHcMixArgs) == 24, "TfHcMixArgs must mirror metal/hc.zig's MixArgs");
 
 // hc_mixes and hc_split_sinkhorn of one row: the norm and the 24 matvecs share one scan, each its own O1 chain.
 [[kernel, max_total_threads_per_threadgroup(TF_HC_TG)]] void tf_dsv41_hc_mix(
@@ -147,6 +148,7 @@ struct TfHcMixArgs {
 struct TfHcArgs2 {
   uint dim, rows;
 };
+static_assert(sizeof(TfHcArgs2) == 8, "TfHcArgs2 must mirror metal/hc.zig's RowArgs");
 
 // hc_pre (model.py:959-963): O4, `pre` being the mix the PREVIOUS sublayer made; no cross-thread sum here.
 [[kernel, max_total_threads_per_threadgroup(TF_HC_TG)]] void tf_dsv41_hc_pre(const device bfloat* X [[buffer(0)]],

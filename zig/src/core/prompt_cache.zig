@@ -10,10 +10,22 @@ const policy = @import("prompt_cache_policy.zig");
 const cuts = @import("prompt_cuts.zig");
 const interior = @import("prompt_interior.zig");
 const index = @import("prompt_cache_index.zig");
+const cache_marks = @import("prompt_cache_marks.zig");
 const forks = @import("prompt_cache_fork.zig");
 pub const rows = @import("rows_store.zig");
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
+/// A prefill chunk's kernel class by rows: the decode path (<= 8), the shared body (9..63), the tensor tile (>= 64).
+pub fn chunkClass(n: usize) u8 {
+    return if (n <= 8) 0 else if (n < 64) 1 else 2;
+}
+
+/// The rows a fresh pass's last chunk holds at `len` for a zero-anchored grid `grid`: `len % grid`, or one whole
+/// chunk when it divides. The class of this is what a resumed suffix's last chunk must keep.
+pub fn freshLast(grid: u32, len: usize) usize {
+    const g: usize = @max(1, grid);
+    return if (len % g != 0) len % g else @min(len, g);
+}
 pub const singleReclaim = imprint.singleReclaim; // the learned-state file helpers, beside the Imprint that owns them
 pub const singleForgetChecked = imprint.singleForgetChecked;
 /// What a family gives the cache: copies of its state while the prompt pass stands at a chunk end.
@@ -99,7 +111,7 @@ pub const RestoreLog = @import("prompt_cache_restore.zig").Log;
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 /// The borrowed entry a backend restores; the caller must report resumed or release it, even on cancellation.
-pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
+pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{}, snap_at: u32 = 0 };
 pub const Store = struct {
     image_frame: u32 = 0,
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
@@ -206,13 +218,20 @@ pub const Store = struct {
         return true;
     }
 
-    /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
+    /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families. A
+    /// `tail` family also keeps one off-grid state before a prompt's end, so a later turn resumes at its own
+    /// boundary instead of at the last grid chunk.
     pub fn usable(s: *const Store, at: u32, starts: []const u32) bool {
-        return at > 0 and (!s.rules.planned or s.startAt(starts, at) == at);
+        return at > 0 and (!s.rules.planned or (s.rules.tail_align > 1 and (s.rules.tail or s.rules.end_mark)) or s.startAt(starts, at) == at);
+    }
+
+    /// Whether `at` is a chunk start of this pass (every position for a family without a planned grid).
+    pub fn aligned(s: *const Store, at: u32, starts: []const u32) bool {
+        return !s.rules.planned or s.startAt(starts, at) == at;
     }
 
     /// The chunk start at or before `at`: the request's, else the family's grid (0 when none).
-    fn startAt(s: *const Store, starts: []const u32, at: u32) u32 {
+    pub fn startAt(s: *const Store, starts: []const u32, at: u32) u32 {
         if (starts.len == 0 and s.rules.grid > 0) return at - at % s.rules.grid;
         return cuts.floorStart(starts, at);
     }
@@ -306,10 +325,11 @@ pub const Store = struct {
             s.find(prompt, starts, spans);
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
+        var tail_at: u32 = 0;
         const ordinary = if (s.active_rewind_at == 0)
-            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
+            try s.fitting(a, try cache_marks.marksRewind(s, a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}, &tail_at))
         else
-            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
+            try s.fittingRewind(a, try s.fitting(a, try cache_marks.marksRewind(s, a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{}, &tail_at)), endpoint, s.active_rewind_at, endpoint_bytes);
         const known_end = if (user_end <= history_len) user_end else 0;
         const marks_ = interior.add(s, a, prompt, from, known_end, rewind_len, starts, spans, ordinary, endpoint, endpoint_bytes, e) catch |err| {
             a.free(ordinary);
@@ -321,7 +341,12 @@ pub const Store = struct {
         }
         s.reserve(prompt, born, e, marks_, spans);
         if (e) |entry| entry.borrowers += 1;
-        return .{ .entry = e, .marks = marks_ };
+        // The tail mark this lookup planned, where the backend may snapshot it inside the chunk that runs past it.
+        // Only a tensor-tile tail (>= 64 rows) and only with a bulk piece behind it: the merged chunk then keeps
+        // the kernel class the cut's own tail chunk would have run.
+        const snap_at: u32 = if (s.rules.tail_snap and tail_at > from and tail_at < prompt.len and
+            prompt.len - tail_at >= 64 and std.mem.indexOfScalar(u32, marks_, tail_at) != null) tail_at else 0;
+        return .{ .entry = e, .marks = marks_, .snap_at = snap_at };
     }
 
     /// Room for every state the pass keeps, made before it: a keep-mirroring peer hears the evictions with the request.
@@ -402,47 +427,8 @@ pub const Store = struct {
 
     /// Where a pass from `from` keeps states: the history, then min_gap apart the stable prefix and shared blocks.
     pub fn marks(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
-        return s.marksRewind(a, prompt, from, history_len, 0, shared, starts, &.{}, previous);
-    }
-
-    /// `marks` with the active rewind second: kept however near the other marks, never at or before the resume point.
-    fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, previous: []const u32) ![]const u32 {
-        const short = !s.rules.planned and prompt.len < s.rules.min_prompt; // the history's mark only, where the pass cuts a chunk anyway
-        if (short and s.rules.chunk == 0) return &.{};
-        var out: std.ArrayList(u32) = .empty;
-        var want: std.ArrayList(u32) = .empty;
-        defer want.deinit(a);
-        // a warm pass (its history the whole prompt) keeps where a state can be keyed, its lookahead before the end
-        const warm_pass = s.rules.warm != .off and history_len == prompt.len and s.rules.lookahead > 0;
-        const repeat_at = s.repeat_log.mark(s.rules.repeat_min, prompt, from, s.rules.lookahead, s.rules.planned);
-        const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else if (history_len == 0) repeat_at else history_len;
-        try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
-        if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
-        // the prompt this one parts from: the one it resumed, or (fork rule) on a miss the kept one sharing the most
-        const kept = if (previous.len > 0 or !s.rules.fork) previous else forks.longestShared(Entry, s.entries.items, prompt);
-        const part: u32 = if (kept.len == 0 or short) 0 else @intCast(std.mem.indexOfDiff(u32, kept, prompt) orelse @min(kept.len, prompt.len));
-        // the fork rule keeps one before the part, however near: a state at `at` is keyed with the token at `at`
-        const stable: u32 = if (part == 0 or part >= history_len or part < history_len / 2) 0 else if (s.rules.fork) part -| s.rules.lookahead else part;
-        if (stable > 0) try want.append(a, stable);
-        if (!short) try want.appendSlice(a, shared);
-        // tail: a prompt that names no history keeps its last chunk too (a chat keeps its history's mark alone)
-        if (!short and s.rules.tail and history_len == 0) try want.append(a, @intCast(prompt.len -| @max(1, s.rules.lookahead)));
-        const fork_at = if (s.rules.fork and s.rules.planned) s.startAt(starts, stable) else stable; // where the loop snaps it
-        for (want.items, 0..) |w, k| {
-            const at = if (s.rules.planned) s.startAt(starts, w) else w;
-            if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
-            const priority = (rewind > 0 and k == 1 and at == rewind) or (s.rules.fork and at == fork_at);
-            if (!priority and !(k == 0 and warm_pass) and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm == .on))) continue; // near the resume point
-            if (k > 0 and !priority) { // the history's mark always (warm families: away from the resume point); the others away from it and each other
-                const near = for (out.items) |o| {
-                    if (@max(o, at) - @min(o, at) < s.rules.min_gap) break true;
-                } else false;
-                if (near) continue;
-            }
-            if (std.mem.indexOfScalar(u32, out.items, at) == null) try out.append(a, at);
-        }
-        std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
-        return out.toOwnedSlice(a);
+        var tail_at: u32 = 0;
+        return cache_marks.marksRewind(s, a, prompt, from, history_len, 0, shared, starts, &.{}, previous, &tail_at);
     }
 
     /// Keep the state at `at` with its span prefix, evicting within the budget; `starts` are a learned cut's chunks.
@@ -582,6 +568,7 @@ test {
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
+    _ = @import("prompt_cache_end_test.zig");
     _ = @import("prompt_cache_interior_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_fork_test.zig");

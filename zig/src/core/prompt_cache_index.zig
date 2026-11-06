@@ -8,6 +8,17 @@ pub fn find(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []con
     std.debug.assert(s.by_position.items.len == s.entries.items.len); // add and Store.remove keep them equal
     for (s.by_position.items[below(s, prompt.len)..]) |e| { // longest first: the first match is the scan's winner
         if (e.expired or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
+        // A tail state off the grid resumes with its own chunk. Rows <= 8 take the decode path, whose arithmetic
+        // differs from the prefill path a fresh pass uses, so only a chunk start may resume there.
+        if (!s.aligned(e.at, starts) and prompt.len - e.at <= 8) continue;
+        // An off-grid tail state resumes its suffix as ONE chunk; past one chunk the pass splits where a fresh pass
+        // does not, so those turns resume at the grid instead.
+        if (!s.aligned(e.at, starts) and s.rules.grid > 0 and prompt.len - e.at > s.rules.grid) continue;
+        // And its last chunk must keep the class a fresh pass gives the same rows.
+        if (s.rules.end_mark and !s.aligned(e.at, starts) and s.rules.grid > 0) {
+            const suffix: usize = prompt.len - e.at;
+            if (pc.chunkClass(suffix) != pc.chunkClass(pc.freshLast(s.rules.grid, prompt.len))) continue;
+        }
         const n = e.tokens.len;
         if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
         if (!modes.equal(e.decode_spans, spans, e.at) or !@import("cache_images.zig").matches(s, e)) continue;

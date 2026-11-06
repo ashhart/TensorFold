@@ -37,6 +37,7 @@ using namespace metal;
 struct TfDsv41Fp8Args {
   uint K, N, R, groups, tiles, blocks;
 };
+static_assert(sizeof(TfDsv41Fp8Args) == 24, "TfDsv41Fp8Args must mirror metal/fp8_rows.zig's Args");
 
 // Exact: the seven magnitude bits of E4M3 placed as a half's exponent and mantissa, then scaled by 2^8.
 inline float tf_dsv41_e4m3(uint code) {
@@ -187,6 +188,7 @@ struct TfDsv41Fp8WArgs {
   uint K, N, R, groups, tiles, blocks;
   long xs, ws, ss, ys; // byte strides between the launches of a batch (grid y)
 };
+static_assert(sizeof(TfDsv41Fp8WArgs) == 56, "TfDsv41Fp8WArgs must mirror metal/fp8_rows.zig's WholeArgs");
 
 // Part and finish in one group: simdgroup t is tile t of CL * NB columns; the roots meet in the same zero-padded tree.
 template <uint RT, uint NB, uint CL, typename T>
