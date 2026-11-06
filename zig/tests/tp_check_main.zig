@@ -67,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
             ok = true;
         } else {
             try w.writeAll("FAIL:");
+            if (r.records == 0) try w.writeAll(" the dumps hold no records;");
             if (!r.same_shape) try w.writeAll(" record counts differ;");
             if (r.first_collective) |i| try w.print(" first differing collective is record {d} (seq {d}, layer {d});", .{ i, x.collectives[i].seq, x.collectives[i].layer });
             if (r.first_logits) |i| try w.print(" first differing logits row is prompt {d} position {d};", .{ x.logits[i].prompt, x.logits[i].position });
@@ -98,12 +99,8 @@ pub fn main(init: std.process.Init) !void {
             for (r.gaps[0..@min(r.gaps.len, 64)]) |g| try w.print("; prompt {d} stops at the gap at position {d}", .{ g.prompt, g.position });
             try w.writeAll("\n");
         }
-        if (r.missing > 0) {
-            try w.writeAll("FAIL: the mixed dump is missing positions the solo run has, so the report is incomplete\n");
-        } else if (r.positions == 0) {
-            try w.writeAll("FAIL: no (prompt, position) appears in both dumps\n");
-        } else if (r.fed_ok == false) {
-            try w.writeAll("FAIL: this teacher-forced run was not fed this solo run's tokens, so its divergence is not reported\n");
+        if (check.agreeFailure(r)) |why| {
+            try w.print("FAIL: {s}\n", .{why});
         } else ok = true;
     } else bad("unknown command {s}\n{s}", .{ cmd, usage });
     try w.flush();

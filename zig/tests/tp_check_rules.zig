@@ -146,5 +146,5 @@ pub fn checkRepeat(x: Dump, y: Dump) RepeatReport {
 }
 
 pub fn repeatPassed(r: RepeatReport) bool {
-    return r.same_shape and r.first_collective == null and r.first_logits == null;
+    return r.records > 0 and r.same_shape and r.first_collective == null and r.first_logits == null;
 }

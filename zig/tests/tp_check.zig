@@ -32,3 +32,4 @@ pub const Split = agree.Split;
 pub const AgreeReport = agree.AgreeReport;
 pub const chosenHash = agree.chosenHash;
 pub const checkAgree = agree.checkAgree;
+pub const agreeFailure = agree.agreeFailure;
