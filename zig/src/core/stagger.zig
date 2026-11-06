@@ -4,7 +4,7 @@ const std = @import("std");
 /// Segments one chunk can take.
 pub const MAX = 4;
 
-/// Where layer i waits for the segment before: ahead of pre (it reads what that one wrote, a conv tail) or of the mixer.
+/// Where layer i waits for the segment before: ahead of pre (it reads that one's writes, a conv tail) or of the mixer.
 pub const Wait = enum { pre, mixer };
 
 /// Rows of segment k when `n` rows split `parts` ways (near-equal, the first ones longer).
