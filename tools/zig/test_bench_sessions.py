@@ -10,12 +10,20 @@ import tempfile
 import threading
 import time
 import unittest
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_sessions as bs  # noqa: E402
+import metrics_text as mt  # noqa: E402
 
 SMALL = ["--system-tokens", "60", "--history-tokens", "1500", "--chunk-tokens", "40,160", "--turn-tokens", "20,60",
          "--max-tokens", "32", "--turns", "2"]
+TOTAL = "tensorfold:prompt_tokens_cached_total"
+EVICT = 'tensorfold:prompt_cache_evictions_total{model="a\\"b,c}",tier="device"}'
+
+
+def common(a: list, b: list) -> int:
+    return next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
 
 
 def rendered(body: dict, pad: int = 0) -> list[str]:
@@ -32,19 +40,34 @@ def rendered(body: dict, pad: int = 0) -> list[str]:
 class Fake:
     """A server keeping one prompt state, so two long sessions in turn evict each other, as in #2346."""
 
-    def __init__(self, stats=True, cache=True, delay=0.0, corrupt=(), fail=(), pad=0):
+    def __init__(self, stats=True, cache=True, delay=0.0, corrupt=(), fail=(), pad=0, metrics=None, labels=False,
+                 partial=False):
         self.stats, self.cache, self.delay, self.corrupt, self.fail = stats, cache, delay, set(corrupt), set(fail)
-        self.pad = pad
+        self.pad, self.metrics, self.labels, self.partial = pad, metrics, labels, partial
         self.state, self.hits, self.misses, self.evictions, self.running, self.chats = [], 0, 0, 0, 0, 0
-        self.seen, self.lock = [], threading.Lock()
+        self.restored, self.seen, self.lock = 0, [], threading.Lock()
+
+    def exposition(self) -> str:
+        """Prometheus text as the native server writes it, plus labelled samples (one escaped) when asked."""
+        lines = [f"# HELP {TOTAL} Prompt tokens restored.", f"# TYPE {TOTAL} counter", f"{TOTAL} {self.restored}",
+                 f"tensorfold:prefix_cache_hits_total {self.restored}",
+                 f"tensorfold:prompt_cache_states {int(bool(self.state))}",
+                 f"tensorfold:requests_running {self.running}"]
+        if self.labels:
+            lines += [f'tensorfold:prompt_cache_evictions_total{{tier="device",model="a\\"b,c}}"}} {self.evictions}',
+                      f'tensorfold:requests_total{{key="prompt_cache",status="200"}} {self.chats}',
+                      'tensorfold:kv_cache_usage_ratio{pool="0"} 0.5']
+        return "\n".join(lines) + "\n"
 
     def reply(self, body: dict, prompt: list[str]) -> tuple[list[dict], dict]:
         with self.lock:
             index = self.chats
             self.chats += 1
-            cached = len(self.state) if self.cache and self.state and prompt[:len(self.state)] == self.state else 0
+            n = common(self.state, prompt)  # partial: a changed state still resumes the prefix both share
+            cached = n if self.cache and (n == len(self.state) or self.partial) else 0
             self.hits, self.misses = self.hits + (cached > 0), self.misses + (cached == 0)
-            self.evictions += bool(self.cache and self.state and not cached)
+            self.evictions += bool(self.cache and self.state and n < len(self.state))
+            self.restored += cached
             self.state = prompt if self.cache else []
         h = hashlib.sha256(" ".join(prompt).encode()).hexdigest()
         thinking = body["chat_template_kwargs"]["enable_thinking"]
@@ -87,6 +110,13 @@ class Fake:
 
             def do_GET(self):
                 fake.seen.append((self.path, None, time.perf_counter()))
+                if fake.metrics is not None and self.path == fake.metrics:
+                    raw = fake.exposition().encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    return self.wfile.write(raw)
                 if self.path != "/stats" or not fake.stats:
                     return self.send(404, {"error": "not found"})
                 self.send(200, {"running": fake.running, "memory": {"active": 1},
@@ -97,8 +127,9 @@ class Fake:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fake.seen.append((self.path, body, time.perf_counter()))
                 if self.path == "/v1/tokenize":
-                    n = len(rendered(body, fake.pad) if "messages" in body else body["prompt"].split())
-                    return self.send(200, {"count": n, "max_model_len": 1 << 20, "tokens": list(range(n))})
+                    words = rendered(body, fake.pad) if "messages" in body else body["prompt"].split()
+                    return self.send(200, {"count": len(words), "max_model_len": 1 << 20,
+                                           "tokens": [zlib.crc32(w.encode()) for w in words]})
                 if fake.chats in fake.fail:
                     fake.chats += 1
                     return self.send(500, {"error": {"message": "fake failure"}})
@@ -333,11 +364,104 @@ class LineTests(Base):
                     self.assertTrue(20 <= r["new_tokens"] <= 60)
                 self.assertEqual(kinds, {"user", "tool"})
 
-    def test_without_stats_the_lines_omit_snapshots(self):
-        code, lines = self.run_bench(Fake(stats=False), "--pattern", "alt", "--sessions", "2", "--turns", "1")
+    def test_without_stats_or_metrics_the_plan_says_so_once_and_the_cache_fields_are_empty(self):
+        fake = Fake(stats=False)
+        code, lines = self.run_bench(fake, "--pattern", "alt", "--sessions", "2", "--turns", "1")
         self.assertEqual(code, 0)
-        self.assertFalse(lines[0]["stats"])
-        self.assertTrue(all("stats_before" not in r and "cache_counters" not in r for r in self.requests(lines)))
+        self.assertEqual((lines[0]["stats"], lines[0]["metrics"], lines[0]["metrics_cache_series"]), (False, None, []))
+        self.assertEqual(lines[0]["cache_note"], "neither /stats nor /metrics answered; cache fields are empty")
+        self.assertEqual(sum("neither /stats" in json.dumps(x) for x in lines), 1)
+        self.assertEqual([p for p, _, _ in fake.seen if p.endswith(("stats", "metrics"))],
+                         ["/stats", "/metrics", "/v1/metrics"])
+        for r in self.requests(lines):
+            self.assertEqual((r["cache_counters"], r["cache_metrics"]), (None, None))
+            self.assertNotIn("stats_before", r)
+        _, lines = self.run_bench(Fake(), "--pattern", "alt", "--sessions", "2", "--turns", "1")
+        self.assertIsNone(lines[0]["cache_note"])
+        self.assertTrue(all(r["cache_metrics"] is None and r["cache_counters"] for r in self.requests(lines)))
+
+    def test_metrics_cache_series_and_their_change_are_on_each_line(self):
+        for path, labels in (("/metrics", False), ("/v1/metrics", True)):
+            with self.subTest(path=path, labels=labels):
+                fake = Fake(stats=False, metrics=path, labels=labels)
+                code, lines = self.run_bench(fake, "--pattern", "burst", "--sessions", "2", "--turns", "3",
+                                             "--burst", "3")
+                self.assertEqual(code, 0)
+                names = {TOTAL, "tensorfold:prefix_cache_hits_total", "tensorfold:prompt_cache_states"}
+                names |= {EVICT} if labels else set()
+                self.assertEqual((lines[0]["metrics"], lines[0]["cache_note"]), (path, None))
+                self.assertEqual(set(lines[0]["metrics_cache_series"]), names)
+                requests, last = self.requests(lines), 0
+                for r in requests:
+                    m = r["cache_metrics"]
+                    self.assertEqual((set(m["before"]), set(m["after"]), set(m["delta"])), (names, names, names))
+                    self.assertEqual(m["before"][TOTAL], last)
+                    self.assertEqual(m["delta"][TOTAL], r["cached_tokens"])
+                    self.assertEqual(m["after"][TOTAL], m["before"][TOTAL] + r["cached_tokens"])
+                    last = m["after"][TOTAL]
+                    self.assertIsNone(r["cache_counters"])
+                self.assertEqual(sum(r["cache_metrics"]["delta"][TOTAL] > 0 for r in requests), 4)
+                if labels:
+                    self.assertEqual([r["cache_metrics"]["delta"][EVICT] for r in requests], [0, 1, 1, 0, 0, 1, 0, 0])
+
+    def test_metrics_text_parsing_names_labels_and_values(self):
+        text = "\n".join([
+            "# HELP tensorfold:prompt_cache_bytes Storage.", "# TYPE tensorfold:prompt_cache_bytes gauge",
+            "tensorfold:prompt_cache_bytes 300000", "tensorfold:prompt_cache_states 3 1700000000000",
+            'tensorfold:prompt_cache_evictions_total{tier="device",model="a\\"b,c}"} 2',
+            'tensorfold:prompt_cache_hit_ratio{ tier = "disk" , } 0.25', "tensorfold:prefix_cache_hits_total 1.29024e5",
+            f"  {TOTAL} 129024  ", "vllm:Prompt_Cache_Misses_total{} NaN",
+            "tensorfold:prompt_cache_restores_total +Inf",
+            'tensorfold:requests_total{key="prompt_cache",status="200"} 9',
+            "tensorfold:kv_cache_usage_ratio 0.5", "tensorfold:requests_running 1",
+            "tensorfold:prompt_cache_x{tier=device} 1", 'tensorfold:prompt_cache_y{a="1" b="2"} 1',
+            "tensorfold:prompt_cache_z", "tensorfold:prompt_cache_w abc", ""])
+        self.assertEqual(mt.series(text), {
+            "tensorfold:prompt_cache_bytes": 300000, "tensorfold:prompt_cache_states": 3, EVICT: 2,
+            'tensorfold:prompt_cache_hit_ratio{tier="disk"}': 0.25, "tensorfold:prefix_cache_hits_total": 129024,
+            TOTAL: 129024, "vllm:Prompt_Cache_Misses_total": None, "tensorfold:prompt_cache_restores_total": None})
+        self.assertEqual(mt.series(None), {})
+        self.assertEqual(mt.change({"a": 1, "b": None, "c": 2}, {"a": 4, "b": 5, "c": None, "d": 1}),
+                         {"before": {"a": 1, "b": None, "c": 2}, "after": {"a": 4, "b": 5, "c": None, "d": 1},
+                          "delta": {"a": 3}})
+        self.assertIsNone(mt.change({}, {}))
+
+    def test_summary_counts_turns_resumed_past_the_shared_prefix(self):
+        fake = Fake(partial=True)
+        code, lines = self.run_bench(fake, "--pattern", "burst", "--sessions", "2", "--turns", "3", "--burst", "2")
+        self.assertEqual(code, 0)
+        bodies = fake.chat_bodies()
+        prefix = common(rendered(bodies[0]), rendered(bodies[1]))
+        self.assertGreater(prefix, len(rendered({"messages": bodies[0]["messages"][:1], "tools": bodies[0]["tools"],
+                                                 "add_generation_prompt": False})))
+        self.assertEqual((lines[0]["shared_prefix_tokens"], lines[-1]["shared_prefix_tokens"]), (prefix, prefix))
+        turns = [r["cached_tokens"] for r in self.requests(lines) if r["phase"] == "turn"]
+        self.assertEqual([c == prefix for c in turns], [True, False, True, False, True, True])
+        self.assertTrue(all(c > prefix for c in turns if c != prefix))
+        got = {n: (s["turns_past_shared_prefix"], s["turns_within_shared_prefix"])
+               for n, s in lines[-1]["sessions"].items()}
+        self.assertEqual(got, {"A": (1, 2), "B": (1, 2)})
+
+    def test_plan_only_writes_the_rendered_counts_and_sends_no_chat_request(self):
+        fake, ref = Fake(metrics="/metrics"), Fake()
+        code, lines = self.run_bench(fake, "--plan-only", "--history-tokens", "3000", ref=ref)
+        self.assertEqual(code, 0)
+        self.assertEqual([x["kind"] for x in lines], ["plan"])
+        plan = lines[0]
+        self.assertTrue(plan["plan_only"])
+        self.assertEqual(fake.chat_bodies(), [])
+        self.assertEqual(ref.seen, [])
+        self.assertEqual(sorted(plan["history"]), ["A", "B", "C"])
+        for name, got in plan["history"].items():
+            self.assertEqual(got["off_by"], got["prompt_tokens"] - 3000)
+            self.assertLessEqual(abs(got["off_by"]), bs.tolerance(3000))
+            last = [b for p, b, _ in fake.seen if p == "/v1/tokenize" and "messages" in b
+                    and b["messages"][1]["content"].startswith(f"Session {name}.")][-1]
+            self.assertEqual(len(rendered(last)), got["prompt_tokens"])
+        _, full = self.run_bench(Fake(metrics="/metrics"), "--history-tokens", "3000")
+        self.assertEqual({**full[0], "plan_only": True}, plan)
+        self.assertEqual([r["prompt_tokens"] for r in self.requests(full) if r["phase"] == "cold"],
+                         [plan["history"][n]["prompt_tokens"] for n in "ABC"])
 
     def test_a_failed_request_is_recorded_stops_its_session_and_fails_the_run(self):
         fake = Fake(fail={3})
@@ -348,6 +472,9 @@ class LineTests(Base):
         self.assertEqual(requests[3]["error"], "HTTPError")
         self.assertIsNone(requests[3]["token_sha256"])
         self.assertEqual(lines[-1]["failed"], 1)
+        tallies = {n: (s["turns_past_shared_prefix"], s["turns_within_shared_prefix"])
+                   for n, s in lines[-1]["sessions"].items()}
+        self.assertEqual(tallies, {"A": (1, 1), "B": (0, 0)})
 
     def test_counter_extraction_finds_only_cache_hit_miss_and_eviction_integers(self):
         snap = {"prompt_cache": {"hits": 2, "misses": 1, "evictions": 0, "bytes": 9}, "cache_hit_rate": 0.5,

@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_timing  # noqa: E402
 from bench_auth import authorize, read_api_key, redact  # noqa: E402
 from bench_evidence import Evidence, count, token_equal  # noqa: E402
+from metrics_text import change, series  # noqa: E402
 from reuse_served import TOOLS  # noqa: E402
 
 USAGE = """Every session is the shared harness (a system message of about --system-tokens, then reuse_served's six
@@ -45,8 +46,9 @@ examples:
 
 --replay-url (for example a server started with --prompt-cache-gib 0) receives the replay session's exact request
 bodies after the run, in order, and each reply's token_sha256 is compared with the first server's.
-Output, to --out and stdout: a plan line, one line per request (with /stats before and after, when the server serves
-it), the replay lines and a summary. The exit status is 1 when a request fails or a replayed reply differs."""
+Output, to --out and stdout: a plan line, one line per request (with /stats and the prompt-cache series of /metrics
+before and after, when the server serves them), the replay lines and a summary. The exit status is 1 when a request
+fails or a replayed reply differs. --plan-only builds the histories, writes the plan line and sends no chat request."""
 NAMES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 NEEDS = {"alt": 2, "burst": 2, "three": 3, "overlap": 3}
 COUNTER = re.compile(r"cache.*(hit|miss|evict)|(hit|miss|evict).*cache", re.IGNORECASE)
@@ -56,7 +58,7 @@ FIRST_OVERHEAD = 16  # tokens a template adds around one message, until the firs
 
 
 class Client:
-    """One server's /v1/tokenize, /stats and streamed /v1/chat/completions."""
+    """One server's /v1/tokenize, /stats, /metrics and streamed /v1/chat/completions."""
 
     def __init__(self, base: str, model: str, key: str | None, timeout: float, thinking: bool):
         self.base, self.model, self.key, self.timeout, self.thinking = base.rstrip("/"), model, key, timeout, thinking
@@ -79,20 +81,28 @@ class Client:
         """A plain text's token count, without special tokens."""
         return self.tokenize({"prompt": text, "add_special_tokens": False})["count"]
 
-    def rendered(self, messages: list) -> tuple[int, int | None]:
-        """The chat prompt's length as the chat route renders it (harness tools, thinking flag), and the context."""
+    def rendered(self, messages: list) -> tuple[int, int | None, list | None]:
+        """The chat prompt's length as the chat route renders it (harness tools, thinking flag), context and ids."""
         got = self.tokenize({"messages": messages, "tools": TOOLS, "add_generation_prompt": True,
                              "chat_template_kwargs": {"enable_thinking": self.thinking}})
-        return got["count"], count(got.get("max_model_len"))
+        ids = got.get("tokens")
+        return got["count"], count(got.get("max_model_len")), ids if isinstance(ids, list) else None
+
+    def text(self, path: str) -> str | None:
+        """A GET route's body when the server answers it; None otherwise."""
+        try:
+            with self.open(path) as r:
+                return r.read().decode("utf-8", "replace")
+        except OSError as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            return None
 
     def stats(self) -> dict | None:
         """GET /stats when the server serves it (native --dashboard); None otherwise."""
         try:
-            with self.open("/stats") as r:
-                got = json.loads(r.read())
-        except (OSError, ValueError) as exc:
-            if isinstance(exc, urllib.error.HTTPError):
-                exc.close()
+            got = json.loads(self.text("/stats") or "null")
+        except ValueError:
             return None
         return got if isinstance(got, dict) else None
 
@@ -211,8 +221,8 @@ def tolerance(target: int) -> int:
 
 
 def history(corpus: Corpus, client: Client, name: str, harness: dict, base: int, target: int,
-            chunk: tuple[int, int], rng: random.Random) -> tuple[list, list, int]:
-    """A session's messages after the harness, in chunk-sized pieces, to `target` rendered prompt tokens."""
+            chunk: tuple[int, int], rng: random.Random) -> tuple[list, list, int, list | None]:
+    """A session's messages after the harness, in chunk-sized pieces, to `target` rendered prompt tokens, and ids."""
     lo, hi = chunk
     head = f"Session {name}.\n\n"
     msgs, sizes, over, est, call = [], [], FIRST_OVERHEAD, base, None
@@ -235,7 +245,7 @@ def history(corpus: Corpus, client: Client, name: str, harness: dict, base: int,
             over = max(0, round((est - first - sizes[1] - sizes[2]) / 2))
         if last:
             break
-    total, k = client.rendered([harness, *msgs])[0], len(msgs) - 1
+    (total, _, ids), k = client.rendered([harness, *msgs]), len(msgs) - 1
     for _ in range(FIX_TRIES):  # recut the last piece, or the one before when a piece is at its bound
         want = min(hi, max(lo, sizes[k] + target - total))
         while k > 0 and want == sizes[k]:
@@ -245,8 +255,15 @@ def history(corpus: Corpus, client: Client, name: str, harness: dict, base: int,
             break
         text, sizes[k] = corpus.cut(want, lo, hi)
         msgs[k]["content"] = (head if k == 0 else "") + text
-        total = client.rendered([harness, *msgs])[0]
-    return msgs, sizes, total
+        total, _, ids = client.rendered([harness, *msgs])
+    return msgs, sizes, total, ids
+
+
+def shared(a: list | None, b: list | None) -> list | None:
+    """The token ids two prompts share from the start; None when either is unknown."""
+    if a is None or b is None:
+        return None
+    return a[:next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))]
 
 
 def schedule(pattern: str, turns: int, burst: int) -> list[list[int]]:
@@ -277,10 +294,7 @@ def leaves(value, path: str = "") -> dict:
 
 def counters(before: dict | None, after: dict | None) -> dict | None:
     """The snapshots' cache hit, miss and eviction counters and their change; None when the server reports none."""
-    a, b = leaves(before), leaves(after)
-    if not a and not b:
-        return None
-    return {"before": a, "after": b, "delta": {k: b[k] - a[k] for k in b if k in a}}
+    return change(leaves(before), leaves(after))
 
 
 def seconds(value: float | None) -> float | None:
@@ -297,8 +311,18 @@ class Bench:
         self.flying: set[str] = set()
         self.records: list[dict] = []
         self.sessions: list[dict] = []
-        self.seq, self.failed, self.t0 = 0, 0, time.perf_counter()
+        self.seq, self.failed, self.t0, self.prefix = 0, 0, time.perf_counter(), None
         self.stats = client.stats() is not None
+        self.metrics, self.found = None, {}
+        for path in ("/metrics", "/v1/metrics"):
+            if (text := client.text(path)) is not None:
+                self.metrics, self.found = path, series(text)
+                break
+
+    def snapshot(self) -> tuple[dict | None, dict]:
+        """/stats and the prompt-cache series of /metrics, from the routes that answered at startup."""
+        return (self.client.stats() if self.stats else None,
+                series(self.client.text(self.metrics)) if self.metrics else {})
 
     def emit(self, record: dict) -> None:
         line = json.dumps(redact(record, self.key))
@@ -313,27 +337,32 @@ class Bench:
         a = self.args
         text, system = self.corpus.cut(a.system_tokens)
         harness = {"role": "system", "content": "You are a coding agent working in a repository.\n\n" + text}
-        base, window = self.client.rendered([harness, {"role": "user", "content": "Begin."}])
+        base, window, _ = self.client.rendered([harness, {"role": "user", "content": "Begin."}])
         if window is not None and a.history_tokens + a.max_tokens > window:
             raise ValueError(f"--history-tokens plus --max-tokens pass the server's context of {window} tokens")
         if a.history_tokens - base < a.chunk_tokens[0]:
             raise ValueError(f"--history-tokens leaves no history piece after the {base}-token harness")
-        plan = {}
+        plan, common = {}, None
         for i in range(a.sessions):
             name = NAMES[i]
-            msgs, sizes, total = history(self.corpus, self.client, name, harness, base, a.history_tokens,
-                                         a.chunk_tokens, self.rng)
+            msgs, sizes, total, ids = history(self.corpus, self.client, name, harness, base, a.history_tokens,
+                                              a.chunk_tokens, self.rng)
+            common = ids if i == 0 else shared(common, ids)
             keep = a.replay_url is not None and name == a.replay_session
             self.sessions.append({"name": name, "messages": [harness, *msgs], "turn": 0, "reply": None,
                                   "alive": True, "bodies": [] if keep else None})
-            plan[name] = {"prompt_tokens": total, "messages": len(msgs), "roles": "".join(m["role"][0] for m in msgs),
-                          "pieces": sizes}
+            plan[name] = {"prompt_tokens": total, "off_by": total - a.history_tokens, "messages": len(msgs),
+                          "roles": "".join(m["role"][0] for m in msgs), "pieces": sizes}
+        self.prefix = None if common is None else len(common)
+        note = None if self.stats or self.metrics else "neither /stats nor /metrics answered; cache fields are empty"
         self.emit({"kind": "plan", "pattern": a.pattern, "sessions": a.sessions, "turns": a.turns, "burst": a.burst,
                    "overlap_gap_s": a.overlap_gap, "thinking": a.thinking == "on", "max_tokens": a.max_tokens,
                    "seed": a.seed, "system_tokens": system, "history_tokens": a.history_tokens,
                    "chunk_tokens": a.chunk_tokens, "turn_tokens": a.turn_tokens, "max_model_len": window,
-                   "tools": [t["function"]["name"] for t in TOOLS], "stats": self.stats, "texts": digests,
-                   "corpus_wrapped": self.corpus.wrapped, "history": plan})
+                   "tools": [t["function"]["name"] for t in TOOLS], "stats": self.stats, "metrics": self.metrics,
+                   "metrics_cache_series": sorted(self.found), "cache_note": note, "plan_only": a.plan_only,
+                   "shared_prefix_tokens": self.prefix, "texts": digests, "corpus_wrapped": self.corpus.wrapped,
+                   "history": plan})
 
     def prepare(self, s: dict, phase: str) -> dict:
         """The session's next body: the cold history, or the last reply resent with a new tool or user message."""
@@ -354,7 +383,7 @@ class Bench:
 
     def send(self, p: dict) -> None:
         s = p["session"]
-        before = self.client.stats() if self.stats else None
+        before = self.snapshot()
         with self.lock:
             others, seq = sorted(self.flying), self.seq
             self.flying.add(s["name"])
@@ -363,7 +392,7 @@ class Bench:
         run = self.client.chat(p["data"])
         with self.lock:
             self.flying.discard(s["name"])
-        after = self.client.stats() if self.stats else None
+        after = self.snapshot()
         first, last = (run["pieces"][0][0], run["pieces"][-1][0]) if run["pieces"] else (None, None)
         record = {"kind": "request", "pattern": self.args.pattern, "session": s["name"], "turn": p["turn"],
                   "phase": p["phase"], "seq": seq, "sent_s": seconds(sent), "in_flight_at_send": others,
@@ -375,9 +404,10 @@ class Bench:
                   "total_s": seconds(run["completed"] - run["sent"]),
                   "chunk_gaps_ms": bench_timing.request(run)["chunk_gaps_ms"], "tensorfold": run["tensorfold"],
                   "speculative": run["speculative"], "token_sha256": run["token_sha256"], "token_sha": run["token_sha"],
-                  "output_sha256": run["output_sha256"], "complete": run["complete"], "error": run["error"]}
+                  "output_sha256": run["output_sha256"], "complete": run["complete"], "error": run["error"],
+                  "cache_counters": counters(before[0], after[0]), "cache_metrics": change(before[1], after[1])}
         if self.stats:
-            record.update(stats_before=before, stats_after=after, cache_counters=counters(before, after))
+            record.update(stats_before=before[0], stats_after=after[0])
         self.emit(record)
         s["reply"] = run
         if run["error"] or not run["complete"]:
@@ -439,8 +469,14 @@ class Bench:
             got = per.setdefault(r["session"], {k: [] for k in ("phase", "prompt_tokens", "cached_tokens", "ttft_s")})
             for k in got:
                 got[k].append(r[k])
+        for got in per.values():  # a turn without a reported cached count is in neither tally
+            cached = [c for p, c in zip(got["phase"], got["cached_tokens"]) if p == "turn" and count(c) is not None]
+            past = None if self.prefix is None else sum(c > self.prefix for c in cached)
+            within = None if past is None else len(cached) - past
+            got.update(turns_past_shared_prefix=past, turns_within_shared_prefix=within)
         return {"kind": "summary", "pattern": self.args.pattern, "requests": len(self.records), "failed": self.failed,
-                "corpus_wrapped": self.corpus.wrapped, "sessions": per, "replay": tally}
+                "corpus_wrapped": self.corpus.wrapped, "shared_prefix_tokens": self.prefix, "sessions": per,
+                "replay": tally}
 
 
 def span(value: str) -> tuple[int, int]:
@@ -481,6 +517,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=3600.0, help="seconds per HTTP request")
     p.add_argument("--replay-url", help="a second server for the replay session's bodies (resumed == fresh)")
     p.add_argument("--replay-session", default="A")
+    p.add_argument("--plan-only", action="store_true", help="build the histories, write the plan line and stop")
     p.add_argument("--out", required=True, help="JSON lines output")
     p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key (both servers) from this variable")
     return p
@@ -541,6 +578,8 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as exc:
             print(redact(f"bench_sessions: setup failed: {type(exc).__name__}: {exc}", key), file=sys.stderr)
             return 1
+        if a.plan_only:
+            return 0
         bench.run()
         ref = Client(a.replay_url, a.model, key, a.timeout, a.thinking == "on") if a.replay_url else None
         tally = bench.replay(ref) if ref else None
