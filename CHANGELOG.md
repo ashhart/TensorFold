@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Prompt cache: a restore the backend refuses now tries the next shorter state kept in memory before prefilling from the start (#2144).
+
 - Native engines that cannot apply presence or frequency penalties refuse nonzero requests with 400; zero, null and omitted penalties keep working (#2166).
 
 - Qwen3.8-27B: a refusal that no `--parallel` or `--context` can fix now names the wired-limit raise, and only suggests one that leaves the system room (#2123). Thanks to @devopsfortunato.
