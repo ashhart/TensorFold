@@ -20,6 +20,7 @@ test "draft sources: Metal Qwen2B and LFM2 MoE follow qualified verification wid
     q.options.streams = 2;
     l.options.streams = 2;
     l.timed = 0;
+    l.shared_timed = 0;
     for ([_]u32{ 1, 16 }) |width| {
         q.width = width;
         l.width = width;

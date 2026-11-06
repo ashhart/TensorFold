@@ -9,6 +9,10 @@ const Case = rounds.Case;
 const modelWith = rounds.modelWith;
 const p1 = rounds.p1;
 const p2 = rounds.p2;
+const Config = @import("config.zig").Config;
+const Cost = @import("config.zig").Cost;
+const HoldCost = @import("hold_price.zig").HoldCost;
+const Sampling = @import("sampling.zig").Sampling;
 
 const gpa = std.testing.allocator;
 
@@ -250,4 +254,87 @@ test "a release retires its own draw and leaves another stream's pending one" {
     try std.testing.expectEqual(@as(usize, 1), target.ringHeld());
     engine.discard(&b);
     try std.testing.expectEqual(@as(usize, 0), target.ringHeld());
+}
+
+/// A drafter's hold pass as a priced head times it: 2 ms for blocks one deep, 5 ms for four (a synthetic fixture).
+const holds = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 2 }, .{ .streams = 1, .depth = 4, .ms = 5 } };
+
+const seeded: Sampling = .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 };
+
+/// modelWith's pipelined fake target carrying a priced head's flags: shared reservations, granted depths, hold costs.
+fn priced(head: bool, speculate: bool) !Config {
+    var costs: [16]Cost = undefined;
+    for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
+    return Config.init(gpa, .{
+        .exact_width = 16,
+        .gpu_tokens = true,
+        .mtp = head,
+        .speculate = speculate,
+        .speculate_early = false,
+        .drafts = 4,
+        .window_costs = &costs,
+        .hidden_rows = true,
+        .batch_rows = 32,
+        .max_streams = 8,
+        .draft_streams = true,
+        .allocate_shared_drafts = true,
+        .draft_probabilities = true,
+        .granted_depth = true,
+        .hold_costs = &holds,
+    }, 16, 15);
+}
+
+/// `c` alone on `cfg` to its end: its reply is the fake target's one-token decode and its queued draws are released.
+fn decodeLone(cfg: *const Config, c: Case) !void {
+    var target: fake.Fake = .{ .gpa = gpa, .ring_len = ring_len };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, cfg, target.backend(), clock.clock());
+    defer engine.deinit();
+    var p = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer p.deinit();
+    var s = try sm.Stream.init(gpa, .{
+        .id = "s",
+        .prompt = c.prompt,
+        .max_new = c.max_new,
+        .eos = c.eos,
+        .sampling = c.sampling,
+        .drafts = c.drafts,
+        .proposer = p.proposer(),
+    });
+    defer s.deinit(gpa);
+    try engine.addStream(&s);
+    var steps: u32 = 0;
+    while (engine.activeCount() > 0) : (steps += 1) {
+        try std.testing.expect(steps < 2 * c.max_new); // a draw queued ahead lands a token a step: no stall
+        try engine.step();
+    }
+    try expectDecode(c, &s);
+    try std.testing.expectEqual(@as(usize, 0), target.ringHeld()); // every draw queued ahead was read
+}
+
+test "a priced head's lone stream that asked for no drafts decodes serially, queued ahead, greedy or sampled" {
+    var cfg = try priced(true, true);
+    defer cfg.deinit(gpa);
+    for ([_]?Sampling{ null, seeded }) |sampling| {
+        for ([_][]const u32{ &p1, &p2 }) |prompt| {
+            try decodeLone(&cfg, .{ .prompt = prompt, .sampling = sampling, .drafts = false });
+        }
+    }
+}
+
+test "a priced config whose head or speculation is off decodes a drafting request as the serial decode" {
+    const Off = struct { head: bool, speculate: bool };
+    const offs = [_]Off{
+        .{ .head = false, .speculate = true },
+        .{ .head = true, .speculate = false },
+        .{ .head = false, .speculate = false },
+    };
+    for (offs) |off| {
+        var cfg = try priced(off.head, off.speculate);
+        defer cfg.deinit(gpa);
+        for ([_]?Sampling{ null, seeded }) |sampling| {
+            try decodeLone(&cfg, .{ .prompt = &p2, .max_new = 60, .sampling = sampling });
+        }
+    }
 }

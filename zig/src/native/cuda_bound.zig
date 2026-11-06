@@ -67,6 +67,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.keep(x.inner.ptr, w, paths);
             }
         }.f,
+        .prepare_draft = if (v.prepare_draft != null) struct {
+            fn f(p: *anyopaque, r: []const be.DraftRequest) anyerror!void {
+                const x = H.bind(p);
+                return x.inner.vtable.prepare_draft.?(x.inner.ptr, r);
+            }
+        }.f else null,
         .draft = struct {
             fn f(p: *anyopaque, r: []const be.DraftRequest) anyerror!void {
                 const x = H.bind(p);

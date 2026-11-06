@@ -4,7 +4,8 @@ set -euo pipefail
 zig="${ZIG:-zig}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 lanes="$root/zig/src/core/lanes/lanes.zig"
-"$zig" test -lc "$lanes"
+sys="$root/zig/src/platform/sys.zig"
+"$zig" test -lc --dep sys "-Mroot=$lanes" "-Msys=$sys"
 for name in lanes_units lanes_replay; do
-  "$zig" test -lc --dep lanes "-Mroot=$root/zig/tests/$name.zig" "-Mlanes=$lanes"
+  "$zig" test -lc --dep lanes --dep sys "-Mroot=$root/zig/tests/$name.zig" --dep sys "-Mlanes=$lanes" "-Msys=$sys"
 done

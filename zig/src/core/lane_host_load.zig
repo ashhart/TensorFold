@@ -76,6 +76,8 @@ pub fn publish(h: *LaneHost) void {
 pub fn began(h: *LaneHost, job: *Job) void {
     h.lock();
     defer h.unlock(); // its publish sees the pass and its fill together: a blocking prefill may unlock no more
+    // Whole-prompt backends prefill inside admitOne: queued peers are not in the wrapper's lane map yet.
+    job.stream.prefill_cohort = @min(h.admitted.items.len + h.queued.items.len, @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes));
     const hint = job.stream.fill_at.load(.monotonic);
     job.load = .{ .on = true, .hint = hint, .sure = hint == 0 };
     job.fill_on.store(true, .release); // status readers count the fill from here until the pass reports

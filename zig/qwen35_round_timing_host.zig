@@ -65,6 +65,8 @@ test "round timing: disabled trace allocation succeeds with no allocator capacit
 test "round timing: drafter and recorder preserve the original observer context" {
     var target: lanes.fake.Fake = .{ .gpa = t.allocator };
     defer target.deinit();
+    var head: lanes.FakeDrafter = .{};
+    defer head.deinit();
     const Spy = struct {
         fn done(ptr: *anyopaque, paths: []const []const u32) void {
             const n: *usize = @ptrCast(@alignCast(ptr));
@@ -74,7 +76,7 @@ test "round timing: drafter and recorder preserve the original observer context"
     var seen: usize = 0;
     var backend = target.backend();
     backend.round_observer = .{ .ptr = &seen, .done = Spy.done };
-    var drafter: lanes.drafted.Drafted = .{ .gpa = t.allocator, .target = backend, .drafter = .{ .ptr = undefined, .vtable = undefined } };
+    var drafter: lanes.drafted.Drafted = .{ .gpa = t.allocator, .target = backend, .drafter = head.drafter() };
     defer drafter.deinit();
     var recorded: lanes.recorder.Recorded = .{ .inner = drafter.backend(), .recorder = undefined };
     const wrapped = recorded.backend();

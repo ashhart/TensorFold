@@ -147,6 +147,8 @@ pub const Strict = struct {
     refused: u32 = 0,
     taps: [8]u32 = undefined,
     tap_count: usize = 0, // the layers it keeps, told before any forward
+    head_proposed: u64 = 0,
+    head_accepted: u64 = 0,
 
     const Snap = struct { start: u64 = 0, rows: std.ArrayList(u32) = .empty, valid: usize = 0 };
     const poison: u32 = 0xdead;
@@ -158,11 +160,17 @@ pub const Strict = struct {
     }
 
     pub fn backend(x: *Strict) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .prepare_features = prepare, .features = features, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .prepare_features = prepare, .features = features, .observe_head = observeHead, .release = release } };
     }
 
     fn self(ptr: *anyopaque) *Strict {
         return @ptrCast(@alignCast(ptr));
+    }
+
+    fn observeHead(ptr: *anyopaque, _: *sm.Stream, proposed: u32, accepted: u32) void {
+        const x = self(ptr);
+        x.head_proposed += proposed;
+        x.head_accepted += accepted;
     }
 
     fn snap(x: *Strict, s: *sm.Stream) !*Snap {
@@ -174,6 +182,7 @@ pub const Strict = struct {
     fn prefill(ptr: *anyopaque, s: *sm.Stream) anyerror!void {
         const x = self(ptr);
         try x.inner.prefill(s);
+        if (s.head_context == false) return;
         const sn = try x.snap(s);
         sn.start = s.cached;
         sn.rows.clearRetainingCapacity();
@@ -192,7 +201,7 @@ pub const Strict = struct {
 
     fn queue(ptr: *anyopaque, s: *sm.Stream, feed: be.Feed, position: u64) anyerror!u64 {
         const x = self(ptr);
-        (try x.snap(s)).valid = 0;
+        if (s.head_context != false) (try x.snap(s)).valid = 0;
         return x.inner.queue(s, feed, position);
     }
 
@@ -205,6 +214,7 @@ pub const Strict = struct {
         try x.inner.verify(windows, out);
         for (windows) |w| {
             if (w.held != 0) return error.HeldReachedTarget; // Drafted hands host tokens
+            if (w.stream.head_context == false) continue;
             const sn = try x.snap(w.stream);
             sn.start = w.positions[0] - 1;
             sn.rows.clearRetainingCapacity();
@@ -218,6 +228,7 @@ pub const Strict = struct {
         const x = self(ptr);
         try x.inner.keep(windows, paths);
         for (windows, paths) |w, path| {
+            if (w.stream.head_context == false) continue;
             const sn = try x.snap(w.stream);
             sn.valid = @min(sn.valid, path.len);
             @memset(sn.rows.items[sn.valid..], poison);
@@ -237,6 +248,7 @@ pub const Strict = struct {
 
     fn features(ptr: *anyopaque, s: *sm.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
         const x = self(ptr);
+        if (s.head_context == false) return error.RowsNotHeld;
         if (!std.mem.eql(u32, taps, x.taps[0..x.tap_count])) return error.TapsNotPrepared;
         const sn = x.snaps.getPtr(s) orelse return error.UnknownStream;
         if (start < sn.start or start + count > sn.start + sn.valid) {
@@ -340,18 +352,6 @@ pub const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
 const p2 = [_]u32{ 2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9 };
 pub const long = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
 pub const sampled: Sampling = .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 };
-
-test "drafts off on the wrapped backend never reach the drafter" {
-    for ([_]?Sampling{ null, sampled }) |s| {
-        const off = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false }}, .wrapped, false);
-        defer freeOut(off);
-        const plain = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false }}, .plain, false);
-        defer freeOut(plain);
-        try std.testing.expectEqualSlices(u32, plain.tokens[0], off.tokens[0]);
-        const h = off.head;
-        try std.testing.expectEqual(@as(u32, 0), h.opens + h.absorbs + h.holds + h.helds + h.releases);
-    }
-}
 
 test "shared rounds commit what each stream commits alone, and reach the drafter as one batch" {
     const together = try run(&.{ .{ .prompt = &p1 }, .{ .prompt = &p2, .sampling = sampled, .max_new = 30 } }, .wrapped, true);
@@ -572,5 +572,5 @@ test "the early first token equals the late one after a complete prompt restore"
 test {
     _ = @import("drafted_role_test.zig");
     _ = @import("drafted_step_test.zig");
-    _ = @import("drafted_held_test.zig");
+    _ = @import("head_enrollment_test.zig");
 }
