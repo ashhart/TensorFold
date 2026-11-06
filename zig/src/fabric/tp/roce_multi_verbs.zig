@@ -36,15 +36,8 @@ pub const flag_bytes: u32 = @sizeOf(u32);
 /// The longest `quiesce` waits for the HCAs to flush what was posted.
 pub const quiesce_ns: u64 = 5 * std.time.ns_per_s;
 
-/// Before ibv_reg_mr: no fork shares or copies the region (DONTFORK), its pages stay 4 KiB (NOHUGEPAGE); else no start.
-pub fn prepareRegion(region: []align(std.heap.page_size_min) u8) Error!void {
-    if (comptime @import("builtin").os.tag != .linux) return; // the verbs wire runs on Linux only
-    const advice = [_]u32{ std.os.linux.MADV.DONTFORK, std.os.linux.MADV.NOHUGEPAGE };
-    for (advice) |a| std.posix.madvise(region.ptr, region.len, a) catch |e| {
-        log.warn("tp roce: madvise({d}) on the {d} B region failed: {t}; refusing to start", .{ a, region.len, e });
-        return error.VerbsFailed;
-    };
-}
+/// Before ibv_reg_mr: the sibling's DONTFORK, and NOHUGEPAGE where THP exists (roce_verbs.zig).
+pub const prepareRegion = @import("roce_verbs.zig").prepareRegion;
 
 /// Whether a QP's actual inline capacity takes the flag post.
 pub fn inlineFits(cap: abi.QpCap) bool {
