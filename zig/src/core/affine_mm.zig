@@ -23,7 +23,7 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, body });
 }
 
-/// Entry points: row sums, the dense matmul, gathers by tile height, scattering gathers, the experts' gate and up through a pair order into SwiGLU.
+/// Entry points: row sums, dense matmul, tiled and scattering gathers, ordered expert gate/up into SwiGLU.
 pub const names = [8][:0]const u8{ "tf_affine_row_sums", "tf_affine_mm", "tf_affine_gather_32", "tf_affine_gather_64", "tf_affine_gather_scatter_32", "tf_affine_gather_scatter_64", "tf_affine_gather_glu_32", "tf_affine_gather_glu_64" };
 
 /// A format's pipelines, in `names` order.
