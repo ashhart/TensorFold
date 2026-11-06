@@ -292,7 +292,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8) !void {
     defer r.deinit();
     var k = try Kernels.load(gpu.d);
     defer k.deinit();
-    try check.expect(k.native_lane.prompt != null and cuda.qmmf.prompt_rows == 512, "the BF16 prompt tile is loaded and takes 512 rows and more", .{});
+    try check.expect(k.native_lane.prompt != null and k.native_lane.prompt_sms > 0 and cuda.qmmf.prompt_rows == 512, "the BF16 prompt tile is loaded with the SM count, from 512 rows", .{});
     var g = try flash.Glue.load(gpu.d);
     defer g.deinit();
     // the unpinned witness's two K slices of up to 8,240 fp32 columns a row

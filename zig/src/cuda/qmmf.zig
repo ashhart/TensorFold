@@ -5,6 +5,7 @@ const module = @import("module.zig");
 const launch_ = @import("launch.zig");
 const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
+const abi = @import("abi.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -156,6 +157,11 @@ fn loadTiles(mod: Module, comptime mode: Mode, comptime wide: bool) ![7]Function
 pub const prompt_shared: u32 = 3 * (128 + 128) * group * 2 + 128;
 pub const prompt_rows: usize = 512;
 
+/// The prompt tile's blocks: its K slices meet inside a block, so one block per 128 x 128 output tile.
+pub fn promptBlocks(m: usize, n: usize) usize {
+    return (m + 127) / 128 * ((n + 127) / 128);
+}
+
 pub fn promptSymbol(comptime out: Out, comptime fused: bool) [:0]const u8 {
     return std.fmt.comptimePrint("_ZN7tf_qmmf11qmmf_kernelILi4ELi128ELi128ELi2ELi4ELi3ELb{d}ELb0ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", .{ @intFromBool(out == .f32), @intFromBool(fused) });
 }
@@ -174,7 +180,8 @@ pub const Lane = struct {
     half: [2][2][2]Function, // by halfModeIndex, Out, then plain / cluster
     half_below: usize = half_below_default,
     shared_down: [4]Function = undefined,
-    prompt: ?[2][2]Function = null, // Out, then plain / fused; loaded only on sm_12x
+    prompt: ?[2][2]Function = null, // Out, then plain / fused; loadPrompt() fills it on sm_12x
+    prompt_sms: usize = 0, // the device's SMs: the tile runs when its blocks fill more than half of them
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
@@ -203,17 +210,25 @@ pub const Lane = struct {
             f.* = try mod.function(name);
             try f.allowDynamicShared(sharedBytes(.bf16, 64));
         }
-        if (capability_major == 12) {
-            var prompt: [2][2]Function = undefined;
-            inline for (.{ Out.bf16, Out.f32 }, 0..) |out, oi| inline for (.{ false, true }, 0..) |fused, fi| {
-                const f = try mod.function(promptSymbol(out, fused));
-                try f.allowDynamicShared(prompt_shared);
-                prompt[oi][fi] = f;
-            };
-            l.prompt = prompt;
-        }
         l.half_below = try halfBelow();
         return l;
+    }
+
+    /// The BF16 prompt tile on the current device if it is sm_12x; only families that timed their shapes call this.
+    pub fn loadPrompt(l: *Lane, d: *const Driver) !void {
+        if ((try d.currentCapability()) / 10 != 12) return;
+        var prompt: [2][2]Function = undefined;
+        inline for (.{ Out.bf16, Out.f32 }, 0..) |out, oi| inline for (.{ false, true }, 0..) |fused, fi| {
+            const f = try l.mod.function(promptSymbol(out, fused));
+            try f.allowDynamicShared(prompt_shared);
+            prompt[oi][fi] = f;
+        };
+        var dev: abi.Device = 0;
+        try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
+        var sms: c_int = 0;
+        try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
+        l.prompt = prompt;
+        l.prompt_sms = @intCast(@max(sms, 1));
     }
 
     pub fn unload(l: *Lane) void {
@@ -238,10 +253,11 @@ pub const Lane = struct {
 
     pub const matmulF32Strided = @import("qmmf_shared.zig").matmulF32Strided;
 
-    /// The actual prompt selection, including loaded instances and the pinned slice meeting plan.
+    /// The actual prompt selection: loaded tiles, the pinned slice plan, and blocks over half the SMs.
     pub fn usesPrompt(l: Lane, m: usize, w: Weight) bool {
         const p = planFor(m, w, l.clusters);
-        return promptEligible(m, w) and !p.cluster and !p.reduce and l.prompt != null;
+        return promptEligible(m, w) and !p.cluster and !p.reduce and l.prompt != null and
+            2 * promptBlocks(m, w.n) > l.prompt_sms;
     }
 
     /// matmul() writing y as `out` says: bf16, or fp32.
@@ -386,8 +402,23 @@ test "large BF16 tiles preserve pinned slices and leave decode and other formats
     try std.testing.expect(promptEligible(4218, out) and p.fused and p.sk == 4 and !p.reduce and !p.cluster);
 }
 
+test "the prompt tile runs only where its blocks fill more than half the SMs" {
+    const f: Function = .{ .d = undefined, .handle = @ptrFromInt(1) };
+    var lane: Lane = .{ .mod = undefined, .fns = undefined, .f32_fns = undefined, .reduce = undefined, .half = undefined, .prompt = @splat(@splat(f)), .prompt_sms = 48, .clusters = false };
+    const hc_down = try pinned(Weight{ .mode = .bf16, .codes = 0, .scales = 0, .n = 324, .k = 10240, .npad = 384 }, 8);
+    const gate_up = try pinned(Weight{ .mode = .bf16, .codes = 0, .scales = 0, .n = 640, .k = 2560, .npad = 640 }, 4);
+    const gdn = try pinned(Weight{ .mode = .bf16, .codes = 0, .scales = 0, .n = 16480, .k = 2560, .npad = 16512 }, 1);
+    // a GB10's 48 SMs: HC down's 3 columns of blocks from 1,025 rows, shared gate/up's 5 from 513, wide ones from 512
+    for ([_]struct { w: Weight, m: usize, want: bool }{
+        .{ .w = hc_down, .m = 1024, .want = false }, .{ .w = hc_down, .m = 1025, .want = true },
+        .{ .w = gate_up, .m = 512, .want = false },  .{ .w = gate_up, .m = 513, .want = true },
+        .{ .w = gdn, .m = 512, .want = true },
+    }) |c| try std.testing.expectEqual(c.want, lane.usesPrompt(c.m, c.w));
+    lane.prompt_sms = 0; // a mocked lane without a device: no floor
+    try std.testing.expect(lane.usesPrompt(512, hc_down));
+}
+
 test "prompt dispatch changes CTA geometry and output instance without changing slices" {
-    const abi = @import("abi.zig");
     const Trace = struct {
         var calls: usize = 0;
         var grid: u32 = 0;

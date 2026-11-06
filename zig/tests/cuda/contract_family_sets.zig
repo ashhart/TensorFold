@@ -48,7 +48,9 @@ pub const Sets = struct {
         errdefer shared_down.deinit();
         const prompt = try gpu.gpa.create(Prompt);
         errdefer gpu.gpa.destroy(prompt);
-        prompt.* = Prompt.init(gpu, s, &modelopt.lane);
+        var prompt_lane = modelopt.lane; // the tile in this set's copy only, as Flash Next loads it
+        try prompt_lane.loadPrompt(gpu.d);
+        prompt.* = Prompt.init(gpu, s, prompt_lane);
         errdefer prompt.deinit();
         try prompt.append(cap, a, list);
         return .{
