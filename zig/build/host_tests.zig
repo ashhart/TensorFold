@@ -12,6 +12,7 @@ const exclusions = [_]Exclusion{
     .{ .name = "test-exl3-prompt-host", .reason = "red on main, #2031 (missing b32 initializer, #2094)" },
     .{ .name = "test-qwen35-draft-frame-host", .reason = "red on main, #2031 (uninitialized seg_fn in the recording fixture)" },
     .{ .name = "test-qwen35-frame-invalidation-host", .reason = "red on main, #2031 (same recording fixture as test-qwen35-draft-frame-host)" },
+    .{ .name = "test-glm-snapshots-host", .reason = "red on main, #2031 (snapshot fixture copies module lacks core)" },
     .{ .name = "test-gemma4-affine-host", .reason = "red on main, #2031 (reviewed Metal affine_mm source pin drifted)" },
     .{ .name = "test-gradient-serving", .reason = "source pins awaiting re-baseline (#2031), gradient source identities drifted" },
     .{ .name = "test-qwen-serving-host", .reason = "source pins awaiting re-baseline (#2031), launch sequence drifted" },
