@@ -63,7 +63,7 @@ pub const Checkpoint = struct {
         return self.addFileSplit(device, path, prefix, selected, null);
     }
 
-    /// As addFileSelected; with `later`, the tensors it names stay in the file for `read` and the rest pack into one buffer.
+    /// As addFileSelected; with `later`, its named tensors stay in the file for `read`, the rest pack into one buffer.
     pub fn addFileSplit(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, selected: ?[]const u8, later: ?Later) !void {
         const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) {
