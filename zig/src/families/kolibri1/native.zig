@@ -79,8 +79,8 @@ const Plan = struct {
 
 /// Whether the full layers' caches lease the pool's pages: asked, and not turned off by TENSORFOLD_KOLIBRI_KV_PAGES=0.
 fn pagesOn(o: Options) bool {
-    const v = std.c.getenv("TENSORFOLD_KOLIBRI_KV_PAGES") orelse return o.kv_pages;
-    return o.kv_pages and !std.mem.eql(u8, std.mem.span(v), "0");
+    const v = @import("profile").lookup("TENSORFOLD_KOLIBRI_KV_PAGES") orelse return o.kv_pages;
+    return o.kv_pages and !std.mem.eql(u8, v, "0");
 }
 
 /// Paged: the first stream's rings and the scratch must fit; the host plans the pool after.
