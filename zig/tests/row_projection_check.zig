@@ -160,7 +160,7 @@ pub fn main(_: std.process.Init) !void {
         const stride_w = c.n * c.k * c.bits / 32 * 4;
         const stride_sb = c.n * groups * 2;
         const w0 = row.Weights{ .w = s.w, .scales = s.s, .biases = s.b, .n = c.n, .k = c.k, .bits = c.bits, .sum = c.sum };
-        // every width of expert 0 against one row at a time, the CPU reference within rounding, relu2 as relu squared of the plain output
+        // expert 0's every width vs one row a time, CPU reference within rounding, relu2 = relu squared of plain output
         try run(queue, Dense{ .p = &p, .w = w0, .x = s.x, .rows = c.rows, .out = s.out, .relu2 = false });
         const wide = try a.dupe(u16, s.out.slice(u16, c.rows * c.n));
         defer a.free(wide);
