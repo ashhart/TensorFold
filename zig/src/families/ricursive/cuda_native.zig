@@ -20,6 +20,11 @@ pub const takes_drafter = false;
 pub const drafter_refusal = "--drafter: Ripple on CUDA loads no drafter yet; serve it without --drafter";
 /// `explain` words this family's open refusals too.
 pub const explains_open = true;
+/// The server's think block rules: Ripple opens `<think>` itself or answers bare, and its markers take no budget.
+pub fn thinking(info: anytype) void {
+    info.reasoning_optional = true;
+    info.thinking_budget = false;
+}
 
 /// GB10's memory (121.7 GiB), the budget when the server gives no reading of its room.
 pub const gb10_bytes: u64 = @intFromFloat(121.7 * (1 << 30));
@@ -217,6 +222,12 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.Unimplemented => "Ripple's CUDA global-layer decode is not in this build yet",
         else => null,
     };
+}
+
+test "ricursive cuda native: a reply thinks or answers bare, with no thinking budget, as on Metal" {
+    var info: struct { reasoning_optional: bool = false, thinking_budget: bool = true } = .{};
+    thinking(&info);
+    try std.testing.expect(info.reasoning_optional and !info.thinking_budget);
 }
 
 test "ricursive cuda native: every refusal of its own is worded, the rest left to the server" {
