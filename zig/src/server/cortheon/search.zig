@@ -57,9 +57,25 @@ fn fragmentText(a: Allocator, fragment: []const u8) Allocator.Error![]const u8 {
     return std.mem.trim(u8, t.text, " \n");
 }
 
+/// `text` with each `&amp;` entity turned into `&`, matching the entity's letters in either case.
+fn decodeAmp(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (std.ascii.startsWithIgnoreCase(text[i..], "&amp;")) { // &AMP; is the same entity
+            try out.append(a, '&');
+            i += 5;
+            continue;
+        }
+        try out.append(a, text[i]);
+        i += 1;
+    }
+    return out.items;
+}
+
 /// The target of a DuckDuckGo result link: its `uddg` parameter decoded, or the link itself.
 fn resultTarget(a: Allocator, href_raw: []const u8) Allocator.Error!?[]const u8 {
-    const href = try std.mem.replaceOwned(u8, a, href_raw, "&amp;", "&");
+    const href = try decodeAmp(a, href_raw);
     if (std.ascii.findIgnoreCase(href, "duckduckgo.com/y.js") != null) return null; // DuckDuckGo.com/y.js is still an ad
     if (std.ascii.findIgnoreCase(href, "uddg=")) |at| { // UDDG= carries the same target
         const start = at + 5;
@@ -247,6 +263,16 @@ test "a search snippet is found when its class letters differ" {
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("A short blurb.", results[0].snippet);
+}
+
+test "a search result decodes an ampersand entity whose letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"//example.org/page?q=1&AMP;x=2\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page?q=1&x=2", results[0].url);
 }
 
 test "a search result keeps a title when its closer's letters differ" {
