@@ -73,3 +73,7 @@ test {
     _ = train;
     _ = @import("cuda_read_cost_test.zig");
 }
+
+test "Qwen pages default: the learner's and the prefix share's refusals stop before the weights load" {
+    try @import("cuda_admit_test.zig").refusals();
+}

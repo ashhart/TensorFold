@@ -136,18 +136,16 @@ pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
-    const pages_all = pages_mod.pagedOnly();
-    _ = try pages_mod.paging(o.slide, false); // a malformed TF_QWEN_KV_PAGES is refused before the load
+    const page_tokens = try pages_mod.paging();
+    const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
     const page_test = try cache_mod.pageTest();
     _ = try cache_mod.cacheRows(o.context, page_test);
-    const share_snaps = try prefix_mod.sharing();
-    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
-    errdefer e.deinit();
-    const page_tokens = try pages_mod.paging(o.slide, e.g.moe()); // pages only when asked, dense or MoE
-    const engine_paged = page_tokens > 0 and pages_all;
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
+    const share_snaps = try prefix_mod.sharing();
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
+    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
+    errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
