@@ -67,23 +67,21 @@ An M5 result does not establish correctness on those GPUs.
 
 ## Verification
 
-Install the repository's test dependencies in an isolated environment. The capture and trusted-forward
-checks also require the checkpoint's tokenizer and `mlx-lm`.
+Install the checks' Python dependency in an isolated environment. The trusted-forward check also requires
+the checkpoint's tokenizer and `mlx-lm`.
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[test,tui]'
+python -m pip install mlx-lm
 zig build test test-native -Dcpu=apple_m1
 zig build tf-qwen35-check tf-qwen35-forward tf-qwen35-exact -Dcpu=apple_m1
-python tools/zig/capture_qwen35.py "$HOME/models/qwen35-2b" /tmp/qwen35-ops
-zig-out/bin/tf-qwen35-check "$HOME/models/qwen35-2b" /tmp/qwen35-ops
+zig-out/bin/tf-qwen35-check "$HOME/models/qwen35-2b"
 zig-out/bin/tf-qwen35-exact "$HOME/models/qwen35-2b"
 python tools/zig/qwen35_fidelity.py "$HOME/models/qwen35-2b" /tmp/qwen35-fidelity
-TENSORFOLD_QWEN35_MODEL="$HOME/models/qwen35-2b" python -m pytest -q tests
 ```
 
-Operation captures check binding and weight hashes with exact equality. The forward/cache sweep covers
+The forward/cache sweep covers
 attention chunk boundaries, partial acceptance followed by continuation, and unequal stream lengths.
 Model fidelity is separate: the tool reports teacher-forced NLL and top-token agreement on the public
 benchmark prompts, this repository's contribution guide and Python's standard library. Stock `mlx-lm`
