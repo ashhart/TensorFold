@@ -3,7 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 
-const Cuda = struct {
+pub const Cuda = struct {
     pub const mi = @import("moss_image");
     pub const st = core.safetensors;
     pub const seconds = mi.seconds;

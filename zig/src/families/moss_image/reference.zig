@@ -53,6 +53,12 @@ pub fn gate(ours: Match, reference: Match, rounded: Match) Verdict {
     return within(ours, .{ .max_abs = 0, .cosine = @min(reference.cosine, rounded.cosine), .worst_row = @max(reference.worst_row, rounded.worst_row), .worst_at = 0 });
 }
 
+/// The farther of two reference runs from exact, in each measure: their spread, as one reference.
+pub fn wider(a: Match, b: Match) Match {
+    const row = if (b.worst_row > a.worst_row) b else a;
+    return .{ .max_abs = @max(a.max_abs, b.max_abs), .cosine = @min(a.cosine, b.cosine), .worst_row = row.worst_row, .worst_at = row.worst_at };
+}
+
 /// Ours against exact rows: its cosine error and worst row each within `factor` of the reference's.
 pub fn within(ours: Match, reference: Match) Verdict {
     const cosine_limit = factor * (1 - reference.cosine);
@@ -139,4 +145,25 @@ test "against float64, a row further off than the reference allows fails" {
     const v = within(match(f32, &ours, &exact, cols), match(f32, &theirs, &exact, cols));
     try std.testing.expect(!v.pass);
     try std.testing.expectEqual(@as(usize, 3), v.row_at);
+}
+
+test "two reference runs: the gate is their spread, and a result outside it still fails" {
+    var exact: [cols * n]f32 = undefined;
+    synthetic(&exact, 4);
+    // one reference run near rounding, the other with row 2 off by 0.5%: as torch bf16 on two devices
+    var near: [cols * n]f32 = undefined;
+    for (&near, exact) |*r, x| r.* = host.round(x);
+    var far: [cols * n]f32 = near;
+    for (far[2 * cols ..][0..cols], exact[2 * cols ..][0..cols]) |*r, x| r.* = host.round(x * 1.005);
+    const spread = wider(match(f32, &near, &exact, cols), match(f32, &far, &exact, cols));
+    try std.testing.expectEqual(@as(usize, 2), spread.worst_at);
+    var ours: [cols * n]u16 = undefined;
+    bf16Of(&ours, &exact);
+    for (ours[2 * cols ..][0..cols], exact[2 * cols ..][0..cols]) |*o, x| o.* = host.bf16(x * 1.005);
+    const rounded = rounding(&exact, cols);
+    // as far as the farther run: outside the nearer run's gate, inside the spread's
+    try std.testing.expect(!gate(match(u16, &ours, &exact, cols), match(f32, &near, &exact, cols), rounded).pass);
+    try std.testing.expect(gate(match(u16, &ours, &exact, cols), spread, rounded).pass);
+    for (ours[2 * cols ..][0..cols], exact[2 * cols ..][0..cols]) |*o, x| o.* = host.bf16(x * 1.05);
+    try std.testing.expect(!gate(match(u16, &ours, &exact, cols), spread, rounded).pass);
 }

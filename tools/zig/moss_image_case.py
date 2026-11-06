@@ -26,6 +26,10 @@ USAGE = """\
   encode MODEL_DIR OUT_DIR [--prompt-file F]  the prompt encoder alone: token ids, embedding rows, and every layer's
                                            output and the final rows in bf16 and in float32, and
                                            each step alone in bf16 on the float32 run's input
+  blocks MODEL_DIR CASE_DIR --step N --branch B  one step of a `case` in float32, the stream into every block
+                                           kept, and torch bf16's embedding, each block and the final layer
+                                           alone on that stream in bf16, on --device and on the CPU:
+                                           CASE_DIR/blocks-N-B.safetensors, for tf-moss-image-blocks
   compare A.png B.png [SIDE.png]           PSNR and mean absolute difference of two pictures, optionally side by side
   noise OUT.json                           torch.randn's starting latents for many seeds and sizes, as sha256s (x86)
   schedule MODEL_DIR OUT.json              MOSSImageScheduler's timesteps and sigmas for many step counts and configs
@@ -270,6 +274,74 @@ def vae(args) -> int:
     return 0
 
 
+def blocks(args) -> int:
+    """One step's branch of a `case` in float32, keeping each block's input; then each step alone in bf16, two ways."""
+    import torch
+    from safetensors.torch import load_file, save_file
+
+    case = load_file(str(Path(args.case_dir) / "case.safetensors"))
+    if "inputs" not in case:
+        sys.exit("blocks needs a case made by `case`, which holds each step's input")
+    latents = case["inputs"][args.step - 1].permute(2, 0, 1)[None]
+    timestep = case["timesteps"][args.step - 1]
+    text = case[args.branch][None]
+    skip = [22] if args.branch == "negative" else []
+    pipe, _ = pipeline(args.model_dir, args.device, text=False)
+    tr = pipe.transformer
+    kept = [layer for i, layer in enumerate(tr.layers) if i not in skip]
+    image = latents.shape[2] * latents.shape[3]
+
+    def forward(device, dtype, pre, post):
+        handles = [m.register_forward_pre_hook(fn, with_kwargs=True) for m, fn in pre]
+        handles += [m.register_forward_hook(fn) for m, fn in post]
+        with torch.no_grad():
+            out = tr(latents.to(device), timestep, text.to(device=device, dtype=dtype), skip_layers=skip).sample
+        for h in handles:
+            h.remove()
+        return rows(out)
+
+    def record(into):
+        def hook(module, a, kw):
+            into.append(a[0][0].float().cpu())
+        return hook
+
+    def output(into):
+        return lambda module, a, out: into.append(out[0].float().cpu())
+
+    # float32 throughout: the stream into each block kept, then the last block's output
+    tr.float()
+    stream = []
+    velocity_fp32 = forward(args.device, torch.float32, [(m, record(stream)) for m in kept], [(kept[-1], output(stream))])
+
+    def alone(device):
+        """bf16, each step alone: the embedding, every block and the final layer, given the float32 stream in bf16."""
+        tr.to(device=device, dtype=torch.bfloat16)
+        embedded, outs = [], []
+
+        def feed(k):
+            def hook(module, a, kw):
+                if k == 0:
+                    embedded.append(a[0][0].float().cpu())
+                x = stream[k].to(device=device, dtype=torch.bfloat16)[None]
+                return (x[:, :image] if k == len(kept) else x,) + tuple(a[1:]), kw
+            return hook
+
+        velocity = forward(device, torch.bfloat16, [(m, feed(k)) for k, m in enumerate(kept + [tr.final_norm_video])],
+                           [(m, output(outs)) for m in kept])
+        return torch.stack(embedded + outs).to(torch.bfloat16).contiguous(), velocity
+
+    steps, velocity_alone = alone(args.device)
+    steps_cpu, velocity_alone_cpu = alone("cpu")
+    out = Path(args.case_dir) / f"blocks-{args.step}-{args.branch}.safetensors"
+    save_file({"step": torch.tensor([args.step], dtype=torch.int64), "skip": torch.tensor(skip or [-1], dtype=torch.int64),
+               "timestep": timestep.reshape(1).float(), "latents": case["inputs"][args.step - 1].contiguous(),
+               "prompt": text[0].contiguous(), "stream": torch.stack(stream).contiguous(), "alone": steps,
+               "alone_cpu": steps_cpu, "velocity_fp32": velocity_fp32, "velocity_alone": velocity_alone,
+               "velocity_alone_cpu": velocity_alone_cpu}, str(out))
+    print(json.dumps({"out": str(out), "blocks": len(kept), "rows": int(stream[0].shape[0])}))
+    return 0
+
+
 def compare(args) -> int:
     import numpy as np
     from PIL import Image
@@ -475,6 +547,12 @@ def main() -> int:
     v.add_argument("--device", default="mps", help="where the float32 decode runs, as the pipeline would")
     v.add_argument("--width", type=int, default=1024)
     v.add_argument("--height", type=int, default=1024)
+    b = sub.add_parser("blocks")
+    b.add_argument("model_dir")
+    b.add_argument("case_dir")
+    b.add_argument("--step", type=int, required=True, help="the step, from 1")
+    b.add_argument("--branch", choices=("prompt", "negative"), required=True)
+    b.add_argument("--device", default="mps")
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")
@@ -486,7 +564,7 @@ def main() -> int:
     q.add_argument("out")
     args = parser.parse_args()
     modes = {"case": case, "start": start, "exact": exact, "decode": decode, "encode": encode, "vae": vae,
-             "compare": compare, "noise": noise, "schedule": schedule}
+             "blocks": blocks, "compare": compare, "noise": noise, "schedule": schedule}
     return modes[args.mode](args)
 
 
