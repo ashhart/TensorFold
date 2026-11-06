@@ -199,7 +199,10 @@ fn finite(rng: std.Random) u16 {
 fn load(gpu: check.Gpu) !q.Lane {
     const cap = try gpu.ctx.capability();
     try check.expect(cap / 10 == 12, "qmmf prompt tiles require sm_12x, got sm_{d}", .{cap});
-    return q.Lane.load(gpu.d, cap / 10);
+    var lane = try q.Lane.load(gpu.d, cap / 10);
+    errdefer lane.unload();
+    try lane.loadPrompt(gpu.d);
+    return lane;
 }
 
 pub fn run(gpu: check.Gpu) !void {
@@ -278,14 +281,15 @@ fn special(gpu: check.Gpu, s: cuda.Stream, lane: *q.Lane) !void {
     check.pass("qmmf-prompt N=129: nonfinite, subnormal and signed-zero input bytes, immutable inputs", .{});
 }
 
-/// The 64-row lane, #1764's prompt16 tile (cuda.nvfp4.Prompt) and this tile, one product each.
-const Way = enum { lane, prompt16, tile };
+/// The 64-row lane, #1764's prompt16 tile (cuda.nvfp4.Prompt), this tile, and the lane's own choice, one product each.
+const Way = enum { lane, prompt16, tile, gated };
 
 fn product3(f: *Fixture, p16: *const cuda.nvfp4.Prompt, m: usize, out: q.Out, way: Way, dest: u64) !void {
     switch (way) {
         .lane => try f.product(m, out, false, dest),
         .tile => try f.product(m, out, true, dest),
         .prompt16 => try p16.matmulOut(f.s, f.x.ptr, f.ldx, m, f.w, dest, out),
+        .gated => try f.lane.matmulOut(f.s, f.x.ptr, f.ldx, m, f.w, dest, out, f.part.ptr),
     }
 }
 
@@ -321,7 +325,8 @@ fn samePrompt16(f: *Fixture, p16: *const cuda.nvfp4.Prompt, m: usize, out: q.Out
     try f.guards(bytes);
 }
 
-const bench_rows = [_]usize{ 512, 768, 1024, 1536 };
+// 640 and 1,152 rows: just past where shared gate/up's and HC down's blocks fill half a GB10's 48 SMs
+const bench_rows = [_]usize{ 512, 640, 768, 1024, 1152, 1536 };
 
 pub fn bench(gpu: check.Gpu) !void {
     var s = try cuda.Stream.init(gpu.d, false);
@@ -331,7 +336,7 @@ pub fn bench(gpu: check.Gpu) !void {
     var p16 = try cuda.nvfp4.Prompt.load(gpu.d);
     defer p16.unload();
     // weighted by each projection's calls in one normal main-model pass, per row count and way
-    var totals: [bench_rows.len][3]f64 = @splat(@splat(0));
+    var totals: [bench_rows.len][4]f64 = @splat(@splat(0));
     for (normal) |shape| {
         var f = try Fixture.init(gpu, s, &lane, shape.n, shape.k, bench_rows[bench_rows.len - 1]);
         defer f.deinit();
@@ -341,20 +346,20 @@ pub fn bench(gpu: check.Gpu) !void {
         for (bench_rows, 0..) |m, mi| {
             try f.compare(m, out, 1);
             try samePrompt16(&f, &p16, m, out);
-            // three rounds, each way's turn rotating within a round; the median of each way
-            var t: [3][3]f64 = undefined;
-            for (0..3) |round| for (0..3) |j| {
-                const i = (round + j) % 3;
+            // four rounds, each way's turn rotating within a round; the median of each way
+            var t: [4][4]f64 = undefined;
+            for (0..4) |round| for (0..4) |j| {
+                const i = (round + j) % 4;
                 t[i][round] = try time3(&f, &p16, m, out, @fromBackingInt(@intCast(i)));
             };
-            var med: [3]f64 = undefined;
+            var med: [4]f64 = undefined;
             for (&med, &t) |*x, *row| x.* = check.median(row);
             const calls: f64 = @floatFromInt(shape.calls);
             for (&totals[mi], med) |*x, v| x.* += v * calls;
-            std.debug.print("BENCH qmmf-prompt {s} M={d} N={d} K={d} SK={d} out={t} lane={d:.4} prompt16={d:.4} tile={d:.4} ms\n", .{ shape.name, m, f.w.n, f.w.k, f.w.sk, out, med[0], med[1], med[2] });
+            std.debug.print("BENCH qmmf-prompt {s} M={d} N={d} K={d} SK={d} out={t} lane={d:.4} prompt16={d:.4} tile={d:.4} gated={d:.4}{s} ms\n", .{ shape.name, m, f.w.n, f.w.k, f.w.sk, out, med[0], med[1], med[2], med[3], if (lane.usesPrompt(m, f.w)) "(tile)" else "(lane)" });
         }
     }
-    for (bench_rows, totals) |m, x| std.debug.print("BENCH qmmf-prompt weighted 36/12/48/96/48/96/96/1/1 M={d}: lane={d:.3} prompt16={d:.3} tile={d:.3} ms\n", .{ m, x[0], x[1], x[2] });
+    for (bench_rows, totals) |m, x| std.debug.print("BENCH qmmf-prompt weighted 36/12/48/96/48/96/96/1/1 M={d}: lane={d:.3} prompt16={d:.3} tile={d:.3} gated={d:.3} ms\n", .{ m, x[0], x[1], x[2], x[3] });
 }
 
 test "qmmf prompt scratch fixture uses usize before multiplication and covers every split row count" {
