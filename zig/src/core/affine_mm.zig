@@ -31,7 +31,7 @@ pub const Pipes = [8]mtl.Pipeline;
 
 pub const Args = extern struct { rows: i32, n: i32, k: i32, experts: i32 };
 
-/// A dense matmul's pitches and batch offsets, in elements (the sums' in rows); the default is one plain [rows, k] x [k, n] product.
+/// Dense pitches and batch offsets in elements (sums in rows); default: one [rows, k] x [k, n] product.
 pub const Strides = extern struct { x_row: i32 = 0, y_row: i32 = 0, sums_row: i32 = 1, x_batch: i32 = 0, y_batch: i32 = 0, sums_batch: i32 = 0, w_batch: i32 = 0, pad: i32 = 0 };
 
 fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
