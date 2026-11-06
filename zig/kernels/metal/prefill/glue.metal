@@ -114,7 +114,7 @@ inline void ssd_decay(const device float* seg, const device bfloat* cb, device f
   }
 }
 
-// B for the state matmul: float(B) over each group's heads, as [heads, state, s]. P: i0 s C b0 heads groups dstate.
+// B for the state matmul: float(B) repeated per group's heads, as [heads, state, s]. P: i0 s C b0 heads groups dstate.
 inline void ssd_b_heads(const device bfloat* act, device float* b, const device int* P, uint3 at) {
   const int t = int(at.x), n = int(at.y), h = int(at.z), s = P[1], N = P[6], g = h / (P[4] / P[5]);
   if (t < s && n < N) {
