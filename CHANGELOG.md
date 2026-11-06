@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: prompt projections share BF16 tiles, with Qwen chain-warp norms and expert-first router dispatch (#2008).
+
 - Tools: compare Living Weights keep rates between two native binaries with fresh checkpoint copies, retained refusal receipts and exact unrelated-token controls (#2027, #1587).
 
 - Tests: the stale serving source pins are re-baselined to current sources; no device re-qualification is claimed.
