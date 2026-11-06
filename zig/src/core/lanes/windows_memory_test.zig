@@ -25,7 +25,7 @@ pub fn check(comptime node: anytype, comptime hybrid: anytype) !void {
     defer e.deinit();
     var s = try Stream.init(a, .{ .id = "bounded", .prompt = &.{ 1, 2 }, .max_new = 64 });
     defer s.deinit(a);
-    _ = try e.rule.rates(win.who(&s));
+    _ = try e.rule.rates(win.who(&s, e.rule.k.hold_costs.len > 0));
     // The round gets only enough arena space for its final probability buffer.
     e.arena.deinit();
     e.arena = std.heap.ArenaAllocator.init(limited.allocator());

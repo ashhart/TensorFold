@@ -1,4 +1,4 @@
-//! A shared reservation and its next verify window use one owned copy decision, including an empty backoff answer.
+//! Costed holds own one copy decision per window; unpriced rounds retain the proposer's original lookup cadence.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const Engine = @import("engine.zig").Engine;
@@ -20,7 +20,7 @@ const Fixture = struct {
     fn init(f: *Fixture, priced: bool) !void {
         var costs: [8]@import("config.zig").Cost = undefined;
         for (&costs, 1..) |*c, n| c.* = .{ .width = @intCast(n), .ms = if (priced) 10 + 6 * @as(f64, @floatFromInt(n - 1)) else 1 };
-        f.cfg = try Config.init(a, .{ .exact_width = 4, .drafts = 3, .batch_rows = 8, .window_costs = &costs, .copy_match = 2, .own_copy_rates = priced, .matched_copy_rates = priced }, 4, 3);
+        f.cfg = try Config.init(a, .{ .exact_width = 4, .drafts = 3, .batch_rows = 8, .window_costs = &costs, .copy_match = 2, .own_copy_rates = priced, .matched_copy_rates = priced, .hold_costs = &.{.{ .streams = 1, .depth = 1, .ms = 0 }} }, 4, 3);
         f.cfg.timed = false;
         f.target = .{ .gpa = a };
         f.e = Engine.init(a, &f.cfg, f.target.backend(), f.clock.clock());
@@ -228,4 +228,26 @@ test "copy reservation: Recall keeps its source beside another stream's lookup" 
     try t.expect(record.rates.missed[0] != missed_before[0]);
     try t.expectEqual(missed_before[2], record.rates.missed[2]);
     try t.expectEqual(@as(u32, 32), record.rates.probe_every); // this rejected copy was not the later lookup's probe
+}
+
+test "copy reservation: unpriced shared rounds retain the second proposer lookup" {
+    for ([_]bool{ false, true }) |priced_holds| {
+        var f: Fixture = .{};
+        try f.init(false);
+        defer f.deinit();
+        if (!priced_holds) {
+            f.cfg.k.hold_costs = &.{};
+            f.e.rule.k.hold_costs = &.{};
+        }
+        var look = try lookup();
+        defer look.deinit();
+        var s = try Stream.init(a, .{ .id = "cadence", .prompt = &history, .max_new = 32, .proposer = look.proposer() });
+        defer s.deinit(a);
+        try look.observe(3, 0);
+        try f.reserve(&s);
+        _ = f.e.arena.reset(.retain_capacity);
+        const planned = try win.plan(&f.e, &s, null);
+        try t.expectEqual(if (priced_holds) win.Kind.none else win.Kind.copy, planned.kind);
+        try t.expectEqualSlices(u32, if (priced_holds) &.{} else &.{ 4, 5, 9 }, planned.tokens);
+    }
 }

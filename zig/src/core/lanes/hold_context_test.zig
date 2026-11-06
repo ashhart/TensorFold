@@ -195,13 +195,19 @@ test "an unaffordable due peer cannot veto or consume the cheap context trial" {
         dear.hold_context_rows = 8;
         dear.verify_row_ms = 100;
         const streams = if (reversed) [2]*sm.Stream{ &dear, &cheap } else [2]*sm.Stream{ &cheap, &dear };
-        var whos = [_]@import("depth.zig").Who{ win.who(streams[0]), win.who(streams[1]) };
+        var whos = [_]@import("depth.zig").Who{
+            win.who(streams[0], f.engine.rule.k.hold_costs.len > 0),
+            win.who(streams[1], f.engine.rule.k.hold_costs.len > 0),
+        };
         var out: [2]i64 = undefined;
         try f.engine.rule.budgets(&whos, win.probe(&f.engine), true, &out);
         try std.testing.expectEqualSlices(i64, if (reversed) &.{ 0, 1 } else &.{ 1, 0 }, &out);
         dear.hold_context_rows = 1;
         dear.verify_row_ms = 0;
-        whos = .{ win.who(streams[0]), win.who(streams[1]) };
+        whos = .{
+            win.who(streams[0], f.engine.rule.k.hold_costs.len > 0),
+            win.who(streams[1], f.engine.rule.k.hold_costs.len > 0),
+        };
         try f.engine.rule.budgets(&whos, win.probe(&f.engine), true, &out);
         try std.testing.expectEqualSlices(i64, if (reversed) &.{ 1, 0 } else &.{ 0, 1 }, &out);
     }
@@ -224,7 +230,7 @@ test "context-aware recovery still reaches a profitable deeper clean shape" {
     defer s.deinit(gpa);
     s.granted = 0;
     s.hold_context_rows = 1;
-    var whos = [_]@import("depth.zig").Who{win.who(&s)};
+    var whos = [_]@import("depth.zig").Who{win.who(&s, f.engine.rule.k.hold_costs.len > 0)};
     var out: [1]i64 = undefined;
     // The reserved first trial cannot pay at 2/23, but its allowed depth two can pay at 3/12.
     try f.engine.rule.budgets(&whos, win.probe(&f.engine), false, &out);
@@ -483,8 +489,8 @@ test "a lone no-confidence head prices newly staged context and retains whole-ro
     try std.testing.expectEqual(@as(u32, 0), s.hold_context_rows);
     // Observed whole rounds already include context; an expensive quote must not be added again.
     contexts[0].ms = 1000;
-    try engine.rule.observeCost(0, 10, false, win.who(&s));
-    try engine.rule.observeCost(1, 11, false, win.who(&s));
+    try engine.rule.observeCost(0, 10, false, win.who(&s, engine.rule.k.hold_costs.len > 0));
+    try engine.rule.observeCost(1, 11, false, win.who(&s, engine.rule.k.hold_costs.len > 0));
     try engine.step();
     try std.testing.expectEqual(@as(u32, 1), s.next.?.count);
     try std.testing.expectEqual(@as(u32, 0), s.hold_context_rows);

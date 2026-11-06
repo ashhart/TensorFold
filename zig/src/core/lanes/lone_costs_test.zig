@@ -25,14 +25,14 @@ fn selected(wide_ms: f64, alone: bool, timed: bool, neighbor_ms: ?f64, row_ms: ?
     defer s.deinit(a);
     s.verify_row_ms = row_ms;
     // Near-certain prefixes are synthetic controls; the two round prices are supplied timing witnesses.
-    _ = try e.rule.rates(win.who(&s));
+    _ = try e.rule.rates(win.who(&s, e.rule.k.hold_costs.len > 0));
     @memset(s.depth.?.p, 0.99);
-    try e.rule.observeCost(15, 94.5, false, win.who(&s));
-    try e.rule.observeCost(16, wide_ms, false, win.who(&s));
+    try e.rule.observeCost(15, 94.5, false, win.who(&s, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(16, wide_ms, false, win.who(&s, e.rule.k.hold_costs.len > 0));
     if (neighbor_ms) |ms| {
         var other = try Stream.init(a, .{ .id = "neighbor", .prompt = &.{7}, .max_new = 128 });
         defer other.deinit(a);
-        try e.rule.observeCost(16, ms, false, win.who(&other));
+        try e.rule.observeCost(16, ms, false, win.who(&other, e.rule.k.hold_costs.len > 0));
     }
     const tokens: [16]u32 = @splat(7);
     var plans = [_]win.Plan{.{ .stream = &s, .position = 3, .kind = .head, .tokens = &tokens }};
@@ -98,7 +98,7 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
     for ([_]u32{ 0, 15, 31, 47, 63 }) |count| {
         s.rounds += 8;
         try std.testing.expectEqual(@as(?u32, count), own.probe(&e, p));
-        try e.rule.observeCost(count, 100, false, win.who(&s));
+        try e.rule.observeCost(count, 100, false, win.who(&s, e.rule.k.hold_costs.len > 0));
         own.observe(&s, count + 1, count + 1, 100);
         s.rounds += 1;
         try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
@@ -108,7 +108,7 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
     p.tokens = tokens[0..16];
     try std.testing.expectEqual(@as(?u32, 16), own.probe(&e, p));
-    try e.rule.observeCost(16, 100, false, win.who(&s));
+    try e.rule.observeCost(16, 100, false, win.who(&s, e.rule.k.hold_costs.len > 0));
     own.observe(&s, 17, 17, 100);
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }
@@ -226,10 +226,10 @@ test "lone price: varying offers cannot phase-lock a profitable unseen width out
     e.alone = true;
     var s = try Stream.init(a, .{ .id = "variable-offers", .prompt = &.{3}, .max_new = 8192 });
     defer s.deinit(a);
-    _ = try e.rule.rates(win.who(&s));
+    _ = try e.rule.rates(win.who(&s, e.rule.k.hold_costs.len > 0));
     @memset(s.depth.?.p, 1);
-    try e.rule.observeCost(0, 20, false, win.who(&s));
-    try e.rule.observeCost(15, 20, false, win.who(&s));
+    try e.rule.observeCost(0, 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(15, 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
     const tokens: [31]u32 = @splat(7);
     var wide_offers: usize = 0;
     var wide_trials: usize = 0;
@@ -241,7 +241,7 @@ test "lone price: varying offers cannot phase-lock a profitable unseen width out
         try win.allocate(&e, &plans);
         const actual = plans[0].count() + 1;
         wide_trials += @intFromBool(actual == 32);
-        try e.rule.observeCost(@intCast(actual - 1), if (actual == 32) 35 else 20, false, win.who(&s));
+        try e.rule.observeCost(@intCast(actual - 1), if (actual == 32) 35 else 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
         s.rounds += 1;
         own.observe(&s, plans[0].cost_probe_rows, actual, if (actual == 32) 35 else 20);
     }
@@ -262,10 +262,10 @@ test "lone price: probe debt survives short offers and unexecuted selections, th
     e.alone = true;
     var s = try Stream.init(a, .{ .id = "probe-debt", .prompt = &.{3}, .max_new = 8192 });
     defer s.deinit(a);
-    _ = try e.rule.rates(win.who(&s));
+    _ = try e.rule.rates(win.who(&s, e.rule.k.hold_costs.len > 0));
     @memset(s.depth.?.p, 1);
-    try e.rule.observeCost(0, 20, false, win.who(&s));
-    try e.rule.observeCost(15, 20, false, win.who(&s));
+    try e.rule.observeCost(0, 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(15, 20, false, win.who(&s, e.rule.k.hold_costs.len > 0));
     const tokens: [47]u32 = @splat(7);
     s.rounds = 8;
     var short = [_]win.Plan{.{ .stream = &s, .position = 1, .kind = .head, .tokens = tokens[0..15] }};
@@ -279,7 +279,7 @@ test "lone price: probe debt survives short offers and unexecuted selections, th
     try std.testing.expectEqual(@as(u64, 8), s.cost_probe_after);
     own.observe(&s, wide[0].cost_probe_rows, 16, 20);
     try std.testing.expectEqual(@as(u64, 8), s.cost_probe_after);
-    try e.rule.observeCost(31, 35, false, win.who(&s));
+    try e.rule.observeCost(31, 35, false, win.who(&s, e.rule.k.hold_costs.len > 0));
     s.rounds = 10;
     own.observe(&s, wide[0].cost_probe_rows, 32, 35);
     try std.testing.expectEqual(@as(u64, 18), s.cost_probe_after);
@@ -293,9 +293,9 @@ test "lone price: probe debt survives short offers and unexecuted selections, th
 }
 
 fn measured(e: *Engine, s: *Stream, rounds: u64) !void {
-    _ = try e.rule.rates(win.who(s));
-    try e.rule.observeCost(15, 94.5, false, win.who(s));
-    try e.rule.observeCost(16, 107.5, false, win.who(s));
+    _ = try e.rule.rates(win.who(s, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(15, 94.5, false, win.who(s, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(16, 107.5, false, win.who(s, e.rule.k.hold_costs.len > 0));
     s.rounds = rounds;
     s.cost_probe_after = rounds + 40;
     s.cost_probe_spacing = 64;
@@ -317,7 +317,7 @@ test "lone price: a finished lone stream's prices and backed-off deadlines start
     var next = try Stream.init(a, .{ .id = "next", .prompt = &.{ 2, 7 }, .max_new = 128 });
     defer next.deinit(a);
     next.rounds = 2;
-    _ = try e.rule.rates(win.who(&next));
+    _ = try e.rule.rates(win.who(&next, e.rule.k.hold_costs.len > 0));
     try own.seed(a, e.lone_kept[0][0], &next);
     try std.testing.expectEqual(@as(?f64, 94.5), next.depth.?.ms.?.get(15));
     try std.testing.expectEqual(@as(?f64, 107.5), next.depth.?.ms.?.get(16));
@@ -346,8 +346,8 @@ test "lone price: a stream that shared a round leaves nothing, and a priced stre
     try own.keep(a, &e.lone_kept[0][0], &shared);
     var priced = try Stream.init(a, .{ .id = "priced", .prompt = &.{2}, .max_new = 128 });
     defer priced.deinit(a);
-    _ = try e.rule.rates(win.who(&priced));
-    try e.rule.observeCost(15, 70, false, win.who(&priced));
+    _ = try e.rule.rates(win.who(&priced, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(15, 70, false, win.who(&priced, e.rule.k.hold_costs.len > 0));
     try own.seed(a, e.lone_kept[0][0], &priced);
     try std.testing.expectEqual(@as(?f64, 70), priced.depth.?.ms.?.get(15));
     try std.testing.expectEqual(@as(?f64, null), priced.depth.?.ms.?.get(16));
@@ -372,9 +372,9 @@ test "lone price: a long prompt's calibration starts only long streams, and leav
     @memset(prompt, 5);
     var long = try Stream.init(a, .{ .id = "long", .prompt = prompt, .max_new = 128 });
     defer long.deinit(a);
-    _ = try e.rule.rates(win.who(&long));
-    try e.rule.observeCost(15, 94.5, false, win.who(&long));
-    try e.rule.observeCost(16, 400, false, win.who(&long));
+    _ = try e.rule.rates(win.who(&long, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(15, 94.5, false, win.who(&long, e.rule.k.hold_costs.len > 0));
+    try e.rule.observeCost(16, 400, false, win.who(&long, e.rule.k.hold_costs.len > 0));
     long.rounds = 60;
     long.cost_probes[16] = .{ .after = 5000, .spacing = 4096, .retry = true };
     try own.keep(a, own.slot(&e.lone_kept, &long), &long);
@@ -382,13 +382,13 @@ test "lone price: a long prompt's calibration starts only long streams, and leav
     try std.testing.expectEqual(@as(usize, 5), own.band(200_000));
     var next = try Stream.init(a, .{ .id = "next", .prompt = &.{ 2, 7 }, .max_new = 128 });
     defer next.deinit(a);
-    _ = try e.rule.rates(win.who(&next));
+    _ = try e.rule.rates(win.who(&next, e.rule.k.hold_costs.len > 0));
     try own.seed(a, own.slot(&e.lone_kept, &next).*, &next);
     try std.testing.expectEqual(@as(?f64, 107.5), next.depth.?.ms.?.get(16));
     try std.testing.expectEqual(@as(u64, 100), next.cost_probes[16].after);
     var later = try Stream.init(a, .{ .id = "later", .prompt = prompt, .max_new = 128 });
     defer later.deinit(a);
-    _ = try e.rule.rates(win.who(&later));
+    _ = try e.rule.rates(win.who(&later, e.rule.k.hold_costs.len > 0));
     try own.seed(a, own.slot(&e.lone_kept, &later).*, &later);
     try std.testing.expectEqual(@as(?f64, 400), later.depth.?.ms.?.get(16));
 }
@@ -412,7 +412,7 @@ test "lone price: deadlines a run of streams backed off start the next stream at
     var next = try Stream.init(a, .{ .id = "next", .prompt = &.{ 2, 7 }, .max_new = 128 });
     defer next.deinit(a);
     next.rounds = 2;
-    _ = try e.rule.rates(win.who(&next));
+    _ = try e.rule.rates(win.who(&next, e.rule.k.hold_costs.len > 0));
     try own.seed(a, own.slot(&e.lone_kept, &next).*, &next);
     try std.testing.expectEqual(@as(?f64, 107.5), next.depth.?.ms.?.get(16));
     try std.testing.expectEqual(2 + own.carry_most, next.cost_probe_after);

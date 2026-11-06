@@ -230,6 +230,7 @@ fn queryCopy(e: *Engine, s: *Stream) !Copy {
 
 /// Reuse only the reserved window's unchanged history and copy policy; ordinary asks still reach the proposer.
 fn reservedCopy(e: *Engine, s: *Stream) ?Copy {
+    if (e.cfg.k.hold_costs.len == 0) return null;
     const r = s.reserved_copy orelse return null;
     const same_proposer = if (r.proposer) |p|
         if (s.proposer) |now| p.ptr == now.ptr and p.vtable == now.vtable else false
@@ -250,6 +251,7 @@ fn reservedCopy(e: *Engine, s: *Stream) ?Copy {
 
 /// Own the next window's copy, including empty answers; commits and lifecycle resets invalidate it.
 pub fn reserveCopy(e: *Engine, s: *Stream) !Copy {
+    if (e.cfg.k.hold_costs.len == 0) return queryCopy(e, s);
     // Reusing a probe leaves the stream's Recall source evidence intact, as do graft candidates.
     if (reservedCopy(e, s)) |copy| return copy;
     const copy = try queryCopy(e, s);
@@ -288,8 +290,8 @@ pub fn probe(e: *Engine) depth.Probe {
     return .{ .ptr = e, .copy = copyAhead };
 }
 
-pub fn who(s: *Stream) depth.Who {
-    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished or s.paused, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null, .row_ms = verify_cost.rowMs(s), .hold_context_rows = s.hold_context_rows, .head_prior = s.head_prior };
+pub fn who(s: *Stream, priced_holds: bool) depth.Who {
+    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished or (priced_holds and s.paused), .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null, .row_ms = verify_cost.rowMs(s), .hold_context_rows = s.hold_context_rows, .head_prior = s.head_prior };
 }
 
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).
@@ -336,7 +338,7 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     if (live and !plans[0].stream.prices_seeded) {
         const s = plans[0].stream;
         s.prices_seeded = true;
-        _ = try e.rule.rates(who(s));
+        _ = try e.rule.rates(who(s, e.cfg.k.hold_costs.len > 0));
         try lone_costs.seed(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
     }
     const own = if (live) try lone_costs.prices(e, plans[0]) else untimed;
@@ -539,7 +541,7 @@ fn nodeChancesInto(e: *Engine, s: *Stream, out: []f64) !void {
         }
     }
     if (e.cfg.draft_confidence != null) return error.NoDraftProbabilities;
-    alloc.chainProbabilitiesInto(try e.rule.rates(who(s)), out);
+    alloc.chainProbabilitiesInto(try e.rule.rates(who(s, e.cfg.k.hold_costs.len > 0)), out);
 }
 
 /// The grammar walk stays shared by serial windows and parallel per-stream jobs.
