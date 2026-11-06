@@ -51,7 +51,7 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("exl3_prompt_pending.zig").records ++
     @import("nemotron_draw_records.zig").records ++
     @import("cuda_lane_pending.zig").records ++
-    @import("moss_image_encoder_pending.zig").records ++
+    @import("moss_image_encoder_records.zig").records ++
     @import("moss_image_decoder_records.zig").records ++
     @import("weight_only_records.zig").cuda ++
     @import("hc_activation_records.zig").cuda ++
