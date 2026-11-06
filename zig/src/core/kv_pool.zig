@@ -48,6 +48,11 @@ pub const PerRequest = struct {
 /// Slots a plan sets aside for snapshots when the caller names no count.
 pub const most_snaps = 64;
 
+/// The --prompt-cache-gib whose bytes hold `states` slots of `slot` bytes, rounded up to a whole GiB.
+pub fn holdingGib(states: usize, slot: u64) u64 {
+    return (states * slot + (1 << 30) - 1) >> 30;
+}
+
 /// What the room at load pays for, in order: the engine's own sequence, the other streams, the prompt cache.
 pub const Budget = struct {
     /// What the device grants past the weights.
@@ -68,6 +73,8 @@ pub const Budget = struct {
     engine_paged: bool = false,
     /// Parts per million of the cache that kept states hold as pool pages (TF_KV_SHARE): made pages past the windows.
     kept_ppm: u32 = 0,
+    /// TF_KV_SHARE with a slot a state (GLM): the cache is its slots, `snaps` at most, and the rest is made pages.
+    slots_only: bool = false,
     /// --prompt-cache-gib named the cache: it comes before every window but the engine's own, which take the rest.
     asked: bool = false,
 };
@@ -101,7 +108,7 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     left -= fit * l.fixed_bytes;
     const cache = @min(b.cache, left -| held(l, b, fit, windows(l, b) - 1));
     const taken = @min(b.cache, left -| held(l, b, fit, 0)) - cache; // what the windows past the engine's own took
-    const kept = cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
+    const kept = if (b.slots_only) cache - split(cache, l.snap_bytes, b.snaps).snaps * l.snap_bytes else cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
     const c = split(cache - kept, l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
     const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);

@@ -22,6 +22,11 @@ pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
     return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0 };
 }
 
+/// TF_KV_SHARE: a kept state's slot (`e.share_pages`: its prefix's pages left to the store), at the window's last mark.
+pub fn shareSlot(e: *const Engine) u64 {
+    return e.stateBytes(e.capacity - e.capacity % @import("cuda_native.zig").snap_grid);
+}
+
 /// A request's need: its prompt, its reply and one last verify window.
 pub fn need(l: kv.Layout, prompt: usize, max_tokens: usize) usize {
     return l.need(prompt, max_tokens, fw.window_rows);
