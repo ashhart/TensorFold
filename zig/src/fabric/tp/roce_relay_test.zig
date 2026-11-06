@@ -179,6 +179,9 @@ test "relay topology: mixed opt-ins, broken opposite and sibling records refuse 
         for (f.dest[0..4]) |hs| for (hs) |ps| for (ps) |dst| try t.expect(dst == null);
     }
     for (0..4) |r| try f.wires[r].connect(&good);
+    const before = f.order;
+    try t.expectError(error.BadRelay, f.wires[0].post(1, 1, 16));
+    try t.expectEqual(before, f.order);
     try t.expectEqual(@as(usize, 0), f.bad);
 }
 

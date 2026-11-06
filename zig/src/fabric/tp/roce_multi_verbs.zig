@@ -381,6 +381,10 @@ pub const VerbsWire = struct {
     fn shown(w: *const VerbsWire, i: usize) u32 {
         for (0..w.layout.world - 1) |k| {
             const p = guard.peerAt(w.me, w.layout.world, @intCast(k));
+            if (w.relay) {
+                if (w.peer_rkey[p][0] != 0 and w.via[p][0] == i) return p;
+                continue;
+            }
             for (w.via[p][0..w.stripes]) |v| if (v == i) return p;
         }
         return guard.peerAt(w.me, w.layout.world, 0);
@@ -470,6 +474,7 @@ pub const VerbsWire = struct {
 
     /// Slot `slot`'s first `padded` bytes to every peer, next rank first, striped over the HCAs to it; `seq` follows.
     pub fn post(w: *VerbsWire, slot: u32, seq: u32, padded: u32) !void {
+        if (w.relay) return error.BadRelay;
         const l = w.layout;
         // the guard's refusals first: a post no HCA may make must not wait on completions to say so
         if (padded > guard.max_write) return error.WriteTooLarge;
