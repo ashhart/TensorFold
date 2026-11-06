@@ -4,6 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- `api.Structure` keeps the body field that asked for a structure (`response_format`, `guided_json` and the other four), so an engine that refuses one can name the field the client sent (#2084).
+
+- `api.Structure` keeps the body field that asked for a structure — `response_format`, `guided_json` and the other four, or `text.format` and `output_config.format` on the Responses and Messages routes — so an engine that refuses one can name the field the client sent (#2084).
+
+- Qwen3.5 decode on HIP reads the BF16 router rows the model already holds, with the same tokens. Thanks @AbrahamCete.
+
 - Cloudflare's Clef-Flash serves on HIP (Radeon AI PRO R9700): its BF16 Qwen3.5 backbone and joint schema head answer `/v1/systemone` with the release's record encoder, head and answers, the head on the GPU over each prompt piece in the shared rounds; validation errors are 422s with their location, and chat and the other routes refuse the checkpoint naming `/v1/systemone`. The HIP Qwen3.5 capability lists offer BF16 again, for a checkpoint with the head. Checkpoints whose `tokenizer_config.json` publishes a `pretokenize_regex` split words with it, as transformers does (#1360, #1952). Thanks to @gilby for the first encoder port (#1361) and to @laudney.
 
 - Cloudflare's Clef-Flash serves on HIP (Radeon AI PRO R9700): its BF16 Qwen3.5 backbone and joint schema head answer `/v1/systemone` with the release's record encoder, head and answers, the head on the GPU over each prompt piece in the shared rounds; validation errors are 422s with their location, and chat and the other routes refuse the checkpoint naming `/v1/systemone`. `capabilities --json` lists BF16 for HIP Qwen3.5 under a new `decisions` key, apart from the chat formats. Checkpoints whose `tokenizer_config.json` publishes a `pretokenize_regex` split words with it, as transformers does (#1360, #1952). Thanks to @gilby for the first encoder port (#1361) and to @laudney.
@@ -65,12 +71,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Developers: `tools/zig/lean_check.py` reads sources as UTF-8 on every platform, so Windows counts the same as Linux and macOS (#2097, fixes #2096). Thanks to @BobClawblaw.
 - Flash Next at `--tp 2` on CUDA: each rank computes its own output columns of the dense projections instead of both repeating the whole projection, with the same replies as one GPU. On two GB10s with NVIDIA's NVFP4 release, plain decode is 21-23% faster, drafted decode 9-11% faster at one stream and 76-77% at two, and prompts about 6%. Model memory goes from 45.04 to 42.42 GiB a rank, and a stream's KV at 65,536 tokens from 2.18 to 1.30 GiB (#1784, refs #1754). Thanks to @laudney.
 - Flash Next on CUDA, beside another open stream: a greedy chain stops at 0.6 per draft, and a round with more than four streams drafting drafts greedy chains 6 deep. That fixes #1786's loss at eight greedy streams: on a GB10, MLX 4-bit chat goes from 288.8 to 303.8 tok/s and code from 336.9 to 358.5, FP4 stays level and every reply keeps its bits. `TF_FLASHNEXT_GREEDY_WIDE` sets the width and `TF_FLASHNEXT_SHARED_DRAFTS=0` keeps the alone rule (#2160, part of #1762). Thanks to @Arminova.
-- `api.Structure` keeps the body field that asked for a structure (`response_format`, `guided_json` and the other four), so an engine that refuses one can name the field the client sent (#2084).
-- `api.Structure` keeps the body field that asked for a structure — `response_format`, `guided_json` and the other four, or `text.format` and `output_config.format` on the Responses and Messages routes — so an engine that refuses one can name the field the client sent (#2084).
-
 - With `--ssd-experts`, the expert pool counts uses, so an expert used once leaves before one used again. On an M3 Ultra, Flash Next reads about 11% less from disk at 17 and 35 GiB pools, and a mixed workload took 8% less time at 35 GiB, with the same replies (#2209).
-
-- Qwen3.5 decode on HIP reads the BF16 router rows the model already holds, with the same tokens. Thanks @AbrahamCete.
 
 - Flash Next on a Mac without tensor units, with `--parallel` above one: a lone reply runs as fast as at `--parallel 1`. On an M3 Ultra, sampled replies are 12-19% faster and greedy ones about 4%, with the same tokens, and a second request joining a reply leaves it unchanged (#2199).
 
