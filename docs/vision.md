@@ -255,6 +255,8 @@ as transformers 5.19's `Glm5NextProcessor` prepares them:
   `<|begin_of_image|>…<|end_of_image|>T.T seconds` block a pair.
 - **Budget:** a request's videos share `--vision-video-tokens` visual tokens (default 16,384; the processor's
   `max_image_tokens`). The frames are sized under it and resized with torch's antialiased uint8 bicubic.
+  `--max-frames N` caps the frames a video is sampled to, from 1 through 8,190; without it the engine samples at
+  most 256.
 
 Video needs `libtfvideo`, an optional library over FFmpeg 9.0.2 (the release PyAV 19.0.1 ships). The server loads it
 when the first video arrives and refuses videos by name without it:
