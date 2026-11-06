@@ -301,6 +301,14 @@ and at gate 3 against the frozen block, the big block loading its operands witho
 (`tf_ctl_wmma12_unswizzled`) and the big block without its K loop's barriers (`tf_ctl_wmma12_unordered`). The last is a
 race, so gate 3 launches it up to eight times a shape and counts it red if any launch differs.
 
+On gfx12, HIP also checks the WMMA product with silu x up in its epilogue (`dense_wmma12_gemm_silu`, a 2-wave 16 x 64
+block and the 128 x 128 block, BF16 out), over a gate/up weight interleaved in 16-row groups. Each block replaces the
+plain WMMA product on that weight, its split into gate and up columns (`tf_copy_cols`) and `tf_silu_mul`, byte for
+byte, at Qwen3-8B's served rows and each block's edges; gate 1 holds the unfused bytes and every float64 class, and
+gate 4 negates the stress rows' x so that every gate and up sum is positive and silu keeps its error. One control goes
+red at gate 3: the pair epilogue applying silu to the fp32 gate sum instead of its BF16 rounding
+(`tf_ctl_silu_unrounded`), once the served kernel shows the unfused bytes on the same inputs.
+
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
 CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: the latent write and the pooled keys
