@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "attention/prefill.hpp"
 #include "quant/dense_tiles.hpp"
 
 __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
@@ -160,4 +161,36 @@ extern "C" __global__ void tf_ctl_js_combine_unrounded(const float* prior, const
     const int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= n) return;
     logits[j] = tf_ctl_bf16(prior[j] + gate * (joint_scale * cosine[j] + tf_ctl_x(res, j)));
+}
+
+// Gate 1: the prompt tile with neither mask nor edge pass, so 0 x inf at a key past a row's edge gives NaN in that row.
+extern "C" __global__ void __launch_bounds__(256, 1)
+tf_ctl_fa_wide_unmasked_f16(const float* q, const __half* k, const __half* v, float* out, int qlen, int span, int heads,
+                            int kv_heads, int d, float scale, int q_pos0, long long k_sb, long long k_sh, long long k_ss,
+                            long long v_sb, long long v_sh, long long v_ss) {
+    fa_dot2<__half, false, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, k_sb, k_sh,
+                                               k_ss, v_sb, v_sh, v_ss, nullptr, 0);
+}
+
+extern "C" __global__ void __launch_bounds__(256, 1)
+tf_ctl_fa_wide_unmasked_bf16(const float* q, const hip_bfloat16* k, const hip_bfloat16* v, float* out, int qlen,
+                             int span, int heads, int kv_heads, int d, float scale, int q_pos0, long long k_sb,
+                             long long k_sh, long long k_ss, long long v_sb, long long v_sh, long long v_ss) {
+    fa_dot2<hip_bfloat16, false, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, k_sb,
+                                                     k_sh, k_ss, v_sb, v_sh, v_ss, nullptr, 0);
+}
+
+extern "C" __global__ void __launch_bounds__(256, 1)
+tf_ctl_fa_paged_unmasked_f16(const float* q, const __half* k, const __half* v, float* out, int qlen, int span,
+                             int heads, int kv_heads, int d, float scale, int q_pos0, const unsigned* table, int count) {
+    fa_dot2<__half, true, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, 0, 0, 0, 0,
+                                              0, 0, table, count);
+}
+
+extern "C" __global__ void __launch_bounds__(256, 1)
+tf_ctl_fa_paged_unmasked_bf16(const float* q, const hip_bfloat16* k, const hip_bfloat16* v, float* out, int qlen,
+                              int span, int heads, int kv_heads, int d, float scale, int q_pos0, const unsigned* table,
+                              int count) {
+    fa_dot2<hip_bfloat16, true, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, 0, 0,
+                                                    0, 0, 0, 0, table, count);
 }
