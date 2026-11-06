@@ -56,6 +56,7 @@ pub const all_metal = @import("attention_pv_records.zig").records ++
     @import("nemotron_experts_records.zig").records ++
     @import("nemotron_pages_records.zig").records ++
     @import("nemotron_attention_records.zig").records ++
+    @import("nemotron_prompt_mask_records.zig").records ++
     @import("nemotron_ssd_records.zig").records ++
     @import("flashnext_attention_records.zig").records ++
     @import("spark25_records.zig").records ++

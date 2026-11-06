@@ -29,6 +29,7 @@ pub const gemma4_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("ge
 pub const lfm2 = @embedFile("lfm2/lfm2.metal") ++ @embedFile("lfm2/lfm2_segments.metal");
 /// LFM2's prompt attention on the tensor units (nax.h inlined at load, after lfm2.metal's text).
 pub const lfm2_attn_nax = @embedFile("lfm2/lfm2_attn_nax.metal");
+pub const nemotron_prompt_masked = @import("nemotron/prompt_masked.zig");
 
 pub const lfm3 = @embedFile("lfm3/ops.metal");
 pub const lfm3_attention = @embedFile("lfm3/attention.metal");
