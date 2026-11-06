@@ -8,7 +8,7 @@ using namespace metal;
 constant constexpr int ITERS = TF_K / 32;
 constant constexpr int PER = (TF_E + 31) / 32;
 
-// Logits [rows, E] = x W^T: a 4-expert block (tg.x) for four rows (tg.y); simdgroup s sums k = 32 i + 4 s + tm, lane l taking i = 4 l..4 l + 3, then the eight partials in order.
+// Logits = x W^T: tg.x 4 experts, tg.y 4 rows; s sums k = 32i+4s+tm, lane l takes i = 4l..4l+3, 8 partials in order.
 [[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
                                 constant int& rows [[buffer(2)]], device TF_OUT_T* OUT [[buffer(3)]],
                                 uint2 tg [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]],
