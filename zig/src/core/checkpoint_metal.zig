@@ -177,7 +177,7 @@ pub const Checkpoint = struct {
         try readInto(fd, dest, d.at + from);
     }
 
-    /// Deferred `name`'s address-only view: its length, unique while the checkpoint lives, unreadable (no memory behind it).
+    /// Deferred `name`'s address-only view: its length, unique for the checkpoint's life, unreadable (no memory).
     pub fn view(self: *Checkpoint, name: []const u8) ![]const u8 {
         const d = self.deferred.get(name) orelse return error.MissingTensor;
         const file = &self.files.items[d.file];
