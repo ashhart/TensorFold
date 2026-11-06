@@ -332,8 +332,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.startsWith(u8, cmd, "dots-")) return @import("dots_tests.zig").run(gpu, cmd, rest);
     if (std.mem.eql(u8, cmd, "qwen-pending")) return @import("contract_qwen_pending.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
+    if (std.mem.eql(u8, cmd, "ricursive-dflash2-attn-contract")) return @import("contract_ricursive_dflash2_attn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "ricursive-contract")) return @import("contract_ricursive.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "ricursive-dflash2-contract")) return @import("contract_ricursive_dflash2.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "ripple-forward")) return @import("ripple_forward_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
