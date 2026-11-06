@@ -157,6 +157,7 @@ pub const usage =
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
     \\  flashnext-modelopt-contract  Flash Next NVFP4's BF16 dense and FP8 MTP-expert downs through gates 1-4
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
+    \\  ricursive-contract        Ripple's glue, attention prep and attention (group 10) through gates 1-4, controls red
     \\  moss-contract [ONLY..]    MOSS-Image's own kernels, its decoder's unpack and its encoder's mixer, gates 1-4, controls red
     \\  idol-decoder-contract     Idol's decoders' stem, to_kv, head norms and attention through gates 1-4, controls red
     \\  idol-contract             Idol's denoiser glue and head-64 attention through gates 1-4, controls red
