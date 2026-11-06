@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B-Preview runs on native Metal (M5 or later) from the publisher's NVFP4 and bf16 releases as published,
+  with exact bf16 caches, thinking, tool calls and structured output; `--context` is capped at 262,144, the longest
+  checked (#2231, fixes #2171). Thanks to @BobClawblaw.
 - Server: Responses grows each output item in one buffer, and Kimi chat advances its native stream parser through new tokens, so a long reply retains memory in proportion to its length while every reply and streamed event stays the same (#2642).
 - Tests: `zig build bench-stream-scan` streams a 32k-token thinking reply (30,000 reasoning tokens, prose, then a Qwen XML, GLM, DSML or Kimi call) through the chat, Messages and Responses routes one or two tokens a chunk, and prints each chunk's request-thread time at 1k to 30k reply tokens, each whole-text step's time and the request arena; under `test-server-cpu` a 300-token reply checks that each route's streamed reasoning, prose and call arguments equal the reply's (#2642).
 
