@@ -181,6 +181,7 @@ test "Qwen retained: malformed positions and lengths refuse before changing a ca
 }
 
 const Harness = struct {
+    gpa: std.mem.Allocator = a,
     metal: q.Metal = undefined,
     store: pc.Store = undefined,
     active: ?*st.Cache = null,
@@ -301,4 +302,26 @@ test "Qwen retained: a failed chunk never captures its incomplete state" {
     seed(&failed);
     try t.expectError(error.FakeForward, h.pass(&failed, ids[0..300], &.{}));
     try t.expectEqual(@as(usize, 0), h.store.entries.items.len);
+}
+
+test "Qwen retained: completed widths record actual chunks and one pass" {
+    const Context = struct {
+        gpa: std.mem.Allocator = a,
+        fn advance(_: @This(), cache: *st.Cache, ids: []const u32) !void {
+            try step({}, cache, ids);
+        }
+    };
+    var allocations: mtl.Allocations = .{};
+    const device: mtl.Device = .{ .allocations = &allocations };
+    const ids: [23]u32 = @splat(7);
+    for ([_]bool{ false, true }) |chunked| {
+        var cache = try st.Cache.init(a, device, 128);
+        defer cache.deinit();
+        seed(&cache);
+        var stream = try lanes.Stream.init(a, .{ .id = "widths", .prompt = &ids, .max_new = 4, .chunks = if (chunked) &.{ 5, 18 } else &.{} });
+        defer stream.deinit(a);
+        try prefill.run(&cache, &stream, 128, Context{}, Context.advance);
+        try t.expectEqualSlices(u32, if (chunked) &.{ 5, 13, 5 } else &.{23}, stream.prefill_widths.items);
+        try t.expectEqual(@as(usize, 23), cache.len);
+    }
 }

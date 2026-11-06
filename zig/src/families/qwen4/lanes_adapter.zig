@@ -112,6 +112,7 @@ pub fn Adapter(comptime E: type, comptime D: type, comptime L: type) type {
                 l.e.fail();
                 return err;
             };
+            if (comptime E.Gpu.kind == .metal) L.prefill_widths.completed(l.a, s, end - lane.filled);
             lane.filled = end;
             s.fill_at.store(@intCast(end), .release);
             for (s.reuse.marks) |cut| if (cut == end) {

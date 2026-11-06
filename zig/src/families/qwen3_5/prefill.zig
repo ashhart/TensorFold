@@ -33,6 +33,7 @@ pub fn run(cache: *st.Cache, stream: *lanes.Stream, chunk: usize, ctx: anytype, 
         while (mark < stream.reuse.marks.len and stream.reuse.marks[mark] <= at) mark += 1;
         if (mark < stream.reuse.marks.len) end = @min(end, stream.reuse.marks[mark]);
         try advance(ctx, cache, ids[at..end]);
+        lanes.prefill_widths.completed(ctx.gpa, stream, end - at);
         at = end;
         stream.fill_at.store(@intCast(at), .monotonic);
         if (stream.reuse.hook) |hook| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null)
