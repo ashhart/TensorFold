@@ -31,9 +31,10 @@ rather than merely the presence of an override flag.
 Without both OS readings, the existing fallback uses an explicit budget (`source: explicit`) or the spare
 Metal working set up to 16 GiB (`source: metal_working_set`). Its OS inputs and unknown `over_cap` remain omitted.
 Nemotron and Flash Next report a disabled retained-prefix cache as a known `budget_bytes: 0`; Qwen3.8-27B omits
-`prompt_cache_plan` when its budget is 0. GLM-5.3-Flash, Qwen3.5-2B and the CUDA server omit it too: GLM keeps
-`--prompt-cache-gib` or 16 GiB inside its load limit, the 2B keeps no prompt states, and the CUDA server keeps
-`--prompt-cache-gib` or 16 GiB inside what its streams leave and names that size in its startup line.
+`prompt_cache_plan` when its budget is 0. GLM-5.3-Flash and the CUDA server omit it too: GLM keeps
+`--prompt-cache-gib` or 16 GiB inside its load limit, and the CUDA server keeps `--prompt-cache-gib` or 16 GiB inside
+what its streams leave and names that size in its startup line. The 2B keeps prompt states only with
+`--prompt-cache-gib`, and then reports the plan.
 This plan is a cache allowance, not a process limit, current cache occupancy, or an admission guarantee.
 
 `/metrics` keeps `tensorfold:process_footprint_bytes` and adds `tensorfold:process_footprint_peak_bytes`
