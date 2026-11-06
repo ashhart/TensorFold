@@ -39,6 +39,7 @@ pub const Kernels = struct {
     nax: ?[tile.bit_widths.len]am.Pipes = null,
     /// Prompt attention on the tensor units (with `nax`); null before the M5.
     attn_nax: ?mtl.Pipeline = null,
+    prompt_mask: ?@import("prompt_mask.zig").Pipelines = null,
 
     pub fn get(self: *const Kernels, comptime key: []const u8) mtl.Pipeline {
         inline for (names, 0..) |n, i| if (comptime std.mem.eql(u8, n, key)) return self.pipelines[i];
@@ -64,6 +65,7 @@ pub const Kernels = struct {
         for (self.pipelines) |p| p.deinit();
         if (self.nax) |set| for (set) |pipes| for (pipes) |p| p.deinit();
         if (self.attn_nax) |p| p.deinit();
+        if (self.prompt_mask) |p| p.deinit();
         self.tiles.deinit();
     }
 };
@@ -83,9 +85,14 @@ pub fn load(device: mtl.Device) !Kernels {
     out.twin = false;
     // `out` is undefined, so attn_nax's default does not apply: unset, it would hold stack garbage.
     out.attn_nax = null;
+    out.prompt_mask = null;
     out.nax = if (device.tensorUnits()) try naxLoad(device) else null;
     errdefer if (out.nax) |set| for (set) |pipes| for (pipes) |x| x.deinit();
-    if (device.tensorUnits()) try attnNaxLoad(device, &out);
+    if (device.tensorUnits()) {
+        try attnNaxLoad(device, &out);
+        errdefer out.attn_nax.?.deinit();
+        out.prompt_mask = try @import("prompt_mask.zig").Pipelines.load(device);
+    }
     return out;
 }
 

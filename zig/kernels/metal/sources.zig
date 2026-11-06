@@ -27,6 +27,7 @@ pub const gemma4_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("ge
 pub const lfm2 = @embedFile("lfm2/lfm2.metal") ++ @embedFile("lfm2/lfm2_segments.metal");
 /// LFM2's prompt attention on the tensor units (nax.h inlined at load, after lfm2.metal's text).
 pub const lfm2_attn_nax = @embedFile("lfm2/lfm2_attn_nax.metal");
+pub const nemotron_prompt_masked = @import("nemotron/prompt_masked.zig");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
@@ -228,3 +229,5 @@ pub const core_weight_only = @embedFile("core/weight_only.metal");
 pub const core_hc_activation_body = @embedFile("core/hc_activation.h");
 pub const core_hc_activation = @embedFile("core/hc_activation.metal");
 pub const core_hc_pointwise = @embedFile("core/hc_pointwise.metal");
+
+pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");

@@ -31,6 +31,15 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.eql(u8, d.name, "contract masked values tf_masked_control")) {
+        const control_text = @import("masked_value_probe.zig").control_source;
+        return .{ .decl = d, .function = fun, .here = control_text, .pre_m5 = control_text };
+    }
+    if (std.mem.startsWith(u8, d.name, "nemotron masked prompt ")) {
+        const raw = if (std.mem.indexOf(u8, fun, "paged") != null) sources.nemotron_prompt_masked.paged_source else sources.nemotron_prompt_masked.contiguous;
+        const body = try tf.frags.sourceMode(device, a, raw, std.mem.indexOf(u8, d.name, " fp32 ") != null);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "attention pv ")) {
         const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
         const probe = @import("metal_attention_pv.zig");
@@ -72,6 +81,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun)) |l| return l;
+    if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
+        const raw = sources.lfm2_prompt_masked.source;
+        const body = try tf.frags.source(device, a, raw);
+        return .{ .decl = d, .function = fun, .here = try std.mem.concat(a, u8, &.{ sources.lfm2, "\n", body }), .pre_m5 = try preM5(a, sources.lfm2, raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
     if (std.mem.startsWith(u8, d.name, "metal ling route ")) {
         const body = @import("ling_metal").route;
