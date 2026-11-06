@@ -301,7 +301,7 @@ pub const Metal = struct {
             s.reuse_failed = at == 0;
         }
         s.fill_at.store(@intCast(at), .monotonic); // a restored prefix is done the moment it is restored
-        // a command buffer a chunk, each committed before the one ahead of it is waited on, so the GPU keeps a chunk queued
+        // a command buffer a chunk, each committed before the one ahead is waited on, so the GPU keeps a chunk queued
         var k: usize = 0;
         while (at < ids.len) {
             while (k < s.chunks.len and s.chunks[k] <= at) k += 1;
@@ -427,7 +427,7 @@ pub const Metal = struct {
             if (w.parents == null) {
                 for (w.positions, 0..) |p, r| if (p != w.positions[0] + r) return error.PositionsNotAChain;
             } else if (windows.len > 1) return error.SharedTreesNotBuilt else if (w.stream.sampling != null) return error.SampledTreesNotBuilt;
-            // the host's rows go to fresh ring slots and the verify copies them in: a draft still in flight writes this window
+            // the host's rows go to fresh ring slots, the verify copies them in: a draft in flight writes this window
             const stage = self.take(1 + w.tokens.len);
             const staged = self.tokens.slice(u32, ring);
             staged[stage % ring] = w.pending;

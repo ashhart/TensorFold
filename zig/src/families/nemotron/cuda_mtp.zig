@@ -369,7 +369,7 @@ pub const Head = struct {
         }
     }
 
-    /// The lane core's draft request: absorb `follow.len` kept rows (follow: the token after each), then `depth` levels.
+    /// The lane core's draft request: absorb `follow.len` kept rows (follow: token after each), then `depth` levels.
     pub fn chain(h: *Head, follow: []const u32, depth: usize, v: Vocab) !void {
         if (follow.len < 1 or follow.len > state.windowRows(h.e.c) or depth >= state.windowRows(h.e.c)) return error.BadDraftRequest;
         try h.e.ops().upload(h.e.b.sampled, std.mem.sliceAsBytes(follow));

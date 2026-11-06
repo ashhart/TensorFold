@@ -234,7 +234,7 @@ pub fn whole(c: Config) bool {
         c.experts == want.experts and c.mla.eql(want.mla);
 }
 
-/// The first `n` backbone layers only (the MTP layer stays): a check whose weights must fit where the whole model does not.
+/// Only the first `n` backbone layers (the MTP layer stays): for a check that must fit where the whole model does not.
 pub fn subset(c: *Config, n: u32) !void {
     if (n == 0 or n > c.layers) return error.BadLayerCount;
     c.run = n;

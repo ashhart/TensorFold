@@ -71,7 +71,7 @@ pub const Launch = struct {
         l.go("custom_kernel_tf_" ++ name, inputs, p, 16, null, outputs, grid, group);
     }
 
-    /// steel_gemm_fused_nax (bm64 bn128 bk256 wm2 wn4, swizzle 2): d [batch, M, N] = a x b, operands at element offsets.
+    /// steel_gemm_fused_nax (bm64 bn128 bk256 wm2 wn4, swizzle 2): d [batch, M, N] = a x b, offsets in elements.
     pub fn gemm(l: Launch, fp32: bool, a: At, b: At, d: At, M: usize, N: usize, K: usize, lda: usize, ldb: usize, ta: bool, tb: bool, batch: usize, strides: [2]usize, offsets: [2]usize) void {
         const tn = (N + 127) / 128;
         const tm = (M + 63) / 64;
@@ -150,7 +150,7 @@ pub const Launch = struct {
         l.go(name, &.{ x, w[0], w[1], w[2], offsets, order }, &.{ n, N, K, E, div }, 16, null, &.{y}, .{ (N + 63) / 64 * 32, @min(n, (n + bm - 1) / bm + E - 1) * 2, 2 }, .{ 32, 2, 2 });
     }
 
-    /// y_prev = state @ C per (row, group, head of the group): fp32 [heads, head, dstate] states, C [s, groups, dstate].
+    /// y_prev = state @ C per (row, group, head in group): fp32 [heads, head, dstate] states, C [s, groups, dstate].
     pub fn gemv(l: Launch, state: At, c: At, y: At, s: usize, groups: usize, heads: usize, head: usize, dstate: usize) void {
         const rep = heads / groups;
         const p = [_]usize{ dstate, head, dstate, 3, s, groups, rep, 1, groups * dstate, dstate, 0, 0, 0, rep * head * dstate, head * dstate, 0 };

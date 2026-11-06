@@ -106,14 +106,14 @@ pub const Tri = struct {
         try t.run("_concat_norms", .{ u(rows), 2, 1 }, &.{ p("E", "*bf16", e), p("Hd", "*bf16", h), p("WE", "*bf16", we), p("WH", "*bf16", wh), p("OUT", "*bf16", out), p("XS", "*fp32", xs), aot.float("eps", eps) }, &.{ ci("D", d), ci("BLOCK", pow2(d)) });
     }
 
-    /// sampler._keyed, one program a row: row r draws position META[0] + r + 1 + offset; without `prob` PROB is OUT, as Python passes it.
+    /// sampler._keyed, a program a row: row r draws position META[0]+r+1+offset; no `prob`: PROB is OUT, as in Python.
     pub fn keyed(t: Tri, vals: u64, ids: u64, meta: u64, out: u64, seed: u64, fp: u64, prob: ?u64, offset: usize, rows: usize, count: usize, k: Keyed) !void {
         const share = if (prob) |x| p("PROB", "*fp32", x) else p("PROB", "*i32", out);
         try t.run("_keyed", .{ u(rows), 1, 1 }, &.{ p("VALS", "*fp32", vals), p("IDS", "*i64", ids), p("META", "*i32", meta), p("OUT", "*i32", out), p("SEED", "*i64", seed), p("FP", "*fp64", fp), share, aot.word("c1", 0x9E3779B97F4A7C15), aot.word("c2", 0xD1B54A32D192ED03), aot.word("m1", 0xBF58476D1CE4E5B9), aot.word("m2", 0x94D049BB133111EB), int("offset", offset) }, &.{ ci("C", count), ci("CP", pow2(count)), ci("K", k.k), ci("CUT", @intFromBool(k.cut)), ci("GREEDY", @intFromBool(k.greedy)), ci("WRITE_PROB", @intFromBool(prob != null)), ci("MINP", @intFromBool(k.minp)), ci("CONF_T", @intFromBool(k.conf_t)) });
     }
 };
 
-/// The rule a _keyed launch compiles in: top_k, the top-p cut, greedy rank 0, the min-p cut, a draft's share at the request's temperature.
+/// Compiled into a _keyed launch: top_k, top-p cut, greedy rank 0, min-p cut, draft share at the request's temperature.
 pub const Keyed = struct { k: usize, cut: bool = false, greedy: bool = false, minp: bool = false, conf_t: bool = false };
 
 test "router K slices" {

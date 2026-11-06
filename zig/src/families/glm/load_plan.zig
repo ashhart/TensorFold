@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's load plan: the checkpoint's identity, the bytes its weights and caches take, the chunk height, the limit.
+//! GLM-5.3-Flash's load plan: checkpoint identity, the bytes its weights and caches take, the chunk height, the limit.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -102,7 +102,7 @@ fn stackBytes(l: anytype, comptime fmt: []const u8, args: anytype, parts: []cons
     return (std.mem.alignForward(usize, rows, pad) + (runs - 1) * pad) * most + runs * 3 * 256;
 }
 
-/// The fewest bytes of caches and buffers a load of `cap` tokens takes (the shortest prompt chunks), counted, not allocated.
+/// Fewest bytes of caches and buffers a load of `cap` tokens takes (shortest prompt chunks), counted, not allocated.
 pub fn leastArena(gpa: std.mem.Allocator, c: *const cfg.Config, cap: u32, chunked: bool) !usize {
     var dry: st.Arena = .{ .device = undefined, .gpa = gpa, .dry = true };
     const both = try st.init(&dry, c, cap);

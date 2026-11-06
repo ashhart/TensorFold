@@ -1,4 +1,4 @@
-//! The prompt chunk's tensor-unit sparse attention against the row kernel and an fp64 host, over dense, sparse and empty key lists.
+//! A prompt chunk's tensor-unit sparse attention vs the row kernel and an fp64 host, on dense, sparse, empty key lists.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -127,7 +127,7 @@ fn sparseCheck(comptime heads: usize) !void {
             const i = (r * heads + h) * RANK + d;
             const got: f64 = f32of(nax_out[i]);
             const theirs: f64 = f32of(row_out[i]);
-            // a bf16 step of the value, but no finer than fp32 sums of the head's values can tell (2^-16 of its largest)
+            // a bf16 step of the value, no finer than fp32 sums of the head's values can tell (2^-16 of its largest)
             const floor = big / 65536.0;
             const bound = @max(@abs(outs[d]) / 128.0, floor);
             try std.testing.expect(@abs(got - outs[d]) <= bound);
