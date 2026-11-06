@@ -555,6 +555,8 @@ pub const LoneHooks = struct {
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
+/// TENSORFOLD_PREFILL_* values the lane host would misread, refused at serve start (lane_host_env.zig).
+pub const prefill_env = @import("lane_host_env.zig");
 /// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
 pub const Rounds = @import("lane_host.zig").Rounds;
 

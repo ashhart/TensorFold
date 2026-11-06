@@ -339,6 +339,8 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.allowed_host = repeated.hosts.items;
     out.allowed_origin = repeated.origins.items;
     if (out.slide_drift_gate and !out.slide) return fail(u, a, "--slide-drift-gate needs --slide", .{});
+    var env_buf: [192]u8 = undefined; // a prefill variable the lane host would misread: refused here, by name
+    if (api.prefill_env.problem(&env_buf)) |why| return fail(u, a, "{s}", .{why});
     try spillWith(u, a, out);
     return out;
 }
