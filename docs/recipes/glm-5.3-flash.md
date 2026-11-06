@@ -5,7 +5,7 @@ This recipe describes the Python 0.6.6 engine, available at the
 Its CUDA EXL3 reader, two-rank flags and DFlash2 policies do not apply to the native Zig binary.
 Nor do its Mac settings. The native binary refuses `--ssd-experts` and reads `GLM_LOAD_LIMIT_GB` (in GB) where this
 page uses `TENSORFOLD_MEMORY_LIMIT_GB` (in GiB); the `TF_GLM_*` variables and the Python paths and modules below are
-that engine's too.
+that engine's too, except `TF_GLM_CLEAR_THINKING`, which the native server also reads ([api](../api.md)).
 The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights, and on CUDA ranks from
 NVIDIA's NVFP4 checkpoint and the EXL3/TR3 checkpoint ([GLM-5.3-Flash on CUDA](glm-5.3-flash-cuda.md)).
 For native serving, use the [qualified model table](../../README.md#pick-a-model), the
