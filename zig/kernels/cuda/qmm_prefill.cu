@@ -59,28 +59,41 @@ __device__ __forceinline__ void prefill_body(
     const int m0 = at.x, n0 = at.y;
 
     auto stage = [&](int s) { return buf + s * T::STAGE; };
+    // Each thread's copies are addressed once: input chunk ch on rows r0 + i * RSTEP, weight chunks, one scale chunk.
+    constexpr int XC = BM * T::CHUNKS / T::THREADS, RSTEP = T::THREADS / T::CHUNKS;
+    static_assert(T::THREADS % T::CHUNKS == 0 && XC * T::THREADS == BM * T::CHUNKS, "whole input chunks a thread");
+    static_assert(RSTEP % T::CHUNKS == 0, "rows r0 + i * RSTEP keep the swizzle phase of row r0");
+    constexpr int TILE_BYTES = 64 * GS / 2;               // one stored 64-column tile's group block
+    constexpr int WC = (T::W / 16 + T::THREADS - 1) / T::THREADS;
+    const int ch = tid % T::CHUNKS, r0 = tid / T::CHUNKS;
+    const int xdst = r0 * T::ROW + swz<T::CHUNKS>(r0, ch) * 16;
+    const __nv_bfloat16* xsrc = x + static_cast<size_t>(m0 + r0) * ldx + ch * 8;
+    const unsigned char* wsrc[WC];
+    bool wok[WC];
+#pragma unroll
+    for (int k = 0; k < WC; ++k) {
+        const int c = tid + k * T::THREADS, t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
+        wok[k] = c < T::W / 16 && n0 + t * 64 < npad;   // a 256-wide block's last tiles may pass the padded columns
+        wsrc[k] = reinterpret_cast<const unsigned char*>(w) + static_cast<size_t>(n0 / 64 + t) * KG * TILE_BYTES
+                  + off * 16;
+    }
+    const int s_which = tid / (T::S / 16), s_off = tid % (T::S / 16);
+    const bool sok = tid < 2 * (T::S / 16) && n0 + s_off * 8 < npad;
+    const __nv_bfloat16* ssrc = (s_which ? biases : scales) + n0 + s_off * 8;
+    const int sdst = s_which * T::S + s_off * 16;
+    static_assert(2 * (T::S / 16) <= T::THREADS, "one scale or bias chunk a thread");
     auto load = [&](int s, int g) {
         unsigned char* p = stage(s);
-        for (int c = tid; c < BM * T::CHUNKS; c += T::THREADS) {
-            const int r = c / T::CHUNKS, ch = c % T::CHUNKS;
-            const int row = min(m0 + r, M - 1);
-            cp16z(p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16, x + static_cast<size_t>(row) * ldx + g * GS + ch * 8,
-                  m0 + r < M);
+#pragma unroll
+        for (int i = 0; i < XC; ++i) {
+            const bool ok = m0 + r0 + i * RSTEP < M;
+            cp16z(p + xdst + i * RSTEP * T::ROW, ok ? xsrc + static_cast<size_t>(i * RSTEP) * ldx + g * GS : x, ok);
         }
         unsigned char* pw = p + T::X;
-        constexpr int TILE_BYTES = 64 * GS / 2;           // one stored 64-column tile's group block
-        for (int c = tid; c < T::W / 16; c += T::THREADS) {
-            const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
-            const size_t tile = static_cast<size_t>(n0 / 64 + t) * KG + g;
-            if (n0 + t * 64 < npad)                       // a 256-wide block's last tiles may pass the padded columns
-                cp16(pw + c * 16, reinterpret_cast<const unsigned char*>(w) + tile * TILE_BYTES + off * 16);
-        }
-        unsigned char* ps = pw + T::W;
-        for (int c = tid; c < 2 * (T::S / 16); c += T::THREADS) {
-            const int which = c / (T::S / 16), off = c % (T::S / 16);
-            const __nv_bfloat16* src = (which ? biases : scales) + static_cast<size_t>(g) * npad + n0 + off * 8;
-            if (n0 + off * 8 < npad) cp16(ps + which * T::S + off * 16, src);
-        }
+#pragma unroll
+        for (int k = 0; k < WC; ++k)
+            if (wok[k]) cp16(pw + (tid + k * T::THREADS) * 16, wsrc[k] + static_cast<size_t>(g) * TILE_BYTES);
+        if (sok) cp16(pw + T::W + sdst, ssrc + static_cast<size_t>(g) * npad);
     };
 
     float acc[T::MT][T::NT][4];
