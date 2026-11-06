@@ -15,13 +15,10 @@ const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 const drama_nvfp4 = @import("metal_drama3_nvfp4.zig");
 const drama_router = @import("metal_drama_router.zig");
-const dsv41 = @import("metal_dsv41_main.zig");
 const drama_combine = @import("metal_drama_combine.zig");
 const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
-const glm_rows_k = @import("metal_glm_rows.zig");
 const pair_k = @import("metal_pair.zig");
-const pair_controls = @import("metal_pair_controls.zig");
 const minimax_k = @import("metal_minimax.zig");
 const attn_k = @import("metal_q27_attn.zig");
 const io_k = @import("metal_q27_attn_io.zig");
@@ -297,7 +294,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
         pair_list.deinit(a);
     }
-    for (std.enums.values(pair_controls.Mutation)) |m| {
+    for (std.enums.values(@import("metal_pair_controls.zig").Mutation)) |m| {
         for (pair_k.all) |w| {
             const control_for = switch (m) {
                 .none => true,
@@ -372,7 +369,7 @@ pub fn main(init: std.process.Init) !u8 {
         d3router_count += 1;
         try kernels.append(a, d3routers[d3router_count - 1].kernel());
     }
-    var dsv41_routes = try dsv41.Routes.create(a, device, queue, &kernels, o.only);
+    var dsv41_routes = try @import("metal_dsv41_main.zig").Routes.create(a, device, queue, &kernels, o.only);
     defer dsv41_routes.destroy();
     var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
     var d3combine_count: usize = 0;
@@ -469,7 +466,7 @@ pub fn main(init: std.process.Init) !u8 {
     var moe: Moe = .{};
     defer moe.deinit(a);
     try moe.collect(a, device, queue, o, &kernels);
-    var glm_windows: glm_rows_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    var glm_windows: @import("metal_glm_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
     var nemotron_experts: @import("metal_nemotron_experts.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
@@ -574,7 +571,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image.destroy();
     const moss_image_decoder = try @import("metal_moss_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image_decoder.destroy();
-    var dsv41_suites = try dsv41.Suites.create(a, device, queue, &kernels, o.only);
+    var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
