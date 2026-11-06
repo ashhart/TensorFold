@@ -267,7 +267,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     h.prompts = null;
     if (share and plan.budget_bytes > 0) {
-        if (h.metal.o.chunk % paged.?.layout.page_tokens != 0) return error.ChunkOffPages;
+        if (h.metal.o.chunk % paged.?.layout.page_tokens != 0) {
+            problem.* = try std.fmt.allocPrint(a, "TF_KV_SHARE keeps prompts as whole pool pages on the prompt chunks' grid, and this Mac's chunk of {d} rows is not a multiple of the pool's {d}-token pages: serve without TF_KV_SHARE", .{ h.metal.o.chunk, paged.?.layout.page_tokens });
+            return error.ChunkOffPages;
+        }
         const x = (try prompt_pages.Adapter.open(nemotron.snapshot.Shared, gpa, h.metal, @intCast(paged.?.layout.page_tokens), try tf.kv_prompts.sharing())).?;
         h.prompts = x;
         x.store.rules.planned = true; // kept on the prompt chunks' grid: a resume's seams are a cold pass's, its tokens too
