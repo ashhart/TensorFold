@@ -186,7 +186,7 @@ pub fn attention(e: *Emitter, L: u32) !void {
     const md = e.cfg.mode(L);
     const ratio: i64 = e.cfg.compressRatio(L);
     const kv_src = e.cfg.kvSource(L);
-    const H: i64 = e.cfg.heads / e.o.world;
+    const H: i64 = try e.rankHeads();
     const hd: i64 = e.cfg.head_dim;
     const IH: i64 = e.cfg.index_heads;
     const ID: i64 = e.cfg.index_dim;
@@ -327,7 +327,7 @@ pub fn attention(e: *Emitter, L: u32) !void {
         last.args = more;
     } else if (e.o.r1_sig) try e.appendLast(&.{ .{ .i = 0 }, .{ .i = 0 } });
     // o: wo_a's groups over the heads' columns, then wo_b (this rank's partial)
-    const g: usize = e.cfg.o_groups / e.o.world;
+    const g: usize = try e.rankGroups();
     const gk: i64 = @divExact(H * hd, @as(i64, @intCast(g)));
     const oa = try e.buf("L.oa", .{}, .bf16, &.{ n, @as(i64, @intCast(g)) * e.cfg.o_lora });
     var po: [8]Proj = undefined;

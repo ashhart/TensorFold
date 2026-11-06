@@ -221,8 +221,14 @@ test "world three: other uneven worlds and every serving path are still refused"
     try testing.expectError(error.BadWorld, admission.nativePrefill(&c, 3));
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
+    const b = arena.allocator();
     const widths: block.Widths = .{};
-    try testing.expectError(error.InvalidBlock, block.emit(arena.allocator(), &c, &widths, .{ .world = 3 }, &.{0}, 1, 0, true));
+    for ([_]u32{ 5, 6, 7 }) |world| try testing.expectError(error.InvalidBlock, block.emit(b, &c, &widths, .{ .world = world }, &.{0}, 1, 0, true));
+    try testing.expectError(error.InvalidBlock, block.emit(b, &c, &widths, .{ .world = 3, .rank = 3 }, &.{0}, 1, 0, true));
+    // experts wide enough for three ranks, so only the rank's group check refuses two output groups
+    var narrow: Config = .{};
+    narrow.o_groups = 2;
+    try testing.expectError(error.InvalidBlock, block.emit(b, &narrow, &widths, .{ .world = 3 }, &.{0}, 1, 0, true));
 }
 
 const Seen = std.StringHashMapUnmanaged([]u8);
