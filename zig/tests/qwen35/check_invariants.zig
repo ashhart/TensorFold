@@ -146,10 +146,50 @@ fn resumed(c: *Ctx) void {
         every = every and r.cached > 0;
     }
     var buf: [160]u8 = undefined;
-    if (differ(again, fresh, &buf)) |why| return c.report.fail(name, "{s}", .{why});
-    if (!every) return c.report.fail(name, "a prompt resumed from no kept caches ({d} tokens kept in all)", .{cached});
-    c.report.pass(name, "{d} streams, {d} tokens, {d} prompt tokens from the kept caches", .{ again.replies.len, again.tokens(), cached });
+    if (differ(again, fresh, &buf)) |why| {
+        c.report.fail(name, "{s}", .{why});
+    } else if (!every) {
+        c.report.fail(name, "a prompt resumed from no kept caches ({d} tokens kept in all)", .{cached});
+    } else c.report.pass(name, "{d} streams, {d} tokens, {d} prompt tokens from the kept caches", .{ again.replies.len, again.tokens(), cached });
+    resumedDrafted(c, extended, again);
 }
+
+/// The resumed drafted run against the same prompts drafted from nothing kept: equal tokens, and each run's drafts.
+fn resumedDrafted(c: *Ctx, extended: []const ids_file.Prompt, again: Session.Done) void {
+    const name = "lanes long greedy: resumed drafted == fresh drafted";
+    if (c.session.h.head == null and c.session.drafted == null) return c.report.skip(name, "the model has no draft head");
+    c.session.h.keepPrompts(0, 0); // evicts every kept prompt, so this run resumes from nothing
+    const fresh = c.session.run(c.arena, .{ .prompts = extended, .max_new = c.tokens, .solo = true }) catch |err| return c.report.broke(name, err);
+    for (fresh.replies) |r| if (r.cached != 0) return c.report.fail(name, "{s} resumed {d} tokens with no prompt kept", .{ r.name, r.cached });
+    var buf: [160]u8 = undefined;
+    if (differ(again, fresh, &buf)) |why| return c.report.fail(name, "{s}", .{why});
+    const a = Drafts.of(again);
+    const f = Drafts.of(fresh);
+    c.report.pass(name, "resumed {d}/{d} drafts kept in {d} rounds ({d:.2} tokens a round), fresh {d}/{d} in {d} ({d:.2})", .{ a.accepted, a.drafted, a.rounds, a.perRound(), f.accepted, f.drafted, f.rounds, f.perRound() });
+}
+
+/// A run's drafts summed over its streams.
+const Drafts = struct {
+    rounds: u64 = 0,
+    accepted: u64 = 0,
+    drafted: u64 = 0,
+    tokens: usize = 0,
+
+    fn of(d: Session.Done) Drafts {
+        var s: Drafts = .{};
+        for (d.replies) |r| {
+            s.rounds += r.rounds;
+            s.accepted += r.accepted;
+            s.drafted += r.drafted;
+            s.tokens += r.tokens.len;
+        }
+        return s;
+    }
+
+    fn perRound(s: Drafts) f64 {
+        return @as(f64, @floatFromInt(s.tokens)) / @as(f64, @floatFromInt(@max(s.rounds, 1)));
+    }
+};
 
 /// A drafted run of every stream at once, the third time: once its shapes are met, rounds replay graphs.
 fn replayShare(c: *Ctx) void {

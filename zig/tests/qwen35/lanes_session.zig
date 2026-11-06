@@ -82,7 +82,7 @@ pub const Session = struct {
         solo: bool = false,
     };
 
-    pub const Reply = struct { name: []const u8, tokens: []const u32, rounds: u64, accepted: u64, cached: u32 };
+    pub const Reply = struct { name: []const u8, tokens: []const u32, rounds: u64, accepted: u64, drafted: u64, cached: u32 };
 
     pub const Done = struct {
         replies: []const Reply,
@@ -139,7 +139,7 @@ pub const Session = struct {
         }
         const seconds = @as(f64, @floatFromInt(std.Io.Clock.awake.now(s.io).toNanoseconds() - t0.toNanoseconds())) / 1e9;
         const out = try arena.alloc(Reply, streams.len);
-        for (out, streams, job.prompts) |*r, *st, p| r.* = .{ .name = p.name, .tokens = try arena.dupe(u32, st.emitted()), .rounds = st.rounds, .accepted = st.accepted, .cached = st.cached };
+        for (out, streams, job.prompts) |*r, *st, p| r.* = .{ .name = p.name, .tokens = try arena.dupe(u32, st.emitted()), .rounds = st.rounds, .accepted = st.accepted, .drafted = st.drafted, .cached = st.cached };
         return .{
             .replies = out,
             .seconds = seconds,
