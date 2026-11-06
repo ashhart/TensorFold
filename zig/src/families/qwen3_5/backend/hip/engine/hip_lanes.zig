@@ -70,6 +70,8 @@ pub const Lane = struct {
     held_n: usize = 0,
     /// Slots written and kept: the next window starts here.
     len: usize,
+    /// The first row a pass tapped: a stream resumed from a snapshot has no tap rows below its resume point.
+    tapped_from: usize = 0,
     /// The stream's id on every rank.
     id: u32 = 0,
     /// The prompt pass in progress, a chunk a call (null once it is in).
@@ -311,6 +313,7 @@ pub const Hip = struct {
         h.e.pool.ids.reserved += need;
         _ = try lane.caches.grow(h.gpa, prompt.len);
         s.cached = @intCast(at);
+        lane.tapped_from = at;
         const fill = glue.Fill.init(at, plan.marks);
         lane.fill = fill;
         // the other ranks get the stream's pages and where it resumed and cuts
@@ -496,7 +499,8 @@ pub const Hip = struct {
         // a verify's rows are in the ring before its keep: they count as written until the keep drops them
         const written = lane.len + if (lane.pending) |p| p.rows else 0;
         const end = start + count;
-        if (count == 0 or end > written) return error.RowsNotHeld;
+        // a resumed lane's ring holds zeros below its resume point: the snapshot keeps no tap rows
+        if (count == 0 or start < lane.tapped_from or end > written) return error.RowsNotHeld;
         // the drafter reads a span's newest tap_window rows at most: those must not be overwritten yet
         if (@max(start, end -| engine.tap_window) < written -| t.rows) return error.RowsNotHeld;
         const row_bytes = t.n * h.e.model().spec.hidden * 2;
