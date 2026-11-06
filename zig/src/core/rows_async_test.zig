@@ -1,5 +1,6 @@
 //! Spill write-behind through the real cache and writer, with a filesystem call held until the test releases it.
 const std = @import("std");
+const waits = @import("rows_test_wait.zig");
 const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
 const rows = @import("rows_store.zig");
@@ -26,7 +27,7 @@ fn nap() void {
 }
 
 fn wait(flag: *std.atomic.Value(bool)) bool {
-    const end = rows.write.nowNs() + std.time.ns_per_s;
+    const end = waits.deadline();
     while (!flag.load(.acquire) and rows.write.nowNs() < end) nap();
     return flag.load(.acquire);
 }
@@ -68,7 +69,7 @@ test "spill I/O: eviction releases its RAM entry while the filesystem write is s
     const returned = wait(&ev.done);
     gate.release.store(true, .release);
     thread.join();
-    _ = rows.write.drain(r, rows.write.nowNs() + std.time.ns_per_s);
+    try waits.published(r);
     try std.testing.expect(entered);
     try std.testing.expect(returned);
     try std.testing.expectEqual(@as(usize, 0), f.live);
@@ -400,7 +401,7 @@ test "spill I/O: shutdown keeps a completed job's own filesystem error" {
     const tokens = fixture.prompt(50);
     try x.keep(&tokens, 600);
     x.s.remove(0);
-    const end = rows.write.nowNs() + 3 * std.time.ns_per_s;
+    const end = waits.deadline();
     while (!x.r.worker.?.ready() and rows.write.nowNs() < end) rows.write.io.nap();
     try std.testing.expect(x.r.worker.?.ready());
     rows.write.stop(x.r, rows.write.nowNs());

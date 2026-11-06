@@ -139,7 +139,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bflo
 #pragma unroll
         for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
         if (lane == 0) {
-            const float z = fmaxf(s, 0.f);
+            const float z = s < 0.f ? 0.f : s;  // not fmaxf, which would make a NaN 0
             act[j] = z * z;
         }
     }
@@ -194,7 +194,7 @@ __device__ __forceinline__ void pocket_in(const __nv_bfloat16* __restrict__ y, i
 #pragma unroll
             for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
             if (lane == 0 && j0 + q < n && t < tile) {
-                const float z = fmaxf(v, 0.f);
+                const float z = v < 0.f ? 0.f : v;  // not fmaxf, which would make a NaN 0
                 act[static_cast<size_t>(r0 + t) * pocket_width + j0 + q] = z * z;
             }
         }
@@ -289,17 +289,6 @@ extern "C" __global__ void tf_add_row(void* __restrict__ y, int y_f32, const flo
     } else {
         __nv_bfloat16* p = static_cast<__nv_bfloat16*>(y) + i;
         *p = __float2bfloat16(__bfloat162float(*p) + x[i]);
-    }
-}
-
-// LatentMoE (Bolt): Z [R, L] bf16, the fp32 sum of Y [R * K, L] (slot order) times WT [R * K]; one block a row.
-extern "C" __global__ void tf_latent_sum(const float* __restrict__ Y, const float* __restrict__ WT, __nv_bfloat16* __restrict__ Z,
-                                         int K, int L) {
-    const int64_t r = blockIdx.x;
-    for (int i = threadIdx.x; i < L; i += blockDim.x) {
-        float acc = 0.0f;
-        for (int k = 0; k < K; ++k) acc = __fmaf_rn(Y[(r * K + k) * L + i], WT[r * K + k], acc);
-        Z[r * L + i] = __float2bfloat16(acc);
     }
 }
 

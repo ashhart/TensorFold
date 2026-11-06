@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const rt = @import("rt.zig");
+const st = @import("core").safetensors;
 
 const platform = @import("sys");
 const pread = platform.c.pread;
@@ -24,6 +25,33 @@ pub fn readExact(fd: c_int, buf: []u8, off: u64) !void {
         if (n <= 0) return error.ReadFailed;
         done += @intCast(n);
     }
+}
+
+/// The header's own spelling of a core dtype ("BF16", "F8_E4M3").
+fn dtypeName(d: st.DType) []const u8 {
+    return switch (d) {
+        inline else => |tag| comptime blk: {
+            const s = @tagName(tag);
+            var b: [s.len]u8 = undefined;
+            for (s, 0..) |ch, i| b[i] = std.ascii.toUpper(ch);
+            const out = b;
+            break :blk &out;
+        },
+    };
+}
+
+/// A shard's data offset and its header as core reads it; a dtype or rank core does not name is left out, not refused.
+fn shardHeader(arena: std.mem.Allocator, fd: c_int) !struct { u64, st.Header } {
+    const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
+    if (end < 8) return error.BadSafetensors;
+    const size: u64 = @intCast(end);
+    var n8: [8]u8 = undefined;
+    try readExact(fd, &n8, 0);
+    const hlen = try st.headerSize(std.mem.readInt(u64, &n8, .little), size);
+    const hdr = try arena.alloc(u8, hlen);
+    try readExact(fd, hdr, 8);
+    const data_len = std.math.cast(usize, size - 8 - hlen) orelse return error.BadSafetensors;
+    return .{ 8 + hlen, try st.parseHeaderOptions(arena, hdr, data_len, .{ .unsupported = .omit }) };
 }
 
 fn openPath(gpa: std.mem.Allocator, dir: []const u8, name: []const u8) !c_int {
@@ -81,29 +109,19 @@ pub const Loader = struct {
         return l;
     }
 
+    /// The shard's tensors by name; its fd stays open for `load` once the header is read.
     pub fn addShard(l: *Loader, dir: []const u8, shard: []const u8) !void {
         const fd = try openPath(l.gpa, dir, shard);
-        var n8: [8]u8 = undefined;
-        try readExact(fd, &n8, 0);
-        const hlen = std.mem.readInt(u64, &n8, .little);
-        const hdr = try l.gpa.alloc(u8, hlen);
-        defer l.gpa.free(hdr);
-        try readExact(fd, hdr, 8);
-        const parsed = try std.json.parseFromSlice(std.json.Value, l.gpa, hdr, .{});
-        defer parsed.deinit();
-        var it = parsed.value.object.iterator();
-        while (it.next()) |e| {
-            if (std.mem.eql(u8, e.key_ptr.*, "__metadata__")) continue;
-            const o = e.value_ptr.object;
-            const offs = o.get("data_offsets").?.array.items;
-            const lo: u64 = @intCast(offs[0].integer);
-            const hi: u64 = @intCast(offs[1].integer);
-            try l.map.put(l.gpa, try l.gpa.dupe(u8, e.key_ptr.*), .{
-                .fd = fd,
-                .off = 8 + hlen + lo,
-                .len = hi - lo,
-                .dtype = try l.gpa.dupe(u8, o.get("dtype").?.string),
-            });
+        var arena = std.heap.ArenaAllocator.init(l.gpa);
+        defer arena.deinit();
+        const data, const names = shardHeader(arena.allocator(), fd) catch |e| {
+            _ = close(fd);
+            return e;
+        };
+        try l.map.ensureUnusedCapacity(l.gpa, @intCast(names.count()));
+        for (names.keys(), names.values()) |name, e| {
+            const t: Info = .{ .fd = fd, .off = data + e.begin, .len = e.end - e.begin, .dtype = dtypeName(e.dtype) };
+            l.map.putAssumeCapacity(try l.gpa.dupe(u8, name), t);
         }
     }
 
@@ -170,3 +188,50 @@ pub const Loader = struct {
         return b;
     }
 };
+
+/// `tmp`/s.safetensors: the length word (`len`, else the header's), the header, then `data` zero bytes.
+fn writeShard(tmp: *std.testing.TmpDir, len: ?u64, header: []const u8, data: usize) !void {
+    var buf: [256]u8 = @splat(0);
+    std.mem.writeInt(u64, buf[0..8], len orelse header.len, .little);
+    @memcpy(buf[8..][0..header.len], header);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "s.safetensors", .data = buf[0 .. 8 + header.len + data] });
+}
+
+test "a shard header is read as core reads it: malformed entries, a huge length word and offsets past the file are refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    var l: Loader = .{ .gpa = arena.allocator(), .r = undefined, .stage = &.{} };
+    const offsets = [_][]const u8{ "[]", "[0]", "[-1,2]", "[-0,2]", "[true,2]", "[null,2]", "\"4\"", "[18446744073709551616,2]", "[7,2]" };
+    for (offsets) |o| {
+        try writeShard(&tmp, null, try std.fmt.allocPrint(arena.allocator(), "{{\"a\":{{\"dtype\":\"U8\",\"shape\":[0],\"data_offsets\":{s}}}}}", .{o}), 2);
+        try std.testing.expectError(error.BadSafetensors, l.addShard(dir, "s.safetensors"));
+    }
+    const entries = [_][]const u8{
+        "[]",
+        "{\"a\":0}",
+        "{\"a\":{\"dtype\":\"U8\",\"shape\":[0]}}",
+        "{\"a\":{\"shape\":[0],\"data_offsets\":[0,0]}}",
+        "{\"a\":{\"dtype\":1,\"shape\":[0],\"data_offsets\":[0,0]}}",
+        "{\"a\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}",
+    };
+    for (entries) |h| {
+        try writeShard(&tmp, null, h, 2);
+        try std.testing.expectError(error.BadSafetensors, l.addShard(dir, "s.safetensors"));
+    }
+    for ([_]u64{ std.math.maxInt(u64), 1 << 20 }) |len| {
+        try writeShard(&tmp, len, "{}", 0);
+        try std.testing.expectError(error.BadSafetensors, l.addShard(dir, "s.safetensors"));
+    }
+    try std.testing.expectEqual(0, l.map.count());
+    const header = "{\"__metadata__\":{},\"a\":{\"dtype\":\"BF16\",\"shape\":[2],\"data_offsets\":[0,4]},\"q\":{\"dtype\":\"Q4\",\"shape\":[1],\"data_offsets\":[4,5]}}";
+    try writeShard(&tmp, null, header, 5);
+    try l.addShard(dir, "s.safetensors");
+    const a = l.map.get("a").?;
+    defer _ = close(a.fd);
+    try std.testing.expect(a.off == 8 + header.len and a.len == 4 and std.mem.eql(u8, a.dtype, "BF16"));
+    try std.testing.expect(l.map.get("q") == null); // a dtype core does not name is left out
+}

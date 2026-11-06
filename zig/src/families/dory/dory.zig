@@ -24,6 +24,7 @@ test {
     _ = @import("ref.zig");
     _ = @import("cuda_weights.zig");
     _ = @import("cuda_model.zig");
+    _ = @import("rope_test.zig");
     _ = @import("cuda_kernels.zig");
     _ = @import("cuda_backend.zig");
     _ = @import("cuda_snap.zig");

@@ -16,21 +16,19 @@ pub const Transaction = struct {
         var nb: [64]u8 = undefined;
         var la = std.heap.ArenaAllocator.init(f.gpa);
         defer la.deinit();
+        // Carries only: rows past the kept ones sit in SWA ring slots (pos % 2 window) rewritten before any read.
+        if (n > f.cfg.window) return error.BadWindow;
         for (try f.backbone(la.allocator())) |L| {
-            for ([_][]const u8{ "swa.v", "swa.s", "carry" }) |part| {
-                const role = try std.fmt.bufPrint(&nb, "s.L{d}.{s}", .{ L, part });
-                const ptr = f.runner.addressOf(role) orelse continue;
-                const carry = std.mem.eql(u8, part, "carry");
-                const row: usize = if (carry) 8 * @as(usize, f.cfg.head_dim) else if (std.mem.endsWith(u8, part, ".v")) 576 else 8;
-                const rows: u32 = if (carry) 1 else 2 * f.cfg.window;
-                const i = t.regions.items.len;
-                if (i == t.owned.items.len) {
-                    try t.owned.ensureUnusedCapacity(f.gpa, 1);
-                    t.owned.appendAssumeCapacity(try cuda.DeviceBuffer.alloc(f.runner.d, row * rows));
-                }
-                if (t.owned.items[i].len < row * rows) return error.TransactionShapeChanged;
-                try t.regions.append(f.gpa, .{ .live = ptr, .backup = t.owned.items[i].ptr, .row_bytes = row, .rows = rows, .kind = if (carry) .carry else .ring, .encoding = if (carry) .f32 else .cuda_fp8_584 });
+            const role = try std.fmt.bufPrint(&nb, "s.L{d}.carry", .{L});
+            const ptr = f.runner.addressOf(role) orelse continue;
+            const row = 8 * @as(usize, f.cfg.head_dim);
+            const i = t.regions.items.len;
+            if (i == t.owned.items.len) {
+                try t.owned.ensureUnusedCapacity(f.gpa, 1);
+                t.owned.appendAssumeCapacity(try cuda.DeviceBuffer.alloc(f.runner.d, row));
             }
+            if (t.owned.items[i].len < row) return error.TransactionShapeChanged;
+            try t.regions.append(f.gpa, .{ .live = ptr, .backup = t.owned.items[i].ptr, .row_bytes = row, .rows = 1, .kind = .carry, .encoding = .f32 });
         }
         t.state.position = f.slot.pos;
         try t.state.begin(t.regions.items, t.copier(), n);

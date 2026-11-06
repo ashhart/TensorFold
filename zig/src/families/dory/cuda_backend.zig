@@ -46,6 +46,7 @@ pub fn fits(physical: usize, prompt: usize, reply: usize) bool {
 }
 
 pub const Dory = struct {
+    priority_copies: bool = false,
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     m: *fwd.Model,
@@ -125,7 +126,7 @@ pub const Dory = struct {
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Dory) lanes.Model {
-        return .{ .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
+        return .{ .root_copies = x.priority_copies, .context_copies = x.priority_copies, .copy_match = if (x.priority_copies) 4 else 8, .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
     }
 
     fn self(ptr: *anyopaque) *Dory {
@@ -251,8 +252,8 @@ pub const Dory = struct {
         return k.at;
     }
 
-    /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row's logits are written.
-    fn chunk(x: *Dory, s: *Stream, l: *Lane) !bool {
+    /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row is in. `_: u32`.
+    fn chunk(x: *Dory, s: *Stream, l: *Lane, _: u32) !bool {
         const p = s.prompt();
         const at = l.fill.?;
         if (s.isCancelled()) return error.Cancelled;
@@ -274,15 +275,15 @@ pub const Dory = struct {
         const x = self(ptr);
         const l = try x.opening(s);
         errdefer x.dropLane(s);
-        while (!try x.chunk(s, l)) {}
+        while (!try x.chunk(s, l, 0)) {}
     }
 
-    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
+    fn prefillStep(ptr: *anyopaque, s: *Stream, _: u32) anyerror!bool {
         const x = self(ptr);
         const going = if (x.lanes.getPtr(s)) |l| l.fill != null else false;
         const l = if (going) x.lanes.getPtr(s).? else try x.opening(s);
         errdefer x.dropLane(s);
-        return x.chunk(s, l);
+        return x.chunk(s, l, 0);
     }
 
     fn handle(x: *Dory) usize {

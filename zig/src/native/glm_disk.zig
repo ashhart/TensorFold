@@ -9,7 +9,7 @@ const Backend = glm.backend.Backend;
 const Allocator = std.mem.Allocator;
 
 /// The store's view of a kept state: its KDA states, then each MLA layer's rows as a whole state lays them out.
-pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .scatter = scatter, .whole = whole };
+pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .blank_bytes = Backend.snapReadBytes, .scatter = scatter, .whole = whole };
 
 fn back(ptr: *anyopaque) *Backend {
     return @ptrCast(@alignCast(ptr));
@@ -98,5 +98,6 @@ pub fn identity(io: std.Io, eng: *const glm.engine.Engine, sl: *glm.slots.Slots)
     var os: [64]u8 = undefined;
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.device.name()));
+    @import("disk_identity.zig").profile(&h, .{ .family = "glm5_next", .backend = "metal" });
     return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }

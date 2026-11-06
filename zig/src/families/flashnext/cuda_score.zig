@@ -52,6 +52,33 @@ pub fn CapabilityCases(comptime Cuda: type) type {
             self.ranks = @ptrFromInt(16);
             try std.testing.expect(self.backend().vtable.score == null);
         }
+
+        test "decision capability: the ranked table outlives backend(), as the scoring table does" {
+            var self: Cuda = undefined;
+            self.head = null;
+            for ([_]usize{ 0, 16 }) |r| {
+                self.ranks = if (r == 0) null else @ptrFromInt(r);
+                // a real call: inlined, a table built in backend() would sit in this frame and survive clobber()
+                const vt = @call(.never_inline, Cuda.backend, .{&self}).vtable;
+                var here: u8 = 0;
+                std.mem.doNotOptimizeAway(&here);
+                const apart = @max(@intFromPtr(vt), @intFromPtr(&here)) - @min(@intFromPtr(vt), @intFromPtr(&here));
+                try std.testing.expect(apart > 1 << 20); // static data, not this thread's stack
+                clobber();
+                // read before backend() runs again: a table in its frame would be rebuilt at the same address
+                const step = vt.prefill_step;
+                const scores = vt.score != null;
+                try std.testing.expect(step != null and step == self.backend().vtable.prefill_step);
+                try std.testing.expectEqual(r == 0, scores);
+            }
+        }
+
+        /// Writes over the stack below the caller, where a table built inside backend() would have lived.
+        noinline fn clobber() void {
+            var junk: [4096]u8 = undefined;
+            @memset(&junk, 0xa5);
+            std.mem.doNotOptimizeAway(&junk);
+        }
     };
 }
 

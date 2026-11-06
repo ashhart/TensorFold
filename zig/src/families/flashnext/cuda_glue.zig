@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
+const Heads = @import("cuda_heads.zig").Heads;
 
 /// The attention tiles' head width and query heads a KV head (flashnext_attn.cu's HD and QR).
 const tile_head_dim = 256;
@@ -16,7 +17,7 @@ fn oneSmem() u32 {
     return (tile_heads + 32) * (tile_head_dim + 8) * 2 + tile_heads * (32 + 8) * 2;
 }
 /// Rows up to which attention reads the next tile ahead (fewer blocks, so latency, not occupancy, sets the time).
-const ahead_rows = 16;
+pub const ahead_rows = 16;
 
 fn int(x: usize) c_int {
     return @intCast(x);
@@ -34,6 +35,10 @@ const Fns = struct {
     wb0: cuda.Function,
     wb_moe: cuda.Function,
     wb_slices: cuda.Function,
+    // each writeback with fn_hc_normalize in one block a row (2560 columns, 4 streams): the same bits
+    wbn0: cuda.Function,
+    wbn_moe: cuda.Function,
+    wbn_slices: cuda.Function,
     normalize: cuda.Function,
     normalize_cols: cuda.Function, // fn_hc_normalize's bits over 256-column slices (dims a multiple of 256)
     dense_mix8: cuda.Function, // fn_hc_dense_mix's bits, a warp a 32-column group, eight a block
@@ -68,6 +73,12 @@ const Fns = struct {
     pool_media_paged: cuda.Function,
     scores_paged: cuda.Function,
     chunks_ahead_paged: cuda.Function,
+    /// A shared round's lanes in one launch a kernel (flashnext_attn_lanes.cuh, TF_FLASHNEXT_ATTN_LANES=1).
+    prep_lanes: cuda.Function,
+    pool_lanes: cuda.Function,
+    scores_lanes: cuda.Function,
+    chunks_lanes: cuda.Function,
+    merge_lanes: cuda.Function,
     chunks_one_paged: cuda.Function,
     fused_paged: cuda.Function,
 };
@@ -121,6 +132,9 @@ pub const Glue = struct {
             .wb0 = try g.hc.function("fn_hc_writeback0"),
             .wb_moe = try g.hc.function("fn_hc_writeback_moe"),
             .wb_slices = try g.hc.function("fn_hc_writeback_slices"),
+            .wbn0 = try g.hc.function("fn_hc_writeback_norm0"),
+            .wbn_moe = try g.hc.function("fn_hc_writeback_norm_moe"),
+            .wbn_slices = try g.hc.function("fn_hc_writeback_norm_slices"),
             .normalize = try g.hc.function("fn_hc_normalize"),
             .normalize_cols = try g.hc.function("fn_hc_normalize_cols"),
             .dense_mix8 = try g.hc.function("fn_hc_dense_mix8"),
@@ -154,6 +168,11 @@ pub const Glue = struct {
             .pool_media_paged = try g.attn.function("fn_qsa_pool_media_paged"),
             .scores_paged = try g.attn.function("fn_qsa_scores_paged"),
             .chunks_ahead_paged = try g.attn.function("fn_attn_chunks_ahead_paged"),
+            .prep_lanes = try g.attn.function("fn_attn_prep_lanes"),
+            .pool_lanes = try g.attn.function("fn_qsa_pool_lanes"),
+            .scores_lanes = try g.attn.function("fn_qsa_scores_lanes"),
+            .chunks_lanes = try g.attn.function("fn_attn_chunks_lanes"),
+            .merge_lanes = try g.attn.function("fn_attn_merge_lanes"),
             .chunks_one_paged = try g.attn.function("fn_attn_chunks_one_paged"),
             .fused_paged = try g.attn.function("fn_attn_fused_paged"),
         };
@@ -162,6 +181,7 @@ pub const Glue = struct {
         try g.f.chunks_one.allowDynamicShared(oneSmem());
         try g.f.fused.allowDynamicShared(oneSmem());
         try g.f.chunks_ahead_paged.allowDynamicShared(chunkSmem(2));
+        try g.f.chunks_lanes.allowDynamicShared(chunkSmem(2));
         try g.f.chunks_one_paged.allowDynamicShared(oneSmem());
         try g.f.fused_paged.allowDynamicShared(oneSmem());
         return g;
@@ -219,25 +239,26 @@ pub const Glue = struct {
         try go(g.f.gate, s, .{ rows, q_heads, 1 }, tile_head_dim, 0, &a);
     }
 
-    /// Text positions, a bf16 cache: the model's heads (cuda_prompt_wt.zig) normed, roped and stored.
-    pub fn attnPrep(g: *const Glue, s: cuda.Stream, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, eps: f32, rows: usize, pg: Pg) !void {
+    /// Text positions, a bf16 cache: the layer's heads `h` and the whole indexer normed, roped and stored.
+    pub fn attnPrep(g: *const Glue, s: cuda.Stream, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, eps: f32, rows: usize, h: Heads, pg: Pg) !void {
         if (wt.head_dim != tile_head_dim) return error.RowShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ proj, pos, q_scale, k_scale, i_scale, inv, q, kc, vc, iq, ikc });
         a.add(eps);
-        ints(&a, &.{ wt.proj_n, wt.q_heads, wt.kv_heads, wt.index_heads, wt.index_dim, wt.half });
+        ints(&a, &.{ h.projN(), h.q, h.kv, wt.index_heads, wt.index_dim, wt.half });
         if (pg.pt != 0) a.add(pg);
         const f = if (pg.pt != 0) g.f.prep_paged else g.f.prep;
-        try go(f, s, .{ rows, wt.q_heads + wt.kv_heads + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
+        try go(f, s, .{ rows, h.q + h.kv + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
     }
 
     /// Attention over 512-key chunks; `qsa` the sparse form (NCH 5, rows' key lists), else dense (NCH 3).
-    pub fn attnChunks(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize, qsa: bool, pg: Pg) !void {
-        const group = wt.q_heads / kv;
+    pub fn attnChunks(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, h: Heads, chunks: usize, qsa: bool, pg: Pg) !void {
+        const kv: usize = h.kv;
+        const group = h.q / kv;
         if (group > tile_heads) return error.RowShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ q, kc, vc, pos, po, pm, pl, ids, nk, sparse });
-        ints(&a, &.{ wt.q_heads, kv, group, 512, if (qsa) wt.nch else wt.dense_nch });
+        ints(&a, &.{ h.q, kv, group, 512, if (qsa) wt.nch else wt.dense_nch });
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, @intFromBool(qsa) });
         if (pg.pt != 0) a.add(pg);
@@ -248,23 +269,24 @@ pub const Glue = struct {
     }
 
     /// Prompt rows' attention with every chunk merged in the program (fn_attn_fused): out bf16, attnChunks then
-    pub fn attnFused(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, pg: Pg) !void {
-        const group = wt.q_heads / kv;
+    pub fn attnFused(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, h: Heads, pg: Pg) !void {
+        const kv: usize = h.kv;
+        const group = h.q / kv;
         if (group > tile_heads) return error.RowShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ q, kc, vc, pos, out, ids, nk, sparse });
-        ints(&a, &.{ wt.q_heads, kv, group, 512 });
+        ints(&a, &.{ h.q, kv, group, 512 });
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, 1 });
         if (pg.pt != 0) a.add(pg);
         try go(if (pg.pt != 0) g.f.fused_paged else g.f.fused, s, .{ rows, kv, 1 }, 128, oneSmem(), &a);
     }
 
-    pub fn attnMerge(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize, qsa: bool) !void {
+    pub fn attnMerge(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, h: Heads, qsa: bool) !void {
         var a: cuda.Args = .{};
         ptrs(&a, &.{ po, pm, pl, pos, out, nk, sparse });
-        ints(&a, &.{ wt.q_heads, kv, wt.q_heads / kv, 512, if (qsa) wt.nch else wt.dense_nch, @intFromBool(qsa) });
-        try go(g.f.merge, s, .{ rows, wt.q_heads, 1 }, tile_head_dim, 0, &a);
+        ints(&a, &.{ h.q, h.kv, h.q / h.kv, 512, if (qsa) wt.nch else wt.dense_nch, @intFromBool(qsa) });
+        try go(g.f.merge, s, .{ rows, h.q, 1 }, tile_head_dim, 0, &a);
     }
 
     pub fn qsaPool(g: *const Glue, s: cuda.Stream, ikc: u64, pooled: u64, pos: u64, k_scale: u64, inv: u64, eps: f32, rows: usize, pg: Pg) !void {
@@ -291,6 +313,56 @@ pub const Glue = struct {
         if (pg.pt != 0) return error.RowShape; // pages hold the tiles' four indexer heads only
         ints(&a, &.{ nb, wt.index_heads, wt.index_ratio, wt.index_top });
         try go(g.f.scores, s, .{ rows, cdiv(blocks, 64), 1 }, 256, 0, &a);
+    }
+
+    // ---- a shared round's lanes in one launch (flashnext_attn_lanes.cuh): lp [lane][4] addresses, li the ints
+
+    /// attnPrep over the round's `rows` rows, each into its lane's caches at its lane's positions.
+    pub fn attnPrepLanes(g: *const Glue, s: cuda.Stream, proj: u64, lp: u64, li: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, iq: u64, eps: f32, rows: usize) !void {
+        if (wt.head_dim != tile_head_dim) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ proj, lp, li, q_scale, k_scale, i_scale, inv, q, iq });
+        a.add(eps);
+        ints(&a, &.{ wt.proj_n, wt.q_heads, wt.kv_heads, wt.index_heads, wt.index_dim, wt.half });
+        try go(g.f.prep_lanes, s, .{ rows, wt.q_heads + wt.kv_heads + wt.index_heads + 1, 1 }, tile_head_dim, 0, &a);
+    }
+
+    /// qsaPool for `lanes` lanes of up to `max_rows` rows each.
+    pub fn qsaPoolLanes(g: *const Glue, s: cuda.Stream, lp: u64, li: u64, k_scale: u64, inv: u64, eps: f32, lanes: usize, max_rows: usize) !void {
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ lp, li, k_scale, inv });
+        a.add(eps);
+        ints(&a, &.{ wt.index_dim, wt.half, wt.index_ratio });
+        try go(g.f.pool_lanes, s, .{ max_rows / wt.index_ratio + 2, lanes, 1 }, wt.index_dim, 0, &a);
+    }
+
+    /// qsaScores (four indexer heads) for `lanes` lanes, each lane's rows at its first row of sc, rows nb apart.
+    pub fn qsaScoresLanes(g: *const Glue, s: cuda.Stream, iq: u64, lp: u64, li: u64, sc: u64, nb: usize, lanes: usize, max_rows: usize, max_blocks: usize) !void {
+        if (wt.index_dim != 128 or wt.index_heads != 4) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ iq, lp, li, sc });
+        ints(&a, &.{ nb, wt.index_ratio, wt.index_top });
+        try go(g.f.scores_lanes, s, .{ cdiv(max_rows, 8), cdiv(max_blocks, 256), lanes }, 256, 0, &a);
+    }
+
+    /// attnChunks (sparse, the next tile ahead) over the round's rows, up to `chunks` chunks a row.
+    pub fn attnChunksLanes(g: *const Glue, s: cuda.Stream, q: u64, lp: u64, li: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize) !void {
+        const group = wt.q_heads / kv;
+        if (group > tile_heads) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ q, lp, li, po, pm, pl, ids, nk, sparse });
+        ints(&a, &.{ wt.q_heads, kv, group, 512, wt.nch });
+        a.add(@as(f32, 0.0625));
+        ints(&a, &.{ wt.index_idw, 1 });
+        try go(g.f.chunks_lanes, s, .{ rows, kv, chunks }, 128, chunkSmem(2), &a);
+    }
+
+    /// attnMerge (sparse) over the round's rows.
+    pub fn attnMergeLanes(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, li: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ po, pm, pl, li, out, nk, sparse });
+        ints(&a, &.{ wt.q_heads, kv, wt.q_heads / kv, 512, wt.nch, 1 });
+        try go(g.f.merge_lanes, s, .{ rows, wt.q_heads, 1 }, tile_head_dim, 0, &a);
     }
 
     pub fn hcNormalize(g: *const Glue, s: cuda.Stream, h: u64, pss: u64, scale: u64, out: u64, eps: f32, rows: usize, dims: usize, streams: usize) !void {
@@ -387,6 +459,35 @@ pub const Glue = struct {
         ints(&a, &.{ n, k, dims, nc, streams, sk });
         const shared: u32 = @intCast(16 * (per * 32 + 8) * 2 + 16 * per * 4);
         try go(g.f.down, s, .{ cdiv(rows, 16), cdiv(n, 64), sk }, 128, shared, &a);
+    }
+
+    /// hcWriteback then hcNormalize with `scale` into `norm`, one block a row: Flash Next's 2560 columns and 4 streams.
+    pub fn hcWritebackNorm(g: *const Glue, s: cuda.Stream, h: u64, hout: u64, pss: u64, branch: u64, inj: u64, y: u64, wts: u64, scale: u64, norm: u64, eps: f32, rs: usize, rows: usize, dims: usize, streams: usize, mode: usize, topk: usize, slots: usize, world: usize) !void {
+        if (dims != 2560 or streams != 4) return error.RowShape;
+        var a: cuda.Args = .{};
+        const grid: [3]usize = .{ rows, 1, 1 };
+        switch (mode) {
+            0 => {
+                ptrs(&a, &.{ h, pss, scale, norm });
+                a.add(eps);
+                try go(g.f.wbn0, s, grid, 256, 0, &a);
+            },
+            2 => {
+                ptrs(&a, &.{ h, hout, pss, inj, y, wts, scale, norm });
+                a.add(eps);
+                ints(&a, &.{ topk, slots });
+                try go(g.f.wbn_moe, s, grid, 256, 0, &a);
+            },
+            4 => {
+                ptrs(&a, &.{ h, hout, pss, branch, inj });
+                a.add(@as(i64, @intCast(rs)));
+                ptrs(&a, &.{ scale, norm });
+                a.add(eps);
+                ints(&a, &.{world});
+                try go(g.f.wbn_slices, s, grid, 256, 0, &a);
+            },
+            else => return error.RowShape,
+        }
     }
 
     /// Mode 0: the streams' sums; 2: the MoE slots (fp32 y and weights) written back; 4: `world` fp32 K slices.

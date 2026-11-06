@@ -19,12 +19,13 @@ pub fn open(h: *LaneHost, job: *Job) bool {
     // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
     if (h.frame_key) |frame| if (h.cache != null and r.images.len > 0 and r.cacheKey().len > 0) {
         const f = frame(r.images);
+        job.frame = f;
         if (f != 0) {
             job.key = h.gpa.dupe(u32, r.cacheKey()) catch return !h.drop(job, "out of memory");
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (h.cache) |store| if (r.embedding == null and r.prompt_logprobs == null and !r.untaught) if (store.lookupUser(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
+    if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught) if (store.lookupUserFrame(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r), r.images, job.frame)) |l| {
         job.entry = l.entry;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
@@ -38,6 +39,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .id = "request",
         .prompt = r.prompt,
         .embedding = r.embedding,
+        .readout = r.readout,
         .max_new = r.max_tokens,
         .eos = r.eos,
         .sampling = r.sampling,
@@ -76,7 +78,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         return !h.drop(job, "out of memory");
     };
     job.started = true;
-    job.fill_on.store(true, .release); // status readers count the fill from here until the pass reports
+    @import("lane_host_load.zig").began(h, job); // the fill shows here
     job.began = std.Io.Clock.awake.now(h.io).toNanoseconds();
     return true;
 }

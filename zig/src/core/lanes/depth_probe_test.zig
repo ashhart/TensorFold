@@ -72,15 +72,48 @@ fn replay(n: usize, intercept: f64, slope: f64, head_ms: f64, enabled: bool) !Re
     if (got.deepest < prior.len) {
         for (streams[0..n]) |s| got.untried_stays_prior = got.untried_stays_prior and s.depth.?.p[got.deepest] == prior[got.deepest];
     }
-    std.debug.print("DEPTH_REPLAY n={d} intercept={d} slope={d} head={d} probe={} deepest={d} crossed={any} last={any} trimmed={d}\n", .{ n, intercept, slope, head_ms, enabled, got.deepest, got.crossed[0..n], got.last[0..n], got.trimmed });
     return got;
 }
 
+const Seen = struct { deepest: u32, crossed: []const u32, last: []const u32, trimmed: u32 };
+
+fn expectSeen(want: Seen, got: Replay) !void {
+    try t.expectEqual(want.deepest, got.deepest);
+    try t.expectEqualSlices(u32, want.crossed, got.crossed[0..want.crossed.len]);
+    try t.expectEqualSlices(u32, want.last, got.last[0..want.last.len]);
+    try t.expectEqual(want.trimmed, got.trimmed);
+}
+
+const replays = [2][2][2]Seen{
+    .{
+        .{
+            .{ .deepest = 6, .crossed = &.{ 62, 62 }, .last = &.{ 6, 6 }, .trimmed = 0 },
+            .{ .deepest = 8, .crossed = &.{ 59, 57 }, .last = &.{ 7, 8 }, .trimmed = 11 },
+        },
+        .{
+            .{ .deepest = 4, .crossed = &.{ 83, 83, 83, 83 }, .last = &.{ 4, 4, 4, 4 }, .trimmed = 0 },
+            .{ .deepest = 5, .crossed = &.{ 75, 83, 83, 76 }, .last = &.{ 5, 5, 5, 5 }, .trimmed = 9 },
+        },
+    },
+    .{
+        .{
+            .{ .deepest = 6, .crossed = &.{ 61, 61 }, .last = &.{ 6, 6 }, .trimmed = 0 },
+            .{ .deepest = 8, .crossed = &.{ 54, 56 }, .last = &.{ 8, 8 }, .trimmed = 2 },
+        },
+        .{
+            .{ .deepest = 4, .crossed = &.{ 82, 82, 82, 82 }, .last = &.{ 4, 4, 4, 4 }, .trimmed = 0 },
+            .{ .deepest = 6, .crossed = &.{ 75, 71, 72, 74 }, .last = &.{ 5, 6, 5, 5 }, .trimmed = 9 },
+        },
+    },
+};
+
 test "shared depth probe: grants learn past a prior cap through ordinary window pricing" {
-    for ([_][2]f64{ .{ 50, 3 }, .{ 55, 2.8 } }) |price| {
-        for ([_]usize{ 2, 4 }) |n| {
+    for ([_][2]f64{ .{ 50, 3 }, .{ 55, 2.8 } }, replays) |price, by_n| {
+        for ([_]usize{ 2, 4 }, by_n) |n, want| {
             const old = try replay(n, price[0], price[1], 1, false);
             const next = try replay(n, price[0], price[1], 1, true);
+            try expectSeen(want[0], old);
+            try expectSeen(want[1], next);
             try t.expectEqual(@as(u32, if (n == 2) 6 else 4), old.deepest);
             try t.expect(old.untried_stays_prior);
             try t.expect(next.deepest > old.deepest);
@@ -95,6 +128,9 @@ test "shared depth probe: eight streams already filling 32 rows stay unchanged" 
     const next = try replay(8, 100, 0, 0, true);
     try t.expectEqualDeep(old, next);
     try t.expectEqual(@as(u32, 3), next.deepest);
+    const full: [8]u32 = @splat(100);
+    const three: [8]u32 = @splat(3);
+    try expectSeen(.{ .deepest = 3, .crossed = &full, .last = &three, .trimmed = 0 }, next);
 }
 
 test "shared depth probe: every eighth grant adds at most one row and rotates streams" {

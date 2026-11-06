@@ -318,6 +318,26 @@ const Copy = struct {
     }
 };
 
+test "multi-fact delete: one cut restores every weight and record of two facts and their retained neighbour" {
+    var t = trainer();
+    var h: Device = .{};
+    var p: P = .{ .gpa = std.testing.allocator, .mode = .auto };
+    defer p.deinit();
+    try three(&h, &p, &t);
+    for (p.neuron(p.down.items, 0, 2, d)) |*v| v.* *= 1.001;
+    try p.upload(&t, &h, 0);
+    const before = try Copy.of(&p);
+    defer before.free();
+    const live = h;
+    const both = [_][2]u16{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 2, 0 } };
+    try std.testing.expectEqual(@as(usize, 4), try forgetting.forget(&p, &t, &h, &both));
+    for (both) |g| try std.testing.expect(std.mem.allEqual(f32, p.neuron(p.up.items, g[0], g[1], d), 0));
+    try std.testing.expectEqualSlices(f32, before.up[2 * d .. 3 * d], p.neuron(p.up.items, 0, 2, d));
+    try std.testing.expectEqual(@as(usize, 3), try forgetting.unforget(&p, &t, &h));
+    try before.expectSame(&p);
+    try expectLive(&live, &h);
+}
+
 /// The forward's layers as the device holds them, for the pocket's slots.
 fn expectLive(before: *const Device, now: *const Device) !void {
     for (0..layers - 1) |l| {
@@ -328,6 +348,9 @@ fn expectLive(before: *const Device, now: *const Device) !void {
 }
 
 test "an allocation or an upload that fails anywhere in a delete leaves the pocket and the forward as they were" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var t = trainer();
     // each allocation of the delete in turn fails (the pocket's, the rounding's among them), until it goes through
     var failures: usize = 0;
@@ -396,6 +419,9 @@ test "an allocation or an upload that fails anywhere in a delete leaves the pock
 }
 
 test "a put-back the device stops taking after one layer is cut keeps its snapshot, refuses, and lands once it can" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var t = trainer();
     const h = try std.testing.allocator.create(Device);
     defer std.testing.allocator.destroy(h);

@@ -161,6 +161,48 @@ fn packers(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream)
         try same(gpu, "nvfp4 expert half", out, std.mem.sliceAsBytes(want[0..blk]));
     }
     check.pass("modelopt repack: fp8, bf16 and fp4 lane tiles and nvfp4 expert blocks (and column halves) equal the host packers", .{});
+    try gateUp(gpu, rng, p, s);
+}
+
+/// Gate and up as parts 0 and 1 of one table, 4 experts then a shared one packed alone after them; guards untouched.
+fn gateUp(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream) !void {
+    const a = gpu.gpa;
+    const e = 4;
+    const n = 64;
+    const k = 96;
+    const per = fx4.bytes(1, n, k, 2);
+    const guard = 256;
+    const cg = try a.alloc(u8, (e + 1) * n * k / 2);
+    defer a.free(cg);
+    const cu = try a.alloc(u8, cg.len);
+    defer a.free(cu);
+    const sg = try a.alloc(u8, (e + 1) * n * k / 16);
+    defer a.free(sg);
+    const su = try a.alloc(u8, sg.len);
+    defer a.free(su);
+    for ([_][]u8{ cg, cu }) |c| fill(rng, c, .any);
+    for ([_][]u8{ sg, su }) |c| fill(rng, c, .scale);
+    const want = try a.alloc(u32, ((e + 1) * per + guard) / 4);
+    defer a.free(want);
+    @memset(want, 0xA5A5_A5A5);
+    var out = try dev(gpu, std.mem.sliceAsBytes(want)); // the guard pattern everywhere before the launches
+    defer out.free();
+    for (0..e + 1) |x| {
+        const c = x * n * k / 2;
+        const b = x * n * k / 16;
+        fx4.packGateUp(want[x * per / 4 ..][0 .. per / 4], .{ cg[c..][0 .. n * k / 2], sg[b..][0 .. n * k / 16] }, .{ cu[c..][0 .. n * k / 2], su[b..][0 .. n * k / 16] }, n, k);
+    }
+    var dev_c = [2]cuda.DeviceBuffer{ try dev(gpu, cg), try dev(gpu, cu) };
+    defer for (&dev_c) |*d| d.free();
+    var dev_s = [2]cuda.DeviceBuffer{ try dev(gpu, sg), try dev(gpu, su) };
+    defer for (&dev_s) |*d| d.free();
+    for (0..2) |m| {
+        try p.fp4Experts(s, dev_c[m].ptr, dev_s[m].ptr, out.ptr, e, n, k, 0, k, 2, m);
+        try p.fp4Experts(s, dev_c[m].ptr + e * n * k / 2, dev_s[m].ptr + e * n * k / 16, out.ptr + e * per, 1, n, k, 0, k, 2, m);
+    }
+    try s.synchronize();
+    try same(gpu, "nvfp4 gate-up pairs, shared expert last, guards", out, std.mem.sliceAsBytes(want));
+    check.pass("modelopt repack: two-part nvfp4 expert tables (gate, up; the shared expert last) equal packGateUp", .{});
 }
 
 /// The lane matmul (decode rows) and prompt rows for one mode against fp64; rows equal at every row count and chunking.

@@ -1,6 +1,10 @@
 //! Optional runtime refusal and discovery regressions with absent files and a fake loader.
 const std = @import("std");
 pub fn tests(b: *std.Build, all: *std.Build.Step) void {
+    const pictures = b.createModule(.{ .root_source_file = b.path("zig/src/core/picture/picture.zig"), .target = b.graph.host, .link_libc = true });
+    const picture_run = b.addRunArtifact(b.addTest(.{ .root_module = pictures }));
+    picture_run.has_side_effects = true;
+    b.step("test-picture-host", "Image codecs, caller limits and pixel goldens without a GPU").dependOn(&picture_run.step);
     const experimental = b.createModule(.{ .root_source_file = b.path("zig/experimental_family_test.zig"), .target = b.graph.host });
     const policy = b.addRunArtifact(b.addTest(.{ .root_module = experimental }));
     b.step("test-experimental-family-host", "Exact release opt-in policy without model or GPU work").dependOn(&policy.step);

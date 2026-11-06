@@ -42,6 +42,7 @@ pub fn rule(name: []const u8, shape: []const u32) struct { kind: u32, e0: u32 } 
     if (ends(name, "A_log")) return .{ .kind = kernels.fill_w, .e0 = 7 };
     if (ends(name, "dt_bias") or ends(name, "conv1d.weight") or ends(name, "e_score_correction_bias")) return .{ .kind = kernels.fill_w, .e0 = 8 };
     if (ends(name, "norm.weight")) return .{ .kind = kernels.fill_one, .e0 = 0 };
+    if (ends(name, "indexer.k_norm.bias")) return .{ .kind = kernels.fill_w, .e0 = 8 };
     if (ends(name, "res_proj.weight")) return .{ .kind = kernels.fill_w, .e0 = 6 };
     if (ends(name, "embed_tokens.weight")) return .{ .kind = kernels.fill_w, .e0 = 7 };
     return .{ .kind = kernels.fill_w, .e0 = if (shape.len == 2) fanExp(shape[1]) else 6 };

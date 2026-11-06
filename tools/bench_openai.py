@@ -17,6 +17,7 @@ import urllib.request
 
 from bench_evidence import Evidence
 from bench_auth import authorize, read_api_key, redact
+from bench_args import validate_temperatures
 import bench_metrics
 
 if sys.version_info < (3, 11):
@@ -114,7 +115,12 @@ def main() -> None:
                    help="send no seed; requires native serve --prompt-seed to match prompt-keyed engine benches, "
                         "so the reply equals the bench's and the timings compare directly")
     args = p.parse_args()
+    if args.tokens < 1:
+        p.error("--tokens must be greater than 0")
+    if args.reps < 1:
+        p.error("--reps must be greater than 0")
     api_key = read_api_key(p, args.api_key_env)
+    validate_temperatures(p, args.temperatures)
     results = []
     for temp in [float(t) for t in args.temperatures.split(",")]:
         for item in PROMPTS:

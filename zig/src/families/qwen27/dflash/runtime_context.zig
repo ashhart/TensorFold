@@ -110,12 +110,22 @@ pub fn attention(ptr: *anyopaque, epoch: u64, p: op.Attention) !op.View {
 fn attendRows(b: *Backend, e: @import("metal").ComputeEncoder, p: op.Attention, context: op.Context, caches: []const @import("runtime_backend.zig").Cache, first: u32, rows: u32, result: op.View) !void {
     const context_rows: u32 = @intCast(context.end - context.begin);
     const keys = context_rows + rows;
-    const merged_k = try b.frame.alloc(keys, b.config.kvWidth(), .bf16);
-    const merged_v = try b.frame.alloc(keys, b.config.kvWidth(), .bf16);
-    const k = try b.frame.ref(merged_k);
-    const v = try b.frame.ref(merged_v);
-    try gather(b, e, context, caches[p.layer].keys, k);
-    try gather(b, e, context, caches[p.layer].values, v);
+    // An unwrapped context is contiguous in the cache: the query rows go behind it and attention reads in place.
+    const at: u32 = @intCast(context.begin % b.config.window);
+    const in_place = at + context_rows <= b.config.window and at + keys <= b.config.window + 16;
+    var k: Ref = undefined;
+    var v: Ref = undefined;
+    if (in_place) {
+        k = .{ .buf = caches[p.layer].keys, .off = @as(usize, at) * b.config.kvWidth() * 2 };
+        v = .{ .buf = caches[p.layer].values, .off = @as(usize, at) * b.config.kvWidth() * 2 };
+    } else {
+        const merged_k = try b.frame.alloc(keys, b.config.kvWidth(), .bf16);
+        const merged_v = try b.frame.alloc(keys, b.config.kvWidth(), .bf16);
+        k = try b.frame.ref(merged_k);
+        v = try b.frame.ref(merged_v);
+        try gather(b, e, context, caches[p.layer].keys, k);
+        try gather(b, e, context, caches[p.layer].values, v);
+    }
     const off = @as(usize, context_rows) * b.config.kvWidth() * 2;
     const own_k = try b.frame.ref(p.keys);
     const own_v = try b.frame.ref(p.values);

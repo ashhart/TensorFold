@@ -43,7 +43,8 @@ const Fake = struct {
         try f.target.backend().vtable.prefill(ptr, s);
     }
 
-    fn step(ptr: *anyopaque, s: *Stream) anyerror!bool {
+    fn step(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
+        _ = max_rows; // the admission pass runs whole prompts
         if (s.prompt_len > glm.engine.prompt_rows) return error.UnboundedPromptChoice;
         try whole(ptr, s);
         return true;

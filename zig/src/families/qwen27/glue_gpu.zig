@@ -1,7 +1,8 @@
 //! Small operators use borrowed buffers and caller-owned encoders; copies never reinterpret activations.
 const mtl = @import("metal");
 const source = @import("qwen_runtime_sources");
-const Config = @import("config.zig").Config;
+const config = @import("config.zig");
+const Config = config.Config;
 const abi = @import("glue.zig");
 const projection = @import("projection.zig");
 const profile = @import("core").gpu_profile;
@@ -51,12 +52,14 @@ pub const Kernels = struct {
         e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
     }
 
+    /// The table is whole on every rank; only the head is sliced, so the bound is its row count, not `c.vocab`.
     pub fn embedding(k: Kernels, input_encoder: mtl.ComputeEncoder, c: Config, p: projection.Triple, ids: Ref, out: Ref, rows: u32) !void {
+        const vocab = try config.embedBound(&c, p.weight.shape[0]);
         var span = profile.begin(k.profiler, input_encoder, .embedding);
         errdefer span.cancel();
         const e = span.encoder;
 
-        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(c.vocab), .bits = p.bits, .group = p.group, .metadata = .bf16 };
+        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(vocab), .bits = p.bits, .group = p.group, .metadata = .bf16 };
         try abi.checkEmbed(a);
         e.setPipeline(k.embed);
         e.setBuffer(ids.buffer, ids.offset, 0);
@@ -104,7 +107,7 @@ pub const Kernels = struct {
     }
 
     pub fn tapRows(k: Kernels, e: mtl.ComputeEncoder, x: Ref, kept: Ref, y: Ref, p: Gather) !void {
-        if (p.rows == 0 or p.rows > p.capacity or p.planes != 5 or p.width == 0) return error.BadTapGather;
+        if (p.rows == 0 or p.rows > p.capacity or p.planes == 0 or p.planes > 8 or p.width == 0) return error.BadTapGather;
         if (x.offset > x.buffer.length() or @as(usize, p.capacity) * p.width * p.planes * 2 > x.buffer.length() - x.offset or kept.offset > kept.buffer.length() or @as(usize, p.rows) * 4 > kept.buffer.length() - kept.offset or y.offset > y.buffer.length() or @as(usize, p.rows) * p.width * p.planes * 2 > y.buffer.length() - y.offset) return error.BadTapGather;
         e.setPipeline(k.gather);
         bind(e, .{ x, kept });

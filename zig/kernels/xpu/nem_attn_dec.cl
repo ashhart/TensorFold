@@ -1,4 +1,6 @@
+#ifndef TF_XPU_NO_DPAS
 #pragma OPENCL EXTENSION cl_intel_subgroup_matrix_multiply_accumulate : enable
+#endif
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 // Nemotron-H decode attention: split-K partials of 512 keys on DPAS, merged by attn_merge / attn_merge_r.
 #define HD 128
@@ -12,6 +14,21 @@ inline ushort to_bf(float f) {
     return (ushort)(u >> 16);
 }
 inline float bfr(float f) { return bf(to_bf(f)); }
+
+#ifdef TF_XPU_NO_DPAS
+// Gen12LP (Iris Xe, DG1) has no DPAS: the same 8x16 by 16x16 bf16 product, A's (m, k) from lane k, fp32 FMAs.
+inline float8 mad_k16(short8 a, int8 b, float8 acc) {
+#pragma unroll
+    for (int k = 0; k < 16; k++) {
+        const uint pair = (uint)b[k >> 1];
+        const float bk = bf((ushort)((k & 1) ? (pair >> 16) : (pair & 0xffffu)));
+#pragma unroll
+        for (int m = 0; m < 8; m++) acc[m] = fma(bf((ushort)intel_sub_group_shuffle(a[m], (uint)k)), bk, acc[m]);
+    }
+    return acc;
+}
+#define intel_sub_group_bf16_bf16_matrix_mad_k16 mad_k16
+#endif
 
 // Grid (NKV * 2 head halves, chunks, rows z), 128 items; q [row][32][128] bf16, kc/vc [pos][2][128]; len0 + z keys.
 __attribute__((reqd_work_group_size(128, 1, 1))) __attribute__((intel_reqd_sub_group_size(16)))

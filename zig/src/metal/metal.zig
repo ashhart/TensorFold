@@ -27,6 +27,7 @@ pub const resident = @import("resident.zig");
 pub const residency_policy = @import("residency_policy.zig");
 pub const keepalive = @import("keepalive.zig");
 pub const clock = @import("clock.zig");
+pub const pass_metrics = @import("pass_metrics.zig");
 pub const counters = @import("counters.zig");
 pub const ane = @import("ane.zig");
 

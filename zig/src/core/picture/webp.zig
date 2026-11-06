@@ -131,13 +131,18 @@ fn chunks(data: []const u8) picture.Error!Chunks {
 
 /// WebP bytes as Pillow loaded them: one frame, RGBA (alpha opaque without one), and the orientation its tags give.
 pub fn decode(io: std.Io, a: Allocator, data: []const u8) picture.Error!picture.Samples {
+    return decodeWithLimits(io, a, data, .{});
+}
+
+pub fn decodeWithLimits(io: std.Io, a: Allocator, data: []const u8, limits: picture.Limits) picture.Error!picture.Samples {
     const c = try chunks(data);
     if (c.animated) return error.Animated;
     const f = try load(io, a);
     var w: c_int = 0;
     var h: c_int = 0;
     if (f.WebPGetInfo(data.ptr, data.len, &w, &h) == 0) return error.Invalid;
-    try picture.fits(@intCast(w), @intCast(h));
+    if (w <= 0 or h <= 0) return error.Invalid;
+    try limits.fits(@intCast(w), @intCast(h));
     const width: usize = @intCast(w);
     const height: usize = @intCast(h);
     const rgba = try a.alloc(u8, width * height * 4);

@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 constexpr int DK = 128, DV = 128, TAPS = 4;
 
@@ -13,7 +14,7 @@ using tf_common::warp_sum;
 static __device__ __forceinline__ float sigmoidf_(float x) { const float e = expf(-fabsf(x)); return (x < 0 ? e : 1.0f) / (1.0f + e); }
 static __device__ __forceinline__ float siluf_(float x) { const float e = expf(-fabsf(x)); return (x < 0 ? x * e : x) / (1.0f + e); }
 
-static __device__ __forceinline__ float softplusf_(float x) { return x > 20.0f ? x : log1pf(expf(x)); }
+using tf_common::softplusf_;
 
 static __device__ __forceinline__ void update(float (&s)[4][4], const float (&kk)[4], const float* vrow, int warp, float g,
                                        float beta) {

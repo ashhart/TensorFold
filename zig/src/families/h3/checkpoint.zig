@@ -1,5 +1,7 @@
-//! One safetensors file mapped read-only, its tensors found by name in the header's text.
+//! One safetensors file mapped read-only, its tensors found by name in core's index of the header.
 const std = @import("std");
+const report = @import("report.zig");
+const st = @import("safetensors");
 
 const c = struct {
     extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
@@ -12,42 +14,23 @@ const c = struct {
 /// Where a tensor sits in the data that follows the header.
 pub const Span = struct { rows: usize, cols: usize, start: usize, end: usize };
 
-fn numbers(text: []const u8, comptime key: []const u8, out: []usize) !usize {
-    const at = std.mem.indexOf(u8, text, key) orelse return error.BadHeader;
-    const end = std.mem.indexOfScalarPos(u8, text, at, ']') orelse return error.BadHeader;
-    var it = std.mem.tokenizeAny(u8, text[at + key.len .. end], ", ");
-    var n: usize = 0;
-    while (it.next()) |word| : (n += 1) {
-        if (n == out.len) return error.BadHeader;
-        out[n] = try std.fmt.parseInt(usize, word, 10);
-    }
-    return n;
-}
-
-/// The bf16 tensor `name` in a safetensors header: a vector counts as one row.
-pub fn locate(header: []const u8, name: []const u8) !Span {
-    var key: [160]u8 = undefined;
-    const quoted = try std.fmt.bufPrint(&key, "\"{s}\":{{", .{name});
-    const at = std.mem.indexOf(u8, header, quoted) orelse return error.MissingTensor;
-    const end = std.mem.indexOfScalarPos(u8, header, at, '}') orelse return error.BadHeader;
-    const text = header[at..end];
-    if (std.mem.indexOf(u8, text, "\"BF16\"") == null) return error.WrongDType;
-    var shape: [2]usize = undefined;
-    var span: [2]usize = undefined;
-    const dims = try numbers(text, "\"shape\":[", &shape);
-    if (try numbers(text, "\"data_offsets\":[", &span) != 2 or dims == 0) return error.BadHeader;
-    const rows = if (dims == 2) shape[0] else 1;
-    const cols = shape[dims - 1];
-    const cells = std.math.mul(usize, rows, cols) catch return error.TensorSizeOverflow;
-    const size = std.math.mul(usize, cells, 2) catch return error.TensorSizeOverflow;
-    if (rows == 0 or cols == 0 or span[1] < span[0] or span[1] - span[0] != size) return error.BadHeader;
-    return .{ .rows = rows, .cols = cols, .start = span[0], .end = span[1] };
+/// The bf16 tensor `name` in core's index of a header: a vector counts as one row.
+pub fn locate(names: st.Header, name: []const u8) !Span {
+    const e = names.get(name) orelse return error.MissingTensor;
+    if (e.dtype != .bf16) return error.WrongDType;
+    if (e.rank == 0 or e.rank > 2) return error.BadHeader;
+    const rows = if (e.rank == 2) e.shape[0] else 1;
+    const cols = e.shape[e.rank - 1];
+    if (rows == 0 or cols == 0) return error.BadHeader;
+    return .{ .rows = rows, .cols = cols, .start = e.begin, .end = e.end };
 }
 
 pub const Checkpoint = struct {
     bytes: []const u8,
     header: []const u8,
     data: usize,
+    names: st.Header,
+    arena: std.heap.ArenaAllocator,
 
     pub const Entry = struct { rows: usize, cols: usize, bytes: []const u8 };
 
@@ -66,18 +49,21 @@ pub const Checkpoint = struct {
         if (@intFromPtr(at) == std.math.maxInt(usize)) return error.CannotMap;
         errdefer _ = Ops.munmap(at, len);
         const bytes = @as([*]const u8, @ptrCast(at))[0..len];
-        const n = std.math.cast(usize, std.mem.readInt(u64, bytes[0..8], .little)) orelse return error.BadHeader;
-        if (n > len - 8) return error.BadHeader;
-        return .{ .bytes = bytes, .header = bytes[8 .. 8 + n], .data = 8 + n };
+        const n = st.headerSize(std.mem.readInt(u64, bytes[0..8], .little), len) catch return error.BadHeader;
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        errdefer arena.deinit();
+        const names = st.parseHeader(arena.allocator(), bytes[8..][0..n], len - 8 - n) catch return error.BadHeader;
+        return .{ .bytes = bytes, .header = bytes[8 .. 8 + n], .data = 8 + n, .names = names, .arena = arena };
     }
 
     pub fn deinit(self: *Checkpoint) void {
+        self.arena.deinit();
         _ = c.munmap(@ptrCast(@constCast(self.bytes.ptr)), self.bytes.len);
     }
 
     pub fn bf16(self: *const Checkpoint, name: []const u8) !Entry {
-        const span = locate(self.header, name) catch |e| {
-            std.debug.print("tensor {s}: {t}\n", .{ name, e });
+        const span = locate(self.names, name) catch |e| {
+            report.say("tensor {s}: {t}", .{ name, e });
             return e;
         };
         if (self.data > self.bytes.len or span.end > self.bytes.len - self.data) return error.BadHeader;
@@ -85,8 +71,15 @@ pub const Checkpoint = struct {
     }
 };
 
+/// core's index of `header`, for the tests.
+fn indexOf(a: std.mem.Allocator, header: []const u8, data_len: usize) !st.Header {
+    return st.parseHeader(a, header, data_len);
+}
+
 test "a matrix and a vector are found by name" {
-    const header = "{\"a.weight\":{\"dtype\":\"BF16\",\"shape\":[3,4],\"data_offsets\":[8,32]},\"a.norm\":{\"dtype\":\"BF16\",\"shape\":[4],\"data_offsets\":[0,8]}}";
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const header = try indexOf(arena.allocator(), "{\"a.weight\":{\"dtype\":\"BF16\",\"shape\":[3,4],\"data_offsets\":[8,32]},\"a.norm\":{\"dtype\":\"BF16\",\"shape\":[4],\"data_offsets\":[0,8]}}", 32);
     const w = try locate(header, "a.weight");
     try std.testing.expectEqual(Span{ .rows = 3, .cols = 4, .start = 8, .end = 32 }, w);
     const n = try locate(header, "a.norm");
@@ -94,10 +87,13 @@ test "a matrix and a vector are found by name" {
 }
 
 test "a missing name, another dtype and a size that does not match are refused" {
-    const header = "{\"f.weight\":{\"dtype\":\"F32\",\"shape\":[2,2],\"data_offsets\":[0,16]},\"b.weight\":{\"dtype\":\"BF16\",\"shape\":[2,2],\"data_offsets\":[0,6]}}";
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const header = try indexOf(arena.allocator(), "{\"f.weight\":{\"dtype\":\"F32\",\"shape\":[2,2],\"data_offsets\":[0,16]},\"s.weight\":{\"dtype\":\"BF16\",\"shape\":[2,2,2],\"data_offsets\":[16,32]}}", 32);
     try std.testing.expectError(error.MissingTensor, locate(header, "x.weight"));
     try std.testing.expectError(error.WrongDType, locate(header, "f.weight"));
-    try std.testing.expectError(error.BadHeader, locate(header, "b.weight"));
+    try std.testing.expectError(error.BadHeader, locate(header, "s.weight"));
+    try std.testing.expectError(error.BadSafetensors, indexOf(arena.allocator(), "{\"b.weight\":{\"dtype\":\"BF16\",\"shape\":[2,2],\"data_offsets\":[0,6]}}", 16));
 }
 
 test "h3 ownership: mapped checkpoint is unmapped after header rejection" {
@@ -128,9 +124,12 @@ test "h3 ownership: mapped checkpoint is unmapped after header rejection" {
 }
 
 test "h3 arithmetic: tensor sizes and offsets reject overflow" {
-    try std.testing.expectError(error.TensorSizeOverflow, locate("{\"a\":{\"dtype\":\"BF16\",\"shape\":[18446744073709551615,2],\"data_offsets\":[0,0]}}", "a"));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.BadSafetensors, indexOf(arena.allocator(), "{\"a\":{\"dtype\":\"BF16\",\"shape\":[18446744073709551615,2],\"data_offsets\":[0,0]}}", 0));
     var bytes: [16]u8 = @splat(0);
-    const ck: Checkpoint = .{ .bytes = &bytes, .data = std.math.maxInt(usize), .header = "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,2]}}" };
+    const header = "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,2]}}";
+    const ck: Checkpoint = .{ .bytes = &bytes, .data = std.math.maxInt(usize), .header = header, .names = try indexOf(arena.allocator(), header, 2), .arena = .init(std.testing.allocator) };
     try std.testing.expectError(error.BadHeader, ck.bf16("a"));
 }
 
@@ -145,4 +144,18 @@ test "h3 arithmetic: header length refuses overflow" {
     const z = try std.testing.allocator.dupeSentinel(u8, path, 0);
     defer std.testing.allocator.free(z);
     try std.testing.expectError(error.BadHeader, Checkpoint.open(z.ptr));
+}
+
+test "a tensor is found by core's index: not a dtype in another field, not a look-alike in metadata, spaced JSON read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const typed = try indexOf(a, "{\"x\":{\"dtype\":\"F16\",\"shape\":[1],\"data_offsets\":[0,2],\"n\":\"BF16\"}}", 2);
+    try std.testing.expectError(error.WrongDType, locate(typed, "x"));
+    const meta = try indexOf(a, "{\"__metadata__\":{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,2]}},\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[2,4]}}", 4);
+    try std.testing.expectEqual(Span{ .rows = 1, .cols = 1, .start = 2, .end = 4 }, try locate(meta, "a"));
+    const spaced = try indexOf(a, "{\"a\": {\"dtype\": \"BF16\", \"shape\": [1], \"data_offsets\": [0, 2]}}", 2);
+    try std.testing.expectEqual(Span{ .rows = 1, .cols = 1, .start = 0, .end = 2 }, try locate(spaced, "a"));
+    for ([_][]const u8{ "{\"w\":{\"dtype\":\"BF16\",", "{\"w\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,2]}}x", "{\"w\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,2]},\"w\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,2]}}" }) |bad|
+        if (indexOf(a, bad, 2)) |_| return error.TestUnexpectedResult else |_| {};
 }

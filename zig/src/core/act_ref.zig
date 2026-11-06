@@ -1,6 +1,6 @@
 //! Activation rows in float64, the reference every backend's activation kernels are checked against.
 const std = @import("std");
-const bf = @import("bf16_round.zig");
+const bf = @import("bf16_round");
 
 pub fn sigmoid(x: f64) f64 {
     return 1 / (1 + @exp(-x));

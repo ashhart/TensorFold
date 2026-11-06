@@ -250,6 +250,15 @@ fn dryWith(a: std.mem.Allocator, config: []const u8, stored: []const Pack, mlx: 
     return wts.load(testing.allocator, undefined, dir, &c, 1, true);
 }
 
+/// The plan a dry load reports: four of 45 layers and the MTP layer, `bytes` in buffers, its matrices by width.
+fn expectPlan(w: *const wts.Weights, c: *const cfg.Config, bytes: usize, widths: []const u8) !void {
+    try testing.expectEqual([2]usize{ 4, 45 }, [2]usize{ c.run, c.layers });
+    try testing.expect(w.mtp != null);
+    try testing.expectEqual(bytes, w.bytes);
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(widths, wts.tally(w, c).summary(&buf));
+}
+
 fn free(w: *wts.Weights) void {
     w.deinit();
     testing.allocator.destroy(w);
@@ -262,6 +271,7 @@ test "a uniform 4/64 checkpoint plans the same matrices, offsets and bytes as th
     const w = try dry(arena.allocator(), flat, &.{});
     defer free(w);
     try testing.expectEqual(@as(usize, 1_512_774_688), w.bytes);
+    try expectPlan(w, &c, 1_512_774_688, "4-bit/64 x39");
     try testing.expectEqual(@as(u64, 0xc1e86c075603176a), plan(w, &c));
     try testing.expectEqual(@as(u8, 0), w.layers[0].attn.kda.in_proj.more); // one width: one run, the matrix itself
 }
@@ -303,6 +313,7 @@ test "the device admits each tensor at its override's width, whatever the key's 
     try testing.expectEqual(quant.uniform, w.layers[1].attn.kda.o_proj.width());
     try testing.expectEqual(quant.uniform, w.layers[3].mlp.moe.gate.width());
     try testing.expect(!wts.native(w, &c));
+    try expectPlan(w, &c, 1_514_347_552, "2-bit/64 x2, 4-bit/64 x35, 5-bit/32 x1, 8-bit/64 x1");
 }
 
 test "a tensor stored at another width than the config gives it is refused, never read at a guessed width" {
@@ -389,6 +400,7 @@ test "a stack of mixed widths plans one run a member, as 0.6.6's QSplit calls ea
     try testing.expectEqual(@as(u32, 4), t.count[8][1]);
     var buf: [256]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, t.summary(&buf), "5-bit/64 x4, 6-bit/64 x2, 8-bit/64 x4") != null);
+    try expectPlan(w, &c, 1_568_093_216, "4-bit/64 x37, 5-bit/64 x4, 6-bit/64 x2, 8-bit/64 x4");
 }
 
 /// oQ's spelling in mlx-lm's layout: the embedding at 8, a stack at 2, the absorbed pair at 5 and 6.
@@ -432,6 +444,7 @@ test "an mlx-lm checkpoint's every tensor is found, each at its own width" {
     try testing.expectEqual(Width{ .bits = 2, .group = 64 }, w.layers[c.layers].mlp.moe.gate.width());
     try testing.expectEqual(Width{ .bits = 2, .group = 64 }, w.layers[c.layers].mlp.moe.up.width());
     try testing.expect(w.mtp.?.eh_bf16 != null);
+    try expectPlan(w, &c, 1_856_184_352, "2-bit/64 x3, 4-bit/64 x34, 5-bit/64 x1, 6-bit/64 x1, 8-bit/64 x1");
 }
 
 test "the device loads mlx-lm's absorbed pair and bf16 eh_proj; a routed gate and up at two widths are refused" {
@@ -445,6 +458,7 @@ test "the device loads mlx-lm's absorbed pair and bf16 eh_proj; a routed gate an
     try testing.expectEqual(quant.uniform, w.layers[3].attn.mla.absorbed.?[0].width());
     try testing.expect(w.mtp.?.eh_bf16 != null);
     try testing.expect(!wts.native(w, &c)); // the pair and the bf16 eh_proj take the row kernels
+    try expectPlan(w, &c, 1_561_010_208, "4-bit/64 x40");
 }
 
 test "a uniform checkpoint in the original layout needs no other width's pipelines" {
@@ -454,6 +468,7 @@ test "a uniform checkpoint in the original layout needs no other width's pipelin
     const w = try dry(arena.allocator(), flat, &.{});
     defer free(w);
     try testing.expect(wts.native(w, &c));
+    try expectPlan(w, &c, 1_512_774_688, "4-bit/64 x39");
 }
 
 test "mlx-lm's one conv1d tensor and fp32 mixes and router plan as the three conv tensors and bf16 ones do" {
@@ -466,4 +481,6 @@ test "mlx-lm's one conv1d tensor and fp32 mixes and router plan as the three con
     const v = try dryWith(a, flat, &.{}, true, false);
     defer free(v);
     try testing.expectEqual(plan(v, &c), plan(w, &c)); // the same buffers, offsets and bytes
+    try expectPlan(w, &c, 1_561_010_208, "4-bit/64 x40");
+    try expectPlan(v, &c, 1_561_010_208, "4-bit/64 x40");
 }

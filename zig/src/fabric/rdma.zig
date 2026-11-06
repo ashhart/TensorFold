@@ -2,6 +2,8 @@
 const std = @import("std");
 
 pub const page = std.heap.page_size_min;
+/// Window layouts align to this on every host, unlike `page`, so Mac and Linux ranks place them at the same offsets.
+pub const layout_align = 16384;
 
 /// Which link a rank pair uses; the cost model prices each.
 pub const LinkKind = enum {

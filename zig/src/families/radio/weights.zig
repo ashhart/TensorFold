@@ -44,7 +44,7 @@ pub const Weights = struct {
         var files = try open(gpa, io, dir);
         defer {
             for (files.items) |*f| {
-                f.release();
+                f.release(gpa);
                 f.close(io);
             }
             files.deinit(gpa);

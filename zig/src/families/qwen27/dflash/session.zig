@@ -5,7 +5,7 @@ const op = @import("operators.zig");
 const weights = @import("weights.zig");
 const execution = @import("execution.zig");
 const selector = @import("selector.zig");
-pub const Batch = struct { values: op.View, positions: []const u64, layers: [5]u32, target_end: u64 };
+pub const Batch = struct { values: op.View, positions: []const u64, layers: [cfg.max_taps]u32, target_end: u64 };
 pub const Session = struct {
     config: cfg.Config,
     context: op.Context,
@@ -16,7 +16,7 @@ pub const Session = struct {
         return .{ .config = c, .context = .{ .cache = cache, .begin = first, .end = first } };
     }
     pub fn admit(s: Session, batch: Batch) !op.Context {
-        if (!std.mem.eql(u32, &batch.layers, &s.config.taps) or batch.positions.len == 0) return error.BadCommittedTaps;
+        if (!std.mem.eql(u32, batch.layers[0..s.config.tap_count], s.config.tapIds()) or batch.positions.len == 0) return error.BadCommittedTaps;
         try batch.values.check(@intCast(batch.positions.len), s.config.tapWidth(), .bf16);
         const end = try std.math.add(u64, s.context.end, batch.positions.len);
         if (end != batch.target_end) return error.BadCommittedTaps;
@@ -38,6 +38,8 @@ pub const Session = struct {
         var lattice = try execution.appendBlock(ops, graph, preparation, s.context, batch.values, batch.positions, next, pending, block);
         defer lattice.deinit();
         s.context = next;
+        const metric = @import("metal").pass_metrics.phase(.selector);
+        defer metric.end();
         return selector.propose(gpa, graph, lattice, pending, try std.math.add(u64, next.end, 1), options);
     }
     pub fn firstDraw(s: Session) !u64 {
@@ -52,11 +54,15 @@ pub const Session = struct {
         if (!std.meta.eql(s.config, graph.config) or first_draw != try s.firstDraw()) return error.BadDraftPosition;
         var lattice = try execution.forwardBlock(ops, graph, preparation, s.context, pending, block);
         defer lattice.deinit();
+        const metric = @import("metal").pass_metrics.phase(.selector);
+        defer metric.end();
         return selector.propose(gpa, graph, lattice, pending, first_draw, options);
     }
     pub fn tree(s: Session, gpa: std.mem.Allocator, ops: op.Ops, graph: *const weights.Graph, preparation: op.Preparation, pending: u32, first_draw: u64, options: selector.Options) !selector.Tree {
         var lattice = try s.propose(ops, graph, preparation, pending, first_draw);
         defer lattice.deinit();
+        const metric = @import("metal").pass_metrics.phase(.selector);
+        defer metric.end();
         return selector.propose(gpa, graph, lattice, pending, first_draw, options);
     }
 };

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "common/glue_math.cuh"
+#include "common/reduce.cuh"
 
 using namespace tf_glue;
 
@@ -16,9 +17,7 @@ constexpr int LT = 1024;   // threads of the one logsumexp block
 constexpr int HALF = 32;   // half head dims a warp holds, one pair a lane: heads up to 64 wide
 
 // 1 / sqrt(ss / n + eps) with IEEE division and square root.
-__device__ __forceinline__ float inv_rms(float ss, int n, float eps) {
-    return __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ss, static_cast<float>(n)), eps)));
-}
+__device__ __forceinline__ float inv_rms(float ss, int n, float eps) { return tf_common::rms_scale(ss, n, eps); }
 
 // A block of T threads' values summed: warp butterflies, then the warps in order; every thread gets the sum.
 template <int T>

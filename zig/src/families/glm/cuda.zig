@@ -20,6 +20,7 @@ pub const dsa_block = @import("cuda_dsa_block.zig");
 pub const mlp = @import("cuda_mlp.zig");
 pub const shard = @import("cuda_shard.zig");
 pub const weights = @import("cuda_weights.zig");
+pub const tile = @import("cuda_tile.zig");
 pub const forward = @import("cuda_forward.zig");
 pub const relay = @import("cuda_relay.zig");
 pub const config = @import("config.zig");
@@ -28,17 +29,21 @@ pub const q4 = @import("cuda_q4.zig");
 pub const ranks = @import("cuda_ranks.zig");
 pub const sampler = @import("cuda_sampler.zig");
 pub const prompt_sink = @import("cuda_prompt_sink.zig");
+pub const prompt_solo = @import("cuda_prompt_solo.zig");
 pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const pages = @import("cuda_pages.zig");
+pub const prefix = @import("cuda_prefix.zig");
 pub const open_owner = @import("cuda_open_owner.zig");
 pub const images = @import("cuda_images.zig");
 pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
 pub const native = @import("cuda_native.zig");
 pub const snapshots = @import("cuda_snapshots.zig");
+pub const kv_host = @import("cuda_kv_host.zig");
 
 test {
+    _ = @import("cuda_formats_csf0_test.zig");
     _ = @import("cuda_tile.zig");
     _ = @import("cuda_kv8_test.zig");
     _ = kv8_ref;
@@ -47,6 +52,11 @@ test {
     _ = @import("cuda_images_interleave_test.zig");
     _ = @import("cuda_pages_test.zig");
     _ = @import("cuda_ranks_test.zig");
+    _ = @import("cuda_taps_tp_test.zig");
+    _ = @import("cuda_roce_multi.zig");
+    _ = @import("cuda_lanes_test.zig");
+    _ = @import("dflash_load.zig");
+    _ = prompt_solo;
     _ = experts;
     _ = exl3;
     _ = vision;
@@ -75,8 +85,10 @@ test {
     _ = engine;
     _ = follow;
     _ = lanes;
+    _ = @import("cuda_zero_budget_test.zig");
     _ = native;
     _ = @import("cuda_qpack.zig");
+    _ = prefix;
     _ = @import("cuda_mtp_chance.zig");
     _ = @import("cuda_tile.zig");
     _ = @import("heat"); // upstream's heat bands, run where the GLM ranks use them
@@ -85,6 +97,8 @@ test {
 pub const dflash = @import("dflash.zig");
 pub const dflash_candidates = @import("dflash_candidates.zig");
 pub const dflash_load_owner = @import("dflash_load_owner.zig");
+pub const dflash_load = @import("dflash_load.zig");
+pub const taps = @import("cuda_taps.zig");
 
 pub const prompts = @import("cuda_prompts.zig");
 pub const prompt_hold = @import("cuda_prompt_hold.zig");

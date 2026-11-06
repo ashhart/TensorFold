@@ -24,7 +24,6 @@ pub const Ctx = struct {
     vars: *const v.Map,
     out: *v.Buffer,
     depth: usize = 0,
-    acc: v.Buffer = .{},
 
     fn resolve(c: *Ctx, name: []const u8) Error!Value {
         if (c.vars.get(name)) |x| return x;
@@ -35,24 +34,33 @@ pub const Ctx = struct {
 
 const acc_min = 4096;
 
-fn isAcc(c: *const Ctx, s: []const u8) bool {
-    return s.len > 0 and s.ptr == c.acc.text.items.ptr and s.len == c.acc.text.items.len;
+fn accumulator(s: v.Str) ?*v.Buffer {
+    const b = s.accumulator orelse return null;
+    const current = b.str();
+    if (s.s.ptr != current.s.ptr or s.s.len != current.s.len) return null;
+    if (s.spans.ptr != current.spans.ptr or s.spans.len != current.spans.len) return null;
+    return b;
 }
 
 fn join(c: *Ctx, l: v.Str, r: v.Str) Error!v.Str {
     const a = c.rt.a;
-    if (l.s.len < acc_min and !isAcc(c, l.s)) {
+    const owned = accumulator(l);
+    if (l.s.len < acc_min and owned == null) {
         var out: v.Buffer = .{};
         try out.append(a, l);
         try out.append(a, r);
         return out.str();
     }
-    if (!isAcc(c, l.s)) {
-        c.acc = .{};
-        try c.acc.append(a, l);
-    }
-    try c.acc.append(a, r);
-    return c.acc.str();
+    const out = owned orelse blk: {
+        const b = try a.create(v.Buffer);
+        b.* = .{};
+        try b.appendRetained(a, l);
+        break :blk b;
+    };
+    try out.appendRetained(a, r);
+    var result = out.str();
+    result.accumulator = out;
+    return result;
 }
 
 const Flow = enum { normal, brk, cont };
@@ -372,7 +380,7 @@ fn binop(c: *Ctx, op: ast.BinOp, l: Value, r: Value) Error!Value {
         return .{ .str = out };
     }
     if (op == .add and l == .list and r == .list and l.list.seq == r.list.seq and (l.list.seq == .list or l.list.seq == .tuple))
-        return rt.list(try std.mem.concat(rt.a, Value, &.{ l.list.items, r.list.items }), l.list.seq);
+        return .{ .list = try l.list.concat(rt.a, r.list) };
     if (op == .mul and (l == .str or l == .list or r == .str or r == .list) and (isNum(l) or isNum(r)) and l != .float and r != .float) {
         const seq = if (isNum(l)) r else l;
         const n = @max(0, intOf(if (isNum(l)) l else r));
@@ -385,7 +393,7 @@ fn binop(c: *Ctx, op: ast.BinOp, l: Value, r: Value) Error!Value {
         }
         if (seq.list.seq == .list or seq.list.seq == .tuple) {
             var out: std.ArrayList(Value) = .empty;
-            for (0..@intCast(n)) |_| try out.appendSlice(rt.a, seq.list.items);
+            for (0..@intCast(n)) |_| try out.appendSlice(rt.a, try seq.list.values(rt.a));
             return rt.list(out.items, seq.list.seq);
         }
     }

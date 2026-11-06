@@ -15,15 +15,18 @@ pub fn option(b: *std.Build) ?[]const u8 {
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, lanes: *std.Build.Module) void {
     const step = b.step("grammar", "libtfgrammar (structured output) from an xgrammar " ++ pinned ++ " checkout: -Dxgrammar=DIR");
     const budget = b.step("test-grammar-budget", "grammar_budget's masks against brute force through a real libtfgrammar: -Dxgrammar=DIR");
+    const tools = b.step("test-grammar-tools", "tool_grammar's call grammars walked through a real libtfgrammar: -Dxgrammar=DIR");
     const root = dir orelse {
         step.dependOn(&b.addFail("zig build grammar needs -Dxgrammar=DIR: " ++ clone).step);
         budget.dependOn(&b.addFail("zig build test-grammar-budget needs -Dxgrammar=DIR: " ++ clone).step);
+        tools.dependOn(&b.addFail("zig build test-grammar-tools needs -Dxgrammar=DIR: " ++ clone).step);
         return;
     };
     const lib = library(b, target, root) orelse {
         const fail = b.addFail(b.fmt("-Dxgrammar={s} is not an xgrammar " ++ pinned ++ " checkout: " ++ clone, .{root}));
         step.dependOn(&fail.step);
         budget.dependOn(&fail.step);
+        tools.dependOn(&fail.step);
         return;
     };
     step.dependOn(&installNative(b, lib).step);
@@ -34,6 +37,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, dir: ?[]const u8, 
     const check = b.createModule(.{ .root_source_file = b.path("zig/grammar_budget_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     check.addOptions("grammar_budget_library", options);
     budget.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = check })).step);
+    const walk = @import("server.zig").plain(b, "zig/src/server/tool_grammar_xgrammar_test.zig", b.graph.host, .debug, lanes);
+    walk.addOptions("grammar_library", options);
+    tools.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = walk })).step);
 }
 
 fn installNative(b: *std.Build, lib: *std.Build.Step.Compile) *std.Build.Step.InstallArtifact {
@@ -85,7 +91,11 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, dir: []const u8)
 pub fn overlay(b: *std.Build, target: std.Build.ResolvedTarget, dir: []const u8) ?std.Build.LazyPath {
     const lib = library(b, target, dir) orelse return null;
     const files = b.addWriteFiles();
-    const name = if (target.result.os.tag == .macos) "libtfgrammar.dylib" else "libtfgrammar.so";
+    const name = switch (target.result.os.tag) {
+        .macos => "libtfgrammar.dylib",
+        .windows => "tfgrammar.dll",
+        else => "libtfgrammar.so",
+    };
     _ = files.addCopyFile(lib.getEmittedBin(), b.fmt("lib/{s}", .{name}));
     const root: std.Build.LazyPath = .{ .cwd_relative = dir };
     _ = files.addCopyFile(root.path(b, "LICENSE"), "LICENSES/xgrammar-Apache-2.0.txt");

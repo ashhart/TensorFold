@@ -239,7 +239,7 @@ pub const Recorded = struct {
     pub fn backend(x: *Recorded) be.Backend {
         const v = x.inner.vtable;
         x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .cancel_prefill = if (v.cancel_prefill != null) cancelPrefill else null, .prefill_many = if (v.prefill_many != null) prefillMany else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .draft_capacity = if (v.draft_capacity != null) draftCapacity else null, .proposal_draft = if (v.proposal_draft != null) plannedDraft else null, .clear_proposals = if (v.clear_proposals != null) clearProposals else null, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .score = if (v.score != null) score else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
-        return .{ .proposal_head = x.inner.proposal_head, .ptr = x, .round_observer = x.inner.round_observer, .vtable = &x.table, .first_before_draft = x.inner.first_before_draft, .penalties = x.inner.penalties };
+        return .{ .proposal_head = x.inner.proposal_head, .ptr = x, .round_observer = x.inner.round_observer, .vtable = &x.table, .first_before_draft = x.inner.first_before_draft, .penalties = x.inner.penalties, .chunk_invariant = x.inner.chunk_invariant };
     }
 
     fn of(p: *anyopaque) *Recorded {
@@ -250,9 +250,9 @@ pub const Recorded = struct {
         try x.inner.prefill(s);
         x.recorder.prompt(x.inner, s);
     }
-    fn prefillStep(p: *anyopaque, s: *Stream) anyerror!bool {
+    fn prefillStep(p: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
         const x = of(p);
-        const done = try x.inner.vtable.prefill_step.?(x.inner.ptr, s);
+        const done = try x.inner.vtable.prefill_step.?(x.inner.ptr, s, max_rows);
         if (done) x.recorder.prompt(x.inner, s);
         return done;
     }

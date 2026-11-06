@@ -12,7 +12,7 @@ pub const Counts = tree_mod.Counts;
 pub const Node = tree_mod.Node;
 pub const Tree = tree_mod.Tree;
 
-/// The rules of prompt_cache.zig, paged: `page` set, `lookahead` and `planned` not (a row's bits ignore its chunk).
+/// The rules of prompt_cache.zig, paged: `page` set; a planned store cuts and resumes only on `grid`, a multiple of it.
 pub const Rules = pc.Rules;
 
 /// What the tree may hold: pages, and snapshots.
@@ -54,8 +54,18 @@ pub const Store = struct {
     const SHARED_KEYS = 64;
 
     pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, rules: Rules) !Store {
-        std.debug.assert(rules.page > 0 and rules.lookahead == 0 and !rules.planned);
-        return .{ .tree = try Tree.init(gpa, family, pages, rules.page), .rules = rules };
+        if (rules.page == 0 or (rules.planned and (rules.grid == 0 or rules.grid % rules.page != 0))) return error.BadPromptRadixRules;
+        return .{ .tree = try Tree.init(gpa, family, pages, rules.page, rules.lookahead), .rules = rules };
+    }
+
+    /// Where a pass may cut and resume: a page edge, or a planned store's grid.
+    fn step(s: *const Store) u32 {
+        return if (s.rules.planned) s.rules.grid else s.rules.page;
+    }
+
+    /// Tokens a resume leaves past its state: the lookahead it read, and at least one to prefill.
+    fn past(s: *const Store) u32 {
+        return @max(1, s.rules.lookahead);
     }
 
     pub fn deinit(s: *Store) void {
@@ -75,10 +85,10 @@ pub const Store = struct {
         return s.limits.pages > 0 and s.limits.snaps > 0;
     }
 
-    /// The deepest node with a state `prompt` resumes exactly: its tokens a prefix, at least one token left.
+    /// The deepest node whose state `prompt` resumes exactly: its tokens and lookahead a prefix, a token left.
     pub fn find(s: *const Store, prompt: []const u32) ?*Node {
-        if (!s.on() or prompt.len < 2) return null;
-        return s.tree.deepest(prompt, (prompt.len - 1) / s.rules.page * s.rules.page);
+        if (!s.on() or prompt.len < s.past() + 1) return null;
+        return s.tree.deepest(prompt, (prompt.len - s.past()) / s.rules.page * s.rules.page, s.step());
     }
 
     /// Restores the longest state `prompt` resumes into `owner`, its pages into `adopt` (held once more); plans marks.
@@ -91,8 +101,8 @@ pub const Store = struct {
         const marks_ = try s.fitting(a, planned);
         errdefer a.free(marks_);
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
-            const cut = w - w % s.rules.page;
-            if (std.mem.indexOfScalar(u32, marks_, cut) != null) s.noteShared(prompt[0..cut]);
+            const cut = w - w % s.step();
+            if (std.mem.indexOfScalar(u32, marks_, cut) != null) s.noteShared(prompt[0 .. cut + s.rules.lookahead]);
         }
         s.reserve(prompt, found, marks_);
         var from: u32 = 0;
@@ -133,7 +143,7 @@ pub const Store = struct {
         if (marks_.len == 0) return;
         const last = marks_[marks_.len - 1];
         while (true) {
-            const new = last / s.rules.page - s.tree.have(prompt[0..last]);
+            const new = last / s.rules.page - s.tree.have(prompt[0 .. last + s.rules.lookahead]);
             if (s.tree.held_pages + new <= s.limits.pages and s.tree.snaps + marks_.len <= s.limits.snaps) return;
             s.tree.evict(s.victim(prompt, from) orelse return);
         }
@@ -141,7 +151,7 @@ pub const Store = struct {
 
     /// A kept state a peer could not resume goes, so later prompts do not ask for it again.
     pub fn forget(s: *Store, prompt: []const u32, at: u32) void {
-        const n = s.find(prompt[0..@min(prompt.len, at + 1)]) orelse return;
+        const n = s.find(prompt[0..@min(prompt.len, at + s.past())]) orelse return;
         if (n.end != at) return;
         s.tree.counts.failed += 1;
         s.tree.evict(n);
@@ -185,10 +195,10 @@ pub const Store = struct {
             if (stable > 0 and stable < history_len and stable >= history_len / 2) try want.append(a, stable);
         }
         try want.appendSlice(a, shared);
-        if (s.rules.tail) try want.append(a, @intCast(prompt.len - 1));
+        if (s.rules.tail and prompt.len > s.past()) try want.append(a, @intCast(prompt.len - s.past()));
         for (want.items, 0..) |w, k| {
-            const m = w - w % s.rules.page;
-            if (m <= from or m >= prompt.len) continue;
+            const m = w - w % s.step();
+            if (m <= from or m >= prompt.len or m + s.rules.lookahead > prompt.len) continue;
             if (k > 0) { // the history's mark always; the others only away from it, each other and the resume point
                 if (m - from < s.rules.min_gap) continue;
                 const near = for (out.items) |o| {
@@ -205,9 +215,9 @@ pub const Store = struct {
     /// At `at` the tree takes the pages of `mine` it lacks and the snapshot, evicting to fit; `path` gets its pages.
     pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque, mine: []const u32, path: []u32) Kept {
         const t = &s.tree;
-        if (!s.on() or at == 0 or at % s.rules.page != 0 or at > prompt.len or mine.len != at / s.rules.page or path.len != mine.len) return .{ .held = false, .shared = 0 };
+        if (!s.on() or at == 0 or at % s.step() != 0 or at + s.rules.lookahead > prompt.len or mine.len != at / s.rules.page or path.len != mine.len) return .{ .held = false, .shared = 0 };
         t.clock += 1;
-        const tokens = prompt[0..at];
+        const tokens = prompt[0 .. at + s.rules.lookahead]; // a page past which the lookahead differs is another page
         const flagged = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(tokens)) != null;
         while (true) {
             var last: ?*Node = null;
@@ -254,10 +264,10 @@ pub const Store = struct {
         return x.used < y.used;
     }
 
-    /// Whether `prompt` repeats every token up to the end of `n`.
+    /// Whether `prompt` repeats every token `n` holds: up to its end, and its lookahead.
     fn extends(n: *const Node, prompt: []const u32) bool {
         const parent = n.parent orelse return true;
-        return prompt.len >= n.end and std.mem.eql(u32, n.tokens, prompt[parent.end..n.end]) and extends(parent, prompt);
+        return prompt.len >= parent.end + n.tokens.len and std.mem.eql(u32, n.tokens, prompt[parent.end..][0..n.tokens.len]) and extends(parent, prompt);
     }
 
     /// Whether a later prompt kept a state below `n`.

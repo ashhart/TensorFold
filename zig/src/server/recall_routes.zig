@@ -106,6 +106,7 @@ test "the record's state and size as GET reports them, and its state in a word" 
     const o: api.recall_store.Options = .{ .dir = dir, .cap_bytes = 64 << 20 };
     const s = (try Store.open(std.testing.allocator, std.testing.io, id, o, &problem, a)).?;
     defer s.close();
+    s.admission.floor = 0;
     var prompt: [300]u32 = undefined;
     for (&prompt, 0..) |*t, i| t.* = @intCast((i * 37) % 1000);
     s.readPrompt(&prompt, 0);

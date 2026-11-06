@@ -121,12 +121,23 @@ __device__ __forceinline__ bool tree_group(
     // tile t's keys and values into stage st (committed keys, then the row's path), one cp.async group
     auto load = [&](int t, int st) {
         uint4* const kd = kv0 + st * 2 * HB * C;
+        // PG: a tile's committed keys in one page take its row once a tile (the same addresses as committed())
+        const int kt = t * HB;
+        int64_t tile = -1;
+        if constexpr (sizeof...(P) != 0) {
+            const Pg& g = (pg, ...);
+            if (kt < p && kt % g.tok + HB <= g.tok)
+                tile = (int64_t)g.tab[s * g.stride + kt / g.tok] * g.page + ((int64_t)(kt % g.tok) * hk + kh) * D;
+        }
         for (int i = lane; i < HB * C; i += 32) {
             const int key = t * HB + i / C;
             const bool in = key < k1;
             const __nv_bfloat16* ksrc;
             const __nv_bfloat16* vsrc;
-            if (key < p) {
+            if (key < p && tile >= 0) {
+                ksrc = kc + tile + (int64_t)(key - kt) * hk * D;
+                vsrc = vc + tile + (int64_t)(key - kt) * hk * D;
+            } else if (key < p) {
                 ksrc = committed(kc, key);
                 vsrc = committed(vc, key);
             } else { // the row's own path: key p + j is path row j
@@ -378,23 +389,24 @@ __device__ __forceinline__ void tree_shared(
         const int* __restrict__ row_stream, const int* __restrict__ streams, const int* __restrict__ paths,          \
         const int* __restrict__ depths, float* __restrict__ po, float* __restrict__ pm, float* __restrict__ pl, int h, \
         int hk, float scale, int ng, int n, const __nv_bfloat16* __restrict__ kn
-#define TF_TREE_SHARED(NAME, D, HB, W, ST)                                                                              \
+// PGB bounds the _pg twin: head dim 128 one-warp twins take a register budget (sm_121 left them at 168, spilling)
+#define TF_TREE_SHARED(NAME, D, HB, W, ST, PGB)                                                                         \
     extern "C" __global__ void __launch_bounds__(32 * W) NAME(TF_TREE_SHARED_ARGS) {                                  \
         tree_shared<D, HB, W, ST>(q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, ng, n, \
                                   kn);                                                                                \
     }                                                                                                                 \
-    extern "C" __global__ void __launch_bounds__(32 * W)                                                              \
+    extern "C" __global__ void PGB                                                                                    \
         NAME##_pg(TF_TREE_SHARED_ARGS, const int* __restrict__ tab, long long page, int tok, int stride) {           \
         tree_shared<D, HB, W, ST>(q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale,        \
                                         ng, n, kn, Pg{tab, page, tok, stride});                                       \
     }
 
-TF_TREE_SHARED(tf_tree_shared, 128, 32, 4, 1)
-TF_TREE_SHARED(tf_tree_shared_256, 256, 16, 4, 1)
-TF_TREE_SHARED(tf_tree_shared_w1, 128, 32, 1, 2)
-TF_TREE_SHARED(tf_tree_shared_256_w1, 256, 16, 1, 2)
-TF_TREE_SHARED(tf_tree_shared_w1s3, 128, 32, 1, 3)
-TF_TREE_SHARED(tf_tree_shared_256_w1s3, 256, 16, 1, 3)
+TF_TREE_SHARED(tf_tree_shared, 128, 32, 4, 1, __launch_bounds__(128))
+TF_TREE_SHARED(tf_tree_shared_256, 256, 16, 4, 1, __launch_bounds__(128))
+TF_TREE_SHARED(tf_tree_shared_w1, 128, 32, 1, 2, __maxnreg__(232))
+TF_TREE_SHARED(tf_tree_shared_256_w1, 256, 16, 1, 2, __launch_bounds__(32))
+TF_TREE_SHARED(tf_tree_shared_w1s3, 128, 32, 1, 3, __maxnreg__(232))
+TF_TREE_SHARED(tf_tree_shared_256_w1s3, 256, 16, 1, 3, __launch_bounds__(32))
 
 // Block (row, key head, group slot): the row's groups past its stream's full committed ones, slot, slot + slots, ...
 template <int D, int HB, int W, int ST, typename... P>

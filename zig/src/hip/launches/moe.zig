@@ -53,6 +53,20 @@ pub fn routerWindow(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, 
     return true;
 }
 
+/// A lane round's router over the stored bf16 rows, which are the fp32 rows' values held narrower.
+pub fn routerBf16(l: *const Launcher, x: C, bf16: C, kind: c_int, logits: F, r: c_int, d: c_int, e: c_int, s: S) Error!bool {
+    if (!l.fuse or r < 1 or r > 16 or @rem(d, 4) != 0 or ad(x) % 8 != 0 or ad(bf16) % 8 != 0) return false;
+    var a: Args = .{};
+    try a.add(ad(x));
+    try a.add(ad(bf16));
+    try a.add(ad(logits));
+    try a.add(r);
+    try a.add(d);
+    try a.add(e);
+    try l.go(l.dec.router_bf16[if (kind == 1) 0 else 1], dim(cdiv(e, 4), cdiv(r, 16), 1), dim(128, 1, 1), 0, s, &a);
+    return true;
+}
+
 pub fn tf_moe_router(l: *const Launcher, x: C, kind: c_int, rows: CF, logits: F, r: c_int, d: c_int, e: c_int, s: S) Error!void {
     // a prompt's rows take the 64 x 64 tiles, a round's few rows a wave an expert; each logit's sum is the same
     var a: Args = .{};
@@ -104,6 +118,19 @@ pub fn tf_moe_combine(l: *const Launcher, y: CF, wts: CF, out: P, kind: c_int, r
     try a.add(slots);
     try a.add(d);
     try l.go(l.moe_combine[tri(kind)], dim(cdiv(d, 256), r, 1), dim(256, 1, 1), 0, s, &a);
+}
+
+/// The slots' sum plus a shared expert run beside the stack, weighted by wts' last slot; `shared` null adds nothing.
+pub fn tf_moe_combine_gate(l: *const Launcher, y: CF, wts: CF, shared: CF, out: P, kind: c_int, r: c_int, slots: c_int, d: c_int, s: S) Error!void {
+    var a: Args = .{};
+    try a.add(ad(y));
+    try a.add(ad(wts));
+    try a.add(ad(shared));
+    try a.add(ad(out));
+    try a.add(kind);
+    try a.add(slots);
+    try a.add(d);
+    try l.go(l.moe_combine_gate, dim(cdiv(d, 256), r, 1), dim(256, 1, 1), 0, s, &a);
 }
 
 pub fn tf_moe_route(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int, tile: c_int, members: I, items: I, capacity: c_int, s: S) Error!void {

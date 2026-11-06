@@ -9,6 +9,7 @@ const widths = @import("widths.zig");
 const wts = @import("gpu_weights.zig");
 const quant = @import("quant_gpu.zig");
 const glue = @import("glue_gpu.zig");
+const moe_gpu = @import("moe_gpu.zig");
 const Frame = @import("gpu_frame.zig").Frame;
 const ane_mlp = @import("ane_mlp.zig");
 
@@ -18,11 +19,16 @@ pub const Model = struct {
     allocator: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
+    /// This rank's share of the family's weights; `local` shapes are what this graph builds, `global` the file's.
+    shard: cfg.Shard,
+    /// The local config, so downstream shapes are the rank's own.
     config: cfg.Config,
     checkpoint: core.checkpoint_metal.Checkpoint,
     weights: wts.Weights,
     kernels: quant.Kernels,
     glue: glue.Kernels,
+    /// The routed block's kernels, with experts.
+    moe: ?moe_gpu.Kernels = null,
     frame: Frame,
     /// The Neural Engine's share of prompt-chunk MLPs, when it loaded.
     ane: ?*ane_mlp.Share = null,
@@ -41,6 +47,16 @@ pub const Model = struct {
         return loadWith(a, io, dir, rows, null, true);
     }
 
+    /// One rank of a `ranks`-way tensor-parallel run: the same checkpoint, sliced in the engine.
+    pub fn loadShard(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode, share_fits: ?*const fn (u64) bool) !*Model {
+        return loadShared(a, io, dir, rows, rank, ranks, mode, share_fits, false);
+    }
+
+    /// One rank of a pair, its share decided after everything else is accounted for (the serving order).
+    pub fn loadShardDeferred(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode) !*Model {
+        return loadShared(a, io, dir, rows, rank, ranks, mode, null, true);
+    }
+
     fn loadWith(
         a: std.mem.Allocator,
         io: std.Io,
@@ -49,26 +65,43 @@ pub const Model = struct {
         share_fits: ?*const fn (u64) bool,
         later: bool,
     ) !*Model {
+        return loadShared(a, io, dir, rows, 0, 1, .full, share_fits, later);
+    }
+
+    fn loadShared(
+        a: std.mem.Allocator,
+        io: std.Io,
+        dir: []const u8,
+        rows: u32,
+        rank: u32,
+        ranks: u32,
+        mode: cfg.Mode,
+        share_fits: ?*const fn (u64) bool,
+        later: bool,
+    ) !*Model {
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
         const c = try cfg.parse(a, text, null);
-        try supported(c);
+        var local = c;
+        const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
+        try supported(shard.global);
         var formats = try affine.Formats.init(a, text);
         defer formats.deinit();
-        var ws = try widths.Widths.resolve(a, &formats, c);
+        var ws = try widths.Widths.resolve(a, &formats, shard.local);
         defer ws.deinit();
         const m = try a.create(Model);
         errdefer a.destroy(m);
         m.allocator = a;
-        m.config = c;
+        m.shard = shard;
+        m.config = shard.local;
         m.widths_tag = ws.tag();
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         if (!qualifiedGeneration(m.device.generation())) return error.QwenMetalQualificationRequired;
         var why: widths.Why = .{};
-        widths.admit(&ws, c, .{ .tensor_units = m.device.tensorUnits() }, &why) catch |err| {
+        widths.admit(&ws, shard.local, .{ .tensor_units = m.device.tensorUnits() }, &why) catch |err| {
             std.log.err("qwen27: {s} (layer {?d}) is {d}-bit group {d}; this chip's projection kernels do not run it ({s})", .{ why.module, why.layer, why.width.bits, why.width.group, @errorName(why.reason) });
             return err;
         };
@@ -80,14 +113,16 @@ pub const Model = struct {
         defer core.checkpoint_host.freeShardFiles(a, files);
         // projections stay in the files until load repacks them: the weights live once, in their lane layouts
         for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
-        m.weights = try wts.load(a, m.device, &m.checkpoint, c, &ws);
+        m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
         errdefer m.weights.deinit();
-        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits() };
+        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
+        m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
+        errdefer if (m.moe) |*k| k.deinit();
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
-        m.frame = try Frame.init(m.device, c, @max(rows, promptRows(if (later) 0 else m.device.generation())));
+        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation())));
         errdefer m.frame.deinit();
         m.ane = null;
         m.share_pending = true;
@@ -106,7 +141,11 @@ pub const Model = struct {
         defer m.checkpoint.closeFiles();
         const c = m.config;
         const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
-        const share = ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and mtl.ane.available() and m.weights.uniformMlp();
+        // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
+        const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
+        if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
+        // the share and its overhead bound are qualified on the dense 27B's MLP alone: routed prompts stay on the GPU
+        if (columns > 0 and c.moe()) std.log.info("qwen27: the Neural Engine share is not qualified for routed checkpoints; prompts run on the GPU alone", .{});
         const bytes = ane_mlp.Share.bytes(c, columns);
         const slices = (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width;
         const required: ?u64 = if (share) ane_mlp.Share.totalBytes(c, columns, slices, ane_policy.build_runtime_overhead) catch |err| switch (err) {
@@ -140,6 +179,7 @@ pub const Model = struct {
     pub fn deinit(m: *Model) void {
         if (m.ane) |share| share.deinit();
         m.frame.deinit();
+        if (m.moe) |*k| k.deinit();
         m.glue.deinit();
         m.kernels.deinit();
         m.weights.deinit();
@@ -151,15 +191,30 @@ pub const Model = struct {
 };
 
 /// A prompt pass's requested rows, before the runner's frame and attention limits.
-pub fn promptRows(generation: u32) u32 {
+pub fn promptRows(c: cfg.Config, generation: u32) u32 {
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
-    return @import("prompt_rows.zig").requested(generation, value);
+    return @import("prompt_rows.zig").requested(generation, c.moe(), value);
 }
 
-/// The qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
+/// The qualified sizes: the 27B's, and the 9B's (half the depth, narrower layers, the same heads of 256 and 128).
+const Size = struct { hidden: usize, intermediate: usize, layers: usize, heads: usize, v_heads: usize };
+const sizes = [_]Size{
+    .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .heads = 24, .v_heads = 48 },
+    .{ .hidden = 4096, .intermediate = 12288, .layers = 32, .heads = 16, .v_heads = 32 },
+};
+
+fn qualifiedSize(c: cfg.Config) bool {
+    for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and c.layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads) return true;
+    return false;
+}
+
+/// A qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
 pub fn supported(c: cfg.Config) !void {
-    if (c.hidden != 5120 or c.intermediate != 17408 or c.layers != 64 or c.vocab != 248320 or c.heads != 24 or c.kv_heads != 4 or c.head_dim != 256 or c.k_heads != 16 or c.v_heads != 48 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
-    for (c.kinds[0..c.layers], 0..) |kind, i| if (kind != (if ((i + 1) % 4 == 0) cfg.Kind.attention else cfg.Kind.linear)) return error.UnqualifiedLayerSchedule;
+    const dense = qualifiedSize(c) and c.kv_heads == 4 and c.k_heads == 16 and !c.moe();
+    // Ornith-1.5-122B: 256 experts of 1,024 and a shared expert of 1,024 over 3,072, 32 heads over 2 of 256
+    const routed = c.hidden == 3072 and c.intermediate == 1024 and c.layers == 48 and c.heads == 32 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 64 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 1024;
+    if (!(dense or routed) or c.vocab != 248320) return error.UnqualifiedQwenShape;
+    try @import("geometry.zig").supported(c);
 }
 
 fn qualifiedGeneration(generation: u32) bool {
@@ -181,4 +236,24 @@ test "the 27B's Neural Engine share of 3,072 columns holds 5,760 MiB of fp16 wei
     c.hidden = 5120;
     c.layers = 64;
     try std.testing.expectEqual(@as(u64, 5760 << 20), ane_mlp.Share.bytes(c, 3072));
+}
+
+fn testShape(hidden: u32, intermediate: u32, layers: u32, heads: u32, v_heads: u32) !void {
+    const a = std.testing.allocator;
+    const text = try std.fmt.allocPrint(a,
+        \\{{"model_type":"qwen3_5","text_config":{{"model_type":"qwen3_5_text","hidden_size":{d},"intermediate_size":{d},
+        \\"num_hidden_layers":{d},"num_attention_heads":{d},"num_key_value_heads":4,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":{d},"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}}}
+    , .{ hidden, intermediate, layers, heads, v_heads });
+    defer a.free(text);
+    return supported(try cfg.parse(a, text, null));
+}
+
+test "a qwen3_5 dense checkpoint opens at the 27B and 9B shapes and refuses its neighbours" {
+    try testShape(5120, 17408, 64, 24, 48);
+    try testShape(4096, 12288, 32, 16, 32);
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShape(2560, 9216, 32, 16, 32)); // the 4B
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShape(4096, 12288, 64, 16, 32)); // 9B widths, 27B depth
+    try std.testing.expectError(error.UnqualifiedQwenShape, testShape(5120, 17408, 64, 24, 32)); // 27B, 9B GDN heads
 }

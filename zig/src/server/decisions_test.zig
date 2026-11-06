@@ -248,3 +248,20 @@ test "an engine with no score hook refuses after the checks pass" {
     try std.testing.expectEqualStrings("decision scoring is not supported by this engine yet", try messageOf(srv, arena.allocator(), choice_body));
     try std.testing.expectEqual(@as(usize, 0), backend.calls);
 }
+
+test "capability audit: decision context errors retain their OpenAI code through the real HTTP route" {
+    var text: ByteText = .{};
+    var backend: Backend = .{ .hooked = true, .window = 4 };
+    const srv = try serve(&text, &backend);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const body = try @import("context_http_fixture.zig").call(srv, arena.allocator(), decisions.post, choice_body);
+    const err = body.get("error").?;
+    const code = err.get("code") orelse return error.MissingContextLengthCode;
+    try std.testing.expectEqualStrings("context_length_exceeded", code.string);
+    try std.testing.expectEqualStrings("invalid_request_error", err.get("type").?.string);
+    try std.testing.expect(err.get("param").? == .null);
+    try std.testing.expectEqualStrings("question 'q': the prompt has 6 tokens, which does not fit the context length of 4 tokens", err.get("message").?.string);
+    try std.testing.expectEqual(@as(usize, 0), backend.calls);
+}

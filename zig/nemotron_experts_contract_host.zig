@@ -223,3 +223,27 @@ test "Nemotron experts contract: relu2's interval holds every fp32 dot within th
     try std.testing.expectEqual(@as(f64, -1), fixture.bfSide(-1 - 0x1p-20, true));
     try std.testing.expect(std.math.isNan(fixture.relu2(std.math.nan(f64))));
 }
+
+test "two-column source hints preserve every arithmetic token in the captured template" {
+    const captured = @import("kernels/metal/nemotron/kernels.zig");
+    const adapter = @import("src/families/nemotron/geo_source.zig");
+    inline for (captured.all) |k| if (comptime std.mem.eql(u8, k.key, "expert_up") or std.mem.eql(u8, k.key, "expert_down")) {
+        const body = comptime adapter.body(k.source, k.function);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "#pragma clang loop unroll(full)"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "max_total_threads_per_threadgroup(SG * 32)"));
+        const strip = [_][2][]const u8{
+            .{ "tf_geo_rowdot", "tf_rowdot" },                           .{ "tf_geo_experts", k.function },
+            .{ "[[max_total_threads_per_threadgroup(SG * 32)]]\n", "" }, .{ "  #pragma clang loop unroll(full)\n", "" },
+        };
+        var plain = try a.dupe(u8, body);
+        defer a.free(plain);
+        for (strip) |edit| {
+            const next = try std.mem.replaceOwned(u8, a, plain, edit[0], edit[1]);
+            a.free(plain);
+            plain = next;
+        }
+        const start = std.mem.indexOf(u8, k.source, "template <int K, int GS, int RPS>").?;
+        const end = std.mem.indexOf(u8, k.source, "\ntemplate [[host_name").?;
+        try std.testing.expectEqualStrings(std.mem.trim(u8, k.source[start..end], "\n"), std.mem.trim(u8, plain, "\n"));
+    };
+}

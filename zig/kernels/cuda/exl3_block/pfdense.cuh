@@ -59,21 +59,13 @@ struct Lay {
 // the configuration list: pfdense_args.h (DSV41_PFD_CFGS)
 
 // -- small device helpers -----------------------------------------------------------------------------------------
-__device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok) {
-    const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem), "r"(ok ? 16 : 0));
-}
+__device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok) { tf_common::cp16z(smem, gmem, ok); }
 using tf_common::cp_commit;
 using tf_common::cp_wait;
 __device__ __forceinline__ void bar_sync() { asm volatile("bar.sync 0;\n" ::: "memory"); }
 using qmm_frag::ldmatrix4;
 // mma.m16n8k16, bf16 inputs, fp32 accumulators (the epilogue's Hadamard chain): d += a @ b
-__device__ __forceinline__ void mma16816_bf16(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};\n"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
-}
+__device__ __forceinline__ void mma16816_bf16(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) { qmm_frag::mma_v(d, a, b); }
 
 // chunk c of row r of a stage's xh rows (CPR chunks a row): an ldmatrix phase's 8 rows in 8 bank groups
 template <int CPR>

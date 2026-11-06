@@ -3,6 +3,7 @@ const cuda = @import("cuda");
 const shared = @import("qwen_vision");
 const wt = @import("cuda_prompt_wt.zig");
 const Pg = @import("cuda_glue.zig").Pg;
+const Heads = @import("cuda_heads.zig").Heads;
 pub const State = struct {
     image: shared.media.Media,
     prep: cuda.Function,
@@ -23,17 +24,17 @@ pub const View = struct {
     pool: cuda.Function,
     prep_paged: cuda.Function,
     pool_paged: cuda.Function,
-    pub fn attn(v: View, stream: cuda.Stream, proj: u64, pos: u64, qw: u64, kw: u64, iw: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, eps: f32, rows: usize, pg: Pg) !void {
+    pub fn attn(v: View, stream: cuda.Stream, proj: u64, pos: u64, qw: u64, kw: u64, iw: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, eps: f32, rows: usize, h: Heads, pg: Pg) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ proj, pos, qw, kw, iw, inv, q, kc, vc, iq, ikc }) |x| a.add(x);
         a.add(eps);
-        for ([_]usize{ wt.proj_n, wt.q_heads, wt.kv_heads, wt.index_heads, wt.index_dim, wt.half }) |x| a.add(@as(i32, @intCast(x)));
+        for ([_]usize{ h.projN(), h.q, h.kv, wt.index_heads, wt.index_dim, wt.half }) |x| a.add(@as(i32, @intCast(x)));
         a.add(v.image.rope);
         a.add(@as(i32, @intCast(v.image.n)));
         a.add(v.image.delta);
         if (pg.pt != 0) a.add(pg);
         const f = if (pg.pt != 0) v.prep_paged else v.prep;
-        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = wt.q_heads + wt.kv_heads + wt.index_heads + 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, stream, &a);
+        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(h.q + h.kv + wt.index_heads + 1), .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, stream, &a);
     }
     pub fn pooled(v: View, stream: cuda.Stream, ikc: u64, out: u64, pos: u64, w: u64, inv: u64, eps: f32, rows: usize, pg: Pg) !void {
         var a: cuda.Args = .{};

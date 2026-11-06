@@ -338,7 +338,7 @@ pub fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usi
     const naming = if (parts.document and got.entity and language == null) try std.mem.join(a, " ", if (got.named.len > 0) got.named else got.words) else "";
     var tries: usize = 0;
     while (got.refs.items.len < want_probes and tries < 2) : (tries += 1) {
-        // a count of its own each try: the draw is seeded by the prompt, so the same prompt gives the same list
+        // a different count each try also changes the prompt when the server uses --prompt-seed
         const count = probes + 4 * tries;
         // first, the questions that asked for the subject rewritten to name it: asked anew, they come back the same way
         if (tries == 0 and naming.len > 0 and got.unnamed.items.len > 0) {

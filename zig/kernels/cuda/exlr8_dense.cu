@@ -2,6 +2,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 #define TF_FULL 0xFFFFFFFFu
 #define TF_INT4 2u
@@ -76,10 +77,7 @@ __device__ __forceinline__ void tf_dense_weights(const uint8_t* W, const TfDense
 }
 
 // The lane's partial sums, added over the warp in the Metal kernels' fixed butterfly.
-__device__ __forceinline__ float tf_dense_lanes(float v) {
-  for (unsigned d = 16; d > 0; d >>= 1) v = __fadd_rn(v, __shfl_xor_sync(TF_FULL, v, d));
-  return v;
-}
+__device__ __forceinline__ float tf_dense_lanes(float v) { return tf_common::warp_sum(v); }
 
 // A block is 32 matrix rows of one job (4 a warp); inputs come 128 at a time through shared memory.
 template <int R>

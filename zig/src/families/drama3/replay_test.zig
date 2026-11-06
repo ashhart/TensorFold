@@ -71,14 +71,15 @@ const Replay = @import("replay.zig").Replay(Fake);
 test "drama replay: refuses short fixtures and insufficient codec capacity" {
     var e: Fake.Engine = .{ .a = std.testing.allocator, .forced = 4 };
     var t: Fake.tts.Tts = .{ .a = std.testing.allocator };
-    try std.testing.expectError(error.ShortReplayFixture, Replay.verify(e.a, std.testing.io, &e, &t, &.{}, .{}));
+    const io = std.testing.io;
+    try std.testing.expectError(error.ShortReplayFixture, Replay.verify(e.a, io, &e, &t, &.{}, .{}, false));
     e.forced = 17;
     t.max_chunk = 1;
-    try std.testing.expectError(error.ReplayCodecCapacity, Replay.verify(e.a, std.testing.io, &e, &t, &.{}, .{}));
+    try std.testing.expectError(error.ReplayCodecCapacity, Replay.verify(e.a, io, &e, &t, &.{}, .{}, false));
 }
 test "drama replay: actually decodes a sixteen-frame chunk and its one-frame tail" {
     var e: Fake.Engine = .{ .a = std.testing.allocator };
     var t: Fake.tts.Tts = .{ .a = std.testing.allocator };
-    try Replay.verify(e.a, std.testing.io, &e, &t, &.{}, .{});
+    try Replay.verify(e.a, std.testing.io, &e, &t, &.{}, .{}, false);
     try std.testing.expect(t.saw16 and t.saw_tail);
 }

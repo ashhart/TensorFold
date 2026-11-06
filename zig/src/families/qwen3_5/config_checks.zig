@@ -1,8 +1,9 @@
 //! What a Qwen3.5 config must declare for the HIP engine: activation, gate, state, layers, rope, end ids, sizes.
 
 const std = @import("std");
+const layer_pattern = @import("qwen35_layers");
 
-pub const Error = error{ UnsupportedActivation, UnsupportedAttentionGate, UnsupportedStateType, BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidLayerTypes, InvalidRotary };
+pub const Error = error{ UnsupportedActivation, UnsupportedAttentionGate, UnsupportedStateType, BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || layer_pattern.Error;
 
 /// The most end ids a checkpoint may declare across config.json and generation_config.json.
 pub const max_eos = 8;
@@ -10,19 +11,11 @@ pub const max_eos = 8;
 /// The most decoder layers a config may declare.
 pub const max_layers = 128;
 
-/// Each layer's kind (true: full attention), from `layer_types` in any order, else every `interval`-th layer.
-pub fn layers(out: *[max_layers]bool, tower: std.json.ObjectMap, count: usize, interval: usize) Error!void {
-    if (count == 0 or count > max_layers or interval == 0) return error.InvalidConfig;
+/// Each layer's kind (true: full attention), by the rule every backend shares (core/qwen35_layers.zig).
+pub fn layers(out: *[max_layers]bool, tower: std.json.ObjectMap, count: usize) Error!void {
+    if (count == 0 or count > max_layers) return error.InvalidConfig;
     out.* = @splat(false);
-    const list = tower.get("layer_types") orelse .null;
-    if (list == .null) {
-        for (out[0..count], 0..) |*full, i| full.* = (i + 1) % interval == 0;
-        return;
-    }
-    if (list != .array or list.array.items.len != count) return error.InvalidLayerTypes;
-    for (list.array.items, out[0..count]) |item, *full| {
-        if (isString(item, "full_attention")) full.* = true else if (!isString(item, "linear_attention")) return error.InvalidLayerTypes;
-    }
+    try layer_pattern.read(out[0..count], tower);
 }
 
 /// The multimodal rope's three sections and their interleaving: the text and image positions a vision tower feeds.
@@ -43,6 +36,12 @@ pub fn mrope(rope: std.json.ObjectMap, rotary: usize) Error!Mrope {
     }
     if (sum * 2 != rotary) return error.InvalidRotary;
     return m;
+}
+
+/// Unscaled rope only: a tower's `rope_scaling`, or a `rope_type`/`type` not default, would be read as plain rope.
+pub fn defaultRope(tower: std.json.ObjectMap, rope: std.json.ObjectMap) Error!void {
+    if (tower.get("rope_scaling")) |v| if (v != .null) return error.InvalidRotary;
+    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| if (!isString(v, "default")) return error.InvalidRotary;
 }
 
 /// `max_position_embeddings`: a positive token count, else the family's 262,144.
@@ -196,13 +195,15 @@ test "layer kinds: any order from layer_types, the interval otherwise; wrong len
     defer arena.deinit();
     const a = arena.allocator();
     var kinds: [max_layers]bool = undefined;
-    try layers(&kinds, try parsed(a, "{}"), 8, 4);
+    try layers(&kinds, try parsed(a, "{}"), 8);
     try std.testing.expectEqualSlices(bool, &.{ false, false, false, true, false, false, false, true }, kinds[0..8]);
-    try layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\",\"linear_attention\",\"full_attention\"]}"), 3, 4);
+    try layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\",\"linear_attention\",\"full_attention\"]}"), 3);
     try std.testing.expectEqualSlices(bool, &.{ true, false, true }, kinds[0..3]);
-    try std.testing.expectError(error.InvalidLayerTypes, layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\"]}"), 3, 4));
-    try std.testing.expectError(error.InvalidLayerTypes, layers(&kinds, try parsed(a, "{\"layer_types\":[\"sliding_attention\"]}"), 1, 4));
-    try std.testing.expectError(error.InvalidConfig, layers(&kinds, try parsed(a, "{}"), max_layers + 1, 4));
+    try layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\",\"linear_attention\"],\"full_attention_interval\":0}"), 2);
+    try std.testing.expectEqualSlices(bool, &.{ true, false }, kinds[0..2]);
+    try std.testing.expectError(error.BadLayerTypes, layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\"]}"), 3));
+    try std.testing.expectError(error.UnsupportedLayerTypes, layers(&kinds, try parsed(a, "{\"layer_types\":[\"sliding_attention\"]}"), 1));
+    try std.testing.expectError(error.InvalidConfig, layers(&kinds, try parsed(a, "{}"), max_layers + 1));
 }
 
 test "mrope: three sections filling half the rotary width, interleaved; max_position positive" {
@@ -218,4 +219,22 @@ test "mrope: three sections filling half the rotary width, interleaved; max_posi
     try std.testing.expectEqual(@as(usize, 262144), try maxPosition(try parsed(a, "{}")));
     try std.testing.expectEqual(@as(usize, 32768), try maxPosition(try parsed(a, "{\"max_position_embeddings\":32768}")));
     try std.testing.expectError(error.InvalidConfig, maxPosition(try parsed(a, "{\"max_position_embeddings\":0}")));
+}
+
+test "rope: a scaled rope (rope_type or type yarn, a rope_scaling block) is refused; default and absent pass" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ "{\"rope_parameters\":{\"rope_type\":\"yarn\",\"factor\":4.0}}", true },
+        .{ "{\"rope_parameters\":{\"type\":\"yarn\"}}", true },
+        .{ "{\"rope_parameters\":{\"rope_type\":\"default\"},\"rope_scaling\":{\"type\":\"yarn\"}}", true },
+        .{ "{\"rope_parameters\":{\"rope_type\":\"default\"},\"rope_scaling\":null}", false },
+        .{ "{\"rope_parameters\":{\"rope_theta\":10000000}}", false },
+    };
+    inline for (cases) |c| {
+        const doc = try std.json.parseFromSlice(std.json.Value, a, c[0], .{});
+        defer doc.deinit();
+        const t = doc.value.object;
+        const got = defaultRope(t, t.get("rope_parameters").?.object);
+        if (c[1]) try std.testing.expectError(error.InvalidRotary, got) else try got;
+    }
 }

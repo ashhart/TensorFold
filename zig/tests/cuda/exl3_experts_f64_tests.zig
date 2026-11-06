@@ -12,7 +12,7 @@ const Run = exl3t.Run;
 
 pub const E = 9; // experts of a synthetic layer
 pub const D = 512; // model width
-const I = 256; // expert width
+pub const I = 256; // expert width
 pub const SLOTS = 8;
 const LIMIT: f32 = 10.0; // the SwiGLU clamp
 const CAP = 300; // rows of x, pick and wts the builders make (the f64 checks use the first 128)
@@ -65,16 +65,16 @@ fn allBits(bits: u32) [E]u32 {
     return .{ bits, bits, bits, bits, bits, bits, bits, bits, bits };
 }
 
-fn widthOf(bits: u32) exl3fmt.Width {
+pub fn widthOf(bits: u32) exl3fmt.Width {
     return .{ .halves = @intCast(2 * bits) };
 }
 
-fn f16v(v: u16) f64 {
+pub fn f16v(v: u16) f64 {
     return @floatCast(@as(f16, @bitCast(v)));
 }
 
 /// bf16 round-to-nearest-even of an f64 (the kernel rounds its fp32 value; the double round is within the tolerance).
-fn bf16r(v: f64) f64 {
+pub fn bf16r(v: f64) f64 {
     const u: u32 = @bitCast(@as(f32, @floatCast(v)));
     return bf(@intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16));
 }
@@ -414,7 +414,7 @@ fn reference(r: *Rig, b: *const Built, rows_n: usize) !struct { want: []f64, tol
 }
 
 /// One output column's GEMM over k: the sums into [n][p], their |t| sums, the propagated input error.
-fn gemmK(xrow: []const f16, wq: []const f16, z: []f64, s1: []f64, e: []f64, xerr: []const f64, k: usize, n: usize, p: usize) void {
+pub fn gemmK(xrow: []const f16, wq: []const f16, z: []f64, s1: []f64, e: []f64, xerr: []const f64, k: usize, n: usize, p: usize) void {
     for (0..k) |ki| {
         const t: f64 = @floatCast(xrow[ki]);
         const ta = @abs(t);
@@ -430,7 +430,7 @@ fn gemmK(xrow: []const f16, wq: []const f16, z: []f64, s1: []f64, e: []f64, xerr
 }
 
 /// Each 128-block along the row axis replaced by the sum of its |entries| over sqrt(128) (the worst case).
-fn absRotate(x: []f64, nrows: usize, cols: usize) void {
+pub fn absRotate(x: []f64, nrows: usize, cols: usize) void {
     const inv = 1.0 / @sqrt(@as(f64, 128.0));
     var r: usize = 0;
     while (r < nrows) : (r += 128) {
@@ -449,7 +449,7 @@ test "the ids are the contract's" {
 }
 
 /// The column-axis twin: each 128-run along the columns replaced by the sum of its |entries| over sqrt(128).
-fn absRotateCols(x: []f64, nrows: usize, cols: usize) void {
+pub fn absRotateCols(x: []f64, nrows: usize, cols: usize) void {
     const inv = 1.0 / @sqrt(@as(f64, 128.0));
     for (0..nrows) |row| {
         var c: usize = 0;

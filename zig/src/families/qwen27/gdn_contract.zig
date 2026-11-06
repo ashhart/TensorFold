@@ -37,7 +37,7 @@ pub const Params = extern struct {
     slots: u32,
     weight_flags: u32,
     eps: f32,
-    /// 0: z, a and b in their own rows; else one fused zba row of this many values (z, then b, then a).
+    /// 0: z, a, b in own rows; else one fused zba row (z, b, a) whose rank blocks sit at zbaB/zbaA and is zbaDim wide.
     zba_stride: u32 = 0,
     advance: u32 = 0, // 1: a shared round's one-row windows step their state in the scan; the replay skips them
 };
@@ -84,7 +84,8 @@ pub const Bytes = struct {
 
     pub fn init(s: Shape, p: Params, k: WeightKinds) !Bytes {
         var expected = try s.params(p.rows, p.slots, k);
-        if (p.zba_stride != 0 and p.zba_stride < s.value + 2 * s.c.v_heads) return error.BadGdnDispatch;
+        // The row must span this rank's b and a reads past the other rank's padding, so the bound is the config stride.
+        if (p.zba_stride != 0 and p.zba_stride < s.c.zbaDim()) return error.BadGdnDispatch;
         expected.zba_stride = p.zba_stride;
         if (!std.mem.eql(u8, std.mem.asBytes(&p), std.mem.asBytes(&expected))) return error.BadGdnDispatch;
         return .{

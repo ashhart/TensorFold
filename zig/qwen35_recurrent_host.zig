@@ -84,7 +84,7 @@ fn engine(e: *q.engine.Engine, d: *cuda.Driver) void {
     e.kv8 = false;
     e.geo = .{ .hid = 5120, .nk = 16, .nv = 48, .qh = 24, .kvh = 4, .nl = 48 };
     const f: cuda.Function = .{ .d = d, .handle = @ptrFromInt(1) };
-    e.keeps = .{ .apply = f, .conv = f, .compact = f };
+    e.keeps = .{ .apply = f, .apply_pend = f, .conv = f, .compact = f };
     e.rec_scratch = rec.Pool.init(a, @intFromPtr(e));
 }
 fn finish(e: *q.engine.Engine, c: *q.engine.Cache) void {

@@ -101,7 +101,8 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
         const ss = try a.alloc(*sm.Stream, streams.len);
         for (streams, ss) |*s, *p| p.* = s;
         const errs = try a.alloc(?anyerror, streams.len);
-        engine.addStreams(ss, errs);
+        const done = try a.alloc(bool, streams.len);
+        engine.addStreams(ss, errs, done);
         for (errs) |err| if (err) |e| return e;
         try std.testing.expectEqual(@as(usize, if (mode.memory_lanes == null) 1 else 0), target.many_passes);
     } else for (streams) |*s| if (mode.chunks > 0) {
@@ -269,7 +270,7 @@ test "a target that gives no rows cannot be recorded" {
     try std.testing.expectError(error.NoFeatures, rec.Recorded.init(.{ .ptr = &target, .vtable = &table }, &recorder));
 }
 
-test "recorded backend preserves both values of first_before_draft and penalties" {
+test "recorded backend preserves both values of first_before_draft, penalties and chunk invariance" {
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
     var tmp = std.testing.tmpDir(.{});
@@ -281,9 +282,11 @@ test "recorded backend preserves both values of first_before_draft and penalties
         var inner = target.backend();
         inner.first_before_draft = enabled;
         inner.penalties = enabled;
+        inner.chunk_invariant = enabled;
         var recorded = try rec.Recorded.init(inner, &recorder);
         try std.testing.expectEqual(enabled, recorded.backend().first_before_draft);
         try std.testing.expectEqual(enabled, recorded.backend().penalties);
+        try std.testing.expectEqual(enabled, recorded.backend().chunk_invariant);
     }
 }
 

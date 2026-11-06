@@ -3,7 +3,7 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const status = @import("lane_host_status.zig");
 const Job = LaneHost.Job;
 
-/// An idle backend driver takes a lone drafted request, sampled, with logprobs, a budget or a grammar when supported.
+/// An idle driver takes a lone drafted request; plain, sampled, with logprobs, a budget or a grammar when supported.
 pub fn fits(h: *LaneHost, job: *Job) bool {
     if (!takes(h, job)) return false;
     h.lock();
@@ -15,7 +15,7 @@ fn takes(h: *LaneHost, job: *Job) bool {
     const r = job.request;
     const lone = h.lone orelse return false;
     const think = lone.min_budget > 0 and (r.think_budget == 0 or r.think_budget > lone.min_budget);
-    return !((r.sampling != null and !lone.sampled) or !r.drafts or ((r.think_budget > 0 or r.loop_guard) and !think) or r.call != null or (r.structure != null and !lone.structures) or (r.images.len > 0 and !lone.images) or (r.logprobs != null and !lone.logprobs) or r.prompt_logprobs != null);
+    return !((r.sampling != null and !lone.sampled) or (!r.drafts and !lone.plain) or ((r.think_budget > 0 or r.loop_guard) and !think) or r.call != null or (r.structure != null and !lone.structures) or (r.images.len > 0 and !lone.images) or (r.logprobs != null and !lone.logprobs) or r.prompt_logprobs != null);
 }
 
 /// After a round: the lane core's last live stream goes back to the driver when nothing else waits or is due.
@@ -68,12 +68,15 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
         }
     };
     var context: Hooks.Context = .{ .host = h };
+    @import("lane_host_load.zig").calling(h, job);
     const paused = lone.run(lone.ctx, &job.stream, .{ .ctx = &context, .committed = Hooks.committed, .yield = Hooks.yield, .resumed = resumed, .prefill_yield = Hooks.prefillYield });
     h.lone_job = null;
+    @import("lane_host_load.zig").returned(h, job); // a hand-off keeps this call's time for the pass's later report
     const handed = paused catch |e| {
         if (!job.prefill_sent) LaneHost.emit(job, .{ .prefilled = 0 });
         if (e == error.Cancelled) return h.cancel(job);
         h.remove(job);
+        @import("lane_host_end.zig").failed(h, e);
         h.finish(job, .failed, h.words(e));
         return true;
     };

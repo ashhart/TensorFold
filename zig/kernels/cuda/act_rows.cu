@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
+#include "common/act.cuh"
 
 namespace tf_act {
 
@@ -15,7 +16,7 @@ using tf_common::pack8;
 using tf_common::group_sum8;
 
 // Exactly rounded division on purpose: the same bits on every GPU, where div.full and ex2.approx are not.
-__device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
+__device__ __forceinline__ float sigmoid(float x) { return tf_common::sigmoid_rn(x); }
 
 }  // namespace tf_act
 

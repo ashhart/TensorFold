@@ -207,6 +207,8 @@ pub fn thinkingFields(cx: *Cx, body: Value, levels: []const []const u8) errors.R
     if (kw_object and !has_enable) if (thinkingSwitch(if (kwargs) |k| k.get("thinking") else null)) |sw| {
         enable = .{ .bool = sw };
     };
+    // DeepSeek's own API (and GLM's and Kimi's) switches thinking with a top-level ``thinking``; the kwargs win.
+    const top: ?bool = if (enable == null) thinkingSwitch(body.get("thinking")) else null;
     var effort = body.field("reasoning_effort");
     if (effort == null and kw_object) if (kwargs) |k| {
         effort = k.field("reasoning_effort");
@@ -220,6 +222,10 @@ pub fn thinkingFields(cx: *Cx, body: Value, levels: []const []const u8) errors.R
         out.enable = on.truthy();
         if (out.enable.? and out.effort != null and std.mem.eql(u8, out.effort.?, "none")) out.effort = null;
     };
+    if (top) |on| {
+        out.enable = on;
+        if (on and out.effort != null and std.mem.eql(u8, out.effort.?, "none")) out.effort = null;
+    }
     if (kw_object) if (kwargs) |k| if (k.get("clear_thinking")) |c| if (c != .null) {
         if (c != .bool) return cx.refuse("chat_template_kwargs.clear_thinking must be true or false");
         out.clear = c.bool;

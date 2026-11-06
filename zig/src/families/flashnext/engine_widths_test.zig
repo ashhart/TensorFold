@@ -54,6 +54,9 @@ test "the uniform 6/32 checkpoint keeps every recorded kernel" {
 }
 
 test "an expert whose gate and up differ in width is refused: one kernel reads both" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const bytes = try with("\"bits\": 6,", "\"group_size\": 32,",
         \\"language_model.model.layers.0.mlp.switch_mlp.up_proj": {"bits": 4, "group_size": 64}
     );

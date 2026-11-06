@@ -95,7 +95,8 @@ pub fn createLayers(a: std.mem.Allocator, layers: usize) !*q.model.Model {
     }
     var widths = try q.widths.Widths.uniformAll(a, c.layers);
     defer widths.deinit();
-    var weights = try q.gpu_weights.load(a, device, &cp, c, &widths);
+    const shard = q.config.Shard{ .rank = 0, .ranks = 1, .global = c, .local = c };
+    var weights = try q.gpu_weights.load(a, device, &cp, &shard, &widths);
     errdefer weights.deinit();
     const glue = try q.glue_gpu.Kernels.init(device);
     errdefer glue.deinit();
@@ -105,6 +106,6 @@ pub fn createLayers(a: std.mem.Allocator, layers: usize) !*q.model.Model {
         f.deinit();
     }
     const m = try a.create(q.model.Model);
-    m.* = .{ .allocator = a, .device = device, .queue = queue, .config = c, .checkpoint = cp, .weights = weights, .kernels = .{ .allocator = a, .device = device }, .glue = glue, .frame = frame };
+    m.* = .{ .allocator = a, .device = device, .queue = queue, .shard = shard, .config = c, .checkpoint = cp, .weights = weights, .kernels = .{ .allocator = a, .device = device }, .glue = glue, .frame = frame };
     return m;
 }

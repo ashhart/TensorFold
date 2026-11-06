@@ -20,9 +20,12 @@ pub fn beginCapture(stream: Stream, mode: abi.CaptureMode) Error!void {
 
 /// Ends the capture; an invalidated capture returns an error and no graph.
 pub fn endCapture(stream: Stream) Error!Graph {
+    const source = @import("copy_source.zig");
     var g: abi.Graph = null;
+    // An invalidated end still ends the sequence, a wrong-thread end does not: keep the guard only while it captures.
+    errdefer if ((captureStatus(stream) catch .active) == .none) source.captureEnd(stream);
     try stream.d.check(stream.d.api.cuStreamEndCapture(stream.handle, &g), "cuStreamEndCapture");
-    @import("copy_source.zig").captureEnd(stream);
+    source.captureEnd(stream);
     return .{ .d = stream.d, .handle = g };
 }
 

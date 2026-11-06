@@ -5,6 +5,7 @@ const core = @import("core");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
 const modelopt = @import("cuda_modelopt.zig");
+const modelopt_experts = @import("cuda_modelopt_experts.zig");
 
 const Geometry = geometry.Geometry;
 const Slot = geometry.Slot;
@@ -85,7 +86,7 @@ pub fn total(g: Geometry) usize {
     t += aligned(g.hidden * 2);
     for (0..g.layers) |i| {
         t += 2 * aligned(g.hidden * 2);
-        if (g.moe()) t += routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
+        if (g.moe()) t += if (mo) modelopt_experts.routedBytes(g) else routedBytes(g.experts, g.intermediate, g.hidden, g.expert_bits);
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
             t += if (mo) modelopt.packedBytes(nk[0], nk[1], g.kinds.of(i, slot)) else packedBytes(nk[0], nk[1], g.bits.of(i, slot));
@@ -107,7 +108,7 @@ pub fn stageBytes(g: Geometry) usize {
             const nk = shape(g, slot);
             raw = @max(raw, modelopt.rawBytes(nk[0], nk[1], g.kinds.of(i, slot)));
         };
-        return raw;
+        return if (g.moe()) @max(raw, modelopt_experts.stageBytes(g)) else raw;
     }
     var most = rawBytes(g.vocab, g.hidden, g.bits.head);
     if (rowBits(g.bits.embed) != g.bits.embed) most = @max(most, rawBytes(g.vocab, g.hidden, g.bits.embed));
@@ -190,18 +191,23 @@ pub fn linear(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuf
     var parts: [3][]const u8 = undefined;
     const specs = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k * bits / 32 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
     for (specs, &parts) |p, *part| part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ n, p[2] })).bytes;
-    const raw = try stageParts(stage, parts);
     const served = servedBits(bits);
-    const out: Proj = if (served == 4) .{ .a4 = try pack4(e, into, raw, n, k) } else blk: {
-        const l = AffineN.layout(n, k, served);
-        const q: AffineN = .{ .w = try into.alloc(l.words), .s = try into.alloc(l.scales), .b = try into.alloc(l.scales), .n = n, .k = k, .npad = l.npad, .bits = served };
-        try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
-        try e.wide.packTable(e.stream, raw[1], n, k, q.npad, q.s);
-        try e.wide.packTable(e.stream, raw[2], n, k, q.npad, q.b);
-        break :blk .{ .an = q };
-    };
+    if (served == 4) return packLinear(e, into, stage, parts, n, k);
+    const raw = try stageParts(stage, parts);
+    const l = AffineN.layout(n, k, served);
+    const q: AffineN = .{ .w = try into.alloc(l.words), .s = try into.alloc(l.scales), .b = try into.alloc(l.scales), .n = n, .k = k, .npad = l.npad, .bits = served };
+    try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
+    try e.wide.packTable(e.stream, raw[1], n, k, q.npad, q.s);
+    try e.wide.packTable(e.stream, raw[2], n, k, q.npad, q.b);
     try e.stream.synchronize(); // the next projection's staging overwrites this one's
-    return out;
+    return .{ .an = q };
+}
+
+/// MLX affine-4 parts (words, scales, biases) of an n-by-k projection, staged and packed into `into`'s arena.
+pub fn packLinear(e: *Engine, into: anytype, stage: *DeviceBuffer, parts: [3][]const u8, n: usize, k: usize) !Proj {
+    const q = try pack4(e, into, try stageParts(stage, parts), n, k);
+    try e.stream.synchronize(); // the next projection's staging overwrites this one's
+    return .{ .a4 = q };
 }
 
 /// Inputs [from, from + len) of an n-by-k affine-4 projection as their own packed projection (the MTP's fc halves).
@@ -229,11 +235,8 @@ fn bf16f(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
 }
 
-/// f32 to bf16, round to nearest even (finite values).
-fn f32bf16(x: f32) u16 {
-    const u: u32 = @bitCast(x);
-    return @intCast((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
-}
+/// f32 to bf16, round to nearest even; NaN stays NaN.
+const f32bf16 = core.bf16_round.bits;
 
 /// 8-bit affine rows (four codes a word, a scale and bias a group of 64) dequantized to bf16: the router rows.
 fn dequant8(dst: []u16, words: []align(1) const u32, scales: []align(1) const u16, biases: []align(1) const u16, k: usize) void {
@@ -272,17 +275,21 @@ fn expertTable(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: [
         const one: []const usize = &.{ n, p[2] };
         part.* = (try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], if (count == 0) one else stacked)).bytes;
     }
+    if (bits == 4) return packTable(e, stage, parts, count, n, k, out, m, mi);
     const raw = try stageParts(stage, parts);
-    if (bits == 4) {
-        try e.experts.packInto(e.stream, raw[0], raw[1], raw[2], out, @max(count, 1), n, k, m, mi);
-    } else {
-        const Pack = struct {
-            fn run(owner: *Engine, w: u64, sc: u64, bias: u64, tmp: [2]u64, dst: u64, chunk_count: usize, nn: usize, kk: usize, mm: usize, index: usize) !void {
-                try owner.experts3.packInto(&owner.experts, owner.stream, w, sc, bias, tmp, dst, chunk_count, nn, kk, mm, index);
-            }
-        };
-        try @import("cuda_expert_pack.zig").chunks(e, Pack.run, stage.ptr, stage.len, raw, parts[0].len + parts[1].len + parts[2].len, out, count, n, k, m, mi);
-    }
+    const Pack = struct {
+        fn run(owner: *Engine, w: u64, sc: u64, bias: u64, tmp: [2]u64, dst: u64, chunk_count: usize, nn: usize, kk: usize, mm: usize, index: usize) !void {
+            try owner.experts3.packInto(&owner.experts, owner.stream, w, sc, bias, tmp, dst, chunk_count, nn, kk, mm, index);
+        }
+    };
+    try @import("cuda_expert_pack.zig").chunks(e, Pack.run, stage.ptr, stage.len, raw, parts[0].len + parts[1].len + parts[2].len, out, count, n, k, m, mi);
+    try e.stream.synchronize(); // the next table's staging overwrites this one's
+}
+
+/// MLX affine-4 parts of `count` stacked experts (one at count 0), staged and packed as `out`'s mi-th table of m.
+pub fn packTable(e: *Engine, stage: *DeviceBuffer, parts: [3][]const u8, count: usize, n: usize, k: usize, out: u64, m: usize, mi: usize) !void {
+    const raw = try stageParts(stage, parts);
+    try e.experts.packInto(e.stream, raw[0], raw[1], raw[2], out, @max(count, 1), n, k, m, mi);
     try e.stream.synchronize(); // the next table's staging overwrites this one's
 }
 
@@ -346,9 +353,13 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     e.final_norm = try normVec(e, ck, mo, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
     const conv = g.convWidth();
     const taps_shape: []const usize = if (mo) &.{ conv, 1, geometry.taps } else &.{ conv, geometry.taps, 1 }; // the same bytes
+    const readers = try core.checkpoint.loadReaders();
     for (e.layers, 0..) |*l, i| {
         var pbuf: [96]u8 = undefined;
         const p = try std.fmt.bufPrint(&pbuf, "{s}layers.{d}.", .{ m, i });
+        defer if (readers > 0) ck.release(); // a read-ahead layer is on the device: its pages leave the cache (none read ahead: main's one release at close)
+        var reading = ck.prefetch(p, readers); // read ahead by threads of their own while the layer packs
+        defer _ = reading.join();
         var ps: std.enums.EnumArray(Slot, Proj) = .initUndefined();
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
@@ -358,7 +369,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
         l.* = .{
             .input_norm = try normVec(e, ck, mo, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
             .post_norm = try normVec(e, ck, mo, "{s}post_attention_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
-            .mlp = if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
+            .mlp = if (g.moe() and mo) try modelopt_experts.routed(e, ck, stage, p) else if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
             .mixer = undefined,
         };
         if (g.pocket > 0) try loadPocket(e, ck, p, i);
@@ -408,6 +419,34 @@ test "a uniform 4-bit checkpoint keeps its sizes; other modules take their own w
 
 test {
     _ = @import("cuda_expert_pack.zig");
+}
+
+test "Qwen norm and dequant bf16: today's bits on every zero, subnormal, infinity and tie; a NaN weight stays NaN" {
+    const old = struct {
+        /// f32bf16 as it was spelled before it was core's bits(): the oracle for every non-NaN input.
+        fn wrapped(x: f32) u16 {
+            const u: u32 = @bitCast(x);
+            return @intCast((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = f32bf16(v);
+            if (!std.math.isNan(v)) return std.testing.expectEqual(wrapped(v), h);
+            try std.testing.expect(std.math.isNan(bf16f(h)));
+            try std.testing.expectEqual(u >> 31, h >> 15);
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+    try std.testing.expectEqual(@as(u16, 0x8000), old.wrapped(@bitCast(@as(u32, 0x7fff8001)))); // the old copy's -0
+    try std.testing.expectEqual(@as(u16, 0x0000), old.wrapped(@bitCast(@as(u32, 0xffff8001)))); // and its +0
+    for ([_]u32{ 0x7fff8001, 0xffff8001, 0x7fc00000, 0xffffffff, 0x7f800001, 0xff800001, 0x7fbfffff, 0xffa00000 }) |u| try old.kept(u);
 }
 
 fn linearWide(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: []const u8, name: []const u8, n: usize, k: usize) !Affine4 {

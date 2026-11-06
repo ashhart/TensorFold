@@ -50,11 +50,7 @@ test "ulps counts steps between positive floats" {
 
 pub const tile_bn: usize = 64;
 
-fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+const toBf16 = @import("core").bf16_round.bits;
 
 /// MLX (n, k8) words to [n/64][k/32][64][4], n padded up to 64. qmm.tile_words.
 pub fn tileWords(gpa: std.mem.Allocator, words: []const u8, n: usize, k8: usize) ![]u8 {
@@ -155,9 +151,7 @@ test "the down norm writes bf16 of h times rinv times scale" {
     try std.testing.expectEqual(@as(u16, 0), out[1]);
 }
 
-fn roundBf16(v: f32) f32 {
-    return @bitCast(@as(u32, toBf16(v)) << 16);
-}
+const roundBf16 = @import("core").bf16_round.round32;
 
 /// glue._hc_reduce_act: sum the K slices in order, round, divide by the stream count, SiLU, and the inject gates.
 pub fn reduceAct(part: []const f32, sk: usize, ndn: usize, low: usize, streams: usize, act: []u16, inj: []u16, xs: []f32) !void {

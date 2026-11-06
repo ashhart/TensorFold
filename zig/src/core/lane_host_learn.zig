@@ -7,9 +7,11 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 pub fn submit(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
     h.mutex.lockUncancelable(h.io);
-    defer h.mutex.unlock(h.io);
+    defer h.unlock();
     if (h.closing) return error.Closed;
     if (h.learner == null) return error.Unsupported;
+    if (request.audit != null and !h.learner.?.read_only_audit) return error.Unsupported;
+    if (request.audit != null and h.stale) return error.Busy;
     h.lessons.append(h.gpa, .{ .request = request, .sink = sink }) catch return error.Busy;
     h.wake.signal(h.io);
 }
@@ -37,7 +39,12 @@ pub fn step(h: *LaneHost) void {
     if (!h.lesson_open) {
         h.mutex.lockUncancelable(h.io);
         const lesson = h.lessons.orderedRemove(0);
-        h.mutex.unlock(h.io);
+        const blocked = lesson.request.audit != null and h.stale;
+        h.unlock();
+        if (blocked) {
+            const failed: api.LearnEvent = .{ .done = .{ .message = "AuditUnresolved" } };
+            return lesson.sink.event(lesson.sink.ctx, &failed);
+        }
         learner.begin(learner.ctx, lesson.request, lesson.sink) catch |e| {
             const failed: api.LearnEvent = .{ .done = .{ .message = h.words(e) } };
             return lesson.sink.event(lesson.sink.ctx, &failed);
@@ -50,5 +57,5 @@ pub fn step(h: *LaneHost) void {
     // learn requests still come in, so the learner can try the put-back again; replies wait for it
     h.mutex.lockUncancelable(h.io);
     h.stale = s.stale;
-    h.mutex.unlock(h.io);
+    h.unlock();
 }

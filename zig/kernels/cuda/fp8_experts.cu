@@ -12,13 +12,7 @@ constexpr int LANE4 = 2;
 constexpr int BLOCK4 = 32 * LANE4;
 constexpr int PER_SCALE = 4;
 
-__device__ __forceinline__ uint4 ld_nc(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint4 ld_nc(const uint4* p) { return tf_common::ld_nc(p); }
 
 using tf_common::fp8pair;
 

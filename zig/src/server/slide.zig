@@ -54,6 +54,9 @@ fn send(conn: *Conn, kind: []const u8, body: []const u8) void {
 }
 
 pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
+    const audit = @import("slide_audit.zig");
+    const opts = audit.options(conn.path) catch return refuse(conn, a, 400, "invalid audit options");
+    if (opts) |o| return audit.serve(srv, conn, a, o);
     const body = srv.slide.render(a, folder(srv)) catch return refuse(conn, a, 500, "out of memory");
     conn.sendJson(200, body);
 }
@@ -74,7 +77,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         .ok => |v| v,
         .err => |message| return refuse(conn, a, 400, message),
     };
-    const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
+    const text = @import("slide_input.zig").read(body) catch |e|
+        return refuse(conn, a, 400, @import("slide_input.zig").message(e));
     const source = body.strField("source") orelse "chat";
     const supplied = supplied_questions.read(a, body) catch |e| switch (e) {
         error.OutOfMemory => return,
@@ -238,7 +242,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
             if (routed == teach.reroutes) {
                 _ = run(srv, a, &.{ .drop = true }, 0);
                 srv.slide.placed(id, &.{});
-                out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: it kept answering questions about something else";
+                out.why = std.fmt.allocPrint(a, "taken out: sub-check took failed: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: sub-check took failed: it kept answering questions about something else";
                 @memset(out.recalled, false);
                 return out;
             }
@@ -262,7 +266,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
             _ = run(srv, a, &.{ .undo = true }, 0);
             srv.slide.placed(id, &.{});
             @memset(out.recalled, false); // the undo took the whole fact out: nothing of it is kept
-            out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
+            out.why = std.fmt.allocPrint(a, "round {d} taken back: sub-check damage failed: {s}", .{ round + 1, why }) catch why;
             return out;
         }
         @memcpy(out.recalled, verdict.recalled);
@@ -464,7 +468,7 @@ pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest,
                     if (out) |o| o.progress(id, p);
                 },
                 .done => if (c.text.len > 0) {
-                    outcome = .{ .failed = a.dupe(u8, c.text) catch "the learner failed" };
+                    outcome = .{ .failed = a.dupe(u8, lessonWords(c.text)) catch "the learner failed" };
                 },
             }
             srv.gpa.free(c.text);
@@ -484,6 +488,14 @@ pub const unplaced = "a delete could not be put back on the device, so replies a
 pub fn engineWords(message: []const u8) []const u8 {
     if (std.mem.eql(u8, message, "LayerRoundsAgain")) return rounds_again;
     return if (std.mem.eql(u8, message, "PutBackNotOnDevice")) unplaced else message;
+}
+
+/// A lesson failure in words, without the delete path's put-back claims.
+pub fn lessonWords(message: []const u8) []const u8 {
+    return if (std.mem.eql(u8, message, "LayerRoundsAgain"))
+        "a fitted layer would change its 4-bit values when saved, so this lesson could not be accepted"
+    else
+        message;
 }
 
 /// What a delete says when a layer it touched would move again at the save: it was put back, and nothing written.

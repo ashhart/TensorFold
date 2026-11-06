@@ -14,6 +14,8 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
     const end = (std.mem.indexOfScalarPos(u8, text, last, ';') orelse return error.CudaProbability) + 1;
     const store = text[start..end];
     if (std.mem.count(u8, store, "__float2bfloat16_rn(p)") != 1 or std.mem.indexOf(u8, store, "rows[h] = __fadd_rn(rows[h], p);") == null) return error.CudaProbability;
+    // #1739 moved the merge into a device body the kernel calls; the host instrument runs both
+    const body = try edit.once(a, try edit.function(text, "__device__ __forceinline__ void fn_attn_merge_body("), "__device__ __forceinline__ ", "inline ");
     var merge = try edit.function(text, "void __launch_bounds__(256) fn_attn_merge(");
     merge = try edit.once(a, merge, "void __launch_bounds__(256)", "void");
     merge = try edit.once(a, merge, "__global__ ", "");
@@ -31,6 +33,8 @@ pub fn generate(a: std.mem.Allocator) ![]const u8 {
         ,
         store,
         "\n sum=rows[0];return ps[0][0];}\n",
+        body,
+        "\n",
         merge,
         \\static void run(const uint16_t* q,const uint16_t* k,const uint16_t* v,const int32_t* ids,int count,uint16_t* output,int control){
         \\ if(count<1||count>32)std::abort();float scores[32],sum=0,maximum=-INFINITY; bfloat weights[32];

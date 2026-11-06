@@ -23,7 +23,7 @@ const e4m3 = core.quant.fp8.e4m3;
 
 // qwen35.cuh's Geo, Seg, Ancestor and Path (src/families/qwen3_5/cuda_cache.zig mirrors them for the engine)
 const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
-const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0 };
+const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
 const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
 const Path = extern struct { n: c_int, rows: [64]c_int };
 
@@ -232,7 +232,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]co
     const layer: c_int = 1;
     const none: u64 = 0;
     var args: cuda.Args = .{};
-    inline for (.{ geo, qn, kn, vr, segs_d, rowseg_d, rowanc_d, layer, none, none }) |x| args.add(x);
+    inline for (.{ geo, qn, kn, vr, segs_d, rowseg_d, rowanc_d, layer, none, none, none }) |x| args.add(x);
     try cuda.launch.launch(fns.rope, .{ .grid = .{ .x = @intCast(m), .y = q_heads + kv_heads }, .block = .{ .x = hd } }, s, &args);
     args = .{};
     inline for (.{ geo, qn, segs_d, rowseg_d, rowanc_d, layer, none, @as(f32, 1.0 / 16.0), pm, pl, po }) |x| args.add(x);

@@ -25,6 +25,8 @@ pub const prompt_heads = 16;
 pub const dense_reach = 2560;
 /// Index-key and gate rows a DSA cache holds (a ring): pool_keys reads only from the current pool's first row on.
 pub const index_ring = 2 * prefill_rows;
+/// A solo prompt pass's rows (TF_GLM_CHUNK_SOLO): a whole ring, which a rebase at a grid point leaves it.
+pub const solo_rows = index_ring;
 
 /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
 const Arena = struct {
@@ -54,7 +56,7 @@ fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
 pub const page_rows = latent.chunk;
 
 /// Where a paged sequence's caches are: the pool's pages at `kv`, `page_bytes` apart, through a table of `pages`.
-pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64 };
+pub const Paged = struct { kv: u64, pages: usize, page_bytes: u64, pk: u64 = 0, pk_page: u64 = 0 }; // pk: TF_GLM_KV_HOST
 
 /// The DSA (MLA) layers among the loaded ones; the MTP layer's caches come after theirs.
 pub fn mlaLayers(w: *const weights.Weights) usize {
@@ -68,6 +70,15 @@ fn pageCacheBytes(c: anytype) usize {
     return page_rows * c.kv_lora * 2 + page_rows / sparse.pool * c.i_dim * 2;
 }
 
+/// TF_GLM_KV_HOST: one cache's pooled keys on a device page of their own, and that page's bytes.
+fn pkCacheBytes(c: anytype) usize {
+    return page_rows / sparse.pool * c.i_dim * 2;
+}
+
+pub fn pkPageBytes(w: *const weights.Weights) u64 {
+    return (mlaLayers(w) + 1) * pkCacheBytes(&w.config);
+}
+
 /// A page's bytes: every DSA layer's part, then the MTP layer's (13,056 a row on GLM-5.3-Flash).
 pub fn pageBytes(w: *const weights.Weights) u64 {
     return (mlaLayers(w) + 1) * pageCacheBytes(&w.config);
@@ -76,7 +87,8 @@ pub fn pageBytes(w: *const weights.Weights) u64 {
 /// Cache `j`'s rows on pages: its part of page 0 at `p.kv`, the others through the table.
 fn onPages(x: *dsa_block.Caches, c: anytype, p: Paged, table: u64, j: usize) void {
     x.lc = p.kv + j * pageCacheBytes(c);
-    x.pk = x.lc + page_rows * c.kv_lora * 2;
+    x.pk = if (p.pk != 0) p.pk + j * pkCacheBytes(c) else x.lc + page_rows * c.kv_lora * 2;
+    x.pks = p.pk_page;
     x.pt = table;
     x.ps = p.page_bytes;
 }
@@ -88,7 +100,7 @@ fn stateSizes(gpa: std.mem.Allocator, w: *const weights.Weights, capacity: usize
     const nd = mlaLayers(w);
     const nk = w.layers.len - nd;
     const n = s.kda.len() * c.kda_dim;
-    const kw = 3 * n + 2 * c.kda_dim + s.kda.len();
+    const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
     const pk_rows = capacity / sparse.pool + 2;
     const ring_rows = @min(capacity, index_ring);
     const rows: usize = @intFromBool(table == null); // on pages a cache's rows are the pool's
@@ -108,7 +120,7 @@ fn b16Shapes(w: *const weights.Weights) [12][2]usize {
     const c = &w.config;
     const s = &w.share;
     const n = s.kda.len() * c.kda_dim;
-    const kw = 3 * n + 2 * c.kda_dim + s.kda.len();
+    const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
     return .{
         .{ kw, c.hidden },                   .{ n, c.kda_dim },                    .{ c.hidden, n },
         .{ c.q_lora + c.kv_lora, c.hidden }, .{ s.mla.len() * c.nope, c.q_lora },  .{ c.i_dim + c.i_heads, c.hidden },
@@ -182,7 +194,7 @@ pub const Buffers = struct {
         const LL = s.kda.len();
         const HL = s.mla.len();
         const n = LL * c.kda_dim;
-        const kw = 3 * n + 2 * c.kda_dim + LL;
+        const kw = @import("cuda_kda_block.zig").rowWidth(LL); // TF_GLM_KDA_PAD
         const mw = s.dense.len();
         const ew = s.moe.len();
         const sh = s.shared.len();
@@ -367,7 +379,7 @@ pub const State = struct {
         const nk = w.layers.len - mlaLayers(w);
         const nd = mlaLayers(w);
         const n = s.kda.len() * c.kda_dim;
-        const kw = 3 * n + 2 * c.kda_dim + s.kda.len();
+        const kw = @import("cuda_kda_block.zig").rowWidth(s.kda.len()); // TF_GLM_KDA_PAD
         const pk_rows = capacity / sparse.pool + 2;
         const sizes = try stateSizes(gpa, w, capacity, kv8, if (paged) |q| q.pages else null);
         defer gpa.free(sizes);

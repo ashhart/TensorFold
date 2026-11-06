@@ -70,7 +70,12 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
     s.facts = h.drafted.facts(loaded.facts);
     s.stream_bytes = h.drafted.streamBytes(loaded.stream_bytes);
     s.held = h;
-    if (@hasField(@TypeOf(opened), "prepare")) s.prepare = .{ .ctx = opened.prepare.ctx, .run = opened.prepare.run, .bytes = if (@hasField(@TypeOf(opened.prepare), "bytes")) opened.prepare.bytes else 0 };
+    if (@hasField(@TypeOf(opened), "prepare")) {
+        // a family's prepare, or an optional one when only some drafters time windows after the pool (not Qwen's MTP)
+        const P = @TypeOf(opened.prepare);
+        const maybe: ?(if (@typeInfo(P) == .optional) @typeInfo(P).optional.child else P) = opened.prepare;
+        if (maybe) |p| s.prepare = .{ .ctx = p.ctx, .run = p.run, .bytes = if (@hasField(@TypeOf(p), "bytes")) p.bytes else 0 };
+    }
     return s;
 }
 

@@ -21,7 +21,7 @@ pub const Expanded = struct {
     ids: []const u32,
     history_len: usize,
     images: []const api.Image,
-    cache_key: []const u32,
+    cache_key: []const u32, // one compact word per model row; the core also checks exact Image metadata
 };
 
 const Part = struct { video: bool = false, url: []const u8, low: bool = false };

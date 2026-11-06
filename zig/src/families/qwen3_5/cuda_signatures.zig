@@ -41,10 +41,10 @@ pub const attn_merge = Sig{ .name = "attn_merge", .handle = "e.fns.attn_merge", 
 pub const attn_gate = Sig{ .name = "attn_gate", .handle = "e.fns.attn_gate", .symbol = "tf_q35_attn_gate", .params = &.{ .geo, .ptr, .ptr, .ptr, .i32, .ptr, .ptr } };
 
 /// The rope: the queries rotated in place, the keys rotated and the values copied into the cache.
-pub const rope = Sig{ .name = "rope", .handle = "e.fns.rope", .symbol = "tf_q35_rope", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .ptr } };
+pub const rope = Sig{ .name = "rope", .handle = "e.fns.rope", .symbol = "tf_q35_rope", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .ptr, .ptr } };
 
 /// The e4m3 rope: the bf16 one's tiles in the e4m3 scales.
-pub const rope8 = Sig{ .name = "rope8", .handle = "e.fp8.rope", .symbol = "tf_q35_rope8", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .ptr } };
+pub const rope8 = Sig{ .name = "rope8", .handle = "e.fp8.rope", .symbol = "tf_q35_rope8", .params = &.{ .geo, .ptr, .ptr, .ptr, .ptr, .ptr, .ptr, .i32, .ptr, .ptr, .ptr } };
 
 /// The draft frame's partial: the draft rows' own cache over the ring.
 pub const draft_partial = Sig{ .name = "draft_partial", .handle = "d.fns.attn_partial", .symbol = "tf_q35d_attn_partial", .params = &.{ .ptr, .ptr, .ptr, .ptr, .i32, .i32, .i32, .i32, .i32, .i32, .ptr, .ptr, .ptr } };
@@ -53,7 +53,10 @@ pub const draft_partial = Sig{ .name = "draft_partial", .handle = "d.fns.attn_pa
 pub const draft_merge = Sig{ .name = "draft_merge", .handle = "d.fns.attn_merge", .symbol = "tf_q35d_attn_merge", .params = &.{ .ptr, .ptr, .ptr, .i32, .ptr } };
 
 /// Every q35 attention kernel's list: the decode partials, the rows, the merge, the gate, the rope and the draft pair.
-pub const all = [_]Sig{ attn_partial, attn_partial8, attn_rows, attn_rows8, attn_merge, attn_gate, rope, rope8, draft_partial, draft_merge, attn_partial_whole, attn_partial8_whole, attn_rows_whole, attn_rows8_whole };
+pub const attn_rows8_mt2 = Sig{ .name = "attn_rows8_mt2", .handle = "e.mt2.paged", .symbol = "tf_q35_attn_rows8_mt2", .params = attn_rows8.params };
+pub const attn_rows8_mt2_whole = Sig{ .name = "attn_rows8_mt2_whole", .handle = "e.mt2.whole", .symbol = "tf_q35_attn_rows8_mt2_whole", .params = attn_rows8.params };
+
+pub const all = [_]Sig{ attn_rows8_mt2, attn_rows8_mt2_whole, attn_partial, attn_partial8, attn_rows, attn_rows8, attn_merge, attn_gate, rope, rope8, draft_partial, draft_merge, attn_partial_whole, attn_partial8_whole, attn_rows_whole, attn_rows8_whole };
 
 /// The list a launch site's handle names, if the table holds one.
 pub fn byHandle(handle: []const u8) ?Sig {

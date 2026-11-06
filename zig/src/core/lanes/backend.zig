@@ -76,18 +76,24 @@ pub const Backend = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
     round_observer: ?RoundObserver = null,
     first_before_draft: bool = false,
+    /// A single-slot target lets its asynchronous keep progress between host steps before drafting again.
+    defer_lone_draft: bool = false,
     /// Every draw (first, queue and verify rows) takes `Stream.penalties` from the reply's tokens; wrappers copy it.
     penalties: bool = false,
+    /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
+    chunk_invariant: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
         /// After prompt work, synchronously write full-width vectors into the caller's host output before release.
         embedding: ?*const fn (*anyopaque, *Stream, []f32) anyerror!void = null,
+        /// After a readout's prompt work, write its BF16 logits into the request's slice; its state goes at release.
+        readout_finish: ?*const fn (*anyopaque, *Stream, []u16) anyerror!void = null,
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
-        /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
-        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// One prompt-pass chunk of at most `max_rows` rows when capped (0: uncapped); null: the pass runs whole.
+        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool = null,
         /// Keep a cancelled partial prompt before release, between prefill_step calls; no prompt work may run.
         cancel_prefill: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Several prompts in one pass, each as after `prefill`; false or an error leaves none prefilled.
@@ -127,6 +133,8 @@ pub const Backend = struct {
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
         /// One logit per label at the row after `prompt` and, when `mass`, the vocabulary's logsumexp (decisions).
         score: ?*const fn (ptr: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 = null,
+        /// Each branch's label logits at trunk ++ branch's last row (Engine.decide); Refused names its `problem`.
+        decide: ?*const fn (ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, problem: *[]const u8) anyerror!void = null,
         /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
         first_masked: ?*const fn (ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 = null,
         /// The stream's held drafts as host tokens in window order, waiting for the draft (a grammar walks them).
@@ -224,6 +232,9 @@ pub const Clock = struct {
     pub const VTable = struct {
         start: *const fn (ptr: *anyopaque) void,
         elapsed_ms: *const fn (ptr: *anyopaque, mark: Mark) f64,
+        host_ns: ?*const fn (ptr: *anyopaque) i128 = null,
+        /// The optional host reader can be called by independent grammar workers.
+        parallel_host_ns: bool = false,
     };
 
     pub fn start(c: Clock) void {
@@ -240,7 +251,12 @@ pub const WallClock = struct {
     started: std.Io.Timestamp = .zero,
 
     pub fn clock(w: *WallClock) Clock {
-        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn } };
+        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn, .host_ns = hostNs, .parallel_host_ns = true } };
+    }
+
+    pub fn hostNs(ptr: *anyopaque) i128 {
+        const w: *WallClock = @ptrCast(@alignCast(ptr));
+        return std.Io.Clock.awake.now(w.io).toNanoseconds();
     }
 
     fn startFn(ptr: *anyopaque) void {

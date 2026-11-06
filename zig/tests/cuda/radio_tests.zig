@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
+const toBf16 = core.bf16_round.bits;
 const radio = @import("radio");
 const lanes = @import("lanes");
 const check = @import("check.zig");
@@ -229,13 +230,13 @@ pub fn kernels(gpu: Gpu) !void {
     const got = try a.alloc(u16, count);
     try dy.download(0, std.mem.sliceAsBytes(got));
     const want = try a.alloc(u16, count);
-    for (want, xs) |*w, x| w.* = cuda.vit.bf16(x);
+    for (want, xs) |*w, x| w.* = toBf16(x);
     try check.sameBytes("tf_vit_cast", std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(want));
     // position rows: RADIO's table shape, grids under, at and past the table's side
     const side = 128;
     const c = 1280;
     const table = try a.alloc(u16, side * side * c);
-    for (table) |*t| t.* = cuda.vit.bf16(rng.floatNorm(f32) * 0.05);
+    for (table) |*t| t.* = toBf16(rng.floatNorm(f32) * 0.05);
     const wide = try a.alloc(f32, table.len);
     for (wide, table) |*o, t| o.* = @bitCast(@as(u32, t) << 16);
     var dt = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(table));
@@ -244,7 +245,7 @@ pub fn kernels(gpu: Gpu) !void {
         const gh, const gw = grid;
         const n = gh * gw;
         const x = try a.alloc(u16, n * c);
-        for (x) |*v| v.* = cuda.vit.bf16(rng.floatNorm(f32));
+        for (x) |*v| v.* = toBf16(rng.floatNorm(f32));
         var dxr = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(x));
         defer dxr.free();
         var dout = try cuda.DeviceBuffer.alloc(gpu.d, 2 * n * c);
@@ -256,7 +257,7 @@ pub fn kernels(gpu: Gpu) !void {
         const pos = try a.alloc(f32, n * c);
         radio.position.rows(wide, side, c, gh, gw, pos);
         const ref = try a.alloc(u16, n * c);
-        for (ref, pos, x) |*r, p, v| r.* = cuda.vit.bf16(@as(f32, @bitCast(@as(u32, cuda.vit.bf16(p)) << 16)) + @as(f32, @bitCast(@as(u32, v) << 16)));
+        for (ref, pos, x) |*r, p, v| r.* = toBf16(@as(f32, @bitCast(@as(u32, toBf16(p)) << 16)) + @as(f32, @bitCast(@as(u32, v) << 16)));
         var name: [64]u8 = undefined;
         try check.sameBytes(try std.fmt.bufPrint(&name, "tf_vit_position_add {d}x{d}", .{ gh, gw }), std.mem.sliceAsBytes(out), std.mem.sliceAsBytes(ref));
     }
@@ -279,7 +280,7 @@ pub fn attention(gpu: Gpu) !void {
     const scale: f32 = @floatCast(1.0 / @sqrt(80.0));
     for ([_]usize{ 1, 77, 1210, 6276, 13082 }) |rows| {
         const qkv = try a.alloc(u16, rows * 3 * heads * dim);
-        for (qkv) |*v| v.* = cuda.vit.bf16(rng.floatNorm(f32) * 1.5);
+        for (qkv) |*v| v.* = toBf16(rng.floatNorm(f32) * 1.5);
         var dq = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(qkv));
         defer dq.free();
         var dout = try cuda.DeviceBuffer.alloc(gpu.d, 2 * rows * heads * dim);

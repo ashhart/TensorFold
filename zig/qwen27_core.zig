@@ -1,5 +1,6 @@
 //! Qwen's view of shared checkpoint contracts and native tensor storage.
 pub const checkpoint = @import("src/core/checkpoint.zig");
+pub const gguf = @import("src/core/gguf.zig");
 pub const checkpoint_metal = @import("src/core/checkpoint_metal.zig");
 pub const safetensors = @import("src/core/safetensors.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
@@ -16,6 +17,8 @@ pub const lane_projection = @import("core_lane");
 pub const gpu_profile = @import("src/core/gpu_profile.zig");
 
 pub const row_projection = @import("core_row");
+/// The tensor units' affine products by expert (the routed block's prompt path).
+pub const affine_mm = @import("core_lane").affine_mm;
 pub const quant = @import("src/core/quant/quant.zig");
 
 pub const draft_ops = @import("draft_ops");

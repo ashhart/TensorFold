@@ -2,6 +2,7 @@
 #pragma once
 
 #include "glm_triton.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace glm_router {
 
@@ -13,11 +14,7 @@ __device__ __forceinline__ uint32_t pair(const __nv_bfloat16* p, bool ok) {
 
 
 __device__ __forceinline__ void mma16816(float* c, const uint32_t* a, const uint32_t* b) {
-  asm volatile(
-      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-      "{%0, %1, %2, %3};"
-      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
-      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+  qmm_frag::mma_v(c, a, b);
 }
 
 }  // namespace glm_router

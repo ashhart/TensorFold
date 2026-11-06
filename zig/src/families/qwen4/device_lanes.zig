@@ -34,5 +34,6 @@ pub fn run(comptime E: type, comptime D: type, comptime L: type, a: std.mem.Allo
     }
     try @import("device_fixture.zig").same(u32, "copied drafted == plain", plain.emitted(), drafted.emitted());
     if (plain.emitted().len != 8 or drafted.drafted == 0) return error.Qwen4DeviceDraftCoverage;
+    if (@import("device_fixture.zig").say != .all) return;
     std.debug.print("PASS qwen4 copied drafted == plain: {d} tokens, {d} proposed\n", .{ plain.emitted().len, drafted.drafted });
 }

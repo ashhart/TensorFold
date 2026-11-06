@@ -197,7 +197,7 @@ fn run(final: bool, rows: usize, world: usize, hook: bool, cancel_inside: bool, 
     const step = b.vtable.prefill_step.?;
     const polls = hook and world == 1 and rows >= 512;
     if (polls and cancel_inside) {
-        try T.expectError(error.Cancelled, step(b.ptr, &s));
+        try T.expectError(error.Cancelled, step(b.ptr, &s, 0));
         try T.expectEqual(start, lane.s.len);
         try T.expectEqual(start, lane.fill.?.at);
         try T.expectEqual(@as(usize, 0), lane.fill.?.next);
@@ -206,7 +206,7 @@ fn run(final: bool, rows: usize, world: usize, hook: bool, cancel_inside: bool, 
         try T.expectEqual(@as(usize, 0), r.logits);
         try T.expectEqual(@as(usize, 1), r.layers);
     } else {
-        try T.expectEqual(final, try step(b.ptr, &s));
+        try T.expectEqual(final, try step(b.ptr, &s, 0));
         try T.expectEqual(start + rows, lane.s.len);
         try T.expectEqual(@as(usize, @intFromBool(final)), r.draws);
         try T.expectEqual(@as(usize, @intFromBool(final)), r.logits);

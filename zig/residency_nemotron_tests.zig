@@ -140,6 +140,10 @@ test "residency owner Nemotron: actual native inventory includes nested prompt, 
             backend.head = null;
             backend.masks = null;
             backend.living = null;
+            backend.kv_arena = null;
+            backend.kv_tables = null;
+            backend.kv_pages = null;
+            backend.kv_pipes = null;
             defer if (backend.wide) |*w| w.deinit();
             defer if (backend.head) |*h| h.deinit();
             defer if (backend.masks) |*m| m.bits.deinit();

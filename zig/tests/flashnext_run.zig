@@ -509,7 +509,7 @@ pub fn main(init: std.process.Init) !void {
         return @import("flashnext_bench.zig").run(&r, m, &toks, gpa, arena);
     }
     if (platform.c.getenv("FZ_PROFILE") != null) {
-        if (platform.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
+        if (platform.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, init.io, r.device, std.mem.span(path));
         var hcskips: std.ArrayList(u32) = .empty; // FZ_HCSKIP=1,2,4: the profile again under each hc knock-out
         if (platform.c.getenv("FZ_HCSKIP")) |v| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');

@@ -25,6 +25,7 @@ pub fn mlpView(m: weights.Mlp, sliced: bool) Error!view.Mlp {
         .dense => |d| .{ .dense = .{ .gate = try projection(d.gate), .up = try projection(d.up), .down = try share(d.down, sliced) } },
         .routed => |r| .{ .moe = .{
             .rows32 = r.rows32.ptr,
+            .rows16 = r.router.ptr,
             .top_k = r.top_k,
             .rows = r.router.dim(0),
             .remap = if (r.remap) |b| b.ptr else 0,

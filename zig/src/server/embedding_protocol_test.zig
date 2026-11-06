@@ -117,3 +117,34 @@ test "embeddings protocol: float and little-endian base64 preserve MRL rows and 
     var nan = [_]f32{ 3, 4, std.math.nan(f32) };
     try t.expectError(error.Refused, response.encode(&cx, "m", parsed, &nan));
 }
+
+test "embeddings protocol: whitespace-only text is refused with its index; an over-long input names its length" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":\" \\t\\n\"}", cap));
+    try t.expectEqualStrings("embedding text must not be empty or whitespace only", cx.message);
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":[\"a\",\"  \"]}", cap));
+    try t.expectEqualStrings("embedding input at index 1 must not be empty or whitespace only", cx.message);
+    // the context is 4 tokens here: a 5-token input names itself, not the batch
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":\"abcde\"}", cap));
+    try t.expectEqual(errors.Kind.context_length, cx.kind);
+    try t.expectEqualStrings("the input (5 tokens) is longer than the model's context length (4 tokens)", cx.message);
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":[1,2,3,4,5]}", cap));
+    try t.expectEqual(errors.Kind.context_length, cx.kind);
+    // past both the context (4) and the batch (8): the input's own length is what is refused, counted whole
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":\"abcdefghi\"}", cap));
+    try t.expectEqualStrings("the input (9 tokens) is longer than the model's context length (4 tokens)", cx.message);
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":[1,2,3,4,5,6,7,8,9]}", cap));
+    try t.expectEqualStrings("the input (9 tokens) is longer than the model's context length (4 tokens)", cx.message);
+    // Unicode spaces are spaces, as Python's strip() takes them; a letter among them is text
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":\"\\u00a0\\u2003\\u3000\"}", cap));
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":[\"a\",\"\\u2003\"]}", cap));
+    try t.expectEqualStrings("embedding input at index 1 must not be empty or whitespace only", cx.message);
+    _ = try parse(&cx, "{\"input\":\"\\u00a0a\"}", cap);
+    // inputs within the context that together pass the batch's 8 tokens
+    try t.expectError(error.Refused, parse(&cx, "{\"input\":[\"abcd\",\"efgh\",\"i\"]}", cap));
+    try t.expectEqualStrings("the embedding batch exceeds the admitted 8 tokens", cx.message);
+    const full = try parse(&cx, "{\"input\":[\"abcd\",\"efgh\"]}", cap);
+    try t.expectEqual(@as(usize, 8), full.tokens.len);
+}

@@ -2,13 +2,13 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const embed = @import("cuda_embed.zig");
-const gdn = @import("cuda_gdn.zig");
 const ple = @import("cuda_ple.zig");
 const weights = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 pub const batch = @import("cuda_batch.zig");
 const fb = @import("cuda_fn_back.zig");
 const pocket = @import("cuda_pocket.zig");
+const chunks = @import("cuda_chunk.zig");
 const layers_n = weights.layers_n;
 const linear_n = weights.linear_n;
 const attn_n = weights.attn_n;
@@ -19,16 +19,12 @@ const vocab = weights.vocab;
 const experts_n = weights.experts_n;
 const slots = weights.slots;
 const moe_w = weights.moe_w;
-const head_dim = weights.head_dim;
-const index_dim = weights.index_dim;
 const proj_n = weights.proj_n;
 const out_k = weights.out_k;
 const ple_layer = weights.ple_layer;
 const inj_stride = weights.inj_stride;
 const wts_stride = weights.wts_stride;
 const ple_tail_n = weights.ple_tail_n;
-const state_n = weights.state_n;
-const kv_heads = weights.kv_heads;
 const Store = weights.Store;
 const Face = weights.Face;
 const Q4 = weights.Q4;
@@ -58,7 +54,7 @@ pub fn argmax(raw: []const u8) u32 {
     return @intCast(at);
 }
 /// `n` zeroed buffers, the fill on the compute stream: a legacy-stream memset returns before it lands.
-fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
+pub fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
     const Zeroed = struct {
         driver: *cuda.Driver,
         stream: cuda.Stream,
@@ -94,26 +90,12 @@ fn made(comptime B: type, gpa: std.mem.Allocator, n: usize, src: anytype) ![]B {
 pub const vocabulary: usize = vocab;
 /// Prompt plus reply tokens a sequence can hold: the model's window.
 pub const max_tokens: usize = weights.window;
-/// One position's keys and values in one attention layer, bf16.
-pub const kv_row_bytes: usize = kv_heads * head_dim * 2;
-/// Device bytes `Engine.newSeq(cap)` allocates: conv tails, recurrent states, KV with indexer keys, the n-gram tail.
-pub fn seqBytes(cap: usize) usize {
-    const linear = linear_n * ((gdn.taps - 1) * gdn.conv_dim * 2 + state_n * 4);
-    const attn = attn_n * (cap * (2 * kv_row_bytes + index_dim * 2) + pooledBytes(cap));
-    return linear + attn + ple_tail_n * wide * 2;
-}
-/// Contiguous storage or the page diagnostic's rounded arena and table, with every live allocation priced.
-pub fn seqBytesPaged(cap: usize, tokens: usize) !usize {
-    if (cap == 0 or cap > max_tokens) return error.BadFlashNextPageTest;
-    if (tokens == 0) return seqBytes(cap);
-    const p = try pages.checkedLayout(cap, tokens);
-    const attention = attn_n * (cap * (2 * kv_row_bytes + index_dim * 2) + pooledBytes(cap));
-    return std.math.add(usize, seqBytes(cap) - attention, p.total) catch error.BadFlashNextPageTest;
-}
-/// One attention layer's pooled indexer keys for a cache of `cap` tokens: a bf16 row of 128 a block of 4.
-pub fn pooledBytes(cap: usize) usize {
-    return (cap + weights.index_ratio - 1) / weights.index_ratio * index_dim * 2;
-}
+/// A stream's device bytes at a rank's heads (cuda_seq_bytes.zig).
+const sizes = @import("cuda_seq_bytes.zig");
+pub const seqBytes = sizes.seqBytes;
+pub const seqBytesPaged = sizes.seqBytesPaged;
+pub const pooledBytes = sizes.pooledBytes;
+const Heads = @import("cuda_heads.zig").Heads;
 const round_graph = @import("cuda_round_graph.zig");
 const pages = @import("cuda_pages.zig");
 /// One loaded checkpoint: the embedding table, every layer, the mixer and head, and the batched pass's scratch.
@@ -137,9 +119,14 @@ pub const Engine = struct {
     batch_s: ?batch.Scratch = null,
     /// Block scores for the sparse rows of an attention block, grown to the longest sequence's need.
     scores: ?cuda.DeviceBuffer = null,
-    /// Rows a batched chunk takes at most (chunkRows).
+    /// Rows a batched chunk takes at most: TF_FLASHNEXT_CHUNK_SOLO if set, else TF_FLASHNEXT_CHUNK (cuda_chunk.zig).
     chunk: usize,
+    /// Rows a lane's prompt pass takes while another stream decodes: TF_FLASHNEXT_CHUNK.
+    busy_chunk: usize = batch.default_chunk,
+    /// The heads every model layer holds on this rank, which each stream's caches take (the MTP head's are full).
+    heads: Heads = .full,
     round_graph: round_graph.Cache = .{},
+    graphs: @import("cuda_window_graph.zig").Graphs = .{}, // drafted windows, draft-head pieces, rollbacks on one GPU
     image_factory: ?*@import("cuda_images.zig").Vision = null,
     collective: ?*@import("cuda_collective.zig").Collective = null,
     /// Each layer's Living Weights pocket, from a taught folder's shards or the learner: every pass adds it.
@@ -153,7 +140,8 @@ pub const Engine = struct {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
         // refused before anything loads: a bad TF_FLASHNEXT_CHUNK leaves no module or buffer behind
-        const chunk = try chunkRows();
+        const busy = try chunkRows();
+        const chunk = try chunks.soloRows(busy, false);
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -164,6 +152,7 @@ pub const Engine = struct {
         e.collective = null;
         e.image_factory = null;
         e.round_graph = .{};
+        e.graphs = .{};
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
         e.model_dir = try gpa.dupe(u8, model_dir);
         errdefer gpa.free(e.model_dir);
@@ -216,6 +205,8 @@ pub const Engine = struct {
             try e.pockets.set(driver, stream, i, pk.gate[0 .. pk.n * dims], pk.up[0 .. pk.n * dims], pk.down[0 .. pk.n * dims], used);
             learned += used;
         }
+        e.heads = e.layers[0].heads;
+        for (e.layers[0..e.n_layers]) |*l| if (!l.heads.eql(e.heads)) return error.UnexpectedTensor;
         if (learned > 0) std.log.info("flashnext: the folder's Living Weights pockets hold {d} learned neurons beside the shared experts", .{learned});
         e.store.loaded(); // every layer is on the device: no pinned staging, borrowed plane or open shard while serving
         e.ngram = try ple.Ngram.init(gpa, io, e.model_dir);
@@ -224,11 +215,13 @@ pub const Engine = struct {
         e.batch_s = null;
         e.scores = null;
         e.chunk = chunk;
+        e.busy_chunk = busy;
         return e;
     }
 
     pub fn deinit(e: *Engine) void {
         e.round_graph.clear();
+        e.graphs.clear(e.gpa);
         e.pockets.deinit();
         if (e.batch_s) |*bs| bs.free(e.gpa);
         if (e.scores) |*b| b.free();
@@ -297,9 +290,11 @@ pub const Engine = struct {
         errdefer if (paged) |*p| p.deinit(e.gpa);
         e.round_graph.clear();
         if (cap == 0 or cap > max_tokens) return error.UnexpectedTensor;
-        _ = try seqBytesPaged(cap, if (paged) |p| p.tokens else 0);
+        _ = try seqBytesPaged(cap, if (paged) |p| p.tokens else 0, e.heads);
         var seq: Seq = .{
+            .gen = @import("cuda_window_graph.zig").nextGen(),
             .stream = e.stream.*,
+            .heads = e.heads,
             .paged = paged,
             .conv = &.{},
             .state = &.{},
@@ -317,11 +312,11 @@ pub const Engine = struct {
         // One rollback owns every published array, and drains before releasing any destination.
         errdefer seq.deinit(e.gpa);
         seq.logits = try e.gpa.alloc(u8, vocab * 2);
-        seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
-        seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, state_n * 4);
-        seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
-        seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
-        seq.ikc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .index) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * index_dim * 2);
+        seq.conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, sizes.convBytes(e.heads));
+        seq.state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, sizes.stateBytes(e.heads));
+        seq.kc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .key) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads));
+        seq.vc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .value) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.kvBytes(cap, e.heads));
+        seq.ikc = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .index) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, sizes.indexBytes(cap));
         seq.pooled = if (seq.paged) |*p| try p.views(e.gpa, e.driver, .pooled) else try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap));
         seq.tail = try cuda.DeviceBuffer.alloc(e.driver, ple_tail_n * wide * 2);
         try seq.tail.fill8(0, e.stream.handle);
@@ -357,6 +352,7 @@ pub const Engine = struct {
             if (b.len >= need) return b.ptr;
             try e.complete();
             e.round_graph.clear();
+            e.graphs.clear(e.gpa);
             b.free();
             e.scores = null;
         }
@@ -375,10 +371,14 @@ pub const Engine = struct {
             if (bs.cap >= rows) return bs;
             try e.complete();
             e.round_graph.clear();
+            e.graphs.clear(e.gpa);
             bs.free(e.gpa);
             e.batch_s = null;
         }
-        e.batch_s = try batch.Scratch.alloc(e.gpa, e.driver, e.stream.*, rows);
+        // head_local: the draft head's lanes on one GPU, a pass's rows split; native_part only where the lane reduces
+        const parts = @import("cuda_batch_state.zig");
+        const z: parts.Sizes = .{ .head_rows = if (e.collective != null) @max(rows, parts.head_rows_one) else parts.head_rows_one, .lane_reduce = !e.batch_k.native_lane.clusters };
+        e.batch_s = try batch.Scratch.alloc(e.gpa, e.driver, e.stream.*, rows, z);
         return &e.batch_s.?;
     }
 
@@ -399,6 +399,7 @@ pub const Engine = struct {
             .seq = seq.view(scores),
             .hooks = hooks,
         };
+        if (try @import("cuda_prompt_windows.zig").forwardGraph(e, Tri, &p, seq, ids, hooks)) return;
         var at: usize = 0;
         while (at < ids.len) {
             const n = @min(s.cap, ids.len - at);
@@ -406,7 +407,7 @@ pub const Engine = struct {
             e.ngram.warmAhead(ids, at + n, @min(ids.len, at + n + s.cap));
             p.hooks.logits = if (last) hooks.logits else .none;
             p.hooks.streams = if (hooks.streams != 0) hooks.streams + at * wide * 2 else 0;
-            try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none) seq.logits else null);
+            try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none and hooks.host_logits) seq.logits else null);
             at += n;
         }
         if (hooks.logits == .none) try e.complete();
@@ -454,7 +455,7 @@ pub const Engine = struct {
         const has_media = for (seqs) |q| {
             if (q.media != null) break true;
         } else false;
-        if (e.collective != null and round_graph.enabled() and !has_media) {
+        if (e.collective != null and round_graph.enabled() and !has_media and e.layers[0].dense_cut == null) {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
@@ -473,6 +474,9 @@ pub const Seq = struct {
     stream: ?cuda.Stream = null,
     media: ?@import("cuda_media.zig").State = null,
     rank_id: u64 = 0,
+    gen: u64 = 0, // its graphs' keys (cuda_window_graph.nextGen): unique among the engine's sequences
+    /// The heads its DeltaNet states and KV caches hold (its engine's), which a snapshot's save and restore read.
+    heads: Heads = .full,
     conv: []cuda.DeviceBuffer,
     state: []cuda.DeviceBuffer,
     kc: []cuda.DeviceBuffer,
@@ -491,7 +495,7 @@ pub const Seq = struct {
 
     /// The caches a batched pass reads and leaves; `scores` the engine's block scores (Engine.reserveScores).
     pub fn view(s: *Seq, scores: u64) batch.SeqState {
-        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg() };
+        return .{ .gen = s.gen, .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores, .pg = s.pg() };
     }
 
     /// The attention kernels' page argument (zero: contiguous caches).
@@ -535,13 +539,6 @@ test "linear layers skip every fourth index and attention starts at 3" {
     try std.testing.expectEqual(@as(usize, 11), attnIndex(47));
 }
 
-test "a sequence's device bytes grow by the twelve attention layers' keys, values, indexer keys and pooled blocks" {
-    const per_token = attn_n * (2 * kv_heads * head_dim * 2 + index_dim * 2);
-    try std.testing.expectEqual(per_token, seqBytes(6) - seqBytes(5));
-    try std.testing.expectEqual(per_token + attn_n * index_dim * 2, seqBytes(5) - seqBytes(4));
-    try std.testing.expect(seqBytes(max_tokens) > max_tokens * per_token);
-}
-
 test "a failed fill frees the buffer it was filling and every one before it" {
     const Fake = struct {
         live: *usize,
@@ -575,25 +572,11 @@ test "a failed fill frees the buffer it was filling and every one before it" {
     try std.testing.expectEqual(@as(usize, 3), live);
 }
 
-/// TF_FLASHNEXT_CHUNK's rows a pass: unset, the default; otherwise 1 to batch.max_chunk, anything else refused.
-pub fn parseChunk(v: ?[]const u8) !usize {
-    const s = v orelse return batch.default_chunk;
-    const n = std.fmt.parseInt(usize, s, 10) catch return error.BadChunk;
-    if (n == 0 or n > batch.max_chunk) return error.BadChunk;
-    return n;
-}
-
-pub fn chunkRows() !usize {
-    return parseChunk(if (std.c.getenv("TF_FLASHNEXT_CHUNK")) |v| std.mem.span(v) else null);
-}
-
-test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the rest" {
-    try std.testing.expectEqual(batch.default_chunk, try parseChunk(null));
-    try std.testing.expectEqual(@as(usize, 4096), try parseChunk("4096"));
-    try std.testing.expectEqual(batch.max_chunk, try parseChunk("16384"));
-    for ([_][]const u8{ "0", "16385", "-1", "4k", "" }) |bad| try std.testing.expectError(error.BadChunk, parseChunk(bad));
-}
+pub const parseChunk = chunks.parseChunk;
+pub const chunkRows = chunks.chunkRows;
 
 test {
     _ = @import("cuda_sequence_completion_test.zig");
+    _ = chunks;
+    _ = sizes;
 }

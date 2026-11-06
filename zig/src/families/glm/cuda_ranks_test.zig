@@ -149,7 +149,11 @@ const Fabric = struct {
 };
 
 test "a direct split start on a ring of four without a switch is refused before loading, at every rank" {
-    for (0..4) |r| try std.testing.expectError(error.SplitUnreachable, Fabric.probe(.{}, r, 4, false));
+    for (0..4, [_]usize{ 2, 3, 0, 1 }) |r, peer| {
+        ranks.refused_pair = null;
+        try std.testing.expectError(error.SplitUnreachable, Fabric.probe(.{}, r, 4, false));
+        try std.testing.expectEqual(@as(?[2]usize, .{ r, peer }), ranks.refused_pair);
+    }
     // the same start on four ranks behind a switch probes each pair once each way
     for (0..4) |r| try std.testing.expectEqual(@as(usize, 6), try Fabric.probe(.{}, r, 4, true));
     // two ranks are each other's neighbours: a direct split starts on a ring of two
@@ -186,7 +190,7 @@ test "every media limit is part of the ranks' agreement" {
 test "every scheduling and identity field that differs stops the ranks" {
     const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
     const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
-    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "pieces", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "capacity", "heat_high", "heat_low" }) |name| {
+    inline for (.{ "layout", "world", "rank", "pages", "split", "kda_wide", "kda_pad", "pieces", "solo", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "roce_multi", "kv_host", "capacity", "heat_high", "heat_low", "kv_host_gib" }) |name| {
         var all = [_]Fingerprint{ zero, one };
         @field(all[1], name) += 1;
         try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);
@@ -206,6 +210,35 @@ test "ranks with different TF_GLM_MM choices disagree" {
     const h: [32]u8 = @splat(0);
     const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, hashBytes("/model")), Fingerprint.of(2, 1, .{ .tiled = false }, 8192, true, h, h, hashBytes("/model")) };
     try std.testing.expect(mismatch(&all) != null);
+}
+
+test "TF_GLM_KDA_PAD: 0 by default, 1 or 0, refused otherwise and without glm_mm, and all ranks must agree" {
+    const Reader = struct {
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "1" else null;
+        }
+        fn off(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "0" else null;
+        }
+        fn yes(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "yes" else null;
+        }
+        fn untiled(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "1" else if (std.mem.eql(u8, key, "TF_GLM_MM")) "0" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expect(!(try Settings.read(&fake, &problem)).kda_pad);
+    try std.testing.expect(!(try Settings.read(Reader.off, &problem)).kda_pad);
+    const padded = try Settings.read(Reader.on, &problem);
+    try std.testing.expect(padded.kda_pad);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.yes, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_KDA_PAD: 0 or 1", problem);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.untiled, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_KDA_PAD=1 requires TF_GLM_MM=1 (glm_mm is what reads the padded rows)", problem);
+    const h: [32]u8 = @splat(0);
+    const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, h), Fingerprint.of(2, 1, padded, 8192, true, h, h, h) };
+    try std.testing.expectEqual(@as(?Mismatch, .{ .field = .kda_pad, .rank = 1 }), mismatch(&all));
 }
 fn digestFixture(io: std.Io, dir: std.Io.Dir, sub: []const u8, byte: u8) !void {
     try dir.createDirPath(io, sub);
@@ -236,6 +269,66 @@ test "ranks disagree on tensor bytes under identical headers, and agree on a cop
     try std.testing.expectEqual(Mismatch{ .field = .checkpoint, .rank = 1 }, mismatch(&all).?);
     all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h, h, try artifact(a, io, paths[2]));
     try std.testing.expect(mismatch(&all) == null);
+}
+
+test "TF_GLM_CHUNK_SOLO: off by default, 2048 or 4096, and every rank must agree (the others take rank 0's solo passes)" {
+    const Reader = struct {
+        fn absent(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
+        fn on(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK_SOLO")) "4096" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK_SOLO")) "1" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).solo);
+    const on = try Settings.read(Reader.on, &problem);
+    try std.testing.expect(on.solo);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_CHUNK_SOLO: 2048 or 4096", problem);
+    const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, on, 8192, true, @splat(0), @splat(0), @splat(0)) };
+    try std.testing.expectEqual(Mismatch{ .field = .solo, .rank = 1 }, mismatch(&all).?);
+}
+
+test "TF_GLM_OVERLAP_PIECES: unset, 8 under TF_GLM_CHUNK_SOLO=4096 with TF_GLM_ROCE_MULTI=1 where the wire opens, else 3; a set value wins" {
+    const Reader = struct {
+        fn wire(key: [:0]const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_GLM_ROCE_MULTI")) return "1";
+            if (std.mem.eql(u8, key, "TF_TP_MASTER")) return "10.0.0.1";
+            if (std.mem.eql(u8, key, "TF_TP_KERNEL_IMAGE")) return "tp_mailbox.fatbin";
+            if (std.mem.eql(u8, key, "TF_GLM_WORLD")) return "3";
+            return null;
+        }
+        fn solo(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK_SOLO")) "4096" else null;
+        }
+        fn both(key: [:0]const u8) ?[]const u8 {
+            return solo(key) orelse wire(key);
+        }
+        fn bothTwo(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_WORLD")) "2" else both(key);
+        }
+        fn bothSet(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_OVERLAP_PIECES")) "3" else both(key);
+        }
+        fn soloNarrow(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_CHUNK_SOLO")) "2048" else wire(key);
+        }
+        fn none(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expectEqual(@as(u32, 8), (try Settings.read(Reader.both, &problem)).pieces);
+    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.bothTwo, &problem)).pieces);
+    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.bothSet, &problem)).pieces);
+    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.solo, &problem)).pieces);
+    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.wire, &problem)).pieces);
+    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.soloNarrow, &problem)).pieces);
+    try std.testing.expectEqual(@as(u32, 3), (try Settings.read(Reader.none, &problem)).pieces);
 }
 
 test "prompt K experiment is explicit and all ranks must agree" {
@@ -291,4 +384,74 @@ test "TF_GLM_INDEX_SPLIT: 2048 by default, 0 for never, a position, and a refusa
     try std.testing.expectEqual(@as(u32, 65536), (try Settings.read(Reader.from, &problem)).index_split);
     try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
     try std.testing.expectEqualStrings("TF_GLM_INDEX_SPLIT: the position a prompt chunk's indexer rows split from, or 0 for never", problem);
+}
+
+test "TF_GLM_ROCE_MULTI: off by default, 1 and 0, and refusals naming a bad value or what the wire needs" {
+    const Reader = struct {
+        fn absent(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
+        fn on(key: [:0]const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_TP_MASTER")) return "10.0.0.1";
+            if (std.mem.eql(u8, key, "TF_TP_KERNEL_IMAGE")) return "tp_mailbox.fatbin";
+            return if (std.mem.eql(u8, key, "TF_GLM_ROCE_MULTI")) "1" else null;
+        }
+        fn lone(key: [:0]const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_TP_MASTER")) return "10.0.0.1";
+            return if (std.mem.eql(u8, key, "TF_GLM_ROCE_MULTI")) "1" else null;
+        }
+        fn off(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_ROCE_MULTI")) "0" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_ROCE_MULTI")) "yes" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).roce_multi);
+    try std.testing.expect((try Settings.read(Reader.on, &problem)).roce_multi);
+    try std.testing.expect(!(try Settings.read(Reader.off, &problem)).roce_multi);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_ROCE_MULTI: 0 or 1", problem);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.lone, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE", problem);
+    const h: [32]u8 = @splat(0);
+    try std.testing.expectEqual(@as(u32, 1), Fingerprint.of(3, 0, .{ .roce_multi = true }, 8192, true, h, h, h).roce_multi);
+}
+
+test "TF_GLM_KV_HOST, _SHARED and _GIB: off by default, the choices, and refusals naming a bad value or a missing base" {
+    const Reader = struct {
+        var vars: []const [2][]const u8 = &.{};
+        fn get(key: [:0]const u8) ?[]const u8 {
+            for (vars) |kv| if (std.mem.eql(u8, kv[0], key)) return kv[1];
+            return null;
+        }
+    };
+    var problem: []const u8 = "";
+    Reader.vars = &.{};
+    try std.testing.expectEqual(@as(u8, 0), (try Settings.read(Reader.get, &problem)).kv_host);
+    Reader.vars = &.{.{ "TF_GLM_KV_HOST", "1" }};
+    try std.testing.expectEqual(@as(u8, 1), (try Settings.read(Reader.get, &problem)).kv_host);
+    Reader.vars = &.{ .{ "TF_GLM_KV_HOST", "1" }, .{ "TF_GLM_KV_HOST_SHARED", "1" }, .{ "TF_GLM_KV_HOST_GIB", "13" } };
+    const shared = try Settings.read(Reader.get, &problem);
+    try std.testing.expectEqual(@as(u8, 2), shared.kv_host);
+    try std.testing.expectEqual(@as(f64, 13), shared.kv_host_gib);
+    const refusals = .{
+        .{ &[_][2][]const u8{.{ "TF_GLM_KV_HOST", "yes" }}, "TF_GLM_KV_HOST: 0 or 1" },
+        .{ &[_][2][]const u8{.{ "TF_GLM_KV_HOST_SHARED", "1" }}, "TF_GLM_KV_HOST_SHARED=1 requires TF_GLM_KV_HOST=1" },
+        .{ &[_][2][]const u8{ .{ "TF_GLM_KV_HOST", "1" }, .{ "TF_GLM_KV_HOST_SHARED", "2" } }, "TF_GLM_KV_HOST_SHARED: 0 or 1" },
+        .{ &[_][2][]const u8{.{ "TF_GLM_KV_HOST_GIB", "13" }}, "TF_GLM_KV_HOST_GIB: the host pages' GiB, more than 0, with TF_GLM_KV_HOST=1" },
+        .{ &[_][2][]const u8{ .{ "TF_GLM_KV_HOST", "1" }, .{ "TF_GLM_KV_HOST_GIB", "0" } }, "TF_GLM_KV_HOST_GIB: the host pages' GiB, more than 0, with TF_GLM_KV_HOST=1" },
+    };
+    inline for (refusals) |r| {
+        Reader.vars = r[0];
+        try std.testing.expectError(error.BadSetting, Settings.read(Reader.get, &problem));
+        try std.testing.expectEqualStrings(r[1], problem);
+    }
+    const h: [32]u8 = @splat(0);
+    const f = Fingerprint.of(2, 0, shared, 8192, true, h, h, h);
+    try std.testing.expectEqual(@as(u32, 2), f.kv_host);
+    try std.testing.expectEqual(@as(f64, 13), f.kv_host_gib);
+    var all = [_]Fingerprint{ f, Fingerprint.of(2, 1, .{ .kv_host = 1 }, 8192, true, h, h, h) };
+    try std.testing.expectEqual(Fingerprint.Field.kv_host, mismatch(&all).?.field);
 }

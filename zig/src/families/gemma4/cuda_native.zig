@@ -10,6 +10,8 @@ const snap = @import("cuda_snap.zig");
 const asst = @import("cuda_assistant.zig");
 const cv = @import("cuda_vision.zig");
 const tw = @import("cuda_tower.zig");
+const kv = @import("core").kv_pool;
+const shared = @import("cuda_shared.zig");
 const dfl = @import("cuda_dflash.zig");
 
 /// The registry's entry for one model_type: gemma4_unified (12B) or gemma4 (31B).
@@ -21,6 +23,13 @@ pub fn Family(comptime name: []const u8) type {
         pub const max_segments: u32 = 1;
         pub const prompt_rows: u32 = be.prompt_rows;
         pub const snap_lookahead: u32 = 0;
+        pub const share_grid: u32 = be.prompt_rows;
+        pub const window_rows: u32 = be.max_window;
+        pub const attach = native.attach;
+        pub const fits = native.fits;
+        pub const share_pool = native.share_pool;
+        pub const share_attach = native.share_attach;
+        pub const kvPool = native.kvPool;
         pub const takes_drafter = true;
         pub const openDrafter = native.openDrafter;
         pub const explains_open = true;
@@ -43,8 +52,8 @@ const native = @This();
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-/// No `precision` field: the server refuses --precision for this family by name. --vision: the 12B's image embedder.
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null };
+/// No `precision` field (refused by name). --vision: the 12B's embedder. kv_pages false, a drafter or env =0: linear.
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, vision: ?cv.Limits = null, drafter: ?[]const u8 = null, kv_pages: bool = true };
 
 pub const Loaded = struct {
     backend: lanes.backend.Backend,
@@ -55,6 +64,8 @@ pub const Loaded = struct {
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
     target: *be.Gemma,
+    layout: ?kv.Layout = null,
+    engine_paged: bool = true,
     /// --vision: what the server's image requests reach (native/cuda_vision_offer.zig).
     vision: ?*cv.Vision = null,
 };
@@ -78,12 +89,18 @@ const Plan = struct {
     context: usize,
     /// What open allocates beside the streams: the vision workspace and the drafter's weights.
     beside: u64,
+    paged: bool,
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
-        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, p.context, n) + be.Gemma.openBytes(n) + p.beside;
+        return try fwd.Model.openPagedBytes(o.gpa, p.d, o.s, &o.w, p.context, n, p.paged) + be.Gemma.openBytes(if (p.paged) be.round_rows else n) + p.beside;
     }
 };
+
+/// Global caches in pool pages: asked, no drafter (its paged verify trails main), TENSORFOLD_GEMMA4_KV_PAGES not 0.
+fn pagesOn(o: Options) bool {
+    return o.kv_pages and !(o.drafts and o.drafter != null) and !envOff("TENSORFOLD_GEMMA4_KV_PAGES");
+}
 
 /// The device bytes of the image path's workspace (the 31B's tower or the 12B's embedder), 0 without --vision.
 fn visionBytes(vision: bool, tower: bool) u64 {
@@ -109,33 +126,40 @@ fn positions(context: usize) usize {
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    const priority_copies = try cuda.priority_copies.read("TF_GEMMA4_COPIES", o.drafts);
     if (kernels != null) return error.CapturedKernels;
     if (o.lanes_fixed and o.lanes > be.round_rows) return error.ParallelPastRound;
+    // TF_KV_SHARE keeps prompts as the pool's pages, so it pages too; otherwise the default, unless turned off
+    const paged = try @import("core").kv_prompts.sharing() > 0 or pagesOn(o);
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .w = undefined, .k = undefined, .s = undefined, .m = undefined, .gb = undefined };
     own.k = try kern.Kernels.load(ctx);
     errdefer own.k.deinit();
+    if (paged) try own.k.win.loadPages(ctx.d);
     own.s = try cuda.Stream.init(ctx.d, false);
     errdefer own.s.deinit();
     own.w = try wts.load(gpa, io, ctx.d, own.s, &own.k, dir, null, o.vision != null);
     errdefer own.w.deinit();
+    // pages alias a shared layer's owner (cuda_pages.alias); the TF_KV_SHARE store is not checked with them yet
+    if (try @import("core").kv_prompts.sharing() > 0 and own.w.config.geo.shared_layers > 0) return error.SharedCacheOwnersNotServed;
     const context = @min(positions(o.context), own.w.config.context);
     const beside = visionBytes(o.vision != null, own.w.tower != null) + if (o.drafter) |dd| (if (o.drafts) try drafterBytes(gpa, io, dd) else 0) else 0;
-    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .beside = beside };
+    const plan: Plan = .{ .own = own, .d = ctx.d, .context = context, .beside = beside, .paged = paged };
     own.room = o.room;
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    const n = fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
+    const n = (if (paged) fitFirst(room, plan) else fit(room, o.lanes, o.lanes_fixed, plan)) catch |e| {
         if (e == error.ParallelPastMemory) {
             const most = fit(room, o.lanes, false, plan) catch 0;
             std.log.err("--parallel {d} needs {d:.2} GiB at a {d}-token window and the CUDA memory budget leaves {d:.2} GiB after the weights: {d} stream{s} fit", .{ o.lanes, gib(try plan.bytes(o.lanes)), context, gib(room), most, if (most == 1) "" else "s" });
         }
         return e;
     };
-    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, context, n);
+    own.m = try fwd.Model.initPaged(gpa, ctx.d, own.s, &own.w, context, n, paged);
     errdefer own.m.deinit();
     own.m.graphed = !envOff("TENSORFOLD_GEMMA4_GRAPHS"); // =0: every decode forward eager
     own.gb = try be.Gemma.init(gpa, ctx.d, &own.m, &own.k, own.s);
+    own.gb.priority_copies = priority_copies;
     errdefer own.gb.deinit();
     if (o.vision) |lim| {
         const v = try gpa.create(cv.Vision);
@@ -153,6 +177,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = own,
         .deinit = release,
         .target = &own.gb,
+        .layout = if (paged) fwd.pages.layout(&own.m) else null,
         .vision = own.v,
     };
 }
@@ -170,8 +195,38 @@ fn gemma(ptr: *anyopaque) *be.Gemma {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn fitFirst(room: u64, plan: Plan) !usize {
+    if (try plan.bytes(1) > room) return error.NoStreamFits;
+    return 1;
+}
+
+pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    try shared.attach(&own.gb, streams, count);
+}
+
+pub fn fits(p: *anyopaque, prompt: u32, max_new: u32) bool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return shared.admits(&own.gb, prompt, max_new);
+}
+
+pub fn share_pool(p: *anyopaque) ?*kv.Pool {
+    const x = gemma(p);
+    return if (x.pool) |*pool| pool else null;
+}
+
+pub fn share_attach(p: *anyopaque, prompts: ?@import("core").kv_prompts.Prompts) void {
+    gemma(p).prompts = prompts;
+}
+
+pub fn kvPool(p: *anyopaque) ?kv.Source {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return if (own.gb.pool) |*pool| .{ .pool = pool, .page_tokens = fwd.pages.tokens } else null;
+}
+
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
     const g = gemma(ptr);
+    if (g.prompts != null) return snap.blobPages(g.m, at, at) * fwd.pages.pageBytes(g.m);
     return snap.bytes(g.m, at) + (if (g.keeper) |kp| kp.bytes(kp.ctx, at) else 0);
 }
 
@@ -189,10 +244,13 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.SharedCacheOwnersNotServed => "TF_KV_SHARE: Gemma shared-layer cache owners are not served by this page adapter; unset TF_KV_SHARE",
+        error.SharedDFlashNotServed => "TF_KV_SHARE: Gemma keeps the MTP assistant's state, but DFlash needs its own context snapshots; unset TF_KV_SHARE with a DFlash drafter",
+        error.BadKvShare => "TF_KV_SHARE takes a nonnegative count of kept prompt states (0 or unset: copies)",
         error.PastContext => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream's caches are in use: retry once another request ends",
         error.NoDraftHead => "Gemma 4 on CUDA drafts with an assistant loaded by --drafter, or from the prompt's own text",
-        error.GemmaDrafterNotServed => "--drafter: Gemma 4 on CUDA loads the 12B's MTP assistant (gemma4_unified_assistant) or a DFlash drafter (DFlashDraftModel)",
+        error.GemmaDrafterNotServed => "--drafter: Gemma 4 on CUDA loads the target's MTP assistant (gemma4_unified_assistant for the 12B, gemma4_assistant for the 31B) or a DFlash drafter (DFlashDraftModel)",
         error.DraftForAnotherTarget => "--drafter: this DFlash drafter was trained for another target (its width or tapped layers do not fit)",
         error.NotDFlashV1, error.UnsupportedDraftMask, error.UnsupportedDraftShape => "--drafter: this DFlash drafter's layout is not the stock one this engine serves",
         error.AssistantForAnotherTarget => "--drafter: this assistant was trained for another Gemma 4 target (its backbone width or key heads differ)",
@@ -212,13 +270,14 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
-/// --drafter: the 12B's MTP assistant over the target's caches, or z-lab's DFlash drafter on the 31B's taps.
+/// --drafter: the target's MTP assistant over its caches, or z-lab's DFlash drafter on the 31B's taps.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
     if (bits != 4) return error.DrafterBitsUnsupported;
     const own: *Owned = @ptrCast(@alignCast(p));
     if (own.gb.lanes.count() != 0) return error.TapsAfterStreams;
     if (own.room) |r| if (r.read(r.ctx)) |left| if (left < try drafterBytes(gpa, io, dir)) return error.DrafterPastMemory;
     if (try dfl.isDFlash(gpa, io, dir)) {
+        if (own.m.paged) return error.SharedDFlashNotServed;
         const d = try dfl.Drafter.init(gpa, io, &own.gb, dir);
         errdefer d.deinit();
         own.gb.keeper = .{ .ctx = d, .bytes = keptBytes, .keep = keepLane };
@@ -226,11 +285,13 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     }
     if (!try asst.isAssistant(gpa, io, dir)) return error.GemmaDrafterNotServed;
     const d = try asst.Drafter.init(gpa, io, &own.gb, dir);
+    own.gb.relocated = .{ .ctx = d, .call = asst.Drafter.relocate };
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveNone };
 }
 
 fn closeDrafter(p: *anyopaque) void {
     const d: *asst.Drafter = @ptrCast(@alignCast(p));
+    d.gb.relocated = null;
     d.deinit();
 }
 

@@ -30,6 +30,7 @@ const pair_bytes = 16;
 
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
+pub const solo_rows = fw.solo_rows;
 pub const max_together = @import("cuda_state.zig").prompt_heads;
 pub const Prompt = struct { slot: u32, ids: []const u32 };
 
@@ -39,6 +40,7 @@ pub const max_shared = 16;
 
 const types = @import("cuda_engine_types.zig");
 const snapshots = @import("cuda_snapshots.zig");
+const prompt_solo = @import("cuda_prompt_solo.zig");
 pub const Part = types.Part;
 pub const Kept = types.Kept;
 const Seq = types.Seq;
@@ -95,6 +97,7 @@ pub const Engine = struct {
     pages: ?*pages_mod.Pages = null, // the other streams' KV pages and sequences (cuda_pages), once the server attached them
     index_split: bool = false, // the next prompt step's indexer rows split across the ranks: rank 0's choice, the chunk's flag 2
     index_splits: u64 = 0, // prompt steps whose indexer rows split (glm-split-check counts them)
+    share_pages: bool = false, // TF_GLM_KV_SHARE: a kept state leaves its prefix's pages to the prompt cache that holds them
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
@@ -133,10 +136,13 @@ pub const Engine = struct {
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
         try ranks.probeStart(d, lib, comm, stream, o.settings, rank, world);
         const share = try shard.Share.of(&c, rank, world);
+        const kb = @import("cuda_kda_block.zig");
+        kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
         const spans = try gpa.alloc(shard.Span, world);
         errdefer gpa.free(spans);
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
-        var m = try fw.Modules.load(d, ctx);
+        const block32 = !exl3.isExl3(gpa, text) and try @import("cuda_experts.zig").wantsBlock32(gpa, text);
+        var m = try fw.Modules.load(d, ctx, block32);
         errdefer m.deinit();
         var pieces = try fw.Pieces.init(d, o.settings.pieces);
         errdefer pieces.deinit();
@@ -174,8 +180,10 @@ pub const Engine = struct {
             e.free(0);
             e.seqs.deinit(gpa);
         }
-        e.bp = try fw.Buffers.init(d, &e.w, fw.prefill_rows, true, o.capacity);
+        e.bp = try fw.Buffers.init(d, &e.w, prompt_solo.bufferRows(o.settings.solo), true, o.capacity);
         errdefer e.bp.deinit();
+        if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
+        if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
         errdefer e.bd.deinit();
         e.bm = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
@@ -337,11 +345,13 @@ pub const Engine = struct {
         e.index_split = false;
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
         if (start >= len or start % fw.prefill_rows != 0) return error.BadChunk;
-        const rows = @min(len - start, fw.prefill_rows);
+        const rows = @min(len - start, @as(usize, if (part.len > fw.prefill_rows + 1) fw.solo_rows else fw.prefill_rows));
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
+        if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
         var one: [1]fw.Rank = undefined;
         var f = e.view(&e.bp, &one);
         f.index_split = split;
+        if (start + rows <= len -| @as(usize, @intCast(dflash.WIN))) f.taps = null; // none read (dflash.promptRun)
         const as_i32: []const i32 = @ptrCast(part);
         if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
         f.prof = e.prompt_profs[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3];
@@ -382,17 +392,7 @@ pub const Engine = struct {
         if (f.prof) |p| p.mark(e.stream, .draw);
         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
         stamp = prof_mod.span(f.prof, e.stream, .mtp);
-        if (e.mtp) {
-            const nxt = as_i32[1..];
-            if (nxt.len > 0) { // decode._absorb_rows
-                const mp = f.prof;
-                defer f.prof = mp;
-                f.prof = null; // the head's pass as one section
-                try f.mtp(nxt, &.{e.bp.fnormed});
-                f.prof = mp;
-                try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
-            }
-        }
+        if (e.mtp) try prompt_solo.mtpRows(e, &f, as_i32);
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .mtp);
         stamp = prof_mod.span(f.prof, e.stream, .commit);
@@ -541,7 +541,7 @@ pub const Engine = struct {
         var s0: usize = 0;
         while (s0 < next.len) : (s0 += fw.window_rows) {
             const part = next[s0..@min(next.len, s0 + fw.window_rows)];
-            try f.mtp(part, &.{hidden + s0 * D * 2});
+            try f.mtpMode(part, &.{hidden + s0 * D * 2}, depth > 0);
             try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + part.len);
         }
         for (0..depth) |j| {
@@ -578,9 +578,10 @@ pub const Engine = struct {
     const greedy = @import("cuda_engine_pick.zig").greedy;
     const greedyChance = @import("cuda_engine_pick.zig").greedyChance;
 
-    /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
+    /// A failed RoCE gather (its rows hold nothing) or TF_GLM_KV_HOST gather past its slots, after a synchronize.
     pub fn checkGathers(e: *const Engine) !void {
         if (e.group) |g| try g.check();
+        try @import("cuda_kv_host.zig").checkActive(); // a TF_GLM_KV_HOST gather past its slots
     }
 
     pub fn copy(e: *const Engine, dst: u64, src: u64, bytes: usize) !void {

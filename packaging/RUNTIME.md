@@ -37,12 +37,14 @@ supply cuBLASLt or NCCL. A GLM CUDA pair needs NCCL on both ranks; adding `--vis
 | --- | --- | --- | --- |
 | CUDA vision towers (`--vision`), cuBLASLt projections | cuBLASLt | `libcublasLt.so.13` (`cublasLt64_13.dll` on Windows) | NVIDIA CUDA 13 cuBLAS runtime; not the display driver |
 | Drama3 CUDA prompt and codec matrix operations | cuBLAS | `libcublas.so.13` | NVIDIA CUDA 13 cuBLAS runtime |
+| HIP BF16 dense projections and image towers | rocBLAS | `librocblas.so.5` | ROCm's matching rocBLAS runtime |
 | CUDA tensor-parallel ranks, including the GLM pair | NCCL | `libnccl.so.2` | NVIDIA NCCL 2 runtime compatible with CUDA 13 |
 | RoCE/RDMA gathers | verbs | `libibverbs.so.1`; `/usr/lib/librdma.dylib` | rdma-core and adapter provider on Linux; the macOS RDMA runtime |
 | Video inputs | TensorFold video | `libtfvideo.so`; `libtfvideo.dylib` | Optional `zig build video -Dffmpeg=PREFIX` runtime built against FFmpeg 9.0.2, installed in the server's `lib` directory |
 | JPEG inputs | libjpeg-turbo 3.1.4.1 | `libturbojpeg.so.0`; `libturbojpeg.0.dylib` | Separately installed pinned decoder; `TENSORFOLD_LIBTURBOJPEG` can name its file |
 | WebP inputs | libwebp 1.6.0 | `libwebpdecoder.so.3`; `libwebpdecoder.3.dylib` | Separately installed pinned decoder; `TENSORFOLD_LIBWEBP` can name its file |
-| Structured output and required tool calls | TensorFold grammar | `libtfgrammar.so`; `libtfgrammar.dylib` | The matching release archive's `lib` directory, or `zig build grammar` |
+| PDF inputs (`--vision --vision-pdf`) | PDFium (`chromium/7725`) | `libpdfium.so`; `libpdfium.dylib` (`pdfium.dll` on Windows) | Installed in `lib/` beside the server or named by `TENSORFOLD_LIBPDFIUM` |
+| Structured output and required tool calls | TensorFold grammar | `libtfgrammar.so`; `libtfgrammar.dylib` (`tfgrammar.dll` on Windows) | The matching release archive's `lib` directory, or `zig build grammar` |
 | HIP tensor-parallel ranks | RCCL | `librccl.so.1` | ROCm's matching RCCL runtime |
 | MCDMA mailbox/Metal speed-up communication | MCDMA RPC | `libmcdma-rpc.so`; `libmcdma-rpc.dylib` | Separately built MCDMA RPC helper; `MCDMA_RPC_LIBRARY` can name its file |
 | MCDMA peer fabric | MCDMA fabric | `libmcdma-fabric.so`; `libmcdma-fabric.dylib` | Separately built MCDMA fabric helper; name the library's full path in the peer configuration file |

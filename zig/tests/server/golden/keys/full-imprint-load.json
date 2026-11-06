@@ -10,10 +10,10 @@
     ],
     [
      "Content-Length",
-     "98"
+     "127"
     ]
    ],
-   "body": "{\"error\": {\"message\": \"saved conversations are off: start the server with --learn-conversations\"}}",
+   "body": "{\"error\": {\"message\": \"saved conversations are off: start the server with --prompt-cache-disk DIR (or --learn-conversations)\"}}",
    "interim": ""
   }
  ]

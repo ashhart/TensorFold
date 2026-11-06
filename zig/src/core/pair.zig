@@ -67,6 +67,8 @@ fn reached(a: u32, b: u32) bool {
 const PairRows = extern struct { width: u32, stride: u32, rank: u32, x: u32, eps: f32, pad0: f32 = 0, pad1: f32 = 0, pad2: f32 = 0 };
 
 pub const Pair = struct {
+    benchmark_group: ?[]const u8 = null,
+    benchmark_allocator: ?std.mem.Allocator = null,
     rank: u32,
     peer: u32,
     l: Layout,
@@ -102,6 +104,7 @@ pub const Pair = struct {
         defer lib_m.deinit();
         const p = try gpa.create(Pair);
         p.* = .{
+            .benchmark_allocator = gpa,
             .rank = s.rank,
             .peer = 1 - s.rank,
             .l = l,
@@ -115,8 +118,8 @@ pub const Pair = struct {
             .bytes = try gpa.alloc(u32, JOBS),
         };
         // both Macs up before the first exchange: a word each way
-        try rd.signal(p.peer, l.flags() + HELLO, 1);
-        while (@atomicLoad(u64, p.word64(l.flags() + HELLO), .acquire) < 1) std.atomic.spinLoopHint();
+        p.benchmark_group = try @import("benchmark_group.zig").metal(gpa, io, device, rd, l.flags() + 4096, l.flags() + HELLO, 2);
+        errdefer if (p.benchmark_group) |b| gpa.free(b);
         p.thread = try std.Thread.spawn(.{}, service, .{p});
         return p;
     }
@@ -128,6 +131,7 @@ pub const Pair = struct {
         p.stop.store(true, .release);
         if (p.thread) |t| t.join();
         p.ep.deinit();
+        if (p.benchmark_allocator) |a| if (p.benchmark_group) |b| a.free(b);
     }
 
     fn word64(p: *const Pair, off: usize) *u64 {

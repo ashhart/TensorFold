@@ -3,10 +3,13 @@ pub const delta_slots_ref = @import("contract/delta_slots_ref.zig");
 pub const delta_slots_records = @import("contract/delta_slots_records.zig");
 pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
+pub const attention_pv = @import("contract/attention_pv.zig");
 pub const rows = @import("contract/rows.zig");
+pub const reference_threads = @import("contract/reference_threads.zig");
 pub const affine = @import("contract/affine.zig");
 pub const dense = @import("contract/dense.zig");
-pub const bf16_round = @import("bf16_round.zig");
+pub const bf16_round = @import("bf16_round");
+pub const attention_range = @import("attention_range.zig");
 pub const limits = @import("contract/limits.zig");
 pub const registry = @import("contract/registry.zig");
 pub const cubin = @import("contract/cubin.zig");
@@ -25,16 +28,21 @@ test {
     _ = @import("contract/nemotron_experts_records.zig");
     _ = @import("contract/moss_image_records.zig");
     _ = @import("contract/metal_pair_records.zig");
+    _ = @import("contract/affine_gather_records.zig");
     _ = spec;
     _ = gates;
     _ = rows;
+    _ = attention_pv;
     _ = affine;
+    _ = reference_threads;
     _ = dense;
     _ = limits;
     _ = registry;
     _ = cubin;
     _ = hsaco;
     _ = hip_records;
+    _ = @import("contract/hip_records_qwen3.zig");
+    _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");
 }
 

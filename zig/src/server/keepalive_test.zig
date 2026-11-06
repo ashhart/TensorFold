@@ -28,6 +28,9 @@ fn leave(a: std.mem.Allocator, io: std.Io, port: u16, body: []const u8, slow: *d
 }
 
 test "a silent engine's stream gets keepalives before its first token (chat: SSE comments, messages: ping events)" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const period = comptime std.meta.fieldInfo(server.Config, .sse_keepalive_s).attrs.defaultValue(f64).?;
     try testing.expect(period > 0 and period <= 15);
     const gpa = testing.allocator;

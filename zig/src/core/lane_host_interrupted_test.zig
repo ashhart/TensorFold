@@ -72,10 +72,11 @@ const Driver = struct {
     }
 
     fn prefill(ptr: *anyopaque, s: *lanes.Stream) !void {
-        while (!try step(ptr, s)) {}
+        while (!try step(ptr, s, 0)) {}
     }
 
-    fn step(ptr: *anyopaque, s: *lanes.Stream) !bool {
+    fn step(ptr: *anyopaque, s: *lanes.Stream, max_rows: u32) !bool {
+        _ = max_rows; // the fake's chunk count already bounds each step
         const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
         const d = of(f.prefill_hook_ctx.?);
         d.steps += 1;

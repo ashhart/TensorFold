@@ -290,8 +290,54 @@ test "WordPiece streams keep the answer after a decoder inserts space before the
                 if (delta.get("reasoning_content")) |v| try reasoning.appendSlice(a, v.string);
                 if (delta.get("content")) |v| try content.appendSlice(a, v.string);
             }
-            try std.testing.expectEqualStrings(case.reasoning, std.mem.trimEnd(u8, reasoning.items, " "));
+            try std.testing.expectEqualStrings(case.reasoning, reasoning.items);
             try std.testing.expectEqualStrings(" Answer", content.items);
+        }
+    }
+}
+
+/// A delta field's pieces over a stream's events, joined (testing-allocator owned).
+fn joined(got: *const Got, field: []const u8) ![]u8 {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    for (got.events.items) |e| {
+        const chunk = try std.json.parseFromSlice(std.json.Value, a, e, .{});
+        defer chunk.deinit();
+        const choices = chunk.value.object.get("choices") orelse continue;
+        if (choices.array.items.len == 0) continue;
+        if (choices.array.items[0].object.get("delta").?.object.get(field)) |v| try out.appendSlice(a, v.string);
+    }
+    return out.toOwnedSlice(a);
+}
+
+const spaced_cases = [_]struct { ids: []const u32, reasoning: []const u8, content: []const u8 }{
+    .{ .ids = &(tokensOf("\n  Plan\n\nstep two \n") ++ [_]u32{think_end} ++ tokensOf("\n\nDone") ++ [_]u32{eos}), .reasoning = "Plan\n\nstep two", .content = "Done" },
+    .{ .ids = &(tokensOf("<think> \nPlan\n") ++ [_]u32{think_end} ++ tokensOf("Done") ++ [_]u32{eos}), .reasoning = "Plan", .content = "Done" },
+    .{ .ids = &tokensOf("Plan \t\n"), .reasoning = "Plan", .content = "" },
+    .{ .ids = &(tokensOf(" \n") ++ [_]u32{think_end} ++ tokensOf("Done") ++ [_]u32{eos}), .reasoning = "", .content = "Done" },
+};
+
+test "streamed reasoning equals the whole reply's, whitespace at either end stripped as it strips it" {
+    const a = std.testing.allocator;
+    for (spaced_cases) |case| {
+        var whole = try send(case.ids, true, ask ++ "}");
+        defer whole.deinit();
+        const parsed = try message(&whole);
+        defer parsed.deinit();
+        const m = parsed.value.object.get("choices").?.array.items[0].object.get("message").?.object;
+        const reasoning = if (m.get("reasoning_content")) |r| r.string else "";
+        try std.testing.expectEqualStrings(case.reasoning, reasoning);
+        try std.testing.expectEqualStrings(case.content, m.get("content").?.string);
+        for ([_]?usize{ 1, 2, 3, null, 256 }) |stride| {
+            var got = try sendText(case.ids, true, ask ++ ",\"stream\":true}", .{}, stride);
+            defer got.deinit();
+            const r = try joined(&got, "reasoning_content");
+            defer a.free(r);
+            try std.testing.expectEqualStrings(reasoning, r);
+            const c = try joined(&got, "content");
+            defer a.free(c);
+            try std.testing.expectEqualStrings(case.content, c);
         }
     }
 }

@@ -8,7 +8,8 @@ const Driver = @import("driver.zig").Driver;
 const Stream = @import("stream.zig").Stream;
 const launch = @import("launch.zig");
 
-const Stage = extern struct {
+/// plan_rotate's and plan_finish's arguments (exl3_plan.cuh's PlanStage), in its field order.
+pub const Stage = extern struct {
     items: u64,
     counts: u64,
     members: u64,
@@ -31,6 +32,7 @@ const Stage = extern struct {
     epi: i32,
     act_mode: i32,
     limit: f32,
+    alpha: f32,
 };
 
 pub const UpContract = enum { bf16, combined_fp32 };
@@ -60,6 +62,7 @@ pub const Grouped = struct {
         const w = l.exl3 orelse return error.BadExperts;
         if (w.dims != l.dims or w.width != l.width or w.experts != l.experts or l.relu2 or
             in.stride > std.math.maxInt(i32) or in.slots > std.math.maxInt(i32)) return error.BadExperts;
+        try checkAct(w);
         const up = epi == .up;
         const k = if (up) w.dims else w.width;
         const n = if (up) w.width else w.dims;
@@ -81,7 +84,7 @@ pub const Grouped = struct {
             .up => 2,
             .down_f32 => 0,
             .down_bf16 => 3,
-        }, .act_mode = w.act_mode, .limit = w.limit };
+        }, .act_mode = w.act_mode, .limit = w.limit, .alpha = w.alpha };
         var rot: launch.Args = .{};
         rot.add(a);
         try launch.launch(g.kernels.plan_rotate, .{ .grid = .{ .x = @intCast(items), .y = @intCast(k / 128), .z = @intCast(mats) }, .block = .{ .x = 32 } }, s, &rot);
@@ -96,6 +99,27 @@ pub const Grouped = struct {
         try launch.launch(g.kernels.plan_finish, .{ .grid = .{ .x = @intCast(items), .y = @intCast(n / 128) }, .block = .{ .x = 32 } }, s, &finish);
     }
 };
+
+/// The activations plan_finish runs (0 bf16, 1 fp32, 2 SwiGLU-OAI); SwiGLU-OAI needs its clamp and alpha.
+fn checkAct(w: ex.Layer) !void {
+    if (w.act_mode < 0 or w.act_mode > 2) return error.BadExperts;
+    if (w.act_mode == 2 and !(w.limit > 0 and w.alpha > 0)) return error.BadExperts;
+}
+
+test "Grouped's SwiGLU-OAI takes act_mode 2 only with a positive clamp and alpha" {
+    var w: ex.Layer = std.mem.zeroes(ex.Layer);
+    try checkAct(w);
+    w.act_mode = 2;
+    try std.testing.expectError(error.BadExperts, checkAct(w));
+    w.limit = 7;
+    try std.testing.expectError(error.BadExperts, checkAct(w));
+    w.alpha = 1.702;
+    try checkAct(w);
+    w.limit = -1;
+    try std.testing.expectError(error.BadExperts, checkAct(w));
+    w.act_mode = 3;
+    try std.testing.expectError(error.BadExperts, checkAct(w));
+}
 
 test "Grouped scratch includes every pair and rejects overflowing geometry" {
     try std.testing.expectEqual(@as(usize, 64 * (128 * 4 + 256 * 4 * 2 * 4)), try Grouped.bytes(128, 256, 1, 4, 2));

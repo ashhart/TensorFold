@@ -36,6 +36,10 @@ const Host = struct {
 const cannot = "the native LFM2 engine cannot load this checkpoint ({s})";
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "Macs")) |why| {
+        problem.* = why;
+        return null;
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const config = q.config.Config.read(gpa, io, o.dir) catch |err| {
@@ -78,7 +82,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .structures = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .decode_share = o.decode_share, .structures = true });
     h.cache = null;
     var why: []const u8 = "";
     const dev = model.device;

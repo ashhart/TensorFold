@@ -13,8 +13,8 @@ pub const window_rows: u32 = engine.max_rows;
 
 /// TF_QWEN_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset or 0: a window each).
 pub fn paging() !usize {
-    const v = std.c.getenv("TF_QWEN_KV_PAGES") orelse return 0;
-    return parsePaging(std.mem.span(v));
+    const v = @import("core").profile.get(.TF_QWEN_KV_PAGES) orelse return 0;
+    return parsePaging(v);
 }
 
 pub fn parsePaging(v: []const u8) !usize {
@@ -23,10 +23,10 @@ pub fn parsePaging(v: []const u8) !usize {
     return n;
 }
 
-/// TF_QWEN_KV_PAGES_ALL=1: every stream on pages, the first stream's reserved window left idle (checks).
+/// TF_QWEN_KV_PAGES_ALL=1: every stream on pages, the engine's own too: no window is reserved for it.
 pub fn pagedOnly() bool {
-    const v = std.c.getenv("TF_QWEN_KV_PAGES_ALL") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+    const v = @import("core").profile.get(.TF_QWEN_KV_PAGES_ALL) orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 /// Pages a stream maps at most: a full window and one more forward.

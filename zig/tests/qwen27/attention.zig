@@ -49,7 +49,7 @@ const Frame = struct {
         try op.preprocess(e, .{ .qg = f.get(.qg), .key = f.get(.raw_k), .q_gain = f.get(.q_gain), .k_gain = f.get(.k_gain), .norm_q = f.get(.norm_q), .norm_k = f.get(.norm_k), .query = f.get(.query), .rotated_key = f.get(.key), .positions = scratch.get(.positions), .rows = f.rows, .eps = 1e-6, .theta = 10000000 });
     }
     fn encode(f: *const Frame, op: *const q.Attention, e: mtl.ComputeEncoder, scratch: *const q.Scratch, binding: *const q.Binding, plan: q.Plan, caches: []const Ref, gate: bool) !void {
-        try op.encode(e, scratch, binding, plan, f.get(.query), f.get(.key), f.get(.v), f.get(.out), caches, if (gate) f.get(.qg) else null, false);
+        try op.encode(e, scratch, binding, plan, f.get(.query), f.get(.key), f.get(.v), f.get(.out), caches, if (gate) f.get(.qg) else null, false, false);
     }
 };
 const CacheOwner = struct {

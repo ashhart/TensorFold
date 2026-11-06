@@ -314,6 +314,11 @@ fn readCuda(_: *Storage, buffer: Storage.Buffer, out: []u8) !void {
     try buffer.download(0, out);
 }
 export fn qwen4CudaNodeCapture(io: *const std.Io, b: *Storage, images: *const CudaGpu.Images) bool {
-    const result = family.node_gate.runRows(CudaGpu, readCuda, std.heap.page_allocator, io.*, b, CudaLoader{ .images = images.* }, &.{ 3, 5 }, family.node_gate.cuda_reference, true) catch return false;
+    const loader: CudaLoader = .{ .images = images.* };
+    const reference = family.node_gate.cuda_reference;
+    const gpa = std.heap.page_allocator;
+    const ids = [_]u32{ 3, 5 };
+    const result = family.node_gate.runRows(CudaGpu, readCuda, gpa, io.*, b, loader, &ids, reference, .nodes) catch
+        return false;
     return result.different == 0;
 }

@@ -1,6 +1,7 @@
 //! Dory's forward on CUDA over cache slots: per_loop KV caches a stream, prompt chunks and rounds of decode rows.
 const std = @import("std");
 const cuda = @import("cuda");
+const rope_freq = @import("core").rope_freq;
 const config = @import("config.zig");
 const schedule = @import("schedule.zig");
 const memory = @import("memory.zig");
@@ -222,7 +223,7 @@ pub const Model = struct {
         for ([_]f64{ c.theta_sliding, c.theta_full }, &m.inv) |theta, *p| {
             var inv: [256]f32 = undefined; // vLLM's inv_freq in fp32: 1 / theta^(2j / D)
             const half = c.head_dim / 2;
-            for (inv[0..half], 0..) |*v, j| v.* = 1 / std.math.pow(f32, @floatCast(theta), @as(f32, @floatFromInt(2 * j)) / @as(f32, @floatFromInt(c.head_dim)));
+            rope_freq.inverseFrequencies(theta, c.head_dim, inv[0..half]);
             p.* = try m.alloc(half * 4);
             if (m.planned == null) try m.upload(s, p.*, std.mem.sliceAsBytes(inv[0..half]));
         }

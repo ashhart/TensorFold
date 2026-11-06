@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const imprint = @import("prompt_imprint.zig");
 const modes = @import("cache_modes.zig");
+const images = @import("cache_images.zig");
 const learned = @import("prompt_learn.zig");
 const lifetime = @import("prompt_cache_lifetime.zig");
 const policy = @import("prompt_cache_policy.zig");
@@ -11,18 +12,14 @@ const interior = @import("prompt_interior.zig");
 const index = @import("prompt_cache_index.zig");
 const forks = @import("prompt_cache_fork.zig");
 pub const rows = @import("rows_store.zig");
-
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
-
 pub const singleReclaim = imprint.singleReclaim; // the learned-state file helpers, beside the Imprint that owns them
 pub const singleForgetChecked = imprint.singleForgetChecked;
-
 /// What a family gives the cache: copies of its state while the prompt pass stands at a chunk end.
 pub const Snapshots = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
-
     pub const VTable = struct {
         /// The most new storage `save` takes at `at` tokens (checked against the budget before any copy).
         bytes: *const fn (ptr: *anyopaque, at: u32) u64,
@@ -60,14 +57,12 @@ pub const Snapshots = struct {
         rows: ?*const rows.Image = null,
     };
 };
-
 /// What a paged store asks of the backend's pages: who holds each, and how many are free.
 pub const Pages = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
     /// Bytes of one page, over every layer.
     bytes: u64,
-
     pub const VTable = struct {
         retain: *const fn (ptr: *anyopaque, id: u32) void,
         release: *const fn (ptr: *anyopaque, id: u32) void,
@@ -77,38 +72,12 @@ pub const Pages = struct {
         available: *const fn (ptr: *anyopaque) usize,
     };
 };
-
 /// What a family's states depend on beyond their position.
-pub const Rules = struct {
-    /// Tokens past the position a state read (Flash Next's MTP head keys row at-1 with token at: 1).
-    lookahead: u32 = 0,
-    /// Prompt kernels that change arithmetic with a chunk's rows: resume and keep only at the request's chunk starts.
-    planned: bool = false,
-    /// A planned family's own zero-anchored chunk rows, its starts when a request names none (0: none).
-    grid: u32 = 0,
-    /// A mark other than the history's is kept only this far from every other mark and the resume point.
-    min_gap: u32 = 256,
-    /// Shorter prompts keep only the history's mark, at a chunk end (`chunk`); a planned family's marks add no call.
-    min_prompt: u32 = 4096,
-    /// Rows an unplanned pass's chunk runs from its resume point or last cut (1: any row; 0: short prompts keep none).
-    chunk: u32 = 0,
-    /// Unplanned passes also cut at Request.chunks and decoded-span edges (false: only their own grid and marks).
-    chunk_starts: bool = true,
-    /// Marks always end chunks; false when a backend may capture them inside a chunk without splitting it.
-    chunk_marks: bool = true,
-    /// Background reply passes kept at their end: .on drops a history mark near the resume point, .waits keeps it.
-    warm: enum { off, on, waits } = .off,
-    /// A paged store (prompt_radix.zig): the tokens a page holds, where its marks and resumes sit (0: not paged).
-    page: u32 = 0,
-    /// A paged store also keeps the prompt's last whole page, for a later turn whose history the request did not name.
-    tail: bool = false,
-    /// Repeated raw prompts keep near their end; only families that allow any-row cuts opt in (0: off).
-    repeat_min: u32 = 0,
-    /// Keep one before where the prompt parts from the one it resumed (a miss: the longest kept one), however near.
-    fork: bool = false,
-};
+pub const Rules = @import("prompt_rules.zig").Rules;
 
 pub const Entry = struct {
+    image_frame: u32 = 0, // the family frame can affect text rows before the first image
+    images: []images.Identity = &.{}, // exact image identities through the keyed prefix, including lookahead
     tokens: []u32, // the state's tokens and `lookahead` more
     decode_spans: []modes.Span = &.{}, // canonical row arithmetic through at, excluding lookahead
     at: u32,
@@ -124,19 +93,16 @@ pub const Entry = struct {
     ext: std.ArrayList(*Entry) = .empty, // entries extending its tokens, born later (policy.link): `extended` reads them
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
 };
-
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
-
 pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
 pub const RestoreLog = @import("prompt_cache_restore.zig").Log;
-
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
-
 /// The borrowed entry a backend restores; the caller must report resumed or release it, even on cancellation.
 pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
-
 pub const Store = struct {
+    image_frame: u32 = 0,
+    image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
     restore_log: ?RestoreLog = null,
     gpa: Allocator,
     family: Snapshots,
@@ -154,9 +120,12 @@ pub const Store = struct {
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
-
     repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
     const SHARED_KEYS = 64;
+    pub const lookupUserImages = images.lookupUser;
+    pub const keepBornImages = images.keepBorn;
+    pub const lookupUserFrame = images.lookupUserFrame;
+    pub const keepBornFrame = images.keepBornFrame;
 
     pub fn init(gpa: Allocator, family: Snapshots, rules: Rules, budget: u64) Store {
         return .{ .gpa = gpa, .family = family, .rules = rules, .budget = budget };
@@ -177,6 +146,7 @@ pub const Store = struct {
         s.family.vtable.drop(s.family.ptr, e.saved);
         s.gpa.free(if (e.own.len > 0) e.own else e.tokens);
         s.gpa.free(e.decode_spans);
+        s.gpa.free(e.images);
         if (e.own.len == 0 or e.last.ptr != e.own.ptr) s.gpa.free(e.last);
         e.ext.deinit(s.gpa);
         s.gpa.destroy(e);
@@ -252,7 +222,7 @@ pub const Store = struct {
         var best: ?u32 = null;
         for (s.entries.items) |e| {
             if (e.expired or e.at > at or at - e.at >= s.rules.min_gap or e.tokens.len > prompt.len or !s.usable(e.at, starts)) continue;
-            if (!std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) or !modes.equal(e.decode_spans, spans, e.at)) continue;
+            if (!std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) or !modes.equal(e.decode_spans, spans, e.at) or !images.matches(s, e)) continue;
             if (best == null or e.at > best.?) best = e.at;
         }
         return best;
@@ -339,7 +309,7 @@ pub const Store = struct {
         for (marks_) |at| {
             const n = @as(usize, at) + s.rules.lookahead;
             const exists = for (s.entries.items) |e| {
-                if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) break true;
+                if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) break true;
             } else false;
             if (!exists) need += s.family.vtable.bytes(s.family.ptr, at);
             new += @intFromBool(!exists);
@@ -364,7 +334,7 @@ pub const Store = struct {
 
     /// Forget a failed peer state matching the token prefix and canonical spans through at.
     pub fn forget(s: *Store, prompt: []const u32, at: u32, spans: []const modes.Span) void {
-        for (s.entries.items) |e| if (!e.expired and e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at)) {
+        for (s.entries.items) |e| if (!e.expired and e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
             s.counts.failed += 1;
             e.expired = true;
             return s.collectExpired();
@@ -463,12 +433,15 @@ pub const Store = struct {
         if (at == 0 or n > prompt.len or s.hold) return false;
         s.clock += 1;
         const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
-        for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) {
+        for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
             e.used = s.clock; // the same state again: no copy
             e.shared = e.shared or shared;
             if (shared) learned.learn(s, e, starts);
             return true;
         };
+        const image_ids = images.prefix(s.gpa, s.image_query orelse &.{}, @intCast(n)) catch |err| return s.fail(at, err);
+        var owns_images = true;
+        defer if (owns_images) s.gpa.free(image_ids);
         const decoded = modes.prefix(s.gpa, spans, at) catch |err| return s.fail(at, err);
         var owns_decoded = true;
         defer if (owns_decoded) s.gpa.free(decoded);
@@ -501,8 +474,9 @@ pub const Store = struct {
             return s.fail(at, err);
         };
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = last[0..n], .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .own = last };
+        e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .own = last };
         owns_decoded = false;
+        owns_images = false;
         index.add(s, e) catch {
             s.free(e);
             return s.fail(at, error.OutOfMemory);
@@ -521,6 +495,7 @@ pub const Store = struct {
         const im = s.imprint orelse return have;
         const read = s.family.vtable.read orelse return have;
         const m = im.best(prompt, starts, s.rules.planned, if (have) |x| x.at else 0) orelse return have;
+        if (s.image_frame != 0 or !images.diskSafe(m.tokens) or !images.equal(&.{}, s.image_query orelse &.{}, @intCast(m.tokens.len))) return have;
         if (!modes.equal(&.{}, spans, m.at)) return have; // the request decodes rows the learned prompt pass prefilled
         const bytes = s.family.vtable.bytes(s.family.ptr, m.at);
         while (bytes <= s.budget and (s.held + s.spare() + bytes > s.budget or s.entries.items.len >= s.most)) {

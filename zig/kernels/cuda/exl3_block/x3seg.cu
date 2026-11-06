@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../exl3_decode.cuh"
+#include "common/qmm_frag.cuh"
 
 using namespace tf_exl3;
 
@@ -113,17 +114,9 @@ __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[step_regs<
     }
 }
 
-__device__ __forceinline__ void pdl_wait() {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-    asm volatile("griddepcontrol.wait;" ::: "memory");
-#endif
-}
+__device__ __forceinline__ void pdl_wait() { qmm_frag::grid_wait(); }
 
-__device__ __forceinline__ void pdl_trigger() {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
-#endif
-}
+__device__ __forceinline__ void pdl_trigger() { qmm_frag::grid_launch(); }
 
 // -- the segment tables (kernel parameters: nothing to copy, graph-capture safe) -------------------------------------
 struct RotSeg {

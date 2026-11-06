@@ -330,3 +330,124 @@ test "flashnext prefill: thinking and both shared head dispatch modes retain com
         }
     };
 }
+
+test "flashnext prefill: an active flag share leaves a gated family's chunks exactly on the cold plan" {
+    const hostfill = @import("../../core/lane_host_fill.zig");
+    const tokens = try a.alloc(u32, 5000);
+    defer a.free(tokens);
+    for (tokens, 0..) |*t, i| t.* = @intCast((i * 5 + 1) % 97);
+    var cold_ends: [64]u32 = undefined;
+    var cold_n: usize = 0;
+    var cold: Fake = .{};
+    defer cold.deinit();
+    var c = try lanes.Stream.init(a, .{ .id = "cold", .prompt = tokens, .max_new = 4 });
+    defer c.deinit(a);
+    while (true) {
+        const done = try fill.step(&cold, &c, 0); // the cold plan: the engine's own cuts, no hint ever
+        cold_ends[cold_n] = @intCast(c.fill_at.load(.monotonic));
+        cold_n += 1;
+        if (done) break;
+    }
+    var f: Fake = .{ .decode_shrink = false }; // the CUDA shape: full-grid chunks even beside decoders
+    defer f.deinit();
+    var cfg = try config();
+    defer cfg.deinit(a);
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, f.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(a, std.testing.io, &core, .{ .lanes = 2, .decode_share = 0.5 }); // the flag is active
+    var dec = try lanes.Stream.init(a, .{ .id = "dec", .prompt = &.{ 3, 1, 4 }, .max_new = 8 });
+    defer dec.deinit(a);
+    try core.addStream(&dec); // a live decoder: runnable, so an opted-in cap would fire
+    defer core.backend.release(&dec);
+    var s = try lanes.Stream.init(a, .{ .id = "shared", .prompt = tokens, .max_new = 4 });
+    defer s.deinit(a);
+    var ends: [64]u32 = undefined;
+    var n: usize = 0;
+    while (true) {
+        const hint = hostfill.capRows(&host);
+        try std.testing.expectEqual(@as(u32, 0), hint); // gated out: the flag alone never caps this family
+        const done = try fill.step(&f, &s, hint);
+        ends[n] = @intCast(s.fill_at.load(.monotonic));
+        n += 1;
+        if (done) break;
+    }
+    try std.testing.expectEqualSlices(u32, cold_ends[0..cold_n], ends[0..n]); // exactness by construction: no drift
+    core.backend.chunk_invariant = true; // the knob is live: a qualified family's cap arrives
+    try std.testing.expectEqual(hostfill.decode_cap_rows, hostfill.capRows(&host));
+}
+
+// The host's nonzero hint caps a call beside decoders in place of decode_rows; 0 keeps them.
+test "flashnext prefill: a nonzero host hint caps the chunk beside a decoder, 0 keeps decode_rows, promptRows bounds it" {
+    const tokens = try a.alloc(u32, 5000);
+    defer a.free(tokens);
+    for (tokens, 0..) |*t, i| t.* = @intCast((i * 5 + 1) % 97);
+    var f: Fake = .{}; // decode_shrink: the Metal shape, 32 rows a call while a stream decodes
+    defer f.deinit();
+    var cfg = try config();
+    defer cfg.deinit(a);
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, f.backend(), clock.clock());
+    defer core.deinit();
+    var dec = try lanes.Stream.init(a, .{ .id = "dec", .prompt = &.{ 3, 1, 4 }, .max_new = 8 });
+    defer dec.deinit(a);
+    try core.addStream(&dec);
+    defer core.backend.release(&dec);
+    try std.testing.expect(f.decoding());
+    var s = try lanes.Stream.init(a, .{ .id = "long", .prompt = tokens, .max_new = 4 });
+    defer s.deinit(a);
+    // hint, then the rows taken: 0 is the default decode cut; Fake.promptRows' step (1024) bounds a big hint
+    const Case = struct { hint: u32, rows: u32 };
+    const cases = [_]Case{ .{ .hint = 0, .rows = fill.decode_rows }, .{ .hint = 700, .rows = 700 }, .{ .hint = 0, .rows = fill.decode_rows }, .{ .hint = 8192, .rows = 1024 }, .{ .hint = 16, .rows = 16 } };
+    const ends = f.ends; // the decoder's own prompt
+    var at: u32 = 0;
+    for (cases) |c| {
+        try std.testing.expect(!try fill.step(&f, &s, c.hint));
+        at += c.rows;
+        try std.testing.expectEqual(@as(u64, at), s.fill_at.load(.monotonic));
+    }
+    while (!try fill.step(&f, &s, 4096)) {} // to the end under a hint: the prompt's state still checks out
+    try std.testing.expectEqual(ends + 1, f.ends);
+}
+
+fn besideSteps(grows: bool, out: []u32) !void {
+    const tokens = try a.alloc(u32, 8192);
+    defer a.free(tokens);
+    for (tokens, 0..) |*t, i| t.* = @intCast((i * 5 + 1) % 97);
+    var f: Fake = .{ .fill_grows = grows };
+    defer f.deinit();
+    var cfg = try config();
+    defer cfg.deinit(a);
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(a, &cfg, f.backend(), clock.clock());
+    defer core.deinit();
+    var dec = try lanes.Stream.init(a, .{ .id = "dec", .prompt = &.{ 3, 1, 4 }, .max_new = 8 });
+    defer dec.deinit(a);
+    try core.addStream(&dec);
+    defer core.backend.release(&dec);
+    var s = try lanes.Stream.init(a, .{ .id = "long", .prompt = tokens, .max_new = 4 });
+    defer s.deinit(a);
+    var at: u64 = 0;
+    for (out) |*rows| {
+        try std.testing.expect(!try fill.step(&f, &s, 0));
+        rows.* = @intCast(s.fill_at.load(.monotonic) - at);
+        at += rows.*;
+    }
+    while (!try fill.step(&f, &s, 4096)) {}
+}
+
+test "flashnext prefill: a prompt's steps beside decoders grow after it has waited, only where asked" {
+    var steps: [fill.waited_steps + 3]u32 = undefined;
+    try besideSteps(true, &steps);
+    for (steps, 1..) |rows, i| try std.testing.expectEqual(if (i > fill.waited_steps) fill.waited_rows else fill.decode_rows, rows);
+    try besideSteps(false, &steps);
+    for (steps) |rows| try std.testing.expectEqual(fill.decode_rows, rows);
+}
+
+test "flashnext prefill: replies take the default share without tensor units; the flag and the env keep their meanings" {
+    try std.testing.expectEqual(@as(?f64, fill.decode_share), fill.shareOf(null, false, false));
+    try std.testing.expectEqual(@as(?f64, null), fill.shareOf(null, false, true)); // tensor units: unchanged until measured
+    try std.testing.expectEqual(@as(?f64, null), fill.shareOf(null, true, false)); // the env's own meaning: the prompt's share
+    try std.testing.expectEqual(@as(?f64, 0.25), fill.shareOf(0.25, true, true)); // the flag over the env, as in Share.withDecode
+    try std.testing.expectEqual(@as(?f64, 0), fill.shareOf(0, false, false)); // --decode-share 0 keeps whole prompts first
+}

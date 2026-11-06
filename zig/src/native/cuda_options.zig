@@ -9,6 +9,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (@hasField(F.Options, "mtp_drafts") and o.mtp_drafts == 0) opts.drafts = false;
     if (@hasField(F.Options, "lanes")) opts.lanes = o.lanes;
     if (@hasField(F.Options, "lanes_fixed")) opts.lanes_fixed = o.lanes_fixed;
+    if (@hasField(F.Options, "one_stream")) opts.one_stream = o.lanes == 1;
     if (@hasField(F.Options, "rank")) {
         opts.tp = @intCast(o.tp);
         opts.rank = @intCast(o.rank);
@@ -38,6 +39,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     }
     if (comptime @hasField(F.Options, "drafter")) opts.drafter = o.drafter;
     if (comptime @hasField(F.Options, "drafter_bits")) opts.drafter_bits = o.drafter_bits;
+    if (comptime @hasField(F.Options, "rope_yarn")) opts.rope_yarn = o.rope_yarn;
     if (@hasField(F.Options, "kv8")) opts.kv8 = o.kv8;
     if (@hasField(F.Options, "prompt_int8")) opts.prompt_int8 = o.prompt_int8;
     if (@hasField(F.Options, "loops")) opts.loops = o.loops;

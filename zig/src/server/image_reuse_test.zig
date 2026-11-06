@@ -65,7 +65,7 @@ const Gone = struct {
 };
 
 const Turn = struct { cached: usize, prompt: usize, rows: usize, tokens: []const u32, finish: []const u8 };
-const Options = struct { image_tokens: u32 = 64, budget: u64 = 1 << 20, strip: bool = false };
+const Options = struct { image_tokens: u32 = 64, budget: u64 = 1 << 20, strip: bool = false, image_pad: bool = false };
 
 /// A served model: the real server and lane host, the fake target (image rows named by their image) and a prompt cache.
 const Harness = struct {
@@ -94,10 +94,15 @@ const Harness = struct {
         h.core = lanes.Engine.init(gpa, &h.cfg, h.target.backend(), h.clock.clock());
         h.store = pc.Store.init(gpa, .{ .ptr = &h.target, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } }, .{ .min_gap = 4, .min_prompt = 0 }, o.budget);
         h.files = try fixture.Fixture.init(a, 0);
-        try h.files.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = template });
+        if (o.image_pad) {
+            const tokenizer = try std.mem.replaceOwned(u8, a, @embedFile("fixtures/control_tokens/mini_tokenizer.json"), "<|image|>", "<|image_pad|>");
+            try h.files.tmp.dir.writeFile(t.io, .{ .sub_path = "tokenizer.json", .data = tokenizer });
+        }
+        const source = if (o.image_pad) try std.mem.replaceOwned(u8, a, template, "<|image|>", "<|image_pad|>") else template;
+        try h.files.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = source });
         var problem: []const u8 = "";
         h.hf = try HfText.load(gpa, t.io, h.files.path, null, a, &problem);
-        h.markers = .{h.hf.text().tokenId("<|image|>").?};
+        h.markers = .{h.hf.text().tokenId(if (o.image_pad) "<|image_pad|>" else "<|image|>").?};
         const vision: api.Vision = .{ .ctx = &h.dummy, .prepare = prepare, .image_token = h.markers[0], .markers = &h.markers, .image_tokens = o.image_tokens, .max_images = 4 };
         h.host = api.LaneHost.init(gpa, t.io, &h.core, .{ .lanes = 2, .vision = vision, .prompt_cache = true });
         h.host.cache = &h.store;
@@ -203,6 +208,49 @@ fn fresh(a: Allocator, o: Options, messages: []const u8) !Turn {
 /// `turn` resumed or not, its reply equals a fresh server's.
 fn expectFresh(a: Allocator, o: Options, messages: []const u8, turn: Turn) !void {
     try t.expectEqualSlices(u32, (try fresh(a, o, messages)).tokens, turn.tokens);
+}
+
+test "image guard: a sole image-pad marker protects typed spellings without adding model wrapper tokens" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h = try Harness.init(t.allocator, a, .{ .image_pad = true });
+    defer h.deinit();
+    const text = h.hf.text();
+    const vision = h.srv.info.vision.?;
+    const image = text.tokenId("<|image_pad|>").?;
+    try t.expectEqualSlices(u32, &.{image}, vision.markers);
+    try t.expect(vision.wrap == null);
+    const prefix = try text.encode(a, "<|im_start|>user\n", false);
+    const suffix = try text.encode(a, "<|im_end|>\n<|im_start|>assistant\n", false);
+    const pic = try picture(a, 'p', 2);
+    for ([_]struct { real: bool, content: []const u8 }{
+        .{ .real = true, .content = "read this" },
+        .{ .real = false, .content = "literal <|image_pad|> text" },
+        .{ .real = true, .content = "literal <|image_pad|> text" },
+    }) |case| {
+        const body = try conv(a, &.{try user(a, case.content, if (case.real) &.{pic} else &.{})});
+        const msgs = (try json.parse(a, body)).ok;
+        var cx: Cx = .{ .a = a };
+        const raw = try @import("prompt.zig").renderIds(h.srv, &cx, msgs, &.{}, false, null, true);
+        const literal = try text.encodePlain(a, case.content);
+        try t.expectEqual(@as(usize, 0), std.mem.countScalar(u32, literal, image));
+        const authored: []const u32 = if (case.real) &.{image} else &.{};
+        const reference = try std.mem.concat(a, u32, &.{ prefix, literal, authored, suffix });
+        try t.expectEqualSlices(u32, reference, raw);
+        const prepared = try @import("prompt.zig").prepare(h.srv, &cx, .{ .messages = msgs, .fields = .null }, false, null);
+        const rows: []const u32 = if (case.real) &.{ image, image } else &.{};
+        const expanded = try std.mem.concat(a, u32, &.{ prefix, literal, rows, suffix });
+        try t.expectEqualSlices(u32, expanded, prepared.ids);
+        try t.expectEqual(@as(usize, @intFromBool(case.real)), prepared.images.len);
+        if (case.real) {
+            try t.expectEqual(@as(u32, @intCast(prefix.len + literal.len)), prepared.images[0].at);
+            try t.expectEqual(@as(u32, 2), prepared.images[0].tokens);
+        }
+        const turn = try h.ask(a, body);
+        try t.expectEqual(expanded.len, turn.prompt);
+        try t.expectEqual(@as(usize, if (case.real) 2 else 0), turn.rows);
+    }
 }
 
 test "image reuse: text turns after an image resume past it, feed no image rows and equal a fresh server" {
@@ -361,7 +409,7 @@ test "image reuse: a cancelled image pass and an evicting cache leave later turn
     try expectFresh(a, small, a2, turn);
 }
 
-test "image reuse: the planted control without image keys resumes another picture's state and the check sees it" {
+test "image reuse: exact image metadata prevents a wrong restore even when row keys are omitted" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -369,7 +417,7 @@ test "image reuse: the planted control without image keys resumes another pictur
     defer h.deinit();
     _ = try h.ask(a, try conv(a, &.{ system, try user(a, "Look at this.", &.{try picture(a, 'a', 12)}) }));
     const other = try conv(a, &.{ system, try user(a, "Look at this.", &.{try picture(a, 'b', 12)}) });
-    const wrong = try h.ask(a, other);
-    try t.expectEqual(@as(usize, 0), wrong.rows); // resumed past the placeholders: picture a's rows stood in for b's
-    try t.expect(!std.mem.eql(u32, (try fresh(a, .{}, other)).tokens, wrong.tokens));
+    const turn = try h.ask(a, other);
+    try t.expectEqual(@as(usize, 12), turn.rows);
+    try expectFresh(a, .{}, other, turn);
 }

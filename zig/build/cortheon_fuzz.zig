@@ -3,7 +3,7 @@ const std = @import("std");
 const Module = std.Build.Module;
 
 /// The harness's tests (seeds, 100,000 structure-aware edits, linear time); `--fuzz=N` adds N coverage-guided inputs.
-pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, api: *Module, tokenizer: *Module, template: *Module) void {
+pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, api: *Module, tokenizer: *Module, template: *Module, core: *Module) void {
     const about = "fuzz-cortheon's build: safe (default) or fast, as shipped";
     const optimize = b.option(std.builtin.OptimizeMode, "fuzz-optimize", about) orelse .safe;
     const harness = b.addTest(.{
@@ -16,6 +16,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, api: *Module, tokeni
                 .{ .name = "engine_api", .module = api },
                 .{ .name = "tokenizer", .module = tokenizer },
                 .{ .name = "template", .module = template },
+                .{ .name = "core", .module = core },
             },
         }),
         .filters = &.{"cortheon.fuzz."},

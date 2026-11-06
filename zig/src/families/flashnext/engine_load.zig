@@ -393,7 +393,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in...
     const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
     if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
-    if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
+    if (tp_path) |path| r.tp = try fz.Tp2.init(arena, io, r.device, path);
     if (r.tp) |t| try r.held.appendSlice(arena, &.{ t.wbuf, t.one, t.pick_tmp }); // every pair round uses them
     if (r.tp == null) try fz.rows_load.attach(
         e.pr,
@@ -426,6 +426,9 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         e.tree = try @import("tree.zig").init(r, a, if (sib > 0) a * sib else b, feed, sib);
         if (sib > 0) std.log.info("flash next: tree rounds, a head chain of {d} and {d} head siblings a depth", .{ a, sib }) else std.log.info("flash next: tree rounds, a head chain of {d} and a branch of {d}", .{ a, b });
     };
+    if (r.fsr) |s| {
+        @import("checkpoint_cache.zig").finish(r.files.items, s.source.files);
+    } else @import("checkpoint_cache.zig").finish(r.files.items, &.{});
     return e;
 }
 

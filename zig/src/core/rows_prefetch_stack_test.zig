@@ -1,5 +1,6 @@
 //! Read-ahead and write-behind share publication rules while keeping independent I/O workers.
 const std = @import("std");
+const waits = @import("rows_test_wait.zig");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const rows = @import("rows_store.zig");
@@ -44,7 +45,7 @@ test "prefetch: a queued write publishes before the next request reads its exact
     try t.expectEqual(@as(u64, 0), f.counts.made);
     try t.expectEqual(@as(usize, 0), fixture.files(x.r.dir, ".st"));
     gate.release.store(true, .release);
-    const end = rows.write.nowNs() + 3 * std.time.ns_per_s;
+    const end = waits.deadline();
     while (job.fetch.name == null or fetch.held(&host, &job)) {
         if (rows.write.nowNs() >= end) return error.PrefetchTimedOut;
         fetch.queue(&host);

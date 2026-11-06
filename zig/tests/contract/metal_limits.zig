@@ -31,6 +31,19 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "attention pv ")) {
+        const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
+        const probe = @import("metal_attention_pv.zig");
+        if (std.mem.eql(u8, fun, probe.function)) {
+            const body = try probe.text(a, device, full);
+            return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+        }
+        const raw = for (sources.prefill) |f| {
+            if (std.mem.eql(u8, f.name, "attention_nax")) break f.text;
+        } else return error.UnknownLaunch;
+        const body = try tf.frags.sourceMode(device, a, raw, full);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
@@ -58,9 +71,26 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
+    if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun)) |l| return l;
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
+    if (std.mem.startsWith(u8, d.name, "metal ling route ")) {
+        const body = @import("ling_metal").route;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "nemotron paged ")) return pagedLaunch(a, device, d, fun);
     if (std.mem.startsWith(u8, d.name, "nemotron attention ")) return attentionLaunch(a, device, d, fun);
+    if (std.mem.startsWith(u8, d.name, "minimax_m3 ")) {
+        const t = try @import("metal_minimax.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
+    if (std.mem.startsWith(u8, d.name, "spark25 attention ")) {
+        const t = try @import("metal_spark25_attention.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
+    if (std.mem.startsWith(u8, d.name, "gemma4 ") and has(d.name, " attention ")) {
+        const t = try @import("metal_gemma4_attention.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "drama3 ")) {
         const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
         return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };
@@ -68,10 +98,13 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     if (std.mem.startsWith(u8, fun, "tf_ctl_")) {
         text = sources.core_contract_controls;
         if (has(fun, "big_tg")) head = "#define TF_CTL_BIG_TG 1\n";
-    } else if (std.mem.startsWith(u8, d.name, "h3 gemm ")) {
+    } else if (std.mem.startsWith(u8, d.name, "h3 gemm ") or std.mem.startsWith(u8, d.name, "nemotron ssd gemm ")) {
         text = for (sources.prefill) |f| {
             if (std.mem.eql(u8, f.name, "gemm_nax")) break f.text;
         } else return error.UnknownLaunch;
+        frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "flashnext prompt attention ")) {
+        text = if (std.mem.eql(u8, fun, "tf_sattn_nax")) sources.flashnext_attn else sources.flashnext_qmm6;
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
         text = @import("h3_kernels").source;
@@ -95,13 +128,15 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     } else if (std.mem.startsWith(u8, d.name, "moss image gemm ")) {
         text = sources.core_qwen_vision;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "moss image decoder ")) {
+        text = sources.moss_image_decoder;
     } else if (std.mem.startsWith(u8, d.name, "moss image ")) {
         text = sources.moss_image;
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         text = sources.core_deltanet;
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
-        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else tf.qwen27.runtime_sources.glue;
+        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         text = sources.core_pair_rows;
     } else if (has(d.name, "tile_qmm")) text = sources.core_tile_qmm else if (has(d.name, "softmax")) text = sources.ops_softmax else if (has(d.name, "rms")) text = sources.ops_embed_norm else if (has(d.name, "top-k")) text = topk_text else if (has(d.name, "row projection")) text = sources.core_row_projection else if (has(d.name, "simd_qmm_bits")) text = sources.core_simd_qmm_bits else if (has(d.name, "simd_qmm")) text = sources.core_simd_qmm else if (has(d.name, "affine_mm")) {
@@ -119,7 +154,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     } else return error.UnknownLaunch;
     const pre = if (frags) try preM5(a, head, text) else try std.mem.concat(a, u8, &.{ head, text });
     const here = if (frags and device.tensorUnits()) blk: {
-        const body = try std.mem.replaceOwned(u8, a, text, "#include \"../nax.h\"", sources.nax);
+        const body = try tf.frags.source(device, a, text);
         break :blk try std.mem.concat(a, u8, &.{ head, body });
     } else pre;
     return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
@@ -133,8 +168,9 @@ fn attentionLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaun
         const text = for (sources.nemotron.all) |k| {
             if (std.mem.eql(u8, k.function, fun)) break k.source;
         } else return error.UnknownLaunch;
-        const pre = if (std.mem.indexOf(u8, d.name, " partial ") != null) try tf.nemotron.simd_attention.rewrite(a, text) else text;
-        return .{ .decl = d, .function = fun, .here = if (tensor) text else pre, .pre_m5 = pre };
+        const pre = if (std.mem.indexOf(u8, d.name, " partial ") != null) try tf.nemotron.simd_attention.layout(a, text) else text;
+        const here = if (tensor) text else if (std.mem.indexOf(u8, d.name, " partial ") != null) try tf.nemotron.simd_attention.forGeneration(a, device.generation(), text) else pre;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     }
     if (std.mem.indexOf(u8, d.name, " tree ") != null) {
         const pre = try std.mem.concat(a, u8, &.{ "#define TF_SIMD_LAYOUT 1\n", sources.nemotron_tree });
@@ -146,7 +182,7 @@ fn attentionLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaun
             if (std.mem.eql(u8, f.name, file)) break f.text;
         } else return error.UnknownLaunch;
         const pre = try preM5(a, "", text);
-        return .{ .decl = d, .function = fun, .here = if (tensor) try std.mem.replaceOwned(u8, a, text, "#include \"../nax.h\"", sources.nax) else pre, .pre_m5 = pre };
+        return .{ .decl = d, .function = fun, .here = if (tensor) try tf.frags.source(device, a, text) else pre, .pre_m5 = pre };
     }
     return .{ .decl = d, .function = fun, .here = sources.nemotron_glue, .pre_m5 = sources.nemotron_glue };
 }
@@ -166,13 +202,17 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
     }
     if (std.mem.indexOf(u8, d.name, " prompt ") != null) {
         const pre = try preM5(a, "", paged.prefill);
-        return .{ .decl = d, .function = fun, .here = if (tensor) try std.mem.replaceOwned(u8, a, paged.prefill, "#include \"../nax.h\"", sources.nax) else pre, .pre_m5 = pre };
+        return .{ .decl = d, .function = fun, .here = if (tensor) try tf.frags.source(device, a, paged.prefill) else pre, .pre_m5 = pre };
     }
     return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
+    if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
+        const full = std.mem.indexOf(u8, l.here, tf.frags.precision.define) != null;
+        std.debug.print("PRECISION limits {s}: shared P x V library {s}\n", .{ l.decl.name, if (full) "fp32" else "legacy" });
+    }
     const p = rig_.pipeline(device, l.here, l.function) catch |err| {
         std.debug.print("{s} {s}: no pipeline on this GPU ({t})\n", .{ if (control) "RED " else "FAIL", l.decl.name, err });
         return 1;

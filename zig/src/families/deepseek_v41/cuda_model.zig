@@ -51,6 +51,8 @@ pub const Options = struct {
     own_prefill: bool = true,
     /// the backbone layers to load and run (null: all; a gate runs a reference's prefix, e.g. 0-24)
     layers: ?[]const u32 = null,
+    /// the server's --prompt-cache-gib on rank 0: every rank's resident limit (session_budget.zig)
+    prompt_cache_gib: ?f64 = null,
 };
 
 /// TF_DSV41_LAYERS=<lo>-<hi>: load and run only that backbone prefix (a reference prefix's model; null: every layer)
@@ -93,6 +95,7 @@ pub const Model = struct {
     stream: cuda.Stream,
     kernels: dk.Kernels,
     session: tp.Session,
+    benchmark_group: ?[]const u8,
     cfg: Config,
     pack: Pack,
     pl: plan.Plan,
@@ -111,6 +114,8 @@ pub const Model = struct {
     slots: u32 = 1,
     /// TF_DSV41_ARENA's sub-allocator (dev_arena.zig), for the process's lifetime
     dev_arena: ?*@import("dev_arena.zig").Installed = null,
+    supervisor: ?@import("model_supervisor.zig").Supervisor = null,
+    progress: @import("round_progress.zig").Progress,
     /// the boot check's figures before the pool, for its measured end (kv_state.afterBoot)
     boot_check: ?kvs.Boot = null,
     slot_set: ?*slots_mod.SlotSet = null,
@@ -145,7 +150,10 @@ pub const Model = struct {
         m.retained_next = null;
         m.retained = false;
         m.boot_complete = false;
+        m.benchmark_group = null;
         m.io = io;
+        m.progress = .{ .io = io };
+        const stall_ns = try @import("round_progress.zig").timeoutNs(if (std.c.getenv("TF_DSV41_STALL_EXIT_S")) |v| std.mem.span(v) else null);
         // gpa.create applies no field defaults: optional parts start null so close() never frees garbage
         m.pass = null;
         m.l2pf = null;
@@ -156,6 +164,7 @@ pub const Model = struct {
         m.slot_pass = null;
         m.sampler = null;
         m.dev_arena = null;
+        m.supervisor = null;
         m.arena = std.heap.ArenaAllocator.init(gpa);
         errdefer if (!keep_owner) m.arena.deinit();
         const a = m.arena.allocator();
@@ -174,17 +183,34 @@ pub const Model = struct {
         else
             &.{};
         try m.session.open(&m.driver, m.tcfg, image);
+        var inventory_group: cuda.tp_group.Group = .{ .lib = m.session.lib, .comm = m.session.nccl.comm, .rank = m.session.nccl.me, .world = m.session.nccl.size };
+        m.benchmark_group = try @import("core").benchmark_group.cuda(a, io, &m.ctx, &inventory_group, m.stream);
+        m.supervisor = .{ .io = io, .ctx = m, .healthy = @import("model_health.zig").context, .fail = @import("model_health.zig").failed, .progress = if (stall_ns > 0) &m.progress else null, .stall_ns = stall_ns };
+        m.supervisor.?.start() catch |err| {
+            m.session.bootFailed(err);
+            return err;
+        };
+        errdefer {
+            m.supervisor.?.stop();
+            m.supervisor = null;
+        }
         // TF_DSV41_ARENA: every device buffer from here on (weights, forms, roles, scratch) carved from large chunks
         m.dev_arena = try @import("dev_arena.zig").install(gpa, &m.ctx, m.tcfg.rank);
         // a failure from here to serving: every rank down with its reason, the session closed before `m` is freed
         m.boot(gpa, io, pack_dir, assets, o) catch |err| {
-            if (m.ctx.synchronize()) |_| {
-                m.session.bootFailed(err);
-            } else |_| {}
+            m.bootAborted(err);
             return err;
         };
+        @import("model_health.zig").watch(m);
         m.boot_complete = true;
         return m;
+    }
+
+    /// A boot that failed under the supervisor: it reports a lost context, then joins before the session closes.
+    pub fn bootAborted(m: *Model, err: anyerror) void {
+        _ = m.supervisor.?.check();
+        m.supervisor.?.stop();
+        if (m.ctx.synchronize()) |_| m.session.bootFailed(err) else |_| {}
     }
 
     /// `open` from the session up: the pack, weights, forward, buffers, assets and serving parts of this rank.
@@ -195,7 +221,18 @@ pub const Model = struct {
         tr.step("start", cuda.usage(false));
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
+        var load_cache = @import("core").checkpoint.cache.Load.begin(io, world > 1);
+        defer load_cache.deinit();
+        try @import("session_protocol.zig").preflight(&m.session.plan);
+        var so = try sg.optionsFromEnv();
+        // rank 0's --prompt-cache-gib (or variable) on every rank: one resident limit, the same evictions
+        so.resident_bytes = try @import("session_budget.zig").agree(&m.session.plan, so.resident_bytes, o.prompt_cache_gib);
         m.cfg = try Config.read(gpa, io, pack_dir);
+        // the release's FP8 blocks parse (Metal runs them); refused here, before any pack or launch on CUDA
+        if (@import("cuda_format.zig").problem(&m.cfg)) |text| {
+            if (!quiet) std.log.err("{s}", .{text});
+            return error.UnsupportedCheckpoint;
+        }
         if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);
         const backbone = if (o.layers) |ls| try a.dupe(u32, ls) else blk: {
@@ -214,7 +251,10 @@ pub const Model = struct {
         var t_build: i96 = 0;
         var t_upload: i96 = 0;
         const t_load = std.Io.Clock.awake.now(io).toNanoseconds();
+        const readers = try @import("core").checkpoint_read_ahead.optInReaders();
         for (m.pl.layers, 0..) |*l, i| {
+            var reading: @import("core").checkpoint_read_ahead.Scope = .{};
+            defer reading.deinit();
             var b: named.Builder = .{ .gpa = gpa, .io = io, .pack = &m.pack };
             defer b.deinit();
             var tag_buf: [16]u8 = undefined;
@@ -224,7 +264,9 @@ pub const Model = struct {
             defer schema.deinit();
             if (cache != null) try schema.layer(l, m.cfg.o_groups, m.tcfg.rank, world);
             if (cache == null or !try cache.?.get(&b, tag, schema.out.items)) {
+                reading = try @import("cuda_load_prefetch.zig").begin(gpa, io, &m.pack, &m.cfg, l.index, readers);
                 try b.layer(l, m.cfg.o_groups, m.tcfg.rank, world);
+                _ = try reading.check();
                 if (cache) |*c| c.put(&b, tag) catch |e| if (!quiet) std.log.warn("dsv41 prepared: {s} not written ({t})", .{ tag, e });
             }
             const t1 = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -257,6 +299,7 @@ pub const Model = struct {
             t_build += t1 - t0;
             t_upload += std.Io.Clock.awake.now(io).toNanoseconds() - t1;
         }
+        @import("core").checkpoint.cache.files(io, m.pack.dir, m.pack.files.items);
         const ms = struct {
             fn of(ns: i96) f64 {
                 return @as(f64, @floatFromInt(ns)) / 1e6;
@@ -357,7 +400,6 @@ pub const Model = struct {
         m.f.engram = &m.host;
         if (world > 1) m.f.link = &m.session.plan;
         m.f.on_stop = .{ .ctx = &m.session, .run = announceStop };
-        const so = try sg.optionsFromEnv();
         const several_ok = m.slots == 1 or so.several;
         if (so.enabled and m.f.kv != null and !several_ok)
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: off with {d} live slots (TF_DSV41_SESSION_SLOTS=1 opens them over every slot; the session-slots check has not run on hardware)", .{m.slots});
@@ -403,7 +445,12 @@ pub const Model = struct {
         if (m.dev_arena) |x| x.endBoot(m.tcfg.rank); // TF_DSV41_ARENA=pack: boot's buffers in, the rest as before
         // the boot check on the boot's own figures: what it took, the dip below idle, the hard floor
         if (m.boot_check) |b| try kvs.afterBoot(b);
-        try comm.barrier();
+        const Ready = struct {
+            fn wait(c: @TypeOf(comm)) !void {
+                try c.barrier();
+            }
+        };
+        try load_cache.finishAfter(.{comm}, Ready.wait);
     }
 
     /// Several live slots: the stacked roles' bases, the row runner, the followers' row ops; one-slot graphs off.
@@ -483,6 +530,8 @@ pub const Model = struct {
         m.aot.deinit();
         m.pl.deinit();
         m.pack.deinit();
+        if (m.supervisor) |*s| s.stop();
+        m.supervisor = null;
         m.session.close();
         m.kernels.deinit();
         m.stream.deinit();

@@ -16,13 +16,7 @@ struct Pre {
 };
 
 // mma from zero (C = 0): the same sums as zeroed accumulators, no register moves.
-__device__ __forceinline__ void mma_z(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0,
-                                      uint32_t b1) {
-  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
-      "{%10, %10, %10, %10};\n"
-      : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(0.f));
-}
+__device__ __forceinline__ void mma_z(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) { qmm_frag::mma0(d, a0, a1, a2, a3, b0, b1); }
 
 // expert_rows' group_sum from the whole row: lane t's 8 inputs in order, the quad's (s0 + s1) + (s2 + s3).
 __device__ __forceinline__ float row_gsum(const uint4 (&v)[4]) {

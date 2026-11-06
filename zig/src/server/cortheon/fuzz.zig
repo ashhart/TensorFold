@@ -1,4 +1,4 @@
-//! Cortheon's readers of untrusted bytes under a fuzz harness: pages, links, search results and the instruction filter.
+//! Cortheon's readers of untrusted bytes under a fuzz harness: pages, links, search results, the filter, own words.
 const std = @import("std");
 const builtin = @import("builtin");
 const html = @import("html.zig");
@@ -7,6 +7,7 @@ const quarantine = @import("quarantine.zig");
 const live = @import("live.zig");
 const seen = @import("seen.zig");
 const web = @import("web.zig");
+const program = @import("program.zig");
 const Budget = @import("budget.zig").Budget;
 const linear_time = @import("../linear_time.zig");
 const Allocator = std.mem.Allocator;
@@ -63,6 +64,10 @@ const seeds = [_][]const u8{
     "<<<<a <a href=\"x <p>Tom & Jerry && x &y; z &amp; w &#33 & &#xFFFFFFFF; &#0; <!-- open",
     // #831: a title never closed, its multibyte words running across the 200-byte cut
     "<html><head><title>" ++ repeat("Ünïcödé wörds ", 24),
+    // a harness's context blocks around the user's words, one nested, one left open
+    "<memories>\nCurrent time: 13:52 UTC\n</memories>\n<ctx id=1>x <ctx>y</ctx> z</ctx> What is new in Zig? <b>bold</b> a<b",
+    // names one byte either side of the longest whose closer counts
+    "<" ++ repeat("n", 61) ++ ">x</" ++ repeat("n", 61) ++ "> <" ++ repeat("m", 62) ++ ">y</" ++ repeat("m", 62) ++ ">z",
 };
 
 /// Pieces of markup and text the mutator inserts: what truncation, hostile pages and the filter's patterns are made of.
@@ -231,6 +236,31 @@ fn check(a: Allocator, input: []const u8) !void {
     }
     _ = seen.registry(input);
     _ = try seen.normal(a, input);
+    try within(std.mem.eql(u8, try program.ownWords(a, input), try ownWordsByRescan(a, input)), "own words", input);
+}
+
+/// `program.ownWords` as it was, each opener searching the rest for its closer: the reference its output must equal.
+fn ownWordsByRescan(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '<' and i + 1 < text.len and std.ascii.isAlphabetic(text[i + 1])) {
+            var j = i + 1;
+            while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '-' or text[j] == '_')) j += 1;
+            if (j < text.len and (text[j] == '>' or text[j] == ' ')) {
+                var close_buf: [64]u8 = undefined;
+                if (std.fmt.bufPrint(&close_buf, "</{s}>", .{text[i + 1 .. j]})) |closer| {
+                    if (std.mem.indexOfPos(u8, text, j, closer)) |end| {
+                        i = end + closer.len;
+                        continue;
+                    }
+                } else |_| {}
+            }
+        }
+        try out.append(a, text[i]);
+        i += 1;
+    }
+    return std.mem.trim(u8, out.items, " \t\r\n");
 }
 
 fn checkOwned(input: []const u8) !void {
@@ -302,6 +332,9 @@ fn readClean(a: Allocator, in: []const u8) anyerror!void {
 fn readSearch(a: Allocator, in: []const u8) anyerror!void {
     for (parsers) |parse| _ = try parse(a, in, 6);
 }
+fn readOwn(a: Allocator, in: []const u8) anyerror!void {
+    _ = try program.ownWords(a, in);
+}
 fn readPage(a: Allocator, in: []const u8) anyerror!void {
     const response: web.Response = .{
         .url = "https://a.org/",
@@ -320,6 +353,7 @@ const readers = [_]Reader{
     .{ .name = "toText", .run = readText },     .{ .name = "hrefs", .run = readLinks },
     .{ .name = "excerpt", .run = readExcerpt }, .{ .name = "clean", .run = readClean },
     .{ .name = "search", .run = readSearch },   .{ .name = "read", .run = readPage },
+    .{ .name = "ownWords", .run = readOwn },
 };
 
 /// `head` then `unit` repeated to `size` bytes; the caller frees it.
@@ -362,10 +396,10 @@ test "cortheon fuzz: every reader takes linear time on long inputs" {
         const pages = [2][]u8{ try longPage(shape[0], shape[1], small), try longPage(shape[0], shape[1], 8 * small) };
         defer for (pages) |p| std.testing.allocator.free(p);
         for (readers) |r| {
-            const ns = try linear_time.fastest(3, &Timed{ .r = r, .pages = .{ pages[0], pages[1] } }, Timed.run);
-            if (ns[1] <= 20 * ms or ns[1] <= 24 * ns[0]) continue; // 8x the bytes: near 8x the time, not 64x
+            const f = try linear_time.fastest(3, &Timed{ .r = r, .pages = .{ pages[0], pages[1] } }, Timed.run);
+            if (f.ns[1] <= 20 * ms or f.work[1] <= 24 * f.work[0]) continue; // 8x the bytes: near 8x the time, not 64x
             const what = "\nfuzz: {s} took {d} ms on {d} KiB and {d} ms on {d} KiB of \"";
-            std.debug.print(what, .{ r.name, ns[0] / ms, small >> 10, ns[1] / ms, (8 * small) >> 10 });
+            std.debug.print(what, .{ r.name, f.ns[0] / ms, small >> 10, f.ns[1] / ms, (8 * small) >> 10 });
             show(shape[0]);
             show(shape[1][0..@min(shape[1].len, 120)]);
             std.debug.print("\" repeated\n", .{});

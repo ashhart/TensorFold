@@ -219,7 +219,7 @@ fn find(rt: *Rt, s: []const u8, sub: []const u8, start: ?Value, end: ?Value, las
 
 fn affix(rt: *Rt, s: []const u8, arg: Value, start: ?Value, end: ?Value, suffix: bool) Error!bool {
     const w = try window(rt, s, start, end);
-    const opts: []const Value = if (arg == .list and arg.list.seq == .tuple) arg.list.items else &.{arg};
+    const opts: []const Value = if (arg == .list and arg.list.seq == .tuple) try arg.list.values(rt.a) else &.{arg};
     for (opts) |o| {
         const p = try str(rt, o, if (suffix) "endswith arg" else "startswith arg");
         const h = hay(s, w, uni.count(p)) orelse continue;
@@ -340,12 +340,12 @@ fn seqMethod(rt: *Rt, l: *const v.List, self: Value, name: []const u8, pos: []co
     if (std.mem.eql(u8, name, "count")) {
         const b = try bind(rt, "count", &.{"value"}, 1, pos, kw);
         var n: i64 = 0;
-        for (l.items) |x| n += @intFromBool(v.eql(x, b[0].?));
+        for (try l.values(rt.a)) |x| n += @intFromBool(v.eql(x, b[0].?));
         return .{ .int = n };
     }
     if (std.mem.eql(u8, name, "index")) {
         const b = try bind(rt, "index", &.{"value"}, 1, pos, kw);
-        for (l.items, 0..) |x, i| if (v.eql(x, b[0].?)) return .{ .int = @intCast(i) };
+        for (try l.values(rt.a), 0..) |x, i| if (v.eql(x, b[0].?)) return .{ .int = @intCast(i) };
         return rt.fail("{s} is not in list", .{try v.repr(rt, b[0].?)});
     }
     _ = try bind(rt, "copy", &.{}, 0, pos, kw);

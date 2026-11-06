@@ -68,3 +68,96 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_best(const __nv_bfloat
         }
     }
 }
+
+namespace fn_mtp {
+// A bf16 value's order as an unsigned key (larger value, larger key); -0 as +0, so equal values tie as drawRow's do.
+static __device__ __forceinline__ unsigned int order_key(unsigned short u) {
+    if (u == 0x8000u) u = 0;
+    return (u & 0x8000u) ? (~u & 0xFFFFu) : (u | 0x8000u);
+}
+}  // namespace fn_mtp
+
+// A row's K best of its first V values as drawRow ranks them (ties: lowest columns): those above the K-th, then ties.
+extern "C" __global__ void __launch_bounds__(1024) fn_row_topk(const __nv_bfloat16* __restrict__ L, int V, long long ld,
+                                                               int K, unsigned short* __restrict__ out_v,
+                                                               int* __restrict__ out_c) {
+    using namespace fn_mtp;
+    const int r = blockIdx.x, t = threadIdx.x, nt = blockDim.x;
+    const unsigned short* row = reinterpret_cast<const unsigned short*>(L + static_cast<long long>(r) * ld);
+    unsigned short* ov = out_v + static_cast<long long>(r) * K;
+    int* oc = out_c + static_cast<long long>(r) * K;
+    __shared__ unsigned int hist[256];
+    __shared__ unsigned int scan[1024], scan_eq[1024];
+    __shared__ unsigned int pick_hi, pick_lo, above;
+    for (int i = t; i < 256; i += nt) hist[i] = 0;
+    __syncthreads();
+    for (int i = t; i < V; i += nt) atomicAdd(&hist[order_key(row[i]) >> 8], 1u);
+    __syncthreads();
+    if (t == 0) {
+        unsigned int cum = 0;
+        int b = 255;
+        for (; b > 0; --b) {
+            if (cum + hist[b] >= static_cast<unsigned int>(K)) break;
+            cum += hist[b];
+        }
+        pick_hi = b;
+        above = cum;
+    }
+    __syncthreads();
+    const unsigned int hi = pick_hi;
+    for (int i = t; i < 256; i += nt) hist[i] = 0;
+    __syncthreads();
+    for (int i = t; i < V; i += nt) {
+        const unsigned int k = order_key(row[i]);
+        if ((k >> 8) == hi) atomicAdd(&hist[k & 255u], 1u);
+    }
+    __syncthreads();
+    if (t == 0) {
+        unsigned int cum = above;
+        int b = 255;
+        for (; b > 0; --b) {
+            if (cum + hist[b] >= static_cast<unsigned int>(K)) break;
+            cum += hist[b];
+        }
+        pick_lo = b;
+        above = cum;
+    }
+    __syncthreads();
+    const unsigned int kth = (hi << 8) | pick_lo, high = above, need = K - high;
+    // each thread's contiguous columns: the values above the K-th and those equal to it, counted, scanned in order
+    const int per = (V + nt - 1) / nt, lo = t * per, end = min(V, lo + per);
+    unsigned int gt = 0, eq = 0;
+    for (int i = lo; i < end; ++i) {
+        const unsigned int k = order_key(row[i]);
+        gt += k > kth;
+        eq += k == kth;
+    }
+    scan[t] = gt;
+    scan_eq[t] = eq;
+    __syncthreads();
+    if (t == 0) {
+        unsigned int s = 0, q = 0;
+        for (int i = 0; i < nt; ++i) {
+            const unsigned int x = scan[i], y = scan_eq[i];
+            scan[i] = s;
+            scan_eq[i] = q;
+            s += x;
+            q += y;
+        }
+    }
+    __syncthreads();
+    // in column order: the values above the K-th fill the first `high` slots, the first `need` ties the rest
+    unsigned int at = scan[t], rank = scan_eq[t];
+    for (int i = lo; i < end; ++i) {
+        const unsigned int k = order_key(row[i]);
+        if (k > kth) {
+            ov[at] = row[i];
+            oc[at] = i;
+            ++at;
+        } else if (k == kth && rank < need) {
+            ov[high + rank] = row[i];
+            oc[high + rank] = i;
+            ++rank;
+        }
+    }
+}

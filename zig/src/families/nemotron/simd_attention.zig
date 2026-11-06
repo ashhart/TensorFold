@@ -22,13 +22,37 @@ const rewrites = [_][2][]const u8{
     },
 };
 
-/// A generated attention source with its result indexing in the simdgroup-matrix layout; the caller frees it.
-pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
+/// The captured source with pre-M5 result indexing, before optional register-array loop hints.
+pub fn layout(a: std.mem.Allocator, source: []const u8) ![]u8 {
     var text = try a.dupe(u8, source);
     errdefer a.free(text);
     for (rewrites) |r| {
         if (std.mem.count(u8, text, r[0]) != 1) return error.AttentionSource;
         const next = try std.mem.replaceOwned(u8, a, text, r[0], r[1]);
+        a.free(text);
+        text = next;
+    }
+    return text;
+}
+
+/// Existing callers, including paged attention, keep the original layout adaptation.
+pub const rewrite = layout;
+
+/// The measured M3 path; other pre-M5 chips retain their original resource use and layout rewrite.
+pub fn forGeneration(a: std.mem.Allocator, generation: u32, source: []const u8) ![]u8 {
+    return if (generation == 15) unroll(a, source) else layout(a, source);
+}
+
+/// Keep the fixed cooperative-tensor elements in registers; each element keeps its original arithmetic.
+pub fn unroll(a: std.mem.Allocator, source: []const u8) ![]u8 {
+    var text = try layout(a, source);
+    errdefer a.free(text);
+    inline for (.{
+        "  for (int i = 0; i < 64; i++) { Olo[i] = 0.0f; }",
+        "    for (int i = 0; i < 64; i++) { const float f = (i & (D / 4)) ? f1 : f0; Olo[i] *= f; }",
+    }) |loop| {
+        if (std.mem.count(u8, text, loop) != 1) return error.AttentionSource;
+        const next = try std.mem.replaceOwned(u8, a, text, loop, "  #pragma clang loop unroll(full)\n" ++ loop);
         a.free(text);
         text = next;
     }
@@ -118,9 +142,13 @@ test "the rewrite finds every line it changes once in a generated attention kern
     const sources = @import("kernel_sources");
     inline for (sources.nemotron.all) |k| {
         if (comptime std.mem.startsWith(u8, k.key, "attn_partial")) {
-            const text = try rewrite(std.testing.allocator, k.source);
+            const text = try unroll(std.testing.allocator, k.source);
             defer std.testing.allocator.free(text);
             try std.testing.expect(std.mem.indexOf(u8, text, "(i & 4)") == null);
+            try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "#pragma clang loop unroll(full)"));
+            const before = try layout(std.testing.allocator, k.source);
+            defer std.testing.allocator.free(before);
+            try std.testing.expect(std.mem.indexOf(u8, before, "#pragma clang loop unroll(full)") == null);
         }
     }
 }

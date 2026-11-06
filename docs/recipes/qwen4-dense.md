@@ -20,6 +20,9 @@ Qwen4 uses the shared projection and pointwise operators and geometry specializa
 Existing Flash Next factories retain their fixed checkpoint dimensions and their arithmetic.
 The new native adapters use the existing engine API, lane host, prompt cache and verification machinery.
 
+Living Weights currently has a [host QSA backward and CUDA/Metal implementation plan](qwen4-living-weights.md).
+That mathematical check does not enable a Qwen4 learner or qualify a device gradient.
+
 Weights remain as stored: BF16, MLX affine 4/8-bit groups 32/64/128, ModelOpt FP8 or ModelOpt NVFP4.
 Each projection keeps its own recipe, scales and bias metadata.
 Activations stay BF16 and reductions stay FP32.

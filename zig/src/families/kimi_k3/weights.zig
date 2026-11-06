@@ -8,7 +8,18 @@ const Tensor = store.Tensor;
 const Config = config.Config;
 
 pub const Kda = struct { q: Tensor, k: Tensor, v: Tensor, g: Tensor, o: Tensor, fa: Tensor, fb: Tensor, b: Tensor, conv_q: Tensor, conv_k: Tensor, conv_v: Tensor, A_log: Tensor, dt_bias: Tensor, o_norm: Tensor };
-pub const Mla = struct { qa: Tensor, qa_norm: Tensor, qb: Tensor, kva: Tensor, kva_norm: Tensor, kvb: Tensor, g: Tensor, o: Tensor };
+pub const Indexer = struct { q: Tensor, k: Tensor, norm: Tensor, bias: Tensor, weights: Tensor };
+pub const Mla = struct {
+    qa: Tensor,
+    qa_norm: Tensor,
+    qb: Tensor,
+    kva: Tensor,
+    kva_norm: Tensor,
+    kvb: Tensor,
+    g: Tensor,
+    o: Tensor,
+    indexer: ?Indexer = null,
+};
 pub const Dense = struct { gate: Tensor, up: Tensor, down: Tensor };
 pub const Moe = struct { router: Tensor, bias: Tensor, down: Tensor, norm: Tensor, up: Tensor, sh_gate: Tensor, sh_up: Tensor, sh_down: Tensor, table: mtl.Buffer };
 
@@ -67,6 +78,13 @@ pub fn layerSpecs(c: *const Config, i: u32, a: std.mem.Allocator, out: *std.Arra
         try spec(out, a, try n(a, p, "self_attn.kv_b_proj.weight"), .bf16, &.{ heads * (c.nope + c.v_dim), c.kv_lora });
         try spec(out, a, try n(a, p, "self_attn.g_proj.weight"), .bf16, &.{ heads * c.v_dim, H });
         try spec(out, a, try n(a, p, "self_attn.o_proj.weight"), .bf16, &.{ H, heads * c.v_dim });
+        if (c.dsa) |d| {
+            try spec(out, a, try n(a, p, "self_attn.indexer.wq_b.weight"), .bf16, &.{ d.heads * d.dim, c.q_lora });
+            try spec(out, a, try n(a, p, "self_attn.indexer.wk.weight"), .bf16, &.{ d.dim, H });
+            try spec(out, a, try n(a, p, "self_attn.indexer.k_norm.weight"), .bf16, &.{d.dim});
+            try spec(out, a, try n(a, p, "self_attn.indexer.k_norm.bias"), .bf16, &.{d.dim});
+            try spec(out, a, try n(a, p, "self_attn.indexer.weights_proj.weight"), .bf16, &.{ d.heads, H });
+        }
     }
     if (!c.isMoe(i)) {
         for ([_][]const u8{ "gate", "up" }) |w| try spec(out, a, try std.fmt.allocPrint(a, "{s}mlp.{s}_proj.weight", .{ p, w }), .bf16, &.{ c.dense_inter, H });
@@ -127,6 +145,14 @@ pub fn layer(c: *const Config, i: u32, src: store.Source, device: mtl.Device, gp
         var m: Mla = undefined;
         const mf = .{ .{ "qa", "self_attn.q_a_proj.weight" }, .{ "qa_norm", "self_attn.q_a_layernorm.weight" }, .{ "qb", "self_attn.q_b_proj.weight" }, .{ "kva", "self_attn.kv_a_proj_with_mqa.weight" }, .{ "kva_norm", "self_attn.kv_a_layernorm.weight" }, .{ "kvb", "self_attn.kv_b_proj.weight" }, .{ "g", "self_attn.g_proj.weight" }, .{ "o", "self_attn.o_proj.weight" } };
         inline for (mf) |f| @field(m, f[0]) = try fetch(src, sp, f[1]);
+        m.indexer = null;
+        if (c.dsa != null) m.indexer = .{
+            .q = try fetch(src, sp, "self_attn.indexer.wq_b.weight"),
+            .k = try fetch(src, sp, "self_attn.indexer.wk.weight"),
+            .norm = try fetch(src, sp, "self_attn.indexer.k_norm.weight"),
+            .bias = try fetch(src, sp, "self_attn.indexer.k_norm.bias"),
+            .weights = try fetch(src, sp, "self_attn.indexer.weights_proj.weight"),
+        };
         l.attn = .{ .mla = m };
     }
     if (!c.isMoe(i)) {
@@ -137,6 +163,7 @@ pub fn layer(c: *const Config, i: u32, src: store.Source, device: mtl.Device, gp
     const ef = .{ .{ "router", "moe.gate.weight" }, .{ "bias", "moe.gate.e_score_correction_bias" }, .{ "down", "moe.routed_expert_down_proj.weight" }, .{ "norm", "moe.routed_expert_norm.weight" }, .{ "up", "moe.routed_expert_up_proj.weight" }, .{ "sh_gate", "shared_experts.gate_proj.weight" }, .{ "sh_up", "shared_experts.up_proj.weight" }, .{ "sh_down", "shared_experts.down_proj.weight" } };
     inline for (ef) |f| @field(m, f[0]) = try fetch(src, sp, f[1]);
     m.table = try device.buffer(@as(usize, c.experts) * @sizeOf(kernels.ExpertPtrs), mtl.ResourceOptions.shared);
+    errdefer m.table.deinit();
     const table = m.table.slice(kernels.ExpertPtrs, c.experts);
     @memset(table, std.mem.zeroes(kernels.ExpertPtrs));
     for (first..last) |e| {
@@ -171,4 +198,47 @@ pub fn layerBytes(c: *const Config, i: u32, a: std.mem.Allocator) !struct { dens
     var expert: u64 = 0;
     for (specs.items) |s| expert += @as(u64, s.shape[0]) * s.shape[1];
     return .{ .dense = dense, .expert = expert };
+}
+
+test "K3.1 adds exactly five BF16 indexer tensors on each of its 24 MLA layers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const k31 = try config.parse(a, @embedFile("fixtures/k31-config.json"));
+    const k3 = Config{};
+    var count: usize = 0;
+    for (0..k31.layers) |li| {
+        var old: std.ArrayList(Spec) = .empty;
+        var new: std.ArrayList(Spec) = .empty;
+        try layerSpecs(&k3, @intCast(li), a, &old);
+        try layerSpecs(&k31, @intCast(li), a, &new);
+        var j: usize = 0;
+        for (new.items) |s| {
+            if (std.mem.indexOf(u8, s.name, ".indexer.") != null) {
+                count += 1;
+                try std.testing.expectEqual(config.Kind.mla, k31.kind(@intCast(li)));
+                try std.testing.expectEqual(store.DType.bf16, s.dtype);
+                const suffix = struct {
+                    fn ends(nm: []const u8, tail: []const u8) bool {
+                        return std.mem.endsWith(u8, nm, tail);
+                    }
+                }.ends;
+                if (suffix(s.name, "wq_b.weight")) {
+                    try std.testing.expectEqualSlices(u32, &.{ 4096, 1536 }, s.shape[0..s.rank]);
+                } else if (suffix(s.name, "wk.weight")) {
+                    try std.testing.expectEqualSlices(u32, &.{ 128, 7168 }, s.shape[0..s.rank]);
+                } else if (suffix(s.name, "weights_proj.weight")) {
+                    try std.testing.expectEqualSlices(u32, &.{ 32, 7168 }, s.shape[0..s.rank]);
+                } else try std.testing.expectEqualSlices(u32, &.{128}, s.shape[0..s.rank]);
+            } else {
+                const want = old.items[j];
+                try std.testing.expectEqualStrings(want.name, s.name);
+                try std.testing.expectEqual(want.dtype, s.dtype);
+                try std.testing.expectEqualSlices(u32, want.shape[0..want.rank], s.shape[0..s.rank]);
+                j += 1;
+            }
+        }
+        try std.testing.expectEqual(old.items.len, j);
+    }
+    try std.testing.expectEqual(@as(usize, 120), count);
 }

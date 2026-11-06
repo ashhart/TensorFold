@@ -279,12 +279,14 @@ test "an https exchange is never sent through a proxy that refuses to tunnel" {
     });
     defer f.stop();
     var proxy: std.http.Client.Proxy = .{ .protocol = .plain, .host = .{ .bytes = "127.0.0.1" }, .authorization = null, .port = f.port, .supports_connect = true };
-    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .https_proxy = &proxy };
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .https_proxy = &proxy, .now = std.Io.Clock.real.now(std.testing.io) };
     client.connection_pool.free_size = 0;
     defer client.deinit();
     const got = stream.fetch(a, std.testing.io, &client, .{ .url = "https://receiver.example.test/api/me", .token = "synthetic-contributor-token-0001", .limit = 64, .timeout_s = 5 });
     try std.testing.expect(got.failed == .network);
-    for (0..f.count()) |i| try std.testing.expectEqualStrings("CONNECT", f.request(i).method);
+    try std.testing.expectEqual(@as(usize, 1), f.count());
+    try std.testing.expectEqualStrings("CONNECT", f.request(0).method);
+    try std.testing.expectEqualStrings("receiver.example.test:443", f.request(0).path);
 }
 
 test "an https exchange is never sent in clear text through a tunnel the proxy opened" {
@@ -295,7 +297,7 @@ test "an https exchange is never sent in clear text through a tunnel the proxy o
     const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "CONNECT", .path = "receiver.example.test:443", .replies = &.{&opened}, .tunnel = true }});
     defer f.stop();
     var proxy: std.http.Client.Proxy = .{ .protocol = .plain, .host = .{ .bytes = "127.0.0.1" }, .authorization = null, .port = f.port, .supports_connect = true };
-    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .https_proxy = &proxy };
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .https_proxy = &proxy, .now = std.Io.Clock.real.now(std.testing.io) };
     client.connection_pool.free_size = 0;
     defer client.deinit();
     const got = stream.fetch(a, std.testing.io, &client, .{ .url = "https://receiver.example.test/api/me", .token = "synthetic-contributor-token-0001", .limit = 64, .timeout_s = 1 });

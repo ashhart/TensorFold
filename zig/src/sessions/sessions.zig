@@ -15,10 +15,12 @@ pub const format = @import("format.zig");
 pub const disk = @import("disk.zig");
 pub const Disk = disk.Disk;
 pub const jobs = @import("jobs.zig");
+pub const restore = @import("restore.zig");
 pub const store = @import("store.zig");
 pub const Store = store.Store;
 
 test {
+    _ = @import("restore.zig");
     _ = @import("prefix_fail_test.zig");
     _ = @import("store_residency_linux_test.zig");
     _ = @import("store_residency_test.zig");

@@ -8,7 +8,7 @@ pub fn halt(h: *LaneHost, reason: []const u8) void {
     h.closing = true;
     h.halt_reason = reason;
     h.wake.broadcast(h.io);
-    h.mutex.unlock(h.io);
+    h.unlock();
     if (h.thread) |t| t.join();
     h.thread = null;
 }

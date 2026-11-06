@@ -95,6 +95,7 @@ pub fn run(gpa: std.mem.Allocator, d: *Mtp, tap: u64, ids: []const u32) !bool {
     ok = report("six siblings a depth, tree rows vs each lane's path chained", tree, chain, &internal) and ok;
     // batched shared rounds against one stream at a time, on the same tap ring
     ok = try @import("cuda_mtp_batch_check.zig").run(gpa, d, tap, ids) and ok;
+    ok = try @import("cuda_mtp_yarn_check.zig").run(gpa, d, tap, ids) and ok;
     return ok;
 }
 

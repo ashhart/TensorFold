@@ -87,12 +87,14 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const libc_mem = b.addSystemCommand(&.{ "sh", "-c", "nm -m \"$0\" | grep -q 'external _memcpy (from libSystem)' || { echo 'tensorfold-native links its own memcpy: find the typed std.json int parse or 128-bit float conversion that pulled in compiler-rt'; exit 1; }" });
     libc_mem.addArtifactArg(exe);
     test_step.?.dependOn(&libc_mem.step);
+    // core/root.zig, as cuda.zig gives the server tests: the engine's tensorfold.zig shares files with qwen_draw
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "tokenizer", .module = tokenizer }} });
     const server_tests = b.createModule(.{
         .root_source_file = b.path("zig/src/server/root.zig"),
         .target = target,
         .optimize = .Debug, // the server's unit tests run with safety checks, as zig_test.sh builds them
         .link_libc = true,
-        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = living } },
+        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = living }, .{ .name = "core", .module = core } },
     });
     // the required-tools tests' 27B mask policy and lane fake, on the engine API's own lanes module
     if (api.import_table.get("lanes")) |lanes_mod| {
@@ -101,12 +103,26 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         server_tests.addImport("qwen27_masks", q27.masks);
     }
     const server_json = server_build.addTo(b, server_tests, target, .Debug);
+    server_build.testImports(b, server_tests, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
+    const kimi_text = b.addExecutable(.{ .name = "tf-k3-text-golden", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/kimi_golden_main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "json", .module = server_json }, .{ .name = "tokenizer", .module = tokenizer } },
+    }) });
+    b.step("tf-k3-text-golden", "Kimi release prompt token ids against an explicitly supplied local tokenizer").dependOn(&b.addInstallArtifact(kimi_text, .{}).step);
+    const kimi_host = b.step("test-kimi-serving-host", "Kimi native text, HTTP and resident budget refusals on the host");
+    for ([_]*std.Build.Module{ server_tests, engines }) |module|
+        kimi_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module, .filters = &.{"Kimi"} })).step);
+
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_json })).step);
-    @import("cortheon_fuzz.zig").add(b, target, api, tokenizer, template);
+    @import("cortheon_fuzz.zig").add(b, target, api, tokenizer, template, core);
     // the parse half's tests, as their own test binary (zig/src/server/tool_parse_test.zig)
     const tool_parse_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } }) });
     _ = server_build.addTo(b, tool_parse_tests.root_module, target, .Debug);
+    server_build.testImports(b, tool_parse_tests.root_module, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(tool_parse_tests).step);
     // the chat-template engine's tests (zig/src/core/template/tests.zig), which no other test binary reaches
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/tests.zig"), .target = target, .optimize = .Debug, .link_libc = true }) })).step);
@@ -116,6 +132,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     golden_build.step(b, target, server_tests, api, tokenizer, template, engines);
     engines.addImport("lanes", api.import_table.get("lanes").?);
     b.step("test-draft-metal-host", "Metal draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines, .filters = &.{"draft sources:"} })).step);
+    b.step("test-drafter-skip-metal-host", "Counted shared draft skips without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"zero grant:"} })).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
@@ -166,6 +183,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
     });
+    engines.addImport("living", mods.living);
     @import("drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
     @import("drama3_metal.zig").targets(b, target, optimize, metal, metal_std, test_step);
 
@@ -190,21 +208,13 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     // Kimi K3: the family module, its metallib, and its GPU check and benchmark programs.
     const kimi_lib = kimiMetallib(b, &mlx_flags);
     b.getInstallStep().dependOn(&b.addInstallFile(kimi_lib, "lib/kimi.metallib").step);
-    const kimi = b.createModule(.{
-        .root_source_file = b.path("zig/src/families/kimi_k3/kimi_k3.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = b.createModule(.{
-            .root_source_file = b.path("zig/src/families/kimi_k3/core_safetensors.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "core", .module = mods.engine }},
-        }) } },
-    });
+    const kimi = kimiModule(b, target, optimize, metal, mods.engine, mods.lanes);
     const kimi_bytes = embedded(b, kimi_lib, "kimi.metallib");
+    engines.addImport("kimi_k3", kimi);
+    engines.addImport("kimi_metallib", kimi_bytes);
     const kimi_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
         .{ .name = "tf-k3-check", .path = "zig/tests/kimi_k3/check.zig", .about = "Kimi K3 kernels and layers on synthetic weights at real shapes" },
+        .{ .name = "tf-k3-serve-check", .path = "zig/tests/kimi_k3/serve.zig", .about = "Kimi native lane adapter on a cut-down synthetic Metal graph" },
         .{ .name = "tf-k3-bench", .path = "zig/tests/kimi_k3/bench.zig", .about = "Kimi K3 kernel bandwidth" },
     };
     for (kimi_programs) |p| {
@@ -213,7 +223,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes } },
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes }, .{ .name = "lanes", .module = mods.lanes } },
         });
         const exe = b.addExecutable(.{ .name = p.name, .root_module = mod });
         b.installArtifact(exe);
@@ -316,7 +326,9 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-glm-video", .path = "zig/tests/glm_video.zig", .about = "GLM-5.3-Flash's video preparation on a clip (libtfvideo), written for tools/zig/glm_video_fixtures.py" },
         .{ .name = "tf-qwen-vision", .path = "zig/tests/qwen_vision.zig", .about = "The Qwen-VL tower on picture files: patches, grids and merged rows written for a float32 reference" },
         .{ .name = "tf-qwen-image", .path = "zig/tests/qwen_image.zig", .about = "Qwen-Image-2.1's transformer on a reference case: each step compared, then the schedule timed" },
-        .{ .name = "tf-moss-image", .path = "zig/tests/moss_image.zig", .about = "MOSS-Image's transformer on a reference case: each step's two branches compared, then the guided schedule timed" },
+        .{ .name = "tf-moss-image", .path = "zig/tests/moss_image.zig", .about = "MOSS-Image on a reference case: each step's two branches compared, then the guided schedule timed and decoded" },
+        .{ .name = "tf-moss-image-encoder", .path = "zig/tests/moss_image_encoder.zig", .about = "MOSS-Image's prompt encoder on a reference case: the ids checked, each step gated against float32, then timed" },
+        .{ .name = "tf-moss-image-decoder", .path = "zig/tests/moss_image_decoder.zig", .about = "MOSS-Image's image decoder on latents, gated against float64 beside torch float32, then timed" },
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
         .{ .name = "tf-mm-bench", .path = "zig/tests/mm_bench.zig", .about = "Prompt matmul kernels from .metal files: chained speed at one shape, bits against the first, error against fp64" },
@@ -329,15 +341,20 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-gemma4-bench", .path = "zig/tests/gemma4/bench.zig", .about = "Gemma 4 dense step costs: projections alone by rows against whole forwards" },
         .{ .name = "tf-gemma4-no-tensor", .path = "zig/tests/gemma4/no_tensor.zig", .about = "Gemma 4's Metal kernels on a Mac without tensor units: what builds, and the row path's bits" },
         .{ .name = "tf-spark-run", .path = "zig/tests/spark25/run.zig", .about = "Spark2.5 on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
+        .{ .name = "tf-minimax-run", .path = "zig/tests/minimax_m3/run.zig", .about = "MiniMax-M3.1-Flash greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
+        .{ .name = "tf-minimax-vision", .path = "zig/tests/minimax_m3/vision.zig", .about = "MiniMax-M3.1-Flash's image tower alone: an image's patches and text rows, for tools/vision_ref.py's check" },
+        .{ .name = "tf-llama-run", .path = "zig/tests/llama/run.zig", .about = "Llama on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
     };
+    // the tokenizer for the programs that tokenize prompts themselves (the engine module has none)
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     for (engine_programs) |p| {
         const mod = b.createModule(.{
             .root_source_file = b.path(p.path),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "core", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "native_engines", .module = engines }, .{ .name = "engine_api", .module = api }, exlr8_build.cliImport(b, target, optimize, engine) },
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "core", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "native_engines", .module = engines }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, exlr8_build.cliImport(b, target, optimize, engine) },
         });
         if (p.c_source) |file| {
             mod.addCSourceFile(.{ .file = b.path(file), .flags = &.{"-std=c11"} });
@@ -514,6 +531,26 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     m.metal.addSystemIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ sdk, "usr/include" })));
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = m.lanes }} });
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
+    engines.addImport("living", m.living);
     @import("drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b));
+    engines.addImport("kimi_k3", kimiModule(b, target, .fast, m.metal, m.engine, m.lanes));
+    engines.addImport("kimi_metallib", embedded(b, kimiMetallib(b, &flags), "kimi.metallib"));
     return nativeServer(b, target, .fast, m.metal, m.engine, m.living, api, engines, build_options, null);
+}
+
+pub fn kimiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
+    const kimi = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/kimi_k3/kimi_k3.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = b.createModule(.{
+            .root_source_file = b.path("zig/src/families/kimi_k3/core_safetensors.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "core", .module = engine }},
+        }) } },
+    });
+    kimi.addImport("lanes", lanes);
+    return kimi;
 }

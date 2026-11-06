@@ -6,8 +6,9 @@ const vision_prompt = @import("cuda_vision_prompt.zig");
 const reuse = @import("cuda_reuse.zig");
 
 /// Where a prompt pass from `at` cuts its chunk: max_rows rows on, or the request's next chunk start before that.
-fn nextCut(len: usize, chunks: []const u32, at: usize) usize {
-    var end: usize = @min(len, at + E.max_rows);
+fn nextCut(len: usize, chunks: []const u32, at: usize, max_rows: u32) usize {
+    const bound = if (max_rows > 0) @min(E.max_rows, max_rows) else E.max_rows;
+    var end: usize = @min(len, at + bound);
     for (chunks) |boundary| if (boundary > at) {
         end = @min(end, boundary);
         break;
@@ -18,7 +19,7 @@ fn nextCut(len: usize, chunks: []const u32, at: usize) usize {
 /// Whether a cold pass over `len` rows (from 0) cuts a chunk at `pos`.
 fn coldCut(len: usize, chunks: []const u32, pos: usize) bool {
     var at: usize = 0;
-    while (at < pos and at < len) at = nextCut(len, chunks, at);
+    while (at < pos and at < len) at = nextCut(len, chunks, at, 0);
     return at == pos;
 }
 
@@ -31,17 +32,17 @@ test "a pass resumes only where a cold pass cuts: every max_rows rows from 0 or 
     try std.testing.expect(coldCut(len, &.{start}, start));
     try std.testing.expect(coldCut(len, &.{start}, start + m));
     try std.testing.expect(!coldCut(len, &.{start}, 2 * m)); // cut at the start instead, then max_rows on
-    try std.testing.expectEqual(@as(usize, start), nextCut(len, &.{start}, m));
+    try std.testing.expectEqual(@as(usize, start), nextCut(len, &.{start}, m, 0));
 }
 
 pub fn run(self: anytype, stream: *lanes.Stream) !void {
     var f = try opening(self, stream);
     defer f.deinit();
-    while (!try chunk(self, stream, &f)) {}
+    while (!try chunk(self, stream, &f, 0)) {}
 }
 
 /// One cut of the prompt pass a call (prefillFn's forwards, in order): the lane host runs rounds between them.
-pub fn step(self: anytype, stream: *lanes.Stream) !bool {
+pub fn step(self: anytype, stream: *lanes.Stream, _: u32) !bool {
     const got = try self.fills.getOrPut(self.gpa, stream);
     if (!got.found_existing) {
         got.value_ptr.* = opening(self, stream) catch |err| {
@@ -50,7 +51,7 @@ pub fn step(self: anytype, stream: *lanes.Stream) !bool {
         };
     }
     const f = self.fills.getPtr(stream).?;
-    const done = chunk(self, stream, f) catch |err| {
+    const done = chunk(self, stream, f, 0) catch |err| {
         endFill(self, stream);
         return err;
     };
@@ -132,8 +133,8 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
     return .{ .at = at, .media = media, .kept = if (shared) |x| .{ .gpa = self.gpa, .marks = x.plan.marks } else null };
 }
 
-/// The pass's next cut; true once the prompt is in.
-fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill) !bool {
+/// The pass's next cut; true once the prompt is in. The hint keeps the cold grid, where a cap would cut differently.
+fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
     const ids = stream.prompt();
     // cancel between cuts and retain the last complete prefix before releasing the cache (#1228)
     if (stream.isCancelled()) {
@@ -142,7 +143,7 @@ fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill) !bool {
     }
     const cache = try self.cacheOf(stream);
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
-    const end = nextCut(ids.len, stream.chunks, f.at);
+    const end = nextCut(ids.len, stream.chunks, f.at, 0);
     try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
     f.at = end;
     stream.fill_at.store(@intCast(end), .monotonic);

@@ -257,7 +257,7 @@ fn isSpace(cp: u21) bool {
 pub fn gated(raw_path: []const u8, metrics_open: bool) bool {
     const path = routePath(raw_path);
     if (path.len == 0 or std.mem.eql(u8, path, "/health") or std.mem.eql(u8, path, "/slide") or publicAsset(path)) return false;
-    if (metrics_open and (std.mem.eql(u8, path, "/metrics") or std.mem.eql(u8, path, "/v1/metrics"))) return false;
+    if (metrics_open and (std.mem.eql(u8, path, "/metrics") or std.mem.eql(u8, path, "/v1/metrics") or std.mem.eql(u8, path, "/v1/load"))) return false;
     return true;
 }
 

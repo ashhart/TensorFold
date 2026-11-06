@@ -1,4 +1,4 @@
-//! An image's words in a prompt's cache key: its markers carry its identity whole, its rows a hash of it.
+//! Cache words locate image rows; the core also compares each image's full identity before it reuses a state.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -16,7 +16,7 @@ pub fn close(hash: u64) u32 {
     return 0x8000_0000 | @as(u32, @truncate((hash >> 31) & 0x7fff_ffff));
 }
 
-/// Row `j`'s word: 31 bits hashed from the identity and the row.
+/// Row `j`'s word is a compact index hint; exact prefix identity is checked by core/cache_images.zig.
 pub fn row(hash: u64, j: usize) u32 {
     return 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(hash, std.mem.asBytes(&j)) & 0x7fff_ffff));
 }
@@ -47,6 +47,82 @@ fn keyOf(a: std.mem.Allocator, id: u64) ![]const u32 {
     const x = (try images.expand(v, null, images.MarkText.text(), &cx, msgs, &[_]u32{ 1, 5, 9, 6, 2 }, 5)).?;
     try std.testing.expectEqualSlices(u32, &.{ 1, 5, 9, 6, 2 }, x.ids);
     return x.cache_key;
+}
+
+fn markerFree(a: std.mem.Allocator, hashes: []const u64, tokens: []const u32) !images.Expanded {
+    var dummy: u8 = 0;
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = named, .image_token = 9, .image_tokens = 64, .max_images = 4 };
+    var body: std.ArrayList(u8) = .empty;
+    try body.appendSlice(a, "[{\"role\":\"user\",\"content\":[");
+    for (hashes, 0..) |hash, i| {
+        if (i != 0) try body.append(a, ',');
+        try body.appendSlice(a, "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:,%FF%D8%FF");
+        var encoded: [8]u8 = undefined;
+        std.mem.writeInt(u64, &encoded, hash, .little);
+        for (encoded) |b| try body.print(a, "%{X:0>2}", .{b});
+        try body.appendSlice(a, "\"}}");
+    }
+    try body.appendSlice(a, "]}]");
+    const msgs = switch (try json.parseText(a, body.items)) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    var cx: errors.Cx = .{ .a = a };
+    const out = (try images.expand(v, null, images.MarkText.text(), &cx, msgs, tokens, tokens.len)).?;
+    try std.testing.expectEqualSlices(u32, tokens, out.ids);
+    try std.testing.expectEqual(tokens.len, out.cache_key.len);
+    return out;
+}
+
+test "marker-free image row collisions cannot restore another image, including adjacent one-row images" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var seen: std.AutoHashMapUnmanaged(u32, u64) = .empty;
+    var pair: ?[2]u64 = null;
+    var n: u64 = 1;
+    while (pair == null and n < 1 << 22) : (n += 1) {
+        const hash = (n *% 0x9E3779B97F4A7C15) & ((1 << 62) - 1);
+        const got = try seen.getOrPut(a, row(hash, 0));
+        if (!got.found_existing) got.value_ptr.* = hash else if (got.value_ptr.* != hash) pair = .{ got.value_ptr.*, hash };
+    }
+    const hashes = pair orelse return error.NoCollision;
+    const Snaps = struct {
+        var state: u8 = 0;
+        fn bytes(_: *anyopaque, at: u32) u64 {
+            return 64 + @as(u64, at);
+        }
+        fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+            return &state;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {}
+        fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    };
+    var store = api.prompt_cache.Store.init(std.testing.allocator, .{ .ptr = &Snaps.state, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 1, .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    const first = try markerFree(a, &.{hashes[0]}, &.{ 1, 9, 2, 3 });
+    const other = try markerFree(a, &.{hashes[1]}, &.{ 1, 9, 2, 3 });
+    try std.testing.expectEqualSlices(u32, first.cache_key, other.cache_key);
+    try std.testing.expect(store.keepBornImages(first.cache_key, 4, 1, null, &.{}, &.{}, first.images));
+    try std.testing.expect(store.keepBornImages(first.cache_key, 4, 2, null, &.{}, &.{}, first.images));
+    const miss = try store.lookupUserImages(a, other.cache_key, 4, 0, 0, 0, &.{}, &.{}, &.{}, other.images);
+    try std.testing.expectEqual(@as(u32, 1), miss.entry.?.at); // text before the image remains reusable
+    store.release(miss.entry.?);
+    const later = try markerFree(a, &.{hashes[0]}, &.{ 1, 9, 2, 4 });
+    const hit = try store.lookupUserImages(a, later.cache_key, 4, 0, 0, 0, &.{}, &.{}, &.{}, later.images);
+    try std.testing.expectEqual(@as(u32, 2), hit.entry.?.at);
+    store.release(hit.entry.?);
+    try std.testing.expect(store.keepBornImages(other.cache_key, 4, 2, null, &.{}, &.{}, other.images));
+    try std.testing.expectEqual(@as(usize, 3), store.entries.items.len); // both identities keep independent states
+    const two = try markerFree(a, &.{ hashes[0], hashes[0] }, &.{ 9, 9, 2, 3 });
+    const changed = try markerFree(a, &.{ hashes[0], hashes[1] }, &.{ 9, 9, 2, 3 });
+    try std.testing.expectEqualSlices(u32, two.cache_key, changed.cache_key);
+    try std.testing.expect(store.keepBornImages(two.cache_key, 4, 1, null, &.{}, &.{}, two.images));
+    try std.testing.expect(store.keepBornImages(two.cache_key, 4, 2, null, &.{}, &.{}, two.images));
+    const partial = try store.lookupUserImages(a, changed.cache_key, 4, 0, 0, 0, &.{}, &.{}, &.{}, changed.images);
+    try std.testing.expectEqual(@as(u32, 1), partial.entry.?.at); // only the first, unchanged image resumes
+    store.release(partial.entry.?);
+    try std.testing.expect(store.image_query == null);
 }
 
 test "one-token images whose row words collide share no kept state; the same image resumes it" {

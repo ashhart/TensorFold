@@ -47,6 +47,10 @@ fn chunk(data: []const u8, at: usize) error{Invalid}!?Chunk {
 }
 
 pub fn decode(a: Allocator, data: []const u8) picture.Error!picture.Samples {
+    return decodeWithLimits(a, data, .{});
+}
+
+pub fn decodeWithLimits(a: Allocator, data: []const u8, limits: picture.Limits) picture.Error!picture.Samples {
     var arena_state = std.heap.ArenaAllocator.init(a);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -64,7 +68,7 @@ pub fn decode(a: Allocator, data: []const u8) picture.Error!picture.Samples {
     const h = info.hdr orelse return error.Invalid;
     const bits = bitsPerPixel(h);
     if (bits == 0) return error.Invalid; // no mode: Pillow's open identified no image
-    try picture.fits(h.width, h.height);
+    try limits.fits(h.width, h.height);
     const frames = if (info.frames) |n| @as(u64, n) + @intFromBool(!info.frame_box) else 1;
     if (frames != 1) return error.Animated;
     // every chunk to IEND checked (verify), the consecutive image data gathered
@@ -329,8 +333,8 @@ const Keys = struct {
             }
         }.at;
         return switch (h.color) {
-            0 => if (t.len < 2) .{} else .{ .gray = if (h.depth == 1) @as(u16, if (k(t, 0) != 0) 255 else 0) else k(t, 0) },
-            2 => if (t.len < 6) .{} else .{ .rgb = .{ k(t, 0), k(t, 1), k(t, 2) } },
+            0 => if (t.len < 2) .{} else .{ .gray = if (h.depth == 1) @as(u16, if (k(t, 0) != 0) 255 else 0) else k(t, 0) & 0xff },
+            2 => if (t.len < 6) .{} else .{ .rgb = .{ k(t, 0) & 0xff, k(t, 1) & 0xff, k(t, 2) & 0xff } },
             else => .{},
         };
     }

@@ -8,6 +8,7 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include "common/qmm_frag.cuh"
 
 namespace dsv41_attn {
 
@@ -57,10 +58,9 @@ __device__ __forceinline__ float texp(float x) { return ex2(__fmul_rn(x, __int_a
 __device__ __forceinline__ float pow2b(uint32_t s) { return __int_as_float(static_cast<int>(s) << 23); }
 
 __device__ __forceinline__ void mma(float (&d)[4], const uint4& a, uint32_t b0, uint32_t b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b0), "r"(b1));
+    const uint32_t av[4] = {a.x, a.y, a.z, a.w};
+    const uint32_t bv[2] = {b0, b1};
+    qmm_frag::mma_v(d, av, bv);
 }
 
 // two e4m3 bytes (low byte = the lower k) with their own scales -> bf16x2 (exact: e4m3 x 2^e is a bf16)

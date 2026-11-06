@@ -30,8 +30,8 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
             const n = x.heads * kd;
             if (x.tiledInput()) {
                 switch (x.proj) { // a split stack's MXFP8 [q | k | v] is the lane's; its bf16 [f_a | g_a | b] tiles
-                    .bf16 => |*p| try add(list, gpa, p, x.width(), x.dims),
-                    .split => |*sp| try add(list, gpa, &sp.rest, x.width() - 3 * n, x.dims),
+                    .bf16 => |*p| try add(list, gpa, p, x.matWidth(), x.dims), // TF_GLM_KDA_PAD: pack the padded rows
+                    .split => |*sp| try add(list, gpa, &sp.rest, x.matWidth() - 3 * n, x.dims),
                 }
                 try add(list, gpa, &x.fb, n, kd);
                 try add(list, gpa, &x.gb, n, kd);
@@ -61,7 +61,44 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
     }
 }
 
-/// Every linear b16.matmul reads, as the fields holding them; the head last, when it is bf16.
+/// Move an uneven fused KDA stack into an eight-aligned buffer so tiledInput() passes; pad columns are ignored.
+pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
+    for (w.layers) |*l| switch (l.mixer) {
+        .kda => |*x| try padOneKdaInput(w, d, s, x),
+        else => {},
+    };
+    // The MTP head's layer is registered too, so it is padded here as well; skipping it over-reads as described.
+    if (w.mtp) |*m| switch (m.layer.mixer) {
+        .kda => |*x| try padOneKdaInput(w, d, s, x),
+        else => {},
+    };
+}
+
+/// One KDA layer's bf16 input rows (the whole stack, or a split stack's rest) moved to an eight-aligned buffer.
+fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@import("cuda_kda_block.zig").Layer) !void {
+    const np = x.matWidth();
+    if (np == x.width()) return; // already aligned, or the pad is off
+    // a split stack's MXFP8 [q | k | v] keeps its width (3 * heads * dk, aligned); its bf16 rest carries the pad
+    const fa: usize = if (x.proj == .split) 3 * x.heads * @import("cuda_kda.zig").dk else 0;
+    const src = switch (x.proj) {
+        .bf16 => |ptr| ptr,
+        .split => |sp| sp.rest,
+    };
+    const n = x.width() - fa;
+    const m = np - fa;
+    const k = x.dims;
+    var buf = try cuda.DeviceBuffer.alloc(d, m * k * 2);
+    errdefer buf.free();
+    try d.check(d.api.cuMemcpyDtoDAsync_v2(buf.ptr, src, n * k * 2, s.handle), "cuMemcpyDtoDAsync");
+    try d.check(d.api.cuMemsetD8Async(buf.ptr + n * k * 2, 0, (m - n) * k * 2, s.handle), "cuMemsetD8Async");
+    try s.synchronize();
+    switch (x.proj) {
+        .bf16 => x.proj = .{ .bf16 = buf.ptr },
+        .split => |*sp| sp.rest = buf.ptr,
+    }
+    if (bufferAt(w, src)) |at| replace(w, at, buf) else try w.buffers.append(w.gpa, buf); // the loader's rows go
+}
+
 fn linears(w: *Weights, list: *std.ArrayList(Lin)) !void {
     for (w.layers) |*l| try layerLinears(w.gpa, l, list);
     if (w.mtp) |*m| {
@@ -71,29 +108,40 @@ fn linears(w: *Weights, list: *std.ArrayList(Lin)) !void {
     try addProj(list, w.gpa, &w.head, w.share.vocab.len(), w.config.hidden);
 }
 
-/// A packed linear moved into a buffer its own size, its bf16 one freed; the bytes freed (0: it shares a buffer).
-fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, bytes: usize) !usize {
-    const old = field.*;
-    const at = for (w.buffers.items, 0..) |b, i| {
-        if (b.ptr == old) break i;
-    } else return 0;
-    const was = w.buffers.items[at].len;
-    var nb = try cuda.DeviceBuffer.alloc(d, bytes);
-    errdefer nb.free(); // the weights own it only once it replaces the old buffer
-    try d.check(d.api.cuMemcpyDtoDAsync_v2(nb.ptr, old, bytes, s.handle), "cuMemcpyDtoDAsync");
-    try s.synchronize();
+/// The index of the weights' own buffer at `ptr`, null when `ptr` lies inside a buffer it shares.
+fn bufferAt(w: *const Weights, ptr: u64) ?usize {
+    for (w.buffers.items, 0..) |b, i| if (b.ptr == ptr) return i;
+    return null;
+}
+
+/// `nb` takes the slot of the weights' buffer `at`: the old one freed in place, its `named` entry pointed at `nb`.
+fn replace(w: *Weights, at: usize, nb: cuda.DeviceBuffer) void {
+    const old = w.buffers.items[at].ptr;
     w.buffers.items[at].free();
     w.buffers.items[at] = nb;
     for (w.named.items) |*n| if (n.ptr == old) {
         n.ptr = nb.ptr;
         n.len = nb.len;
     };
+}
+
+/// A packed linear moved into a buffer its own size, its bf16 one freed; the bytes freed (0: it shares a buffer).
+fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, bytes: usize) !usize {
+    const old = field.*;
+    const at = bufferAt(w, old) orelse return 0;
+    const was = w.buffers.items[at].len;
+    var nb = try cuda.DeviceBuffer.alloc(d, bytes);
+    errdefer nb.free(); // the weights own it only once it replaces the old buffer
+    try d.check(d.api.cuMemcpyDtoDAsync_v2(nb.ptr, old, bytes, s.handle), "cuMemcpyDtoDAsync");
+    try s.synchronize();
+    replace(w, at, nb);
     field.* = nb.ptr;
     return was -| nb.len;
 }
 
 /// Eligible linears tiled in place; uneven KDA inputs and their views stay bf16 for the row-major kernels.
 pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernels, s: cuda.Stream, d: *const cuda.Driver, dense_bits: u8, head_bits: u8) !mm_mod.Packed {
+    try padKdaInputs(w, d, s); // pad_to was set at load (Engine.open), so a stack pads only with TF_GLM_KDA_PAD=1
     var list: std.ArrayList(Lin) = .empty;
     defer list.deinit(w.gpa);
     try linears(w, &list);

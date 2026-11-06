@@ -12,8 +12,8 @@ const Cache = caches.Cache;
 
 /// TF_QWEN_KV_SHARE=n: keep prompts as pool pages and at most n recurrent-state snapshots (0 or unset: off).
 pub fn sharing() !usize {
-    const v = std.c.getenv("TF_QWEN_KV_SHARE") orelse return 0;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch error.BadQwenKvShare;
+    const v = @import("core").profile.get(.TF_QWEN_KV_SHARE) orelse return 0;
+    return std.fmt.parseInt(usize, v, 10) catch error.BadQwenKvShare;
 }
 
 /// Below 4 snapshots a stream, live streams evict each other's before a resume (8 at 8 streams resumed none).
@@ -73,6 +73,7 @@ pub const Prefix = struct {
         const s: *Snap = @ptrCast(@alignCast(saved));
         const cache = owner.cache.?;
         const e = x.e;
+        try cache.flush(e);
         try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(cache.state.ptr, s.host.bytes.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyHtoDAsync");
         try e.stream.synchronize();
     }
@@ -139,6 +140,7 @@ pub const Prefix = struct {
         errdefer x.gpa.destroy(s);
         s.* = .{ .host = try cuda.HostBuffer.alloc(e.d, e.g.stateBytes()) };
         errdefer s.host.free();
+        try cache.flush(e);
         try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(s.host.bytes.ptr, cache.state.ptr, e.g.stateBytes(), e.stream.handle), "cuMemcpyDtoHAsync");
         try e.stream.synchronize();
         return @ptrCast(s);

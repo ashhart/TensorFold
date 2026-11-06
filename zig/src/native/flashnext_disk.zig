@@ -140,6 +140,7 @@ pub fn identity(gpa: Allocator, io: std.Io, eng: *fx.Engine) !struct { id: u64, 
     var os: [64]u8 = undefined;
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.r.device.name()));
+    @import("disk_identity.zig").profile(&h, .{ .family = "qwen4_exp", .backend = "metal" });
     return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 

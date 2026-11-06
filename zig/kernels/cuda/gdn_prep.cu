@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <math.h>
 #include <stdint.h>
+#include "common/act.cuh"
 
 namespace tf_gdn_prep {
 
@@ -31,7 +32,7 @@ struct Io {
 };
 
 // Exactly rounded division on purpose: the same bits on every GPU, where div.full and ex2.approx are not.
-__device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
+__device__ __forceinline__ float sigmoid(float x) { return tf_common::sigmoid_rn(x); }
 
 template <int J>
 __device__ __forceinline__ void prep(const Io& io, int c, int kh, int vh, int keep, float eps) {

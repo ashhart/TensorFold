@@ -146,6 +146,10 @@ const Engine = struct {
 };
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "CUDA")) |why| {
+        problem.* = why;
+        return null;
+    }
     const window: u32 = if (o.context) |c| blk: {
         if (c < 1 or c > default_context) {
             problem.* = try std.fmt.allocPrint(a, "--context {d}: d1 reads 1 to {d} tokens a decision", .{ c, default_context });

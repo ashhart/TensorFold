@@ -1,0 +1,138 @@
+name: Performance or memory regression
+description: TensorFold is slower or uses more memory than it did, or than it should.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Measure before and after on the same machine, checkpoint, prompts and settings, as CONTRIBUTING.md describes.
+        A suspected regression is welcome without a patch. Write "n/a" and why for a field that does not apply.
+        Do not paste private paths, hostnames, tokens, keys or confidential prompts. Maintainers may relabel the issue.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Engine or server
+        - Desktop app
+        - Mobile app
+        - Tools, build or CI
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: metric
+    attributes:
+      label: Metric
+      multiple: true
+      options:
+        - Decode speed
+        - Prompt processing or time to first token
+        - Concurrent throughput
+        - Pauses between tokens
+        - Memory
+        - Startup or build time
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Baseline and candidate versions or commits
+      description: The faster or smaller one and the slower or larger one. Say whether either is a fork with changes.
+      placeholder: "the `--version` output for both"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      multiple: true
+      options:
+        - Metal
+        - CUDA
+        - HIP
+        - XPU
+        - None (no GPU involved)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      multiple: true
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - iOS
+        - Android
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and runtime
+      description: Chip or GPU, RAM or VRAM, OS version, and driver, CUDA, ROCm or Xcode versions. Hosts and ranks when it runs on several, and any other load.
+    validations:
+      required: true
+  - type: textarea
+    id: model
+    attributes:
+      label: Checkpoint and revision
+      description: Repository and immutable revision, format or quantization, and the drafter and its revision. "n/a" for a model-free measurement.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact commands and inputs
+      description: |
+        The server and client commands, public prompt IDs, token arrays or a generator, and the settings:
+        drafts, sampling, thinking, precision, output length, concurrent streams, and cache cold or warm with cached-token counts.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: |
+        Baseline and candidate values with units, the repetitions, the run order and the spread.
+        For memory, the peak physical process footprint and any device or pinned allocations, with the RAM class and context.
+    validations:
+      required: true
+  - type: textarea
+    id: equality
+    attributes:
+      label: Token equality
+      description: Whether both runs gave the same tokens, or why tokens do not apply.
+    validations:
+      required: true
+  - type: textarea
+    id: receipt
+    attributes:
+      label: Raw output
+      description: The tool output or log behind the results, or why it is missing.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: First bad commit, profile or suspected cause
+      description: Optional. A bisect result, a profile, or a comparison with another server such as `mlx_lm` or vLLM.
+  - type: textarea
+    id: related
+    attributes:
+      label: Related issues and pull requests
+      description: Links to similar reports and how this one differs, or "none found".
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: This report holds no private paths, hostnames, tokens, keys or confidential prompts.
+          required: true

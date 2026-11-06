@@ -7,13 +7,7 @@
 
 namespace tf_experts_rows {
 
-__device__ __forceinline__ uint4 ld_w(const uint4* p) {
-  uint4 r;
-  asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w)
-               : "l"(p));
-  return r;
-}
+__device__ __forceinline__ uint4 ld_w(const uint4* p) { return tf_common::ld_nc(p); }
 
 __device__ __forceinline__ uint4 ld_x(const __nv_bfloat16* p) { return __ldg(reinterpret_cast<const uint4*>(p)); }
 

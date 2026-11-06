@@ -9,6 +9,7 @@
 // PROBE 3 (timing only, wrong results): no decode and no mma, the load path alone.
 
 #include "experts_grouped.cuh"
+#include "common/qmm_frag.cuh"
 
 namespace dsv41_x3ld {
 
@@ -19,13 +20,7 @@ using tf_exl3x::mma16816;
 
 constexpr int W = 4;   // warps a CTA: upstream's default_config, which fixes the K ranges
 
-__device__ __forceinline__ uint4 ldg_v4(const uint32_t* p) {
-    uint4 v;
-    asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
-                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
-                 : "l"(p));
-    return v;
-}
+__device__ __forceinline__ uint4 ldg_v4(const uint32_t* p) { return tf_common::ld_nc(reinterpret_cast<const uint4*>(p)); }
 
 // load_pair's value (ok ? *(const uint32_t*)x : 0), the load pinned where it stands
 __device__ __forceinline__ uint32_t ldg_pair(const half* x, bool ok) {
@@ -34,11 +29,7 @@ __device__ __forceinline__ uint32_t ldg_pair(const half* x, bool ok) {
     return v;
 }
 
-__device__ __forceinline__ void pdl_wait() {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-    asm volatile("griddepcontrol.wait;" ::: "memory");
-#endif
-}
+__device__ __forceinline__ void pdl_wait() { qmm_frag::grid_wait(); }
 
 template <int K2, int NT>
 struct Step {

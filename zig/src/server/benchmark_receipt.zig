@@ -44,8 +44,9 @@ pub const Settings = struct {
     serial: bool,
     context_tokens: ?i64,
     managed: bool,
-    /// 1 or 2 when attested. A managed run is one rank. An attached run stays null until the server manifest names it.
+    /// The loaded server attests this count; a missing manifest stays unranked even for a managed run.
     rank_count: ?u8 = null,
+    group: ?Value = null,
     /// The cache format the run used (bf16 or fp8); null for an attached run, whose own format is not known.
     kv_cache: ?[]const u8 = null,
 };
@@ -102,6 +103,30 @@ pub fn value(a: Allocator, run_id: []const u8, created_at: []const u8, model: Mo
     if (runtime.driver) |d| try deps.str("driver", d);
     try r.put("dependencies", deps.value());
     try top.put("runtime", r.value());
+    try top.put("hardware", try hardwareValue(a, hardware));
+    const st = try Builder.init(a);
+    try st.int("tokens", @as(?u32, settings.tokens));
+    try st.int("repetitions", @as(?u32, settings.repetitions));
+    const temps = try a.alloc(Value, settings.temperatures.len);
+    for (settings.temperatures, temps) |t, *slot| slot.* = .{ .float = t };
+    try st.put("temperatures", .{ .array = temps });
+    try st.put("serial", .{ .bool = settings.serial });
+    try st.int("context_tokens", settings.context_tokens);
+    try st.str("kv_cache", settings.kv_cache);
+    try st.put("managed", .{ .bool = settings.managed });
+    try st.int("rank_count", settings.rank_count);
+    try top.put("settings", st.value());
+    if (settings.group) |g| try top.put("group", g);
+    const rows = try a.alloc(Value, samples.len);
+    for (samples, rows) |x, *slot| slot.* = try sampleValue(a, x);
+    try top.put("samples", .{ .array = rows });
+    const v = top.value();
+    suite.sortKeys(v);
+    return v;
+}
+
+/// Canonical public hardware fields, shared by local manifests and receipts.
+pub fn hardwareValue(a: Allocator, hardware: Hardware) !Value {
     const h = try Builder.init(a);
     try h.str("cpu_model", hardware.cpu_model);
     try h.int("system_memory_bytes", hardware.system_memory_bytes);
@@ -117,25 +142,7 @@ pub fn value(a: Allocator, run_id: []const u8, created_at: []const u8, model: Mo
     try h.put("gpus", .{ .array = gpus });
     try h.int("gpu_count", if (gpus.len > 0) @as(?usize, gpus.len) else null);
     try h.str("source", hardware.source);
-    try top.put("hardware", h.value());
-    const st = try Builder.init(a);
-    try st.int("tokens", @as(?u32, settings.tokens));
-    try st.int("repetitions", @as(?u32, settings.repetitions));
-    const temps = try a.alloc(Value, settings.temperatures.len);
-    for (settings.temperatures, temps) |t, *slot| slot.* = .{ .float = t };
-    try st.put("temperatures", .{ .array = temps });
-    try st.put("serial", .{ .bool = settings.serial });
-    try st.int("context_tokens", settings.context_tokens);
-    try st.str("kv_cache", settings.kv_cache);
-    try st.put("managed", .{ .bool = settings.managed });
-    try st.int("rank_count", settings.rank_count orelse if (settings.managed) @as(?u8, 1) else null);
-    try top.put("settings", st.value());
-    const rows = try a.alloc(Value, samples.len);
-    for (samples, rows) |x, *slot| slot.* = try sampleValue(a, x);
-    try top.put("samples", .{ .array = rows });
-    const v = top.value();
-    suite.sortKeys(v);
-    return v;
+    return h.value();
 }
 
 fn sampleValue(a: Allocator, x: suite.Sample) !Value {

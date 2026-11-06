@@ -34,6 +34,11 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 test "Draft frames: the actual drafter advertises batched holds" {
     var d: q.draft.Draft = undefined;
+    var target: q.engine.Engine = undefined;
+    target.g.hidden = 256; // the drafter's facts read the target's shape: this small one keeps its copy match
+    target.g.layers = 1;
+    target.g.experts = 0;
+    d.e = &target;
     d.projection_role = .proposal;
     d.frame_streams = 128;
     d.scratch_one = 0;
@@ -150,6 +155,7 @@ fn actualFrame(block: usize) !void {
     e.embed_w = 1;
     e.embed_s = 2;
     e.embed_b = 3;
+    e.affine.mlp128 = false;
     e.affine.prefill_fn = function(&driver, 11);
     e.affine.group_fn = function(&driver, 10);
     e.affine.pdl = false;
@@ -269,7 +275,7 @@ test "Draft frames: combined target rows above capacity refuse before even settl
     e.kv8 = false;
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 2, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
-    e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
     const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
     var caches: [2]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
     caches[0].last = .{ .start = 0, .rows = 2 };
@@ -296,7 +302,7 @@ test "Draft frames: an unsupported prompt geometry is refused at admission" {
     e.kv8 = false;
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
-    e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
     const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
     var caches: [1]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
     const ids: [129]u32 = @splat(1);
@@ -333,7 +339,7 @@ test "Draft frames: the geometry refusal precedes the request's own state" {
     e.kv8 = false;
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
-    e.keeps = .{ .apply = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
     const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
     var caches: [1]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
     caches[0].last = .{ .start = 0, .rows = 2 };

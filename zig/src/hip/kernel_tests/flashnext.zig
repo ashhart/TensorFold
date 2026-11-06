@@ -5,6 +5,7 @@ const Rig = rig.Rig;
 const gpa = rig.gpa;
 const at = rig.at;
 const DeviceBuffer = @import("../memory.zig").DeviceBuffer;
+const bf16_round = @import("bf16_round");
 
 pub fn ptr(comptime T: type, b: DeviceBuffer) T {
     return @ptrFromInt(at(b));
@@ -13,9 +14,22 @@ pub fn ptr(comptime T: type, b: DeviceBuffer) T {
 /// The activation's round-to-nearest-even of `v`, widened back.
 pub fn rnd(t: *const Rig, v: f32) f32 {
     if (!t.bf16) return @floatCast(rig.f16Value(rig.f16Bits(v)));
-    const u: u32 = @bitCast(v);
-    const b: u32 = (u + 0x7fff + ((u >> 16) & 1)) >> 16;
-    return @bitCast(b << 16);
+    return bf16_round.round32(v);
+}
+
+test "Flash Next rnd's bf16 is core's round32(): 0xffffffff gives a NaN, other words the plain + copy's value" {
+    var t: Rig = undefined;
+    t.bf16 = true;
+    try std.testing.expect(std.math.isNan(rnd(&t, @bitCast(@as(u32, 0xffff_ffff)))));
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 19) |i| { // every bf16 value's tie and carry edges, then random words
+        const lo = [_]u32{ 0x7fff, 0x8000, 0x8001, 0xffff };
+        const w: u32 = if (i < 1 << 18) @as(u32, @intCast(i >> 2)) << 16 | lo[i & 3] else prng.random().int(u32);
+        const v: f32 = @bitCast(w);
+        if (std.math.isNan(v)) {
+            try std.testing.expect(std.math.isNan(rnd(&t, v)));
+        } else try std.testing.expectEqual(((w + 0x7fff + ((w >> 16) & 1)) >> 16) << 16, @as(u32, @bitCast(rnd(&t, v))));
+    }
 }
 
 pub fn sigmoid(x: f32) f32 {
@@ -253,6 +267,7 @@ test "the wide norm over a row of every stream, and the gates without inject gat
         ptr(?*const anyopaque, x),
         ptr(?[*]const f32, sc),
         ptr(?*anyopaque, y),
+        null,
         t.kind(),
         rows,
         w,
@@ -279,6 +294,54 @@ test "the wide norm over a row of every stream, and the gates without inject gat
     for (0..rows * low) |i| {
         const v = rnd(t, rnd(t, zh[i]) / 4.0);
         try rig.expect(close(t, value(t, ga[i]), rnd(t, v * sigmoid(v)), 1), "gate {d}", .{i});
+    }
+}
+
+test "the MTP wide norm's two launches store tf_fn_rms_wide's bytes at rows 1 to 17" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    const wide = @import("../launches/flashnext.zig");
+    if (!wide.wideSplit(&t.on, @ptrFromInt(64), t.kind(), 1, wide.wide_width)) return error.SkipZigTest; // gfx1201, bf16
+    var rng: rig.Rng = .{ .state = 0x7A1D };
+    const w = wide.wide_width;
+    const rows = 17;
+    const eps: f32 = 1e-6;
+    const hx = try acts(t, &rng, rows * w, 2.0);
+    defer gpa.free(hx);
+    @memset(hx[0..w], 0);
+    for (0..w) |i| { // row 1 spans 2^-20 to 2^19; row 5's squares overflow fp32
+        const e: i32 = @intCast(i % 200);
+        hx[w + i] = t.bits(std.math.pow(f32, 2, @floatFromInt(@rem(e, 40) - 20)));
+        hx[5 * w + i] = t.bits(std.math.pow(f32, 2, @floatFromInt(e - 100)));
+    }
+    hx[2 * w + 77] = t.bits(std.math.nan(f32));
+    hx[3 * w + 5000] = t.bits(std.math.inf(f32));
+    hx[4 * w + 9] = t.bits(-std.math.inf(f32));
+    hx[4 * w + 10230] = t.bits(std.math.inf(f32));
+    const scale = try gpa.alloc(f32, w);
+    defer gpa.free(scale);
+    for (scale) |*x| x.* = 1.0 + rng.unit() * 0.5;
+    var x = try t.upload(hx);
+    defer x.free();
+    var sc = try t.upload(scale);
+    defer sc.free();
+    var want = try t.alloc(rows * w * 2);
+    defer want.free();
+    var got = try t.alloc(rows * w * 2);
+    defer got.free();
+    var waves = try t.alloc(rows * wide.wide_waves * 4);
+    defer waves.free();
+    const st = t.stream.handle;
+    try t.off.fn_rms_wide(ptr(?*const anyopaque, x), ptr(?[*]const f32, sc), ptr(?*anyopaque, want), ptr(?[*]f32, waves), t.kind(), rows, w, eps, st);
+    try t.stream.synchronize();
+    const base = try rig.download(u16, want);
+    defer gpa.free(base);
+    for (1..rows + 1) |m| {
+        try t.on.fn_rms_wide(ptr(?*const anyopaque, x), ptr(?[*]const f32, sc), ptr(?*anyopaque, got), ptr(?[*]f32, waves), t.kind(), @intCast(m), w, eps, st);
+        try t.stream.synchronize();
+        const gy = try rig.download(u16, got);
+        defer gpa.free(gy);
+        try std.testing.expectEqualSlices(u16, base[0 .. m * w], gy[0 .. m * w]);
     }
 }
 

@@ -50,12 +50,18 @@ pub fn rows(e: *E.Engine, router: u64, layer: cuda.experts.Layer, x: u64, out: u
     try e.plan.routeRows(e.stream, s.picks, pairs, count, tile, plan, if (params == 0) 0 else params + 2 * 4, slots);
     const rows_in: cuda.experts.Rows = .{ .x = x, .stride = g.hidden, .slots = slots };
     const act_in: cuda.experts.Rows = .{ .x = s.act, .stride = g.intermediate };
-    if (wide) {
+    const nvfp4 = layer.format == .nvfp4;
+    if (nvfp4) { // prompt tiles with the decode form's sums: a pair's bits in any window, fp32 down sums both ways
+        const k = if (e.mo) |*m| if (m.experts) |*nx| nx else return error.FormatNotLoaded else return error.FormatNotLoaded;
+        const launch = if (wide) &cuda.experts.Nvfp4Experts.runFact else &cuda.experts.Nvfp4Experts.run;
+        try launch(k, e.stream, .up, rows_in, layer, plan, s.act, items, -1);
+        try launch(k, e.stream, .down_f32, act_in, layer, plan, s.y, items, -1);
+    } else if (wide) {
         try grouped.prompt(e.stream, .up, rows_in, layer, plan, s.act, items, -1);
         try grouped.prompt(e.stream, .down_bf16, act_in, layer, plan, s.y, items, -1);
     } else {
         try grouped.decode(e.stream, .up, rows_in, layer, plan, s.act, items, -1);
         try grouped.decode(e.stream, .down_f32, act_in, layer, plan, s.y, items, -1);
     }
-    try e.moe.combine(e.stream, s.y, !wide, s.wts, out, total, slots, g.hidden, params);
+    try e.moe.combine(e.stream, s.y, !wide or nvfp4, s.wts, out, total, slots, g.hidden, params);
 }

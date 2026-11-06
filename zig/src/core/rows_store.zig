@@ -26,6 +26,8 @@ pub const Image = struct {
     gather: *const fn (ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, out: []u8) anyerror!void,
     /// A new kept state of `at` tokens, its image filled by `scatter` and then restored as any other.
     blank: *const fn (ptr: *anyopaque, at: u32) anyerror!pc.Saved,
+    /// New storage `blank` takes at `at` (null: the family's ordinary save estimate).
+    blank_bytes: ?*const fn (ptr: *anyopaque, at: u32) u64 = null,
     /// Copy `in`, back to back, into `ranges` of `saved`'s image.
     scatter: *const fn (ptr: *anyopaque, saved: pc.Saved, ranges: []const image.Range, in: []const u8) anyerror!void,
     /// Whether `saved`'s image can still be read whole (null: always).
@@ -122,7 +124,7 @@ pub const Rows = struct {
         errdefer r.deinit();
         try makePath(gpa, r.dir);
         try r.scan();
-        r.settle();
+        try r.settle();
         r.stamp();
         r.sync_writes = o.sync_writes or (if (platform.c.getenv("TENSORFOLD_ROWS_SYNC")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false);
         r.staging_bytes = o.staging_bytes;
@@ -165,6 +167,11 @@ pub const Rows = struct {
         gpa.free(s.tokens);
         gpa.free(s.spans);
         gpa.free(s.starts);
+    }
+
+    /// A disk restore can need more storage than saving a resident state whose rows stay in the live pool.
+    pub fn blankBytes(r: *const Rows, at: u32) u64 {
+        return if (r.img.blank_bytes) |f| f(r.family.ptr, at) else r.family.vtable.bytes(r.family.ptr, at);
     }
 
     /// A staging buffer of at least `bytes` (kept between steps).
@@ -422,7 +429,8 @@ pub const Rows = struct {
                 const bytes = dirs.fileBytes(p) catch continue;
                 try r.blocks.put(r.gpa, n, .{ .bytes = bytes });
             } else if (std.mem.endsWith(u8, name, ".st")) {
-                r.readState(p) catch {
+                r.readState(p) catch |err| {
+                    if (err == error.OutOfMemory) return err;
                     _ = platform.c.unlink(p);
                 };
             }
@@ -455,7 +463,7 @@ pub const Rows = struct {
     }
 
     /// Each state's blocks counted; a state missing one, or that its family cannot lay out, goes; then idle blocks.
-    fn settle(r: *Rows) void {
+    fn settle(r: *Rows) !void {
         var i: usize = 0;
         while (i < r.states.items.len) {
             const s = &r.states.items[i];
@@ -463,7 +471,7 @@ pub const Rows = struct {
             defer wants.deinit(r.gpa);
             const whole = if (r.wantsOf(r.gpa, s, &wants)) |_| for (wants.items) |w| {
                 if (!r.blocks.contains(chain.stem(w.name))) break false;
-            } else true else |_| false;
+            } else true else |err| if (err == error.OutOfMemory) return err else false;
             if (!whole) {
                 var gone = r.states.orderedRemove(i);
                 unlinkName(r.dir, gone.name, ".st");
@@ -581,19 +589,5 @@ fn makePath(gpa: Allocator, dir: [:0]const u8) !void {
 }
 
 test {
-    _ = image;
-    _ = chain;
-    _ = file;
-    _ = write.io;
-    _ = @import("rows_test.zig");
-    _ = @import("rows_spill_test.zig");
-    _ = @import("rows_async_test.zig");
-    _ = @import("rows_close_test.zig");
-    _ = @import("rows_stage_test.zig");
-    _ = @import("rows_select_test.zig");
-    _ = @import("rows_recall_select_test.zig");
-    _ = @import("rows_pool_select_test.zig");
-    _ = @import("rows_prefetch.zig");
-    _ = @import("rows_prefetch_stack_test.zig");
-    _ = @import("rows_refusal_test.zig");
+    _ = @import("rows_all_test.zig");
 }

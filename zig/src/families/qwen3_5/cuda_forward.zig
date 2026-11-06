@@ -70,17 +70,19 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
                 try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                 try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
-                try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos });
+                try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
                 if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
                     try @import("cuda_prompt.zig").run(e, @intCast(ai), total);
                 } else {
                     const args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po };
-                    const groups = (total + 64 / group - 1) / (64 / group);
+                    const tile_rows: usize = if (shape.mt2) 32 / group else 64 / group;
+                    const groups = (total + tile_rows - 1) / tile_rows;
                     const rows_args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), @as(c_int, @intCast(total)), e.pm, e.pl, e.po };
                     if (e.kv8) {
                         try launch(e, if (shape.paged) e.fp8.attn_partial else e.fp8.attn_partial8_whole, sig.attn_partial8, .{ total, max_chunks, g.kv_heads }, .{ 128, 1, 1 }, args);
-                        try launch(e, if (shape.paged) e.fp8.attn_rows else e.fp8.attn_rows8_whole, sig.attn_rows8, .{ groups, max_chunks, g.kv_heads }, .{ 256, 1, 1 }, rows_args);
+                        const rows_fn = if (shape.mt2) (if (shape.paged) e.mt2.paged else e.mt2.whole) else (if (shape.paged) e.fp8.attn_rows else e.fp8.attn_rows8_whole);
+                        try launch(e, rows_fn, sig.attn_rows8, .{ groups, max_chunks, g.kv_heads }, .{ if (shape.mt2) @as(usize, 128) else 256, 1, 1 }, rows_args);
                     } else {
                         try shared(e, if (shape.paged) e.fns.attn_partial else e.fns.attn_partial_whole, sig.attn_partial, .{ total, max_chunks, g.kv_heads }, 128, args);
                         try shared(e, if (shape.paged) e.fns.attn_rows else e.fns.attn_rows_whole, sig.attn_rows, .{ groups, max_chunks, g.kv_heads }, 256, rows_args);
@@ -97,8 +99,14 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
         switch (l.mlp) {
             .dense => |m| {
-                try e.projAgain(m.gate, e.x, e.gate, total, prompt);
-                try e.projAgain(m.up, e.x, e.up, total, prompt);
+                if (m.gate == .x3) {
+                    try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, prompt); // one EXL3 group launch
+                } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
+                    try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
+                } else {
+                    try e.projAgain(m.gate, e.x, e.gate, total, prompt);
+                    try e.projAgain(m.up, e.x, e.up, total, prompt);
+                }
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
                 const n: c_longlong = @intCast(total * g.intermediate);
                 try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)), sums });

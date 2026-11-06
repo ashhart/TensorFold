@@ -63,6 +63,11 @@ pub fn planKvWriteAct(
     try l.flat(l.plan.kv_write_act, @intCast(p.rows * kv_heads * d), s, &a);
 }
 
+/// Keys a warp scores from score_span keys on, and below it (plan.hip's kScoreKeys and kScoreKeysShort).
+const score_keys = 4;
+const score_keys_short = 2;
+const score_span = 16384;
+
 /// One query a row (rows, heads, d) fp32 over its slot's caches up to its position; the walk covers `span` keys.
 pub fn planCausal(l: *const Launcher, q: u64, out: u64, scores: u64, stats: u64, partials: u64, p: PlanRef, layer: usize, heads: usize, kv_heads: usize, d: usize, span: usize, scale: f32, kind: c_int, s: S) Error!void {
     return planCausalAs(l, q, out, scores, stats, partials, p, layer, heads, kv_heads, d, span, scale, kind, false, s);
@@ -110,9 +115,11 @@ pub fn planCausalAs(
     try a.add(scale);
     try a.add(p.args);
     try a.add(layer_c);
-    // a warp scores a key for the block's heads: four warps a block, the heads' queries in shared memory
-    const score = if (act) l.plan.score_act[which] else l.plan.score[which];
-    try l.go(score, dim(cdiv(span, 4), blocks, rows), dim(128, 1, 1), @intCast(group * d * 4), s, &a);
+    // four warps a block score their keys for the block's heads; short spans take fewer keys a warp to fill the card
+    const long = span >= score_span;
+    const keys: usize = if (long) score_keys else score_keys_short;
+    const fns = if (act) (if (long) l.plan.score_act else l.plan.score2_act) else if (long) l.plan.score else l.plan.score2;
+    try l.go(fns[which], dim(cdiv(span, 4 * keys), blocks, rows), dim(128, 1, 1), @intCast(group * d * 4), s, &a);
     var b: Args = .{};
     try b.add(scores);
     try b.add(stats);

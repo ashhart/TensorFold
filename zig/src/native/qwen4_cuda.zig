@@ -61,6 +61,10 @@ const P = struct {
 };
 pub const Native = F.native_host.Host(P, Api, L);
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: Api.Open, problem: *[]const u8) !?Api.Opened {
+    if (try o.slideRefusal(a, "CUDA")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (F.native_host.refusal(o)) |why| {
         problem.* = why;
         return null;
@@ -78,4 +82,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: Api.Ope
         problem.* = try std.fmt.allocPrint(a, "Qwen4 CUDA refused {s}: {s}", .{ if (p.name().len > 0) p.name() else "native load", @errorName(err) });
         return null;
     };
+}
+
+test "slide admission: qwen4_cuda refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text" });
 }

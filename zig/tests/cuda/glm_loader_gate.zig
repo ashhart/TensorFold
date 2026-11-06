@@ -288,6 +288,7 @@ fn expertsMade(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, up: bool)
     if (i == c.layers and (try p.ck.get(try std.fmt.allocPrint(p.a, at ++ "gate_proj.weight", .{ i, 0 }))).dtype == .bf16) {
         return .{ .skip = "the GPU quantizer's, from the MTP layer's bf16 experts" };
     }
+    if (p.ck.has(try std.fmt.allocPrint(p.a, at ++ "gate_proj.weight_scale.csf0_bases", .{ i, 0 }))) return .{ .made = try @import("glm_loader_b32.zig").made(p, c, s, i, up) };
     const X = cuda.experts.Nvfp4Experts;
     const d: usize = c.hidden;
     const cut = s.moe;
@@ -428,11 +429,7 @@ fn put(out: *std.ArrayList(u8), gpa: std.mem.Allocator, t: Tensor, lo: usize, hi
 }
 
 /// fp32 to bf16 to nearest even (torch's), NaN kept quiet.
-fn bf16(v: f32) u16 {
-    const b: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((b >> 16) | 0x40);
-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+const bf16 = core.bf16_round.bits;
 
 /// What a run changes on purpose: one bit of upload `name`'s downloaded bytes; the copies changed and those caught.
 const Tamper = struct { name: ?[]const u8, done: usize = 0, caught: usize = 0 };
@@ -521,7 +518,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8) !void {
     const a = arena.allocator();
     const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(1 << 24));
     const c = try glm.config.parse(a, text);
-    var m = try glm.forward.Modules.load(gpu.d, gpu.ctx);
+    var m = try glm.forward.Modules.load(gpu.d, gpu.ctx, try glm.experts.wantsBlock32(a, text));
     defer m.deinit();
     var stream = try cuda.Stream.init(gpu.d, false);
     defer stream.deinit();

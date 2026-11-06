@@ -67,6 +67,7 @@ const Copies = struct {
         const n = rowBytes(c, self.snap.at);
         for (0..self.c.attentions + @intFromBool(self.c.mtp != null)) |i| {
             const kv = if (i < self.c.attentions) self.c.kv[i] else self.c.mtp.?;
+            if (!self.into) @import("kv_pages.zig").holds(kv, self.snap.at);
             if (kv.paged) |p| {
                 // the same bytes as a contiguous cache's: a head's rows in order, a page's run of them a part
                 for ([2]usize{ p.k_off, p.v_off }) |half| for (0..c.kv_heads) |h| {
@@ -104,6 +105,7 @@ pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
 pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
     if (cache.len != 0 or snap.head != (cache.mtp != null)) return error.SnapshotLayout;
     if (snap.at + 1 > cache.kv[0].capacity) return error.ContextFull;
+    try @import("kv_pages.zig").grow(cache, snap.at);
     const slot = try b.pool.take();
     errdefer b.pool.give(slot);
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = slot, .snap = snap, .into = false });

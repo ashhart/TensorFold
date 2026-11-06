@@ -90,7 +90,7 @@ fn loadLayers(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8
         L.held.deinit(gpa);
     }
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     try src.add(&ck);
     var out: Layers = .{ .blocks = try gpa.alloc(?latent.Tables, c.layers) };
     errdefer gpa.free(out.blocks);
@@ -115,6 +115,8 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const t0 = std.Io.Clock.awake.now(io);
     var c = try Config.read(gpa, io, dir);
     try latent.place(&c);
+    var load_cache = core.checkpoint.cache.Load.begin(io, c.world > 1);
+    defer load_cache.deinit();
     if (c.rank == 0 or c.latent == 0) return error.NotAnExpertRank;
     try latent.checkHeld(c);
     c.ck = try @import("cuda_latent_ck.zig").wanted(ctx, c, precision);
@@ -129,6 +131,8 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     var g = try cuda.tp_group.Group.open(ctx.d, c.rank, c.world);
     defer g.close();
     try latent.agree(gpa, io, c, &g, ctx.d, stream, dir);
+    const inventory = try @import("core").benchmark_group.cuda(gpa, io, ctx, &g, stream);
+    defer if (inventory) |b| gpa.free(b);
     var content: ?*identity.Content = try identity.Content.start(gpa, io, dir, c.held != null); // compared at ready
     errdefer if (content) |x| x.abandon();
     const ops: kern.Ops = .{ .k = &k, .s = stream };
@@ -165,7 +169,7 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     std.log.info("rank {d} of {d}: {d} MoE layers{s} of share {d} ({s}) in {d:.1} s, {d:.2} GiB on the device; serving rank 0's jobs", .{ c.rank, c.world, blocks, if (layers.mtp != null) " and the MTP head's" else "", c.rank, if (c.ck) "the checkpoint's math" else "full precision", @import("cuda_engine.zig").seconds(io, t0), @as(f64, @floatFromInt(cuda.usage(false).device)) / (1 << 30) });
     const loaded = content.?;
     content = null;
-    try cuda.tp_watch.ready(io, try loaded.finish()); // every rank loaded, with the same bytes, before the first job
+    try load_cache.finishAfter(.{ io, try loaded.finish() }, cuda.tp_watch.ready);
     var jobs: usize = 0;
     while (true) {
         try g.recv(stream, first, firstBytes(c), 0);

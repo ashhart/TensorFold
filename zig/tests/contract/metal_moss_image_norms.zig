@@ -1,6 +1,7 @@
-//! mi_norm and mi_qk under the contract: RMS norms at the publisher's bf16 points, their fp32 sums proven in gate 4.
+//! mi_norm, me_norm and mi_qk under the contract: RMS norms at the publisher's bf16 points, fp32 sums proven in gate 4.
 const std = @import("std");
 const mtl = @import("metal");
+const tf = @import("tensorfold");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const mi = @import("metal_moss_image_common.zig");
@@ -16,7 +17,7 @@ const bf = mi.bf;
 const kref = mi.kref;
 const kat = mi.kat;
 
-// --- mi_norm: bf16(bf16(x rsqrt(mean x^2 + eps)) w), then bf16(bf16(y s) + b) when modulated --
+// --- mi_norm: bf16(bf16(x rsqrt(mean x^2 + eps)) w), then bf16(bf16(y s) + b) when modulated; me_norm: one rounding --
 
 const norm_why = "a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps";
 
@@ -25,11 +26,14 @@ fn normDepth(s: c.Shape) usize {
     return (s.k + 255) / 256 + 10;
 }
 
+/// mi_norm plain or modulated, or the encoder's me_norm: bf16(x rsqrt(mean x^2 + eps) (1 + w)).
+pub const NormKind = enum { plain, modulated, zero_centered };
+
 pub const Norm = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
-    modulated: bool,
+    kind: NormKind,
     name: []const u8,
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
@@ -40,19 +44,24 @@ pub const Norm = struct {
     out: rig_.Ref = undefined,
     ends: Ends,
 
-    pub fn spec(name: []const u8, modulated: bool) c.Spec {
+    pub fn spec(name: []const u8, kind: NormKind) c.Spec {
         return .{
             .name = name,
             .accum = .f32,
             .depth = normDepth,
             .ops = 2 * (mi.div_ulps + mi.rsqrt_ulps) + 1,
-            .mids = if (modulated) 3 else 1,
+            .mids = switch (kind) {
+                .plain => 1,
+                .modulated => 3,
+                .zero_centered => 0,
+            },
             .out = .bf16,
             .tiles = .{ .{}, .{}, .{ .size = 256 } },
-            .served = if (modulated)
-                &.{ .{ .rows = 4188, .n = 3072, .k = 3072 }, .{ .rows = 4130, .n = 3072, .k = 3072 }, .{ .rows = 4125, .n = 3072, .k = 3072 } }
-            else
-                &.{ .{ .rows = 63, .n = 3072, .k = 3072 }, .{ .rows = 34, .n = 3072, .k = 3072 }, .{ .rows = 10, .n = 3072, .k = 3072 } },
+            .served = switch (kind) {
+                .modulated => &.{ .{ .rows = 4188, .n = 3072, .k = 3072 }, .{ .rows = 4130, .n = 3072, .k = 3072 }, .{ .rows = 4125, .n = 3072, .k = 3072 } },
+                .plain => &.{ .{ .rows = 63, .n = 3072, .k = 3072 }, .{ .rows = 34, .n = 3072, .k = 3072 }, .{ .rows = 10, .n = 3072, .k = 3072 } },
+                .zero_centered => &.{ .{ .rows = 63, .n = 4096, .k = 4096 }, .{ .rows = 34, .n = 4096, .k = 4096 }, .{ .rows = 10, .n = 4096, .k = 4096 }, .{ .rows = 4096, .n = 4096, .k = 4096 } },
+            },
             .sums = .{ .bf16 = 0, .why = norm_why },
         };
     }
@@ -69,7 +78,7 @@ pub const Norm = struct {
         t.v = &.{};
     }
     pub fn kernel(t: *Norm, control: ?g.Gate) g.Kernel {
-        return .{ .spec = spec(t.name, t.modulated), .ctx = t, .vt = &vt, .control = control };
+        return .{ .spec = spec(t.name, t.kind), .ctx = t, .vt = &vt, .control = control };
     }
     const vt = g.hooks(Norm);
 
@@ -85,7 +94,7 @@ pub const Norm = struct {
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         if (fill == .stress) mi.integers(rng, t.x, 32) else mi.randomBf16(rng, t.x, -3, 3);
-        mi.randomBf16(rng, t.v[0..k], 0.25, 2);
+        if (t.kind == .zero_centered) mi.randomBf16(rng, t.v[0..k], -0.75, 1) else mi.randomBf16(rng, t.v[0..k], 0.25, 2);
         // the modulation's 1 + scale, and its shift
         mi.randomBf16(rng, t.v[k .. 2 * k], 0.5, 1.5);
         mi.randomBf16(rng, t.v[2 * k ..], -1, 1);
@@ -108,7 +117,11 @@ pub const Norm = struct {
 
     pub fn run(t: *Norm) !void {
         const p = t.rig.begin();
-        ks.norm(p.e, t.pipe, kref(t.ins[0]), kref(t.ins[1]), kref(t.ins[2]), kref(t.ins[3]), kref(t.out), t.shape.rows, t.shape.k, cfg.eps, t.modulated);
+        const k = t.shape.k;
+        if (t.kind == .zero_centered)
+            ks.encoderNorm(p.e, t.pipe, kref(t.ins[0]), kref(t.ins[1]), kref(t.out), t.shape.rows, k, k, k, tf.moss_image.encoder_config.eps)
+        else
+            ks.norm(p.e, t.pipe, kref(t.ins[0]), kref(t.ins[1]), kref(t.ins[2]), kref(t.ins[3]), kref(t.out), t.shape.rows, k, cfg.eps, t.kind == .modulated);
         try t.rig.finish(p);
     }
 
@@ -122,9 +135,14 @@ pub const Norm = struct {
         for (0..k) |j| {
             const x: f64 = c.fromBf16(t.x[r * k + j]);
             const w: f64 = c.fromBf16(t.v[j]);
+            if (t.kind == .zero_centered) {
+                const r1 = Range.of(x).mul(n.r).fp32(0.5).mul(Range.of(1 + w).fp32(0.5)).fp32(0.5).bf16();
+                ends.put(want, mag, r * k + j, bf(x * n.inv * (1 + w)), r1);
+                continue;
+            }
             var y = bf(bf(x * n.inv) * w);
             var yr = Range.of(x).mul(n.r).fp32(0.5).bf16().mul(Range.of(w)).fp32(0.5).bf16();
-            if (t.modulated) {
+            if (t.kind == .modulated) {
                 const s: f64 = c.fromBf16(t.v[k + j]);
                 const b: f64 = c.fromBf16(t.v[2 * k + j]);
                 y = bf(bf(y * s) + b);

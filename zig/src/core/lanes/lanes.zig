@@ -18,22 +18,29 @@ pub const cost_rule = @import("cost_rule.zig");
 pub const gpu_rule = @import("gpu_rule.zig");
 pub const gpu_full = @import("gpu_full.zig");
 pub const depth = @import("depth.zig");
+pub const hold_price = @import("hold_price.zig");
 pub const mtp_policy = @import("mtp_policy.zig");
 pub const trim = @import("trim.zig");
 pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");
 pub const backend = @import("backend.zig");
 pub const embedding = @import("embedding.zig");
+pub const readout = @import("readout.zig");
 pub const events = @import("events.zig");
 pub const windows = @import("windows.zig");
+pub const shared_drafts = @import("shared_drafts.zig");
+pub const row_cost = @import("row_cost.zig");
 pub const trail = @import("trail.zig");
 pub const engine = @import("engine.zig");
 pub const fake = @import("fake.zig");
+pub const shared_head_cost_check = @import("shared_head_cost_check.zig");
+pub const shared_draft_check = @import("shared_draft_check.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
 pub const recorder = @import("recorder.zig");
 pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
+pub const grammar_time = @import("grammar_time.zig");
 pub const grammar_fake = @import("grammar_fake.zig"); // a stand-in libtfgrammar for tests
 
 pub const Engine = engine.Engine;
@@ -49,17 +56,23 @@ pub const Trim = trim.Trim;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
+    _ = @import("late_draft_test.zig");
     _ = @import("long_loop.zig");
     _ = @import("long_loop_test.zig");
     _ = @import("loop_stop_test.zig");
     _ = @import("handover_test.zig");
     _ = @import("open_first_test.zig");
+    _ = @import("open_trace_test.zig");
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("drafted_chances_test.zig");
+    _ = @import("drafted_copy_test.zig");
     _ = @import("root_copy_test.zig");
     _ = @import("drafted_grammar_test.zig");
     _ = @import("windows_grammar_test.zig");
+    _ = @import("grammar_time_test.zig");
+    _ = @import("grammar_parallel_test.zig");
     _ = @import("pricing_test.zig");
     _ = @import("depth_probe_test.zig");
     _ = @import("proposal_external_test.zig");
@@ -69,7 +82,12 @@ test {
     _ = @import("fill_trim_test.zig");
     _ = @import("fair_turns_test.zig");
     _ = @import("copied_rate_test.zig");
+    _ = @import("granted_reservation_test.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");
 pub const learned_dirs = @import("learned_dirs.zig");
+
+test {
+    _ = @import("context_copy_price_test.zig");
+}

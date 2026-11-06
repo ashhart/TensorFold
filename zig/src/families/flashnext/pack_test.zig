@@ -528,6 +528,9 @@ test {
 }
 
 test "a pack never reads a tensor at a width the config leaves half-declared, though its shapes would fit" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -542,6 +545,9 @@ test "a pack never reads a tensor at a width the config leaves half-declared, th
 }
 
 test "a directly read tensor (expert, embedding, n-gram table) whose shapes contradict its declared width is refused" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();

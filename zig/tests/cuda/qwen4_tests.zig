@@ -29,7 +29,7 @@ pub fn execute(gpu: check.Gpu) !void {
     var d = try D.load(&b, 32, 32, 2, C.kernels.sample, C.kernels.torch_argmax);
     var closed = false;
     defer if (!closed) d.close() catch {};
-    const nodes = try F.node_gate.run(G, read, gpu.gpa, gpu.io, &b, Loader{}, true);
+    const nodes = try F.node_gate.run(G, read, gpu.gpa, gpu.io, &b, Loader{}, .nodes);
     if (nodes.different != 0) return error.Qwen4NodeMismatch;
     try F.device_gate.Gate(G, D, @import("lanes"), read).runAll(gpu.gpa, gpu.io, &b, Loader{}, &d);
     try d.close();

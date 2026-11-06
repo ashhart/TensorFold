@@ -1,6 +1,6 @@
 //! RMS norm rows in float64, the reference every backend's norm kernels are checked against (CUDA: cuda/norms.zig).
 const std = @import("std");
-const bf = @import("bf16_round.zig");
+const bf = @import("bf16_round");
 
 /// y = x / sqrt(mean(x^2) + eps) * w for one row (w null: no weight).
 pub fn rms(x: []const f64, w: ?[]const f64, eps: f64, y: []f64) void {

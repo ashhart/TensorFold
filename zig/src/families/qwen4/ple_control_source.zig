@@ -46,7 +46,7 @@ pub fn cuda(a: std.mem.Allocator, production: []const u8) ![]u8 {
         var text = try edit.once(mem, try edit.function(production, original_name), original_name, try std.mem.concat(mem, u8, &.{ name, "(" }));
         if (control == .sums) {
             if (gate) {
-                for ([_][]const u8{ "kss", "qss", "dot", "gss" }) |v| text = try edit.once(mem, text, try std.fmt.allocPrint(mem, "{s} = block_sum({s}, scratch);", .{ v, v }), try std.fmt.allocPrint(mem, "{s} = __half2float(__float2half_rn(block_sum({s}, scratch)));", .{ v, v }));
+                for ([_][]const u8{ "kss", "qss", "dot", "gss" }) |v| text = try edit.once(mem, text, try std.fmt.allocPrint(mem, "{s} = block_sum_serial({s}, scratch);", .{ v, v }), try std.fmt.allocPrint(mem, "{s} = __half2float(__float2half_rn(block_sum_serial({s}, scratch)));", .{ v, v }));
             }
         } else {
             for (if (gate) &[_][]const u8{"GATED[row + d]"} else &[_][]const u8{ "HOUT[at]", "NROW[at]" }) |marker| {

@@ -23,10 +23,7 @@ constexpr float HAD = 0.08838834764831845f;          // 1 / sqrt(128)
 constexpr int NB = 8;                                 // column tiles an item: 128 columns, one Hadamard block
 constexpr int MUL1 = 2;
 
-__device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok) {
-    const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem), "r"(ok ? 16 : 0));
-}
+__device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool ok) { tf_common::cp16z(smem, gmem, ok); }
 using tf_common::cp_commit;
 using tf_common::cp_wait;
 using qmm_frag::ldmatrix4;

@@ -7,11 +7,59 @@ the drafter; without it the model decodes plain. On CUDA the native engine serve
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
 
+The Metal dense loader reads aligned hidden, intermediate, layer and head counts from `config.json`.
+It retains the existing attention/DeltaNet head layouts and layer schedule. The untied 9B geometry
+(4096 hidden, 12288 intermediate, 32 layers) uses the same runtime-shaped projections; full checkpoint
+reference, draft, resume, concurrency and performance qualification remains pending. The pinned 2B
+continues to open its separate engine. Host header checks do not qualify another checkpoint.
+
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
+
+A lone Metal DFlash2 stream can verify 16, 32 or 64 rows (`TF_QWEN27_WINDOW`), on tensor units and earlier chips.
+Both device classes retain the 16-row default. Startup prices every row count through
+the selected width, in a width-tagged cache.
+Tensor-unit servers with several slots also measure wider unfused row shapes, through 64 rows when the context fits.
+Shared allocation uses those prices beyond the lone window; the lone window retains its own measured prices.
+Shared DFlash2 proposals use the allocator's grants before their batched pass, on both projection paths.
+Lone, cost-pruned trees keep their learned landing counts; shared requests and their tails use the node log-probability prior.
+Wide tensor-unit windows enable context copies by default; earlier chips keep copies opt-in.
+A lone lane request may propose up to 15/31/63 tree nodes at 16/32/64 rows, including the drafter's next-most-likely siblings at each depth. It chooses a parent-closed prefix
+by expected accepted tokens per measured millisecond in the common lane allocator, using its calibrated landing rates.
+The proposal keeps every candidate available until that decision. Copies compete for the same verification window;
+`TF_QWEN27_COPIES=0` disables them. The narrow tensor-unit default keeps copies off.
+The masked drafter block is unchanged. Both device classes use the lane loop by default, including at 16 rows.
+`TF_QWEN27_LANES=0` selects the legacy greedy shortcut; sampled requests retain the shared lane loop.
+Startup names the selected lone loop and width beside the lane window and copy policy.
+`tf-qwen27-bench --model DIR --widths costs` measures rows 1 through 64, with GPU and wall time including keep.
+The wall price excludes the diagnostic's host logit hash and scan.
+
+A greedy single-window lane pass gathers its matching taps with its target picks
+in the final verify command buffer. The lane core still chooses
+its authoritative keep. A matching prefix publishes its cache keep behind the next drafter frame; other paths
+keep synchronously. Target-state users drain outstanding keeps before verification, prefill, release or reset.
+The completed shared logit row is restored by an exact host word copy on that prefetched path.
+The cache keep is encoded while the target verify runs, using its existing plans. It remains uncommitted until
+the lane core supplies the authoritative path. Failure or a changed path drops the unused prepared buffer.
+Selector scratch is bounded on the stack; only the three owned result arrays allocate. A full tree that loses
+weak nodes during common pricing can offer context copies into the freed rows and price them once more.
+Drafter scratch reserves 64 KiB chunks, so small context growth reuses its existing buffers.
+On a single-slot server, a lone greedy lane starts its next draft at the following host step. Its target keep
+can finish while the host publishes the current reply chunk, as in the serial loop. The saved request owns
+its row indices and following tokens, and release or handoff cancels it. Shared, sampled and structured
+requests retain their existing scheduling.
+
+`TF_Q27_PASS_PROFILE=1` records host phases, GPU spans, command-buffer waits and commits, and forwarding-allocator
+calls on the serving thread. The `q27_offer` and `q27_keep` lines show verified tree and copy rows and the kept path.
+It preserves command boundaries. Leave it unset for throughput measurements.
+
+The legacy lone shortcut handles greedy requests; sampled requests use the shared lane loop.
+For bounded top-k requests, the BF16 host draw validates and selects candidates in one scan, using owned stack
+scratch. The same FP64 keyed sampler applies temperature, top-p and min-p to the same ordered candidates.
+Larger or unbounded cuts keep the general draw. Sampling time has its own pass-profile phase.
 
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
 default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
@@ -43,6 +91,41 @@ DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_st
 window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
+
+## GGUF host adapter
+
+`families/qwen27/gguf.zig` prepares the dense family's GGUF metadata and tensor identities on the host (#1920).
+It accepts the observed qwen35 architecture, refuses the unproven qwen3 alias, uses core's typed views
+and checks the fixed DeltaNet/attention geometry and layer schedule. Unknown computation keys, conflicting
+patterns, missing tensors, wrong shapes and unsupported quantization are refused by key or tensor identity.
+
+The observed ggml-org revision a316ea527fde32c12487be7574e2db5ac2ad2a7e has 40 metadata keys and 851 tensors.
+Core's reader checks both Q4_K_M and Q8_0 header/index lists against the plan, with no missing names or shapes.
+The testdata directory pins the extracted keys, tensor names/shapes and corresponding native Config input.
+Host tests use those data files and need no checkpoint. Large tokenizer arrays record type/count only.
+
+`Adapter.open` borrows the GGUF byte image and owns its index, destination names and compact affine arrays until
+`deinit`. FP32 coefficient tables and group-16/32 layouts remain intact. Dense F32/F16/BF16 tensors borrow their
+original bytes. GGUF matrices reverse dimension labels only; the convolution is reshaped without a transpose.
+The host fixture checks every repacked value against independent source decoding for all ten core formats.
+Core's documented signed-zero cancellation exception still applies; this does not extend its exactness claim.
+
+Destination names are identities for future native loading, not ready-to-serve tensors. The `ssm_a` entry has an
+explicit negative-exponential-decay role: its bytes are not relabelled as a usable logarithmic `A_log`. GDN head
+ordering still needs checkpoint qualification. No coefficient is narrowed or group merged.
+
+The final, input, post-attention, gated-linear, Q and K norm tensors carry the explicit `rms_gain` role.
+Sixteen values per class from both GGUF variants match the supplied MLX BF16 gains after rounding to BF16.
+Both checkpoints therefore store effective multiplicative gains here: the adapter neither adds nor subtracts one.
+It preserves the GGUF F32 values, including the bits beyond the MLX BF16 representation. The paired sample fixture
+checks all 96 values and the borrowed byte identities; this comparison does not qualify the remaining weights.
+Existing Metal paths still need FP32 metadata and group-16 qualification, tokenizer/chat-template integration,
+prepared-cache integration and real-model token/performance gates. GGUF model arguments receive a coming-later
+refusal; the adapter does not enable end-to-end GGUF inference.
+
+```sh
+zig build test-qwen27-gguf-host test-gguf-host -j1 --summary all
+```
 
 The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
@@ -218,7 +301,8 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --parallel 16 --context 8192 --
 
 `--parallel N` decodes up to N requests in shared rounds: each stream verifies its own DFlash2 tree in one
 forward, and every reply equals the same request served alone. A new prompt prefills 1,024 tokens a round
-while the other streams decode. States kept at message starts let prompts that share a system prompt resume
+while the other streams decode. On Metal, a reply that would end well before a long prompt goes first: the prompt
+lends it at most a quarter of its own time, and `--decode-share` or `TENSORFOLD_PREFILL_ORDER` overrides this. States kept at message starts let prompts that share a system prompt resume
 there, and each stream's caches are sized once, at admission.
 
 On one DGX Spark, with the workload from issue #38 (48 chat requests of 3,000 to 5,100 tokens sharing a
@@ -294,6 +378,24 @@ their solo runs and every solo run equal to `"draft": false` (60 of 60 for oQ2 a
 serial, resumed against fresh, by `token_sha`) matched on 8 of 8 short-prompt cells and 4 of 4 cells at 8,192
 tokens with a real resume, and replays after a restart matched too. A conversation grown by 6,144 tokens a turn
 to the 140,288 window kept swap at 653 to 656 MB, with a 43.57 GiB peak footprint.
+
+### A 48 GB M5 Pro Mac mini on 1.2.1
+
+Halfpenny Mac measured these on a rack-mounted Mac mini with the release binary; the 1.1.0 runs of the same cells
+are [public receipts](https://tensorfold.dev/benchmarks?contributor=7cc22071-45c2-4df0-8466-2cc25904b4fe) on the
+board.
+
+| | |
+| --- | --- |
+| Machine | Mac mini Mac17,16, Apple M5 Pro, 15-core CPU, 16-core GPU, 48 GB, macOS 27.0.1 (26A434), headless |
+| Runtime | TensorFold 1.2.1, the native Metal binary from Homebrew (`ashhart/tensorfold/tensorfold`), no Python |
+| Checkpoints | `TensorFold/Qwen3.8-27B-MLX-4bit@22d8d538`, `z-lab/Qwen3.8-27B-DFlash2@50307d4c` |
+| Launch | `tensorfold benchmark TensorFold/Qwen3.8-27B-MLX-4bit`, managed server, defaults; `--serial` for the plain rows |
+
+Decode medians from the [public benchmark command](README.md#measurements), 256-token replies, five repeats a cell,
+in tok/s for code sampled, chat sampled, code greedy and chat greedy: 89.1, 47.2, 79.3 and 56.4 with DFlash2;
+17.3, 17.3, 17.3 and 17.3 with `--serial`. First text arrived in 71 to 73 ms on every cell. The 1.1.0 binary served
+86.5, 46.1, 80.2 and 53.3 on the same cells. The machine was otherwise idle and no wired-limit sysctl was set.
 
 ## Calibration and checks
 

@@ -4,14 +4,20 @@ const mtl = @import("metal");
 const Config = @import("config.zig").Config;
 const Ref = @import("projection.zig").Ref;
 
-pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps };
+pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps, router, picks, route_weights, offsets, order, sorted_weights, sorted_rows, expert_gate, expert_up, expert_act, expert_out, expert_sums };
 
 /// A prompt pass's rows at most (a chain); rounds with trees and every logits row stay within `logit_rows`.
 pub const max_rows = 2048;
+
+/// The router's output pitch: its rows (a multiple of 64, the tensor units' dense product's pitch).
+fn routerRows(config: Config) usize {
+    return if (config.moe()) @import("widths.zig").routerRows(config.experts) else 0;
+}
 pub const logit_rows = 128;
 
 pub fn allocationSizes(config: Config, capacity: u32) [std.enums.values(Field).len]usize {
     const mp = 16 * ((capacity + 15) / 16);
+    const slots: usize = if (config.moe()) capacity * (config.top_k + 1) else 0; // a row's picks and its shared expert
     return .{
         capacity * 4,                                                                       8 * 4,                                                                                                                                  3 * capacity * 4,
         capacity * config.hidden * 2,                                                       capacity * config.hidden * 2,                                                                                                           capacity * config.hidden * 2,
@@ -25,6 +31,12 @@ pub fn allocationSizes(config: Config, capacity: u32) [std.enums.values(Field).l
         capacity * config.conv_kernel * 4,                                                  capacity * 4,                                                                                                                           capacity * 16,
         capacity * 16,                                                                      capacity * 4,                                                                                                                           capacity * config.kvDim() * 2,
         capacity * 4,                                                                       capacity * @sizeOf(@import("core").tree_slots.Step),
+            // the routed block: a row's logits, its picks and weights, the sorted slots, the experts' rows
+                                                                                           capacity * routerRows(config) * 2,
+        slots * 4,                                                                          slots * 4,                                                                                                                              (config.experts + 1) * 4,
+        slots * 4,                                                                          slots * 4,                                                                                                                              slots * config.hidden * 2,
+        slots * config.moe_intermediate * 2,                                                slots * config.moe_intermediate * 2,                                                                                                    slots * config.moe_intermediate * 2,
+        slots * config.hidden * 2,                                                          slots * @max(config.hidden, config.moe_intermediate) / 64 * 4,
     };
 }
 
@@ -69,6 +81,11 @@ pub const Frame = struct {
         }
         buffers[@backingInt(Field.eps)].slice(f32, 1)[0] = config.eps;
         return .{ .buffers = buffers, .capacity = capacity, .config = config, .standby = standby };
+    }
+
+    /// Slots a pass of `rows` makes: each row's top-k picks and its shared expert.
+    pub fn slotsOf(frame: *const Frame, rows: u32) u32 {
+        return rows * @as(u32, @intCast(frame.config.top_k + 1));
     }
 
     pub fn deinit(frame: *Frame) void {

@@ -75,6 +75,8 @@ const Script = struct {
     reply: []const u32,
     asked: ?u8 = null,
     prompt_rows: bool = true,
+    logprobs: bool = true,
+    submits: usize = 0,
 
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -82,11 +84,12 @@ const Script = struct {
 
     fn info(ctx: *anyopaque) api.Info {
         const e: *Script = @ptrCast(@alignCast(ctx));
-        return .{ .context_window = 64, .logprobs = true, .prompt_logprobs = e.prompt_rows };
+        return .{ .context_window = 64, .logprobs = e.logprobs, .prompt_logprobs = e.prompt_rows };
     }
 
     fn submit(ctx: *anyopaque, id: api.Id, r: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e: *Script = @ptrCast(@alignCast(ctx));
+        e.submits += 1;
         e.asked = r.logprobs;
         var rows: [32]api.LogprobRow = undefined;
         for (e.reply, rows[0..e.reply.len], 0..) |t, *row, i| {
@@ -173,8 +176,12 @@ fn send(reply: []const u32, thinking: bool, route: Route, body: []const u8) !Got
 }
 
 fn sendWith(reply: []const u32, thinking: bool, route: Route, body: []const u8, prompt_rows: bool) !Got {
+    return sendCapabilities(reply, thinking, route, body, prompt_rows, true);
+}
+
+fn sendCapabilities(reply: []const u32, thinking: bool, route: Route, body: []const u8, prompt_rows: bool, logprobs: bool) !Got {
     var text: Text = .{};
-    var backend: Script = .{ .reply = reply, .prompt_rows = prompt_rows };
+    var backend: Script = .{ .reply = reply, .prompt_rows = prompt_rows, .logprobs = logprobs };
     var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
         .served_name = "test-model",
         .model_ids = &.{"test-model"},
@@ -191,6 +198,7 @@ fn sendWith(reply: []const u32, thinking: bool, route: Route, body: []const u8, 
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
     var got: Got = .{};
     openai.run(srv, a, got.out(), .{ .conn = &conn }, route != .completions, chat);
+    if (!logprobs) try std.testing.expectEqual(@as(usize, 0), backend.submits);
     return got;
 }
 
@@ -434,5 +442,22 @@ test "prompt_logprobs: null first, then each prompt token with its rank before t
         var got = try sendWith(&reply, false, c.route, c.body, c.rows);
         defer got.deinit();
         try std.testing.expectEqual(@as(u16, 400), got.status);
+    }
+}
+
+test "logprobs capability: unsupported chat and completions return 400 before submitting, whole or streamed" {
+    for ([_]bool{ false, true }) |stream| {
+        const extra = if (stream) ",\"stream\":true}" else "}";
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        for ([_]Route{ .chat, .completions }) |route| {
+            const head = if (route == .chat) ask else "{\"model\":\"test-model\",\"prompt\":\"x\",\"max_tokens\":32,\"logprobs\":2";
+            const body = try std.mem.concat(arena.allocator(), u8, &.{ head, extra });
+            var got = try sendCapabilities(&.{ 1, 2 }, false, route, body, true, false);
+            defer got.deinit();
+            try std.testing.expectEqual(@as(u16, 400), got.status);
+            try std.testing.expectEqual(@as(usize, 0), got.events.items.len);
+            try std.testing.expect(std.mem.indexOf(u8, got.body, "logprobs are not supported") != null);
+        }
     }
 }

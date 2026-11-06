@@ -30,15 +30,7 @@ struct Tile {
     static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
 };
 
-__device__ __forceinline__ void unpack8(const uint4 u, float (&f)[8]) {
-    const __nv_bfloat162* p = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float2 v = __bfloat1622float2(p[i]);
-        f[2 * i] = v.x;
-        f[2 * i + 1] = v.y;
-    }
-}
+#include "common/unpack8_value.cuh"
 
 // x e4m3 [M, K] and w e4m3 [npad/64, K/64, 8, 32, 2, 8], both in the fragment order quant8 and the FP8 pack write.
 template <typename C, bool CLUSTER>

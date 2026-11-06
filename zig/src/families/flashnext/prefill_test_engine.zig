@@ -40,6 +40,7 @@ pub const Fake = struct {
     gpa: std.mem.Allocator = a,
     target: lanes.fake.Fake = .{ .gpa = a },
     filling: std.AutoHashMapUnmanaged(*Stream, fill.State) = .empty,
+    fill_grows: bool = false,
     complete: std.AutoHashMapUnmanaged(*Stream, Summary) = .empty,
     table: lanes.backend.Backend.VTable = undefined,
     barrier: bool = false,
@@ -56,6 +57,7 @@ pub const Fake = struct {
     freed: usize = 0,
     max_slots: usize = 4,
     restored_at: u32 = 0,
+    decode_shrink: bool = true, // false: chunks keep the engine's full cuts beside decoders (the CUDA grid's shape)
     fail_image: bool = false,
     fail_chunk: bool = false,
     fail_completion: bool = false,
@@ -158,6 +160,7 @@ pub const Fake = struct {
         return .{ .stream = s, .slot = preferred orelse f.target.lanes.count() - 1, .at = at, .owner = o };
     }
     pub fn decoding(f: *const Fake) bool {
+        if (!f.decode_shrink) return false;
         var it = f.target.lanes.keyIterator();
         while (it.next()) |key| if (!f.filling.contains(key.*) and !key.*.finished and !key.*.paused) return true;
         return false;

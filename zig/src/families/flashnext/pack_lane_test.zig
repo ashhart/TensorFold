@@ -86,6 +86,9 @@ test "a stack of several widths writes a pack per run with its rows' places, and
 }
 
 test "runs whose columns aren't a multiple of 32 keep MLX's layout untiled, as decode.py's nt 0, at the GDN rows" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -123,6 +126,9 @@ fn packMixed(gpa: std.mem.Allocator, stack: []const lane.Q, proj: []const lane.Q
 }
 
 test "a lane stack and a prompt projection of several widths free every buffer when any allocation fails" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

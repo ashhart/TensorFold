@@ -154,6 +154,9 @@ test "each GLM tensor of a mixed oQ table resolves to its module's width, the re
 }
 
 test "a uniform table gives every module 4/64; aliases that disagree, no table and other modes are refused" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

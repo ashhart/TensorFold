@@ -7,7 +7,7 @@ const be = lanes.backend;
 /// Windows a shared pass takes at most (a round's streams).
 const round_streams = 32;
 
-/// The drafted windows verified in shared passes of up to `cap` rows (alone on two ranks), then drawn.
+/// The drafted windows verified in shared passes of up to `cap` rows (both ranks' at TP=2), then drawn.
 pub fn windows(self: anytype, wins: []const be.Window, out: []be.Verified, drafted: []const usize, row_ids: []const [mtp.max_rows]u32, cap: usize) !void {
     var seqs: [round_streams]*prompt.Seq = undefined;
     var ds: [round_streams]*mtp.Draft = undefined;
@@ -25,10 +25,16 @@ pub fn windows(self: anytype, wins: []const be.Window, out: []be.Verified, draft
             idss[n] = row_ids[drafted[at + n]][0..w.rows()];
             rows += w.rows();
         }
-        if (n == 1 or self.ranks != null or cap <= 1) {
+        if (n == 1 or cap <= 1) {
             for (seqs[0..n], ds[0..n], idss[0..n]) |q, d, ids| try self.ops().verify(q, d, ids);
+        } else if (self.ranks) |r| {
+            try r.verifyMany(@TypeOf(self.tri()), self.tri(), seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
         } else try self.ops().verifyMany(seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
         for (drafted[at..][0..n], ds[0..n]) |wi, d| try self.ops().draws(d, wins[wi].stream.sampling, wins[wi].masks, out[wi].sampled[0..wins[wi].rows()]);
         at += n;
     }
+}
+
+test {
+    _ = @import("cuda_lanes_verify_test.zig");
 }

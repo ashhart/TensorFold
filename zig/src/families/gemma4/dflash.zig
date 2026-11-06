@@ -176,7 +176,7 @@ pub const Drafter = struct {
     /// Chains of up to 15, always drafted, no plain guard: a block costs the same at any depth, a guard bills per row.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = block_rows - 1, .step_ms = d.step_ms, .prior = &prior, .plain_guard = false, .batched = true, .stream_bytes = d.laneBytes(d.options.capacity) };
+        return .{ .limit_shared_drafts = true, .depth = block_rows - 1, .step_ms = d.step_ms, .prior = &prior, .plain_guard = false, .batched = true, .stream_bytes = d.laneBytes(d.options.capacity) };
     }
 
     fn laneBytes(d: *const Drafter, capacity: usize) usize {

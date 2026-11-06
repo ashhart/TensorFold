@@ -4,6 +4,9 @@ const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 
 test "Failure boundaries: failed thread context initialization fails queued work without backend execution" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const a = std.testing.allocator;
     const io = std.testing.io;
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
@@ -52,6 +55,9 @@ test "Failure boundaries: failed thread context initialization fails queued work
 }
 
 test "Failure boundaries: a failed round retains every admitted job when allocation fails" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const a = std.testing.allocator;
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);

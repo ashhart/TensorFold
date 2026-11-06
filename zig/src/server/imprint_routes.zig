@@ -105,9 +105,9 @@ fn reply(a: Allocator, ask: *const Ask) !Value {
     return .{ .object = o };
 }
 
-/// Without --learn-conversations each route says so, rather than answer for a store the engine never opened.
+/// Without a conversation store each route names both disk-cache spellings, rather than answer for an unopened store.
 fn off(conn: *Conn, a: Allocator) void {
-    const message = "saved conversations are off: start the server with --learn-conversations";
+    const message = "saved conversations are off: start the server with --prompt-cache-disk DIR (or --learn-conversations)";
     const quoted = json.quote(a, message, .{}) catch return;
     conn.sendJson(404, std.fmt.allocPrint(a, "{{\"error\": {{\"message\": {s}}}}}", .{quoted}) catch return);
 }

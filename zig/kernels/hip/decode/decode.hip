@@ -28,6 +28,58 @@ __device__ __forceinline__ float4 widen4(uint2 v) {
 constexpr int kRouterWaves = 4;
 constexpr int kRouterSteps = 16;  // float4 loads a lane keeps in flight
 constexpr int kRouterRows = 16;
+constexpr int kRouterGroups = 4;  // bf16 weight groups a lane keeps in flight
+
+// The bf16 rows' router: 16 rows a block, a wave an expert, each lane summing (lane * 4 + 128 * g) x, y, z, w.
+template <int KIND>
+__device__ void router_bf16(const void* x, const void* rows, float* logits, int r, int d, int e) {
+    const int lane = threadIdx.x & 31;
+    const int expert = blockIdx.x * kRouterWaves + (threadIdx.x >> 5);
+    if (expert >= e) return;
+    const int first = blockIdx.y * kRouterRows;
+    const uint16_t* xb = static_cast<const uint16_t*>(x) + static_cast<long long>(first) * d;
+    const uint16_t* wb = static_cast<const uint16_t*>(rows) + static_cast<long long>(expert) * d;
+    logits += static_cast<long long>(first) * e;
+    const int rows_left = r - first;
+    const int live = rows_left < kRouterRows ? rows_left : kRouterRows;
+    float acc[kRouterRows];
+#pragma unroll
+    for (int k = 0; k < kRouterRows; ++k) acc[k] = 0.f;
+    // a lane's group: four values a count, strided by the block's width, so its sums meet the fp32 kernel's
+    const int groups = (d + 127) / 128;
+    for (int g = 0; g < groups; g += kRouterGroups) {
+        uint2 wv[kRouterGroups];
+#pragma unroll
+        for (int p = 0; p < kRouterGroups; ++p) {
+            const int at = lane * 4 + 128 * (g + p);
+            wv[p] = (g + p < groups && at < d) ? *reinterpret_cast<const uint2*>(wb + at) : make_uint2(0u, 0u);
+        }
+#pragma unroll
+        for (int p = 0; p < kRouterGroups; ++p) {
+            const int at = lane * 4 + 128 * (g + p);
+            if (g + p >= groups || at >= d) continue;
+            // the checkpoint holds these rows in bf16 whatever the activations are
+            const float4 w = widen4<2>(make_uint2(wv[p].x, wv[p].y));
+#pragma unroll
+            for (int k = 0; k < kRouterRows; ++k) {
+                if (k >= live) continue;
+                const uint16_t* xr = xb + static_cast<long long>(k) * d + at;
+                const float4 xv = widen4<KIND>(*reinterpret_cast<const uint2*>(xr));
+                acc[k] = fmaf(xv.x, w.x, acc[k]);
+                acc[k] = fmaf(xv.y, w.y, acc[k]);
+                acc[k] = fmaf(xv.z, w.z, acc[k]);
+                acc[k] = fmaf(xv.w, w.w, acc[k]);
+            }
+        }
+    }
+#pragma unroll
+    for (int k = 0; k < kRouterRows; ++k) {
+        float v = acc[k];
+#pragma unroll
+        for (int mask = 16; mask > 0; mask >>= 1) v += __shfl_xor(v, mask, 32);
+        if (lane == 0 && k < live) logits[static_cast<long long>(k) * e + expert] = v;
+    }
+}
 
 // logits[r, e] = x[r] . rows[e], 16 rows a block, a wave an expert; d is a multiple of 4, weight rows 16-byte aligned.
 template <int KIND>
@@ -396,6 +448,17 @@ extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
 extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
     tf_router_decode_bf16(const void* x, const float* rows, float* logits, int r, int d, int e) {
     router_decode<2>(x, rows, logits, r, d, e);
+}
+
+// fp16 activations read bf16 rows: only the activations follow the kind.
+extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
+    tf_router_bf16_f16(const void* x, const void* rows, float* logits, int r, int d, int e) {
+    router_bf16<1>(x, rows, logits, r, d, e);
+}
+
+extern "C" __global__ void __launch_bounds__(32 * kRouterWaves)
+    tf_router_bf16(const void* x, const void* rows, float* logits, int r, int d, int e) {
+    router_bf16<2>(x, rows, logits, r, d, e);
 }
 
 extern "C" __global__ void __launch_bounds__(kTailThreads)

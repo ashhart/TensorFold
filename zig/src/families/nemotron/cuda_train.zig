@@ -266,8 +266,8 @@ pub const Trainer = struct {
     /// The raw weights the backward's products read, and the LM head dequantized once.
     fn loadRaw(t: *Trainer, io: std.Io, dir: []const u8) !void {
         const c = t.c;
-        var ck = try core.Checkpoint.openModel(t.gpa, io, dir);
-        defer ck.close();
+        var ck = try @import("cuda_train_source.zig").open(t.gpa, io, dir, c);
+        defer core.checkpoint.cache.close(&ck);
         // direct reads through the engine loader's slots: copies from the mapping crawl on GB10
         var src = try Source.init(t.gpa, t.e.ops());
         defer src.deinit();

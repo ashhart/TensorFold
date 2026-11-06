@@ -77,3 +77,10 @@ test "the one-wave test uses the replaced classic kernel's resident warps, not t
     try std.testing.expectEqual(@as(?usize, 6), pick(true, 19, 20, 768, 960));
     try std.testing.expectEqual(@as(?usize, null), pick(true, 20, 20, 768, 960));
 }
+
+test "NVFP4 decode CTA geometry is explicit, bounded and defaults to four warps" {
+    try std.testing.expectEqual(@as(usize, 4), try Nvfp4Experts.decodeWarps(null));
+    try std.testing.expectEqual(@as(usize, 1), try Nvfp4Experts.decodeWarps("1"));
+    try std.testing.expectEqual(@as(usize, 4), try Nvfp4Experts.decodeWarps("4"));
+    for ([_][]const u8{ "0", "2", "8", "", "garbage" }) |v| try std.testing.expectError(error.BadExpertWarps, Nvfp4Experts.decodeWarps(v));
+}

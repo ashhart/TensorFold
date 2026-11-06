@@ -83,6 +83,9 @@ const Fixture = struct {
 };
 
 test "GLM expiry: a failed relocation keeps its selected restore borrow alive until reported" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var f: Fixture = .{};
     f.init();
     defer f.deinit();

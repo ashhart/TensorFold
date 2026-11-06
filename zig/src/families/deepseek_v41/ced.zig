@@ -51,6 +51,53 @@ pub fn savePoint(n: u64, cached: u64) ?u64 {
 
 pub const Stash = ft.Stash;
 
+/// A suffix rule: how many rows the decoder's first layer consumes, and whether those rows are the full forward's.
+pub const Rule = struct { rows: u32, exact: bool };
+
+/// The exact rule for `kept` rows: the cone's rows, which the full forward's bits match.
+pub fn rule(cfg: *const Config, kept: u32) Error!Rule {
+    return .{ .rows = try suffixRows(cfg, kept), .exact = true };
+}
+
+/// The decoder suffix cone: the rows the encoder's last layer must produce for the decoder to stay exact.
+pub fn suffixRows(cfg: *const Config, kept: u32) Error!u32 {
+    const d = try decoderStart(cfg);
+    return kept + (cfg.layers - d) * (cfg.window - 1);
+}
+
+/// Every row: an encoder layer is not cone-limited.
+pub const all_rows: u32 = std.math.maxInt(u32);
+
+/// The rows of layer `layer`'s output the cone needs: the decoder's cone, or every row of an encoder layer.
+pub fn layerRows(cfg: *const Config, kept: u32, layer: u32) Error!u32 {
+    const d = try decoderStart(cfg);
+    if (layer < d) return all_rows;
+    return kept + (cfg.layers - 1 - layer) * (cfg.window - 1);
+}
+
+/// The rows layer `layer` computes over a prompt of `n` rows: its cone's, or all of them for an encoder layer.
+pub fn layerRowsOf(cfg: *const Config, kept: u32, layer: u32, n: u32) Error!u32 {
+    const rows = try layerRows(cfg, kept, layer);
+    return if (rows == all_rows) n else @min(rows, n);
+}
+
+/// The replay before a save at S: the cone's rows [S - R, S), or null when the segment since `cached` is shorter.
+pub const Replay = struct { r0: u64, s: u64 };
+
+pub fn snapshotReplayWith(cfg: *const Config, n: u64, cached: u64, kept: u32) Error!?Replay {
+    const s = savePoint(n, cached) orelse return null;
+    if (s < cached) return null;
+    const r: u64 = try suffixRows(cfg, kept);
+    if (s - cached < r) return null;
+    return .{ .r0 = s - r, .s = s };
+}
+
+/// The replay before a save at S under the release config: the cone's rows [S - R, S), or null when too short.
+pub fn snapshotReplay(n: u64, cached: u64, kept: u32) Error!?Replay {
+    const cfg: Config = .{};
+    return snapshotReplayWith(&cfg, n, cached, kept);
+}
+
 /// The drafter hand-off before the first verify row: one ingest of the last `window` taps rows from `row0` at `start`.
 pub const Handoff = struct { start: u64, row0: u32, n: u32 };
 

@@ -1,4 +1,4 @@
-//! Persistent expert addressing with CLOCK eviction and explicit read/consumer ownership.
+//! Persistent expert addressing with CLOCK eviction over use counts and explicit read/consumer ownership.
 const std = @import("std");
 pub const absent: i32 = -1;
 pub const Ticket = struct { key: usize, slot: usize, generation: u64 };
@@ -7,8 +7,9 @@ pub const Slot = struct {
     generation: u64 = 0,
     reading: bool = false,
     ready: bool = false,
-    referenced: bool = false,
+    uses: u2 = 0, // demand hits, less the hand's passes: a new expert starts at none, so one used once leaves first
     leased: bool = false,
+    displaced: ?usize = null, // the expert a forecast's reservation pushed out: its bytes stay until the read starts
 };
 
 pub const Cache = struct {
@@ -59,7 +60,7 @@ pub const Cache = struct {
 
     pub fn resident(c: *Cache, key: usize) !?usize {
         const at = try c.peek(key) orelse return null;
-        c.slots[at].referenced = true;
+        c.slots[at].uses +|= 1;
         return at;
     }
 
@@ -88,7 +89,7 @@ pub const Cache = struct {
         };
         for (c.current[0..c.current_count]) |key| if (c.slotFor(key)) |s| {
             s.leased = true;
-            s.referenced = true;
+            s.uses +|= 1;
         };
     }
 
@@ -117,7 +118,7 @@ pub const Cache = struct {
     }
 
     pub fn forecastRoom(c: *const Cache) bool {
-        for (c.slots) |s| if (!s.reading and !s.leased and !s.referenced) return true;
+        for (c.slots) |s| if (!s.reading and !s.leased and s.uses == 0) return true;
         return false;
     }
 
@@ -127,17 +128,19 @@ pub const Cache = struct {
         if (!forecast and !c.demand[key]) return error.UnprotectedDemand;
         if (try c.peek(key) != null or c.pending(key) != null) return null;
         var visits: usize = 0;
-        while (visits < c.slots.len * @as(usize, if (forecast) 1 else 2)) : (visits += 1) {
+        const sweeps: usize = if (forecast) 1 else @as(usize, std.math.maxInt(u2)) + 1;
+        while (visits < c.slots.len * sweeps) : (visits += 1) {
             const i = c.hand;
             c.hand = (i + 1) % c.slots.len;
             const s = &c.slots[i];
             if (s.reading or s.leased) continue;
-            if (s.referenced) {
-                if (!forecast) s.referenced = false;
+            if (s.uses > 0) {
+                if (!forecast) s.uses -= 1;
                 continue;
             }
-            if (s.key) |old| c.map[old] = absent;
-            s.* = .{ .key = key, .generation = s.generation +% 1, .reading = true, .leased = c.demand[key] };
+            const old = s.key;
+            if (old) |k| c.map[k] = absent;
+            s.* = .{ .key = key, .generation = s.generation +% 1, .reading = true, .leased = c.demand[key], .displaced = if (forecast) old else null };
             c.inflight[key] = @intCast(i);
             return .{ .key = key, .slot = i, .generation = s.generation };
         }
@@ -157,8 +160,21 @@ pub const Cache = struct {
         c.inflight[t.key] = absent;
         s.reading = false;
         s.ready = true;
-        s.referenced = s.leased;
+        s.displaced = null;
         c.map[t.key] = @intCast(t.slot);
+    }
+
+    /// A forecast whose read never started: the expert it displaced is still in its slot, and stays, unless it moved.
+    pub fn giveBack(c: *Cache, t: Ticket) !void {
+        const s = try c.ticket(t);
+        const old = s.displaced orelse return c.abort(t);
+        if (c.map[old] != absent or c.inflight[old] != absent) return c.abort(t);
+        c.inflight[t.key] = absent;
+        s.key = old;
+        s.reading = false;
+        s.ready = true;
+        s.displaced = null;
+        c.map[old] = @intCast(t.slot);
     }
 
     pub fn abort(c: *Cache, t: Ticket) !void {

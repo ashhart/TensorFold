@@ -207,6 +207,7 @@ pub fn Backend(comptime F: type) type {
             .draft = draftFn,
             .tree = heldFn,
             .release = releaseFn,
+            .readout_finish = if (@hasDecl(F, "readoutFinish")) readoutFinishFn else null,
         };
 
         /// The backend behind `ptr`, the calling thread bound to its GPU.
@@ -218,11 +219,11 @@ pub fn Backend(comptime F: type) type {
 
         /// The whole prompt pass, chunk by chunk (a driver of its own, with no rounds between).
         fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
-            while (!try prefillStepFn(ptr, s)) {}
+            while (!try prefillStepFn(ptr, s, 0)) {} // whole prompts: the 512-row cap would cut where this driver never does
         }
 
         /// One chunk of the prompt pass, ending on the next cut or the prompt's end; the last draws the first token.
-        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
+        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
             const h = of(ptr);
             if (s.isCancelled()) return error.Cancelled;
             const lane = if (h.streams.map.get(s)) |l| (if (l.fill != null) l else try h.begin(s)) else try h.begin(s);
@@ -232,6 +233,15 @@ pub fn Backend(comptime F: type) type {
             try h.tp.fill(lane.id, to);
             // The hook reaches the engine, so a cancel arriving inside a long chunk stops between its layers.
             const cancel = h.cancelOf(s);
+            // a readout's every piece, the last too, feeds its readout: no projection, no draw, no `last` row
+            if (comptime @hasDecl(F, "readoutPiece")) if (s.readout != null) {
+                try h.readoutPiece(lane, prompt, f.at, to, cancel);
+                f.at = to;
+                _ = f.cut(to); // a cut passed keeps no state: a readout writes no snapshot
+                if (to < prompt.len) return false;
+                lane.fill = null;
+                return true;
+            };
             if (to == prompt.len) {
                 // a structured reply keeps the prompt's last row: its first token is drawn again under the grammar
                 if (s.grammar != null and lane.first_row == null) lane.first_row = try h.gpa.alloc(
@@ -329,6 +339,12 @@ pub fn Backend(comptime F: type) type {
         fn heldFn(ptr: *anyopaque, s: *lanes.Stream, _: std.mem.Allocator) anyerror!?lanes.stream.Held {
             const lane = try of(ptr).streams.get(s);
             return .{ .count = @intCast(lane.held_n) };
+        }
+
+        /// A filled readout's logits into the request's slice, before its release.
+        fn readoutFinishFn(ptr: *anyopaque, s: *lanes.Stream, logits: []u16) anyerror!void {
+            const h = of(ptr);
+            try h.readoutFinish(try h.streams.get(s), logits);
         }
 
         fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {

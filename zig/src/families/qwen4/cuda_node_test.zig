@@ -8,10 +8,17 @@ fn read(_: *n.B, buffer: n.B.Buffer, out: []u8) !void {
 }
 test "Qwen4 CUDA nodes: every two-row storage node matches and queued state has no first divergence" {
     var b: n.B = .{};
-    const summary = try @import("node_gate.zig").run(n.G, read, t.allocator, std.testing.io, &b, n.Loader{}, false);
+    const gate = @import("node_gate.zig");
+    const summary = try gate.run(n.G, read, t.allocator, std.testing.io, &b, n.Loader{}, .first);
     try t.expectEqual(@as(usize, 0), summary.different);
     try t.expectEqual(@as(usize, 142), summary.checked);
     try t.expect(summary.first[0] == null and summary.first[1] == null);
+    try t.expectEqual(@as(usize, 0), b.held);
+    const ids = [_]u32{ 3, 5 };
+    const io = std.testing.io;
+    const legacy = try gate.runRows(n.G, read, t.allocator, io, &b, n.Loader{}, &ids, gate.legacy_reference, .nothing);
+    try t.expect(legacy.first[0] == null);
+    try t.expectEqual([2]usize{ 55, 42 }, [2]usize{ legacy.first[1] orelse 0, legacy.values[1] });
     try t.expectEqual(@as(usize, 0), b.held);
 }
 test "Qwen4 CUDA nodes: the real probability-store and merge bodies preserve the reported counterexample" {

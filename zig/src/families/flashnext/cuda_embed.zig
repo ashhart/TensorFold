@@ -12,30 +12,27 @@ pub const biases_name = "language_model.model.embed_tokens.biases";
 
 const Triple = struct { weight: Tensor, scales: Tensor, biases: Tensor };
 
-fn tensorAt(obj: std.json.ObjectMap, data: []const u8, name: []const u8, dtype: core.safetensors.DType) !Tensor {
-    const o = (obj.get(name) orelse return error.MissingTensor).object;
-    const got = core.safetensors.DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
-    if (got != dtype) return error.UnexpectedTensor;
-    const shape = o.get("shape").?.array.items;
-    if (shape.len == 0 or shape.len > 4) return error.UnexpectedTensor;
-    const offs = o.get("data_offsets").?.array.items;
-    const begin: usize = @intCast(offs[0].integer);
-    const end: usize = @intCast(offs[1].integer);
-    if (end < begin or end > data.len) return error.BadSafetensors;
-    var t: Tensor = .{ .dtype = dtype, .rank = @intCast(shape.len), .shape = @splat(1), .bytes = data[begin..end] };
-    for (shape, 0..) |d, i| t.shape[i] = @intCast(d.integer);
-    return t;
+/// core's index of a header over `data`; a tensor of a dtype or rank core does not name is left out, not refused.
+fn index(arena: std.mem.Allocator, header: []const u8, data: []const u8) !core.safetensors.Header {
+    return core.safetensors.parseHeaderOptions(arena, header, data.len, .{ .unsupported = .omit });
+}
+
+/// `name` from core's index: the dtype asked for, rank 1 to 4, bytes that core checked against the shape.
+fn tensorAt(names: core.safetensors.Header, data: []const u8, name: []const u8, dtype: core.safetensors.DType) !Tensor {
+    const e = names.get(name) orelse return error.MissingTensor;
+    if (e.dtype != dtype or e.rank == 0 or e.rank > 4) return error.UnexpectedTensor;
+    return .{ .dtype = e.dtype, .rank = e.rank, .shape = e.shape, .bytes = data[e.begin..e.end] };
 }
 
 /// The three embedding tensors inside one safetensors header. Other tensors, including rank above 4, are ignored.
 pub fn readTriple(gpa: std.mem.Allocator, header: []const u8, data: []const u8) !Triple {
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, header, .{});
-    defer parsed.deinit();
-    const obj = parsed.value.object;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const names = try index(arena.allocator(), header, data);
     return .{
-        .weight = try tensorAt(obj, data, weight_name, .u32),
-        .scales = try tensorAt(obj, data, scales_name, .bf16),
-        .biases = try tensorAt(obj, data, biases_name, .bf16),
+        .weight = try tensorAt(names, data, weight_name, .u32),
+        .scales = try tensorAt(names, data, scales_name, .bf16),
+        .biases = try tensorAt(names, data, biases_name, .bf16),
     };
 }
 
@@ -55,18 +52,18 @@ pub const Mapped = struct {
         if (len < 8) return error.BadSafetensors;
         var map = try std.Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
         errdefer map.destroy(io);
-        const header_len: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
-        if (header_len > len - 8) return error.BadSafetensors;
+        const header_len = try core.safetensors.headerSize(std.mem.readInt(u64, map.memory[0..8], .little), len);
         const triple = try readTriple(gpa, map.memory[8..][0..header_len], map.memory[8 + header_len ..]);
         return .{ .io = io, .file = file, .map = map, .weight = triple.weight, .scales = triple.scales, .biases = triple.biases };
     }
 
     /// One named tensor in this shard. Rank 1 to 4.
     pub fn lookup(self: *const Mapped, gpa: std.mem.Allocator, name: []const u8, dtype: core.safetensors.DType) !Tensor {
-        const header_len: usize = @intCast(std.mem.readInt(u64, self.map.memory[0..8], .little));
-        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, self.map.memory[8..][0..header_len], .{});
-        defer parsed.deinit();
-        return tensorAt(parsed.value.object, self.map.memory[8 + header_len ..], name, dtype);
+        const header_len = try core.safetensors.headerSize(std.mem.readInt(u64, self.map.memory[0..8], .little), self.map.memory.len);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const data = self.map.memory[8 + header_len ..];
+        return tensorAt(try index(arena.allocator(), self.map.memory[8..][0..header_len], data), data, name, dtype);
     }
 
     pub fn close(self: *Mapped) void {
@@ -120,11 +117,7 @@ pub const Table = struct {
 };
 
 /// fp32 to bf16, round to nearest even, the rounding Triton uses.
-fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+const toBf16 = core.bf16_round.bits;
 
 fn f32FromBf16(b: []const u8, i: usize) f32 {
     return @bitCast(@as(u32, std.mem.readInt(u16, b[2 * i ..][0..2], .little)) << 16);
@@ -166,6 +159,21 @@ test "embedding bytes are read when another tensor has rank above 4" {
     var out: [32]u16 = undefined;
     try dequant(triple.weight.bytes, triple.scales.bytes, triple.biases.bytes, 32, 0, &out);
     try std.testing.expectEqual(@as(u16, 0x3f80), out[0]);
+}
+
+test "a malformed embedding entry is refused with an error, and its bytes must match its shape" {
+    const bad = [_][]const u8{
+        "[]",
+        "{\"language_model.model.embed_tokens.weight\":5}",
+        "{\"language_model.model.embed_tokens.weight\":{\"dtype\":\"U32\",\"shape\":[1,4],\"data_offsets\":[0]}}",
+        "{\"language_model.model.embed_tokens.weight\":{\"dtype\":\"U32\",\"shape\":[1,4],\"data_offsets\":[-1,16]}}",
+        "{\"language_model.model.embed_tokens.weight\":{\"dtype\":\"U32\",\"shape\":[1,4],\"data_offsets\":[0.0,16]}}",
+        "{\"language_model.model.embed_tokens.weight\":{\"dtype\":\"U32\",\"shape\":[1000000,4],\"data_offsets\":[0,16]}," ++
+            "\"language_model.model.embed_tokens.scales\":{\"dtype\":\"BF16\",\"shape\":[1,1],\"data_offsets\":[16,18]}," ++
+            "\"language_model.model.embed_tokens.biases\":{\"dtype\":\"BF16\",\"shape\":[1,1],\"data_offsets\":[18,20]}}",
+    };
+    const data: [20]u8 = @splat(0);
+    for (bad) |header| try std.testing.expectError(error.BadSafetensors, readTriple(std.testing.allocator, header, &data));
 }
 
 test "one embedding group dequants nibbles with scale and bias" {

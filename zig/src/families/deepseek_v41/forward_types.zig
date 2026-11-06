@@ -9,34 +9,40 @@ pub const keep: u32 = replay_rows - 1;
 /// the stash ring's rows (position p at row p % ring): at least `keep`, a power of two
 pub const ring: u32 = 128;
 
+/// A slot's stash bookkeeping over `ring_rows` rows (rows on the device, "s.ced.*" row p % ring_rows).
+pub fn StashOf(comptime ring_rows: u32) type {
+    comptime std.debug.assert(ring_rows >= keep);
+    return struct {
+        from: u64 = 0,
+        hi: u64 = 0,
+        ids: [ring_rows]u32 = @splat(0),
+
+        /// A segment at `start`; a gap starts the stash over there.
+        pub fn extend(s: *@This(), start: u64, ids: []const u32) void {
+            if (s.hi != start) s.from = start;
+            for (ids, 0..) |t, i| s.ids[@intCast((start + i) % ring_rows)] = t;
+            s.hi = start + ids.len;
+        }
+
+        /// The first position held.
+        pub fn lo(s: *const @This()) u64 {
+            return @max(s.from, s.hi -| keep);
+        }
+
+        /// The replay check: the stash ends at `end` and holds [r0, end).
+        pub fn covers(s: *const @This(), r0: u64, end: u64) bool {
+            return s.hi == end and s.lo() <= r0 and end - r0 <= keep;
+        }
+
+        /// The ids of positions [r0, end) (`covers` first).
+        pub fn tail(s: *const @This(), r0: u64, end: u64, out: []u32) void {
+            for (out[0..@intCast(end - r0)], 0..) |*o, i| o.* = s.ids[@intCast((r0 + i) % ring_rows)];
+        }
+    };
+}
+
 /// A slot's stash bookkeeping (rows on the device, "s.ced.*" row p % ring): positions [max(from, hi - keep), hi), ids.
-pub const Stash = struct {
-    from: u64 = 0,
-    hi: u64 = 0,
-    ids: [ring]u32 = @splat(0),
-
-    /// A segment at `start`; a gap starts the stash over there.
-    pub fn extend(s: *Stash, start: u64, ids: []const u32) void {
-        if (s.hi != start) s.from = start;
-        for (ids, 0..) |t, i| s.ids[@intCast((start + i) % ring)] = t;
-        s.hi = start + ids.len;
-    }
-
-    /// The first position held.
-    pub fn lo(s: *const Stash) u64 {
-        return @max(s.from, s.hi -| keep);
-    }
-
-    /// The replay check: the stash ends at `end` and holds [r0, end).
-    pub fn covers(s: *const Stash, r0: u64, end: u64) bool {
-        return s.hi == end and s.lo() <= r0 and end - r0 <= keep;
-    }
-
-    /// The ids of positions [r0, end) (`covers` first).
-    pub fn tail(s: *const Stash, r0: u64, end: u64, out: []u32) void {
-        for (out[0..@intCast(end - r0)], 0..) |*o, i| o.* = s.ids[@intCast((r0 + i) % ring)];
-    }
-};
+pub const Stash = StashOf(ring);
 
 /// One segment of a multi-segment run: a slot's prompt ids from its position `start`.
 pub const MultiSeg = struct { slot: u32, start: u64, ids: []const u32 };

@@ -258,7 +258,7 @@ fn runRequest(gpa: std.mem.Allocator, io: std.Io, a: Args, e: *d3.Engine, tts: ?
         if (nref > 0) ref_frames = refs[0].codes.len;
         rows = (try d3.prompt.build(ar, tok, text, refs[0..nref])).frames;
     }
-    if (a.replay) try d3.replay.verify(gpa, io, e, tts orelse return error.CodecRequired, rows, q.smp);
+    if (a.replay) try d3.replay.verify(gpa, io, e, tts orelse return error.CodecRequired, rows, q.smp, true);
     if (a.speed_probe) {
         if (@hasDecl(d3, "speed_probe")) try d3.speed_probe.verify(e) else return error.CudaOnlyProbe;
     }

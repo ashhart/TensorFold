@@ -68,7 +68,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try qwen.Engine.init(a, io, &ctx, args[1], false);
+    const e = try qwen.Engine.init(a, io, &ctx, args[1], false, null);
     defer e.deinit();
     if (e.pockets.any() or e.g.pocket != 0) return error.FreshUntaughtCheckpointRequired;
     const t = try Trainer.init(a, io, e);

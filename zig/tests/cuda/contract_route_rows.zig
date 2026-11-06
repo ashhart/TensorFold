@@ -93,7 +93,7 @@ pub const Logits = struct {
         for ([_]usize{ sh.rows, sh.k, sh.n }) |v| a.add(@as(i32, @intCast(v)));
         const r = self.route;
         switch (kind) {
-            .wide => try cuda.launch.launch(r.wide_fn, .{ .grid = .{ .x = @intCast((sh.rows + 127) / 128), .y = @intCast((sh.n + 63) / 64) }, .block = .{ .x = 256 }, .shared = rr.wide_shared }, self.rig.s, &a),
+            .wide => try cuda.launch.launch(r.wide_fn, .{ .grid = .{ .x = @intCast((sh.n + 63) / 64), .y = @intCast((sh.rows + 127) / 128) }, .block = .{ .x = 256 }, .shared = rr.wide_shared }, self.rig.s, &a),
             .few => try cuda.launch.launch(r.few_fn, .{ .grid = .{ .x = @intCast((sh.rows + 15) / 16), .y = @intCast((sh.n + 31) / 32) }, .block = .{ .x = 128 }, .shared = rr.few_shared }, self.rig.s, &a),
             .logits => try cuda.launch.launch(r.logits_fn, .{ .grid = .{ .x = @intCast((sh.rows + 15) / 16), .y = @intCast((sh.n + 31) / 32) }, .block = .{ .x = 128 }, .shared = rr.many_shared }, self.rig.s, &a),
         }

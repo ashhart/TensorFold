@@ -18,7 +18,7 @@ const checkpoint_cli = @import("checkpoint_cli");
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
-    " [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB]" ++
+    " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++
     " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
     " [--learn-conversations] [--learn-daily-gib LEARN_DAILY_GIB] [--recall] [--recall-dir RECALL_DIR]" ++
     " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
         return 0;
     }
     if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve")) {
@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else return benchmark.main(init, argv[2..], engines.capabilities(a));
     }
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("usage: tensorfold-native capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | serve MODEL [flags] | benchmark MODEL [flags]\n", .{});
+        std.debug.print("usage: tensorfold-native capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n", .{});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -156,7 +156,7 @@ pub fn main(init: std.process.Init) !u8 {
         .model_dir = dir,
         .model_type = model_type,
         .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Closer.halt, .replace = Reopen.replace },
-        .sampling = try sampling(a, io, dir, args),
+        .sampling = try sampling(a, io, dir, args, model_type),
         .environ = init.environ_map,
         .started = started,
         .identity = engines.identity(a, args),
@@ -207,24 +207,11 @@ fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]cons
     return if (t == .string) t.string else "unknown";
 }
 
-/// generation_config.json's sampling (``do_sample`` false is greedy), then the serve flags over it.
-fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !?json.Value {
-    const out = try json.newObject(a);
+/// The family's defaults, generation_config.json's sampling, then the serve flags (family_sampling.resolve).
+fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args, model_type: []const u8) !?json.Value {
     const path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
-    if (std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20))) |bytes| {
-        if ((try json.parse(a, bytes)) == .ok) {
-            const cfg = (try json.parse(a, bytes)).ok;
-            for ([_][]const u8{ "temperature", "top_k", "top_p", "min_p" }) |k| if (cfg.field(k)) |v| try out.put(a, k, v);
-            if (cfg.get("do_sample")) |d| if (d == .bool) {
-                if (!d.bool) try out.put(a, "temperature", .{ .float = 0 }) else if (out.get("temperature") == null) try out.put(a, "temperature", .{ .float = 1 });
-            };
-        }
-    } else |_| {}
-    if (args.temperature) |t| try out.put(a, "temperature", .{ .float = t });
-    if (args.top_p) |t| try out.put(a, "top_p", .{ .float = t });
-    if (args.top_k) |t| try out.put(a, "top_k", try json.intValue(a, t));
-    if (args.min_p) |t| try out.put(a, "min_p", .{ .float = t });
-    return if (out.count() > 0) json.Value{ .object = out } else null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch null;
+    return @import("family_sampling.zig").resolve(a, model_type, bytes, .{ .temperature = args.temperature, .top_p = args.top_p, .top_k = args.top_k, .min_p = args.min_p });
 }
 
 const Closer = @import("idle_unload_closer.zig").Closer;

@@ -43,6 +43,7 @@ pub const Kernels = struct {
         errdefer k.qk.unload();
         k.win = try cuda.window_attention.WindowAttention.load(d);
         errdefer k.win.unload();
+        try k.win.loadPages(d); // the full layers' paged decode and prompt rows, and tf_wrows_put
         k.act = try cuda.act_rows.ActRows.load(d);
         return k;
     }

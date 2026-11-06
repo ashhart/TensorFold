@@ -80,6 +80,9 @@ fn Cases(comptime family: @import("family.zig").Family) type {
             }
         };
         test "Learning persistence: SwiGLU delete retains gates and exact metadata until a stale put-back lands" {
+            const log_level = std.testing.log_level;
+            std.testing.log_level = .err;
+            defer std.testing.log_level = log_level;
             var p: P = .{ .gpa = t.allocator, .mode = .reply };
             defer p.deinit();
             try @import("pocket_load.zig").load(&p, ReadHost{ .fail = false });

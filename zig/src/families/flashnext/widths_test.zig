@@ -43,6 +43,9 @@ test "a mixed-override config resolves each module under either prefix and never
 }
 
 test "two spellings of one module that disagree are refused" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const bytes = try overridden(
         \\"language_model.model.layers.0.self_attn.v_proj": {"bits": 8, "group_size": 64},
         \\"model.layers.0.self_attn.v_proj.weight": {"bits": 4, "group_size": 64}

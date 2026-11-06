@@ -10,7 +10,7 @@ pub fn find(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []con
         if (e.expired or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
         const n = e.tokens.len;
         if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
-        if (!modes.equal(e.decode_spans, spans, e.at)) continue;
+        if (!modes.equal(e.decode_spans, spans, e.at) or !@import("cache_images.zig").matches(s, e)) continue;
         return e;
     }
     return null;

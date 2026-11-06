@@ -34,7 +34,9 @@ fn open(d: *const Dir, id: store.Identity, o: struct { cap: u64 = 64 << 20, read
     defer arena.deinit();
     var problem: []const u8 = "";
     const opts: store.Options = .{ .dir = d.path, .cap_bytes = o.cap, .read_only = o.read_only };
-    return (try Store.open(gpa, std.testing.io, id, opts, &problem, arena.allocator())) orelse error.TestRefused;
+    const s = (try Store.open(gpa, std.testing.io, id, opts, &problem, arena.allocator())) orelse return error.TestRefused;
+    s.admission.floor = 0;
+    return s;
 }
 
 fn ids(n: usize, seed: u64) ![]u32 {
@@ -186,12 +188,16 @@ test "read-only writes nothing and cannot empty; a second writer reads; empty st
     try std.testing.expectEqual(@as(u64, 0), r.added);
     try std.testing.expectError(error.ReadOnly, r.empty());
     r.close();
-    const e = try open(&d, identity(7, "m"), .{});
-    try std.testing.expectEqual(@as(u32, 101), e.shared.record.held());
-    try e.empty();
-    try std.testing.expectEqual(@as(u32, 0), e.shared.record.held());
-    e.readPrompt(b, 0);
-    e.close();
+    var reloaded: u32 = 0;
+    {
+        const e = try open(&d, identity(7, "m"), .{});
+        defer e.close();
+        reloaded = e.shared.record.held();
+        try e.empty();
+        try std.testing.expectEqual(@as(u32, 0), e.shared.record.held());
+        e.readPrompt(b, 0);
+    }
+    try std.testing.expectEqual(@as(u32, 101), reloaded);
     const after = try open(&d, identity(7, "m"), .{});
     defer after.close();
     try std.testing.expectEqual(@as(u32, 101), after.shared.record.held());
@@ -224,4 +230,39 @@ test "an empty that cannot remove a chunk file says which, keeps nothing in memo
     try std.testing.expect(!s.stats().left);
     s.readPrompt(a, 0);
     try std.testing.expectEqual(@as(u64, 300), s.added);
+}
+
+test "a disk-floor refusal writes no ids, then retries when space returns" {
+    const Disk = struct {
+        var space: u64 = 0;
+        fn free(_: [:0]const u8) ?u64 {
+            return space;
+        }
+        fn clock() ?u64 {
+            return 100;
+        }
+    };
+    var d = try Dir.init();
+    defer d.deinit();
+    const s = try open(&d, identity(9, "m"), .{});
+    defer s.close();
+    s.admission = .{ .free = Disk.free, .clock = Disk.clock };
+    try std.testing.expectEqual(@as(u64, 4) << 30, s.admission.floor);
+    Disk.space = s.admission.floor - 1;
+    const prompt = try ids(300, 13);
+    defer gpa.free(prompt);
+    s.readPrompt(prompt, 0);
+    try std.testing.expectEqual(@as(u64, 0), s.added);
+    try std.testing.expectEqual(@as(u32, 0), s.shared.record.held());
+    try std.testing.expectEqual(@as(u8, 1), s.admission.failures);
+    try std.testing.expectEqual(@as(c_int, -1), s.file);
+    try std.testing.expect(!s.failed);
+    s.readPrompt(prompt, 0);
+    try std.testing.expectEqual(@as(u8, 1), s.admission.failures);
+    Disk.space = std.math.maxInt(u64);
+    s.readPrompt(prompt, 0);
+    try std.testing.expectEqual(@as(u64, 300), s.added);
+    try std.testing.expectEqual(@as(u32, 301), s.shared.record.held());
+    try std.testing.expectEqual(@as(u8, 0), s.admission.failures);
+    try std.testing.expectEqual(@as(u64, 0), s.admission.reserved);
 }

@@ -75,11 +75,7 @@ fn groupField(g: plan.GroupPlan, gl: u32, buf: []u8) ![]const u8 {
 }
 
 /// fp32 -> bf16, round to nearest even (torch's .to(bfloat16)); NaN stays a quiet NaN.
-pub fn bf16Round(x: f32) u16 {
-    const b: u32 = @bitCast(x);
-    if (std.math.isNan(x)) return @intCast((b >> 16) | 0x40);
-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+pub const bf16Round = @import("core").bf16_round.bits;
 
 pub fn bf16Widen(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);

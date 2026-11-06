@@ -25,12 +25,12 @@ const Masks = @import("../../core/grammar_mask.zig").Masks;
 const be = lanes.backend;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 const ring = 1 << 16;
-
+pub const limits = @import("limits.zig");
 /// A lone stream's window rows at most, and a shared round's.
-pub const max_window = 16;
+pub const max_window = limits.max_window;
 
 /// A stream's tree window's rows at most (its lanes).
-pub const max_lanes = 64;
+pub const max_lanes = limits.max_lanes;
 
 /// Prompt chunks this short take the decode kernels, longer ones the prefill kernels (Python's fused_rows).
 pub const fused_rows = 16;
@@ -134,13 +134,15 @@ pub const Metal = struct {
         return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = grammar.firstMasked, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true } };
     }
 
-    /// The facts the round loop reads at setup (Python's NemotronH attributes), with this engine's own timings.
+    /// The round loop's setup facts, including this engine's measured head-step depth cap.
     pub fn facts(self: *const Metal) lanes.Model {
         const drafting = self.head != null;
         return .{
             .exact_width = if (drafting) max_window else 1,
             .gpu_tokens = true,
             .mtp = drafting,
+            .allocate_shared_drafts = drafting,
+            .limit_shared_drafts = drafting,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &nemotron_config.draft_prior,
@@ -155,7 +157,6 @@ pub const Metal = struct {
             .lane_costs = self.costs.window[0..self.costs.windows],
         };
     }
-
     pub fn forward(self: *Metal) fwd.Forward {
         return .{ .c = self.m.config, .k = &self.m.kernels, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members, .masks = if (self.masks) |*m| m else null };
     }
@@ -226,11 +227,6 @@ pub const Metal = struct {
         if (c.pending) |p| c.commit(&self.pool, p.rows);
     }
 
-    /// A stream's draw at `position`: argmax, or its keyed sampler (rows after it at the next positions).
-    fn drawOf(s: *const lanes.Stream, position: u64) fwd.Draw {
-        return if (s.sampling) |t| .{ .sampled = .{ .sampling = t, .position = position } } else .greedy;
-    }
-
     /// The fresh state slot a segment stores to: always after all its rows, after its replayed rows if it has any.
     pub fn slotFor(self: *Metal, c: *const st.Cache, store: fwd.Store) !i32 {
         return if (store == .full or c.replay > 0) @intCast(try self.pool.take()) else -1;
@@ -246,7 +242,7 @@ pub const Metal = struct {
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         const ids = s.prompt();
-        if (ids.len == 0 or ids.len + s.max_new + max_window > self.o.capacity) return error.PromptTooLong;
+        try limits.check(ids.len, s.max_new, self.o.capacity);
         if (s.isCancelled()) return error.Cancelled;
         const rows_needed = @min(self.o.capacity, ids.len + s.max_new + max_lanes + 1); // the reply and a widest window past it
         try self.drain();
@@ -314,6 +310,7 @@ pub const Metal = struct {
             if (c.decide != lesson_route.none and c.decide >= at and c.decide + 1 < end) end = @intCast(c.decide + 1);
             const rows = @min(self.o.chunk, end - at);
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
+            try kv_pages.grow(c, at + rows);
             try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             while (self.flights.items.len > 1) try self.land();
             at += rows;
@@ -358,7 +355,7 @@ pub const Metal = struct {
                 b.forward().draw(e, &segs, .last, b.tokens, slot(j.h));
             }
         };
-        try self.submit(.prefill, h + 1, Head{ .h = h, .c = c, .how = drawOf(s, position), .mask_row = mask_row });
+        try self.submit(.prefill, h + 1, Head{ .h = h, .c = c, .how = fwd.drawOf(s, position), .mask_row = mask_row });
         return h;
     }
 
@@ -381,6 +378,7 @@ pub const Metal = struct {
         const in = self.feedSlot(feed);
         const out = self.take(1);
         if (c.len + 1 > c.kv[0].capacity) return error.ContextFull;
+        try kv_pages.grow(c, c.len + 1);
         const state = try self.slotFor(c, .full);
         errdefer self.pool.give(@intCast(state));
         const Step = struct {
@@ -397,7 +395,7 @@ pub const Metal = struct {
                 f.draw(e, &segs, .all, b.tokens, slot(j.out));
             }
         };
-        try self.submit(.step, out + 1, Step{ .in = in, .out = out, .c = c, .state = state, .how = drawOf(s, position) });
+        try self.submit(.step, out + 1, Step{ .in = in, .out = out, .c = c, .state = state, .how = fwd.drawOf(s, position) });
         hold(c, 1, .full, state);
         c.commit(&self.pool, 1);
         c.start = 0;
@@ -425,6 +423,7 @@ pub const Metal = struct {
             self.settle(c);
             const rows = w.rows();
             if (rows > max_lanes or c.len + rows > c.kv[0].capacity) return error.WindowTooWide;
+            try kv_pages.grow(c, c.len + rows);
             if (w.parents == null) {
                 for (w.positions, 0..) |p, r| if (p != w.positions[0] + r) return error.PositionsNotAChain;
             } else if (windows.len > 1) return error.SharedTreesNotBuilt else if (w.stream.sampling != null) return error.SampledTreesNotBuilt;
@@ -435,7 +434,7 @@ pub const Metal = struct {
             for (w.tokens, 0..) |t, r| staged[(stage + 1 + r) % ring] = t;
             fills[i] = .{ .stage = stage, .held = w.held, .n = w.tokens.len };
             const mask_row = try grammar.stage(self, w, total);
-            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = drawOf(w.stream, w.positions[0]), .mask_row = mask_row };
+            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = fwd.drawOf(w.stream, w.positions[0]), .mask_row = mask_row };
             taken = i + 1;
             c.start = total;
             c.rows = rows;
@@ -494,6 +493,7 @@ pub const Metal = struct {
                 @memcpy(c.compact.?.path[0..path.len], path);
             }
             c.commit(&self.pool, path.len);
+            if (self.flights.items.len == 0) kv_pages.keep(c); // the dropped rows' pages: the verify has landed
             for (path, 0..) |r, i| c.replay_map[i] = @intCast(r);
         }
     }
@@ -527,8 +527,9 @@ pub const Metal = struct {
         for (requests, 0..) |r, i| {
             const c = try self.cacheOf(r.stream);
             if (r.lanes == null and r.depth + 1 > max_window) return error.WindowTooWide;
+            try kv_pages.grow(c, @max(c.len, c.mtp_len) + max_lanes + max_window); // the head's kept rows and drafts
             if (r.lanes) |l| if (l.parents.len + 1 > max_lanes or r.stream.sampling != null) return error.WindowTooWide;
-            jobs[i] = .{ .c = c, .kept = 0, .depth = r.depth, .how = drawOf(r.stream, r.position), .token = 0, .lanes = r.lanes, .ranks = r.ranks or self.ranks_always };
+            jobs[i] = .{ .c = c, .kept = 0, .depth = r.depth, .how = fwd.drawOf(r.stream, r.position), .token = 0, .lanes = r.lanes, .ranks = r.ranks or self.ranks_always };
             if (r.rows) |rows| {
                 jobs[i].kept = rows.len;
                 jobs[i].path = rows;

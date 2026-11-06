@@ -1,5 +1,6 @@
 //! Admission for the Qwen3.5-2B MLX affine checkpoint: pinned geometry and formats, tied or untied head; other geometries require qualification.
 const std = @import("std");
+const layer_pattern = @import("qwen35_layers");
 
 pub const hidden = 2048;
 pub const vocab = 248320;
@@ -109,18 +110,15 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
         .{ "intermediate_size", intermediate },  .{ "linear_num_key_heads", linear_heads }, .{ "linear_num_value_heads", linear_heads },
         .{ "linear_key_head_dim", linear_dim },  .{ "linear_value_head_dim", linear_dim },  .{ "linear_conv_kernel_dim", conv_taps },
         .{ "num_attention_heads", query_heads }, .{ "num_key_value_heads", kv_heads },      .{ "head_dim", head_dim },
-        .{ "full_attention_interval", 4 },
     };
     inline for (dims) |d| if (try integer(text, d[0]) != d[1]) return error.UnsupportedQwenGeometry;
     if (try number(try field(text, "rms_norm_eps")) != 1e-6) return error.UnsupportedQwenConfig;
-    const types = try field(text, "layer_types");
-    if (types != .array or types.array.items.len != layers) return error.UnsupportedQwenGeometry;
-    for (types.array.items, 0..) |kind, i| {
-        if (kind != .string or !std.mem.eql(u8, kind.string, if (linear(i)) "linear_attention" else "full_attention"))
-            return error.UnsupportedQwenGeometry;
-    }
+    var full: [layers]bool = undefined;
+    try layer_pattern.read(&full, text);
+    for (full, 0..) |f, i| if (f == linear(i)) return error.UnsupportedQwenGeometry; // the 2B's schedule only
     const rope = try object(try field(text, "rope_parameters"));
     try string(rope, "rope_type", "default");
+    checks.defaultRope(text, rope) catch return error.UnsupportedQwenRotary;
     try boolean(rope, "mrope_interleaved", true);
     if (try number(try field(rope, "rope_theta")) != theta or
         try number(try field(rope, "partial_rotary_factor")) != 0.25) return error.UnsupportedQwenRotary;
@@ -237,6 +235,8 @@ test "admit the affine 2B geometry and text rotary layout" {
         .{ "\"rope_theta\":10000000", "\"rope_theta\":100000", error.UnsupportedQwenRotary },
         .{ "\"mrope_section\":[11,11,10]", "\"mrope_section\":[16,8,8]", error.UnsupportedQwenRotary },
         .{ "\"max_position_embeddings\":262144", "\"max_position_embeddings\":524288", error.UnsupportedQwenConfig },
+        .{ "\"full_attention_interval\":4", "\"full_attention_interval\":2", error.LayerTypesContradictFullAttentionInterval },
+        .{ "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":262144", error.UnsupportedQwenConfig },
     };
     inline for (changes) |change| {
         try std.testing.expect(std.mem.indexOf(u8, compact, change[0]) != null);
@@ -267,7 +267,6 @@ pub const Error = error{
     UnsupportedModel,
     InvalidMoe,
     InvalidRotary,
-    InvalidLayerTypes,
 } || checks.Error || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
 
 pub const checks = @import("config_checks.zig");
@@ -289,7 +288,6 @@ pub const Spec = struct {
     eps: f64,
     rope_theta: f64,
     rotary_dim: usize,
-    full_every: usize,
     bits: u8,
     group: u16,
     experts: usize,
@@ -374,7 +372,6 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
         .eps = try numberOf(tower.get("rms_norm_eps") orelse .{ .float = 1e-6 }),
         .rope_theta = base,
         .rotary_dim = rotary,
-        .full_every = try optionalInt(tower, "full_attention_interval", 4),
         .bits = bits,
         .group = group_size,
         .experts = experts,
@@ -384,12 +381,14 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
         .mtp_layers = try optionalInt(tower, "mtp_num_hidden_layers", 0),
     };
     if (rotary % 2 != 0 or rotary == 0 or rotary > per_head) return error.InvalidRotary;
-    if (spec.full_every == 0 or attn_heads == 0) return error.InvalidConfig;
+    if (attn_heads == 0) return error.InvalidConfig;
     try checks.computes(tower);
     try checks.products(.{ .hidden = spec.hidden, .intermediate = spec.intermediate, .vocab = spec.vocab, .heads = spec.heads, .kv_heads = spec.kv_heads, .head_dim = spec.head_dim, .key_heads = spec.key_heads, .value_heads = spec.value_heads, .key_dim = spec.key_dim, .value_dim = spec.value_dim, .conv = spec.conv, .experts = spec.experts, .moe_width = spec.moe_width, .shared_width = spec.shared_width });
-    try checks.layers(&spec.full_layers, tower, spec.n_layers, spec.full_every);
+    try checks.layers(&spec.full_layers, tower, spec.n_layers);
     spec.mrope = try checks.mrope(rope, rotary);
+    try checks.defaultRope(tower, rope);
     spec.max_position = try checks.maxPosition(tower);
+    if (spec.max_position > 262144) return error.InvalidConfig; // past the trained window only with scaled rope
     return spec;
 }
 
@@ -503,7 +502,7 @@ test "a top-level config, the partial rotary default and the MoE fields" {
     try std.testing.expectEqual(@as(usize, 512), s.moe_width);
     try std.testing.expectEqual(@as(usize, 512), s.shared_width);
     try std.testing.expectEqual(@as(usize, 0), s.intermediate);
-    try std.testing.expectEqual(@as(usize, 4), s.full_every);
+    try std.testing.expect(s.full(3) and !s.full(0) and !s.full(2)); // no interval, no list: every fourth layer
 }
 
 test "the geometry refuses what the kernels do not compute and sizes past 32 bits" {
@@ -515,6 +514,11 @@ test "the geometry refuses what the kernels do not compute and sizes past 32 bit
         .{ "\"rms_norm_eps\"", "\"output_gate_type\": \"sigmoid\", \"rms_norm_eps\"", error.UnsupportedAttentionGate },
         .{ "\"rms_norm_eps\"", "\"mamba_ssm_dtype\": \"bfloat16\", \"rms_norm_eps\"", error.UnsupportedStateType },
         .{ "\"vocab_size\": 248320", "\"vocab_size\": 1048576", error.InvalidConfig },
+        // a scaled rope, which HIP and loader.zig would otherwise read as plain rope, and a window past the trained one
+        .{ "\"rope_theta\": 10000000,", "\"rope_type\": \"yarn\", \"factor\": 4.0, \"rope_theta\": 10000000,", error.InvalidRotary },
+        .{ "\"rope_theta\": 10000000,", "\"type\": \"yarn\", \"rope_theta\": 10000000,", error.InvalidRotary },
+        .{ "\"rms_norm_eps\"", "\"rope_scaling\": {\"type\": \"yarn\", \"factor\": 4.0}, \"rms_norm_eps\"", error.InvalidRotary },
+        .{ "\"rms_norm_eps\"", "\"max_position_embeddings\": 1048576, \"rms_norm_eps\"", error.InvalidConfig },
     };
     for (cases) |c| {
         const text = try std.mem.replaceOwned(u8, a, sample_text, c[0], c[1]);
@@ -530,15 +534,33 @@ test "the Python loader's refusals" {
     const wrong = try std.mem.replaceOwned(u8, a, sample_text, "\"qwen3_5\"", "\"llama\"");
     defer a.free(wrong);
     try std.testing.expectError(error.UnsupportedModel, declared(arena.allocator(), wrong));
-    // any mix of the two kinds is read as written; another kind is refused
+    // any mix of the two kinds is read as written unless the interval contradicts it; another kind is refused
     const mixed = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"linear_attention\"],");
     defer a.free(mixed);
-    const s = try geometry(try textTower(try declared(arena.allocator(), mixed)), 4, 64);
+    try std.testing.expectError(error.LayerTypesContradictFullAttentionInterval, geometry(try textTower(try declared(arena.allocator(), mixed)), 4, 64));
+    const unset = try std.mem.replaceOwned(u8, a, mixed, "\"full_attention_interval\": 4,", "\"full_attention_interval\": null,");
+    defer a.free(unset);
+    const s = try geometry(try textTower(try declared(arena.allocator(), unset)), 4, 64);
     try std.testing.expect(s.full(3) and !s.full(7));
     const types = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"sliding_attention\"],");
     defer a.free(types);
-    try std.testing.expectError(error.InvalidLayerTypes, geometry(try textTower(try declared(arena.allocator(), types)), 4, 64));
+    try std.testing.expectError(error.UnsupportedLayerTypes, geometry(try textTower(try declared(arena.allocator(), types)), 4, 64));
     const moe = try std.mem.replaceOwned(u8, a, sample_text, "\"vocab_size\"", "\"num_experts\": 8, \"num_experts_per_tok\": 9, \"vocab_size\"");
     defer a.free(moe);
     try std.testing.expectError(error.InvalidMoe, geometry(try textTower(try declared(arena.allocator(), moe)), 4, 64));
+}
+
+test "Metal 2B format scope: the geometry takes only affine q4g64 from the family union" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+    const compact = try std.json.Stringify.valueAlloc(a, doc.value, .{});
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |g| {
+        const widened = try std.mem.replaceOwned(u8, a, compact, "\"bits\":4", try std.fmt.allocPrint(a, "\"bits\":{d}", .{bits}));
+        const changed = try std.mem.replaceOwned(u8, a, widened, "\"group_size\":64", try std.fmt.allocPrint(a, "\"group_size\":{d}", .{g}));
+        if (bits == 4 and g == 64) {
+            _ = try parse(a, changed);
+        } else try std.testing.expectError(error.UnsupportedQwenQuantization, parse(a, changed));
+    };
 }

@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     var runner = try q.decode_round.Runner.init(a, target, 1, 256);
     defer runner.deinit();
     runner.capture_taps = true;
-    runner.taps.ids = .{ 0, 1, 2, 3, 4 };
+    runner.taps.ids = .{ 0, 1, 2, 3, 4, 0, 0, 0 };
     const draft = try draft_graph.create(a, target);
     defer draft.deinit();
     const eager = try draft_graph.create(a, target);
@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
         const host_taps = try a.alloc(u8, bytes);
         for (0..5) |_| {
             @memset(host_taps, 0xab);
-            try q.tap_gather.gather(runner.taps.buffer.contents()[0..runner.taps.buffer.length()], runner.taps.capacity, runner.taps.rows, runner.taps.width, path[0..rows], host_taps);
+            try q.tap_gather.gather(runner.taps.buffer.contents()[0..runner.taps.buffer.length()], runner.taps.capacity, runner.taps.rows, runner.taps.width, runner.taps.count, path[0..rows], host_taps);
             if (!std.mem.eql(u8, host_taps, accepted.contents()[0..bytes])) return error.HostTapGatherDiffers;
         }
         try draft.absorb(.{ .buf = accepted }, @intCast(rows));

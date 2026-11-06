@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const h3 = @import("cuda.zig");
 const weights = @import("cuda_weights.zig");
+const report = @import("report.zig");
 const abi = cuda.abi;
 const Mock = struct {
     var calls: usize = 0;
@@ -259,7 +260,7 @@ fn blockFixture(dir: std.Io.Dir, ids: []const usize, missing_norm: ?usize) ![:0]
     defer a.free(path);
     return a.dupeSentinel(u8, path, 0);
 }
-fn badBlocks(ids: []const usize, missing: ?usize) !void {
+fn badBlocks(ids: []const usize, missing: ?usize, comptime absent: []const u8) !void {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const path = try blockFixture(tmp.dir, ids, missing);
@@ -268,17 +269,18 @@ fn badBlocks(ids: []const usize, missing: ?usize) !void {
     const result = weights.read(&m, path.ptr);
     if (result) |_| weights.free(&m) else |_| {}
     try std.testing.expectError(error.BadBlocks, result);
+    try report.expect("tensor " ++ absent, error.MissingTensor);
     try std.testing.expectEqual(@as(usize, 0), Mock.calls);
     try std.testing.expectEqual(@as(usize, 0), Mock.host_live);
 }
 test "h3 blocks: zero missing-first block fails before allocation" {
-    try badBlocks(&.{0}, 0);
+    try badBlocks(&.{0}, 0, "blocks.0.norm1.weight");
 }
 test "h3 blocks: gap block fails before allocation" {
-    try badBlocks(&.{ 0, 2 }, null);
+    try badBlocks(&.{ 0, 2 }, null, "blocks.1.attn.qkv_proj.weight");
 }
 test "h3 blocks: missing-middle norm fails before allocation" {
-    try badBlocks(&.{ 0, 1, 2 }, 1);
+    try badBlocks(&.{ 0, 1, 2 }, 1, "blocks.1.norm1.weight");
 }
 test "h3 blocks: valid one and two contiguous complete blocks load and release" {
     var tmp = std.testing.tmpDir(.{});

@@ -53,6 +53,9 @@ pub const Backend = struct {
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
     pub fn facts(b: *const Backend) lanes.Model {
         return .{
+            .learn_row_costs = b.sl.e.ep == null and !b.sl.e.device.tensorUnits(), // the table is an M5 Ultra's: others pay more
+            .allocate_shared_drafts = b.sl.e.hasMtp(),
+            .limit_shared_drafts = b.sl.e.hasMtp(),
             .exact_width = st.max_rows,
             .first_copy_rows = 4,
             .mtp = b.sl.e.hasMtp(),
@@ -93,10 +96,10 @@ pub const Backend = struct {
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
-        while (!try prefillStep(ptr, s)) {}
+        while (!try prefillStep(ptr, s, 0)) {}
     }
-    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
-        return prompt_fill.step(self(ptr), s);
+    fn prefillStep(ptr: *anyopaque, s: *Stream, _: u32) anyerror!bool {
+        return prompt_fill.step(self(ptr), s, 0);
     }
 
     pub fn beginPrompt(b: *Backend, s: *Stream) !prompt_fill.State {
@@ -193,6 +196,16 @@ pub const Backend = struct {
     pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
         const b = self(ptr);
         return snapshot.bytes(&b.sl.e.c, at, b.sl.resident());
+    }
+
+    /// A disk read allocates a whole image, even when ordinary saves share the live MLA pool.
+    pub fn snapReadBytes(ptr: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(&self(ptr).sl.e.c, at, false);
+    }
+
+    pub fn snapCharged(_: *anyopaque, saved: *anyopaque) u64 {
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        return snap.bytes;
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
@@ -421,3 +434,54 @@ pub const Backend = struct {
         b.sl.release(kv.value);
     }
 };
+
+test "zero grant: GLM Metal MTP resumes after a long priced skip" {
+    var w: @import("weights.zig").Weights = undefined;
+    w.mtp = @as(@import("weights.zig").Mtp, undefined);
+    var e: Engine = undefined;
+    e.w = &w;
+    e.ep = null;
+    var slots: [16]slots_mod.Slot = undefined;
+    var sl: slots_mod.Slots = undefined;
+    sl.e = &e;
+    sl.slots = &slots;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    b.costs = null;
+    try lanes.shared_draft_check.check(b.facts(), false);
+}
+
+test "shared head costs: GLM Metal MTP retains costed copy grants" {
+    var w: @import("weights.zig").Weights = undefined;
+    w.mtp = @as(@import("weights.zig").Mtp, undefined);
+    var e: Engine = undefined;
+    e.w = &w;
+    e.ep = null;
+    var slots: [16]slots_mod.Slot = undefined;
+    var sl: slots_mod.Slots = undefined;
+    sl.e = &e;
+    sl.slots = &slots;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    b.costs = null;
+    try lanes.shared_head_cost_check.check(b.facts());
+}
+
+test "GLM disk charge: a whole read is larger than a resident save and charged at its actual size" {
+    var e: Engine = undefined;
+    e.c = .{};
+    var sl: slots_mod.Slots = undefined;
+    sl.e = &e;
+    sl.learned = null;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    const resident = Backend.snapBytes(&b, 130000);
+    const whole = Backend.snapReadBytes(&b, 130000);
+    try std.testing.expectEqual(@as(u64, snapshot.bytes(&e.c, 130000, false)), whole);
+    try std.testing.expect(whole > resident + (2 << 30));
+    var snap: snapshot.Snap = .{ .id = 1, .at = 130000, .buf = undefined, .bytes = whole };
+    try std.testing.expectEqual(whole, Backend.snapCharged(&b, &snap));
+    snap.bytes = @intCast(resident);
+    try std.testing.expectEqual(resident, Backend.snapCharged(&b, &snap));
+    try std.testing.expectEqual([2]u64{ 147619840, 2643622912 }, [2]u64{ resident, whole });
+}

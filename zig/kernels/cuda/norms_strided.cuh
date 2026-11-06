@@ -4,6 +4,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
 
 namespace tf_rms_strided {
 
@@ -28,9 +29,7 @@ __device__ __forceinline__ float block_sum(float acc, float* red) {
 }
 
 // 1 / sqrt(ss / n + eps) with IEEE division and square root.
-__device__ __forceinline__ float inv_rms(float ss, int n, float eps) {
-    return __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ss, static_cast<float>(n)), eps)));
-}
+__device__ __forceinline__ float inv_rms(float ss, int n, float eps) { return tf_common::rms_scale(ss, n, eps); }
 
 // Each 64-value group of buf summed in order into xs, by the first T threads (buf written before a barrier).
 template <int T>

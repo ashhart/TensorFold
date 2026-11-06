@@ -10,7 +10,7 @@ const Module = module.Module;
 const Function = module.Function;
 const Stream = stream_.Stream;
 
-/// A Window's `pg` (win 0, head dims 256, 512): caches name a layer in page 0; `table` rows of ids, `stride` a slot.
+/// A Window's `pg` (win 0, 128's prompt, 256, 512): caches name a layer in page 0, `table` rows of ids a slot.
 pub const Pages = struct { table: u64, page_elems: usize, tokens: usize, stride: usize = 0 };
 
 /// A row's heads and keys (pos - win, pos] (win 0: all) at cache row slot * ring + key % ring; p32: wide P in halves.
@@ -22,11 +22,22 @@ pub const page_unit = chunk_keys;
 /// Keys a prompt tile (window_rows.cuh's BN): a paged tile takes one page base, so prompt pages hold whole tiles.
 pub const prompt_tile = 32;
 
-/// Head dim 256 pages hold whole chunks; 512's decode looks up each key's page (prompt rows: whole tiles, promptWith).
+/// Pages any paged kernel reads or `put` writes: no window, a wide head dim, a position count, i64 page steps.
+fn pageShape(w: Window) bool {
+    const p = w.pg orelse return true;
+    return w.win == 0 and wide(w.d) and p.tokens > 0 and p.page_elems <= std.math.maxInt(i63);
+}
+
+/// Head dim 256 decode pages hold whole chunks; 512's decode looks up each key's page (prompt rows: promptShape).
 fn pagedShape(w: Window) bool {
     const p = w.pg orelse return true;
-    if (w.win != 0 or p.tokens == 0 or p.page_elems > std.math.maxInt(i63)) return false;
-    return if (w.d == 256) p.tokens % page_unit == 0 else w.d == 512;
+    return pageShape(w) and (w.d != 256 or p.tokens % page_unit == 0);
+}
+
+/// Prompt rows at either head dim: a 32-key tile takes one page base, so pages hold whole tiles (prompt_tile).
+fn promptShape(w: Window) bool {
+    const p = w.pg orelse return true;
+    return pageShape(w) and p.tokens % prompt_tile == 0;
 }
 
 /// Head dims window_rows.cu serves, with any query heads a key head up to 16.
@@ -57,6 +68,7 @@ pub const WindowAttention = struct {
     merge_fn: Function,
     tc_fn: Function,
     prompt_fns: [2]Function, // 4, then 8 query heads a block
+    prompt_pg_fns: [2]Function, // the same over a stream's pages (tf_window_prompt_h4_pg, _h8_pg)
     rows: Module, // window_rows.cu
     pages: ?Module = null, // window_pages.cu (loadPages): window_rows.cuh over paged caches
     put_fn: ?Function = null, // tf_wrows_put: rows into paged caches
@@ -73,9 +85,12 @@ pub const WindowAttention = struct {
         var mod = try Module.load(d, kernels.window_attention);
         errdefer mod.unload();
         var p: [2]Function = undefined;
+        var pp: [2]Function = undefined;
         inline for (.{ 4, 8 }, 0..) |hpc, i| {
             p[i] = try mod.function(std.fmt.comptimePrint(prompt_name, .{hpc}));
             try p[i].allowDynamicShared(prompt_smem);
+            pp[i] = try mod.function(std.fmt.comptimePrint("tf_window_prompt_h{d}_pg", .{hpc}));
+            try pp[i].allowDynamicShared(prompt_smem);
         }
         var rows = try Module.load(d, kernels.window_rows);
         errdefer rows.unload();
@@ -89,16 +104,16 @@ pub const WindowAttention = struct {
             const f = try mod.function("tf_window_decode_tc");
             try f.allowDynamicShared(tc_smem);
             break :tc f;
-        }, .prompt_fns = p, .rows = rows, .wide_fns = wf };
+        }, .prompt_fns = p, .prompt_pg_fns = pp, .rows = rows, .wide_fns = wf };
     }
 
-    /// Loads window_pages.cu: decode, prompt rows and `put` over caches in pages (head dims 256 and 512; P32 at 512).
+    /// Loads window_pages.cu: decode, prompt rows (bf16 P and P32) and `put` over caches in pages (head dims 256, 512).
     pub fn loadPages(g: *WindowAttention, d: *const Driver) !void {
         if (g.pages != null) return;
         var pages = try Module.load(d, kernels.window_pages);
         errdefer pages.unload();
-        const p: Paged = .{ .part = try pages.function("tf_wrows_part_256_pg"), .merge = try pages.function("tf_wrows_merge_256_pg"), .prompt = .{ try pages.function("tf_wrows_prompt_256_pg"), null } };
-        try p.prompt[0].?.allowDynamicShared(rows_smem[0]);
+        const p: Paged = .{ .part = try pages.function("tf_wrows_part_256_pg"), .merge = try pages.function("tf_wrows_merge_256_pg"), .prompt = .{ try pages.function("tf_wrows_prompt_256_pg"), try pages.function("tf_wrows_prompt_256_p32_pg") } };
+        for (p.prompt) |pf| try pf.?.allowDynamicShared(rows_smem[0]);
         const p512: Paged = .{ .part = try pages.function("tf_wrows_part_512_pg"), .merge = try pages.function("tf_wrows_merge_512_pg"), .prompt = .{ try pages.function("tf_wrows_prompt_512_pg"), try pages.function("tf_wrows_prompt_512_p32_pg") } };
         try p512.part.allowDynamicShared(staged_smem);
         for (p512.prompt) |pf| try pf.?.allowDynamicShared(rows_smem[1]);
@@ -147,7 +162,7 @@ pub const WindowAttention = struct {
     /// n rows q [n, h, d] at pos/slot (int32 [n]) -> out [n, h, d]; `scratch`: scratchBytes(w, n) (d != 128).
     pub fn decode(g: *const WindowAttention, s: Stream, q: u64, kc: u64, vc: u64, out: u64, pos: u64, slot: ?u64, w: Window, scratch: u64, n: usize) !void {
         if (wide(w.d)) return decodeWith(g.wideFns(w.d), s, q, kc, vc, out, pos, slot, w, scratch, n);
-        if (w.hk == 0 or w.h % w.hk != 0 or w.h / w.hk > 16 or w.d > 128 or w.ring == 0) return error.WindowShape;
+        if (w.hk == 0 or w.h % w.hk != 0 or w.h / w.hk > 16 or w.d > 128 or w.ring == 0 or w.pg != null) return error.WindowShape;
         if (w.win == 0 and w.ring > 4096) return error.WindowShape; // an unwindowed row's tiles come from the ring
         if (n == 0) return;
         if (w.d == 128) { // tensor cores; the heads of a row are one mma tile
@@ -227,7 +242,8 @@ pub const WindowAttention = struct {
     /// n rows k, v [n, hk * d] bf16 into the paged caches kc/vc (a layer's part of page 0) at pos/slot (int32 [n]).
     pub fn put(g: *const WindowAttention, s: Stream, k: u64, v: u64, kc: u64, vc: u64, pos: u64, slot: u64, w: Window, n: usize) !void {
         const p = w.pg orelse return error.WindowShape;
-        if (!pagedShape(w)) return error.WindowShape;
+        if (w.win != 0 or p.tokens == 0 or p.page_elems > std.math.maxInt(i63)) return error.WindowShape; // any position count
+        if ((w.hk * w.d) % 8 != 0) return error.WindowShape; // 16-byte rows at any head dim (Kolibri's 128 too)
         if (n == 0) return;
         var a: launch_.Args = .{};
         for ([_]u64{ k, v, kc, vc, pos, slot, p.table }) |x| a.add(x);
@@ -238,11 +254,12 @@ pub const WindowAttention = struct {
         try launch_.launch(g.put_fn orelse return error.WindowShape, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = 128 } }, s, &a);
     }
 
-    /// n prompt rows of one stream at p0, p0 + 1, ... (d 128); kc/vc that stream's ring, key p at row p % ring.
+    /// n prompt rows of one stream at p0, p0 + 1, ... (d 128): kc/vc its ring, key p at row p % ring, or (pg) pages.
     pub fn prompt(g: *const WindowAttention, s: Stream, q: u64, kc: u64, vc: u64, out: u64, p0: usize, n: usize, w: Window) !void {
         if (wide(w.d)) return g.promptRows(s, q, kc, vc, out, p0, n, w, null);
         const grp = w.h / w.hk;
         if (w.d != 128 or w.hk == 0 or w.h % w.hk != 0 or grp % 4 != 0) return error.WindowShape;
+        if (w.pg) |pg| if (w.win != 0 or pg.tokens == 0 or pg.page_elems > std.math.maxInt(i63)) return error.WindowShape;
         if (n == 0) return;
         const hpc: usize = if (grp % 8 == 0) 8 else 4;
         var a: launch_.Args = .{};
@@ -251,9 +268,10 @@ pub const WindowAttention = struct {
         a.add(w.scale);
         a.add(@as(i32, @intCast(w.win)));
         a.add(@as(i32, @intCast(w.ring)));
+        if (w.pg) |pg| addPages(&a, pg, false);
         const rows = 16 * (8 / hpc);
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast((n + rows - 1) / rows), .y = @intCast(w.hk * (grp / hpc)), .z = 1 }, .block = .{ .x = 256 }, .shared = prompt_smem };
-        try launch_.launch(g.prompt_fns[if (hpc == 8) 1 else 0], cfg, s, &a);
+        try launch_.launch((if (w.pg != null) g.prompt_pg_fns else g.prompt_fns)[if (hpc == 8) 1 else 0], cfg, s, &a);
     }
 
     /// Wide prompt rows, G up to 16; row i's last key hi[i] (int32, in [p0 + i, p0 + n)) or its position (null).
@@ -265,10 +283,9 @@ pub const WindowAttention = struct {
     /// promptRows by `f` (wideFns, or the contract's controls).
     pub fn promptWith(f: *const Wide, s: Stream, q: u64, kc: u64, vc: u64, out: u64, p0: usize, n: usize, w: Window, hi: ?u64) !void {
         const grp = if (w.hk > 0) w.h / w.hk else 0;
-        if (!wideShape(w) or p0 + n > std.math.maxInt(i32) or !pagedShape(w)) return error.WindowShape;
+        if (!wideShape(w) or p0 + n > std.math.maxInt(i32) or !promptShape(w)) return error.WindowShape;
         var paged: ?Function = null;
-        if (w.pg) |p| { // pages hold whole prompt tiles (prompt_tile), and the head dim has this P's paged twin
-            if (p.tokens % prompt_tile != 0) return error.WindowShape;
+        if (w.pg != null) { // the head dim has this P's paged twin
             paged = (f.paged orelse return error.WindowShape).prompt[@intFromBool(w.p32)] orelse return error.WindowShape;
         }
         if (n == 0) return;
@@ -302,6 +319,21 @@ test "paged shapes: head dim 256 pages hold whole chunks, 512's decode pages any
     w.d = 512;
     w.pg.?.tokens = 0;
     try std.testing.expect(!pagedShape(w));
+}
+
+test "paged prompt rows: pages of whole 32-key tiles at head dims 256 and 512, no window" {
+    var w: Window = .{ .h = 16, .hk = 4, .d = 256, .win = 0, .ring = 0, .scale = 1, .pg = .{ .table = 0, .page_elems = 32 * 1024, .tokens = 32 } };
+    try std.testing.expect(promptShape(w) and !pagedShape(w));
+    w.pg.?.tokens = 48;
+    try std.testing.expect(!promptShape(w) and pageShape(w)); // `put` places rows in pages of any count
+    w.pg.?.tokens = 64;
+    w.d = 512;
+    try std.testing.expect(promptShape(w));
+    w.win = 1024;
+    try std.testing.expect(!promptShape(w));
+    w.win = 0;
+    w.d = 128;
+    try std.testing.expect(!promptShape(w));
 }
 
 test "wide geometry rejects empty heads and preserves all sixteen GQA ratios" {

@@ -65,6 +65,9 @@ const sample =
 ;
 
 test "the released transformer config passes; another depth, rotary or class does not" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const a = std.testing.allocator;
     try check(a, sample);
     const deeper = try std.mem.replaceOwned(u8, a, sample, "\"num_layers\": 32", "\"num_layers\": 40");

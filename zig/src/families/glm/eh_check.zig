@@ -3,6 +3,12 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const wide = @import("wide.zig");
+const bf16_round = @import("bf16_round");
+
+/// TF_TEST_RECEIPTS=1 prints each check's measured error; the bounds are checked either way.
+fn receipts() bool {
+    return if (@import("builtin").os.tag == .windows) false else std.testing.environ.getPosix("TF_TEST_RECEIPTS") != null;
+}
 
 const n: usize = 4096; // D, kept for every shape
 const k: usize = 8192;
@@ -12,10 +18,7 @@ const few: f64 = 2; // attn_check's pair bar, and the ~2-step fp64 sanity bound
 // An fp32 reduction of this k can move a small column by more than one bf16 step: acc_floor.
 const acc_floor: f64 = 0.1;
 
-fn bf16(v: f32) u16 {
-    const u: u32 = @bitCast(v);
-    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
-}
+const bf16 = bf16_round.bits;
 
 fn f32of(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
@@ -187,7 +190,8 @@ fn ehCheck() !void {
                 }
             }
         }
-        std.debug.print(
+        const say = receipts() or !pair_ok or !ref_ok;
+        if (say) std.debug.print(
             "eh nax vs scal rows={d} k={d} n={d}: worst-col scal={d:.2} nax={d:.2} max={d:.2} pair-abs={d:.3} fp64-abs bf16-steps={d:.2} floor-cols; sampled fp64: cols step 16 x 32 rows + 4 corner rows (used {d} rows x {d} cols)\n",
             .{
                 rows,
@@ -208,7 +212,11 @@ fn ehCheck() !void {
         sh1.update(std.mem.sliceAsBytes(row_out));
         var sh2: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{});
         sh2.update(std.mem.sliceAsBytes(nax_out));
-        std.debug.print("eh byte-hash rows={d}: scalar sha256={s} nax={s} diverging-elements={d}\n", .{ rows, std.fmt.bytesToHex(sh1.finalResult(), .lower), std.fmt.bytesToHex(sh2.finalResult(), .lower), pair_div });
+        const scalar_hex = std.fmt.bytesToHex(sh1.finalResult(), .lower);
+        const nax_hex = std.fmt.bytesToHex(sh2.finalResult(), .lower);
+        if (say) std.debug.print("eh byte-hash rows={d}: scalar sha256={s} nax={s} diverging-elements={d}\n", .{
+            rows, scalar_hex, nax_hex, pair_div,
+        });
         if (!pair_ok) std.debug.print(
             "eh nax pair fail rows={d} r={d} c={d} scal={d:.4} nax={d:.4} fp64-abs\n",
             .{ rows, pair_i / n, pair_i % n, f32of(row_out[pair_i]), f32of(nax_out[pair_i]) },
@@ -224,4 +232,17 @@ fn ehCheck() !void {
 
 test "eh_proj on the tensor units: fp64 error no worse than the row kernel, decode and prompt apart" {
     try ehCheck();
+}
+
+test "eh_proj's bf16 is core's bits(): 0xffffffff gives a NaN, other words the plain + copy's bits" {
+    try std.testing.expect(std.math.isNan(f32of(bf16(@bitCast(@as(u32, 0xffff_ffff))))));
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 19) |i| { // every bf16 value's tie and carry edges, then random words
+        const lo = [_]u32{ 0x7fff, 0x8000, 0x8001, 0xffff };
+        const w: u32 = if (i < 1 << 18) @as(u32, @intCast(i >> 2)) << 16 | lo[i & 3] else prng.random().int(u32);
+        const v: f32 = @bitCast(w);
+        if (std.math.isNan(v)) {
+            try std.testing.expect(std.math.isNan(f32of(bf16(v))));
+        } else try std.testing.expectEqual(@as(u16, @intCast((w + 0x7fff + ((w >> 16) & 1)) >> 16)), bf16(v));
+    }
 }

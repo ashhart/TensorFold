@@ -122,6 +122,16 @@ pub fn Index(comptime Extra: type) type {
             return x.by_key.get(key);
         }
 
+        pub fn has(x: *const Self, id: u32) bool {
+            return id < x.entries.items.len;
+        }
+
+        pub fn holds(x: *const Self, id: u32, pos: u64, key: Digest) bool {
+            if (!x.has(id)) return false;
+            const e = &x.entries.items[id];
+            return e.live and e.pos == pos and std.mem.eql(u8, &e.key, &key);
+        }
+
         fn newNode(x: *Self, digest: Digest, parent: u32, depth: u32) !u32 {
             try x.by_digest.ensureUnusedCapacity(x.gpa, 1);
             if (x.free_nodes.items.len == 0) {

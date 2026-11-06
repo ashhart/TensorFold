@@ -6,6 +6,7 @@ const kern = @import("cuda_kernels.zig");
 const image = @import("image.zig");
 
 const vit = cuda.vit;
+const toBf16 = @import("core").bf16_round.bits;
 const W = wts.tower_width;
 const H = wts.tower_heads;
 const D = wts.tower_head_dim;
@@ -93,7 +94,7 @@ pub const Tower = struct {
         // host rows: bf16 2 (p - 0.5), the RoPE's cos and sin, each patch's two position rows
         const host = try t.gpa.alloc(u16, p * wts.patch_width + 2 * p * D);
         defer t.gpa.free(host);
-        for (pixels, host[0 .. p * wts.patch_width]) |v, *h| h.* = vit.bf16(2 * (v - 0.5));
+        for (pixels, host[0 .. p * wts.patch_width]) |v, *h| h.* = toBf16(2 * (v - 0.5));
         rope(host[p * wts.patch_width ..][0 .. p * D], host[p * wts.patch_width + p * D ..][0 .. p * D], gw, p);
         const ids = try t.gpa.alloc(i32, 2 * p);
         defer t.gpa.free(ids);
@@ -152,8 +153,8 @@ fn rope(cs: []u16, sn: []u16, gw: usize, p: usize) void {
     for (0..p) |q| for (0..D) |dd| {
         const axis: f32 = @floatFromInt(if (dd < half) q % gw else q / gw);
         const angle = axis * inv[(dd % half) % (half / 2)];
-        cs[q * D + dd] = vit.bf16(@cos(angle));
-        sn[q * D + dd] = vit.bf16(@sin(angle));
+        cs[q * D + dd] = toBf16(@cos(angle));
+        sn[q * D + dd] = toBf16(@sin(angle));
     };
 }
 
@@ -161,8 +162,8 @@ test "the RoPE rows: position 0 is cos 1, sin 0; the x half follows the column, 
     var cs: [2 * 3 * D]u16 = undefined;
     var sn: [2 * 3 * D]u16 = undefined;
     rope(&cs, &sn, 3, 6);
-    try std.testing.expectEqual(vit.bf16(1), cs[0]);
-    try std.testing.expectEqual(vit.bf16(0), sn[D - 1]);
+    try std.testing.expectEqual(toBf16(1), cs[0]);
+    try std.testing.expectEqual(toBf16(0), sn[D - 1]);
     try std.testing.expectEqual(cs[1 * D + 0], cs[4 * D + 0]); // patches 1 and 4 share the column
     try std.testing.expectEqual(cs[3 * D + D / 2], cs[4 * D + D / 2]); // patches 3 and 4 share the row
 }

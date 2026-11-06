@@ -1,10 +1,11 @@
-//! The Metal graph borrows native scalar tensors and owns only byte-preserving affine layouts.
+//! Borrows native scalar tensors and owns only byte-preserving affine layouts; rows and columns follow config.Shard.
 const std = @import("std");
 const mtl = @import("metal");
 const cp = @import("core").checkpoint_metal;
-const Config = @import("config.zig").Config;
+const cfg = @import("config.zig");
 const projection = @import("projection.zig");
 const lane = @import("core").lane_projection;
+const row_gpu = @import("core").row_projection;
 const widths = @import("widths.zig");
 const Width = widths.Width;
 const Ref = projection.Ref;
@@ -13,7 +14,10 @@ pub const Tensor = cp.Tensor;
 
 pub const Gdn = struct { qkv: Linear, zba: Linear, out: Linear, conv: Tensor, a_log: Tensor, dt: Tensor, norm: Tensor };
 pub const Attention = struct { q: Linear, kv: Linear, out: Linear, q_norm: Tensor, k_norm: Tensor };
-pub const Layer = struct { norm: Tensor, post_norm: Tensor, gu: Linear, down: Linear, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
+/// The routed block: the router (experts, shared gate, zero rows), the stacked experts, the shared expert's matrices.
+pub const Moe = struct { router: row_gpu.Weights, gate: row_gpu.Experts, up: row_gpu.Experts, down: row_gpu.Experts, shared_gate: row_gpu.Weights, shared_up: row_gpu.Weights, shared_down: row_gpu.Weights };
+/// With experts, `gu` and `down` are the shared expert's.
+pub const Layer = struct { norm: Tensor, post_norm: Tensor, gu: Linear, down: Linear, moe: ?Moe = null, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
 
 pub const Weights = struct {
     allocator: std.mem.Allocator,
@@ -89,29 +93,143 @@ const Builder = struct {
         return .{ .weight = tensors[0], .scales = tensors[1], .biases = tensors[2], .bits = w.bits, .group = w.group };
     }
 
-    /// `parts` (stacked in order, `n` rows of `k` each, at their widths) staged from the files and repacked.
+    /// One part's staged tensors, shape-checked and viewed at the rank's rows; the stage must outlive these views.
+    fn viewed(p: Part, k: usize, tensors: [3]Tensor) !projection.Triple {
+        const weight = try checked(tensors[0], .u32, &.{ p.n, k * p.w.bits / 32 });
+        const scales = try checked(tensors[1], .bf16, &.{ p.n, k / p.w.group });
+        const biases = try checked(tensors[2], .bf16, &.{ p.n, k / p.w.group });
+        return .{ .weight = try rowView(weight, p.span), .scales = try rowView(scales, p.span), .biases = try rowView(biases, p.span), .bits = p.w.bits, .group = p.w.group, .gn = p.n };
+    }
+
+    /// `experts` [n, k] matrices stacked in `module` at width `w`, borrowed where the files packed them.
+    fn experts(b: Builder, module: []const u8, count: usize, n: usize, k: usize, w: Width, repeat: usize) !row_gpu.Experts {
+        const t = try b.quantAt(module, &.{count}, n, k, w);
+        const out: row_gpu.Experts = .{ .one = weightsOf(t, n, k), .experts = count, .repeat = repeat };
+        try out.validate();
+        return out;
+    }
+
+    /// A quantized module's three tensors of `lead` ++ [n, packed k] shape.
+    fn quantAt(b: Builder, module: []const u8, lead: []const usize, n: usize, k: usize, w: Width) !projection.Triple {
+        if (k * w.bits % 32 != 0 or k % w.group != 0) return error.BadNativeTensor;
+        const suffixes = [_][]const u8{ ".weight", ".scales", ".biases" };
+        var tensors: [3]Tensor = undefined;
+        var shape: [3]usize = undefined;
+        @memcpy(shape[0..lead.len], lead);
+        shape[lead.len] = n;
+        for (suffixes, &tensors, 0..) |suffix, *t, i| {
+            const name = try std.mem.concat(b.allocator, u8, &.{ module, suffix });
+            defer b.allocator.free(name);
+            shape[lead.len + 1] = if (i == 0) k * w.bits / 32 else k / w.group;
+            t.* = try b.tensor(name, if (i == 0) .u32 else .bf16, shape[0 .. lead.len + 2]);
+        }
+        return .{ .weight = tensors[0], .scales = tensors[1], .biases = tensors[2], .bits = w.bits, .group = w.group };
+    }
+
+    /// The router's [experts, k] rows and the shared expert's gate row in one owned matrix of widths.routerRows rows.
+    fn router(b: Builder, prefix: []const u8, c: cfg.Config, w: Width, shared: Width) !row_gpu.Weights {
+        // one matrix holds both: widths.admit refuses a shared gate quantized unlike its router
+        if (shared.bits != w.bits or shared.group != w.group) return error.UnsupportedRouterFormat;
+        const k = c.hidden;
+        const router_name = try std.mem.concat(b.allocator, u8, &.{ prefix, widths.leaf(c, .router) });
+        defer b.allocator.free(router_name);
+        const gate_name = try std.mem.concat(b.allocator, u8, &.{ prefix, widths.leaf(c, .shared_gate) });
+        defer b.allocator.free(gate_name);
+        const r = try b.quantAt(router_name, &.{}, c.experts, k, w);
+        const g = try b.quantAt(gate_name, &.{}, 1, k, shared);
+        const n = widths.routerRows(c.experts);
+        const words = k * w.bits / 32 * 4;
+        const groups = k / w.group * 2;
+        const parts = [3][2]usize{ .{ words, 0 }, .{ groups, words * n }, .{ groups, words * n + groups * n } };
+        const buffer = try b.device.buffer(parts[2][1] + groups * n, mtl.ResourceOptions.shared);
+        errdefer buffer.deinit();
+        const bytes = buffer.slice(u8, parts[2][1] + groups * n);
+        @memset(bytes, 0);
+        for ([_]Tensor{ r.weight, r.scales, r.biases }, [_]Tensor{ g.weight, g.scales, g.biases }, parts) |rt, gt, part| {
+            @memcpy(bytes[part[1]..][0 .. part[0] * c.experts], rt.host(u8)[0 .. part[0] * c.experts]);
+            @memcpy(bytes[part[1] + part[0] * c.experts ..][0..part[0]], gt.host(u8)[0..part[0]]);
+        }
+        try b.owned.append(b.allocator, buffer);
+        const out: row_gpu.Weights = .{ .w = buffer, .w_off = parts[0][1], .scales = buffer, .s_off = parts[1][1], .biases = buffer, .b_off = parts[2][1], .n = n, .k = k, .group = w.group, .bits = w.bits };
+        try out.validate();
+        return out;
+    }
+
+    /// Parts at their widths and K windows, all staged before any is viewed: the stage is one reused buffer.
     fn linear(b: Builder, parts: []const Part, k: usize) !Linear {
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
-        const names = try arena.allocator().alloc([]const u8, parts.len * 3);
+        if (parts.len > 3) return error.BadProjectionShape;
+        for (parts) |p| if (k * p.w.bits % 32 != 0 or k % p.w.group != 0) return error.BadNativeTensor;
+        const a = arena.allocator();
+        const names = try a.alloc([]const u8, parts.len * 3);
         for (parts, 0..) |p, i| for ([_][]const u8{ ".weight", ".scales", ".biases" }, 0..) |suffix, j| {
-            names[i * 3 + j] = try std.mem.concat(arena.allocator(), u8, &.{ b.prefix, p.module, suffix });
+            names[i * 3 + j] = try std.mem.concat(a, u8, &.{ b.prefix, p.module, suffix });
         };
         try b.stage.reserve(b.checkpoint, names);
         defer b.stage.reset();
         var triples: [3]projection.Triple = undefined;
-        if (parts.len > triples.len) return error.BadProjectionShape;
         for (parts, triples[0..parts.len], 0..) |p, *t, i| {
-            if (k * p.w.bits % 32 != 0 or k % p.w.group != 0) return error.BadNativeTensor;
-            t.* = .{
-                .weight = try checked(try b.stage.read(b.checkpoint, names[i * 3]), .u32, &.{ p.n, k * p.w.bits / 32 }),
-                .scales = try checked(try b.stage.read(b.checkpoint, names[i * 3 + 1]), .bf16, &.{ p.n, k / p.w.group }),
-                .biases = try checked(try b.stage.read(b.checkpoint, names[i * 3 + 2]), .bf16, &.{ p.n, k / p.w.group }),
-                .bits = p.w.bits,
-                .group = p.w.group,
-            };
+            t.* = try viewed(p, k, .{
+                try b.stage.read(b.checkpoint, names[i * 3]),
+                try b.stage.read(b.checkpoint, names[i * 3 + 1]),
+                try b.stage.read(b.checkpoint, names[i * 3 + 2]),
+            });
         }
         return b.stack(triples[0..parts.len]);
+    }
+
+    /// One tensor a rank takes in blocks (GDN q | k | v); `n` is the split's key, `rows` each block's checkpoint rows.
+    fn blocks(b: Builder, module: []const u8, n: usize, k: usize, w: Width, spans: []const cfg.Span, rows: []const usize) !Linear {
+        var arena = std.heap.ArenaAllocator.init(b.allocator);
+        defer arena.deinit();
+        if (k * w.bits % 32 != 0 or k % w.group != 0) return error.BadNativeTensor;
+        const suffixes = [_][]const u8{ ".weight", ".scales", ".biases" };
+        const names = try arena.allocator().alloc([]const u8, suffixes.len);
+        for (suffixes, 0..) |suffix, j| names[j] = try std.mem.concat(arena.allocator(), u8, &.{ b.prefix, module, suffix });
+        try b.stage.reserve(b.checkpoint, names);
+        defer b.stage.reset();
+        const weight = try checked(try b.stage.read(b.checkpoint, names[0]), .u32, &.{ n, k * w.bits / 32 });
+        const scales = try checked(try b.stage.read(b.checkpoint, names[1]), .bf16, &.{ n, k / w.group });
+        const biases = try checked(try b.stage.read(b.checkpoint, names[2]), .bf16, &.{ n, k / w.group });
+        var triples: [3]projection.Triple = undefined;
+        if (spans.len > triples.len or rows.len != spans.len) return error.BadProjectionShape;
+        for (spans, rows, triples[0..spans.len]) |span, gn, *t| {
+            t.* = .{ .weight = try rowView(weight, span), .scales = try rowView(scales, span), .biases = try rowView(biases, span), .bits = w.bits, .group = w.group, .gn = gn, .whole = n };
+        }
+        return b.stack(triples[0..spans.len]);
+    }
+
+    /// `conv1d.weight`'s row blocks fused in the same q | k | v order, as one bf16 copy (the file's is not repacked).
+    fn conv(b: Builder, module: []const u8, kernel: usize, n: usize, spans: []const cfg.Span) !Tensor {
+        const t = try b.tensor(module, .bf16, &.{ n, kernel, 1 });
+        var at: usize = 0;
+        for (spans) |span| {
+            if (span.len == 0 or span.from != at) break;
+            at = span.end();
+        }
+        if (at == n) return t; // the blocks are the whole tensor in order: no copy
+        var rows: usize = 0;
+        for (spans) |span| rows += span.len;
+        const out = try b.device.buffer(rows * kernel * @sizeOf(u16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        b.owned.append(b.allocator, out) catch |err| {
+            out.deinit();
+            return err;
+        };
+        const from = t.host(u16);
+        const to = out.slice(u16, rows * kernel);
+        var base: usize = 0;
+        for (spans) |span| {
+            if (span.end() > n) return error.BadNativeTensor;
+            @memcpy(to[base * kernel ..][0 .. span.len * kernel], from[span.from * kernel ..][0 .. span.len * kernel]);
+            base += span.len;
+        }
+        var view = t;
+        view.buffer = out;
+        view.offset = 0;
+        view.bytes = rows * kernel * @sizeOf(u16);
+        view.shape[0] = rows;
+        return view;
     }
 
     /// Fused members of one width take one matrix as before; a mixed stack becomes one matrix a member.
@@ -133,12 +251,14 @@ const Builder = struct {
         }
         var fused = runs[0].linear;
         fused.n = first;
+        fused.gn = 0;
+        for (runs) |run| fused.gn += run.linear.gn;
         fused.raw = null;
         fused.runs = runs;
         return fused;
     }
 
-    fn layer(b: Builder, c: Config, i: usize) !Layer {
+    fn layer(b: Builder, s: *const cfg.Shard, i: usize) !Layer {
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -148,41 +268,103 @@ const Builder = struct {
                 return std.mem.concat(allocator, u8, &.{ p, leaf });
             }
         };
+        const c = s.local;
+        const g = s.global;
         const w = b.widths.layers[i];
         const M = widths.Member;
+        const qkv = s.qkvSpans();
+        const qkvRows = [3]usize{ g.k_heads * g.dk, g.k_heads * g.dk, g.gdnValueDim() };
+        const convRows = s.convSpans();
         const mixer: @FieldType(Layer, "mixer") = switch (c.kind(i)) {
             .linear => .{ .linear = .{
-                .qkv = try b.linear(&.{.{ .module = try Name.full(a, prefix, "linear_attn.in_proj_qkv"), .n = c.gdnQkvDim(), .w = w[@backingInt(M.qkv)] }}, c.hidden),
-                .zba = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_z"), .n = c.gdnValueDim(), .w = w[@backingInt(M.z)] }, .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_b"), .n = c.v_heads, .w = w[@backingInt(M.b)] }, .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_a"), .n = c.v_heads, .w = w[@backingInt(M.a)] } }, c.hidden),
-                .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "linear_attn.out_proj"), .n = c.hidden, .w = w[@backingInt(M.out)] }}, c.gdnValueDim()),
-                .conv = try b.tensor(try Name.full(a, prefix, "linear_attn.conv1d.weight"), .bf16, &.{ c.gdnQkvDim(), c.conv_kernel, 1 }),
-                .a_log = try b.tensor(try Name.full(a, prefix, "linear_attn.A_log"), .bf16, &.{c.v_heads}),
-                .dt = try b.tensor(try Name.full(a, prefix, "linear_attn.dt_bias"), .bf16, &.{c.v_heads}),
+                .qkv = try b.blocks(try Name.full(a, prefix, "linear_attn.in_proj_qkv"), g.gdnQkvDim(), g.hidden, w[@backingInt(M.qkv)], &qkv, &qkvRows),
+                .zba = try b.linear(&.{
+                    .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_z"), .n = g.gdnValueDim(), .w = w[@backingInt(M.z)], .span = s.zRows() },
+                    .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_b"), .n = g.v_heads, .w = w[@backingInt(M.b)], .span = s.abRows() },
+                    .{ .module = try Name.full(a, prefix, "linear_attn.in_proj_a"), .n = g.v_heads, .w = w[@backingInt(M.a)], .span = s.abRows() },
+                }, g.hidden),
+                .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "linear_attn.out_proj"), .n = g.hidden, .w = w[@backingInt(M.out)], .span = s.outputRows() }}, g.gdnValueDim()),
+                .conv = try b.conv(try Name.full(a, prefix, "linear_attn.conv1d.weight"), g.conv_kernel, g.gdnQkvDim(), &convRows),
+                .a_log = try rowView(try decayLog(try b.get(try Name.full(a, prefix, "linear_attn.A_log")), &.{g.v_heads}), s.valueRows()),
+                .dt = try rowView(try b.tensor(try Name.full(a, prefix, "linear_attn.dt_bias"), .bf16, &.{g.v_heads}), s.valueRows()),
                 .norm = try b.tensor(try Name.full(a, prefix, "linear_attn.norm.weight"), .bf16, &.{c.dv}),
             } },
             .attention => .{ .attention = .{
-                .q = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.q_proj"), .n = c.qDim(), .w = w[@backingInt(M.q)] }}, c.hidden),
-                .kv = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "self_attn.k_proj"), .n = c.kvDim(), .w = w[@backingInt(M.k)] }, .{ .module = try Name.full(a, prefix, "self_attn.v_proj"), .n = c.kvDim(), .w = w[@backingInt(M.v)] } }, c.hidden),
-                .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.o_proj"), .n = c.hidden, .w = w[@backingInt(M.o)] }}, c.heads * c.head_dim),
+                .q = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.q_proj"), .n = g.qDim(), .w = w[@backingInt(M.q)], .span = s.qRows() }}, g.hidden),
+                .kv = try b.linear(&.{
+                    .{ .module = try Name.full(a, prefix, "self_attn.k_proj"), .n = g.kvDim(), .w = w[@backingInt(M.k)], .span = s.kvRows() },
+                    .{ .module = try Name.full(a, prefix, "self_attn.v_proj"), .n = g.kvDim(), .w = w[@backingInt(M.v)], .span = s.kvRows() },
+                }, g.hidden),
+                .out = try b.linear(&.{.{ .module = try Name.full(a, prefix, "self_attn.o_proj"), .n = g.hidden, .w = w[@backingInt(M.o)], .span = s.outputRows() }}, g.heads * g.head_dim),
                 .q_norm = try b.tensor(try Name.full(a, prefix, "self_attn.q_norm.weight"), .bf16, &.{c.head_dim}),
                 .k_norm = try b.tensor(try Name.full(a, prefix, "self_attn.k_norm.weight"), .bf16, &.{c.head_dim}),
             } },
         };
-        const gu = try b.linear(&.{ .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = c.intermediate, .w = w[@backingInt(M.gate)] }, .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = c.intermediate, .w = w[@backingInt(M.up)] } }, c.hidden);
-        const down = try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = c.hidden, .w = w[@backingInt(M.down)] }}, c.intermediate);
-        return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .gu = gu, .down = down, .mixer = mixer };
+        const shared: ?[3]projection.Triple = if (!c.moe()) null else .{
+            try b.quant(try Name.full(a, prefix, widths.leaf(c, .gate)), c.intermediate, c.hidden, w[@backingInt(M.gate)]),
+            try b.quant(try Name.full(a, prefix, widths.leaf(c, .up)), c.intermediate, c.hidden, w[@backingInt(M.up)]),
+            try b.quant(try Name.full(a, prefix, widths.leaf(c, .down)), c.hidden, c.intermediate, w[@backingInt(M.down)]),
+        };
+        const moe: ?Moe = if (!c.moe()) null else .{
+            .shared_gate = weightsOf(shared.?[0], c.intermediate, c.hidden),
+            .shared_up = weightsOf(shared.?[1], c.intermediate, c.hidden),
+            .shared_down = weightsOf(shared.?[2], c.hidden, c.intermediate),
+            .router = try b.router(prefix, c, w[@backingInt(M.router)], w[@backingInt(M.shared_gate)]),
+            .gate = try b.experts(try Name.full(a, prefix, widths.leaf(c, .egate)), c.experts, c.moe_intermediate, c.hidden, w[@backingInt(M.egate)], c.top_k + 1),
+            .up = try b.experts(try Name.full(a, prefix, widths.leaf(c, .eup)), c.experts, c.moe_intermediate, c.hidden, w[@backingInt(M.eup)], c.top_k + 1),
+            .down = try b.experts(try Name.full(a, prefix, widths.leaf(c, .edown)), c.experts, c.hidden, c.moe_intermediate, w[@backingInt(M.edown)], 1),
+        };
+        // with experts the shared expert's lane layouts come from its resident tensors, else the dense MLP's are staged
+        const gu = if (shared) |t| try b.stack(&.{ t[0], t[1] }) else try b.linear(&.{
+            .{ .module = try Name.full(a, prefix, "mlp.gate_proj"), .n = g.intermediate, .w = w[@backingInt(M.gate)], .span = s.intermediateRows() },
+            .{ .module = try Name.full(a, prefix, "mlp.up_proj"), .n = g.intermediate, .w = w[@backingInt(M.up)], .span = s.intermediateRows() },
+        }, g.hidden);
+        const down = if (shared) |t| try b.stack(&.{t[2]}) else try b.linear(&.{.{ .module = try Name.full(a, prefix, "mlp.down_proj"), .n = g.hidden, .w = w[@backingInt(M.down)], .span = s.outputRows() }}, g.intermediate);
+        return .{ .norm = try b.tensor(try Name.full(a, prefix, "input_layernorm.weight"), .bf16, &.{c.hidden}), .post_norm = try b.tensor(try Name.full(a, prefix, "post_attention_layernorm.weight"), .bf16, &.{c.hidden}), .gu = gu, .down = down, .moe = moe, .mixer = mixer };
     }
 };
 
-const Part = struct { module: []const u8, n: usize, w: Width };
+const Part = struct {
+    /// The module's checkpoint name, without the shard's namespace prefix.
+    module: []const u8,
+    /// The rows the checkpoint's tensor has, before this rank takes its span.
+    n: usize,
+    w: Width,
+    /// The rows this rank takes: the whole tensor unless the rank splits this matrix.
+    span: cfg.Span = .{},
+};
+
+/// Rows `[span.from, end)` of `t`: rows are contiguous, so the same buffer at a later offset and a shorter shape.
+fn rowView(t: Tensor, span: cfg.Span) !Tensor {
+    if (span.len == 0) return t;
+    if (span.from == 0 and span.len == t.shape[0]) return t;
+    if (span.end() > t.shape[0]) return error.BadNativeTensor;
+    var row: usize = 1;
+    for (t.shape[1..t.rank]) |d| row *= d;
+    const elem = t.dtype.size();
+    const at = span.from * row * elem;
+    if (at % elem != 0) return error.BadNativeTensor;
+    var view = t;
+    view.offset = t.offset + at;
+    view.bytes = row * span.len * elem;
+    view.shape[0] = span.len;
+    return view;
+}
 
 fn checked(t: Tensor, dtype: cp.DType, shape: []const usize) !Tensor {
     if (t.dtype != dtype or t.rank != shape.len or !std.mem.eql(usize, t.shape[0..t.rank], shape)) return error.BadNativeTensor;
     return t;
 }
 
-/// The graph from `checkpoint`, whose `repacked` tensors stay in their files: each Linear is staged, repacked, dropped.
-pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, c: Config, ws: *const widths.Widths) !Weights {
+/// A_log as stored: bf16, or f32 (mlx-vlm and mlx_lm conversions); the GDN kernels read either through weight_flags.
+fn decayLog(t: Tensor, shape: []const usize) !Tensor {
+    return checked(t, if (t.dtype == .f32) .f32 else .bf16, shape);
+}
+
+/// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
+pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths) !Weights {
+    const c = s.local;
+    const g = s.global;
     const prefix: []const u8 = if (checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else if (checkpoint.has("model.embed_tokens.weight")) "" else return error.MissingTextNamespace;
     if (checkpoint.has("language_model.model.embed_tokens.weight") and checkpoint.has("model.embed_tokens.weight")) return error.AmbiguousTextNamespace;
     var owned: std.ArrayList(mtl.Buffer) = .empty;
@@ -200,10 +382,10 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     var stage = cp.Stage{ .device = device };
     defer stage.deinit();
     const b = Builder{ .allocator = allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &owned, .stage = &stage, .runs = &runs, .widths = ws };
-    for (layers, 0..) |*l, i| l.* = try b.layer(c, i);
-    const embed = try b.quant("model.embed_tokens", c.vocab, c.hidden, ws.embed);
+    for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
+    const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
-    const head = try b.linear(&.{.{ .module = "lm_head", .n = c.vocab, .w = ws.head }}, c.hidden);
+    const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
 }
@@ -229,6 +411,11 @@ fn regJobs(a: std.mem.Allocator, jobs: *std.ArrayList(lane.Order), p: Linear) st
     if (p.runs.len == 0 and p.bits == 4 and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k });
 }
 
+/// A borrowed quantized tensor as the row kernels' matrix.
+fn weightsOf(t: projection.Triple, n: usize, k: usize) row_gpu.Weights {
+    return .{ .w = t.weight.buffer, .w_off = t.weight.offset, .scales = t.scales.buffer, .s_off = t.scales.offset, .biases = t.biases.buffer, .b_off = t.biases.offset, .n = n, .k = k, .group = t.group, .bits = t.bits };
+}
+
 pub fn ref(t: Tensor) Ref {
     return .{ .buffer = t.buffer, .offset = t.offset };
 }
@@ -244,4 +431,18 @@ test "repacked names the modules the graph reads only through owned copies" {
     try std.testing.expect(!repacked("language_model.model.layers.3.self_attn.q_norm.weight", 2));
     try std.testing.expect(!repacked("language_model.model.norm.weight", 2));
     try std.testing.expect(!repacked("language_model.model.layers.0.linear_attn.A_log", 2));
+}
+
+test "A_log loads in bf16 or in f32, as mlx-vlm conversions store it, and refuses other dtypes and shapes" {
+    var t: Tensor = .{ .buffer = undefined, .offset = 0, .bytes = 32 * 4, .dtype = .f32, .rank = 1 };
+    t.shape[0] = 32;
+    try std.testing.expectEqual(cp.DType.f32, (try decayLog(t, &.{32})).dtype);
+    t.dtype = .bf16;
+    t.bytes = 32 * 2;
+    try std.testing.expectEqual(cp.DType.bf16, (try decayLog(t, &.{32})).dtype);
+    t.dtype = .f16;
+    try std.testing.expectError(error.BadNativeTensor, decayLog(t, &.{32}));
+    t.dtype = .f32;
+    t.bytes = 32 * 4;
+    try std.testing.expectError(error.BadNativeTensor, decayLog(t, &.{48}));
 }

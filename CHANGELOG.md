@@ -4,11 +4,614 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA: the recipe notes that `TF_GLM_CHUNK_SOLO=4096` made prompts 12-14% slower with NVIDIA's NVFP4 checkpoint on two GB10s at `--parallel 1`, so leave it unset there (#2288).
+
+- Flash Next on CUDA at `--tp 2` with drafts keeps prompt states, and no longer needs `--prompt-cache-gib 0` to start. On two GB10s, a chat with about 28,500 tokens of history replies in 1.5 s resumed against 21.2 s fresh, with the same replies (#2214, fixes #1829).
+
+- Flash Next on CUDA: the whole shared expert's down projection writes straight into its output slot, without a scatter, so NVFP4 prompts run about 0.7% faster on a GB10 with the same tokens (#1792). Thanks to @laudney.
+
+- Qwen3.8-27B on Metal: a NaN or infinity in a value a row must not see no longer turns that row's attention output into NaN on the prompt kernels (before M5 and on M5) or the M5 decode prefix. Replies change only where such a value already sits in a masked key, and finite inputs keep their bytes (#2106). Thanks to @cshintov.
+
+- Flash Next on Metal: a lone `"draft": false` reply at `--parallel` above one runs as it does at `--parallel 1`, 17-18% faster on an M3 Ultra with the same tokens (#2272).
+
+- CI: the cache tool's own test runs only when the tool, `no-gpu.yml` or Zig's version changes, on main too, which saves about 2 minutes of each main `zig` job (#2277).
+
+- Qwen3.8-27B on Metal: a reply that would end well before a long prompt now goes first, and the prompt lends it at most a quarter of its own time. `--decode-share`, `TENSORFOLD_PREFILL_SHARE`, or any `TENSORFOLD_PREFILL_ORDER` other than `srpt` keeps the old order (#2224).
+
+- Flash Next on CUDA: at `--parallel 1` on one GPU, a prompt pass takes up to 8,192 rows, so prompts run 15-23% faster on a GB10 for about 3.2 GiB more memory; `TF_FLASHNEXT_CHUNK_SOLO` still decides (#2246).
+
+- Docs: the slow drafted request after a `draft: false` one no longer reproduces, and the expert recipe lists peak memory at each `--ssd-experts` budget (#2237).
+
+- Flash Next with `--ssd-experts`: a request no longer waits for a forecast read it doesn't need, and a forecast that never started keeps the expert it displaced: about 8% faster at 35 GiB and 4% at 17 GiB (#2236).
+- CUDA on integrated GPUs such as the GB10: synchronous downloads stage through a per-thread pinned buffer, which guards against a driver fault where a copy into pageable memory could miss pages. Discrete cards keep the direct copy. On an idle GB10, large copies take longer: 212 µs instead of 85 µs at 4 MiB (#2103). Thanks to @shuuul.
+- Prompt scheduling: a resumed turn that has not started its prompt pass is ranked by its uncached tail, not its whole prompt, so a long cached history no longer waits behind a cold prefill; a rejected restore ranks the whole prompt again (#2256). Thanks to @laidick.
+
+- CI: a pull request's `zig` and `zig-windows` jobs reuse main's test passes and compiles, C and C++ included, so they run only what its diff changed; main still checks every commit from scratch (#2274).
+
+- Tests: Metal learning admission checks Kimi's own refusal and runs without shader compilation. Serving is unchanged (#2267).
+
+- Tests: Metal GLM draft-source facts use a defined host capability receiver, removing a random crash from an uninitialized device. Serving is unchanged (#2268).
+
+- CI: main's build cache now fits every runner, because CI compiles host code for one CPU, and `release-paths` and the macOS dev tools use the cache too (#2252).
+
+- Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) runs on CUDA from `mlx_lm.convert` 4-bit checkpoints: per-layer inputs in their own launch and layers 24 to 41 on the caches of 22 and 23, with replies equal across streams and resumes (#1222, #2230). Thanks to @jschmied.
+
+- Qwen3-Reranker-8B on HIP computes a rerank request's shared start (the system prompt, the instruction and the query) once a pass instead of once a document, with the same responses byte for byte: 16 documents of 323 tokens, 87 of them shared, take 1.98 s instead of 2.63 s on the dot2 tile and 0.73 s instead of 0.99 s with the gfx12 WMMA tile (opt-in, `--policy matrix=on`), on a Radeon AI PRO R9700. The decide GPU checks now run on the tile and attention path that `TF_QWEN3_MATRIX` and `TF_QWEN3_ATTENTION` choose (#2262, part of #2245). Thanks to @laudney.
+
+## 1.2.3
+
+- llama on Metal: Nanbeige's own `Nanbeige/Nanbeige4.3-33B-INT4` release (compressed-tensors int4 in groups of 32, 21.0 GiB) is served as published, read in place; any other quantization of the family is refused by name. Against a float64 reference over 1,500 teacher-forced positions on an M5 Ultra, mean KL 0.0044 and 97.1% top-1. Prompts need Metal 4 tensor units, so M1 to M4 Macs are refused at load (#1782, part of #1414). Thanks to @BobClawblaw.
+- Nemotron on CUDA: `TF_KV_PAGES=0` and `TF_KV_PAGES=all` are reported as overrides at startup and in `capabilities`, for Nemotron-H and Nemotron Omni, instead of "registered overrides: none"; how the value is read is unchanged (#2061). Thanks to @garvrao80.
+- Clusters: the fabric layer gains a pipeline stage link, a TCP ring between ranks on Linux and macOS that carries each round's plan and hidden rows, with a shared key proved both ways before any frame. Nothing serves through it yet (#2012, step 1 of #2005). Thanks to @jschmied.
+- Developers: `docs/pr/SKILL.md` is a pre-flight for preparing a pull request, linked from `AGENTS.md` and the README (#1595). Thanks to @jayleaton.
+- Developers: `tools/zig/lean_check.py` reads sources as UTF-8 on every platform, so Windows counts the same as Linux and macOS (#2097, fixes #2096). Thanks to @BobClawblaw.
+- Flash Next at `--tp 2` on CUDA: each rank computes its own output columns of the dense projections instead of both repeating the whole projection, with the same replies as one GPU. On two GB10s with NVIDIA's NVFP4 release, plain decode is 21-23% faster, drafted decode 9-11% faster at one stream and 76-77% at two, and prompts about 6%. Model memory goes from 45.04 to 42.42 GiB a rank, and a stream's KV at 65,536 tokens from 2.18 to 1.30 GiB (#1784, refs #1754). Thanks to @laudney.
+- Flash Next on CUDA, beside another open stream: a greedy chain stops at 0.6 per draft, and a round with more than four streams drafting drafts greedy chains 6 deep. That fixes #1786's loss at eight greedy streams: on a GB10, MLX 4-bit chat goes from 288.8 to 303.8 tok/s and code from 336.9 to 358.5, FP4 stays level and every reply keeps its bits. `TF_FLASHNEXT_GREEDY_WIDE` sets the width and `TF_FLASHNEXT_SHARED_DRAFTS=0` keeps the alone rule (#2160, part of #1762). Thanks to @Arminova.
+- With `--ssd-experts`, the expert pool counts uses, so an expert used once leaves before one used again. On an M3 Ultra, Flash Next reads about 11% less from disk at 17 and 35 GiB pools, and a mixed workload took 8% less time at 35 GiB, with the same replies (#2209).
+
+- Flash Next on a Mac without tensor units, with `--parallel` above one: a lone reply runs as fast as at `--parallel 1`. On an M3 Ultra, sampled replies are 12-19% faster and greedy ones about 4%, with the same tokens, and a second request joining a reply leaves it unchanged (#2199).
+
+- Flash Next on Metal reports a filling prompt's progress: the dashboard shows what's left, and `TENSORFOLD_PREFILL_ORDER=srpt` works from a server's first long prompt (#2194).
+
+- CI: `zig` and `zig-windows` keep main's build cache instead of rebuilding from nothing, every check still reruns, and the quick checks run first.
+
+- HIP: the `tf_sum_partials` records follow ROCm 10.1's hipcc, taking 8 limit problems off the contract (#2233). Thanks to @AbrahamCete.
+
+- CUDA docs match the code: README, RUNBOOK and the recipes now say which families refuse an A100 at startup, that no NVFP4 or FP8 model has run on sm_80 to sm_89, and that the largest recorded run is three GB10s (#2227).
+
+- Kimi K3 and K3.1 on Metal through the native server: chat rendering, reasoning and tool calls, with K3.1 capped at 2,047 tokens until its sparse index is qualified. Tested on a synthetic graph; no real weights have run here, and the full 1.45 TB checkpoint doesn't fit one Mac through this path (#2221, part of #2192).
+
+- HIP: a lane round of more than four rows reuses cached weights instead of reading them from DRAM again for each row block, and makes a chunk's code pairs once; gfx1030's spilling tiles keep their layout. On a gfx1151 the 27B at 16 streams goes from about 51 to 75 tok/s on code. The records are @AbrahamCete's own, as we have no AMD GPU (#1694). Thanks to @AbrahamCete.
+
+- CUDA with KV pages: `--prompt-cache-gib N` now keeps N GiB before the pool sets aside windows past the engine's own, so a named cache is no longer cut to almost nothing at some room sizes. A command that already names N splits memory differently after an upgrade; unset, the order is unchanged. The startup line counts the windows the pages hold (#2220). Thanks to @Bizuayeu, and to @MiaAI-Lab for finding it.
+
+- llama `--drafter`: a probe stays armed until a round verifies its drafts, so a request that once stood the drafter aside gets drafting back; replies don't change (#2169, closes #2168). Thanks to @BobClawblaw.
+- GLM-5.3-Flash on CUDA: `TF_GLM_CHUNK_SOLO=4096` now serves beside `--drafter` (DFlash2), 80 MiB more on each rank; a cold 64K prompt's first token comes about 7% sooner at TP=2 with the same tokens (#2219). Thanks to @Bizuayeu and @MiaAI-Lab.
+
+- Every retryable 503 on the OpenAI-shaped inference routes names its wait in a fixed `code` (`server_restarting`, `engine_loading`, `engine_reload_failed`, `engine_busy`, `engine_unavailable`, `memory_pressure`); a parked model's reload was reported as `server_restarting` with the drain's message and now answers `engine_loading` or `engine_reload_failed` with the model's own words, while capacity refusals gain the code and keep their status and absent `Retry-After` — an embeddings request that finds the engine busy now names `engine_busy` and says busy instead of unavailable. The drain's body bytes, every status code and every other message are unchanged, and the Messages routes' Anthropic envelope has no code field (#2135). Thanks to @devopsfortunato.
+
+- GLM on CUDA: `TF_GLM_COPIES=1` adds opt-in context copies, verified and priced with the same row costs as drafts. Off by default; tokens are unchanged (#2146).
+
+- Living Weights: a lesson's extra wordings are seeded from the lesson, so the same lesson samples the same wordings on each run (#1587).
+
+- `cached_tokens` and `prompt_tokens_cached_total` can no longer exceed the prompt, whatever a backend reports (#1899).
+
+- GLM-5.3-Flash on CUDA: at three ranks or more, where `TF_GLM_ROCE_MULTI=1` opens the wire, `TF_GLM_CHUNK_SOLO=4096` with `TF_GLM_OVERLAP_PIECES` unset puts a prompt chunk's exchanges in 8 pieces instead of 3, so a cold prompt's first token comes about 5% sooner at TP=3 with the same tokens. TP=2, where the exchanges stay on NCCL, and every other combination keep 3, a set `TF_GLM_OVERLAP_PIECES` still wins, and rank 0 prints the count at startup (#2116).
+
+- GLM on CUDA at TP=2 with `TF_KV_PAGES=on` and `TF_GLM_KV_HOST=1`: a prompt chunk's MTP pass reads the pooled keys at the device stride, so a long first prompt no longer faults (#2173, fixes #2119). Thanks to @Bizuayeu.
+- Living Weights: a refused lesson round names the sub-check that failed (#1587).
+
+- Kimi K3.1 Pro's config is recognised: `dsa_config` is checked and refused where unsupported, not silently read as K3, and the family caps it at 2,047 tokens until a sparse index is qualified. Not served yet (#2192).
+
+- DeepSeek-V4.1 logs its resolved serving settings at start-up, so two runs can be compared setting by setting (#1395).
+
+- HIP: the OCR families share one host protocol, with the same replies (#2040). Thanks to @laudney.
+- `THIRD_PARTY_NOTICES.md` names the model release and library code that five sets of files follow, with the LFM Open License text (#2197).
+
+- Persisted prompt states include the resolved profile values that can affect a family's arithmetic or experimental/debug path. Changing one moves the disk namespace, so the first long prompt under that setting prefills again; an unset boolean and an explicit 0 share the same key. Native CUDA and the four Metal persistence owners use the same scoped helper. Qwen and Flash Next on CUDA have such rows even with nothing set, so their disk states from before this version aren't reused: the first long prompt after upgrading prefills again (#2131).
+
+- Lane host: the paged KV pool's promises now count in the host's one ledger, with no change in behaviour (#2127). Thanks to @jschmied.
+
+- Qwen3.5 on HIP: the prompt conv writes q, k and v to their own rows, which drops 144 of the 27B's 160 column copies, with the same results (#2117). Thanks to @AbrahamCete.
+
+- README: the GLM-5.3-Flash Jammed XSFP4 row, and shorter FP4 rows that keep their links (#2114). Thanks to @Bizuayeu.
+
+- Tests: the Qwen27 lanes' facts read a dense model's config, so `test-native` no longer crashes (#2122). Thanks to @BobClawblaw.
+
+- `tools/bench_fill.py` measures a long prompt filling beside a running reply, in both arrival orders, against each run alone, with every reply checked against its run alone (#2154).
+- DeepSeek-V4 and V4.1 tool calls stream their arguments as they are written, from the first parameter's end, like GLM and XML calls; a call whose first parameter is the long one still arrives when that parameter closes. With `stream: false`, a reply cut by `length` inside a DSML call now returns that call instead of text (#1975).
+
+- The XPU unknown-model error names Gemma 4 E4B when the build includes its DPAS engine (#2189).
+
+- The Qwen3.5-2B recipe says which of the family's listed formats load at its geometry: only `mlx-q4g64` (#2139).
+- Decision routes now include `context_length_exceeded` on context-limit errors for text-only prompts, preserving their status and text; a prompt with pictures still gets a plain request error from the engine check (#2183).
+- `capabilities --json`: the docs now say what `env` covers, a selected documented subset, and that `profiles.registered_switches` covers the profile registry (#2139).
+- Model discovery reads one engine-info snapshot under the idle-unload lock, avoiding reload races (#2186).
+
+- HIP Qwen format discovery names each admitted MLX bit width and group size, such as `mlx-q4g64` (#2188).
+- The native `--reasoning-effort` choices include `minimal` and `max`, using the shared request vocabulary. Existing template coercion and `--no-thinking` behavior stay unchanged (#2139).
+
+- Nemotron-H on Metal, when both the checkpoint context and `--context` are absent, now reports its existing 262,193-token prompt-plus-reply limit in `/v1/models`. Requests, default reply limits and the backend refusal remain unchanged.
+- Model discovery keeps `reasoning.default_effort` for templates that consume `reasoning_effort` as free text, even when they name no quoted effort levels. It omits the default when the template does not mention that input. Rendering and request behavior are unchanged.
+
+- Flash Next on a Mac without tensor units, with `--parallel` above one: a long prompt beside a running reply no longer slows both. Replies take 0.8 of that time by default and the prompt's steps grow from 32 to 512 rows after eight. On an M3 Ultra, a 1,024-token reply beside a 64K prompt went from 48 s to 8 s and the prompt's first token from 90 s to 54 s, with the same tokens. `--decode-share 0` keeps the old order (#2167, #1893). Thanks to @dinadur.
+- `--profile stable`'s registry covers GLM's host KV tier: `TF_GLM_KV_HOST` and `TF_GLM_KV_HOST_SHARED` are now rows in the table, with [#1795](https://github.com/ashhart/TensorFold/pull/1795)'s identical tokens at TP=2, and their readers resolve through the registry. A switch looked up by name now goes through `core.profile.lookup`, which serves registered names from the table and every other name from the environment as before. Stable supplies no value, so nothing is enabled or changed by default (#1660).
+
+- GLM-5.3-Flash on a Mac without tensor units learns what a shared round's row costs on that chip instead of pricing it from an M5 Ultra's table, so an M3 Ultra stops over-drafting with several requests at once: about 14% more decode throughput at four streams when drafts land often, with the same tokens. That was measured on a 40-layer cut of the 45-layer model, not the whole model (#2111).
+
+- LFM3-1.7B runs on Intel GPUs through XPU, Iris Xe first (#1696). Thanks to @jschmied.
+- Disk prompt-state startup preserves valid files when allocation fails, and reports the failure instead of treating them as damaged (#2134).
+
+- Fish Audio Drama 3 (`fish_omni`) on Metal lists its native NVFP4 expert weights beside FP8 in `capabilities` (#2139).
+
+- HIP Qwen3.5 and Qwen3.5-MoE no longer list BF16 in `capabilities`, since those servers refuse a BF16 checkpoint for chat (it can only score decisions) (#2139).
+
+- MiniMax-M3 on Metal refuses logprobs with an external drafter before prefill; plain decoding keeps logprobs (#2139).
+- CUDA GLM-5.3-Flash capabilities include the EXL3 format its loader already serves (#2139).
+
+- Model discovery omits reasoning for engines that disable it, including HIP OCR and scoring models, even when their template has thinking markers (#2139).
+
+- Qwen3.5 decode on HIP reads the BF16 router rows the model already holds, with the same tokens (#2007). Thanks to @AbrahamCete.
+
+- Qwen3.5 prompts on HIP run the residual add and post-mixer norm in one launch, with the same bytes (#2099). Thanks to @AbrahamCete.
+
+- GLM-5.3-Flash on CUDA reads block 32's scales only for a `csf0_v1` checkpoint, and every rank refuses a scale offset past 0x7E with a named error (#2091). Thanks to @Bizuayeu.
+- GLM on CUDA with `TF_GLM_PREFILL_REDUCE=ring` warms up only each rank's ring neighbours at startup; the default split and gather warm-up are unchanged (#1971).
+
+- Qwen3.5-MoE's prompt sorts its experts' rows in one threadgroup, a thread an expert, with the same order as the serial sort (#1799). Thanks to @BobClawblaw.
+- A batched `/v1/embeddings` request no longer hangs on a backend that prefills many prompts at once, and the lane core can score decision prompts in 1,024-row pieces (#2047). Thanks to @laudney.
+- The native tokenizer reads a Qwen2 checkpoint's slow-tokenizer files when it ships no `tokenizer.json`, converting them to the JSON it would ship; structured output still needs that file (#2225). Thanks to @shuuul.
+
+- XPU's dense 27B takes its kernel sizes from one shared `shape.h`, with 8-head prompt attention, and its SPIR-V images stay byte-identical (#1425, thanks @tolewis).
+
+- PNG pictures with a `tRNS` key past 255, or a 16-bit key, now decode with Pillow's transparency: grayscale and RGB keys compare their low byte with the decoded sample. Pictures without such a key decode as before, and 1-bit grayscale keeps its whole-key rule (#2100).
+
+- GLM on CUDA at TP>1: the DFlash2 drafter reads complete prompt taps on every rank (it read stale residual rows under the split prompt reduce), so acceptance is back to the gathered level with every reply unchanged (#1623, thanks @BadAd84).
+
+- dots.mocr on HIP: the publisher's BF16 `dots-studio/dots.mocr` OCR checkpoint is served natively, with its own template, tokenizer, image processor and EOS ids, token-exact against its model card (#1938, part of #1927, thanks @laudney).
+- CUDA on the RTX PRO 4500 (sm_120): the dense 27B's MLP uses a 128-row tile, byte-equal to the 64-row one, with `TF_CUDA_TEST_MLP128` (0 or 1) to pin either for testing (#1730, thanks @Maxrio9).
+
+- CUDA on the RTX PRO 4500 (sm_120): attention takes the MT2 FP8 path from 8,192 cached tokens, token-equal to the default path (#1731, thanks @Maxrio9).
+
+- Flash Next on HIP advises random access over the n-gram table's mapped tensors, so a gather's scattered single-row reads fault only their own pages instead of whole readahead windows: the first request after start decodes at 35.8 tok/s instead of 24.4, and a cold 7K-token prompt starts in 28.9 s instead of 48.4 s on a Strix Halo (gfx1151), with every reply token-equal (#1615, fixes #1602, thanks @gilby).
+
+- `TF_KV_SHARE=n` keeps a paged CUDA family's prompts as its core pool's pages (Gemma 4, Kolibri-1), with replies equal to a fresh prefill; it's opt-in, and costs about 3.5% decode after a short cold prompt on Kolibri-1 (#1755, part of #1657). Thanks to @jschmied.
+- Qwen3.5's attention-layer pattern (`layer_types`, `full_attention_interval`) is read by one shared reader on Metal, CUDA, HIP and XPU, so a config gets the same pattern or the same refusal everywhere; a `layer_types` list that contradicts the interval is refused naming both keys, and XPU checks a present `config.json` at load (#2086, fixes #1863).
+- Flash Next FP4 on CUDA: drafted rounds send the first token earlier, keep the n-gram table resident, draft deeper on greedy requests and replay rounds through CUDA graphs. One-stream decode on a GB10 is up to 11.5% faster (chat +8.7%, code +6.3% at temperature 0), and every reply is token-equal to main (#1786, thanks @Arminova).
+
+- Docs: the GLM CUDA recipe gives `TF_GLM_OVERLAP_PIECES=8` beside `TF_GLM_CHUNK_SOLO=4096` at TP=3 with `TF_GLM_ROCE_MULTI` (#2067). Since #2116 that's the default there, so the variable only pins it. Thanks to @Bizuayeu.
+
+- Docs: the Flash Next recipe says native Metal takes `--ple-on-ssd`, which reads per-layer embedding rows from the SSD in batches (#2068). Thanks to @swbiggart.
+
+- The cluster planner gives a dense model's rounds zero expert cost instead of dividing zero by zero, so its decode and combined round times are finite (#2070). Thanks to @swbiggart.
+
+- Qwen 3.5 on CUDA: a kept path longer than the 48-row pending buffer is kept at once instead of overrunning it, which fixes the occasional INVALID_VALUE on deferred keeps (#1982). Thanks to @jrb-ai.
+
+- GLM-5.3-Flash on CUDA reads csf0_v1 checkpoints, whose NVFP4 routed experts carry their scales at block 32 as a base plus a 4-bit offset, saving about 13 GiB across a TP=2 pair with the same tokens; block-16 checkpoints are unchanged (#2041). Thanks to @Bizuayeu.
+
+- In one-call tool mode, a stream sends prose held after a hidden call envelope at the finish, so the streamed content equals the whole reply; other streams are unchanged (#2049). Thanks to @devopsfortunato.
+
+- GLM tool calls stream their arguments as the model writes them, as Qwen-style XML calls already do, and the joined pieces equal the whole reply's arguments (#2050). Thanks to @devopsfortunato.
+- HIP: Qwen 3.5 loads BF16 checkpoints with their Hugging Face tensor names and runs the BF16 projections through rocBLAS, the base for Clef-Flash. MLX checkpoints are unchanged (#2046). Thanks to @laudney.
+
+- Kolibri-1 on CUDA keeps its full-attention layers' caches in pages of the core KV pool, as Gemma 4 does, with identical tokens when the prompt store is off (#1620, part of #1657). Thanks to @jschmied.
+
+- Qwen 3.5 on CUDA: the mixers' and the dense MLP's scratch rows share one region, freeing 0.46 GiB on the 27B with the same tokens and speed (#1476). Thanks to @diwakergupta.
+
+- The kernel contract checks Qwen3.8-27B's attention_io pack, append and keep at the other two head shapes the family admits, GQA16 (32 query heads over 2) and the 9B's 16 over 4 (#2063). Thanks to @cshintov.
+
+- `kernel-contract` frees each kernel's device buffers once its gates are done, so the full suite fits on a 16 GiB card instead of running out of memory in the MoE backward suite (#2042). Thanks to @BlivionIaG.
+
+- Six remaining fp32-to-bf16 conversions use core's shared rounding: every non-NaN input gives the same bits, and a NaN now stays a NaN where it didn't before (#2052).
+
+- cortheon keeps a source, link, page or query that differs only in spelling (a capital scheme, a query- or fragment-only link, a Windows path, a scheme-relative result), and resolves `.` and `..` without dropping empty path segments, so `/docs/` keeps its slash (#2036). Thanks to @ppardus.
+
+- The Recall tests set their own disk floor, so the full host suite passes on a machine with less than 4 GiB free. The 4 GiB floor itself is unchanged and has its own test (#2051).
+
+- Developers: passing test binaries no longer print, so `zig build test` shows `failed command:` only for a real failure (#2153).
+
+- Community benchmark receipts (v2) can record 1 to 8 loaded ranks and each node's hardware, in separate single-node and multi-node categories. Both the bundled client and one attached to a running server read the running group. v1 is unchanged, and v2 uploads stay off for now (#974).
+
+- Six host-test steps that had gone red on main pass again: their fixtures follow the code they test, and each fix was checked by planting the original break (#2024). Thanks to @jishnuvenugopal.
+
+- Dory on CUDA takes its RoPE tables from core's exact helper, matching transformers' fp32 values (they moved by up to 5 ulp). Replies can change where a token was a near-tie; decode speed is unchanged within 0.3% on a GB10. There's no switch back: the new tables are the reference's (#2035, part of #1852).
+- Clusters: the fabric layer can link nodes over ConnectX (RoCE v2), the first step of #1594 (#1957). Thanks to @ThinkOffApp.
+
+- `cluster check`, `cluster status` and `serve`'s preflight now exit 1 when a configured model cannot be planned (#2069). Thanks to @swbiggart.
+
+- DeepSeek-V4.1 on CUDA reads `--prompt-cache-gib` as the kept states' resident limit on every rank (0: none resident in RAM; with `TF_DSV41_SESSION_DISK` an evicted chat is parked on disk): with TP > 1 rank 0 sends its limit to the other ranks at startup. A set `TF_DSV41_SESSION_RESIDENT_GIB` wins on rank 0; set on another rank, it must equal rank 0's limit or every rank refuses to start (#1625).
+
+- On RDNA4 (gfx12), Qwen3-8B's BF16 projections can run on a new WMMA tile, opt-in with `--policy matrix=on`: Qwen3-Embedding-8B embeds 100 short inputs in 0.99 s instead of 2.47 s and Qwen3-Reranker-8B ranks 16 documents in 1.39 s instead of 3.22 s on a Radeon AI PRO R9700. The tile's fp32 sums are less precise than the dot2 chain's (8 to 41 times further from float64 per projection), so the default `matrix=auto` keeps the dot2 tile and its bits; the BF16 projections WMMA writes are as close, and both models pass their oracles on it. Other chips are unchanged, and gfx1200 is unmeasured (part of #1977). Thanks to @laudney.
+
+- `/v1/rerank` sends a request's documents to the engine as one decision, and Qwen3-Reranker-8B on HIP packs them into as few prompt passes as fit instead of one pass a document, with the same responses byte for byte: 16 documents of about 260 tokens take 2.69 s instead of 3.22 s on the dot2 tile and 1.00 s instead of 1.39 s with the gfx12 WMMA tile of #2034 (opt-in, `--policy matrix=on`), on a Radeon AI PRO R9700. The lane host carries `Engine.decide` for a backend that gives it; no other family changes (part of #1977). Thanks to @laudney.
+
+- The native HIP engine serves `Qwen/Qwen3-Embedding-8B` as Qwen publishes it (BF16) through `/v1/embeddings` on a Radeon AI PRO R9700 (gfx1201): BF16 dense weights stay BF16 on a new dot2 GEMM tile, inputs of up to 32,768 tokens batch to the same vectors as alone, and `dimensions` takes any MRL width from 32 to 4,096. Every family's `/v1/embeddings` now refuses a whitespace-only text as SGLang does, and names an input longer than the context with its token count (`context_length_exceeded`) before the batch limit; see [the API notes](docs/api.md#embeddings) (#1978, part of #1977). Thanks to @laudney.
+
+- Eight remaining host BF16 roundings in test oracles (GLM's Metal checks and CUDA FP8 KV reference, Nemotron's training scan, LFM2's DSpark taps, Flash Next's HIP kernel tests) and the XPU FP64 GDN reference use core's shared conversion, so a negative NaN gives a NaN instead of overflowing in Debug builds; every other non-NaN input gives the same bits. No kernel or served path changes (part of #1863).
+
+- Qwen3.8-27B on Metal gains a host GGUF family adapter for metadata, tensor names and exact affine preparation, with the observed qwen35 schema and effective norm gains pinned in host tests; GGUF serving remains unavailable (#1920).
+
+- `POST /v1/rerank` serves `Qwen/Qwen3-Reranker-8B` on HIP in the rerank shape agreed in #1895 (`results` with `index`, `relevance_score` and `document`, `top_n`, `return_documents`, `usage.total_tokens`), taking SGLang's request fields too: each document's prompt is the model card's template token for token, a prompt past `max_length` (default 8192) losing the end of its content as the card's tokenizer cuts it, and its score is sigmoid(yes - no) of the last position's label logits, read from `lm_head` rows in f64. Only an engine that declares a reranker answers; every other server answers the route with HTTP 400, and a reranker server refuses the other model routes by name. The lane host's score queue now stops at a drain's deadline: the score already running finishes and the queued ones fail without running, which also reaches `/v1/decisions` on Flash Next on CUDA (#1981, part of #1977). Thanks to @laudney.
+
+- The Qwen3.8-27B Metal engine serves Qwen3.5-MoE checkpoints (`qwen3_5_moe`): Ornith-1.5-122B on one M5 Ultra from the publisher's own 4-bit MLX weights, with routed and shared experts, 32 query heads over 2 KV heads, its eight-tap DFlash2 drafter, images, the prompt cache and several streams; the dense 27B is unchanged (#1125). Thanks to @BobClawblaw.
+
+- HIP on the gfx1151 iGPU routes a many-expert prompt through a 64-row tile, with up to 12 expert pairs an item and prompt chunks capped at 1,024 rows; other GPUs are unchanged (#1658). Thanks to @gilby.
+
+- PDF documents as input with `--vision --vision-pdf` (#1820). Thanks to @joernchen.
+
+- CUDA loaders gain opt-in checked read-ahead with `TF_LOAD_PREFETCH` on Nemotron, Bolt, MiniMax M3, Kolibri-1, Spark 2.5 and DeepSeek-V4.1 (unset is 0). GLM keeps its legacy default of 16 readers. Upload and existing release order stay unchanged; disabled adapters start no reader, and failed reads name their source (#2003). This extends @jschmied's #1928 mechanism; Gemma 4 and Qwen 3.5 keep its default of 16.
+
+- Living Weights: `tensorfold slide audit` measures each learned fact's pocket neurons against its questions, subject contexts, other facts and 256 fixed general prompts. The explicit graph audit adds firing rates and strongest off-subject prompts without changing weights, lessons or checks (#1968).
+
+- Qwen4 on CUDA drops its checkpoint from the page cache after loading, and tensor-parallel loaders drop theirs only once every rank has finished loading, so ranks on one host no longer evict pages another is still reading (#1868).
+
+## 1.2.2
+
+- CUDA lanes: Gemma 4, MiniMax M3, Kolibri-1, Spark 2.5 and Dory can verify root and context copies as Nemotron does, opt-in: set `TF_GEMMA4_COPIES`, `TF_MINIMAX_COPIES`, `TF_KOLIBRI_COPIES`, `TF_SPARK_COPIES` or `TF_DORY_COPIES` to 1. Replies equal `"draft": false`, and unset is the old policy (#2022, part of #1910).
+
+- The dense Qwen3.5 Metal loader takes its shape from the checkpoint's config rather than the 27B's fixed geometry, checked against the 27B, 9B and 2B with identical tokens (#1817).
+
+- Living Weights on Gemma 4, step 1: the prepared-attention backward on the host, checked against an independent reference; nothing served changes (#2032, part of #1803).
+
+- Docs: the GLM CUDA recipe says what `TF_GLM_CHUNK_SOLO` gains at TP=3 with `TF_GLM_ROCE_MULTI` (a little under half of its gain without it) (#1996). Thanks to @Bizuayeu.
+
+- Living Weights on Qwen4 dense, step 1: the QSA backward pass on the host, checked against a binary64 reference; nothing served changes (#2021, part of #1804).
+
+- CUDA kernels share their duplicated device primitives; the machine code is identical on sm_80, 86, 89, 120 and 121 (#2018, closes #1409).
+
+- Metal: Qwen3.8-27B's keep gathers and scatters the binding's KV heads a row, so a keep stages what the layout holds (#2013). Thanks to @cshintov.
+
+- `TF_LOAD_PREFETCH`: Gemma 4 and Qwen 3.5 on CUDA read each layer ahead while the current one uploads, so the 27B loads about a third faster on a GB10. Replies are unchanged, and `TF_LOAD_PREFETCH=0` is the old path (#1928). Thanks to @jschmied.
+
+- Flash Next on CUDA loads its experts about 12% faster with the direct load: the next chunk is read while the current one packs, and the store switches shards without reopening them. Replies are unchanged (#1960). Thanks to @jschmied.
+
+- Gemma 4 on CUDA keeps its global layers' caches in pages of the core KV pool, every stream on pages, so with `TF_KV_SHARE` its prompts can be kept and resumed as pool pages; unset, tokens and speed are unchanged (#1619, part of #1657). Thanks to @jschmied.
+
+- TensorFold Starlight moves to its own repository, [ashhart/tf-starlight](https://github.com/ashhart/tf-starlight), with its history: it pins the TensorFold release it is tested with and checks the engine contract against that release in CI (#1972, fixes #1970).
+
+- DeepSeek-V4.1 on Metal, part one: its kernels, the decoder over every layer, Engram, prompt chunks and DSpark drafts, each checked against float64 references (#1710-#1719). Serving it on Metal follows with #1720-#1722. Thanks to @gilby.
+
+- Docs: the cache benchmark receipts say which tool-call content they count (#1999). Thanks to @garvrao80.
+
+- `zig build test-info-config` runs info's issue-934 test again: it was built from the CUDA CLI root, which never reached it (#2006). Thanks to @jishnuvenugopal.
+
+- The Nemotron XPU loader and the XPU safetensors reader read shard headers through core, so a malformed or oversized header is refused before anything is read (#1919). Thanks to @jschmied.
+
+- Windows: a cost-cache read that lands mid-replace is counted as a miss (safe: the window is priced again), so its concurrency test no longer flakes (#2001).
+
+- GLM on CUDA with TF_GLM_KV_SHARE no longer reports a balanced idle KV pool as (UNEVEN) at close; nothing else changes (#1993). Thanks to @Bizuayeu.
+
+- lfm3, Spark 2.5 and the GLM vision tower take their RoPE frequency tables from core's exact helper; no value changes (#1995, part of #1852).
+
+- GLM refuses a checkpoint whose `tensorfold_activation_dtype` asks for anything but bfloat16, naming the key, instead of silently serving bf16 activations; docs/api.md says which engines serve `/v1/decisions` (#1987, for #840).
+
+- GLM on CUDA at TP=3 can pack the fused KDA input to an even width with `TF_GLM_KDA_PAD=1`, carried in the fingerprint every rank agrees on; unset, the engine is unchanged (#1545). Thanks to @BadAd84.
+
+- Seven host BF16 conversions on load and inference paths (the XPU loader, the CUDA vision towers, Gemma 4's assistant weights, Step5's vision, DeepSeek's DSpark and Flash Next's PLE scale) round through core's shared conversion, so a negative NaN no longer overflows in Debug builds; every finite value gives the same bits (#1954, part of #1863). Thanks to @jschmied.
+
+- Qwen 3.5 on CUDA rounds its host-side weight copies (norm weights, EXL3 norms and vectors, drafter scales and biases) with core's bf16 rounding, so a NaN weight stays NaN instead of becoming a finite value at load; every other value is bit-identical (#1986, part of #1863).
+
+- Flash Next on HIP routes from the checkpoint's stored BF16 router rows, widened in the router kernel with the FP32 lane order kept, with the same tokens, for about 2.5 MiB more memory a layer (the BF16 rows are held beside the FP32 ones) (#1614). Thanks to @gilby.
+
+- The Metal vision towers' shard reader and the cluster planner's checkpoint reader check a safetensors header's length with core's `headerSize` before reading it, so a malformed or oversized header is refused before any large allocation (#1983, part of #1872).
+
+- `serve --prompt-cache-disk DIR` is a shorter spelling of `--learn-conversations --learn-dir DIR`, with the same limits, spill and start-up line; giving it together with either legacy flag is refused (#1908). Thanks to @garvrao80.
+
+- HIP gate-5 launch records are re-derived with ROCm 10.1's hipcc, now the one reference toolchain; record values only, no kernel or serving change (#1979). Thanks to @laudney.
+
+- GLM on CUDA runs a prompt chunk's MTP pass on its last row past the caches, so cold prompts of 32K to 167K tokens finish 5% to 14% sooner on three GB10s at TP=3, with identical replies (#1577). Thanks to @gilby.
+
+- Flash Next on CUDA runs the MTP head's experts on a call's last row only, the one row that reaches the draft; the head's cache is still written for every row, and replies are unchanged (#1925). Thanks to @jschmied.
+
+- Nemotron on CUDA drafts copies of earlier text in its lanes: a verified copy is tried first inside the existing verify windows with the same acceptance rule, so replies are unchanged and drafts off is main exactly (#1974, part of #1910).
+
+- The XPU build makes one core module per device tree and passes it through the runtime, family and module builders, while the Nemotron XPU device binaries keep their own optimize level (#1918). Thanks to @jschmied.
+
+- On HIP, decode's softmax stats and partial sums load sixteen values ahead and fold them in the same order, with the same bits (#1961). Thanks to @AbrahamCete.
+
+- GLM's CUDA `TF_KV_PAGES` is read through the profile registry, and startup reports the selection it resolved; the value and where it is read are unchanged (#1959, part of #1660). Thanks to @garvrao80.
+
+- GLM on CUDA can keep the KV pages' latent rows in pinned host memory with `TF_GLM_KV_HOST`, for a 1M-token window on two 96 GB cards; unset, the engine is as before, with identical tokens at TP=2 on two GB10s (#1795, part of #1794). Thanks to @russellmm.
+
+- On HIP, the planned decode score takes four keys a warp on long spans and two on short ones, with the same lane order and folds, so decode runs 7.5-18.9% faster on Qwen3.6-35B-A3B and Qwen3.8-27B at 32K and 64K with identical tokens on a gfx1151 (#1932). Thanks to @AbrahamCete.
+
+- Ling's grouped expert routing runs on Metal, checked against a float64 reference: sigmoid scores plus the routing bias, groups picked by their top scores, empty picks handled and both infinities in a group refused (#1836, part of #1247). Thanks to @ThinkOffApp.
+
+- HIP loads a shared expert wider than the routed experts beside the stack instead of refusing it, and keeps the fused stack when the widths match, with the same tokens (#1612). Thanks to @gilby.
+
+- Flash Next on CUDA: prompt passes do less work with the same bits (BF16 projections of 1,024 rows or more on a 128 x 128 tile, the hyper-connection writeback and normalize in one launch, wide route logits read once, the QSA select and the fused DeltaNet gated norm reworked, the prompt scratch sized by use), so cold prompts run about 4-5% faster on a GB10 with identical tokens (#1764, part of #1762). Thanks to @Arminova.
+
+- The proposal and pull-request templates ask for proof and an opt-in for any change to default-path output tokens, planted controls for new kernels, and the `--version` output rather than a release number (#1596). Thanks to @jayleaton.
+
+- On a CUDA card too small for an EXL3 checkpoint's embedding beside its window, the Qwen3.5 engine maps the embedding rows from host memory instead of refusing to start; wherever they fit on the card, they stay there as before (#1678). Thanks to @diwakergupta.
+
+- An Intel XPU server built without DPAS (`-Dxpu-dpas=false`, Gen12LP) serves Nemotron-H and leaves out the Qwen3.8-27B runner and Gemma 4 E4B, refusing them by name, and Gen12LP's Nemotron prompt projection takes 8 x 4 tiles (#1692). Thanks to @jschmied.
+
+- MOSS-Image computes its sampling schedule natively from `scheduler_config.json`, bit for bit what its `MOSSImageScheduler` sets: the shifted float32 grid snapped to the training levels, repeats dropped, sigmas ending at 0 (#1670, part of #1529). Thanks to @BobClawblaw.
+
+- The Qwen3.8-27B recipe gains measurements on a 48 GB M5 Pro Mac mini with 1.2.1: 89.1 tok/s sampled code with DFlash2, against 86.5 on 1.1.0 (#1947). Thanks to @pauldodd123.
+
+- Cache benchmark runs qualify only when a complete stream showed real text or reasoning: a usage-only reply no longer passes as "equal output" (#1967). Thanks to @garvrao80.
+
+- On HIP, an integrated GPU counts the card's own memory only when sysfs confirms the firmware carve-out; every other case, GTT included, keeps the system's count, and the start-up line says which it used (#1963). Thanks to @llstrk.
+
+- The prompt cache keeps exact image identities beside its words (position, rows, grid and a content hash over the image bytes, never a path), so a cached state is never resumed for a different, moved or re-gridded image; image prompts' states are no longer saved to disk or learned. Text-only prompts are unchanged (#1962, part of #1927). Thanks to @laudney.
+
+- Cortheon reads a GitHub file as raw text from `GitHub.com` and `www.github.com` too, keeps search results and seen links whose scheme is written in capitals, and reads a link whose tag breaks after a carriage return (#1949). Thanks to @ppardus.
+
+- Cortheon finds every closing tag around a harness's context blocks in one pass, so a message with many unclosed tags no longer takes time quadratic in its length; the result is unchanged, and the fuzz harness checks it against the old scan (#1898). Thanks to @jishnuvenugopal.
+
+- A request-log test sets its file's mode after creating it, so it passes under any umask (#1900). Thanks to @jishnuvenugopal.
+
+- `zig build -Dgpu=<gpu>` builds one stripped server for one GPU with every model family: about 69% smaller on CUDA (`sm_80`, `sm_86`, `sm_89`, `sm_120`, `sm_121` or `spark`) and 58% on HIP (a `gfx` name), and a CUDA one refuses a GPU of another SM at startup, naming both (#1936, fixes #1934). Thanks to @laudney.
+
+- A lane stream that finishes on its first token is released when its reply ends, in every family (it leaked until the server stopped), and the lane host gains a byte ledger that families can opt into, so a request reserves its prompt and reply and waits when it doesn't fit; no family uses it yet (#1945, part of #1943). Thanks to @laudney.
+
+- On Ryzen AI Max (RDNA 3.5) GPUs, one- and two-row decode launches use narrower stream tiles, so Qwen3.6-35B-A3B chat decodes about 18% faster with drafts on, and Qwen3.8-27B about 5% faster, with the same tokens (#1855). Thanks to @AbrahamCete.
+
+- Flash Next on RDNA 3.5 iGPUs (gfx1150 to gfx1153) fills prompts in 4,096-row chunks by default on one GPU, falling back to 1,024 when the larger chunk would admit fewer streams. Tokens are unchanged. The larger chunk's scratch holds about 4.6 GiB more device memory; `--policy prefill_step=1024` gives it back (#1651, fixes #1649). Thanks to @gilby.
+
+- CUDA's Qwen DFlash2 drafters must declare sliding attention on every layer (`use_sliding_window` and one `sliding_attention` per layer), which the kernels run, so a drafter declaring a full-attention layer is refused before loading instead of running through the sliding ring (#1946, part of #1863). Thanks to @garvrao80.
+
+- Flash Next on HIP gathers n-gram drafts in parallel and releases the checkpoint's weight pages after uploading them, so the page cache falls from 31.5 to 2.8 GiB and the first cold prompt runs in 28.55 s instead of 48.44 s on a gfx1151 (#1611). Thanks to @gilby.
+
+- `serve --profile stable` names today's defaults explicitly, and startup reports the profile and any registered switch set away from it; seven CUDA KV switches (`TF_QWEN_KV_PAGES`, `TF_QWEN_KV_SHARE`, `TF_GLM_KV_SHARE`, `TF_KV_SHARE`, `TF_FLASHNEXT_KV_PAGES` and two `_ALL` checks) are read through one registry, with environment values winning byte for byte; `fast-exact` and `fast` are refused until qualified (#1944, part of #1660). Thanks to @garvrao80.
+
+- Compaction keeps a memory note sent as text parts instead of summarizing the conversation again, and a note or remembered file path that arrived with carriage returns no longer carries them into the next note; Cortheon's checks read a shell command wherever it sits among the call's fields, its search fallback stays within its 120-byte cap, and its text cuts never end in a partial character (#1939). Thanks to @ppardus.
+
+- Qwen3.8-Flash-Next on CUDA serves `nvidia/Qwen3.8-Flash-Next-NVFP4` at `--tp 2` on two GPUs, one rank a host: its BF16 attention, DeltaNet and shared-expert projections, its n-gram table of E4M3 rows with one BF16 scale, and its MTP head's E4M3 experts with 128x128 block scales load as stored. The CUDA server now serves `--tp` (`--rank`, `--master`, `--master-port`); families that open without ranks refuse it by name, and `--idle-unload` is refused with it. The ranks compute and compare a cached digest of every checkpoint byte, so `TENSORFOLD_CHECKPOINT_SHA256` is no longer required (it still overrides the digest). A crash on the first prompt at `--tp 2`, a vtable built on the stack, is fixed. At `--tp 2` each rank owns half the routed experts whole, so replies are one GPU's bytes; on two GB10s drafted replies equal `"draft": false` (6 of 6) and concurrent replies equal their solo runs in 8 of 8 cells (#1771, for #1754). Thanks to @laudney.
+- GLM-OCR on HIP: the publisher's BF16 `zai-org/GLM-OCR` served natively, its CogViT image encoder and GLM decoder in Zig and HIP with no Python or libtorch, every reply checked against the model card's Transformers examples (#1940, part of #1927). Thanks to @laudney.
+- The dense Qwen Metal loader validates config-derived projection geometry through shared structural checks, retaining the current 9B and 27B qualification policy and the 2B's separate engine (part of #503).
+
+- A model family can declare that its replies never carry a reasoning block, so the whole reply is answer content whatever `enable_thinking` the chat template renders; the OCR models in #1927 are the first to need it (#1933). Thanks to @laudney.
+
+- GLM-5.3-Flash on Macs with `--learn-conversations`: a prompt state restored from disk is charged at its full size (its attention rows as well as its KDA states) before it is chosen, prefetched or recalled, so the prompt cache no longer grows past its budget by about 2.5 GB a restored state at 130,000 tokens (#1818, part of #1572).
+
+- The tokenizer supports NFKC and NFKD normalizers, as Nemotron Parse uses, and a normalized added token decodes as the checkpoint spells it, matching Hugging Face tokenizers. No model we serve decodes differently (#1931, part of #1927). Thanks to @laudney.
+
+- The Flash Next recipe covers native HIP on a Strix Halo iGPU, with speed and quality for three checkpoints (#1747, fixes #1617). Thanks to @gilby.
+
+- HIP gains a shared rocBLAS BF16 projection with FP32 sums, loaded as an optional runtime library. Nothing calls it yet (#1930, part of #1927). Thanks to @laudney.
+
+- The prompt cache can let a family count repeated image or keyed prompts as repeats, under the cache's own key. No family uses it yet (#1929, part of #1927). Thanks to @laudney.
+
+- HIP Qwen3.5-family servers price shared draft rounds at the row bucket they actually run, so Qwen3.6-35B-A3B with MTP at four streams no longer drops into a slower drafting mode, and models load faster. Tokens are unchanged (#1830, fixes #1695). Thanks to @AbrahamCete.
+
+- The Living Weights view reads a shard's header with core's safetensors reader, so a malformed header, length word or offset is refused with an error instead of a panic or a 64 GiB allocation, and its sums and row counts are checked (#1923, part of #1872). Thanks to @jschmied.
+
+- `core/gguf.zig` reads GGUF files with every length and offset checked before use, and repacks GGUF's Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K, Q3_K and Q2_K blocks exactly into per-group affine weights. It is the first step toward native GGUF on Apple Silicon (#1926, part of #1920).
+
+- With `TF_NEMOTRON_METAL_KV_PAGES` off, Nemotron on Metal's paged KV checks cost one null check a pass, and debug builds assert that every pass's K/V rows sit inside the lane's pages (#1914, part of #1293). Thanks to @jschmied.
+
+- Flash Next on CUDA reads its experts past the page cache with O_DIRECT, and keeps a load's shards open, so a cold start on a GB10 drops from about 74 s to 48 s with the same replies and the n-gram table still cached. `TF_LOAD_DIRECT=0` keeps the mapped reads (#1901, fixes #1873). Thanks to @jschmied.
+
+- Flash Next on CUDA reads its embedding shard's header with core's safetensors reader, so a malformed header is refused with an error instead of a panic, and a tensor's bytes must match its shape (#1917, part of #1872). Thanks to @jschmied.
+
+- The image session benchmark fails a turn whose stream ends before `[DONE]`, keeps it out of the next turn's history, and exits 1 when any turn failed, instead of reporting a partial reply as a success (#1916, fixes #1915). Thanks to @garvrao80.
+
+- Gemma 4 on Intel GPUs refuses a shard with wrong tensor sizes, overlapping tensors, unknown dtypes or too many dimensions, so a bad file can no longer overrun a device buffer (#1905, part of #1872). Thanks to @jschmied.
+
+- TensorFold Starlight, the enterprise platform, lands in `starlight/`: one governed OpenAI- and Anthropic-compatible endpoint for a fleet of TensorFold engines, with single sign-on (OIDC, SAML and SCIM), per-model access, priorities and budgets, model placement and supervision on Mac, Linux and Windows nodes, an admin console, Prometheus metrics and the TensorFold Connect desktop app (#1922, fixes #1921).
+
+- `TENSORFOLD_PREFILL_ORDER=srpt` lets short replies decode ahead of a long prompt that is still filling, while the prompt keeps at least a tenth of the GPU time and `--decode-share` still applies. Replies are the same tokens. It is off by default (#1876). Thanks to @gilby.
+
+- Qwen3.8-27B with a DFlash drafter on Metal compiles the drafter head's lane pipeline at load, so the first request no longer waits on it, and a head that fails to compile is refused by name at start-up instead of failing that request (#1734). Thanks to @kieranscotney.
+
+- H3 on CUDA finds each tensor by its real header entry, so a look-alike in metadata no longer returns the wrong tensor, spaced JSON headers load, and malformed headers are refused (#1906, part of #1872). Thanks to @jschmied.
+
+- GLM on CUDA refuses a malformed DFlash2 drafter header, or a tensor range past the file, with an error instead of crashing or reading unset memory (#1904, part of #1872). Thanks to @jschmied.
+
+- Drama speech on CUDA reuses a catalog voice's reference prefill across requests, as Metal does: the backbone and tower state after the reference's whole prompt chunks is kept, and a later request in the same voice restores it and prefills only the rest. The cut is a whole chunk, so a cached request makes the chunk cuts an uncached one makes; host tests check this against a fake lane, and it is not yet measured on a GPU. It is opt-in: `TF_DRAMA_REFERENCE_CACHE=N` keeps N voices (1 through 16, each up to 61.4 MiB plus 46 KiB a saved row); the default 0 keeps none, and the default voice is unchanged (#1745). Thanks to @jayleaton.
+
+- `pull` fetches an EXL8 width file's header again when its length word or tensor entries are corrupt, instead of crashing or keeping a bad copy (#1907, part of #1872). Thanks to @jschmied.
+
+- DeepSeek V4.1 packs refuse a shard whose header length runs past its file or past 100 MB before anything is allocated, instead of allocating up to 1 GiB first (#1903, part of #1872). Thanks to @jschmied.
+
+- EAQ containers refuse a shard whose header length runs past its file or past 100 MB before anything is allocated (#1902, part of #1872). Thanks to @jschmied.
+
+- With `TF_NEMOTRON_METAL_KV_PAGES=1`, Nemotron on Metal takes KV pages as a reply grows instead of for its whole context at the start, so a short chat holds 1 page instead of 17. It is off by default (#1837, part of #1293). Thanks to @jschmied.
+
+- Qwen3.5-9B runs on Metal on the 27B's engine, instead of being refused as an unqualified shape (#1826, part of #503). Thanks to @grantoverton.
+
+- The kernel contract computes its affine and GLM float64 references on worker threads, so it finishes sooner, with the same reference bytes (#1776). Thanks to @BlivionIaG.
+
+- Host code: sixteen hand-written fp32-to-bf16 copies now use core's one rounding, identical on every input; a negative NaN no longer panics a Debug build (#1864, fixes #1863). Thanks to @jschmied.
+
+- RoPE: transformers' inverse frequencies are computed in one place (`core.rope_freq`), and Gemma 4 on CUDA uses them, with the same bits (#1853, for #1852). Thanks to @jschmied.
+
+- `tools/bench_image_session.py` plays one chat session that resends the same picture every turn, and records each reply's hash, cached prompt tokens and first-token time, to check that image turns keep and resume their prompt (#1889, for #1828).
+
+- The benchmark clients refuse a malformed `--temperatures` list, or a non-finite entry such as `nan` or `inf`, with a clear error and exit status 2 before any request, instead of a traceback (#1875, fixes #1874). Thanks to @garvrao80.
+
+- LFM3's backends share one copy of the RoPE frequencies and the layer schedule, so every backend reads the same numbers, bit for bit as torch's (#1839). Thanks to @jschmied.
+
+- The CUDA kernel contract's NVFP4 expert-waves control goes red as planted on large GPUs such as the RTX 5090, where its test shape used to fit in one wave (#1832, fixes #1778). Thanks to @rootsbymenda.
+
+- The server's linear-time tests count thread cycles on Windows, so a busy CI runner no longer fails them by chance (#1854). Thanks to @Bizuayeu.
+
+- Nemotron on Intel GPUs refuses a config with an unknown `layers_block_type` name at load, instead of serving that layer as attention (#1865). Thanks to @jschmied.
+
+- GLM-5.3-Flash on CUDA refuses `TF_GLM_CHUNK_SOLO=4096` beside `--drafter` at load with a clear error, instead of holding 1.6 to 1.9 GiB of prompt buffers that no pass uses (#1842). Thanks to @Bizuayeu.
+
+- The Intel GPU host tests build again: `zig build test-slide-xpu-host` no longer stops with a missing kernel image (#1840). Thanks to @jschmied.
+
+- Flash Next on CUDA: `TF_FLASHNEXT_ATTN_LANES=1` (off by default) runs a shared decode round's attention in one launch a kernel, with each row's caches and position in a table uploaded once a round, instead of a launch per stream. Replies are the same tokens; the kernels are bit-equal to the per-stream launches (`tf-cuda-test flashnext-attn-lanes`) (#1739). Thanks to @optimisme.
+
+- GLM, GLM-DSA and Flash Next on Metal drop their checkpoint from the file cache once loaded, keeping the SSD expert and PLE files that serving still reads (#1888, part of #1868).
+
+- On Macs, the q27, Nemotron, LFM2 and Qwen3.5 loaders drop their checkpoint from the file cache once the weights are loaded, so unified memory doesn't hold them twice: on an M5 Ultra a loaded Qwen3.8-27B frees about 14 GiB and Nemotron 3.5 Lightning about 17 GiB, with the same replies (#1885, part of #1868).
+
+- Gemma 4 on CUDA: `TF_KV_SHARE=n` keeps prompts as the KV pool's pages in the shared prompt store, with sliding-window tails kept per stream and the MTP assistant's pages bound to its cache; resumed, concurrent and drafted replies equal their plain runs. Unset, nothing changes (#1883, part of #1657).
+
+- On M5 Macs, opt-in: `TF_ATTENTION_PV_FP32=1` keeps attention's P x V at full fp32 for Nemotron's prompt attention, closer to float64 (output cells off the nearest bf16 value fall from about 1.1M to 1.8K of 8.6M), at a large prompt-speed cost (30% to 87% slower at 2K to 32K). Unset, nothing changes (#1882, part of #1772).
+
+- The benchmark clients refuse a nonpositive `--tokens`, `--reps` or `--levels` entry, or a malformed `--levels` list, with a clear error and exit status 2 before any request, instead of failing mid-run or writing zero-stream cells (#1869, fixes #1867). Thanks to @garvrao80.
+
+- Qwen3.8-27B EXL3 checkpoints on CUDA prefill prompts much faster, with the same tokens: on a GB10, prompt prefill runs 38% to 42% faster from 2K to 64K tokens (2K: 494 to 705 tok/s), and decode gains 5 to 12% (#1467). Thanks to @BHCC2025.
+
+- On CUDA, every family's loader drops its checkpoint from the page cache once the weights are on the GPU, as Flash Next does since 1.2.1, so a GB10's shared memory doesn't hold them twice: a served Qwen3.8-27B frees about 15 GiB. Files read at runtime (PLE rows, DeepSeek's Engram tables) are kept (#1884, part of #1868).
+
+- Lanes: grammar masks for constrained streams are filled in parallel across streams, with the same masks and tokens; one stream is unchanged. On an M5 Ultra, Qwen3.5-2B serves 0.7% to 1.3% faster at 4 to 32 constrained streams (#1881, fixes #1455).
+
+- On Macs, DeepSeek V4.1's CSA2 attention for decode and prompt rows, its bf16 and fp32 matvecs and phase-1 glue, and its registered glue kernels (norms, RoPE, FP8 and FP4 round trips, embed, join, mean) have their own Metal kernels under the kernel contract, ahead of the Mac server (#1709, #1710, #1711, part of #1676). Thanks to @gilby.
+
+- Flash Next on CUDA: `TF_FLASHNEXT_READOUT_ROWS=128` (off by default, 64 unset) moves the hyper-connection read-out's switch to the prompt tiles from 64 rows, so a large shared decode round keeps the row kernels: the same bits, and up to 7% more throughput at 16 streams on a GB10 (#1741, part of #1737). Thanks to @optimisme.
+
+- Flash Next on CUDA (one GPU): a partly kept window's DeltaNet rows are applied at the start of the next window instead of replayed, a lane's fixed buffers are reused across streams, and a pass's shared expert runs on a side stream, all with the same tokens; `TF_FLASHNEXT_KEEP_LATE=0`, `TF_FLASHNEXT_LANE_PARTS=0` and `TF_FLASHNEXT_SHARED_SIDE=0` turn each off (#1763). Thanks to @Arminova.
+
+- HIP: Flash Next loads oMLX checkpoints whose MTP head sits at the top-level `mtp.*`, so their drafts work, and the usual `language_model.mtp.*` layout gives the same tokens as before (#1613, fixes #1598). Thanks to @gilby.
+
+- On Macs, Flash Next with `--ple-on-ssd` reads its per-layer embedding rows from disk in batches instead of one at a time: decode is 36% to 39% faster on an M5 Max (75.8 to 105.1 tok/s on code) and cold prompts take a third of the time at 2K tokens, with the same replies (#1462, fixes #1461). Thanks to @paragontasx.
+
+- Qwen3.5-family models on CUDA can apply a verified window's kept DeltaNet rows inside the next round's slot scan, instead of a separate pass over every layer's state, with the same bits. On a GB10, Qwen3.8-27B MLX 4-bit decodes 1% to 8% faster, most at 16 streams, with none slower, for about 66 MiB more a stream. It is opt-in with `TF_QWEN_KEEP_LATE=1`: on by default it failed some served chats on a GB10 with `CUDA_ERROR_INVALID_VALUE` (8 of 64 requests on Qwen3.8-27B MLX 4-bit), so the separate pass stays the default until that is fixed. Replies are unchanged either way (#1824, #1958). Thanks to @jrb-ai, with code from @fkiene's cuda.fast submission.
+
+## 1.2.1
+
+- Qwen3.8-Flash-Next on CUDA: a loaded server drops its checkpoint from the page cache. On a GB10, whose GPU memory is the system's, about 36 GiB of cached shards had left under 1 GiB free, and long prompts slowed to about 0.73x from some point in a server's life until a restart; they now hold their speed, with the same tokens (fixes #1868).
+
+- Qwen3.8-Flash-Next on Macs, opt-in: `TENSORFOLD_PREFILL_POLICY=fcfs` serves long prompts that arrive together oldest first, in chunks of `TENSORFOLD_PREFILL_TOKENS` rows (default 2,048) between decode rounds, with the same tokens. With eight 14K-token prompts at once on an M3 Ultra, the last user's first token comes after 93.6 s instead of 326.9 s, and each chunk pauses the streams decoding beside it for about 1.7 s; unset, nothing changes (#1843). Thanks to @ivanfioravanti.
+- GLM-5.3-Flash on CUDA with `TF_GLM_KV_SHARE`: a prompt with images keeps and resumes its prompt state, matched on each image's content, so an agent session that resends a screenshot no longer prefills the whole conversation every turn; a changed image resumes only the text before it (fixes #1828).
+
+- Kernel contract (Metal): the M5's tensor units keep 10 mantissa bits of an fp32 `mma_16x32` operand, cut toward zero. The contract now states that cut for every kernel with an fp32 operand: Gemma 4's, Spark's, Flash Next's, Nemotron's and MiniMax's attention and Nemotron's SSD products. Each has a control that fails without it, and no output changes (#1748, part of #1546). Thanks to @BobClawblaw.
+
+- GLM-5.3-Flash on CUDA: `TF_GLM_CHUNK_SOLO=4096` (opt-in, on every rank) lets a prompt pass take 4,096 rows while no other stream is decoding, with the same bytes. On GB10s a cold prompt's first token comes 6% to 9% sooner from 8K to 128K tokens. It holds 1.6 to 1.9 GiB more for prompt buffers, and a request that arrives during a long pass waits for it to end. Unset, nothing changes (#1823, option C of #1554). Thanks to @Bizuayeu.
+
+- Qwen3.8-27B on M5: checkpoints that mix bit widths in a fused projection (such as the oQ4 and oQ2 quantizations) answer prompts longer than 128 tokens, instead of failing with `BadCoreProjectionRows`; each 128-row piece is the call main already made, so replies keep main's tokens (#1822). Thanks to @grantoverton.
+
+- Windows: the cost cache reads a table through a shared file handle, so a reader that meets a table being replaced sees a miss quietly instead of logging an unexpected `FILE_DELETED` status, which failed a host test (#1809, fixes #1805).
+
+- Qwen3.8-27B and Qwen3.6-35B-A3B on CUDA: with `TF_QWEN_KV_PAGES=n` and `TF_QWEN_KV_PAGES_ALL=1`, the engine's own stream becomes a pool lane too, as on GLM, Gemma 4 and Kolibri-1, so no full-context window sits idle beside the pool (1.90 GiB back for the 27B at `--parallel 8 --context 16384`); without `_ALL` nothing changes (#1750). Thanks to @jschmied.
+
+- Living Weights: a lesson no longer stops at its first step with `LayerRoundsAgain` (2 of 7 Nemotron lessons on a Mac and both on a GB10 before this). New fits are written on the 4-bit grid before they're judged, so rounding a taught layer again keeps its values; a lesson that still can't round says so in words; and the guide explains why the same lesson can take different steps on separate runs (#1810, fixes #1807).
+
+- Lanes, opt-in: an external drafter's own chain chances price its verify rows, the last verified grant bounds the next hold, and measured hold costs filter shared-row reservations, so a stream given no rows is never offered a hold. Defaults are unchanged (#1381). Thanks to @BlivionIaG.
+
+- HIP: prompt projections round to the activation type in their tile instead of writing fp32 and launching a cast, with the same bytes; cold prompts are 2% to 3% faster on Qwen3.8-27B on gfx1151 (#1685). Thanks to @AbrahamCete.
+
+- On Macs, DeepSeek V4.1's routed experts have a grouped prompt GEMM under the kernel contract, bit-equal to the decode rows; nothing serves through it yet (#1708, part of #1676). Thanks to @gilby.
+
+- On Macs, DeepSeek V4.1's MXFP4 experts have their own Metal kernels under the kernel contract, with Kimi's left as they are; nothing serves through them yet (#1707, part of #1676). Thanks to @gilby.
+
+- On Macs, DeepSeek V4.1's FP8 block-scaled rows and tiles have their own Metal kernels under the kernel contract, for the release checkpoint's serving parts; nothing serves through them yet (#1706, part of #1676). Thanks to @gilby.
+
+- LFM3-1.7B and LFM3-VL-2B's official MLX 4-, 6- and 8-bit checkpoints are admitted and checked (geometry, quantization, tensor headers) ahead of their engines, with one table of the decoder's tensor names for every backend (#1513, part of #1491). Thanks to @BlivionIaG and @jschmied.
+
+- Living Weights: `DELETE /v1/slide/facts` takes a list of fact ids and removes them as one reversible change: every graph record publishes together, and a shard write that fails part way restores the whole selection or marks every selected id pending for retry. A single delete is unchanged (#1816, part of #678).
+
+- XPU: Gen12LP GPUs (Iris Xe, DG1) build Nemotron's kernels, with a plain bf16 fallback for its two DPAS products and decode attention through the partial kernels; DPAS builds are unchanged (#1673). Thanks to @jschmied.
+
+- Lane rounds count the time each stream spends in grammar mask fills, per round and per reply, reported with the round metrics; nothing is read when no stream is constrained, and behaviour is unchanged (#1814, part of #1455).
+
+- CUDA tensor parallel: a rank that cannot bind its liveness port (`NCCL_COMM_ID`'s port + 1, often held by an earlier server still exiting) says so, as do a rank that never arrives and a failed accept, instead of reporting a generic "glue kernels" error (#1813, fixes #1761).
+
+- Living Weights: Nemotron Omni registers the shared Nemotron learner on CUDA, reading its widths from the family description and the raw language-model tensors, and a lesson that carries an image or audio is refused by name instead of training through the media towers (#1815, part of #1801).
+
+- Gemma 4 E4B on Intel GPUs: prompts are read 2.0 to 2.6 times faster on an Arc Pro B70 (layers past the KV-owning ones run only for the last row, 1,024-row forwards, the GeGLU fused into the gate_up GEMM), and decode is 4% to 8% faster at 32K to 64K tokens, with the same logits (#1746, part of #1222). Thanks to @Mirrdhyn.
+
+- HIP: the prompt attention tile keeps its probabilities in registers and runs 6 waves a SIMD on gfx1151, with the same output bits; cold first token is 1% to 5% faster from 2K to 64K tokens on Qwen3.8-27B, and the tile is registered with the kernel contract (#1788). Thanks to @AbrahamCete.
+
+- `--slide` on a checkpoint whose family doesn't learn on that backend now stops before loading with "`--slide`: <model type> checkpoints do not learn on <backend> yet", on CUDA, Metal, HIP and XPU, instead of serving and learning nothing. Metal learners register by family, as CUDA's do, and read their widths from the family's Living Weights description, so a new family's learner plugs in without editing the Metal host (#1800).
+
+- Windows: the server loads the grammar library as `tfgrammar.dll`, so structured output and required or named tool calls serve there too (#1796, fixes #1789). Thanks to @wesley4546.
+
+- With `TF_DSV41_PF_4K=1`, `aot-needs` also lists the 2,048-row prefill variants the forward still runs, so a pack built with it no longer fails its first operation with `MissingTritonVariant _kv_store … RING 4096` (#1683). Thanks to @jayleaton.
+
+- DeepSeek-V4.1's prefill planner sizes the indexer's scratch before it shares and prices the workspace, so ragged prompts and the two-batch-overlap branch can no longer plan less than they use. This takes about 128 MiB more per rank on the Flash-1017 pack, and tokens are unchanged (#1681). Thanks to @jayleaton.
+
+- On WSL2, where Intel's Sysman can't run, an Intel GPU's free memory falls back to the device's total less what TensorFold has allocated, so Nemotron with MTP can size its prompt cache there. Native Linux still asks Sysman (#1691). Thanks to @jschmied.
+
+- On Intel GPUs, the engine asks Level Zero how many drivers and devices there are before listing them and skips empty entries, so `tensorfold-xpu devices` and the device tests no longer crash on WSL2 with an Iris Xe (#1672). Thanks to @jschmied.
+
+- With `--cortheon`, text beside an image now counts toward the room left for a fetched page, so a long vision turn no longer gets a full page. Progress lines and the check for a utility request no longer cut a character in half, and a fallback search whose first word doesn't fit is skipped instead of sent empty (#1677). Thanks to @ppardus.
+
+- The CUDA drafter cost-identity host test sets the rewritten file's time itself, so it passes on filesystems with a coarse clock, such as ramfs and NTFS (#1770, fixes #1697). Thanks to @wesley4546.
+
+- `TENSORFOLD_LOG_TIME=1` (or `on`) starts each server log line, the `[tensorfold]` lines and every engine's warnings, with its UTC time to the millisecond, to match the log against other records. It's off by default, and the log is unchanged without it (#1690, fixes #1626). Thanks to @atakann.
+
+- On GB10s, affine-4 (MLX 4-bit) decode and verify projections that read the same input run as one grouped launch, each output byte-equal to its separate launch under the kernel contract, for the dense targets, Nemotron, the DFlash2 drafter, Gemma 4 and Spark. Replies are unchanged. Nemotron 3.5 Lightning: 8 streams +13.3%, 2 streams +5.9%; Qwen3.8-27B with DFlash2: decode after a prompt +3.7% to +5.0%, 1 stream +4.5%, 4 streams +3.5% (#1783).
+
+- Shared draft rounds price each stream's drafts before drafting, and a stream whose drafts would get no verify rows skips the drafter's proposal work, for Nemotron, Qwen's MTP, GLM, Gemma 4 (assistant and DFlash) and attached LFM2 drafters, on CUDA and Metal; each family keeps its head step's cost in the price. Replies are unchanged. Nemotron 3.5 Lightning with its MTP head: on an M5 Ultra, 16-stream chat +9.0% greedy and +4.7% sampled; on a GB10, 16 streams +2.1% and 8 streams +1.1% (#1779).
+
+- MOSS-Image's image decoder (the checkpoint's FLUX.2 small VAE, in float32 as the pipeline runs it) runs on Metal inside the `moss_image` family, and `tf-moss-image` writes `picture.png` itself, so torch no longer decodes (#1687, #1504). Thanks to @BobClawblaw.
+
+- On CUDA, a driver older than CUDA 13.0 is refused at startup with a plain message naming the driver to install (R580 or newer), before any kernel loads; an R550 driver had ended the process with SIGILL inside libcuda on the first module load (#1791, #1724). Thanks to @rootsbymenda.
+
+- Spark 2.5 on CUDA: `TF_KV_SHARE=n` keeps prompts as the KV pool's pages in the shared prompt store, with at most n kept states, so a conversation resumes at the store's last 256-token mark from pages it already holds instead of a full copy. Unset or 0, nothing changes. The native CUDA adapter it uses is family-neutral; Kolibri-1 follows (#1756, part of #1657). Thanks to @jschmied.
+
+- DeepSeek-V4.1 reads the release checkpoint as published (`deepseek-ai/DeepSeek-V4.1-Flash-1017`): FP8 E4M3 blocks with 32x32 E8M0 scales, MXFP4 routed experts and the FP8 Engram table, beside the EXL3 trellises. `tf-dsv41-engram-pack pack` writes the release's Engram tables as row shards with a manifest (the source tensors, each table's SHA-256 and a seeded row sample), `manifest` writes one for tables packed earlier after checking sampled rows against the release, and the CUDA engine refuses a release checkpoint by name before loading it (#1705, for #1676). Thanks to @gilby.
+
+- MOSS-Image's prompt encoder runs on Metal inside the `moss_image` family, in bf16 as published with fp32 sums where the reference sums, under the Metal kernel contract (`tf-kernel-contract --only "moss image"`) (#1512). Thanks to @BobClawblaw.
+
+- GLM-5.3-Flash on CUDA with `--vision`: `TF_GLM_VISION_HOST=1` keeps the vision tower's bf16 weights in pinned host memory mapped into the device and copies each unit into one device slot just before it runs, so rank 0 keeps 240 MiB for the tower instead of 1.05 GiB and every rank gets that room back for KV pages and the prompt cache (#1760). Unset, nothing changes. Thanks to @russellmm.
+
+- A tool marked `"strict": true` is now held to its schema under `tool_choice: "auto"` (or none) on every family with a grammar runtime: the server compiles a grammar that triggers at the call markup, so a strict tool's arguments always validate (#1688). `TENSORFOLD_TOOL_GRAMMAR=1` holds every auto tools request the same way.
+
+- Qwen3.5 and 3.6 on CUDA serve past their trained 262,144 positions with static YaRN rope: `--rope-yarn 4` on the checkpoint as downloaded, or a config whose rope carries a YaRN block (SGLang's staged 1M copy loads as is), raise the window to 1,048,576. On one GB10, `nvidia/Qwen3.6-35B-A3B-NVFP4` prefills a 1,048,512-token prompt in 26 minutes, finds a passphrase placed 5% in, and decodes to the window's last token; drafted, concurrent and resumed replies equal their plain runs. Without YaRN every reply is byte-identical to before. HIP, Metal, the DFlash2 drafters and every other family refuse a scaled rope by name instead of reading it as plain rope (#1675).
+
+- DeepSeek-V4.x requests that omit sampling fields now sample at the release's recommended settings, temperature 1.0 and top_p 1.0 from DeepSeek's model cards, instead of decoding greedily when the checkpoint has no `generation_config.json`. A `generation_config.json`, the serve flags and the request still override them (#1725).
+
+- DeepSeek-V4.x: `tool_choice: "required"` and named tool calls are now constrained to the model's own DSML call markup, so those requests are held to a valid call on DeepSeek too (#1684).
+
+- Qwen3.6-35B-A3B on CUDA: `--drafter` also takes a DFlash2 draft model, chosen by the `dflash_config` in its `config.json`; the checkpoint's own directory still drafts with its MTP layer. With `incoai/Qwen3.6-35B-A3B-DFlash2` over `nvidia/Qwen3.6-35B-A3B-NVFP4`, one GB10 decodes 130 tok/s at one stream on a 4.2K-token prompt (MTP: 99), and every drafted reply equals its plain run (#1674).
+
+- A fresh-start session disk now clears the `.tfs` and `.tmp` files earlier serving processes left behind, under an exclusive lock on its directory, so restarts no longer fill the disk (#1680). Ported by @jayleaton from @mikolaj92's downstream fix, corroborated by @Jenpo.
+
+- GLM-5.3-Flash on CUDA: `TF_GLM_KV_SHARE=n` with `TF_KV_PAGES=on` keeps prompts as the KV pool's pages in the shared prompt store (the one `TF_QWEN_KV_SHARE` uses), with at most n states past them, on one GPU and at tensor parallel. Where main's flat store has no room for a long state (GB10s at TP=3 with the 1M window), a 64k message sent again resumes in about 1.7 s instead of prefilling for 36 s; token-id prompts resume at every width (#1732, #1510). Unset, nothing changes.
+
+- MOSS-Image-Base's transformer runs on CUDA too, through the same test tool (`tf-moss-image`) and cases as on Metal (#1528, for #1518). It runs on an RTX 5090 (sm_120) and a GB10 (sm_121) and refuses other GPUs; on CUDA, the prompt encoder and image decoder still run in torch, and nothing is served yet. Against the publisher's torch bf16 pipeline, every step's cosine is 0.99967 or better, the same step run twice gives the same bytes, and a 1024x1024 picture is 44.0 dB (RTX 5090) and 45.9 dB (GB10) PSNR from torch's. Its 50 guided steps at 1024x1024 take 24.6 s on an RTX 5090 and 69.6 s on a GB10, 1.26x and 2.03x faster than torch. Its four kernels and full attention at head dim 128, a new instance of the vision towers' kernel, pass the kernel contract with five planted controls red; the towers' existing attention kernels compile to the same SASS. See [the recipe](docs/recipes/moss-image-cuda.md). Thanks to @BobClawblaw.
+
+- DeepSeek-V4.x replies carry the Spark recipe's per-response stats (`prompt`, `cached`, `ttft_s`, `finish`, `completion`, `prefill_s`, `decode_s`, `rounds`, `drafted`, `accepted`) in their `tensorfold` block, after its own keys; `TENSORFOLD_WIRE=spark` turns them on for any family and `native` turns them off (#1753).
+
+- DeepSeek-V4.1 on CUDA backs up only the ratio-2 recurrent carries before each window, instead of every layer's sliding-window ring (89 device copies, 6.4 MB a window on Flash-1017); rejected rows still roll back exactly (#1752).
+
+- DeepSeek-V4.1's DSpark drafting on CUDA no longer drains the whole context before each draft pass's staging upload, so a draft pass stops waiting for every side stream (#1751).
+
+- DeepSeek-V4.1 at tensor parallel: every rank's session store now charges disk eviction the same logical size, so the ranks evict the same prefixes and their caps no longer drift apart, and a restore checks the leader's identity before it changes anything (#1679). Adapted by @jayleaton from @florianbrede-ayet's downstream fix, with @rootsbymenda's report of the diverging caps.
+
+- GLM-5.3-Flash on CUDA: `TF_GLM_HOST_CACHE=1` on every rank keeps its prompt states in pinned host memory mapped into the device, sized by `--prompt-cache-gib`, so on discrete cards where the KV pool leaves the device arena a fraction of a GiB a long conversation's state is kept instead of refused and the next turn resumes rather than prefilling the whole conversation (#1736, #1735, #1510). Unset, nothing changes. Thanks to @russellmm.
+
+- EXL3 mixture-of-experts models on CUDA (GLM-5.3-Flash and the Qwen3.5-MoE EXL3 packs): on sm_120 and sm_121 (RTX PRO and RTX 50 Blackwell, GB10), the grouped experts kernel reads a warp's next tile of weights while it decodes the current one (#1505). The decode and the sums are unchanged, so outputs are the same bits; the kernel contract checks them against the previous loop at one to three tiles a warp and at the served models' widths, with two planted load faults that must fail. On a GB10 the kernel ran 11% faster at MiMo-V2.6-Flash's expert shapes (109 to 97 µs a launch), and GLM-5.3-Flash at two GB10s decoded the same tokens, within 1% of its previous speed. Ampere and Ada GPUs build the same code as before. Thanks to @ajensenwaud.
+
+- CUDA graphs: a capture whose end fails because it was invalidated (`CUDA_ERROR_STREAM_CAPTURE_INVALIDATED`) no longer leaves its stream marked as capturing, which had refused every later capture on that stream and every temporary host upload in the process with `UnownedCaptureSource`. A failed end that leaves the stream capturing, such as one from the wrong thread, still keeps the guard (#1744). Thanks to @jayleaton.
+
+- Chat streams with thinking on: the joined `delta.reasoning_content` pieces now equal the finished reply's `reasoning_content` byte for byte. The stream had kept the whitespace the finished reply strips, such as the newline before `</think>`; it now holds whitespace back until more reasoning follows. A streamed `/v1/responses` reasoning item now matches the non-streamed one too (#1743). Thanks to @jayleaton.
+
+- Spark 2.5 on CUDA keeps its full-attention layers' K/V (every fourth layer) in pages of the core pool, leased per stream as it grows, while the sliding layers keep their rings; streams no longer reserve a full context each up front. On a GB10 tokens are unchanged and speed is level. `TENSORFOLD_SPARK25_KV_PAGES=0` keeps the linear caches (#1653).
+
+- Qwen3.8-27B on M5 Ultra: a prompt chunk of more than 128 rows runs each 4-bit projection in one dispatch instead of 128-row pieces, so each weight matrix is read once per chunk. Replies are token-identical; decode, verify rows and other chips are unchanged (#1738). Thanks to @Nipale-ai.
+
+- The server reads a request's top-level `thinking` switch (`{"type": "disabled"}` or `"enabled"`), as DeepSeek's own API and Hermes Agent's DeepSeek profile send it. Before, it was ignored and the prompt still opened a think block. `chat_template_kwargs` still wins when both are set (#1742).
+
+- MiniMax-M3.1-Flash on CUDA, at tensor parallel over two GB10s (sm_121 and two ranks only; anything else is refused), from Mia-AiLab's published EXL3 pack read as stored: a lossy third-party quantization whose logits against the release, teacher-forced over 2,406 tokens, give a mean KL of 0.0788 and 89.9% top-1 agreement (#1388, after #1235). It serves the release's DSpark drafts, kept prompt states, tools, structured output and images; one stream with drafts ran 24 to 39 tokens a second. The shared EXL3 grouped experts gain a SwiGLU-OAI epilogue (`act_mode` 2); modes 0 and 1 are bit-equal to before in the kernel contract. Thanks to @BobClawblaw.
+
+- Gemma 4 31B on CUDA takes Google's MTP assistant (`google/gemma-4-31B-it-assistant`) as `--drafter`. On a GB10 it decodes German prose at 28.3 tok/s against 12.2 undrafted at one stream, with drafted replies equal to `"draft": false` and four concurrent replies equal to their runs alone. Other assistant types are still refused by type (#1385, for #1383). Thanks to @ThomasHalwax.
+
+- `/metrics` now carries the scheduler load a traffic shaper needs, and a new `GET /v1/load` returns the same values as one JSON snapshot under the `/metrics` access rule (the `read` key scope; `--metrics-open` opens it): the server's identity and process instance, whether `--idle-unload` has parked the engine, model requests in progress by route group, queued prompt tokens and those still filling, requests requeued for memory and background passes that yielded, prompt and decode tokens counted as the work happens with the engine time of their prompt calls, and on CUDA the KV mode, free lanes and GLM-5.3-Flash's page pool in tokens. A value an engine cannot count is left out rather than shown as zero, no engine value is shown while the engine is parked, and `engine_parked` reads 1 only once a request can reload the engine. On the lane host `preemptions_total` now counts those requeues and yields, and the Flash Next host no longer reports it as a constant 0. On a GB10 with Qwen3.6-35B-A3B, replies are token-identical to before and `/v1/load` answers in under a millisecond when idle; scheduling is unchanged (#1655, #1558). Thanks to @laudney.
+
+- Qwen3.8-27B on two Macs, second step: the 27B family can load one rank's half of the checkpoint (12 of 24 attention heads, half of the linear-attention heads, the MLP and the vocabulary head) and run its layers with the pair's row exchanges, while the embedding table stays whole on each Mac and the next token is the better of the two half-vocabulary picks. Each rank keeps the K split one Mac uses for the whole matrix, so the pair's sums are one Mac's. Nothing serves through it yet; on one Mac the split code is compiled out, the attention merges run main's kernels unchanged and every projection keeps main's split, so replies are the same tokens (#1433, after #1432). Thanks to @akol1.
+
+- Flash Next on CUDA: `TF_FLASHNEXT_CHUNK_SOLO` (opt-in, up to 16,384 rows) lets a prompt pass take a larger chunk when no other stream is decoding, and `TF_FLASHNEXT_CHUNK`'s rows otherwise. On a GB10 at 4,096 rows, a lone prompt's first token comes 5-8% sooner, for 2.25 GiB more scratch and up to about 2 s of wait for a request that arrives during a large pass. Unset, nothing changes (#1733, option C of #1554). Thanks to @jschmied.
+
+- Qwen3.8-27B on Metal: the DFlash2 drafter reads its sliding-window keys and values in place in its cache while the context has not wrapped, instead of copying them to scratch for every draft layer each round. Drafts are bit-identical (#1727). Thanks to @kieranscotney.
+
+- Flash Next's MTP head norms its 10,240-value rows with tiled launches on CUDA sm_120 and sm_121 and split wave launches on HIP gfx1201, storing the same bytes as before: the norm kernel runs 1.4x to 2.5x faster on a GB10 and 4x to 5x on a Radeon AI PRO R9700 at 1 to 16 rows (#1702, fixes #1689). Thanks to @laudney.
+
+## 1.2.0
+
+- CUDA EXL3: the dense projections zero their split-K counters only when the buffer grows, on the calls' stream, instead of before every 128-row block of every call; each block's last program already resets its own counter. Replies are token-identical, and on a GB10 with the Qwen3.8-27B 3.50 bpw pack decode is 0.4% to 0.9% faster (#1475). Thanks to @diwakergupta.
+
+- Qwen3.6-35B-A3B on CUDA serves NVIDIA's NVFP4 checkpoint (`nvidia/Qwen3.6-35B-A3B-NVFP4`) as downloaded: W4A16 NVFP4 routed and shared experts, FP8 attention and DeltaNet projections and the NVFP4 head run as stored, and `--drafter` naming the same checkpoint drafts with its bf16 MTP layer, quantized to affine-4 at load. One GB10 decodes 66 tok/s without drafts and 112 to 125 tok/s with them; drafted, concurrent and resumed replies equal their plain runs. The rules come from @gilby's #345.
+- Qwen3.8-27B on M5 Macs serves one stream through the 16-row lane loop by default (`TF_QWEN27_LANES=0` keeps the serial loop), and lane rounds shared by several streams price and fill their rows from measured costs. Replies are token-identical. On an M5 Ultra with DFlash2, one stream decodes 2.6% faster on code and 4.6% on chat, and four greedy code streams 18.6% faster; on an M3 Ultra 16 streams are 3.5% faster and one stream 1.9%. Wider 32- and 64-row lone windows stay opt-in (`TF_QWEN27_WINDOW`, `TF_QWEN27_COPIES`) (#1621).
+
+- DeepSeek-V4.1 on CUDA no longer stays up unable to answer after a sticky CUDA context fault: a host monitor sends the fault to fail-fast at once instead of waiting for a health poll, and with `TF_TP_FAILFAST=0` the process exits with status 70 rather than waiting on communicator teardown. Under fail-fast, a round error the ranks cannot recover from (such as `CudaFailed` or `Timeout`) now takes every rank down instead of leaving them out of step. A stall watchdog, off by default, withdraws readiness and exits when a round, snapshot, KV union or follower step makes no progress for `TF_DSV41_STALL_EXIT_S` seconds; off, it costs one null check per launch, and replies are unchanged (#1646). Thanks to @jayleaton.
+
+- LFM2.5-24B-A2B on M1 and M2 Macs: the prompt tiles (`core/tile_qmm`) store their matrix fragments whole instead of element by element, which on an M1 had held every prompt tile to 0.04 TFLOPS. On an M1 Pro the tiles run at 2.4 to 2.7 TFLOPS, a 2,048-row prompt chunk takes 3.9 s instead of 243 s, a cold 930-token prompt's first token comes in 2.0 s instead of 212 s, and 16 greedy streams run at 116 to 123 tok/s together instead of 11 to 17. The tiles' outputs are bit-identical, so replies are the same tokens. M3 and later GPUs compile the tiles exactly as before; the M2 takes the M1's path on its evidence and was not measured (#1590, fixes #1523). Thanks to @Arminova.
+
+- HIP: the matrix-core prompt tile of gfx11 GPUs no longer spills to scratch inside its K loop: a group's index and bounds are a shift and a mask instead of a run-time division, and a group's first product starts from zero on a uniform branch instead of a select per accumulator, so the tile fits in 248 registers. Every sum is the same in the same order, so replies are token-equal to before. On a Ryzen AI Max+ 395 (gfx1151) with Qwen3.8-27B MLX 4-bit, the seven prompt products at 2,048 rows take 63.7 ms instead of 105.8 ms, and cold prefill is 32% faster at 2k tokens (8.60 to 5.83 s) and 24.5% faster at 64k; decode, Metal and CUDA are unchanged (#1663). Thanks to @AbrahamCete.
+
+- The paged prompt store (`prompt_radix`) can now serve a family whose cached rows read tokens past their page, as GLM's MTP rows do: with a lookahead, a page is matched and shared only while a prompt repeats the tokens past it, and a planned family cuts and resumes only on its grid, a whole number of pages. A store given rules it cannot keep (a zero page, or a planned grid that is no multiple of the page) now fails with `error.BadPromptRadixRules` in every build instead of a debug-only assert. No family turns these rules on yet, so HIP's families and every other path keep, resume and evict exactly as before, which a new golden test pins (#1659, part of #1510). Thanks to @Bizuayeu.
+
+- MOSS-Image: `moss_image.noise` makes the pipeline's seeded starting latents (`torch.randn` on a seeded CPU generator) in the family's host code, byte for byte what x86 torch makes, on any CPU. ARM torch, on a Mac or a GB10, gives slightly different bits: for seed 42 at 1024x1024, 200,873 of 524,288 values differ, by at most 2.2e-6. `zig build test` checks 69 cases, 24 seeds and 9 sizes from 16x16 to 2048x2048, against torch 2.13.0's recorded latents, and `moss_image_case.py noise` records them. `tf-moss-image` still reads its latents from the case file, and nothing else changes (#1668, fixes #1530). Thanks to @BobClawblaw.
+
+- Intel Arc Pro B70 (Xe2): the XPU backend serves Gemma 4 E4B (NVIDIA Nemotron 3.5 Bolt E4B) from `mlx_lm.convert` 4-bit checkpoints, with the per-layer input linears kept in BF16 (a checkpoint that quantizes them still loads, with a warning per tensor) and, optionally, 8-bit attention projections. It keeps prompt states in the prompt cache, runs up to 8 streams with shared forwards, draws the sampling top-k on the card and answers `/v1/decisions`; the audio tower and the drafter are not included yet. On the B70 it reads 2,048-token prompts at 6,772 tok/s and decodes one stream at 135.6 tok/s (3,950 and 118.6 with 8-bit attention), and 4 streams reach 426 tok/s together, each reply equal to the stream's reply alone. Qwen3.8 27B and Nemotron 3.5 Lightning on the XPU backend give the same replies at the same speeds (#1552, for #1222). Thanks to @Mirrdhyn.
+
+- Nemotron on CUDA: the router's top-k runs on the shared MoE top-k, which adds the router's slices itself, in place of Nemotron's own `tf_nemo_topk` and `tf_nemo_topk_wide`, and Bolt's latent-expert sum runs on the shared combine. Picks, weights and replies are the same bytes as before. In a GB10 trace of Lightning decoding, the top-k takes 2.74 µs a call instead of 4.37 (#1354, step 2 of #548). Thanks to @jschmied.
+
+- Kernel contract: Nemotron's pocket kernels on CUDA, the learned neurons Living Weights adds beside the shared expert, are now checked against float64: relu^2 up and the down added into the shared expert's slot, one row a block and tiled, with fp32 and bf16 output, and the unused neurons set to NaN so a read of one shows. On a GB10 all six pass gates 1 to 4 and both planted controls go red (a relu by `fmaxf`, which drops a NaN, and a down launched one neuron short), with launch records for sm_80 to sm_121; `tf-cuda-test pocket-contract` runs the set alone (#1629). Inference kernels are unchanged. Thanks to @BobClawblaw.
+
+- Nemotron on CUDA: squared ReLU in the grouped experts (MLX affine, GGUF and NVFP4), the NVFP4 `ck_experts` path and the pocket now keeps a NaN instead of turning it into 0, and an NVFP4 activation block holding a NaN gets a NaN scale instead of a finite one, so a NaN reaches the output rather than vanishing (#1628, step 1 of #1549). Finite values give the same bits as before: only the squared-ReLU functions' SASS changes, every Qwen and Gemma kernel compiles as before, and on a GB10 replies were token-identical on Nemotron 3.5 Lightning (NVFP4 and MLX 4-bit), Bolt and Super VL, greedy, sampled and with an image. Thanks to @BobClawblaw.
+
+- HIP: on gfx11 GPUs the prompt GEMM's matrix-core tile now runs its blocks in bands of four row blocks, as CUDA's tile order does, so neighbouring row blocks read each column block's weights while they are still in cache. Each tile computes the same sums in the same order, so replies are token-identical, and a new kernel test holds the tile's bytes to the dot2 tile's on the 27B's prompt shapes and the band edges. On a Ryzen AI Max+ 395 (gfx1151) with Qwen3.8-27B, a cold prompt takes 7.60 s instead of 8.64 s at 2k tokens (-12.0%), 31.4 s instead of 35.5 s at 8k, and 330.8 s instead of 365.7 s at 64k (-9.5%); decode is unchanged, and other GPUs never run the new order (#1648). Thanks to @AbrahamCete.
+
+- GLM on CUDA loads faster: 8 threads decode and pack each layer's routed experts instead of the loader's one (`TF_GLM_LOAD_PACK`, 1 to 16), the packed experts go up a piece at a time (at most 192 MiB) from pinned memory the GPU copies from, and 16 readers now read ahead of the load instead of 8. GLM-5.3-Flash XSFP4 loads in about 51 s instead of 155 s on two GB10s (TP=2) and 46 s instead of 124 s on three (TP=3), with the same replies and memory free at serving within about 1 GiB (#1636). Thanks to @Bizuayeu.
+
 - `--vision-urls`: an HTTPS image or video download now ends at its deadline however the server at the other end behaves. A timer closes the connection when the deadline passes, so a server that never answers the TLS handshake, or sends bytes slowly enough to keep each read alive, no longer holds the request past its download limit (10 seconds for an image, 20 for a video); the request gets the usual "failed or timed out" refusal. The TLS setup moves to its own file, `media_fetch_tls.zig`, with host tests for silent and malformed peers and for simultaneous first downloads loading the CA certificates once. Replies, model paths and images that download normally are unchanged (#1645). Thanks to @jayleaton.
 
 - DeepSeek V4.1 on CUDA: with both `TF_DSV41_PREPARED` and `TF_DSV41_SESSION_DISK` set, boot now hashes the pack once instead of twice; the session store reuses the content digest the prepared cache was keyed with, so a large pack is no longer read a second time from disk before the server is ready. The identity is the same value as before, and without a prepared cache the store still reads the pack once (#1644). Thanks to @jayleaton.
 
 - DeepSeek V4.1 on CUDA (experimental) copies its weights and persistent forms to the GPU through one reusable 64 MiB pinned stage instead of a host copy of the whole image, so the public Flash-1017 EXL3 pack no longer stops at boot with `CopySourceLimit` at TP=2; with it, a rank loaded all 95.1 GiB of its weights. The bytes on the GPU, their addresses and their digests are unchanged, a failed later chunk keeps the same cleanup, and uploads under 64 MiB make the same single copy as before (#1643). Thanks to @jayleaton.
+
+- Nemotron 3.5 on Metal: the decode attention kernel on M3-class GPUs and the experts' 2-row tiles unroll their fixed loops, with bit-identical outputs. On an M3 Ultra, Nemotron 3.5 Lightning decodes 1.8% faster at one stream (0.8% at 4 streams), and 0.8% and 1.5% faster after 2k and 8k prompts, with the same tokens (#1621).
 
 - DeepSeek-V4.1-Flash on CUDA (experimental) plans EXL3 packs that keep a BF16 `.weight` beside a projection's EXL3 trellis, such as `jayleaton/DeepSeek-V4.1-Flash-1017-EXL3-2.8bpw`, which used to stop at planning with `UnsupportedDenseProjection` (booting that pack also needs the upload-stage change, #1643): the CUDA rank planner takes the stored trellis, still checked by the shared trellis validator, and still refuses dense-only and malformed projections. Metal and every other family keep reading the dense weight first, and packs without a dense sibling plan as before. Thanks to @jayleaton.
 
@@ -48,6 +651,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Multirank RoCE (`TF_COMM_BACKEND=roce` at three ranks or more) now connects over a switchless ring: each peer's stripes go over the ports on the /24 it shares, so three GB10s cabled in a ring connect where they used to refuse, and pass `tf-tp-test suite` exactly, with an 8 KiB exchange taking 10.7 µs against NCCL's 26.3 µs. A switch pairs the ports as before, two ranks are unchanged, and a ring of four still refuses and falls back to NCCL (#1516, for #1288). Thanks to @Bizuayeu.
 
+- GLM-5.3-Flash on CUDA at three ranks or more takes `TF_GLM_ROCE_MULTI=1` (off by default; it needs `TF_TP_MASTER` and `TF_TP_KERNEL_IMAGE`), which sends the main stream's small all-gathers over the multirank RoCE wire instead of NCCL. Every rank first checks one gather on the wire against NCCL's, byte for byte, and the wire is used only when all agree; otherwise every rank stays on NCCL. On three GB10s in a ring at TP=3, decode went from 51.2 to 52.6 tok/s (+2.57%) with the drafts and +1.13% without, with the same tokens, but a cold 136k-token prompt is 1.2 to 1.6% slower with the wire open, so NCCL stays the default (#1524, part of #1288). Thanks to @Bizuayeu.
+
 - Gemma 4: Metal and CUDA now prepare images from one shared source file instead of a CUDA copy kept equal by a test (#1589). The patches and image hashes each step produces are unchanged. Thanks to @jschmied.
 
 - Qwen-VL pictures (Qwen3.8-27B, Qwen3.6-35B-A3B and Qwen3.8 Flash Next, on Metal and CUDA) are resized and normalized as the checkpoints' named processor, transformers' `Qwen2VLImageProcessorFast`, does: torchvision's antialiased bicubic and its fused normalization in float32, the same `pixel_values` bits on five test pictures. Pillow's bicubic was used before; on a 941×1672 photo it differed in 0.1% of pixel values, by at most 2 levels, so replies to pictures can differ slightly. Video frames already took these settings, and text-only replies are unchanged (#1586). Thanks to @jschmied.
@@ -68,6 +673,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Kernel contract: the CUDA runner now loads fp8_experts' image, so a `zig build kernel-contract` run on a CUDA machine no longer stops at its first fp8_experts record (about 90 minutes in on a GB10) and makes all 1,325 live-limit checks through to its `SUMMARY` line. A host test now fails if any registered CUDA launch or control names an image the runner cannot load (#1579). Inference kernels are unchanged. Thanks to @Bizuayeu.
 
+- Chat templates that build the prompt by appending to a string with other joins in between, as DeepSeek-V4.1's does, no longer copy the whole prompt at every turn, so memory grows with the prompt's length instead of its square: a 2,000-message chat through DeepSeek-V4.1's template peaks at 15 MB instead of 154 MB (53 MB instead of 152 MB with tools). Every rendered prompt is byte-identical to before (#1633). Thanks to @fche for the report.
+
 - Cortheon: a research planner query longer than 200 bytes is now cut on a character boundary, so a multi-byte character at the cap is left out whole instead of being split into invalid UTF-8 in the search query (#1610). Thanks to @ppardus.
 
 - With `--cortheon`, the task goal that the search planner and web reads see is cut at 4,000 bytes on a character boundary. A character straddling the cut was split, so the planner's prompt was not valid UTF-8; now a character that does not fit is left out whole, as page titles and search queries already were (#1575). Without `--cortheon` nothing changes. Thanks to @ppardus.
@@ -78,7 +685,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Nemotron on M1-family Macs: routed experts in windows of 16 or more rows (shared rounds of concurrent streams, a 16-row prompt chunk, wide copy windows) take two members a pass at 8 rows a simdgroup, through two new instantiations of the existing kernel (#1466). Each output keeps the same summation order, so replies are the same tokens. On an M1 Max the routed-expert kernels take 4 to 5% less time at 16 rows and 14 to 20% less at 64 to 128 rows; served Nemotron 3.5 Lightning shows no regression there, and M3 Ultra and M5 Ultra, which keep their kernels, measured the same as before. Thanks to @mrv777.
 
+- CUDA EXL3: the trellis weight loads in the expert, linear, segmented and unpack kernels skip L1 allocation (`ld.global.nc.L1::no_allocate`), since each word is read once a token; the values read are the same, so replies are unchanged. On three GB10s at TP=3 with GLM-5.3-Flash EXL3 4bpw, decode rose 2.3% on one stream and 0.5 to 2.3% from 2 to 8 streams (#1534). Thanks to @BadAd84.
+
 - Qwen3.8-27B on Metal keeps 16-row windows and lane copies off by default. On pre-M5 chips, `TF_QWEN27_WINDOW=32` or `64` opts into a wider lane window, and `TF_QWEN27_COPIES=1` opts into lane context copies; served qualification remains pending (#1621).
+
+- The native server takes `--decode-share X` (0 to under 1) instead of refusing it: while a long prompt fills beside running replies, the replies get X of each fill step's time, the same time share `TENSORFOLD_PREFILL_SHARE` sets from the prompt's side (#1327, for #840). It works on the CUDA, Metal and HIP lane servers; DeepSeek, Spark-X on Metal, Qwen4 and the XPU servers ignore it. No model's prompt chunks change size: the flag can also cap a filling prompt's chunks at 512 rows, but that stays off for every model until it is shown to give the same tokens at any cut. Without the flag nothing changes. Thanks to @javierbits and @simon-lin88.
+
+- MiniMax-M3.1-Flash on Metal: the new `minimax_m3` family serves MiniMax's 428B-A23B model (`minimax_m3_vl`, its own `config.json`) on one 256 GB M5 Ultra, with tools, structured output, thinking on or off, images, the prompt cache, two streams and DFlash2 or DSpark drafts that keep replies equal to plain decoding. It reads two community checkpoints, lossy conversions of MiniMax's NVFP4 release, labelled with their cost against it (mean KL 0.244 on mix34, 0.295 on mix256k); everything from those weights on is exact, with a bf16 key/value cache (147,456 tokens on mix256k, 32,768 on mix34). Measured on the M5 Ultra with DFlash2, one stream decodes 44-58 tokens a second on mix256k. `MINIMAX_LOAD_LIMIT_GB` sets the memory budget and `MINIMAX_DRAFTER` picks the drafter (#1235, for #1519). Thanks to @BobClawblaw.
 
 - [The runbook](RUNBOOK.md#prompt-prefill-share-and-budget) documents `TENSORFOLD_PREFILL_SHARE` and `TENSORFOLD_PREFILL_BUDGET`: what each accepts, its default, and how it trades a long prompt's finish against decoding streams' next rounds.
 

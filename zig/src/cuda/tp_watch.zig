@@ -44,6 +44,16 @@ fn address() !posix.sockaddr.in {
     return .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.readInt(u32, &ip.ip4.bytes, .little) };
 }
 
+/// What a rank's liveness line failing to start means, for the load error; null for any other error.
+pub fn explain(e: anyerror) ?[]const u8 {
+    return switch (e) {
+        error.BindFailed => "rank 0 could not listen on NCCL_COMM_ID's port + 1, where the ranks' liveness lines meet: another process may hold it (often an earlier server still exiting) or NCCL_COMM_ID's host may not be this machine's; wait for that process to exit or choose another NCCL_COMM_ID port",
+        error.RankNeverCame => "not every rank connected its liveness line within 5 minutes on NCCL_COMM_ID's port + 1: start every rank with the same NCCL_COMM_ID and check that port is reachable",
+        error.AcceptFailed => "rank 0 could not accept another rank's liveness line on NCCL_COMM_ID's port + 1",
+        else => null,
+    };
+}
+
 /// A stream socket whose peer's host vanishing (no FIN) shows within about 20 s: 10 s idle, then 3 probes 3 s apart.
 fn socket() !posix.socket_t {
     const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
@@ -51,10 +61,10 @@ fn socket() !posix.socket_t {
     const fd: posix.socket_t = @intCast(rc);
     const one: c_int = 1;
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
-    for ([_][2]u32{ .{ posix.TCP.KEEPIDLE, 10 }, .{ posix.TCP.KEEPINTVL, 3 }, .{ posix.TCP.KEEPCNT, 3 } }) |o| {
+    if (@import("builtin").os.tag == .linux) for ([_][2]u32{ .{ posix.TCP.KEEPIDLE, 10 }, .{ posix.TCP.KEEPINTVL, 3 }, .{ posix.TCP.KEEPCNT, 3 } }) |o| {
         const v: c_int = @intCast(o[1]);
         posix.setsockopt(fd, posix.IPPROTO.TCP, o[0], std.mem.asBytes(&v)) catch {};
-    }
+    };
     return fd;
 }
 
@@ -249,6 +259,22 @@ fn watch(fd: posix.socket_t, line: usize) void {
     stop();
 }
 
+test "a liveness line that cannot start names its port, not the glue kernels" {
+    for ([_]anyerror{ error.BindFailed, error.RankNeverCame, error.AcceptFailed }) |e| {
+        const text = explain(e).?;
+        try std.testing.expect(std.mem.indexOf(u8, text, "NCCL_COMM_ID's port + 1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "glue kernels") == null);
+    }
+    const bind = explain(error.BindFailed).?;
+    try std.testing.expect(std.mem.indexOf(u8, bind, "earlier server still exiting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bind, "host may not be this machine's") != null);
+    const missing = explain(error.RankNeverCame).?;
+    try std.testing.expect(std.mem.indexOf(u8, missing, "every rank") != null);
+    try std.testing.expect(std.mem.indexOf(u8, missing, "rank 0 waited") == null);
+    for ([_]anyerror{ error.OutOfMemory, error.SocketFailed, error.NoCommId, error.NcclUnavailable, error.RankNeverReady }) |e|
+        try std.testing.expect(explain(e) == null);
+}
+
 test "a record is 64 bytes, and a name past 56 bytes is cut" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(Record));
     var r: Record = .{ .kind = error_kind, .rank = 1 };
@@ -431,22 +457,31 @@ const ProcessTest = struct {
     extern "c" fn fork() c_int;
     extern "c" fn socketpair(c_int, c_int, c_int, *[2]c_int) c_int;
     extern "c" fn kill(c_int, c_int) c_int;
+    const child = @import("tp_watch_child.zig");
     fn check(mode: u8) !void {
         var pair: [2]c_int = undefined;
         if (socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketFailed;
+        const err = child.open() catch |e| {
+            for (pair) |fd| _ = posix.system.close(fd);
+            return e;
+        };
+        defer _ = posix.system.close(err[0]);
         const pid = fork();
         if (pid < 0) {
             _ = posix.system.close(pair[0]);
             _ = posix.system.close(pair[1]);
+            _ = posix.system.close(err[1]);
             return error.ForkFailed;
         }
         if (pid == 0) {
             _ = posix.system.close(pair[1]);
+            _ = child.dup2(err[1], 2);
             ending.store(mode == 2, .release);
             watch(pair[0], 0);
             std.c._exit(0);
         }
         _ = posix.system.close(pair[0]);
+        _ = posix.system.close(err[1]);
         last_pid = pid;
         last_fd = pair[1];
         last_reaped = false;
@@ -477,6 +512,8 @@ const ProcessTest = struct {
                 last_reaped = true;
                 try std.testing.expectEqual(@as(c_int, 0), status & 0x7f);
                 try std.testing.expectEqual(@as(c_int, if (mode == 2) 0 else 1), (status >> 8) & 0xff);
+                var buf: [512]u8 = undefined;
+                try std.testing.expectEqualStrings(child.said(mode), child.drain(err[0], &buf));
                 return;
             }
             std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};

@@ -1,5 +1,6 @@
 //! The CUDA H3 family as a C library for a host that shares its CUDA context: tf_h3_open, tf_h3_forward, tf_h3_close.
 const std = @import("std");
+const report = @import("report.zig");
 const h3 = @import("cuda.zig");
 const weights = @import("cuda_weights.zig");
 const host = @import("cuda_host.zig");
@@ -14,7 +15,7 @@ export fn tf_h3_abi_version() u32 {
 /// The transformer at `path` (one safetensors file) on the GPU in its bf16; null on failure.
 export fn tf_h3_open(path: [*:0]const u8) ?*h3.Model {
     return h3.Model.load(gpa, path) catch |e| {
-        std.debug.print("tf_h3_open: {t}\n", .{e});
+        report.say("tf_h3_open: {t}", .{e});
         return null;
     };
 }
@@ -33,7 +34,7 @@ export fn tf_h3_shape(model: *const h3.Model, out: *[7]u32) void {
 /// Every block over the packed stream, in place. Returns the seconds taken, or a negative number on failure.
 export fn tf_h3_forward(model: *h3.Model, in: *const h3.Model.Inputs) f64 {
     return model.forward(in) catch |e| {
-        std.debug.print("tf_h3_forward: {t}\n", .{e});
+        report.say("tf_h3_forward: {t}", .{e});
         return -1;
     };
 }
@@ -42,7 +43,7 @@ export fn tf_h3_forward(model: *h3.Model, in: *const h3.Model.Inputs) f64 {
 export fn tf_h3_set_weight(model: *h3.Model, block: u32, which: c_int, w: u64, rows: u32, cols: u32) c_int {
     const projection = std.enums.fromInt(weights.Projection, which) orelse return -1;
     weights.set(model, block, projection, w, rows, cols) catch |e| {
-        std.debug.print("tf_h3_set_weight: {t}\n", .{e});
+        report.say("tf_h3_set_weight: {t}", .{e});
         return -1;
     };
     return 0;
@@ -66,7 +67,7 @@ export fn tf_h3_spent(model: *const h3.Model, out: [*]f64, names: [*][*:0]const 
 /// tf_h3_forward for inputs in host memory (every address of `in` a host address; pinned memory copies fastest).
 export fn tf_h3_forward_host(model: *h3.Model, in: *const h3.Model.Inputs) f64 {
     return host.forwardHost(model, in) catch |e| {
-        std.debug.print("tf_h3_forward_host: {t}\n", .{e});
+        report.say("tf_h3_forward_host: {t}", .{e});
         return -1;
     };
 }
@@ -74,7 +75,7 @@ export fn tf_h3_forward_host(model: *h3.Model, in: *const h3.Model.Inputs) f64 {
 /// Pinned host memory the GPU maps, for a host without a framework: returns its host address, stores its device one.
 export fn tf_h3_host_alloc(model: *h3.Model, bytes: u64, device: *u64) ?*anyopaque {
     return host.hostAlloc(model, bytes, device) catch |e| {
-        std.debug.print("tf_h3_host_alloc: {t}\n", .{e});
+        report.say("tf_h3_host_alloc: {t}", .{e});
         return null;
     };
 }
@@ -146,19 +147,24 @@ test "h3 library: exported host and device refusals need no CUDA dependencies or
         const expected = if (std.mem.eql(u8, c.field, "rot")) error.BadH3Rotary else if (std.mem.eql(u8, c.field, "prefix_tiles") or std.mem.eql(u8, c.field, "keep")) error.BadH3Keep else if (std.mem.eql(u8, c.field, "blocks")) error.BadH3Blocks else if (c.value == 0xffffffff) error.BadH3Scalar else error.BadH3Dimensions;
         try std.testing.expectError(expected, m.plan(&in));
         try std.testing.expectEqual(@as(f64, -1), tf_h3_forward(&m, &in));
+        try report.expect("tf_h3_forward", expected);
         try std.testing.expectEqual(@as(f64, -1), tf_h3_forward_host(&m, &in));
+        try report.expect("tf_h3_forward_host", expected);
     }
     inline for (.{ "x", "tables", "line", "slot", "sizes" }) |field| {
         var in = valid;
         @field(in, field) = 0;
         try std.testing.expectError(error.BadH3Address, m.plan(&in));
         try std.testing.expectEqual(@as(f64, -1), tf_h3_forward(&m, &in));
+        try report.expect("tf_h3_forward", error.BadH3Address);
         try std.testing.expectEqual(@as(f64, -1), tf_h3_forward_host(&m, &in));
+        try report.expect("tf_h3_forward_host", error.BadH3Address);
     }
     var in = valid;
     in.attention_out = 0xfffffffffffffff0;
     try std.testing.expectError(error.BadH3Address, m.plan(&in));
     try std.testing.expectEqual(@as(f64, -1), tf_h3_forward_host(&m, &in));
+    try report.expect("tf_h3_forward_host", error.BadH3Address);
     _ = try m.plan(&valid);
     in = valid;
     in.rot = 64;
@@ -168,5 +174,6 @@ test "h3 library: exported host and device refusals need no CUDA dependencies or
     _ = try m.plan(&in);
     m.hidden = std.math.maxInt(usize);
     try std.testing.expectEqual(@as(f64, -1), tf_h3_forward_host(&m, &valid));
+    try report.expect("tf_h3_forward_host", error.BadH3Scalar);
     try std.testing.expectError(error.BadH3Product, @import("cuda_validation.zig").product(&.{ std.math.maxInt(usize), 2 }));
 }

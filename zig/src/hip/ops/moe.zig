@@ -16,7 +16,16 @@ pub fn moeTail(o: Ops, x: Tensor, y: u64, wts: u64, weight: u64, normed: Tensor,
     try z.tf_tail(p(x.ptr), f(y), f(wts), f(weight), p(normed.ptr), @backingInt(x.kind), int(rows), int(slots), int(width), eps, o.stream);
 }
 
+/// The logits over the fp32 rows, or over the bf16 rows a checkpoint holds too (the same values, half the bytes).
 pub fn moeRouter(o: Ops, x: Tensor, rows32: u64, logits: u64, r: usize, d: usize, e: usize) Error!void {
+    return moeRouterRows(o, x, rows32, 0, logits, r, d, e);
+}
+
+/// `rows16`: the router rows as bf16 when the model holds them (0 keeps the fp32 rows).
+pub fn moeRouterRows(o: Ops, x: Tensor, rows32: u64, rows16: u64, logits: u64, r: usize, d: usize, e: usize) Error!void {
+    if (o.window and rows16 != 0) if (o.l.routerBf16(p(x.ptr), p(rows16), @backingInt(x.kind), f(logits), int(r), int(d), int(e), o.stream)) |ran| {
+        if (ran) return;
+    } else |err| return err;
     if (o.window) if (o.l.routerWindow(p(x.ptr), @backingInt(x.kind), f(rows32), f(logits), int(r), int(d), int(e), o.stream)) |ran| {
         if (ran) return;
     } else |err| return err;
@@ -39,4 +48,10 @@ pub fn moeAct(o: Ops, both: u64, out: Tensor, pairs: usize, width: usize, limit:
 
 pub fn moeCombine(o: Ops, y: u64, wts: u64, out: Tensor, r: usize, slots: usize, d: usize) Error!void {
     try o.l.tf_moe_combine(f(y), f(wts), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), o.stream);
+}
+
+/// The same sum with a shared expert run beside the stack: `shared` (rows, d) fp32, or 0 where it adds nothing.
+pub fn moeCombineGate(o: Ops, y: u64, wts: u64, shared: u64, out: Tensor, r: usize, slots: usize, d: usize) Error!void {
+    if (slots < 2) return error.BadShape;
+    try o.l.tf_moe_combine_gate(f(y), f(wts), if (shared == 0) null else f(shared), p(out.ptr), @backingInt(out.kind), int(r), int(slots), int(d), o.stream);
 }

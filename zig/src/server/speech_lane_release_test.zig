@@ -20,7 +20,6 @@ test "invalid advertised speech output releases the lane before the first write"
     try std.testing.expect(std.mem.startsWith(u8, probe.first_bytes.items, "HTTP/1.1 500"));
     try expectHeader(probe.first_bytes.items, "the engine advertises no usable speech output");
     try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
-    std.debug.print("invalid output: first-write inflight={d}\n", .{probe.first_inflight});
     try std.testing.expectEqual(@as(u32, 0), probe.first_inflight);
 }
 
@@ -44,8 +43,8 @@ test "speech submit errors release the lane before the first write" {
         try std.testing.expect(std.mem.startsWith(u8, probe.first_bytes.items, case[1]));
         try expectHeader(probe.first_bytes.items, case[2]);
         try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
-        std.debug.print("{s}: first-write inflight={d}\n", .{ @errorName(case[0]), probe.first_inflight });
         std.testing.expectEqual(@as(u32, 0), probe.first_inflight) catch {
+            std.debug.print("{s}: first-write inflight={d}\n", .{ @errorName(case[0]), probe.first_inflight });
             failed = true; // Exercise every submit error even when an earlier case holds the lane.
         };
     }
@@ -121,7 +120,6 @@ test "a completed non-empty stream releases the lane before its first write" {
     try std.testing.expect(probe.writes >= 1);
     try std.testing.expect(std.mem.startsWith(u8, probe.first_bytes.items, "HTTP/1.1 200"));
     try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
-    std.debug.print("completed stream: first-write inflight={d}\n", .{probe.first_inflight});
     try std.testing.expectEqual(@as(u32, 0), probe.first_inflight);
 }
 

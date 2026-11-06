@@ -77,6 +77,9 @@ pub const Graph = struct {
     pub const Fault = enum { none, write, rename };
     pub const record = deleting.record;
     pub const remove = deleting.remove;
+    pub const recordMany = deleting.recordMany;
+    pub const recordStates = deleting.recordStates;
+    pub const removeMany = deleting.removeMany;
     pub const snapshot = deleting.snapshot;
 
     /// A graph that starts from `path`'s file when it reads, else empty.
@@ -371,6 +374,14 @@ pub const Graph = struct {
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
         return g.document(a, true);
+    }
+
+    /// One immutable view for an audit: graph JSON and copied facts under the same lock, even beside a clear.
+    pub fn auditView(g: *Graph, a: Allocator, dir: ?[]const u8) !struct { document: []const u8, facts: []Fact } {
+        if (dir) |d| g.scanned(d);
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        return .{ .document = try g.document(a, true), .facts = try deleting.copyLocked(g, a) };
     }
 
     pub fn find(g: *Graph, id: u32) ?*Fact {

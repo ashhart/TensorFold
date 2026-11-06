@@ -37,6 +37,8 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     ple_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 PLE native contract"} })).step);
     const qsa_step = b.step("test-qwen4-qsa-host", "Generated native QSA bodies against independent scalar references");
     qsa_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{ "Qwen4 QSA native contract", "Qwen4 QSA scores", "Qwen4 QSA selection" } })).step);
+    const backward = b.step("test-qwen4-qsa-backward-host", "Fixed-selection QSA adjoints against independent binary64 finite differences");
+    backward.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 QSA backward:"} })).step);
     const device_host = b.step("test-qwen4-device-host", "The full native device gate under numeric host instruments and refusal controls");
     device_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 device gate:"} })).step);
     const reference_step = b.step("test-qwen4-reference-host", "Qwen4 reference precision, rotary inputs and queued capture fault controls");

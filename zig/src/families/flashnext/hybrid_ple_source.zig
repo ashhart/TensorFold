@@ -16,5 +16,7 @@ pub fn cuda(a: std.mem.Allocator) ![]u8 {
     conv = try edit.once(mem, conv, "bf(CW[static_cast<long long>(e) * TAPS + t])", "CW[static_cast<long long>(e) * TAPS + t]");
     const sigmoid = try edit.once(mem, try edit.function(original, "__device__ __forceinline__ float bsig("), "return rbf(tf_sigmoid(x));", "const float e = tf_exp(-fabsf(x)); return rbf(__fdiv_rn(x < 0 ? e : 1.0f, __fadd_rn(1.0f, e)));");
     const silu = try edit.once(mem, try edit.function(original, "__device__ __forceinline__ float bsilu("), "return rbf(tf_silu(x));", "const float e = tf_exp(-fabsf(x)); return rbf(__fdiv_rn(x < 0 ? __fmul_rn(x, e) : x, __fadd_rn(1.0f, e)));");
-    return std.mem.concat(a, u8, &.{ "#include <cuda_bf16.h>\n#include \"common/glue_math.cuh\"\nusing namespace tf_glue;\n", sigmoid, "\n", silu, "\n", try edit.function(original, "__device__ __forceinline__ float block_sum("), "\n", gate, "\n", conv, "\n" });
+    const sum = "using tf_common::block_sum_serial;";
+    if (std.mem.count(u8, original, sum) != 1) return error.HybridGeometrySourceChanged;
+    return std.mem.concat(a, u8, &.{ "#include <cuda_bf16.h>\n#include \"common/glue_math.cuh\"\nusing namespace tf_glue;\n", sigmoid, "\n", silu, "\n", sum, "\n", gate, "\n", conv, "\n" });
 }

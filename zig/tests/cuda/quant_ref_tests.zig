@@ -21,6 +21,11 @@ const Rig = struct {
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     worst: f64 = 0, // the largest difference as a fraction of its tolerance, over every check
+    quiet: bool = false,
+    last: Last = .{},
+
+    /// The latest close's largest difference over its tolerance (non-finite: the first such) and its element.
+    pub const Last = struct { most: f64 = 0, at: usize = 0 };
 
     pub fn dev(r: *Rig, bytes: []const u8) !u64 {
         const b = try cuda.DeviceBuffer.fromHost(r.gpu.d, bytes);
@@ -50,7 +55,7 @@ const Rig = struct {
         return out;
     }
 
-    /// `got` (bf16 or fp32 at `ptr`) within `tol` of `want` everywhere; tol is per element.
+    /// `got` (bf16 or fp32 at `ptr`) within `tol` of `want` everywhere; tol is per element. `quiet` prints nothing.
     pub fn close(r: *Rig, name: []const u8, ptr: u64, f32_out: bool, want: []const f64, tol: []const f64) !void {
         const raw = try r.back(ptr, want.len * @as(usize, if (f32_out) 4 else 2));
         var most: f64 = 0;
@@ -58,6 +63,10 @@ const Rig = struct {
         for (want, tol, 0..) |w, t, i| {
             const g: f64 = if (f32_out) std.mem.bytesToValue(f32, raw[4 * i ..][0..4]) else bf(std.mem.bytesToValue(u16, raw[2 * i ..][0..2]));
             const q = @abs(g - w) / t;
+            if (!std.math.isFinite(q)) {
+                r.last = .{ .most = q, .at = i };
+                if (r.quiet) return error.TestFailed;
+            }
             try check.expect(std.math.isFinite(q), "{s}: non-finite error at element {d} (got {e}, reference {e}, tolerance {e})", .{ name, i, g, w, t });
             if (!(q <= most)) {
                 most = q;
@@ -65,6 +74,8 @@ const Rig = struct {
             }
         }
         r.worst = @max(r.worst, most);
+        r.last = .{ .most = most, .at = at };
+        if (r.quiet) return if (most <= 1) {} else error.TestFailed;
         std.debug.print("RESULT {s}: largest difference {d:.3} of its tolerance (element {d})\n", .{ name, most, at });
         try check.expect(most <= 1, "{s} within its float64 tolerance", .{name});
     }

@@ -24,6 +24,10 @@ pub fn resolve(a: Allocator, io: std.Io, environ: ?*const std.process.Environ.Ma
     const home = if (environ) |e| e.get("HOME") orelse e.get("USERPROFILE") orelse "" else ""; // Windows sets USERPROFILE
     const expanded = if (std.mem.startsWith(u8, model, "~/")) try std.fs.path.join(a, &.{ home, model[2..] }) else model;
     if (isDir(io, expanded)) return expanded;
+    if (@import("gguf_refusal.zig").forPath(expanded)) |why| {
+        problem.* = why;
+        return null;
+    }
     if (!isRepoId(model)) {
         problem.* = try std.fmt.allocPrint(a, "{s} is neither a directory nor a Hugging Face repo id (owner/name)", .{model});
         return null;

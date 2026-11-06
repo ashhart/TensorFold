@@ -59,6 +59,7 @@ const LISTS = COUNTS + 256;
 const source = @import("kernel_sources").glm_ep;
 
 pub const Ep = struct {
+    benchmark_group: ?[]const u8 = null,
     rank: u32,
     peer: u32,
     own: [2]u32,
@@ -91,7 +92,7 @@ pub const Ep = struct {
     st: Stats = .{}, // when the peer's entries land against our post, and how the picks split
 
     /// Connect to the peer in `s`, refuse it unless it runs the same model with the other half of the experts (`me`).
-    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, s: Settings, me: Identity) !*Ep {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, s: Settings, me: Identity) !*Ep {
         if (s.rank > 1 or s.links.len != 1) return error.EpTwoRanksOneLink;
         const link = blk: {
             const lib = try gpa.dupeSentinel(u8, s.library, 0);
@@ -120,7 +121,10 @@ pub const Ep = struct {
         t.* = .{ .rank = s.rank, .peer = 1 - s.rank, .own = .{ me.own_lo, me.own_hi }, .link = link, .rd = rd, .win = win, .wbuf = wbuf, .lists = lists, .localize_pipe = pipes[0], .pack_pipe = pipes[1], .post_pipe = pipes[2], .unpack_pipe = pipes[3], .rcombine_pipe = pipes[4], .rfinal_pipe = pipes[5], .rsend_pipe = pipes[6], .rsum_pipe = pipes[7], .amax_send_pipe = pipes[8], .amax_merge_pipe = pipes[9], .ctl = undefined };
         t.ctl = try control.Control.init(gpa, rd, CONTROL, &t.failed);
         errdefer t.ctl.deinit(gpa);
+        t.ctl.inventory = true;
         _ = try t.ctl.hello(me); // both Macs up, running the same thing, before the first exchange
+        t.benchmark_group = try @import("core").benchmark_group.metal(gpa, io, device, rd, FLAGS + 4096, CONTROL, 3);
+        errdefer if (t.benchmark_group) |b| gpa.free(b);
         t.trace = platform.c.getenv("GLM_EP_TRACE") != null;
         if (platform.c.getenv("GLM_EP_DELAY_US")) |v| t.delay_ns = 1000 * (std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0);
         t.thread = try std.Thread.spawn(.{}, service, .{t});
@@ -145,6 +149,7 @@ pub const Ep = struct {
         t.lists.deinit();
         t.wbuf.deinit();
         t.link.deinit();
+        if (t.benchmark_group) |b| gpa.free(b);
         gpa.destroy(t);
     }
 

@@ -542,6 +542,9 @@ test "the state-dict VM reads torch.save's tensor records and their views" {
 }
 
 test "the state-dict VM refuses globals outside the allow-list" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     // PROTO 2; GLOBAL os.system; STOP
     const evil = "\x80\x02cos\nsystem\n.";
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

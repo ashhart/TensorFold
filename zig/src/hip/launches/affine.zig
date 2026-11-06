@@ -6,7 +6,6 @@ const runtime = @import("../runtime.zig");
 const hl = @import("../launch.zig");
 const Module = @import("../module.zig").Module;
 const Function = @import("../module.zig").Function;
-const Stream = @import("../stream.zig").Stream;
 const util = @import("util.zig");
 
 const Caps = @import("../caps.zig").Caps;
@@ -14,6 +13,8 @@ const registry = @import("core").registry;
 const quant = @import("core").quant;
 const tuning = @import("../tuning/tuning.zig");
 const mlx_entries = @import("mlx_entries.zig");
+const stream_pick = @import("stream_pick.zig");
+const stream_layout = @import("stream_layout.zig");
 
 const Error = runtime.Error;
 
@@ -42,19 +43,7 @@ pub const Arg = extern struct {
     out16: u64 = 0,
 };
 
-/// quant/mlx_tiles.hpp's StreamSides: up to four products that share x, K, width and group in one launch.
-pub const StreamSides = extern struct {
-    words: [4]u64 = @splat(0),
-    scale: [4]u64 = @splat(0),
-    bias: [4]u64 = @splat(0),
-    out: [4]u64 = @splat(0),
-    n: [4]c_int = @splat(0),
-    first: [5]c_int = @splat(0),
-    count: c_int = 0,
-    out_half: c_int = 0,
-    pair_cols: c_int = 0,
-    limit: f32 = 0,
-};
+pub const StreamSides = stream_layout.StreamSides;
 
 /// One side of a group: its matrix and where its (rows, n) output goes.
 pub const Side = struct { words: u64, scale: u64, bias: u64, n: c_int, out: u64 };
@@ -134,9 +123,12 @@ pub const Kernels = struct {
     relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
+    /// Off lays a round's stream row blocks on the grid's y: the reference layout the interleaved one must equal.
+    stream_interleave: bool,
     block: [bit_widths.len]Function,
     gemm: [bit_widths.len]Function,
     wmma_gemm: [bit_widths.len]Function,
+    item: @import("matrix_item.zig").Functions,
     kp: [bit_widths.len][kp_tiles.len]Function,
     span: [2]Function,
     fold: Function,
@@ -156,6 +148,7 @@ pub const Kernels = struct {
         k.mode = choices.matrix;
         k.tile = if (choices.gemm) .gemm else .block;
         k.stream_on = choices.stream;
+        k.stream_interleave = true;
         k.reg = Registry.init(tableFor(caps), &mlx_entries.all);
         k.reg.verify(k.env(), .mlx) catch return error.Invalid;
         // the GEMM tile's rows of x a lane keeps (tiles/gemm.hpp GemmShape): 8 for BF16, 16 for FP16
@@ -175,6 +168,7 @@ pub const Kernels = struct {
         inline for (bit_widths, 0..) |bits, b| {
             k.block[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_dot2_blockINS0_{s}ELi{d}EEEvNS0_6AffineE", .{ dot, bits }));
             if (k.matrix) k.wmma_gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm16affine_wmma_gemmILi{d}EEEvNS0_6AffineE", .{bits}));
+            if (k.matrix) k.item[b] = try @import("matrix_item.zig").load(m, bits);
             k.gemm[b] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm17affine_gemm_blockINS0_{s}ELi{d}E{s}EEvNS0_6AffineE", .{ dot, bits, shape }));
             inline for (kp_tiles, 0..) |t, i| {
                 k.kp[b][i] = try m.function(std.fmt.comptimePrint("_ZN2tf4rocm14affine_gemm_kpINS0_{s}ELi{d}ELi{d}ELi{d}ELi{d}ELi{d}ELb{d}EEEvNS0_6AffineE", .{ dot, bits, t.cb, t.r, t.waves, t.rb, @intFromBool(t.loop) }));
@@ -289,7 +283,8 @@ pub const Kernels = struct {
     pub fn tableFor(caps: Caps) *const tuning.Table {
         return switch (caps.generation) {
             .rdna2 => &tuning.gfx1030,
-            .rdna3, .rdna3_5 => &tuning.gfx1100,
+            .rdna3 => &tuning.gfx1100,
+            .rdna3_5 => &tuning.gfx1151,
             .rdna4 => &tuning.gfx1201,
         };
     }
@@ -341,22 +336,11 @@ pub const Kernels = struct {
     ) Error!void {
         const b = bitIndex(a.bits).?;
         var sides = sides_in;
-        // a pair's lane carries half as many output columns: a gate column and its up column make one
-        const pair_div: c_int = if (sides.pair_cols > 0) 2 else 1;
         var lpc_log2: u5 = 0;
         while ((@as(c_int, 1) << lpc_log2) < (a.k >> 5) and lpc_log2 < 5) lpc_log2 += 1;
-        const ri: usize = if (a.m == 1) 0 else if (a.m == 2) 1 else 2;
-        // the widest column count that still fills the card with waves, within the registers the lane's code words take
-        var pick: usize = 0;
-        var c: usize = stream_cbs.len;
-        while (c > 0) {
-            c -= 1;
-            if (stream_cbs[c] * stream_rows[ri] > 16 or stream_cbs[c] * a.bits > stream_code_words) continue;
-            pick = c;
-            const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[c], pair_div);
-            if (@as(u64, cdiv(total_n, per_block)) * stream_waves * @as(u64, @intCast(items)) * cdiv(a.m, stream_rows[ri]) >= streams_wanted) break;
-        }
-        const per_block: c_int = stream_waves * (@as(c_int, 32) >> lpc_log2) * @divExact(stream_cbs[pick], pair_div);
+        const ri = stream_pick.rowTile(a.m);
+        const tile = stream_pick.pick(k.caps.generation, a.m, lpc_log2, a.bits, total_n, items, sides.pair_cols > 0);
+        const per_block = tile.per_block;
         var blocks: c_uint = cdiv(total_n, per_block);
         if (sides.count > 0) {
             blocks = 0;
@@ -376,8 +360,10 @@ pub const Kernels = struct {
             else => 2,
         }));
         const table = if (sides.pair_cols > 0) &k.pairs else if (relu2) &k.relu2 else &k.stream;
-        const f = table[b][ri][pick].?;
-        try go(r, f, .{ .x = blocks, .y = cdiv(a.m, stream_rows[ri]), .z = @intCast(items) }, .{ .x = 32 * stream_waves }, s, &args);
+        const f = table[b][ri][tile.at].?;
+        // a column block's row blocks run next to each other on x, so the later ones read its weights from cache
+        const grid = stream_layout.grid(k.stream_interleave, blocks, cdiv(a.m, stream_rows[ri]), items);
+        try go(r, f, grid, .{ .x = 32 * stream_waves }, s, &args);
     }
 
     /// One row on the row tile: a lane owns a group, a wave reads a column's row in one run.
@@ -596,4 +582,6 @@ test "the lane groups of a row tile" {
 
 test {
     _ = mlx_entries;
+    _ = stream_pick;
+    _ = stream_layout;
 }

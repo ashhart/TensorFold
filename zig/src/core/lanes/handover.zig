@@ -14,6 +14,7 @@ pub fn detach(e: *Engine, s: *Stream) bool {
     for (e.live.items, 0..) |x, i| {
         if (x != s) continue;
         _ = e.live.orderedRemove(i);
+        e.late.cancel(s);
         s.dropRoundState(e.gpa);
         return true;
     }
