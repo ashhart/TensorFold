@@ -71,6 +71,11 @@ pub const Tower = struct {
         try vit.linear(&t.g, &t.vk, t.s, t.acc, t.cols, w, b, y, rows, co, ld);
     }
 
+    /// Whether stages go to a sink (the schedule then runs conv_out once more without the positions, for its tap).
+    pub fn dumping(t: *const Tower) bool {
+        return t.sink != null;
+    }
+
     pub fn dump(t: *Tower, stage: []const u8, ptr: u64, rows: usize, cols: usize, conv_shape: ?[3]usize) !void {
         if (t.sink) |dm| try dm.put(dm.ctx, stage, ptr, rows, cols, conv_shape);
     }
