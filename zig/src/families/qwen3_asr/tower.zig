@@ -134,9 +134,8 @@ pub const Buffers = struct {
     }
 };
 
-/// The bf16 input of chunks [first, first + n) of `feats`: [n][mels][frames a chunk], zero past the clip.
-fn input(a: cfg.Audio, feats: mel.Features, first: usize, n: usize, host: []u16) []u16 {
-    const cf = a.chunkFrames();
+/// The bf16 input of chunks [first, first + n) of `feats`: [n][mels][cf], zero past the clip.
+fn input(a: cfg.Audio, feats: mel.Features, cf: usize, first: usize, n: usize, host: []u16) []u16 {
     const out = host[0 .. n * a.mels * cf];
     @memset(out, 0);
     for (0..n) |i| for (0..a.mels) |m| for (0..cf) |j| {
@@ -146,10 +145,10 @@ fn input(a: cfg.Audio, feats: mel.Features, first: usize, n: usize, host: []u16)
     return out;
 }
 
-/// The convolutions over a group of chunks into rows of b.x from first * 13 on, positions added.
-fn front(r: anytype, a: cfg.Audio, w: *const Weights, b: Buffers, feats: mel.Features, first: usize, n: usize, host: []u16) !void {
-    const cf = a.chunkFrames();
-    try r.upload(b.in, std.mem.sliceAsBytes(input(a, feats, first, n, host)));
+/// The convolutions over a group of chunks into rows of b.x from first * 13 on, positions added; each chunk is
+/// convolved at the plan's chunk length (a lone short chunk at its own, as the package pads to the longest chunk).
+fn front(r: anytype, a: cfg.Audio, w: *const Weights, b: Buffers, feats: mel.Features, cf: usize, first: usize, n: usize, host: []u16) !void {
+    try r.upload(b.in, std.mem.sliceAsBytes(input(a, feats, cf, first, n, host)));
     const f1 = (a.mels - 1) / 2 + 1;
     const t1 = (cf - 1) / 2 + 1;
     const f2 = (f1 - 1) / 2 + 1;
@@ -178,7 +177,7 @@ pub fn encode(r: anytype, gpa: std.mem.Allocator, a: cfg.Audio, w: *const Weight
     defer gpa.free(host);
     var first: usize = 0;
     while (first < plan.chunks) : (first += w.group) {
-        try front(r, a, w, b, feats, first, @min(w.group, plan.chunks - first), host);
+        try front(r, a, w, b, feats, plan.chunk_frames, first, @min(w.group, plan.chunks - first), host);
         try r.sync(); // the host input is refilled for the next group
     }
     const rows = plan.rows;
