@@ -91,6 +91,11 @@ fn pendingBytes(capacity: usize, rows: usize, replacement: usize) usize {
     return if (capacity < rows) replacement else 0;
 }
 
+/// The main scratch also serves verify forwards, independently of the prompt ceiling.
+fn mainGrowthCeiling(prompt_rows: usize, verify_rows: usize) usize {
+    return @min(max_rows, @max(prompt_rows, verify_rows));
+}
+
 /// Peak additional bytes when main scratch grows before the optional INT8 workspace.
 fn pendingPeak(main_new: usize, main_old: usize, int8_new: usize) usize {
     if (main_new == 0) return int8_new;
@@ -104,9 +109,10 @@ pub fn unallocatedScratchBytes(e: anytype) !usize {
 
 /// Pending scratch bytes for a known prompt INT8 setting, including the replacement peak.
 pub fn unallocatedScratchBytesFor(e: anytype, int8_on: bool) !usize {
-    const rows = @min(e.scratch_rows, max_rows);
-    // Admission must reserve the same geometric capacity ensureScratch/ensureRows will allocate.
-    const main_capacity = growthCapacity(e.scratch_capacity, rows, rows);
+    const prompt_rows = @min(e.scratch_rows, max_rows);
+    const main_rows = mainGrowthCeiling(prompt_rows, e.verify_rows);
+    // Reserve verify rows for main scratch, but only prompt rows for the optional INT8 workspace.
+    const main_capacity = growthCapacity(e.scratch_capacity, main_rows, main_rows);
     var measured = e.*;
     const full = try scratch(&measured, main_capacity, .measure);
     const main_new = pendingBytes(e.scratch_capacity, main_capacity, full);
@@ -115,7 +121,7 @@ pub fn unallocatedScratchBytesFor(e: anytype, int8_on: bool) !usize {
         var old_measure = e.*;
         main_old = try scratch(&old_measure, e.scratch_capacity, .measure);
     }
-    const int8_capacity = growthCapacity(e.int8.capacity, rows, rows);
+    const int8_capacity = growthCapacity(e.int8.capacity, prompt_rows, prompt_rows);
     const int8_new = if (int8_on and e.int8.capacity < int8_capacity) blk: {
         const g = e.g;
         const k = @max(g.intermediate, g.valueWidth(), g.attnWidth(), g.hidden);
@@ -135,6 +141,8 @@ test "lazy scratch admission reserves a full replacement only while growth remai
     try std.testing.expectEqual(at_512 + 5 * mib, pendingPeak(at_512, 0, 5 * mib));
     try std.testing.expectEqual(5 * mib, pendingPeak(0, 0, 5 * mib));
     try std.testing.expectEqual(@as(usize, 512), growthCapacity(32, 40, 512));
+    try std.testing.expectEqual(@as(usize, 128), mainGrowthCeiling(64, 128));
+    try std.testing.expectEqual(@as(usize, 256), mainGrowthCeiling(256, 128));
     try std.testing.expectEqual(@as(usize, 40), growthCapacity(0, 40, 512));
     try std.testing.expectEqual(@as(usize, 64), growthCapacity(32, 40, 64));
     try std.testing.expectEqual(@as(usize, 512), growthCapacity(256, 300, 512));
@@ -145,7 +153,7 @@ test "lazy scratch admission reserves a full replacement only while growth remai
 pub fn ensureScratch(e: anytype, rows: usize) !void {
     if (rows == 0 or rows > max_rows) return error.InvalidScratchRows;
     if (rows <= e.scratch_capacity) return;
-    const capacity = growthCapacity(e.scratch_capacity, rows, e.scratch_rows);
+    const capacity = growthCapacity(e.scratch_capacity, rows, mainGrowthCeiling(e.scratch_rows, e.verify_rows));
     var measured = e.*;
     const bytes = try scratch(&measured, capacity, .measure);
     var replacement = DeviceBuffer.alloc(e.d, bytes) catch {
