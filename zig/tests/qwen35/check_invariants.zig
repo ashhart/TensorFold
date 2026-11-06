@@ -54,7 +54,7 @@ fn rows(c: *Ctx) void {
     }
 }
 
-/// A drafter's tap rings after a prompt and a round of 1, 4 and 16 rows: the traced residuals, byte for byte.
+/// A drafter's tap rings after a prompt and a round of 1, 4 and 16 rows: the traced residuals; then a replayed round.
 fn taps(c: *Ctx) void {
     if (c.tp()) return c.report.skip("taps", "a drafter's taps run on one rank");
     if (c.e.model().act.size() != 2) return c.report.skip("taps", "taps keep 16-bit residuals");
@@ -69,6 +69,11 @@ fn taps(c: *Ctx) void {
             c.report.fail(name, "tap {d} at position {d}: first difference at column {d}", .{ d.tap, d.position, d.column });
         } else c.report.pass(name, "every tapped layer's residual rows are in the stream's ring at their positions", .{});
     }
+    const name = "taps after a replayed 4-row round: graph == eager";
+    if (!c.e.o.graphs) return c.report.skip(name, "graphs are off");
+    const diff = taps_run.graphsCase(c.gpa, c.e, ids, 4) catch |err| return c.report.broke(name, err);
+    if (diff) |d| return c.report.fail(name, "tap {d} at position {d}: first difference at column {d}", .{ d.tap, d.position, d.column });
+    c.report.pass(name, "a second stream's round, replayed from the first one's graph, leaves its ring byte for byte as eager rounds do", .{});
 }
 
 /// Where two runs' replies first differ, as a line to print; null when they are equal.
