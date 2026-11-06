@@ -6,11 +6,15 @@ const row = @import("core").row_projection;
 const sources = @import("qwen_runtime_sources");
 const projection = @import("projection.zig");
 const profile = @import("core").gpu_profile;
+const qk = lane.qk;
 pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
+/// Whether plain matrices take qk; off, a reg copy takes tf_lane_reg, else tf_lane_pair: every choice, the same words.
+pub var qk_rows: bool = true;
+
+pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, cooperative: bool = false };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
@@ -65,6 +69,8 @@ pub const Kernels = struct {
     /// The last norm's output and its tf_sq_fits words, while no later norm has written over it.
     fits: ?Fits = null,
     fits_words: ?mtl.Buffer = null,
+    /// qk's pipelines, made at the first plain matrix's quant.
+    qks: ?qk.Pipelines = null,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -92,6 +98,7 @@ pub const Kernels = struct {
         var lane_it = k.lanes.valueIterator();
         while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
+        if (k.qks) |*q| q.deinit();
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
         k.cache.deinit(k.allocator);
@@ -146,18 +153,21 @@ pub const Kernels = struct {
         skip: u32,
         cut: [2]u32,
         long: bool,
+        /// A plain matrix with no reg copy: tf_lane_pair, which reads weight_layout and writes tf_lane_reg's words.
+        cooperative: bool,
     ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
-        const reg = p.bits == 4 and p.group == 64;
+        const reg = p.bits == 4 and p.group == 64 and !cooperative;
         const key = Key{
             .kind = .projection,
             .n = p.n,
             .k = p.k,
-            .slices = if (reg) sk else p.slices,
+            .slices = if (reg or cooperative) sk else p.slices,
             .skip = skip,
             .cut = cut,
             .bits = p.bits,
             .group = p.group,
             .long = long,
+            .cooperative = cooperative,
         };
         const half = p.n / 64;
         const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
@@ -174,8 +184,9 @@ pub const Kernels = struct {
                 .output = if (cut[1] > 0) .f32 else .bf16,
                 .precompute_sums = reg or (p.bits == 8 and p.group == 64),
                 .reg = reg,
+                .cooperative = cooperative,
                 .row_blocks = long and !reg,
-                .rows = if (long) lane.max_reg_rows else if (reg) lane.reg_rows else 16,
+                .rows = if (long) lane.max_reg_rows else if (reg or cooperative) lane.reg_rows else 16,
             });
             k.joined(entry.value_ptr);
         }
@@ -186,7 +197,12 @@ pub const Kernels = struct {
     pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
         if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
         // decoded rows never take the long key (longKey needs prompt rows)
-        _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false);
+        if (p.plain and qk_rows) {
+            if (k.qks == null) k.qks = qk.Pipelines.init(k.allocator, k.device);
+            for ([_]u32{ 8, 16 }) |block| _ = try k.qks.?.get(p.slices, block);
+            return;
+        }
+        _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false, p.plain and p.reg_copy == null);
     }
 
     fn quantOne(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
@@ -247,19 +263,45 @@ pub const Kernels = struct {
         }
         const reg = p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
-        const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.long_prompt and k.prompt and rows > 16;
-        const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
-        const entry = try k.laneEntry(p, sk, skip, cut, long);
+        if (reg and p.plain and qk_rows and skip == 0 and cut[1] == 0) {
+            try k.quantQk(e, p, x, xs, y, rows, sk);
+            try span.end();
+            return;
+        }
+        // A plain matrix off qk: tf_lane_reg on its reg copy when it has one, else the cooperative kernel.
+        const on_reg = reg and (!p.plain or p.reg_copy != null);
+        const words = if (p.plain) p.reg_copy orelse p.words else p.words;
+        // reg rows take the long key past 128 rows; 8-bit matrices past 16 as whole-prompt row blocks; cooperative never
+        const long = if (on_reg) longKey(k.long_prompt, k.prompt, rows) else !reg and k.long_prompt and k.prompt and rows > 16;
+        const sums: ?Sums = if (on_reg or (p.bits == 8 and p.group == 64)) xs else null;
+        const entry = try k.laneEntry(p, sk, skip, cut, long, reg and !on_reg);
         const step = entry.value_ptr.max_rows;
         var first: u32 = 0;
         while (first < rows) : (first += step) {
             const xr = lane.Ref{ .buf = x.buffer, .off = x.offset + @as(usize, first) * p.k * 2 };
-            const w = lane.Ref{ .buf = p.words.buffer, .off = p.words.offset };
+            const w = lane.Ref{ .buf = words.buffer, .off = words.offset };
             const sb = lane.Ref{ .buf = p.pairs.buffer, .off = p.pairs.offset };
             const yr = lane.Ref{ .buf = y.buffer, .off = y.offset + @as(usize, first) * p.n * @as(usize, if (cut[1] > 0) 4 else 2) };
             if (sums) |s| try entry.value_ptr.encodeSums(e, xr, w, sb, .{ .ref = .{ .buf = s.ref.buffer, .off = s.ref.offset + @as(usize, first) * 4 }, .stride = s.stride }, yr, @min(rows - first, step)) else try entry.value_ptr.encode(e, xr, w, sb, yr, @min(rows - first, step));
         }
         try span.end();
+    }
+
+    /// qk on a plain matrix, 128 rows a dispatch, on the producer's group sums or else the reg entry's tf_lane_sums.
+    fn quantQk(k: *Kernels, e: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, y: Ref, rows: u32, sk: u32) !void {
+        if (k.qks == null) k.qks = qk.Pipelines.init(k.allocator, k.device);
+        const own = if (xs == null) try k.laneEntry(p, sk, 0, .{ 0, 0 }, false, false) else null;
+        const w = lane.Ref{ .buf = p.words.buffer, .off = p.words.offset };
+        const sb = lane.Ref{ .buf = p.pairs.buffer, .off = p.pairs.offset };
+        var first: u32 = 0;
+        while (first < rows) : (first += lane.reg_rows) {
+            const take = @min(rows - first, lane.reg_rows);
+            const xr = lane.Ref{ .buf = x.buffer, .off = x.offset + @as(usize, first) * p.k * 2 };
+            const yr = lane.Ref{ .buf = y.buffer, .off = y.offset + @as(usize, first) * p.n * 2 };
+            const sums: lane.Sums = if (xs) |s| .{ .ref = .{ .buf = s.ref.buffer, .off = s.ref.offset + @as(usize, first) * 4 }, .stride = s.stride } else try own.?.value_ptr.encodeOwnSums(e, xr, take);
+            try k.qks.?.encode(e, p.n, p.k, sk, xr, w, sb, sums, yr, take);
+            if (xs == null) e.barrier();
+        }
     }
 
     /// A mixed stack: each member its own product into its columns; row kernels write the fused rows at a stride.
