@@ -2,7 +2,7 @@
 const std = @import("std");
 const reg = @import("registry.zig");
 pub const records = [_]reg.CudaRecord{
-    .{ .launch = .{ .name = "tf_q35_attn_rows8_mt2", .symbol = "tf_q35_attn_rows8_mt2", .image = "qwen35_kv8", .threads = 128, .min_sm = 120 }, .usage = .{ .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 242, .static = 36992, .bound = 128 }, .{ .regs = 242, .static = 36992, .bound = 128 } }, .later_pending = true },
+    .{ .launch = .{ .name = "tf_q35_attn_rows8_mt2", .symbol = "tf_q35_attn_rows8_mt2", .image = "qwen35_kv8", .threads = 128, .min_sm = 120 }, .usage = .{ .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 242, .static = 36992, .bound = 128 }, .{ .regs = 243, .static = 36992, .bound = 128 } }, .later_pending = true },
     .{ .launch = .{ .name = "tf_q35_attn_rows8_mt2_whole", .symbol = "tf_q35_attn_rows8_mt2_whole", .image = "qwen35_kv8", .threads = 128, .min_sm = 120 }, .usage = .{ .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 239, .static = 36992, .bound = 128 }, .{ .regs = 239, .static = 36992, .bound = 128 } }, .later_pending = true },
     .{ .launch = .{ .name = "tf_q35_attn_partial_whole", .symbol = "tf_q35_attn_partial_whole", .image = "qwen35", .threads = 128, .dynamic = 65536, .opt_in = true, .min_sm = 80 }, .usage = .{
         .{ .regs = 167, .static = 11648, .bound = 128 },
