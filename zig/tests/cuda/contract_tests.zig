@@ -15,6 +15,7 @@ const glm_router_k = @import("contract_glm_router.zig");
 const mm_k = @import("contract_mm.zig");
 const prefill_many_k = @import("contract_qmm_prefill_many.zig");
 const prefill_tile22_k = @import("contract_qmm_prefill_tile22.zig");
+const prompt_many_k = @import("contract_prompt_many.zig");
 const mx_k = @import("contract_mxfp8.zig");
 const half_k = @import("contract_lane_half.zig");
 const wide_k = @import("contract_projection_f32.zig");
@@ -227,6 +228,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     var prefill_tile22 = prefill_tile22_k.Registrations.init(gpu, s, &affine4);
     defer prefill_tile22.deinit();
     try prefill_tile22.append(cap, a, &kernels);
+    var prompt_many = prompt_many_k.Registrations.init(gpu, s, &prompt);
+    defer prompt_many.deinit();
+    try prompt_many.append(cap, a, &kernels);
     var mx = [_]mx_k.Product{
         .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .clusters = true },
         .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .clusters = false },
