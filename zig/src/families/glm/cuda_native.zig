@@ -92,6 +92,7 @@ pub fn share_states(p: *anyopaque, snaps: usize, parallel: u32) !void {
     if (own.share == 0) return;
     const slot = (own.layout orelse return error.NoPages).snap_bytes;
     const n = if (snapshots.pages.onHost()) own.share else snaps; // TF_GLM_HOST_CACHE: in host memory, outside the device plan
+    own.e.share_pages = n > 0; // no slot, no store: rank 0 counts its idle pages as the followers do
     if (n > 0) try readySnapshots(own, n * slot);
     if (share_mod.advice(n, parallel, slot)) |want| std.log.warn(
         "TF_KV_SHARE={d} keeps {d} states in the prompt cache's slots, under 4 a GLM stream at --parallel {d}: live streams evict each other's before a resume; {d} take TF_KV_SHARE={d} and --prompt-cache-gib {d}",
@@ -188,7 +189,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (share_mod.moved(if (std.c.getenv("TF_GLM_KV_SHARE")) |v| std.mem.span(v) else "")) return error.GlmKvShareMoved; // before any rank opens
     const share_snaps = try kp.sharing();
     if (share_mod.tooMany(share_snaps)) {
-        std.log.err("TF_KV_SHARE={d} asks more kept states than the {d} a startup plan holds: set {d} or fewer", .{ share_snaps, kv.most_snaps, kv.most_snaps });
+        std.log.err("TF_KV_SHARE={d} asks more kept states than the {d} it keeps: set {d} or fewer", .{ share_snaps, kv.most_snaps, kv.most_snaps });
         return error.GlmShareTooMany;
     }
     return startup.open(io, p, @import("core").profile.get(.TF_KV_PAGES), set, cuda.tp_watch, StartArgs{ .gpa = gpa, .io = io, .ctx = ctx, .dir = dir, .o = o, .p = p, .roce_bytes = roce_bytes, .share = share_snaps }, openRank, startup.log);
@@ -481,7 +482,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadKvShare => "TF_KV_SHARE: give how many states the prompt store over the KV pages keeps, or 0 or unset for off",
         error.GlmKvShareMoved => "TF_GLM_KV_SHARE is now TF_KV_SHARE, the prompt store every family on the KV pool shares: set that instead",
         error.GlmShareNeedsPages => "TF_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
-        error.GlmShareTooMany => std.fmt.comptimePrint("TF_KV_SHARE keeps at most {d} states, a slot each in the startup plan: set {d} or fewer", .{ kv.most_snaps, kv.most_snaps }),
+        error.GlmShareTooMany => std.fmt.comptimePrint("TF_KV_SHARE keeps at most {d} states: set {d} or fewer", .{ kv.most_snaps, kv.most_snaps }),
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
         error.TooManyRanks => std.fmt.comptimePrint(

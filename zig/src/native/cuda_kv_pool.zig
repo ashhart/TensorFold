@@ -173,7 +173,7 @@ pub fn attach(comptime F: type, a: Allocator, ctx: *anyopaque, paged: ?Plan, pro
         return false;
     };
     if (comptime @hasDecl(F, "share_states")) F.share_states(ctx, p.snaps, p.lanes) catch |e| {
-        problem.* = try std.fmt.allocPrint(a, "the CUDA engine could not make its {d} kept states' slots ({s})", .{ p.snaps, @errorName(e) });
+        problem.* = try std.fmt.allocPrint(a, "the CUDA engine could not ready its kept states ({s})", .{@errorName(e)});
         return false;
     };
     return true;
