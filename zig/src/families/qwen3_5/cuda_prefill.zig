@@ -134,7 +134,7 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
 }
 
 /// The pass's next cut; true once the prompt is in. The hint keeps the cold grid, where a cap would cut differently.
-fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
+pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
     const ids = stream.prompt();
     // cancel between cuts and retain the last complete prefix before releasing the cache (#1228)
     if (stream.isCancelled()) {
@@ -145,6 +145,7 @@ fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
     const end = nextCut(ids.len, stream.chunks, f.at, 0);
     try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
+    lanes.prefill_widths.completed(self.gpa, stream, end - f.at);
     f.at = end;
     stream.fill_at.store(@intCast(end), .monotonic);
     // a mark the store asked for, where this pass cut anyway: the lane host copies the state here

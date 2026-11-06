@@ -1,5 +1,4 @@
 //! GLM-5.3-Flash's CUDA lane backend (as nemotron/cuda_lanes.zig): a slot per stream, shared verify, chunked prompts.
-
 const std = @import("std");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
@@ -9,19 +8,14 @@ const dflash = @import("dflash.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
 const prefix_mod = @import("cuda_prefix.zig");
 const cuda = @import("cuda");
-
 const be = lanes.backend;
-
 /// First tokens a handle names.
 const ring = 1024;
-
 /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
 pub const max_rows = fw.window_rows;
 const mtp_rows = 1 + engine.max_drafts;
 const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
-
 const copy_policy = @import("cuda_copy_policy.zig");
-
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
 const Lane = struct {
     slot: u32,
@@ -33,7 +27,6 @@ const Lane = struct {
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
     marks: []const u32 = &.{}, // TF_GLM_KV_SHARE: where the prompt cache keeps this stream's pass (owned)
 };
-
 pub const Lanes = struct {
     x: follow.Leader,
     whole: bool = false, // prompt passes run whole (TF_GLM_PROMPT_STEPS=0): no other stream's round between chunks
@@ -228,14 +221,17 @@ pub const Lanes = struct {
         return true;
     }
 
-    fn many(self: *Lanes, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
+    pub fn many(self: anytype, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
         try self.x.prefillMany(parts, firsts);
+        for (ss) |s| lanes.prefill_widths.completed(self.x.e.gpa, s, s.prompt_len);
         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
     }
 
     /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
     fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
-        const self = of(ptr);
+        return prefillStep(of(ptr), s);
+    }
+    pub fn prefillStep(self: anytype, s: *lanes.Stream) !bool {
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
         const from = if (going == null) try self.opening(s) else null;
         if (going == null) try self.images(s, from);
@@ -250,12 +246,16 @@ pub const Lanes = struct {
         var keeps: prefix_mod.Keeps = undefined;
         const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
         if (step.first) |first| {
+            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
             l.first = self.take(first);
             l.fill = null;
             return true;
         }
         l.fill = at + step.rows; // on the 2048 grid (cuda_engine.zig), so uncapped; the share still works by time
-        if (s.settle_step) try self.x.e.stream.synchronize(); // its tail would land in the next decode round's time
+        if (s.settle_step) { // its tail would land in the next decode round's time
+            try self.x.e.stream.synchronize();
+            lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
+        }
         return false;
     }
 
