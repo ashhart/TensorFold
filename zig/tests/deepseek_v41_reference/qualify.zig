@@ -13,6 +13,9 @@ pub const Result = struct {
     max_absolute_error: f64,
     rms_error: f64,
     normalized_rms_error: f64,
+    /// KL divergence of the teacher's next-token distribution from the engine's, per row: mean and worst.
+    mean_kl: f64 = 0,
+    max_kl: f64 = 0,
     greedy_disagreements: usize,
     gpu_seconds: f64,
     cpu_seconds: f64,
@@ -179,6 +182,9 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
         const expected = try reference.step(id);
         result.cpu_seconds += mtl.clock.seconds() - start;
         @memcpy(cpu[i * 129280 ..][0..129280], expected);
+        const kl = try klRow(actual, expected);
+        result.mean_kl += kl;
+        result.max_kl = @max(result.max_kl, kl);
         const expected_token = if (T == f32) try maximum(expected) else try maximumWide(expected);
         if (try maximum(actual) != expected_token) result.greedy_disagreements += 1;
         for (actual, expected) |a, b| {
@@ -191,6 +197,7 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
         }
         std.debug.print("oracle teacher {d}/{d}: GPU token={d}, CPU token={d}\n", .{ i + 1, ids.len, try maximum(actual), expected_token });
     }
+    if (ids.len > 0) result.mean_kl /= @as(f64, @floatFromInt(ids.len));
     result.rms_error = @sqrt(squared_error / @as(f64, @floatFromInt(cpu.len)));
     result.normalized_rms_error = if (squared_reference == 0) result.rms_error else @sqrt(squared_error / squared_reference);
     result.numeric_gate_passed = result.normalized_rms_error <= result.normalized_rms_limit;
@@ -212,6 +219,35 @@ fn runOf(comptime T: type, gpa: std.mem.Allocator, io: std.Io, model: *Model, id
     std.debug.print("{s}\n", .{json});
     try enforceGate(result.normalized_rms_error, result.greedy_disagreements);
     return result;
+}
+
+/// The teacher's distribution against the engine's on one logits row: KL(teacher || engine), f64.
+fn klRow(actual: []const f32, expected: anytype) !f64 {
+    var max_a: f64 = -std.math.inf(f64);
+    var max_e: f64 = -std.math.inf(f64);
+    for (actual, expected) |a, b| {
+        if (!std.math.isFinite(a)) return error.NonfiniteTeacherLogits;
+        const w: f64 = if (@TypeOf(expected[0]) == f32) @as(f64, b) else b;
+        if (!std.math.isFinite(w)) return error.NonfiniteTeacherLogits;
+        max_a = @max(max_a, @as(f64, a));
+        max_e = @max(max_e, w);
+    }
+    var sum_a: f64 = 0;
+    var sum_e: f64 = 0;
+    for (actual, expected) |a, b| {
+        const w: f64 = if (@TypeOf(expected[0]) == f32) @as(f64, b) else b;
+        sum_a += @exp(@as(f64, a) - max_a);
+        sum_e += @exp(w - max_e);
+    }
+    const lse_a = max_a + @log(sum_a);
+    const lse_e = max_e + @log(sum_e);
+    var kl: f64 = 0;
+    for (actual, expected) |a, b| {
+        const w: f64 = if (@TypeOf(expected[0]) == f32) @as(f64, b) else b;
+        const p = @exp(w - lse_e);
+        kl += p * ((w - lse_e) - (@as(f64, a) - lse_a));
+    }
+    return @max(kl, 0);
 }
 
 fn enforceGate(normalized_rms_error: f64, greedy_disagreements: usize) !void {
