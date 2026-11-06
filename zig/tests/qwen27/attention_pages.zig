@@ -29,14 +29,17 @@ const Rng = struct {
 };
 
 /// A round: its streams' windows (start, rows, a tree or a chain), the prompt kernel or the decode path, and a keep.
-const Case = struct { starts: []const u32, rows: []const u32, tree: bool = false, prompt: bool = false };
+const Case = struct { starts: []const u32, rows: []const u32, tree: bool = false, prompt: bool = false, planted: bool = false };
 const cases = [_]Case{
-    .{ .starts = &.{0}, .rows = &.{1} },                                        .{ .starts = &.{255}, .rows = &.{1} },                                           .{ .starts = &.{256}, .rows = &.{1} },
-    .{ .starts = &.{511}, .rows = &.{1} },                                      .{ .starts = &.{8191}, .rows = &.{1} },                                          .{ .starts = &.{12287}, .rows = &.{1} },
-    .{ .starts = &.{250}, .rows = &.{16} },                                     .{ .starts = &.{4090}, .rows = &.{16}, .tree = true },                           .{ .starts = &.{8184}, .rows = &.{16} },
-    .{ .starts = &.{ 100, 767, 3000 }, .rows = &.{ 16, 9, 16 }, .tree = true }, .{ .starts = &.{ 0, 255, 256, 9000 }, .rows = &.{ 3, 6, 16, 1 }, .tree = true }, .{ .starts = &.{0}, .rows = &.{128}, .prompt = true },
-    .{ .starts = &.{200}, .rows = &.{128}, .prompt = true },                    .{ .starts = &.{1000}, .rows = &.{128}, .prompt = true },                        .{ .starts = &.{8100}, .rows = &.{128}, .prompt = true },
+    .{ .starts = &.{0}, .rows = &.{1} },                                                         .{ .starts = &.{255}, .rows = &.{1} },                                           .{ .starts = &.{256}, .rows = &.{1} },
+    .{ .starts = &.{511}, .rows = &.{1} },                                                       .{ .starts = &.{8191}, .rows = &.{1} },                                          .{ .starts = &.{12287}, .rows = &.{1} },
+    .{ .starts = &.{250}, .rows = &.{16} },                                                      .{ .starts = &.{4090}, .rows = &.{16}, .tree = true },                           .{ .starts = &.{8184}, .rows = &.{16} },
+    .{ .starts = &.{ 100, 767, 3000 }, .rows = &.{ 16, 9, 16 }, .tree = true },                  .{ .starts = &.{ 0, 255, 256, 9000 }, .rows = &.{ 3, 6, 16, 1 }, .tree = true }, .{ .starts = &.{0}, .rows = &.{128}, .prompt = true },
+    .{ .starts = &.{200}, .rows = &.{128}, .prompt = true },                                     .{ .starts = &.{1000}, .rows = &.{128}, .prompt = true },                        .{ .starts = &.{8100}, .rows = &.{128}, .prompt = true },
     .{ .starts = &.{12160}, .rows = &.{128}, .prompt = true },
+    // Inf and NaN in a round's own values, which a window's earlier rows must not see: the masked kernels and scan
+                                      .{ .starts = &.{250}, .rows = &.{16}, .planted = true },                         .{ .starts = &.{4090}, .rows = &.{16}, .tree = true, .planted = true },
+    .{ .starts = &.{ 100, 767, 3000 }, .rows = &.{ 16, 9, 16 }, .tree = true, .planted = true }, .{ .starts = &.{200}, .rows = &.{128}, .prompt = true, .planted = true },        .{ .starts = &.{8100}, .rows = &.{128}, .prompt = true, .planted = true },
 };
 const most_streams = 4;
 
@@ -56,11 +59,14 @@ pub fn main(init: std.process.Init) !void {
     defer device.deinit();
     const queue = try device.queue();
     const units = device.tensorUnits();
-    const geometry = attn.planning.Geometry{ .shared_prefix = units };
+    // --shared-prefix: the M5's plan (prefix kernels over every row's keys) on any chip; the bits check addressing
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const shared = units or (args.len > 1 and std.mem.eql(u8, args[1], "--shared-prefix"));
+    const geometry = attn.planning.Geometry{ .shared_prefix = shared };
     const heads = geometry.heads;
     const kvh = geometry.kv_heads;
     if (!units) try q.simd_attention.check(device, queue);
-    const limits = attn.Limits{ .rows = most_rows, .streams = most_streams, .keys = capacity, .shared_prefix = units, .geometry = geometry };
+    const limits = attn.Limits{ .rows = most_rows, .streams = most_streams, .keys = capacity, .shared_prefix = shared, .geometry = geometry };
     var scratch = try attn.Scratch.init(device, limits);
     defer scratch.deinit();
 
@@ -98,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
         else
             .{ .keys = .{ .buffer = arena }, .values = .{ .buffer = arena, .offset = part }, .capacity = capacity, .pages = .{ .table = .{ .buffer = tables, .offset = st * per * 4 }, .page_bytes = page_bytes } };
     }
-    std.debug.print("attention_pages on {s}, tensor units {s}: {d} rounds, {d} pages of {d} bytes shuffled\n", .{ std.mem.span(device.name()), if (units) "yes" else "no", cases.len, total, page_bytes });
+    std.debug.print("attention_pages on {s}, tensor units {s}, shared prefix {s}: {d} rounds, {d} pages of {d} bytes shuffled\n", .{ std.mem.span(device.name()), if (units) "yes" else "no", if (shared) "yes" else "no", cases.len, total, page_bytes });
 
     // the same random rows in both layouts
     for (0..most_streams) |st| for (0..2) |kv| for (0..kvh) |hk| for (0..capacity) |row| {
@@ -126,6 +132,7 @@ pub fn main(init: std.process.Init) !void {
             k.* = rng.bf16();
             v.* = rng.bf16();
         }
+        if (cs.planted) plant(val.slice(u16, rows * kvh * dim), cs.rows, kvh);
         var plan = try attn.Plan.init(a, ws[0..cs.starts.len], geometry);
         defer plan.deinit();
         try scratch.upload(plan);
@@ -186,6 +193,21 @@ pub fn main(init: std.process.Init) !void {
         return error.Differs;
     };
     std.debug.print("PASS {d} rounds: {d} output values and every cache row the same bits, paged and contiguous\n", .{ cases.len, compared });
+}
+
+/// Each window's later rows: an Inf, a -Inf and a NaN in a few heads' values, which its first row must not see.
+fn plant(values: []u16, rows: []const u32, kvh: usize) void {
+    var first: usize = 0;
+    for (rows) |count| {
+        var r: usize = 1;
+        while (r < count) : (r += 3) {
+            const row = values[((first + r) * kvh + r % kvh) * dim ..][0..dim];
+            row[r % dim] = 0x7f80;
+            row[(r * 7 + 128) % dim] = 0xff80;
+            row[(r * 13 + 5) % dim] = 0x7fc1;
+        }
+        first += count;
+    }
 }
 
 /// Stream `st`'s cache `kv` (0 keys, 1 values), head `hk`, row `row` in the arena.
