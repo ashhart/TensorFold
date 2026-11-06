@@ -4,7 +4,9 @@ const std = @import("std");
 /// The four tools run tools/zig/moss_image_case.py's reference cases; cuda.zig installs them with its CUDA targets.
 pub fn install(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, strip: bool, cuda: *std.Build.Module, core: *std.Build.Module) void {
     const moss = b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
-    const moss_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "moss_image", .module = moss } } });
+    // tf-moss-image: the transformer on a reference case (tools/zig/moss_image_case.py), compared and timed; its own
+    // prompt encoder and image decoder run from the same checkpoint, so it imports the tokenizer for --prompt's ids
+    const moss_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "tokenizer", .module = core.import_table.get("tokenizer").? }, .{ .name = "moss_image", .module = moss } } });
     b.installArtifact(b.addExecutable(.{ .name = "tf-moss-image", .root_module = moss_tool }));
     const moss_blocks = b.createModule(.{ .root_source_file = b.path("zig/tests/moss_image_blocks_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "moss_image", .module = moss } } });
     b.installArtifact(b.addExecutable(.{ .name = "tf-moss-image-blocks", .root_module = moss_blocks }));

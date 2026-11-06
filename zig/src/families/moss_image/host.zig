@@ -14,6 +14,23 @@ pub fn round(x: f32) f32 {
     return widen(bf16(x));
 }
 
+/// The serving host's 8-bit picture rule (native/moss_image_host.zig): clamp, rescale, * 255, then round ties to even.
+pub fn quantize(out: []u8, pixels: []const f32) void {
+    for (out, pixels) |*o, v| {
+        const unit = std.math.clamp(v, -1, 1) * 0.5 + 0.5;
+        o.* = roundEven(unit * 255);
+    }
+}
+
+/// A value from 0 through 255 as the nearest whole number, ties to even: Metal's `rint`, as the host rounds it.
+pub fn roundEven(x: f32) u8 {
+    const whole = @trunc(x);
+    const at: u32 = @intFromFloat(whole);
+    const frac = x - whole;
+    const up: u32 = if (frac > 0.5 or (frac == 0.5 and at % 2 == 1)) 1 else 0;
+    return @intCast(@min(at + up, 255));
+}
+
 /// Rotary cos, sin (image + text rows, 64) in bf16: image rows at frame `text`, centred; then prompt rows by frame.
 pub fn rotary(cos: []f32, sin: []f32, bands: *const [cfg.bands]f32, text: usize, rows: usize, columns: usize) void {
     const half = cfg.head_dim / 2;
@@ -181,4 +198,15 @@ test "MOSS-Image bf16: the old spelling's bits on every zero, subnormal, infinit
     for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
     var prng = std.Random.DefaultPrng.init(1863);
     for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+}
+
+test "MOSS-Image pictures: the host's 8-bit rule clamps, scales and rounds ties to even" {
+    try std.testing.expectEqual(@as(u8, 0), roundEven(0.5));
+    try std.testing.expectEqual(@as(u8, 2), roundEven(1.5));
+    try std.testing.expectEqual(@as(u8, 2), roundEven(2.5));
+    try std.testing.expectEqual(@as(u8, 128), roundEven(127.5));
+    const pixels = [_]f32{ -2, 0, 1, 2 };
+    var out: [pixels.len]u8 = undefined;
+    quantize(&out, &pixels);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 128, 255, 255 }, &out);
 }
