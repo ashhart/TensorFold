@@ -69,7 +69,7 @@ pub fn runAttention(gpa: std.mem.Allocator, io: std.Io, model: *Model, snapshot:
     var encoding = true;
     errdefer if (encoding) enc.end();
     for (model.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
-    try attention.encodeDiagnostic(&model.pipelines.attention, enc, weights, model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(layer), 1, cfg, true, .{ .ctx = &capture, .capture = AttentionCapture.gpu });
+    try attention.encodeDiagnostic(&model.pipelines.attention, enc, weights, model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(layer), 1, cfg, true, .{ .ctx = &capture, .capture = AttentionCapture.gpu }, null, &.{});
     enc.end();
     encoding = false;
     cb.commit();
