@@ -4,6 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Unlimited-OCR-2 on native Metal (M5 GPUs): Baidu's BF16 release as published serves page images through
+  `tensorfold-native serve --vision`; one stream, greedy, up to 131,072 tokens. On three of the recipe's six cases its
+  text is identical to the release's own `infer` in torch bf16. The other three first depart from it where two
+  candidate tokens tie, as torch's own float32 run does; later picks differ by up to one bf16 step on the single pages
+  and up to three in the five-page document (#2074). Thanks to @BobClawblaw.
+
 - TENSORFOLD_PHASE_METRICS=1 adds a bounded request queue-wait histogram and its vLLM alias to native metrics; it is off by default (#2139).
 
 - GLM on CUDA prefetches a decode window's next weights into L2 on a side stream, on by default on GB10 (sm_121) only, inside a 12 MiB budget; replies are identical, and every other GPU is unchanged (#1580). Thanks to @Bizuayeu.

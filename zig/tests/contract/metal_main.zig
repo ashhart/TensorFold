@@ -23,7 +23,6 @@ const glm_rows_k = @import("metal_glm_rows.zig");
 const pair_k = @import("metal_pair.zig");
 const pair_controls = @import("metal_pair_controls.zig");
 const minimax_k = @import("metal_minimax.zig");
-const attn_k = @import("metal_q27_attn.zig");
 const io_k = @import("metal_q27_attn_io.zig");
 const q27_moe = @import("metal_qwen27_moe.zig");
 const q27_rows = @import("metal_qwen27_moe_rows.zig");
@@ -493,33 +492,18 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_unroll: @import("metal_nemotron_unroll.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_unroll.deinit();
     try nemotron_unroll.collect(o.only);
-    // qwen27 attention_io at the 27B's head counts on one Mac (24 over 4) and on a rank of two (12 over 2)
-    var ios: std.ArrayList(*io_k.Io) = .empty;
-    defer {
-        for (ios.items) |x| {
-            x.deinit();
-            a.destroy(x);
-        }
-        ios.deinit(a);
-    }
-    var io_regs: std.ArrayList(io_k.Reg) = .empty;
-    defer io_regs.deinit(a);
-    for (std.enums.values(attn_k.Heads)) |h| for (std.enums.values(io_k.Which)) |w| try io_regs.append(a, .{ .heads = h, .which = w });
-    try io_regs.appendSlice(a, &.{ .{ .heads = .q27b, .which = .append, .control = true }, .{ .heads = .rank, .which = .device_keep, .control = true } });
-    for (io_regs.items) |r| {
-        if (!wanted(o, io_k.spec(r).name)) continue;
-        const x = try a.create(io_k.Io);
-        errdefer a.destroy(x);
-        x.* = try io_k.Io.init(a, device, queue, r);
-        try ios.append(a, x);
-        try kernels.append(a, x.kernel());
-    }
+    var ios: io_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer ios.deinit();
+    try ios.collect(o.only);
     var attn_rows: @import("metal_q27_attn_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer attn_rows.deinit();
     try attn_rows.collect(o.only);
     var minimax: minimax_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer minimax.deinit();
     try minimax.collect(o.only);
+    var uocr: @import("metal_uocr.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer uocr.deinit();
+    try uocr.collect(o.only);
     var mma_operand: @import("metal_mma_operand.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer mma_operand.deinit();
     try mma_operand.collect(o.only);
