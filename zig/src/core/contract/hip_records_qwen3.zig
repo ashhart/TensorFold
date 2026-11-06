@@ -6,7 +6,7 @@ const hip_records = @import("hip_records.zig");
 const Record = hip_records.Record;
 const check = hip_records.check;
 
-pub const records = [5]Record{
+pub const records = [7]Record{
     .{
         .launch = .{ .name = "attention tf_heads_rows", .symbol = "tf_heads_rows", .image = "ops", .threads = 256 },
         .usage = .{
@@ -41,6 +41,24 @@ pub const records = [5]Record{
             .{ .vgprs = 0, .served = false },
             .{ .vgprs = 0, .served = false },
             .{ .vgprs = 202, .sgprs = 24, .lds = 65536, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "dense gemm dense_wmma12_gemm_silu<DotBF16, W12Pair>", .symbol = "_ZN2tf4rocm22dense_wmma12_gemm_siluINS0_7DotBF16ENS0_6W12GeoILi16ELi64ELi64ELi1ELi2EEEEEvNS0_6AffineE", .image = "affine_tiles", .threads = 64 },
+        .usage = .{
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 138, .sgprs = 22, .lds = 23040, .private = 0, .bound = 64, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "dense gemm dense_wmma12_gemm_silu<DotBF16, W12Big>", .symbol = "_ZN2tf4rocm22dense_wmma12_gemm_siluINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi64ELi2ELi4EEEEEvNS0_6AffineE", .image = "affine_tiles", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 202, .sgprs = 22, .lds = 65536, .private = 0, .bound = 256, .wave = 32 },
         },
     },
     .{
