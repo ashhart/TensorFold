@@ -72,6 +72,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: ten native `serve` flags that were undocumented now are: `--top-p`, `--top-k` and `--min-p` as sampling defaults, `--compact-at`, `--compact-keep` and `--compact-memory`, Dory's `--loops`, the two silence-onset flags and Drama 3's `--max-frames` (#2345).
 
 - CI: main's `zig` and `zig-windows` jobs reuse main's newest build cache, as a pull request does, so each push compiles and runs only what changed since. `zig_cache_restat --prune` keeps each saved cache to about one build, and a nightly run builds and checks everything from nothing (#2402).
+- Qwen3.5 on CUDA loads a plain BF16 checkpoint as a decision backbone (Cloudflare's Clef-Flash), not for chat:
+  chat and the flags the joint schema head is not qualified with are refused by name before the weights load,
+  `capabilities --json` lists `bf16` under `decisions`, and its norms scale by 1 + w in FP32 (#2324).
 
 - Docs: `docs/api.md` lists `DELETE /v1/slide/facts`, and `docs/control.md` no longer says the native server refuses `--spill-gib` and `--vision` (#2341).
 
