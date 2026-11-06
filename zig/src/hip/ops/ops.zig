@@ -38,6 +38,7 @@ pub const Ops = struct {
     blas: ?*const @import("../blas.zig").Blas = null,
 
     pub const project = products.project;
+    pub const projectSilu = products.projectSilu;
     pub const projectGroup = products.projectGroup;
     pub const projectRoutedAct = products.projectRoutedAct;
     pub const projectRouted = products.projectRouted;
