@@ -385,8 +385,6 @@ pub fn main(init: std.process.Init) !u8 {
         try gathers.append(a, p);
         try kernels.append(a, p.kernel());
     };
-    var h3_list: std.ArrayList(*h3_k.H3) = .empty;
-    defer for (h3_list.items) |x| x.deinit();
     var qwen3_heads: @import("metal_qwen3_heads.zig").Suite = .{};
     defer qwen3_heads.deinit();
     try qwen3_heads.collect(a, device, queue, &kernels, o.only);
@@ -396,13 +394,9 @@ pub fn main(init: std.process.Init) !u8 {
     var masked_values = @import("metal_masked_values.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer masked_values.deinit();
     try masked_values.collect(o.only);
-    if (tensor) for (std.enums.values(h3_k.Which)) |w| {
-        if (!wanted(o, h3_k.spec(w).name)) continue;
-        const x = try a.create(h3_k.H3);
-        x.* = try h3_k.H3.init(a, device, queue, w);
-        try h3_list.append(a, x);
-        try kernels.append(a, x.kernel());
-    };
+    var h3: h3_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer h3.deinit();
+    try h3.collect(o.only);
     var h3_top: ?h3_topk.TopK = null;
     defer if (h3_top) |*x| x.deinit();
     if (wanted(o, h3_topk.spec().name)) {
