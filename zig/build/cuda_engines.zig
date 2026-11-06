@@ -91,6 +91,7 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "dory", .module = @import("dory.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "dots_mocr_cuda", .module = @import("dots_mocr_cuda.zig").module(b, target, optimize, cuda, core, lanes, @import("cuda_dense.zig").module(b, target, optimize, cuda, core, lanes)) },
             .{ .name = "muse_spark", .module = @import("muse.zig").moduleOver(b, target, optimize, cuda, core, lanes, @import("tp.zig").moduleWith(b, target, optimize, cuda, verbs)) },
+            .{ .name = "ricursive_cuda", .module = @import("ricursive_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
         },
     });
     mod.addImport("qwen4", @import("qwen4.zig").module(b, target, optimize, core));
