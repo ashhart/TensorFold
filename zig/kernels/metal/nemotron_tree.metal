@@ -146,7 +146,7 @@ template <int H, int DH, int NG, int DS, int XD, int PROJ, int DTOFF, int SSZ>
 #define TT_Y(b, k, hi) ((b) * 8 + (hi) * 4 + (k))
 #endif
 
-// A node's keys past the shared pass, gathered by logical position (dims: P, PT, NCA, NCB, NT): its one-row step's sums.
+// A node's keys past the shared pass, gathered by logical position (dims: P, PT, NCA, NCB, NT): one-row step's sums.
 template <int G, int D, int CK, int TK, int MAXD>
 [[kernel]] void tf_tree_tail(
   const device bfloat16_t* QP [[buffer(0)]],
