@@ -9,6 +9,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_QWEN_KV_HOST_GIB", .raw = "8", .n = 8 },
     .{ .name = "TF_Q27_QK", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_QK", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_FLAT_GLUE", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_FLAT_GLUE", .raw = "1", .n = 1 },
     .{ .name = "TF_CACHE_EVICT", .raw = "main", .n = 0 },
     .{ .name = "TF_CACHE_EVICT", .raw = "decayed_resume", .n = 1 },
     .{ .name = "TF_CUDA_SCHED", .raw = "auto", .n = 0 },
