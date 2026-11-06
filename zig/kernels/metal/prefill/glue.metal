@@ -1,4 +1,4 @@
-// Nemotron prefill's element-wise steps, copies and compiled fusions, value for value MLX 0.32.3's (one op a statement).
+// Nemotron prefill's element-wise steps, copies and compiled fusions, value for value MLX 0.32.3's (an op a statement).
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
