@@ -11,8 +11,9 @@ const Counted = struct {
     inner: fixture.Model = .{},
     calls: usize = 0,
     learns: usize = 0,
-    requests: std.crypto.hash.sha2.Sha256 = .init(.{}),
-    replies: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    lock: std.Io.Mutex = .init,
+    requests: [2048][32]u8 = undefined,
+    replies: [2048][32]u8 = undefined,
     fn engine(m: *@This()) api.Engine {
         return .{ .ctx = m, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
@@ -21,29 +22,36 @@ const Counted = struct {
     }
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const m: *@This() = @ptrCast(@alignCast(ctx));
+        m.lock.lockUncancelable(t.io);
+        const index = m.calls;
         m.calls += 1;
-        var length: [8]u8 = undefined;
-        std.mem.writeInt(u64, &length, request.prompt.len, .little);
-        m.requests.update(&length);
-        m.requests.update(std.mem.sliceAsBytes(request.prompt));
+        m.lock.unlock(t.io);
+        std.debug.assert(index < m.requests.len);
+        std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(request.prompt), &m.requests[index], .{});
+        var tokens = std.crypto.hash.sha2.Sha256.init(.{});
+        defer {
+            var token_hash: [32]u8 = undefined;
+            tokens.final(&token_hash);
+            var paired = std.crypto.hash.sha2.Sha256.init(.{});
+            paired.update(&m.requests[index]);
+            paired.update(&token_hash);
+            paired.final(&m.replies[index]);
+        }
         const Forward = struct {
-            model: *Counted,
+            tokens: *std.crypto.hash.sha2.Sha256,
             sink: api.Sink,
             fn event(raw: *anyopaque, which: api.Id, value: *const api.Event) void {
                 const f: *@This() = @ptrCast(@alignCast(raw));
                 switch (value.*) {
                     .tokens => |ids| {
-                        var size: [8]u8 = undefined;
-                        std.mem.writeInt(u64, &size, ids.len, .little);
-                        f.model.replies.update(&size);
-                        f.model.replies.update(std.mem.sliceAsBytes(ids));
+                        f.tokens.update(std.mem.sliceAsBytes(ids));
                     },
                     else => {},
                 }
                 f.sink.event(f.sink.ctx, which, value);
             }
         };
-        var forward: Forward = .{ .model = m, .sink = sink };
+        var forward: Forward = .{ .tokens = &tokens, .sink = sink };
         const e = m.inner.engine();
         return e.vtable.submit(e.ctx, id, request, .{ .ctx = &forward, .event = Forward.event });
     }
@@ -114,8 +122,16 @@ fn capture(a: std.mem.Allocator, case: usize, extra: []const u8) !Capture {
     for (graph.field("facts").?.array) |fact| try fact.object.put(a, "at", try json.intValue(a, 0));
     var request_hash: [32]u8 = undefined;
     var reply_hash: [32]u8 = undefined;
-    m.requests.final(&request_hash);
-    m.replies.final(&reply_hash);
+    const Less = struct {
+        fn less(_: void, x: [32]u8, y: [32]u8) bool {
+            return std.mem.order(u8, &x, &y) == .lt;
+        }
+    };
+    // Side questions run concurrently; compare every request/reply pair independently of submission order.
+    std.mem.sort([32]u8, m.requests[0..m.calls], {}, Less.less);
+    std.mem.sort([32]u8, m.replies[0..m.calls], {}, Less.less);
+    std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(m.requests[0..m.calls]), &request_hash, .{});
+    std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(m.replies[0..m.calls]), &reply_hash, .{});
     return .{ .requests_sha256 = try std.fmt.allocPrint(a, "{x}", .{request_hash}), .replies_sha256 = try std.fmt.allocPrint(a, "{x}", .{reply_hash}), .calls = m.calls, .learns = m.learns, .writes = srv.slide.test_persist_calls, .graph = try json.stringify(a, graph, .{ .compact = true }), .events = try events(a, wire) };
 }
 

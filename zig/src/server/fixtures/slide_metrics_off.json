@@ -3,8 +3,8 @@
     "calls": 278,
     "learns": 3,
     "writes": 4,
-    "requests_sha256": "b06b82999194f8308f4c2de773101a68145508d89992c2937692a6078b4934dd",
-    "replies_sha256": "18fc953c3f17f0e98b825e4a18a089e9c28a30f8f574e810f9c684d78df49221",
+    "requests_sha256": "c5a68d350b2830c5f8ddb225ae3ec7754f2496a3720214b025459f8055bd7999",
+    "replies_sha256": "214f68ae8317ea06a4e270d4d97b0a8f9822cbee888cf909d27ef3a6427b45b1",
     "graph": "{\"next\":2,\"facts\":[{\"id\":1,\"text\":\"I like blue.\",\"source\":\"chat\",\"at\":0,\"state\":\"learned\",\"links\":[],\"round\":1,\"questions\":[\"Which colour do I like?\",\"What colour did I say I like?\"],\"answers\":[{\"question\":\"Which colour do I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"},{\"question\":\"What colour did I say I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"}]}]}",
     "events": "fact\n{\"id\":1,\"text\":\"I like blue.\"}\nlearning\n{\"id\":1}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nlearned\n{\"id\":1,\"recalled\":true,\"steps\":1}\nprogress\n{\"id\":0,\"phase\":\"saving\",\"at\":0,\"of\":0}\nsaved\n{\"saved\":true}\n[DONE]\n"
   },
@@ -12,8 +12,8 @@
     "calls": 402,
     "learns": 9,
     "writes": 4,
-    "requests_sha256": "4a1ce4bb7aa832f2c27b24c9eb33efe03cd46cfc2deb3c73d501fdd939da0153",
-    "replies_sha256": "b554298b8e91fb5bdd92f8c416930a5ec8affef500ce6e2676853c8c72b3335b",
+    "requests_sha256": "9e1b91bc30482c8f1a076b4d76f8975a5d7eaf97c4e085f043960f65d7ef7ef4",
+    "replies_sha256": "cb8a0c5f07437b9fc0637e4a963dbb8a25d9875f5b65e1284baf566ef2b8a3c6",
     "graph": "{\"next\":2,\"facts\":[{\"id\":1,\"text\":\"I like blue.\",\"source\":\"chat\",\"at\":0,\"state\":\"missed\",\"links\":[],\"round\":5,\"questions\":[\"Which colour do I like?\",\"What colour did I say I like?\"],\"answers\":[{\"question\":\"Which colour do I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"},{\"question\":\"What colour did I say I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"}]}]}",
     "events": "fact\n{\"id\":1,\"text\":\"I like blue.\"}\nlearning\n{\"id\":1}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nlearned\n{\"id\":1,\"recalled\":false,\"steps\":5}\nprogress\n{\"id\":0,\"phase\":\"saving\",\"at\":0,\"of\":0}\nsaved\n{\"saved\":true}\n[DONE]\n"
   },
@@ -21,8 +21,8 @@
     "calls": 6,
     "learns": 2,
     "writes": 4,
-    "requests_sha256": "3b2e06df9ab247b5cab2ac12d7ed08cccaed1c85525e7b36b86de6c6848c51eb",
-    "replies_sha256": "24eae2fa80ad88f3df95c26f5b91a86bfa33c85d87d11bd8cff1cf094465a4b0",
+    "requests_sha256": "277ac0bcf16aa4b18180c88bd97764f1b01c140a8f394c667b20d2ad9ecca100",
+    "replies_sha256": "1947554490c54ae5e2500daff142e6b5f8a17bf12a9093b919be9aaba8b61503",
     "graph": "{\"next\":2,\"facts\":[{\"id\":1,\"text\":\"I like blue.\",\"source\":\"chat\",\"at\":0,\"state\":\"missed\",\"links\":[],\"message\":\"too few clean answers to learn from\"}]}",
     "events": "fact\n{\"id\":1,\"text\":\"I like blue.\"}\nlearning\n{\"id\":1}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nlearned\n{\"id\":1,\"recalled\":false,\"message\":\"too few clean answers to learn from\"}\nprogress\n{\"id\":0,\"phase\":\"saving\",\"at\":0,\"of\":0}\nsaved\n{\"saved\":true}\n[DONE]\n"
   }
