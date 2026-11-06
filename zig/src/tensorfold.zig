@@ -28,7 +28,23 @@ pub const frags = @import("core/frags.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
 pub const quant = @import("core/quant/quant.zig");
+pub const deepseek_v41_config = @import("families/deepseek_v41/config.zig");
+pub const deepseek_v41_load = @import("families/deepseek_v41/load.zig");
+pub const deepseek_v41_pack = @import("families/deepseek_v41/pack.zig");
+pub const deepseek_v41_weights = @import("families/deepseek_v41/weights.zig");
+/// The streamed Engram row source: the qualification tool's reference reads its rows through this, so that a streamed
+/// model can be compared against the CPU reference at all.
+pub const deepseek_v41_engram_rows = @import("families/deepseek_v41/engram_rows_safetensors.zig");
+pub const deepseek_v41_view = @import("families/deepseek_v41/view.zig");
+pub const deepseek_v41 = @import("families/deepseek_v41/model.zig");
+pub const deepseek_v41_profiler = @import("families/deepseek_v41/profiler.zig");
+pub const deepseek_v41_backend = @import("families/deepseek_v41/backend.zig");
+pub const deepseek_v41_token_map = @import("families/deepseek_v41/token_map.zig");
+pub const gpu_counters = @import("core/gpu_counters.zig");
+pub const expert_groups = @import("core/expert_groups.zig");
+pub const deepseek_v41_engram_hash = @import("families/deepseek_v41/engram_hash.zig");
 pub const exl3_format = @import("core/exl3_format.zig");
+pub const exl3_layout = @import("core/exl3_layout.zig");
 pub const exl3_projection = @import("core/exl3_projection.zig");
 pub const exlr8 = @import("core/exlr8.zig");
 pub const exlr8_projection = @import("core/exlr8_projection.zig");
@@ -134,6 +150,9 @@ pub const tree_commit_gpu = @import("tree_commit_gpu");
 
 pub const tree_slots = @import("core/tree_slots.zig");
 
+// LOCAL WORKAROUND (not part of this change): the branch's native root must export what load.zig imports.
+// Reported separately; remove when the branch publishes it.
+pub const paced_read = @import("core/paced_read.zig");
 pub const weight_only = @import("core/weight_only.zig");
 pub const weight_only_contract = @import("core/contract/weight_only.zig");
 pub const weight_only_cuda_adapter = @import("core/weight_only_cuda_impl.zig").Adapter;

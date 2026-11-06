@@ -34,6 +34,8 @@ pub const core_row_projection = @embedFile("core/row_projection.metal");
 pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
     @embedFile("core/tile_qmv_rows.metal");
 pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
+/// The same EXL3 prefill reduction on the tensor units (core/exl3_projection.zig, loadWith).
+pub const core_exl3_projection_nax = @embedFile("core/exl3_projection_nax.metal");
 pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
 pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
 pub const core_exlr8_prompt = @embedFile("core/exlr8_prompt.metal");
@@ -65,8 +67,7 @@ pub const nemotron_head = @embedFile("nemotron_head.metal");
 /// Keyed draws over the whole vocabulary where tf_gpu_sample would keep only its 1,024 candidates.
 pub const nemotron_sample = @embedFile("nemotron_sample.metal");
 
-/// Sliding Weights: the learned change in the forward and the bounded step on captured rows.
-/// Learning in the weights: a low-rank change at every layer, and the gradients through each kind of layer to it.
+/// Sliding Weights: the learned forward change and bounded captured-row steps; per-layer low-rank change and gradients.
 pub const train = @embedFile("train.metal");
 pub const train_mixers = @embedFile("train_mixers.metal");
 
@@ -151,6 +152,18 @@ pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal");
+pub const core_affine_mm_i8 = @embedFile("core/affine_mm_i8.h");
+
+/// The reference's quantised GEMM skeleton (ml-explore/mlx v0.32.4, MIT): `steel/gemm`'s BlockMMA, BlockLoader
+/// and QuantizedBlockLoader with `affine_gather_qmm_rhs`, flattened from seventeen MLX headers with their includes
+/// resolved (see the file's own list). It is the composition the sibling engine dispatches for its expert bodies;
+/// our trellis decode is grafted where their quantised loader sits.
+pub const core_mlx_steel = @embedFile("core/mlx/mlx_steel.h");
+
+/// The int8 routed body: the trellis skeleton (`core/exl3_projection_nax.metal`) with the tile and the x block
+/// quantised per 16x16 fragment and multiplied on the tensor units as int8 x int8 (TF_DSV41_INT8_BODY).
+pub const core_exl3_projection_nax_i8 = @embedFile("core/exl3_projection_nax_i8.metal");
+pub const core_exl3_projection_i8 = @embedFile("core/exl3_projection_i8.metal");
 /// A hyper-connection block boundary in two launches (core/hc.zig).
 pub const core_hc_boundary = @embedFile("core/hc_boundary.metal");
 /// MLX's precise row softmax and its embedding and RMS kernels, as the replicas in ops/ write them.
@@ -161,6 +174,21 @@ pub const flashnext_gen = @import("flashnext/sources_gen.zig");
 /// Nemotron's packed kernels prebuilt as one metallib, for a macOS whose runtime compiler refuses uint4b_format.
 pub const packed_metallib = @import("nemotron_packed_metallib").bytes;
 /// The core lane projection (tensor units): every window row's sums in one weight read, and its row order.
+pub const core_expert_groups = @embedFile("core/expert_groups.metal");
+/// DeepSeek V4.1 Flash: Engram hash/commit, CSA attention, mHC mix, routed experts, shared projections, cache/rotary.
+pub const deepseek_v41_engram = @embedFile("deepseek_v41/engram_exl3.metal");
+pub const deepseek_v41_ops = @embedFile("deepseek_v41/ops.metal");
+pub const deepseek_v41_mhc = @embedFile("deepseek_v41/mhc.metal");
+pub const deepseek_v41_hc_boundary = @embedFile("deepseek_v41/hc_boundary.metal");
+pub const deepseek_v41_route = @embedFile("deepseek_v41/route_exl3.metal");
+pub const deepseek_v41_kv = @embedFile("deepseek_v41/kv.metal");
+/// ROUND-486: the served window KV norm+rope+pack fusion (its own TU, so rope.metal's contraction is kept).
+pub const deepseek_v41_kv_glue = @embedFile("deepseek_v41/kv_glue.metal");
+pub const deepseek_v41_rope = @embedFile("deepseek_v41/rope.metal");
+pub const deepseek_v41_index = @embedFile("deepseek_v41/index_exl3.metal");
+pub const deepseek_v41_csa2 = @embedFile("deepseek_v41/csa2.metal");
+/// The same attention's prompt chunks on the tensor units (nax.h inlined at load, after kv's decoders).
+pub const deepseek_v41_csa2_nax = @embedFile("deepseek_v41/csa2_nax.metal");
 pub const core_lane_projection = @embedFile("core/lane_projection.metal");
 pub const core_lane_order = @embedFile("core/lane_order.metal");
 /// Lane rows attending a shared context through an explicit mask (core/shared_attention.zig).

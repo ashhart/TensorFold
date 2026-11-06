@@ -26,6 +26,25 @@ const int = trail.int;
 const Outcome = struct { got: []const u32, path: []const u32, cut: ?usize, follow: []const u32 };
 const Result = struct { rows: u32, keep: u32, got: []const u32 };
 const Unread = struct { event: usize, handle: u64 };
+/// ROUND-459 instrument (TF_DSV41_CONCLUDE_PROF): where the round's host time between the two forwards goes.
+const Prof = struct {
+    pre_ns: u64 = 0, // plan + build, before the verify's encode
+    verify_ns: u64 = 0, // backend.verify (encode + commit + wait)
+    tok_ns: u64 = 0, // win.tokens + rowParents
+    conclude_ns: u64 = 0, // the whole conclude
+    accept_ns: u64 = 0, // accept.acceptPath
+    pre_commit_ns: u64 = 0, // conclude's bookkeeping before Stream.commit
+    commit_ns: u64 = 0, // Stream.commit
+    event_ns: u64 = 0, // the round trail.event
+    keep_ns: u64 = 0, // backend.keep
+    draft_ns: u64 = 0, // askDrafts / draftLate (the drafter's own forward)
+};
+/// Monotonic host nanoseconds (as model.zig reads it).
+fn nowNs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
 pub const Engine = struct {
     const pieces_ = @import("pieces.zig");
     pub const beginStream = pieces_.beginStream;
@@ -38,6 +57,8 @@ pub const Engine = struct {
     cfg: *const Config,
     backend: be.Backend,
     clock: be.Clock,
+    prof_on: bool = false, // ROUND-459 instrument (TF_DSV41_CONCLUDE_PROF)
+    prof: Prof = .{},
     log: ?*ev.Log = null,
     trim: ?trim.Trim = null, // a family's row policy in place of the built-in allocation (lanes/trim.zig)
     rule: depth.Rule,
@@ -60,6 +81,7 @@ pub const Engine = struct {
             .cfg = cfg,
             .backend = backend,
             .clock = clock,
+            .prof_on = std.c.getenv("TF_DSV41_CONCLUDE_PROF") != null,
             .arena = std.heap.ArenaAllocator.init(gpa),
             .rule = .{
                 .gpa = gpa,
@@ -145,7 +167,17 @@ pub const Engine = struct {
             const chosen = try e.takeTurns(live.items);
             e.shared_rounds += 1;
             for (chosen) |s| s.served = e.shared_rounds;
+            // ROUND 529: a shared round's drafter conditions every lane on the last verified lane's
+            // capture (one taps ring, one drafter ring), so three of four drafted streams moved while
+            // the plain windows were token-identical and faster. A shared round runs the exact plain
+            // window; a stream that runs alone again gets its own drafts back.
+            const drafts_on = try a.alloc(bool, chosen.len);
+            for (chosen, 0..) |s, i| {
+                drafts_on[i] = s.drafts;
+                if (e.cfg.shared_plain) s.drafts = false;
+            }
             try e.roundStreams(chosen);
+            for (chosen, 0..) |s, i| s.drafts = drafts_on[i];
         } else {
             for (live.items) |s| {
                 // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
@@ -201,6 +233,9 @@ pub const Engine = struct {
     fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
         e.clock.start();
         try e.late.flush(e, Engine.askDrafts);
+        const prof = e.prof_on;
+        var t_prev: u64 = if (prof) nowNs() else 0;
+        if (prof) e.prof = .{};
         const priced = s.priced;
         s.priced = null;
         const a = e.arena.allocator();
@@ -210,13 +245,33 @@ pub const Engine = struct {
         const plan = plans[0];
         const early = e.cfg.family_mtp and s.drafts and plan.kind != .forced and e.cfg.speculate_early and plan.parents == null and s.grammar == null;
         const windows = [_]be.Window{try win.build(e, plan, early)};
+        if (prof) {
+            e.prof.pre_ns = nowNs() - t_prev;
+            t_prev = nowNs();
+        }
         const rows = windows[0].rows();
         var out = [_]be.Verified{.{ .sampled = try a.alloc(u32, rows), .drafts = try a.alloc(u32, rows - 1), .rows = if (s.logprobs != null) try a.alloc(LogRow, rows) else &.{} }};
         try e.backend.verify(&windows, &out);
+        if (prof) {
+            e.prof.verify_ns = nowNs() - t_prev;
+            t_prev = nowNs();
+        }
         const tokens = try win.tokens(e, windows[0], out[0]);
         const parents = try win.rowParents(e, windows[0]);
+        if (prof) {
+            e.prof.tok_ns = nowNs() - t_prev;
+            t_prev = nowNs();
+        }
         const o = try e.conclude(s, plan, out[0].sampled, out[0].rows, tokens, parents, windows[0].positions);
+        if (prof) {
+            e.prof.conclude_ns = nowNs() - t_prev;
+            t_prev = nowNs();
+        }
         if (o.path.len < rows or plan.parents != null) try e.backend.keep(&windows, &.{o.path});
+        if (prof) {
+            e.prof.keep_ns = nowNs() - t_prev;
+            t_prev = nowNs();
+        }
         const held_levels = s.held_levels;
         if (e.cfg.family_mtp and s.drafts) {
             if (early and o.cut == null) {
@@ -234,6 +289,23 @@ pub const Engine = struct {
                 try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
+        }
+        if (prof) {
+            e.prof.draft_ns = nowNs() - t_prev;
+            const p_ = e.prof;
+            std.log.info("cprof: round {d} pre {d:.3} verify {d:.3} tok {d:.3} concl {d:.3} (acc {d:.3} precommit {d:.3} commit {d:.3} event {d:.3}) keep {d:.3} draft {d:.3} ms", .{
+                s.rounds,
+                @as(f64, @floatFromInt(p_.pre_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.verify_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.tok_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.conclude_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.accept_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.pre_commit_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.commit_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.event_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.keep_ns)) / 1e6,
+                @as(f64, @floatFromInt(p_.draft_ns)) / 1e6,
+            });
         }
         if (e.cfg.timed and s.graft_room != null and s.rounds > 1) {
             // the stream's round time beyond its window and head levels, for the lane planner
@@ -327,6 +399,8 @@ pub const Engine = struct {
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.
     fn conclude(e: *Engine, s: *Stream, p: Plan, sampled: []const u32, rows_lp: []const LogRow, tokens: []const u32, parents: []const i32, positions: []const u64) !Outcome {
         const a = e.arena.allocator();
+        const prof = e.prof_on;
+        var t_prev: u64 = if (prof) nowNs() else 0;
         const rows = tokens.len;
         var path: []u32 = undefined;
         var committed: std.ArrayList(u32) = .empty;
@@ -337,6 +411,10 @@ pub const Engine = struct {
             try committed.append(a, s.popForce() orelse sampled[rows - 1]);
         } else {
             path = try accept.acceptPath(a, tokens, parents, sampled);
+            if (prof) {
+                e.prof.accept_ns += nowNs() - t_prev;
+                t_prev = nowNs();
+            }
             for (path[1..]) |r| try committed.append(a, accept.targetPick(sampled, parents, r));
             try committed.append(a, sampled[path[path.len - 1]]);
             if (s.proposer) |pr| pr.round(@intCast(rows), @intCast(path.len - 1));
@@ -421,7 +499,15 @@ pub const Engine = struct {
             committed_rows = try a.alloc(LogRow, committed.items.len);
             for (committed_rows, committed.items, path[0..committed.items.len]) |*r, t, row| r.* = rows_lp[row].forToken(t);
         }
+        if (prof) {
+            e.prof.pre_commit_ns += nowNs() - t_prev;
+            t_prev = nowNs();
+        }
         const landed = try s.commit(e.gpa, committed.items, committed_rows);
+        if (prof) {
+            e.prof.commit_ns += nowNs() - t_prev;
+            t_prev = nowNs();
+        }
         const got = committed.items[0..landed];
         if (s.finished and got.len < path.len) path = path[0 .. got.len + 1];
         const keep = path.len;
@@ -436,6 +522,7 @@ pub const Engine = struct {
             f("path", .{ .u32s = path }),                             f("got", .{ .u32s = got }),
             f("cut", if (cut) |c| int(c) else .null),
         });
+        if (prof) e.prof.event_ns += nowNs() - t_prev;
         return .{ .got = got, .path = path, .cut = cut, .follow = committed.items[0..keep] };
     }
 

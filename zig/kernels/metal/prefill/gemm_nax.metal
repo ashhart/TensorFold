@@ -105,8 +105,8 @@ inline void gemm_store(thread const frag<float> (&acc)[2][2], device O* D, int l
 }
 
 // D = A * B per batch, steel_gemm_fused_nax without epilogue; P holds the GEMM_PARAMS fields of check_prefill_ops.
-template <typename T, bool TA, bool TB, bool AM, bool AN, bool AK, int BM, int BN, int BK, int WM, int WN>
-inline void gemm_nax(const device T* A, const device T* B, device T* D, const device int* P, uint3 tg, uint sg,
+template <typename T, bool TA, bool TB, bool AM, bool AN, bool AK, int BM, int BN, int BK, int WM, int WN, typename O = T>
+inline void gemm_nax(const device T* A, const device T* B, device O* D, const device int* P, uint3 tg, uint sg,
                      uint lane) {
   static_assert(BM / WM == 32 && BN / WN == 32, "a simdgroup owns a 32x32 block");
   const int swz = P[8];
@@ -125,11 +125,11 @@ inline void gemm_nax(const device T* A, const device T* B, device T* D, const de
   frag<float> acc[2][2];
   if (full) {
     gemm_block<T, TA, TB, true, BK>(acc, A, B, lda, ldb, P[2], P[9], rows, cols, home);
-    gemm_store<T, true>(acc, D, ldd, rows, cols, home);
+    gemm_store<O, true>(acc, D, ldd, rows, cols, home);
   } else {
     gemm_block<T, TA, TB, false, BK>(acc, A, B, lda, ldb, P[2], P[9], rows, cols, home);
     if (rows > 0 && cols > 0) {
-      gemm_store<T, false>(acc, D, ldd, rows, cols, home);
+      gemm_store<O, false>(acc, D, ldd, rows, cols, home);
     }
   }
 }
@@ -203,6 +203,35 @@ inline void gemm_splitk_sum(const device float* C, device O* D, const device int
   tfp::gemm_nax<bfloat16_t, false, true, false, true, false, 64, 128, 256, 2, 4>(A, B, D, P, threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 
 }
+// Hand-added beside the generated entries: the same n_t_n_t_n block with an fp32 destination, so a consumer that
+// reads fp32 (the router gate) takes the tensor-unit GEMM without the bf16 round. Ties A/B to bf16, D to float.
+[[max_total_threads_per_threadgroup(256)]]
+[[kernel]] void custom_kernel_tf_gemm_nax_bf16_f32out_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_float(
+  const device bfloat16_t* A [[buffer(0)]],
+  const device bfloat16_t* B [[buffer(1)]],
+  const device int32_t* P [[buffer(2)]],
+  device float* D [[buffer(3)]],
+  uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],
+  uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+  uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
+  tfp::gemm_nax<bfloat16_t, false, true, false, true, false, 64, 128, 256, 2, 4, float>(A, B, D, P, threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
+
+}
+// Hand-added: the f16 twin of the same block, fp32 destination. The released packs store the router gate f16, so
+// an f16 A/B GEMM keeps the weight's 10 mantissa bits (a bf16 round of that weight moves the band to 41 %).
+[[max_total_threads_per_threadgroup(256)]]
+[[kernel]] void custom_kernel_tf_gemm_nax_f16_f32out_n_t_n_t_n_64_128_256_2_4_float16_t_float16_t_int32_t_float(
+  const device float16_t* A [[buffer(0)]],
+  const device float16_t* B [[buffer(1)]],
+  const device int32_t* P [[buffer(2)]],
+  device float* D [[buffer(3)]],
+  uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],
+  uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+  uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
+  tfp::gemm_nax<float16_t, false, true, false, true, false, 64, 128, 256, 2, 4, float>(A, B, D, P, threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
+
+}
+
 [[max_total_threads_per_threadgroup(256)]]
 [[kernel]] void custom_kernel_tf_gemm_nax_bf16_n_t_t_n_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t(
   const device bfloat16_t* A [[buffer(0)]],

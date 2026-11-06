@@ -128,6 +128,9 @@ test {
     _ = @import("nvfp4_fixture_test.zig");
     _ = @import("drafter_release_test.zig");
     _ = kv_pool;
+    _ = @import("exl3_projection_decode.zig");
+    _ = @import("expert_groups.zig");
+    _ = @import("safetensors_security_test.zig");
     _ = kv_prompts;
 }
 
@@ -137,6 +140,16 @@ pub const tree_slots = @import("tree_slots.zig");
 pub const exl3_layout = @import("exl3_layout.zig");
 
 pub const exl3_prepare = @import("exl3_prepare.zig");
+pub const paced_read = @import("paced_read.zig");
+pub const exl3_projection = @import("exl3_projection.zig");
+pub const exl3_projection_decode = @import("exl3_projection_decode.zig");
+pub const frags = @import("frags.zig");
+pub const expert_groups = @import("expert_groups.zig");
+pub const gpu_counters = @import("gpu_counters.zig");
+pub const gpu_profile = @import("gpu_profile.zig");
+pub const checkpoint_metal = @import("checkpoint_metal.zig");
+pub const exl3_projection_gpu_test = @import("exl3_projection_gpu_test.zig");
+pub const safetensors_security_test = @import("safetensors_security_test.zig");
 
 pub const weight_only_contract = @import("contract/weight_only.zig");
 pub const weight_only_cuda_adapter = @import("weight_only_cuda_impl.zig").Adapter;

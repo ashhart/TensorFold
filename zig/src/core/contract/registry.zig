@@ -454,6 +454,8 @@ pub const metal = @import("fsr_records.zig").metal ++ [_]M{
     .{ .name = "h3 pooled branch h3_coarse", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "h3 AdaLN tables h3_modulation", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "h3 routed attention h3_attention", .threads = 256, .tg_memory = 25856, .offline = false },
+    .{ .name = "dsv41 gate gemm f16 custom_kernel_tf_gemm_nax_f16_f32out_n_t_n_t_n_64_128_256_2_4_float16_t_float16_t_int32_t_float", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "dsv41 gate gemm bf16 custom_kernel_tf_gemm_nax_bf16_f32out_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_float", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "h3 gemm whole custom_kernel_tf_gemm_nax_bf16_n_t_t_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "h3 gemm ragged custom_kernel_tf_gemm_nax_bf16_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "qwen vision qwv_gemm_bf16_nt_00", .threads = 256, .tg_memory = 0, .reserved = 256 },

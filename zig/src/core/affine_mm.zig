@@ -9,7 +9,7 @@ const bf16_round = @import("bf16_round");
 pub const Glu = enum { clipped, plain };
 
 /// The weights' bits (2-6 or 8) and group (32, 64 or 128), the output's type and the GLU epilogue.
-pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false, glu: Glu = .clipped };
+pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false, glu: Glu = .clipped, i8: bool = false, qg: u16 = 32 };
 
 /// The kernel source for `f` (nax.h inlined for this GPU).
 pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
@@ -17,10 +17,17 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     if (f.bits < 2 or f.bits > 8 or f.bits == 7 or !group_ok) return error.UnsupportedFormat;
     const body = try frags.source(device, a, ks.core_affine_mm);
     defer a.free(body);
+    // The int8 tile pieces are a header beside the kernel (kept under the line limit); inline it like nax.h.
+    const body_i8 = try std.mem.replaceOwned(u8, a, body, "#include \"affine_mm_i8.h\"", ks.core_affine_mm_i8);
+    defer a.free(body_i8);
     const glu = if (f.glu == .plain) "#define TF_GLU_PLAIN 1\n" else "";
     const out = if (f.out_f32) "float" else "bfloat";
-    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}";
-    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, body });
+    // int8 x and codes with int32 sums (the sibling's affine_mm_i8.h): x's scale a TF_QG columns, groups 32 or 64.
+    if (f.i8 and (f.group == 128 or f.qg > f.group or (f.qg != 32 and f.qg != 64))) return error.UnsupportedFormat;
+    const i8_head: []const u8 = if (f.i8) try std.fmt.allocPrint(a, "#define TF_I8 1\n#define TF_QG {d}\n", .{f.qg}) else "";
+    defer if (f.i8) a.free(@constCast(i8_head));
+    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}{s}";
+    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, i8_head, body_i8 });
 }
 
 /// Entry points: row sums, dense matmul, tiled and scattering gathers, ordered expert gate/up into SwiGLU.

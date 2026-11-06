@@ -20,6 +20,7 @@ inline float tf_o_run(float v) { return TF_CTL == 3 ? float(half(v)) : v; }
 struct TfOPostArgs {
   uint dim, rows, topk, per_group, groups;
 };
+static_assert(sizeof(TfOPostArgs) == 20, "TfOPostArgs must mirror metal/fold.zig's PostArgs");
 
 // Kimi's routed combine (group fmas, then the group tree) plus the shared expert into B, then hc_post into Y.
 [[kernel, max_total_threads_per_threadgroup(64)]] void tf_dsv41_o_combpost(
@@ -89,6 +90,7 @@ struct TfONormArgs {
   uint dim, rows;
   float eps;
 };
+static_assert(sizeof(TfONormArgs) == 12, "TfONormArgs must mirror metal/fold.zig's NormArgs");
 
 // hc_pre (H), rmsnorm (HN) and act_quant (HQ) of a row in a group of 1024; POST first makes X1 = hc_post(BR, X).
 
