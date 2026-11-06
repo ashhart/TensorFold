@@ -7,6 +7,8 @@ pub const weights = @import("cuda_weights.zig");
 pub const model = @import("cuda_model.zig");
 pub const backend = @import("cuda_backend.zig");
 pub const native = @import("cuda_native.zig");
+pub const dflash2_weights = @import("cuda_dflash2_weights.zig");
+pub const dflash2_select = @import("cuda_dflash2_select.zig");
 
 test {
     _ = kernels;
@@ -16,4 +18,6 @@ test {
     _ = model;
     _ = backend;
     _ = native;
+    _ = dflash2_weights;
+    _ = dflash2_select;
 }
