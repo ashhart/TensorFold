@@ -79,7 +79,7 @@ template <bool EXPAND>
 template [[host_name("tf_hc_expand_mix")]] [[kernel]] decltype(tf_hc_expand_mix<true>) tf_hc_expand_mix<true>;
 template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<false>) tf_hc_expand_mix<false>;
 
-// A pending branch into the streams in place (prompt chunks' one stream buffer): a threadgroup of TF_D / 4 a row, four columns of every stream a thread, read before written.
+// In-place pending branch to the streams (one prompt buffer): TF_D / 4 a row, 4 stream columns each, read before write.
 [[kernel]] void tf_hc_expand_inplace(device bfloat* X [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
                                      const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
                                      uint r [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) {
