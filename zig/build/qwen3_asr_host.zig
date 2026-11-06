@@ -8,7 +8,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     checks.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family })).step);
     all.dependOn(checks);
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = host, .link_libc = true });
-    // core for its Checkpoint: one checkpoint folder's shards (the 1.7B's two) as one name space, as the CUDA load opens it
+    // core for its Checkpoint: a folder's shards (the 1.7B's two) as one name space, as the CUDA load opens them
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = host, .link_libc = true });
     core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, host));
     core.addImport("tokenizer", tokenizer);

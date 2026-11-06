@@ -1,9 +1,4 @@
 //! The tower's chunk and window plan: 100-frame chunks through the convolutions, then attention over whole windows.
-//! The package pads every chunk to the longest one, so a clip of one chunk under 100 frames is convolved at its own
-//! length, and a clip of more chunks at 100 frames a chunk, the last one zero-padded.
-//! Attention runs within windows of n_window_infer frames, as the package's vLLM backend and its flash-attention-2
-//! path do; tf-qwen3-asr runs that. The package's stock transformers SDPA path attends over every row instead
-//! (`Attention.global`); the float64 reference and tf-qwen3-asr-check run either, so both kinds of case stay checkable.
 const std = @import("std");
 const Audio = @import("config.zig").Audio;
 
@@ -23,7 +18,7 @@ pub fn rows(len: usize) usize {
     return @as(usize, @intCast(tail)) + (len / 100) * 13;
 }
 
-/// How the tower's layers attend: within the plan's windows, or over every row.
+/// Windows of n_window_infer frames (vLLM's and flash-attention-2's, what tf-qwen3-asr runs) or SDPA's every row.
 pub const Attention = enum { windows, global };
 
 /// A clip's plan: its chunks' frames and rows, and the attention windows over the rows.
@@ -31,7 +26,7 @@ pub const Plan = struct {
     frames: usize,
     chunks: usize,
     last_frames: usize, // the last chunk's frames (a full chunk when frames divide)
-    chunk_frames: usize, // frames of the longest chunk: the convolutions' time length, every chunk padded to it
+    chunk_frames: usize, // the longest chunk's frames, every chunk padded to it: a lone short chunk is convolved as is
     rows: usize,
     chunk_rows: usize, // rows of the longest chunk: a row's position inside its chunk runs to this
     window_rows: usize, // rows an attention window spans
