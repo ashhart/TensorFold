@@ -8,11 +8,12 @@ import numpy as np
 import torch
 from safetensors import safe_open
 
-USAGE = """usage: ricursive_reference.py MODEL_DIR tokens.json out.bin [--bf16-points | --release]
+USAGE = """usage: ricursive_reference.py MODEL_DIR tokens.json out.bin [--bf16-points | --release | --release-f64]
 writes raw bf16 logits [positions, vocab]; an NVFP4 release's MLPs are its exact dequantized values
   (default)      float64: bf16 weights cast up exactly, the release's arithmetic, one rounding at the end
   --bf16-points  float64 rounded to bf16 at every point the release's bf16 forward rounds
-  --release      the checkpoint's own modeling_ricursive.py layers in bf16 (bf16 releases only)"""
+  --release      the checkpoint's own modeling_ricursive.py layers in bf16 (bf16 releases only)
+  --release-f64  those layers in float64, an NVFP4 release's MLPs as their exact dequantized values"""
 
 
 def bf16_once(x: np.ndarray) -> np.ndarray:
@@ -50,7 +51,7 @@ def main(model_dir: str, tokens: str, out: str, mode: str = "") -> None:
 
     t0 = time.time()
     with torch.no_grad():
-        h = release(model_dir, cfg, tensor, ids) if mode == "--release" else exact(cfg, tensor, ids, mode == "--bf16-points", index)
+        h = release(model_dir, cfg, tensor, ids, mode == "--release-f64") if mode.startswith("--release") else exact(cfg, tensor, ids, mode == "--bf16-points", index)
         head = tensor("lm_head.weight").to(h.dtype)
         with open(out, "wb") as f:
             for s in range(0, n, 64):
@@ -133,8 +134,8 @@ def exact(cfg, tensor, ids, points, index):
     return norm(x, w("model.norm.weight"))
 
 
-def release(model_dir, cfg, tensor, ids):
-    """The checkpoint's own decoder layers and norms in bf16, each layer's weights loaded alone."""
+def release(model_dir, cfg, tensor, ids, f64=False):
+    """The checkpoint's own decoder layers and norms in bf16 (or float64), each layer's weights loaded alone."""
     sys.path.insert(0, model_dir)  # its modeling file imports configuration_ricursive as a package sibling
     pkg = importlib.util.spec_from_file_location("ricursive_release", f"{model_dir}/modeling_ricursive.py",
                                                  submodule_search_locations=[model_dir])
@@ -149,16 +150,16 @@ def release(model_dir, cfg, tensor, ids):
     sys.modules[spec_m.name] = mod
     spec_m.loader.exec_module(mod)
     config = conf.RicursiveConfig.from_pretrained(model_dir)
-    bf = torch.bfloat16
+    bf = torch.float64 if f64 else torch.bfloat16
     n = len(ids)
-    x = tensor("model.embed_tokens.weight")[torch.tensor(ids)].unsqueeze(0) * config.embed_scale
+    x = tensor("model.embed_tokens.weight")[torch.tensor(ids)].unsqueeze(0).to(bf) * config.embed_scale
     v0 = x
     position_ids = torch.arange(n).unsqueeze(0)
     t0 = time.time()
     for i in range(config.num_hidden_layers):
         layer = mod.RicursiveDecoderLayer(config, i).to(bf)
         prefix = f"model.layers.{i}."
-        state = {k[len(prefix):]: tensor(k) for k in index_names(model_dir, prefix)}
+        state = layer_state(tensor, index_names(model_dir, prefix), prefix, f64)
         layer.load_state_dict(state, strict=True)
         x = layer(x, position_ids=position_ids, value_residual=v0)[0]
         print(f"layer {i + 1} of {config.num_hidden_layers}, {time.time() - t0:.0f} s", flush=True)
@@ -167,11 +168,23 @@ def release(model_dir, cfg, tensor, ids):
     return final(x)[0]
 
 
+def layer_state(tensor, names, prefix, f64):
+    """A layer's weights by module name; in float64 an NVFP4 weight is its exact values and its scales are dropped."""
+    have = set(names)
+    state = {}
+    for k in names:
+        if f64 and k.endswith((".weight_scale", ".weight_scale_2", ".input_scale")):
+            continue
+        nv = f64 and f"{k}_scale" in have
+        state[k[len(prefix):]] = nvfp4(tensor(k), tensor(f"{k}_scale"), tensor(f"{k}_scale_2")) if nv else tensor(k)
+    return state
+
+
 def index_names(model_dir, prefix):
     return [k for k in json.load(open(f"{model_dir}/model.safetensors.index.json"))["weight_map"] if k.startswith(prefix)]
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (4, 5) or sys.argv[4:] not in ([], ["--bf16-points"], ["--release"]):
+    if len(sys.argv) not in (4, 5) or sys.argv[4:] not in ([], ["--bf16-points"], ["--release"], ["--release-f64"]):
         sys.exit(USAGE)
     main(*sys.argv[1:4], mode=sys.argv[4] if len(sys.argv) > 4 else "")
