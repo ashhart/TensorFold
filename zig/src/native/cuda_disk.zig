@@ -125,9 +125,10 @@ pub fn keptKey(comptime K: type, a: Allocator, io: std.Io, g: *const cuda.Contex
     const facts = K.facts(owner); // an array, or a slice
     const list: []const u64 = if (@typeInfo(@TypeOf(facts)) == .pointer) facts else &facts;
     const id = try identityOf(a, io, g, dir, kernels, list, probed, profile);
-    if (comptime !@hasDecl(K, "policy")) return id;
-    const resolved = K.policy(owner);
-    return persistence_policy.extend(id, K.policy_domain, &resolved);
+    const P = if (@hasDecl(K, "view")) K.view else K; // a kept image's family declares its policy in its view
+    if (comptime !@hasDecl(P, "policy")) return id;
+    const resolved = P.policy(owner);
+    return persistence_policy.extend(id, P.policy_domain, &resolved);
 }
 
 /// The identity's hash: the checkpoint, kernels, device, driver, a family's facts, then its probe's hash.
@@ -200,6 +201,7 @@ pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, r
 
 /// The disk module of a family's kept states (image, probe, facts), or null: Nemotron's is this file's own.
 pub fn keptDisk(comptime F: type) ?type {
+    if (@hasDecl(F, "kept_view")) return @import("cuda_kept.zig").Kept(F.kept_view);
     return if (@hasDecl(F, "kept_disk")) F.kept_disk else null;
 }
 
@@ -210,7 +212,10 @@ pub fn attachKept(comptime K: type, name: []const u8, a: Allocator, io: std.Io, 
         if (@hasDecl(K, "bind")) K.bind(loaded.target, ctx); // the context the store's copies make current
         const p = try K.probe(a, io, loaded.backend, loaded.target);
         const staging = stagingOf(K, loaded.target);
-        try open(o, root, try keptKey(K, a, io, ctx, o.dir, kernels, loaded.target, p.hash, .{ .family = name, .backend = "cuda" }), p.rate, store, name, staging);
+        const id = try keptKey(K, a, io, ctx, o.dir, kernels, loaded.target, p.hash, .{ .family = name, .backend = "cuda" });
+        // a kept image's key also binds the prompt's files and a drafter's checkpoint (native/cuda_kept.zig)
+        const key = if (comptime @hasDecl(K, "prompted")) try K.prompted(a, io, o, id) else id;
+        try open(o, root, key, p.rate, store, name, staging);
     }
 }
 
