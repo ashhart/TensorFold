@@ -70,3 +70,46 @@ test "qwen27 rows: a decoder arriving between chunks caps the next one and leavi
     b.owners[2] = null;
     try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
 }
+
+const floor = @import("native/qwen27_prompt_floor.zig");
+const Load = struct {
+    calls: usize = 0,
+    fn open(l: *@This(), value: ?[]const u8, why: *[]const u8) !void {
+        try floor.environment(a, value, why);
+        l.calls += 1;
+    }
+};
+
+test "qwen27 rows: a below-floor setting refuses before the loader with its value, origin and remedy" {
+    var loader: Load = .{};
+    for ([_][]const u8{ "0", "1", "16", "17", "32", "64", "112", "127" }) |value| {
+        var why: []const u8 = "";
+        try std.testing.expectError(error.PromptRowsTooSmall, loader.open(value, &why));
+        defer a.free(why);
+        try std.testing.expect(std.mem.indexOf(u8, why, "at least 128 prompt rows") != null);
+        const origin = try std.fmt.allocPrint(a, "TF_PROMPT_ROWS supplied {s}.", .{value});
+        defer a.free(origin);
+        try std.testing.expect(std.mem.indexOf(u8, why, origin) != null);
+        try std.testing.expect(std.mem.indexOf(u8, why, "unset it to use the device default") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 0), loader.calls);
+}
+
+test "qwen27 rows: exactly the serving floor reaches the loader and keeps the requested capacity" {
+    var loader: Load = .{};
+    var why: []const u8 = "unchanged";
+    try loader.open("128", &why);
+    try loader.open(null, &why);
+    try std.testing.expectEqual(@as(usize, 2), loader.calls);
+    try std.testing.expectEqualStrings("unchanged", why);
+    try std.testing.expectEqual(@as(u32, 128), rows.requested(13, false, "128"));
+    try std.testing.expectEqual(@as(u32, 16), rows.requested(13, false, "16"));
+}
+
+test "qwen27 rows: a caller-created narrow frame names frame capacity rather than an unrelated environment" {
+    var why: []const u8 = "";
+    try std.testing.expectError(error.PromptRowsTooSmall, floor.admit(a, 64, .frame, &why));
+    defer a.free(why);
+    try std.testing.expectEqualStrings("native Qwen prompt serving needs at least 128 prompt rows; model.frame.capacity supplied 64. Create the model frame with at least 128 rows before attaching native lanes.", why);
+    try floor.check(128);
+}
