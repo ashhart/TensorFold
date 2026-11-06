@@ -41,7 +41,7 @@ inline void mamba_a(const device bfloat* a_log, device float* a, const device in
   }
 }
 
-// [conv state rows | this chunk's conv channels]: the zero or kept state, then proj[:, x0:x0 + C]. P: L C proj x0 state.
+// [conv state rows | this chunk's conv channels]: the zero or kept state, then proj[:, x0:x0+C]. P: L C proj x0 state.
 inline void conv_pack(const device bfloat* proj, const device bfloat* state, device bfloat* padded, const device int* P,
                       uint2 at) {
   const int c = int(at.x), r = int(at.y), C = P[1], taps = 3;
