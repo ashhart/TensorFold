@@ -52,7 +52,7 @@ pub fn rowSumsAt(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: 
     e.dispatchThreads(mtl.Size.of(k / group, rows, 1), mtl.Size.of(@min(k / group, 64), 1, 1));
 }
 
-/// y [rows, n] = x [rows, q.k] W^T with x's group sums `sums`; n is q.n rounded up to 64 (the padded weight rows, y's pitch).
+/// y = x W^T using group `sums`; x is [rows, q.k], y is [rows, n], n = q.n rounded up to 64 (padded weights).
 pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32) void {
     const n = std.mem.alignForward(u32, q.n, 64);
     denseBatch(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) });
