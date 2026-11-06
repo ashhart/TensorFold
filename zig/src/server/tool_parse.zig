@@ -1,4 +1,4 @@
-//! Tool calls in a finished reply, every family's markup, as OpenAI tool_calls (``tools.parse_tool_calls_from_content``).
+//! Tool calls in a finished reply, each family's markup as OpenAI tool_calls (``tools.parse_tool_calls_from_content``).
 const std = @import("std");
 const json = @import("json");
 const ids = @import("ids.zig");
