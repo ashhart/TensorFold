@@ -1,4 +1,4 @@
-//! A converged round's collectives: what each layer exchanges, and one-shot or reduce-scatter + all-gather (both exact).
+//! A converged round's collectives: what each layer exchanges; one-shot or reduce-scatter + all-gather (both exact).
 const std = @import("std");
 const fabric = @import("fabric");
 const model = @import("model.zig");
