@@ -245,7 +245,7 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     }
     return u;
 }
-/// Restored Qwen launches retain a pending entry wherever a compiler receipt is absent.
+/// Restored Qwen launches, and Ripple's unmeasured ones, retain a pending entry wherever a compiler receipt is absent.
 pub const cuda_pending = joins.cuda_pending;
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
