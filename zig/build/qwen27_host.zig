@@ -86,6 +86,17 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen-dense-geometry-host", "Dense config and full-size packed headers without shaders or a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = dense_names.items })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    const floor_logs = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_logs.zig"), .target = b.graph.host });
+    const floor_root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_entry_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen27_served", .module = host }, .{ .name = "tensorfold", .module = engine }, .{ .name = "qwen_weights_diagnostics", .module = floor_logs } } });
+    if (b.graph.host.result.os.tag == .macos) floor_root.linkSystemLibrary("objc", .{});
+    const floor_test = b.addTest(.{ .root_module = floor_root, .test_runner = .{ .path = b.path("zig/qwen_vision_weights_runner.zig"), .mode = .simple } });
+    const floor_step = b.step("test-qwen27-prompt-floor-host", "Actual startup and lane constructor floor diagnostics without devices");
+    for ([_][]const u8{ "16", "128" }) |value| {
+        const run = b.addRunArtifact(floor_test);
+        run.setEnvironmentVariable("TF_PROMPT_ROWS", value);
+        run.has_side_effects = true;
+        floor_step.dependOn(&run.step);
+    }
     const minimax = b.createModule(.{ .root_source_file = b.path("zig/src/native/minimax_m3.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     b.step("test-minimax-info-host", "MiniMax logprob offers against its actual wrapped backend without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = minimax, .filters = &.{"MiniMax capabilities:"} })).step);
     const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });
