@@ -107,7 +107,7 @@ pub const Attn = struct {
         const tensor = device.tensorUnits();
         if (!tensor) try q.simd_attention.check(device, queue);
         const gm = at_.geometry(r.heads, tensor);
-        const body = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads);
+        const body = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads, false);
         defer a.free(body);
         const text = if (!r.control) try a.dupe(u8, body) else edit: {
             const e = controlEdit(r.which, tensor) orelse return error.ControlEdit;

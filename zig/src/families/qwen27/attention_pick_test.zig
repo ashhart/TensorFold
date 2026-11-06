@@ -45,7 +45,7 @@ test "prompt pick: one non-finite value at every key, head and kind; masked iff 
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const a = std.testing.allocator;
-    const text = try simd_attention.grouped(a, device.tensorUnits(), true, 6, kv_heads);
+    const text = try simd_attention.grouped(a, device.tensorUnits(), true, 6, kv_heads, false);
     defer a.free(text);
     const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer lib.deinit();
