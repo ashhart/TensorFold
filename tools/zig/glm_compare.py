@@ -1,4 +1,4 @@
-"""Compare a tf-glm-run capture (raw bf16) with glm_ref.py's (safetensors) array by array, or two glm_ref.py captures (--trace: call by call)."""
+"""tf-glm-run capture (raw bf16) vs glm_ref.py's (safetensors), per array; --trace: two glm_ref.py's call-by-call."""
 
 from __future__ import annotations
 
