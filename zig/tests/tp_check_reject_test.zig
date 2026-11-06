@@ -90,3 +90,68 @@ test "tp check: the writer refuses a phase or version the format does not have" 
     try testing.expectError(error.UnsupportedPhaseVersion, c.writeCollectiveVersion(&w.writer, 4, rec));
     try testing.expectEqual(@as(usize, 0), w.written().len);
 }
+
+fn headerOnly(a: std.mem.Allocator) ![]u8 {
+    var w: std.Io.Writer.Allocating = .init(a);
+    defer w.deinit();
+    try c.writeHeader(&w.writer, .{ .rank = 0, .world = 2, .label = "empty" });
+    return w.toOwnedSlice();
+}
+
+fn logitsOf(a: std.mem.Allocator, rows: []const []const f32) ![]u8 {
+    var w: std.Io.Writer.Allocating = .init(a);
+    defer w.deinit();
+    try c.writeHeader(&w.writer, .{ .rank = 0, .world = 2, .label = "logits" });
+    for (rows, 0..) |row, i| try c.writeLogits(&w.writer, 0, i, 0, row);
+    return w.toOwnedSlice();
+}
+
+fn agreeOn(a: std.mem.Allocator, mixed: []const []const f32, solo: []const []const f32) !?[]const u8 {
+    const m = try logitsOf(a, mixed);
+    defer a.free(m);
+    const s = try logitsOf(a, solo);
+    defer a.free(s);
+    var md = try c.parse(a, m);
+    defer md.deinit(a);
+    var sd = try c.parse(a, s);
+    defer sd.deinit(a);
+    var r = try c.checkAgree(a, md, sd);
+    defer r.deinit(a);
+    return c.agreeFailure(r);
+}
+
+test "tp check: rule 2 refuses two dumps with no records" {
+    const a = testing.allocator;
+    const bytes = try headerOnly(a);
+    defer a.free(bytes);
+    var x = try c.parse(a, bytes);
+    defer x.deinit(a);
+    var y = try c.parse(a, bytes);
+    defer y.deinit(a);
+    try testing.expect(!c.repeatPassed(c.checkRepeat(x, y)));
+}
+
+test "tp check: rule 4 fails when it compared nothing, or the mixed run's logits are not finite" {
+    const a = testing.allocator;
+    const good = [_]f32{ 1, 2 };
+    const wide = [_]f32{ 1, 2, 3 };
+    const nan = [_]f32{ std.math.nan(f32), 2 };
+    const inf = [_]f32{ std.math.inf(f32), 2 };
+    try testing.expectEqual(@as(?[]const u8, null), try agreeOn(a, &.{&good}, &.{&good}));
+    try testing.expectEqualStrings("no position could be compared", (try agreeOn(a, &.{&wide}, &.{&good})).?);
+    try testing.expectEqualStrings("the mixed run's logits are not finite", (try agreeOn(a, &.{&nan}, &.{&good})).?);
+    try testing.expectEqualStrings("the mixed run's logits are not finite", (try agreeOn(a, &.{ &good, &inf }, &.{ &good, &good })).?);
+    try testing.expectEqual(@as(?[]const u8, null), try agreeOn(a, &.{ &good, &good }, &.{ &good, &nan }));
+}
+
+test "tp check: a buffer that is not whole elements is refused" {
+    const a = testing.allocator;
+    for ([_]c.Call{ .all_reduce, .all_gather, .exchange }) |call| {
+        var w: std.Io.Writer.Allocating = .init(a);
+        defer w.deinit();
+        try c.writeHeader(&w.writer, .{ .rank = 0, .world = 2, .label = "partial" });
+        const row = [_]u8{ 1, 2, 3, 4, 5, 6 };
+        try c.writeCollective(&w.writer, .{ .seq = 0, .layer = 0, .call = call, .dtype = .f32, .op = .sum, .peer = 0, .send = &row, .recv = row[0..4] });
+        try testing.expectError(error.BadLength, c.parse(a, w.written()));
+    }
+}

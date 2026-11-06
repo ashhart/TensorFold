@@ -33,6 +33,8 @@ pub const AgreeReport = struct {
     kl_max: f64 = 0,
     /// Positions left out of the divergence figures because the vocab sizes differ or a logit is not finite.
     skipped: usize = 0,
+    /// Positions where the mixed run's own logits are not finite: a fault in that run, so the report fails.
+    mixed_nonfinite: usize = 0,
 
     pub fn deinit(r: *AgreeReport, a: std.mem.Allocator) void {
         a.free(r.splits);
@@ -138,6 +140,7 @@ pub fn checkAgree(a: std.mem.Allocator, mixed: Dump, solo: Dump) !AgreeReport {
             try splits.append(a, .{ .prompt = s.prompt, .position = s.position });
         }
         if (forced and r.fed_ok != true) continue;
+        if (!finite(m)) r.mixed_nonfinite += 1;
         if (m.vocab() != s.vocab() or !finite(m) or !finite(s)) {
             r.skipped += 1;
             continue;
@@ -165,4 +168,14 @@ pub fn checkAgree(a: std.mem.Allocator, mixed: Dump, solo: Dump) !AgreeReport {
     r.splits = try splits.toOwnedSlice(a);
     r.gaps = try gaps.toOwnedSlice(a);
     return r;
+}
+
+/// Why a report cannot stand, or null: rule 4 has no bound, so the report only has to be complete and non-empty.
+pub fn agreeFailure(r: AgreeReport) ?[]const u8 {
+    if (r.missing > 0) return "the mixed dump is missing positions the solo run has, so the report is incomplete";
+    if (r.positions == 0) return "no (prompt, position) appears in both dumps";
+    if (r.fed_ok == false) return "this teacher-forced run was not fed this solo run's tokens, so its divergence is not reported";
+    if (r.mixed_nonfinite > 0) return "the mixed run's logits are not finite";
+    if (r.compared == 0) return "no position could be compared";
+    return null;
 }
