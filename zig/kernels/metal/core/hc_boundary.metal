@@ -106,7 +106,7 @@ inline float4 hc_col4(float4 v) {
   return v + simd_shuffle_xor(v, ushort(2));
 }
 
-// One threadgroup of 1024 a row: the slices' sums added in order, the mixes scaled by the streams' inverse norm, then the family's split: pre, post and the Sinkhorn comb, the streams collapsed and normed.
+// 1024 a row: slice sums in order, mixes by 1/norm, then the split (pre, post, Sinkhorn), streams collapsed, normed.
 [[kernel]] void tf_hc_split(const device bfloat* X [[buffer(0)]], const device float* PART [[buffer(1)]],
                         const constant float* SCALE [[buffer(2)]], const device float* BASEV [[buffer(3)]],
                         const device bfloat* NORMW [[buffer(4)]], const constant float* EPS [[buffer(5)]],
