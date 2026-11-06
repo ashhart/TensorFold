@@ -47,7 +47,10 @@ test "qwen27 speed: shared in-place verify then empty and full keeps restore sta
             const buffer = metal.Buffer{ .id = 100 + i, .data = try a.alignedAlloc(u8, .@"16", bytes) };
             @field(metadata, field) = .{ .buffer = buffer };
         }
-        defer inline for (@typeInfo(gpu.Metadata).@"struct".field_names) |field| a.free(@field(metadata, field).buffer.data);
+        defer inline for (@typeInfo(gpu.Metadata).@"struct".field_names) |field| {
+            const ref = if (comptime std.mem.eql(u8, field, "flows")) @field(metadata, field).? else @field(metadata, field);
+            a.free(ref.buffer.data);
+        };
         const state = try pool.committed(0, 0, true);
         @memset(@constCast(state), 0x12);
         const other = try pool.committed(0, 1, true);
