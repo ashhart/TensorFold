@@ -247,6 +247,7 @@ each route and its events.
 | `GET /v1/slide/graph` | Every fact as JSON: its state, neurons, questions and their expected answers, and the model's pocket |
 | `DELETE /v1/slide/graph` | Clears the graph; the weights keep what they learned |
 | `DELETE /v1/slide/fact/{id}` | Deletes one fact from the weights, every other fact checked again, streaming `fact`, `checking`, `zeroed`, `checked` and `forgot` events; an optional `{"reason": "..."}` goes into the graph |
+| `DELETE /v1/slide/facts` | Deletes the facts the body's `ids` select (1 to 256 distinct learned fact IDs) in one transaction: an invalid selection refuses the whole request before any cut; an optional `{"reason": "..."}` goes into the graph |
 
 A delete's last event, `forgot`, says `"deleted": true` only when both the shards and the graph file hold the delete,
 and its `state` is the fact's state in the graph file; a fact left `deleting` is settled by sending the delete again.
