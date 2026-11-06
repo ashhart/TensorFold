@@ -275,3 +275,50 @@ test "drafts-off shared rounds advance unpriced depth probes but not costed prob
         try t.expectEqual(@as(u64, if (priced) 1 else 8), e.rule.shared_rounds);
     }
 }
+
+test "target-only shared reservations preserve unpriced depth probe cadence" {
+    var costs: [8]Cost = undefined;
+    for (&costs, 1..) |*c, rows| c.* = .{ .width = @intCast(rows), .ms = 6 + 2 * @as(f64, @floatFromInt(rows)) };
+    for ([_]bool{ false, true }) |priced| for ([_]bool{ false, true }) |limited| for ([_]bool{ false, true }) |granted| {
+        var cfg = try Config.init(gpa, .{
+            .exact_width = 8,
+            .mtp = true,
+            .speculate = true,
+            .speculate_early = false,
+            .drafts = 3,
+            .draft_prior = &.{0.5},
+            .window_costs = &costs,
+            .mtp_step_ms = 0,
+            .hidden_rows = true,
+            .batch_rows = 8,
+            .max_streams = 2,
+            .draft_streams = true,
+            .allocate_shared_drafts = true,
+            .limit_shared_drafts = limited,
+            .draft_probabilities = granted,
+            .granted_depth = granted,
+            .hold_costs = if (priced) &.{.{ .streams = 1, .depth = 1, .ms = 0.01 }} else &.{},
+        }, 8, 7);
+        defer cfg.deinit(gpa);
+        cfg.timed = false;
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer e.deinit();
+        e.rule.k.depth_probe_every = 8;
+        var streams: [2]Stream = undefined;
+        var made: usize = 0;
+        defer for (streams[0..made]) |*s| s.deinit(gpa);
+        for (&streams) |*s| {
+            s.* = try Stream.init(gpa, .{ .id = "shared-cadence", .prompt = &.{1}, .max_new = 100, .eos = &.{}, .drafts = false });
+            made += 1;
+            try e.addStream(s);
+        }
+        for (0..7) |_| try e.step();
+        try t.expectEqual(@as(u64, 7), e.shared_rounds);
+        // Main reaches rule.budgets through shared reservations only for a legacy depth cap.
+        try t.expectEqual(@as(u64, if (!priced and limited and !granted) 7 else 0), e.rule.shared_rounds);
+        try t.expectEqual(@as(usize, 0), target.drafts_calls);
+    };
+}

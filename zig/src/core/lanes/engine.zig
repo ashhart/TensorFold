@@ -311,7 +311,7 @@ pub const Engine = struct {
         };
         const budgets = try a.alloc(i64, heads.items.len);
         const sampled = win.anySampled(plans);
-        if (heads.items.len > 0 and e.cfg.allocate_shared_drafts) {
+        if ((heads.items.len > 0 or e.cfg.k.hold_costs.len == 0) and e.cfg.allocate_shared_drafts) {
             try @import("shared_drafts.zig").budgets(e, plans, heads.items, budgets);
         } else if (heads.items.len > 0 or e.cfg.k.hold_costs.len == 0) {
             const whos = try a.alloc(depth.Who, heads.items.len);

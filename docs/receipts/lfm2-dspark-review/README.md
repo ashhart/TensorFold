@@ -11,6 +11,32 @@ The [relocation ledger](https://github.com/BlivionIaG/TensorFold/blob/1b968d6039
 binds all 14 removed files (96,536 lines) to their original hashes; local paths in three records are anonymized.
 No source labels, numerical results or failed verdicts were changed.
 
+## Follow-up to the remaining shared-lane review requests
+
+This follow-up to `28760ea25f17c0f6bc4490af5139670f107b48ea` addresses
+[the two remaining requests](https://github.com/ashhart/TensorFold/pull/1394#issuecomment-6685052787):
+
+- Unpriced target-only shared rounds retain main's `shared_drafts.budgets` dispatch.
+  Consequently, only `limit_shared_drafts` without `granted_depth` advances the depth-probe clock there.
+  Costed rounds with no drafting heads still skip head pricing.
+- The new regression fails before the dispatch fix (`expected 0, found 7`).
+  The repository host scheduler suite then passes 440 tests, with one skipped.
+  A standalone consumer also runs seven shared rounds in each of eight priced/limited/granted
+  configurations, preserving the expected probe cadence and issuing no draft calls.
+  Its deterministic fixture backend is not a device or performance measurement.
+- Both Qwen probes were built and run on actual main at the PR's merge base,
+  `36f849362700d0d8c4c9ec9e68b7b28e5c6e74c8`, on the same Apple M4 Pro with 48 GiB RAM.
+  `tf-qwen27-dflash-served-check` exits 1 with `ServedDraftDiffers`;
+  `tf-qwen27-lanes-check` exits 1 with `UntimedDraftWindow`.
+  These match the failures already recorded for the PR, rather than only checking its feature parent.
+  Both programs use generated five-layer model fixtures, not trained checkpoints.
+
+The main-baseline binary SHA-256 values are, respectively:
+`b489bb5e8891585f59a8ac05e6c40b31364f23b88625dba030e44bc334bd4583` and
+`16931caef8af2b0f128ef8405ede7608e7494967a99929e378ed60aa6e5af3ea`.
+The comparison establishes that both probe errors also occur on main at the base;
+it does not make either probe pass or waive the requested cross-family device/performance cells.
+
 
 ## Shared-reservation performance candidate `62bd342d3`
 
