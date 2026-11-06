@@ -61,7 +61,7 @@ fn fragmentText(a: Allocator, fragment: []const u8) Allocator.Error![]const u8 {
 fn resultTarget(a: Allocator, href_raw: []const u8) Allocator.Error!?[]const u8 {
     const href = try std.mem.replaceOwned(u8, a, href_raw, "&amp;", "&");
     if (std.mem.indexOf(u8, href, "duckduckgo.com/y.js") != null) return null; // an ad
-    if (std.mem.indexOf(u8, href, "uddg=")) |at| {
+    if (std.ascii.findIgnoreCase(href, "uddg=")) |at| { // UDDG= carries the same target
         const start = at + 5;
         const end = std.mem.indexOfScalarPos(u8, href, start, '&') orelse href.len;
         return try decode(a, href[start..end]);
@@ -185,6 +185,16 @@ test "a search result keeps a link written without a scheme" {
     defer arena.deinit();
     const a = arena.allocator();
     const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"//example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps the target when uddg's letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"//duckduckgo.com/l/?UDDG=https%3A%2F%2Fexample.org%2Fpage&amp;rut=x\">Example</a></h2></div>";
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
