@@ -1,4 +1,4 @@
-//! Exactness across the cluster on the toy model: drafted == plain, shared == solo, and the same bits at 1, 2 and 4 nodes.
+//! Cluster exactness on the toy model: drafted == plain, shared == solo, and the same bits at 1, 2 and 4 nodes.
 const std = @import("std");
 const lanes = @import("lanes");
 const exchange = @import("exchange.zig");

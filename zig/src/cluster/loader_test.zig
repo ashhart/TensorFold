@@ -1,4 +1,4 @@
-//! Loading on two fake nodes: what each rank reads, local files mapped and hashed once, missing shards pulled and checked.
+//! Loading on two fake nodes: what each rank reads, files mapped and hashed once, missing shards pulled and checked.
 const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
 const model = @import("model.zig");

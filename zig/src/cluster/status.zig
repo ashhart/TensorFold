@@ -1,4 +1,4 @@
-//! What `tensorfold cluster status` and `check` print: nodes, links, memory, the placement per rank, costs and load progress.
+//! What `tensorfold cluster status` and `check` print: nodes, links, memory, placement per rank, costs, load progress.
 const std = @import("std");
 const platform = @import("sys");
 const node = @import("node.zig");

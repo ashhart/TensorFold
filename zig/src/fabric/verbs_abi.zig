@@ -1,4 +1,4 @@
-//! The verbs ABI (rdma-core's infiniband/verbs.h, which Apple's SDK ships for librdma): the structs and constants we use.
+//! The verbs ABI (rdma-core's infiniband/verbs.h, which Apple's SDK ships for librdma): structs and constants we use.
 const std = @import("std");
 const platform = @import("sys");
 

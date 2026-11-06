@@ -56,7 +56,7 @@ pub const Mailbox = struct {
         return mapFd(fd);
     }
 
-    /// The listen end's mailbox: POSIX shared memory on a Mac, the file /dev/shm/mcdma-rpc.NAME on Linux; MCDMA_RPC_BOX_DIR names a test directory.
+    /// The listen end's mailbox: POSIX shm on a Mac, /dev/shm/mcdma-rpc.NAME on Linux; MCDMA_RPC_BOX_DIR: a test dir.
     pub fn openListen(name: []const u8) Error!Mailbox {
         if (!layout.validName(name)) return error.InvalidName;
         const env = platform.c.getenv("MCDMA_RPC_BOX_DIR");

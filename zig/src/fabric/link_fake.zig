@@ -5,7 +5,7 @@ const words = @import("words.zig");
 const mailbox = @import("mailbox.zig");
 const fake = @import("fake.zig");
 
-/// One link: each rank's window is its mailbox, and `step` moves words and payloads as rpcd_connect.c and rpcd_listen.c do.
+/// One link: each rank's window is its mailbox; `step` moves words and payloads as rpcd_connect.c and rpcd_listen.c do.
 pub const Link = struct {
     cluster: *fake.Cluster,
     req: usize,
