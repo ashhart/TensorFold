@@ -126,7 +126,7 @@ pub const Generation = struct {
         const delta = g.streamed.after(vis, !copied);
         if (delta.len > 0) {
             try g.streamed.set(g.a, vis, delta);
-            try g.emit(sink, if (g.lp) |*l| (try l.delta(g.srv, g.a, g.thinking, g.ignore_eos, g.collected.items, delta, g.streamed.text.items.len, false)).? else .{ .string = delta });
+            try g.emit(sink, if (g.lp) |*l| (try l.delta(g.srv, g.a, g.thinking, g.grammar.keepsTrailing(g.ignore_eos), g.collected.items, delta, g.streamed.text.items.len, false)).? else .{ .string = delta });
         }
         if (g.calls) |*c| {
             var out: std.ArrayList(Value) = .empty;
@@ -226,7 +226,7 @@ pub const Generation = struct {
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
-        const content_tokens = if (g.ignore_eos and g.grammar != .on) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
+        const content_tokens = if (g.grammar.keepsTrailing(g.ignore_eos)) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
         const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);
@@ -259,7 +259,7 @@ pub const Generation = struct {
             const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason, g.single) else content;
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
-            if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
+            if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.grammar.keepsTrailing(g.ignore_eos), g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
             if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length")) {
                 // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                 var out: std.ArrayList(Value) = .empty;
