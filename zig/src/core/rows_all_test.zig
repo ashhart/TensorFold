@@ -18,5 +18,6 @@ test {
     _ = @import("rows_prefetch_stack_test.zig");
     _ = @import("rows_refusal_test.zig");
     _ = @import("rows_startup_fault_test.zig");
+    _ = @import("rows_drop_test.zig");
     _ = @import("rows_restore_burst_test.zig");
 }
