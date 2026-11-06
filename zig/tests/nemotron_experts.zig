@@ -1,4 +1,4 @@
-//! Nemotron's routed experts at window widths: member-row pass shapes bit-checked against the engine's kernels, then timed.
+//! Nemotron's routed experts at window widths: member-row pass shapes bit-checked against the engine's kernels, timed.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
