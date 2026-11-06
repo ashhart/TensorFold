@@ -5,6 +5,7 @@ const ks = @import("kernel_sources");
 const cfg = @import("config.zig");
 const model = @import("model.zig");
 const st = @import("state.zig");
+const df = @import("dflash2.zig");
 const frags = @import("../../core/frags.zig");
 
 /// Ripple-65B, the family's one qualified checkpoint.
@@ -19,8 +20,15 @@ pub const attention_name = "rc_prompt_attention";
 pub const sample_name = "tf_sample_full";
 pub const fp4_names = model.fp4_names;
 pub const fp4_gemm_names = [_][]const u8{ "rc_fp4_gemm_00", "rc_fp4_gemm_01", "rc_fp4_gemm_10", "rc_fp4_gemm_11" };
-/// Every pipeline model.zig builds: glue, llama's row kernels and GEMMs, attention, the draw and the NVFP4 MLP's.
-pub const pipelines = glue_names.len + llama_names.len + gemm_names.len + 2 + fp4_names.len + fp4_gemm_names.len;
+/// dflash2.metal's pipelines: the target's tap (model.zig's setTaps), then the drafter's (dflash2.zig's).
+pub const dflash2_names = blk: {
+    var out: [df.kernel_names.len + 1][]const u8 = undefined;
+    out[0] = "rc_tap";
+    for (df.kernel_names, 1..) |n, i| out[i] = n;
+    break :blk out;
+};
+/// Every pipeline the family builds: glue, llama's row kernels and GEMMs, attention, the draw, NVFP4's and DFlash2's.
+pub const pipelines = glue_names.len + llama_names.len + gemm_names.len + 2 + fp4_names.len + fp4_gemm_names.len + dflash2_names.len;
 
 /// The glue's text as model.zig builds it.
 pub fn glueSource(a: std.mem.Allocator) ![]u8 {
@@ -54,6 +62,11 @@ pub fn fp4Library(device: mtl.Device, src: []const u8) !mtl.Library {
     return mtl.Library.fromSource(device, src, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
 }
 
+/// dflash2.metal's library as dflash2.zig and setTaps compile it: MLX's language, precise math functions.
+pub fn dflash2Library(device: mtl.Device, src: []const u8) !mtl.Library {
+    return mtl.Library.fromSource(device, src, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
+}
+
 /// The NVFP4 GEMM's text: nax.h inlined for this GPU (model.zig's build), or as a GPU without tensor units takes it.
 pub fn fp4GemmSource(device: mtl.Device, a: std.mem.Allocator, units: bool) ![]u8 {
     if (units) return frags.source(device, a, ks.ricursive_fp4_gemm);
@@ -62,7 +75,7 @@ pub fn fp4GemmSource(device: mtl.Device, a: std.mem.Allocator, units: bool) ![]u
 
 /// Every pipeline the family runs appears among the registrations' functions.
 pub fn requireComplete(functions: []const []const u8) !void {
-    inline for (.{ glue_names, llama_names, gemm_names, [_][]const u8{ attention_name, sample_name }, fp4_names, fp4_gemm_names }) |list| for (list) |name| {
+    inline for (.{ glue_names, llama_names, gemm_names, [_][]const u8{ attention_name, sample_name }, fp4_names, fp4_gemm_names, dflash2_names }) |list| for (list) |name| {
         var seen = false;
         for (functions) |f| if (std.mem.eql(u8, f, name)) {
             seen = true;
@@ -74,7 +87,7 @@ pub fn requireComplete(functions: []const []const u8) !void {
 test "ricursive contracts: the roll call wants every pipeline" {
     var all: [pipelines][]const u8 = undefined;
     var i: usize = 0;
-    inline for (.{ glue_names, llama_names, gemm_names, [_][]const u8{ attention_name, sample_name }, fp4_names, fp4_gemm_names }) |list| for (list) |name| {
+    inline for (.{ glue_names, llama_names, gemm_names, [_][]const u8{ attention_name, sample_name }, fp4_names, fp4_gemm_names, dflash2_names }) |list| for (list) |name| {
         all[i] = name;
         i += 1;
     };

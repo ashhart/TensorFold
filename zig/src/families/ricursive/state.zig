@@ -58,6 +58,9 @@ pub const Cache = struct {
     capacity: usize,
     len: usize = 0,
     follow: ?mtl.ResidencySet.Follow = null,
+    /// The latest tapped rows a drafter may absorb: positions [start, start + rows), in a scratch's or last_tap.
+    tap: Tap = .{},
+    last_tap: ?mtl.Buffer = null, // the prompt's last row's taps, kept for the first draft
 
     pub fn setResident(self: *Cache, hook: ?mtl.ResidencySet.Follow) void {
         if (self.follow) |f| mtl.resident.fields.apply(self, f, false);
@@ -91,8 +94,11 @@ pub const Cache = struct {
         self.setResident(null);
         self.kv.deinit();
         self.logits.deinit();
+        if (self.last_tap) |x| x.deinit();
     }
 };
+
+pub const Tap = struct { buf: ?mtl.Buffer = null, off: usize = 0, start: usize = 0, rows: usize = 0 };
 
 pub const fields = [_][]const u8{ "ids", "resid", "v0", "x", "vx", "q", "g", "qn", "att", "y", "gu", "act", "logits_all", "pm", "pl", "po", "wq" };
 
@@ -136,6 +142,7 @@ pub const Scratch = struct {
     pl: mtl.Buffer,
     po: mtl.Buffer,
     wq: mtl.Buffer, // a prompt chunk's NVFP4 projection as bf16 (its global left to the GEMM)
+    taps: ?mtl.Buffer = null, // with a drafter: every row's tapped residuals (bf16 [rows, taps, hidden])
     rows: usize,
 
     /// Buffers for `rows` rows at once (batch_rows for decode, prompt_rows for prompt chunks).
@@ -149,11 +156,13 @@ pub const Scratch = struct {
             made += 1;
         }
         s.rows = rows;
+        s.taps = null;
         return s;
     }
 
     pub fn deinit(s: *Scratch) void {
         inline for (fields) |f| @field(s, f).deinit();
+        if (s.taps) |x| x.deinit();
     }
 };
 

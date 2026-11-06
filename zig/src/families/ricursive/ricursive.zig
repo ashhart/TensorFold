@@ -8,6 +8,8 @@ pub const backend = @import("backend.zig");
 pub const budget = @import("budget.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const contracts = @import("contracts.zig");
+pub const dflash2 = @import("dflash2.zig");
+pub const dflash2_config = @import("dflash2_config.zig");
 
 test {
     _ = config;
@@ -16,4 +18,5 @@ test {
     _ = budget;
     _ = snapshot;
     _ = contracts;
+    _ = dflash2_config;
 }
