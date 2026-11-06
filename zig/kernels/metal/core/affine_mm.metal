@@ -470,7 +470,7 @@ inline bfloat am_swiglu(float g, float u, float limit) {
   return static_cast<bfloat>(float(silu) * float(bfloat(u)));
 }
 #else
-// The glue's SwiGLU in bf16 (glm_act2): MLX's bf16 exp and abs, nn.silu's x * sigmoid(x), gate and up clipped at `limit`.
+// The glue's SwiGLU in bf16 (glm_act2): MLX's bf16 exp and abs, nn.silu's x*sigmoid(x), gate and up clipped at `limit`.
 inline bfloat am_sigmoid(bfloat x) {
   const bfloat e = bfloat(__metal_exp(float(bfloat(__metal_fabs(float(x), __METAL_MAYBE_FAST_MATH__))), __METAL_MAYBE_FAST_MATH__));
   const bfloat y = bfloat(1) / (bfloat(1) + e);
