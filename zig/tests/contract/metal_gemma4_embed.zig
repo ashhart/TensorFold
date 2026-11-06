@@ -134,6 +134,24 @@ pub const Probe = struct {
         }
     }
 };
+/// metal_main's embedding probes: each built when its name matches `only`, kept at a fixed address.
+pub const Suite = struct {
+    probes: [24]Probe = undefined,
+    made: usize = 0,
+
+    pub fn collect(s: *Suite, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, only: ?[]const u8, kernels: *std.ArrayList(g.Kernel)) !void {
+        for (entries) |v| {
+            if (only) |o| if (std.mem.indexOf(u8, v.name, o) == null) continue;
+            s.probes[s.made] = try Probe.init(a, device, queue, v);
+            s.made += 1;
+        }
+        for (s.probes[0..s.made]) |*p| try kernels.append(a, p.kernel());
+    }
+
+    pub fn deinit(s: *Suite) void {
+        for (s.probes[0..s.made]) |*p| p.deinit();
+    }
+};
 pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usize {
     var problems: usize = 0;
     for (entries) |v| {
