@@ -1,4 +1,4 @@
-//! Dependent dispatch boundaries through serial and concurrent encoders and indirect command buffers; run under the GPU lock.
+//! Dependent dispatch boundaries via serial, concurrent encoders and indirect command buffers; run under the GPU lock.
 const std = @import("std");
 const mtl = @import("metal");
 const common = @import("common.zig");
