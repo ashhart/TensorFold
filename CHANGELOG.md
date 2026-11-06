@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: the portable-names check runs on every pull request again; since #2274 a reused pass could miss a newly added name
+  Windows can't check out (#2311).
+
 - Tests: the Qwen3.8-27B decode control in the Metal kernel contract edits the line #2106 changed, so contract runs on
   M5 reach their summary again (#2303, fixes #2301). Thanks to @BobClawblaw.
 
