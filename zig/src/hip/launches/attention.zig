@@ -94,6 +94,7 @@ pub fn tf_causal(l: *const Launcher, q: CF, k: C, v: C, out: F, batch: c_int, ql
     // a 16-bit cache of whole 64-wide heads takes the 64-row tile (attention=f32: 16-row); odd heads a wave a query
     if (kind < 2 and @rem(d, 64) == 0 and d <= 256 and @rem(k_ss, 8) == 0 and @rem(v_ss, 8) == 0 and l.wide) {
         try l.go(l.fa_wide[kind], dim(cdiv(qlen, 64), heads, batch), dim(256, 1, 1), 0, s, &a);
+        if (l.edge) try l.go(l.fa_wide_edge[kind], dim(cdiv(qlen, 64), heads, batch), dim(256, 1, 1), 0, s, &a);
     } else if (d >= 2 and @rem(d, 2) == 0) {
         try l.go(l.fa_prefill[kind], dim(cdiv(qlen, 16), heads, batch), dim(256, 1, 1), 0, s, &a);
     } else {
@@ -119,6 +120,8 @@ pub fn pagedCausal(l: *const Launcher, q: u64, k: u64, v: u64, table: u64, out: 
     try a.add(table);
     try a.add(@as(c_int, @intCast(count)));
     try l.go(l.fa_paged[@intCast(cache_kind)], dim(cdiv(qlen, 64), heads, 1), dim(256, 1, 1), 0, s, &a);
+    // where dot2 ignores a zero's sign the tile is main's; the edge pass reruns a block a non-finite masked key reaches
+    if (l.edge) try l.go(l.fa_paged_edge[@intCast(cache_kind)], dim(cdiv(qlen, 64), heads, 1), dim(256, 1, 1), 0, s, &a);
 }
 
 pub fn tf_attn_gate(l: *const Launcher, att: CF, qg: C, out: P, kind: c_int, len: c_int, heads: c_int, d: c_int, rows_major: c_int, s: S) Error!void {
