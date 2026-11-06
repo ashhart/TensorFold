@@ -153,8 +153,8 @@ pub const Model = struct {
         defer m.checkpoint.closeFiles();
         const c = m.config;
         const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
-        // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
-        const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
+        // The share is every layer's whole MLP: tensor parallel ranks and stages hold less and run prompts on the GPU.
+        const share = m.shard.ranks == 1 and m.weights.stage == null and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
         // the share and its overhead bound are qualified on the dense 27B's MLP alone: routed prompts stay on the GPU
         if (columns > 0 and c.moe()) std.log.info("qwen27: the Neural Engine share is not qualified for routed checkpoints; prompts run on the GPU alone", .{});
