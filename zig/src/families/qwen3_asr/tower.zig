@@ -167,7 +167,12 @@ fn front(r: anytype, a: cfg.Audio, w: *const Weights, b: Buffers, feats: mel.Fea
     try r.dump("conv3", b.c1, n * f3 * t3, a.conv, .{ n, f3, t3 });
     try r.gelu(b.c1, b.c1, n * f3 * t3 * a.conv);
     try r.flatten(b.c1, b.wide, n, f3, t3, a.conv);
-    try r.linear(b.wide, w.conv_out, null, b.x + first * t3 * a.d * 2, n * t3, a.d, a.conv * f3, .none, w.positions);
+    const rows = b.x + first * t3 * a.d * 2;
+    if (r.dumping()) { // the package's conv_out tap is before the positions: one more pass for it, only when dumping
+        try r.linear(b.wide, w.conv_out, null, rows, n * t3, a.d, a.conv * f3, .none, null);
+        try r.dump("conv_out", rows, n * t3, a.d, null);
+    }
+    try r.linear(b.wide, w.conv_out, null, rows, n * t3, a.d, a.conv * f3, .none, w.positions);
 }
 
 /// The tower over `feats` into `out` [rows, a.out] bf16; the plan's rows returned.
