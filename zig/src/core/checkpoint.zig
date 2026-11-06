@@ -13,7 +13,7 @@ pub const Ahead = prefetching.Ahead;
 pub const max_readers = prefetching.max_readers;
 pub const loadReaders = prefetching.configured;
 
-/// The checkpoint's shard paths in name order: model.safetensors.index.json's weight map, else every model*.safetensors.
+/// The checkpoint's shard paths by name: model.safetensors.index.json's weight map, else every model*.safetensors.
 pub fn shardFiles(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![][:0]u8 {
     var names: std.ArrayList([:0]u8) = .empty;
     errdefer {
