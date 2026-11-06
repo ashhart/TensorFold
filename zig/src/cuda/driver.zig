@@ -53,6 +53,8 @@ pub const Driver = struct {
     }
 
     pub fn close(self: *Driver) void {
+        // this thread's staged download buffer frees through this driver: it goes while the struct is still here
+        @import("download_stage.zig").release(self);
         if (@import("copy_source.zig").keepDriver(self)) return;
         self.lib.close();
     }

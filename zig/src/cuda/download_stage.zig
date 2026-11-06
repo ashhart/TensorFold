@@ -48,6 +48,11 @@ pub fn drop() void {
     }
 }
 
+/// Frees this thread's buffer when it is `d`'s: a driver leaves the stage before its own struct goes away.
+pub fn release(d: *const Driver) void {
+    if (held) |h| if (h.d == d) drop();
+}
+
 /// Forgets the cached device reading (tests use distinct drivers, but a fake may reuse one).
 pub fn forget() void {
     device = null;

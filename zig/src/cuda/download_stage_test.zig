@@ -86,3 +86,26 @@ test "a discrete GPU's download copies straight into the caller's slice" {
     try std.testing.expectEqual(@intFromPtr(&out), destination);
     try std.testing.expectEqual(@as(usize, 0), allocations);
 }
+
+test "a driver leaving the stage frees this thread's buffer, so no freed driver is ever freed through" {
+    integrated_flag = 1;
+    allocations = 0;
+    stage.forget();
+    stage.drop();
+    defer stage.forget();
+    defer stage.drop();
+    const before = memory.usage(false).host;
+    var one = driver();
+    var out: [64]u8 = @splat(0xaa);
+    const src: memory.DeviceBuffer = .{ .d = &one, .ptr = 0x1000, .len = out.len, .borrowed = true };
+    try src.download(0, &out);
+    try std.testing.expectEqual(@as(usize, 1), allocations);
+    stage.release(&one);
+    try std.testing.expectEqual(before, memory.usage(false).host);
+    // the next driver stages its own buffer instead of freeing through the one that left
+    var two = driver();
+    const other: memory.DeviceBuffer = .{ .d = &two, .ptr = 0x2000, .len = out.len, .borrowed = true };
+    try other.download(0, &out);
+    try std.testing.expectEqual(@as(usize, 2), allocations);
+    try std.testing.expect(std.mem.allEqual(u8, &out, 0x5a));
+}
