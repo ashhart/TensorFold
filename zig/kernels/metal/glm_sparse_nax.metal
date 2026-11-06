@@ -1,4 +1,4 @@
-// GLM's sparse MLA for prompt chunks on the tensor units: exact bf16 products, fp32 sums, probabilities in three bf16 parts (exact).
+// GLM's sparse MLA, prompt chunks, tensor units: exact bf16 products, fp32 sums, probabilities as 3 bf16 parts (exact).
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
