@@ -74,7 +74,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CI: main's `zig` and `zig-windows` jobs reuse main's newest build cache, as a pull request does, so each push compiles and runs only what changed since. `zig_cache_restat --prune` keeps each saved cache to about one build, and a nightly run builds and checks everything from nothing (#2402).
 - Qwen3.5 on CUDA loads a plain BF16 checkpoint as a decision backbone (Cloudflare's Clef-Flash), not for chat:
   chat and the flags the joint schema head is not qualified with are refused by name before the weights load,
-  `capabilities --json` lists `bf16` under `decisions`, and its norms scale by 1 + w in FP32 (#2324).
+  and its norms scale by 1 + w in FP32. A quantized Qwen3.5 checkpoint that ships `joint_head_config.json` is now
+  refused (`QwenHeadNeedsBf16`), as on HIP: the head runs on the BF16 weights only (#2383, part of #2324). Thanks to
+  @laudney.
 
 - Docs: `docs/api.md` lists `DELETE /v1/slide/facts`, and `docs/control.md` no longer says the native server refuses `--spill-gib` and `--vision` (#2341).
 
