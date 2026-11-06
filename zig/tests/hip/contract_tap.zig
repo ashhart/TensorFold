@@ -1,4 +1,4 @@
-//! A drafter's taps under the contract on HIP: tf_plan_tap and tf_tap_rows copy residual words into a tap ring.
+//! A drafter's taps under the contract on HIP: tf_plan_tap and tf_tap_rows fill a tap ring; a planted control for each.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
@@ -20,15 +20,15 @@ fn none(_: c.Shape) usize {
     return 0;
 }
 
-/// A round's rows over their slots' descriptors, or one stream's prompt rows from a position.
-pub const Mode = enum { plan, rows };
+/// A round's rows over their slots' descriptors, or one stream's prompt rows from a position; and a control of each.
+pub const Mode = enum { plan, rows, wrong_row, wrong_tap };
 
 const rule = "every ring word is its row's residual word, NaN and infinity bits included, or keeps its bytes";
 
 pub fn spec(m: Mode) c.Spec {
     return switch (m) {
-        .plan => .{
-            .name = "hip tf_plan_tap",
+        .plan, .wrong_row => .{
+            .name = if (m == .plan) "hip tf_plan_tap" else "control: tf_plan_tap writes each row one ring row on",
             .accum = .none,
             .depth = none,
             .out = .raw,
@@ -36,8 +36,8 @@ pub fn spec(m: Mode) c.Spec {
             // a decode row, a draft window and a 16-row verify over 27B's five taps
             .served = &.{ .{ .rows = 1, .n = 5, .k = 5120 }, .{ .rows = 4, .n = 5, .k = 5120 }, .{ .rows = 16, .n = 5, .k = 5120 } },
         },
-        .rows => .{
-            .name = "hip tf_tap_rows",
+        .rows, .wrong_tap => .{
+            .name = if (m == .rows) "hip tf_tap_rows" else "control: tf_tap_rows writes the next tap",
             .accum = .none,
             .depth = none,
             .out = .raw,
@@ -74,13 +74,18 @@ pub const Tap = struct {
     }
 
     pub fn kernel(self: *Tap) g.Kernel {
-        return .{ .spec = spec(self.m), .ctx = self, .vt = &vt };
+        const control: ?g.Gate = if (self.m == .wrong_row or self.m == .wrong_tap) .shapes else null;
+        return .{ .spec = spec(self.m), .ctx = self, .vt = &vt, .control = control };
     }
 
     const vt = g.hooks(Tap);
 
+    fn round(self: *const Tap) bool {
+        return self.m == .plan or self.m == .wrong_row;
+    }
+
     fn tap(self: *const Tap) usize {
-        return if (self.m == .plan) self.shape.n - 1 else 1;
+        return if (self.round()) self.shape.n - 1 else 1;
     }
 
     fn ringWords(self: *const Tap) usize {
@@ -108,12 +113,17 @@ pub const Tap = struct {
         self.ring = try self.rig.output(self.ringWords() * 4);
         self.pos = try a.alloc(i32, shape.rows);
         self.slot = try a.alloc(i32, shape.rows);
-        const start: usize = if (self.m == .plan) first else pos0;
+        const start: usize = if (self.round()) first else pos0;
         for (self.pos, self.slot, 0..) |*p, *s, r| {
             p.* = @intCast(start + r);
-            s.* = if (self.m == .plan and r % 4 != 0) @intCast(r % 4 % 3) else 0;
+            s.* = if (self.round() and r % 4 != 0) @intCast(r % 4 % 3) else 0;
         }
-        if (self.m == .rows) return true;
+        if (!self.round()) return true;
+        // the control's plan names each row's next position
+        const pos = try a.dupe(i32, self.pos);
+        if (self.m == .wrong_row) for (pos) |*p| {
+            p.* += 1;
+        };
         var descs: [3]u64 = @splat(0);
         for (descs[0..2], [_]u64{ self.ring, 0 }) |*d, at| {
             var desc: [words]u64 = @splat(0);
@@ -122,7 +132,7 @@ pub const Tap = struct {
         }
         const one = [1]i32{@intCast(shape.rows)};
         self.plan = .{ .rows = shape.rows, .slots = descs.len, .args = .{
-            .pos = try self.rig.input(std.mem.sliceAsBytes(self.pos)),
+            .pos = try self.rig.input(std.mem.sliceAsBytes(pos)),
             .slot = try self.rig.input(std.mem.sliceAsBytes(self.slot)),
             .count = try self.rig.input(std.mem.asBytes(&one)),
             .desc = try self.rig.input(std.mem.asBytes(&descs)),
@@ -135,8 +145,9 @@ pub const Tap = struct {
         const s = self.shape;
         const st = self.rig.s.handle;
         switch (self.m) {
-            .plan => try self.l.planTap(self.in, self.plan, s.k, self.tap(), s.n, ring_rows, st),
+            .plan, .wrong_row => try self.l.planTap(self.in, self.plan, s.k, self.tap(), s.n, ring_rows, st),
             .rows => try self.l.tapRows(self.in, self.ring, s.rows, s.k, self.tap(), s.n, ring_rows, pos0, st),
+            .wrong_tap => try self.l.tapRows(self.in, self.ring, s.rows, s.k, self.tap() + 1, s.n, ring_rows, pos0, st),
         }
         try self.rig.s.synchronize();
     }
