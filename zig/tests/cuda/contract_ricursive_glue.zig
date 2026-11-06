@@ -1,4 +1,4 @@
-//! Ripple's CUDA glue under the contract: tf_rc_embed, tf_rc_add_norm (four forms), tf_rc_gate, tf_rc_silu_clamp.
+//! Ripple's CUDA glue in the contract: tf_rc_embed, tf_rc_add_norm (4 forms), tf_rc_gate, tf_rc_silu_clamp, tf_rc_tap.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -14,8 +14,9 @@ const Iv = ref.Iv;
 const Sums = ref.Sums;
 const Kernels = kern.Kernels;
 const Function = cuda.Function;
+const Tap = @import("contract_ricursive_tap.zig").Tap; // tf_rc_tap's check
 
-const hidden = 5120;
+pub const hidden = 5120;
 const query = 80 * 128; // the output gate's rows: query heads x head dim
 const intermediate = 40960;
 const vocab = 100352;
@@ -456,6 +457,7 @@ pub const Set = struct {
     norm_ctls: [5]ref.Gated(AddNorm) = undefined,
     gates: [2]ref.Gated(Gate) = undefined,
     silus: [3]ref.Gated(SiluClamp) = undefined,
+    taps: [5]ref.Checked(Tap) = undefined,
 
     /// Every registration over `k`, appended to `list` (each control after the kernel it breaks).
     pub fn init(set: *Set, gpu: check.Gpu, s: cuda.Stream, k: *const Kernels, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
@@ -475,11 +477,19 @@ pub const Set = struct {
             .{ .rig = rig, .k = .{ .kern = k, .f = try k.mod.function("tf_rc_ctl_silu_round"), .drop = .round } },
             .{ .rig = rig, .k = .{ .kern = k, .f = try k.mod.function("tf_rc_ctl_silu_no_lower"), .drop = .lower } },
         };
+        set.taps = .{
+            .{ .rig = rig, .k = .{ .kern = k, .f = k.tap, .form = .chunk } },
+            .{ .rig = rig, .k = .{ .kern = k, .f = k.tap, .form = .round } },
+            .{ .rig = rig, .k = .{ .kern = k, .f = try k.mod.function("tf_rc_ctl_tap_column"), .form = .round, .fault = .column } },
+            .{ .rig = rig, .k = .{ .kern = k, .f = try k.mod.function("tf_rc_ctl_tap_ring"), .form = .round, .fault = .ring } },
+            .{ .rig = rig, .k = .{ .kern = k, .f = try k.mod.function("tf_rc_ctl_tap_swap"), .form = .round, .fault = .swap } },
+        };
         for (&set.embeds) |*x| try list.append(a, x.kernel());
         for (&set.norms) |*x| try list.append(a, x.kernel());
         for (&set.norm_ctls) |*x| try list.append(a, x.kernel());
         for (&set.gates) |*x| try list.append(a, x.kernel());
         for (&set.silus) |*x| try list.append(a, x.kernel());
+        for (&set.taps) |*x| try list.append(a, x.kernel());
     }
 
     pub fn deinit(set: *Set) void {
@@ -488,5 +498,6 @@ pub const Set = struct {
         for (&set.norm_ctls) |*x| x.deinit();
         for (&set.gates) |*x| x.deinit();
         for (&set.silus) |*x| x.deinit();
+        for (&set.taps) |*x| x.deinit();
     }
 };

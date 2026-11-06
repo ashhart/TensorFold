@@ -1,4 +1,4 @@
-//! Ripple's CUDA glue (ricursive.cu): its served launches, pending in registry.cuda_pending until nvcc's records land.
+//! Ripple's CUDA glue and the drafter's tap (ricursive.cu): its served launches, pending until nvcc's records land.
 const std = @import("std");
 const registry = @import("registry.zig");
 
@@ -8,6 +8,7 @@ pub const cuda = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "ricursive tf_rc_add_norm", .symbol = "tf_rc_add_norm", .image = "ricursive", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 } } }, // TODO(spark): fill from kernel-contract-limits
     .{ .launch = .{ .name = "ricursive tf_rc_gate", .symbol = "tf_rc_gate", .image = "ricursive", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 } } }, // TODO(spark): fill from kernel-contract-limits
     .{ .launch = .{ .name = "ricursive tf_rc_silu_clamp", .symbol = "tf_rc_silu_clamp", .image = "ricursive", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 } } }, // TODO(spark): fill from kernel-contract-limits
+    .{ .launch = .{ .name = "ricursive tf_rc_tap", .symbol = "tf_rc_tap", .image = "ricursive", .threads = 256, .min_sm = 80 }, .usage = .{ .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 }, .{ .regs = 0, .static = 0, .bound = 0 } } }, // TODO(spark): fill from kernel-contract-limits
 };
 
 test "Ripple's CUDA glue records: one served launch a symbol, on the ricursive image" {

@@ -1,4 +1,4 @@
-//! Ripple's forward rounds == one-row steps, bit for bit (ripple-forward): streams, verify windows, graphs, reuse.
+//! Ripple's forward rounds == one-row steps, bit for bit (ripple-forward): streams, windows, graphs, reuse, taps.
 const std = @import("std");
 const cuda = @import("cuda");
 const rc = @import("ricursive_cuda");
@@ -6,117 +6,10 @@ const check = @import("check.zig");
 
 const fwd = rc.model;
 const wts = rc.weights;
-const Config = @FieldType(wts.Weights, "config");
-const Weight = cuda.qmmf.Weight;
+const fixture = @import("ripple_fixture.zig"); // the release-width target's random weights
 
-/// The release's attention and widths, so every lane matmul takes the release's plan (tile, K slices, cluster).
-pub fn config() Config {
-    var c: Config = .{ .hidden = 5120, .intermediate = 12288, .layers = 10, .heads = 80, .kv_heads = 8, .vocab = 16384, .eps = 1e-6, .theta = 10000, .window = 1024, .embed_scale = 71.55417527999327, .clamp = 20, .context = 8192, .fp4_mlp = true };
-    for (0..c.layers) |i| c.global[i] = i % 5 == 4;
-    return c;
-}
-
-/// bf16 bits of x, rounded to nearest even.
-fn bf16(x: f32) u16 {
-    const b: u32 = @bitCast(x);
-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
-
-const Build = struct {
-    w: *wts.Weights,
-    d: *const cuda.Driver,
-    r: std.Random,
-
-    fn put(b: Build, bytes: []const u8) !u64 {
-        var buf = try cuda.DeviceBuffer.fromHost(b.d, bytes);
-        errdefer buf.free();
-        try b.w.buffers.append(b.w.gpa, buf);
-        b.w.bytes += bytes.len;
-        return buf.ptr;
-    }
-
-    /// `n` bf16 values of magnitude in [2^e, 2^(e+1)), random signs and mantissas (fast: the release's sizes).
-    fn values(b: Build, n: usize, e: i32) ![]u16 {
-        const v = try b.w.gpa.alloc(u16, n);
-        const exp: u16 = @intCast((e + 127) << 7);
-        var bits: u64 = 0;
-        for (v, 0..) |*x, i| {
-            if (i % 4 == 0) bits = b.r.int(u64);
-            x.* = exp | @as(u16, @truncate(bits & 0x807f));
-            bits >>= 16;
-        }
-        return v;
-    }
-
-    /// A norm's or the embedding's bf16 values, normal with deviation `sd` around `mean`.
-    fn small(b: Build, n: usize, mean: f32, sd: f32) !u64 {
-        const v = try b.w.gpa.alloc(u16, n);
-        defer b.w.gpa.free(v);
-        for (v) |*x| x.* = bf16(mean + sd * b.r.floatNorm(f32));
-        return b.put(std.mem.sliceAsBytes(v));
-    }
-
-    /// A bf16 [n, k] projection packed for the lane and prompt matmuls, its values about 1 / sqrt(k).
-    fn dense(b: Build, n: usize, k: usize) !Weight {
-        const src = try b.values(n * k, -@as(i32, std.math.log2_int(usize, k) / 2) - 1);
-        defer b.w.gpa.free(src);
-        const out = try b.w.gpa.alloc(u16, cuda.modelopt.padded(n) * k);
-        defer b.w.gpa.free(out);
-        cuda.qmmf.packBf16(out, src, n, k);
-        return cuda.modelopt.bf16Weight(try b.put(std.mem.sliceAsBytes(out)), n, k);
-    }
-
-    /// An NVFP4 [n, k] projection: random nibbles, E4M3 scales of 1 to 3, a global of 1/1024 (about 1 / sqrt(k)).
-    fn fp4(b: Build, n: usize, k: usize) !Weight {
-        const gpa = b.w.gpa;
-        const codes = try gpa.alloc(u8, n * k / 2);
-        defer gpa.free(codes);
-        b.r.bytes(codes);
-        const scales = try gpa.alloc(u8, n * k / 16);
-        defer gpa.free(scales);
-        const e4m3 = [_]u8{ 0x38, 0x3c, 0x40, 0x44 };
-        b.r.bytes(scales);
-        for (scales) |*x| x.* = e4m3[x.* & 3];
-        const words = try gpa.alloc(u32, cuda.nvfp4.padded(n) / 64 * (k / 64) * 512);
-        defer gpa.free(words);
-        const tiles = try gpa.alloc(u8, cuda.nvfp4.padded(n) * (k / 16));
-        defer gpa.free(tiles);
-        cuda.nvfp4.packWords(words, codes, n, k);
-        cuda.nvfp4.packScales(tiles, scales, n, k);
-        return cuda.nvfp4.weight(try b.put(std.mem.sliceAsBytes(words)), try b.put(tiles), 1.0 / 1024.0, n, k);
-    }
-};
-
-/// Random weights in the loader's layout (cuda_weights.load): q, k and g one projection, NVFP4 MLPs.
-pub fn build(gpu: check.Gpu, c: Config, seed: u64) !wts.Weights {
-    var w: wts.Weights = .{ .gpa = gpu.gpa, .config = c };
-    errdefer w.deinit();
-    var prng = std.Random.DefaultPrng.init(seed);
-    const b: Build = .{ .w = &w, .d = gpu.d, .r = prng.random() };
-    const h = c.hidden;
-    const q = c.queryWidth();
-    const kv = c.kvWidth();
-    w.embed = try b.small(c.vocab * h, 0, 0.02);
-    w.head = try b.dense(c.vocab, h);
-    w.norm = try b.small(h, 1, 0.1);
-    w.layers = try gpu.gpa.alloc(wts.Layer, c.layers);
-    for (w.layers) |*l| l.* = .{
-        .qkg = try b.dense(2 * q + kv, h),
-        .v = try b.dense(kv, h),
-        .o = try b.dense(h, q),
-        .gate = try b.fp4(c.intermediate, h),
-        .up = try b.fp4(c.intermediate, h),
-        .down = try b.fp4(h, c.intermediate),
-        .input_norm = try b.small(h, 1, 0.1),
-        .post_attn = try b.small(h, 1, 0.1),
-        .pre_ffn = try b.small(h, 1, 0.1),
-        .post_ffn = try b.small(h, 1, 0.1),
-        .q_norm = try b.small(128, 1, 0.1),
-        .k_norm = try b.small(128, 1, 0.1),
-        .blend = wts.blendOf(bf16(b.r.float(f32) * 2 - 1)),
-    };
-    return w;
-}
+pub const config = fixture.config;
+pub const build = fixture.build;
 
 /// A stream: its prompt's length and decode tokens (teacher-forced, so every run feeds the same rows).
 const Spec = struct { name: []const u8, prompt: usize };
@@ -366,6 +259,192 @@ fn replay(m: *const fwd.Model, r: Replay, toks: []const u32, got: []u8, want: []
     return graphVsEager(m, r.what, chains[0..r.chains.len], toks[0..n], got, want);
 }
 
+/// The tapped layers (columns 0, 1 and 2): sliding, global, sliding.
+const tap_layers = [_]u32{ 1, 4, 8 };
+
+/// A slot's whole tap ring into `out`.
+fn ringOf(m: *const fwd.Model, slot: usize, out: []u8) !void {
+    try m.download(m.tapRing(slot).?, out[0 .. fwd.tap_rows * m.tapRowBytes()]);
+}
+
+/// Position p's tap column t in a downloaded ring.
+fn tapRow(m: *const fwd.Model, ring: []const u8, p: usize, t: usize) []const u8 {
+    const h2 = m.c.hidden * 2;
+    return ring[(p % fwd.tap_rows) * m.tapRowBytes() + t * h2 ..][0..h2];
+}
+
+/// The ring rows that differ between two downloaded rings.
+fn ringDiff(m: *const fwd.Model, got: []const u8, want: []const u8) usize {
+    const row = m.tapRowBytes();
+    var n: usize = 0;
+    for (0..fwd.tap_rows) |r| n += @intFromBool(!std.mem.eql(u8, got[r * row ..][0..row], want[r * row ..][0..row]));
+    return n;
+}
+
+/// Stream B in a zeroed `slot`: a prompt chunk's last logits, a graph round's and an eager round's (22-token window).
+fn plainB(m: *const fwd.Model, x: *const Streams, slot: usize, last: []u8, by_graph: []u8, eager: []u8) !void {
+    const n = specs[1].prompt;
+    const t = decodeTokens(1);
+    try m.reset(slot, m.context);
+    _ = try prefill(m, slot, x.ids[1][0..n]);
+    try m.download(m.b.logits, last);
+    const chain = [_]fwd.Chain{.{ .slot = slot, .p0 = n, .tokens = t }};
+    try m.roundAs(&chain, x.ids[1][n..][0..t], .graph);
+    try roundRows(m, t, by_graph);
+    try m.roundAs(&chain, x.ids[1][n..][0..t], .exact);
+    try roundRows(m, t, eager);
+}
+
+/// One-row eager steps of `ids` in `slot` from p0.
+fn eagerSteps(m: *const fwd.Model, slot: usize, p0: usize, ids: []const u32) !void {
+    for (ids, p0..) |id, p| try m.roundAs(&.{.{ .slot = slot, .p0 = p, .tokens = 1 }}, &.{id}, .exact);
+}
+
+/// The drafter's taps (slots zeroed first): tap rows equal the residual after each tapped layer; steps 1 to 5 below.
+fn taps(m: *fwd.Model, w: *const wts.Weights, x: *const Streams) !usize {
+    const a = m.gpa;
+    const c = m.c;
+    const v2 = c.vocab * 2;
+    const h2 = c.hidden * 2;
+    const t = decodeTokens(1);
+    var fails: usize = 0;
+    const bufs = try a.alloc(u8, 2 * (v2 + 2 * t * v2));
+    defer a.free(bufs);
+    const off = .{ bufs[0..v2], bufs[v2..][0 .. t * v2], bufs[v2 + t * v2 ..][0 .. t * v2] };
+    const on = .{ bufs[v2 + 2 * t * v2 ..][0..v2], bufs[2 * v2 + 2 * t * v2 ..][0 .. t * v2], bufs[2 * v2 + 3 * t * v2 ..][0 .. t * v2] };
+
+    // 4 (before): plain logits without taps, the round's graph captured without the tap launches
+    if (m.tap != null) return error.TapsAlreadySet;
+    try plainB(m, x, 4, off[0], off[1], off[2]);
+
+    try m.setTaps(&tap_layers);
+    if (m.captured() != 0) {
+        std.debug.print("FAIL ripple-forward taps: setTaps left {d} graphs captured\n", .{m.captured()});
+        fails += 1;
+    }
+    for (0..m.arena.slots) |sl| try m.reset(sl, m.context);
+    const ring_bytes = fwd.tap_rows * m.tapRowBytes();
+    const rings = try a.alloc(u8, 2 * ring_bytes);
+    defer a.free(rings);
+    const ring_a = rings[0..ring_bytes];
+    const ring_b = rings[ring_bytes..];
+    const resid = try a.alloc(u8, fwd.prompt_rows * h2);
+    defer a.free(resid);
+
+    // 1 and 3: B's prompt (3,066 rows: 2,048, then 1,018 at 2,048 to 3,065, rows 2,048 to 2,063 then 0 to 1,001)
+    var cut: [tap_layers.len]wts.Weights = undefined; // the model ending at each tapped layer (shared buffers)
+    for (&cut, tap_layers) |*cw, l| {
+        cw.* = w.*;
+        cw.layers = w.layers[0 .. l + 1];
+    }
+    const ids = x.ids[1][0..specs[1].prompt];
+    var chunk_bad: usize = 0;
+    var wrap_bad: usize = 0;
+    var kept_bad: usize = 0;
+    var at: usize = 0;
+    while (at < ids.len) {
+        const end = @min(ids.len, at + fwd.prompt_rows);
+        try ringOf(m, 0, ring_a);
+        try m.prompt(0, at, ids[at..end]);
+        try ringOf(m, 0, ring_b);
+        for (0..fwd.tap_rows) |r| {
+            const named = (r + fwd.tap_rows - at % fwd.tap_rows) % fwd.tap_rows < end - at;
+            const row = m.tapRowBytes();
+            if (!named and !std.mem.eql(u8, ring_a[r * row ..][0..row], ring_b[r * row ..][0..row])) kept_bad += 1;
+        }
+        for (&cut, 0..) |*cw, col| {
+            m.w = cw;
+            defer m.w = w;
+            try m.prompt(1 + col, at, ids[at..end]);
+            try m.download(m.b.resid, resid[0 .. (end - at) * h2]);
+            for (at..end) |p| if (!std.mem.eql(u8, tapRow(m, ring_b, p, col), resid[(p - at) * h2 ..][0..h2])) {
+                chunk_bad += 1;
+                wrap_bad += @intFromBool(p >= fwd.tap_rows);
+            };
+        }
+        at = end;
+    }
+    if (chunk_bad == 0) {
+        check.pass("ripple-forward taps 1: B's 2 prompt chunks (3,066 rows), layers 1, 4 and 8 == the residual after each layer (eager)", .{});
+    } else {
+        std.debug.print("FAIL ripple-forward taps 1: {d} of {d} tap rows differ from the residual after their layer\n", .{ chunk_bad, ids.len * tap_layers.len });
+        fails += 1;
+    }
+    var untouched: usize = 0; // slots 4-9: no chunk named them since the reset
+    for (4..m.arena.slots) |sl| {
+        try ringOf(m, sl, ring_a);
+        untouched += @intFromBool(std.mem.indexOfNone(u8, ring_a, &.{0}) != null);
+    }
+    if (wrap_bad == 0 and kept_bad == 0 and untouched == 0) {
+        check.pass("ripple-forward taps 3: positions 2,064 to 3,065 at pos % 2,064; rows 1,002 to 2,047 and other slots' rings untouched", .{});
+    } else {
+        std.debug.print("FAIL ripple-forward taps 3: {d} wrapped rows wrong, {d} unnamed rows changed, {d} other slots' rings written\n", .{ wrap_bad, kept_bad, untouched });
+        fails += 1;
+    }
+
+    // 4 (after): the same logits with taps on, eager and from a graph captured with the tap launches
+    try plainB(m, x, 4, on[0], on[1], on[2]);
+    const p_ok = same("taps on: B's prompt", .{}, on[0], off[0]);
+    const g_ok = sameRows("taps on: graph round", t, v2, on[1], off[1]);
+    const e_ok = sameRows("taps on: eager round", t, v2, on[2], off[2]);
+    if (p_ok and g_ok and e_ok) {
+        check.pass("ripple-forward taps 4: plain logits with taps on == taps off: B's prompt, a {d}-row round eager and from a graph", .{t});
+    } else {
+        std.debug.print("FAIL ripple-forward taps 4: taps change plain logits (same: prompt {d}, graph round {d}, eager round {d})\n", .{ @intFromBool(p_ok), @intFromBool(g_ok), @intFromBool(e_ok) });
+        fails += 1;
+    }
+
+    // 2: two streams, 16 rows each, one across the ring's wrap (2,056 to 2,071), the other at 100 to 115
+    var prng = std.Random.DefaultPrng.init(0x7461_7073);
+    var toks: [3 * 32]u32 = undefined;
+    for (&toks) |*tk| tk.* = prng.random().uintLessThan(u32, @intCast(c.vocab));
+    const lens = [2]usize{ 2056, 100 };
+    for ([_]usize{ 5, 7 }) |sl| _ = try prefill(m, sl, x.ids[4][0..lens[0]]);
+    for ([_]usize{ 6, 8 }) |sl| _ = try prefill(m, sl, x.ids[0][0..lens[1]]);
+    // the 32-row graph captured first in slots 4 and 9 (positions 0 to 15), then replayed below
+    try m.reset(4, m.context);
+    try m.roundAs(&.{ .{ .slot = 4, .p0 = 0, .tokens = 16 }, .{ .slot = 9, .p0 = 0, .tokens = 16 } }, toks[0..32], .graph);
+    const graphs = m.captured();
+    try m.roundAs(&.{ .{ .slot = 7, .p0 = lens[0], .tokens = 16 }, .{ .slot = 8, .p0 = lens[1], .tokens = 16 } }, toks[0..32], .graph);
+    try eagerSteps(m, 5, lens[0], toks[0..16]);
+    try eagerSteps(m, 6, lens[1], toks[16..32]);
+    var round_bad: usize = 0;
+    for ([_][2]usize{ .{ 7, 5 }, .{ 8, 6 } }) |pair| {
+        try ringOf(m, pair[0], ring_a);
+        try ringOf(m, pair[1], ring_b);
+        round_bad += ringDiff(m, ring_a, ring_b);
+    }
+    if (round_bad == 0 and m.captured() == graphs) {
+        check.pass("ripple-forward taps 2: a 2-stream round of 16 rows a stream from a graph (one across the wrap) == one-row eager steps, whole rings", .{});
+    } else {
+        std.debug.print("FAIL ripple-forward taps 2: {d} ring rows differ; graphs {d} before the replay, {d} after\n", .{ round_bad, graphs, m.captured() });
+        fails += 1;
+    }
+
+    // 5: a verify round at 2,072 and 116 keeps 5 and 11 rows; the next 16-row rounds start at 2,077 and 127
+    const p1 = [2]usize{ lens[0] + 16, lens[1] + 16 };
+    const kept = [2]usize{ 5, 11 };
+    try m.roundAs(&.{ .{ .slot = 7, .p0 = p1[0], .tokens = 16 }, .{ .slot = 8, .p0 = p1[1], .tokens = 16 } }, toks[32..64], .graph);
+    try m.roundAs(&.{ .{ .slot = 7, .p0 = p1[0] + kept[0], .tokens = 16 }, .{ .slot = 8, .p0 = p1[1] + kept[1], .tokens = 16 } }, toks[64..96], .graph);
+    try eagerSteps(m, 5, p1[0], toks[32..][0..kept[0]]);
+    try eagerSteps(m, 5, p1[0] + kept[0], toks[64..80]);
+    try eagerSteps(m, 6, p1[1], toks[48..][0..kept[1]]);
+    try eagerSteps(m, 6, p1[1] + kept[1], toks[80..96]);
+    var keep_bad: usize = 0;
+    for ([_][2]usize{ .{ 7, 5 }, .{ 8, 6 } }) |pair| {
+        try ringOf(m, pair[0], ring_a);
+        try ringOf(m, pair[1], ring_b);
+        keep_bad += ringDiff(m, ring_a, ring_b);
+    }
+    if (keep_bad == 0 and m.captured() == graphs) {
+        check.pass("ripple-forward taps 5: a verify round keeping 5 and 11 of 16 rows, then the next round at the rejected positions == one-row steps of the kept rows", .{});
+    } else {
+        std.debug.print("FAIL ripple-forward taps 5: {d} ring rows differ; graphs {d}, then {d}\n", .{ keep_bad, graphs, m.captured() });
+        fails += 1;
+    }
+    return fails;
+}
+
 pub fn run(gpu: check.Gpu) !void {
     const a = gpu.gpa;
     const c = config();
@@ -485,5 +564,8 @@ pub fn run(gpu: check.Gpu) !void {
         std.debug.print("FAIL ripple-forward graphs coexist: {d} of {d} replays differ, {d} graphs before and {d} after\n", .{ order, any_order.len, graphs, m.captured() });
         fails += 1;
     }
+
+    // 7. a drafter's taps on the same model (last: setTaps drops the graphs above)
+    fails += try taps(&m, &w, &x);
     try check.expect(fails == 0, "ripple-forward: {d} checks differ", .{fails});
 }
