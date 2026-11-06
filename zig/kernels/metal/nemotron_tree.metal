@@ -1,4 +1,4 @@
-// Tree windows for Nemotron: Mamba by parent, attention by logical key position, KV compaction, row gathers, draft top-k.
+// Nemotron's tree windows: Mamba by parent, attention by logical key position, KV compaction, row gathers, draft top-k.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
