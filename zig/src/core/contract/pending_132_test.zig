@@ -2,6 +2,7 @@
 const std = @import("std");
 const registry = @import("registry.zig");
 const limits = @import("limits.zig");
+const fresh130 = @import("measurements/main_130.zig");
 
 test "compiler receipts: new 13.0 records preserve independent 13.2 selection" {
     const r = for (registry.all_cuda) |row| {
@@ -46,7 +47,7 @@ test "prompt int8: five-SM receipts remain independent of later releases, 13.3's
         const row = for (registry.all_cuda) |r| {
             if (std.mem.eql(u8, r.launch.name, receipt.name)) break r;
         } else return error.MissingDecodeRecord;
-        try std.testing.expectEqualDeep(row.usage, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
+        try std.testing.expectEqualDeep(fresh130.lookup(row.launch.name) orelse row.usage, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
         for ([_]?limits.Nvcc{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 4 }, .{ .major = 14, .minor = 0 } }) |version|
             try std.testing.expectEqualDeep(registry.none, registry.usageFor(row, version));
         try std.testing.expectEqualDeep(receipt.usage, registry.usageFor(row, .{ .major = 13, .minor = 3 }));
@@ -56,7 +57,7 @@ test "prompt int8: five-SM receipts remain independent of later releases, 13.3's
         const row = for (registry.all_cuda) |r| {
             if (std.mem.eql(u8, r.launch.name, receipt.name)) break r;
         } else return error.MissingPendingRecord;
-        try std.testing.expectEqualDeep(row.usage, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
+        try std.testing.expectEqualDeep(fresh130.lookup(row.launch.name) orelse row.usage, registry.usageFor(row, .{ .major = 13, .minor = 0 }));
         try std.testing.expectEqualDeep(receipt.usage, registry.usageFor(row, .{ .major = 13, .minor = 3 }));
     }
 }

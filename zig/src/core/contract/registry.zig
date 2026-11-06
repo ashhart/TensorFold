@@ -335,6 +335,7 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 }
 /// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
+    if (release) |v| if (v.major == 13 and v.minor == 0) if (@import("measurements/main_130.zig").lookup(r.launch.name)) |u| return u;
     var u = r.usage;
     const rel = release orelse return u;
     if (r.later_pending and !newer(.{ .major = 13, .minor = 2 }, rel)) u = none;
@@ -561,6 +562,7 @@ test "the registered launches fit every Apple family and every SM, and each plan
 }
 test {
     _ = @import("registry_sets_test.zig");
+    _ = @import("measurements/main_130.zig");
     _ = @import("nvfp4_tile_pending.zig");
     _ = paging;
     _ = @import("minimax_records.zig");
