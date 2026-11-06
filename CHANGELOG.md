@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B-Preview runs on native Metal (M5 or later) from the publisher's NVFP4 and bf16 releases as published,
+  with exact bf16 caches, thinking, tool calls and structured output; `--context` is capped at 262,144, the longest
+  checked (#2231, fixes #2171). Thanks to @BobClawblaw.
+
 - TENSORFOLD_PHASE_METRICS=1 adds a bounded request queue-wait histogram and its vLLM alias to native metrics; it is off by default (#2139).
 
 - GLM on CUDA prefetches a decode window's next weights into L2 on a side stream, on by default on GB10 (sm_121) only, inside a 12 MiB budget; replies are identical, and every other GPU is unchanged (#1580). Thanks to @Bizuayeu.
