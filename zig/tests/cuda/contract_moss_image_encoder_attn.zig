@@ -47,8 +47,6 @@ fn fmax(a: f64, b: f64) f64 {
     return @max(a, b);
 }
 
-const why = "an output is a weighted mean of bf16 values rounded once: a bf16 weight sum errs under the output's own ulp";
-
 /// A score's dot: 256 products a block, then block_sum_tree's two butterflies; a step rescales both by exp(m - top).
 fn depth(s: c.Shape) usize {
     return 4 * (s.k + 1) + 11;
@@ -80,7 +78,6 @@ pub const Attn = struct {
             // a key head is four query heads: the heads move in fours, the prompt's rows and the width do not
             .tiles = .{ .{ .size = group, .step = group, .min = group }, .{}, .{ .size = 8 } },
             .served = &served,
-            .sums = .{ .bf16 = 0, .why = why },
         };
     }
 

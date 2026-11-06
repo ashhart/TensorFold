@@ -103,30 +103,41 @@ encoded again in 0.078 s, the same bytes: true
 PASS every step within its gate, repeated byte for byte
 ```
 
-`moss_image_encoder_pending.zig` records the nine launches' geometry; their five-SM usage receipts, and the contract
-test types' float64 references, are still owed.
+`moss_image_encoder_records.zig` holds the nine launches' geometry and five-SM usage receipts, measured.
+`zig/tests/cuda/contract_moss_image_encoder_*.zig` puts each kernel under gates 1-4, with its outputs against float64
+at its rounding points and a planted control that gate 3 must catch.
 
 ## Kernel contract
 
-`zig/tests/cuda/contract_moss_image*.zig` registers the four kernels in each form the family launches, and the head-128
-attention:
+`zig/tests/cuda/contract_moss_image*.zig` registers all 24 kernels the family launches: the transformer's eight (the
+norm plain and modulated, q and k's RMSNorm and rotary over separate projections and over packed rows, the situ gate
+over (hidden | gate) rows and over two buffers, the gate add, and the head-128 attention), the decoder's seven
+(`tf_md_unpack`, `tf_md_gemm`, `tf_md_conv3x3`, `tf_md_group_part`, `tf_md_group_finish`, `tf_md_norm`,
+`tf_md_softmax`) and the encoder's nine, one suite each (`tf_me_norm`, `tf_me_head`, `tf_me_attention`, `tf_me_gate`,
+`tf_me_silu_mul`, `tf_me_conv`, `tf_me_gdn_prep`, `tf_me_gdn`, `tf_me_gated_norm`):
 
-- each output is checked against float64 at the kernel's bf16 points, in the range its fp32 steps allow (IEEE division
-  and square root, two ulps for `expf` and `tanhf`);
-- shapes are the served ones (4,106 to 4,188 joint rows, 10 to 63 prompt rows, widths 3,072 and 8,192) and the tiles'
-  edges; the attention runs all 24 heads at the prompt lengths and two at the joint lengths;
-- five controls each drop one bf16 rounding point (the norm's, the modulation's, the rotary's, the sigmoid's and the
-  gate's), and gate 3 must catch each;
-- the attention is checked against `contract_attn.zig`'s float64 reference; its gate 4 uses P x V sums that fp16 or bf16
-  sums would miss.
+- each output is checked against float64 at its rounding points, in the range its fp32 steps allow (IEEE division
+  and square root, two ulps for `expf`, `logf` and `tanhf`);
+- shapes are the served ones: the transformer's 4,106 to 4,188 joint rows, 10 to 63 prompt rows and 3,072 and 8,192
+  widths, its attention all 24 heads at the prompt lengths and two at the joint lengths; the encoder's 10 to 33 prompt
+  rows, 16 query heads of 256 over 4 key-value heads and 16 key heads of 128 over 32 value heads; the tiles' edges as
+  well;
+- 21 controls each drop or move one step of the kernel's arithmetic, and gate 3 must catch each: the transformer's
+  five (the norm's, the modulation's, the rotary's, the sigmoid's and the gate add's), the decoder's seven (its two
+  biases, the unpack's mean, the group's centred squares and dropped channels, beta and the score scale), and the
+  encoder's nine (its two `(1 + w)`, the score scale, the silu, the gated norm's weight, the decay, the up projection,
+  and beta's and the sigmoid's fp32);
+- the transformer's and the encoder's attention are checked against `contract_attn.zig`'s float64 reference; their
+  gate 4 uses P x V sums that fp16 or bf16 sums would miss.
 
-Gate 5's records are in `moss_image_cuda_records.zig` (sm_80, 86, 89, 120 and 121; the same on nvcc 13.0, 13.2 and
-13.3, so no later release needs a set of its own).
+Gate 5's records are in `moss_image_cuda_records.zig` for the transformer (sm_80, 86, 89, 120 and 121; the same on nvcc
+13.0, 13.2 and 13.3, so no later release needs a set of its own), `moss_image_decoder_records.zig` for the decoder and
+`moss_image_encoder_records.zig` for the encoder, all of them measured.
 
 `tf-cuda-test moss-contract` on a GB10 (nvcc 13.0 and 13.2) and an RTX 5090 (nvcc 13.3):
 
 ```
-SUMMARY moss image: 8 kernels, 8 pass gates 1-4, 0 fail; 5 controls: 5 red as planted, 0 missed
+SUMMARY moss image: 24 kernels, 24 pass gates 1-4, 0 fail; 21 controls: 21 red as planted, 0 missed
 ```
 
 ## Run a case
