@@ -79,7 +79,7 @@ def gdn_window(out: Path, g: torch.Generator, parents: list[int]) -> dict:
 
 
 def compiled(fn) -> dict:
-    """The JIT cache's one specialization of ``fn``: signature, constants, and launch args specialized as multiples of 16."""
+    """JIT cache's one specialization of ``fn``: signature, constants, launch args specialized as multiples of 16."""
 
     found = {}
     for entry in getattr(fn, "device_caches", {}).values():
