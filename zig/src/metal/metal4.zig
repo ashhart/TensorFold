@@ -563,6 +563,14 @@ pub const State = struct {
     }
 };
 
+pub fn waitForFence(e: Id, fence: Id) void {
+    objc.msg(void, e, "waitForFence:beforeEncoderStages:", .{ fence, stage_dispatch });
+}
+
+pub fn updateFence(e: Id, fence: Id) void {
+    objc.msg(void, e, "updateFence:afterEncoderStages:", .{ fence, stage_dispatch });
+}
+
 test "the follow table: lookups, a dropped key, growth keeps every live address" {
     const t = Table.init(8);
     defer t.deinit();
