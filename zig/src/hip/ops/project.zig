@@ -61,6 +61,17 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
     }
 }
 
+/// silu(gate) x up into `act` (m, n / 2) from an interleaved gate/up BF16 projection (n, k), in the WMMA epilogue.
+pub fn projectSilu(o: Ops, x: Tensor, proj: Projection, m: usize, act: Tensor) Error!void {
+    const h = switch (proj.handle) {
+        .dense => |d| d,
+        .mlx, .bf16 => return error.BadShape,
+    };
+    if (h.dtype != .bf16 or m == 0 or x.kind != .bf16 or act.kind != .bf16) return error.BadShape;
+    if (o.l.dense.siluRefusal(x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k)) != null) return error.BadShape;
+    try o.l.dense.gemmSilu(o.l.r, x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k), o.stream);
+}
+
 /// Up to four products of the same `m` rows in one launch; false, nothing launched, when no grouped tile takes them.
 pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: []Tensor) Error!bool {
     var ws: [4]Affine = undefined;

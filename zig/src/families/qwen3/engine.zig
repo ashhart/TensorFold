@@ -50,7 +50,8 @@ pub const Engine = struct {
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
         const before = hip.usage(false).device;
-        e.m = try model.Model.load(gpa, io, &e.driver, dir);
+        // the WMMA tile fuses silu x up into the gate/up product, over the two weights interleaved in one
+        e.m = try model.Model.load(gpa, io, &e.driver, dir, if (e.lib.dense.serve == .wmma12) .interleaved else .plain);
         e.weights = hip.usage(false).device - before;
         return e;
     }
