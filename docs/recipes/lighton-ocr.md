@@ -87,6 +87,18 @@ python3 tools/zig/lighton_ocr_reference.py examples --size 0.8B \
   --output RECEIPT.json --device cuda:0
 ```
 
+`tools/zig/lighton_ocr_pixels.py` checks the same 1B pins, then runs the
+1B processor, called as the card does, on the 40 synthetic pages that
+`zig/src/families/lighton_ocr/pixels_test.zig` makes. It prints each
+page's CHW pixel shape and SHA256; the test holds those rows in
+`fixtures/processor_pixels.txt` and compares its own prepared pixels
+with them byte for byte:
+
+```sh
+python3 tools/zig/lighton_ocr_pixels.py --model MODEL_DIRECTORY \
+  --output processor_pixels.txt
+```
+
 `tools/zig/lighton_ocr_reference.py capture` writes processor pixels,
 vision features, decoder inputs and teacher logits with pinned local
 Transformers and checkpoint files. Outputs must be outside the checkout.
