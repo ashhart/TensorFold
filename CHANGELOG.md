@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The heaviest host test gates build in ReleaseSafe, which keeps every runtime safety check: the Qwen4 host gate's 113 checks take 18 seconds on one 20-core host instead of 4 minutes, and the CUDA host family's gates take a sixth to an eighteenth of their Debug time, for about the same compile cost (#2242).
+
 - GLM-5.3-Flash on CUDA: `TF_GLM_KV_SHARE` moves to `TF_KV_SHARE`. With `TF_KV_PAGES=on`, `TF_KV_SHARE=n` keeps GLM's prompts in the shared prompt store that Spark 2.5, Gemma 4 and Kolibri-1 use, with the same tokens, resume marks and memory as GLM's own store, which goes. A server started with `TF_GLM_KV_SHARE` set to anything but 0 or an empty value stops before the weights load and names `TF_KV_SHARE` (#2211).
 
 - Qwen 3.5 and 3.6 on CUDA: a prompt chunk's last layer runs q, attention, o and the MLP over the kept row's 128-row tile only, and k and v over every row, so the cache is unchanged and the last row's logits stay bit-equal; on a GB10 first tokens come 1 to 3% sooner. A model served with an MTP head, int8 or images keeps the full last layer (#2229, closes #2165). Thanks to @jschmied and @jungjipdo.
@@ -68,7 +70,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CI: `zig` and `zig-windows` keep main's build cache instead of rebuilding from nothing, every check still reruns, and the quick checks run first.
 
 - HIP: the `tf_sum_partials` records follow ROCm 10.1's hipcc, taking 8 limit problems off the contract (#2233). Thanks to @AbrahamCete.
-- The heaviest host test gates build in ReleaseSafe, which keeps every runtime safety check: the Qwen4 host gate's 113 checks take 18 seconds on one 20-core host instead of 4 minutes, and the CUDA host family's gates take a sixth to an eighteenth of their Debug time, for about the same compile cost (#2242).
+
 - CUDA docs match the code: README, RUNBOOK and the recipes now say which families refuse an A100 at startup, that no NVFP4 or FP8 model has run on sm_80 to sm_89, and that the largest recorded run is three GB10s (#2227).
 
 - Kimi K3 and K3.1 on Metal through the native server: chat rendering, reasoning and tool calls, with K3.1 capped at 2,047 tokens until its sparse index is qualified. Tested on a synthetic graph; no real weights have run here, and the full 1.45 TB checkpoint doesn't fit one Mac through this path (#2221, part of #2192).
