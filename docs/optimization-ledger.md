@@ -24,7 +24,7 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/bf16_round.zig`: the one fp32-to-bf16 rounding every host copy uses.
 - `zig/src/core/profile.zig` and [profiles](profiles.md): the `--profile` switch registry.
 - `zig/src/core/contract/` and the [kernel contract](kernel-contract.md): the gates a new or ported kernel passes.
-- `zig/src/core/prompt_tail.zig`: the last layer's kept tile. Not on main yet: it is on [#2229].
+- `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]).
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
 ## The table
@@ -187,8 +187,8 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) |
 | 15. MTP | done¹ | no (DSpark) | no (prompt) |
 | 16. DFlash(2) | yes | yes | no (prompt) |
-| 17. DSpark | yes | done [#2221] | no (prompt) |
-| 18. Copy drafts | yes | yes | no (prompt) |
+| 17. DSpark | yes | yes | no (prompt) |
+| 18. Copy drafts | yes | done [#2221] | no (prompt) |
 | 19. Shared drafts | yes | yes | no (prompt) |
 | 20. Solo chunks | yes | yes | no (prompt) |
 | 21. Read-ahead | yes | yes | yes |
@@ -269,13 +269,14 @@ below; these are estimates for planning a port, not results.
 
 2. **KV pages from the core pool.** Streams lease KV pages from one `kv_pool` as their rows grow, instead of each
    reserving a whole `--context` window, so more streams fit and a short request holds little ([#1156], [#781]'s
-   follow-ups). Sliding layers keep their rings. Qwen's pages are opt-in (`TF_QWEN_KV_PAGES`, `_ALL`); [#2011] makes
-   them the default at the window path's speed (2k to 32k prompts within +0.3..+0.7 %). Dory's are opt-in
+   follow-ups). Sliding layers keep their rings. Qwen's pages are opt-in (`TF_QWEN_KV_PAGES`, `_ALL`); [#2011] keeps
+   them opt-in, makes `--parallel` a cap with pages set, and brings them to the window path's speed (2k to 32k prompts
+   within +0.3..+0.7 %). Dory's are opt-in
    (`TENSORFOLD_DORY_KV_PAGES=1`), Flash Next's experimental. Metal's port is tracked in [#1293].
 
 3. **Shared paged prompt store.** A kept prompt stays as the pool's own pages in one `prompt_radix` store, so a resume
-   copies nothing and the cache and the streams draw on the same memory (`TF_QWEN_KV_SHARE`, `TF_GLM_KV_SHARE`, and
-   `TF_KV_SHARE` on the core adapter, [#1657]). On Qwen3.8-27B a cold first turn is 3–6 % faster with it on, and the
+   copies nothing and the cache and the streams draw on the same memory (`TF_QWEN_KV_SHARE`, and `TF_KV_SHARE` on
+   the core adapter, [#1657], which GLM uses). On Qwen3.8-27B a cold first turn is 3–6 % faster with it on, and the
    second turn level ([#1357]). [#2211] moved GLM onto the shared store. It can't be combined with
    `--learn-conversations` today. Flash Next already resumes a prefix from the host store's whole-state copies; on the
    shared store a kept 32k state would stop duplicating about 0.9 GiB of attention rows (27 KiB a token).
