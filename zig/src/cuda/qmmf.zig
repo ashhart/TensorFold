@@ -119,9 +119,8 @@ pub fn halfShared(mode: Mode) u32 {
 /// MXFP8/BF16 decode calls take half tiles below this many 64-column blocks (TF_QMMF_HALF_BELOW; 0 never): same sums.
 pub const half_below_default: usize = 96;
 
-fn halfBelow() usize {
-    const v = std.c.getenv("TF_QMMF_HALF_BELOW") orelse return half_below_default;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch half_below_default;
+fn halfBelow() !usize {
+    return @import("sys").environment.read(usize, "TF_QMMF_HALF_BELOW", half_below_default);
 }
 
 pub fn halfModeIndex(mode: Mode) ?usize {
@@ -189,7 +188,7 @@ pub const Lane = struct {
             f.* = try mod.function(name);
             try f.allowDynamicShared(sharedBytes(.bf16, 64));
         }
-        l.half_below = halfBelow();
+        l.half_below = try halfBelow();
         return l;
     }
 

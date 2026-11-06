@@ -124,6 +124,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("hip-dense-tune", "Time the dot2 and WMMA BF16 dense tiles at Qwen3-8B's shapes (-Dhip-arch)").dependOn(&dense_tune_run.step);
     const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
+    b.step("test-environment-hip-host", "Named HIP budget refusals without GPU work").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip, .filters = &.{ "HIP environment:", "a carve-out needs the card" } })).step);
     b.step("test-slide-hip-host", "Unsupported HIP learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"slide admission:"} })).step);
     const blas_host = b.addRunArtifact(b.addTest(.{ .root_module = host.hip, .filters = &.{ "HIP BLAS:", "HIP fixed BLAS:", "HIP convolution:", "HIP AOTriton:" } }));
     b.step("test-hip-blas-host", "HIP BLAS, convolution and attention admission without device execution").dependOn(&blas_host.step);

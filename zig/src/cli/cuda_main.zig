@@ -181,9 +181,14 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("RESULT digest {s}\n", .{&std.fmt.bytesToHex(d, .lower)});
         return 0;
     }
+    const settings = @import("sys").environment;
+    if (try settings.refusal(init.arena.allocator(), init.environ_map, .{ .cuda = true, .device = opts.device, .segments = if (opts.segments) |n| @intCast(n) else null, .carveout = opts.carveout })) |why| {
+        std.debug.print("{s}\n", .{why});
+        return 2;
+    }
+    const device = try deviceOrdinal(opts.device, init.environ_map.get("TF_CUDA_DEVICE"));
     var driver = try cuda.Driver.open();
     defer driver.close();
-    const device = try deviceOrdinal(opts.device, init.environ_map.get("TF_CUDA_DEVICE"));
     var ctx = try cuda.Context.init(&driver, @intCast(device));
     defer ctx.deinit();
     const kernels: ?[]const u8 = switch (try cuda.aot.pick(init.arena.allocator(), init.io, opts.kernels orelse init.environ_map.get("TENSORFOLD_CUDA_KERNELS"), try ctx.capability())) {
@@ -221,7 +226,7 @@ pub fn main(init: std.process.Init) !u8 {
     const widths = std.mem.eql(u8, cmd, "widths");
     const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench or widths);
     const sampling: ?lanes.Sampling = if ((std.mem.eql(u8, cmd, "run") or widths) and opts.sampling.temperature > 0) opts.sampling else null;
-    const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
+    const segments = opts.segments orelse @as(usize, @intCast((try settings.parse("TF_CUDA_SEGMENTS", init.environ_map.get("TF_CUDA_SEGMENTS"))) orelse 1));
     // a rank past 0 of a tensor-parallel latent MoE holds expert shares and serves rank 0's jobs, whatever the command
     if (init.environ_map.get("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, r, "0")) {
         nemotron.worker.serve(gpa, init.io, &ctx, opts.model, opts.math) catch |err| {
@@ -317,10 +322,7 @@ fn parseCounts(text: []const u8) !Counts {
 
 /// The GPU ordinal `--device` or `TF_CUDA_DEVICE` picks before an engine loads (PR #354); nothing set means 0.
 fn deviceOrdinal(flag: ?u32, env: ?[]const u8) !u32 {
-    if (flag) |d| return d;
-    const value = env orelse return 0;
-    if (value.len == 0) return 0;
-    return std.fmt.parseInt(u32, value, 10);
+    return @import("sys").environment.device(flag, env);
 }
 
 fn parseFloats(gpa: std.mem.Allocator, text: []const u8) ![]f64 {
@@ -393,5 +395,5 @@ test "the device ordinal comes from --device, then TF_CUDA_DEVICE, else 0" {
     try std.testing.expectEqual(@as(u32, 3), try deviceOrdinal(null, "3"));
     try std.testing.expectEqual(@as(u32, 0), try deviceOrdinal(null, null));
     try std.testing.expectEqual(@as(u32, 0), try deviceOrdinal(null, ""));
-    try std.testing.expectError(error.Overflow, deviceOrdinal(null, "4294967296"));
+    try std.testing.expectError(error.InvalidEnvironment, @import("sys").environment.parse("TF_CUDA_DEVICE", "4294967296"));
 }

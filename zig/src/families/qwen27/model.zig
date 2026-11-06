@@ -79,6 +79,12 @@ pub const Model = struct {
         share_fits: ?*const fn (u64) bool,
         later: bool,
     ) !*Model {
+        if (platform.getenv("TF_PROMPT_ROWS")) |raw| {
+            const n = std.fmt.parseInt(u32, raw, 10) catch 0;
+            if (n < 16 or n > 2048 or n % 16 != 0) {
+                try platform.environment.check("TF_PROMPT_ROWS", raw);
+            }
+        }
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));

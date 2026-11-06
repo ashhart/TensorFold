@@ -101,6 +101,7 @@ pub const Draft = struct {
     /// The target's window ms by rows (cuda_native.zig times them), for the round loop's prices.
     costs: [engine.most_window]lanes.config.Cost = undefined,
     n_costs: usize = 0,
+    tree_nodes: usize = 0,
 
     startup: profile.Times = .{},
     frame_streams: usize = 1,
@@ -117,11 +118,13 @@ pub const Draft = struct {
     const stagedLen = frame.stagedLen;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft {
+        const nodes = try tree.nodes();
         const started = profile.now(io);
         const c = try Config.read(gpa, io, dir, e.g);
         const d = try gpa.create(Draft);
         errdefer gpa.destroy(d);
         d.* = .{ .gpa = gpa, .io = io, .e = e, .c = c, .w = undefined, .mod = undefined, .fns = undefined, .scratch = undefined, .taps_in = 0, .th = 0, .thn = 0, .kabs = 0, .kn = 0, .vabs = 0, .xs = 0, .h = 0, .h2 = 0, .x = 0, .xin = 0, .dyn = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .o = 0, .gate = 0, .up = 0, .act = 0, .logits = 0, .words = 0, .parts = 0, .hp = 0, .ids = 0, .staged = undefined };
+        d.tree_nodes = nodes;
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen35_draft);
         errdefer d.mod.unload();
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(d.fns, name) = try d.mod.function("tf_q35d_" ++ name);
@@ -393,7 +396,7 @@ pub const Draft = struct {
         d.drawn = .{ .sampling = it.sampling, .position = it.position };
         defer d.drawn = .{};
         if (it.lanes) |shape| return d.selectLanes(ctx, it.pending, rows, shape);
-        const limit = if (d.c.block == 16) tree.nodes() else 0;
+        const limit = if (d.c.block == 16) d.tree_nodes else 0;
         if (limit > 0) {
             // the whole budget whenever drafts are asked: the block's forward costs the same at any depth
             const n = if (it.depth == 0) 0 else limit;
@@ -423,7 +426,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.block == 16) tree.nodes() else 0) };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = copyMatch(d.e.g), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {

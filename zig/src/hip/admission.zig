@@ -73,6 +73,35 @@ pub const Plan = struct { pool: Pool, source: Source };
 
 pub const PlanError = error{ HostMemoryUnavailable, BadReserve, BadLimit };
 
+/// User-facing malformed budget text, kept separate from the pure admission error for host tests.
+pub fn badSetting(a: std.mem.Allocator, err: PlanError, env: Env) ![]const u8 {
+    const name: []const u8 = switch (err) {
+        error.BadReserve => "TENSORFOLD_MEMORY_RESERVE_GIB",
+        error.BadLimit => "TENSORFOLD_HIP_MEMORY_LIMIT_GB",
+        else => unreachable,
+    };
+    const raw = if (err == error.BadReserve) env.reserve else env.limit;
+    const forms: []const u8 = if (err == error.BadReserve)
+        "a number of GiB from 0.5 (2 on shared memory) to the memory's size"
+    else
+        "a positive number of GiB whose byte count fits in a 64-bit size";
+    return std.fmt.allocPrint(a, "{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw orelse ""), forms });
+}
+
+test "HIP environment: reserve and limit refusals name the actual text and accepted form" {
+    const a = std.testing.allocator;
+    const card: MemInfo = .{ .total = 16 << 30, .available = 15 << 30 };
+    try std.testing.expectError(error.BadReserve, plan(false, card, null, null, .{ .reserve = "bad-reserve" }));
+    try std.testing.expectError(error.BadLimit, plan(false, card, null, null, .{ .limit = "bad-limit" }));
+    for ([_]PlanError{ error.BadReserve, error.BadLimit }) |err| {
+        const text = try badSetting(a, err, .{ .reserve = "bad-reserve", .limit = "bad-limit" });
+        defer a.free(text);
+        try std.testing.expect(std.mem.indexOf(u8, text, if (err == error.BadReserve) "TENSORFOLD_MEMORY_RESERVE_GIB=\"bad-reserve\"" else "TENSORFOLD_HIP_MEMORY_LIMIT_GB=\"bad-limit\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "expected") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "GiB") != null);
+    }
+}
+
 /// The pool from the card's count, /proc/meminfo's text and the device's dedicated VRAM (sysfs), without I/O.
 pub fn plan(integrated: bool, card: MemInfo, text: ?[]const u8, vram: ?u64, env: Env) PlanError!Plan {
     const source = sourceOf(integrated, card, vram);
