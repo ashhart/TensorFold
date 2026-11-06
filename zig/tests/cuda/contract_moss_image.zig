@@ -1,4 +1,4 @@
-//! MOSS-Image's CUDA kernels under the contract (moss-contract): its glue with controls, and attention at head dim 128.
+//! MOSS-Image's CUDA kernels under the contract (moss-contract): the glue, attention and the decoder's unpack.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -8,6 +8,7 @@ const rig_ = @import("contract_rig.zig");
 const norms = @import("contract_moss_image_norms.zig");
 const steps = @import("contract_moss_image_steps.zig");
 const full = @import("contract_moss_image_attn.zig");
+const unpack = @import("contract_moss_image_decoder_unpack.zig");
 
 const g = core.contract.gates;
 
@@ -26,6 +27,7 @@ pub const Set = struct {
     situs: [3]steps.Situ = undefined,
     adds: [2]steps.GateAdd = undefined,
     full: full.Full = undefined,
+    decoder: *unpack.Set = undefined,
 
     /// The set, its kernels appended to `list` (each control after the kernel it breaks).
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -65,10 +67,12 @@ pub const Set = struct {
         for (&set.situs) |*x| try list.append(a, x.kernel());
         for (&set.adds) |*x| try list.append(a, x.kernel());
         try list.append(a, set.full.kernel());
+        set.decoder = try unpack.Set.init(gpu, s, a, list, &set.ctl);
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        set.decoder.deinit();
         for (&set.norms) |*x| x.deinit();
         for (&set.qks) |*x| x.deinit();
         for (&set.situs) |*x| x.deinit();
