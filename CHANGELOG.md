@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B: a refusal that no `--parallel` or `--context` can fix now names the wired-limit raise, and only suggests one that leaves the system room (#2123). Thanks to @devopsfortunato.
+
 - `api.Structure` keeps the body field that asked for a structure (`response_format`, `guided_json` and the other four), so an engine that refuses one can name the field the client sent (#2084).
 
 - `api.Structure` keeps the body field that asked for a structure — `response_format`, `guided_json` and the other four, or `text.format` and `output_config.format` on the Responses and Messages routes — so an engine that refuses one can name the field the client sent (#2084).
