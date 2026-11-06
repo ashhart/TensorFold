@@ -62,7 +62,14 @@ pub const Attn = struct {
     pub fn prepare(t: *Attn, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.n == 0) return false;
         t.rig.reset();
-        const a = t.rig.gpu.gpa;
+        try t.inputs(t.rig.gpu.gpa, shape, fill, seed);
+        t.dev = try t.rig.input(std.mem.sliceAsBytes(t.qkv.items));
+        t.out = try t.rig.output(t.count() * 2);
+        return true;
+    }
+
+    /// The host side of prepare: qkv filled for `fill`, and the float64 reference sized for its tokens.
+    fn inputs(t: *Attn, a: std.mem.Allocator, shape: c.Shape, fill: g.Fill, seed: u64) !void {
         t.heads = shape.rows;
         t.tokens = shape.n;
         t.held = null;
@@ -79,9 +86,6 @@ pub const Attn = struct {
             .nonfinite => t.plant(),
             .stress => t.stress(rng),
         }
-        t.dev = try t.rig.input(std.mem.sliceAsBytes(t.qkv.items));
-        t.out = try t.rig.output(t.count() * 2);
-        return true;
     }
 
     fn at(t: *Attn, row: usize, part: usize, head: usize, e: usize) *u16 {
@@ -97,14 +101,14 @@ pub const Attn = struct {
         t.at(t.tokens / 3, 2, last, 9).* = half(r.inf);
     }
 
-    /// Gate 4: every key of a head alike (each weight 1), values small odd integers mirrored over the keys.
+    /// Gate 4: keys alike (weights 1), odd values below 256 mirrored: fp16 lane sums pass 2048, fp32 sums stay exact.
     fn stress(t: *Attn, rng: std.Random) void {
         const n = t.tokens;
         for (0..t.heads) |hd| for (0..r.D) |e| {
             const key = t.at(0, 1, hd, e).*;
             for (0..n) |row| t.at(row, 1, hd, e).* = key;
             for (0..n / 2) |row| {
-                const v: f64 = @floatFromInt(1 + 2 * rng.uintLessThan(u32, 8));
+                const v: f64 = @floatFromInt(1 + 2 * rng.uintLessThan(u32, 128));
                 t.at(row, 2, hd, e).* = half(v);
                 t.at(n / 2 + row, 2, hd, e).* = half((if (row < 8) @as(f64, 1) else 0) - v);
             }
@@ -151,3 +155,33 @@ pub const Attn = struct {
         return t.ref.?.simulate(t, t.outputs(), 1.0 / 8.0, acc, order, out);
     }
 };
+
+/// The worst |got - want| / boundExact over the outputs, as gate 4 counts it (a non-finite sum misses infinitely).
+fn worst(got: []const f64, want: []const f64) f64 {
+    var most: f64 = 0;
+    for (got, want) |x, w| most = @max(most, if (std.math.isFinite(x)) @abs(x - w) / c.boundExact(spec("host"), w) else std.math.inf(f64));
+    return most;
+}
+
+test "gate 4's attention inputs at the joint rows: fp32 sums exact in every order, fp16 and bf16 miss by 100x" {
+    const a = std.testing.allocator;
+    var t: Attn = .{ .rig = undefined, .k = undefined, .name = "host" };
+    defer if (t.ref) |*x| x.deinit();
+    defer t.qkv.deinit(a);
+    try t.inputs(a, .{ .rows = 1, .n = r.joint, .k = r.joint }, .stress, 0x1d01);
+    // Every key scores alike, so every token's output is token 0's: its head's d outputs stand for all of them.
+    var buf: [3 * r.D]f64 = undefined;
+    const want = buf[0..r.D];
+    const got = buf[r.D .. 2 * r.D];
+    try t.ref.?.reference(&t, 1, 1.0 / 8.0, want, buf[2 * r.D ..]);
+    var margin = [2]f64{ std.math.inf(f64), std.math.inf(f64) };
+    for ([_]g.Order{ .sequential, .pairwise, .strided }) |o| {
+        try t.ref.?.simulate(&t, 1, 1.0 / 8.0, .f32, o, got);
+        try std.testing.expect(worst(got, want) <= 1);
+        for ([_]c.Accum{ .f16, .bf16 }, &margin) |acc, *m| {
+            try t.ref.?.simulate(&t, 1, 1.0 / 8.0, acc, o, got);
+            m.* = @min(m.*, worst(got, want));
+        }
+    }
+    try std.testing.expect(margin[0] >= 100 and margin[1] >= 100);
+}
