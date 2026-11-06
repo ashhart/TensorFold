@@ -23,16 +23,16 @@ const VArgs = extern struct { rows: u32, pos: u32, heads: u32, groups: u32, bloc
 const every_key = std.math.maxInt(i32);
 
 pub const B = struct { buf: mtl.Buffer = undefined, off: usize = 0, args: bool = false };
-fn b(buf: mtl.Buffer) B {
+pub fn b(buf: mtl.Buffer) B {
     return .{ .buf = buf };
 }
-fn bo(buf: mtl.Buffer, off: usize) B {
+pub fn bo(buf: mtl.Buffer, off: usize) B {
     return .{ .buf = buf, .off = off };
 }
-fn t(x: wts.Tensor) B {
+pub fn t(x: wts.Tensor) B {
     return .{ .buf = x.buffer, .off = x.offset };
 }
-const A = B{ .args = true };
+pub const A = B{ .args = true };
 
 const Enc = struct {
     e: mtl.ComputeEncoder,
@@ -49,31 +49,8 @@ const Enc = struct {
         if (groups) x.e.dispatchGroups(g3, t3) else x.e.dispatchThreads(g3, t3);
     }
 
-    /// y [rows, d.n] (rows `ldy` apart, at byte `out_off`) = x W^T: the GEMM a prompt chunk, the row kernels a window.
     fn dense(x: Enc, d: wts.Dense, in: B, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
-        const e = x.e;
-        if (n_rows <= st.batch_rows) {
-            // the variant holding the rows in registers: 1, 2, 4, 8, 16 or 32
-            const v: @import("model.zig").Llama = if (n_rows <= 1) .matvec_1 else if (n_rows <= 2) .matvec_2 else if (n_rows <= 4) .matvec_4 else if (n_rows <= 8) .matvec_8 else if (n_rows <= 16) .matvec_16 else .matvec_32;
-            e.setPipeline(x.m.ll(v));
-            e.setBuffer(in.buf, in.off, 0);
-            e.setBuffer(d.buf, d.off, 1);
-            e.setValue(MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) }, 2);
-            e.setBuffer(out, out_off, 3);
-            e.dispatchGroups(mtl.Size.of((d.n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
-            return;
-        }
-        const tn = (d.n + 127) / 128;
-        const tm = (n_rows + 63) / 64;
-        e.setPipeline(x.m.gemm[@intFromBool(n_rows % 64 == 0)][@intFromBool(d.n % 128 == 0)]);
-        e.setBuffer(in.buf, in.off, 0);
-        e.setBuffer(d.buf, d.off, 1);
-        var p: [16]i32 = @splat(0);
-        const vals = [_]usize{ n_rows, d.n, d.k, d.k, d.k, ldy, tn, tm, 2, d.k / 256, 0, 0, 0, 0, 0 };
-        for (vals, 0..) |v, i| p[i] = @intCast(v);
-        e.setBytes(std.mem.asBytes(&p), 2);
-        e.setBuffer(out, out_off, 3);
-        e.dispatchThreads(mtl.Size.of(@as(usize, tn << 2) * 32, (tm + 3) / 4 * 4, 2), mtl.Size.of(32, 4, 2));
+        denseRows(x.e, x.m, d, in, out, out_off, n_rows, ldy);
     }
 
     /// An MLP projection: bf16, or NVFP4 rows; a prompt chunk dequantizes exactly, then the GEMM applies the global.
@@ -127,8 +104,34 @@ const Enc = struct {
     }
 };
 
-/// All rows' logits or the last's; ids on the GPU; the last row drawn on the GPU; committed unwaited into `flight`.
-pub const Out = struct { all: bool = false, timing: ?*Timing = null, ids: ?B = null, draw: ?Draw = null, flight: ?*mtl.CommandBuffer = null };
+/// y [rows, d.n] (rows `ldy` apart, at byte `out_off`) = x W^T: the GEMM past 32 rows, the row kernels to 32.
+pub fn denseRows(e: mtl.ComputeEncoder, m: *const Model, d: wts.Dense, in: B, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
+    if (n_rows <= st.batch_rows) {
+        // the variant holding the rows in registers: 1, 2, 4, 8, 16 or 32
+        const v: @import("model.zig").Llama = if (n_rows <= 1) .matvec_1 else if (n_rows <= 2) .matvec_2 else if (n_rows <= 4) .matvec_4 else if (n_rows <= 8) .matvec_8 else if (n_rows <= 16) .matvec_16 else .matvec_32;
+        e.setPipeline(m.ll(v));
+        e.setBuffer(in.buf, in.off, 0);
+        e.setBuffer(d.buf, d.off, 1);
+        e.setValue(MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) }, 2);
+        e.setBuffer(out, out_off, 3);
+        e.dispatchGroups(mtl.Size.of((d.n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
+        return;
+    }
+    const tn = (d.n + 127) / 128;
+    const tm = (n_rows + 63) / 64;
+    e.setPipeline(m.gemm[@intFromBool(n_rows % 64 == 0)][@intFromBool(d.n % 128 == 0)]);
+    e.setBuffer(in.buf, in.off, 0);
+    e.setBuffer(d.buf, d.off, 1);
+    var p: [16]i32 = @splat(0);
+    const vals = [_]usize{ n_rows, d.n, d.k, d.k, d.k, ldy, tn, tm, 2, d.k / 256, 0, 0, 0, 0, 0 };
+    for (vals, 0..) |v, i| p[i] = @intCast(v);
+    e.setBytes(std.mem.asBytes(&p), 2);
+    e.setBuffer(out, out_off, 3);
+    e.dispatchThreads(mtl.Size.of(@as(usize, tn << 2) * 32, (tm + 3) / 4 * 4, 2), mtl.Size.of(32, 4, 2));
+}
+
+/// All rows' logits or the last's, ids or draws on the GPU, committed into `flight`; `taps`: a drafter's features.
+pub const Out = struct { all: bool = false, timing: ?*Timing = null, ids: ?B = null, draw: ?Draw = null, flight: ?*mtl.CommandBuffer = null, taps: ?B = null };
 
 /// A GPU draw of the last row's logits: argmax, or the keyed sampler at `position` (lanes' gpu_rule and gpu_full).
 pub const Draw = struct {
@@ -174,7 +177,14 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
     const ea = Args{ .rows = @intCast(n), .width = @intCast(h), .scale = c.embed_scale };
     x.glue(m.pipe(.embed), ea, &.{ out.ids orelse b(s.ids), bo(W.embed.buf, W.embed.off), A, b(s.resid), b(s.v0) }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
     x.addNorm(n, null, W.layers[0].input_norm, W.layers[0].attn.blend);
-    for (W.layers, 0..) |l, i| try layer(x, segments, l, i, n, if (i + 1 < W.layers.len) W.layers[i + 1] else null);
+    for (W.layers, 0..) |l, i| {
+        try layer(x, segments, l, i, n, if (i + 1 < W.layers.len) W.layers[i + 1] else null);
+        // the residual after a tapped layer (the release's capture: post-block, before the final norm)
+        if (out.taps) |tb| if (m.tap_at[i] >= 0) {
+            const ta = [4]u32{ @intCast(n), @intCast(h), m.taps, @intCast(m.tap_at[i]) };
+            x.glue(m.tap.?, ta, &.{ b(s.resid), A, tb }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
+        };
+    }
     if (out.all) {
         x.dense(W.head, b(s.x), s.logits_all, 0, n, c.vocab);
     } else {

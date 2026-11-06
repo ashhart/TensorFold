@@ -11,8 +11,11 @@ const row = @import("../step5/backend.zig").row;
 const gpu_full = lanes.gpu_full;
 const be = lanes.backend;
 
-/// The longest context a stream may take, the streams at once, and the bytes every stream's caches may hold.
-pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64 };
+/// A stream's longest context, the streams at once, the caches' bytes, and a drafter's context bytes a stream.
+pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, drafts: bool = false, drafter_bytes: u64 = 0 };
+
+/// Window widths the depth rule prices (a pending token and up to 15 drafts).
+const max_window = st.window_rows;
 
 /// Token slots a stream's handles point at: drawn tokens and host-fed ones (no command in flight reads a fresh one).
 const ring = 4096;
@@ -38,6 +41,9 @@ pub const Metal = struct {
     landed: u64 = 0, // slots below it are written
     flights: std.ArrayList(Flight) = .empty,
     values: []f32, // a logits row as f32, for the host twin of the GPU draw
+    sink: ?be.FeatureSink = null, // a drafted prompt pass: each chunk's taps to the drafter as it lands
+    costs: [max_window]lanes.config.Cost = undefined, // window ms by rows, for the depth rule (measure)
+    timed: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -93,11 +99,70 @@ pub const Metal = struct {
 
     pub fn facts(self: *const Metal) lanes.Model {
         // rows are independent in every decode kernel, so any width, alone or beside other streams, gives one-row bits
-        return .{ .exact_width = st.window_rows, .gpu_tokens = true, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true };
+        return .{ .exact_width = st.window_rows, .gpu_tokens = !self.options.drafts, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed] };
+    }
+
+    /// A window of each width 1..max_window at position 0 on a throwaway cache, the second of two runs timed.
+    pub fn measure(self: *Metal) !void {
+        var cache = try st.Cache.init(self.model.device, &self.model.config, 256);
+        defer cache.deinit();
+        var ids: [max_window]u32 = undefined;
+        for (&ids, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
+        for (1..max_window + 1) |rows| {
+            var ms: f64 = 0;
+            for (0..2) |run| {
+                cache.len = 0;
+                const t0 = msNow();
+                try fwd.run(self.model, &self.scratch, &cache, ids[0..rows], .{ .all = true });
+                if (run == 1) ms = msNow() - t0;
+            }
+            self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
+        }
+        self.timed = max_window;
+    }
+
+    /// A tapped row's bytes: every tap's hidden row, bf16.
+    fn tapBytes(self: *const Metal) usize {
+        return @as(usize, self.model.taps) * self.model.config.hidden * 2;
+    }
+
+    /// The drafter's layers: both scratches keep their rows from now on.
+    fn prepareFn(ptr: *anyopaque, taps: []const u32) !void {
+        const self = cast(ptr);
+        try self.model.setTaps(taps);
+        if (self.scratch.taps != null) return;
+        const opts = mtl.ResourceOptions.shared;
+        const decode = try self.model.device.buffer(st.batch_rows * self.tapBytes(), opts);
+        errdefer decode.deinit();
+        const prompt = try self.model.device.buffer(st.prompt_rows * self.tapBytes(), opts);
+        self.scratch.taps = decode;
+        self.prompt.taps = prompt;
+        if (self.follow) |f| {
+            f.join(f.ctx, decode);
+            f.join(f.ctx, prompt);
+        }
+    }
+
+    /// Rows [start, start + count) of the stream's latest tapped rows, on the device.
+    fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
+        const self = cast(ptr);
+        const tp = (try self.cacheOf(stream)).tap;
+        if (taps.len != self.model.taps or tp.buf == null) return error.UnpreparedRicursiveTaps;
+        if (count == 0 or start < tp.start or start + count > tp.start + tp.rows) return error.RicursiveTapsNotHeld;
+        const width = self.tapBytes();
+        return .{ .buffer = @intFromPtr(tp.buf.?.id), .offset = tp.off + (start - tp.start) * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+    }
+
+    fn prefillFeaturesFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, sink: be.FeatureSink) !void {
+        const self = cast(ptr);
+        if (taps.len != self.model.taps) return error.UnpreparedRicursiveTaps;
+        self.sink = sink;
+        defer self.sink = null;
+        return prefillFn(ptr, stream);
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -179,11 +244,27 @@ pub const Metal = struct {
                 };
             }
             const s = if (end - at > st.batch_rows) &self.prompt else &self.scratch;
-            try fwd.run(self.model, s, cache, ids[at..end], .{});
+            const taps = if (stream != null) s.taps else null;
+            try fwd.run(self.model, s, cache, ids[at..end], .{ .taps = if (taps) |x| .{ .buf = x } else null });
+            if (taps) |x| try self.keepTaps(cache, stream.?, x, end - at, base + end == stream.?.prompt().len);
             cache.len += end - at;
             at = end;
             if (stream) |sm| if (std.mem.indexOfScalar(u32, sm.reuse.marks, @intCast(cache.len)) != null) if (sm.reuse.hook) |k| k.at(k.ptr, sm, @intCast(cache.len));
         }
+    }
+
+    /// A drafted prompt chunk's taps: to the drafter as they land, the prompt's last row kept for the first draft.
+    fn keepTaps(self: *Metal, cache: *st.Cache, stream: *lanes.Stream, x: mtl.Buffer, rows: usize, last: bool) !void {
+        const width = self.tapBytes();
+        if (self.sink) |k| try k.take(k.ptr, stream, .{ .buffer = @intFromPtr(x.id), .rows = @intCast(rows), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, cache.len);
+        cache.tap = .{ .buf = x, .start = cache.len, .rows = rows };
+        if (!last) return;
+        if (cache.last_tap == null) {
+            cache.last_tap = try self.model.device.buffer(width, mtl.ResourceOptions.shared);
+            if (cache.follow) |f| f.join(f.ctx, cache.last_tap.?);
+        }
+        @memcpy(cache.last_tap.?.slice(u8, width), x.slice(u8, rows * width)[(rows - 1) * width ..][0..width]);
+        cache.tap = .{ .buf = cache.last_tap, .start = cache.len + rows - 1, .rows = 1 };
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
@@ -199,8 +280,8 @@ pub const Metal = struct {
             m: *Metal,
             stream: *lanes.Stream,
             ids: []const u32,
-            pub fn growth(_: *const @This()) u64 {
-                return 0; // no drafter: a stream's caches are all it takes
+            pub fn growth(a: *const @This()) u64 {
+                return a.m.options.drafter_bytes; // a drafter's context for the stream, beside its caches
             }
             pub fn shed(_: *const @This(), _: u64) void {}
             pub fn restoreBytes(a: *const @This()) u64 {
@@ -331,7 +412,15 @@ pub const Metal = struct {
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
-        try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true });
+        const taps = self.scratch.taps;
+        try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true, .taps = if (taps) |x| .{ .buf = x } else null });
+        if (taps) |x| {
+            var at: usize = 0;
+            for (segments[0..windows.len]) |seg| {
+                seg.cache.tap = .{ .buf = x, .off = at * self.tapBytes(), .start = seg.cache.len, .rows = seg.rows };
+                at += seg.rows;
+            }
+        }
         const all = self.scratch.logits_all.slice(u16, total * vocab);
         var base: usize = 0;
         for (windows, out, segments[0..windows.len]) |w, o, seg| {
@@ -423,4 +512,10 @@ fn argmax(l: []const u16) usize {
         best = i;
     };
     return best;
+}
+
+fn msNow() f64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(f64, @floatFromInt(ts.sec)) * 1e3 + @as(f64, @floatFromInt(ts.nsec)) / 1e6;
 }
