@@ -81,6 +81,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
 
     const t0 = std.Io.Clock.awake.now(io);
     const cfg = try Config.read(gpa, io, pack_dir);
+    try @import("block_admission.zig").serving(&cfg, world);
     var pack = try Pack.open(gpa, io, pack_dir);
     defer pack.deinit();
     const blocks = if (lanes_mode == 3) blk: {
