@@ -337,10 +337,11 @@ test "a query row's prompt attention keeps its bits wherever its chunk starts, o
     const t = try Rig.open(1 << 20);
     defer t.close();
     var rng: rig.Rng = .{ .state = 0x7A1C5 };
-    // the 64-row tile (wide on, d 128), then the 16-row tile (attention=f32 turns wide off)
+    // the 64-row tile (wide on, d 128), then the 16-row tile (attention=f32 turns wide off); odd cuts split a key pair
     for ([_]bool{ true, false }) |wide| {
         t.on.wide = wide;
         defer t.on.wide = true;
+        try shifted(t, &rng, 32, 8, 128, 2400, 1);
         try shifted(t, &rng, 32, 8, 128, 2400, 87);
         try shifted(t, &rng, 32, 8, 128, 2400, 2100);
     }

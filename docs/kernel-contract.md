@@ -133,8 +133,7 @@ Python family's Triton glue it was ported from. Nemotron's Metal `tf_xup_w3` giv
 the NaN: its relu2 is `metal::max(bfloat(acc), 0.0f)`; the other up pipelines give its bytes on the same inputs.
 HIP's prompt attention tile (`tf_fa_paged_*`, `tf_fa_wide_*`) writes 0 for a row whose every score is NaN where
 float64 gives NaN, as its running max is `fmaxf` and a row at max -inf takes p = 0; and an infinite value at a key
-whose fp32 weight is 0 (past the row's causal edge in its 64-key tile, or under fp32's least) gives NaN where float64
-gives inf or a finite value, as its P x V takes every key of the tile.
+the row sees under fp32's least weight gives NaN where float64 gives inf, as 0 x inf enters its P x V.
 Qwen3.8 Flash Next's `tf_sattn_nax` and `tf_attn256_nax` score masked keys -FLT_MAX, the value each row's running
 max starts from, so a row whose every score is -Inf weighs its masked keys 1 and gives a finite average where float64
 gives NaN. `tf_sattn_nax`'s padding lanes also read key 0 at p = 0, so a non-finite value in key 0's row reaches every

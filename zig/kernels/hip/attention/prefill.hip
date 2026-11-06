@@ -221,11 +221,13 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
         // the online softmax in registers: a row's 64 keys sit on its 16 lanes, key pair pp's p on lane pp / 2
         pair_t ph[4][2];
         float alpha_r[4];
+        int seen[4];   // the keys of this tile each row sees: none to 0, all from 64
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
             const int row = sr + 16 * i;
             int vis = CAUSAL ? q_pos0 + q0 + row + 1 : span;
             if (vis > span) vis = span;
+            seen[i] = vis - k0;
             float tile_max = -INFINITY;
             int nan_row = 0; // !CAUSAL: a NaN score makes its row NaN, as in Torch
 #pragma unroll
@@ -257,8 +259,9 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
             // the chunk's key pairs as (key, key + 1) pairs at each of its dims
             const int pair = tid / kKChunks, g = tid % kKChunks;
             using elem8 = elem __attribute__((ext_vector_type(8)));
-            const elem8 ha = __builtin_bit_cast(elem8, kept(va, FULL || 2 * pair < rows));
-            const elem8 hb = __builtin_bit_cast(elem8, kept(vb, FULL || 2 * pair + 1 < rows));
+            // a value past the span reads the span's last (load16); the products zero each key past a row's edge
+            const elem8 ha = __builtin_bit_cast(elem8, va);
+            const elem8 hb = __builtin_bit_cast(elem8, vb);
             pair_t lo[4], hi[4];
 #pragma unroll
             for (int m = 0; m < 4; ++m) lo[m] = pair_t{ha[m], hb[m]}, hi[m] = pair_t{ha[4 + m], hb[4 + m]};
@@ -281,8 +284,13 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
 #pragma unroll
                 for (int i = 0; i < 4; ++i) {
                     const pair_t pp4 = row_lane(ph[i][pp % 2], lane);
+                    // a key past the row's edge takes value 0: RDNA 3.5's dot2 rounds a -0 lane (0 x v < 0) off +0's
+                    const int left = FULL ? 2 : seen[i] - 2 * pp;
+                    const unsigned keep = left >= 2 ? ~0u : left == 1 ? 0xffffu : 0u;   // key 2pp is the low half
 #pragma unroll
-                    for (int m = 0; m < 4; ++m) pv[i][m] = T::dot(pp4, vv[m], pv[i][m]);
+                    for (int m = 0; m < 4; ++m)
+                        pv[i][m] = T::dot(pp4, __builtin_bit_cast(pair_t, __builtin_bit_cast(unsigned, vv[m]) & keep),
+                                          pv[i][m]);
                 }
             }
 #pragma unroll
