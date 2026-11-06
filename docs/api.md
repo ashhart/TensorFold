@@ -349,6 +349,17 @@ request yields when a foreground request needs its lane or memory, then restarts
 suppressed.
 Session-title requests are also treated as background work.
 
+The serve flags `--top-p`, `--top-k` and `--min-p` set the server's defaults for the request fields of the same
+names, as `--temperature` does. Under them sit two layers: a family's built-in sampling (DeepSeek-V4 and V4.1
+serve their model cards' temperature 1 and top_p 1), then the checkpoint's `generation_config.json`
+(`temperature`, `top_k`, `top_p`, `min_p`; `do_sample: false` means temperature 0, and `do_sample: true` without
+a temperature means 1). A flag that is set replaces what those layers gave. When nothing sets a value the server
+has no sampling default and the serving line prints `greedy`; otherwise it prints the resolved defaults as
+name-value pairs. A request's own fields win over the defaults. The merged values are checked per request like
+request fields: a `--min-p` outside 0 through 1 refuses every chat request, a negative `--top-k` clamps to 0, and
+`--temperature` and `--top-p` must be finite numbers. An engine that decodes greedily only refuses sampled
+requests while the server samples by default, and its refusal suggests serving with `--temperature 0`.
+
 `--name-priority ID=background` gives one served id (`--name` or an `--alias`) a default priority: a request that
 asks for it and sends no `priority` of its own is treated as `priority: "background"`. The request's own `priority`
 field always wins over the default. This lets one server answer to several ids at their usual priority while a
