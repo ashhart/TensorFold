@@ -6,9 +6,7 @@ const Engine = engine.Engine;
 
 /// Whether a stream besides `s` is past its prompt pass (a lane with no fill): a solo pass would hold up its rounds.
 pub fn othersDecode(lanes: anytype, s: anytype) bool {
-    var it = lanes.iterator();
-    while (it.next()) |kv| if (kv.key_ptr.* != s and kv.value_ptr.fill == null) return true;
-    return false;
+    return @import("lanes").solo_chunk.othersDecode(lanes, s, "fill");
 }
 
 /// The rows an engine sizes its prompt buffers for: at start, as they hold memory all the time.
