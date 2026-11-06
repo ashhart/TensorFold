@@ -60,6 +60,7 @@ pub const Forward = struct {
     slot: u32 = 0, // the bound sequence's lesson latch slot, which a window's rows read
     untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught sequences', else all
     segs: []const Seg = &.{}, // a window's sequences, as windowSegs runs them
+    unread: bool = false, // nothing reads this prompt chunk's rows: it stops at its last state write
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
@@ -396,9 +397,17 @@ pub const Forward = struct {
         for (0..f.w.blocks.len) |i| {
             try f.chunkPre(&w, i);
             try f.chunkMixer(&w, i);
+            if (f.unread and i == lastState(f.w.blocks)) return;
             try f.chunkPost(&w, i);
         }
         try f.chunkFinish(&w);
+    }
+
+    /// The last block that writes state: every block past it reads and writes its rows alone.
+    fn lastState(blocks: anytype) usize {
+        var i = blocks.len - 1;
+        while (i > 0 and blocks[i].kind == .moe) i -= 1;
+        return i;
     }
 
     /// A chunk's embedding, from p_ids.
