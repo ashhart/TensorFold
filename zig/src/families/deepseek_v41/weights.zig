@@ -186,7 +186,7 @@ pub fn sizeofDescriptors() usize {
 /// so the two projections are one indexed call and each output row still runs the shipped per-row arithmetic.
 fn fusedTable(device: mtl.Device, gate: mtl.Buffer, up: mtl.Buffer, count: usize, shared_gate: exl3.Matrix, shared_up: exl3.Matrix) !mtl.Buffer {
     // The table carries the two shared-expert matrices after the 2E routed entries, so the SAME indexed dispatch
-    // can carry the shared gate/up rows (the comparator's moe_up form).
+    // can carry the shared gate/up rows (one indexed gate/up form).
     const table = try device.buffer((2 * count + 2) * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     const dst: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
     const gate_src: [*]const exl3.ExpertDescriptor = @ptrCast(@alignCast(gate.contents()));

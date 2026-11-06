@@ -373,7 +373,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-moss-image-decoder", .path = "zig/tests/moss_image_decoder.zig", .about = "MOSS-Image's image decoder on latents, gated against float64 beside torch float32, then timed" },
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
-        .{ .name = "tf-gemm-bench", .path = "zig/tests/dsv41_gemm_bench.zig", .about = "MLXs gemm_nax at prompt shapes: the boxs bf16 tensor-unit GEMM rate" },
+        .{ .name = "tf-gemm-bench", .path = "zig/tests/dsv41_gemm_bench.zig", .about = "TensorFold's gemm_nax at prompt shapes: the box's bf16 tensor-unit GEMM rate" },
         .{ .name = "tf-fp8-repack", .path = "zig/tests/fp8_repack.zig", .about = "One EXL3 projection decoded to its unrotated W_q and requantized to E4M3 in the fp8 dense body tile order" },
         .{ .name = "tf-gate-bench", .path = "zig/tests/dsv41_gate_bench.zig", .about = "The router gate: tf-dense-col, the tensor-unit gate GEMM (f16/bf16), each against fp64" },
         .{ .name = "tf-scan-bench", .path = "zig/tests/dsv41_scan_bench.zig", .about = "The prompt scan at its real shape: the dense-key pass, the tensor-unit sparse attention, key and split sweeps" },

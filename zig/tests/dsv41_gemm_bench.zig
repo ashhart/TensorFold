@@ -1,4 +1,4 @@
-//! The box's bf16 tensor-unit GEMM at prompt scale: MLX's `gemm_nax` body from the tree, dispatched with the
+//! The box's bf16 tensor-unit GEMM at prompt scale: TensorFold's `gemm_nax` body from the tree, dispatched with the
 //! engine's own conventions. The reference rate every "at the peak" claim about the prompt GEMMs needs.
 const std = @import("std");
 const mtl = @import("metal");
@@ -98,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .m = 3584, .k = 5120, .n = 2304 }, // routed gate at prompt rows
         .{ .m = 3584, .k = 5120, .n = 384 }, // the router gate
     };
-    std.debug.print("gemm bench: MLX gemm_nax (bf16, tb), tensor units {}\n", .{device.tensorUnits()});
+    std.debug.print("gemm bench: TensorFold gemm_nax (bf16, tb), tensor units {}\n", .{device.tensorUnits()});
     std.debug.print("  {s:>18} {s:>9} {s:>9} {s:>9}\n", .{ "M x N x K", "ms", "TMAC/s", "GB/s" });
     // The dispatch convention at the engine's own case: M = 3619 (not 64-aligned) and N = 384, the bounded variant.
     {
@@ -1068,7 +1068,7 @@ fn timeRow(queue: mtl.Queue, pipe: mtl.Pipeline, reduce: ?mtl.Pipeline, args: Ex
     return median(samples[0..nt]);
 }
 
-// The register-only body (the comparator's structure, already the routed decode's) on the DENSE one-row fixture.
+// The register-only body (the alternative form's structure, already the routed decode's) on the DENSE one-row fixture.
 // The body reads its weights through descriptors[expert], so a dense matrix needs a descriptor of its own; the
 // pointer is rewritten a trial at a time so the eight trellis copies rotate and the weights are not resident when
 // they come back (the same cold protocol as the other arms).
@@ -1103,8 +1103,8 @@ fn timeRowDesc(queue: mtl.Queue, pipe: mtl.Pipeline, args: Exl3Args, x: mtl.Buff
     return median(samples[0..nt]);
 }
 
-// THE COMPARATOR'S LANE PACKING, PRICED AS A BENCH ARM. The source spot-check found the one structural difference
-// left at the dense one-row shapes: the comparator gives a sixteen-column tile ONE simdgroup whose thirty-two lanes
+// THE ALTERNATIVE FORM'S LANE PACKING, AS A BENCH ARM. The source spot-check found the one structural difference
+// left at the dense one-row shapes: the alternative form gives a sixteen-column tile ONE simdgroup whose thirty-two lanes
 // split the whole K walk, while the engine gives it TF_FMA_WARPS = 16 warps whose partials meet through threadgroup
 // memory at the end. This helper selects the three shapes the decode ledger names (wq_b, wo_a, wo_b) so a lane-only
 // run prices exactly those.
@@ -1300,7 +1300,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     // The register-direct MMA's decode-free floor (a bench-only arm; no engine path selects it).
     const regfloor = if (nax_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matvec_nax_regfloor", false) catch null) else null;
     defer if (regfloor) |p| p.deinit();
-    // The register-only body on the dense one-row fixture. It is the routed decode's body (the comparator's
+    // The register-only body on the dense one-row fixture. It is the routed decode's body (the alternative form's
     // structure: one warp a sixteen-column tile, the decoded weights in registers, no threadgroup tile, no barrier
     // in the k loop, no split-K and no reduce dispatch), priced here on the DENSE shapes -- the shared expert's
     // gate/up and down and the attention's projections -- where the engine today runs the 128-column
@@ -1377,9 +1377,9 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             npf += 1;
         }
     }
-    // THE ENGINE'S OWN CONFIGURATION AND THE COMPARATOR'S READ. The engine compiles the register-only body with
+    // THE ENGINE'S OWN CONFIGURATION AND THE ALTERNATIVE FORM'S READ. The engine compiles the register-only body with
     // SIXTEEN warps a threadgroup (the bench's fma arm is at four), and the body reads its stream words as TWO
-    // 2-byte loads a word, where the prefill tiles (and the comparator) read one 4-byte load a word. Both are the
+    // 2-byte loads a word, where the prefill tiles (and the alternative form) read one 4-byte load a word. Both are the
     // same bytes, the same values and the same order, so every arm here is BIT-IDENTICAL to the shipped body.
     const WideArm = struct { name: []const u8, warps: u32, pipe: ?mtl.Pipeline, lib: ?mtl.Library };
     var wide_arms: [8]WideArm = undefined;
@@ -1433,9 +1433,9 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             ndense += 1;
         }
     }
-    // THE LANE PACKING (the comparator's structure) AT THE DENSE ONE-ROW SHAPES. The body and the value path are
+    // THE LANE PACKING (the alternative form's structure) AT THE DENSE ONE-ROW SHAPES. The body and the value path are
     // the shipped dense kernel's; only TF_FMA_WARPS and the load form move, so every arm is the same arithmetic in
-    // a different lane packing. `w1` is the comparator's: one simdgroup a sixteen-column tile, its thirty-two lanes
+    // a different lane packing. `w1` is the alternative form's: one simdgroup a sixteen-column tile, its thirty-two lanes
     // walking the whole k, no cross-warp reduction. The hash column prices whether an arm is bit-identical to the
     // w16 control (a changed reduction order may differ; a changed load form may not).
     const LaneArm = struct { name: []const u8, warps: u32, pipe: ?mtl.Pipeline, lib: ?mtl.Library };
@@ -1844,7 +1844,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the ACTIVATION READ gone: the x row is not read)\n", .{ s.n, s.k, "fma/4 d4", 1, t_diag4, macs / (t_diag4 * 1e-3), gbs / (t_diag4 * 1e-3) });
                     if (pass == 1 and t_diag5 > 0)
                         std.debug.print("  {d:>7}x{d:>5} {s:>7} {d:>5} {d:>9.3} {d:>9.0} {d:>8.1}  (the CROSS-WARP REDUCTION gone: the warps' partials)\n", .{ s.n, s.k, "fma/4 d5", 1, t_diag5, macs / (t_diag5 * 1e-3), gbs / (t_diag5 * 1e-3) });
-                    // The engine's own warp count and the comparator's 4-byte stream word.
+                    // The engine's own warp count and the alternative form's 4-byte stream word.
                     for (wide_arms[0..nwide], 0..) |arm, ai| {
                         const t = t_ww[ai];
                         if (pass == 1 and t > 0)
@@ -2002,7 +2002,7 @@ fn oneRowBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     .tile_k_stride = (s.n / 16) * tile_bytes,
                     .tile_n_stride = tile_bytes,
                 };
-                std.debug.print("  {d:>7}x{d:>5} h{d} LANE PACKING: one simdgroup a 16-column tile, the whole k walk (the comparator's structure)\n", .{ s.n, s.k, s.halves });
+                std.debug.print("  {d:>7}x{d:>5} h{d} LANE PACKING: one simdgroup a 16-column tile, the whole k walk (the alternative form's structure)\n", .{ s.n, s.k, s.halves });
                 std.debug.print("  {s:>12} {s:>5} {s:>9} {s:>9} {s:>8} {s:>9}\n", .{ "body", "warps", "ms", "weights/s", "GB/s", "hash" });
                 var h_ref: u64 = 0;
                 var t_ref: f64 = 0;
@@ -2629,8 +2629,8 @@ fn exl3F64Row(trellis: []const u16, x: []const u16, n: u32, k: u32, halves: u32,
 }
 
 // THE AFFINE 4-BIT ROUTED DECODE, PRICED AT OUR OWN ROUTED SHAPES AND IN THE SAME RUN AS THE EXL3 BODIES. The
-// comparator's decode is affine (one simdgroup a column); our pack is a codebook. The affine body already exists in
-// this tree -- tile_qmv's indexed twin, ported whole from the sibling branch (Apache-2.0, THIRD_PARTY_NOTICES) --
+// alternative form's decode is affine (one simdgroup a column); our pack is a codebook. The affine body already exists in
+// this tree -- tile_qmv's indexed twin, the tree's own indexed twin --
 // with 4/6/8-bit codes and group-64 bf16 scales and biases. It is timed on synthetic codes: the access pattern is
 // the same whatever the codes hold, and the question here is the body's cost, not a repack's quality (that owes the
 // band later).
@@ -2663,7 +2663,7 @@ fn timeAffine(queue: mtl.Queue, pipe: mtl.Pipeline, args: anytype, ws: []const m
 }
 
 // THE 3-BIT AFFINE PREFILL ROUTE PRICED AT THE ROUTED TILE'S SHAPE. The affine_mm gather is the tensor-unit path
-// with NO per-weight extraction (a 3-bit code and a group-64 scale), and it is already in this tree (ported from
+// with NO per-weight extraction (a 3-bit code and a group-64 scale), and it is already in this tree (present in
 // the sibling, Apache-2.0). Priced here on the plan's own geometry: 384 experts x one 64-row tile each, n = 2304, k
 // = 5120. Synthetic codes and scales: the access pattern is the body's, the values are not the question (a repack
 // owes the band).
@@ -2785,10 +2785,10 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer if (nax_lib) |l| l.deinit();
     const mma = if (nax_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_nax", false) catch null) else null;
     defer if (mma) |p| p.deinit();
-    // The one-simdgroup-per-column routed decode (the comparator's plan) on our tile pack.
+    // The one-simdgroup-per-column routed decode (the alternative form's plan) on our tile pack.
     const col_nax = if (nax_lib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matvec_col_nax", false) catch null) else null;
     defer if (col_nax) |p| p.deinit();
-    // The affine 4-bit routed decode (the comparator's value path) on the tree's own tile_qmv body.
+    // The affine 4-bit routed decode (the alternative form's value path) on the tree's own tile_qmv body.
     const a4_lib = mtl.Library.fromSource(device, ks.core_tile_qmm, mtl.CompileOptions.mlx()) catch null;
     defer if (a4_lib) |l| l.deinit();
     const affine4 = if (a4_lib) |l| (mtl.Pipeline.init(device, l, "tf_tile_qmv_indexed_q4", false) catch null) else null;
@@ -2873,7 +2873,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
     defer for (t3_warps_pipes) |maybe| if (maybe) |p| p.deinit();
     defer for (t3_libs) |maybe| if (maybe) |l| l.deinit();
 
-    // The comparator's decode structure -- one warp a sixteen-column tile, one k walk, no split-K, no partials, no
+    // The alternative form's decode structure -- one warp a sixteen-column tile, one k walk, no split-K, no partials, no
     // reduce dispatch, the decoded weights in registers (no threadgroup round trip). The warps a threadgroup are
     // TF_FMA_WARPS: each warp walks its own slice of the k blocks and the partials meet once, at the end of the
     // walk, so the parallelism of a split-K dispatch without its round trip.
@@ -2960,7 +2960,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
         const sl2 = if (slib) |l| (mtl.Pipeline.init(device, l, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) else null;
         fma_arms[nfma] = .{ .name = "fma w4 st+lu", .warps = 4, .pipe = sl2 };
         nfma += 1;
-        // THE ENGINE'S OWN ROUTED CONFIGURATION (sixteen warps, the same body form) AND THE COMPARATOR'S 4-BYTE
+        // THE ENGINE'S OWN ROUTED CONFIGURATION (sixteen warps, the same body form) AND THE ALTERNATIVE FORM'S 4-BYTE
         // STREAM WORD (the prefill tiles' read, The form). Both are the same bytes, the same values and the same
         // order: every arm is BIT-IDENTICAL to the shipped body.
         for ([_]u32{ 4, 16 }) |w| {
@@ -3006,7 +3006,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             fma_arms[nfma] = .{ .name = nm, .warps = w, .pipe = p };
             nfma += 1;
         }
-        // THE PAIR BODY AT THE ROUTED SHAPES. The engine already HAS the comparator's pair form
+        // THE PAIR BODY AT THE ROUTED SHAPES. The engine already HAS the alternative form's pair form
         // (tf_exl3_matmul_decode_fma_static_pair_lut: it scans the routes for the next slot naming the same expert,
         // the even rank leads, and ONE weight decode serves the pair -- the engine's own comment says the pair's
         // rows are bit-identical to the single-row body's). Priced it in the PLAIN path (one row: a mate never
@@ -3414,8 +3414,8 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
             };
             std.debug.print("  {s:>10} funnel vs shipped: {d} of {d} differ ({s})\n", .{ s.name, differing, n_out, if (differing == 0) "BIT-IDENTICAL" else "DIFFERS" });
         }
-        // The register-only body (the comparator's structure) against the shipped tensor-unit body on the same
-        // buffers. The reduction order is the comparator's, so the two are not bit-identical: the check is the size
+        // The register-only body (the alternative form's structure) against the shipped tensor-unit body on the same
+        // buffers. The reduction order is the alternative form's, so the two are not bit-identical: the check is the size
         // of the difference against the size of the sums.
         if (mma_tf != null and nfma > 0 and fma_arms[0].pipe != null) {
             const host_a = try gpa.alloc(f32, n_out);
@@ -3612,7 +3612,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                 arms[narms] = .{ .name = "direct table", .splits = splits, .ms = t_t, .hash = h_t };
                 narms += 1;
             }
-            // The comparator's structure -- one warp a sixteen-column tile, one k walk, no split-K, no partials and
+            // The alternative form's structure -- one warp a sixteen-column tile, one k walk, no split-K, no partials and
             // no reduce dispatch -- timed as one dispatch of the routed stage for the same six experts.
             {
                 const fargs = Exl3Args{
@@ -3647,7 +3647,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                         narms += 1;
                     }
                 }
-                // One simdgroup a column, the lanes walking k (the comparator's plan); one warp a column, four
+                // One simdgroup a column, the lanes walking k (the alternative form's plan); one warp a column, four
                 // warps a threadgroup.
                 if (col_nax) |cp| {
                     @memset(sums.slice(u32, n_out), 0);
@@ -3656,7 +3656,7 @@ fn routedBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !vo
                     arms[narms] = .{ .name = "col plan", .splits = 1, .ms = t, .hash = h };
                     narms += 1;
                 }
-                // The affine 4-bit routed decode (the comparator's value path), same shape, same run.
+                // The affine 4-bit routed decode (the alternative form's value path), same shape, same run.
                 if (affine4) |ap| {
                     const ng = s.k / 64;
                     const wbytes: usize = @as(usize, rows) * s.n * s.k / 2;
@@ -4453,12 +4453,12 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     defer if (p20) |q| q.deinit();
     const p21 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax21", false) catch null;
     defer if (p21) |q| q.deinit();
-    // The funnel read in the prompt body (the comparator's structure) and the no-value diagnostic.
+    // The funnel read in the prompt body (the alternative form's structure) and the no-value diagnostic.
     const p40 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax40", false) catch null;
     defer if (p40) |q| q.deinit();
     const p41 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax41", false) catch null;
     defer if (p41) |q| q.deinit();
-    // The funnel's extraction in 32-bit words (the comparator's dig_dec_job structure).
+    // The funnel's extraction in 32-bit words (the alternative form's dig_dec_job structure).
     const p50 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax50", false) catch null;
     defer if (p50) |q| q.deinit();
     // The cooperative read (one lane a word) and the shuffle.
@@ -4505,10 +4505,10 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     defer if (p82) |q| q.deinit();
     const p83 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax83", false) catch null;
     defer if (p83) |q| q.deinit();
-    // The comparator's routed prefill geometry (BM 128, BN 64, BK 64, 8 SG x 32x32).
+    // The alternative form's routed prefill geometry (BM 128, BN 64, BK 64, 8 SG x 32x32).
     const p84 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax84", false) catch null;
     defer if (p84) |q| q.deinit();
-    // The dense 128x64 tile with a simdgroup that owns thirty-two rows (the comparator's NAXTile shape): the lane
+    // The dense 128x64 tile with a simdgroup that owns thirty-two rows (the alternative form's NAXTile shape): the lane
     // keeps eight states and the weight fragments are read once for two row groups.
     const p56 = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill_nax56", false) catch null;
     defer if (p56) |q| q.deinit();
@@ -4679,7 +4679,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
         args128.rows = @intCast(rows128);
         const lm = @as(f64, @floatFromInt(live)) * @as(f64, exl3_n) * @as(f64, exl3_k);
         const pm128 = @as(f64, @floatFromInt(rows128)) * @as(f64, exl3_n) * @as(f64, exl3_k);
-        std.debug.print("\ncomparator routed prefill geometry: N {d} K {d}, live rows {d}; 64-row plan {d} rows; 128-row plan {d} rows ({d} tiles)\n", .{ exl3_n, exl3_k, live, rows64, rows128, tiles128 });
+        std.debug.print("\nalternative form routed prefill geometry: N {d} K {d}, live rows {d}; 64-row plan {d} rows; 128-row plan {d} rows ({d} tiles)\n", .{ exl3_n, exl3_k, live, rows64, rows128, tiles128 });
         _ = try timeRows(queue, p59.?, &args64, xb64, experts[0], sb64, rt64, descs, table, 64, 128, rows64, 1);
         const ms64 = try timeRows(queue, p59.?, &args64, xb64, experts[0], sb64, rt64, descs, table, 64, 128, rows64, 5);
         const h64 = hashLiveRows(sb64, rows64 * exl3_n, &plan_counts, &off64, exl3_n);
@@ -4943,7 +4943,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     if (p57) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms57 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the 32-bit stream word -- the comparator's read)\n", .{ "nax57", ms57, macs / (ms57 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the 32-bit stream word -- the alternative form's read)\n", .{ "nax57", ms57, macs / (ms57 * 1e-3) / 1e12 });
     }
     if (p53) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
@@ -4953,7 +4953,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     if (p69) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms69 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (nax59 + the eight stores CONTIGUOUS -- the comparator's store form)\n", .{ "nax69", ms69, macs / (ms69 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (nax59 + the eight stores CONTIGUOUS -- the alternative form's store form)\n", .{ "nax69", ms69, macs / (ms69 * 1e-3) / 1e12 });
     }
     if (p70) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
@@ -4978,7 +4978,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
     if (p64) |pipe| {
         _ = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 1);
         const ms64 = try timeExl3(queue, pipe, &args, x, experts[0], sums, routes, descs, table, 64, 128, 5);
-        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the eight stores CONTIGUOUS, one lane's run -- the comparator's store form)\n", .{ "nax64", ms64, macs / (ms64 * 1e-3) / 1e12 });
+        std.debug.print("  {s:>8} {d:>9.3} {d:>9.1}  (the eight stores CONTIGUOUS, one lane's run -- the alternative form's store form)\n", .{ "nax64", ms64, macs / (ms64 * 1e-3) / 1e12 });
         const hash64 = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sums.slice(f32, @as(usize, exl3_rows) * exl3_n)));
         std.debug.print("  sums: nax48 {x:0>16} nax64 {x:0>16} {s}\n", .{ hash48, hash64, if (hash48 == hash64) "IDENTICAL" else "DIFFER" });
     }
@@ -5351,7 +5351,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
                     try benchDenseCompare128(device, queue, q31, p79, p80, p82, p83, dtable, dense_rows, 1024, 4096); // wo_a
                 }
             }
-            // The 128-row grouped tile: one expert a 128-row block, 384 tiles, the comparator's shape. The decode is
+            // The 128-row grouped tile: one expert a 128-row block, 384 tiles, the alternative form's shape. The decode is
             // once a tile; the MMA rows double (mostly padding), which is the trade this prices.
             if (p2) |pipe128| {
                 const rows128: usize = 384 * 128;
@@ -5401,7 +5401,7 @@ fn exl3Bench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void
 }
 
 // THE FP8/E4M3 DENSE ARM. nax31 reads the 5-6 bit EXL3 trellis and decodes it; this arm reads a one-byte-a-weight
-// E4M3 tensor already in the kernel's 16-k x 64-n block order and expands it to half with the comparator's exact
+// E4M3 tensor already in the kernel's 16-k x 64-n block order and expands it to half with the alternative form's exact
 // bit trick. Both are timed in one run at the attention's three shapes, and the fp8 path is validated against a
 // host fp32 sum on a fixed pattern (row 0, columns 0..7).
 fn fp8Value(b: u8) f32 {
