@@ -23,6 +23,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Internal: the kernel contract's nvcc 13.0 resource records match what nvcc 13.0.88 builds for 57 CUDA kernels (226 per-SM slots), so the five-SM limits gate passes on main; no kernel, flag or launch changes (#2390).
 
 - Flash Next on CUDA: a prompt-cache mark inside a prompt chunk is kept on the way through the pass instead of cutting the pass there, so a new short prompt's first token comes 19% sooner on a GB10, with replies unchanged; `TF_FLASHNEXT_KEEP_INPASS=0` cuts the pass at the mark as before (#1866). Thanks to @Arminova.
+- Tests: `tf-moss-image-blocks` gates MOSS-Image's transformer block by block against the publisher's float32 run, within twice the spread of torch bf16's device and CPU runs, on Metal and CUDA (#2294, part of #1529).
 
 - Cluster: MCDMA bring-up on real hosts, step 2a of #1594 (#2088). Thanks to @ThinkOffApp.
 
