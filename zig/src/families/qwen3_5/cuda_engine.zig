@@ -289,15 +289,10 @@ pub const Engine = struct {
 
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
-        // Warm the actual 32-row startup path, not the entire configured context.
-        // unallocatedScratchBytes() reserves the larger context ceiling for later growth.
+        // Warm 32 startup rows; reserve the configured context ceiling for later growth.
         const warm_rows = @min(32, e.scratch_rows);
-        e.ensureScratch(warm_rows) catch |err| {
-            if (err != error.ScratchGrowFailed) return err;
-        };
-        if (e.int8.on) e.int8.ensureRows(e, warm_rows) catch |err| {
-            if (err != error.ScratchGrowFailed) return err;
-        };
+        try e.ensureScratch(warm_rows);
+        if (e.int8.on) try e.int8.ensureRows(e, warm_rows);
         const ids: [32]u32 = @splat(0);
         const greedy: Draw = .{ .rule = null, .position = 33 };
         try e.forward(&.{.{ .cache = warm_cache, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
@@ -591,15 +586,6 @@ pub const Engine = struct {
     }
 };
 
-test "dense read cost: hidden and slot variants have distinct graph keys" {
-    var seen: [32]u32 = undefined;
-    var n: usize = 0;
-    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
-        for ([_]bool{ false, true }) |hidden| {
-            const shape: Engine.Shape = .{ .total = 1, .nseg = 1, .record = true, .prompt = false, .taps = true, .slots = slots, .hidden = hidden };
-            for (seen[0..n]) |key| try std.testing.expect(key != shape.key());
-            seen[n] = shape.key();
-            n += 1;
-        }
-    }
+test {
+    _ = @import("cuda_engine_test.zig");
 }
