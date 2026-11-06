@@ -58,7 +58,7 @@ pub fn runCommitting(device: mtl.Device, queues: []const mtl.Queue, layers: usiz
         done: *[16]mtl.CommandBuffer,
         n_done: *usize,
 
-        /// Ends the lane's encoder, waits for (or signals) `value` between its encoders, and opens the next behind the fence.
+        /// Ends the lane's encoder, waits for (or signals) `value` between encoders, opens the next behind the fence.
         fn sync(x: *const @This(), l: *Lane, ev: mtl.Event, value: u64, wait_: bool) void {
             l.fence.update(l.enc);
             l.enc.end();
