@@ -16,6 +16,8 @@ const entities = [_]struct { []const u8, []const u8 }{
     .{ "middot", "\u{b7}" },  .{ "bull", "\u{2022}" },  .{ "times", "\u{d7}" },   .{ "copy", "\u{a9}" },     .{ "reg", "\u{ae}" },
     .{ "trade", "\u{2122}" }, .{ "deg", "\u{b0}" },     .{ "rarr", "\u{2192}" },  .{ "larr", "\u{2190}" },   .{ "zwj", "" },
     .{ "zwnj", "" },          .{ "shy", "" },
+    .{ "AMP", "&" },       .{ "LT", "<" },       .{ "GT", ">" },           .{ "QUOT", "\"" }, // HTML's uppercase names
+    .{ "COPY", "\u{a9}" }, .{ "REG", "\u{ae}" }, .{ "TRADE", "\u{2122}" },
 };
 
 fn isName(ch: u8) bool {
@@ -53,7 +55,7 @@ fn entity(html: []const u8, at: usize, buf: *[4]u8) ?struct { text: []const u8, 
         const n = std.unicode.utf8Encode(if (code == 0 or code > 0x10ffff or (code >= 0xd800 and code <= 0xdfff)) 0xfffd else code, buf) catch return null;
         return .{ .text = buf[0..n], .len = semi + 1 - at };
     }
-    for (entities) |e| if (std.ascii.eqlIgnoreCase(body, e[0])) return .{ .text = e[1], .len = semi + 1 - at }; // &NBSP; is the same entity
+    for (entities) |e| if (std.mem.eql(u8, body, e[0])) return .{ .text = e[1], .len = semi + 1 - at };
     return null;
 }
 
@@ -370,8 +372,8 @@ test "title, main content, blocks, lists and entities" {
     try std.testing.expect(std.mem.indexOf(u8, t.text, "| a | b") != null);
     for ([_][]const u8{ "alert", "Home", "legal", "hidden", "color" }) |gone| try std.testing.expect(std.mem.indexOf(u8, t.text, gone) == null);
     try std.testing.expect(!t.truncated);
-    const cased = try toText(a, "<p>Version&NBSP;0.17</p>", 1000, null);
-    try std.testing.expectEqualStrings("Version 0.17", cased.text);
+    const cased = try toText(a, "<p>Version&AMP;0.17 &rArr; &rarr;</p>", 1000, null);
+    try std.testing.expectEqualStrings("Version&0.17 &rArr; \u{2192}", cased.text); // &rArr; stays; &AMP; is defined
 }
 
 test "bare ampersands are text, and a page full of them reads in linear time" {
