@@ -1,4 +1,4 @@
-//! Admission for the Qwen3.5-2B MLX affine checkpoint: pinned geometry and formats, tied or untied head; other geometries require qualification.
+//! Qwen3.5-2B MLX affine admission: pinned geometry and formats, tied or untied head; other geometries need qualifying.
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
 

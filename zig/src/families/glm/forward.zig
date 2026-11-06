@@ -1,4 +1,4 @@
-//! A window of 1-16 consecutive rows through GLM-5.3-Flash on one serial encoder, each op in the Python family's decode arithmetic.
+//! A 1-16 row window through GLM-5.3-Flash on one serial encoder, each op in the Python family's decode arithmetic.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -194,7 +194,7 @@ pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows:
     e.dispatchThreads(size(x.c.hidden / per, rows, 1), size(256, 1, 1));
 }
 
-/// A block boundary: the pending branch into the streams, then (with `hc`) the next block's mix, split and norm (core/hc.zig).
+/// Block boundary: the pending branch into streams, then with `hc` the next block's mix, split and norm (core/hc.zig).
 pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?wts.Hc, norm: ?Ref) void {
     const sc = x.sc;
     const k = x.k;
@@ -215,7 +215,7 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
     if (pending) x.xi = 1 - x.xi;
 }
 
-/// KDA layer `ki` on `normed`: the stacked projection (kept for a replay), each stream's fused step, the out-projection.
+/// KDA layer `ki` on `normed`: the stacked projection (kept for replay), each stream's fused step, the out-projection.
 fn kda(x: *Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, rows: u32) void {
     const sc = x.sc;
     const tp = x.c.tp > 1; // TP2: this Mac's heads, their out-projection partial summed with the peer's
@@ -283,7 +283,7 @@ pub fn mlaKeys(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_i
     };
 }
 
-/// The rows' queries (from `xp`), their attention over each segment's cache as written, unabsorb and o_proj into `branch`.
+/// The rows' queries (from `xp`), attention over each segment's cache as written, unabsorb and o_proj into `branch`.
 pub fn mlaAttend(x: *Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, rows: u32, pos: u32) void {
     const c = x.c;
     const k = x.k;
@@ -327,7 +327,7 @@ fn attend(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg) void {
     if (dense < g.rows) attendSparse(x, e, mi, g, dense);
 }
 
-/// Rows' latent keys, indexer keys and gates into MLA cache `mi` at pos.., their indexer weights into `iw`, the blocks they complete.
+/// Rows' latent keys, indexer keys, gates to cache `mi` at pos..; indexer weights to `iw`; the blocks they complete.
 pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, xp: Ref, xp_stride: u32, iw: Ref, rows: u32, pos: u32) void {
     const c = x.c;
     const k = x.k;
@@ -390,7 +390,7 @@ pub fn attendDense(x: *const Ctx, e: mtl.ComputeEncoder, keys: Ref, q: Ref, scor
     e.dispatchGroups(size(x.c.kv_lora / 32, 1, 1), size(2 * H, 1, 1));
 }
 
-/// A stream's rows [first, rows) past index_topk keys: fp32 block scores, the best blocks in block order plus the tail, the sparse kernel.
+/// A stream's rows [first, rows) past index_topk keys: fp32 block scores, top blocks in order, the tail, sparse kernel.
 fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg, first: u32) void {
     const c = x.c;
     const sc = x.sc;
@@ -403,7 +403,7 @@ fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg, first: 
     attendBlocks(x, e, mi, ql, sc.indices, att, n, g.pos + g.rows);
 }
 
-/// `n` rows' 64 heads over their listed keys on the tensor units: each block of attn_span entries its own softmax, then the blocks in order.
+/// `n` rows' 64 heads over their keys on tensor units: a softmax per block of attn_span entries, then blocks in order.
 fn attendBlocks(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, ql: Ref, indices: Ref, out: Ref, n: u32, key_length: u32) void {
     const c = x.c;
     const k = x.k;
@@ -533,7 +533,7 @@ pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, pick
     if (x.c.tp > 1) x.ep.?.argmax(e, logits, picks, n, part[0], rows);
 }
 
-/// A judged window's first `keep` of `rows` in every KDA layer (replayed from the round's entry state when some were rejected).
+/// A judged window's first `keep` of `rows` in each KDA layer, replayed from the round's entry state on a rejection.
 pub fn keepKda(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, keep: u32) void {
     keepKdaAt(x, e, 0, rows, keep);
 }
