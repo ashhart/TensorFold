@@ -15,6 +15,7 @@ const moe_k = @import("contract_nemo_moe.zig");
 const walk_k = @import("contract_walk.zig");
 const prefill_k = @import("contract_prefill.zig");
 const add_rms_k = @import("contract_add_rms.zig");
+const tail_k = @import("contract_tail.zig");
 const window_k = @import("contract_window.zig");
 const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
@@ -191,6 +192,10 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&add_rms, std.enums.values(add_rms_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&add_rms) |*m| m.deinit();
     for (&add_rms) |*m| try kernels.append(a, m.kernel());
+    var tails: [2]tail_k.Tail = undefined;
+    for (&tails, std.enums.values(tail_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&tails) |*m| m.deinit();
+    for (&tails) |*m| try kernels.append(a, m.kernel());
     var convs: [2]window_k.ConvWindow = undefined;
     for (&convs, std.enums.values(window_k.Part)) |*m, p| m.init(a, &r, s, &l, p);
     defer for (&convs) |*m| m.deinit();

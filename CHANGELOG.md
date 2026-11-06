@@ -6,6 +6,25 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - With `--cortheon`, a DuckDuckGo result whose `uddg` key, ad host, `Result--ad` mark, `CLASS=` or `&AMP;` differs only in spelling is kept, a tool argument whose key's letters differ is read with the exact key still first, HTML's uppercase named entities decode, and a `data:` link is dropped (cortheon: keep search results, tools and markup when only the spelling differs #2372). Without `--cortheon` nothing changes. Thanks to @ppardus.
 
+- Internal: 42 more lean findings fixed in the tests' comments and the tools' docstrings, with no change in behaviour (#2315).
+
+- HIP: the decode round's residual-add and norm tail issues each row's loads before its branches, and a MoE tail loads its slots' rows together, with output bytes unchanged. On a gfx1151, one-stream decode is 2.7% faster on Qwen3.6-35B-A3B and 1.1% on the 27B. `tf_tail` is now under the kernel contract (#2247). Thanks to @AbrahamCete.
+
+- Docs: `docs/optimization-ledger.md` lists which speed and memory optimizations apply to which native family, and where each stands, with links to the PRs that measured them (#2232). Thanks to @jschmied.
+
+- Docs: the pull request pre-flight asks a PR that adds, finishes or drops a family's optimization to update that family's cell in the optimization ledger (#2243). Thanks to @jschmied.
+
+- Server: tool calls completed just before the thinking-close marker are returned when no answer follows, whole and
+  streamed; calls followed by more reasoning or an answer stay in reasoning (#2313, fixes #2310). Thanks to @AdrianBinDC.
+
+- CI: the portable-names check runs on every pull request again; since #2274 a reused pass could miss a newly added name
+  Windows can't check out (#2311).
+- Tests: the Metal kernel contract checks a masked key's non-finite value across every family's prompt attention, with
+  the families that still give hidden rows NaN registered as known (#2308, refs #1009).
+
+- Tests: the Qwen3.8-27B decode control in the Metal kernel contract edits the line #2106 changed, so contract runs on
+  M5 reach their summary again (#2303, fixes #2301). Thanks to @BobClawblaw.
+
 - Build: `zig build server-cpu` (the CPU-only fake server and engine-less CLI the server tests install) compiles again; its server module gets `core`, as the Metal, CUDA and fuzz graphs give it (#2363). Thanks to @Whq02.
 
 - Build: a plain `zig build` on Linux compiles again; the `tf-qwen35-cuda` tool passes the device flag that kept prompt states gained on 4 Nov (#2362). Thanks to @jschmied for the report.

@@ -510,7 +510,9 @@ model card advises `true` for plain chat; any other value is a 400, and other fa
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
-A call only mentioned while thinking, with the block closed after it, stays reasoning.
+A complete call at the end of reasoning is also returned when the think-close marker follows and the answer is
+empty or whitespace. While streaming, those calls stay held until the reply ends. When the block closes, a call
+followed by more reasoning or a nonempty answer stays reasoning.
 
 `thinking_budget` (the request's; absent or 0 takes `--thinking-budget`) replaces the reply's budget-th token,
 while it is still thinking, with a newline, the closing think marker and a blank line, then continues the answer.

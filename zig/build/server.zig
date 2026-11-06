@@ -61,6 +61,7 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
+    b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"logprobs_test"} }));
     b.step("test-logprob-offers-host", "Logprob request capability refusals before engine submission").dependOn(&logprobs.step);
     const models = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"model discovery"} }));
