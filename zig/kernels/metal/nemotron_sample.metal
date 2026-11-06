@@ -1,4 +1,4 @@
-// Keyed draws over the whole vocabulary for rows tf_gpu_sample would cut to 1,024 candidates (top_k off, or above 1,024).
+// Keyed draws over the whole vocabulary for rows tf_gpu_sample would cut to 1024 candidates (top_k off, or above 1024).
 #include <metal_stdlib>
 using namespace metal;
 
