@@ -1,4 +1,4 @@
-// A lone greedy stream's round on the GPU: the verify's arguments, the accept, the head's arguments and its confidence stop.
+// A lone greedy stream's GPU round: the verify's arguments, the accept, the head's arguments and its confidence stop.
 #include <metal_stdlib>
 using namespace metal;
 
