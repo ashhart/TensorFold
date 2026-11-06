@@ -1,4 +1,6 @@
-//! Borrowed resident EXL3 projections; fixed tiles keep each row independent of its surrounding window.
+//! Borrowed resident EXL3 projections; fixed tiles keep each row independent of its surrounding window. The
+//! model-facing order follows the release's inference/model.py, revision 314113f8; the trellis arithmetic and the
+//! kernel shapes are the lane's own pack format.
 const std = @import("std");
 pub const checkpoint = @import("exl3_load.zig");
 pub const load = @import("exl3_metal_load.zig");
@@ -15,7 +17,7 @@ pub const View = struct {
 pub const ScaleFormat = enum { f16, packed_signs };
 pub const Output = enum { bf16, f32 };
 
-/// ROUND-520: a prompt-row int8 sidecar: the pre-quantized dense weight in the fp8 body's 16-k x 64-n block
+/// A prompt-row int8 sidecar: the pre-quantized dense weight in the fp8 body's 16-k x 64-n block
 /// order (k*n bytes) and one f32 scale an output row. `direct` packs bake the rotation in; the others keep it.
 pub const Int8 = struct {
     weight: View,
@@ -43,7 +45,7 @@ pub const Matrix = struct {
     /// Byte strides between tiles; zero derives the checkpoint's stored K-major layout.
     tile_k_stride: usize = 0,
     tile_n_stride: usize = 0,
-    /// ROUND-520: the prompt-row int8 twin, when a sidecar is loaded (TF_DSV41_I8_PREFILL). Decode stays the
+    /// The prompt-row int8 twin, when a sidecar is loaded (TF_DSV41_I8_PREFILL). Decode stays the
     /// trellis; the prompt paths take this only at rows >= 1024.
     int8: ?Int8 = null,
     /// Whether that twin was packed pre-rotated (both Hadamards baked in). The matrix carries the fact, so a
@@ -109,13 +111,13 @@ pub const Rows = struct {
     /// The caller wrote this dispatch's rotated input (row-major, k halfs a row) into the scratch base -- the fused
     /// SwiGLU+rotate pass does -- so rotate_in is skipped and the GEMM reads those rows. `x` is that scratch view.
     prerotated: bool = false,
-    /// ROUND-395: leave the projection's f32 sums in the scratch for a caller that runs the epilogue itself (the
+    /// Leave the projection's f32 sums in the scratch for a caller that runs the epilogue itself (the
     /// one-row transform fold reads them, normalises and preps in one kernel). The dispatch's output is not written.
     no_epilogue: bool = false,
-    /// ROUND-419: this dispatch's routes carry duplicate entries that name the same descriptor (the fused
+    /// This dispatch's routes carry duplicate entries that name the same descriptor (the fused
     /// gate/up call's shared-expert tail), so the paired body can share one weight decode between them.
     pair: bool = false,
-    /// ROUND-422: the caller asks for the tensor-unit dense tile from EIGHT rows up (the shipped gate is 64).
+    /// The caller asks for the tensor-unit dense tile from EIGHT rows up (the shipped gate is 64).
     /// The drafter's conditioning tap projection asks for it: its 128-row window WRAPS (the taps ring is
     /// circular), so it is two calls whose row counts are (128-first) and (first), and half the rounds ran
     /// the smaller piece -- 1..63 rows -- on the general/shared body instead of the tile (2.353 -> 0.869 ms
@@ -154,7 +156,7 @@ pub fn descriptor(m: Matrix) !ExpertDescriptor {
         .suh_signs = @intFromBool(m.suh_format == .packed_signs),
         .svh_signs = @intFromBool(m.svh_format == .packed_signs),
         .has_bias = @intFromBool(m.bias != null),
-        // ROUND-394: the entry's own output width. An indexed batch may carry matrices of different n (the
+        // The entry's own output width. An indexed batch may carry matrices of different n (the
         // attention's wq_a 1280 and wkv 512 read the same input row), so the decode body bounds each row's
         // column tiles by this field; 0 means the call's own n. Every single-width table keeps n == the call's
         // n, so nothing moves for them.
@@ -202,7 +204,7 @@ pub const Pipelines = struct {
     swiglu_prerotate: mtl.Pipeline,
     dense: mtl.Pipeline,
     prefill: ?mtl.Pipeline = null,
-    /// ROUND-520: the int8 prompt-row body (f32 sums, for a pack that keeps the runtime rotation) and its bf16
+    /// The int8 prompt-row body (f32 sums, for a pack that keeps the runtime rotation) and its bf16
     /// destination twin (for a pre-rotated pack, no epilogue transform). Loaded only under TF_DSV41_I8_PREFILL.
     prefill_fp8: ?mtl.Pipeline = null,
     prefill_fp8b: ?mtl.Pipeline = null,
@@ -217,27 +219,27 @@ pub const Pipelines = struct {
     /// The same prefill entry with RG row groups by CG column groups of tile: a wider column tile re-reads the
     /// activation tile for fewer output tiles.
     prefill_nax_tiles: [8]?mtl.Pipeline = @splat(null),
-    /// ROUND-346: the routed 64x64 prompt tile with the funnel read (nax42). Bit-identical to nax5.
+    /// The routed 64x64 prompt tile with the funnel read (nax42). Bit-identical to nax5.
     prefill_nax_funnel: ?mtl.Pipeline = null,
-    /// ROUND-347: the same tile with the grouping's padded rows skipped (nax48). Bit-identical on the real rows.
+    /// The same tile with the grouping's padded rows skipped (nax48). Bit-identical on the real rows.
     prefill_nax_skip_pad: ?mtl.Pipeline = null,
-    /// ROUND-352: the routed tile with the stream word read as one 4-byte load (nax57). Bit-identical.
+    /// The routed tile with the stream word read as one 4-byte load (nax57). Bit-identical.
     prefill_nax_wide: ?mtl.Pipeline = null,
-    /// ROUND-352: the routed tile with the funnel path as the only path (nax59): the cursor arrays the
+    /// The routed tile with the funnel path as the only path (nax59): the cursor arrays the
     /// Fast path needs are dead there. Bit-identical.
     prefill_nax_funnel_only: ?mtl.Pipeline = null,
-    /// ROUND-350: the routed 64x64 prompt tile with the funnel read and the block's words by a cooperative load
+    /// The routed 64x64 prompt tile with the funnel read and the block's words by a cooperative load
     /// and a shuffle (nax52), and its twin with the grouping's padded rows skipped (nax53). Bit-identical.
     prefill_nax_coop: ?mtl.Pipeline = null,
     prefill_nax_coop_skip: ?mtl.Pipeline = null,
-    /// ROUND-348: the dense 128x64 prompt tile with the funnel read (nax51). The dense lane owns four states,
+    /// The dense 128x64 prompt tile with the funnel read (nax51). The dense lane owns four states,
     /// so the funnel reads two words where the cursor path reads four. Bit-identical to nax31.
     prefill_nax_dense_funnel: ?mtl.Pipeline = null,
-    /// ROUND-348: the 128-row routed tile (nax49): eight row groups, the funnel read on a four-window run and
+    /// The 128-row routed tile (nax49): eight row groups, the funnel read on a four-window run and
     /// the grouping's padded rows skipped. The weight decode is per tile, so the taller tile decodes each
     /// expert's weights once for twice the rows.
     prefill_nax_skip_pad128: ?mtl.Pipeline = null,
-    /// ROUND-350: the 128-row routed tile with the comparator's thirty-two-row warp (nax54): a warp owns two
+    /// The 128-row routed tile with the thirty-two-row warp (nax54): a warp owns two
     /// sixteen-row groups, so the block is decoded by one warp (eight states a lane, eight bits a weight) and
     /// the tile covers twice the rows. Bit-identical to the shipped tile.
     prefill_nax_warp32: ?mtl.Pipeline = null,
@@ -260,57 +262,56 @@ pub const Pipelines = struct {
     /// product are bit-identical; only six ALU ops a weight become one load.
     decode_nax_tab: ?mtl.Pipeline = null,
     decode_nax_ctab: ?mtl.Pipeline = null,
-    /// ROUND-334: the compact table body with the two-word funnel read (TF_DECODE_FUNNEL). The routed pack's
+    /// The compact table body with the two-word funnel read (TF_DECODE_FUNNEL). The routed pack's
     /// halves = 6 makes eight consecutive states a lane fit two 32-bit stream words; the read is bit-identical
     /// to decode_nax_ctab (bench: 0 of 13,824 / 30,720 outputs differ) and the stage is ~7-9 % faster.
     decode_nax_ctab_f: ?mtl.Pipeline = null,
-    /// ROUND-336: the comparator's register-only decode body (`tf_exl3_matmul_decode_fma`): one warp a
+    /// The register-only decode body (`tf_exl3_matmul_decode_fma`): one warp a
     /// sixteen-column tile, one k walk, no split-K, no partials and no reduce dispatch, and the decoded
-    /// weights stay in registers (no threadgroup weight tile, no barrier in the k loop). Structure ported
-    /// from mlx-serve's dsv41_exl3_guone_k3 / dsv41_exl3_mul1h_k3 decode kernels (MIT/Apache-2.0).
-    /// The reduction order is the comparator's, not the tensor unit's, so its sums are FP32 but not
-    /// bit-identical to the tensor-unit body's (bench NRMS 1.0e-6 at the pack's shapes).
+    /// weights stay in registers (no threadgroup weight tile, no barrier in the k loop). The reduction order is
+    /// the FP32 walk's, not the tensor unit's, so its sums are FP32 but not bit-identical to the tensor-unit
+    /// body's.
     decode_fma: ?mtl.Pipeline = null,
-    /// ROUND-338: the register-only decode body with the static state selection
+    /// The register-only decode body with the static state selection
     /// (`tf_exl3_matmul_decode_fma_static`): the lane's eight windows at compile-time shifts, so the per-state
     /// word selection (the `rel[k]` cursor) and the per-state bit offset leave the inner loop. The same states,
     /// the same codebook values, the same products and the same reduction tree, so the output is bit-identical
     /// (bench hash equal to the shipped body at the pack's routed shapes).
     decode_fma_static: ?mtl.Pipeline = null,
-    /// ROUND-338: the register-only decode body with the static state selection and the codebook read from a
+    /// The register-only decode body with the static state selection and the codebook read from a
     /// 1024-entry threadgroup LUT (`tf_exl3_matmul_decode_fma_static_lut`). The mul1 value depends only on the
     /// state's byte sum, so the 65,536-entry table holds 1,024 distinct values; the LUT's values are the
     /// table's, entry for entry, so the output is bit-identical and what the arm removes is the table's L2
     /// traffic (the bench prices it 1.65-1.81x on the shipped body at the routed shapes).
     decode_fma_static_lut: ?mtl.Pipeline = null,
-    /// ROUND-395: the one-row transform fold (`tf_exl3_norm_transform`): the output transform, the RMS norm and the
+    /// The one-row transform fold (`tf_exl3_norm_transform`): the output transform, the RMS norm and the
     /// next projection's input transform in one dispatch. Optional so an older metallib still loads.
     norm_transform: ?mtl.Pipeline = null,
-    /// ROUND-340: the register-only body on the DENSE one-row path (`tf_exl3_matmul_decode_fma_dense`): the
+    /// The register-only body on the DENSE one-row path (`tf_exl3_matmul_decode_fma_dense`): the
     /// routed decode's own structure (one warp a sixteen-column tile, the decoded weights in registers, no
     /// threadgroup weight tile, no barrier in the k walk, no split-K and no partials round trip), reading a
     /// dense matrix's trellis from the buffer and its strides, width and codebook from the args. The dense
     /// path's shipped body is the 128-column threadgroup-tile one, which runs the same shape class at half the
     /// rate the routed stage reaches on it (the bench: 202 GB/s against 412 at n = 2304, k = 5120).
     decode_fma_dense: ?mtl.Pipeline = null,
-    /// ROUND-369: the MULTI-ROW dense body (`tf_exl3_matmul_decode_fma_dense_multi2` / `_multi4`): the
+    /// The MULTI-ROW dense body (`tf_exl3_matmul_decode_fma_dense_multi2` / `_multi4`): the
     /// register-only dense body with R rows a threadgroup, so the weight decode -- the ALU-bound part -- is
     /// shared by the rows instead of paid once a row (the shipped body is one row a threadgroup, and the
     /// dispatch's height is the row count, so a four-row window decodes the attention's dense weights four
     /// times over). Every row keeps the shipped per-row arithmetic (the same k blocks, the same warp split,
     /// the same accumulator tree and the same cross-warp sum), so each row's sum is bit-identical to the
-    /// one-row body's. The comparator's shape is the same (mlx-serve's paired decode, MIT/Apache-2.0).
+    /// one-row body's. The shape the paired decode uses.
     decode_fma_dense_multi2: ?mtl.Pipeline = null,
     decode_fma_dense_multi4: ?mtl.Pipeline = null,
-    /// ROUND-370: the PAIRED routed decode (`tf_exl3_matmul_decode_fma_static_pair` / `_pair_lut`): the
+    /// The PAIRED routed decode (`tf_exl3_matmul_decode_fma_static_pair` / `_pair_lut`): the
     /// entries that name the same expert -- the same weight matrix -- are computed in one threadgroup, so
     /// the weight decode and the weight traffic are paid once for the pair and the odd rank exits. The
-    /// comparator's own shape (mlx-serve's dspark pair kernel, MIT/Apache-2.0). Each row keeps the shipped
+    /// shape one decode for the rows that share a weight. Each row keeps the shipped
     /// per-row arithmetic, so the pair's rows are bit-identical to the single-row body's.
     decode_fma_static_pair: ?mtl.Pipeline = null,
     decode_fma_static_pair_lut: ?mtl.Pipeline = null,
-    /// ROUND-337: the warps a threadgroup of the register-only body (the receipt's chain length).
-    /// ROUND-357: landed at 16 from the bench's per-warp-count fp64 receipt (all 16 engine shapes
+    /// The warps a threadgroup of the register-only body (the receipt's chain length).
+    /// Landed at 16 from the bench's per-warp-count fp64 receipt (all 16 engine shapes
     /// no worse than the shipped path; the routed stage 1.123e-7 against 2.348e-7) and the in-situ
     /// A/B (32.23/32.25 -> 35.83/35.92/35.89 tok/s, both orders).
     fma_warps: usize = 16,
@@ -326,13 +327,13 @@ pub const Pipelines = struct {
     /// decodes its 16 states into registers, so there is no threadgroup weight tile and no barrier. Same k order
     /// and table value as `matmul_wide`, hence bit-identical.
     matmul_direct: ?mtl.Pipeline = null,
-    /// ROUND-338: the static state selection in the one-row body (`tf_exl3_matmul_wide_static_tab`): the lane's
+    /// The static state selection in the one-row body (`tf_exl3_matmul_wide_static_tab`): the lane's
     /// eight windows are extracted at compile-time shifts from one funnel shift a block, so the per-state word
     /// selection (the `rel[k]` cursor) and the per-state bit offset leave the inner loop. The same tile, the
     /// same activation load, the same 16-product FP32 sums and the same k order as `matmul_wide`, so the output
     /// is bit-identical (bench hash equal at every shape and split count).
     matmul_static: ?mtl.Pipeline = null,
-    /// ROUND-338: the static state selection with the codebook read from a 1024-entry threadgroup LUT
+    /// The static state selection with the codebook read from a 1024-entry threadgroup LUT
     /// (`tf_exl3_matmul_wide_static_lut`): the mul1 value depends only on the state's byte sum, so the
     /// 65,536-entry table holds 1,024 distinct values and a threadgroup can hold them all. The LUT's values
     /// are the table's, entry for entry (bench hash equal over the whole output), so the output is
@@ -379,7 +380,7 @@ pub const Pipelines = struct {
                 mmd = null;
             }
         } else std.log.err("exl3: direct pipeline did not load", .{});
-        // ROUND-338: the static state selection in the one-row body (the same 128-column geometry as the wide
+        // The static state selection in the one-row body (the same 128-column geometry as the wide
         // body: eight SIMDgroups a threadgroup).
         var mms = if (gpa != null) (mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_static_tab", false) catch null) else null;
         var mmsl = if (gpa != null) (mtl.Pipeline.init(device, lib, "tf_exl3_matmul_wide_static_lut", false) catch null) else null;
@@ -452,7 +453,7 @@ pub const Pipelines = struct {
         var decode_fma: ?mtl.Pipeline = null;
         var decode_fma_static: ?mtl.Pipeline = null;
         var decode_fma_static_lut: ?mtl.Pipeline = null;
-        // ROUND-340: the dense one-row path's register-only body.
+        // The dense one-row path's register-only body.
         var decode_fma_dense: ?mtl.Pipeline = null;
         var decode_fma_dense_multi2: ?mtl.Pipeline = null;
         var decode_fma_dense_multi4: ?mtl.Pipeline = null;
@@ -488,36 +489,36 @@ pub const Pipelines = struct {
                                 if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_tiles[t] = pf else pf.deinit();
                             } else |_| {}
                         }
-                        // ROUND-347: the same tile with the grouping's padded rows skipped (nax48).
+                        // The same tile with the grouping's padded rows skipped (nax48).
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax48", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_skip_pad = pf else pf.deinit();
                         } else |_| {}
-                        // ROUND-352: the routed tile with the stream word read as one 4-byte load (nax57).
+                        // The routed tile with the stream word read as one 4-byte load (nax57).
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax57", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_wide = pf else pf.deinit();
                         } else |_| {}
-                        // ROUND-352: the routed tile with the funnel path as the only path (nax59).
+                        // The routed tile with the funnel path as the only path (nax59).
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax59", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel_only = pf else pf.deinit();
                         } else |_| {}
-                        // ROUND-348: the 128-row routed tile (nax49): the funnel read on a four-window run and
+                        // The 128-row routed tile (nax49): the funnel read on a four-window run and
                         // the grouping's padded rows skipped.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax49", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 256) prefill_nax_skip_pad128 = pf else pf.deinit();
                         } else |_| {}
-                        // ROUND-350: the 128-row routed tile with the comparator's thirty-two-row warp.
+                        // The 128-row routed tile with the thirty-two-row warp.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax54", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_warp32 = pf else pf.deinit();
                         } else |_| {}
-                        // ROUND-348: the dense prompt tile with the funnel read (nax51).
+                        // The dense prompt tile with the funnel read (nax51).
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax51", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 256) prefill_nax_dense_funnel = pf else pf.deinit();
                         } else |_| {}
-                        // ROUND-346: the funnel read in the routed prompt tile (nax42).
+                        // The funnel read in the routed prompt tile (nax42).
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax42", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_funnel = pf else pf.deinit();
                         } else |_| {}
-                        // ROUND-350: the cooperative read -- the block's words by one lane a word and a shuffle.
+                        // The cooperative read -- the block's words by one lane a word and a shuffle.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax52", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_coop = pf else pf.deinit();
                         } else |_| {}
@@ -530,12 +531,12 @@ pub const Pipelines = struct {
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax18", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_db64 = pf else pf.deinit();
                         } else |err| std.log.err("exl3: nax18 pipeline init failed: {s}", .{@errorName(err)});
-                        // The dense 128x64 prompt tile on the double-buffered body (ROUND-312's nax31 diagnostic,
+                        // The dense 128x64 prompt tile on the double-buffered body ('s nax31 diagnostic,
                         // 38.0 against 28.8 TMAC/s at the same shape, bit-identical to nax2's k/MMA order).
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax31", false)) |pf| {
                             if (pf.simdWidth() == 32 and pf.maxThreads() >= 128) prefill_nax_dense_db = pf else pf.deinit();
                         } else |err| std.log.err("exl3: nax31 pipeline init failed: {s}", .{@errorName(err)});
-                        // ROUND-520: the prompt-row int8 body. Only under the flag, so a default boot compiles and
+                        // The prompt-row int8 body. Only under the flag, so a default boot compiles and
                         // loads exactly what it did before.
                         if (std.c.getenv("TF_DSV41_I8_PREFILL") != null) {
                             if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_fp8", false)) |pf| {
@@ -551,8 +552,8 @@ pub const Pipelines = struct {
                                 } else pf.deinit();
                             } else |err| std.log.err("exl3: fp8b prefill pipeline failed: {s}", .{@errorName(err)});
                         }
-                        // ROUND-351: the dense 128x64 tile with a simdgroup that owns thirty-two rows (nax56): the
-                        // comparator's NAXTile shape. The lane keeps eight states, so the stream words it reads cover
+                        // The dense 128x64 tile with a simdgroup that owns thirty-two rows (nax56): the
+                        // NAXTile shape. The lane keeps eight states, so the stream words it reads cover
                         // twice the states, and the weight fragments are read once for two row groups. The values, the
                         // k order and the MMA order per output are nax31's, so the output is bit-identical.
                         if (mtl.Pipeline.init(device, nax_lib, "tf_exl3_matmul_prefill_nax56", false)) |pf| {
@@ -626,7 +627,7 @@ pub const Pipelines = struct {
                                     }
                                 } else std.log.err("exl3: compact table decode library compile failed", .{});
                             } else |_| {}
-                            // ROUND-334: the same compact table body with the two-word funnel read. halves = 6
+                            // The same compact table body with the two-word funnel read. halves = 6
                             // is the routed pack's width; the body falls back to the four-word path otherwise.
                             if (std.fmt.allocPrint(g, "#define TF_DECODE_TABLE 1\n#define TF_DECODE_COMPACT 1\n#define TF_DECODE_FUNNEL 1\n{s}", .{src})) |src_tcf| {
                                 defer g.free(src_tcf);
@@ -637,23 +638,23 @@ pub const Pipelines = struct {
                                     }
                                 } else std.log.err("exl3: compact table funnel decode library compile failed", .{});
                             } else |_| {}
-                            // ROUND-336: the register-only body. Four warps a threadgroup (TF_FMA_WARPS 4) is
+                            // The register-only body. Four warps a threadgroup (TF_FMA_WARPS 4) is
                             // the bench's best at the pack's routed shapes: gate/up 0.116 ms against the
                             // tensor-unit body's 0.167 (1.44x), down 0.098 against 0.155 (1.60x).
-                            // ROUND-337: the warps a threadgroup are the receipt's chain length (each warp walks
+                            // The warps a threadgroup are the receipt's chain length (each warp walks
                             // its own slice of the k blocks), so the count is a knob: TF_DSV41_FMA_WARPS picks it,
-                            // sixteen is the default (ROUND-357's receipt and in-situ A/B).
+                            // sixteen is the default ('s receipt and in-situ A/B).
                             var warps: usize = fma_warps;
                             if (std.c.getenv("TF_DSV41_FMA_WARPS")) |v| {
                                 if (std.fmt.parseInt(usize, std.mem.span(v), 10)) |w| {
-                                    // ROUND-356: 32 warps a threadgroup (the device's 1,024-thread limit) joins the
+                                    // 32 warps a threadgroup (the device's 1,024-thread limit) joins the
                                     // sweep. The count is the k-parallelism per sixteen-column tile, and the
                                     // in-situ ranking on this tree is 4 < 8 < 16, so the ceiling is priced.
                                     if (w == 1 or w == 2 or w == 4 or w == 8 or w == 16 or w == 32) warps = w;
                                 } else |_| {}
                             }
-                            // ROUND-434: the FMA body's prefetch ring depth (TF_FMA_PF blocks in flight). The
-                            // shipped body keeps one block in flight; ROUND-416's bench priced 8 at -5.2 % on the
+                            // The FMA body's prefetch ring depth (TF_FMA_PF blocks in flight). The
+                            // shipped body keeps one block in flight; 's bench priced 8 at -5.2 % on the
                             // verify's 56-slot gate/up shape (bit-identical: the ring only moves loads) and at a
                             // loss on every plain-path shape, so the depth is an env knob here and a serve A/B
                             // decides. TF_DSV41_FMA_PF=1 is the shipped path.
@@ -675,14 +676,14 @@ pub const Pipelines = struct {
                                             std.log.info("exl3: register-only decode pipeline active (tf_exl3_matmul_decode_fma, {d} warps)", .{warps});
                                         } else pf.deinit();
                                     }
-                                    // ROUND-338: the same body with the static state selection.
+                                    // The same body with the static state selection.
                                     if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_static", false) catch null) |ps| {
                                         if (ps.simdWidth() == 32 and ps.maxThreads() >= 32 * warps) {
                                             decode_fma_static = ps;
                                             std.log.info("exl3: register-only decode pipeline active (tf_exl3_matmul_decode_fma_static, {d} warps)", .{warps});
                                         } else ps.deinit();
                                     }
-                                    // ROUND-338: the same body with the static state selection and the codebook
+                                    // The same body with the static state selection and the codebook
                                     // read from a 1024-entry threadgroup LUT.
                                     if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_static_lut", false) catch null) |pl| {
                                         if (pl.simdWidth() == 32 and pl.maxThreads() >= 32 * warps) {
@@ -690,7 +691,7 @@ pub const Pipelines = struct {
                                             std.log.info("exl3: register-only decode pipeline active (tf_exl3_matmul_decode_fma_static_lut, {d} warps)", .{warps});
                                         } else pl.deinit();
                                     }
-                                    // ROUND-340: the same body on the dense one-row path: a dense matrix has no
+                                    // The same body on the dense one-row path: a dense matrix has no
                                     // expert descriptor, so this variant reads the trellis from the buffer and
                                     // the strides, the width and the codebook from the args.
                                     if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_dense", false) catch null) |pd| {
@@ -699,7 +700,7 @@ pub const Pipelines = struct {
                                             std.log.info("exl3: dense register-only decode pipeline active (tf_exl3_matmul_decode_fma_dense, {d} warps)", .{warps});
                                         } else pd.deinit();
                                     }
-                                    // ROUND-369: the same body with two and four rows a threadgroup: the weight
+                                    // The same body with two and four rows a threadgroup: the weight
                                     // decode is shared by the rows, and every row's sum is bit-identical.
                                     if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_dense_multi2", false) catch null) |pd| {
                                         if (pd.simdWidth() == 32 and pd.maxThreads() >= 32 * warps) {
@@ -713,7 +714,7 @@ pub const Pipelines = struct {
                                             std.log.info("exl3: multi-row dense register-only decode pipeline active (tf_exl3_matmul_decode_fma_dense_multi4, {d} warps)", .{warps});
                                         } else pd.deinit();
                                     }
-                                    // ROUND-370: the paired routed decode: the entries that name the same expert
+                                    // The paired routed decode: the entries that name the same expert
                                     // share one weight decode.
                                     if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_static_pair", false) catch null) |pd| {
                                         if (pd.simdWidth() == 32 and pd.maxThreads() >= 32 * warps) {
@@ -831,7 +832,7 @@ var nax_cols_cache: ?u32 = null;
 var nax_db_logged: bool = false;
 var routed_logged: bool = false;
 var dense_log_count: u32 = 0;
-/// ROUND-422: the log counter for the calls the eight-row dense gate moves.
+/// The log counter for the calls the eight-row dense gate moves.
 var dense8_log_count: u32 = 0;
 var matmul_tab_logged: bool = false;
 var direct_log_count: u32 = 0;
@@ -864,7 +865,7 @@ fn fmaLutOn() bool {
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// ROUND-394: true when the indexed decode body that honours a descriptor's own output width is the one the
+/// True when the indexed decode body that honours a descriptor's own output width is the one the
 /// stages will pick for a rows <= 8 indexed call -- the register-only body. The attention's wq_a (n 1280) and
 /// wkv (n 512) batch into one indexed call, so the caller gates on this: a fallback body that only knows the
 /// call's n would read a narrower entry's stream past its last column.
@@ -896,7 +897,7 @@ fn fmaStaticOn() bool {
 /// register-only body's), not the dense body's, so the arm needed the FP64 reference for the dense one-row
 /// class before it could default on: it stands (the register-only body reads NRMS 1.23e-7 against the shipped
 /// body's 2.26e-7 at the pack's width 10, and 1.38e-7 against 2.22e-7 at width 12 -- the register-only body
-/// is the more accurate of the two, as it was for the routed class in ROUND-337), so it defaults on.
+/// is the more accurate of the two, as it was for the routed class in ), so it defaults on.
 fn fmaDenseOn() bool {
     const v = std.c.getenv("TF_DSV41_EXL3_FMA_DENSE") orelse return true;
     return !std.mem.eql(u8, std.mem.span(v), "0");
@@ -910,14 +911,14 @@ fn staticDecodeOn() bool {
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 var moe_cols_cache: ?u32 = null;
-/// ROUND-419 (instrument): a one-shot line the first time the paired body is selected, so an in-situ A/B
+/// (instrument): a one-shot line the first time the paired body is selected, so an in-situ A/B
 /// can say whether the call-site hint fired at all.
 var pair_logged: bool = false;
 var fma_log_count: usize = 0;
 var dense_db_cache: ?u32 = null;
 
 /// TF_DSV41_EXL3_DENSE_DB: the dense prompt attention projections on the double-buffered 128x64 body (nax31).
-/// Same k order and MMA order as nax2, so the output is bit-identical. Default on: the receipts (ROUND-315) are the
+/// Same k order and MMA order as nax2, so the output is bit-identical. Default on: the receipts () are the
 /// bench's identical hash, both canons, and the 20-prompt band at 294/294. Set =0 to force the nax2 schedule back.
 fn denseDb() bool {
     return envRows("TF_DSV41_EXL3_DENSE_DB", 1, &dense_db_cache) != 0;
@@ -926,7 +927,7 @@ fn denseDb() bool {
 var dense_rpg2_cache: ?u32 = null;
 
 /// TF_DSV41_EXL3_DENSE_RPG2: the dense prompt tile on the thirty-two-row simdgroup body (nax56): the
-/// comparator's NAXTile shape. The lane owns eight states instead of four, so the stream words it reads cover
+/// NAXTile shape. The lane owns eight states instead of four, so the stream words it reads cover
 /// twice the states, and the weight fragments are read once for two row groups, so the tile's threadgroup
 /// traffic per row halves. The values, their order, the k order and the MMA order per output are nax31's, so
 /// the output is bit-identical. Default off until the bench and the in-situ receipt price it.
@@ -937,7 +938,7 @@ fn denseRpg2() bool {
 var moe_db_cache: ?u32 = null;
 
 /// TF_DSV41_EXL3_FUNNEL_PREFILL: the routed prompt tile reads its states from the two-word funnel -- the
-/// comparator's structure (one funnel shift a block, the eight windows at compile-time shifts) on our map and
+/// structure (one funnel shift a block, the eight windows at compile-time shifts) on our map and
 /// our ring. The values, their order and the k order are the shipped body's, so the output is bit-identical
 /// (the bench's hash is equal to the shipped body's at the routed shape). `=0` restores the shipped cursor for
 /// a same-binary A/B.
@@ -952,7 +953,7 @@ fn skipPadOn() bool {
 }
 
 /// TF_DSV41_EXL3_WIDE_WORDS: the routed prompt tile reads its stream word as one 4-byte load -- the
-/// comparator's read -- instead of two 2-byte loads. The same bytes, so the output is bit-identical; the
+/// read -- instead of two 2-byte loads. The same bytes, so the output is bit-identical; the
 /// kernel falls back to the shipped read when the tile's byte address is not 4-byte aligned.
 fn wideWordsOn() bool {
     const v = std.c.getenv("TF_DSV41_EXL3_WIDE_WORDS") orelse return false;
@@ -960,15 +961,15 @@ fn wideWordsOn() bool {
 }
 
 /// TF_DSV41_EXL3_FUNNEL_ONLY: the routed prompt tile takes the funnel path as its only path, so the cursor
-/// arrays the Fast path needs -- off, sh and rel -- are not live across the k loop. ROUND-352: the shipped
+/// arrays the Fast path needs -- off, sh and rel -- are not live across the k loop. The shipped
 /// default (the funnel path is the one the routed pack's width takes); `=0` restores the shipped body.
 fn funnelOnlyOn() bool {
     const v = std.c.getenv("TF_DSV41_EXL3_FUNNEL_ONLY") orelse return true;
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// TF_DSV41_EXL3_DENSE_FUNNEL: the dense prompt tile reads its states from the two-word funnel (the comparator's
-/// structure, ROUND-346) instead of the cursor's four-word read. The dense tile is 128 rows, so a lane owns four
+/// TF_DSV41_EXL3_DENSE_FUNNEL: the dense prompt tile reads its states from the two-word funnel (the wide form's
+/// structure, ) instead of the cursor's four-word read. The dense tile is 128 rows, so a lane owns four
 /// states and the funnel reads a twenty-five-bit run -- two words. Bit-identical to the shipped body.
 var dense_funnel8_cache: ?u32 = null;
 
@@ -977,7 +978,7 @@ fn denseFunnelOn() bool {
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// TF_DSV41_EXL3_DENSE_FUNNEL8 (ROUND-433, default OFF): the dense prompt tile's funnel read at halves = 8, the
+/// TF_DSV41_EXL3_DENSE_FUNNEL8 (, default OFF): the dense prompt tile's funnel read at halves = 8, the
 /// tap projection's width. The dense tile's lane owns four states four bits apart, a 28-bit run, so the funnel's
 /// two words cover it where the shipped body reads four. The bench is bit-identical both ways, but the cut only
 /// pays at a WIDE n: at 128 x 15,360 x 5,120 halves 8 it is 0.711 -> 0.459 ms (-35.5 %), and at the engine's
@@ -991,16 +992,16 @@ fn denseFunnel8On() bool {
 /// a word) and takes the two it needs by a shuffle, instead of every lane reading them: the same words, the same
 /// values, the same order (bit-identical). `=0` restores the per-lane read.
 fn coopPrefillOn() bool {
-    // ROUND-350: the cooperative read is OFF by default: the bench prices it 4.9 % faster on the routed tile but
+    // The cooperative read is OFF by default: the bench prices it 4.9 % faster on the routed tile but
     // in situ it is 8.3 % SLOWER (the routed decode there is bound by memory-level parallelism, not by the load
     // instructions). The flag keeps the instrument.
     const v = std.c.getenv("TF_DSV41_EXL3_COOP_PREFILL") orelse return false;
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 
-/// TF_DSV41_EXL3_WARP32: the 128-row routed tile with the comparator's thirty-two-row warp (nax54): a warp
+/// TF_DSV41_EXL3_WARP32: the 128-row routed tile with the thirty-two-row warp (nax54): a warp
 /// owns two sixteen-row groups, so the block is decoded by one warp and the lane keeps eight states and eight
-/// bits a weight. `=0` restores ROUND-348's nax49 (the four-state lane) for the A/B.
+/// bits a weight. `=0` restores 's nax49 (the four-state lane) for the A/B.
 fn warp32On() bool {
     const v = std.c.getenv("TF_DSV41_EXL3_WARP32") orelse return true;
     return !std.mem.eql(u8, std.mem.span(v), "0");
@@ -1056,7 +1057,7 @@ const Args = extern struct {
     y_stride: u64,
     tile_k_stride: u64,
     tile_n_stride: u64,
-    /// ROUND-419: the call site's pair hint. The fused gate/up dispatch names the shared expert's two
+    /// The call site's pair hint. The fused gate/up dispatch names the shared expert's two
     /// matrices once a token row, so its routes carry duplicates the pair kernel can share a decode by;
     /// the down dispatch does not carry the shared rows (the shared down is a dense call), and the bench
     /// prices the pair at +12-24 % on the down shapes. Set only where the duplicates are.
@@ -1167,7 +1168,7 @@ fn rowsArgs(k: usize, n: usize, r: Rows, x: View, y: View, scratch: View) !Args 
         .pair = @intFromBool(r.pair),
     };
 }
-/// ROUND-395: the f32 sums' offset in a call's scratch -- the rotated region rounded to 16 bytes. The fold's
+/// The f32 sums' offset in a call's scratch -- the rotated region rounded to 16 bytes. The fold's
 /// caller reads them with `encodeNormTransform`.
 pub fn sumsOffset(k: usize, rows: usize) usize {
     return (@as(usize, k) * rows * 2 + 15) & ~@as(usize, 15);
@@ -1183,7 +1184,7 @@ pub const NormTransform = extern struct {
     eps: f32,
 };
 
-/// ROUND-395: THE ONE-ROW TRANSFORM FOLD. Reads the merged wq_a+wkv call's f32 sums (its dispatch ran with
+/// THE ONE-ROW TRANSFORM FOLD. Reads the merged wq_a+wkv call's f32 sums (its dispatch ran with
 /// `no_epilogue`), writes the output transform of both entries (qr 1280, raw 512), the q_norm of qr, and wq_b's
 /// rotated input into the scratch base, all with the shipped kernels' arithmetic and order (see the metal
 /// kernel's header). The next call runs with `prerotated`.
@@ -1327,7 +1328,7 @@ pub fn encodeInt8Tile(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: 
     e.barrier();
 }
 
-/// ROUND-520: the prompt-row int8 path for a dense projection. `direct` is a pre-rotated pack (the weight carries
+/// The prompt-row int8 path for a dense projection. `direct` is a pre-rotated pack (the weight carries
 /// suh/H_K and H_N/svh), so the call is one byte body into the caller's bf16 output; otherwise the shipped rotate_in
 /// and rotate_out bracket the byte body exactly as the trellis path brackets its GEMM. The row scale is applied by
 /// the body's own epilogue, so an int8 pack's scale never reaches rotate_out a second time.
@@ -1439,7 +1440,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     // The tensor-unit decode tile is four rows a threadgroup with one live row each; TF_DSV41_EXL3_SCALAR_EXPERTS=1
     // re-measures the scalar one-row path (which streams the output head at 184 GB/s) against it.
     const decode_nax = p.decode_nax != null and a.indexed == 1 and std.c.getenv("TF_DSV41_EXL3_SCALAR_EXPERTS") == null;
-    // TF_DSV41_EXL3_DECODE_COMPACT: the one-row, 1 KB-threadgroup decode tile (the occupancy fix measured in round 173).
+    // TF_DSV41_EXL3_DECODE_COMPACT: the one-row, 1 KB-threadgroup decode tile .
     // Windows and draft blocks take the compact tile (measured +8.6 % at five rows); the plain token keeps the shipped one.
     const compact = p.decode_nax_c != null and decode_nax and (std.c.getenv("TF_DSV41_EXL3_DECODE_COMPACT") != null or a.rows > 1);
     // TF_DSV41_EXL3_ROUTED_TABLE (default on): the routed decode body reads the codebook value from the resident
@@ -1447,7 +1448,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     // (the codebook check), so the decoded tile and the product are bit-identical: only the ALU work moves to a
     // load. TF_DSV41_EXL3_ROUTED_TABLE=0 restores the ALU body for a same-binary A/B.
     const routed_table = std.c.getenv("TF_DSV41_EXL3_ROUTED_TABLE") == null;
-    // ROUND-334: the two-word funnel read is bit-identical at halves = 6 (the routed pack's width) and cuts the
+    // The two-word funnel read is bit-identical at halves = 6 (the routed pack's width) and cuts the
     // stage's stream traffic in half. TF_DSV41_EXL3_FUNNEL=0 restores the four-word body for a same-binary A/B.
     const funnel = std.c.getenv("TF_DSV41_EXL3_FUNNEL") == null and a.halves == 6;
     const decode_pipe: ?mtl.Pipeline = if (decode_nax) blk: {
@@ -1461,9 +1462,9 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     } else null;
     const grouped_nax = a.indexed == 2 and a.rows % 64 == 0;
     const moe_splits: usize = if (decode_nax and a.rows <= moe_split_rows and p.reduce != null) moeSplitCount() else 1;
-    // ROUND-336/337: the register-only decode body takes the routed decode: one warp a sixteen-column tile,
+    // /337: the register-only decode body takes the routed decode: one warp a sixteen-column tile,
     // one k walk, no split-K (so no partials round trip and no reduce dispatch), the decoded weights in
-    // registers. ROUND-337 landed its receipt (the fp64 reference for the changed reduction class: the
+    // registers. landed its receipt (the fp64 reference for the changed reduction class: the
     // register-only body's sums are closer to the fp64 truth than the tensor-unit body's -- NRMS 1.54e-7
     // against 2.35e-7 -- so it defaults on). TF_DSV41_EXL3_FMA=0 restores the tensor-unit body for a
     // same-binary A/B.
@@ -1472,11 +1473,11 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
         if (v[0] == '0') fma_off = true;
     }
     const fma = p.decode_fma != null and decode_nax and a.rows <= moe_split_rows and !fma_off;
-    // ROUND-338: the static state selection in the register-only body. TF_DSV41_EXL3_FMA_STATIC=0 restores the
+    // The static state selection in the register-only body. TF_DSV41_EXL3_FMA_STATIC=0 restores the
     // shipped cursor for a same-binary A/B; the outputs are bit-identical (the bench's hash is equal to the
     // shipped body's at the pack's routed shapes).
     const fma_static = p.decode_fma_static != null and decode_nax and a.rows <= moe_split_rows and !fma_off and fmaStaticOn();
-    // ROUND-338: the same body with the codebook read from the 1024-entry threadgroup LUT (the mul1 value
+    // The same body with the codebook read from the 1024-entry threadgroup LUT (the mul1 value
     // depends only on the state's byte sum, so 1,024 entries hold every value; the LUT's values are the
     // table's, entry for entry, so the output is bit-identical).
     const fma_static_lut = p.decode_fma_static_lut != null and decode_nax and a.rows <= moe_split_rows and !fma_off and
@@ -1489,20 +1490,20 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     // same bits as a solo step (row_invariance.zig measures it; TF_DSV41_NO_ROW_INVARIANT restores the old
     // window arithmetic). Rows == 1 takes this path either way, so no shipped stream's bits move.
     const row_invariant = std.c.getenv("TF_DSV41_NO_ROW_INVARIANT") == null;
-    // ROUND-340: the register-only body on the dense one-row path. The dense shapes (the attention's four
+    // The register-only body on the dense one-row path. The dense shapes (the attention's four
     // projections and the shared expert's three) run the 128-column threadgroup-tile body today, at half the
     // rate the routed stage reaches on the same shape class; this body is the routed decode's own structure
-    // (the comparator's: one warp a sixteen-column tile, the decoded weights in registers, no threadgroup
+    // (the wide form's: one warp a sixteen-column tile, the decoded weights in registers, no threadgroup
     // weight tile, no barrier in the k walk, no split-K and no partials round trip). Its reduction order is the
     // register-only body's, so the flag's arm owes the FP64 reference for the dense one-row class.
-    // ROUND-362: the drafter's own blocks are packed at halves = 8 (the backbone's are 10/12), and the
+    // The drafter's own blocks are packed at halves = 8 (the backbone's are 10/12), and the
     // register-only dense body has a halves == 8 branch. TF_DSV41_EXL3_FMA_DENSE_H8=1 lets it take the
     // drafter's projections too, so the 16-column threadgroup body is measured against it.
-    // ROUND-425 (THE LANDING): the halves-8 dense matrices (the trunk's shared expert's DOWN projection,
+    // (THE LANDING): the halves-8 dense matrices (the trunk's shared expert's DOWN projection,
     // n=5120 k=2304, and the Engram projection, n=25600 k=6144 -- not only the drafter's) take the
     // register-only dense body BY DEFAULT: the class's FP64 receipt is 1.60-3.45x more accurate than the
-    // shipped body at these shapes (ROUND-421), and the chain-level agreement with the FP64 chain is
-    // exactly the shipped path's (ROUND-425: 9/16 and 3/11, the same disagreement sets).  The flag is now
+    // shipped body at these shapes (), and the chain-level agreement with the FP64 chain is
+    // exactly the shipped path's (9/16 and 3/11, the same disagreement sets). The flag is now
     // a VALUE test: unset or any value but "0" is the body; TF_DSV41_EXL3_FMA_DENSE_H8=0 restores the
     // shipped body for a same-binary A/B.  (The old presence test armed the flag on "0" -- the record's
     // watch-out; that footgun is fixed here.)
@@ -1514,7 +1515,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     const fma_dense_ok = p.decode_fma_dense != null and a.indexed == 0 and a.routed == 0 and a.rows <= 8 and
         a.n % 16 == 0 and a.k % 16 == 0 and (a.halves == 6 or a.halves == 10 or a.halves == 12 or
         (a.halves == 8 and fma_dense_h8));
-    // ROUND-369: the MULTI-ROW dense body -- R rows a threadgroup, so the weight decode is shared by the
+    // The MULTI-ROW dense body -- R rows a threadgroup, so the weight decode is shared by the
     // rows. The shipped dense body is one row a threadgroup (`row = tg.y`, the dispatch's height is the row
     // count), so a four-row verify decodes the attention's dense weights four times over the same bytes.
     // Every row keeps the shipped per-row arithmetic, so the rows' sums do not move.
@@ -1523,13 +1524,13 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
         (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0)
     else
         4;
-    // ROUND-385 (the arm): THE CEIL HEIGHT.  The multi body's partial group is already guarded in the
+    // (the arm): THE CEIL HEIGHT. The multi body's partial group is already guarded in the
     // kernel (`if (row >= a.rows) break;`), so a row count that is not a multiple of the body's R can
     // still share ONE weight decode per group: the height is ceil(rows / R) instead of rows / R.  The
     // even row counts are unchanged (the height is the same), so the shipped paths stay bit-identical.
     // Without it a FIVE-ROW window (the depth-4 drafter) falls back to the one-row body and decodes the
     // dense weights once a row.
-    // ROUND-388: THE CEIL HEIGHT IS THE DEFAULT.  The multi body-s height is ceil(rows/R) instead of
+    // THE CEIL HEIGHT IS THE DEFAULT. The multi body-s height is ceil(rows/R) instead of
     // rows/R, so a window whose row count is not a multiple of R still shares ONE weight decode per group
     // instead of falling back to the one-row body (which decodes the dense weights once a row -- the
     // ALU-bound part of that body).  The kernel-s own guard (`if (row >= a.rows) break;`) skips the padded
@@ -1547,12 +1548,12 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     const fma_dense_multi2 = fma_dense_ok and multi_rows >= 2 and a.rows >= 2 and (multi_ceil or a.rows % 2 == 0) and
         (multi_rows == 2 or !fma_dense_multi4);
     const fma_dense = fma_dense_ok and fmaDenseOn() and !fma_dense_multi4 and !fma_dense_multi2;
-    // ROUND-370: THE PAIRED ROUTED DECODE IS A PRICED LOSS IN OUR BODY, so the flag ARMS it (the default is
-    // the shipped one-entry-a-threadgroup body). The comparator's pair kernel shares one weight decode
+    // THE PAIRED ROUTED DECODE IS A PRICED LOSS IN OUR BODY, so the flag ARMS it (the default is
+    // the shipped one-entry-a-threadgroup body). The pair kernel shares one weight decode
     // between the entries that name the same expert; here the pair's overhead (the per-threadgroup scan for
     // the mate, the doubled loop body and the sixteen accumulators) costs more than the shared decode saves:
     // the routed stage reads 0.41 -> 0.53 ms (the gate/up) and 0.23 -> 0.30 ms (the down) a layer.
-    // ROUND-419: THE PAIR, PRICED IN SITU AND WITHDRAWN. The call site's hint (the fused gate/up's shared
+    // THE PAIR, PRICED IN SITU AND WITHDRAWN. The call site's hint (the fused gate/up's shared
     // tail names each shared matrix once a token row) is carried in `a.pair`, and the bench's multiset model
     // priced the pair at -10.8 % on the two-row gate/up dispatch and -2.9 % on the four-row one. In situ it
     // is a LOSS at both: the novel band 36.82/36.79 -> 35.94/35.94 tok/s (-2.3 %) and the warm probe
@@ -1605,15 +1606,15 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     const nax_cols: usize = if (a.indexed != 0 and nax_tile >= 256) 64 else if (moe_cols != 0) moe_cols else envRows("TF_DSV41_EXL3_NAX_COLS", if (a.indexed != 0) 128 else 64, &nax_cols_cache);
     const tile_id: usize = ((nax_tile / 64) - 1) * 2 + (nax_cols / 64 - 1);
     const nax_pick: ?mtl.Pipeline = p.prefill_nax_tiles[tile_id];
-    // ROUND-346: the funnel read in the routed prompt tile (nax42). The routed pack's width is halves = 6, so
+    // The funnel read in the routed prompt tile (nax42). The routed pack's width is halves = 6, so
     // the kernel's own guard takes it; at another width the kernel reads the shipped path.
     const nax_funnel_pick: ?mtl.Pipeline = if (funnelPrefillOn() and a.indexed != 0 and tile_id == 0)
         p.prefill_nax_funnel
     else
         null;
     const nax_funnel = nax_funnel_pick != null;
-    // ROUND-347: the same tile with the grouping's padded rows skipped.
-    // ROUND-348: the 128-row tile (tile_id 2) is the same body with eight row groups; the grouped plan pads
+    // The same tile with the grouping's padded rows skipped.
+    // The 128-row tile (tile_id 2) is the same body with eight row groups; the grouped plan pads
     // each expert's block to the tile's own width, so the two travel together.
     const nax_skip_pad_pick: ?mtl.Pipeline = if (skipPadOn() and a.indexed != 0)
         (if (tile_id == 0)
@@ -1625,7 +1626,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     else
         null;
     const nax_skip_pad = nax_skip_pad_pick != null;
-    // ROUND-352: the routed tile with the stream word read as one 4-byte load (nax57): the comparator's
+    // The routed tile with the stream word read as one 4-byte load (nax57): the wide form's
     // read. The kernel checks the tile's alignment itself and falls back to the shipped read.
     const nax_wide_pick: ?mtl.Pipeline = if (wideWordsOn() and a.indexed != 0 and tile_id == 0 and
         nax_skip_pad_pick != null)
@@ -1633,7 +1634,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     else
         null;
     const nax_wide = nax_wide_pick != null;
-    // ROUND-352: the routed tile with the funnel path as its only path (nax59). The pack's routed width is
+    // The routed tile with the funnel path as its only path (nax59). The pack's routed width is
     // halves = 6, the funnel path's width; the kernel is only selected there.
     const nax_funnel_only_pick: ?mtl.Pipeline = if (funnelOnlyOn() and a.indexed != 0 and tile_id == 0 and
         nax_skip_pad_pick != null)
@@ -1641,7 +1642,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     else
         null;
     const nax_funnel_only = nax_funnel_only_pick != null;
-    // ROUND-350: the cooperative read of the block's words (the funnel's read, the words by a shuffle). It rides
+    // The cooperative read of the block's words (the funnel's read, the words by a shuffle). It rides
     // the funnel (the read is inside the funnel's branch) and the padded rows' skip.
     const nax_coop_pick: ?mtl.Pipeline = if (funnelPrefillOn() and coopPrefillOn() and a.indexed != 0 and tile_id == 0)
         (if (skipPadOn()) p.prefill_nax_coop_skip else p.prefill_nax_coop)
@@ -1656,7 +1657,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
         nax_db_logged = true;
         std.log.info("exl3: nax10 table body selected rows={d} tile={d} cols={d}", .{ a.rows, nax_tile, nax_cols });
     }
-    // ROUND-422 (THE LEVER, default off): THE DENSE TILE AT EIGHT ROWS. The drafter's conditioning
+    // (THE LEVER, default off): THE DENSE TILE AT EIGHT ROWS. The drafter's conditioning
     // projects the taps ring's 128-row window through main_proj, and the window WRAPS (the ring is
     // circular): it is TWO calls whose row counts are (128-first) and (first), so half the rounds run the
     // smaller piece on 1..63 rows -- and the tensor-unit dense tile's gate is 64 rows, so that piece ran
@@ -1681,9 +1682,9 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     // The dense 128x64 tile's double-buffered twin: one barrier a block, the next block's decode in flight with the
     // multiply. Only the dense shapes (the three attention projections and the shared expert) take it.
     const nax_dense_db = p.prefill_nax_dense_db != null and nax and a.indexed == 0 and tile_id == 2 and denseDb();
-    // ROUND-351: the dense tile with a simdgroup that owns thirty-two rows (nax56). It runs four warps, not eight.
+    // The dense tile with a simdgroup that owns thirty-two rows (nax56). It runs four warps, not eight.
     const nax_dense_rpg2 = p.prefill_nax_dense_rpg2 != null and nax and a.indexed == 0 and tile_id == 2 and denseRpg2();
-    // ROUND-348: the dense tile's funnel read (nax51): the same tile and the same order, two words a lane.
+    // The dense tile's funnel read (nax51): the same tile and the same order, two words a lane.
     const nax_dense_funnel = p.prefill_nax_dense_funnel != null and nax and a.indexed == 0 and tile_id == 2 and
         ((a.halves == 8 and denseFunnel8On()) or denseFunnelOn());
     if (std.c.getenv("TF_DSV41_EXL3_FUNNEL_LOG") != null and a.indexed == 0 and tile_id == 2 and a.rows >= 4) {
@@ -1714,7 +1715,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     const matmul_direct = p.matmul_direct != null and a.indexed == 0 and a.routed == 0 and a.rows == 1 and
         a.n >= 4096 and a.n % 256 == 0 and a.k % 16 == 0 and a.halves <= 14 and
         tableDecodeOn() and wideDecodeOn() and directDecodeOn();
-    // ROUND-338: the static state selection. The shipped body picks each state's word pair and bit offset at
+    // The static state selection. The shipped body picks each state's word pair and bit offset at
     // run time (the `rel[k]` cursor); here one funnel shift a block puts the lane's window at a known place and
     // the eight windows then sit at compile-time shifts, so the cursor leaves the inner loop. The same tile, the
     // same activation load, the same 16-product FP32 sums and the same k order, so the output is bit-identical
@@ -1724,7 +1725,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     const matmul_static = p.matmul_static != null and a.indexed == 0 and a.routed == 0 and a.rows == 1 and
         a.n <= 32768 and a.n % 128 == 0 and a.k % 16 == 0 and (a.halves == 6 or a.halves == 10 or a.halves == 12) and
         tableDecodeOn() and wideDecodeOn() and staticDecodeOn();
-    // ROUND-338: the same static body with the codebook read from the 1024-entry threadgroup LUT. The LUT's
+    // The same static body with the codebook read from the 1024-entry threadgroup LUT. The LUT's
     // values are the table's, entry for entry, so the output is bit-identical; what it removes is the table's
     // L2 traffic (the bench prices it 4-16 % better at the long-k shapes).
     const matmul_static_lut = p.matmul_static_lut != null and a.indexed == 0 and a.routed == 0 and a.rows == 1 and
@@ -1759,7 +1760,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     // 256 threads), so it is named before the direct body's 256-column geometry.
     const group_cols: usize = if (fma or fma_static or fma_static_lut or fma_dense) 16 else if (matmul_static or matmul_static_lut) 128 else if (matmul_direct) 256 else if (matvec_nax or matmul_wide) 128 else if (nax) nax_cols else if (decode_nax) 32 else 16;
     const height: usize = if (fma_dense_multi4) (a.rows + 3) / 4 else if (fma_dense_multi2) (a.rows + 1) / 2 else if (fma or fma_static or fma_static_lut or fma_dense or fma_pair or fma_pair_lut) a.rows else if (matvec_nax) 1 else if (splits > 1 and !decode_nax) splits else if (a.indexed == 1 and !decode_nax) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows;
-    // ROUND-350: the warp32 tile runs four warps (a warp owns two sixteen-row groups), the other nax tiles
+    // The warp32 tile runs four warps (a warp owns two sixteen-row groups), the other nax tiles
     // one warp a sixteen-row group.
     const nax_warp32: bool = nax and a.indexed != 0 and tile_id == 2 and warp32On() and nax_skip_pad_pick != null;
     const threads: usize = if (fma or fma_static or fma_static_lut or fma_dense or fma_dense_multi2 or fma_dense_multi4 or fma_pair or fma_pair_lut) 32 * p.fma_warps else if (nax) (if (nax_dense_rpg2 or nax_warp32) nax_tile / 32 * 32 * (nax_cols / 64) else nax_tile / 16 * 32 * (nax_cols / 64)) else if (decode_nax) 32 * moe_rows else if (matmul_static or matmul_static_lut) 256 else if (matmul_direct) 256 else if (matmul_wide) 256 else if (shared or matvec_nax) 128 else 32;
@@ -1775,7 +1776,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
         const dpick: []const u8 = if (nax_dense_rpg2) "nax56" else if (nax_dense_funnel) "nax51" else if (nax_dense_db) "nax31" else if (nax) "nax_tile" else if (shared) "shared" else "matmul";
         std.log.info("exl3: dense dispatch rows={d} n={d} k={d} tile={d} cols={d} grid={d}x{d} threads={d} body={s}", .{ a.rows, a.n, a.k, nax_tile, nax_cols, (@as(usize, a.n) + group_cols - 1) / group_cols, height, threads, dpick });
     }
-    // ROUND-422 (the instrument): the dense calls the eight-row gate moves, named.
+    // (the instrument): the dense calls the eight-row gate moves, named.
     if (dense8_on and a.indexed == 0 and a.routed == 0 and a.rows >= 8 and a.rows < 64 and dense8_log_count < 14) {
         dense8_log_count += 1;
         std.log.info("exl3: dense8 rows={d} n={d} k={d} grid={d}x{d} threads={d} body={s}", .{ a.rows, a.n, a.k, (@as(usize, a.n) + group_cols - 1) / group_cols, height, threads, if (nax) "nax_tile" else if (shared) "shared" else "matmul" });
@@ -1788,7 +1789,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     // TF_DSV41_DOUBLE_GEMM: a second identical GEMM dispatch (dense calls only, rotate passes outside the loop),
     // so the prefill delta is the in-situ dense GEMM time itself, separated from the rotate passes that
     // TF_DSV41_DOUBLE_ATTN_DENSE also doubles.
-    // ROUND-430 (the instrument): the same doubling arm narrowed to ONE output width, so an in-situ GEMM can be
+    // (the instrument): the same doubling arm narrowed to ONE output width, so an in-situ GEMM can be
     // priced shape by shape (the record's 682 ms is the sum over every dense call). TF_DSV41_DOUBLE_GEMM_N=<n>
     // duplicates only the dense calls whose n is <n>; unset keeps TF_DSV41_DOUBLE_GEMM's whole-set form.
     const gemm_passes: usize = if (a.indexed == 0) blk: {
@@ -1820,7 +1821,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     bind(e, routes, 6);
     bind(e, descriptors, 7);
     const rotate_out_width: usize = (a.n / 128 + 3) / 4;
-    // ROUND-360 instrument: TF_DSV41_DOUBLE_ROTATE_OUT duplicates the scale+bias epilogue. It reads the sums and
+    // instrument: TF_DSV41_DOUBLE_ROTATE_OUT duplicates the scale+bias epilogue. It reads the sums and
     // writes the same values again, so the reply does not move; the delta prices the pass.
     const rotate_out_passes: usize = if (std.c.getenv("TF_DSV41_DOUBLE_ROTATE_OUT") != null) 2 else 1;
     for (0..rotate_out_passes) |_| e.dispatchGroups(.{ .width = rotate_out_width, .height = a.rows }, .{ .width = 128 });
@@ -1872,7 +1873,7 @@ test "EXL3 scratch is row compact and bounded independently of full matrices" {
     try std.testing.expectError(error.UnsupportedExl3Shape, scratchBytes(129, 128, 1));
     try std.testing.expectEqual(@as(usize, 72), @sizeOf(ExpertDescriptor));
     // 104 predates the defaulted fields (2026-10-11, standalone resident EXL3 projections)
-    // and ROUND-419's pair hint; test-exl3 was not among the suites the record ran. The
+    // and 's pair hint; test-exl3 was not among the suites the record ran. The
     // kernel contract (101/101, gates 1-4) encodes Args into real launches on this tree:
     // the 112-byte layout is the agreement receipt.
     try std.testing.expectEqual(@as(usize, 112), @sizeOf(Args));
