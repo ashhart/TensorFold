@@ -47,6 +47,7 @@ inline float tf_c_e2m1v(uint c) {
 struct TfCPoolArgs {
   uint rows, dim;
 };
+static_assert(sizeof(TfCPoolArgs) == 8, "TfCPoolArgs must mirror metal/compress.zig's PoolArgs");
 
 // Compressor ratio 2 (model.py:429-487): a column a thread, rows in order; odd positions pool the two slots.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_pool2(
@@ -78,6 +79,7 @@ struct TfCPoolArgs {
 struct TfCRtArgs {
   uint blocks, in_stride, out_row;
 };
+static_assert(sizeof(TfCRtArgs) == 12, "TfCRtArgs must mirror metal/compress.zig's RtArgs");
 
 // The compressed KV's fp4_act_quant round trip (kernel.py:184), 16-value blocks, E4M3 scales, to row D[r] (< 0 skips).
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_fp4rt(
@@ -108,6 +110,7 @@ struct TfCRtArgs {
 struct TfCPackArgs {
   uint blocks, in_stride, code_row, scale_row, scale_off, use_dest;
 };
+static_assert(sizeof(TfCPackArgs) == 24, "TfCPackArgs must mirror metal/compress.zig's PackArgs");
 
 // Index keys and queries, fp4_act_quant: 32-value blocks, E8M0 scales, E2M1 nibbles, to row D[r] (< 0 skips).
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_c_fp4pack(

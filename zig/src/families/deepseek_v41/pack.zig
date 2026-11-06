@@ -240,9 +240,29 @@ pub const Pack = struct {
         for (0..@intCast(span.count)) |i| @memcpy(out[i * len ..][0..len], tmp[i * stride ..][0..len]);
     }
 
-    /// Drops the page cache of bytes just read (POSIX_FADV_DONTNEED): on unified memory it competes with the device.
+    /// Drops the page cache of bytes just read: on unified memory the cached copy competes with the device.
+    /// The shared cache API carries the Linux advice (checkpoint_drop is Linux-only by design, #1887, so
+    /// it defers to a no-op on macOS); the device-relevant drop is the local msync(INVALIDATE) below, the
+    /// same mechanism as core/checkpoint_file_cache.release, scoped to the range this pack read. Best
+    /// effort: a failed hint changes no bytes.
+    extern "c" fn msync(addr: *anyopaque, len: usize, flags: c_int) c_int;
+    const ms_sync: c_int = 0x0002; // <sys/mman.h> (macOS)
+    const ms_invalidate: c_int = 0x0010;
     fn dropCache(file: Io.File, offset: u64, len: usize) void {
-        @import("core").checkpoint.cache.range(file, offset, len);
+        if (comptime @hasDecl(core, "checkpoint_host")) {
+            core.checkpoint_host.cache.range(file, offset, len);
+        } else {
+            core.checkpoint.cache.range(file, offset, len);
+        }
+        if (@import("builtin").os.tag != .macos) return;
+        const page: u64 = @intCast(std.heap.pageSize());
+        const start = offset - (offset % page);
+        const span = (offset - start) + len;
+        const end = start + ((span + page - 1) / page) * page;
+        const span_usize: usize = @intCast(end - start);
+        const map = std.posix.mmap(null, span_usize, .{ .READ = true }, .{ .TYPE = .SHARED }, file.handle, @intCast(start)) catch return;
+        defer std.posix.munmap(map);
+        _ = msync(map.ptr, map.len, ms_sync | ms_invalidate);
     }
 
     /// The codebook of the group at `prefix`: its marker's value, else the 3-instruction default.

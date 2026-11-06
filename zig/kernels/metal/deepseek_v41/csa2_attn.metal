@@ -30,6 +30,7 @@ struct TfAttnArgs {
   float scale;
   uint pad;
 };
+static_assert(sizeof(TfAttnArgs) == 16, "TfAttnArgs must mirror metal/csa2_attn.zig's Args");
 
 // A row's record (ints): position, window row base, window base position (-1: ring of 128), cache row base, count.
 
@@ -37,6 +38,7 @@ struct TfAttnArgs {
 struct TfAttnMeta {
   int pos, wofs, wbase, cofs, ncomp, rope, p1, p2;
 };
+static_assert(sizeof(TfAttnMeta) == 32, "TfAttnMeta must mirror metal/csa2_attn.zig's Meta");
 
 // One lane's 16 dims of a key: 32 bytes of bf16.
 struct TfKey {

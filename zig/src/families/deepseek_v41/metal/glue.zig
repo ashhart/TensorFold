@@ -45,23 +45,39 @@ fn grid(e: mtl.ComputeEncoder, x: usize, y: usize, z: usize) void {
     e.dispatchThreads(mtl.Size.of(x, y, z), mtl.Size.of(@min(x, 64), 1, 1));
 }
 
+/// The kernels' `TfGNormArgs`, `TfGHcArgs` and `Dsv41RouteArgs`.
+pub const GNormArgs = extern struct { dim: u32, in_stride: u32, out_stride: u32, eps: f32 };
+pub const GHcArgs = extern struct { dim: u32, iters: u32, eps: f32, hc_eps: f32, alpha: f32 };
+pub const RouteArgs = extern struct { rows: i32, topk: i32, scale: f32, eps: f32 };
+
+/// ROUND-527: the argument records of glue_tmp's kernels, one named extern struct each so the mirror check
+/// compares them field by field (they were positional `[N]u32` payloads until this round).
+pub const GRopeArgs = extern struct { pairs: u32, heads: u32, head_stride: u32, row_stride: u32, off: u32, positions: u32 };
+pub const GCandArgs = extern struct { keys: u32, blocks: u32, topk: u32 };
+pub const GHcArgs2 = extern struct { dim: u32, rows: u32 };
+pub const GScatterArgs = extern struct { words: u32, items: u32, rep: u32 };
+pub const GEmbedArgs = extern struct { dim: u32, rows: u32, vocab: u32 };
+pub const GMeanArgs = extern struct { dim: u32, rows: u32, stride: u32 };
+pub const TopkArgs = extern struct { width: u32 };
+
+
 /// RMSNorm of `rows` bf16 rows of `dim` with an fp32 weight, bf16 out.
 pub fn rmsnorm(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref, rows: u32, dim: u32, eps: f32) void {
     e.setPipeline(p.of(.rmsnorm));
     bind(e, &.{ x, w, y });
-    e.setValue(extern struct { dim: u32, ins: u32, outs: u32, eps: f32 }{ .dim = dim, .ins = dim, .outs = dim, .eps = eps }, 3);
+    e.setValue(GNormArgs{ .dim = dim, .in_stride = dim, .out_stride = dim, .eps = eps }, 3);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(tg, 1, 1));
 }
 
 /// Element strides of the act_quant round trip: value (a, b, k) reads a*sa + b*sb + k and writes a*ta + b*tb + k.
-pub const Strides = struct { k: u32, nb: u32, na: u32 = 1, sa: u32 = 0, sb: u32, ta: u32 = 0, tb: u32 };
+pub const Strides = extern struct { k: u32, nb: u32, na: u32 = 1, sa: u32 = 0, sb: u32, ta: u32 = 0, tb: u32 };
 
 /// Rows of `heads` heads of `head` dims, copied with the last 64 dims of each head rotated at the row's position.
 pub fn rope(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, pos: Ref, table: Ref, rows: u32, heads: u32, head: u32, positions: u32) !void {
     try checkRope(heads, head, positions);
     e.setPipeline(p.of(.rope));
     bind(e, &.{ x, y, pos, table });
-    e.setValue([6]u32{ head / 2, heads, head, heads * head, head - 64, positions }, 4);
+    e.setValue(GRopeArgs{ .pairs = head / 2, .heads = heads, .head_stride = head, .row_stride = heads * head, .off = head - 64, .positions = positions }, 4);
     grid(e, head / 2, heads, rows);
 }
 
@@ -82,7 +98,7 @@ pub fn mv(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref, ro
 pub fn cand(p: *const Pipelines, e: mtl.ComputeEncoder, s: Ref, vis: Ref, bs: Ref, mask: Ref, rows: u32, keys: u32, blocks: u32, topk: u32) void {
     e.setPipeline(p.of(.cand));
     bind(e, &.{ s, vis, bs, mask });
-    e.setValue([3]u32{ keys, blocks, topk }, 4);
+    e.setValue(GCandArgs{ .keys = keys, .blocks = blocks, .topk = topk }, 4);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(tg, 1, 1));
 }
 
@@ -92,7 +108,7 @@ pub const Hc = struct { dim: u32, iters: u32, eps: f32, hc_eps: f32, alpha: f32 
 pub fn hcmix(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: [3]Ref, out: [3]Ref, rows: u32, h: Hc) void {
     e.setPipeline(p.of(.hcmix));
     bind(e, &.{ x, w[0], w[1], w[2], out[0], out[1], out[2] });
-    e.setValue(extern struct { dim: u32, iters: u32, eps: f32, hc_eps: f32, alpha: f32 }{ .dim = h.dim, .iters = h.iters, .eps = h.eps, .hc_eps = h.hc_eps, .alpha = h.alpha }, 7);
+    e.setValue(GHcArgs{ .dim = h.dim, .iters = h.iters, .eps = h.eps, .hc_eps = h.hc_eps, .alpha = h.alpha }, 7);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(tg, 1, 1));
 }
 
@@ -100,7 +116,7 @@ pub fn hcmix(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: [3]Ref, out:
 pub fn hcpre(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, pre: Ref, y: Ref, rows: u32, dim: u32) void {
     e.setPipeline(p.of(.hcpre));
     bind(e, &.{ x, pre, y });
-    e.setValue([2]u32{ dim, rows }, 3);
+    e.setValue(GHcArgs2{ .dim = dim, .rows = rows }, 3);
     grid(e, dim, rows, 1);
 }
 
@@ -108,7 +124,7 @@ pub fn hcpre(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, pre: Ref, y: Re
 pub fn hcpost(p: *const Pipelines, e: mtl.ComputeEncoder, branch: Ref, res: Ref, post: Ref, comb: Ref, y: Ref, rows: u32, dim: u32) void {
     e.setPipeline(p.of(.hcpost));
     bind(e, &.{ branch, res, post, comb, y });
-    e.setValue([2]u32{ dim, rows }, 5);
+    e.setValue(GHcArgs2{ .dim = dim, .rows = rows }, 5);
     grid(e, dim, rows, 1);
 }
 
@@ -116,7 +132,7 @@ pub fn hcpost(p: *const Pipelines, e: mtl.ComputeEncoder, branch: Ref, res: Ref,
 pub fn scatter(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, dest: Ref, items: u32, bytes: u32, rep: u32) void {
     e.setPipeline(p.of(.scatter));
     bind(e, &.{ x, y, dest });
-    e.setValue([3]u32{ bytes / 4, items, rep }, 3);
+    e.setValue(GScatterArgs{ .words = bytes / 4, .items = items, .rep = rep }, 3);
     grid(e, bytes / 4, items, 1);
 }
 
@@ -125,7 +141,7 @@ pub fn embed(p: *const Pipelines, e: mtl.ComputeEncoder, table: Ref, ids: Ref, y
     try checkEmbed(dim, vocab);
     e.setPipeline(p.of(.embed));
     bind(e, &.{ table, ids, y, pre });
-    e.setValue([3]u32{ dim, rows, vocab }, 4);
+    e.setValue(GEmbedArgs{ .dim = dim, .rows = rows, .vocab = vocab }, 4);
     grid(e, dim, rows, 1);
 }
 
@@ -138,7 +154,7 @@ pub fn checkEmbed(dim: u32, vocab: u32) !void {
 pub fn hcmean(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, rows: u32, dim: u32, stride: u32) void {
     e.setPipeline(p.of(.hcmean));
     bind(e, &.{ x, y });
-    e.setValue([3]u32{ dim, rows, stride }, 2);
+    e.setValue(GMeanArgs{ .dim = dim, .rows = rows, .stride = stride }, 2);
     grid(e, dim, rows, 1);
 }
 
@@ -148,7 +164,7 @@ pub const Route = struct { logits: Ref, bias: Ref, bias_vl: Ref, image: Ref, pic
 pub fn route(pipe: mtl.Pipeline, e: mtl.ComputeEncoder, r: Route, rows: u32, topk: u32, scale: f32) void {
     e.setPipeline(pipe);
     bind(e, &.{ r.logits, r.bias, r.bias_vl, r.image });
-    e.setValue(extern struct { rows: i32, topk: i32, scale: f32, eps: f32 }{ .rows = @intCast(rows), .topk = @intCast(topk), .scale = scale, .eps = 1e-20 }, 4);
+    e.setValue(RouteArgs{ .rows = @intCast(rows), .topk = @intCast(topk), .scale = scale, .eps = 1e-20 }, 4);
     e.setBuffer(r.picks.buf, r.picks.off, 5);
     e.setBuffer(r.weights.buf, r.weights.off, 6);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
@@ -157,7 +173,7 @@ pub fn route(pipe: mtl.Pipeline, e: mtl.ComputeEncoder, r: Route, rows: u32, top
 /// The index top-512 of scores [rows][width] (row stride `width`), counting visible[row] keys; selected [rows][512].
 pub fn topk512(pipe: mtl.Pipeline, e: mtl.ComputeEncoder, scores: Ref, visible: Ref, selected: Ref, rows: u32, width: u32) void {
     e.setPipeline(pipe);
-    e.setValue([1]u32{width}, 0);
+    e.setValue(TopkArgs{ .width = width }, 0);
     e.setBuffer(scores.buf, scores.off, 1);
     e.setBuffer(visible.buf, visible.off, 2);
     e.setBuffer(selected.buf, selected.off, 3);

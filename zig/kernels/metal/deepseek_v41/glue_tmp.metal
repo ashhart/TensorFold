@@ -71,6 +71,7 @@ struct TfGNormArgs {
   uint dim, in_stride, out_stride;
   float eps;
 };
+static_assert(sizeof(TfGNormArgs) == 16, "TfGNormArgs must mirror metal/glue.zig's GNormArgs");
 
 // RMSNorm of a bf16 row: x * rsqrt(mean(x^2) + eps), times the fp32 weight, rounded to bf16 once.
 kernel void tf_dsv41_g_rmsnorm(const device bfloat* X [[buffer(0)]], const device float* Wt [[buffer(1)]],
@@ -91,6 +92,7 @@ kernel void tf_dsv41_g_rmsnorm(const device bfloat* X [[buffer(0)]], const devic
 struct TfGRopeArgs {
   uint pairs, heads, head_stride, row_stride, off, positions;
 };
+static_assert(sizeof(TfGRopeArgs) == 24, "TfGRopeArgs must mirror metal/glue.zig's GRopeArgs");
 
 // A head copied with its dims from `off` on rotated by the table at the row's position (pairs as complex numbers).
 kernel void tf_dsv41_g_rope(const device bfloat* X [[buffer(0)]], device bfloat* Y [[buffer(1)]],
@@ -116,6 +118,7 @@ kernel void tf_dsv41_g_rope(const device bfloat* X [[buffer(0)]], device bfloat*
 struct TfGFp4Args {
   uint blocks, in_stride, code_row, scale_row, scale_off, use_dest;
 };
+static_assert(sizeof(TfGFp4Args) == 24, "TfGFp4Args must mirror metal/glue.zig's GFp4Args");
 
 // fp4_act_quant's packing: E2M1 codes (low nibble first) over a power-of-two scale a 32-value block; dest < 0 skips.
 kernel void tf_dsv41_g_fp4pack(const device bfloat* X [[buffer(0)]], device uchar* C [[buffer(1)]],
@@ -142,6 +145,7 @@ kernel void tf_dsv41_g_fp4pack(const device bfloat* X [[buffer(0)]], device ucha
 struct TfGFp4RtArgs {
   uint blocks, in_stride, out_row;
 };
+static_assert(sizeof(TfGFp4RtArgs) == 12, "TfGFp4RtArgs must mirror metal/glue.zig's GFp4RtArgs");
 
 // The compressed KV's round trip: E2M1 over an E4M3 scale a 16-value block, back to bf16 at row dest (< 0 skips).
 kernel void tf_dsv41_g_fp4rt(const device bfloat* X [[buffer(0)]], device bfloat* Y [[buffer(1)]],
@@ -165,6 +169,7 @@ kernel void tf_dsv41_g_fp4rt(const device bfloat* X [[buffer(0)]], device bfloat
 struct TfGPoolArgs {
   uint rows, dim;
 };
+static_assert(sizeof(TfGPoolArgs) == 8, "TfGPoolArgs must mirror metal/glue.zig's GPoolArgs");
 
 // The ratio-2 compressor over a launch's rows in order: each row fills slot pos % 2, an odd position pools both slots.
 kernel void tf_dsv41_g_pool2(const device float* KV [[buffer(0)]], const device float* SC [[buffer(1)]],
@@ -192,6 +197,7 @@ kernel void tf_dsv41_g_pool2(const device float* KV [[buffer(0)]], const device 
 struct TfGMvArgs {
   uint k, n;
 };
+static_assert(sizeof(TfGMvArgs) == 8, "TfGMvArgs must keep its 8-byte (k, n) pair (glue_tmp's own mv kernel)");
 
 // A bf16-weight matvec, one simdgroup an output: lane chains over K in steps of 32, then the butterfly.
 template <typename T>
@@ -215,6 +221,7 @@ template [[host_name("tf_dsv41_g_mv_bf16")]] [[kernel]] decltype(tf_dsv41_g_mv<b
 struct TfGCandArgs {
   uint keys, blocks, topk;
 };
+static_assert(sizeof(TfGCandArgs) == 12, "TfGCandArgs must mirror metal/glue.zig's GCandArgs");
 
 // The candidate blocks of a row: block maxima, the newest block pinned, the top `topk` (ties to the lower block).
 kernel void tf_dsv41_g_cand(const device float* S [[buffer(0)]], const device int* V [[buffer(1)]],
@@ -242,6 +249,7 @@ struct TfGHcArgs {
   uint dim, iters;
   float eps, hc_eps, alpha;
 };
+static_assert(sizeof(TfGHcArgs) == 20, "TfGHcArgs must mirror metal/glue.zig's GHcArgs");
 
 // The hyper-connection mixes of a row: its normed stream through hc_fn, then pre, post and the Sinkhorn comb.
 kernel void tf_dsv41_g_hcmix(const device bfloat* X [[buffer(0)]], const device float* FN [[buffer(1)]],
@@ -298,6 +306,7 @@ kernel void tf_dsv41_g_hcmix(const device bfloat* X [[buffer(0)]], const device 
 struct TfGHcArgs2 {
   uint dim, rows;
 };
+static_assert(sizeof(TfGHcArgs2) == 8, "TfGHcArgs2 must mirror metal/glue.zig's GHcArgs2");
 
 // hc_pre: the four streams collapsed by the row's pre mix in fp32, rounded to bf16 once.
 kernel void tf_dsv41_g_hcpre(const device bfloat* X [[buffer(0)]], const device float* PRE [[buffer(1)]],
@@ -331,6 +340,7 @@ kernel void tf_dsv41_g_hcpost(const device bfloat* B [[buffer(0)]], const device
 struct TfGScatterArgs {
   uint words, items, rep;
 };
+static_assert(sizeof(TfGScatterArgs) == 12, "TfGScatterArgs must mirror metal/glue.zig's GScatterArgs");
 
 // Rows of 32-bit words copied to the destination rows D[i] (source row i / rep); a negative destination skips.
 kernel void tf_dsv41_g_scatter(const device uint* X [[buffer(0)]], device uint* Y [[buffer(1)]],
@@ -345,6 +355,7 @@ kernel void tf_dsv41_g_scatter(const device uint* X [[buffer(0)]], device uint* 
 struct TfGEmbedArgs {
   uint dim, rows, vocab;
 };
+static_assert(sizeof(TfGEmbedArgs) == 12, "TfGEmbedArgs must mirror metal/glue.zig's GEmbedArgs");
 
 // The tokens' rows of the bf16 table, copied into all four streams; the pre mix starts one-hot (1, 0, 0, 0).
 kernel void tf_dsv41_g_embed(const device ushort* T [[buffer(0)]], const device uint* ID [[buffer(1)]],
@@ -362,6 +373,7 @@ kernel void tf_dsv41_g_embed(const device ushort* T [[buffer(0)]], const device 
 struct TfGMeanArgs {
   uint dim, rows, stride;
 };
+static_assert(sizeof(TfGMeanArgs) == 12, "TfGMeanArgs must mirror metal/glue.zig's GMeanArgs");
 
 // The mean of a row's four streams in fp32, rounded to bf16 once, at Y + row * stride (the DSpark tap).
 kernel void tf_dsv41_g_hcmean(const device bfloat* X [[buffer(0)]], device bfloat* Y [[buffer(1)]],

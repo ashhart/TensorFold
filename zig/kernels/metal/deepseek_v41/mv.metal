@@ -10,6 +10,7 @@ using namespace metal;
 struct TfDsv41MvArgs {
   uint k, n, rows;
 };
+static_assert(sizeof(TfDsv41MvArgs) == 12, "TfDsv41MvArgs must mirror metal/mv.zig's Args");
 
 inline float tf_dsv41_mv_x(bfloat v) {
   const float f = float(v);

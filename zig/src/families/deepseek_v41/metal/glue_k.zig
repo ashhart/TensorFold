@@ -45,7 +45,7 @@ pub const Pipelines = struct {
 
 pub const rms_threads = 256;
 
-const RmsArgs = extern struct { D: u32, R: u32, eps: f32 };
+pub const RmsArgs = extern struct { D: u32, R: u32, eps: f32 };
 
 /// y [rows][d] bf16 = RMS norm of x with weight w (bf16, or fp32 when `w32`); d any size, one threadgroup a row.
 pub fn rms(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref, rows: u32, d: u32, eps: f32, w32: bool) void {
@@ -57,7 +57,7 @@ pub fn rms(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, y: Ref, r
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(rms_threads, 1, 1));
 }
 
-const EmbedArgs = extern struct { D: u32, R: u32, V: u32, reps: u32, lo: i32 };
+pub const EmbedArgs = extern struct { D: u32, R: u32, V: u32, reps: u32, lo: i32 };
 
 /// out [n][reps][d] bf16 from the rank's slice table [v][d] (global ids lo .. lo + v); an id off it gives zeros.
 pub fn embed(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, table: Ref, out: Ref, n: u32, d: u32, v: u32, lo: i32, reps: u32) void {
@@ -79,7 +79,7 @@ pub fn moeJoin(p: *const Pipelines, e: mtl.ComputeEncoder, routed: Ref, shared: 
     e.dispatchThreads(mtl.Size.of(n, 1, 1), mtl.Size.of(32, 1, 1));
 }
 
-const MeanArgs = extern struct { D: u32, R: u32, hc: u32 };
+pub const MeanArgs = extern struct { D: u32, R: u32, hc: u32 };
 
 /// y [n][d] bf16 = mean over the hc copies of x [n][hc][d] bf16.
 pub fn hcMean(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, n: u32, d: u32, hc: u32) void {
@@ -93,7 +93,10 @@ pub fn hcMean(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, n: u32
 /// Rows of `heads` heads, the rope tail at element `off` of each head; strides in bf16 elements, all even. x may be y.
 pub const RopeCall = struct { rows: u32, heads: u32 = 1, pairs: u32 = 32, ldx: u32, hx: u32, ox: u32, ldy: u32, hy: u32, oy: u32 };
 
-const RopeArgs = extern struct { R: u32, H: u32, pairs: u32, ldx: u32, hx: u32, ox: u32, ldy: u32, hy: u32, oy: u32 };
+pub const RopeArgs = extern struct { R: u32, H: u32, pairs: u32, ldx: u32, hx: u32, ox: u32, ldy: u32, hy: u32, oy: u32 };
+comptime {
+    @import("index_mirror.zig").check(RopeArgs, sources.dsv41.glue, "TfRopeArgs");
+}
 
 /// An in-place call on [rows][heads][head_dim] rows: the last 2 * pairs elements of each head.
 pub fn ropeInPlace(rows: u32, heads: u32, head_dim: u32, pairs: u32) RopeCall {
@@ -121,7 +124,7 @@ pub fn rope(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, pos: Ref
 /// fp8: act_quant blocks of 32; fp4_e8m0: indexer q and k, blocks of 32; fp4_e4m3: compressed KV, blocks of 16.
 pub const Quant = enum { fp8, fp4_e8m0, fp4_e4m3 };
 
-const QuantArgs = extern struct { N: u32, R: u32 };
+pub const QuantArgs = extern struct { N: u32, R: u32 };
 
 /// y [rows][n] bf16 = the round trip of x [rows][n] bf16; n a multiple of 32. x may be y (a block is read whole first).
 pub fn quant(p: *const Pipelines, e: mtl.ComputeEncoder, kind: Quant, x: Ref, y: Ref, rows: u32, n: u32) !void {
