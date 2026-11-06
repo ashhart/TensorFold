@@ -1,4 +1,4 @@
-//! TensorFold's cluster layer: inventory, membership over MCDMA links, the placement planner, loading and converged rounds.
+//! The cluster layer: inventory, membership over MCDMA links, the placement planner, loading and converged rounds.
 const std = @import("std");
 
 pub const node = @import("node.zig");

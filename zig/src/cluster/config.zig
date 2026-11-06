@@ -1,4 +1,4 @@
-//! cluster.json (schema tensorfold-cluster/1): the nodes, how to reach them, and per model its nodes, layout and budgets.
+//! cluster.json (schema tensorfold-cluster/1): the nodes, how to reach them, per model its nodes, layout and budgets.
 const std = @import("std");
 const node = @import("node.zig");
 const plan = @import("plan.zig");

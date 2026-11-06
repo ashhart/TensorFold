@@ -1,4 +1,4 @@
-//! The control step over key-only ssh: read-only probes, `cluster init`, and starting `tensorfold node`; never the data plane.
+//! Control step over key-only ssh: read-only probes, `cluster init`, starting `tensorfold node`; never the data plane.
 const std = @import("std");
 const node = @import("node.zig");
 const config = @import("config.zig");

@@ -1,4 +1,4 @@
-//! The two-sided link over verbs: per peer a UC queue pair and a ring of one-packet receives that a message fills in order.
+//! Two-sided link over verbs: per peer a UC queue pair and a ring of one-packet receives that a message fills in order.
 const std = @import("std");
 const abi = @import("verbs_abi.zig");
 const vqp = @import("verbs_qp.zig");

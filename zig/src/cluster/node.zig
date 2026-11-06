@@ -80,7 +80,7 @@ pub const Inventory = struct {
     }
 };
 
-/// macOS's GPU limit when iogpu.wired_limit_mb is 0: fit to 107.5 GiB on 128 GiB and 222.7 GiB on 256 GiB, two thirds below that.
+/// macOS GPU limit when iogpu.wired_limit_mb is 0: fit to 107.5 of 128 GiB and 222.7 of 256 GiB, two thirds below that.
 pub fn defaultGpuLimit(memory: u64) u64 {
     const fit = memory / 10 * 9 -| 768 * gib / 100;
     return @max(memory / 3 * 2, fit);
