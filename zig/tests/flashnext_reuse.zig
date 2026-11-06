@@ -90,7 +90,7 @@ fn fresh(e: *fx.Engine, a: Allocator, prompt: []const u32, n: usize, depth: ?usi
 
 const Turn = struct { prompt: []u32, history: u32 };
 
-/// The indexer's pooled block keys before a mark, rebuilt after a restore rather than copied: counts and a hash of every layer's.
+/// The indexer's pooled block keys before a mark, rebuilt after restore, not copied: counts and a hash per layer.
 const Pooled = struct {
     counts: [13]usize = @splat(0),
     hash: u64 = 0,
