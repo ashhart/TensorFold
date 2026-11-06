@@ -29,5 +29,11 @@ __global__ void __launch_bounds__(G::Threads) dense_wmma12_gemm(Affine a) {
     wmma12_gemm_tile<G, IdentityAct<T>, GemmOut<T>>(a);
 }
 
+// The same product over a packed gate/up weight, writing silu(gate) * up as tf_silu_mul would (act is n / 2 wide).
+template <typename T, class G>
+__global__ void __launch_bounds__(G::Threads) dense_wmma12_gemm_silu(Affine a) {
+    wmma12_gemm_tile<G, IdentityAct<T>, SiluPairOut<T>>(a);
+}
+
 }  // namespace rocm
 }  // namespace tf
