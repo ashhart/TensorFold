@@ -56,7 +56,7 @@ class WorkloadArguments(unittest.TestCase):
                         patch.object(module.urllib.request, "urlopen", side_effect=lambda *a, **k: response()) as http, \
                         contextlib.redirect_stdout(io.StringIO()):
                     module.main()
-                self.assertEqual(http.call_count, 4 if module is bench_openai else 8)
+                self.assertEqual(http.call_count, 5 if module is bench_openai else 9)
                 self.assertTrue(json.loads(output.read_text()))
                 if module is bench_concurrent:
                     self.assertEqual([c["streams"] for c in json.loads(output.read_text())["cells"]], [1, 2, 1, 2])

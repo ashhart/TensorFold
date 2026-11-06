@@ -447,3 +447,15 @@ seeded CPU generator, so that it makes the same latents bit for bit:
 - `log256_ps` and `sincos256_ps` from `avx_mathfun.h`, which PyTorch includes (zlib license, Copyright (C) 2012 Giovanni
   Garberoglio, based on Julien Pommier's `sse_mathfun.h`, Copyright (C) 2007; the license is in
   `LICENSES/avx_mathfun-zlib.txt`).
+
+## Thinking-off checkpoint template fixtures
+
+The fixtures in `zig/src/server/fixtures/thinking/` are unmodified release files, used only as host-test inputs:
+- `glm53.jinja` and `glm53-tokenizer_config.json` come from
+  [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4) at revision `da920bb0b9f4`
+  (NVIDIA's quantization of zai-org's GLM-5.3-Flash), under the MIT license its model card states. See
+  [`LICENSES/MIT.txt`](LICENSES/MIT.txt).
+- `lfm2.jinja` and `lfm2-tokenizer_config.json` come from
+  [LiquidAI/LFM2.5-24B-A2B-MLX-4bit](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit) at revision
+  `667408d494bde191c2cb9dd4f4549827816b9275`, under the LFM Open License v1.0. See
+  [`LICENSES/LFM-Open-1.0.txt`](LICENSES/LFM-Open-1.0.txt).

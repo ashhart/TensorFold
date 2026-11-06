@@ -97,7 +97,7 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 
 | Route | Behavior |
 | --- | --- |
-| `GET /v1/models` | Served model ID and any configured aliases (both servers) |
+| `GET /v1/models` | Served model ID and any configured aliases (both servers); native entries include `capabilities.thinking_switch` |
 | `GET /health` | Liveness, the served model, the queue and live rates; open with keys (see [Health](#health)) |
 | `GET /memory`, `GET /v1/memory` | Native read-only memory snapshot ([memory diagnostics](memory-diagnostics.md)) |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
@@ -260,7 +260,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
-| `chat_template_kwargs.enable_thinking` | Template thinking toggle; `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
+| `chat_template_kwargs.enable_thinking` | Template thinking toggle; explicit off returns HTTP 400 when a thinking tokenizer has neither a template switch nor a closable generation prefix; omitted switches keep working. `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `thinking` | Top-level toggle, the same forms as `chat_template_kwargs.thinking`; read only when the kwargs set neither toggle, so the kwargs win. Enabling it clears a `reasoning_effort` of `none`, so the template's default effort applies | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
@@ -481,7 +481,9 @@ grammar fails while decoding ends with HTTP 500 (an error event when streaming);
 
 ## Reasoning
 
-On both backends, `reasoning_effort: none` disables thinking; other effort values enable it and reach the chat
+Native `/v1/models` entries and aliases include `capabilities.thinking_switch`. It is true when explicit thinking off is supported for a simple text chat by the existing template switch or generation-prefix closure, or the tokenizer has no thinking-close marker. Discovery uses the same off-render check as requests; each request still validates its own rendered prefix. It is false for a refused probe or a model without text generation. Benchmark clients read this bit once and omit the off field when it is false, labelled as the model default. Unknown discovery preserves the off request, labelled `off requested (unverified)`. The separate `capabilities.thinking_applicable` bit is false when no thinking-close marker exists; clients then report `not applicable` and send no thinking field.
+
+On both backends, `reasoning_effort: none` asks the chat template to disable thinking; an explicit off request returns HTTP 400 when the template cannot honor it. Other effort values enable thinking and reach the chat
 template. The server also reads it from `chat_template_kwargs.reasoning_effort`, where vLLM's clients send it; the
 top-level field wins. An unnamed level maps to the nearest level the template names, and a tie takes
 the higher one. GLM-5.3 lists `low`, `high` and `max`, so `max` stays `max`, `medium` is heard as `high`
@@ -493,14 +495,16 @@ precedence. A request without an effort gets `--reasoning-effort` when the serve
 the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is `xhigh`, which adds an instruction
 to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
 the same prompt for the same request. Effort support depends on the checkpoint's template, and effort does not set a
-token budget. With thinking off, GLM-5.3's prompt is the template's render unchanged, plus the close of its dangling
-think block: the server appends `</think>` (one token), and the template's `Reasoning Effort` head stays as the
-template writes it. The released Python 0.6.6 engine instead rewrites GLM's render for a no-thinking request — its
-`thinking_off` strips the `Reasoning Effort` head and closes the block inline — so its no-thinking prompts are 6 to 7
-tokens shorter than native's on the same request (#1911 measured a system-plus-user prompt at 22 tokens rendered, 16
-on the Python engine, and 23 on native). A prompt count, a cache key or a kept state from one engine therefore does
-not match the other's for `enable_thinking: false`. GLM-5.3 keeps
-every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
+token budget. With thinking off, native passes no reasoning effort to the template. If its generation prefix ends
+in a single `<think>` token, native appends the single `</think>` token, leaving an empty think block. This handles
+GLM-5.3 and LFM2 templates without their own off switch. Other template text stays unchanged: GLM-5.3's
+`Reasoning Effort` head stays as the template writes it, and an older GLM-5.3 template still writes its default
+`Reasoning Effort: Max` line. The released Python 0.6.6 engine instead rewrites GLM's render for a no-thinking
+request — its `thinking_off` strips the `Reasoning Effort` head and closes the block inline — so its no-thinking
+prompts are 6 to 7 tokens shorter than native's on the same request (#1911 measured a system-plus-user prompt at 22
+tokens rendered, 16 on the Python engine, and 23 on native). A prompt count, a cache key or a kept state from one
+engine therefore does not match the other's for `enable_thinking: false`. GLM-5.3 keeps every earlier assistant
+turn's reasoning in the prompt, as zai-org's template does by
 default (`clear_thinking` false), also on checkpoints whose template still clears it before the last user message, so
 a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. The native server
 gives the template `clear_thinking` false on every render, and `TF_GLM_CLEAR_THINKING=1` sets it true for the server,
