@@ -1,4 +1,4 @@
-//! Pinned DeepSeek V4.1 attention, resident EXL3 projections and causal packed-cache chunk execution.
+// ! Pinned DeepSeek V4.1 attention, resident EXL3 projections and causal packed-cache chunk execution.
 const std = @import("std");
 const mtl = @import("metal");
 const exl3 = @import("core").exl3_projection;
@@ -14,9 +14,9 @@ const rope = @import("rope.zig");
 pub const View = @import("view.zig").View;
 pub const State = kv.cache.State;
 
-/// One segment of a batched decode forward: a slot's state, its first position, its first row in the launch's
-/// buffers and its row count. The batch rung is one-row segments (a shared round's lanes), so `n` is 1 today; the
-/// type carries it so the core is written once.
+/// One segment of a batched decode forward: a slot's state, its first position, its first row in the launch's buffers
+/// and its row count. The batch rung is one-row segments (a shared round's lanes), so `n` is 1 today; the type
+/// carries it so the core is written once.
 pub const Seg = struct { state: *State, p0: u32, r0: u32, n: u32 };
 
 /// Layer 0's wq_b input (the post-q_norm qr, [rows, q_lora] bf16), for the GPTQ calibration Hessian. Null unless
@@ -139,11 +139,11 @@ pub const Workspace = struct {
     /// A decode layer's split key scans: (split, head group, lane) by (max, sum, 64 accumulators).
     partials: mtl.Buffer,
     selection: index.Scratch,
-    /// The batch's per-segment selection scratches; segment 0 uses `selection`. Three extras cover a four-lane
-    /// shared round.
+    /// The batch's per-segment selection scratches; segment 0 uses `selection`. Three extras cover a four-lane shared
+    /// round.
     sel_extra: [3]?index.Scratch = .{ null, null, null },
-    /// Identity map [0..7] for the fused wo_a indexed dispatch (one row per output group), repeated for the
-    /// multi-row path.
+    /// Identity map [0..7] for the fused wo_a indexed dispatch (one row per output group), repeated for the multi-row
+    /// path.
     ids: mtl.Buffer,
     /// A scratch row for the doubling arms (the workspace rows are live for a prompt chunk, so a repeat there would
     /// change the reply).
@@ -157,8 +157,8 @@ pub const Workspace = struct {
     selection_rows: u32 = 0,
     candidate_position: u32 = 0,
     candidate_rows: u32 = 0,
-    /// A merged tail chunk's PREFIX (its rows before the tail mark) is published into this stash ring as well as
-    /// the whole chunk into the live one, so the state at the mark can be copied from it.
+    /// A merged tail chunk's PREFIX (its rows before the tail mark) is published into this stash ring as well as the
+    /// whole chunk into the live one, so the state at the mark can be copied from it.
     publish_limit: u32 = 0,
     publish_stash: ?View = null,
 
@@ -211,8 +211,8 @@ pub const Workspace = struct {
     pub fn dense(self: *const Workspace) View {
         return .{ .buffer = self.dense_kv, .offset = 0 };
     }
-    /// The identity map for the fused wo_a's indexed dispatch (one row per output group), repeated for the
-    /// multi-row path. The drafter's own attention takes the same fused form.
+    /// The identity map for the fused wo_a's indexed dispatch (one row per output group), repeated for the multi-row
+    /// path. The drafter's own attention takes the same fused form.
     pub fn idMap(self: *const Workspace) View {
         return .{ .buffer = self.ids, .offset = 0 };
     }
@@ -228,8 +228,8 @@ pub const Workspace = struct {
         set.add(w.selection.buffer);
         for (w.sel_extra) |e| if (e) |x| set.add(x.buffer);
     }
-    /// A region's view into the attention workspace: public so a second model (the drafter) can assemble its
-    /// own scan from the same buffers.
+    /// A region's view into the attention workspace: public so a second model (the drafter) can assemble its own scan
+    /// from the same buffers.
     pub fn view(w: *const Workspace, region: Region) View {
         var offset: usize = 0;
         for (regions[0..@backingInt(region)]) |size| offset += size * w.max_rows;
@@ -271,8 +271,6 @@ fn norm(p: *const Pipelines, e: mtl.ComputeEncoder, x: View, weight: checkpoint.
     e.barrier();
 }
 
-/// The norm repeated into a scratch row (the workspace rows are live for a prompt chunk, so a repeat there would
-/// change the reply) and priced.
 fn normRepeat(p: *const Pipelines, e: mtl.ComputeEncoder, x: View, dup: View, weight: checkpoint.Tensor, rows: u32, width: u32, eps: f32) void {
     ops.encodeRms(e, &p.plain, x, tensor(weight), dup, .{ .rows = rows, .width = width, .x_stride = width, .y_stride = width, .eps = eps, .weight_f32 = weight.dtype == .f32 });
     e.barrier();
@@ -281,15 +279,14 @@ fn rotate(p: *const Pipelines, e: mtl.ComputeEncoder, x: View, rows: u32, heads:
     try p.rotary.encode(e, x, .{ .rows = rows, .heads = heads, .width = width, .rotary = c.rope_dim, .stride = heads * width, .position = position, .step = step, .inverse = @intFromBool(inverse), .spectrum = if (ratio == 0) .normal else .compressed });
 }
 
-/// The rotary pass repeated into a scratch row and priced.
 fn rotateRepeat(p: *const Pipelines, e: mtl.ComputeEncoder, dup: View, rows: u32, heads: u32, width: u32, position: u32, ratio: u32, step: u32, inverse: bool, c: config.Config) !void {
     try p.rotary.encode(e, dup, .{ .rows = rows, .heads = heads, .width = width, .rotary = c.rope_dim, .stride = heads * width, .position = position, .step = step, .inverse = @intFromBool(inverse), .spectrum = if (ratio == 0) .normal else .compressed });
 }
-// The attention stage's own block ledger. The doubling arms price a dispatch's marginal cost; this counts
-// the dispatches each block issues, by reading the engine's own counter at each block boundary (an atomic
-// load: no command-buffer split, no perturbation of the stream). It prints a block's count for the layers
-// TF_DSV41_ATTN_COUNT_LAYERS names (default "0,2,3": an ordinary layer, an owner layer that also sources
-// the index, and a layer that reads a compressed source).
+// The attention stage's own block ledger. The doubling arms isolate a dispatch's marginal cost; this counts the
+// dispatches each block issues, by reading the engine's own counter at each block boundary (an atomic load: no
+// command-buffer split, no perturbation of the stream). It prints a block's count for the layers
+// TF_DSV41_ATTN_COUNT_LAYERS names (default "0,2,3": an ordinary layer, an owner layer that also sources the index,
+// and a layer that reads a compressed source).
 var attn_count_flag: ?bool = null;
 var attn_count_layers: ?[]const u8 = null;
 var attn_count_base: u64 = 0;
@@ -345,8 +342,8 @@ fn precedingIndex(layer: u32) u32 {
 /// BF16 x/y [rows,5120]; layers 0..39 share the chunk-start cursor, appended by the caller after all layers.
 
 // No extra RMS after wq_b or index-query Hadamard outside EXL3.
-/// A decode layer's split scans: 32 splits at most, 4 head groups of 64 heads, 4 SIMDgroups a group, 32 lanes,
-/// 68 floats a lane.
+/// A decode layer's split scans: 32 splits at most, 4 head groups of 64 heads, 4 SIMDgroups a group, 32 lanes, 68
+/// floats a lane.
 fn partialBytes(rows: u32) usize {
     // A split's (max, sum, accumulators) for every row: a drafted window above one row keeps its own parts, so its
     // rows sum in exactly the order a plain step's does (drafted == plain).
@@ -380,12 +377,12 @@ pub fn encodeProfiled(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const weig
 }
 
 /// Same encoder and arithmetic as encode, with optional copies at operator boundaries. A decode-sized batch of
-/// one-row segments -- the shared round's lanes in one launch. The row-wise projections run once over every
-/// segment's rows (the dense EXL3 weights decode once instead of once a lane); every slot-bound step runs once a
-/// segment against that segment's own state and selection scratch: the window KV's norm+rope+pack, the compressor's
-/// pool, the index key and its pick, the sparse scan, the ring publish and the output rope. The output projections
-/// then run once over all rows. Only one-row segments are admitted: this rung amortises the dense attention
-/// weights, it is not a prefill batch.
+/// one-row segments -- the shared round's lanes in one launch. The row-wise projections run once over every segment's
+/// rows (the dense EXL3 weights decode once instead of once a lane); every slot-bound step runs once a segment
+/// against that segment's own state and selection scratch: the window KV's norm+rope+pack, the compressor's pool, the
+/// index key and its pick, the sparse scan, the ring publish and the output rope. The output projections then run
+/// once over all rows. Only one-row segments are admitted: this rung amortises the dense attention weights, it is not
+/// a prefill batch.
 fn encodeMulti(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weights.Attention, work: *Workspace, x: View, y: View, ep: *const exl3.Pipelines, scratch: exl3.View, layer: u32, c: config.Config, segs: []const Seg) !void {
     var e = e_in;
     const nsegs = segs.len;
@@ -594,22 +591,22 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
     const dense_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_DENSE") != null) 2 else 1;
     const dup_view: View = .{ .buffer = work.dup, .offset = 0 };
     // Wq_a (n 1280) and wkv (n 512) read the same input row and the same k, so one indexed call carries both: one
-    // rotate_in (each row its own descriptor's suh), one register-only GEMM (each row bounded by its descriptor's
-    // own width) and one rotate_out (each row its own svh). The decode row's qr comes back at the region base and
-    // its kv at +1280 halves, both contiguous, so every consumer below sees the same values at the same strides for
-    // a one-row call. Rows > 1 keep the two separate calls (their layouts are per-row strided); the bodies, the k
-    // order and the per-row arithmetic are the shipped ones, so the bits do not move. TF_DSV41_NO_FUSE_QKV=1
-    // restores the two calls for a same-binary A/B.
+    // rotate_in (each row its own descriptor's suh), one register-only GEMM (each row bounded by its descriptor's own
+    // width) and one rotate_out (each row its own svh). The decode row's qr comes back at the region base and its kv
+    // at +1280 halves, both contiguous, so every consumer below sees the same values at the same strides for a
+    // one-row call. Rows > 1 keep the two separate calls (their layouts are per-row strided); the bodies, the k order
+    // and the per-row arithmetic are the shipped ones, so the bits do not move. TF_DSV41_NO_FUSE_QKV=1 restores the
+    // two calls for a same-binary A/B.
     const qkv_merged = rows == 1 and w.qkv_descriptors != null and exl3.indexedWidthBody(ep) and
         std.c.getenv("TF_DSV41_NO_FUSE_QKV") == null;
-    // THE TRANSFORM FOLD. When the merged wq_a+wkv call leaves its f32 sums in place (`no_epilogue`), one kernel
-    // does both output transforms, the q_norm and wq_b's input transform with the three shipped kernels' arithmetic
-    // and order, so the chain's three dispatches become one.
+    // THE TRANSFORM FOLD. When the merged wq_a+wkv call leaves its f32 sums in place (`no_epilogue`), one kernel does
+    // both output transforms, the q_norm and wq_b's input transform with the three shipped kernels' arithmetic and
+    // order, so the chain's three dispatches become one.
     const norm_fold = qkv_merged and ep.norm_transform != null and std.c.getenv("TF_DSV41_FUSE_NORM_TRANSFORM") != null;
     if (qkv_merged) {
         const fused = work.view(.qkv);
         // TF_DSV41_DOUBLE_ATTN_QKV -- the merged call's same-output duplicate. The merged path bypasses the
-        // dense_passes loop, so DOUBLE_ATTN_DENSE never prices it.
+        // dense_passes loop, so DOUBLE_ATTN_DENSE never covered it.
         const qkv_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_QKV") != null) 2 else 1;
         for (0..qkv_passes) |_| {
             try exl3.encodeIndexed(ep, e, .{ .descriptors = .{ .buffer = w.qkv_descriptors.?, .offset = 0 }, .count = 2, .k = c.hidden, .n = c.q_lora }, core(x), core(fused), scratch, .{
@@ -664,8 +661,8 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, layer, .kv_projection, raw);
     // The window KV's norm + rope + fp8 pack as ONE dispatch, at the pack's own threadgroup geometry (16 a row, 256
     // threads) with the shipped rms reduction order, the rope's source expression and the pack's exact
-    // max/scale/code. TF_DSV41_NO_FUSE_KVGLUE=1 is the same-binary control. It is used only where no instrument
-    // reads the intermediate rows, and never above 8 rows (the prompt path keeps the three wide kernels).
+    // max/scale/code. TF_DSV41_NO_FUSE_KVGLUE=1 is the same-binary control. It is used only where no instrument reads
+    // the intermediate rows, and never above 8 rows (the prompt path keeps the three wide kernels).
     const fuse_kv_glue = rows <= 8 and w.kv_norm.dtype == .bf16 and c.head_dim == 512 and !diagnostic and
         std.c.getenv("TF_DSV41_NO_FUSE_KVGLUE") == null and
         std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") == null and
@@ -717,10 +714,10 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
             const output: exl3.Output = if (ratio == 1) .bf16 else .f32;
             const values = work.view(.values);
             const gates = work.view(.gates);
-            // TF_DSV41_DOUBLE_ATTN_COMPRESSOR issues the two compressor EXL3 calls a second time -- the same
-            // output, so the reply, the pooling and the routing cannot move -- and prices the compressor inside the
-            // attention stage: the term the record seven doubling arms (the four dense calls, the transforms, the
-            // norms, the ropes, the dense-KV and the scan) do not name.
+            // TF_DSV41_DOUBLE_ATTN_COMPRESSOR issues the two compressor EXL3 calls a second time -- the same output,
+            // so the reply, the pooling and the routing cannot move -- and isolates the compressor inside the attention
+            // stage: the term the record seven doubling arms (the four dense calls, the transforms, the norms, the
+            // ropes, the dense-KV and the scan) do not name.
             const compressor_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_COMPRESSOR") != null) 2 else 1;
             for (0..compressor_passes) |_| {
                 try projection(ep, e, compressor.wkv, x, values, scratch, rows, c.hidden, c.head_dim, output);
@@ -750,9 +747,9 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
             }
         }
         // Every visible key is kept when there are no more compressed keys than the selection keeps: the picks are
-        // then the identity in ascending position order, which is what the score/heap/sort path returns for the
-        // same keys. So the query projection, its rotation and pack, the weights projection and four selection
-        // dispatches buy nothing there, and the block candidate machinery has nothing to filter.
+        // then the identity in ascending position order, which is what the score/heap/sort path returns for the same
+        // keys. So the query projection, its rotation and pack, the weights projection and four selection dispatches
+        // buy nothing there, and the block candidate machinery has nothing to filter.
         const few_keys = compressed_rows <= c.index_topk;
         if (kv.cache.isIndexSource(layer)) {
             const selector = if (w.indexer) |*value| value else return error.MissingAttentionIndexer;
@@ -774,9 +771,9 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
                     .bf16 => .bf16,
                     else => .f16,
                 } };
-                // The one-column form is the same per-column arithmetic (same lane k-stride, same compensated
-                // order, same 16..1 butterfly) so it is bit-identical, and it reads 0.067. TF_DSV41_DENSE_COL=0 is
-                // the same-binary control.
+                // The one-column form is the same per-column arithmetic (same lane k-stride, same compensated order,
+                // same 16..1 butterfly) so it is bit-identical, and it reads 0.067. TF_DSV41_DENSE_COL=0 is the
+                // same-binary control.
                 const dense_col_env = std.c.getenv("TF_DSV41_DENSE_COL");
                 const dense_col = (dense_col_env == null or
                     !std.mem.eql(u8, std.mem.span(dense_col_env.?), "0")) and
@@ -788,18 +785,16 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
                 e.barrier();
                 attnMark(layer, "index_q", prof, &e);
             }
-            // The block filter is a shortcut only when its candidate set is narrower than the keys; with 2,048
-            // blocks of 8 it covers 16,384 slots, so under ~131k tokens it scores more slots than exist and its
-            // block heap costs a serial sort. Off there, every key is scored directly once -- the same keys, the
-            // same scores, the same strict top-k order, so the picks are identical.
-            // The build is a PER-ROW SERIAL SORT, so a decode row pays it alone. Decode (rows <= 8) therefore takes
-            // the direct path.
-            // "narrower" is not enough -- the filter must HALVE the scored keys. Where it is off the picks are the
-            // direct path's own (the exact set), so no arithmetic moves. TF_DSV41_BLOCK_FILTER=1|0 still forces
-            // either way.
-            // The candidate path pays a per-forward build plus the non-NAX score kernel on the four reader layers,
-            // and that does not pay while the set is half the keys. The gate is an eighth: only at >= 131k keys
-            // (past this model's 65,536 window) does it stand.
+            // The block filter is a shortcut only when its candidate set is narrower than the keys; with 2,048 blocks
+            // of 8 it covers 16,384 slots, so under ~131k tokens it scores more slots than exist and its block heap
+            // costs a serial sort. Off there, every key is scored directly once -- the same keys, the same scores,
+            // the same strict top-k order, so the picks are identical. The build is a PER-ROW SERIAL SORT, so a
+            // decode row pays it alone. Decode (rows <= 8) therefore takes the direct path. "narrower" is not enough
+            // -- the filter must HALVE the scored keys. Where it is off the picks are the direct path's own (the
+            // exact set), so no arithmetic moves. TF_DSV41_BLOCK_FILTER=1|0 still forces either way. The candidate
+            // path pays a per-forward build plus the non-NAX score kernel on the four reader layers, and that does
+            // not pay while the set is half the keys. The gate is an eighth: only at >= 131k keys (past this model's
+            // 65,536 window) does it stand.
             const filter_env: ?bool = if (std.c.getenv("TF_DSV41_BLOCK_FILTER")) |v|
                 std.mem.eql(u8, std.mem.span(v), "1")
             else
@@ -853,8 +848,8 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
                 e.barrier();
             }
             attnMark(layer, "select", prof, &e);
-            // (TF_DSV41_DUMP_SELECT=1, needs ATTN_PROF on this layer, whose own commit+wait is what makes the
-            // scratch readable): the selection's picks and the heap's worst.
+            // (TF_DSV41_DUMP_SELECT=1, needs ATTN_PROF on this layer, whose own commit+wait is what makes the scratch
+            // readable): the selection's picks and the heap's worst.
             if (std.c.getenv("TF_DSV41_DUMP_SELECT") != null and prof != null) {
                 const v = work.selection.positions();
                 const base: [*]const u8 = @ptrCast(v.buffer.contents());
@@ -885,7 +880,7 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
                 const sb: [*]const u8 = @ptrCast(sv.buffer.contents());
                 const sf: [*]const f32 = @ptrCast(@alignCast(sb + sv.offset));
                 if (std.c.getenv("TF_DSV41_DUMP_SELECT_REF") != null) {
-                    // the attention's order: score desc, then position asc
+                    // The attention's order: score desc, then position asc
                     const Pick = struct { score: f32, pos: i32 };
                     var ref: [512]Pick = undefined;
                     var n: u32 = 0;
@@ -925,7 +920,7 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
                     }
                     var refpos: [512]i32 = undefined;
                     for (0..512) |i| refpos[i] = ref[i].pos;
-                    // ascending insertion sort (512 entries, once)
+                    // Ascending insertion sort (512 entries, once)
                     for (1..512) |i| {
                         const cur = refpos[i];
                         var j = i;
@@ -1023,8 +1018,8 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
         if (prefix < rows) try p.cache.publishWindow(e, chunk, .{ .buffer = stash.buffer, .offset = stash.offset + @as(usize, layer) * kv.cache.window * kv.cache.ring_stride }, prefix, position);
     };
     try p.cache.publishWindow(e, chunk, ring, rows, position);
-    // TF_DSV41_DOUBLE_ATTN_PUBLISH -- the KV ring publish's same-output duplicate (the publish copies the chunk
-    // into the ring's slots; the second pass copies the same bytes).
+    // TF_DSV41_DOUBLE_ATTN_PUBLISH -- the KV ring publish's same-output duplicate (the publish copies the chunk into
+    // the ring's slots; the second pass copies the same bytes).
     if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ATTN_PUBLISH") != null)
         try p.cache.publishWindow(e, chunk, ring, rows, position);
     attnMark(layer, "publish", prof, &e);
@@ -1037,13 +1032,11 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
     const group_output = c.o_groups * c.o_lora;
     // The multi-row path takes the same dispatch -- q is row-major, so `rows * o_groups` rows of `group_input` are
     // exactly the (row, group) slices, and `grouped` is the same row-major layout at `o_lora`; the ids repeat 0..7
-    // per row. The prefill (rows > 8) keeps the eight separate projections, where one dispatch per group is the
-    // right shape.
+    // per row. The prefill (rows > 8) keeps the eight separate projections, where one dispatch per group is the right
+    // shape.
     if (rows <= 8 and w.wo_a_descriptors != null and std.c.getenv("TF_DSV41_NO_FUSE_WO_A") == null) {
         for (&w.wo_a) |*m| exl3.useMatrix(e, m.*);
-        // TF_DSV41_DOUBLE_ATTN_WOA -- the merged wo_a call's same-output duplicate. Like the merged wq_a+wkv, it is
-        // an INDEXED call: it bypasses the dense_passes loop, so TF_DSV41_DOUBLE_ATTN_DENSE never priced it -- the
-        // record's attention ledger has a hole exactly where the eight output groups are.
+        // TF_DSV41_DOUBLE_ATTN_WOA -- the merged wo_a call's same-output duplicate.
         const wo_a_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_WOA") != null) 2 else 1;
         for (0..wo_a_passes) |_| try exl3.encodeIndexed(ep, e, .{ .descriptors = .{ .buffer = w.wo_a_descriptors.?, .offset = 0 }, .count = c.o_groups, .k = group_input, .n = c.o_lora }, core(q), core(grouped), scratch, .{
             .count = rows * c.o_groups,
