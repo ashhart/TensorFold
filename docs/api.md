@@ -860,7 +860,10 @@ instead of reading the conversation again from its first token. Qwen3.8-27B, Nem
 one Mac, and Nemotron, the Qwen3.5 hybrids and Flash Next on CUDA, keep them; other engines refuse the flag at startup.
 
 The engine stages an owned copy between rounds, and an I/O thread writes and fsyncs it. Staging has a 1 GiB byte permit
-and at most eight jobs. A save that finds either full but would fit alone waits in the queue until a write finishes; one
+and at most eight jobs. Qwen3.8-27B widens the permit to one whole state at its `--context`, with none of its rows on
+disk yet, but never past `--prompt-cache-gib`: a conversation whose first save or post-compaction prompt holds more
+than about 13K new tokens is still written. A save is charged only its new bytes, the rows not already on disk.
+A save that finds either full but would fit alone waits in the queue until a write finishes; one
 that cannot fit even then is skipped. So is a waiting save whose state leaves RAM, unless `--spill-gib` copies it then
 (below); that copy, like any made at an eviction, is skipped when the permit is full. A block still being written is
 charged and copied once, however many saves name it. The copy waits for its GPU producers before RAM can be reused. A
