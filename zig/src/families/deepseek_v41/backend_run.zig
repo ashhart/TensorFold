@@ -346,7 +346,7 @@ pub fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const 
         // Diagnostic (TF_DSV41_CLEAR_STALE=1): the rejected rows the window wrote stay in the ring; zero them so
         // the re-feed cannot read them, and see whether the divergence survives.
         // The compressed path's partial sums for the block the rejected draft row started are scratch that the next
-        // forward would read as complete; clearing them is the round-257 finding's fix candidate.
+        // forward would read as complete; clearing them is the stale-partial fix candidate.
         if (std.c.getenv("TF_DSV41_CLEAR_PARTIALS") != null) b.model.caches[i].clearPartials();
         if (std.c.getenv("TF_DSV41_CLEAR_STALE") != null) {
             const start = b.model.caches[i].position;

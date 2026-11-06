@@ -245,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
 // -- EXL3 prompt body at the routed stage shape ---------------------------------------------------------------
 // The stage shape: 384 expert tiles x 64 rows (the grouped prompt padding), N = 2304, K = 5120, the same
 // tf_exl3_matmul_prefill_nax3 (RG=4, CG=2) the engine dispatches for a grouped prompt chunk. This is the
-// 18.7 TMAC/s term in the prefill ledger; the double-buffered candidate is nax7 below it.
+// term in the prefill ledger; the double-buffered candidate is nax7 below it.
 
 const Exl3Args = extern struct {
     k: u32,

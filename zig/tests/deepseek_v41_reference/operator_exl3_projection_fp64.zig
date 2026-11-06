@@ -1457,7 +1457,7 @@ test "wo_a fusion against the legacy eight calls (TF_WO_DIFF=1)" {
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
     // A `try` that throws before endEncoding makes Metal abort in the encoder's dealloc and hides the
-    // Zig error; end it on every error path (found round 1: InvalidExl3View read as a Metal assertion).
+    // Zig error; end it on every error path (InvalidExl3View otherwise reads as a Metal assertion).
     errdefer enc.end();
     for (&matrices) |*m| exl3.useMatrix(enc, m.*);
     for (&matrices, 0..) |*m, g| try exl3.encode(&p, enc, m.*, .{ .buffer = q_gpu, .offset = g * k * 2 }, .{ .buffer = legacy_gpu, .offset = g * n * 2 }, view(h.view(scratch)), .{ .count = 1, .x_stride = q_width, .y_stride = group_output, .output = .bf16 });
@@ -1704,7 +1704,7 @@ test "decode MoE at one row, 120 dispatches, isolated (TF_ROOFLINE_DEC=1)" {
     std.debug.print("ROOFLINE_DEC {{\"layers\":{d},\"gpu_ms\":{d:.2},\"gbs\":{d:.1},\"e12_weights_s\":{d:.3}}}\n", .{ layers, seconds * 1e3, bytes / seconds / 1e9, weights / seconds / 1e12 });
 }
 
-// Round 268: the grouped window path at the shape a drafted round actually runs -- three rows, six slots a row,
+// The grouped window path at the shape a drafted round actually runs -- three rows, six slots a row,
 // experts deduplicated across slots, and the plan's sixty-four-row padding -- against the shipped per-row call
 // (indexed == 1). Hand-builds the arrays the group plan produces (offsets sixty-four-aligned a expert, scatter in
 // slot order), so this is the kernel differential, not an oracle. TF_GRP_WIN=1.
