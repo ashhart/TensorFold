@@ -311,7 +311,7 @@ pub fn hrefs(a: Allocator, page: []const u8, max: usize, budget: ?*Budget) Alloc
         if (q != ' ') v = v[1..];
         const stop = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
         const raw = std.mem.trim(u8, v[0..stop], " \t\r\n");
-        if (raw.len == 0 or raw[0] == '#' or std.ascii.startsWithIgnoreCase(raw, "javascript:") or std.ascii.startsWithIgnoreCase(raw, "mailto:")) continue;
+        if (raw.len == 0 or raw[0] == '#' or std.ascii.startsWithIgnoreCase(raw, "javascript:") or std.ascii.startsWithIgnoreCase(raw, "mailto:") or std.ascii.startsWithIgnoreCase(raw, "data:")) continue; // a data URL is not a page
         var text: std.ArrayList(u8) = .empty;
         var i: usize = 0;
         while (i < raw.len) {
@@ -442,6 +442,15 @@ test "link targets are read from anchors, decoded, without fragments or scripts"
     try std.testing.expectEqualStrings("/docs?a=1&b=2", got[0]);
     try std.testing.expectEqualStrings("https://o.org/", got[1]);
     try std.testing.expectEqualStrings("rel/page", got[2]);
+}
+
+test "a data URL is not kept as a page link" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try hrefs(a, "<p><a href=\"data:text/html,hi\">d</a> <a href=\"/docs\">x</a></p>", 10, null);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("/docs", got[0]);
 }
 
 test "a link broken onto the next line by a carriage return is kept" {
