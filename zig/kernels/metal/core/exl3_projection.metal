@@ -70,6 +70,33 @@ inline half tf_exl3_value(ushort state, uint codebook) {
   return half(float(as_type<half>(ushort(x))) + float(as_type<half>(ushort(x >> 16))));
 }
 
+// A scalar lane's state window: the ring word, its bit offset and the next ring word. The pack fixes the arithmetic;
+// these named fields are the lane's own cursor, and the scalar twin of the tensor-unit walk.
+struct TfExl3ScalarWindow {
+  uint word, bit, next;
+};
+
+inline TfExl3ScalarWindow tf_exl3_scalar_window(uint p, uint halves) {
+  const uint ring = 128 * halves;
+  const uint end = ((p + 1) * halves - ((halves & 1u) ? ((p + 1) & 1u) : 0u)) / 2;
+  uint start = end + ring - 16;
+  if (start >= ring) start -= ring;
+  const uint word = start >> 5, bit = start & 31u;
+  TfExl3ScalarWindow w;
+  w.word = word;
+  w.bit = bit;
+  w.next = word + 1 == 4 * halves ? 0 : word + 1;
+  return w;
+}
+
+inline half tf_exl3_scalar_value(const device ushort* tile, TfExl3ScalarWindow w, uint codebook) {
+  const uint lo = tf_exl3_word(tile, w.word);
+  const uint hi = tf_exl3_word(tile, w.next);
+  const uint carry = (hi >> ((32 - w.bit) & 31u)) & (0u - uint(w.bit != 0));
+  return tf_exl3_value(ushort(((lo << w.bit) | carry) >> 16), codebook);
+}
+
+
 // Lane l holds indices l, l+32, l+64, l+96; all seven butterfly stages have a fixed FP32 order.
 inline void tf_exl3_hadamard(thread float (&v)[4], uint lane) {
   for (uint d = 1; d < 32; d *= 2) {
@@ -505,7 +532,9 @@ kernel void tf_exl3_dense(const device half* rotated [[buffer(0)]],
   sums[ulong(g.y) * a.n + g.x] = acc;
 }
 
-// Four SIMDgroups share decoded weights while each retains its original eight-row compensated dots.
+// Four SIMDgroups share decoded weights while each retains its original eight-row compensated dots. The
+// release feeds the prompt through its expert blocks (inference/model.py, revision 314113f8); the pack arithmetic
+// and the window walk below are our own.
 kernel void tf_exl3_matmul_prefill(const device half* x [[buffer(0)]],
                                   const device uchar* trellis [[buffer(1)]],
                                   device float* sums [[buffer(2)]],
@@ -519,15 +548,9 @@ kernel void tf_exl3_matmul_prefill(const device half* x [[buffer(0)]],
   threadgroup float wx[256], xx[512];
   const uint rb = tg.y * 32, nb = tg.x * 16;
   if (a.indexed || a.routed || rb >= a.rows) return;
-  uint maps[8];
+  TfExl3ScalarWindow win[8];
   if (sg == 0) {
-    for (uint j = 0; j < 8; ++j) {
-      const uint p = lane + 32 * j, ring = 128 * a.halves;
-      const uint end = ((p + 1) * a.halves - ((a.halves & 1u) ? ((p + 1) & 1u) : 0u)) / 2;
-      const uint start = (end + ring - 16) % ring;
-      const uint wi = start / 32, off = start % 32, next = wi + 1 == 4 * a.halves ? 0 : wi + 1;
-      maps[j] = wi | (off << 6) | (next << 11);
-    }
+    for (uint j = 0; j < 8; ++j) win[j] = tf_exl3_scalar_window(lane + 32 * j, a.halves);
   }
   float high[4] = {0,0,0,0}, low[4] = {0,0,0,0};
   for (uint kb = 0; kb < a.k; kb += 16) {
@@ -538,7 +561,7 @@ kernel void tf_exl3_matmul_prefill(const device half* x [[buffer(0)]],
         const uint p = lane + 32 * j, l = p / 8, e = p % 8;
         const uint r = 2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u);
         const uint c = l / 4 + 8 * (e >> 2);
-        wx[r * 16 + c] = float(tf_exl3_value(tf_exl3_mapped_state(tile, maps[j]), a.codebook));
+        wx[r * 16 + c] = float(tf_exl3_scalar_value(tile, win[j], a.codebook));
       }
     }
     for (uint j = lane; j < 128; j += 32) {
