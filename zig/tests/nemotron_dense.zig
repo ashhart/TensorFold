@@ -1,4 +1,4 @@
-//! Nemotron's tensor-unit dense projections at real shapes: schedule variants bit-checked against the engine's kernels, then timed.
+//! Nemotron's tensor-unit dense projections at real shapes: schedule variants bit-checked vs engine kernels, timed.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
