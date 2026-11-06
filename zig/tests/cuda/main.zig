@@ -284,6 +284,7 @@ const usage =
     \\  dory-states MODEL LOOPS TEXT N  Dory kept prompt states at 8k and 32k resumed into wiped caches == fresh
     \\  dory-bench MODEL LOOPS TEXT N [STREAMS...]  Dory greedy decode tok/s at 1/2/4/8 streams (graphs on)
     \\  dory-pages MODEL LOOPS TEXT N   Dory with its full caches in pages == contiguous: fp32 logits bytes, then replies
+    \\  dory-store MODEL LOOPS TEXT N   Dory prompts as pool pages (DORY_PAGED=1): resumes and shared streams == fresh
     \\  dory-prefill MODEL LOOPS TEXT N  Dory prompt time alone at 512, 2k, 8k and 16k rows (DORY_PAGED=1: on pages)
     \\  gemma4-states MODEL DRAFTER TEXT N   Gemma 4 + DFlash: stepped passes keep the drafter's context, resumed == fresh
     \\  spark25-pages MODEL TEXT N   Spark2.5: full-layer caches in pool pages == linear ones, replies and logits
