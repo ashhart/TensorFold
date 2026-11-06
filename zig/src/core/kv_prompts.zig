@@ -1,5 +1,6 @@
 //! TF_KV_SHARE: what a family on the core pool calls of one prompt store over its pages (native/cuda_prompt_pages.zig).
 const std = @import("std");
+const kv = @import("kv_pool.zig");
 
 /// Where a pass resumes and the marks it keeps states at (`marks` the store's allocation, freed by `free`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
@@ -34,7 +35,59 @@ pub const Prompts = struct {
     pub fn free(p: Prompts, marks: []const u32) void {
         p.vtable.free(p.ctx, marks);
     }
+
+    /// `begin`, its marks in `gpa` for a lane to own; a failure gives `adopt`'s pages back.
+    pub fn plan(p: Prompts, gpa: std.mem.Allocator, pool: *kv.Pool, prompt: []const u32, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) !Plan {
+        const got = try p.begin(prompt, history_len, shared, owner, adopt);
+        defer p.free(got.marks);
+        const marks = gpa.dupe(u32, got.marks) catch |e| {
+            for (adopt.items) |id| pool.release(id);
+            return e;
+        };
+        return .{ .from = got.from, .marks = marks };
+    }
+
+    /// At mark `at` the store takes the stream's pages and state; pages it held replace `l`'s, the whole table written.
+    pub fn keepPages(p: Prompts, gpa: std.mem.Allocator, pool: *kv.Pool, l: *kv.Lease, prompt: []const u32, at: usize, owner: *anyopaque, page_tokens: usize, table: kv.Table) !bool {
+        const n = at / page_tokens;
+        const path = try gpa.alloc(u32, n);
+        defer gpa.free(path);
+        const mine = try gpa.dupe(u32, l.ids.items);
+        defer gpa.free(mine);
+        const shared = p.keep(prompt, @intCast(at), owner, mine[0..n], path);
+        if (std.mem.eql(u32, mine[0..shared], path[0..shared])) return shared == n;
+        @memcpy(mine[0..shared], path[0..shared]); // the same tokens' rows: a resume from any row is exact
+        try table.write(table.ctx, mine, 0);
+        for (path[0..shared], 0..) |id, i| pool.share(l, i, id);
+        return shared == n;
+    }
 };
+
+/// `n` free pool pages the store holds for a state's copied rows; NoCachePages: none, even reclaiming.
+pub fn holdBlob(gpa: std.mem.Allocator, pool: *kv.Pool, n: usize) ![]u32 {
+    if (n == 0) return &.{};
+    const ids = try gpa.alloc(u32, n);
+    if (!pool.hold(ids)) {
+        gpa.free(ids);
+        return error.NoCachePages;
+    }
+    return ids;
+}
+
+/// A state's held pages back to the pool; queued copies out of them must be done.
+pub fn dropBlob(gpa: std.mem.Allocator, pool: *kv.Pool, blob: *[]u32) void {
+    for (blob.*) |id| pool.release(id);
+    gpa.free(blob.*);
+    blob.* = &.{};
+}
+
+/// The idle server's line: nothing promised, and every page free unless a store holds some.
+pub fn idleLine(pool: *const kv.Pool, store: bool) void {
+    if (@import("builtin").is_test) return;
+    const c = pool.census();
+    const ok = pool.idle() and (store or c.free == c.total);
+    std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
+}
 
 /// A kept state's copied rows in store-held pages: byte o in chunk c = o / chunk, region c % regions, page c / regions.
 pub const Blob = struct {
@@ -77,6 +130,79 @@ const Pieces = struct {
         try p.got.append(testing.allocator, .{ region, id, within, from, n });
     }
 };
+
+const Stub = struct {
+    held: [2]u32,
+    fn of(ctx: *anyopaque) *Stub {
+        return @ptrCast(@alignCast(ctx));
+    }
+    fn begin(_: *anyopaque, _: []const u32, _: u32, _: []const u32, _: *anyopaque, _: *std.ArrayList(u32)) anyerror!Plan {
+        return .{ .from = 256, .marks = try testing.allocator.dupe(u32, &.{512}) };
+    }
+    fn keep(ctx: *anyopaque, _: []const u32, _: u32, _: *anyopaque, mine: []const u32, path: []u32) usize {
+        @memcpy(path, Stub.of(ctx).held[0..mine.len]);
+        return mine.len;
+    }
+    fn report(_: *anyopaque, _: usize, _: u32, _: u64) void {}
+    fn free(_: *anyopaque, marks: []const u32) void {
+        testing.allocator.free(marks);
+    }
+    const vtable: Prompts.VTable = .{ .begin = begin, .keep = keep, .report = report, .free = free };
+};
+
+const Written = struct {
+    ids: [4]u32 = @splat(0),
+    from: usize = 99,
+    fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
+        const w: *Written = @ptrCast(@alignCast(ctx));
+        w.from = from;
+        @memcpy(w.ids[from..][0 .. ids.len - from], ids[from..]);
+    }
+};
+
+test "keeping swaps the store's pages in and writes the whole table: a table of the prefix alone hides the rest" {
+    var pool = try kv.Pool.init(testing.allocator, 8, 1);
+    defer pool.deinit();
+    var held: [2]u32 = undefined;
+    try testing.expect(pool.hold(&held));
+    var l: kv.Lease = .{};
+    defer pool.finish(&l);
+    try pool.promise(&l, 4);
+    try pool.cover(&l, 4, null);
+    const rest = [2]u32{ l.ids.items[2], l.ids.items[3] };
+    var stub: Stub = .{ .held = held };
+    const p: Prompts = .{ .ctx = &stub, .vtable = &Stub.vtable };
+    var w: Written = .{};
+    var owner: u8 = 0;
+    const whole = try p.keepPages(testing.allocator, &pool, &l, &.{ 1, 2, 3 }, 512, &owner, 256, .{ .ctx = &w, .write = Written.write });
+    try testing.expect(whole);
+    try testing.expectEqual(@as(usize, 0), w.from);
+    try testing.expectEqualSlices(u32, &.{ held[0], held[1], rest[0], rest[1] }, &w.ids);
+    try testing.expectEqualSlices(u32, &w.ids, l.ids.items);
+    try testing.expectEqual(@as(u32, 2), pool.holders(held[0]));
+    for (held) |id| pool.release(id);
+}
+
+test "a plan's marks are the lane's own; a blob's pages come from the pool and go back" {
+    var pool = try kv.Pool.init(testing.allocator, 4, 1);
+    defer pool.deinit();
+    var stub: Stub = .{ .held = .{ 0, 0 } };
+    const p: Prompts = .{ .ctx = &stub, .vtable = &Stub.vtable };
+    var adopt: std.ArrayList(u32) = .empty;
+    defer adopt.deinit(testing.allocator);
+    var owner: u8 = 0;
+    const got = try p.plan(testing.allocator, &pool, &.{1}, 1, &.{}, &owner, &adopt);
+    defer testing.allocator.free(got.marks);
+    try testing.expectEqual(@as(u32, 256), got.from);
+    try testing.expectEqualSlices(u32, &.{512}, got.marks);
+    var blob = try holdBlob(testing.allocator, &pool, 3);
+    try testing.expectEqual(@as(usize, 1), pool.available());
+    try testing.expectError(error.NoCachePages, holdBlob(testing.allocator, &pool, 2));
+    dropBlob(testing.allocator, &pool, &blob);
+    try testing.expectEqual(@as(usize, 4), pool.available());
+    try testing.expectEqual(@as(usize, 0), blob.len);
+    try testing.expectEqual(@as(usize, 0), (try holdBlob(testing.allocator, &pool, 0)).len);
+}
 
 test "a blob's bytes walk its regions a chunk at a time, then its next page; a run splits at chunk edges" {
     const b: Blob = .{ .ids = &.{ 7, 3 }, .chunk = 10, .regions = 2 };
