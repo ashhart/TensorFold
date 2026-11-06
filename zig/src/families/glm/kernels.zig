@@ -7,6 +7,7 @@ const moe_route = @import("../../core/moe_route.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const hc = @import("../../core/hc.zig");
 const wide = @import("wide.zig");
+const ordered = @import("ordered_projection.zig");
 
 /// The route's shape (config.zig refuses other checkpoints).
 pub const route_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 288, .topk = 8 };
@@ -102,6 +103,7 @@ pub const Kernels = struct {
     absorb_nax_tp: mtl.Pipeline,
     mm_bf16: affine_mm.Pipes, // prompt chunks' 4-bit g64 matmuls on the tensor units (core/affine_mm.zig): dense, gathers
     mm_f32: affine_mm.Pipes, // and with fp32 out: expert parallel by rows' down partials
+    ordered: ?ordered.Pipelines = null,
     wide: ?wide.Pipes = null, // the products at other widths (wide.zig), for a checkpoint that has one
 
     pub fn deinit(k: *Kernels) void {
@@ -109,8 +111,22 @@ pub const Kernels = struct {
         inline for (info.field_names, info.field_types) |name, T| {
             if (T == mtl.Pipeline) @field(k, name).deinit() else if (T == ?wide.Pipes) {
                 if (k.wide) |*w| w.deinit();
+            } else if (T == ?ordered.Pipelines) {
+                if (k.ordered) |*p| p.deinit();
             } else if (T != u64) for (&@field(k, name)) |*p| p.deinit();
         }
+    }
+
+    /// Single-rank pre-M5 arithmetic also changes the identity of saved learned states.
+    pub fn order(k: *Kernels, gpa: std.mem.Allocator, device: mtl.Device) !void {
+        if (k.kda_prep.maxThreads() < 128 or k.kda_scan.maxThreads() < 512 or k.kda_post.maxThreads() < 32)
+            return error.UnsupportedOrderedKdaThreads;
+        try k.widen(gpa, device);
+        var p = try ordered.Pipelines.load(device);
+        errdefer p.deinit();
+        try p.warm();
+        k.ordered = p;
+        k.source_hash ^= std.hash.Wyhash.hash(0, sources.core_simd_qmm_bits ++ "glm-ordered-v1");
     }
 
     /// The other widths' pipelines, once: their sources join the hash a learned state's identity reads.
@@ -220,6 +236,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
     k.wide = null;
+    k.ordered = null;
     var jobs: [generated.len + 23]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
