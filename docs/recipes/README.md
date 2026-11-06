@@ -37,7 +37,8 @@ The native release includes CUDA kernels for sm_80, sm_86, sm_120 and sm_121. Th
 per-card model qualification. Nemotron MLX 4-bit has been checked on GB10, RTX 3090 and RTX PRO 6000.
 The A100 (sm_80) has [kernel-check evidence](../../CHANGELOG.md#1012) from #846, but no served checkpoint on record;
 it is not model-qualified. See [qualified models](../../README.md#qualified-models) for the measured scope.
-`tensorfold info REPO` prints a checkpoint's memory floor: its weights plus a 2 GiB runtime margin.
+`tensorfold info REPO` prints a checkpoint's memory floor: its weights plus a 2 GiB runtime margin. On macOS, a
+Flash Next (`qwen4_exp`) checkpoint instead prints its startup and cold pack budgets.
 
 | Engine | Floor |
 | --- | --- |
