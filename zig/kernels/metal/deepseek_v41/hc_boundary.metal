@@ -2,10 +2,12 @@
 // (inference/model.py, revision 314113f8) define the contract: one projection of the flattened hc
 // stream yields the pre/post/comb coefficient sets, comb is made doubly stochastic by Sinkhorn,
 // pre collapses the copies to one sublayer input, and post expands the sublayer output back out
-// with the residual mixed through comb. This file is the lane's launch split for that
-// contract: a threadgroup owns a 1024-column slice of one row, 1024 threads a row and five columns
-// a thread; the mixes' partial sums are reduced in two stages and the boundary pass carries the
-// lagged collapse that the next block consumes.
+// with the residual mixed through comb.
+//
+// Status: the launch split below (a threadgroup a 1024-column slice, 1024 threads a row, five
+// columns a thread; the two-stage mix reduction and the lagged collapse) follows BobClawblaw/
+// TensorFold's deepseek-v41-main commit 72a552ed (Apache-2.0). It is not yet re-expressed from the
+// release and is not claimed as rewritten; it belongs with the separate affine_mm PR.
 #include <metal_stdlib>
 using namespace metal;
 
