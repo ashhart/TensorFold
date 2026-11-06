@@ -36,6 +36,8 @@ test "environment: every strict reader refuses bad text before opening a model, 
 
 const Case = struct { name: []const u8, raw: []const u8, n: u64 };
 const valid = [_]Case{
+    .{ .name = "TF_Q27_METAL4", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_METAL4", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_FLAT_GLUE", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_FLAT_GLUE", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_QK", .raw = "0", .n = 0 },
