@@ -146,8 +146,9 @@ These were measured on our machines. They aren't a promise for yours.
   2.2% of each other on our Macs. A follow-up turn that adds about 280 tokens to a 7-10k-token conversation got its
   first token in 0.187-0.202 s.
 - The first prompt of a new size compiles some kernels. A 9.9k-token prompt took 3.6 s the first time and 1.3 s after.
-- A drafted request right after a `"draft": false` one decodes slower: on our Macs, 103 against 169 tokens a second on
-  a short story, and the next request is back to speed.
+- A drafted request right after a `"draft": false` one decoded slower in speed-up mode: on two M5 Ultras, 103 against
+  169 tokens a second on a short story, and the next request was back to speed. On one Mac this no longer happens
+  ([#2237](https://github.com/ashhart/TensorFold/pull/2237)); we haven't rerun it on a pair since.
 - When you stop rank 0, stop rank 1 too. It stops following but keeps running, and keeps a CPU core busy, until you end
   it. If a request fails partway or the link drops, restart both servers.
 - Flash Next 6-bit only. We have run speed-up mode only on two M5 Ultras.
