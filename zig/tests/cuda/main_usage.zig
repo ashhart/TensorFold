@@ -198,4 +198,5 @@ pub const usage =
     \\  glm-fp8g-shares          block-FP8 TP shares packed as GLM's loader packs them, on the lane, against FP64 of the cut
     \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
     \\
+    \\  ricursive-contract        Ripple's glue, attention prep and attention (group 10) through gates 1-4, controls red
 ;
