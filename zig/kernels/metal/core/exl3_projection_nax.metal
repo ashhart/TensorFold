@@ -173,6 +173,72 @@ inline uint tf_exl3_map_for(uint p, uint halves) {
   return wi | (off << 6) | (next << 11);
 }
 
+// A routed prompt tile's decode job. The release groups a prompt's rows into expert blocks (inference/model.py,
+// revision 314113f8); a tile is one block's row window and one column window, and its weights are the resident pack
+// slice the route names. The trellis strides, width and codebook are our EXL3 pack's own layout.
+struct TfExl3DigJob {
+  const device uchar* trellis;
+  ulong tile_k_stride, tile_n_stride;
+  uint halves, codebook;
+  uint row_block, col_block, tile_rows;
+  uint rows_here, cols_here;
+};
+
+template <uint CG>
+inline TfExl3DigJob tf_exl3_dig_job(const device uchar* trellis, constant TfExl3Args& a,
+                                    const device uint* routes, const device TfExl3Expert* descriptors,
+                                    uint row_block, uint col_block, uint tile_rows) {
+  const uint expert = a.indexed ? routes[row_block] : a.expert_id;
+  const uint didx = a.indexed ? expert : 0;
+  TfExl3DigJob job;
+  job.trellis = a.indexed ? descriptors[didx].trellis : trellis;
+  job.tile_k_stride = a.indexed ? descriptors[didx].tile_k_stride : a.tile_k_stride;
+  job.tile_n_stride = a.indexed ? descriptors[didx].tile_n_stride : a.tile_n_stride;
+  job.halves = a.indexed ? descriptors[didx].halves : a.halves;
+  job.codebook = a.indexed ? descriptors[didx].codebook : a.codebook;
+  job.row_block = row_block;
+  job.col_block = col_block;
+  job.tile_rows = tile_rows;
+  job.rows_here = min(tile_rows, a.rows - row_block);
+  job.cols_here = min(64u * CG, a.n - col_block);
+  return job;
+}
+
+// The lane's window walk over one pack tile: the stream is a ring of 128*halves sixteen-bit states, and a lane owns
+// `States` consecutive states from p0. State k starts halves/2 bits after state k-1 and wraps at the ring. `at[k]` is
+// the threadgroup slot that state's weight lands in; `off`, `sh` and `rel` are the general read's cursor: the bit
+// offset in the state's first word, the shift that brings the second word down, and the word's distance from the
+// lane's first word. The arithmetic is fixed by the pack format; the walk is our own cursor.
+struct TfExl3DigWindows {
+  uint at[8], off[8], sh[8], rel[8];
+  uint first_word, first_bit, words;
+};
+
+template <uint States, uint CG>
+inline TfExl3DigWindows tf_exl3_dig_windows(uint p0, uint halves, uint hg, uint h, bool cursor) {
+  TfExl3DigWindows walk;
+  walk.words = 4u * halves;
+  const uint map = tf_exl3_map_for(p0, halves);
+  walk.first_word = map & 63u;
+  walk.first_bit = (map >> 6) & 31u;
+  const uint ring = 128u * halves;
+  const uint origin = (walk.first_word << 5) | walk.first_bit;
+  TF_UNROLL
+  for (uint k = 0; k < States; ++k) {
+    const uint p = p0 + k, l = p / 8, e = p % 8;
+    walk.at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * (64u * CG) + hg + h * 16u + (l / 4 + 8 * (e >> 2));
+    if (cursor) {
+      uint c8 = origin + k * (halves >> 1);
+      if (c8 >= ring) c8 -= ring;
+      const uint wi = c8 >> 5;
+      walk.off[k] = c8 & 31u;
+      walk.sh[k] = (32u - walk.off[k]) & 31u;
+      walk.rel[k] = wi >= walk.first_word ? wi - walk.first_word : wi + walk.words - walk.first_word;
+    }
+  }
+  return walk;
+}
+
 // One state block's four stream words from the next 16-row tile, with the ring's wrap folded in once.
 inline uint tf_exl3_block_word(const device uchar* data, ulong ks, ulong ns, uint kb, uint nb, uint hg, uint h,
                                uint wi, uint words) {
@@ -329,15 +395,8 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   if (a.indexed == 1 || rb >= a.rows) return;
   const uint tile_expert = a.indexed ? routes[rb] : a.expert_id;
   if (a.indexed && tile_expert >= a.experts) return;
-  const uint didx = a.indexed ? tile_expert : 0;
-  const device uchar* data = a.indexed ? descriptors[didx].trellis : trellis;
-  const ulong ks = a.indexed ? descriptors[didx].tile_k_stride : a.tile_k_stride;
-  const ulong ns = a.indexed ? descriptors[didx].tile_n_stride : a.tile_n_stride;
-  const uint halves = a.indexed ? descriptors[didx].halves : a.halves;
-  const uint codebook = a.indexed ? descriptors[didx].codebook : a.codebook;
+  const TfExl3DigJob job = tf_exl3_dig_job<CG>(trellis, a, routes, descriptors, rb, nb, trows);
   const short2 home = frag_home(ushort(lane));
-  const uint rows_here = min(trows, a.rows - rb);
-  const uint cols_here = min(64u * CG, a.n - nb);
   // Four warps decode a sixty-four-column group; a threadgroup with more warps a group than that splits the sixteen
   // states of each lane between them instead of leaving those warps to wait at the barrier. The warps decoding one
   // sixteen-column block. With Rpg row groups a warp (the wide form's thirty-two-row simdgroup) the block is decoded
@@ -349,35 +408,18 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   const uint h = group % 4u, hg = (group / 4u) * 64u;
   const uint p0 = (wg * 32u + tid % 32u) * states;
   const bool decodes = group < 4u * CG and nb + hg + h * 16u < a.n;
-  uint at[8], off[8], sh[8], rel[8];
-  const uint words = 4 * halves;
-  const uint wi0 = tf_exl3_map_for(p0, halves) & 63u;
-  const uint b0 = (tf_exl3_map_for(p0, halves) >> 6) & 31u;
-  if (Fast) {
-    const uint ring = 128 * halves;
-    const uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, halves) >> 6) & 31u);
-    TF_UNROLL
-    for (uint k = 0; k < states; ++k) {
-      const uint p = p0 + k, l = p / 8, e = p % 8;
-      at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * (64u * CG) + hg + h * 16u + (l / 4 + 8 * (e >> 2));
-      uint c8 = cur + k * (halves >> 1);
-      if (c8 >= ring) c8 -= ring;
-      const uint wi = c8 >> 5;
-      // With F6 the funnel path is the only one, and the cursor arrays the Fast path needs are dead there -- but they
-      // are live registers across the whole k loop, so they are not computed at all.
-      if (!F6) {
-        off[k] = c8 & 31u;
-        sh[k] = (32u - off[k]) & 31u;
-        rel[k] = wi >= wi0 ? wi - wi0 : wi + words - wi0;
-      }
-    }
-  }
+  const uint words = 4 * job.halves;
+  const uint wi0 = tf_exl3_map_for(p0, job.halves) & 63u;
+  // The Fast path's cursor is the shared walk; with F6 the funnel path is the only one, and the cursor arrays it
+  // does not read stay uncomputed, because they would be live registers across the whole k loop.
+  TfExl3DigWindows walk;
+  if (Fast) walk = tf_exl3_dig_windows<states, CG>(p0, job.halves, hg, h, !F6);
   // This SIMDgroup's row groups (Rpg of them) and its column group.
   const uint sgr = Rpg * (sg % (RG / Rpg)), sgc = sg / (RG / Rpg);
   // The routed tile's padded rows need no multiply. Each expert's block is padded to sixty-four rows (the padding
   // rows carry the sentinel expert id), and a warp owns sixteen rows of the tile, so a warp reads its own sixteen
   // route ids and skips the multiply when they are all padding. The decode stays: the other warps read the whole
-  // sixty-four-column tile. The real rows' values, their order and the k order are the shipped body's, so the reply
+  // sixty-four-column tile. The real rows' values, their order and the k order are our own single-buffer body's, so the reply
   // is bit-identical. The skip is per sixteen-row group, so a warp that owns two groups (the shape) still multiplies
   // the real one. The mask keeps the per-group answer in a scalar (no local memory).
   uint real_mask = (1u << Rpg) - 1u;
@@ -412,12 +454,12 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   // shuffle, so the warp reads the block's ninety-six bytes once instead of 2.67 times over.
   uint mine = 0, wi1s = 0;
   if (Funnel and Coop and decodes) {
-    const device ushort* tile0 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16 + hg / 16u + h) * ns);
+    const device ushort* tile0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
     mine = (lane < words) ? tf_exl3_word_t<W>(tile0, lane) : 0u;
     wi1s = (wi0 + 1u < words) ? wi0 + 1u : wi0 + 1u - words;
   }
   if (Fast and decodes) {
-    const device ushort* tile0 = reinterpret_cast<const device ushort*>(data + ulong(nb / 16 + hg / 16u + h) * ns);
+    const device ushort* tile0 = reinterpret_cast<const device ushort*>(job.trellis + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
     uint a1 = wi0 + 1; if (a1 >= words) a1 -= words;
     uint a2 = wi0 + 2; if (a2 >= words) a2 -= words;
     uint a3 = wi0 + 3; if (a3 >= words) a3 -= words;
@@ -427,13 +469,13 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
     p3v = tf_exl3_word_t<W>(tile0, a3);
   }
   for (uint kb = 0; kb < a.k; kb += 16) {
-    // One thread owns 8 consecutive states of one 16x16 tile. The bit cursor advances by `halves` a state, so it
+    // One thread owns 8 consecutive states of one 16x16 tile. The bit cursor advances by `job.halves` a state, so it
     // rolls forward with one add and one conditional subtract instead of recomputing the map formula.
     if (decodes) {
       {
         const device ushort* tile = reinterpret_cast<const device ushort*>(
-            data + ulong(kb / 16) * ks + ulong(nb / 16 + hg / 16u + h) * ns);
-        if (Funnel and (F6 or halves == 6) and (states == 8 or states == 4)) {
+            job.trellis + ulong(kb / 16) * job.tile_k_stride + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
+        if (Funnel and (F6 or job.halves == 6) and (states == 8 or states == 4)) {
           // Two words a lane: the funnel holds the lane's eight windows (three bits apart), so the state's window is
           // one shift and one mask from the funnel, with no cursor and no select chain.
           const uint nkb = kb + 16;
@@ -443,33 +485,33 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
             const uint w1 = simd_shuffle(mine, wi1s);
             if (nkb < a.k) {
               const device ushort* tile_n = reinterpret_cast<const device ushort*>(
-                  data + ulong(nkb / 16) * ks + ulong(nb / 16 + hg / 16u + h) * ns);
+                  job.trellis + ulong(nkb / 16) * job.tile_k_stride + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
               mine = (lane < words) ? tf_exl3_word_t<W>(tile_n, lane) : 0u;
             }
-            if (Cheap) tf_exl3_decode_funnel_cheap(wx, at, b0, halves >> 1, w0, w1);
-            else if (Funnel32) tf_exl3_decode_funnel32<states, NoValue>(wx, table, lut, codebook, at, b0, w0, w1);
-            else tf_exl3_decode_funnel<states, NoValue>(wx, table, lut, codebook, at, b0, halves >> 1, w0, w1);
+            if (Cheap) tf_exl3_decode_funnel_cheap(wx, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
+            else if (Funnel32) tf_exl3_decode_funnel32<states, NoValue>(wx, table, lut, job.codebook, walk.at, walk.first_bit, w0, w1);
+            else tf_exl3_decode_funnel<states, NoValue>(wx, table, lut, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
           } else {
           const uint w0 = p0v, w1 = p1v;
           if (nkb < a.k) {
             const device ushort* tile_n = reinterpret_cast<const device ushort*>(
-                data + ulong(nkb / 16) * ks + ulong(nb / 16 + hg / 16u + h) * ns);
+                job.trellis + ulong(nkb / 16) * job.tile_k_stride + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
             p0v = tf_exl3_word_t<W>(tile_n, wi0);
             p1v = tf_exl3_word_t<W>(tile_n, wi0 + 1 < words ? wi0 + 1 : wi0 + 1 - words);
           }
           if (Store != 0) {
-            sacc = tf_exl3_decode_funnel_store<states, Store>(wx, table, lut, codebook, at, b0, halves >> 1, w0, w1, sacc, kb, tid);
-          } else if (Cheap) tf_exl3_decode_funnel_cheap(wx, at, b0, halves >> 1, w0, w1);
-          else if (Funnel32) tf_exl3_decode_funnel32<states, NoValue>(wx, table, lut, codebook, at, b0, w0, w1);
-          else tf_exl3_decode_funnel<states, NoValue>(wx, table, lut, codebook, at, b0, halves >> 1, w0, w1);
+            sacc = tf_exl3_decode_funnel_store<states, Store>(wx, table, lut, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1, sacc, kb, tid);
+          } else if (Cheap) tf_exl3_decode_funnel_cheap(wx, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
+          else if (Funnel32) tf_exl3_decode_funnel32<states, NoValue>(wx, table, lut, job.codebook, walk.at, walk.first_bit, w0, w1);
+          else tf_exl3_decode_funnel<states, NoValue>(wx, table, lut, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
           }
-        } else if (Fast and (halves & 1u) == 0 and halves <= 16) {
+        } else if (Fast and (job.halves & 1u) == 0 and job.halves <= 16) {
           // Eight states span seven steps, so at 8 bits a value their cursors reach three words past the first.
           const uint w0 = p0v, w1 = p1v, w2 = p2v, w3 = p3v;
           const uint nkb = kb + 16;
           if (nkb < a.k) {
             const device ushort* tile_n = reinterpret_cast<const device ushort*>(
-                data + ulong(nkb / 16) * ks + ulong(nb / 16 + hg / 16u + h) * ns);
+                job.trellis + ulong(nkb / 16) * job.tile_k_stride + ulong(nb / 16 + hg / 16u + h) * job.tile_n_stride);
             p0v = tf_exl3_word(tile_n, wi0);
             p1v = tf_exl3_word(tile_n, wi0 + 1 < words ? wi0 + 1 : wi0 + 1 - words);
             p2v = tf_exl3_word(tile_n, wi0 + 2 < words ? wi0 + 2 : wi0 + 2 - words);
@@ -477,14 +519,14 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
           }
           TF_UNROLL
           for (uint k = 0; k < states; ++k) {
-            const uint lo = rel[k] == 0 ? w0 : rel[k] == 1 ? w1 : w2;
-            const uint hi = rel[k] == 0 ? w1 : rel[k] == 1 ? w2 : w3;
-            const uint carry = (hi >> sh[k]) & (0u - uint(off[k] != 0));
-            wx[at[k]] = NoValue ? half(ushort(((lo << off[k]) | carry) >> 16))
-                                : tf_exl3_pick(table, lut, ushort(((lo << off[k]) | carry) >> 16), codebook);
+            const uint lo = walk.rel[k] == 0 ? w0 : walk.rel[k] == 1 ? w1 : w2;
+            const uint hi = walk.rel[k] == 0 ? w1 : walk.rel[k] == 1 ? w2 : w3;
+            const uint carry = (hi >> walk.sh[k]) & (0u - uint(walk.off[k] != 0));
+            wx[walk.at[k]] = NoValue ? half(ushort(((lo << walk.off[k]) | carry) >> 16))
+                                : tf_exl3_pick(table, lut, ushort(((lo << walk.off[k]) | carry) >> 16), job.codebook);
           }
-        } else if (halves <= 16 and (halves & 1u) == 0 and states == 8) {
-          const uint ring = 128 * halves;
+        } else if (job.halves <= 16 and (job.halves & 1u) == 0 and states == 8) {
+          const uint ring = 128 * job.halves;
           uint at1 = wi0 + 1; if (at1 >= words) at1 -= words;
           uint at2 = wi0 + 2; if (at2 >= words) at2 -= words;
           uint at3 = wi0 + 3; if (at3 >= words) at3 -= words;
@@ -492,11 +534,11 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
           const uint w0 = tf_exl3_word_t<W>(tile, wi0);
           const uint w1 = tf_exl3_word_t<W>(tile, at1), w2 = tf_exl3_word_t<W>(tile, at2);
           const uint w3 = tf_exl3_word_t<W>(tile, at3), w4 = tf_exl3_word_t<W>(tile, at4);
-          uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, halves) >> 6) & 31u);
+          uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, job.halves) >> 6) & 31u);
           TF_UNROLL
           for (uint k = 0; k < 8; ++k) {
             // Each state's cursor comes from the block's origin: the eight decodes are independent.
-            uint c8 = cur + k * (halves >> 1);
+            uint c8 = cur + k * (job.halves >> 1);
             if (c8 >= ring) c8 -= ring;
             const uint wi = c8 >> 5, off = c8 & 31u;
             const uint rel = wi >= wi0 ? wi - wi0 : wi + words - wi0;
@@ -506,7 +548,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
             const uint p = p0 + k, l = p / 8, e = p % 8;
             const uint r = 2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u);
             const uint c = l / 4 + 8 * (e >> 2);
-            wx[r * (64u * CG) + hg + h * 16 + c] = tf_exl3_pick(table, lut, ushort(((lo << off) | carry) >> 16), codebook);
+            wx[r * (64u * CG) + hg + h * 16 + c] = tf_exl3_pick(table, lut, ushort(((lo << off) | carry) >> 16), job.codebook);
           }
         } else {
           TF_UNROLL
@@ -515,7 +557,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
             const uint l = p / 8, e = p % 8;
             const uint r = 2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u);
             const uint c = l / 4 + 8 * (e >> 2);
-            wx[r * (64u * CG) + hg + h * 16 + c] = tf_exl3_pick(table, lut, tf_exl3_mapped_state(tile, tf_exl3_map_for(p, halves)), codebook);
+            wx[r * (64u * CG) + hg + h * 16 + c] = tf_exl3_pick(table, lut, tf_exl3_mapped_state(tile, tf_exl3_map_for(p, job.halves)), job.codebook);
           }
         }
       }
@@ -533,7 +575,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
       if (any_live) {
         TF_UNROLL
         for (uint r = 0; r < Rpg; ++r) {
-          if (group_live[r]) tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), 0, home, int(rb + rows_here));
+          if (group_live[r]) tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), 0, home, int(rb + job.rows_here));
         }
       }
     }
@@ -541,7 +583,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
       // The staging: the column group's first warp reads its row group's activation from the device once and writes
       // it into the tile's staging area (the tile's rows, the block's sixteen k columns). The other column group's
       // warps read it back from there AFTER the barrier that publishes it, so the device read happens once a row
-      // group, not once a column group. The values, their order and the k order are the shipped body's.
+      // group, not once a column group. The values, their order and the k order are the single-buffer body's.
       if (sgc == 0 and any_live) {
         TF_UNROLL
         for (uint r = 0; r < Rpg; ++r) {
@@ -551,8 +593,8 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
             const int c0 = int(kb) + int(home.x);
             half4 v0 = half4(0.0h, 0.0h, 0.0h, 0.0h);
             half4 v1 = half4(0.0h, 0.0h, 0.0h, 0.0h);
-            if (r0 < int(rb + rows_here)) v0 = *(const device half4*)(x + r0 * int(a.k) + c0);
-            if (r1 < int(rb + rows_here)) v1 = *(const device half4*)(x + r1 * int(a.k) + c0);
+            if (r0 < int(rb + job.rows_here)) v0 = *(const device half4*)(x + r0 * int(a.k) + c0);
+            if (r1 < int(rb + job.rows_here)) v1 = *(const device half4*)(x + r1 * int(a.k) + c0);
             *(threadgroup half4*)(ax + int((sgr + r) * 16 + uint(home.y)) * 16 + int(home.x)) = v0;
             *(threadgroup half4*)(ax + int((sgr + r) * 16 + uint(home.y) + 8u) * 16 + int(home.x)) = v1;
           }
@@ -563,7 +605,7 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
       if (any_live) {
         TF_UNROLL
         for (uint r = 0; r < Rpg; ++r) {
-          if (group_live[r]) tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), int(kb), home, int(rb + rows_here));
+          if (group_live[r]) tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), int(kb), home, int(rb + job.rows_here));
         }
       }
     }
@@ -602,16 +644,16 @@ inline void tf_exl3_prefill_body(threadgroup half* wx, const device half* x, con
   const int r0 = int(rb + sgr * 16);
   const int c0 = int(nb + sgc * 64u);
   // `sums` is the whole [rows, n] buffer and frag_put_in indexes it absolutely (rr, cc), so the bounds must be
-  // absolute too: the last live row is rb + rows_here and the last live column is nb + cols_here. The relative counts
-  // (rows_here - sg*16, cols_here) left every row past 32 and every column past 16 unwritten, which is what made this
+  // absolute too: the last live row is rb + job.rows_here and the last live column is nb + job.cols_here. The relative counts
+  // (job.rows_here - sg*16, job.cols_here) left every row past 32 and every column past 16 unwritten, which is what made this
   // kernel's answers wrong.
   TF_UNROLL
   for (uint r = 0; r < Rpg; ++r) {
     if (group_live[r]) {
-      frag_put_in(lo0[r], sums, int(a.n), r0 + int(r * 16), c0, home, int(rb + rows_here), int(nb + cols_here));
-      frag_put_in(hi0[r], sums, int(a.n), r0 + int(r * 16), c0 + 16, home, int(rb + rows_here), int(nb + cols_here));
-      frag_put_in(lo1[r], sums, int(a.n), r0 + int(r * 16), c0 + 32, home, int(rb + rows_here), int(nb + cols_here));
-      frag_put_in(hi1[r], sums, int(a.n), r0 + int(r * 16), c0 + 48, home, int(rb + rows_here), int(nb + cols_here));
+      frag_put_in(lo0[r], sums, int(a.n), r0 + int(r * 16), c0, home, int(rb + job.rows_here), int(nb + job.cols_here));
+      frag_put_in(hi0[r], sums, int(a.n), r0 + int(r * 16), c0 + 16, home, int(rb + job.rows_here), int(nb + job.cols_here));
+      frag_put_in(lo1[r], sums, int(a.n), r0 + int(r * 16), c0 + 32, home, int(rb + job.rows_here), int(nb + job.cols_here));
+      frag_put_in(hi1[r], sums, int(a.n), r0 + int(r * 16), c0 + 48, home, int(rb + job.rows_here), int(nb + job.cols_here));
     }
   }
 }
@@ -747,17 +789,10 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
   if (a.indexed == 1 || rb >= a.rows) return;
   const uint tile_expert = a.indexed ? routes[rb] : a.expert_id;
   if (a.indexed && tile_expert >= a.experts) return;
-  const uint didx = a.indexed ? tile_expert : 0;
-  const device uchar* data = a.indexed ? descriptors[didx].trellis : trellis;
-  const ulong ks = a.indexed ? descriptors[didx].tile_k_stride : a.tile_k_stride;
-  const ulong ns = a.indexed ? descriptors[didx].tile_n_stride : a.tile_n_stride;
-  const uint halves = a.indexed ? descriptors[didx].halves : a.halves;
-  const uint codebook = a.indexed ? descriptors[didx].codebook : a.codebook;
+  const TfExl3DigJob job = tf_exl3_dig_job<CG>(trellis, a, routes, descriptors, rb, nb, trows);
   const short2 home = frag_home(ushort(lane));
-  const uint rows_here = min(trows, a.rows - rb);
-  const uint cols_here = min(64u * CG, a.n - nb);
-  // With Rpg row groups a SIMDgroup (the shape: a simdgroup owns thirty-two rows), the warps decoding one column
-  // group are RG / (4 * Rpg) and a lane owns 8 / that many states. Rpg = 1 is the shipped body, bit for bit.
+  // With Rpg row groups a SIMDgroup (a SIMDgroup owns thirty-two rows in the wide tile), the warps decoding one column
+  // group are RG / (4 * Rpg) and a lane owns 8 / that many states. Rpg = 1 is the single-row-group tile, bit for bit.
   constexpr uint wpg = RG / (4u * Rpg);
   constexpr uint states = 8u / wpg;
   const uint gwarp = tid / 32u, group = gwarp / wpg, wg = gwarp % wpg;
@@ -766,31 +801,15 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
   const bool decodes = group < 4u * CG and nb + hg + h * 16u < a.n;
   // The funnel is admissible where the lane's run fits two 32-bit words: halves = 6 (stride 3) with four or eight
   // states, and halves = 8 (stride 4) with four states. Everything else keeps the cursor path.
-  const bool use_funnel = Funnel and ((halves == 6u and (states == 8u or states == 4u)) or
-                                      (halves == 8u and states == 4u));
-  if ((halves & 1u) != 0 or halves > 16) {
+  const bool use_funnel = Funnel and ((job.halves == 6u and (states == 8u or states == 4u)) or
+                                      (job.halves == 8u and states == 4u));
+  if ((job.halves & 1u) != 0 or job.halves > 16) {
     tf_exl3_prefill_body<true, RG, CG, UseTable, false, false, false, false, false, false, Rpg>(wx, x, trellis, sums, a, routes, descriptors, table, nullptr, lane, sg, tid, tptg, tg);
     return;
   }
-  uint at[8], off[8], sh[8], rel[8];
-  const uint words = 4 * halves;
-  const uint wi0 = tf_exl3_map_for(p0, halves) & 63u;
-  const uint b0 = (tf_exl3_map_for(p0, halves) >> 6) & 31u;
-  {
-    const uint ring = 128 * halves;
-    const uint cur = (wi0 << 5) | ((tf_exl3_map_for(p0, halves) >> 6) & 31u);
-    TF_UNROLL
-    for (uint k = 0; k < states; ++k) {
-      const uint p = p0 + k, l = p / 8, e = p % 8;
-      at[k] = (2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u)) * (64u * CG) + hg + h * 16u + (l / 4 + 8 * (e >> 2));
-      uint c8 = cur + k * (halves >> 1);
-      if (c8 >= ring) c8 -= ring;
-      const uint wi = c8 >> 5;
-      off[k] = c8 & 31u;
-      sh[k] = (32u - off[k]) & 31u;
-      rel[k] = wi >= wi0 ? wi - wi0 : wi + words - wi0;
-    }
-  }
+  const TfExl3DigWindows walk = tf_exl3_dig_windows<states, CG>(p0, job.halves, hg, h, true);
+  const uint words = walk.words;
+  const uint wi0 = walk.first_word;
   const uint sgr = Rpg * (sg % (RG / Rpg)), sgc = sg / (RG / Rpg);
   frag<float> lo0[Rpg], hi0[Rpg], lo1[Rpg], hi1[Rpg];
   TF_UNROLL
@@ -802,16 +821,16 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
   }
   // Prologue: block 0 into buffer 0, then one barrier before the first multiply.
   if (decodes) {
-    const uint w0 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0, words);
-    const uint w1 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 1, words);
+    const uint w0 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, 0, nb, hg, h, wi0, words);
+    const uint w1 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, 0, nb, hg, h, wi0 + 1, words);
     if (use_funnel) {
-      if (halves == 8u) tf_exl3_decode_funnel<states, false, 4>(wx, table, nullptr, codebook, at, b0, 4, w0, w1);
-      else tf_exl3_decode_funnel<states>(wx, table, nullptr, codebook, at, b0, halves >> 1, w0, w1);
+      if (job.halves == 8u) tf_exl3_decode_funnel<states, false, 4>(wx, table, nullptr, job.codebook, walk.at, walk.first_bit, 4, w0, w1);
+      else tf_exl3_decode_funnel<states>(wx, table, nullptr, job.codebook, walk.at, walk.first_bit, job.halves >> 1, w0, w1);
     } else {
-      const uint w2 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 2, words);
-      const uint w3 = tf_exl3_block_word(data, ks, ns, 0, nb, hg, h, wi0 + 3, words);
-      if (UseTable) tf_exl3_decode_table<states>(wx, table, codebook, at, off, sh, rel, w0, w1, w2, w3);
-      else tf_exl3_decode_fast<states>(wx, codebook, at, off, sh, rel, w0, w1, w2, w3);
+      const uint w2 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, 0, nb, hg, h, wi0 + 2, words);
+      const uint w3 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, 0, nb, hg, h, wi0 + 3, words);
+      if (UseTable) tf_exl3_decode_table<states>(wx, table, job.codebook, walk.at, walk.off, walk.sh, walk.rel, w0, w1, w2, w3);
+      else tf_exl3_decode_fast<states>(wx, job.codebook, walk.at, walk.off, walk.sh, walk.rel, w0, w1, w2, w3);
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -821,17 +840,17 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
     // Issue the next block's stream loads before the multiply, so their latency overlaps the tensor work.
     uint nw0 = 0, nw1 = 0, nw2 = 0, nw3 = 0;
     if (nkb < a.k and decodes and DoDecode) {
-      nw0 = tf_exl3_block_word(data, ks, ns, nkb, nb, hg, h, wi0, words);
-      nw1 = tf_exl3_block_word(data, ks, ns, nkb, nb, hg, h, wi0 + 1, words);
+      nw0 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, nkb, nb, hg, h, wi0, words);
+      nw1 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, nkb, nb, hg, h, wi0 + 1, words);
       if (!use_funnel) {
-        nw2 = tf_exl3_block_word(data, ks, ns, nkb, nb, hg, h, wi0 + 2, words);
-        nw3 = tf_exl3_block_word(data, ks, ns, nkb, nb, hg, h, wi0 + 3, words);
+        nw2 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, nkb, nb, hg, h, wi0 + 2, words);
+        nw3 = tf_exl3_block_word(job.trellis, job.tile_k_stride, job.tile_n_stride, nkb, nb, hg, h, wi0 + 3, words);
       }
     }
     frag<half> av[Rpg];
     TF_UNROLL
     for (uint r = 0; r < Rpg; ++r)
-      tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), int(kb), home, int(rb + rows_here));
+      tf_frag_get_dev4(av[r], (const device half*)x, int(a.k), int(rb + (sgr + r) * 16), int(kb), home, int(rb + job.rows_here));
     if (Mmas > 0) {
       threadgroup half* cur = wx + cur_buf * (16u * 64u * CG);
       frag<half> b0, b1;
@@ -850,10 +869,10 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
     if (nkb < a.k and decodes and DoDecode) {
       threadgroup half* nxt = wx + (cur_buf ^ 1u) * (16u * 64u * CG);
       if (use_funnel) {
-        if (halves == 8u) tf_exl3_decode_funnel<states, false, 4>(nxt, table, nullptr, codebook, at, b0, 4, nw0, nw1);
-        else tf_exl3_decode_funnel<states>(nxt, table, nullptr, codebook, at, b0, halves >> 1, nw0, nw1);
-      } else if (UseTable) tf_exl3_decode_table<states>(nxt, table, codebook, at, off, sh, rel, nw0, nw1, nw2, nw3);
-      else tf_exl3_decode_fast<states>(nxt, codebook, at, off, sh, rel, nw0, nw1, nw2, nw3);
+        if (job.halves == 8u) tf_exl3_decode_funnel<states, false, 4>(nxt, table, nullptr, job.codebook, walk.at, walk.first_bit, 4, nw0, nw1);
+        else tf_exl3_decode_funnel<states>(nxt, table, nullptr, job.codebook, walk.at, walk.first_bit, job.halves >> 1, nw0, nw1);
+      } else if (UseTable) tf_exl3_decode_table<states>(nxt, table, job.codebook, walk.at, walk.off, walk.sh, walk.rel, nw0, nw1, nw2, nw3);
+      else tf_exl3_decode_fast<states>(nxt, job.codebook, walk.at, walk.off, walk.sh, walk.rel, nw0, nw1, nw2, nw3);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (DoDecode) cur_buf ^= 1u;
@@ -862,16 +881,16 @@ inline void tf_exl3_prefill_body_db(threadgroup half* wx, const device half* x, 
   TF_UNROLL
   for (uint r = 0; r < Rpg; ++r) {
     const int r0 = int(rb + (sgr + r) * 16);
-    frag_put_in(lo0[r], sums, int(a.n), r0, c0, home, int(rb + rows_here), int(nb + cols_here));
-    frag_put_in(hi0[r], sums, int(a.n), r0, c0 + 16, home, int(rb + rows_here), int(nb + cols_here));
-    frag_put_in(lo1[r], sums, int(a.n), r0, c0 + 32, home, int(rb + rows_here), int(nb + cols_here));
-    frag_put_in(hi1[r], sums, int(a.n), r0, c0 + 48, home, int(rb + rows_here), int(nb + cols_here));
+    frag_put_in(lo0[r], sums, int(a.n), r0, c0, home, int(rb + job.rows_here), int(nb + job.cols_here));
+    frag_put_in(hi0[r], sums, int(a.n), r0, c0 + 16, home, int(rb + job.rows_here), int(nb + job.cols_here));
+    frag_put_in(lo1[r], sums, int(a.n), r0, c0 + 32, home, int(rb + job.rows_here), int(nb + job.cols_here));
+    frag_put_in(hi1[r], sums, int(a.n), r0, c0 + 48, home, int(rb + job.rows_here), int(nb + job.cols_here));
   }
   if (Mmas == 0 and tid < 256u) {
     // Keep every decoded store live: read the states this thread wrote, not just the first.
     float acc = 0;
     TF_UNROLL
-    for (uint k = 0; k < states; ++k) acc += float(wx[cur_buf * (16u * 64u * CG) + at[k]]);
+    for (uint k = 0; k < states; ++k) acc += float(wx[cur_buf * (16u * 64u * CG) + walk.at[k]]);
     sums[tid] = acc;
   }
 }
