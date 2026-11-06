@@ -75,6 +75,7 @@ def compare(ref: np.ndarray, eng: np.ndarray, ids: list[int], top: int, chunk: i
     ref_lp = np.zeros((rows, 3))
     eng_lp = np.zeros((rows, 3))
     finite = np.ones(rows, dtype=bool)
+    lead = np.zeros(rows)  # the reference's logprob lead of its top-1 over the engine's top-1 (0 where they agree)
     for lo in range(0, rows, chunk):
         hi = min(rows, lo + chunk)
         r, e = bf16_to_f32(np.asarray(ref[lo:hi])), bf16_to_f32(np.asarray(eng[lo:hi]))
@@ -86,6 +87,8 @@ def compare(ref: np.ndarray, eng: np.ndarray, ids: list[int], top: int, chunk: i
         ref_lp[lo:hi] = np.take_along_axis(lp, ref_top[lo:hi], -1)
         eng_lp[lo:hi] = np.take_along_axis(lq, eng_top[lo:hi], -1)
         agree[lo:hi] = ref_top[lo:hi, 0] == eng_top[lo:hi, 0]
+        at = np.arange(hi - lo)
+        lead[lo:hi] = lp[at, ref_top[lo:hi, 0]] - lp[at, eng_top[lo:hi, 0]]
     worst = []
     for r in np.argsort(-np.nan_to_num(kl, nan=np.inf), kind="stable")[:top]:
         worst.append({
@@ -106,6 +109,7 @@ def compare(ref: np.ndarray, eng: np.ndarray, ids: list[int], top: int, chunk: i
         "top1_agreement": float(agree.mean()),
         "top1_misses": int((~agree).sum()),
         "nonfinite_rows": int((~finite).sum()),
+        "miss_leads": sorted(round(float(m), 4) for m in lead[~agree]),
         "worst": worst,
     }
 
@@ -134,6 +138,10 @@ def run_kl(a: argparse.Namespace) -> int:
         eng3 = " ".join(f"{t}:{p}" for t, p in w["engine"])
         print(f"  row {w['row']}, next {w['next_token']}, KL {w['kl']:.4f}, reference [{ref3}], engine [{eng3}], "
               f"margin {w['reference_margin']}{'' if w['same_top1'] else ', TOP-1 DIFFERS'}")
+    leads = np.array(rep["miss_leads"])
+    if leads.size:  # a miss where the reference itself barely prefers its pick is a near tie, not an error
+        print(f"top-1 misses by the reference's lead of its pick over the engine's: {int((leads < 0.1).sum())} under "
+              f"0.1, {int((leads < 0.5).sum())} under 0.5, the largest {leads.max():.4f} (nats)")
     if a.out:
         Path(a.out).write_text(json.dumps(rep, indent=1))
     bad = rep["nonfinite_rows"] > 0 or not rep["kl_mean"] == rep["kl_mean"]
