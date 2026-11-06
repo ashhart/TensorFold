@@ -10,7 +10,7 @@ const ref = @import("dsv41_hc_ref.zig");
 const c = contract.spec;
 const g = contract.gates;
 const fu = tf.dsv41_metal.fused;
-const gl = tf.dsv41_metal.glue_tmp;
+const gl = tf.dsv41_metal.glue_rows;
 const base = "dsv41 fused ";
 const mult = ref.mult;
 
@@ -108,7 +108,7 @@ pub const Proj = struct {
             .name = name,
             .pipes = try sharedPipes(a, device, ctl),
         };
-        if (ctl == 0) p.glue = try gl.Pipelines.load(device, sources.dsv41.glue_tmp);
+        if (ctl == 0) p.glue = try gl.Pipelines.load(device, sources.dsv41.glue_rows);
         return p;
     }
 

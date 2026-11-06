@@ -1,4 +1,4 @@
-//! Launches the layer encoders share, over the registered kernels (the phase-1 glue's bits).
+//! Launches the layer encoders share, over the registered kernels (the row glue's bits).
 const mtl = @import("metal");
 const ctx_ = @import("ctx.zig");
 const pipelines = @import("pipelines.zig");

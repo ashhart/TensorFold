@@ -78,10 +78,6 @@ pub fn main(init: std.process.Init) !void {
         try mxDenseBench(device, queue, gpa);
         return;
     }
-    if (std.c.getenv("TF_BENCH_MMA16") != null) {
-        try bf16xBench(device, queue, gpa);
-        return;
-    }
     var options = mtl.CompileOptions.mlx();
     options.math_functions = .precise;
     var gemm_src: ?[]const u8 = null;
@@ -5515,86 +5511,6 @@ const MxShape = struct { name: []const u8, m: u32, k: u32, n: u32 };
 // ROUND-519: the same e4m3 x e8m0/32 body with bfloat16 MMA operands and fp32 accumulation (the fp8_mma arm's
 // fp32 simdgroup matrices are the rate question). Synthetic weights; no pack and no serve.
 const Bf16xArgs = extern struct { K: u32, N: u32, R: u32 };
-const bf16x_src = @embedFile("r519_bf16_mma.metal");
-
-fn bf16xEncode(e: mtl.ComputeEncoder, pipe: mtl.Pipeline, x: mtl.Buffer, w: mtl.Buffer, s: mtl.Buffer, y: mtl.Buffer, k: u32, n: u32, rows: u32) !void {
-    e.setPipeline(pipe);
-    e.setBuffer(x, 0, 0);
-    e.setBuffer(w, 0, 1);
-    e.setBuffer(s, 0, 2);
-    e.setBuffer(y, 0, 3);
-    e.setValue(Bf16xArgs{ .K = k, .N = n, .R = rows }, 4);
-    e.dispatchGroups(mtl.Size.of(n / 32, (rows + 31) / 32, 1), mtl.Size.of(128, 1, 1));
-}
-
-fn bf16xBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void {
-    const fp8 = tf.dsv41_metal.fp8_mma;
-    const shapes = [_]MxShape{
-        .{ .name = "wq_b", .m = 3619, .k = 1280, .n = 32768 },
-        .{ .name = "wo_a", .m = 3619, .k = 32768, .n = 1024 },
-        .{ .name = "square", .m = 3619, .k = 5120, .n = 5120 },
-    };
-    std.debug.print("ROUND-519 e4m3 x e8m0/32: fp32 MMA against bfloat16 MMA (fp32 accum), synthetic\n", .{});
-    std.debug.print("  {s:>8} {s:>3} {s:>9} {s:>9} {s:>9} {s:>9}\n", .{ "shape", "RS", "f32 ms", "f32 MAC/s", "bf16 ms", "bf16 MAC/s" });
-    for ([_]u32{ 4, 8 }) |rs| {
-        var pipes = if (rs == 4) try fp8.Pipelines.load(device) else blk: {
-            const text = try std.fmt.allocPrint(gpa, "#define TF_RS {d}\n{s}", .{ rs, ks.dsv41.fp8_mma });
-            defer gpa.free(text);
-            break :blk try fp8.Pipelines.loadSource(device, text);
-        };
-        defer pipes.deinit();
-        const text = if (rs == 4) bf16x_src else try std.fmt.allocPrint(gpa, "#define TF_RS {d}\n{s}", .{ rs, bf16x_src });
-        defer if (rs != 4) gpa.free(text);
-        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
-        defer lib.deinit();
-        const px = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_mma_bf16x", false);
-        defer px.deinit();
-        for (shapes) |sh| {
-            const m: usize = sh.m;
-            const n: usize = sh.n;
-            const k: usize = sh.k;
-            const x = try device.buffer(m * k * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-            defer x.deinit();
-            const w = try device.buffer(n * k, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-            defer w.deinit();
-            const sc = try device.buffer((n / 32) * (k / 32), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-            defer sc.deinit();
-            const y = try device.buffer(m * n * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-            defer y.deinit();
-            for (x.slice(u16, m * k), 0..) |*v, i| v.* = @truncate(@as(u32, @bitCast(@as(f32, @floatFromInt(@as(i32, @intCast(i % 17)) - 8)) / 64.0)) >> 16);
-            @memset(w.slice(u8, n * k), 0x38);
-            @memset(sc.slice(u8, (n / 32) * (k / 32)), 127);
-            @memset(y.slice(u8, m * n * 2), 0);
-            const macs = @as(f64, @floatFromInt(m)) * @as(f64, @floatFromInt(n)) * @as(f64, @floatFromInt(k));
-            var ms = [_]f64{ 0, 0 };
-            var hs = [_]u64{ 0, 0 };
-            inline for (0..2) |which| {
-                var samples: [9]f64 = undefined;
-                for (0..9) |t| {
-                    const cb = queue.commandBuffer();
-                    const e = cb.compute(.serial);
-                    if (which == 0) {
-                        try fp8.encode(&pipes, e, .{ .buf = x }, .{ .buf = w }, .{ .buf = sc }, .{ .buf = y }, .{ .k = sh.k, .n = sh.n, .rows = sh.m, .out = .bf16 });
-                    } else {
-                        try bf16xEncode(e, px, x, w, sc, y, sh.k, sh.n, sh.m);
-                    }
-                    e.end();
-                    cb.commit();
-                    cb.wait();
-                    if (cb.failure()) |msg| {
-                        std.debug.print("  {s} rs{d}: failed: {s}\n", .{ sh.name, rs, msg });
-                        return error.DispatchFailed;
-                    }
-                    samples[t] = (cb.gpuEnd() - cb.gpuStart()) * 1e3;
-                }
-                std.mem.sort(f64, samples[0..9], {}, std.sort.asc(f64));
-                ms[which] = samples[4];
-                hs[which] = std.hash.Wyhash.hash(0, y.slice(u8, m * n * 2));
-            }
-            std.debug.print("  {s:>8} {d:>3} {d:>9.3} {d:>9.1} {d:>9.3} {d:>9.1}  {x:0>16} {x:0>16}\n", .{ sh.name, rs, ms[0], macs / (ms[0] * 1e-3) / 1e12, ms[1], macs / (ms[1] * 1e-3) / 1e12, hs[0], hs[1] });
-        }
-    }
-}
 
 fn mxDenseBench(device: mtl.Device, queue: mtl.Queue, gpa: std.mem.Allocator) !void {
     const fp8 = tf.dsv41_metal.fp8_mma;
