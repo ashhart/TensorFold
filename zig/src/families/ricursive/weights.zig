@@ -59,7 +59,7 @@ fn require(t: Tensor, dtype: @TypeOf(t.dtype), dims: []const usize) error{Unexpe
 }
 
 /// The bf16 tensor `prefix ++ suffix` of exactly `dims`.
-fn get(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, dims: []const usize) !Tensor {
+pub fn get(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, dims: []const usize) !Tensor {
     return getAs(c, prefix, suffix, .bf16, dims);
 }
 
@@ -89,7 +89,7 @@ fn proj(c: *const ck.Checkpoint, f: *const cfg.Config, prefix: []const u8, compt
 }
 
 /// The release's bf16 [n, k] matrix in place: k whole 256s for the GEMM's steps, 8-byte aligned for the row kernel.
-fn dense(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
+pub fn dense(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
     const w = try get(c, prefix, suffix, &.{ n, k });
     if (k % 256 != 0 or w.offset % 8 != 0) {
         std.log.err("ricursive: {s}{s} at byte {d}: the row kernels need 8-byte rows of whole 256s", .{ prefix, suffix, w.offset });
