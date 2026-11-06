@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- HIP on gfx12 under `--policy matrix=on`: the WMMA dense tile's big block takes 64-deep K steps over swizzled LDS rows, its barrier orders LDS only, and the block thresholds are tuned again, with the same output bytes: Qwen3-Reranker-8B ranks 16 documents in 0.694 s instead of 0.720 s and Qwen3-Embedding-8B embeds 100 short inputs in 0.946 s instead of 0.974 s on a Radeon AI PRO R9700. The kernel contract checks the new block byte for byte against a frozen copy of the old one (part of #2245). Thanks to @laudney.
+- HIP on gfx12 under `--policy matrix=on`: the WMMA dense tile's big block takes 64-deep K steps over swizzled LDS rows, its barrier orders LDS only, and the block thresholds are tuned again, with the same output bytes: Qwen3-Reranker-8B ranks 16 documents in 0.697 to 0.705 s instead of 0.720 to 0.727 s and Qwen3-Embedding-8B embeds 100 short inputs in 0.946 to 0.956 s instead of 0.969 to 0.995 s on a Radeon AI PRO R9700 (the best run of each of four alternated rounds). The kernel contract checks the new block byte for byte against a frozen copy of the old one (part of #2245). Thanks to @laudney.
 
 - Build: `zig build -Dgpu=<gpu>` builds the one-GPU server again; its modules now import the profile registry, as the
   full build's do (#2290). Thanks to @atakann.

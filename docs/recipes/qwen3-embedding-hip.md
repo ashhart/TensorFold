@@ -120,6 +120,6 @@ Results on the R9700 (ROCm 10.1); the distance rows are dot2 (the default), the 
 | WMMA: MRL width 32, 1024, 4096 worst distance (limit) | 1.06e-4 (1.9e-4), 1.35e-4 (1.7e-4), 1.31e-4 (1.6e-4) |
 | WMMA: card 2 x 2 scores, worst difference to the card | 0.0024 (dot2: 0.0014) |
 | Layer-0 projections against float64, BF16 out (WMMA / dot2) | 1.0000 in every class (q, k, v, o, gate, up, down) |
-| `hip-kernel-test` and `hip-kernel-contract`, WMMA tile (both geometries, fp32 and BF16 out) | gates 1 to 4 pass, fp32 worst 1.4% of its bound (depth k plus k 2^-126); its planted control (each 16-deep step summed in BF16) red at gate 4; gate 5 records current, gfx1201 only |
-| 100 short inputs in one request / one short query, cold | WMMA (`matrix=on`) 0.946 s / 39.3 ms; dot2 (default) 2.470 s / 75.1 ms; SGLang 0.841 s / 38.4 ms on the same card |
+| `hip-kernel-test` and `hip-kernel-contract`, WMMA tile (both geometries, fp32 and BF16 out) | gates 1 to 4 pass, fp32 worst 1.4% of its bound (depth k plus k 2^-126); the big block bit-equal to the 32-deep block it replaces; three planted controls red: each 16-deep step summed in BF16 (gate 4), the big block's loads without the swizzle and its K loop without barriers (gate 3); gate 5 records current, gfx1201 only |
+| 100 short inputs in one request / one short query, cold | WMMA (`matrix=on`) 0.946 to 0.956 s / 39.4 to 39.5 ms; dot2 (default) 2.470 s / 75.1 ms; SGLang 0.841 s / 38.4 ms on the same card |
 | Load | 4 s from the page cache |

@@ -298,7 +298,8 @@ it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of 
 controls' code object, with its own gate-5 record) on the same inputs, and the kernel tests hold both geometries to
 float64. Three controls go red: the small block summing each 16-deep step in BF16 (`tf_ctl_wmma12_bf16_sum`) at gate 4,
 and at gate 3 against the frozen block, the big block loading its operands without the stores' swizzle
-(`tf_ctl_wmma12_unswizzled`) and the big block without its K loop's barriers (`tf_ctl_wmma12_unordered`).
+(`tf_ctl_wmma12_unswizzled`) and the big block without its K loop's barriers (`tf_ctl_wmma12_unordered`). The last is a
+race, so gate 3 launches it up to eight times a shape and counts it red if any launch differs.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
