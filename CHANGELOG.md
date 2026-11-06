@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on CUDA prefetches a decode window's next weights into L2 on a side stream, on by default on GB10 (sm_121) only, inside a 12 MiB budget; replies are identical, and every other GPU is unchanged (#1580). Thanks to @Bizuayeu.
+
+- GLM on CUDA prefetches a decode window's next weights into L2 on a side stream, on by default on GB10 (sm_121) at two ranks or more, inside a 12 MiB budget; replies are identical, and every other GPU is unchanged (#1580). Thanks to @Bizuayeu.
+
 - Internal: 11 more lean findings fixed in the CUDA kernel headers and the tests' comments, with no change in behaviour (#2326).
 
 - Internal: 14 more lean findings fixed in the core library's comments, with no change in behaviour (#2323).
