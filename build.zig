@@ -228,6 +228,7 @@ pub fn build(b: *std.Build) void {
     grammar_build.steps(b, target, xgrammar, lanes_cpu);
     grammar_build.hostTests(b, test_step);
     contract_build.hostTests(b, gemma4_contract_host);
+    @import("zig/build/startup_states_timing.zig").step(b);
     // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     @import("zig/build/mcdma_pair.zig").add(b, target);
