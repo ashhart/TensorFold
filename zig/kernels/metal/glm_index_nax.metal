@@ -104,7 +104,7 @@ inline frag<bfloat> ix_frag(const device bfloat* r0, const device bfloat* r1, in
   }
 }
 
-// A transposed right operand's element e: its key (a block, the op's column) and its dim (on M5 the op loads it as any operand).
+// A transposed right operand's element e: key (a block, the op's column), dim (on M5 the op loads it as any operand).
 #ifndef TF_SIMD_FRAGS
 inline short ix_key(short e, short2 home) { return home.y + (e >> 2) * 8; }
 inline short ix_dim(short e, short2 home) { return home.x + (e & 3); }
