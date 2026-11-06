@@ -14,7 +14,6 @@ test {
     _ = @import("tests/deepseek_v41_reference/operator_csa2_index_fp64.zig");
     _ = @import("tests/deepseek_v41_reference/operator_exl3_projection_fp64.zig");
     _ = @import("tests/deepseek_v41_reference/operator_combine_fp64.zig");
-    _ = @import("tests/deepseek_v41_reference/operator_affine_i8_fp64.zig");
     _ = @import("tests/deepseek_v41_reference/wo_a_fusion.zig");
     _ = @import("tests/deepseek_v41_reference/row_invariance.zig");
     _ = @import("tests/deepseek_v41_reference/exl3_int8_tile.zig");

@@ -39,12 +39,9 @@ pub const Pipelines = struct {
         defer pool.pop();
         var options = mtl.CompileOptions.mlx();
         options.math_functions = .precise;
-        // The router gate's GEMM: MLX's gemm_nax, nax.h inlined, in the same library so one pipeline set covers both.
-        var gate_source: ?[]const u8 = null;
-        inline for (sources.prefill) |f| {
-            if (comptime std.mem.eql(u8, f.name, "gemm_nax")) gate_source = f.text;
-        }
-        const gemm_text = if (gate_source) |g| try frags.source(device, std.heap.page_allocator, g) else null;
+        // The router gate's GEMM: the lane's own prefill block with an fp32 destination, nax.h inlined, in the
+        // same library as the ops so one pipeline set covers both.
+        const gemm_text = frags.source(device, std.heap.page_allocator, sources.deepseek_v41_gate_gemm) catch null;
         defer if (gemm_text) |g| std.heap.page_allocator.free(g);
         const text = if (gemm_text) |g| try std.mem.concat(std.heap.page_allocator, u8, &.{ sources.deepseek_v41_ops, g }) else sources.deepseek_v41_ops;
         defer if (gemm_text != null) std.heap.page_allocator.free(text);
