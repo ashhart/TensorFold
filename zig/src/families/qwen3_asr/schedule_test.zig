@@ -53,8 +53,10 @@ const TowerHost = struct {
     gpa: std.mem.Allocator,
     stages: std.StringHashMapUnmanaged([]f64) = .empty,
     conv1_frames: usize = 0, // the first convolution's time length, as the schedule last passed it
+    conv_out: std.ArrayList(f64) = .empty, // gathered over the chunk groups
 
     fn deinit(t: *TowerHost) void {
+        t.conv_out.deinit(t.gpa);
         var it = t.stages.iterator();
         while (it.next()) |e| {
             t.gpa.free(e.key_ptr.*);
@@ -91,9 +93,14 @@ const TowerHost = struct {
     pub fn dump(t: *TowerHost, stage: []const u8, ptr: u64, rows: usize, cols: usize, conv_shape: ?[3]usize) !void {
         const v = try t.m.at(ptr, rows * cols);
         if (conv_shape != null) return; // the reference taps convs per chunk, channels first: extents only here
+        if (std.mem.eql(u8, stage, "conv_out")) return t.conv_out.appendSlice(t.gpa, v);
         const got = try t.stages.getOrPut(t.gpa, stage);
         if (got.found_existing) t.gpa.free(got.value_ptr.*) else got.key_ptr.* = try t.gpa.dupe(u8, stage);
         got.value_ptr.* = try t.gpa.dupe(f64, v);
+    }
+
+    pub fn dumping(_: *const TowerHost) bool {
+        return true;
     }
 
     pub fn flatten(t: *TowerHost, x: u64, y: u64, n: usize, f: usize, tt: usize, c: usize) !void {
@@ -178,14 +185,17 @@ const Fake = struct {
 const Ref = struct {
     gpa: std.mem.Allocator,
     stages: std.StringHashMapUnmanaged([]f64) = .empty,
+    conv_out: std.ArrayList(f64) = .empty, // a chunk at a time
 
     fn put(ctx: *anyopaque, stage: []const u8, offset: usize, values: []const f64) anyerror!void {
         const r: *Ref = @ptrCast(@alignCast(ctx));
+        if (std.mem.eql(u8, stage, "conv_out")) return r.conv_out.appendSlice(r.gpa, values);
         if (offset != 0 or std.mem.startsWith(u8, stage, "conv")) return;
         try r.stages.put(r.gpa, try r.gpa.dupe(u8, stage), try r.gpa.dupe(f64, values));
     }
 
     fn deinit(r: *Ref) void {
+        r.conv_out.deinit(r.gpa);
         var it = r.stages.iterator();
         while (it.next()) |e| {
             r.gpa.free(e.key_ptr.*);
@@ -247,6 +257,10 @@ fn towerCase(frames: usize, group: usize, want_windows: usize) !void {
         try std.testing.expect(c >= 0.9999);
     }
     try std.testing.expect(seen >= small.layers + 4); // embed, each layer, ln_post, proj1, audio_rows
+    // conv_out, before the positions, chunk after chunk at the plan's chunk rows
+    try std.testing.expectEqual(plan.chunks * plan.chunk_rows * small.d, host.conv_out.items.len);
+    try std.testing.expectEqual(ref.conv_out.items.len, host.conv_out.items.len);
+    try std.testing.expect(cosine(host.conv_out.items, ref.conv_out.items) >= 0.9999);
 }
 
 test "tower schedule: a host binding matches the float64 reference at torch's points, two windows, a short chunk" {

@@ -36,11 +36,16 @@ const Compare = struct {
         try c.d.check(c.d.api.cuMemcpyDtoH_v2(raw.ptr, ptr, raw.len * 2), "cuMemcpyDtoH");
         const vals = try c.gpa.alloc(f64, raw.len);
         defer c.gpa.free(vals);
-        if (conv) |sh| { // channels last [n][f][t][c] to the export's [n][c][f][t]
-            const per = sh[1] * sh[2] * cols;
-            for (0..sh[0]) |n| for (0..sh[1]) |f| for (0..sh[2]) |t| for (0..cols) |k| {
-                vals[n * per + (k * sh[1] + f) * sh[2] + t] = widen(raw[((n * sh[1] + f) * sh[2] + t) * cols + k]);
-            };
+        const conv_out = std.mem.eql(u8, stage, "conv_out"); // [n][rows][d], a chunk group at a time
+        if (conv != null or conv_out) {
+            if (conv) |sh| { // channels last [n][f][t][c] to the export's [n][c][f][t]
+                const per = sh[1] * sh[2] * cols;
+                for (0..sh[0]) |n| for (0..sh[1]) |f| for (0..sh[2]) |t| for (0..cols) |k| {
+                    vals[n * per + (k * sh[1] + f) * sh[2] + t] = widen(raw[((n * sh[1] + f) * sh[2] + t) * cols + k]);
+                };
+            } else for (vals, raw) |*v, r| {
+                v.* = widen(r);
+            }
             const got = try c.conv.getOrPut(c.gpa, stage);
             if (!got.found_existing) got.value_ptr.* = .empty;
             try got.value_ptr.appendSlice(c.gpa, vals);
@@ -59,9 +64,9 @@ const Compare = struct {
         std.debug.print("STAGE {s:<12} cos {d:.9} worst {e:.3} at {d} rms(diff)/rms(ref) {e:.3}\n", .{ stage, m.cosine, m.worst, m.at, m.rms_diff / @max(m.rms_want, 1e-300) });
     }
 
-    /// The conv stages, gathered over every chunk group, compared once whole.
+    /// The conv stages and conv_out, gathered over every chunk group, compared once whole.
     fn finishConvs(c: *Compare) !void {
-        for ([_][]const u8{ "conv1", "conv2", "conv3" }) |n| if (c.conv.getPtr(n)) |l| {
+        for ([_][]const u8{ "conv1", "conv2", "conv3", "conv_out" }) |n| if (c.conv.getPtr(n)) |l| {
             try c.report(n, l.items);
             l.deinit(c.gpa);
         };
