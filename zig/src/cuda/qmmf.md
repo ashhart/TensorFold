@@ -45,7 +45,10 @@ activation rows use the existing coalesced 16-byte `cp.async` loads,
 including zero fill past M and the caller's activation stride. Each warp
 waits for both copy paths before it reads the stage. The CTA barrier
 before the next prefetch also prevents reuse while another warp still
-reads the old stage. Barrier parity changes each time a stage is reused.
+reads the old stage. After that barrier, the issuing thread executes
+`fence.proxy.async.shared::cta` before the bulk copies, so the stage's
+last `ldmatrix` reads (generic proxy) are ordered before the async-proxy
+writes that refill it. Barrier parity changes each time a stage is reused.
 The larger instances retain a 16-byte copy fallback in older SM images;
 the launcher loads and selects them only on sm_12x.
 
