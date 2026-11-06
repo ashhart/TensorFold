@@ -126,6 +126,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the sessions-writes mixed load holds its pool to one slot's capacity, so it exercises spills to the tier (#2731). Thanks to @garvrao80.
 
 - Prompt cache: when two disk restores in a row fail (a damaged or missing state file), the request now resumes from the shorter state it already had in RAM instead of prefilling from token 0, so the reply's `cached_tokens` reports that state's position (#2694). Thanks to @ThinkOffApp.
+- Tests: `zig build tf-tp-check` builds a checker for the dumps each rank of a mixed Metal and CUDA tensor-parallel run
+  writes, and `zig build test-tp-check` runs its tests (#2321, part of #1236). Thanks to @ThinkOffApp.
 
 ## 1.2.6
 
