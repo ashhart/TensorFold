@@ -119,9 +119,6 @@ pub const Rows = struct {
     /// Leave the projection's f32 sums in the scratch for a caller that runs the epilogue itself (the one-row
     /// transform fold reads them, normalises and preps in one kernel). The dispatch's output is not written.
     no_epilogue: bool = false,
-    /// This dispatch's routes carry duplicate entries that name the same descriptor (the fused gate/up call's
-    /// shared-expert tail), so the paired body can share one weight decode between them.
-    pair: bool = false,
     /// The caller asks for the tensor-unit dense tile from EIGHT rows up (the shipped gate is 64). The hint is the
     /// CALLER's, so nothing else in the engine moves.
     dense8: bool = false,
@@ -293,16 +290,9 @@ pub const Pipelines = struct {
     /// once a row (the shipped body is one row a threadgroup, and the dispatch's height is the row count, so a
     /// four-row window decodes the attention's dense weights four times over). Every row keeps the shipped per-row
     /// arithmetic (the same k blocks, the same warp split, the same accumulator tree and the same cross-warp sum), so
-    /// each row's sum is bit-identical to the one-row body's. The shape the paired decode uses.
+    /// each row's sum is bit-identical to the one-row body's.
     decode_fma_dense_multi2: ?mtl.Pipeline = null,
     decode_fma_dense_multi4: ?mtl.Pipeline = null,
-    /// The PAIRED routed decode (`tf_exl3_matmul_decode_fma_static_pair` / `_pair_lut`): the entries that name the
-    /// same expert -- the same weight matrix -- are computed in one threadgroup, so the weight decode and the weight
-    /// traffic are paid once for the pair and the odd rank exits. The shape one decode for the rows that share a
-    /// weight. Each row keeps the shipped per-row arithmetic, so the pair's rows are bit-identical to the single-row
-    /// body's.
-    decode_fma_static_pair: ?mtl.Pipeline = null,
-    decode_fma_static_pair_lut: ?mtl.Pipeline = null,
     fma_warps: usize = 16,
     /// One row, four column tiles a threadgroup: dense projections at decode width on the tensor units.
     matvec_nax: ?mtl.Pipeline = null,
@@ -445,8 +435,6 @@ pub const Pipelines = struct {
         var decode_fma_dense: ?mtl.Pipeline = null;
         var decode_fma_dense_multi2: ?mtl.Pipeline = null;
         var decode_fma_dense_multi4: ?mtl.Pipeline = null;
-        var decode_fma_static_pair: ?mtl.Pipeline = null;
-        var decode_fma_static_pair_lut: ?mtl.Pipeline = null;
         var fma_warps: usize = 16;
         var matvec_nax: ?mtl.Pipeline = null;
         var int8_tile: ?mtl.Pipeline = null;
@@ -692,20 +680,6 @@ pub const Pipelines = struct {
                                             std.log.info("exl3: multi-row dense register-only decode pipeline active (tf_exl3_matmul_decode_fma_dense_multi4, {d} warps)", .{warps});
                                         } else pd.deinit();
                                     }
-                                    // The paired routed decode: the entries that name the same expert share one
-                                    // weight decode.
-                                    if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_static_pair", false) catch null) |pd| {
-                                        if (pd.simdWidth() == 32 and pd.maxThreads() >= 32 * warps) {
-                                            decode_fma_static_pair = pd;
-                                            std.log.info("exl3: paired routed register-only decode pipeline active (tf_exl3_matmul_decode_fma_static_pair, {d} warps)", .{warps});
-                                        } else pd.deinit();
-                                    }
-                                    if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_static_pair_lut", false) catch null) |pd| {
-                                        if (pd.simdWidth() == 32 and pd.maxThreads() >= 32 * warps) {
-                                            decode_fma_static_pair_lut = pd;
-                                            std.log.info("exl3: paired routed register-only decode pipeline active (tf_exl3_matmul_decode_fma_static_pair_lut, {d} warps)", .{warps});
-                                        } else pd.deinit();
-                                    }
                                 } else std.log.err("exl3: fma decode library compile failed", .{});
                             } else |_| {}
                         }
@@ -734,7 +708,7 @@ pub const Pipelines = struct {
         // The three codebooks as a table: the tensor-unit kernels read a value instead of deriving it.
 
         if (table == null) std.log.err("exl3: codebook table not created; the tensor-unit path will read none", .{});
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .swiglu_prerotate = sr, .dense = dn, .prefill = prefill, .prefill_fp8 = prefill_fp8, .prefill_fp8b = prefill_fp8b, .prefill_cast = prefill_cast, .reduce = reduce, .prefill_nax = prefill_nax, .prefill_nax_tiles = prefill_nax_tiles, .decode_nax = decode_nax, .decode_nax_c = decode_nax_c, .decode_nax_tab = decode_nax_tab, .decode_nax_ctab = decode_nax_ctab, .decode_nax_ctab_f = decode_nax_ctab_f, .decode_fma = decode_fma, .decode_fma_static = decode_fma_static, .decode_fma_static_lut = decode_fma_static_lut, .decode_fma_dense = decode_fma_dense, .decode_fma_dense_multi2 = decode_fma_dense_multi2, .decode_fma_dense_multi4 = decode_fma_dense_multi4, .decode_fma_static_pair = decode_fma_static_pair, .decode_fma_static_pair_lut = decode_fma_static_pair_lut, .fma_warps = fma_warps, .matvec_nax = matvec_nax, .int8_tile = int8_tile, .matmul_tab = if (table != null) mmt else null, .matmul_wide = if (table != null) mmw else null, .matmul_direct = if (table != null) mmd else null, .matmul_static = if (table != null) mms else null, .matmul_static_lut = if (table != null) mmsl else null, .codebook_table = table, .prefill_nax_db = prefill_nax_db, .prefill_nax_db64 = prefill_nax_db64, .prefill_nax_dense_db = prefill_nax_dense_db, .prefill_nax_dense_rpg2 = prefill_nax_dense_rpg2, .prefill_nax_moe_db = prefill_nax_moe_db, .prefill_nax_funnel = prefill_nax_funnel, .prefill_nax_skip_pad = prefill_nax_skip_pad, .prefill_nax_wide = prefill_nax_wide, .prefill_nax_funnel_only = prefill_nax_funnel_only, .prefill_nax_skip_pad128 = prefill_nax_skip_pad128, .prefill_nax_warp32 = prefill_nax_warp32, .prefill_nax_coop = prefill_nax_coop, .prefill_nax_coop_skip = prefill_nax_coop_skip, .prefill_nax_dense_funnel = prefill_nax_dense_funnel };
+        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .swiglu_prerotate = sr, .dense = dn, .prefill = prefill, .prefill_fp8 = prefill_fp8, .prefill_fp8b = prefill_fp8b, .prefill_cast = prefill_cast, .reduce = reduce, .prefill_nax = prefill_nax, .prefill_nax_tiles = prefill_nax_tiles, .decode_nax = decode_nax, .decode_nax_c = decode_nax_c, .decode_nax_tab = decode_nax_tab, .decode_nax_ctab = decode_nax_ctab, .decode_nax_ctab_f = decode_nax_ctab_f, .decode_fma = decode_fma, .decode_fma_static = decode_fma_static, .decode_fma_static_lut = decode_fma_static_lut, .decode_fma_dense = decode_fma_dense, .decode_fma_dense_multi2 = decode_fma_dense_multi2, .decode_fma_dense_multi4 = decode_fma_dense_multi4, .fma_warps = fma_warps, .matvec_nax = matvec_nax, .int8_tile = int8_tile, .matmul_tab = if (table != null) mmt else null, .matmul_wide = if (table != null) mmw else null, .matmul_direct = if (table != null) mmd else null, .matmul_static = if (table != null) mms else null, .matmul_static_lut = if (table != null) mmsl else null, .codebook_table = table, .prefill_nax_db = prefill_nax_db, .prefill_nax_db64 = prefill_nax_db64, .prefill_nax_dense_db = prefill_nax_dense_db, .prefill_nax_dense_rpg2 = prefill_nax_dense_rpg2, .prefill_nax_moe_db = prefill_nax_moe_db, .prefill_nax_funnel = prefill_nax_funnel, .prefill_nax_skip_pad = prefill_nax_skip_pad, .prefill_nax_wide = prefill_nax_wide, .prefill_nax_funnel_only = prefill_nax_funnel_only, .prefill_nax_skip_pad128 = prefill_nax_skip_pad128, .prefill_nax_warp32 = prefill_nax_warp32, .prefill_nax_coop = prefill_nax_coop, .prefill_nax_coop_skip = prefill_nax_coop_skip, .prefill_nax_dense_funnel = prefill_nax_dense_funnel };
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
@@ -774,8 +748,6 @@ pub const Pipelines = struct {
         if (p.decode_fma_dense) |pf| pf.deinit();
         if (p.decode_fma_dense_multi2) |pf| pf.deinit();
         if (p.decode_fma_dense_multi4) |pf| pf.deinit();
-        if (p.decode_fma_static_pair) |pf| pf.deinit();
-        if (p.decode_fma_static_pair_lut) |pf| pf.deinit();
         if (p.matvec_nax) |pf| pf.deinit();
         if (p.matmul_tab) |pf| pf.deinit();
         if (p.matmul_wide) |pf| pf.deinit();
@@ -886,9 +858,6 @@ fn staticDecodeOn() bool {
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 var moe_cols_cache: ?u32 = null;
-/// (instrument): a one-shot line the first time the paired body is selected, so an in-situ A/B can say whether the
-/// call-site hint fired at all.
-var pair_logged: bool = false;
 var fma_log_count: usize = 0;
 var dense_db_cache: ?u32 = null;
 
@@ -1024,8 +993,6 @@ const Args = extern struct {
     y_stride: u64,
     tile_k_stride: u64,
     tile_n_stride: u64,
-    /// The call site's pair hint. Set only where the duplicates are.
-    pair: u32 = 0,
 };
 
 fn shape(k: usize, n: usize) !void {
@@ -1127,7 +1094,6 @@ fn rowsArgs(k: usize, n: usize, r: Rows, x: View, y: View, scratch: View) !Args 
         .y_stride = r.y_stride,
         .tile_k_stride = 0,
         .tile_n_stride = 0,
-        .pair = @intFromBool(r.pair),
     };
 }
 /// The f32 sums' offset in a call's scratch -- the rotated region rounded to 16 bytes. The fold's caller reads them
@@ -1396,7 +1362,19 @@ fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows
 
 const ReduceArgs = extern struct { splits: u32, n: u32 };
 
-fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View, su: View, sv: View, bias: View, descriptors: View, x: View, y: View, scratch: View, r: Rows) void {
+/// Which body a projection call takes: the lane's own plan over the pack's shapes, the resident
+/// pipelines and the call's hints. The plan names the pipeline, the split count and the dispatch
+/// geometry; `stages` only encodes it.
+const Plan = struct {
+    pipeline: mtl.Pipeline,
+    splits: usize,
+    group_cols: usize,
+    height: usize,
+    threads: usize,
+    depth: usize,
+};
+
+fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     var a = args;
     const matvec_nax = p.matvec_nax != null and a.rows == 1 and a.indexed == 0 and a.routed == 0 and
         std.c.getenv("TF_DSV41_EXL3_MATVEC") != null;
@@ -1491,43 +1469,11 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
     const fma_dense_multi2 = fma_dense_ok and multi_rows >= 2 and a.rows >= 2 and (multi_ceil or a.rows % 2 == 0) and
         (multi_rows == 2 or !fma_dense_multi4);
     const fma_dense = fma_dense_ok and fmaDenseOn() and !fma_dense_multi4 and !fma_dense_multi2;
-    // The default is therefore the shipped single-row body. TF_DSV41_EXL3_FMA_PAIR=1 forces the pair on every routed
-    // call (the A/B arm); =2 honours the call-site hint alone (the instrument); unset or =0 is the shipped path.
-    const pair_env = std.c.getenv("TF_DSV41_EXL3_FMA_PAIR");
-    const pair_off = pair_env != null and pair_env.?[0] == '0' and pair_env.?[1] == 0;
-    const pair_force = pair_env != null and !pair_off and pair_env.?[0] == '1' and pair_env.?[1] == 0;
-    const pair_hint = pair_env != null and !pair_off and pair_env.?[0] == '2' and pair_env.?[1] == 0;
-    const pair_on = pair_force or (pair_hint and a.pair != 0);
-    const fma_pair_lut = pair_on and p.decode_fma_static_pair_lut != null and fma_static_lut;
-    const fma_pair = pair_on and p.decode_fma_static_pair != null and fma_static and !fma_static_lut;
-    if ((fma_pair_lut or fma_pair) and !pair_logged) {
-        pair_logged = true;
-        std.log.info("exl3: PAIRED body selected (rows {d}, indexed {d}, hint {d})", .{ a.rows, a.indexed, a.pair });
-    }
-    const splits: usize = if (fma or fma_dense or fma_dense_multi2 or fma_dense_multi4 or fma_pair or fma_pair_lut) 1 else if (a.indexed == 0 and a.routed == 0 and (a.rows == 1 or (row_invariant and a.rows <= 8)) and p.reduce != null)
+    const splits: usize = if (fma or fma_dense or fma_dense_multi2 or fma_dense_multi4) 1 else if (a.indexed == 0 and a.routed == 0 and (a.rows == 1 or (row_invariant and a.rows <= 8)) and p.reduce != null)
         @as(usize, splitOverride() orelse @as(u32, @intCast(if (wide) wide_splits else one_row_splits)))
     else
         moe_splits;
     a.splits = @intCast(splits);
-    const sums_off = (@as(usize, a.rows) * a.k * 2 + 15) & ~@as(usize, 15);
-    const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + sums_off };
-    const partials = View{ .buffer = scratch.buffer, .offset = scratch.offset + sums_off + ((@as(usize, a.rows) * a.n * 4 + 15) & ~@as(usize, 15)) };
-    const routes = if (r.routes) |v| v.ids else scratch;
-    const rotate_passes: usize = if (std.c.getenv("TF_DSV41_DOUBLE_ROTATE") != null) 2 else 1;
-    if (!r.prerotated) {
-        e.setPipeline(p.rotate_in);
-        bind(e, x, 0);
-        bind(e, su, 1);
-        bind(e, scratch, 2);
-        e.setValue(a, 3);
-        bind(e, r.input_ids orelse scratch, 4);
-        bind(e, routes, 5);
-        bind(e, descriptors, 6);
-        // Four 128-element blocks a threadgroup (512 of the row), so the pass needs a quarter of the threadgroups.
-        const rotate_width: usize = (a.k / 128 + 3) / 4;
-        for (0..rotate_passes) |_| e.dispatchGroups(.{ .width = rotate_width, .height = a.rows }, .{ .width = 128 });
-        e.barrier();
-    }
     // Tile shape: rows a threadgroup covers (a dense tile can span more rows because its weights are shared) and
     // columns it covers (a wider column tile re-reads the activation tile fewer times).
     const nax_tile: usize = if (a.indexed != 0) (if (r.tile_rows != 0) r.tile_rows else 64) else envRows("TF_DSV41_EXL3_NAX_TILE_ROWS", 128, &nax_tile_cache);
@@ -1667,26 +1613,18 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
         matmul_tab_logged = true;
         std.log.info("exl3: table-decode matmul body selected rows={d} n={d} k={d} splits={d}", .{ a.rows, a.n, a.k, splits });
     }
-    e.setPipeline(if (fma_pair_lut) p.decode_fma_static_pair_lut.? else if (fma_pair) p.decode_fma_static_pair.? else if (fma_static_lut) p.decode_fma_static_lut.? else if (fma_static) p.decode_fma_static.? else if (fma) p.decode_fma.? else if (fma_dense_multi4) p.decode_fma_dense_multi4.? else if (fma_dense_multi2) p.decode_fma_dense_multi2.? else if (fma_dense) p.decode_fma_dense.? else if (matvec_nax) p.matvec_nax.? else if (decode_pipe) |dp| dp else if (matmul_static_lut) p.matmul_static_lut.? else if (matmul_static) p.matmul_static.? else if (matmul_direct) p.matmul_direct.? else if (matmul_wide) p.matmul_wide.? else if (matmul_tab) p.matmul_tab.? else if (nax_db) nax_db_pick.? else if (nax_dense_rpg2) p.prefill_nax_dense_rpg2.? else if (nax_dense_funnel) p.prefill_nax_dense_funnel.? else if (nax_dense_db) p.prefill_nax_dense_db.? else if (nax_moe_db) p.prefill_nax_moe_db.? else if (nax_coop) nax_coop_pick.? else if (nax_wide) nax_wide_pick.? else if (nax_funnel_only) nax_funnel_only_pick.? else if (nax_skip_pad) nax_skip_pad_pick.? else if (nax_funnel) nax_funnel_pick.? else if (nax) nax_pick.? else if (shared) p.prefill.? else p.matmul);
-    bind(e, scratch, 0);
-    bind(e, trellis, 1);
-    bind(e, sums, 2);
-    e.setValue(a, 3);
-    bind(e, routes, 4);
-    bind(e, descriptors, 5);
-    bind(e, partials, 6);
-    if (p.codebook_table) |t| e.setBuffer(t, 0, 7);
+    const pipeline = (if (fma_static_lut) p.decode_fma_static_lut.? else if (fma_static) p.decode_fma_static.? else if (fma) p.decode_fma.? else if (fma_dense_multi4) p.decode_fma_dense_multi4.? else if (fma_dense_multi2) p.decode_fma_dense_multi2.? else if (fma_dense) p.decode_fma_dense.? else if (matvec_nax) p.matvec_nax.? else if (decode_pipe) |dp| dp else if (matmul_static_lut) p.matmul_static_lut.? else if (matmul_static) p.matmul_static.? else if (matmul_direct) p.matmul_direct.? else if (matmul_wide) p.matmul_wide.? else if (matmul_tab) p.matmul_tab.? else if (nax_db) nax_db_pick.? else if (nax_dense_rpg2) p.prefill_nax_dense_rpg2.? else if (nax_dense_funnel) p.prefill_nax_dense_funnel.? else if (nax_dense_db) p.prefill_nax_dense_db.? else if (nax_moe_db) p.prefill_nax_moe_db.? else if (nax_coop) nax_coop_pick.? else if (nax_wide) nax_wide_pick.? else if (nax_funnel_only) nax_funnel_only_pick.? else if (nax_skip_pad) nax_skip_pad_pick.? else if (nax_funnel) nax_funnel_pick.? else if (nax) nax_pick.? else if (shared) p.prefill.? else p.matmul);
     // Rows a decode threadgroup takes: one a SIMDgroup (TF_DSV41_EXL3_MOE_ROWS selects one a threadgroup).
     const moe_rows: usize = if (decode_nax) (if (compact) 1 else envRows("TF_DSV41_EXL3_MOE_ROWS", 2, &moe_rows_cache)) else 4;
-    const group_rows: usize = if (fma or fma_static or fma_static_lut or fma_pair or fma_pair_lut or fma_dense_multi2 or fma_dense_multi4) 1 else if (decode_nax) moe_rows else if (nax) nax_tile else if (shared) 32 else 8;
+    const group_rows: usize = if (fma or fma_static or fma_static_lut or fma_dense_multi2 or fma_dense_multi4) 1 else if (decode_nax) moe_rows else if (nax) nax_tile else if (shared) 32 else 8;
     // The geometry must follow the PIPELINE that was chosen: the static body is the wide body's (128 columns, 256
     // threads), so it is named before the direct body's 256-column geometry.
     const group_cols: usize = if (fma or fma_static or fma_static_lut or fma_dense) 16 else if (matmul_static or matmul_static_lut) 128 else if (matmul_direct) 256 else if (matvec_nax or matmul_wide) 128 else if (nax) nax_cols else if (decode_nax) 32 else 16;
-    const height: usize = if (fma_dense_multi4) (a.rows + 3) / 4 else if (fma_dense_multi2) (a.rows + 1) / 2 else if (fma or fma_static or fma_static_lut or fma_dense or fma_pair or fma_pair_lut) a.rows else if (matvec_nax) 1 else if (splits > 1 and !decode_nax) splits else if (a.indexed == 1 and !decode_nax) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows;
+    const height: usize = if (fma_dense_multi4) (a.rows + 3) / 4 else if (fma_dense_multi2) (a.rows + 1) / 2 else if (fma or fma_static or fma_static_lut or fma_dense) a.rows else if (matvec_nax) 1 else if (splits > 1 and !decode_nax) splits else if (a.indexed == 1 and !decode_nax) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows;
     // The warp32 tile runs four warps (a warp owns two sixteen-row groups), the other nax tiles one warp a
     // sixteen-row group.
     const nax_warp32: bool = nax and a.indexed != 0 and tile_id == 2 and warp32On() and nax_skip_pad_pick != null;
-    const threads: usize = if (fma or fma_static or fma_static_lut or fma_dense or fma_dense_multi2 or fma_dense_multi4 or fma_pair or fma_pair_lut) 32 * p.fma_warps else if (nax) (if (nax_dense_rpg2 or nax_warp32) nax_tile / 32 * 32 * (nax_cols / 64) else nax_tile / 16 * 32 * (nax_cols / 64)) else if (decode_nax) 32 * moe_rows else if (matmul_static or matmul_static_lut) 256 else if (matmul_direct) 256 else if (matmul_wide) 256 else if (shared or matvec_nax) 128 else 32;
+    const threads: usize = if (fma or fma_static or fma_static_lut or fma_dense or fma_dense_multi2 or fma_dense_multi4) 32 * p.fma_warps else if (nax) (if (nax_dense_rpg2 or nax_warp32) nax_tile / 32 * 32 * (nax_cols / 64) else nax_tile / 16 * 32 * (nax_cols / 64)) else if (decode_nax) 32 * moe_rows else if (matmul_static or matmul_static_lut) 256 else if (matmul_direct) 256 else if (matmul_wide) 256 else if (shared or matvec_nax) 128 else 32;
     // One split dispatch over a window: a row group a threadgroup (the tile spans eight rows), the splits in y.
     const split_groups: usize = if (splits > 1 and !decode_nax) (a.rows + 7) / 8 else 1;
     if ((fma or fma_static or fma_static_lut) and fma_log_count < 8) {
@@ -1709,6 +1647,48 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
         const pick: []const u8 = if (nax_db) "nax10" else if (nax_dense_db) "nax31" else if (nax_moe_db) "nax19" else if (nax_coop) (if (nax_skip_pad) "nax53" else "nax52") else if (nax_wide) "nax57" else if (nax_funnel_only) "nax59" else if (nax_skip_pad) (if (nax_warp32) "nax54" else "nax48") else if (nax_funnel) "nax42" else if (nax) "nax_tile" else if (shared) "shared" else if (decode_nax) "decode" else "matmul";
         std.log.info("exl3: indexed dispatch rows={d} n={d} k={d} tile={d} cols={d} grid={d}x{d} threads={d} body={s}", .{ a.rows, a.n, a.k, nax_tile, nax_cols, (@as(usize, a.n) + group_cols - 1) / group_cols, height, threads, pick });
     }
+    return .{
+        .pipeline = pipeline,
+        .splits = splits,
+        .group_cols = group_cols,
+        .height = height,
+        .threads = threads,
+        .depth = if (fma or fma_static or fma_static_lut or fma_dense) 1 else if (decode_nax) moe_splits else split_groups,
+    };
+}
+
+fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View, su: View, sv: View, bias: View, descriptors: View, x: View, y: View, scratch: View, r: Rows) void {
+    var a = args;
+    const plan = planBody(p, a, r);
+    a.splits = @intCast(plan.splits);
+    const sums_off = (@as(usize, a.rows) * a.k * 2 + 15) & ~@as(usize, 15);
+    const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + sums_off };
+    const partials = View{ .buffer = scratch.buffer, .offset = scratch.offset + sums_off + ((@as(usize, a.rows) * a.n * 4 + 15) & ~@as(usize, 15)) };
+    const routes = if (r.routes) |v| v.ids else scratch;
+    const rotate_passes: usize = if (std.c.getenv("TF_DSV41_DOUBLE_ROTATE") != null) 2 else 1;
+    if (!r.prerotated) {
+        e.setPipeline(p.rotate_in);
+        bind(e, x, 0);
+        bind(e, su, 1);
+        bind(e, scratch, 2);
+        e.setValue(a, 3);
+        bind(e, r.input_ids orelse scratch, 4);
+        bind(e, routes, 5);
+        bind(e, descriptors, 6);
+        // Four 128-element blocks a threadgroup (512 of the row), so the pass needs a quarter of the threadgroups.
+        const rotate_width: usize = (a.k / 128 + 3) / 4;
+        for (0..rotate_passes) |_| e.dispatchGroups(.{ .width = rotate_width, .height = a.rows }, .{ .width = 128 });
+        e.barrier();
+    }
+    e.setPipeline(plan.pipeline);
+    bind(e, scratch, 0);
+    bind(e, trellis, 1);
+    bind(e, sums, 2);
+    e.setValue(a, 3);
+    bind(e, routes, 4);
+    bind(e, descriptors, 5);
+    bind(e, partials, 6);
+    if (p.codebook_table) |t| e.setBuffer(t, 0, 7);
     // TF_DSV41_DOUBLE_GEMM: a second identical GEMM dispatch (dense calls only, rotate passes outside the loop), so
     // the prefill delta is the in-situ dense GEMM time itself, separated from the rotate passes that
     // TF_DSV41_DOUBLE_ATTN_DENSE also doubles. TF_DSV41_DOUBLE_GEMM_N=<n> duplicates only the dense calls whose n is
@@ -1721,13 +1701,13 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, args: Args, trellis: View,
         }
         break :blk 1;
     } else (if (std.c.getenv("TF_DSV41_DOUBLE_GEMM_INDEXED") != null) 2 else 1);
-    for (0..gemm_passes) |_| e.dispatchGroups(.{ .width = (@as(usize, a.n) + group_cols - 1) / group_cols, .height = height, .depth = if (fma or fma_static or fma_static_lut or fma_dense) 1 else if (decode_nax) moe_splits else split_groups }, .{ .width = threads });
+    for (0..gemm_passes) |_| e.dispatchGroups(.{ .width = (@as(usize, a.n) + plan.group_cols - 1) / plan.group_cols, .height = plan.height, .depth = plan.depth }, .{ .width = plan.threads });
     e.barrier();
-    if (splits > 1) {
+    if (plan.splits > 1) {
         e.setPipeline(p.reduce.?);
         bind(e, partials, 0);
         bind(e, sums, 1);
-        e.setValue(ReduceArgs{ .splits = @intCast(splits), .n = @as(u32, @intCast(a.rows)) * a.n }, 2);
+        e.setValue(ReduceArgs{ .splits = @intCast(plan.splits), .n = @as(u32, @intCast(a.rows)) * a.n }, 2);
         e.dispatchThreads(.{ .width = @as(usize, a.rows) * a.n }, .{ .width = 256 });
         e.barrier();
     }
@@ -1793,8 +1773,8 @@ test "EXL3 scratch is row compact and bounded independently of full matrices" {
     try std.testing.expectError(error.InvalidExl3Rows, scratchBytes(128, 128, 0));
     try std.testing.expectError(error.UnsupportedExl3Shape, scratchBytes(129, 128, 1));
     try std.testing.expectEqual(@as(usize, 72), @sizeOf(ExpertDescriptor));
-    // The Args record counts the defaulted fields and the pair hint.
-    try std.testing.expectEqual(@as(usize, 112), @sizeOf(Args));
+    // The Args record counts the defaulted fields.
+    try std.testing.expectEqual(@as(usize, 104), @sizeOf(Args));
 }
 
 test "stored per-matrix width and rectangular strides include public target shapes" {

@@ -10,7 +10,6 @@ struct TfExl3Args {
   uint output_f32, input_ids, output_ids, routed;
   uint expert_id, repeat, indexed, experts, splits;
   ulong x_stride, y_stride, tile_k_stride, tile_n_stride;
-  uint pair;
 };
 
 // A little-endian int16 pair as one stream word (the same read tf_exl3_word makes).

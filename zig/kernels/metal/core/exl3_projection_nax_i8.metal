@@ -11,7 +11,6 @@ struct TfExl3Args {
   uint output_f32, input_ids, output_ids, routed;
   uint expert_id, repeat, indexed, experts, splits;
   ulong x_stride, y_stride, tile_k_stride, tile_n_stride;
-  uint pair;
 };
 
 // Metal 3 / argument-buffer tier 2 descriptors are populated once from resident buffers' GPU addresses.

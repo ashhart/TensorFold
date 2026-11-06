@@ -3953,10 +3953,6 @@ pub const Model = struct {
                 both.input_ids = convert(ws.view(.fused_sources));
                 both.routes = .{ .ids = convert(ws.view(.fused_ids)), .repeat = 1 };
                 both.output_rows = both.count;
-                // The shared expert's tail (fids[2*r*picks .. +2r], route.metal) names each of the two shared
-                // matrices r times, so with two or more token rows the routes carry the duplicates the paired body
-                // shares a decode by. One row has none (the plain path).
-                both.pair = r >= 2;
             }
             if (fused_grouped != null) both.output_rows = @as(usize, rows) * 2 * picks;
             const fused_passes: u32 = expertPasses();
