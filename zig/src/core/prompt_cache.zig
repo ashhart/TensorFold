@@ -324,7 +324,7 @@ pub const Store = struct {
         return .{ .entry = e, .marks = marks_ };
     }
 
-    /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
+    /// Room for every state the pass keeps, made before it: a keep-mirroring peer hears the evictions with the request.
     fn reserve(s: *Store, prompt: []const u32, born: u32, from: ?*Entry, marks_: []const u32, spans: []const modes.Span) void {
         var need: u64 = 0;
         var new: usize = 0; // states it keeps that the store lacks: a slot each
