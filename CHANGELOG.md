@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Internal: 73 more lean findings fixed in the kernels' comments, tests, cluster and fabric, with no change in behaviour
+  (#2295).
+
 - Metal: a request's finished stats list its prompt pass widths (`tensorfold.prefill_widths`, one entry per completed
   target pass) on every Metal text family. Telemetry only (#2293).
 
