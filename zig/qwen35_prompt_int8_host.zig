@@ -79,6 +79,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     e.wide.split = null;
     e.wide.pdl = false;
     e.g = .{ .hidden = 256, .intermediate = 512, .layers = 0, .vocab = 1, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = false, .context = 1, .linear = @splat(false) };
+    e.scratch_rows = 64;
     return e;
 }
 const weight: cuda.qlinear.Affine4 = .{ .w = 10, .s = 20, .b = 30, .n = 129, .k = 256, .npad = 256 };
@@ -114,34 +115,28 @@ test "prompt int8: enable allocates once, failure retains no owner, and deinit i
     try T.expectEqual(cuda.w4a8.Kernels.scratch(1, 512), e.int8.buf.?.len);
     try T.expectEqual(@as(usize, 1), e.int8.capacity);
 
-    // Growing the workspace replaces its old allocation.
-    try e.int8.ensureRows(&e, 17);
-    try T.expectEqual(@as(usize, 4), Trace.allocations);
-    try T.expectEqual(cuda.w4a8.Kernels.scratch(32, 512), e.int8.buf.?.len);
-    try T.expectEqual(@as(usize, 32), e.int8.capacity);
-    try T.expectEqual(@as(usize, 1), Trace.frees);
-
-    // Failed growth preserves the previous workspace and its ownership.
+    // The first post-warm-up growth jumps to the admitted 64-row ceiling.
     Trace.fail = true;
-    try T.expectError(error.ScratchGrowFailed, e.int8.ensureRows(&e, 33));
-    try T.expect(e.int8.buf != null and e.int8.ws != 0 and e.int8.capacity == 32);
-    try T.expectEqual(cuda.w4a8.Kernels.scratch(32, 512), e.int8.buf.?.len);
+    try T.expectError(error.ScratchGrowFailed, e.int8.ensureRows(&e, 17));
+    try T.expect(e.int8.buf != null and e.int8.ws != 0 and e.int8.capacity == 1);
+    try T.expectEqual(cuda.w4a8.Kernels.scratch(1, 512), e.int8.buf.?.len);
     try T.expectEqual(@as(usize, 5), Trace.allocations);
-    try T.expectEqual(@as(usize, 1), Trace.frees);
+    try T.expectEqual(@as(usize, 0), Trace.frees);
 
     Trace.fail = false;
-    try e.int8.ensureRows(&e, 33);
+    try e.int8.ensureRows(&e, 17);
     try T.expect(e.int8.buf != null and e.int8.ws != 0);
-    // Capacity grows geometrically: 32 -> 64 for a 33-row request.
     try T.expectEqual(@as(usize, 64), e.int8.capacity);
     try T.expectEqual(cuda.w4a8.Kernels.scratch(64, 512), e.int8.buf.?.len);
     try T.expectEqual(@as(usize, 6), Trace.allocations);
-    try T.expectEqual(@as(usize, 2), Trace.frees);
+    try T.expectEqual(@as(usize, 1), Trace.frees);
+    try e.int8.ensureRows(&e, 33);
+    try T.expectEqual(@as(usize, 6), Trace.allocations);
 
     e.int8.deinit();
     try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
     e.int8.deinit();
-    try T.expectEqual(@as(usize, 4), Trace.frees);
+    try T.expectEqual(@as(usize, 3), Trace.frees);
     try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0 and e.int8.capacity == 0);
 }
 
