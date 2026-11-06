@@ -6,6 +6,7 @@ const wts = @import("cuda_weights.zig");
 const fwd = @import("cuda_model.zig");
 const be = @import("cuda_backend.zig");
 const cfg = @import("config.zig");
+const dfl = @import("cuda_dflash2.zig");
 
 const snap = be.snap;
 
@@ -16,8 +17,8 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = be.prompt_rows;
 /// A kept state is the caches through its position and nothing past it (no draft head reads a token on).
 pub const snap_lookahead: u32 = 0;
-pub const takes_drafter = false;
-pub const drafter_refusal = "--drafter: Ripple on CUDA loads no drafter yet; serve it without --drafter";
+/// --drafter: the DFlash2 drafter (ricursiveAI/Ripple-65B-Preview-DFlash2) proposes chains the target verifies.
+pub const takes_drafter = true;
 /// `explain` words this family's open refusals too.
 pub const explains_open = true;
 /// The server's think block rules: Ripple opens `<think>` itself or answers bare, and its markers take no budget.
@@ -31,8 +32,8 @@ pub const gb10_bytes: u64 = @intFromFloat(121.7 * (1 << 30));
 
 /// The server's reading of the room left after the weights; null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
-/// --parallel: the streams made at open (auto: the most that fit, at most a round's rows over 16-row windows).
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null };
+/// --parallel: streams made at open (auto: the most that fit, at most round rows / 16); --drafter: the DFlash2 folder.
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 8, lanes_fixed: bool = false, room: ?Room = null, drafter: ?[]const u8 = null };
 
 /// What the native server drives: every stream's caches, allocated at open.
 pub const Loaded = struct {
@@ -47,7 +48,7 @@ pub const Loaded = struct {
 };
 
 /// The weights, kernels, stream, forward and backend one open owns.
-pub const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: fwd.Kernels, s: cuda.Stream, m: fwd.Model, rb: be.Ripple };
+pub const Owned = struct { gpa: std.mem.Allocator, w: wts.Weights, k: fwd.Kernels, s: cuda.Stream, m: fwd.Model, rb: be.Ripple, draft: ?*dfl.Drafter };
 
 /// Device bytes past the weights for the CLI's one stream at `context` positions: scratch, caches, the backend's.
 pub fn openBytes(w: *const wts.Weights, k: *const fwd.Kernels, context: usize) u64 {
@@ -83,16 +84,39 @@ fn fit(room: u64, asked: u32, fixed: bool, plan: anytype) !usize {
     return n;
 }
 
-/// The device bytes `n` streams take at `positions`: the forward's scratch for a round, their slots, the backend's.
-const Plan = struct {
+/// Device bytes of n streams at positions: the round's scratch, slots, the backend's, and a drafter's bytes and rings.
+pub const Plan = struct {
     w: *const wts.Weights,
     k: *const fwd.Kernels,
     positions: usize,
+    drafter: ?dfl.Config = null,
 
-    fn bytes(p: Plan, n: usize) !u64 {
-        return fwd.Model.openBytes(p.w, p.k, p.positions, n, be.round_rows) + be.Ripple.openBytes(p.w.config.vocab, n);
+    pub fn bytes(p: Plan, n: usize) !u64 {
+        const draft = if (p.drafter) |c| dfl.openBytes(&c, p.w.config, p.k.lane.clusters, n) else 0;
+        return fwd.Model.openBytes(p.w, p.k, p.positions, n, be.round_rows) + be.Ripple.openBytes(p.w.config.vocab, n) + draft;
     }
 };
+
+/// The streams open makes in room (fit's count) with the drafter's bytes; each refusal is logged with its sizes.
+pub fn admitted(room: u64, asked: u32, fixed: bool, context: usize, plain: Plan, drafter: ?dfl.Config) !usize {
+    var plan = plain;
+    plan.drafter = drafter;
+    return fit(room, asked, fixed, plan) catch |e| {
+        if (e == error.ParallelPastMemory) {
+            const most = fit(room, asked, false, plan) catch 0;
+            std.log.err("--parallel {d} needs {d:.2} GiB at a {d}-token context{s}, and the CUDA memory budget leaves {d:.2} GiB after the weights: {d} stream{s} fit", .{ asked, gib(try plan.bytes(asked)), context, if (drafter != null) " with the DFlash2 drafter" else "", gib(room), most, if (most == 1) "" else "s" });
+        }
+        // a drafter that leaves no room for one stream is refused by name
+        if (e == error.NoStreamFits) {
+            if (drafter != null and (fit(room, 1, false, plain) catch 0) > 0) {
+                std.log.err("--drafter: the DFlash2 drafter needs {d:.2} GiB beside one Ripple stream's {d:.2} GiB at a {d}-token context; the CUDA memory budget leaves {d:.2} GiB after the weights", .{ gib(try plan.bytes(1) - try plain.bytes(1)), gib(try plain.bytes(1)), context, gib(room) });
+                return error.DrafterPastMemory;
+            }
+            std.log.err("ripple: one stream at a {d}-token context needs {d:.2} GiB of caches and scratch past the weights; the CUDA memory budget leaves {d:.2} GiB", .{ context, gib(try plan.bytes(1)), gib(room) });
+        }
+        return e;
+    };
+}
 
 /// The checkpoint through the CUDA gate, the kernels and a stream; the forward is made by the caller.
 fn begin(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !*Owned {
@@ -104,6 +128,7 @@ fn begin(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []co
     own.k = try fwd.Kernels.load(ctx);
     errdefer own.k.deinit();
     own.s = try cuda.Stream.init(ctx.d, false);
+    own.draft = null;
     return own;
 }
 
@@ -146,20 +171,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const positions = be.physical(try contextOf(o.context));
     const own = try begin(gpa, io, ctx, dir);
     errdefer abandon(own);
-    const plan: Plan = .{ .w = &own.w, .k = &own.k, .positions = positions };
-    const room = roomOf(o.room);
-    const n = fit(room, o.lanes, o.lanes_fixed, plan) catch |e| {
-        if (e == error.ParallelPastMemory) {
-            const most = fit(room, o.lanes, false, plan) catch 0;
-            std.log.err("--parallel {d} needs {d:.2} GiB at a {d}-token context, and the CUDA memory budget leaves {d:.2} GiB after the weights: {d} stream{s} fit", .{ o.lanes, gib(try plan.bytes(o.lanes)), o.context, gib(room), most, if (most == 1) "" else "s" });
-        }
-        if (e == error.NoStreamFits) std.log.err("ripple: one stream at a {d}-token context needs {d:.2} GiB of caches and scratch past the weights; the CUDA memory budget leaves {d:.2} GiB", .{ o.context, gib(try plan.bytes(1)), gib(room) });
-        return e;
-    };
+    // the drafter's config (refused by name) before the streams, so its bytes are admitted with theirs
+    const drafter: ?dfl.Config = if (o.drafts and o.drafter != null) try dfl.readConfig(gpa, io, o.drafter.?, &own.w.config) else null;
+    const plain: Plan = .{ .w = &own.w, .k = &own.k, .positions = positions };
+    const n = try admitted(roomOf(o.room), o.lanes, o.lanes_fixed, o.context, plain, drafter);
     own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, positions, n, be.round_rows);
     errdefer own.m.deinit();
     own.rb = try be.Ripple.init(gpa, ctx.d, &own.m);
     std.log.info("Ripple on CUDA: {d} stream{s} of {d} positions (a {d}-token context and a {d}-row verify reserve), rounds of {d} rows, prompt chunks of {d}", .{ n, if (n == 1) "" else "s", positions, o.context, be.reserve, be.round_rows, fwd.prompt_rows });
+    if (drafter) |dc| std.log.info("Ripple on CUDA: {d:.2} GiB kept for the DFlash2 drafter's weights, scratch and {d} streams' rings", .{ gib(dfl.openBytes(&dc, own.w.config, own.k.lane.clusters, n)), n });
     return .{
         .backend = own.rb.backend(),
         .facts = own.rb.facts(),
@@ -174,6 +194,44 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 fn release(p: *anyopaque) void {
     closeOwned(@ptrCast(@alignCast(p)));
+}
+
+/// The drafter the native host serves through the lane core's Drafted wrapper (Qwen's shape).
+pub const Opened = struct {
+    drafter: lanes.drafter.Drafter,
+    ctx: *anyopaque,
+    close: *const fn (*anyopaque) void,
+    reserve: *const fn (*anyopaque, u32) anyerror!void,
+    prepare: ?struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!lanes.drafter.Facts, bytes: usize } = null,
+};
+
+/// --drafter's folder over open p's streams, before any stream or graph; served bf16 as published, bits unread.
+pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
+    _ = bits;
+    const own: *Owned = @ptrCast(@alignCast(p));
+    if (own.draft != null or own.rb.lanes.count() != 0) return error.TapsAfterStreams;
+    own.draft = try dfl.Drafter.open(gpa, io, &own.m, dir, own.m.arena.slots);
+    return .{ .drafter = own.draft.?.drafter(), .ctx = own, .close = closeDrafter, .reserve = reserveDrafter, .prepare = .{ .ctx = own, .run = calibrateDrafter, .bytes = 0 } };
+}
+
+fn closeDrafter(p: *anyopaque) void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    if (own.draft) |d| d.deinit();
+    own.draft = null;
+}
+
+fn reserveDrafter(p: *anyopaque, streams: u32) anyerror!void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    try own.draft.?.reserve(streams);
+}
+
+/// The target's verify windows timed before the first stream, into the drafter's facts (the depth rule's prices).
+pub fn calibrateDrafter(p: *anyopaque) anyerror!lanes.drafter.Facts {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    const d = own.draft orelse return error.MissingCalibrationDrafter;
+    if (own.rb.lanes.count() != 0) return error.WindowsAfterStreams;
+    try d.timeWindows();
+    return d.facts();
 }
 
 /// Whether a request's caches could start now (the lane host's admission, on its engine thread).
@@ -220,6 +278,10 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.RicursiveCudaNeedsNvfp4 => "Ripple on CUDA serves the NVFP4 release (ModelOpt W4A16 MLPs, bf16 attention): the BF16 checkpoint's 130 GB do not fit GB10",
         error.UnsupportedRicursiveCudaShape => "this Ripple checkpoint's shape is not one the CUDA kernels take (group of 2 to 16 query heads in pairs, hidden size at most 8,192, widths in whole 128s)",
         error.Unimplemented => "Ripple's CUDA global-layer decode is not in this build yet",
+        error.DrafterPastMemory => "--drafter: the CUDA memory budget fits no Ripple stream beside the DFlash2 drafter's weights and buffers at this context: lower --context, serve without --drafter, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
+        error.NotRippleDFlash2 => "--drafter: the folder is not a DFlash2 drafter (DFlash2DraftModel); Ripple takes ricursiveAI/Ripple-65B-Preview-DFlash2",
+        error.UnqualifiedRippleDFlash2 => "--drafter: the folder is not the drafter checked against this Ripple (ricursiveAI/Ripple-65B-Preview-DFlash2's geometry and taps)",
+        error.UnsupportedRicursiveDFlash2Shape => "--drafter: this DFlash2 drafter's shape is not one Ripple's CUDA drafter kernels take (16-row blocks, whole groups of 128-wide heads, a vocabulary of at most 131,072)",
         else => null,
     };
 }
@@ -231,7 +293,7 @@ test "ricursive cuda native: a reply thinks or answers bare, with no thinking bu
 }
 
 test "ricursive cuda native: every refusal of its own is worded, the rest left to the server" {
-    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoStreamFits, error.ParallelPastRound, error.ParallelPastMemory, error.SegmentsUnsupported, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.BuiltWithoutKernels, error.RicursiveCudaNeedsNvfp4, error.UnsupportedRicursiveCudaShape, error.Unimplemented }) |e| {
+    for ([_]anyerror{ error.PastContext, error.NoFreeSlot, error.NoStreamFits, error.ParallelPastRound, error.ParallelPastMemory, error.SegmentsUnsupported, error.NoDraftHead, error.StructuresUnsupported, error.CapturedKernels, error.BuiltWithoutKernels, error.RicursiveCudaNeedsNvfp4, error.UnsupportedRicursiveCudaShape, error.Unimplemented, error.DrafterPastMemory, error.NotRippleDFlash2, error.UnqualifiedRippleDFlash2, error.UnsupportedRicursiveDFlash2Shape }) |e| {
         try std.testing.expect(explain(null, e) != null);
     }
     for ([_]anyerror{ error.OutOfMemory, error.SamplingUnsupported, error.LogprobsUnsupported, error.WindowTooWide }) |e| {
@@ -290,6 +352,32 @@ test "ricursive cuda native: streams at a context on GB10 by the release's slot 
     };
     try std.testing.expectEqual(@as(usize, 8), try fit(room, 8, false, Slots{ .c = c, .positions = be.physical(32768), .fixed = scratch }));
     try std.testing.expect(try fit(room, 8, false, Slots{ .c = c, .positions = be.physical(262144), .fixed = scratch }) < 8);
+}
+
+test "ricursive cuda native: the DFlash2 drafter's bytes at 32,768 positions on GB10 and the streams they leave" {
+    var c = try cfg.parse(std.testing.allocator, @embedFile("fixtures/config.json"));
+    c.fp4_mlp = true;
+    const dc = try @import("dflash2_spec.zig").parse(std.testing.allocator, @embedFile("fixtures/dflash2_config.json"), &c);
+    const room = gb10_bytes - wts.deviceBytes(c);
+    const Slots = struct {
+        c: cfg.Config,
+        positions: usize,
+        drafter: ?dfl.Config,
+        fn bytes(p: @This(), n: usize) !u64 {
+            const draft = if (p.drafter) |d| dfl.openBytes(&d, p.c, true, n) else 0;
+            return 1_400_000_000 + fwd.Arena.bytes(p.c, p.positions, n) + be.Ripple.openBytes(p.c.vocab, n) + draft;
+        }
+    };
+    const plain: Slots = .{ .c = c, .positions = be.physical(32768), .drafter = null };
+    const drafted: Slots = .{ .c = c, .positions = be.physical(32768), .drafter = dc };
+    // 8 streams of a 32k context and the drafter fit GB10 after the target's weights
+    try std.testing.expectEqual(@as(usize, 8), try fit(room, 8, false, plain));
+    try std.testing.expectEqual(@as(usize, 8), try fit(room, 8, false, drafted));
+    for (1..9) |n| try std.testing.expectEqual(dfl.openBytes(&dc, c, true, n), try drafted.bytes(n) - try plain.bytes(n));
+    // at 128k the drafter's bytes leave one stream fewer
+    const long_plain: Slots = .{ .c = c, .positions = be.physical(131072), .drafter = null };
+    const long_drafted: Slots = .{ .c = c, .positions = be.physical(131072), .drafter = dc };
+    try std.testing.expectEqual(try fit(room, 8, false, long_plain) - 1, try fit(room, 8, false, long_drafted));
 }
 
 test "the prompt cache's hooks compile against the store's vtable" {
