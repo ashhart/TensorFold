@@ -204,8 +204,8 @@ data. The page asks for the server's key once and keeps it for that browser tab.
 ## Audit a pocket
 
 `tensorfold slide audit --server http://127.0.0.1:8080 --key-stdin < ~/models/slide-key` explicitly measures what each
-learned fact's neurons fire on. Add `--json` for the complete machine-readable audit, or `--threshold 0.02` to flag
-an off-subject firing rate above 2% instead of the default 1%. The same request is
+learned fact's neurons fire on. Add `--json` for the complete machine-readable audit, or `--threshold 0.02` (a rate
+from 0 through 1) to flag an off-subject firing rate above 2% instead of the default 1%. The same request is
 `GET /v1/slide/graph?audit=1&threshold=0.02`; its response adds `audit` and keeps the existing graph fields.
 Ordinary graph requests do not run an audit, and audits require a pocket learner served with `--slide`.
 
