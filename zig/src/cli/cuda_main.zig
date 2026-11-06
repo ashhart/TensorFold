@@ -15,6 +15,7 @@ const lanes_cli = @import("cuda_lanes.zig");
 const segments_cli = @import("cuda_segments.zig");
 const train_check = @import("cuda_train_check.zig");
 const dory_cli = @import("cuda_dory.zig");
+const ricursive_cli = @import("cuda_ricursive.zig");
 const decode = nemotron.decode;
 
 const usage =
@@ -42,6 +43,7 @@ const usage =
     \\       tensorfold digest MODEL   (every byte of the checkpoint hashed, as a tensor-parallel rank checks it at load)
     \\       tensorfold kl MODEL --tokens ID,... [--gold ID,...] [--max-tokens N] (--dump FILE | --against FILE) [--precision P]
     \\                (logits rows to FILE, fed --gold then greedy; or FILE's tokens fed: KL, top-1 and NLL against its rows)
+    \\                [--gold-file PATH] [--chunk ROWS]   (a Ripple checkpoint: every prompt row's logits, the prompt in chunks of ROWS)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width, 1-32 for a latent MoE else 1-16, against serial decoding, a wrong draft every third window)
     \\       tensorfold models
@@ -90,6 +92,13 @@ pub fn main(init: std.process.Init) !u8 {
             i += 1;
         } else if (std.mem.eql(u8, a, "--gold")) {
             opts.gold = try parseIds(gpa, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--gold-file")) {
+            gpa.free(opts.gold);
+            opts.gold = try segments_cli.readIds(gpa, init.io, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--chunk")) {
+            opts.chunk = try std.fmt.parseInt(usize, value, 10);
             i += 1;
         } else if (std.mem.eql(u8, a, "--precision")) {
             opts.math = std.meta.stringToEnum(nemotron.Precision, value) orelse return error.BadPrecision;
@@ -192,8 +201,23 @@ pub fn main(init: std.process.Init) !u8 {
         const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
         return dory_cli.run(gpa, init.io, &ctx, opts.model, .{ .tokens = opts.tokens, .max_tokens = opts.max_tokens, .loops = opts.loops, .context = opts.context, .drafts = opts.drafts, .graphs = opts.graphs, .stop_eos = opts.stop_eos, .sampling = s });
     }
+    if (ricursive_cli.wants(gpa, init.io, opts.model)) {
+        if (kernels != null or opts.sampling.temperature > 0 or opts.loops != null) {
+            std.debug.print("Ripple on CUDA runs greedily on its own kernels: --kernels native, temperature 0, no --loops\n", .{});
+            return 2;
+        }
+        const ro: ricursive_cli.Options = .{ .tokens = opts.tokens, .gold = opts.gold, .max_tokens = opts.max_tokens, .context = opts.context, .stop_eos = opts.stop_eos, .report = opts.report, .chunk = opts.chunk, .dump = opts.dump, .against = opts.against, .graphs = opts.graphs };
+        if (std.mem.eql(u8, args[1], "run")) return ricursive_cli.run(gpa, init.io, &ctx, opts.model, ro);
+        if (std.mem.eql(u8, args[1], "kl")) return ricursive_cli.klRun(gpa, init.io, &ctx, opts.model, ro);
+        std.debug.print("Ripple on CUDA takes run and kl so far\n", .{});
+        return 2;
+    }
     if (opts.loops != null) {
         std.debug.print("--loops sets a Dory checkpoint's recurrent passes: {s} is not one\n", .{opts.model});
+        return 2;
+    }
+    if (opts.chunk != null) {
+        std.debug.print("--chunk forwards a Ripple prompt in chunks: {s} is not a Ripple checkpoint\n", .{opts.model});
         return 2;
     }
     const env = init.environ_map;
@@ -288,6 +312,7 @@ const Options = struct {
     costs: ?[]f64 = null,
     segments: ?usize = null,
     loops: ?usize = null, // a Dory checkpoint's recurrent passes (run only)
+    chunk: ?usize = null, // kl on a Ripple checkpoint: every prompt row's logits, the prompt in chunks of this many rows
     counts: Counts = .{ .items = .{ 1, 2, 3, 4 }, .len = 4 },
     repeat: usize = 3,
     streams: usize = 4,

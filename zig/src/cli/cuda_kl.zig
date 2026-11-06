@@ -35,39 +35,61 @@ fn logSoftmax(row: []const u8, out: []f64) void {
     for (out) |*o| o.* -= z;
 }
 
-fn download(gpa: std.mem.Allocator, e: *nemotron.Engine, ptr: u64, len: usize) ![]u8 {
-    const host = try gpa.alloc(u8, len);
-    errdefer gpa.free(host);
-    try e.ops().download(host, ptr);
-    try e.stream.synchronize();
-    return host;
+/// An engine's logits rows in order: row(i) gives row i's bf16 logits, step(i, t) feeds token t after it.
+pub const Source = struct {
+    ctx: *anyopaque,
+    vocab: usize,
+    row: *const fn (ctx: *anyopaque, i: usize, out: []u8) anyerror!void,
+    step: *const fn (ctx: *anyopaque, i: usize, t: u32) anyerror!void,
+};
+
+/// The usage refusal before any GPU work: a prompt and exactly one of --dump and --against.
+pub fn refused(prompt: []const u32, dump: ?[]const u8, against: ?[]const u8) bool {
+    if ((dump == null) != (against == null) and prompt.len != 0) return false;
+    std.debug.print("kl: give --tokens and one of --dump FILE or --against FILE\n", .{});
+    return true;
 }
+
+const Nemotron = struct {
+    fn row(ctx: *anyopaque, i: usize, out: []u8) anyerror!void {
+        const e: *nemotron.Engine = @ptrCast(@alignCast(ctx));
+        try e.ops().download(out, if (i == 0) e.b.p_logits else e.b.logits);
+        try e.stream.synchronize();
+    }
+    fn step(ctx: *anyopaque, _: usize, t: u32) anyerror!void {
+        const e: *nemotron.Engine = @ptrCast(@alignCast(ctx));
+        _ = try e.step(t, null);
+    }
+};
 
 /// `dump`: `n` rows after `prompt` into the file, fed `feed` then greedy. `against`: the file's tokens fed, row by row.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, prompt: []const u32, feed: []const u32, n: usize, dump: ?[]const u8, against: ?[]const u8) !u8 {
-    if ((dump == null) == (against == null) or prompt.len == 0) {
-        std.debug.print("kl: give --tokens and one of --dump FILE or --against FILE\n", .{});
-        return 2;
-    }
-    const v = e.c.vocab;
-    const rec = recordBytes(v);
+    if (refused(prompt, dump, against)) return 2;
     _ = try e.prefill(prompt, null, null);
+    return compare(gpa, io, .{ .ctx = e, .vocab = e.c.vocab, .row = Nemotron.row, .step = Nemotron.step }, prompt.len, feed, n, dump, against);
+}
+
+/// `src`'s rows after a `prompt_len`-token prompt: `dump` writes `n`, fed `feed` then greedy; `against` feeds the file.
+pub fn compare(gpa: std.mem.Allocator, io: std.Io, src: Source, prompt_len: usize, feed: []const u32, n: usize, dump: ?[]const u8, against: ?[]const u8) !u8 {
+    const v = src.vocab;
+    const rec = recordBytes(v);
+    const row = try gpa.alloc(u8, v * 2);
+    defer gpa.free(row);
     if (dump) |path| {
         const buf = try gpa.alloc(u8, header_bytes + n * rec);
         defer gpa.free(buf);
         std.mem.writeInt(u32, buf[0..4], @intCast(n), .little);
         std.mem.writeInt(u32, buf[4..8], @intCast(v), .little);
         for (0..n) |i| {
-            const row = try download(gpa, e, if (i == 0) e.b.p_logits else e.b.logits, v * 2);
-            defer gpa.free(row);
+            try src.row(src.ctx, i, row);
             const t: u32 = if (i < feed.len) feed[i] else @intCast(argmax(row, v));
             const at = header_bytes + i * rec;
             std.mem.writeInt(u32, buf[at..][0..4], t, .little);
             @memcpy(buf[at + 4 ..][0 .. v * 2], row);
-            if (i + 1 < n) _ = try e.step(t, null);
+            if (i + 1 < n) try src.step(src.ctx, i, t);
         }
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf });
-        std.debug.print("RESULT kl dump: {d} rows ({d} fed) after a {d}-token prompt to {s}\n", .{ n, @min(n, feed.len), prompt.len, path });
+        std.debug.print("RESULT kl dump: {d} rows ({d} fed) after a {d}-token prompt to {s}\n", .{ n, @min(n, feed.len), prompt_len, path });
         return 0;
     }
     const ref = try std.Io.Dir.cwd().readFileAlloc(io, against.?, gpa, .limited(1 << 34));
@@ -89,8 +111,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, prompt: []co
         const at = header_bytes + i * rec;
         const t = std.mem.readInt(u32, ref[at..][0..4], .little);
         const want = ref[at + 4 ..][0 .. v * 2];
-        const row = try download(gpa, e, if (i == 0) e.b.p_logits else e.b.logits, v * 2);
-        defer gpa.free(row);
+        try src.row(src.ctx, i, row);
         logSoftmax(want, lp);
         logSoftmax(row, lq);
         var kl: f64 = 0;
@@ -105,7 +126,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, prompt: []co
         if (!same and first_diff == null) first_diff = i;
         nll[0] -= lp[t];
         nll[1] -= lq[t];
-        if (i + 1 < rows) _ = try e.step(t, null);
+        if (i + 1 < rows) try src.step(src.ctx, i, t);
     }
     const r: f64 = @floatFromInt(rows);
     std.debug.print("RESULT kl: {d} rows, mean KL {e:.3} nats, max {e:.3} at row {d}; top-1 {d} of {d}; first differs at {?d}; mean NLL of the fed tokens {d:.4} (reference) {d:.4} (this run)\n", .{ rows, kl_sum / r, kl_max, kl_at, top1, rows, first_diff, nll[0] / r, nll[1] / r });
