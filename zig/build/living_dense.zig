@@ -3,6 +3,7 @@ const std = @import("std");
 
 pub fn target(b: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, cuda: *std.Build.Module, qwen: *std.Build.Module) void {
     const moe = b.addExecutable(.{ .name = "tf-qwen-moe-learn", .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/qwen_moe_learn.zig"), .target = t, .optimize = o, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = qwen } } }) });
+    b.installArtifact(moe);
     b.step("compile-qwen-moe-learn", "Compile MoE learner qualification without running a device").dependOn(&moe.step);
     const run = b.addRunArtifact(moe);
     const model = b.option([]const u8, "qwen35-learn-model", "MoE checkpoint for learner qualification");
