@@ -2,6 +2,9 @@
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
+    .{ .name = "lfm2 masked prompt lfm2_attn_masked", .threads = 128, .tg_memory = 18432, .reserved = 128 },
+    .{ .name = "lfm2 masked prompt lfm2_prompt_scan", .threads = 128, .tg_memory = 0, .reserved = 128 },
+    .{ .name = "lfm2 masked prompt lfm2_prompt_pick", .threads = 1, .tg_memory = 0, .reserved = 1 },
     .{ .name = "metal lfm2 argmax lfm2_argmax", .threads = 1024, .tg_memory = 384, .m1 = 1024, .m2 = 1024 },
     .{ .name = "metal lfm2 stream conv lfm2_conv_segs", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "metal lfm2 stream attention qk lfm2_qk_segs", .threads = 32, .tg_memory = 0, .m1 = 832, .m2 = 832 },

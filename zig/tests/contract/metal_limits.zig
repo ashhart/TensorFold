@@ -81,6 +81,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun)) |l| return l;
+    if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
+        const raw = sources.lfm2_prompt_masked.source;
+        const body = try tf.frags.source(device, a, raw);
+        return .{ .decl = d, .function = fun, .here = try std.mem.concat(a, u8, &.{ sources.lfm2, "\n", body }), .pre_m5 = try preM5(a, sources.lfm2, raw) };
+    }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };
     if (std.mem.startsWith(u8, d.name, "metal ling route ")) {
         const body = @import("ling_metal").route;

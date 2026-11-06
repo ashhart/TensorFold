@@ -229,3 +229,5 @@ pub const core_weight_only = @embedFile("core/weight_only.metal");
 pub const core_hc_activation_body = @embedFile("core/hc_activation.h");
 pub const core_hc_activation = @embedFile("core/hc_activation.metal");
 pub const core_hc_pointwise = @embedFile("core/hc_pointwise.metal");
+
+pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");
