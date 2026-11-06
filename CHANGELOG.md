@@ -122,6 +122,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Serving: `serve` refuses, at start and by name, a `TENSORFOLD_PREFILL_SHARE` outside 0.01 to 1, a `TENSORFOLD_PREFILL_POLICY` other than `fcfs`, and `TENSORFOLD_PREFILL_TOKENS` or `TENSORFOLD_PREFILL_BUDGET` text that is not a whole number. The lane host used to read each one as its default without a word, so a share of 0 meant whole prompt steps (#2369).
 
 - Build: a plain `zig build` on Linux compiles again; the `tf-qwen35-cuda` tool passes the device flag that kept prompt states gained on 4 Nov (#2362). Thanks to @jschmied for the report.
+- Developers: `tf-xpu-contract-run` runs the kernel contract's gates 1 to 4 on an Intel GPU through Level Zero, with
+  planted controls and gate 5 checked live against the card; its first run covers the Qwen3.8-27B glue on an Arc Pro B70
+  (#2269, part of #2080). Thanks to @tolewis.
 
 - Flash Next on CUDA: a shared round's DeltaNet steps run in one launch each across its lanes instead of one launch a lane, so 8 streams decode 3-6% faster on a GB10 with the same tokens; one stream keeps its own launches (#1942). Thanks to @Arminova.
 - Qwen4: the rotary table comes from core's exact helper, matching transformers' FP32 values; replies can change where a token was a near-tie (#2000).
