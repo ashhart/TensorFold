@@ -5,12 +5,13 @@ const platform = @import("sys");
 const rows = @import("rows_store.zig");
 const imprint = @import("prompt_imprint.zig");
 const corpus = @import("rows_startup_corpus.zig");
+const ops = @import("imprint_ops_timing.zig");
 const Peak = @import("rows_peak_allocator.zig").Peak;
 const dirs = @import("lanes").learned_dirs;
 const Allocator = std.mem.Allocator;
 
-const usage = "usage: tf-startup-states rows|imprint seed|open|phases|summary|clean COUNT\n";
-const Store = enum { rows, imprint };
+const usage = "usage: tf-startup-states rows|imprint|ops seed|open|phases|summary|clean COUNT\n";
+const Store = enum { rows, imprint, ops }; // ops: Imprint's per-request calls, timed on its own seeded store
 const identity: u64 = 0x27b;
 const cap: u64 = 1 << 50;
 const nowNs = rows.write.nowNs;
@@ -31,17 +32,18 @@ pub fn main(init: std.process.Init) !u8 {
         clean(root, runs);
         switch (store) {
             .rows => try seedRows(a, root, count),
-            .imprint => try seedImprint(a, root, count),
+            .imprint, .ops => try seedImprint(a, root, count),
         }
     } else if (std.mem.eql(u8, mode, "open")) {
-        try open(a, store, root, runs, count);
+        if (store == .ops) try ops.run(a, root, identity, cap, runs, count) else try open(a, store, root, runs, count);
     } else if (std.mem.eql(u8, mode, "phases")) {
         switch (store) {
             .rows => try rowsPhases(a, root),
             .imprint => try imprintPhases(a, root),
+            .ops => return fail(),
         }
     } else if (std.mem.eql(u8, mode, "summary")) {
-        try summary(a, store, runs, count);
+        if (store == .ops) try ops.summary(a, runs, count) else try summary(a, store, runs, count);
     } else if (std.mem.eql(u8, mode, "clean")) {
         clean(root, runs);
     } else return fail();
@@ -195,6 +197,7 @@ fn open(a: Allocator, store: Store, root: [:0]const u8, runs: [:0]const u8, coun
             found = m.metas.items.len;
             m.deinit();
         },
+        .ops => unreachable,
     }
     const fp = footprint() orelse .{ 0, 0 };
     std.debug.print("STARTUP_STATES store={t} states={d} ms={d:.1} heap_peak_mib={d:.1} footprint_peak_mib={d:.1}\n", .{ store, found, ms(ns), mib(peak.peak), mib(fp[1]) });
