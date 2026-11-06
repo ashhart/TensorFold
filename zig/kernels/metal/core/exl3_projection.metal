@@ -1,4 +1,6 @@
-// Native EXL3: stored trellis tiles, row-independent compensated dots, and normalized Sylvester rotations.
+// Native EXL3: stored trellis tiles, row-independent compensated dots, and normalized Sylvester rotations. The
+// model-facing order (attention, MTP, dense/shared routing) follows the release's inference/model.py, revision
+// 314113f8; the trellis arithmetic and the kernel shapes are the lane's own pack format.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -133,9 +135,8 @@ inline half tf_exl3_table_value(const device half* table, uint codebook, ushort 
   return table[codebook * 65536u + uint(state)];
 }
 
-// ROUND-338: the mul1 value depends only on the state's byte sum, so the 65,536-entry table holds 1,024
-// distinct values and a threadgroup can hold them all. The structure is mlx-serve's prefill kernel's
-// (dig_lut_fill, MIT/Apache-2.0, NOTICE per-file): the table is filled once a threadgroup and the decode
+// The mul1 value depends only on the state's byte sum, so the 65,536-entry table holds 1,024
+// distinct values and a threadgroup can hold them all: the table is filled once a threadgroup and the decode
 // reads it in place of the 384 KB resident table's load.
 inline uint tf_exl3_mul1_index(ushort state) {
   const uint x = uint(state) * 0x83DCD12Du;
@@ -150,11 +151,10 @@ inline half tf_exl3_mul1_value(uint bs) {
   return half(fma(float(hs), float(as_type<half>(ushort(0x1EEEu))), float(as_type<half>(ushort(0xC931u)))));
 }
 
-// ROUND-338: the lane's eight windows at compile-time shifts. C_cur is the 32-bit window at the lane's first
+// The lane's eight windows at compile-time shifts. C_cur is the 32-bit window at the lane's first
 // state (its bit 31 is that window's first stream bit) and C_next the window 32 bits later; S is the states'
 // stride in bits (halves / 2) and J the state's index, so every shift below folds at compile time. The
-// structure is the comparator's (mlx-serve's dsv41_exl3_mul1h_k3 decode kernel, MIT/Apache-2.0, NOTICE
-// per-file): one funnel shift a block, then the windows at fixed shifts.
+// structure: one funnel shift a block, then the windows at fixed shifts.
 template <uint S, uint J>
 inline ushort tf_exl3_state_static(uint c_cur, uint c_next) {
   const uint bit = S * J;
@@ -349,7 +349,7 @@ kernel void tf_exl3_rotate_out(const device float* sums [[buffer(0)]],
   const uint row = tg.y, base = (tg.x * (tptg.x / 32u) + sg) * 128;
   const bool active = tf_exl3_active(routes, a, row);
   const uint id = a.indexed ? routes[row] : 0;
-  // ROUND-394: an indexed batch may carry entries of different output width (descriptor.reserved, 0 = the
+  // An indexed batch may carry entries of different output width (descriptor.reserved, 0 = the
   // call's n). The entry's own width bounds the columns this row writes; single-width tables are unchanged.
   const uint width = (a.indexed && active && descriptors[id].reserved != 0) ? descriptors[id].reserved : a.n;
   if (base >= width || !active) return;
@@ -371,7 +371,7 @@ kernel void tf_exl3_rotate_out(const device float* sums [[buffer(0)]],
   }
 }
 
-// ROUND-520: the pre-rotated int8 pack's epilogue. The byte body leaves f32 sums; the rotated pack has no
+// The pre-rotated int8 pack's epilogue. The byte body leaves f32 sums; the rotated pack has no
 // Hadamard/svh left to apply, so this is one cast into the caller's bf16 output at its own row stride.
 kernel void tf_exl3_epilogue(const device float* sums [[buffer(0)]],
                              device uchar* y [[buffer(1)]],
@@ -382,8 +382,8 @@ kernel void tf_exl3_epilogue(const device float* sums [[buffer(0)]],
   reinterpret_cast<device bfloat*>(y)[ulong(r) * a.y_stride + c] = bfloat(sums[ulong(r) * a.n + c]);
 }
 
-// ROUND-395: THE ONE-ROW TRANSFORM FOLD -- the projection's output transform, the RMS norm and the next
-// projection's input transform in ONE dispatch (the chain wq_a -> q_norm -> wq_b). ROUND-360 section 3 designed
+// THE ONE-ROW TRANSFORM FOLD -- the projection's output transform, the RMS norm and the next
+// projection's input transform in ONE dispatch (the chain wq_a -> q_norm -> wq_b). Section 3 designed
 // it and section 3b named the blocker: the butterfly's lane layout (a lane holds lane+32j) against this
 // family's STRIDED norm (thread t holds t, t+256, ...). Here the row goes through threadgroup memory, so the
 // permutation is a shared-memory write/read, not a shuffle. The arithmetic is the three shipped kernels' own:
@@ -583,9 +583,8 @@ kernel void tf_exl3_splitk_reduce(const device float* partials [[buffer(0)]],
 
 // ------------------------------------------------------------------------------------------------
 // SwiGLU + the down projection's rotate_in, fused (TF_DSV41_SWIGLU_ROT; default off until its differential and
-// the canons are green). Ported mechanism: mlx-serve's q3_prefill_dig2_swiglu_2304_x writes the down projection's
-// rotated input in its SwiGLU pass instead of a separate rotate (src/sdk/quant/exl3/stream/kernels/exl3/,
-// MIT/Apache-2.0; attribution required). The arithmetic here is ours: the same bf16 round of silu(gate)*up, the
+// the canons are green). The down projection's rotated input is written in the SwiGLU pass instead of a separate
+// rotate: the same bf16 round of silu(gate)*up, the
 // same per-expert su scale and the same 128-point Sylvester rotation tf_exl3_rotate_in applies, so a row's
 // rotated bits are the two-pass path's bits. Each SIMDgroup owns one 128-element block of one row, and the row
 // is written to the destination slot its expert tile occupies.
@@ -637,7 +636,7 @@ kernel void tf_exl3_swiglu_prerotate(const device ushort* gate [[buffer(0)]],
 // so a threadgroup reads eight contiguous n tiles of a k block, and the shared activation tile is double
 // buffered, so a block costs one threadgroup barrier instead of two. Each SIMDgroup runs the same decode, the
 // same 16-product FP32 sum and the same k order as tf_exl3_matmul_tab, so the output is bit-identical.
-// Bench arm for ROUND-323's one-row tile geometry; not dispatched by the engine yet.
+// Bench arm for 's one-row tile geometry; not dispatched by the engine yet.
 template <bool Table, bool Decode = true, bool Lut = false>
 inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* trellis,
                                      device float* sums, constant TfExl3Args& a,
@@ -771,8 +770,7 @@ kernel void tf_exl3_matmul_wide_tab(const device half* x [[buffer(0)]],
   tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
 }
 
-// ROUND-338: the wide one-row body with the static state selection -- the comparator's structure (mlx-serve's
-// dsv41_exl3_mul1h_k3 decode kernel, MIT/Apache-2.0, NOTICE per-file). The shipped body picks each state's
+// The wide one-row body with the static state selection. The shipped body picks each state's
 // word pair and bit offset at run time (the `rel[k]` cursor the record named as one of the body's two bounds);
 // here one funnel shift a block puts the lane's window at a known place and the eight windows then sit at
 // compile-time shifts, so the cursor leaves the inner loop and the lane reads three stream words, not four.
@@ -868,7 +866,7 @@ inline void tf_exl3_matmul_wide_static_impl(const device half* x, const device u
   }
 }
 
-// ROUND-338 bench arm: the static state selection with the codebook read from the resident table.
+// bench arm: the static state selection with the codebook read from the resident table.
 kernel void tf_exl3_matmul_wide_static_tab(const device half* x [[buffer(0)]],
                                            const device uchar* trellis [[buffer(1)]],
                                            device float* sums [[buffer(2)]],
@@ -893,7 +891,7 @@ kernel void tf_exl3_matmul_wide_static_tab(const device half* x [[buffer(0)]],
     tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
 }
 
-// ROUND-338 bench arm: the static state selection with the codebook read from a 1024-entry threadgroup LUT.
+// bench arm: the static state selection with the codebook read from a 1024-entry threadgroup LUT.
 kernel void tf_exl3_matmul_wide_static_lut(const device half* x [[buffer(0)]],
                                            const device uchar* trellis [[buffer(1)]],
                                            device float* sums [[buffer(2)]],
@@ -927,7 +925,7 @@ kernel void tf_exl3_matmul_wide_static_lut(const device half* x [[buffer(0)]],
     tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
 }
 
-// ROUND-339: the static one-row body with a deeper weight prefetch (PF blocks of stream words in flight a
+// The static one-row body with a deeper weight prefetch (PF blocks of stream words in flight a
 // lane). The shipped body issues the next block's three stream words at the top of the current block, so a
 // block's DRAM latency is hidden by one block's compute only. The narrow one-row shapes (n = 2304, 1280, 512
 // -- the shared expert's gate/up and the attention's wq_a) have one wave of threadgroups and nothing else to
@@ -1065,7 +1063,7 @@ inline void tf_exl3_matmul_wide_static_pf_impl(const device half* x, const devic
   }
 }
 
-// ROUND-339 bench arm: the static one-row body with the codebook LUT and a two-block prefetch.
+// bench arm: the static one-row body with the codebook LUT and a two-block prefetch.
 kernel void tf_exl3_matmul_wide_static_lut_pf2(const device half* x [[buffer(0)]],
                                                const device uchar* trellis [[buffer(1)]],
                                                device float* sums [[buffer(2)]],
@@ -1096,7 +1094,7 @@ kernel void tf_exl3_matmul_wide_static_lut_pf2(const device half* x [[buffer(0)]
     tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
 }
 
-// ROUND-339 bench arm: the static one-row body with the codebook LUT and a four-block prefetch.
+// bench arm: the static one-row body with the codebook LUT and a four-block prefetch.
 kernel void tf_exl3_matmul_wide_static_lut_pf4(const device half* x [[buffer(0)]],
                                                const device uchar* trellis [[buffer(1)]],
                                                device float* sums [[buffer(2)]],
@@ -1127,7 +1125,7 @@ kernel void tf_exl3_matmul_wide_static_lut_pf4(const device half* x [[buffer(0)]
     tf_exl3_matmul_wide_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
 }
 
-// ROUND-338 bench arm: the shipped dynamic selection with the codebook read from a 1024-entry threadgroup LUT.
+// bench arm: the shipped dynamic selection with the codebook read from a 1024-entry threadgroup LUT.
 // The separation experiment's fourth cell: the table load removed, the cursor left in.
 kernel void tf_exl3_matmul_wide_lut(const device half* x [[buffer(0)]],
                                     const device uchar* trellis [[buffer(1)]],
@@ -1148,7 +1146,7 @@ kernel void tf_exl3_matmul_wide_lut(const device half* x [[buffer(0)]],
   tf_exl3_matmul_wide_impl<true, true, true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx, lut);
 }
 
-// Diagnostic arm (ROUND-327): the wide body with the trellis load and the codebook value removed, so the difference
+// Diagnostic arm (): the wide body with the trellis load and the codebook value removed, so the difference
 // against tf_exl3_matmul_wide_tab prices the decode (loads + bit extraction + table read) in the dispatch. Values
 // are meaningless; timing only.
 kernel void tf_exl3_matmul_wide_noload_tab(const device half* x [[buffer(0)]],
@@ -1167,7 +1165,7 @@ kernel void tf_exl3_matmul_wide_noload_tab(const device half* x [[buffer(0)]],
   tf_exl3_matmul_wide_impl<true, false>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
 }
 
-// 32-k continuation of the wide one-row tile (ROUND-327): eight SIMDgroups own 128 columns, and each block decodes
+// 32-k continuation of the wide one-row tile (): eight SIMDgroups own 128 columns, and each block decodes
 // two consecutive 16-k tiles before one barrier, so the barrier count halves and a threadgroup reads 1.5 KB of
 // contiguous trellis a block. Each 16-k tile is decoded exactly as tf_exl3_matmul_wide_tab decodes it (same maps,
 // same table value) and the accumulation still ascends k in order, so the output is bit-identical by construction.
@@ -1309,7 +1307,7 @@ kernel void tf_exl3_matmul_wide2_tab(const device half* x [[buffer(0)]],
   tf_exl3_matmul_wide2_impl<true>(x, trellis, sums, a, routes, descriptors, partials, table, lane, sg, tg, wx, xx);
 }
 
-// Direct-register one-row decode (ROUND-327): a lane owns one output column, decodes that column's 16 states for
+// Direct-register one-row decode (): a lane owns one output column, decodes that column's 16 states for
 // a 16-k block into registers (eight stream words; the window is sized for halves <= 14), reads the codebook table and
 // accumulates ascending k. No threadgroup weight tile, no barrier, no shared round trip; a warp covers 32 columns.
 // The k order, the table entry and the FP32 FMA sequence are the wide body's, so the one-row output is
@@ -1357,7 +1355,7 @@ kernel void tf_exl3_matmul_direct_tab(const device half* x [[buffer(0)]],
   }
   for (uint i = 0; i < 8; ++i) wnext[i] = (wbase + i) % words;
 #if defined(TF_DIRECT_NW)
-  // ROUND-335: the sixteen states of a column span 27 ring positions; at halves = 10 the union is six words
+  // The sixteen states of a column span 27 ring positions; at halves = 10 the union is six words
   // (max(rel) = 4), at halves = 12 seven (max(rel) = 5), at halves = 6 five. The body's eight-word load is two
   // or three words more than the `rel[k] + 1` access ever reaches; load only what the map names.
   const uint nw = min(maxrel + 2u, words);
@@ -1394,7 +1392,7 @@ kernel void tf_exl3_matmul_direct_tab(const device half* x [[buffer(0)]],
   else sums[nb] = high;
 }
 
-// ROUND-330: the routed decode's direct-register descriptor body. The routed stage reads its weights through
+// The routed decode's direct-register descriptor body. The routed stage reads its weights through
 // descriptors[expert] (one row an expert), so the dense direct body's weight source does not apply; this is the
 // same register body with the descriptor's trellis, strides, width and codebook in place of the dense arguments.
 // A lane owns one output column of one row, decodes that column's sixteen states per 16-k block into registers
@@ -1479,7 +1477,7 @@ kernel void tf_exl3_matmul_direct_desc(const device half* x [[buffer(0)]],
   else sums[ulong(row) * a.n + nb] = high;
 }
 
-// The direct-register one-row body with a wider load width (ROUND-331): the trellis stream word is read as one
+// The direct-register one-row body with a wider load width (): the trellis stream word is read as one
 // 32-bit load instead of two 16-bit loads, and the activation row is read as four half4 loads instead of sixteen
 // 16-bit loads. The bytes read and their order are unchanged, the codebook entry is the same table entry and the
 // accumulation still ascends k in the same FP32 order, so the output is bit-identical by construction.
@@ -1553,7 +1551,7 @@ kernel void tf_exl3_matmul_direct_tab_v(const device half* x [[buffer(0)]],
   else sums[nb] = high;
 }
 
-// The direct-register one-row body with its stream words named (ROUND-332): the eight stream words of a 16-k
+// The direct-register one-row body with its stream words named (): the eight stream words of a 16-k
 // block are read into named scalars and selected with a comparison chain, instead of an array indexed by the
 // runtime cursor `rel[k]`. An array with a runtime index cannot live in registers on this target, so the
 // narrow body was reading and writing thread-local memory sixteen times a block. The words read, the windows
