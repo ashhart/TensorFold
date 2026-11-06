@@ -76,9 +76,9 @@ upstream's release-checkpoint line) under `zig/kernels/metal/deepseek_v41/` plus
 `core/exl3_projection*` and `core/expert_groups` group. The kernel contract registers the
 family at **89 kernel variants: 89/89 pass gates 1–4, 0 fail, 186/186 planted controls
 caught red, 2 documented limit records** (`tf-kernel-contract --only dsv41` on the shipped
-tree). The headline tensor-unit paths report themselves at boot: `tf_exl3_matmul_prefill_nax`
-(prompt) and `tf_exl3_matmul_decode_nax` / the register-only `tf_exl3_matmul_decode_fma`
-(decode), beside the CSA2 attention, the sparse index block, the Engram gather and the
+tree). The headline tensor-unit paths report themselves at boot: `tf_exl3_matmul_prefill_nax3` /
+`tf_exl3_matmul_prefill_nax31` (prompt) and `tf_exl3_matmul_decode_fma_static_lut` /
+`tf_exl3_matmul_decode_fma_dense` (decode), beside the CSA2 attention, the sparse index block, the Engram gather and the
 hyper-connection boundary.
 
 ## Known issues (honest)

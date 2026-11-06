@@ -1,11 +1,9 @@
 // ! Borrowed resident EXL3 projections; fixed tiles keep each row independent of its surrounding window. The !
 // model-facing order follows the release's inference/model.py, revision 314113f8; the trellis arithmetic and the !
 // kernel shapes are the lane's own pack format.
-// Status: the Metal bodies named in the lane notes are re-expressed from the
-// release's inference/model.py (revision 314113f8). The host glue for the paired
-// decode and the drafter's conditioning still follows the earlier ported shape
-// (mlx-serve's dsv41_exl3_guone_k3 / dsv41_exl3_mul1h_k3, MIT/Apache-2.0), and is
-// not claimed as rewritten; its rewrite is scheduled.
+// The host plan names the body, the split count and the dispatch geometry from this pack's own
+// shapes; the drafter's conditioning is staged in the family's model.zig. No other engine's glue is
+// carried.
 const std = @import("std");
 pub const checkpoint = @import("exl3_load.zig");
 pub const load = @import("exl3_metal_load.zig");
