@@ -16,8 +16,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Buil
     gate_tests.dependOn(&tests.step);
     test_step.dependOn(&tests.step);
     const files = b.addRunArtifact(b.addTest(.{ .root_module = module(b, "zig/tests/tp_check_file_test.zig", host, .ReleaseSafe) }));
-    gate_tests.dependOn(&files.step);
-    test_step.dependOn(&files.step);
+    gate_tests.dependOn(&files.step); // about 2 GiB while it runs, so not in every `zig build test`
     // ReleaseSafe whatever -Doptimize says: a gate keeps its safety checks
     const exe = b.addExecutable(.{ .name = "tf-tp-check", .root_module = module(b, "zig/tests/tp_check_main.zig", target, .ReleaseSafe) });
     b.step("tf-tp-check", "The mixed-TP gate (#1236 rules 1, 2, 4) over each rank's collective and logits dumps").dependOn(&b.addInstallArtifact(exe, .{}).step);

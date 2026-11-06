@@ -15,7 +15,7 @@ pub const Kind = enum(u32) { collective = 1, logits = 2 };
 /// Which collective a record holds; `exchange` and `send` name their peer, `recv` the rank it came from.
 pub const Call = enum(u8) { all_reduce, all_gather, exchange };
 
-pub const Error = error{ BadMagic, BadVersion, Truncated, BadKind, BadEnum, OutOfMemory };
+pub const Error = error{ BadMagic, BadVersion, Truncated, BadKind, BadEnum, BadLength, OutOfMemory };
 
 /// How tokens were chosen; a teacher-forced run is fed another run's tokens, and its `chosen` stays its own arg-max.
 pub const Mode = enum(u8) { greedy, teacher_forced };
@@ -186,12 +186,14 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8) Error!Dump {
                 const peer = try c.int(u32);
                 const ns = try c.int(u64);
                 const nr = try c.int(u64);
+                const dtype = try enumOf(DType, e[1]);
+                if (ns % dtype.size() != 0 or nr % dtype.size() != 0) return error.BadLength;
                 try cs.append(a, .{
                     .phase = try phaseOf(format_version, e[3]),
                     .seq = seq,
                     .layer = layer,
                     .call = try enumOf(Call, e[0]),
-                    .dtype = try enumOf(DType, e[1]),
+                    .dtype = dtype,
                     .op = try enumOf(Op, e[2]),
                     .peer = peer,
                     .send = try c.take(ns),
