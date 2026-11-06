@@ -228,17 +228,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         const run_exe = b.addExecutable(.{ .name = "tf-dsv41-run", .root_module = run_mod });
         b.installArtifact(run_exe);
         b.step("tf-dsv41-run", "DSV41 qualification receipts on real weights").dependOn(&b.addInstallArtifact(run_exe, .{}).step);
-
-        const ids_mod = b.createModule(.{
-            .root_source_file = b.path("zig/tf_ids_tmp.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "tokenizer", .module = tokenizer }},
-        });
-        const ids_exe = b.addExecutable(.{ .name = "tf-ids", .root_module = ids_mod });
-        b.installArtifact(ids_exe);
-        b.step("tf-ids", "text to token ids JSON").dependOn(&b.addInstallArtifact(ids_exe, .{}).step);
     }
 
     for (programs) |p| {

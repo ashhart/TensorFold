@@ -198,10 +198,10 @@ pub const Proj = struct {
 };
 
 fn glueTmp(device: mtl.Device, out: mv.Out) !mtl.Pipeline {
-    return rig_.pipeline(device, sources.dsv41.glue_tmp, if (out == .f32) "tf_dsv41_g_mv_f32" else "tf_dsv41_g_mv_bf16");
+    return rig_.pipeline(device, sources.dsv41.glue_rows, if (out == .f32) "tf_dsv41_g_mv_f32" else "tf_dsv41_g_mv_bf16");
 }
 
-/// glue_tmp's launch: x [rows][k], w [n][k] bf16 into y: one simdgroup an output.
+/// glue_rows's launch: x [rows][k], w [n][k] bf16 into y: one simdgroup an output.
 fn encodeOld(old: mtl.Pipeline, e: anytype, p: *const Proj, y: rig_.Ref) void {
     const f = p.f.?;
     e.setPipeline(old);
@@ -281,7 +281,7 @@ pub const Suite = struct {
         return bad;
     }
 
-    /// Bytes equal glue_tmp's over its envelope; fp32 weights holding bf16 values equal the bf16 weights.
+    /// Bytes equal glue_rows's over its envelope; fp32 weights holding bf16 values equal the bf16 weights.
     pub fn equality(s: *Suite, seed: u64) !usize {
         var bad: usize = 0;
         var cases: usize = 0;
@@ -307,7 +307,7 @@ pub const Suite = struct {
                 const n = p.f.?.outputs() * p.es();
                 if (std.mem.indexOfDiff(u8, p.rig.bytes(p.y, n), p.rig.bytes(want, n))) |i| {
                     bad += 1;
-                    std.debug.print("FAIL glue_tmp equality {d}x{d}x{d} {t} {t}: first difference at byte {d}\n", .{ shape.rows, shape.n, shape.k, out, fill, i });
+                    std.debug.print("FAIL glue_rows equality {d}x{d}x{d} {t} {t}: first difference at byte {d}\n", .{ shape.rows, shape.n, shape.k, out, fill, i });
                 }
             };
         }
@@ -340,11 +340,11 @@ pub const Suite = struct {
             }
         }
         const word = if (bad == 0) "PASS" else "FAIL";
-        std.debug.print("{s} equality {s}: {d} cases byte-equal to glue_tmp's tf_dsv41_g_mv_f32 and _bf16 (bf16 weights) or to the bf16 weights of the same values (fp32 weights), {d} differ\n", .{ word, base, cases, bad });
+        std.debug.print("{s} equality {s}: {d} cases byte-equal to glue_rows's tf_dsv41_g_mv_f32 and _bf16 (bf16 weights) or to the bf16 weights of the same values (fp32 weights), {d} differ\n", .{ word, base, cases, bad });
         return bad;
     }
 
-    /// The LM head's shape: prefixes, splits, sampled columns against the oracle, glue_tmp's bytes; `time` adds timing.
+    /// The LM head's shape: prefixes, splits, sampled columns against the oracle, glue_rows's bytes; `time` adds timing.
     pub fn head(s: *Suite, io: std.Io, seed: u64, time: bool) !usize {
         const p = s.find(.bf16, .f32) orelse return 0;
         if (!try p.prepare(head_shape, .random, seed)) return error.Refused;
@@ -384,10 +384,10 @@ pub const Suite = struct {
         try p.rig.finish(pass);
         if (std.mem.indexOfDiff(u8, whole, p.rig.bytes(want, len))) |i| {
             bad += 1;
-            std.debug.print("FAIL head glue_tmp equality: first difference at byte {d}\n", .{i});
+            std.debug.print("FAIL head glue_rows equality: first difference at byte {d}\n", .{i});
         }
         const word = if (bad == 0) "PASS" else "FAIL";
-        std.debug.print("{s} head {s}{d}x{d}x{d}: {d} launches byte-equal to one launch, {d} sampled outputs equal the fp32 order, whole output equals glue_tmp, {d} problems\n", .{ word, base, f.shape.rows, f.shape.n, f.shape.k, launches, sampled, bad });
+        std.debug.print("{s} head {s}{d}x{d}x{d}: {d} launches byte-equal to one launch, {d} sampled outputs equal the fp32 order, whole output equals glue_rows, {d} problems\n", .{ word, base, f.shape.rows, f.shape.n, f.shape.k, launches, sampled, bad });
         if (time) try s.timing(io, p, old);
         return bad;
     }
@@ -421,7 +421,7 @@ pub const Suite = struct {
             }
             const us = median(&samples);
             const read: f64 = @floatFromInt(wbytes.len + cut.rows * f.shape.k * 2);
-            std.debug.print("TIME {s}{s} head K {d} N {d} R {d}: {d:.1} us median of {d} x {d} cold launches, {d:.0} GB/s over {d:.1} MB read\n", .{ base, if (is_old) "glue_tmp" else "mv", f.shape.k, f.shape.n, cut.rows, us, samples.len, copies, read / us / 1000.0, read / 1e6 });
+            std.debug.print("TIME {s}{s} head K {d} N {d} R {d}: {d:.1} us median of {d} x {d} cold launches, {d:.0} GB/s over {d:.1} MB read\n", .{ base, if (is_old) "glue_rows" else "mv", f.shape.k, f.shape.n, cut.rows, us, samples.len, copies, read / us / 1000.0, read / 1e6 });
         };
         try s.promptTiming(io, p, old);
     }
@@ -436,7 +436,7 @@ pub const Suite = struct {
         e.dispatchGroups(mtl.Size.of(f.shape.n, rows, 1), mtl.Size.of(32, 1, 1));
     }
 
-    /// Prompt chunks of the router gate and the indexer projection: mv against glue_tmp, weights warm as in a layer.
+    /// Prompt chunks of the router gate and the indexer projection: mv against glue_rows, weights warm as in a layer.
     fn promptTiming(s: *Suite, io: std.Io, _: *Proj, old: mtl.Pipeline) !void {
         var p = try Proj.init(s.a, s.device, s.queue, .{}, "timing");
         defer p.deinit();
@@ -453,7 +453,7 @@ pub const Suite = struct {
                 }
                 const us = median(&samples);
                 const flops = 2.0 * @as(f64, @floatFromInt(shape.rows * shape.n * shape.k));
-                std.debug.print("TIME {s}{s} prompt chunk {d}x{d}x{d}: {d:.1} us median of {d} x 8 launches, {d:.2} TFLOP/s\n", .{ base, if (is_old) "glue_tmp" else "mv", shape.rows, shape.n, shape.k, us, samples.len, flops / us / 1e6 });
+                std.debug.print("TIME {s}{s} prompt chunk {d}x{d}x{d}: {d:.1} us median of {d} x 8 launches, {d:.2} TFLOP/s\n", .{ base, if (is_old) "glue_rows" else "mv", shape.rows, shape.n, shape.k, us, samples.len, flops / us / 1e6 });
             }
         }
     }

@@ -1,4 +1,4 @@
-//! Launch encoders of the phase-1 glue (glue_tmp.metal), the MoE route and the index top-512.
+//! Launch encoders of the row glue (glue_rows.metal), the MoE route and the index top-512.
 const std = @import("std");
 const mtl = @import("metal");
 const mvk = @import("mv.zig");
@@ -50,7 +50,7 @@ pub const GNormArgs = extern struct { dim: u32, in_stride: u32, out_stride: u32,
 pub const GHcArgs = extern struct { dim: u32, iters: u32, eps: f32, hc_eps: f32, alpha: f32 };
 pub const RouteArgs = extern struct { rows: i32, topk: i32, scale: f32, eps: f32 };
 
-/// ROUND-527: the argument records of glue_tmp's kernels, one named extern struct each so the mirror check
+/// ROUND-527: the argument records of glue_rows's kernels, one named extern struct each so the mirror check
 /// compares them field by field (they were positional `[N]u32` payloads until this round).
 pub const GRopeArgs = extern struct { pairs: u32, heads: u32, head_stride: u32, row_stride: u32, off: u32, positions: u32 };
 pub const GCandArgs = extern struct { keys: u32, blocks: u32, topk: u32 };
