@@ -44,6 +44,53 @@ kernel void tf_round_bf16_argmax(const device ushort* logits [[buffer(0)]],
   }
   if (lane == 0) picks[row] = { masks[0] != 0 ? 0xffffffffu : ids[0], masks[0] };
 }
+// tf_round_bf16_argmax with a row on every core: the largest finite value, then the lowest token, chunk by chunk.
+struct ChunkBest { float value; uint token, mask; };
+constant constexpr uint CHUNK_STEPS = 32, CHUNK_TOKENS = 32 * CHUNK_STEPS;
+kernel void tf_round_pick_chunks(const device ushort* logits [[buffer(0)]],
+                                 device ChunkBest* out [[buffer(1)]],
+                                 constant Argmax& p [[buffer(2)]],
+                                 uint2 place [[threadgroup_position_in_grid]],
+                                 ushort lane [[thread_index_in_simdgroup]]) {
+  const uint chunk = place.x, row = place.y, chunks = (p.vocab + CHUNK_TOKENS - 1) / CHUNK_TOKENS;
+  float best = -INFINITY;
+  uint id = 0xffffffffu, mask = 0;
+  for (uint step = 0; step < CHUNK_STEPS; step++) {
+    const uint token = chunk * CHUNK_TOKENS + step * 32 + lane;
+    if (token >= p.vocab) break;
+    const float value = as_type<float>(uint(logits[ulong(row) * p.stride + token]) << 16);
+    if (!isfinite(value)) mask |= isnan(value) ? 1u : value > 0 ? 2u : 4u;
+    else if (id == 0xffffffffu || value > best) {
+      best = value;
+      id = token;
+    }
+  }
+  const float top = simd_max(best);
+  const uint who = simd_min(best == top && id != 0xffffffffu ? id : 0xffffffffu);
+  const uint masks = simd_or(mask);
+  if (lane == 0) out[row * chunks + chunk] = {top, who, masks};
+}
+kernel void tf_round_pick_rows(const device ChunkBest* chunks_best [[buffer(0)]],
+                               device Pick* picks [[buffer(1)]],
+                               constant Argmax& p [[buffer(2)]],
+                               uint row [[threadgroup_position_in_grid]],
+                               ushort lane [[thread_index_in_simdgroup]]) {
+  const uint chunks = (p.vocab + CHUNK_TOKENS - 1) / CHUNK_TOKENS;
+  float best = -INFINITY;
+  uint id = 0xffffffffu, mask = 0;
+  for (uint chunk = lane; chunk < chunks; chunk += 32) {
+    const ChunkBest other = chunks_best[row * chunks + chunk];
+    mask |= other.mask;
+    if (other.token != 0xffffffffu && (id == 0xffffffffu || other.value > best || (other.value == best && other.token < id))) {
+      best = other.value;
+      id = other.token;
+    }
+  }
+  const float top = simd_max(best);
+  const uint who = simd_min(best == top && id != 0xffffffffu ? id : 0xffffffffu);
+  const uint masks = simd_or(mask);
+  if (lane == 0) picks[row] = { masks != 0 ? 0xffffffffu : who, masks };
+}
 kernel void tf_tree_round_match(const device uint* tokens [[buffer(0)]],
                                 const device int* parents [[buffer(1)]],
                                 const device Pick* picks [[buffer(2)]],

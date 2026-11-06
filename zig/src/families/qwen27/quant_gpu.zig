@@ -15,41 +15,25 @@ pub const Sums = struct { ref: Ref, stride: u32 };
 pub var qk_rows: bool = true;
 
 pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true, cooperative: bool = false, xs_group: u16 = 64, shift: bool = false };
-pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
+pub const Kind = enum { projection, xsum, norm, input_norm, mlp, mlp_rows, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
-pub fn longPrompt(name: []const u8, tensor_units: bool) bool {
-    return tensor_units and std.mem.endsWith(u8, name, " Ultra");
-}
+pub fn longPrompt(name: []const u8, tensor_units: bool) bool { return tensor_units and std.mem.endsWith(u8, name, " Ultra"); }
 
 test "long prompt dispatches only on an Ultra with tensor units" {
-    try std.testing.expect(longPrompt("Apple M5 Ultra", true));
-    try std.testing.expect(!longPrompt("Apple M5 Max", true));
-    try std.testing.expect(!longPrompt("Apple M5 Pro", true));
-    try std.testing.expect(!longPrompt("Apple M3 Ultra", false));
+    try std.testing.expect(longPrompt("Apple M5 Ultra", true) and !longPrompt("Apple M5 Max", true) and !longPrompt("Apple M5 Pro", true) and !longPrompt("Apple M3 Ultra", false));
 }
 
 /// Whether a reg projection's `rows` take its long key: prompt rows past `lane.reg_rows` on a `longPrompt` chip.
-pub fn longKey(long_prompt: bool, prompt: bool, rows: u32) bool {
-    return long_prompt and prompt and rows > lane.reg_rows;
-}
+pub fn longKey(long_prompt: bool, prompt: bool, rows: u32) bool { return long_prompt and prompt and rows > lane.reg_rows; }
 
 test "only prompt chunks past 128 rows take the long key" {
-    try std.testing.expect(longKey(true, true, 129));
-    try std.testing.expect(longKey(true, true, 2048));
-    try std.testing.expect(!longKey(true, true, 128));
-    try std.testing.expect(!longKey(true, false, 2048));
-    try std.testing.expect(!longKey(false, true, 2048));
+    try std.testing.expect(longKey(true, true, 129) and longKey(true, true, 2048) and !longKey(true, true, 128) and !longKey(true, false, 2048) and !longKey(false, true, 2048));
 }
 
 pub const Kernels = struct {
-    allocator: std.mem.Allocator,
-    residency: ?mtl.ResidencySet.Follow = null,
-    device: mtl.Device,
-    profiler: ?*profile.Trace = null,
-    row_pipelines: ?row.Pipelines = null,
-    simd: ?row.simd.Pipelines = null,
-    simd_bits: ?row.simd_bits.Pipelines = null,
+    allocator: std.mem.Allocator, residency: ?mtl.ResidencySet.Follow = null, device: mtl.Device, profiler: ?*profile.Trace = null,
+    row_pipelines: ?row.Pipelines = null, simd: ?row.simd.Pipelines = null, simd_bits: ?row.simd_bits.Pipelines = null,
     /// Raw matrices take simd_qmm_bits' tiles; off on tensor units, whose raw matrices are runs short of a lane tile.
     raw_tiles: bool = true,
     /// Per [n, k] shape: whether the scalar twin's 1-2 row bits equal the tiles' (checked once on this chip).
@@ -62,24 +46,19 @@ pub const Kernels = struct {
     prompt: bool = false,
     /// Set on `longPrompt` chips: chunks past a short entry's capacity take one dispatch on a separate long key.
     long_prompt: bool = false,
-    lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
-    cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
+    lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty, cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
     /// Per [n, k]: whether simd_qmm's half operands give its tiles' bits (checked once on this chip).
     half_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// Per [n, k]: whether chunk pairs on tf_sq_prep_s's sums give simd_qmm's tiles' bits (checked once on this chip).
     sum_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// The last norm's output, its tf_sq_fits words and tf_sq_prep_h output, while no later norm writes over it.
-    fits: ?Fits = null,
-    fits_words: ?mtl.Buffer = null,
-    prep_words: ?mtl.Buffer = null,
+    fits: ?Fits = null, fits_words: ?mtl.Buffer = null, prep_words: ?mtl.Buffer = null,
     /// tf_sq_prep_s's sums for a chunk-pair projection's prompt rows, written just before it.
     sum_words: ?mtl.Buffer = null,
     /// qk's pipelines, made at the first plain matrix's quant.
     qks: ?qk.Pipelines = null,
     sn: ?(if (@hasDecl(@import("core"), "sensenova_loop")) @import("core").sensenova_loop.linear_gpu.LinearGpu else void) = null,
-    sn_xs128_mode: bool = false,
-    sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
-
+    sn_xs128_mode: bool = false, sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
         while (it.next()) |p| {
@@ -88,10 +67,7 @@ pub const Kernels = struct {
         }
         k.residency = hook;
     }
-
-    pub fn joined(k: *Kernels, p: *const lane.Projection) void {
-        if (k.residency) |f| mtl.resident.fields.apply(p, f, true);
-    }
+    pub fn joined(k: *Kernels, p: *const lane.Projection) void { if (k.residency) |f| mtl.resident.fields.apply(p, f, true); }
 
     pub fn deinit(k: *Kernels) void {
         k.setResident(null);
@@ -132,6 +108,7 @@ pub const Kernels = struct {
             .norm => "custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float",
             .input_norm => "custom_kernel_q27_norm_input_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float",
             .mlp => "custom_kernel_q27_mlp_xs_bfloat16_t_bfloat16_t_int32_t_bfloat16_t_float",
+            .mlp_rows => "q27_mlp_rows",
             .ane_input => "q27_ane_input",
             .mlp_ane => "q27_mlp_ane",
             .add_ane => "q27_add_ane",
@@ -142,26 +119,16 @@ pub const Kernels = struct {
         return p;
     }
 
-    fn xsGroup(k: *const Kernels, width: u32) u16 {
-        if (!k.device.tensorUnits()) return 0;
-        if (k.sn_xs128_mode) return if (width % 128 == 0) 128 else 0;
-        return 64;
-    }
+    fn xsGroup(k: *const Kernels, width: u32) u16 { return if (!k.device.tensorUnits()) 0 else if (k.sn_xs128_mode) (if (width % 128 == 0) 128 else 0) else 64; }
 
     /// Encodes the product without ordering its output; the caller barriers before dependent reads or writes.
-    pub fn quant(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32) !void {
-        return k.quantSkip(input_encoder, p, x, xs, dims, y, rows, 0);
-    }
+    pub fn quant(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32) !void { return k.quantSkip(input_encoder, p, x, xs, dims, y, rows, 0); }
 
     /// `quant` over input groups [cut[0], cut[0] + cut[1]) only, into fp32 partial sums.
-    pub fn quantCut(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: Sums, dims: Ref, y: Ref, rows: u32, cut: [2]u32) !void {
-        return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, 0, cut);
-    }
+    pub fn quantCut(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: Sums, dims: Ref, y: Ref, rows: u32, cut: [2]u32) !void { return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, 0, cut); }
 
     /// `quant` over a fused two-half projection (the MLP's gate_up) without the first `skip` tiles of each half.
-    pub fn quantSkip(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32) !void {
-        return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, skip, .{ 0, 0 });
-    }
+    pub fn quantSkip(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32) !void { return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, skip, .{ 0, 0 }); }
 
     fn quantImpl(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
@@ -176,29 +143,9 @@ pub const Kernels = struct {
     }
 
     /// The lane projection a launch of `p` takes, compiled from source and cached the first time its key is seen.
-    fn laneEntry(
-        k: *Kernels,
-        p: projection.Linear,
-        sk: u32,
-        skip: u32,
-        cut: [2]u32,
-        long: bool,
-        /// A plain matrix with no reg copy: tf_lane_pair, which reads weight_layout and writes tf_lane_reg's words.
-        cooperative: bool,
-    ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
+    fn laneEntry(k: *Kernels, p: projection.Linear, sk: u32, skip: u32, cut: [2]u32, long: bool, cooperative: bool) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
         const reg = (p.bits == 4 or p.bits == 5 or p.bits == 6) and p.group == 64 and !cooperative;
-        const key = Key{
-            .kind = .projection,
-            .n = p.n,
-            .k = p.k,
-            .slices = if (reg or cooperative) sk else p.slices,
-            .skip = skip,
-            .cut = cut,
-            .bits = p.bits,
-            .group = p.group,
-            .long = long,
-            .cooperative = cooperative,
-        };
+        const key = Key{ .kind = .projection, .n = p.n, .k = p.k, .slices = if (reg or cooperative) sk else p.slices, .skip = skip, .cut = cut, .bits = p.bits, .group = p.group, .long = long, .cooperative = cooperative };
         const half = p.n / 64;
         const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
         const entry = try k.lanes.getOrPut(k.allocator, key);
@@ -570,6 +517,17 @@ pub const Kernels = struct {
 
         const xs_group = k.xsGroup(width);
         const xs_on = xs_group != 0;
+        if (@import("core_delta").flat_glue) {
+            const pipeline = try k.get(.{ .kind = .mlp_rows, .k = width, .n = width, .xs = xs_on, .xs_group = xs_group });
+            if (pipeline.maxThreads() >= 256) {
+                e.setPipeline(pipeline);
+                bind(e, .{ gate, up, dims, out, xs });
+                e.setValue(width, 5);
+                e.dispatchGroups(mtl.Size.of(width / 64, padded(rows) / 16, 1), mtl.Size.of(256, 1, 1));
+                try span.end();
+                return;
+            }
+        }
         const grp_w: u32 = if (xs_group == 128) 128 else 64;
         e.setPipeline(try k.get(.{ .kind = .mlp, .k = width, .n = width, .xs = xs_on, .xs_group = xs_group }));
         bind(e, .{ gate, up, dims, out, xs });
@@ -602,7 +560,7 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
         .xsum => sources.xsum,
         .norm => sources.norm_xs,
         .input_norm => sources.norm_input,
-        .mlp => sources.mlp_xs,
+        .mlp, .mlp_rows => sources.mlp_xs,
         .ane_input, .mlp_ane, .add_ane => sources.mlp_ane,
     };
     const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
@@ -610,7 +568,7 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
         .projection => unreachable,
         .xsum => try std.fmt.allocPrint(a, "constexpr int K={d}, GS=64;", .{key.k}),
         .norm, .input_norm => try std.fmt.allocPrint(a, "constexpr int K={d};{s}", .{ key.k, if (key.shift) "\n#define Q27_SHIFT 1" else "" }),
-        .mlp => try std.fmt.allocPrint(a, "constexpr int N={d};", .{key.n}),
+        .mlp, .mlp_rows => try std.fmt.allocPrint(a, "constexpr int N={d};", .{key.n}),
         .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(a, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
     };
     defer a.free(definitions);

@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const Config = @import("config.zig").Config;
 const Ref = @import("projection.zig").Ref;
 
-pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps, router, picks, route_weights, offsets, order, sorted_weights, sorted_rows, expert_gate, expert_up, expert_act, expert_out, expert_sums, tail_dims, h_streams, mhc_coeff };
+pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps, router, picks, route_weights, offsets, order, sorted_weights, sorted_rows, expert_gate, expert_up, expert_act, expert_out, expert_sums, tail_dims, h_streams, mhc_coeff, flows };
 
 /// A prompt pass's rows at most (a chain); rounds with trees and every logits row stay within `logit_rows`.
 pub const max_rows = 2048;
@@ -40,6 +40,7 @@ pub fn allocationSizes(config: Config, capacity: u32) [std.enums.values(Field).l
         8 * 4, // the prompt tail's dims: its rows, then the whole chunk's padded rows (the group sums' stride)
         if (config.looped) capacity * 2 * config.hidden * 2 else 0,
         if (config.looped) capacity * 6 * 2 else 0,
+        capacity * 4,
     };
 }
 
