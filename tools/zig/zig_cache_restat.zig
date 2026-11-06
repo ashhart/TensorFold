@@ -1,4 +1,4 @@
-//! `zig_cache_restat CACHE_DIR ZIG_LIB_DIR`: every recorded file whose contents still match its digest gets today's id.
+//! `zig_cache_restat CACHE_DIR ZIG_LIB_DIR [--prune]`: a record whose file still matches its digest gets today's id.
 const std = @import("std");
 const Io = std.Io;
 const Cache = std.Build.Cache;
@@ -11,7 +11,11 @@ const Totals = struct {
     updated: usize = 0,
     changed: usize = 0,
     unreadable: usize = 0,
+    pruned: usize = 0,
+    outputs: usize = 0,
 };
+/// A manifest, the output folder Zig names after it, and the output folders its files are in.
+const Entry = struct { name: []const u8, out: Cache.HexDigest, dead: bool, uses: []const Cache.HexDigest };
 
 const Restat = struct {
     gpa: std.mem.Allocator,
@@ -22,6 +26,7 @@ const Restat = struct {
     key: std.ArrayList(u8) = .empty,
     buffer: []u8,
     totals: Totals = .{},
+    entries: std.ArrayList(Entry) = .empty,
 
     /// What `path` under prefix `prefix` holds today, read once per run; null when it can't be read.
     fn look(r: *Restat, prefix: usize, path: []const u8) !?Seen {
@@ -55,19 +60,34 @@ const Restat = struct {
     }
 
     /// Returns how many records now carry today's id, or null when `contents` isn't a complete manifest.
-    fn update(r: *Restat, contents: []u8) !?usize {
+    fn update(r: *Restat, name: []const u8, contents: []u8) !?usize {
         var updated: usize = 0;
         var off: usize = 0;
+        var input: Cache.BinDigest = @splat(0);
+        const named = name.len == Cache.hex_digest_len and (std.fmt.hexToBytes(&input, name) catch null) != null;
+        // Zig names an entry's output folder by hashing its manifest's name, then each record's digest in order.
+        var out = Cache.hasher_init;
+        out.update(&input);
+        var dead = false;
+        var uses: std.ArrayList(Cache.HexDigest) = .empty;
         while (off + 1 < contents.len) {
             const file_off: File.Offset = @fromBackingInt(@as(u32, @intCast(off)));
             const file = file_off.getFallible(contents) catch return null;
             const path = file_off.pathFallible(contents) catch return null;
             if (file.flags.prefix >= r.roots.len or path.len == 0) return null;
             off += File.sizeOf(path.len);
+            out.update(&file.digest);
+            if ((file.flags.prefix == 2 or file.flags.prefix == 3) and path.len > 2 + Cache.hex_digest_len and
+                path[0] == 'o' and (path[1] == '/' or path[1] == '\\'))
+                try uses.append(r.gpa, path[2..][0..Cache.hex_digest_len].*);
             if (file.flags.is_directory or file.flags.metadata_only) continue;
-            const seen = try r.look(file.flags.prefix, path) orelse continue;
+            const seen = try r.look(file.flags.prefix, path) orelse {
+                dead = true;
+                continue;
+            };
             if (seen.size != file.size or !std.mem.eql(u8, &seen.digest, &file.digest)) {
                 r.totals.changed += 1;
+                dead = true;
                 continue;
             }
             if (seen.inode == file.inode and seen.mtime == file.mtime) continue;
@@ -76,6 +96,16 @@ const Restat = struct {
             updated += 1;
         }
         if (off + 1 != contents.len or contents[off] != 0) return null;
+        if (named) {
+            var digest: Cache.BinDigest = undefined;
+            out.final(&digest);
+            try r.entries.append(r.gpa, .{
+                .name = try r.gpa.dupe(u8, name),
+                .out = std.fmt.bytesToHex(digest, .lower),
+                .dead = dead,
+                .uses = uses.items,
+            });
+        }
         return updated;
     }
 
@@ -96,7 +126,7 @@ const Restat = struct {
             return;
         };
         r.totals.manifests += 1;
-        const updated = (if (got == size) try r.update(contents) else null) orelse {
+        const updated = (if (got == size) try r.update(name, contents) else null) orelse {
             r.totals.unreadable += 1;
             return;
         };
@@ -108,13 +138,37 @@ const Restat = struct {
         r.totals.rewritten += 1;
         r.totals.updated += updated;
     }
+
+    /// `--prune`: an entry whose files changed can't hit again, and nor can one that reads its outputs, so both go.
+    fn prune(r: *Restat, manifests: Io.Dir, outputs: Io.Dir) !void {
+        var gone: std.AutoHashMapUnmanaged(Cache.HexDigest, void) = .empty;
+        for (r.entries.items) |e| if (e.dead) try gone.put(r.gpa, e.out, {});
+        var more = true;
+        while (more) {
+            more = false;
+            for (r.entries.items) |*e| if (!e.dead) for (e.uses) |used| if (gone.contains(used)) {
+                e.dead = true;
+                try gone.put(r.gpa, e.out, {});
+                more = true;
+                break;
+            };
+        }
+        for (r.entries.items) |e| if (e.dead) {
+            manifests.deleteFile(r.io, e.name) catch continue;
+            r.totals.pruned += 1;
+            outputs.access(r.io, &e.out, .{}) catch continue;
+            outputs.deleteTree(r.io, &e.out) catch continue;
+            r.totals.outputs += 1;
+        };
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 3) {
-        std.debug.print("usage: zig_cache_restat CACHE_DIR ZIG_LIB_DIR\n", .{});
+    const pruning = args.len == 4 and std.mem.eql(u8, args[3], "--prune");
+    if (args.len != 3 and !pruning) {
+        std.debug.print("usage: zig_cache_restat CACHE_DIR ZIG_LIB_DIR [--prune]\n", .{});
         std.process.exit(2);
     }
     const cwd = Io.Dir.cwd();
@@ -135,8 +189,11 @@ pub fn main(init: std.process.Init) !void {
         if (entry.kind != .file or std.mem.eql(u8, entry.name, "timestamp")) continue;
         try r.manifest(manifests, entry.name);
     }
+    if (pruning) try r.prune(manifests, try cache.createDirPathOpen(io, "o", .{}));
     const t = r.totals;
-    std.debug.print("zig_cache_restat: {d} manifests, {d} rewritten, {d} records updated, {d} changed, {d} unreadable\n", .{
+    std.debug.print("zig_cache_restat: {d} manifests, {d} rewritten, {d} records updated, {d} changed, {d} unreadable", .{
         t.manifests, t.rewritten, t.updated, t.changed, t.unreadable,
     });
+    if (pruning) std.debug.print(", {d} pruned with {d} output folders", .{ t.pruned, t.outputs });
+    std.debug.print("\n", .{});
 }

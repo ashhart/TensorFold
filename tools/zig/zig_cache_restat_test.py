@@ -1,5 +1,6 @@
 """A restored build cache stays cached when only file ids changed, and still misses when contents changed."""
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,6 +26,9 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&run.step);
 }
 """
+# The same steps, but the executable links the C object, so a changed C file reaches all three.
+LINKED = BUILD.replace("    const run = b.addRunArtifact",
+                       "    from_zig.root_module.addObject(from_c);\n    const run = b.addRunArtifact")
 SOURCES = {
     "src/hello.c": "int hello(void) { return 7; }\n",
     "src/hello.zig": "pub fn main() void {}\n",
@@ -55,8 +59,9 @@ class RestatTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout + result.stderr
 
-    def restat_then_build(self):
-        print(self.run_zig(self.restat_command).strip().splitlines()[-1])
+    def restat_then_build(self, *extra):
+        self.restat_line = self.run_zig(self.restat_command + list(extra)).strip().splitlines()[-1]
+        print(self.restat_line)
         summary = self.run_zig([self.zig, "build", "--summary", "all"]).splitlines()
         steps = {}
         for name, marker in (("c", "compile obj from_c"), ("zig", "compile exe from_zig"), ("run", "run exe from_zig")):
@@ -92,6 +97,29 @@ class RestatTests(unittest.TestCase):
         self.assertEqual(self.restat_then_build(), {"c": False, "zig": True, "run": True}, "changed C compiles")
         (self.root / "src/hello.zig").write_text("pub fn main() void {\n    _ = 1;\n}\n", newline="\n")
         self.assertEqual(self.restat_then_build(), {"c": True, "zig": False, "run": False}, "changed Zig compiles, runs")
+
+
+    def test_prune_keeps_one_build(self):
+        (self.root / "build.zig").write_text(LINKED, newline="\n")
+        calls = "extern fn hello() c_int;\n\npub fn main() void {\n    _ = hello();\n}\n"
+        (self.root / "src/hello.zig").write_text(calls, newline="\n")
+        self.run_zig([self.zig, "build"])
+        self.new_ids()
+        self.restore_cache()
+        all_cached = {"c": True, "zig": True, "run": True}
+        self.assertEqual(self.restat_then_build("--prune"), all_cached, "pruning keeps what can still hit")
+        self.assertIn(", 0 pruned", self.restat_line)
+        before = {path.name for path in (self.cache / "o").iterdir()}
+        (self.root / "src/hello.c").write_text("int hello(void) { return 8; }\n", newline="\n")
+        none_cached = {"c": False, "zig": False, "run": False}
+        self.assertEqual(self.restat_then_build("--prune"), none_cached, "a changed C file reaches all three")
+        found = re.search(r"(\d+) pruned with (\d+) output folders", self.restat_line)
+        pruned, folders = int(found[1]), int(found[2])
+        self.assertGreaterEqual(pruned, 3, self.restat_line)
+        self.assertGreaterEqual(folders, 2, self.restat_line)
+        after = {path.name for path in (self.cache / "o").iterdir()}
+        self.assertEqual(len(before - after), folders, "the pruned folders are the ones gone")
+        self.assertEqual(len(after), len(before), "each pruned folder's build replaced it, so the cache didn't grow")
 
 
 if __name__ == "__main__":
