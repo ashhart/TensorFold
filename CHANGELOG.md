@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living Weights: `--slide-drift-gate` (opt-in, with `--slide`) measures each lesson's drift on unrelated replies and checks its recall before keeping it; without the flag nothing changes (#2028, part of #1389).
+
 - Internal: 11 more lean findings fixed in core, CUDA, HIP and server comments, with no change in behaviour (#2332).
 
 - Tests: `test-metal-residency-owners-host` compiles and passes again (68 tests), so it can come off CI's exclusion list (#2331, part of #2031). Thanks to @jishnuvenugopal.
