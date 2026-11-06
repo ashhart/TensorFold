@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Build: `zig build server-cpu` (the CPU-only fake server and engine-less CLI the server tests install) compiles again; its server module gets `core`, as the Metal, CUDA and fuzz graphs give it (#2363). Thanks to @Whq02.
+
 - Build: a plain `zig build` on Linux compiles again; the `tf-qwen35-cuda` tool passes the device flag that kept prompt states gained on 4 Nov (#2362). Thanks to @jschmied for the report.
 
 - Flash Next on CUDA: a shared round's DeltaNet steps run in one launch each across its lanes instead of one launch a lane, so 8 streams decode 3-6% faster on a GB10 with the same tokens; one stream keeps its own launches (#1942). Thanks to @Arminova.
