@@ -1,4 +1,4 @@
-//! Hyper-connection block boundaries in two launches (kernels/metal/core/hc_boundary.metal): the expand with partial sums, then the split (in place: three).
+//! Hyper-connection block boundaries (hc_boundary.metal): expand with partial sums then split; 2 launches, 3 in place.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
