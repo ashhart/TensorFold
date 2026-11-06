@@ -58,7 +58,7 @@ pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anyt
     denseBatch(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) });
 }
 
-/// `batch` dense products at once, each over its own rows of the weights (`s`; q.n a multiple of 64), e.g. a per-head projection.
+/// `batch` dense products over per-batch weight rows with strides `s`; q.n is a multiple of 64 (e.g. heads).
 pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides) void {
     const n = std.mem.alignForward(u32, q.n, 64);
     e.setPipeline(p[1]);
