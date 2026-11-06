@@ -89,6 +89,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop: Discover shows a model as installed again once its selected revision matches the one it would download (#4313 compared the snapshot path, not its sha), and the room worker test lists the ticket bot's reviewed imports (#4606).
 
+- Ripple-65B-Preview runs on native CUDA (GB10 checked) from the publisher's NVFP4 release as published, with the
+  same bf16 layer math as Metal (#2302, fixes #2300). Thanks to @jrb-ai.
+
 - Tests: the admission HTTP stress test waits for its choices to submit before a client walks away, so it no longer fails on loaded hosts.
 
 - Sessions: the tier thread's job runner can no longer lose a wakeup and sleep with a job queued (which could hang a request's settle or the store's teardown when async I/O is on).
