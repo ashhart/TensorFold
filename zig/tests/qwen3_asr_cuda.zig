@@ -5,7 +5,8 @@ const qa = @import("qwen3_asr");
 const tok = @import("tokenizer");
 const host = qa.host;
 
-const usage = "usage: tf-qwen3-asr MODEL_DIR CLIP.wav [--case DIR [--ids-only]] [--tokens N]\n";
+const usage = "usage: tf-qwen3-asr MODEL_DIR CLIP.wav [--case DIR [--ids-only] [--min-cos X]] [--tokens N]\n" ++
+    "  with a case, a gate: exit 1 when the prompt or transcript differs or a stage's cosine is under X (default 0.99)\n";
 const eos = [_]u32{ 151645, 151643 };
 
 fn seconds() f64 {
@@ -79,6 +80,7 @@ pub fn main(init: std.process.Init) !u8 {
     var case_dir: ?[]const u8 = null;
     var max_new: usize = 448;
     var ids_only = false; // a case of ids and margins only: no stage compared
+    var min_cos: f64 = 0.99;
     var i: usize = 3;
     while (i < args.len) : (i += 2) {
         if (std.mem.eql(u8, args[i], "--ids-only")) {
@@ -87,7 +89,9 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (i + 1 >= args.len) {
             std.debug.print(usage, .{});
             return 2;
-        } else if (std.mem.eql(u8, args[i], "--case")) case_dir = args[i + 1] else if (std.mem.eql(u8, args[i], "--tokens")) {
+        } else if (std.mem.eql(u8, args[i], "--case")) case_dir = args[i + 1] else if (std.mem.eql(u8, args[i], "--min-cos")) {
+            min_cos = try std.fmt.parseFloat(f64, args[i + 1]);
+        } else if (std.mem.eql(u8, args[i], "--tokens")) {
             max_new = try std.fmt.parseInt(usize, args[i + 1], 10);
         } else {
             std.debug.print(usage, .{});
@@ -136,10 +140,12 @@ pub fn main(init: std.process.Init) !u8 {
     var case: ?host.case.Case = if (case_dir) |dir| try host.case.Case.open(gpa, io, dir) else null;
     defer if (case) |*c| c.deinit();
     var cmp: ?Compare = if (case) |*c| .{ .gpa = gpa, .case = c, .s = s, .d = &driver } else null;
+    var same_prompt = true;
     if (cmp) |*c| {
         const want = try c.case.ids(gpa, "prompt_ids");
         defer gpa.free(want);
-        std.debug.print("PROMPT ids {s} the case's\n", .{if (std.mem.eql(u32, want, ids)) "equal to" else "DIFFERENT from"});
+        same_prompt = std.mem.eql(u32, want, ids);
+        std.debug.print("PROMPT ids {s} the case's\n", .{if (same_prompt) "equal to" else "DIFFERENT from"});
     }
     // a warm pass first: the timed pass after it sees no cuBLASLt plan creation or module load
     _ = try m.encode(feats, rows_buf.ptr, null);
@@ -193,7 +199,9 @@ pub fn main(init: std.process.Init) !u8 {
                 if (first < ref.len) ref[first] else 0,
             });
         }
-        std.debug.print("SUMMARY qwen3-asr cuda: worst stage cosine {d:.9}, transcript {s}\n", .{ c.worst, if (same) "equal" else "different" });
+        const pass = same_prompt and same and c.worst >= min_cos; // NaN fails
+        std.debug.print("SUMMARY qwen3-asr cuda: worst stage cosine {d:.9} (gate {d}), transcript {s}: {s}\n", .{ c.worst, min_cos, if (same) "equal" else "different", if (pass) "PASS" else "FAIL" });
+        if (!pass) return 1;
     }
     return 0;
 }
