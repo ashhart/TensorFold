@@ -30,6 +30,13 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
     std.log.err("qwen27: {s} failed on the GPU: {s}", .{ what, msg });
     return true;
 }
+
+/// The flat kernels or the general ones, for every round after this; TF_Q27_FLAT_GLUE=0 keeps the general ones.
+pub fn setFlatGlue(on: bool) void {
+    @import("core_delta").flat_glue = on;
+    @import("core").tree_round_gpu.chunked_picks = on;
+}
+
 /// A slot's rows in the taps buffer: cache rows [start, start + rows) sit at frame rows from `first`.
 pub const Tapped = struct { start: u32 = 0, first: u32 = 0, rows: u32 = 0 };
 pub const Runner = struct {
@@ -93,6 +100,7 @@ pub const Runner = struct {
     }
 
     fn build(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, paged: bool) !Runner {
+        setFlatGlue(try @import("sys").environment.read(bool, "TF_Q27_FLAT_GLUE", @import("core_delta").flat_glue));
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
         const geometry = try attn.planning.Geometry.fromConfig(m.config, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
         const linear_index = try a.alloc(u32, m.config.layers);
@@ -508,7 +516,7 @@ pub const Runner = struct {
 
     fn metadata(r: *Runner) @import("gdn_pool_gpu.zig").Metadata {
         const f = &r.model.frame;
-        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps) };
+        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps), .flows = f.get(.flows) };
     }
 
     pub fn promptRows(r: *const Runner, requested: u32) u32 {
