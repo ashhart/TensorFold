@@ -9,8 +9,9 @@ GLM-5.3-Flash.
 - The native engine has the format and a reference decoder in core (`zig/src/core/exl3_format.zig`, @akol1, #496),
   and Metal has a standalone EXL3 projection (`zig/src/core/exl3_projection.zig`, @akol1, #681). On CUDA, `qwen3_5`
   serves EXL3 packs of the Qwen3.5 models and of the dense Qwen3.8-27B ([using it](#using-it)).
-- The grouped routed experts landed (#741); the remaining CUDA pieces are in review (#740, #806). A family needs them
-  and a loader for its EXL3 tensors before it can serve a checkpoint.
+- CUDA's EXL3 operators, projections and grouped routed experts landed in 1.1.0 (#740, #741, #806, #837). On CUDA,
+  GLM-5.3-Flash runs its routed experts through them and `qwen3_5` serves dense EXL3 packs. Another family needs a
+  loader for its EXL3 tensors before it can serve a checkpoint.
 - The Python engine served EXL3 on CUDA from 0.3.6 to 0.6.6 through the module @vcruz305 wrote (#42): every codebook,
   widths 1 to 8 mixed per tensor, a row-invariant linear for 1 to 128 rows, and grouped routed experts, for the 27B,
   Flash Next and mixed-width packs. It is at the
