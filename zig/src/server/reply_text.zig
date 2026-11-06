@@ -4,7 +4,8 @@ const json = @import("json");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
-pub const Markers = struct { open: []const u8, close: []const u8 };
+/// `optional`: the reply writes its own opener when it thinks, and a reply that does not is all answer (Ripple's).
+pub const Markers = struct { open: []const u8, close: []const u8, optional: bool = false };
 /// Qwen's prompt opens the think block; Gemma 4's reply opens its thought channel.
 pub const think_markers: Markers = .{ .open = "", .close = "</think>" };
 /// MiniMax-M3's adaptive thinking: the reply writes `<mm:think>...</mm:think>` itself, or `</mm:think>` alone.
@@ -155,6 +156,10 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
         text = trimmed;
     } else if (!finished and std.mem.startsWith(u8, openerOf(m), text)) {
         return .{ .reasoning = "", .answer = "" }; // held while the reply may still be writing that opener
+    } else if (m.optional) {
+        var held: usize = 0; // a reply without the opener answers: only a partial call opener is held while it streams
+        for (o.calls) |c| held = @max(held, if (finished) 0 else partialTag(text, c[0]));
+        return .{ .reasoning = "", .answer = text[0 .. text.len - held] };
     }
     if (at) |v| at = if (v >= shift) v - shift else null;
     const end: ?usize = switch (close) {
@@ -559,6 +564,19 @@ test "reply text: MiniMax-M3's adaptive think block, written by the reply or ski
     try std.testing.expectEqualStrings("Hello there", bare.answer);
     const held = try splitThinking(a, "<mm:th", false, mm_markers);
     try std.testing.expectEqualStrings("", held.answer);
+}
+
+test "reply text: an optional think block, a reply that opens one splits, a bare reply is all answer" {
+    const m: Markers = .{ .open = "", .close = "</think>", .optional = true };
+    for ([_]struct { []const u8, bool, []const u8, []const u8 }{
+        .{ "<think>\nAdd them.\n</think>\n\n42", true, "Add them.\n", "42" },
+        .{ "17 * 23 = 391.", true, "", "17 * 23 = 391." },
+        .{ "Sure. <tool_ca", false, "", "Sure. " },
+    }) |case| {
+        const got = try splitThinking(std.testing.allocator, case[0], case[1], m);
+        try std.testing.expectEqualStrings(case[2], got.reasoning);
+        try std.testing.expectEqualStrings(case[3], got.answer);
+    }
 }
 
 test "reply text: MiniMax-M3's call opener is watched for only under MiniMax-M3's markers" {

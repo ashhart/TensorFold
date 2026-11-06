@@ -4,6 +4,15 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ripple-65B on Metal drafts with the publisher's DFlash2 drafter (`--drafter`, ricursiveAI/Ripple-65B-Preview-DFlash2)
+  beside either release, with replies equal to plain ones: one stream decodes 1.5-2.7 times as fast on the NVFP4
+  release and 2.3-6.1 times on the bf16 release; past two streams it is slower, so `--parallel` above 2 is refused
+  with it (#2260, fixes #2259). Thanks to @BobClawblaw.
+
+- Ripple-65B-Preview runs on native Metal (M5 or later) from the publisher's NVFP4 and bf16 releases as published,
+  with exact bf16 caches, thinking, tool calls and structured output; `--context` is capped at 262,144, the longest
+  checked (#2231, fixes #2171). Thanks to @BobClawblaw.
+
 - Internal: 42 more lean findings fixed in the tests' comments and the tools' docstrings, with no change in behaviour (#2315).
 
 - HIP: the decode round's residual-add and norm tail issues each row's loads before its branches, and a MoE tail loads its slots' rows together, with output bytes unchanged. On a gfx1151, one-stream decode is 2.7% faster on Qwen3.6-35B-A3B and 1.1% on the 27B. `tf_tail` is now under the kernel contract (#2247). Thanks to @AbrahamCete.
