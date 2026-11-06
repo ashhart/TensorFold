@@ -63,8 +63,9 @@ ones as they were: their SASS is identical before and after (sm_80, 86, 89, 120 
 Its scratch is Metal's five picture tensors at the widest stage (4.0 GB at 1024x1024) and the score matrix (1.0 GB).
 `tf-moss-image-decoder VAE_DIR LATENTS OUT WIDTH HEIGHT` writes the picture before the clamp.
 
-`moss_image_decoder_records.zig` records the seven kernels' launches' geometry as a pending set; their five-SM usage
-receipts, and the contract test types' float64 references, are still owed.
+`moss_image_decoder_records.zig` holds the seven kernels' thirteen launches' geometry and five-SM usage receipts,
+measured. `zig/tests/cuda/contract_moss_image_decoder_*.zig` puts each kernel under gates 1-4, with its outputs
+against float64 at its rounding points and a planted control that gate 3 must catch.
 
 ## Prompt encoder
 
