@@ -19,15 +19,27 @@ pub fn format(a: std.mem.Allocator, profile: p.Profile, family: []const u8, back
     var found = false;
     for (p.entries) |e| {
         if (!e.applies(family, backend)) continue;
-        const raw = environment.get(e.name()) orelse continue;
-        if (!e.differs(raw)) continue;
-        try out.writer.print("{s} {s}=", .{ if (found) ";" else "", e.name() });
-        try shown(&out.writer, raw);
-        try out.writer.print(" ({s}, env)", .{@tagName(e.class)});
-        found = true;
+        if (e.members) |members| {
+            for (members) |member| {
+                if (!member.applies(family)) continue;
+                const raw = environment.get(member.name) orelse continue;
+                if (!member.differs(raw)) continue;
+                try append(&out.writer, member.name, raw, e.class, &found);
+            }
+        } else {
+            const raw = environment.get(e.name()) orelse continue;
+            if (e.differs(raw)) try append(&out.writer, e.name(), raw, e.class, &found);
+        }
     }
     if (!found) try out.writer.writeAll(" none");
     return try out.toOwnedSlice();
+}
+
+fn append(writer: *std.Io.Writer, name: []const u8, raw: []const u8, class: p.Class, found: *bool) !void {
+    try writer.print("{s} {s}=", .{ if (found.*) ";" else "", name });
+    try shown(writer, raw);
+    try writer.print(" ({s}, env)", .{@tagName(class)});
+    found.* = true;
 }
 
 const TestEnv = struct {
@@ -45,6 +57,7 @@ const TestEnv = struct {
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST")) return e.glm_host;
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST_SHARED")) return e.glm_shared;
         if (std.mem.eql(u8, name, "TF_KV_SHARE")) return null;
+        if (p.registered(name) != null) return null;
         return "fixture-secret-must-not-be-read";
     }
 };
@@ -115,4 +128,50 @@ test "profile line: Nemotron paging reports exact off and all, independently of 
         for ([_][]const u8{ "metal", "hip", "xpu" }) |backend|
             try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, family, backend, TestEnv{ .glm_pages = "0" }));
     }
+}
+
+const ExtraEnv = struct {
+    name: []const u8,
+    value: []const u8,
+    pub fn get(e: @This(), name: []const u8) ?[]const u8 {
+        return if (std.mem.eql(u8, name, e.name)) e.value else null;
+    }
+};
+
+test "profile line: new rows and every grouped member report real names and scoped classes" {
+    const a = std.testing.allocator;
+    for ([_]struct { name: []const u8, raw: []const u8, family: []const u8, backend: []const u8, class: []const u8 }{
+        .{ .name = "TENSORFOLD_KOLIBRI_KV_PAGES", .raw = "0", .family = "kolibri1", .backend = "cuda", .class = "arithmetic" },
+        .{ .name = "TENSORFOLD_DORY_KV_PAGES", .raw = "", .family = "dory", .backend = "cuda", .class = "arithmetic" },
+        .{ .name = "GEMMA_DRAFT_BF16", .raw = "self_attn.q_proj", .family = "gemma4", .backend = "metal", .class = "debug" },
+        .{ .name = "TF_ANE_COLUMNS", .raw = "3072", .family = "qwen3_5", .backend = "metal", .class = "experimental" },
+        .{ .name = "TF_PROMPT_ROWS", .raw = "128", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
+        .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "both", .family = "nemotron_h", .backend = "metal", .class = "experimental" },
+        .{ .name = "TF_SLIDE_EDIT", .raw = "0", .family = "nemotron_h", .backend = "metal", .class = "experimental" },
+        .{ .name = "TF_SLIDE_PROBE", .raw = "", .family = "nemotron_h", .backend = "cuda", .class = "experimental" },
+        .{ .name = "TF_SLIDE_ROUTED", .raw = "1", .family = "nemotron_h", .backend = "cuda", .class = "experimental" },
+    }) |c| {
+        const env: ExtraEnv = .{ .name = c.name, .value = c.raw };
+        const line = try format(a, .stable, c.family, c.backend, env);
+        defer a.free(line);
+        const expected = try std.fmt.allocPrint(a, "profile: stable; registered overrides: {s}={s} ({s}, env)", .{ c.name, c.raw, c.class });
+        defer a.free(expected);
+        try std.testing.expectEqualStrings(expected, line);
+        const hidden = try format(a, .stable, "unknown", c.backend, env);
+        defer a.free(hidden);
+        try std.testing.expectEqualStrings("profile: stable; registered overrides: none", hidden);
+        try std.testing.expect(std.mem.indexOf(u8, line, "slide_learn_mode=") == null);
+    }
+}
+
+test "profile line: Qwen CUDA does not advertise Nemotron-only learning modes" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "TF_SLIDE_EDIT", "TF_SLIDE_PROBE", "TF_SLIDE_ROUTED" }) |name| {
+        const line = try format(a, .stable, "qwen3_5", "cuda", ExtraEnv{ .name = name, .value = "1" });
+        defer a.free(line);
+        try std.testing.expectEqualStrings("profile: stable; registered overrides: none", line);
+    }
+    const line = try format(a, .stable, "qwen3_5", "cuda", ExtraEnv{ .name = "TF_SLIDE_POCKET_KEY", .value = "both" });
+    defer a.free(line);
+    try std.testing.expectEqualStrings("profile: stable; registered overrides: TF_SLIDE_POCKET_KEY=both (experimental, env)", line);
 }

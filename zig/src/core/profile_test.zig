@@ -5,6 +5,7 @@ const t = std.testing;
 
 test "stable profile: live lookup is exactly the legacy libc lookup for every registered switch" {
     inline for (p.entries) |e| {
+        if (comptime e.members != null) continue;
         const old = std.c.getenv(e.name());
         const current = p.get(e.id);
         if (old) |raw| {
@@ -21,9 +22,10 @@ test "stable profile: registry scopes metadata and never supplies a default" {
         try t.expect(e.name().len > 0 and e.families.len > 0 and e.effect.len > 0 and e.evidence.len > 0);
         try t.expect(e.stable == null);
         try t.expect(p.resolve(.stable, e.id, null) == null);
-        try t.expect(e.applies(e.families[0], "cuda"));
-        try t.expect(!e.applies(e.families[0], "metal"));
-        try t.expect(!e.applies(e.families[0], "hip"));
+        if (e.scopes) |scopes| {
+            for (scopes) |scope| try t.expect(e.applies(scope.families[0], scope.backend));
+        } else try t.expect(e.applies(e.families[0], e.backend));
+        try t.expect(!e.applies(e.families[0], "unknown-backend"));
         try t.expect(!e.applies("unknown-model", "cuda"));
     }
     try t.expectEqual(p.Class.debug, p.entry(.TF_QWEN_KV_PAGES_ALL).class);
@@ -124,5 +126,11 @@ test "stable profile: a runtime name lookup covers the registry and leaves every
         try t.expect(p.registered(name) == null);
     // An unset variable is null through both paths, so an unregistered name keeps the reader's old default.
     try t.expect(p.lookup("TF_PROFILE_FIXTURE_UNSET") == null);
-    inline for (p.entries) |e| try t.expectEqual(p.get(e.id), p.lookup(e.name()));
+    inline for (p.entries) |e| {
+        if (comptime e.members == null) try t.expectEqual(p.get(e.id), p.lookup(e.name()));
+    }
+}
+
+test {
+    _ = @import("profile_more_test.zig");
 }
