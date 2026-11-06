@@ -1,4 +1,4 @@
-// Routed experts with an expert's member rows MB at a time: each weight word unpacked once for MB rows, each row's sums as tf_rowdot.
+// Routed experts, member rows MB at a time: each weight word unpacked once for MB rows, each row's sums as tf_rowdot.
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
