@@ -32,19 +32,28 @@ test "world four: default configuration plans every rank without payload reads" 
     }
 }
 
-test "world four: world one and two plans retain their main fingerprint" {
+/// The plans of every rank of `worlds`, as one digest.
+fn plansDigest(worlds: []const u32) ![64]u8 {
     const cfg: Config = .{};
     var pack = try defaultPack(std.testing.allocator);
     defer pack.deinit();
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    for ([_]u32{ 1, 2 }) |world| for (0..world) |rank| {
+    for (worlds) |world| for (0..world) |rank| {
         var p = try plan.build(std.testing.allocator, &cfg, &pack, .{ .rank = @intCast(rank), .world = world });
         defer p.deinit();
         try fingerprint(&p, &hash);
     };
     var digest: [32]u8 = undefined;
     hash.final(&digest);
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    std.debug.print("world one/two plan fingerprint: {s}\n", .{hex});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+test "world four: world one and two plans retain their main fingerprint" {
+    const hex = try plansDigest(&.{ 1, 2 });
     try std.testing.expectEqualStrings("0b2e082e4d244eec2d631a0da6f4495a5ccf73259f9384faea2167507169b5f5", &hex);
+}
+
+test "world four: its own plans retain their main fingerprint" {
+    const hex = try plansDigest(&.{4});
+    try std.testing.expectEqualStrings("0e980dd2b1df61f26511b6c993e2e581bd88c38da2882dbaf71585a1ec981b7d", &hex);
 }
