@@ -26,18 +26,38 @@ fn request(a: Allocator, s: *pc.Store, f: *Fake, p: []const u32, history: u32) !
     return .{ .from = plan.from, .sum = f.pass(s, plan) };
 }
 
-/// A state's own file cut in half or its name's first byte flipped; a block only it names deleted or a byte flipped.
-const Fault = enum { truncate, rename, delete, flip };
+/// A state's own file cut in half, deleted or its name's first byte flipped; a block only it names deleted or flipped.
+const Fault = enum { truncate, lose, rename, delete, flip };
 const Plant = struct { at: u32, fault: Fault };
+
+/// Whether the state at `at` is one `plants` make the store drop at open.
+fn lost(plants: []const Plant, at: u32) bool {
+    for (plants) |x| if (x.at == at and x.fault != .flip) return true;
+    return false;
+}
+
+/// The blocks no state left after `plants` names, less those a plant deletes: what the reopened store removes.
+fn unnamed(r: *rows.Rows, plants: []const Plant) !usize {
+    var kept: std.ArrayList(rows.write.Want) = .empty;
+    defer kept.deinit(gpa);
+    for (r.states.items) |*s| if (!lost(plants, s.at)) try r.wantsOf(gpa, s, &kept);
+    var n: usize = 0;
+    var it = r.blocks.keyIterator();
+    while (it.next()) |b| n += @intFromBool(for (kept.items) |w| {
+        if (std.mem.eql(u8, &rows.chain.stem(w.name), b)) break false;
+    } else true);
+    for (plants) |x| n -= @intFromBool(x.fault == .delete);
+    return n;
+}
 
 fn plant(r: *rows.Rows, x: Plant) !void {
     const i = for (r.states.items, 0..) |s, i| {
         if (s.at == x.at) break i;
     } else return error.TestNoState;
-    const own = x.fault == .truncate or x.fault == .rename;
+    const own = x.fault == .truncate or x.fault == .lose or x.fault == .rename;
     var buf: [1200]u8 = undefined;
     const p = try rows.file.path(&buf, r.dir, &rows.chain.hex(if (own) r.states.items[i].name else try onlyBlock(r, i)), if (own) ".st" else ".blk", false);
-    if (x.fault == .delete) return t.expectEqual(@as(c_int, 0), platform.c.unlink(p));
+    if (x.fault == .delete or x.fault == .lose) return t.expectEqual(@as(c_int, 0), platform.c.unlink(p));
     const fd = platform.c.open(p, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
     try t.expect(fd >= 0);
     defer _ = platform.c.close(fd);
@@ -121,10 +141,16 @@ test "rows drop: a cause past eight is said at once, and a flush says each other
     heard.len = 0;
     d.flush();
     try t.expectEqualStrings("", heard.text());
+    for ([_]usize{ 1, 2 }) |n| {
+        d.blocks += n;
+        d.flush();
+    }
+    try t.expectEqualStrings("imprint: a disk block no kept state names is removed" ++ why ++ "imprint: 2 disk blocks no kept state names are removed" ++ why, heard.text());
 }
 
 const failed = "imprint: a disk state failed its check (RowsRead); it is forgotten\n";
 const missing = "imprint: a disk state is missing one of its blocks; it is forgotten\n";
+const why = " (a state's file is gone, or a write was cut short)\n";
 
 test "rows drop: each state dropped at open is said with its cause, and the earlier state still restores" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -136,6 +162,8 @@ test "rows drop: each state dropped at open is said with its cause, and the earl
     const cases = [_]Case{
         .{ .plants = &.{}, .opened = "", .from = 2000 },
         .{ .plants = &.{.{ .at = 2000, .fault = .truncate }}, .opened = failed, .from = 1400 },
+        // with its own file gone the state is never known: only the blocks only it named are said, as they go
+        .{ .plants = &.{.{ .at = 2000, .fault = .lose }}, .opened = "", .from = 1400 },
         .{ .plants = &.{.{ .at = 2000, .fault = .rename }}, .opened = failed, .from = 1400 },
         .{ .plants = &.{.{ .at = 2000, .fault = .delete }}, .opened = missing, .from = 1400 },
         .{ .plants = &.{ .{ .at = 2000, .fault = .truncate }, .{ .at = 1400, .fault = .rename } }, .opened = "imprint: 2 disk states failed their check (RowsRead); they are forgotten\n", .from = 800 },
@@ -147,7 +175,7 @@ test "rows drop: each state dropped at open is said with its cause, and the earl
         var buf: [128]u8 = undefined;
         const dir = try std.fmt.bufPrint(&buf, "/tmp/tf-rows-drop{d}-{d}", .{ n, platform.c.getpid() });
         defer rmTree(dir);
-        {
+        const gone = blk: {
             var f: Fake = .{ .gpa = gpa };
             const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
             defer r.deinit();
@@ -165,26 +193,30 @@ test "rows drop: each state dropped at open is said with its cause, and the earl
             var kept: std.ArrayList(u32) = .empty;
             for (r.states.items) |st| try kept.append(a, st.at);
             try t.expectEqualSlices(u32, &ats, kept.items);
+            const k = try unnamed(r, c.plants);
             for (c.plants) |x| try plant(r, x);
-        }
+            break :blk k;
+        };
+        const removed: []const u8 = switch (gone) {
+            0 => "",
+            1 => "imprint: a disk block no kept state names is removed" ++ why,
+            else => try std.fmt.allocPrint(a, "imprint: {d} disk blocks no kept state names are removed" ++ why, .{gone}),
+        };
         var heard: note.Heard = .{};
         note.sink = &heard;
         defer note.sink = null;
         var f: Fake = .{ .gpa = gpa };
         const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
         defer r.deinit();
-        try t.expectEqualStrings(c.opened, heard.text());
-        var lost: usize = 0;
+        try t.expectEqualStrings(try std.mem.concat(a, u8, &.{ c.opened, removed }), heard.text());
+        var drops: usize = 0;
         for (ats) |at| {
-            const dropped = for (c.plants) |x| {
-                if (x.at == at and x.fault != .flip) break true;
-            } else false;
-            lost += @intFromBool(dropped);
-            try t.expectEqual(!dropped, for (r.states.items) |s| {
+            drops += @intFromBool(lost(c.plants, at));
+            try t.expectEqual(!lost(c.plants, at), for (r.states.items) |s| {
                 if (s.at == at) break true;
             } else false);
         }
-        try t.expectEqual(ats.len - lost, r.states.items.len);
+        try t.expectEqual(ats.len - drops, r.states.items.len);
         try t.expectEqual(r.states.items.len, files(r.dir, ".st"));
         try t.expectEqual(@as(usize, r.blocks.count()), files(r.dir, ".blk"));
         heard.len = 0;
@@ -196,5 +228,10 @@ test "rows drop: each state dropped at open is said with its cause, and the earl
         try t.expectEqual(c.from, got.from);
         try t.expect(f.restored_ok);
         try t.expectEqual(fresh(p[0..2050]), got.sum);
+        heard.len = 0;
+        const blocks = r.blocks.count();
+        while (r.states.items.len > 0) r.remove(0); // collection while serving removes their blocks, quietly
+        try t.expect(r.blocks.count() < blocks);
+        try t.expectEqualStrings("", heard.text());
     }
 }
