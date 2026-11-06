@@ -23,7 +23,7 @@ pub const start = stagger.start;
 pub const Call = stagger.Call;
 pub const next = stagger.next;
 
-/// Hooks leave the encoder open and commit nothing; what segment k+1 reads of segment k must be written by k's mixer or earlier.
+/// Hooks leave the encoder open, commit nothing; what segment k+1 reads of k must be written by k's mixer or earlier.
 pub fn run(device: mtl.Device, queues: []const mtl.Queue, layers: usize, mode: mtl.DispatchType, fam: anytype) !f64 {
     return runCommitting(device, queues, layers, mode, fam, 0);
 }
