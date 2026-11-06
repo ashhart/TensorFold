@@ -23,7 +23,8 @@ pub const Commands = struct {
     hazards: Hazards = .{},
     /// Set by a state-corrupting failure (signaled fence or invalid buffer): later begin and submit refuse.
     poison: ?Error = null,
-    /// Set by a successful queue submit; the next begin records one barrier that fences that batch.
+    /// Set by the first successful submit and never cleared: every later begin records a fence barrier.
+    /// A discarded begin keeps the barrier owed, so the next begin still records it.
     submitted_before: bool = false,
 
     pub fn init(dev: *const Device) Error!Commands {
@@ -77,10 +78,7 @@ pub const Commands = struct {
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
         try check(self.dev.api.vkBeginCommandBuffer(self.cmd, &info));
-        if (self.submitted_before) {
-            dispatchBarrier(self.dev, self.cmd);
-            self.submitted_before = false;
-        }
+        if (self.submitted_before) dispatchBarrier(self.dev, self.cmd);
         self.recording = true;
         return self.cmd;
     }
@@ -481,6 +479,54 @@ test "a batch begun after a submission starts with one barrier that fences the e
     _ = try cmds.begin();
     try std.testing.expectEqual(@as(usize, 2), Calls.barriers);
     try std.testing.expectEqual(@as(usize, 3), Calls.begins);
+}
+
+test "a discarded batch keeps the barrier owed to the submission before it" {
+    const Calls = struct {
+        var barriers: usize = 0;
+        fn reset(_: c.VkCommandBuffer, _: c.VkCommandBufferResetFlags) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn begin(_: c.VkCommandBuffer, _: [*c]const c.VkCommandBufferBeginInfo) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn end(_: c.VkCommandBuffer) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn queueSubmit(_: c.VkQueue, _: c_uint, _: [*c]const c.VkSubmitInfo, _: c.VkFence) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn wait(_: c.VkDevice, _: c_uint, _: [*c]const c.VkFence, _: c.VkBool32, _: c_ulonglong) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn resetFences(_: c.VkDevice, _: c_uint, _: [*c]const c.VkFence) callconv(.c) c.VkResult {
+            return c.VK_SUCCESS;
+        }
+        fn barrier(_: c.VkCommandBuffer, _: c.VkPipelineStageFlags, _: c.VkPipelineStageFlags, _: c.VkDependencyFlags, _: u32, _: [*c]const c.VkMemoryBarrier, _: u32, _: [*c]const c.VkBufferMemoryBarrier, _: u32, _: [*c]const c.VkImageMemoryBarrier) callconv(.c) void {
+            barriers += 1;
+        }
+    };
+    var api: @import("device.zig").DeviceApi = undefined;
+    api.vkResetCommandBuffer = Calls.reset;
+    api.vkBeginCommandBuffer = Calls.begin;
+    api.vkEndCommandBuffer = Calls.end;
+    api.vkQueueSubmit = Calls.queueSubmit;
+    api.vkWaitForFences = Calls.wait;
+    api.vkResetFences = Calls.resetFences;
+    api.vkCmdPipelineBarrier = Calls.barrier;
+    var dev: Device = undefined;
+    dev.api = api;
+    dev.handle = @ptrFromInt(0x2000);
+    dev.queue = @ptrFromInt(0x3000);
+    var cmds: Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = @ptrFromInt(0x4000) };
+    _ = try cmds.begin();
+    try cmds.submit(0);
+    // Batch B opens after A is submitted, then is discarded unsubmitted: its barrier never runs.
+    _ = try cmds.begin();
+    cmds.discard();
+    // Batch C still owes the fence for A, so it records its own barrier.
+    _ = try cmds.begin();
+    try std.testing.expectEqual(@as(usize, 2), Calls.barriers);
 }
 
 test "fill geometry refuses torn, empty and out-of-range fills" {
