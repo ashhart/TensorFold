@@ -15,6 +15,8 @@ pub const Plan = struct {
     keeps: []abi.Keep,
     kept_rows: []u32,
     slot_steps: []tree_slots.Step = &.{},
+    flows: []u32 = &.{}, // the slot steps as the column scan reads them
+    flowing: bool = false, // every window is one tree, so `flows` holds its steps
     compact: bool = false,
     slot_peak: usize = 0, // the most register slots any window's schedule holds live
 
@@ -52,6 +54,9 @@ pub const Plan = struct {
         const slot_steps = try gpa.alloc(tree_slots.Step, rows);
         errdefer gpa.free(slot_steps);
         @memset(slot_steps, .{ .row = 0, .read_slot = -1, .write_slot = 0 });
+        const flows = try gpa.alloc(u32, rows);
+        errdefer gpa.free(flows);
+        var flowing = true;
         var compact = true;
         var slot_peak: usize = 0;
         var first: u32 = 0;
@@ -66,6 +71,7 @@ pub const Plan = struct {
                 },
                 else => return err,
             });
+            if (compact) flowing = tree_slots.flows(slot_steps[first..][0..n], flows[first..][0..n]) and flowing;
             @memset(slots[first..][0..n], input.state_slot);
             for (input.window.conv, 0..) |index, at| windows[first * p.taps + at] = if (index < p.taps - 1) index else index + first;
             for (input.path, 0..) |row, at| kept_rows[keep_first + at] = first + row;
@@ -74,7 +80,7 @@ pub const Plan = struct {
             first += n;
             keep_first += @intCast(input.path.len);
         }
-        return .{ .gpa = gpa, .parents = parents, .windows = windows, .row_slots = slots, .segments = segments, .keeps = keeps, .kept_rows = kept_rows, .slot_steps = slot_steps, .compact = compact, .slot_peak = slot_peak };
+        return .{ .gpa = gpa, .parents = parents, .windows = windows, .row_slots = slots, .segments = segments, .keeps = keeps, .kept_rows = kept_rows, .slot_steps = slot_steps, .flows = flows, .flowing = flowing and compact, .compact = compact, .slot_peak = slot_peak };
     }
 
     pub fn deinit(plan: *Plan) void {
@@ -85,6 +91,7 @@ pub const Plan = struct {
         plan.gpa.free(plan.keeps);
         plan.gpa.free(plan.kept_rows);
         plan.gpa.free(plan.slot_steps);
+        plan.gpa.free(plan.flows);
         plan.* = undefined;
     }
 };
