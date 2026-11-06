@@ -52,6 +52,7 @@ const TowerHost = struct {
     m: *Mem,
     gpa: std.mem.Allocator,
     stages: std.StringHashMapUnmanaged([]f64) = .empty,
+    conv1_frames: usize = 0, // the first convolution's time length, as the schedule last passed it
 
     fn deinit(t: *TowerHost) void {
         var it = t.stages.iterator();
@@ -70,6 +71,7 @@ const TowerHost = struct {
     pub fn conv(t: *TowerHost, w: u64, b: u64, x: u64, y: u64, n: usize, fi: usize, ti: usize, c: usize, co: usize) !void {
         const fo = (fi - 1) / 2 + 1;
         const to = (ti - 1) / 2 + 1;
+        if (c == 1) t.conv1_frames = ti;
         const xs = try t.m.at(x, n * fi * ti * c);
         const ws = try t.m.at(w, co * c * 9);
         const bs = try t.m.at(b, co);
@@ -207,27 +209,29 @@ fn cosine(a: []const f64, b: []const f64) f64 {
 
 const small: cfg.Audio = .{ .d = 8, .layers = 2, .heads = 2, .ffn = 16, .mels = 16, .conv = 4, .out = 6, .window = 50, .window_infer = 200, .positions = 1500, .conv_chunks = 500 };
 
-test "tower schedule: a host binding matches the float64 reference at torch's points, two windows, a short chunk" {
+/// The schedule on the host binding against the float64 reference for a clip of `frames` frames, `group` chunks a pass.
+fn towerCase(frames: usize, group: usize, want_windows: usize) !void {
     const gpa = std.testing.allocator;
     var mem: Mem = .{ .gpa = gpa };
     defer mem.deinit();
     var fake: Fake = .{ .gpa = gpa };
     defer fake.deinit();
-    var w = try tower.Weights.load(gpa, small, &fake, &mem, 3); // groups of 3 over 4 chunks: one short group
+    var w = try tower.Weights.load(gpa, small, &fake, &mem, group);
     defer w.deinit(gpa);
-    const frames = 350;
     const data = try gpa.alloc(f32, small.mels * frames);
     defer gpa.free(data);
     var rng: std.Random.DefaultPrng = .init(7);
     for (data) |*v| v.* = rng.random().floatNorm(f32);
     const feats: mel.Features = .{ .data = data, .mels = small.mels, .frames = frames };
     const plan = try chunks.Plan.init(small, frames);
-    try std.testing.expectEqual(@as(usize, 2), plan.windows());
-    const b = try tower.Buffers.alloc(small, 3, plan.rows, &mem);
+    try std.testing.expectEqual(want_windows, plan.windows());
+    const b = try tower.Buffers.alloc(small, group, plan.rows, &mem);
     const out = try mem.alloc(2 * plan.rows * small.out);
     var host: TowerHost = .{ .m = &mem, .gpa = gpa };
     defer host.deinit();
     try std.testing.expectEqual(plan.rows, try tower.encode(&host, gpa, small, &w, b, feats, out));
+    // a lone chunk under 100 frames is convolved at its own length (the package pads only to the longest chunk)
+    try std.testing.expectEqual(if (frames < small.chunkFrames()) frames else small.chunkFrames(), host.conv1_frames);
     var ref: Ref = .{ .gpa = gpa };
     defer ref.deinit();
     const want = try tower_ref.run(gpa, small, .torch, .{ .ctx = &fake, .get = Fake.get }, feats, .{ .ctx = &ref, .put = Ref.put });
@@ -239,10 +243,19 @@ test "tower schedule: a host binding matches the float64 reference at torch's po
         seen += 1;
         try std.testing.expectEqual(e.value_ptr.len, got.len);
         const c = cosine(got, e.value_ptr.*);
-        if (c < 0.9999) std.debug.print("stage {s}: cosine {d}\n", .{ e.key_ptr.*, c });
+        if (c < 0.9999) std.debug.print("{d} frames, stage {s}: cosine {d}\n", .{ frames, e.key_ptr.*, c });
         try std.testing.expect(c >= 0.9999);
     }
     try std.testing.expect(seen >= small.layers + 4); // embed, each layer, ln_post, proj1, audio_rows
+}
+
+test "tower schedule: a host binding matches the float64 reference at torch's points, two windows, a short chunk" {
+    try towerCase(350, 3, 2); // groups of 3 over 4 chunks: one short group, a 50-frame last chunk padded to 100
+}
+
+test "tower schedule: a lone chunk of 50 or 99 frames, convolved at its own length" {
+    try towerCase(50, 3, 1);
+    try towerCase(99, 3, 1);
 }
 
 /// The LM's operators as extents only: every row an op touches lies inside the buffer it names.
