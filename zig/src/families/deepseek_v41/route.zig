@@ -39,7 +39,7 @@ pub const Shape = struct {
     experts: u32 = 384,
     topk: u32 = 6,
     /// Nonzero writes the shared expert's two pick blocks into the fused tables after the routed twelve a token, so
-    /// the routed gate/up and the shared gate/up are ONE indexed dispatch (the comparator's moe_up form). The
+    /// the routed gate/up and the shared gate/up are ONE indexed dispatch (one indexed gate/up form). The
     /// kernel writes them, not the host, so no CPU/GPU buffer range is shared.
     moe_up: u32 = 0,
 };
