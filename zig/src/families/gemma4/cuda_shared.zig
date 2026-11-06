@@ -35,29 +35,30 @@ pub fn shufflePages(x: anytype, seed: u64) void {
     if (x.pool) |*p| prng.random().shuffle(u32, p.free[0..p.nfree]);
 }
 
-/// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
+/// The idle server's line (TF_KV_SHARE: the store holds pages).
 pub fn report(x: anytype) void {
-    if (@import("builtin").is_test) return;
-    const p = x.pool orelse return;
-    const c = p.census();
-    const ok = p.idle() and (x.prompts != null or c.free == c.total); // TF_KV_SHARE: the store holds pages
-    std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
+    core.kv_prompts.idleLine(&(x.pool orelse return), x.prompts != null);
 }
 
-pub fn reach(x: anytype, l: anytype, end: usize) !void {
-    const p = if (x.pool) |*p| p else return;
-    const n = pagesOf(end);
-    if (n <= l.lease.ids.items.len) return;
-    const Map = struct {
-        x: @TypeOf(x),
+/// A slot's table entries from `from` on, for the pool's `cover` and `keepPages`.
+fn Map(comptime X: type) type {
+    return struct {
+        x: X,
         slot: usize,
         fn write(ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void {
             const m: *@This() = @ptrCast(@alignCast(ctx));
             try fwd.pages.map(m.x.m, m.x.s, m.slot, ids[from..], from);
         }
     };
-    var map: Map = .{ .x = x, .slot = l.slot };
-    try p.cover(&l.lease, n, .{ .ctx = &map, .write = Map.write });
+}
+
+pub fn reach(x: anytype, l: anytype, end: usize) !void {
+    const p = if (x.pool) |*p| p else return;
+    const n = pagesOf(end);
+    if (n <= l.lease.ids.items.len) return;
+    const M = Map(@TypeOf(x));
+    var map: M = .{ .x = x, .slot = l.slot };
+    try p.cover(&l.lease, n, .{ .ctx = &map, .write = M.write });
 }
 
 /// Restore rings while begin protects its found state, before a promise can reclaim the snapshot.
@@ -145,19 +146,9 @@ pub fn marked(x: anytype, s: *Stream, l: anytype, at: usize) !void {
     const pr = x.prompts orelse return;
     if (!l.shared) return;
     if (std.mem.indexOfScalar(u32, l.marks, @intCast(at)) != null) {
-        const n = at / fwd.pages.tokens;
-        const path = try x.gpa.alloc(u32, n);
-        defer x.gpa.free(path);
-        const mine = try x.gpa.dupe(u32, l.lease.ids.items[0..n]);
-        defer x.gpa.free(mine);
-        const shared = pr.keep(s.prompt(), @intCast(at), s, mine, path);
-        if (shared == n) l.kept += 1;
-        if (!std.mem.eql(u32, mine[0..shared], path[0..shared])) {
-            try fwd.pages.map(x.m, x.s, l.slot, path[0..shared], 0);
-            for (path[0..shared], 0..) |id, i| x.pool.?.share(&l.lease, i, id);
-            // Remapping a prefix must not shorten the already covered writable suffix.
-            x.m.caps[l.slot] = l.lease.ids.items.len * fwd.pages.tokens;
-        }
+        const M = Map(@TypeOf(x));
+        var map: M = .{ .x = x, .slot = l.slot };
+        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, s.prompt(), at, s, fwd.pages.tokens, .{ .ctx = &map, .write = M.write })) l.kept += 1;
     }
     if (at == s.prompt().len) pr.report(at, s.cached, l.kept);
 }
