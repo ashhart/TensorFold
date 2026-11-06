@@ -168,7 +168,7 @@ pub const Pipelines = struct {
         var options = mtl.CompileOptions.mlx();
         options.math_functions = .precise;
         const gpa = std.heap.page_allocator;
-        const joined = try std.mem.concat(gpa, u8, &.{ sources.deepseek_v41_kv, sources.deepseek_v41_index });
+        const joined = try std.mem.concat(gpa, u8, &.{ sources.deepseek_v41_kv, sources.deepseek_v41_index, sources.deepseek_v41_index_nax });
         defer gpa.free(joined);
         const text = try frags.source(device, gpa, joined);
         defer gpa.free(text);
@@ -271,9 +271,9 @@ pub const Pipelines = struct {
         // TF_DSV41_INDEX_SELECT_ONE=0 is the same-binary control; the removal arms (mask != 0) and the doubling
         // arms stay on the heap path.
         const one_env = std.c.getenv("TF_DSV41_INDEX_SELECT_ONE");
-        // ROUND 515: the one-dispatch select was decode-only (rows <= 8). The row bound the buffer actually imposes
-        // is the capacity check below, so it, not an arbitrary 8 -- governs; the env restores the old limit for a
-        // same-binary A/B and TF_DSV41_INDEX_SELECT_ONE=0 the heap path.
+        // The one-dispatch select is bounded by the buffer's capacity check below, not by a fixed row limit;
+        // the env restores a smaller limit for a same-binary A/B, and TF_DSV41_INDEX_SELECT_ONE=0 takes the
+        // heap path.
         const one_rows: u32 = blk: {
             const raw = std.c.getenv("TF_DSV41_INDEX_SELECT_ONE_ROWS") orelse break :blk 16384;
             break :blk std.fmt.parseInt(u32, std.mem.span(raw), 10) catch 8;

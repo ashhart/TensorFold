@@ -25,10 +25,10 @@ import tempfile
 # check_dsv41_metal_mirrors.sh reproduces them.  A source that only compiles inside a join is assigned to it below.
 JOINS = [
     ("csa2-kv-join", ["kv.metal", "csa2.metal", "csa2_nax.metal"], None),
-    ("index-kv-join", ["kv.metal", "index_exl3.metal"], None),
+    ("index-kv-join", ["kv.metal", "index_exl3.metal", "index_exl3_nax.metal"], None),
     ("route-defines", ["route.metal"], "#define TF_DSV41_E 384\n#define TF_DSV41_TOPK 6\n"),
 ]
-JOIN_ONLY = {"csa2.metal", "csa2_nax.metal", "index_exl3.metal", "route.metal"}
+JOIN_ONLY = {"csa2.metal", "csa2_nax.metal", "index_exl3.metal", "index_exl3_nax.metal", "route.metal"}
 
 STRUCT_DEF = re.compile(r"\bstruct\s+([A-Za-z_]\w*)\s*\{")
 KERNEL = re.compile(r"(?:\[\[\s*kernel[^\]]*\]\]\s*|\bkernel\s+)void\s+([A-Za-z_]\w*)\s*\(")
