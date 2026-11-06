@@ -9,13 +9,13 @@ test "q27 contract: both chain libraries contain the served pre-M5 prompt shader
     for ([_]bool{ false, true }) |baseline| for ([_]bool{ false, true }) |units| {
         const text = try chain.source(t.allocator, units, baseline, false, .q27b);
         defer t.allocator.free(text);
-        const symbol = if (units) "Q27_PROMPT(8)" else "Q27_PROMPT_SG(8)";
+        const symbol = if (units) "Q27_PROMPT(8, false," else "Q27_PROMPT_SG(8, false,";
         try t.expect(std.mem.indexOf(u8, text, symbol) != null);
         try t.expect(std.mem.indexOf(u8, text, "q27_attn_prompt_merge_single") != null);
     };
     const text = try tf.qwen27.simd_attention.library(t.allocator, false, true);
     defer t.allocator.free(text);
-    try t.expect(std.mem.indexOf(u8, text, "Q27_PROMPT_SG(8)") != null);
+    try t.expect(std.mem.indexOf(u8, text, "Q27_PROMPT_SG(8, false,") != null);
 }
 
 noinline fn fromAnotherFrame(x: *chain.Case) g.Kernel {
