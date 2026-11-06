@@ -89,3 +89,70 @@ test "the packed gate/up product writes the plain product then tf_silu_mul's byt
         for ([_]usize{ 1, 7, 16, 17, 64, 65, 300, 2048 }) |m| for ([_]bool{ false, true }) |planted| try compare(t, &rng, shape, m, n, k, planted);
     };
 }
+
+/// gate and up (inter, k) interleaved by 16 rows into (2 x inter, k), as qwen3's loader packs them.
+fn interleave(out: []u16, gate: []const u16, up: []const u16, inter: usize, k: usize) void {
+    const block = 16 * k;
+    for (0..inter / 16) |g| {
+        @memcpy(out[2 * g * block ..][0..block], gate[g * block ..][0..block]);
+        @memcpy(out[(2 * g + 1) * block ..][0..block], up[g * block ..][0..block]);
+    }
+}
+
+test "the fused product on the interleaved weight writes what main serves: gate and up products, then tf_silu_mul" {
+    const t = try Rig.open(64 << 20);
+    defer t.close();
+    if (!t.on.dense.wmma12) return error.SkipZigTest;
+    var rng: rig.Rng = .{ .state = 0x51_2E };
+    // Qwen3-8B's gate_proj and up_proj, unpacked, and the same two weights interleaved
+    const k = 4096;
+    const inter = 12288;
+    const hg = try gpa.alloc(u16, inter * k);
+    defer gpa.free(hg);
+    const hu = try gpa.alloc(u16, inter * k);
+    defer gpa.free(hu);
+    for (hg, hu) |*g, *u| {
+        g.* = rig.bf16Bits(@floatCast(rng.normal() * 0.03));
+        u.* = rig.bf16Bits(@floatCast(rng.normal() * 0.03));
+    }
+    const hp = try gpa.alloc(u16, 2 * inter * k);
+    defer gpa.free(hp);
+    interleave(hp, hg, hu, inter, k);
+    var gate_w = try t.upload(hg);
+    defer gate_w.free();
+    var up_w = try t.upload(hu);
+    defer up_w.free();
+    var packed_w = try t.upload(hp);
+    defer packed_w.free();
+    const s = t.stream.handle;
+    const d = &t.on.dense;
+    // rows the pair block serves and rows the big block serves, each through the served routing
+    for ([_]usize{ 7, 300 }) |m| {
+        const hx = try gpa.alloc(u16, m * k);
+        defer gpa.free(hx);
+        for (hx) |*v| v.* = rig.bf16Bits(@floatCast(rng.normal()));
+        var x = try t.upload(hx);
+        defer x.free();
+        var fused = try t.alloc(m * inter * 2);
+        defer fused.free();
+        var gate = try t.alloc(m * inter * 2);
+        defer gate.free();
+        var up = try t.alloc(m * inter * 2);
+        defer up.free();
+        var want = try t.alloc(m * inter * 2);
+        defer want.free();
+        const mi: c_int = @intCast(m);
+        try d.gemmSilu(t.on.r, at(x), at(packed_w), at(fused), mi, 2 * inter, k, s);
+        try d.gemm(t.on.r, .wmma12, at(x), at(gate_w), 0, at(gate), mi, inter, k, s);
+        try d.gemm(t.on.r, .wmma12, at(x), at(up_w), 0, at(up), mi, inter, k, s);
+        const o = t.ops(&t.on);
+        try o.siluMul(.{ .ptr = at(gate), .kind = .bf16 }, .{ .ptr = at(up), .kind = .bf16 }, .{ .ptr = at(want), .kind = .bf16 }, m * inter);
+        try t.stream.synchronize();
+        const got = try rig.download(u8, fused);
+        defer gpa.free(got);
+        const exp = try rig.download(u8, want);
+        defer gpa.free(exp);
+        const diff = std.mem.indexOfDiff(u8, got, exp);
+        try rig.expect(diff == null, "silu fused m {d}: differs from main's gate, up and tf_silu_mul from byte {?d}", .{ m, diff });
+    }
+}
