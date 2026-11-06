@@ -11,8 +11,10 @@ same `tf-moss-image` tool and checked against the same publisher pipeline.
 
 The prompt encoder is ported (`cuda_encoder.zig`, `moss_image_encoder.cu`): the checkpoint's Qwen3.5-9B text model,
 the chat-formatted prompt to the final-norm rows `[tokens, 4096]` the refiner takes, driven by
-`tf-moss-image-encoder`. It is a denoiser's front end, not a token family: neither it nor the decoder registers with
-the lane engine, the server or `families.detect`.
+`tf-moss-image-encoder`. It is a denoiser's front end, not a token family: neither it nor the decoder appears in
+`families.detect`, and neither answers a text route. The checkpoint is served all the same: `moss_image_host.zig`
+opens the checkpoint whose `model_index.json` names `MOSSImagePipeline` ahead of the family table, the encoder, the
+transformer and the decoder resident on CUDA, and `POST /v1/images/generations` answers one picture a request.
 
 The image decoder is ported (`cuda_decoder.zig`, `moss_image_decoder.cu`): the checkpoint's `vae/` in float32, the
 latents to the raw `[height, width, 3]` picture the pipeline clamps afterwards, driven by `tf-moss-image-decoder`.
