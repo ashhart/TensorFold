@@ -10,8 +10,18 @@ const Allocator = std.mem.Allocator;
 
 /// Whether the family keeps prompts this way: it declares the hooks, its streams are on pages and TF_KV_SHARE is set.
 pub fn wanted(comptime F: type, loaded: anytype) !bool {
+    return could(F, loaded) and try hooks.sharing() > 0;
+}
+
+/// Whether TF_KV_SHARE would keep the family's prompts this way: it declares the hooks and its streams are on pages.
+pub fn could(comptime F: type, loaded: anytype) bool {
     if (comptime !@hasDecl(F, "share_attach")) return false;
-    return loaded.layout != null and try hooks.sharing() > 0;
+    return loaded.layout != null;
+}
+
+/// What the unpaged store's note on a state past its whole budget adds: the setting, where `could` holds.
+pub fn hint(comptime F: type, loaded: anytype) []const u8 {
+    return if (could(F, loaded)) "; TF_KV_SHARE=n keeps a prompt's rows as the pool's pages instead of copying them" else "";
 }
 
 /// The store over the family's pool: its pages in the tree, the rest of a state from the family's `snap_*` decls.
@@ -143,4 +153,13 @@ test "TF_KV_SHARE's adapter: a kept prompt's pages resume a later one, adopted; 
     for (adopt.items) |id| f.pool.release(id);
     x.close();
     try testing.expect(f.prompts == null and f.pool.idle() and f.pool.available() == 8);
+}
+
+test "TF_KV_SHARE: a state past the unpaged cache's whole budget names it where the family on pages could keep it" {
+    const l: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = 4, .snap_bytes = 0 };
+    const paged: struct { layout: ?kv.Layout } = .{ .layout = l };
+    const windows: struct { layout: ?kv.Layout } = .{ .layout = null };
+    try testing.expect(std.mem.indexOf(u8, hint(Fake, paged), "TF_KV_SHARE=n") != null);
+    try testing.expectEqualStrings("", hint(Fake, windows)); // a window a stream: the store cannot share
+    try testing.expectEqualStrings("", hint(struct {}, paged)); // a family without the store's hooks
 }

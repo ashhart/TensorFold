@@ -12,7 +12,7 @@ pub fn fitting(s: *pc.Store, a: Allocator, marks_: []const u32) ![]const u32 {
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
         if (bytes <= s.budget) try out.append(a, at) else {
             s.counts.refused += 1;
-            pc.note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
+            pc.note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget{s}", .{ at, bytes >> 20, s.budget >> 20, s.over });
         }
     }
     return out.toOwnedSlice(a);

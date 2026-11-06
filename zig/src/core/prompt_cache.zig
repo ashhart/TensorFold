@@ -120,6 +120,7 @@ pub const Store = struct {
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
+    over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
     repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
     const SHARED_KEYS = 64;
     pub const lookupUserImages = images.lookupUser;
@@ -472,7 +473,7 @@ pub const Store = struct {
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
         if (bytes > s.budget or s.most == 0) {
             s.counts.refused += 1;
-            note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
+            note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget{s}", .{ at, bytes >> 20, s.budget >> 20, if (bytes > s.budget) s.over else "" });
             return false;
         }
         while (s.entries.items.len > 0) { // room: spare storage this save can take, else new storage inside the budget
