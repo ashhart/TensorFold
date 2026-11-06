@@ -76,6 +76,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: tool calls completed just before the thinking-close marker are returned when no answer follows, whole and
   streamed; calls followed by more reasoning or an answer stay in reasoning (#2313, fixes #2310). Thanks to @AdrianBinDC.
+- Clusters: a Linux kernel built without transparent hugepages no longer refuses a RoCE start: `prepareRegion` keeps
+  `MADV_DONTFORK` strict, asks for `MADV_NOHUGEPAGE` only where THP can apply it, and says at startup when it skips it
+  (#2380, for #2378). Thanks to @devopsfortunato.
 
 - CI: the portable-names check runs on every pull request again; since #2274 a reused pass could miss a newly added name
   Windows can't check out (#2311).
