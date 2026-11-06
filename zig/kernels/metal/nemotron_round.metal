@@ -4,7 +4,7 @@ using namespace metal;
 
 // state (u32): len, mtp_len, copy source, pending, kept, kept - 1, rounds, next rows, top-1 product, alive, copy rows,
 
-// match, tail copy rows, second choice row, its chance; from 16: a missed copy row's place + 1, rounds left, first copy row
+// match, tail copy rows, second choice row, chance; from 16: a missed copy row's place +1, rounds left, first copy row
 #define S_RESUME 16
 #define S_GUESS 19  // a copied window that also runs the head's first level, for its guess beside the copy's first row
 #define S_LEAF 20   // the leaf's kind: 1 a second choice, 2 the head's guess beside a copy
