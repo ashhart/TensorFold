@@ -11,7 +11,7 @@ const Allocator = std.mem.Allocator;
 
 const Script = struct {
     seen: bool = false,
-    prompt: [16]u32 = undefined,
+    prompt: [4096]u32 = undefined,
     count: usize = 0,
 
     fn engine(s: *Script) api.Engine {
@@ -151,7 +151,7 @@ fn checkSource(template: []const u8, close_token: bool, server_thinking: bool, e
     if (code == 400) {
         try t.expect(!script.seen);
         const message = whole.get("error").?.strField("message").?;
-        try t.expect(std.mem.indexOf(u8, message, "thinking") != null);
+        try t.expectEqualStrings("thinking off is not supported by this chat template: it has no thinking switch or closable generation prefix", message);
     } else {
         try t.expect(script.seen);
         try t.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
@@ -188,4 +188,76 @@ test "thinking request: internal lesson ask keeps main behavior without an off s
 
 test "thinking request: internal lesson askIn keeps main behavior without an off switch" {
     try checkSource(plain, true, true, "", 200, &.{0}, .ask_in);
+}
+
+fn checkpoint(source: []const u8, config: []const u8, kind: []const u8, expected: []const u8) !void {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try @import("thinking_family_fixture.zig").init(t.allocator, t.io, source, config, kind);
+    defer f.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(t.allocator, t.io, f.path, null, a, &problem);
+    defer hf.deinit();
+    try t.expectEqualStrings(source, hf.source);
+    const text = hf.text();
+    const messages = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"H\"}]")).ok;
+    const raw = try text.render(a, messages, .{ .enable_thinking = false }, &problem);
+    try t.expectEqualStrings(expected, raw.text);
+    const raw_ids = try raw.encode(text, a, &problem);
+    try t.expectEqualStrings(expected, try text.decode(a, raw_ids));
+    try t.expectEqual(@as(u32, 300), raw_ids[raw_ids.len - 1]);
+    const closed_ids = try std.mem.concat(a, u32, &.{ raw_ids, &.{301} });
+    try t.expectEqualStrings(try std.mem.concat(a, u8, &.{ expected, "</think>" }), try text.decode(a, closed_ids));
+    for ([_]bool{ false, true }) |default| {
+        var script: Script = .{};
+        const srv = try Server.init(t.allocator, t.io, script.engine(), text, .{
+            .served_name = "m",
+            .model_ids = &.{ "m", "alias" },
+            .enable_thinking = default,
+            .use_drafts = false,
+        }, null);
+        defer srv.deinit();
+        try t.expect(!srv.thinking_switch);
+        try t.expect(try capability(srv, a));
+        try t.expect(!script.seen);
+        var cx: @import("errors.zig").Cx = .{ .a = a };
+        // The legacy entry point is used by main and by internal requests; it adds the same closing token.
+        const legacy = try @import("prompt.zig").renderIds(srv, &cx, messages, &.{}, false, null, true);
+        try t.expectEqualSlices(u32, closed_ids, legacy);
+        for ([_][]const u8{ off, ",\"thinking\":false", ",\"thinking\":{\"type\":\"disabled\"}", ",\"reasoning_effort\":\"none\"", ",\"chat_template_kwargs\":{\"thinking\":false}", ",\"chat_template_kwargs\":{\"reasoning_effort\":\"none\"}" }) |extra|
+            try checkpointReply(srv, a, &script, extra, legacy);
+        try checkpointReply(srv, a, &script, "", if (default) raw_ids else legacy);
+        try checkpointReply(srv, a, &script, ",\"thinking\":true", raw_ids);
+    }
+}
+
+fn checkpointReply(srv: *Server, a: Allocator, script: *Script, extra: []const u8, ids: []const u32) !void {
+    const body = (try json.parse(a, try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"messages\":[{{\"role\":\"user\",\"content\":\"H\"}}],\"max_tokens\":2,\"return_token_ids\":true{s}}}", .{extra}))).ok;
+    var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
+    var response: Reply = .{ .a = a };
+    script.seen = false;
+    openai.run(srv, a, response.out(), .{ .conn = &conn }, true, body);
+    try std.testing.expectEqual(@as(?u16, 200), response.status);
+    try std.testing.expect(script.seen);
+    try std.testing.expectEqualSlices(u32, ids, script.prompt[0..script.count]);
+    const whole = response.whole.?;
+    const message = whole.get("choices").?.array[0].get("message").?;
+    const is_closed = ids[ids.len - 1] == 301;
+    try std.testing.expectEqualStrings(if (is_closed) "K" else "", message.strField("content").?);
+    if (is_closed) {
+        try std.testing.expect(message.strField("reasoning_content") == null);
+    } else try std.testing.expectEqualStrings("K", message.strField("reasoning_content").?);
+    const tokens = whole.get("tensorfold").?.get("token_ids").?.array;
+    try std.testing.expectEqual(@as(usize, 1), tokens.len);
+    try std.testing.expectEqual(@as(?i64, 2), tokens[0].int64());
+}
+
+test "thinking request: checkpoint GLM 5.3 off closes its generation prefix and preserves main ids" {
+    try checkpoint(@embedFile("fixtures/thinking/glm53.jinja"), @embedFile("fixtures/thinking/glm53-tokenizer_config.json"), "glm5_next", "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>H<|assistant|><think>");
+}
+
+test "thinking request: checkpoint LFM2 off closes its generation prefix and preserves main ids" {
+    try checkpoint(@embedFile("fixtures/thinking/lfm2.jinja"), @embedFile("fixtures/thinking/lfm2-tokenizer_config.json"), "lfm2_moe", "<|startoftext|><|im_start|>user\nH<|im_end|>\n<|im_start|>assistant\n<think>");
 }
