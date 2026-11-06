@@ -167,7 +167,7 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
   l[0] = l[1] = 0.0f;
 }
 
-// out [rows, 64, 512] over each row's `width` listed keys (an entry outside [0, key_length) is no key); grid (4 head groups, rows).
+// out [rows, 64, 512] over rows' `width` keys (an entry outside [0, key_length) is no key); grid (4 head groups, rows).
 [[kernel]] void glm_sparse_nax(const device bfloat* ql [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
                                const device int32_t* indices [[buffer(2)]], constant float& scale [[buffer(3)]],
                                constant int4& meta [[buffer(4)]], device bfloat* out [[buffer(5)]],
