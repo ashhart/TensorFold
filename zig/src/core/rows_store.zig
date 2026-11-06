@@ -67,12 +67,14 @@ pub const Options = struct {
     spill: Spill = .off,
     sync_writes: bool = false,
     staging_bytes: u64 = 1 << 30,
+    longest: u32 = 0, // the longest state the host keeps: the permit takes one whole, within the RAM store's budget
     slots: ?usize = null, // --checkpoint-slots: the RAM store's states at most, beside this one (null: the family's)
 };
 
 /// The store under `o`, the RAM store's disk: `o.slots` bounds what it keeps in RAM.
 pub fn attach(gpa: Allocator, store: *pc.Store, o: Options) !*Rows {
     const r = try Rows.open(gpa, store.family, o);
+    r.staging_bytes = @max(o.staging_bytes, @min(write.coldCharge(r, o.longest) catch 0, store.budget)); // unpriced: the floor
     store.disk = r;
     if (o.slots) |n| store.most = n;
     return r;
