@@ -1,4 +1,4 @@
-/* Use the installed HIP header's versioned property layout, not a Zig replica. */
+// Use the installed HIP header's versioned property layout, not a Zig replica.
 #include <hip/hip_runtime_api.h>
 #include <string.h>
 
