@@ -318,6 +318,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (capacity == 0 or capacity > model.config.max_position) return error.ContextFull;
     const policy = @import("qwen27_window.zig");
     const units = model.device.tensorUnits();
+    // the paged kernels have run only before the M5: a Mac with tensor units refuses the flag until they run there
+    if (q.decode_round.pagesOn() and units) {
+        why.* = "TF_QWEN27_METAL_KV_PAGES=1 has run only on Macs without tensor units (M1 to M4) so far; unset it on this Mac";
+        return error.KvPagesUntested;
+    }
     const window = lb.windowRows(units) catch |err| {
         why.* = policy.problem(err) orelse why.*;
         return err;
