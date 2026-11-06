@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B: a prompt frame below 128 rows (`TF_PROMPT_ROWS=16`) is refused before loading, with the setting, the
+  value and the fix named, instead of a bare "TargetBinding" (#2298).
+
 - Docs: the Flash Next CUDA recipe gives `TF_FLASHNEXT_CONFIDENCE`'s real default, -0.4 (the drafts' probabilities
   multiply to at least 0.4), and what its sign means (#2296).
 
