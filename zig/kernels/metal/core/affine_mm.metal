@@ -365,7 +365,7 @@ inline bool am_tile(const device int32_t* offsets, int experts, int total, int t
   return false;
 }
 
-// A simdgroup's row starts: rows [row, row + rows) of x and its row sums, or with `order` sorted rows' token rows (order / topk).
+// A simdgroup's row starts: x rows [row, row + rows) and their sums, or with `order` sorted token rows (order / topk).
 template <int TM>
 inline AmRows<TM> am_rows(const device bfloat* x, int ldx, const device float* xs, int ldxs, int row, int rows, int tm,
                           short2 home, const device int32_t* order, int topk) {
