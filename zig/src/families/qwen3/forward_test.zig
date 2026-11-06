@@ -30,6 +30,15 @@ const Gpu = struct {
         g.arena = try hip.Arena.init(&g.r, arena_bytes);
     }
 
+    /// The checkpoint as the engine loads it on this launcher: each MLP interleaved where the WMMA tile serves.
+    fn load(g: *Gpu, dir: []const u8) !qwen3.Model {
+        const layout: qwen3.Layout = if (g.l.dense.serve == .wmma12) .interleaved else .plain;
+        var m = try qwen3.Model.load(gpa, t.io, &g.r, dir, layout);
+        errdefer m.deinit();
+        for (m.layers) |l| try t.expect(l.mlp == layout);
+        return m;
+    }
+
     fn close(g: *Gpu) void {
         g.arena.deinit();
         g.l.unload();
@@ -431,7 +440,7 @@ test "Qwen3-Embedding: the card's and the long inputs batched equal them alone, 
     }
     try t.expect(lengths[inputs.len - 1] > 16384);
     const window = 32768;
-    var m = try qwen3.Model.load(gpa, t.io, &g.r, dir);
+    var m = try g.load(dir);
     defer m.deinit();
     for (refs, bars) |r, b| {
         try t.expectEqual(m.spec.hidden, r.array.items.len);
@@ -490,7 +499,7 @@ test "Qwen3-Reranker: each case's yes - no logit from lastRows and lm_head rows 
     var g: Gpu = undefined;
     try g.open(8 << 30);
     defer g.close();
-    var m = try qwen3.Model.load(gpa, t.io, &g.r, dir);
+    var m = try g.load(dir);
     defer m.deinit();
     const yes: u32 = @intCast(ref.object.get("yes").?.integer);
     const no: u32 = @intCast(ref.object.get("no").?.integer);
