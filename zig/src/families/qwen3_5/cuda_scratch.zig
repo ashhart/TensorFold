@@ -80,11 +80,11 @@ pub fn scratch(e: anytype, rows: usize, mode: Mode) !usize {
     return t.total;
 }
 
-fn growthCapacity(capacity: usize, rows: usize) usize {
+/// After the 32-row warm-up, grow once to the admitted ceiling, not through geometric steps.
+pub fn growthCapacity(capacity: usize, rows: usize, ceiling: usize) usize {
     if (capacity >= rows) return capacity;
-    var target = if (capacity == 0) rows else capacity;
-    while (target < rows) target = @min(max_rows, target * 2);
-    return target;
+    if (capacity == 0) return rows;
+    return @max(rows, @min(ceiling, max_rows));
 }
 
 fn pendingBytes(capacity: usize, rows: usize, replacement: usize) usize {
@@ -106,7 +106,7 @@ pub fn unallocatedScratchBytes(e: anytype) !usize {
 pub fn unallocatedScratchBytesFor(e: anytype, int8_on: bool) !usize {
     const rows = @min(e.scratch_rows, max_rows);
     // Admission must reserve the same geometric capacity ensureScratch/ensureRows will allocate.
-    const main_capacity = growthCapacity(e.scratch_capacity, rows);
+    const main_capacity = growthCapacity(e.scratch_capacity, rows, rows);
     var measured = e.*;
     const full = try scratch(&measured, main_capacity, .measure);
     const main_new = pendingBytes(e.scratch_capacity, main_capacity, full);
@@ -115,7 +115,7 @@ pub fn unallocatedScratchBytesFor(e: anytype, int8_on: bool) !usize {
         var old_measure = e.*;
         main_old = try scratch(&old_measure, e.scratch_capacity, .measure);
     }
-    const int8_capacity = growthCapacity(e.int8.capacity, rows);
+    const int8_capacity = growthCapacity(e.int8.capacity, rows, rows);
     const int8_new = if (int8_on and e.int8.capacity < int8_capacity) blk: {
         const g = e.g;
         const k = @max(g.intermediate, g.valueWidth(), g.attnWidth(), g.hidden);
@@ -134,20 +134,24 @@ test "lazy scratch admission reserves a full replacement only while growth remai
     try std.testing.expectEqual(at_512, pendingPeak(at_512, at_32, 5 * mib));
     try std.testing.expectEqual(at_512 + 5 * mib, pendingPeak(at_512, 0, 5 * mib));
     try std.testing.expectEqual(5 * mib, pendingPeak(0, 0, 5 * mib));
-    try std.testing.expectEqual(@as(usize, 64), growthCapacity(32, 40));
-    try std.testing.expectEqual(@as(usize, 40), growthCapacity(0, 40));
-    try std.testing.expectEqual(@as(usize, 512), growthCapacity(256, 300));
-    try std.testing.expectEqual(@as(usize, 512), growthCapacity(512, 300));
+    try std.testing.expectEqual(@as(usize, 512), growthCapacity(32, 40, 512));
+    try std.testing.expectEqual(@as(usize, 40), growthCapacity(0, 40, 512));
+    try std.testing.expectEqual(@as(usize, 64), growthCapacity(32, 40, 64));
+    try std.testing.expectEqual(@as(usize, 512), growthCapacity(256, 300, 512));
+    try std.testing.expectEqual(@as(usize, 512), growthCapacity(512, 300, 512));
 }
 
 /// Grow scratch without sacrificing the previous allocation on failure.
 pub fn ensureScratch(e: anytype, rows: usize) !void {
     if (rows == 0 or rows > max_rows) return error.InvalidScratchRows;
     if (rows <= e.scratch_capacity) return;
-    const capacity = growthCapacity(e.scratch_capacity, rows);
+    const capacity = growthCapacity(e.scratch_capacity, rows, e.scratch_rows);
     var measured = e.*;
     const bytes = try scratch(&measured, capacity, .measure);
-    var replacement = DeviceBuffer.alloc(e.d, bytes) catch return error.ScratchGrowFailed;
+    var replacement = DeviceBuffer.alloc(e.d, bytes) catch {
+        std.log.err("Qwen3.5 CUDA scratch allocation failed: {d} bytes for {d} rows", .{ bytes, capacity });
+        return error.ScratchGrowFailed;
+    };
     e.stream.synchronize() catch |err| {
         replacement.free();
         return err;
