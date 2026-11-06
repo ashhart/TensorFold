@@ -426,7 +426,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             if (disk) |rows| rows.deinit();
             h.store = null;
         }
-        try kv_pages.store(F, store, loaded.target, kept); // its snapshot slots, before a disk probe takes one
+        try kv_pages.store(F, store, loaded, kept); // its snapshot slots, before a disk probe takes one
         h.store = store;
         if (o.learn_conversations) if (o.learn) |root| {
             if (F == nemotron.native) try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
