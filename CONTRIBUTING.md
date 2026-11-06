@@ -41,6 +41,15 @@ zig build test-cuda-host
 
 This subset does not replace the complete `test` suite.
 
+Native Linux no-GPU CI runs `zig build -Dfixed-cpu test-host --test-timeout 20m`.
+It includes `test` and every configured `test-*` and `check-*` step, including compile-only checks.
+New named checks join automatically, even when a build module registers them last.
+The reviewed exclusions in `zig/build/host_tests.zig` cover the optional xgrammar tests,
+the separately scheduled `check-release-paths` gate, and temporary failures tracked in #2031.
+An empty named check, a stale exclusion, or an alias that brings excluded work back into the aggregate fails it.
+When a fix lands, remove its temporary exclusion and the matching fixture entry in `tools/zig/host_tests_test.py`.
+This aggregate is only registered for native Linux; other hosts keep their existing `test` and device steps.
+
 HIP is an explicit build opt-in. Add `-Dhip=true` to enable its host tests and named HIP targets:
 
 ```sh
