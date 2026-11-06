@@ -167,7 +167,7 @@ pub const Store = struct {
         return if (s.family.vtable.spare) |f| f(s.family.ptr) else 0;
     }
 
-    /// A kept state takes `extra` more bytes (a family copied what it shared into it) if the budget has room; never evicts, a pass is under way.
+    /// A kept state takes `extra` bytes (a family's copied-in share) within budget; never evicts, a pass is under way.
     pub fn grow(s: *Store, saved: Saved, extra: u64) bool {
         for (s.entries.items) |e| if (!e.expired and e.tokens.len > 0 and e.saved == saved) {
             if (extra > s.room()) return false;
