@@ -1,18 +1,19 @@
 //! tf-qwen3-asr-check: a Qwen3-ASR checkpoint's weights, tokenizer, mel rows and float64 tower against a case.
 const std = @import("std");
 const qa = @import("qwen3_asr");
-const st = @import("safetensors");
+const core = @import("core");
 const tok = @import("tokenizer");
 
 const usage = "usage: tf-qwen3-asr-check MODEL_DIR CLIP.wav CASE_DIR [--points exact|torch] [--no-tower]\n";
 
+/// The checkpoint's shards as one name space (core.Checkpoint, as the CUDA load opens them).
 const Mapped = struct {
-    file: st.File,
+    ck: core.Checkpoint,
 
     fn get(ctx: *anyopaque, name: []const u8) ?[]const u8 {
         const m: *Mapped = @ptrCast(@alignCast(ctx));
-        const t = m.file.get(name) orelse return null;
-        return t.bytes;
+        for (m.ck.files.items) |*f| if (f.get(name)) |t| return t.bytes;
+        return null;
     }
 };
 
@@ -57,19 +58,19 @@ const Compare = struct {
     }
 };
 
-fn checkWeights(gpa: std.mem.Allocator, cfg: qa.config.Config, file: *const st.File) !void {
+fn checkWeights(gpa: std.mem.Allocator, cfg: qa.config.Config, m: *Mapped) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var have: std.ArrayList(qa.names.Have) = .empty;
-    for (file.names.keys(), file.names.values()) |name, *e| try have.append(a, .{ .name = name, .bf16 = e.dtype == .bf16, .shape = e.shape[0..e.rank] });
+    for (m.ck.files.items) |*file| for (file.names.keys(), file.names.values()) |name, *e| try have.append(a, .{ .name = name, .bf16 = e.dtype == .bf16, .shape = e.shape[0..e.rank] });
     var problem: []const u8 = "";
     qa.names.validate(a, cfg, have.items, &problem) catch |err| {
         std.debug.print("WEIGHTS refused: {s} ({t})\n", .{ problem, err });
         return err;
     };
-    const head = file.get(qa.names.head).?.bytes;
-    const embed = file.get(qa.names.lm ++ "embed_tokens.weight").?.bytes;
+    const head = Mapped.get(m, qa.names.head).?;
+    const embed = Mapped.get(m, qa.names.lm ++ "embed_tokens.weight").?;
     if (!std.mem.eql(u8, head, embed)) return error.UntiedHead;
     std.debug.print("WEIGHTS ok: {d} tensors, all bf16 at the config's shapes; lm_head bit-equal to the embedding\n", .{have.items.len});
 }
@@ -114,11 +115,9 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
     const cfg = try qa.config.read(gpa, io, args[1]);
-    const path = try std.fs.path.join(gpa, &.{ args[1], "model.safetensors" });
-    defer gpa.free(path);
-    var mapped: Mapped = .{ .file = try st.File.open(gpa, io, path) };
-    defer mapped.file.close(io);
-    try checkWeights(gpa, cfg, &mapped.file);
+    var mapped: Mapped = .{ .ck = try core.Checkpoint.openModel(gpa, io, args[1]) };
+    defer mapped.ck.close();
+    try checkWeights(gpa, cfg, &mapped);
     var case = try qa.case.Case.open(gpa, io, args[3]);
     defer case.deinit();
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, args[2], gpa, .limited(1 << 31));
