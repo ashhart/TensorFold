@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the Flash Next CUDA recipe gives `TF_FLASHNEXT_CONFIDENCE`'s real default, -0.4 (the drafts' probabilities
+  multiply to at least 0.4), and what its sign means (#2296).
+
 - Internal: 73 more lean findings fixed in the kernels' comments, tests, cluster and fabric, with no change in behaviour
   (#2295).
 
