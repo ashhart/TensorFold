@@ -134,13 +134,13 @@ test "closing a driver drops its thread's bounce and forgets its integrated read
         .windows => "kernel32.dll",
         else => "libc.so.6",
     };
-    d.lib = try std.DynLib.open(library);
+    d.lib = try @import("sys").DynLib.open(library);
     var closed = false;
     defer if (!closed) d.close();
     var out: [64]u8 = @splat(0xaa);
     try memory.download(&d, 0x1000, &out);
     var other = driver();
-    other.lib = try std.DynLib.open(library);
+    other.lib = try @import("sys").DynLib.open(library);
     other.close();
     try std.testing.expectEqual(before + (64 << 10), memory.usage(false).host);
     d.close();
@@ -148,7 +148,7 @@ test "closing a driver drops its thread's bounce and forgets its integrated read
     try std.testing.expectEqual(before, memory.usage(false).host);
     integrated_flag = 0;
     d = driver();
-    d.lib = try std.DynLib.open(library);
+    d.lib = try @import("sys").DynLib.open(library);
     closed = false;
     @memset(&out, 0xaa);
     try memory.download(&d, 0x1000, &out);
