@@ -116,6 +116,7 @@ pub const Backend = struct {
             if (mark < s.reuse.marks.len) end = @min(end, s.reuse.marks[mark]); // a mark ends a chunk: its state is kept there
             const n = @min(end - at, gpu.prompt_rows);
             if (try fl.chunk(e, i, at, n, false)) |t| b.first[i] = t;
+            lanes.prefill_widths.completed(b.gpa, s, n);
             at += n;
             s.fill_at.store(at, .monotonic); // fl.chunk waits on rank 0: `at` is landed progress
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);

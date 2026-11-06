@@ -16,3 +16,18 @@ pub fn compileHost(b: *std.Build, engine: *std.Build.Module, lanes: *std.Build.M
     _ = object.getEmittedBin();
     b.step("check-nemotron-prefill-widths-host", "Compile actual Metal prefill, read, land and release without shaders").dependOn(&object.step);
 }
+
+pub fn rest(b: *std.Build, engine: *std.Build.Module, lanes: *std.Build.Module) void {
+    const metal = engine.import_table.get("metal").?;
+    const bodies = b.createModule(.{ .root_source_file = b.path("zig/src/metal_prefill_rest_compile.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "lanes", .module = lanes }, .{ .name = "kimi", .module = @import("metal_targets.zig").kimiModule(b, b.graph.host, .debug, metal, engine, lanes) } } });
+    const object = b.addObject(.{ .name = "metal-prefill-rest-compile", .root_module = bodies });
+    _ = object.getEmittedBin();
+    const check = b.step("check-metal-prefill-rest-host", "Actual remaining Metal prompt callback bodies without shaders or execution");
+    check.dependOn(&object.step);
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen4_metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) } } });
+    @import("qwen4.zig").metalNative(b, b.graph.host, host);
+    const qwen = b.addObject(.{ .name = "qwen4-prefill-widths-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/qwen4_prefill_widths_compile.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "host", .module = host }} }) });
+    _ = qwen.getEmittedBin();
+    check.dependOn(&qwen.step);
+}
