@@ -22,8 +22,7 @@ fn body(comptime text: []const u8) []const u8 {
     @setEvalBranchQuota(20_000_000);
     const begin = std.mem.indexOf(u8, text, "// One 64-query block").?;
     const end = std.mem.indexOfPos(u8, text, begin, "}  // namespace tfp").?;
-    return edit(text[begin..end], "attention_pv(acc[d], acc[d + 1], s[k], v0, v1, ushort(lane));",
-        "if (CAUSAL && kb >= first_masked)\n" ++
+    return edit(text[begin..end], "attention_pv(acc[d], acc[d + 1], s[k], v0, v1, ushort(lane));", "if (CAUSAL && kb >= first_masked)\n" ++
         "          nemo_masked_pv(acc[d], acc[d + 1], s[k], v0, v1, ushort(lane), home, kb * BK + 16 * k, P[3], int(tg.x) * BQ + P[11] + tm + home.y);\n" ++
         "        else attention_pv(acc[d], acc[d + 1], s[k], v0, v1, ushort(lane));", 1);
 }
