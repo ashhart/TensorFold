@@ -45,7 +45,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 
 | Optimization | q3.5 | fnext | glm | gem4 | nemo |
 | --- | --- | --- | --- | --- | --- |
-| 1. Prompt tail | open [#2229] | yes | yes | yes | yes |
+| 1. Prompt tail | done [#2229] | yes | yes | yes | yes |
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
 | 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | open M[#1850] |
 | 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
@@ -65,7 +65,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 18. Copy drafts | done [#1477] | done [#468] | done [#2146] | done [#2022] | done [#1974] |
 | 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779] | done [#1779] | done [#768] |
 | 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | yes | yes |
-| 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | open [#2033] |
+| 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | done [#2033] |
 | 22. Direct load | open [#2282] | done [#1901] | yes | open [#2282] | done [#458] |
 | 23. Page drop | done [#1884] | done [#1880] | done [#600] | done [#1884] | done [#1884] |
 | 24. L2 prefetch | failed [#2014] | no (null) | open [#2162] | no (null) | failed [#2014] |
@@ -95,7 +95,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 18. Copy drafts | done [#2022] | done [#2022] | done [#2022] | done [#2022] | yes |
 | 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | ? |
 | 20. Solo chunks | yes | yes | yes | yes | yes |
-| 21. Read-ahead | open [#2033] | open [#2033] | yes | open [#2033] | open [#2033] |
+| 21. Read-ahead | done [#2033] | done [#2033] | yes | done [#2033] | done [#2033] |
 | 22. Direct load | yes | yes | yes | yes | open [#1924] |
 | 23. Page drop | done [#1884] | done [#1884] | done [#1884] | done [#1884] | yes |
 | 24. L2 prefetch | yes | yes | yes | yes | done¹ |
@@ -187,7 +187,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) |
 | 15. MTP | done¹ | no (DSpark) | no (prompt) |
 | 16. DFlash(2) | yes | yes | no (prompt) |
-| 17. DSpark | yes | open [#2221] | no (prompt) |
+| 17. DSpark | yes | done [#2221] | no (prompt) |
 | 18. Copy drafts | yes | yes | no (prompt) |
 | 19. Shared drafts | yes | yes | no (prompt) |
 | 20. Solo chunks | yes | yes | no (prompt) |
@@ -252,8 +252,8 @@ below; these are estimates for planning a port, not results.
 
    | Family | Last layer, layers | Main blocker | Gain | Effort |
    | --- | --- | --- | --- | --- |
-   | qwen3_5 (27B) | full attention, 64 | MTP taps the last layer | −1.2..−1.6 % TTFT | open [#2229] |
-   | qwen3_5 (35B-A3B) | full attention, 40 | MTP taps the last layer | −1.3..−2.9 % TTFT (no drafter) | open [#2229] |
+   | qwen3_5 (27B) | full attention, 64 | MTP taps the last layer | −1.2..−1.6 % TTFT | done [#2229] |
+   | qwen3_5 (35B-A3B) | full attention, 40 | MTP taps the last layer | −1.3..−2.9 % TTFT (no drafter) | done [#2229] |
    | gemma4 | global attention, 42–60 | drafter taps copy every row | ~1.5 % | easy |
    | dory | an MLP sublayer, 72 sublayers | none | ~1.3 % | easy |
    | spark25 | full attention, 36 | fused QKVG GEMM | ~2 % | medium |
@@ -276,7 +276,7 @@ below; these are estimates for planning a port, not results.
 3. **Shared paged prompt store.** A kept prompt stays as the pool's own pages in one `prompt_radix` store, so a resume
    copies nothing and the cache and the streams draw on the same memory (`TF_QWEN_KV_SHARE`, `TF_GLM_KV_SHARE`, and
    `TF_KV_SHARE` on the core adapter, [#1657]). On Qwen3.8-27B a cold first turn is 3–6 % faster with it on, and the
-   second turn level ([#1357]). [#2211] (open) moves GLM onto the shared store. It can't be combined with
+   second turn level ([#1357]). [#2211] moved GLM onto the shared store. It can't be combined with
    `--learn-conversations` today. Flash Next already resumes a prefix from the host store's whole-state copies; on the
    shared store a kept 32k state would stop duplicating about 0.9 GiB of attention rows (27 KiB a token).
 
@@ -308,8 +308,8 @@ below; these are estimates for planning a port, not results.
 10. **Native FP4/FP8 pair decode.** nvcc 13.2 (PTX ISA 9.2) decodes an FP4 or FP8 pair to a bf16 pair in one
     instruction on `sm_120a`/`sm_121a`, where TF decodes in software today (`fp4pair`, `fp8pair` in `fp_pairs.cuh`,
     [#1555]). On the 27B's prompt16 FP4 projections it took 4–5 % off the kernel time with bit-equal output ([#1448]).
-    The FP8 block experts gained nothing, as decode there is bandwidth-bound, so FP8-only families are `failed`. The
-    approved plan is the native decode behind a compile-time gate; no PR is open yet.
+    The FP8 block experts gained nothing, as decode there is bandwidth-bound, so FP8-only families are `failed`. [#2238]
+    lands it behind `-Dnative-fp-decode`, off by default; the release toolchain stays on nvcc 13.0 until its own PR.
 
 11. **Projections that share an input, in one launch.** Projections that read the same input (q/k/v/gate, gate/up)
     run as one grouped launch or one fused GEMM, byte-equal to separate launches. [#1783] does this for affine-4
@@ -369,6 +369,9 @@ below; these are estimates for planning a port, not results.
     | flashnext (C) | first token −5..−10 % at 2k–32k, decode waits unchanged | [#1733] |
     | glm (C) | cold first token −6..−7 % at TP=2, −7..−8 % at TP=3 | [#1823] |
     | flashnext (M) | 1,024-token reply beside a 64K prompt 48 → 8 s, prompt's first token 90 → 54 s | [#2167] |
+    | flashnext (C), one GPU | prompts 15–23 % faster at `--parallel 1`, up to 8,192 rows a pass | [#2246] |
+
+    `TF_GLM_CHUNK_SOLO=4096` is slower with GLM's NVFP4 checkpoint on two GB10s ([#2288]).
 
 21. **Load read-ahead.** Reader threads read a layer's checkpoint into the page cache while the loader packs the
     previous one (`TF_LOAD_PREFETCH`, 16 readers, on by default where it landed). [#2033] ports it to six more
@@ -530,5 +533,8 @@ below; these are estimates for planning a port, not results.
 [#2215]: https://github.com/ashhart/TensorFold/pull/2215
 [#2221]: https://github.com/ashhart/TensorFold/pull/2221
 [#2229]: https://github.com/ashhart/TensorFold/pull/2229
+[#2238]: https://github.com/ashhart/TensorFold/pull/2238
+[#2246]: https://github.com/ashhart/TensorFold/pull/2246
 [#2282]: https://github.com/ashhart/TensorFold/pull/2282
 [#2283]: https://github.com/ashhart/TensorFold/pull/2283
+[#2288]: https://github.com/ashhart/TensorFold/pull/2288
