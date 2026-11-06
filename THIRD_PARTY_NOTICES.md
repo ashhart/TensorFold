@@ -447,3 +447,23 @@ seeded CPU generator, so that it makes the same latents bit for bit:
 - `log256_ps` and `sincos256_ps` from `avx_mathfun.h`, which PyTorch includes (zlib license, Copyright (C) 2012 Giovanni
   Garberoglio, based on Julien Pommier's `sse_mathfun.h`, Copyright (C) 2007; the license is in
   `LICENSES/avx_mathfun-zlib.txt`).
+
+## Unlimited-OCR-2
+
+The `unlimited-ocr` family (`zig/src/families/uocr/` and its kernels) follows the Python code that ships with
+[baidu/Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2) at revision
+`0480966938291445591f69f08a13b041c073a96a`, not only the paper and the weights:
+
+- `modeling_unlimitedocr.py`: the page guard (`_uocr_page_count_guard`), gundam's tiles (`dynamic_preprocess`,
+  `find_closest_aspect_ratio`), the views' token layout and the prompt (`_uocr_build_inputs`, `infer`), which
+  `guard.zig`, `preprocess.zig`, `prompt.zig` and `chat_template.jinja` repeat;
+- `deepencoder.py`: the CLIP encoder (`quick_gelu`, its resized position table);
+- `dash_attention.py` and `modeling_deepseekv2.py`: the DASH router (block keys, page-aware candidates, top 16,
+  entmax-1.5).
+
+These are under the release's MIT License, Copyright (c) 2026 Baidu (see "MIT License text" above). The SAM encoder,
+the decoder's attention, its page2d rotary and its MoE gate follow none of the release's code: they are written from
+the papers and from the release's modules measured through their inputs and outputs.
+
+TensorFold ships none of these files and no Unlimited-OCR-2 weights; `tools/zig/uocr_reference.py` runs the release's
+own code as the reference.

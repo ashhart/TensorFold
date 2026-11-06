@@ -87,6 +87,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const t = try @import("metal_minimax.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
     }
+    if (std.mem.startsWith(u8, d.name, "uocr ")) {
+        const t = try @import("metal_uocr.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "spark25 attention ")) {
         const t = try @import("metal_spark25_attention.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
