@@ -14,7 +14,7 @@ fn enqueue(step: cuda.Function, cfg: cuda.Config, stream: cuda.Stream, counter: 
     }
 }
 
-/// Host cost of preparing the next replay by patching: every node's arguments, then a whole-exec update from a recapture.
+/// Host cost of preparing the next replay by patching: every node's arguments, then a whole-exec update on recapture.
 fn patchCost(gpu: Gpu, step: cuda.Function, cfg: cuda.Config, stream: cuda.Stream, counter: u64, n: usize, g: cuda.graph.Graph, exec: cuda.graph.Exec) !u64 {
     const buf = try gpu.gpa.alloc(cuda.graph.Node, n);
     defer gpu.gpa.free(buf);
