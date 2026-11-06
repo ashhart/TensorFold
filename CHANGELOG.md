@@ -431,6 +431,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the Qwen3.8-27B decode control in the Metal kernel contract edits the line #2106 changed, so contract runs on
   M5 reach their summary again (#2303, fixes #2301). Thanks to @BobClawblaw.
+- With `--cortheon`, a DuckDuckGo result whose `uddg` key, ad host, `Result--ad` mark, `CLASS=` or `&AMP;` differs only in spelling is kept, a tool argument whose key's letters differ is read with the exact key still first, HTML's uppercase named entities decode, and a `data:` link is dropped (cortheon: keep search results, tools and markup when only the spelling differs #2372). Without `--cortheon` nothing changes. Thanks to @ppardus.
 
 - Build: `zig build server-cpu` (the CPU-only fake server and engine-less CLI the server tests install) compiles again; its server module gets `core`, as the Metal, CUDA and fuzz graphs give it (#2363). Thanks to @Whq02.
 
