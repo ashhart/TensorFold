@@ -88,7 +88,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   (#2295).
 - GLM-5.3-Flash on CUDA: an EXL3 checkpoint whose `quantization_config` sits inside `text_config` loads as EXL3. Admission already read it there, but the config parser read only the top level, so such a pack was admitted and then asked for NVFP4 dense weights at load (#2327).
 
-- Docs: `docs/hermes-agent.md` shows how to use TensorFold from Hermes Agent through the community [hermes-tensorfold](https://github.com/atakann/hermes-tensorfold) plugin (a model provider and a dashboard tab), checked on a GB10 with Qwen3.8-Flash-Next (#2109).
+- Docs: `docs/hermes-agent.md` shows how to use TensorFold from Hermes Agent through the community [hermes-tensorfold](https://github.com/atakann/hermes-tensorfold) plugin (a model provider and a dashboard tab), checked on a GB10 with Qwen3.8-Flash-Next (#2330, part of #2109). Thanks to @atakann.
 
 - Metal: a request's finished stats list its prompt pass widths (`tensorfold.prefill_widths`, one entry per completed
   target pass) on every Metal text family. Telemetry only (#2293).
