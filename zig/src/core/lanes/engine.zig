@@ -1,4 +1,5 @@
 //! The lane round loop (Python FamilyRounds and SharedRounds): every decision and cost update in Python's order.
+const builtin = @import("builtin");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Config = @import("config.zig").Config;
@@ -39,8 +40,10 @@ const Prof = struct {
     keep_ns: u64 = 0, // backend.keep
     draft_ns: u64 = 0, // askDrafts / draftLate (the drafter's own forward)
 };
-/// Monotonic host nanoseconds (as model.zig reads it).
+/// Monotonic host nanoseconds. Windows builds read 0: this clock only feeds the
+/// env-gated prof instrument, and the family never serves on Windows.
 fn nowNs() u64 {
+    if (comptime builtin.os.tag == .windows) return 0;
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
