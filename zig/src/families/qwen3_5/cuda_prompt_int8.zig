@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const max_rows = @import("cuda_round.zig").max_rows;
+const scratch_memory = @import("cuda_scratch.zig");
 
 pub const State = struct {
     on: bool = false,
@@ -31,14 +32,14 @@ pub const State = struct {
 
         const g = e.g;
         const k = @max(g.intermediate, g.valueWidth(), g.attnWidth(), g.hidden);
-        var capacity = if (s.capacity == 0) rows else s.capacity;
-        while (capacity < rows) capacity = @min(max_rows, capacity * 2);
+        const capacity = scratch_memory.growthCapacity(s.capacity, rows, e.scratch_rows);
 
         // Allocate first: a failed grow must leave the previous workspace usable.
-        var replacement = cuda.DeviceBuffer.alloc(
-            e.d,
-            cuda.w4a8.Kernels.scratch(capacity, k),
-        ) catch return error.ScratchGrowFailed;
+        const bytes = cuda.w4a8.Kernels.scratch(capacity, k);
+        var replacement = cuda.DeviceBuffer.alloc(e.d, bytes) catch {
+            std.log.err("Qwen3.5 CUDA INT8 scratch allocation failed: {d} bytes for {d} rows", .{ bytes, capacity });
+            return error.ScratchGrowFailed;
+        };
         errdefer replacement.free();
 
         try e.stream.synchronize();
