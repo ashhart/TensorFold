@@ -1,4 +1,4 @@
-//! The cluster's exact reductions: a fixed binary tree over S slices, with any contiguous split of the slices over ranks.
+//! The cluster's exact reductions: a fixed binary tree over S slices, with any contiguous split of them over ranks.
 const std = @import("std");
 
 /// Slices [begin, end) of a reduction (heads, intermediate columns, expert groups).
