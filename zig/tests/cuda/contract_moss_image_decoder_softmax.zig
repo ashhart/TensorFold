@@ -18,9 +18,9 @@ const underflow: f32 = -20000;
 
 /// The mid block's positions: 1456 (52 x 28 of 416 x 224), 5120 (64 x 80) and 16384 (128 x 128), smallest first.
 const served = [_]c.Shape{
-    .{ .rows = 1, .n = 1456, .k = 1 },
-    .{ .rows = 1, .n = 5120, .k = 1 },
-    .{ .rows = 1, .n = 16384, .k = 1 },
+    .{ .rows = 1, .n = 1456, .k = 1456 },
+    .{ .rows = 1, .n = 5120, .k = 5120 },
+    .{ .rows = 1, .n = 16384, .k = 16384 },
 };
 
 /// A thread's share of the row, block_sum_tree's two warp sums (5 steps each), and the exponentials' roundings.
@@ -51,7 +51,6 @@ pub const Softmax = struct {
             .in_place = true,
             .tiles = .{ .{}, .{ .size = 256 }, .{} },
             .served = &served,
-            .sums = .{ .f16 = 0, .why = "a row's exponentials are 1 or 0, its sum the count of its 1s: exact in fp32 in any order and in fp16, whose ulp is 1 over that count, while a bf16 sum of it rounds by its ulp of 8" },
         };
     }
 
