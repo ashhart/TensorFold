@@ -35,22 +35,21 @@ pub fn copyBytes(m: *const fwd.Model, at: usize, from: usize) u64 {
     return n;
 }
 
-/// Each layer's cache, K then V, positions [first, at) of `slot` (full: from `from`), one copy a run, in order.
-fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
+const W = @import("core").state_walk.Device;
+
+/// A state's parts at most: each layer's K and V, a ring's two runs each.
+const max_parts = cfg.max_layers * 2 * 2;
+
+/// Each layer's K then V, positions [first, at) of `slot` (full: from `from`) as parts: paged whole, a ring a run.
+fn parts(m: *const fwd.Model, slot: usize, at: usize, from: usize, out: *[max_parts]W.Part) ![]const W.Part {
     if (from > 0 and (!m.paged or from % fwd.pages.tokens != 0 or from > at)) return error.KeptPagesUnpaged;
-    var off: usize = 0;
+    var n: usize = 0;
     for (0..fwd.pages.ownLayers(m)) |i| for ([_][]u64{ m.kc, m.vc }) |cache| {
         const rb = rowBytes(m, i);
-        if (cfg.global(i) and m.paged) { // pages: p in page p / page_tokens of the slot's row, a copy a run within one
-            var p: usize = from;
-            while (p < at) {
-                const into = p % fwd.pages.tokens;
-                const run = @min(at - p, fwd.pages.tokens - into);
-                const row = @as(usize, m.ids[slot * fwd.pages.perSlot(m) + p / fwd.pages.tokens]) * fwd.pages.tokens + into;
-                try f(ctx, cache[i] + row * rb, off, run * rb);
-                off += run * rb;
-                p += run;
-            }
+        if (cfg.global(i) and m.paged) { // position p in page p / page_tokens of the slot's row
+            const span = fwd.pages.tokens * rb;
+            out[n] = .{ .live = cache[i], .len = (at - from) * rb, .span = span, .page = span, .from = from * rb };
+            n += 1;
             continue;
         }
         const len = m.cacheLen(i);
@@ -59,16 +58,32 @@ fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, 
         while (p < at) {
             const row = p % len;
             const run = @min(at - p, len - row);
-            try f(ctx, base + row * rb, off, run * rb);
-            off += run * rb;
+            out[n] = .{ .live = base + row * rb, .len = run * rb };
+            n += 1;
             p += run;
         }
     };
+    return out[0..n];
+}
+
+/// Each run of `slot`'s state through the core walk: f(ctx, dev, off, len), `off` its place in the kept bytes.
+fn each(
+    m: *const fwd.Model,
+    slot: usize,
+    at: usize,
+    from: usize,
+    ctx: anytype,
+    comptime f: fn (@TypeOf(ctx), dev: u64, off: u64, len: usize) anyerror!void,
+) !void {
+    var store: [max_parts]W.Part = undefined;
+    const ps = try parts(m, slot, at, from, &store);
+    const row: []const u32 = if (m.paged) m.ids[slot * fwd.pages.perSlot(m) ..][0..fwd.pages.perSlot(m)] else &.{};
+    try W.each(ps, row, .{}, ctx, f);
 }
 
 const Copy = struct { m: *const fwd.Model, s: cuda.Stream, buf: u64 = 0, blob: ?Blob = null, out: bool };
 
-fn copy(c: Copy, dev: u64, off: usize, len: usize) anyerror!void {
+fn copy(c: Copy, dev: u64, off: u64, len: usize) anyerror!void {
     if (c.blob) |b| return b.each(off, len, Piece{ .c = c, .dev = dev }, Piece.copy);
     try move(c, dev, c.buf + off, len);
 }
@@ -152,8 +167,8 @@ const testing = std.testing;
 
 const Count = struct {
     runs: *std.ArrayList([3]usize),
-    fn add(c: Count, dev: u64, off: usize, len: usize) anyerror!void {
-        try c.runs.append(testing.allocator, .{ dev, off, len });
+    fn add(c: Count, dev: u64, off: u64, len: usize) anyerror!void {
+        try c.runs.append(testing.allocator, .{ dev, @intCast(off), len });
     }
 };
 
