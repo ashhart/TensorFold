@@ -385,9 +385,38 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
     const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
-    const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
-    if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
+    var head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
+    if (device.tensorUnits()) {
+        if (qkLayout(allocator, device)) markPlain(layers, &head);
+        try laneOrder(allocator, device, layers, head);
+    }
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
+}
+
+/// Whether 4-bit g64 matrices stay in weight_layout for qk: a GPU that builds qk, unless TF_Q27_QK=0.
+pub fn qkLayout(allocator: std.mem.Allocator, device: mtl.Device) bool {
+    if (std.c.getenv("TF_Q27_QK")) |v| if (v[0] == '0') return false;
+    if (lane.qk.available(allocator, device)) return true;
+    std.log.info("qwen27: this GPU's runtime compiler does not build qk; projections take tf_lane_reg", .{});
+    return false;
+}
+
+/// qk reads 4-bit g64 matrices as `projection.prepare` leaves them, so they skip the reorder and keep no copy.
+fn markPlain(layers: []Layer, head: *Linear) void {
+    for (layers) |*l| {
+        switch (l.mixer) {
+            .linear => |*g| for ([_]*Linear{ &g.qkv, &g.zba, &g.out }) |p| plainOne(p),
+            .attention => |*t| for ([_]*Linear{ &t.q, &t.kv, &t.out }) |p| plainOne(p),
+        }
+        plainOne(&l.gu);
+        plainOne(&l.down);
+    }
+    plainOne(head);
+}
+
+/// Mixed stacks keep their members in reg order: quantRuns takes them a row a launch on the lane kernels.
+fn plainOne(p: *Linear) void {
+    if (p.runs.len == 0 and p.raw == null and p.bits == 4 and p.group == 64 and p.n % 32 == 0) p.plain = true;
 }
 
 /// Tensor-unit projections leave load in lane_projection.reg_layout, the order quant_gpu's reg kernel reads.
@@ -402,13 +431,13 @@ fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, he
         for (list) |p| try regJobs(a, &jobs, p);
     }
     try regJobs(a, &jobs, head);
-    try lane.regOrder(device, jobs.items);
+    if (jobs.items.len > 0) try lane.regOrder(device, jobs.items);
 }
 
 /// Only 4-bit g64 matrices take the reg kernel; other widths keep lane_projection.weight_layout.
 fn regJobs(a: std.mem.Allocator, jobs: *std.ArrayList(lane.Order), p: Linear) std.mem.Allocator.Error!void {
     for (p.runs) |r| try regJobs(a, jobs, r.linear);
-    if (p.runs.len == 0 and p.bits == 4 and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k });
+    if (p.runs.len == 0 and !p.plain and p.bits == 4 and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k });
 }
 
 /// A borrowed quantized tensor as the row kernels' matrix.

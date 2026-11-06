@@ -5,6 +5,8 @@ const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
 /// The tensor units' affine products by expert, beside the lane layouts (one module for their shared fragments).
 pub const affine_mm = @import("affine_mm.zig");
+/// qk: 4-bit g64 products on weight_layout as load leaves it, in tf_lane_reg's words.
+pub const qk = @import("qk_projection.zig");
 
 pub const weight_layout = "u32[ceil(N/32)][K/group][32][group*bits/32], low-bit-first codes, columns past N zero";
 pub const reg_layout = "u32[N/32][K/64][2][32 lanes][4] 4-bit codes, regBlock order";
@@ -281,6 +283,22 @@ pub const Projection = struct {
         return p.encodeImpl(e, x, w, sb, sums, y, rows);
     }
 
+    /// tf_lane_sums of `rows` rows of x into this projection's scratch, and a barrier; callers order its reuse.
+    pub fn encodeOwnSums(p: Projection, e: mtl.ComputeEncoder, x: Ref, rows: u32) !Sums {
+        const pipe = p.sums_pipe orelse return error.SumsNeedReg;
+        if (rows == 0 or rows > p.max_rows) return error.InvalidRows;
+        try checkRef(x, rows * p.k * 2, 2);
+        const stride: u32 = 16 * ((rows + 15) / 16);
+        e.setPipeline(pipe);
+        e.setBuffer(x.buf, x.off, 0);
+        e.setValue(@as(i32, @intCast(rows)), 1);
+        e.setBuffer(p.sums_buffer.?, 0, 2);
+        e.setValue(@as(i32, @intCast(stride)), 3);
+        e.dispatchThreads(.{ .width = stride * p.group_count }, .{ .width = 256 });
+        e.barrier();
+        return .{ .ref = .{ .buf = p.sums_buffer.? }, .stride = stride };
+    }
+
     fn encodeImpl(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, given: ?Sums, y: Ref, rows: u32) !void {
         if (rows == 0 or rows > p.max_rows) return error.InvalidRows;
         const blocks = (rows + 15) / 16;
@@ -289,15 +307,7 @@ pub const Projection = struct {
         try checkRef(w, p.weight_bytes, if (p.reg) 16 else 8);
         try checkRef(sb, p.metadata_bytes, 16);
         try checkRef(y, ((rows - 1) * p.y_stride + p.n) * p.output_bytes, p.output_bytes);
-        if (given == null) if (p.sums_pipe) |pipe| {
-            e.setPipeline(pipe);
-            e.setBuffer(x.buf, x.off, 0);
-            e.setValue(@as(i32, @intCast(rows)), 1);
-            e.setBuffer(p.sums_buffer.?, 0, 2);
-            e.setValue(@as(i32, @intCast(stride)), 3);
-            e.dispatchThreads(.{ .width = stride * p.group_count }, .{ .width = 256 });
-            e.barrier();
-        };
+        if (given == null and p.sums_pipe != null) _ = try p.encodeOwnSums(e, x, rows);
         e.setPipeline(p.pipe);
         e.setBuffer(x.buf, x.off, 0);
         e.setBuffer(w.buf, w.off, 1);
@@ -322,6 +332,10 @@ fn checkRef(r: Ref, need: usize, alignment: usize) !void {
     if (r.off % alignment != 0) return error.MisalignedBuffer;
     const len = r.buf.length();
     if (r.off > len or need > len - r.off) return error.BufferTooSmall;
+}
+
+test {
+    _ = qk; // qk_projection.zig's tests run with this module's
 }
 
 test "a reg layout's rows size its sums scratch, never its kernel source" {
