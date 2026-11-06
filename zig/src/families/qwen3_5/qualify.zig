@@ -1,4 +1,4 @@
-//! Admit wider native lanes only after real-weight forward rows and committed caches match one-row execution on this GPU.
+//! Admit wider native lanes only after real-weight forward rows and committed caches match one-row runs on this GPU.
 const std = @import("std");
 const mtl = @import("metal");
 const Model = @import("model.zig").Model;

@@ -34,7 +34,7 @@ pub fn capture(e: *Engine, prompt: []const u32, path: []const u8) !void {
     std.debug.print("captured {d} rows ({d} bytes) in {s}\n", .{ n, bytes, path });
 }
 
-/// Each call of a plain reply (prompt windows, then `steps` rows of `reply`), sublayer by sublayer: glm_ref.py --trace's twin.
+/// Each call of a plain reply (prompt windows, then `steps` rows of `reply`) by sublayer: twin of glm_ref.py --trace.
 pub fn trace(e: *Engine, prompt: []const u32, reply: []const u32, steps: usize, path: []const u8) !void {
     const c = &e.c;
     const pool = mtl.objc.Pool.push();
@@ -69,7 +69,7 @@ pub fn trace(e: *Engine, prompt: []const u32, reply: []const u32, steps: usize, 
     std.debug.print("traced {d} calls ({d} prompt rows, {d} steps) in {s}\n", .{ calls, P, total - P, path });
 }
 
-/// Teacher-forced agreement: the greedy picks with `reply`'s tokens fed back; how many equal them, the first that differs.
+/// Teacher-forced agreement: greedy picks with `reply`'s tokens fed back; how many equal them, the first that differs.
 pub fn forced(e: *Engine, prompt: []const u32, reply: []const u32) !struct { same: usize, first: ?usize } {
     const c = &e.c;
     const pool = mtl.objc.Pool.push();
@@ -102,7 +102,7 @@ pub fn forced(e: *Engine, prompt: []const u32, reply: []const u32) !struct { sam
     return .{ .same = same, .first = first };
 }
 
-/// Knock-out profile: a `depth`-draft round replayed `reps` times with each launch class left out in turn, by median GPU time.
+/// Knock-out profile: a `depth`-draft round replayed `reps` times, each launch class left out in turn; median GPU time.
 pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !void {
     const c = &e.c;
     const D = c.hidden;
@@ -150,7 +150,7 @@ pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !vo
     }
 }
 
-/// The chunk path's matmul against the decode's row kernel on layer 0's real KDA in-projection input: the share that differs.
+/// The chunk matmul vs the decode row kernel on layer 0's real KDA in-projection input: the share that differs.
 pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
     const pr = &(e.pr orelse return error.NoPromptPath);
     const rows: u32 = @intCast(@min(prompt.len, st.max_rows));
@@ -187,7 +187,7 @@ pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
     std.debug.print("matmul check (layer 0 KDA in-projection, {d} rows x {d}): {d} of {d} bf16 outputs differ ({d:.3}%), at most {d} steps\n", .{ rows, N, differ, @as(usize, rows) * N, 100 * @as(f64, @floatFromInt(differ)) / @as(f64, @floatFromInt(@as(usize, rows) * N)), worst });
 }
 
-/// A prompt chunk's GPU time by class (median of `reps`): whole, then each class left out (alone with `only`); a pair runs it together.
+/// Prompt chunk GPU time, median of `reps`: whole, then each class left out (alone with `only`); pairs run it together.
 pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, parts: bool) !void {
     const pr = &(e.pr orelse return error.NoPromptPath);
     const C = fwd.Class;

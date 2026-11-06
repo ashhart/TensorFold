@@ -59,7 +59,7 @@ pub const Tables = struct {
         return t;
     }
 
-    /// A place's parent: the previous place in a chain or replay; a tree row's parent (its root after the replayed rows).
+    /// A place's parent: the previous place in a chain or replay; a tree row's parent (its root after replayed rows).
     fn parentOf(g: fwd.Seg, k: i32, loc: i32) i32 {
         if (loc < k) return loc - 1;
         const p = g.parents orelse return loc - 1;

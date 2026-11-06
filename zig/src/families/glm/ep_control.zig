@@ -1,4 +1,4 @@
-//! The expert-parallel pair's control protocol over a link's window: identities, requests and stop decisions, each acked.
+//! The expert-parallel pair's control protocol on a link's window: identities, requests and stop decisions, each acked.
 const std = @import("std");
 const platform = @import("sys");
 const fabric = @import("fabric");
@@ -118,7 +118,7 @@ pub const Control = struct {
         return peer.*;
     }
 
-    /// A step both Macs take in order: rank 0's stop decision, read and acknowledged by rank 1 before its parity word is reused.
+    /// In-order step on both Macs: rank 0's stop decision, read and acked by rank 1 before its parity word is reused.
     pub fn agree(c: *Control, quit: bool) !bool {
         c.step += 1;
         const at = CTRL + 8 * (c.step % 2);
