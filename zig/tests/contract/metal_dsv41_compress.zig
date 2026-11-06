@@ -115,7 +115,7 @@ pub const Proj = struct {
     ctl: u8,
     name: []const u8,
     pipes: cp.Pipelines,
-    /// the pipelines of glue_tmp, when the equality probe launches them in place of ours
+    /// the pipelines of glue_rows, when the equality probe launches them in place of ours
     tmp: ?cp.Pipelines = null,
     shape: c.Shape = undefined,
     x: []u16 = &.{},
@@ -279,7 +279,7 @@ pub const Proj = struct {
         if (p.fam == .pool) @memcpy(p.rig.bytes(p.o[1], p.ol[1]), std.mem.sliceAsBytes(p.state0));
     }
 
-    /// Rows r0 to r0 + m of the prepared call as one launch, our kernels or (tmp) glue_tmp's.
+    /// Rows r0 to r0 + m of the prepared call as one launch, our kernels or (tmp) glue_rows's.
     pub fn encode(p: *Proj, e: anytype, r0: usize, m: usize, tmp: bool) void {
         const pl = if (tmp) &p.tmp.? else &p.pipes;
         const n = p.shape.n;
@@ -429,7 +429,7 @@ pub const Proj = struct {
     }
 };
 
-/// Every registered variant, the launch-split probe after the gates and the equality with glue_tmp's kernels.
+/// Every registered variant, the launch-split probe after the gates and the equality with glue_rows's kernels.
 pub const Suite = struct {
     a: std.mem.Allocator,
     device: mtl.Device,
@@ -524,12 +524,12 @@ pub const Suite = struct {
         return bad;
     }
 
-    /// Our kernels and glue_tmp's give the same bytes on finite inputs, outputs and carry alike.
+    /// Our kernels and glue_rows's give the same bytes on finite inputs, outputs and carry alike.
     pub fn equality(s: *Suite, seed: u64) !usize {
         var any = false;
         for (s.probes.items) |p| any = any or p.ctl == 0;
         if (!any) return 0;
-        const lib = try mtl.Library.fromSource(s.device, sources.dsv41.glue_tmp, mtl.CompileOptions.mlx());
+        const lib = try mtl.Library.fromSource(s.device, sources.dsv41.glue_rows, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var old: cp.Pipelines = .{
             .pool = try mtl.Pipeline.init(s.device, lib, "tf_dsv41_g_pool2", false),
@@ -563,12 +563,12 @@ pub const Suite = struct {
                     cases += 1;
                     if (std.mem.indexOfDiff(u8, mine, try p.rig.outputBytes())) |at_byte| {
                         differ += 1;
-                        std.debug.print("FAIL glue_tmp equality {s} {d}x{d}: first difference at byte {d}\n", .{ p.name, shape.rows, shape.n, at_byte });
+                        std.debug.print("FAIL glue_rows equality {s} {d}x{d}: first difference at byte {d}\n", .{ p.name, shape.rows, shape.n, at_byte });
                     }
                 }
             };
         }
-        std.debug.print("{s} equality {s}: {d} cases of the pool, the round trip and both packings byte-equal to glue_tmp's kernels on finite inputs, {d} differ\n", .{ if (differ == 0) "PASS" else "FAIL", base, cases, differ });
+        std.debug.print("{s} equality {s}: {d} cases of the pool, the round trip and both packings byte-equal to glue_rows's kernels on finite inputs, {d} differ\n", .{ if (differ == 0) "PASS" else "FAIL", base, cases, differ });
         return differ;
     }
 };

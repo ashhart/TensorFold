@@ -1,7 +1,7 @@
-//! The hc families' input fills and the four exact checks of the glue_tmp part-two suite, kept out of its main file.
+//! The hc families' input fills and the four exact checks of the glue_rows part-two suite, kept out of its main file.
 const std = @import("std");
 const contract = @import("contract");
-const ref = @import("dsv41_glue_tmp_ref.zig");
+const ref = @import("dsv41_glue_rows_ref.zig");
 
 const c = contract.spec;
 const g = contract.gates;

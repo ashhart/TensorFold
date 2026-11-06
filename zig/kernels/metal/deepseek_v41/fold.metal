@@ -56,7 +56,7 @@ static_assert(sizeof(TfOPostArgs) == 20, "TfOPostArgs must mirror metal/fold.zig
   if (TF_CTL == 4 && g.x == 0) Y[ulong(a.rows) * 4u * a.dim + g.y] = bfloat(1.0f);
 }
 
-// glue_tmp's helpers (tf_g_tree, the act_quant round trip), the same expressions.
+// glue_rows's helpers (tf_g_tree, the act_quant round trip), the same expressions.
 inline float tf_o_tree(float v) {
   for (ushort m = 1; m < 32; m *= 2) v += simd_shuffle_xor(v, m);
   return v;
@@ -94,7 +94,7 @@ static_assert(sizeof(TfONormArgs) == 12, "TfONormArgs must mirror metal/fold.zig
 
 // hc_pre (H), rmsnorm (HN) and act_quant (HQ) of a row in a group of 1024; POST first makes X1 = hc_post(BR, X).
 
-// The sum of squares runs on threads 0..255 as glue_tmp's rmsnorm: every 256th value, the butterfly, eight partials.
+// The sum of squares runs on threads 0..255 as glue_rows's rmsnorm: every 256th value, the butterfly, eight partials.
 template <bool POST>
 [[kernel, max_total_threads_per_threadgroup(TF_O_TG)]] void tf_dsv41_o_prenorm(
     const device bfloat* X [[buffer(0)]], const device float* PRE [[buffer(1)]], const device float* Wt [[buffer(2)]],

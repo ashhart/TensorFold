@@ -1,4 +1,4 @@
-//! DeepSeek V4.1's phase-1 glue on Metal: rmsnorm, rope, scatter, embed, hcmean against float64; controls 1-4.
+//! DeepSeek V4.1's row glue on Metal: rmsnorm, rope, scatter, embed, hcmean against float64; controls 1-4.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -10,8 +10,8 @@ const ref = @import("dsv41_glue_ref.zig");
 const c = contract.spec;
 const g = contract.gates;
 const rows_ = contract.rows;
-const gl = tf.dsv41_metal.glue_tmp;
-const base = "dsv41 glue_tmp ";
+const gl = tf.dsv41_metal.glue_rows;
+const base = "dsv41 glue_rows ";
 const eps: f32 = 1e-20; // rms_norm_eps
 const vocab: u32 = 300; // the embed probe's table rows
 const table_positions: u32 = 8192; // the rope probe's table rows, 32 cos then 32 sin each
@@ -124,9 +124,9 @@ pub const Proj = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, f: Fam, ctl: u8, name: []const u8) !Proj {
         var p: Proj = .{ .a = a, .arena = std.heap.ArenaAllocator.init(a), .rig = .{ .a = a, .device = device, .queue = queue }, .fam = f, .ctl = ctl, .name = name, .pipes = undefined };
         if (ctl == 0) {
-            p.pipes = try gl.Pipelines.load(device, sources.dsv41.glue_tmp);
+            p.pipes = try gl.Pipelines.load(device, sources.dsv41.glue_rows);
         } else {
-            const text = try std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ ctl, sources.dsv41.glue_tmp });
+            const text = try std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ ctl, sources.dsv41.glue_rows });
             defer a.free(text);
             p.pipes = try gl.Pipelines.load(device, text);
         }

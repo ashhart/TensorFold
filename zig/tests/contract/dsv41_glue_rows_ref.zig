@@ -1,4 +1,4 @@
-//! Float64 oracles for DeepSeek V4.1's phase-1 glue beyond the rows family: the FP4 packings, pool, cand and hc mixes.
+//! Float64 oracles for DeepSeek V4.1's row glue beyond the rows family: the FP4 packings, pool, cand and hc mixes.
 const std = @import("std");
 const contract = @import("contract");
 pub const base = @import("dsv41_glue_ref.zig");

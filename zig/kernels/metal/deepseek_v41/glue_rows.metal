@@ -1,4 +1,4 @@
-// DeepSeek V4.1's phase-1 glue on Metal, the bits glue.metal, compress.metal and the fused kernels are checked against.
+// DeepSeek V4.1's row glue on Metal, the bits glue.metal, compress.metal and the fused kernels are checked against.
 #include <metal_stdlib>
 using namespace metal;
 #pragma clang fp contract(off)
@@ -197,7 +197,7 @@ kernel void tf_dsv41_g_pool2(const device float* KV [[buffer(0)]], const device 
 struct TfGMvArgs {
   uint k, n;
 };
-static_assert(sizeof(TfGMvArgs) == 8, "TfGMvArgs must keep its 8-byte (k, n) pair (glue_tmp's own mv kernel)");
+static_assert(sizeof(TfGMvArgs) == 8, "TfGMvArgs must keep its 8-byte (k, n) pair (glue_rows's own mv kernel)");
 
 // A bf16-weight matvec, one simdgroup an output: lane chains over K in steps of 32, then the butterfly.
 template <typename T>

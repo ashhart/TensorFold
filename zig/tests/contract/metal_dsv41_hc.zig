@@ -10,7 +10,7 @@ const ref = @import("dsv41_hc_ref.zig");
 const c = contract.spec;
 const g = contract.gates;
 const hcm = tf.dsv41_metal.hc;
-const glue = tf.dsv41_metal.glue_tmp;
+const glue = tf.dsv41_metal.glue_rows;
 const base = "dsv41 hc ";
 const mult = ref.mult;
 const dim: usize = 4 * 5120; // hc_mult * hidden: the flattened stream the mixes and the collapse read
@@ -106,7 +106,7 @@ pub const Proj = struct {
         var p: Proj = .{ .a = a, .arena = std.heap.ArenaAllocator.init(a), .rig = .{ .a = a, .device = device, .queue = queue }, .kind = k, .ctl = ctl, .name = name, .pipes = undefined };
         if (ctl == 0) {
             p.pipes = try hcm.Pipelines.load(device);
-            p.glue_pipes = try glue.Pipelines.load(device, sources.dsv41.glue_tmp);
+            p.glue_pipes = try glue.Pipelines.load(device, sources.dsv41.glue_rows);
         } else {
             const text = try std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ ctl, sources.dsv41.hc });
             defer a.free(text);
@@ -182,7 +182,7 @@ pub const Proj = struct {
         }
     }
 
-    /// The phase-1 glue over the same bytes and the same buffers, so gate 3 compares bits on identical inputs.
+    /// The row glue over the same bytes and the same buffers, so gate 3 compares bits on identical inputs.
     fn encodeGlue(p: *Proj, e: anytype) void {
         const bp = p.glue_pipes.?;
         const rows: u32 = @intCast(p.shape.rows);

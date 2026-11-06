@@ -5,13 +5,13 @@ const tf = @import("tensorfold");
 const sources = @import("kernel_sources");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
-const ref = @import("dsv41_glue_tmp_ref.zig");
-const aux = @import("metal_dsv41_glue_tmp2_aux.zig");
+const ref = @import("dsv41_glue_rows_ref.zig");
+const aux = @import("metal_dsv41_glue_rows2_aux.zig");
 
 const c = contract.spec;
 const g = contract.gates;
-const gl = tf.dsv41_metal.glue_tmp;
-const base = "dsv41 glue_tmp 2 ";
+const gl = tf.dsv41_metal.glue_rows;
+const base = "dsv41 glue_rows 2 ";
 const tg = 256;
 const dim: usize = 5120; // the hyper-connection stream: hc_mult * hidden
 const iters: u32 = 20;
@@ -88,7 +88,7 @@ fn at(r: rig_.Ref, extra: usize) gl.Ref {
     return .{ .buf = r.buf, .off = r.off + extra };
 }
 
-/// The pipeline of a glue_tmp kernel by its source name.
+/// The pipeline of a glue_rows kernel by its source name.
 fn pipe(pl: *const gl.Pipelines, name: []const u8) mtl.Pipeline {
     for (gl.names, 0..) |n, i| if (std.mem.eql(u8, n, name)) return pl.p[i];
     unreachable;
@@ -136,9 +136,9 @@ pub const Proj = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, f: Fam, ctl: u8, name: []const u8) !Proj {
         var p: Proj = .{ .a = a, .arena = std.heap.ArenaAllocator.init(a), .rig = .{ .a = a, .device = device, .queue = queue }, .fam = f, .ctl = ctl, .name = name, .pipes = undefined };
         if (ctl == 0) {
-            p.pipes = try gl.Pipelines.load(device, sources.dsv41.glue_tmp);
+            p.pipes = try gl.Pipelines.load(device, sources.dsv41.glue_rows);
         } else {
-            const text = try std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ ctl, sources.dsv41.glue_tmp });
+            const text = try std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ ctl, sources.dsv41.glue_rows });
             defer a.free(text);
             p.pipes = try gl.Pipelines.load(device, text);
         }

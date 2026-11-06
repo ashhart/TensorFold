@@ -1,4 +1,4 @@
-//! Decode launches that split or fuse the phase-1 glue (fused.metal): the same bits in fewer, wider dispatches.
+//! Decode launches that split or fuse the row glue (fused.metal): the same bits in fewer, wider dispatches.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -94,7 +94,7 @@ fn mixFin(p: *const Pipelines, e: mtl.ComputeEncoder, m: Mix, rows: u32) void {
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
 }
 
-/// glue_tmp's hcmix in two launches: (24 + 1) x 8 simdgroups a row for the sums, then a simdgroup a row for the rest.
+/// glue_rows's hcmix in two launches: (24 + 1) x 8 simdgroups a row for the sums, then a simdgroup a row for the rest.
 pub fn hcmix(p: *const Pipelines, e: mtl.ComputeEncoder, m: Mix, rows: u32) void {
     mixPart(p, e, m, rows);
     e.barrier();
@@ -129,7 +129,7 @@ pub fn normScratch(rows: usize) usize {
     return rows * 8 * 4;
 }
 
-/// glue_tmp's hcpre (x by pre into h), rmsnorm (hn) and actq (hq); rows over 2048 wide in two launches via `part`.
+/// glue_rows's hcpre (x by pre into h), rmsnorm (hn) and actq (hq); rows over 2048 wide in two launches via `part`.
 pub const Norm = struct { x: Ref, pre: Ref, w: Ref, h: Ref, hn: Ref, hq: Ref, part: Ref, dim: u32, eps: f32 };
 
 pub fn prenorm(p: *const Pipelines, e: mtl.ComputeEncoder, n: Norm, rows: u32) !void {
