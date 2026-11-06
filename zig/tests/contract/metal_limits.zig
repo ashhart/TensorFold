@@ -32,8 +32,8 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         }
     }.f;
     if (std.mem.eql(u8, d.name, "contract masked values tf_masked_control")) {
-        const text = @import("masked_value_probe.zig").control_source;
-        return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
+        const control = @import("masked_value_probe.zig").control_source;
+        return .{ .decl = d, .function = fun, .here = control, .pre_m5 = control };
     }
     if (std.mem.startsWith(u8, d.name, "attention pv ")) {
         const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
