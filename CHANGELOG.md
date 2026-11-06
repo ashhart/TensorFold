@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP on gfx12 under `--policy matrix=on`: Qwen3 dense checkpoints load each layer's gate and up weights interleaved as one weight, and one WMMA product writes silu(gate) x up in its epilogue instead of two products and `tf_silu_mul`, with the same output bytes: Qwen3-Reranker-8B ranks 16 documents in 0.657 to 0.661 s instead of 0.687 to 0.697 s and Qwen3-Embedding-8B embeds 100 short inputs in 0.901 to 0.911 s instead of 0.940 to 0.948 s on a Radeon AI PRO R9700. The kernel contract checks both fused blocks byte for byte against the unfused launches (part of #2245). Thanks to @laudney.
 - GLM-5.3-Flash on CUDA: with `TF_KV_SHARE=n`, the startup plan sets a slot aside in the prompt cache for each kept
   state, so the cache keeps as many states as its slots hold, up to n, and the rest of it goes to the KV pool's pages;
   the startup line names the slots and, when fewer than n fit, the `--prompt-cache-gib` that holds them all. A value
