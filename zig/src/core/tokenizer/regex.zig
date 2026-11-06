@@ -1,4 +1,4 @@
-//! Backtracking matcher for the Oniguruma (Ruby syntax) patterns in tokenizer.json; unsupported syntax is an error, never a guess.
+//! Backtracking matcher for Oniguruma (Ruby) patterns in tokenizer.json; unsupported syntax is an error, never a guess.
 const std = @import("std");
 const unicode = @import("unicode.zig");
 
