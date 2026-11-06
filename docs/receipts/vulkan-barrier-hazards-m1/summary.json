@@ -1,0 +1,443 @@
+{
+ "change": {
+  "old_build_commit": "9eef5a521471490501fee27f367d9b0c4e0a84e2",
+  "new_build_commit": "c03ebda74",
+  "new_build_adds": "Pipeline.run records a barrier only before a dispatch that conflicts with an earlier one since the last barrier"
+ },
+ "setup": {
+  "chip": "Apple M1 (G13G B1)",
+  "gpu_driver": "Honeykrisp, Mesa 26.3.0-devel (git-9323171c12)",
+  "os": "Linux",
+  "kernel_release": "7.1.12-2-20261013.18-sep-ARCH",
+  "checkpoint": "Qwen3.5-2B-MLX-4bit, revision 93760be4",
+  "quantization": "4-bit, group 64, bf16 activations",
+  "settings": "free-running greedy, 64 steps, two runs per process, vendor id 0x10005, one model process at a time, fresh process per run",
+  "order": "old,new,new,old,old,new (three pairs, both orders)",
+  "decision_rule": "median run-2 gain of at least 3 percent on unicode-24 and every pair positive"
+ },
+ "cases": [
+  {
+   "case": "unicode-24",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "kernel_release": "7.1.12-2-20261013.18-sep-ARCH",
+   "start_utc": "2026-11-03T12:57:01+00:00",
+   "end_utc": "2026-11-03T12:57:33+00:00",
+   "elfs": {
+    "old": {
+     "sha256": "2386a0272ec8bf58ecc7bd45c66e27fe84b892537dff6aa872ae8afa685b222d",
+     "bytes": 5814080
+    },
+    "new": {
+     "sha256": "decd73cad94b6b7880471fba49da048a88847cfd4c2d0c4a50e38786a8369525",
+     "bytes": 5822848
+    }
+   },
+   "logits_sha256_all_six_processes": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f",
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 736,
+     "run1_ms": 2090,
+     "run2_ms": 2117,
+     "peak_rss_bytes": 297385984,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 728,
+     "run1_ms": 1958,
+     "run2_ms": 1960,
+     "peak_rss_bytes": 311377920,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 741,
+     "run1_ms": 1960,
+     "run2_ms": 1957,
+     "peak_rss_bytes": 535281664,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 737,
+     "run1_ms": 2093,
+     "run2_ms": 2107,
+     "peak_rss_bytes": 282296320,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 743,
+     "run1_ms": 2094,
+     "run2_ms": 2094,
+     "peak_rss_bytes": 535265280,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 751,
+     "run1_ms": 1963,
+     "run2_ms": 1977,
+     "peak_rss_bytes": 534446080,
+     "logits_sha256": "e5447d9a3ab50c35e9b6e9b41dc3670040bb163080484d6aef41a1afab8b669f"
+    }
+   ],
+   "pairs": [
+    {
+     "pair": 1,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 2117,
+     "run2_new_ms": 1960,
+     "run2_gain": 0.074162,
+     "run1_old_ms": 2090,
+     "run1_new_ms": 1958,
+     "run1_gain": 0.063158
+    },
+    {
+     "pair": 2,
+     "order": [
+      "new",
+      "old"
+     ],
+     "run2_old_ms": 2107,
+     "run2_new_ms": 1957,
+     "run2_gain": 0.071191,
+     "run1_old_ms": 2093,
+     "run1_new_ms": 1960,
+     "run1_gain": 0.063545
+    },
+    {
+     "pair": 3,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 2094,
+     "run2_new_ms": 1977,
+     "run2_gain": 0.055874,
+     "run1_old_ms": 2094,
+     "run1_new_ms": 1963,
+     "run1_gain": 0.06256
+    }
+   ],
+   "run2_gain_median": 0.071191,
+   "run2_gain_min": 0.055874,
+   "run2_gain_max": 0.074162,
+   "run1_gain_median": 0.063158,
+   "speedup_rule": "MET",
+   "raw_result_json_sha256": "6ce42f3c4463a043cccd8821fb801389d982493ce849fb273c697e59bc321038"
+  },
+  {
+   "case": "document-256",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "kernel_release": "7.1.12-2-20261013.18-sep-ARCH",
+   "start_utc": "2026-11-03T12:58:46+00:00",
+   "end_utc": "2026-11-03T12:59:37+00:00",
+   "elfs": {
+    "old": {
+     "sha256": "2386a0272ec8bf58ecc7bd45c66e27fe84b892537dff6aa872ae8afa685b222d",
+     "bytes": 5814080
+    },
+    "new": {
+     "sha256": "decd73cad94b6b7880471fba49da048a88847cfd4c2d0c4a50e38786a8369525",
+     "bytes": 5822848
+    }
+   },
+   "logits_sha256_all_six_processes": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb",
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 740,
+     "run1_ms": 3701,
+     "run2_ms": 3694,
+     "peak_rss_bytes": 534560768,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 729,
+     "run1_ms": 3520,
+     "run2_ms": 3520,
+     "peak_rss_bytes": 298745856,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 729,
+     "run1_ms": 3523,
+     "run2_ms": 3518,
+     "peak_rss_bytes": 283525120,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 748,
+     "run1_ms": 3691,
+     "run2_ms": 3713,
+     "peak_rss_bytes": 280936448,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 741,
+     "run1_ms": 3689,
+     "run2_ms": 3698,
+     "peak_rss_bytes": 284344320,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 732,
+     "run1_ms": 3520,
+     "run2_ms": 3519,
+     "peak_rss_bytes": 312426496,
+     "logits_sha256": "147a2d2e023222c0fd8f12c88ac72bfc8888faed858c2939252149f88e6bd8cb"
+    }
+   ],
+   "pairs": [
+    {
+     "pair": 1,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 3694,
+     "run2_new_ms": 3520,
+     "run2_gain": 0.047103,
+     "run1_old_ms": 3701,
+     "run1_new_ms": 3520,
+     "run1_gain": 0.048906
+    },
+    {
+     "pair": 2,
+     "order": [
+      "new",
+      "old"
+     ],
+     "run2_old_ms": 3713,
+     "run2_new_ms": 3518,
+     "run2_gain": 0.052518,
+     "run1_old_ms": 3691,
+     "run1_new_ms": 3523,
+     "run1_gain": 0.045516
+    },
+    {
+     "pair": 3,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 3698,
+     "run2_new_ms": 3519,
+     "run2_gain": 0.048405,
+     "run1_old_ms": 3689,
+     "run1_new_ms": 3520,
+     "run1_gain": 0.045812
+    }
+   ],
+   "run2_gain_median": 0.048405,
+   "run2_gain_min": 0.047103,
+   "run2_gain_max": 0.052518,
+   "run1_gain_median": 0.045812,
+   "speedup_rule": "MET",
+   "raw_result_json_sha256": "22b00f3f7c13795540d15ccd606c86e51c3688e6eb989b463e4473d89e3b8011"
+  },
+  {
+   "case": "document-1024",
+   "status": "PASS_WITH_NOT_VERIFIED",
+   "kernel_release": "7.1.12-2-20261013.18-sep-ARCH",
+   "start_utc": "2026-11-03T13:00:33+00:00",
+   "end_utc": "2026-11-03T13:02:37+00:00",
+   "elfs": {
+    "old": {
+     "sha256": "2386a0272ec8bf58ecc7bd45c66e27fe84b892537dff6aa872ae8afa685b222d",
+     "bytes": 5814080
+    },
+    "new": {
+     "sha256": "decd73cad94b6b7880471fba49da048a88847cfd4c2d0c4a50e38786a8369525",
+     "bytes": 5822848
+    }
+   },
+   "logits_sha256_all_six_processes": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820",
+   "processes": [
+    {
+     "label": "pr0-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 756,
+     "run1_ms": 9797,
+     "run2_ms": 9812,
+     "peak_rss_bytes": 535248896,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr1-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 748,
+     "run1_ms": 9492,
+     "run2_ms": 9479,
+     "peak_rss_bytes": 535265280,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr2-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 735,
+     "run1_ms": 9489,
+     "run2_ms": 9488,
+     "peak_rss_bytes": 312885248,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr3-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 732,
+     "run1_ms": 9803,
+     "run2_ms": 9812,
+     "peak_rss_bytes": 534134784,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr4-old",
+     "arm": "old",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 754,
+     "run1_ms": 9786,
+     "run2_ms": 9775,
+     "peak_rss_bytes": 533872640,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    },
+    {
+     "label": "pr5-new",
+     "arm": "new",
+     "exit_code": 0,
+     "receipt": "COMPLETE_OK",
+     "engine_ready_ms": 756,
+     "run1_ms": 9482,
+     "run2_ms": 9515,
+     "peak_rss_bytes": 400654336,
+     "logits_sha256": "7f9d8e65e90eb3751edc41aed99c9ac5d37ce3f7d99dae1e626497632661a820"
+    }
+   ],
+   "pairs": [
+    {
+     "pair": 1,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 9812,
+     "run2_new_ms": 9479,
+     "run2_gain": 0.033938,
+     "run1_old_ms": 9797,
+     "run1_new_ms": 9492,
+     "run1_gain": 0.031132
+    },
+    {
+     "pair": 2,
+     "order": [
+      "new",
+      "old"
+     ],
+     "run2_old_ms": 9812,
+     "run2_new_ms": 9488,
+     "run2_gain": 0.033021,
+     "run1_old_ms": 9803,
+     "run1_new_ms": 9489,
+     "run1_gain": 0.032031
+    },
+    {
+     "pair": 3,
+     "order": [
+      "old",
+      "new"
+     ],
+     "run2_old_ms": 9775,
+     "run2_new_ms": 9515,
+     "run2_gain": 0.026598,
+     "run1_old_ms": 9786,
+     "run1_new_ms": 9482,
+     "run1_gain": 0.031065
+    }
+   ],
+   "run2_gain_median": 0.033021,
+   "run2_gain_min": 0.026598,
+   "run2_gain_max": 0.033938,
+   "run1_gain_median": 0.031132,
+   "speedup_rule": "MET",
+   "raw_result_json_sha256": "6414abe09e2eea6ea7608ecac473f4da0eeb759ce8b6f8e532c27e871305ffa1"
+  }
+ ],
+ "first_build": {
+  "status": "FAIL",
+  "digest": "e8535a02dd1ed2b7bde4b4d8d93d6d4e461c2079499e125a11789f1279801812",
+  "digests": [
+   "e8535a02dd1ed2b7bde4b4d8d93d6d4e461c2079499e125a11789f1279801812"
+  ]
+ },
+ "compute_only_barrier_unicode24": {
+  "gain": -0.001433349259436216,
+  "status": "PASS_WITH_NOT_VERIFIED"
+ },
+ "decode_bench_step_ms": {
+  "barrier": 23.62,
+  "narrow": 21.72,
+  "nobarrier": 16.917
+ },
+ "decode_bench_chain_step_ms": {
+  "barrier": 24.722,
+  "narrow": 21.733
+ },
+ "identity_probe": [
+  "RESULT stage1 elapsed_ms=6440 on \"Apple M1 (G13G B1)\": passed=25 total=25"
+ ],
+ "suites_equal_lines": 10
+}

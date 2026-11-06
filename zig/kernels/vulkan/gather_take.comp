@@ -1,0 +1,251 @@
+#version 460
+
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/gather_take.comp at fde15c1ece69:
+
+// code unchanged, comments condensed.
+
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+
+// General gather (take / take_along): t -> idx_lin and window s; table window + gathered axes.
+
+// operation: 0 i32, 1 u32, 2 i64 LE, 3 u8, 4 i8, 5 u16, 6 i16; signed neg wraps like offset_neg_idx.
+
+// OOR index (or i64 high not 0/0xFFFFFFFF) writes zero; upstream leaves such reads undefined.
+
+// USE_U32/U16/I64 raw copy; USE_BOOL/U8 packed bytes via BYTE_AT + atomicOr (host pre-zeros).
+
+// USE_MULTI_INDEX: indices bind 1, axis meta bind 2, output bind 3; push tables rank-cap 4.
+
+#ifdef USE_COMPLEX
+#define STORAGE_TYPE vec2
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(x) (x)
+#elif defined(USE_FP16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define STORAGE_TYPE float16_t
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#elif defined(USE_BF16)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#define STORE_VALUE(f) bf16_store(f)
+#elif defined(USE_U32)
+#define STORAGE_TYPE uint
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(x) (x)
+#elif defined(USE_BOOL)
+// Packed-bool: 1 byte/elem via uint words; BYTE_AT load, atomicOr store; host densifies tables.
+#define STORAGE_TYPE uint
+#define LOAD_BOOL_LANE(word, lane) (((word) >> ((lane) * 8u)) & 0xFFu)
+#define STORE_BOOL(b) ((b) ? 1u : 0u)
+#elif defined(USE_U8)
+// Raw u8/i8 via uint words + BYTE_AT; no 0/1 normalize; no 8-bit storage feature.
+#define STORAGE_TYPE uint
+#elif defined(USE_U16)
+// Raw u16/i16 bit copy; needs 16-bit storage; host gates dispatch.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#define STORAGE_TYPE uint16_t
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(x) (x)
+#elif defined(USE_I64)
+#define STORAGE_TYPE uvec2
+#define LOAD_VALUE(x) (x)
+#define STORE_VALUE(x) (x)
+#else
+#define STORAGE_TYPE float
+#define LOAD_VALUE(x) float(x)
+#define STORE_VALUE(f) STORAGE_TYPE(f)
+#endif
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Table {
+  STORAGE_TYPE values[];
+} input_data;
+layout(set = 0, binding = 1, std430) readonly buffer Indices {
+  int values[];
+} indices_data;
+#ifdef USE_MULTI_INDEX
+layout(set = 0, binding = 2, std430) readonly buffer AxisMetadata {
+  uint values[];
+} axis_metadata;
+layout(set = 0, binding = 3, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+#else
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+  STORAGE_TYPE values[];
+} output_data;
+#endif
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+// Honeykrisp: shift-mask byte extract miscompiles; BYTE_AT constant-shift select is proven.
+#define BYTE_AT(word, lane)                                                   \
+  ((lane) == 0u ? ((word) & 0xFFu)                                            \
+       : (lane) == 1u ? (((word) >> 8u) & 0xFFu)                              \
+       : (lane) == 2u ? (((word) >> 16u) & 0xFFu)                             \
+                      : (((word) >> 24u) & 0xFFu))
+
+// DECODE_INDEX: width-scaled slot on word transport; BYTE_AT narrow lanes; OOR => out_index==dim.
+
+// Expands as a braced block (GLSL bool conditions; do/while(0) does not compile).
+#define DECODE_INDEX(buf, base, slot, op, dim, out_index)                     \
+  {                                                                           \
+    uint decoded_index = (dim);                                               \
+    if ((op) == 3u || (op) == 4u) {                                           \
+      uint bword = uint(buf.values[(base) + ((slot) >> 2u)]);                 \
+      uint b = BYTE_AT(bword, (slot) & 3u);                                   \
+      if ((op) == 4u && (b & 0x80u) != 0u) {                                  \
+        b |= 0xFFFFFF00u;                                                     \
+      }                                                                       \
+      decoded_index = b < 0x80000000u ? b : (dim) + b;                        \
+    } else if ((op) == 5u || (op) == 6u) {                                    \
+      uint hword = uint(buf.values[(base) + ((slot) >> 1u)]);                 \
+      uint h = ((slot) & 1u) == 0u ? (hword & 0xFFFFu) : (hword >> 16u);      \
+      if ((op) == 6u && (h & 0x8000u) != 0u) {                                \
+        h |= 0xFFFF0000u;                                                     \
+      }                                                                       \
+      decoded_index = h < 0x80000000u ? h : (dim) + h;                        \
+    } else {                                                                  \
+      uint word = uint(buf.values[(base) + (slot)]);                          \
+      if ((op) == 0u) {                                                       \
+        decoded_index = word < 0x80000000u ? word : (dim) + word;             \
+      } else if ((op) == 1u) {                                                \
+        decoded_index = word;                                                 \
+      } else {                                                                \
+        uint high = uint(buf.values[(base) + (slot) + 1u]);                   \
+        if (high == 0u) {                                                     \
+          decoded_index = word;                                               \
+        } else if (high == 0xFFFFFFFFu) {                                     \
+          decoded_index = (dim) + word;                                       \
+        }                                                                     \
+      }                                                                       \
+    }                                                                         \
+    (out_index) = decoded_index;                                              \
+  }                                                                           \
+
+void main() {
+  uint t = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (t < params.count) {
+// Split output element into index position and window position.
+    uint idx_count = 1u;
+    for (uint i = 0u; i < params.dims; ++i) {
+      idx_count *= params.out_strides[i];
+    }
+    uint slice_total = params.count / idx_count;
+    uint idx_lin = t / slice_total;
+    uint s = t - idx_lin * slice_total;
+
+// Decode window position across the table dims.
+    uint win = 0u;
+    uint scale = 1u;
+    for (uint i = params.flags; i > 0u; --i) {
+      uint dim = params.shape[i - 1u];
+      win += ((s / scale) % dim) * params.in_strides[i - 1u];
+      scale *= dim;
+    }
+
+    uint word_slot =
+        params.operation == 2u ? idx_lin + idx_lin : idx_lin;
+    bool valid = true;
+    uint src = 0u;
+#ifdef USE_MULTI_INDEX
+    for (uint axis = 0u; axis < params.aux_size; ++axis) {
+      uint dim = axis_metadata.values[axis];
+      uint index;
+      DECODE_INDEX(indices_data,
+                   axis_metadata.values[2u * params.aux_size + axis],
+                   word_slot,
+                   params.operation,
+                   dim,
+                   index);
+      valid = valid && index < dim;
+      src += index * axis_metadata.values[params.aux_size + axis];
+    }
+#else
+    {
+      uint dim = params.reduce_size;
+      uint index;
+      DECODE_INDEX(indices_data,
+                   params.rhs_offset,
+                   word_slot,
+                   params.operation,
+                   dim,
+                   index);
+      valid = index < dim;
+      src = index * params.matrix_m;
+    }
+#endif
+#if defined(USE_COMPLEX) || defined(USE_U32) || defined(USE_U16) || defined(USE_I64)
+    STORAGE_TYPE value = STORAGE_TYPE(0);
+#else
+    float value = 0.0;
+#endif
+#if defined(USE_BOOL) || defined(USE_U8)
+// Bool/U8 byte-lane merge: unique lane in output word via atomicOr (four threads, four lanes).
+
+// Invalid index ORs 0 into host-prezeroed output (documented zero read).
+    uint in_elem = params.lhs_offset + src + win;
+#ifdef USE_BOOL
+    bool bvalue = valid
+        ? (LOAD_BOOL_LANE(input_data.values[in_elem >> 2u],
+                          in_elem & 3u) != 0u)
+        : false;
+    uint bbit = STORE_BOOL(bvalue);
+#else
+    uint bbit = valid
+        ? BYTE_AT(input_data.values[in_elem >> 2u], in_elem & 3u)
+        : 0u;
+#endif
+    uint out_elem = params.output_offset + t;
+    uint out_byte = out_elem & 3u;
+    uint out_word_index = out_elem >> 2u;
+    atomicOr(output_data.values[out_word_index], bbit << (out_byte * 8u));
+#else
+    if (valid) {
+      value = LOAD_VALUE(
+          input_data.values[params.lhs_offset + src + win]);
+    }
+    output_data.values[params.output_offset + t] = STORE_VALUE(value);
+#endif
+    if (params.count - t <= stride) {
+      break;
+    }
+    t += stride;
+  }
+}

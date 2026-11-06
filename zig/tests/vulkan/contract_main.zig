@@ -47,6 +47,28 @@ pub fn main(init: std.process.Init) !u8 {
     if (!std.mem.eql(u32, &pipeline.local, &.{ fx.local_size_x, 1, 1 })) return error.LocalSizeMismatch;
     var fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &pipeline);
     defer fixture.deinit();
+    var vec4_pipeline = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_q4_vec4, layout);
+    defer vec4_pipeline.deinit();
+    if (!std.mem.eql(u32, &vec4_pipeline.local, &.{ fx.local_size_x, 1, 1 })) return error.LocalSizeMismatch;
+    var vec4_fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &vec4_pipeline);
+    defer vec4_fixture.deinit();
+    vec4_fixture.name = "vulkan qmm_q4_vec4 affine q4 g64 transposed";
+    var tile_pipeline = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_q4_tile, layout);
+    defer tile_pipeline.deinit();
+    if (!std.mem.eql(u32, &tile_pipeline.local, &.{ fx.local_size_x, 1, 1 })) return error.LocalSizeMismatch;
+    var tile_fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &tile_pipeline);
+    defer tile_fixture.deinit();
+    tile_fixture.name = "vulkan qmm_q4_tile affine q4 g64 transposed tiled 32";
+    tile_fixture.tiled = true;
+    var rows_pipeline = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_q4_tile_rows, layout);
+    defer rows_pipeline.deinit();
+    if (!std.mem.eql(u32, &rows_pipeline.local, &.{ fx.local_size_x, 1, 1 })) return error.LocalSizeMismatch;
+    var rows_fixture = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &rows_pipeline);
+    defer rows_fixture.deinit();
+    rows_fixture.name = "vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread";
+    rows_fixture.tiled = true;
+    rows_fixture.rows_per_thread = 4;
+    rows_fixture.columns_per_thread = 2;
     const control_layout: vk.dispatch.Layout = .{ .bindings = 3, .push_bytes = 8, .writes = 1 << 2 };
     var p_fmax = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_fmax, control_layout);
     defer p_fmax.deinit();
@@ -69,6 +91,15 @@ pub fn main(init: std.process.Init) !u8 {
     var writes_b = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_b);
     defer writes_b.deinit();
     writes_b.corrupt = 3;
+    // Planted gate 3 control on the rows image: the rows past its last four-row block are never computed.
+    var p_skip = try vk.dispatch.Pipeline.init(&dev, &shaders.qmm_q4_tile_rows, layout);
+    defer p_skip.deinit();
+    var skips_tail = fx.Fixture.init(init.gpa, &dev, &cmds, staging, &p_skip);
+    defer skips_tail.deinit();
+    skips_tail.tiled = true;
+    skips_tail.rows_per_thread = 4;
+    skips_tail.columns_per_thread = 2;
+    skips_tail.skip_tail = true;
     var controls = [_]fx.Control{
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fmax, .qmm_fmax),
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_atomic, .atomic_sum),
@@ -77,11 +108,15 @@ pub fn main(init: std.process.Init) !u8 {
         fx.Control.init(init.gpa, &dev, &cmds, staging, &p_fp16, .fp16_accum),
     };
     defer for (&controls) |*control| control.deinit();
-    var kernels: [8]g.Kernel = undefined;
+    var kernels: [12]g.Kernel = undefined;
     kernels[0] = fixture.kernel();
-    for (&controls, 1..) |*control, i| kernels[i] = control.kernel();
-    kernels[6] = writes_w.kernel();
-    kernels[7] = writes_b.kernel();
+    kernels[1] = vec4_fixture.kernel();
+    kernels[2] = tile_fixture.kernel();
+    kernels[3] = rows_fixture.kernel();
+    for (&controls, 4..) |*control, i| kernels[i] = control.kernel();
+    kernels[9] = writes_w.kernel();
+    kernels[10] = writes_b.kernel();
+    kernels[11] = skips_tail.kernel();
     const start = std.Io.Clock.awake.now(init.io);
     tally.controls += gate5_controls;
     tally.caught += gate5_controls;
