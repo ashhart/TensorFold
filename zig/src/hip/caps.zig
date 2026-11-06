@@ -13,6 +13,8 @@ pub const Caps = struct {
     sdot8: bool,
     matrix: Matrix,
     act: Act,
+    /// dot2 rounds a sum with a -0 lane apart from the same sum with +0, so masked lanes must enter as +0.
+    dot2_signed_zero: bool,
     generation: Generation,
 
     /// The caps of `name` ("gfx1030", "gfx1151:xnack-" ...), or null for a GPU outside the table.
@@ -35,10 +37,10 @@ const Row = struct { names: []const []const u8, caps: Caps };
 
 /// One row a generation; every part of it shares the instructions the kernels use.
 const table = [_]Row{
-    .{ .names = &.{ "gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036" }, .caps = .{ .wave = 32, .dot2_f16 = true, .dot2_bf16 = false, .sdot4 = true, .sdot8 = true, .matrix = .none, .act = .f16, .generation = .rdna2 } },
-    .{ .names = &.{ "gfx1100", "gfx1101", "gfx1102", "gfx1103" }, .caps = .{ .wave = 32, .dot2_f16 = true, .dot2_bf16 = true, .sdot4 = true, .sdot8 = true, .matrix = .wmma11, .act = .bf16, .generation = .rdna3 } },
-    .{ .names = &.{ "gfx1150", "gfx1151", "gfx1152", "gfx1153" }, .caps = .{ .wave = 32, .dot2_f16 = true, .dot2_bf16 = true, .sdot4 = true, .sdot8 = true, .matrix = .wmma11, .act = .bf16, .generation = .rdna3_5 } },
-    .{ .names = &.{ "gfx1200", "gfx1201" }, .caps = .{ .wave = 32, .dot2_f16 = true, .dot2_bf16 = true, .sdot4 = true, .sdot8 = true, .matrix = .wmma12, .act = .bf16, .generation = .rdna4 } },
+    .{ .names = &.{ "gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036" }, .caps = .{ .wave = 32, .dot2_f16 = true, .dot2_bf16 = false, .sdot4 = true, .sdot8 = true, .matrix = .none, .act = .f16, .dot2_signed_zero = false, .generation = .rdna2 } },
+    .{ .names = &.{ "gfx1100", "gfx1101", "gfx1102", "gfx1103" }, .caps = .{ .wave = 32, .dot2_f16 = true, .dot2_bf16 = true, .sdot4 = true, .sdot8 = true, .matrix = .wmma11, .act = .bf16, .dot2_signed_zero = false, .generation = .rdna3 } },
+    .{ .names = &.{ "gfx1150", "gfx1151", "gfx1152", "gfx1153" }, .caps = .{ .wave = 32, .dot2_f16 = true, .dot2_bf16 = true, .sdot4 = true, .sdot8 = true, .matrix = .wmma11, .act = .bf16, .dot2_signed_zero = true, .generation = .rdna3_5 } },
+    .{ .names = &.{ "gfx1200", "gfx1201" }, .caps = .{ .wave = 32, .dot2_f16 = true, .dot2_bf16 = true, .sdot4 = true, .sdot8 = true, .matrix = .wmma12, .act = .bf16, .dot2_signed_zero = false, .generation = .rdna4 } },
 };
 
 test "each generation gets its instructions" {
@@ -48,6 +50,8 @@ test "each generation gets its instructions" {
     try std.testing.expect(rdna3.dot2_bf16 and rdna3.matrix == .wmma11 and rdna3.act == .bf16);
     try std.testing.expectEqual(Generation.rdna3_5, Caps.of("gfx1151:xnack-").?.generation);
     try std.testing.expectEqual(Matrix.wmma12, Caps.of("gfx1201").?.matrix);
+    try std.testing.expect(Caps.of("gfx1152").?.dot2_signed_zero and !Caps.of("gfx1201").?.dot2_signed_zero);
+    try std.testing.expect(!rdna2.dot2_signed_zero and !rdna3.dot2_signed_zero);
     for (table) |row| try std.testing.expectEqual(@as(u8, 32), row.caps.wave);
 }
 
