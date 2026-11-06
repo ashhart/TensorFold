@@ -66,6 +66,10 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   pool then costs the card 768 bytes a token instead of 13,056, so a 1,048,576-token window fits beside the weights.
   `TF_GLM_KV_HOST_GIB` sizes the host pages (one full window unasked); `TF_GLM_KV_HOST_SHARED=1` gives the ranks of
   one host a single copy in `/dev/shm`. Checked on two RTX PRO 6000 Blackwell cards at TP=2.
+- `TF_KV_SHARE=n` (with KV pages, 64 at most) keeps prompts' rows as the pool's pages, and the startup plan sets aside
+  a slot for each of the n kept states' other parts in the prompt cache, as many as the cache holds; the rest of the
+  cache goes to the pool's pages. `--prompt-cache-gib N` bounds them: the startup line names the slots, and when the
+  cache holds fewer than n, how many it holds and the `--prompt-cache-gib` that holds all n.
 - `TF_GLM_CHUNK_SOLO=4096` on every rank (opt-in) lets a prompt pass take 4,096 rows while no other stream is decoding.
   Unset or `2048`, every pass takes 2,048 rows and nothing extra is held. See [Prompt chunk size](#prompt-chunk-size).
 - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
