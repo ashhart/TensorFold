@@ -90,7 +90,7 @@ pub const Rank = struct {
     naive: bool = false,
     /// Sums as reduce-scatter then all-gather instead of one-shot (the same canonical tree).
     split_sums: bool = false,
-    /// Attention by streams: a slot's owner runs every head of its rows and keeps its caches; rows are then all-gathered.
+    /// Attention by streams: a slot's owner runs every head of its rows and keeps its caches; rows then all-gathered.
     by_streams: bool = false,
     /// Every expert split by its intermediate columns (8 slices) instead of whole experts by groups.
     split_experts: bool = false,
