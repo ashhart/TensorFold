@@ -4,6 +4,10 @@ const registry = @import("registry.zig");
 const limits = @import("limits.zig");
 const fresh130 = @import("measurements/main_130.zig");
 
+test {
+    _ = fresh130; // its own receipts tests; registry.zig stays within 600 lines
+}
+
 test "compiler receipts: new 13.0 records preserve independent 13.2 selection" {
     const r = for (registry.all_cuda) |row| {
         if (std.mem.eql(u8, row.launch.name, "tf_topk_slices")) break row;
