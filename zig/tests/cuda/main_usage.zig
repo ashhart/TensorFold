@@ -200,4 +200,5 @@ pub const usage =
     \\
     \\  ricursive-contract        Ripple's glue, attention prep and attention (group 10) through gates 1-4, controls red
     \\  ripple-forward            Ripple's forward rounds (streams, verify windows, mixes) == one-row steps, bit for bit (synthetic)
+    \\  ripple-serve              Ripple's lane backend: shared rounds, copied drafts, kept states, logprob rows (synthetic)
 ;
