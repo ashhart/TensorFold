@@ -145,10 +145,10 @@ This API does not enable constrained generation or add a server capability.
 
 7. **The depth rule.**
    - Three draft levels: 3, 6 and 8 (3 or 7 on a paired Mac).
-   - A moving average of drafts landed over drafts offered moves the level: up to 6 above 0.8 and 8 above 0.74, back
-     to 6 below 0.62 and 3 below 0.65.
-   - The widest level runs only while nearly all drafts land. Metal's MTP chains run up to 8 drafts; on CUDA the recipe
-     defaults to 6 (8 for greedy streams), and an explicit depth stops at 15.
+   - A moving average of drafts landed over drafts offered moves the level: from 3 up to 6 above 0.8, from 6 up to 8
+     above 0.74, from 8 back to 6 below 0.62, and from 6 to 3 below 0.65. On a pair, 3 goes to 7 above 0.95.
+   - The widest level holds while the moving average stays at 0.62 or above (0.8 on a pair). Metal's MTP chains run
+     up to 8 drafts; on CUDA the recipe defaults to 6 (8 for greedy streams), and an explicit depth stops at 15.
    - Flash Next code at depth 6: 6.07 tokens a round, 242.7 tok/s.
 8. **Copy drafts on the GPU.** The GPU keeps the token history and finds the longest suffix match, up to 8 tokens.
    - Lenient gate: a match of 3 that reaches 6, or that agrees with the head's first draft.
