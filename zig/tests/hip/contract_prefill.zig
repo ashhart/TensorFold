@@ -39,11 +39,10 @@ const names = [2][2][]const u8{
     .{ "hip prompt tile tf_fa_paged_f16 (fp16 cache pages)", "hip prompt tile tf_fa_paged_bf16 (bf16 cache pages)" },
 };
 
-/// What gate 1 finds on the tile: NaN scores leave its max, and its P x V takes every key of a tile.
+/// What gate 1 finds on the tile: NaN scores leave its max, and its P x V takes a seen key whose weight underflows.
 const finding = "a row whose every score is NaN writes 0 where float64 gives NaN (its running max is fmaxf, " ++
-    "which drops NaN, and a row at max -inf takes p = 0), and an infinite value at a key whose fp32 weight is 0 " ++
-    "(past the row's causal edge in its tile, or under fp32's least) gives NaN where float64 gives inf or a finite " ++
-    "value, as 0 x inf enters P x V";
+    "which drops NaN, and a row at max -inf takes p = 0), and an infinite value at a key the row sees under " ++
+    "fp32's least weight gives NaN where float64 gives inf, as 0 x inf enters P x V";
 
 /// A row's P x V chain: a dot2 a key pair and a fold a tile, under its keys plus a tile.
 fn keyChain(s: c.Shape) usize {
