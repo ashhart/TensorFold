@@ -17,7 +17,6 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     root.addImport("h3_kernels", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }));
     @import("qwen4.zig").metalNative(b, target, root);
     const install = b.addInstallArtifact(exe, .{});
-    b.getInstallStep().dependOn(&install.step);
     b.step("tf-masked-values", "Build the isolated prompt-mask fixtures from runtime sources only").dependOn(&install.step);
     const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/masked_value_data.zig"), .target = target, .imports = &.{.{ .name = "contract", .module = contract }} }) });
     const host = b.step("test-masked-values-host", "The hidden/visible exceptional-value fixtures and contract host gates");
