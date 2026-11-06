@@ -1,4 +1,4 @@
-// GLM-5.3-Flash latent attention for rows reading all keys: the 64 query heads as one matrix against the one latent head.
+// GLM-5.3-Flash latent attention, rows reading all keys: the 64 query heads as one matrix against the one latent head.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
