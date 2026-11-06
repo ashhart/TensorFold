@@ -13,7 +13,7 @@ pub fn chunks(n: usize, whole: usize) u32 {
     return splits(if (whole != 0) whole else n);
 }
 
-/// Output tiles a simdgroup within the 16 KB reduction buffer; tiles never change a row's bits.
+/// Output tiles a simdgroup within the reduction buffer; tiles never change a row's bits.
 pub fn tiles(n: usize, rt: u32, s: u32) u32 {
     var nt: u32 = if (n % 32 == 0) 4 else if (n % 16 == 0) 2 else 1;
     while (nt > 1 and !fits(s, nt, rt)) nt /= 2;
@@ -32,30 +32,39 @@ pub fn scalarBlock(rows: usize, s: u32) u32 {
     return if (xb % s == 0 and rows * xb * 76 * 4 <= 20480) xb else 0;
 }
 
+/// Row count alone selects the tile height; all heights retain the same K chunks and sum tree.
+pub fn rowTiles(rows: usize) u32 {
+    return if (rows > 16) 4 else @min(2, @as(u32, @intCast((rows + 7) / 8)));
+}
+
 pub const max_scalar_rows = 2;
 const s_values = [_]u32{ 8, 16, 32 };
 const nt_values = [_]u32{ 1, 2, 4 };
 
 pub const Args = extern struct { k: i32, n: i32, r: i32, one: f32 = 1.0 };
 
-/// Whether a tile shape's reduction buffer fits 16 KB (the only shapes `tiles` picks, and the only ones built).
+/// Four row tiles use at most 32 KiB; one and two retain the 16 KiB reduction limit.
 fn fits(s: u32, nt: u32, rt: u32) bool {
-    return s * rt * nt * 64 * 4 <= 16384;
+    return s * rt * nt * 64 * 4 <= (if (rt == 4) @as(u32, 32768) else 16384);
 }
 
 pub const Pipelines = struct {
-    mma: [s_values.len][nt_values.len][2]?mtl.Pipeline,
+    mma: [s_values.len][nt_values.len][3]?mtl.Pipeline,
     scalar: [s_values.len][2][max_scalar_rows]mtl.Pipeline,
     paired: mtl.Pipeline, // tf_sq_mmp_16_4_2_2: the shapes `pairs` takes
 
     pub fn load(device: mtl.Device) !Pipelines {
+        return loadSource(device, sources.core_simd_qmm);
+    }
+
+    pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const lib = try mtl.Library.fromSource(device, sources.core_simd_qmm, mtl.CompileOptions.mlx());
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var p: Pipelines = undefined;
         inline for (s_values, 0..) |s, si| {
-            inline for (nt_values, 0..) |nt, ti| inline for (.{ 1, 2 }, 0..) |rt, ri| {
+            inline for (nt_values, 0..) |nt, ti| inline for (.{ 1, 2, 4 }, 0..) |rt, ri| {
                 p.mma[si][ti][ri] = if (comptime fits(s, nt, rt)) try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_sq_mma_{d}_{d}_{d}", .{ s, nt, rt }), false) else null;
             };
             inline for (.{ 1, 2 }, 0..) |nr, ni| inline for (.{ 1, 2 }, 0..) |rs, ri| {
@@ -91,11 +100,11 @@ pub fn call(p: *const Pipelines, n: usize, k: usize, rows: usize, scalar: bool, 
         if (pipeline.maxThreads() < sgs * 32) return error.SimdThreads;
         return .{ .pipeline = pipeline, .args = args, .groups = .{ .width = (n + per - 1) / per }, .threads = sgs * 32 };
     }
-    const rt: u32 = @min(2, @as(u32, @intCast((rows + 7) / 8)));
+    const rt: u32 = rowTiles(rows);
     if (paired and pairs(n, rt, s) and p.paired.maxThreads() >= 256)
         return .{ .pipeline = p.paired, .args = args, .groups = .{ .width = n / 32, .height = (rows + 15) / 16 }, .threads = 256 };
     const nt = tiles(n, rt, s);
-    const pipeline = p.mma[si][std.mem.indexOfScalar(u32, &nt_values, nt).?][rt - 1] orelse return error.UnsupportedSimdShape;
+    const pipeline = p.mma[si][std.mem.indexOfScalar(u32, &nt_values, nt).?][if (rt == 4) 2 else rt - 1] orelse return error.UnsupportedSimdShape;
     const sgs: usize = @min(s, 16, pipeline.maxThreads() / 32);
     if (sgs == 0) return error.SimdThreads;
     return .{ .pipeline = pipeline, .args = args, .groups = .{ .width = (n + 8 * nt - 1) / (8 * nt), .height = (rows + 8 * rt - 1) / (8 * rt) }, .threads = sgs * 32 };

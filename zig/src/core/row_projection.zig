@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 
-/// 4-bit groups of 64 with fp32 sums take simdgroup-matrix tiles instead (8 rows a weight read).
+/// 4-bit groups of 64 with fp32 sums take simdgroup-matrix tiles instead (up to 32 rows a weight read).
 pub const simd = @import("simd_qmm.zig");
 /// Groups of 64 at any width with fp32 sums: the same tiles, rows at a stride.
 pub const simd_bits = @import("simd_qmm_bits.zig");
