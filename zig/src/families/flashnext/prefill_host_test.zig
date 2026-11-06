@@ -444,10 +444,9 @@ test "flashnext prefill: a prompt's steps beside decoders grow after it has wait
     for (steps) |rows| try std.testing.expectEqual(fill.decode_rows, rows);
 }
 
-test "flashnext prefill: replies take the default share without tensor units; the flag and the env keep their meanings" {
-    try std.testing.expectEqual(@as(?f64, fill.decode_share), fill.shareOf(null, false, false));
-    try std.testing.expectEqual(@as(?f64, null), fill.shareOf(null, false, true)); // tensor units: unchanged until measured
-    try std.testing.expectEqual(@as(?f64, null), fill.shareOf(null, true, false)); // the env's own meaning: the prompt's share
-    try std.testing.expectEqual(@as(?f64, 0.25), fill.shareOf(0.25, true, true)); // the flag over the env, as in Share.withDecode
-    try std.testing.expectEqual(@as(?f64, 0), fill.shareOf(0, false, false)); // --decode-share 0 keeps whole prompts first
+test "flashnext prefill: replies take the default share; the flag and the env keep their meanings" {
+    try std.testing.expectEqual(@as(?f64, fill.decode_share), fill.shareOf(null, false));
+    try std.testing.expectEqual(@as(?f64, null), fill.shareOf(null, true)); // the env's own meaning: the prompt's share
+    try std.testing.expectEqual(@as(?f64, 0.25), fill.shareOf(0.25, true)); // the flag over the env, as in Share.withDecode
+    try std.testing.expectEqual(@as(?f64, 0), fill.shareOf(0, false)); // --decode-share 0 keeps whole prompts first
 }
