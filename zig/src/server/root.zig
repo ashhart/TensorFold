@@ -112,6 +112,7 @@ test {
     _ = @import("tool_dsml_messages_test.zig");
     _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
+    _ = @import("limit_pins_test.zig");
     _ = @import("think_split_test.zig");
     _ = @import("deepseek_reply_test.zig");
     _ = @import("thinking_reserve_test.zig");
