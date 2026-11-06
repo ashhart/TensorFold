@@ -77,6 +77,9 @@ pub fn spec(wide: bool, geo: Shape, planted: ?Plant) c.Spec {
     };
 }
 
+/// Launches of the unordered control a shape: gate 3 counts it red if any differs from the frozen block.
+const race_runs = 8;
+
 pub const DenseWmma12 = struct {
     rig: rig_.Rig,
     l: *const hip.Launcher,
@@ -150,10 +153,20 @@ pub const DenseWmma12 = struct {
         const n: c_int = @intCast(s.n);
         const k: c_int = @intCast(s.k);
         const h = self.rig.s.handle;
-        if (self.planted) |f| {
+        const f = self.planted orelse {
+            try self.l.dense.gemmOn(self.l.r, .wmma12, self.geo, self.x, self.w, out32, out16, m, n, k, h);
+            return self.rig.s.synchronize();
+        };
+        // the unordered control is a race: up to `race_runs` launches, to the first that differs from the baseline
+        const runs: usize = if (self.plant == .unordered) race_runs else 1;
+        for (0..runs) |_| {
             try self.l.dense.gemmWith(self.l.r, f, self.geo, self.x, self.w, out32, out16, m, n, k, h);
-        } else try self.l.dense.gemmOn(self.l.r, .wmma12, self.geo, self.x, self.w, out32, out16, m, n, k, h);
-        try self.rig.s.synchronize();
+            try self.rig.s.synchronize();
+            if (runs == 1) return;
+            const out = try self.rig.a.dupe(u8, try self.rig.outputBytes());
+            defer self.rig.a.free(out);
+            if (!std.mem.eql(u8, out, try self.replaced())) return;
+        }
     }
 
     /// The replaced block's bytes on the prepared inputs: the frozen 32-deep block into its own buffer.
