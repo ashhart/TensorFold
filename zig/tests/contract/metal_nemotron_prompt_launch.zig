@@ -10,8 +10,15 @@ pub const State = struct {
     mask: ?Masks = null,
     pick: rig.Ref = undefined,
     baseline: bool = false,
+    paged: bool = false,
+    pages: rig.Ref = undefined,
+    table: rig.Ref = undefined,
+    page_count: usize = 0,
+    originals: [4]?mtl.Pipeline = @splat(null),
+    page_model: tf.nemotron.kv_pages.Pipelines = undefined,
     pub fn deinit(s: *State) void {
         if (s.mask) |m| m.deinit();
+        for (s.originals) |pipe| if (pipe) |x| x.deinit();
     }
 };
 
@@ -20,6 +27,42 @@ pub fn prepare(p: anytype) !void {
     if (p.prompt_run.mask == null) p.prompt_run.mask = try Masks.load(p.a, p.rig.device, p.prompt_full);
     p.prompt_run.pick = try p.rig.scratch(64);
     @memset(p.rig.bytes(p.prompt_run.pick, 64), 0);
+    if (!p.prompt_run.paged) return;
+    const state = &p.prompt_run;
+    if (state.originals[0] == null) {
+        const raw = @import("kernel_sources").nemotron_paged;
+        const text = if (p.prompt_full) |on| try tf.frags.sourceMode(p.rig.device, p.a, raw.prefill, on) else try tf.frags.source(p.rig.device, p.a, raw.prefill);
+        defer p.a.free(text);
+        for (raw.prefill_names, &state.originals, &state.page_model.prompt) |name, *slot, *borrowed| {
+            slot.* = try rig.pipeline(p.rig.device, text, name);
+            borrowed.* = slot.*.?;
+        }
+    }
+    state.page_count = (p.cap + 255) / 256;
+    const ids = try p.a.alloc(u32, state.page_count);
+    defer p.a.free(ids);
+    for (ids, 0..) |*id, i| id.* = @intCast(ids.len - 1 - i);
+    state.table = try p.rig.input(std.mem.sliceAsBytes(ids));
+    const data = try p.a.alloc(u8, state.page_count * page_bytes);
+    defer p.a.free(data);
+    @memset(data, 0xff); // unmapped/past-capacity rows must not participate
+    state.pages = try p.rig.input(data);
+    stagePages(p);
+}
+
+const page_bytes = 4 * 256 * 128 * 2;
+
+/// The same fixture in reversed physical pages, including both K and V planes and every KV head.
+pub fn stagePages(p: anytype) void {
+    const state = &p.prompt_run;
+    if (!state.paged) return;
+    const out = p.rig.bytes(state.pages, state.page_count * page_bytes);
+    for (0..p.cap) |key| for (0..2) |plane| for (0..2) |h| {
+        const physical = state.page_count - 1 - key / 256;
+        const off = physical * page_bytes + ((plane * 2 + h) * 256 + key % 256) * 128 * 2;
+        const source = p.at(plane == 1, h, key);
+        @memcpy(out[off..][0 .. 128 * 2], std.mem.sliceAsBytes(p.host[source..][0..128]));
+    };
 }
 
 pub fn run(p: anytype, e: mtl.ComputeEncoder) !void {
@@ -46,7 +89,11 @@ pub fn run(p: anytype, e: mtl.ComputeEncoder) !void {
         try kernels.pipelines.put(p.a, name, original);
         var enc = tf.nemotron.encoder.Enc{ .e = e, .concurrent = true };
         const launch = tf.nemotron.prefill_launch.Launch{ .k = &kernels, .e = &enc };
-        launch.attention(.{ .b = p.qref.buf, .off = p.qref.off }, .{ .b = p.kv[0].buf, .off = p.kv[0].off }, .{ .b = p.kv[1].buf, .off = p.kv[1].off }, .{ .b = p.out.buf, .off = p.out.off }, t, kl, heads, kvh, strides, fl[0], null, .{ .b = p.prompt_run.pick.buf, .off = p.prompt_run.pick.off });
+        const state = &p.prompt_run;
+        const kv0 = if (state.paged) state.pages else p.kv[0];
+        const kv1 = if (state.paged) rig.Ref{ .buf = state.pages.buf, .off = state.pages.off + 2 * 256 * D * 2 } else p.kv[1];
+        const pages: ?tf.nemotron.prefill_launch.Paged = if (state.paged) .{ .pipes = &state.page_model, .table = .{ .b = state.table.buf, .off = state.table.off, .page_bytes = page_bytes } } else null;
+        launch.attention(.{ .b = p.qref.buf, .off = p.qref.off }, .{ .b = kv0.buf, .off = kv0.off }, .{ .b = kv1.buf, .off = kv1.off }, .{ .b = p.out.buf, .off = p.out.off }, t, kl, heads, kvh, strides, fl[0], pages, .{ .b = state.pick.buf, .off = state.pick.off });
         return;
     }
     e.setPipeline(original);
