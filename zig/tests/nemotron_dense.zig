@@ -289,7 +289,7 @@ fn time(q: mtl.Queue, p: Pipes, s: Shape, split: bool, sk: usize, b: *const Bufs
     return t[reps / 2];
 }
 
-/// Row r of the 8-row outputs against row r computed alone (rows 0..7), and rows 0..m-1 at m = 1, 2, 3 against the same.
+/// Row r of the 8-row outputs against row r alone (rows 0..7), and rows 0..m-1 at m = 1, 2, 3 against the same.
 fn rowExact(q: mtl.Queue, p: Pipes, s: Shape, split: bool, sk: usize, b: *const Bufs, full: []const u32, scratch: []u32) bool {
     for (0..8) |r| {
         _ = run(q, p, s, split, sk, b, b.x1[r], b.xs1[r], 1, scratch);
