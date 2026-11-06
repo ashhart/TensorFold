@@ -190,6 +190,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const t = try @import("metal_minimax.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
     }
+    if (std.mem.startsWith(u8, d.name, "uocr ")) {
+        if (!assemble) return undefined;
+        const t = try @import("metal_uocr.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "spark25 attention ")) {
         if (!assemble) return undefined;
         const t = try @import("metal_spark25_attention.zig").limitsText(a, device, d.name);
