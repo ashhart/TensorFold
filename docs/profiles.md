@@ -4,10 +4,10 @@
 the same profile. It enables no additional optimization and supplies no new environment values.
 
 This is the foundation of [#1660](https://github.com/ashhart/TensorFold/issues/1660), beginning with the CUDA KV
-switches in its first table, their `_ALL` companions, and GLM's and Nemotron's paging policies (seven variables).
-It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings continue through their existing readers. `fast-exact` and `fast`
-are refused by name; they are not aliases
-for `stable` and cannot enable unqualified optimizations.
+switches in its first table, their `_ALL` companions, the shared prompt store, GLM's and Nemotron's paging policies,
+the Dory, Gemma 4 and Spark2.5 pool-page switches, and Nemotron's paging on Metal. The registry also covers grouped learning modes.
+It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings keep their existing readers. `fast-exact` and `fast` are refused by name; they are not aliases for `stable` and cannot enable
+unqualified optimizations.
 
 ## Explicit environment values win
 
@@ -46,14 +46,21 @@ Coverage includes:
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, Spark2.5 and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
+- Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,
+  every stream's caches are contiguous and made at open.
+- Gemma 4 on CUDA: `TENSORFOLD_GEMMA4_KV_PAGES`, global caches in pool pages by default, where `0` keeps them linear.
+- Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
+- Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
+  and values in the core pool's pages.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the
 switch is faster for every shape, device, or workload. The `*_ALL` checks stay `debug`; Flash Next paging remains
-`experimental`. No class turns a switch on. GLM's existing automatic paging default is preserved; other default-on
-paging outside this registry is unchanged. The two GLM host-memory switches carry [#1795](https://github.com/ashhart/TensorFold/pull/1795)'s
-identical tokens at TP=2 on two GB10s, and `TF_GLM_PROMPT_TAIL` carries [#2226](https://github.com/ashhart/TensorFold/pull/2226)'s.
-`TF_GLM_KV_HOST_GIB` stays outside the registry: it sizes those pages rather
-than choosing a policy, and its reader keeps its own default.
+`experimental`. No class turns a switch on. GLM's existing automatic paging default is preserved; Gemma 4's and
+Spark2.5's default-on paging is registered here, where `0` keeps the linear caches; other default-on paging outside
+this registry is unchanged. The two GLM host-memory switches carry
+[#1795](https://github.com/ashhart/TensorFold/pull/1795)'s identical tokens at TP=2 on two GB10s, and
+`TF_GLM_PROMPT_TAIL` carries [#2226](https://github.com/ashhart/TensorFold/pull/2226)'s. `TF_GLM_KV_HOST_GIB` stays
+outside the registry: it sizes those pages rather than choosing a policy, and its reader keeps its own default.
 
 A reader that resolves its switch by name uses `core.profile.lookup`: a registered name comes from this registry, and
 every other name keeps the libc lookup and default it had. GLM's rank settings read that way, and their fingerprint
@@ -113,7 +120,8 @@ The registry has separate CUDA rows for GLM and Nemotron's same-named setting, w
 `capabilities --json` lists both rows under `registered_switches`; select a row by `id`, family and backend rather
 than assuming the environment name alone identifies its policy. Lookup remains shared and returns the raw value.
 An optional `report_values` list takes precedence over `syntax` for reporting exact overrides; null retains the
-existing syntax rule. Nemotron's row lists `0` and `all`, while GLM's row keeps its `auto` rule.
+existing syntax rule. Nemotron's row lists `0` and `all`, while GLM's row keeps its `auto` rule. Dory's row keeps
+the `not_zero` syntax: every value except exactly `0`, empty text included, adds an override.
 
 For Nemotron (`nemotron_h` and `nemotron_h_omni`), paging is on by default. Exactly `TF_KV_PAGES=0` disables it;
 exactly `TF_KV_PAGES=all` puts every stream on pages for checks. Those two values appear as registered overrides.

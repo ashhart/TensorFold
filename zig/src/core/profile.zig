@@ -19,6 +19,9 @@ pub const Switch = enum {
     GEMMA_DRAFT_BF16,
     TF_ANE_COLUMNS,
     TF_PROMPT_ROWS,
+    TENSORFOLD_GEMMA4_KV_PAGES,
+    TENSORFOLD_SPARK25_KV_PAGES,
+    TF_NEMOTRON_METAL_KV_PAGES,
     slide_learn_mode,
 };
 pub const Syntax = enum { count, one, auto, present, not_zero };
@@ -110,6 +113,9 @@ pub const entries = [_]Entry{
     .{ .id = .TF_ANE_COLUMNS, .families = &.{"qwen3_5"}, .backend = "metal", .class = .experimental, .effect = "FP16 Neural Engine prompt columns; exact output not qualified", .evidence = "#2370" },
     .{ .id = .TF_PROMPT_ROWS, .families = qwen, .backend = "metal", .class = .arithmetic, .syntax = .present, .effect = "Explicit prompt frame capacity and kept-state key geometry", .evidence = "#2370" },
     .{ .id = .slide_learn_mode, .families = slide_cuda, .backend = "multiple", .scopes = &.{ .{ .backend = "cuda", .families = slide_cuda }, .{ .backend = "metal", .families = nemotron } }, .members = &.{ .{ .name = "TF_SLIDE_POCKET_KEY", .syntax = .auto }, .{ .name = "TF_SLIDE_EDIT", .syntax = .present, .families = nemotron }, .{ .name = "TF_SLIDE_PROBE", .syntax = .present, .families = nemotron }, .{ .name = "TF_SLIDE_ROUTED", .syntax = .present, .families = nemotron } }, .class = .experimental, .effect = "Pocket keying and presence-selected edit, probe or routed learning modes", .evidence = "#2370" },
+    .{ .id = .TENSORFOLD_GEMMA4_KV_PAGES, .families = &.{ "gemma4", "gemma4_unified" }, .class = .identical, .report_values = &.{"0"}, .effect = "Global caches lease pool pages by default; 0 keeps them linear", .evidence = "#1619" },
+    .{ .id = .TENSORFOLD_SPARK25_KV_PAGES, .families = &.{"spark2_5"}, .class = .identical, .report_values = &.{"0"}, .effect = "Full caches lease pool pages by default; 0 keeps them linear", .evidence = "#1653" },
+    .{ .id = .TF_NEMOTRON_METAL_KV_PAGES, .families = &.{"nemotron_h"}, .backend = "metal", .class = .identical, .syntax = .one, .effect = "Only exact 1 puts keys and values in the core pool's pages; unset, whole caches made at open", .evidence = "#1537" },
 };
 
 comptime {

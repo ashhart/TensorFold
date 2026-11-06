@@ -67,7 +67,8 @@ const Plan = struct {
 
 /// Whether the full layers' caches lease the pool's pages: asked, and not turned off by TENSORFOLD_SPARK25_KV_PAGES=0.
 fn pagesOn(o: Options) bool {
-    return o.kv_pages and !envOff("TENSORFOLD_SPARK25_KV_PAGES");
+    const off = if (@import("core").profile.get(.TENSORFOLD_SPARK25_KV_PAGES)) |v| std.mem.eql(u8, v, "0") else false;
+    return o.kv_pages and !off;
 }
 
 /// Paged: the first stream's rings and the scratch must fit; the host plans the pool after.

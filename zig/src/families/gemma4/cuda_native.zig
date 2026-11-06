@@ -99,7 +99,8 @@ const Plan = struct {
 
 /// Global caches in pool pages: asked, no drafter (its paged verify trails main), TENSORFOLD_GEMMA4_KV_PAGES not 0.
 fn pagesOn(o: Options) bool {
-    return o.kv_pages and !(o.drafts and o.drafter != null) and !envOff("TENSORFOLD_GEMMA4_KV_PAGES");
+    const off = if (@import("core").profile.get(.TENSORFOLD_GEMMA4_KV_PAGES)) |v| std.mem.eql(u8, v, "0") else false;
+    return o.kv_pages and !(o.drafts and o.drafter != null) and !off;
 }
 
 /// The device bytes of the image path's workspace (the 31B's tower or the 12B's embedder), 0 without --vision.
