@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (std.mem.eql(u8, mode, "phases")) {
         switch (store) {
             .rows => try rowsPhases(a, root),
-            .imprint => try imprintPhases(a, root, count),
+            .imprint => try imprintPhases(a, root),
         }
     } else if (std.mem.eql(u8, mode, "summary")) {
         try summary(a, store, runs, count);
@@ -278,24 +278,21 @@ fn walk(a: Allocator, dir: [:0]const u8, what: Walk) !i128 {
     return nowNs() - t0;
 }
 
-/// Imprint.open's quadratic parts measured alone: the unindexed-file sweep, and readIndex's duplicate checks.
-fn imprintPhases(a: Allocator, root: [:0]const u8, count: usize) !void {
+/// Imprint.open's per-record parts measured alone: the unindexed-file sweep, and readIndex's duplicate checks.
+fn imprintPhases(a: Allocator, root: [:0]const u8) !void {
     var t0 = nowNs();
     var m = try imprint.Imprint.open(a, root, identity, cap);
     defer m.deinit();
     const opened = nowNs() - t0;
     t0 = nowNs();
-    try dirs.removeUnindexed(m.dir, m.metas.items);
+    try dirs.removeUnindexed(a, m.dir, m.metas.items);
     const swept = nowNs() - t0;
-    var scans: [9]i128 = undefined;
-    for (&scans) |*x| {
-        t0 = nowNs();
-        std.mem.doNotOptimizeAway(m.has(0));
-        x.* = nowNs() - t0;
-    }
-    std.mem.sort(i128, &scans, {}, std.sort.asc(i128));
-    const dupes = @divTrunc(scans[4] * @as(i128, @intCast(count)), 2);
-    std.debug.print("STARTUP_STATES_PHASES store=imprint states={d} open_ms={d:.1} sweep_ms={d:.1} one_scan_us={d:.1} duplicate_checks_ms~{d:.1} rest_ms~{d:.1}\n", .{ m.metas.items.len, ms(opened), ms(swept), ms(scans[4]) * 1e3, ms(dupes), ms(opened - swept - dupes) });
+    t0 = nowNs();
+    var keys: std.AutoHashMapUnmanaged(u64, void) = .empty; // as readIndex grows it, one record at a time
+    defer keys.deinit(a);
+    for (m.metas.items) |x| _ = try keys.getOrPut(a, x.key);
+    const dupes = nowNs() - t0;
+    std.debug.print("STARTUP_STATES_PHASES store=imprint states={d} open_ms={d:.1} sweep_ms={d:.1} duplicate_checks_ms={d:.1} rest_ms~{d:.1}\n", .{ m.metas.items.len, ms(opened), ms(swept), ms(dupes), ms(opened - swept - dupes) });
 }
 
 /// The seeded tree (two levels: identities and their files) and the runs file removed.
