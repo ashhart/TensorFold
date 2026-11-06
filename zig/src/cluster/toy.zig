@@ -190,7 +190,7 @@ pub const Rank = struct {
         }
     }
 
-    /// Attention by streams: every head for the rows of slots this rank owns, the heads' canonical tree here, rows gathered.
+    /// Attention by streams: every head for this rank's slots' rows, the heads' canonical tree here, rows gathered.
     fn attendOwned(r: *Rank, a: Allocator, x: exchange.Exchange, layer: u32, rows: []const round.Row, XN: []const f32, X: []f32) !void {
         const D = r.w.dims;
         var mine: std.ArrayList(round.Row) = .empty;
