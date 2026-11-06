@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record every Triton and extension launch a run makes, then map each launched Triton specialization to its cached cubin."""
+"""Record every Triton/extension launch a run makes, then map each launched specialization to its cached cubin."""
 
 from __future__ import annotations
 
