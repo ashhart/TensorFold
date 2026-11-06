@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: a shared round's DeltaNet steps run in one launch each across its lanes instead of one launch a lane, so 8 streams decode 3-6% faster on a GB10 with the same tokens; one stream keeps its own launches (#1942). Thanks to @Arminova.
+
 - Docs: `docs/api.md` matches the server: the `speculative` draft counters, Responses metadata limits, inline
   `input_file` and Messages `document` PDFs, and the fields it left out (`thinking`, `min_rows`, grammar timings,
   `exact_mode`, `stop_sequence`, health's `memory.limit` and 503 body, `/v1/models`' context and reasoning) (#2299).
