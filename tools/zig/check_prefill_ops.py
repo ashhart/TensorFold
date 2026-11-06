@@ -1,4 +1,4 @@
-"""Check our prefill kernels against MLX 0.32.3's at Nemotron's prefill shapes: bits, time, entry points, launch JSON."""
+"""Check our prefill kernels vs MLX 0.32.3's at Nemotron's prefill shapes: bits, time, entry points, launch JSON."""
 
 from __future__ import annotations
 
