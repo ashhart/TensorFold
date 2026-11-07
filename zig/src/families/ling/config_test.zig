@@ -191,8 +191,16 @@ test "hf_quant_config.json's NVFP4 block when config.json has none; groups other
     try t.expectEqual(config.Quant.bf16, (try config.parseWith(t.allocator, json, null, &why)).quant);
 }
 
-test "EXL3 is refused naming #832; a glob matches whole names only" {
-    try refused("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\"", error.Exl3, "#832");
+test "an EXL3 pack parses to quant exl3, an unknown codebook is refused; a glob matches whole names only" {
+    {
+        const json = try edit("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\"");
+        defer t.allocator.free(json);
+        var why: config.Why = .{};
+        const c = try config.parse(t.allocator, json, &why);
+        try t.expectEqual(config.Quant.exl3, c.quant);
+        try t.expectEqual(@as(u32, 0), c.plain_n);
+    }
+    try refused("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\", \"codebook\": \"e8p\"", error.Exl3, "codebook e8p");
     try t.expect(config.glob("*.mlp.gate", "model.layers.4.mlp.gate"));
     try t.expect(!config.glob("*.mlp.gate", "model.layers.4.mlp.gate_proj"));
     try t.expect(config.glob("model.layers.*.attention*", "model.layers.12.attention.q_proj"));
