@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face가 다운로드를 캐시하는 위치입니다. TensorFold의 모델 폴더는 설정 → 모델 폴더에서 관리합니다.",
  "Engine knob: append per-request records to a file for diagnostics.": "엔진 옵션: 진단용으로 요청별 기록을 파일에 추가합니다.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "1로 설정하면 엔진 터미널의 라이브 텍스트 표시를 숨깁니다. 제공되는 모델은 그대로입니다.",
- "Engine knob: mix a salt into request seeds.": "엔진 옵션: 요청 시드에 솔트를 혼합합니다."
+ "Engine knob: mix a salt into request seeds.": "엔진 옵션: 요청 시드에 솔트를 혼합합니다.",
+ "Control vector": "제어 벡터",
+ "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "제어 벡터는 로컬 모델을 유도합니다. 모델의 답이 달라지며, 켜기 전까지는 꺼져 있습니다. 엔진은 시작할 때 지금 적용 중인 것을 알려줍니다.",
+ "Apply a control vector": "제어 벡터 적용",
+ "Choose…": "선택…",
+ "Strength": "강도",
+ "File: {value0}": "파일: {value0}",
+ "In force in the loaded model.": "불러온 모델에서 적용 중입니다.",
+ "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1은 그 파일을 얻었을 때의 강도입니다. 강도를 몇 배 이상으로 올리면 모델이 대답하지 않을 수 있습니다.",
+ "The strength must be above 0 and at most {value0}.": "강도는 0보다 크고 {value0} 이하여야 합니다.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "이 빌드의 TensorFold 엔진은 아직 제어 벡터를 지원하지 않아 현재 엔진에는 전달할 수 없습니다.",
+ "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "제어 벡터가 적용되는 동안 모델의 답이 달라집니다. 이것은 안전 설정이 아니라 유도 방향으로, 모델이 무엇을 말할지를 바꿉니다."
 }

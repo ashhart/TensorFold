@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face がダウンロードを保存する場所です。TensorFold 自身のモデルフォルダは「設定 → モデルフォルダ」で管理します。",
  "Engine knob: append per-request records to a file for diagnostics.": "エンジン設定：リクエストごとの記録を診断用にファイルへ追記します。",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "1 にするとエンジンのターミナルでのライブ表示を隠します。提供されるモデルは変わりません。",
- "Engine knob: mix a salt into request seeds.": "エンジン設定：リクエストのシードにソルトを混ぜます。"
+ "Engine knob: mix a salt into request seeds.": "エンジン設定：リクエストのシードにソルトを混ぜます。",
+ "Control vector": "コントロールベクター",
+ "A control vector steers the local model: it changes what the model says. It is off until you turn it on, and the engine names what is in force when it starts.": "コントロールベクターはローカルモデルを導きます。モデルの返答が変わり、有効にするまでは無効のままです。エンジンは起動時に、いま適用されているものを示します。",
+ "Apply a control vector": "コントロールベクターを適用",
+ "Choose…": "選択…",
+ "Strength": "強度",
+ "File: {value0}": "ファイル：{value0}",
+ "In force in the loaded model.": "読み込まれたモデルで適用中です。",
+ "One is the strength the file was derived at. A strength past a few can leave the model without an answer.": "1 はそのファイルを求めたときの強度です。強度を数倍以上にすると、モデルが答えを返さなくなることがあります。",
+ "The strength must be above 0 and at most {value0}.": "強度は 0 より大きく、{value0} 以下にしてください。",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "このビルドの TensorFold エンジンはまだコントロールベクターに対応していないため、現在のエンジンでは渡せません。",
+ "With a control vector in force the model replies differently. It is a steering direction, not a safety setting: it changes what the model is willing to say.": "コントロールベクターが有効な間、モデルの返答は変わります。これは安全設定ではなく誘導の方向です。モデルが何を言うかを変えます。"
 }
