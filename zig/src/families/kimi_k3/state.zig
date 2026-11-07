@@ -18,14 +18,25 @@ pub const State = struct {
     heads: u32,
     kda: []?KdaArena,
     mla: []?mtl.Buffer,
+    index_keys: []?mtl.Buffer,
     streams: []Stream,
 
     /// Caches for `layers` (a subset for tests) and `heads` local KDA heads; every slot starts empty.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, cfg: Config, limits: Limits, layers: []const u32, heads: u32) !State {
         try cfg.checkEnd(0, limits.max_ctx);
-        var s = State{ .gpa = gpa, .cfg = cfg, .limits = limits, .heads = heads, .kda = try gpa.alloc(?KdaArena, cfg.layers), .mla = try gpa.alloc(?mtl.Buffer, cfg.layers), .streams = try gpa.alloc(Stream, limits.slots) };
+        var s = meta: {
+            const kda = try gpa.alloc(?KdaArena, cfg.layers);
+            errdefer gpa.free(kda);
+            const mla = try gpa.alloc(?mtl.Buffer, cfg.layers);
+            errdefer gpa.free(mla);
+            const index_keys = try gpa.alloc(?mtl.Buffer, cfg.layers);
+            errdefer gpa.free(index_keys);
+            const streams = try gpa.alloc(Stream, limits.slots);
+            break :meta State{ .gpa = gpa, .cfg = cfg, .limits = limits, .heads = heads, .kda = kda, .mla = mla, .index_keys = index_keys, .streams = streams };
+        };
         @memset(s.kda, null);
         @memset(s.mla, null);
+        @memset(s.index_keys, null);
         @memset(s.streams, .{});
         errdefer s.deinit();
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -33,18 +44,28 @@ pub const State = struct {
         const sz: usize = @as(usize, heads) * cfg.kda_dim;
         const W3: usize = 3 * sz;
         for (layers) |i| switch (cfg.kind(i)) {
-            .kda => s.kda[i] = .{
-                .S = try device.buffer(n * sz * cfg.kda_dim * 4, opts),
-                .conv = try device.buffer(n * (cfg.conv - 1) * W3 * 2, opts),
-                .log_a = try device.buffer(n * limits.log_rows * sz * 4, opts),
-                .log_k = try device.buffer(n * limits.log_rows * sz * 4, opts),
-                .log_u = try device.buffer(n * limits.log_rows * sz * 4, opts),
-                .log_x = try device.buffer(n * limits.log_rows * W3 * 2, opts),
-            },
+            .kda => s.kda[i] = try arena(device, .{ n * sz * cfg.kda_dim * 4, n * (cfg.conv - 1) * W3 * 2, n * limits.log_rows * sz * 4, n * limits.log_rows * sz * 4, n * limits.log_rows * sz * 4, n * limits.log_rows * W3 * 2 }, opts),
             .mla => s.mla[i] = try device.buffer(n * limits.max_ctx * (cfg.kv_lora + cfg.rope) * 2, opts),
+        };
+        if (cfg.dsa != null) for (layers) |i| {
+            if (cfg.kind(i) == .mla) s.index_keys[i] = try device.buffer(n * limits.max_ctx * 128 * 2, opts);
         };
         for (0..limits.slots) |slot| s.reset(@intCast(slot));
         return s;
+    }
+
+    fn arena(device: mtl.Device, sizes: [6]usize, opts: usize) !KdaArena {
+        var result: KdaArena = undefined;
+        var made: usize = 0;
+        const fields = @typeInfo(KdaArena).@"struct".field_names;
+        errdefer inline for (fields, 0..) |name, n| {
+            if (n < made) @field(result, name).deinit();
+        };
+        inline for (fields, 0..) |name, n| {
+            @field(result, name) = try device.buffer(sizes[n], opts);
+            made += 1;
+        }
+        return result;
     }
 
     /// A slot's caches emptied for a new stream (zero state, zero conv window).
@@ -67,6 +88,10 @@ pub const State = struct {
         return s.mla[layer].?.gpuAddress();
     }
 
+    pub fn indexCache(s: *const State, layer: u32) kernels.Ref {
+        return .{ .buf = s.index_keys[layer].? };
+    }
+
     /// After a round: a prompt chunk commits all its rows; a drafted window keeps its first `kept` rows.
     pub fn advance(s: *State, slot: u32, rows: u32, commit: bool, kept: u32) void {
         const st = &s.streams[slot];
@@ -84,13 +109,27 @@ pub const State = struct {
     pub fn buffers(s: *const State, out: *std.ArrayList(mtl.Buffer), gpa: std.mem.Allocator) !void {
         for (s.kda) |maybe| if (maybe) |k| inline for (@typeInfo(KdaArena).@"struct".field_names) |f| try out.append(gpa, @field(k, f));
         for (s.mla) |maybe| if (maybe) |b| try out.append(gpa, b);
+        for (s.index_keys) |maybe| if (maybe) |b| try out.append(gpa, b);
     }
 
     pub fn deinit(s: *State) void {
         for (s.kda) |maybe| if (maybe) |k| inline for (@typeInfo(KdaArena).@"struct".field_names) |f| @field(k, f).deinit();
         for (s.mla) |maybe| if (maybe) |b| b.deinit();
+        for (s.index_keys) |maybe| if (maybe) |b| b.deinit();
         s.gpa.free(s.kda);
         s.gpa.free(s.mla);
+        s.gpa.free(s.index_keys);
         s.gpa.free(s.streams);
     }
 };
+
+test "Kimi state metadata releases each partially allocated array without opening a GPU" {
+    const Probe = struct {
+        fn run(a: std.mem.Allocator) !void {
+            const c: Config = .{};
+            var s = try State.init(a, undefined, c, .{ .slots = 1, .max_ctx = 32 }, &.{}, c.kda_heads);
+            defer s.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}

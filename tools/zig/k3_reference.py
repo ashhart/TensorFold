@@ -1,4 +1,4 @@
-"""Kimi K3's text forward in NumPy, written from the official semantics: fp64 sums, bf16 where the model rounds."""
+"""Kimi K3 text forward and explicitly assumed K3.1 index formulas: fp64 sums, BF16 at the recorded nodes."""
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -52,6 +52,46 @@ def sigmoid(x):
 def linear(x, w):
     """bf16 x @ w.T with an exact-as-fp64 sum, rounded to bf16 once (F.linear in bf16)."""
     return bf16(np.asarray(x, np.float64) @ np.asarray(w, np.float64).T)
+
+
+def index_key(projected, weight, bias, eps=1e-5):
+    """Experimental K3.1 assumption: BF16 projection, population LayerNorm(128), affine, one BF16 store."""
+    x = np.asarray(projected, np.float64)
+    if x.shape[-1] != 128:
+        raise ValueError("K3.1 index key width must be 128")
+    centered = x - x.mean(-1, keepdims=True)
+    normed = centered / np.sqrt((centered * centered).mean(-1, keepdims=True) + eps)
+    return bf16(normed * np.asarray(weight, np.float64) + np.asarray(bias, np.float64))
+
+
+def index_project(x, qan, W, p, eps=1e-5):
+    """Unconfirmed K3.1 inputs: xin for keys/head weights and q_a's normed BF16 row for queries; no RoPE."""
+    q = linear(qan, W[p + "indexer.wq_b.weight"]).reshape(-1, 32, 128)
+    k = index_key(linear(x, W[p + "indexer.wk.weight"]),
+                  W[p + "indexer.k_norm.weight"], W[p + "indexer.k_norm.bias"], eps)
+    w = linear(x, W[p + "indexer.weights_proj.weight"])
+    return q, k, w
+
+
+def index_scores(query, keys, head_weights):
+    """Independent float64 formula assumed from our GLM/DeepSeek: two positive scales, ReLU then head sum."""
+    q, k, w = (np.asarray(v, np.float64) for v in (query, keys, head_weights))
+    if q.shape[-2:] != (32, 128) or k.shape[-1] != 128 or w.shape[-1] != 32:
+        raise ValueError("K3.1 index scores require 32 heads of 128 columns")
+    dots = np.einsum("...hd,kd->...hk", q, k, dtype=np.float64, optimize=False) / np.sqrt(128.0)
+    return ((w / np.sqrt(32.0))[..., :, None] * np.maximum(dots, 0.0)).sum(-2, dtype=np.float64)
+
+
+def index_select(scores, visible, topk=2048):
+    """Experimental policy: inclusive causal keys, NaNs last, signed zero tied, low-position ties, sorted output."""
+    values = np.asarray(scores, np.float64)
+    if values.ndim != 1 or visible < 1 or visible > len(values) or topk < 1:
+        raise ValueError("invalid K3.1 selection shape")
+    if visible <= topk:
+        return np.arange(visible, dtype=np.uint32)
+    s = values[:visible]
+    order = np.lexsort((np.arange(visible), -np.where(np.isnan(s), 0.0, s), np.isnan(s)))
+    return np.sort(order[:topk]).astype(np.uint32)
 
 
 def rms_norm(x, w, eps):

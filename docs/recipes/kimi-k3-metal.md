@@ -41,3 +41,13 @@ The prompt/value port and golden fixtures are credited in [THIRD_PARTY_NOTICES.m
 For an already available local tokenizer with the pinned release assets, run
 `zig-out/bin/tf-k3-text-golden LOCAL_TOKENIZER_DIRECTORY` to compare all 15 release prompt ID arrays.
 Synthetic tokenization checks do not replace that real-asset check or real-model qualification.
+
+## Experimental indexer diagnostics
+
+The K3.1 index operators implement a candidate schedule derived from our GLM and DeepSeek index code. The query tap, BF16 intermediate roundings, score scaling, selection cadence and exceptional-value tie policy are assumptions. No released K3.1 model-forward reference is available. The native server retains the 2047-token admission ceiling.
+
+`tf-kernel-contract --only 'kimi index' --no-limits` selects the new operators' numerical gates and planted controls. The independent references use binary64 arithmetic; a separate byte check compares indexed attention with dense attention over the same compacted selected keys. The selected list is chronological, numeric ties prefer lower positions, signed zeros tie, and NaNs rank after all numeric scores. Those policies need model-reference confirmation.
+
+`zig build tf-k31-index-lanes -Dcpu=apple_m1 -Doptimize=ReleaseFast` builds the long-context state diagnostic. It constructs a one-layer synthetic graph and explicitly selects the internal experimental index mode. It checks top-k boundaries, snapshots, partial verification, drafted output and concurrent streams. It also prints the five compiled pipeline resource readings. The internal mode refuses the complete released geometry and cannot be selected through checkpoint JSON or native CLI options. Synthetic agreement does not qualify long-context K3.1 serving.
+
+The experimental index contract runs only with an explicit `--only` filter until a released-model reference is available. Plain K3 does not compile or load the experimental index library. Within synthetic experiments, each row retains its own dense or indexed attention path across mixed short and long streams.

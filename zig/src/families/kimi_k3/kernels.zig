@@ -1,6 +1,7 @@
 //! Kimi K3's Metal pipelines and how each is dispatched; argument structs mirror zig/kernels/metal/kimi.
 const std = @import("std");
 const mtl = @import("metal");
+const Index = @import("index.zig");
 
 /// A buffer binding: the buffer and a byte offset into it.
 pub const Ref = struct {
@@ -77,37 +78,66 @@ pub const Kernels = struct {
     mla_attend: mtl.Pipeline,
     mla_merge: mtl.Pipeline,
     mla_uv: mtl.Pipeline,
+    index: ?Index.Pipelines,
     fill_bf16: mtl.Pipeline,
     fill_f32: mtl.Pipeline,
     fill_u8: mtl.Pipeline,
     fp4_dequant: mtl.Pipeline,
     mma_peak: mtl.Pipeline,
 
-    pub fn init(device: mtl.Device, lib: mtl.Library) !Kernels {
+    const pipeline_count = count: {
+        var n: usize = 0;
+        for (@typeInfo(Kernels).@"struct".field_types) |T| {
+            if (T == mtl.Pipeline) n += 1 else if (T != ?Index.Pipelines) n += @typeInfo(T).array.len;
+        }
+        break :count n;
+    };
+
+    fn tracked(device: mtl.Device, lib: mtl.Library, name: []const u8, opened: []mtl.Pipeline, count: *usize) !mtl.Pipeline {
+        const p = try mtl.Pipeline.init(device, lib, name, false);
+        opened[count.*] = p;
+        count.* += 1;
+        return p;
+    }
+
+    pub fn init(device: mtl.Device, lib: mtl.Library, dsa: bool) !Kernels {
         var k: Kernels = undefined;
+        k.index = null;
+        var opened: [pipeline_count]mtl.Pipeline = undefined;
+        var count: usize = 0;
+        errdefer for (opened[0..count]) |p| p.deinit();
         const info = @typeInfo(Kernels).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
-            if (T == mtl.Pipeline) @field(k, name) = try mtl.Pipeline.init(device, lib, "k3_" ++ name, false);
+            if (T == mtl.Pipeline) @field(k, name) = try tracked(device, lib, "k3_" ++ name, &opened, &count);
         }
         for (row_blocks, 0..) |rb, i| {
             var buf: [32]u8 = undefined;
-            k.rows_bf16[i] = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&buf, "k3_rows_bf16_r{d}", .{rb}), false);
-            k.rows_f32[i] = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&buf, "k3_rows_f32_r{d}", .{rb}), false);
-            k.glus[i] = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&buf, "k3_glu_r{d}", .{rb}), false);
+            k.rows_bf16[i] = try tracked(device, lib, try std.fmt.bufPrint(&buf, "k3_rows_bf16_r{d}", .{rb}), &opened, &count);
+            k.rows_f32[i] = try tracked(device, lib, try std.fmt.bufPrint(&buf, "k3_rows_f32_r{d}", .{rb}), &opened, &count);
+            k.glus[i] = try tracked(device, lib, try std.fmt.bufPrint(&buf, "k3_glu_r{d}", .{rb}), &opened, &count);
         }
         for ([_]u32{ 1, 4 }, 0..) |rp, i| {
             var buf: [32]u8 = undefined;
-            k.xp_up[i] = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&buf, "k3_xp_up_r{d}", .{rp}), false);
-            k.xp_down[i] = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&buf, "k3_xp_down_r{d}", .{rp}), false);
+            k.xp_up[i] = try tracked(device, lib, try std.fmt.bufPrint(&buf, "k3_xp_up_r{d}", .{rp}), &opened, &count);
+            k.xp_down[i] = try tracked(device, lib, try std.fmt.bufPrint(&buf, "k3_xp_down_r{d}", .{rp}), &opened, &count);
         }
+        k.index = try Index.Pipelines.load(device, dsa);
         return k;
     }
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
-            if (T == mtl.Pipeline) @field(k, name).deinit() else for (&@field(k, name)) |*p| p.deinit();
+            if (T == mtl.Pipeline) {
+                @field(k, name).deinit();
+            } else if (T == ?Index.Pipelines) {
+                if (k.index) |*p| p.deinit();
+            } else for (&@field(k, name)) |*p| p.deinit();
         }
+    }
+
+    pub fn indexView(k: *const Kernels) @import("index.zig").Pipelines {
+        return k.index.?;
     }
 
     /// y[r, n] = x[r] . w[n] for rows r (bf16 rounded, or fp32 when `f32_out`); `w` slice-interleaved, `part` scratch.

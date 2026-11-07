@@ -7,14 +7,14 @@ pub const Gpu = struct {
     library: mtl.Library,
     k: family.kernels.Kernels,
 
-    pub fn init() !Gpu {
+    pub fn init(dsa: bool) !Gpu {
         const device = try mtl.Device.init();
         errdefer device.deinit();
         const queue = try device.queue();
         errdefer queue.deinit();
         const library = try mtl.Library.fromBytes(device, @import("kimi_metallib").bytes);
         errdefer library.deinit();
-        return .{ .device = device, .queue = queue, .library = library, .k = try family.kernels.Kernels.init(device, library) };
+        return .{ .device = device, .queue = queue, .library = library, .k = try family.kernels.Kernels.init(device, library, dsa) };
     }
     pub fn deinit(g: *Gpu) void {
         g.k.deinit();

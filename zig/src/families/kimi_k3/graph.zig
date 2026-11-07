@@ -44,12 +44,15 @@ pub const Graph = struct {
 
 /// Cut-down tests may reduce layers, vocabulary and expert count, while retaining the served kernel geometry.
 pub fn nativeShape(c: Config) !void {
+    try c.checkEnd(0, 1);
+    if (c.dsa) |d| if (d.heads != 32 or d.dim != 128 or d.topk != 2048) return error.UnsupportedKimiIndexGeometry;
     var supported: Config = .{};
     supported.layers = c.layers;
     supported.vocab = c.vocab;
     supported.experts = c.experts;
     supported.full_attn = c.full_attn;
     supported.dsa = c.dsa;
+    supported.experimental_index = c.experimental_index;
     if (!std.meta.eql(c, supported) or c.layers == 0 or c.layers > 93 or c.vocab < 256 or
         c.vocab > 163840 or c.vocab % 32 != 0 or c.experts < 16 or c.experts > 896 or c.experts % 8 != 0)
         return error.UnsupportedKimiNativeGeometry;

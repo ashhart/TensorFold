@@ -212,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
     var model: ?*k3.shards.Shards = null;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    var g = try Gpu.init();
+    var g = try Gpu.init(cfg.dsa != null);
     defer g.deinit();
     var shards: k3.shards.Shards = undefined;
     if (model_dir) |d| {

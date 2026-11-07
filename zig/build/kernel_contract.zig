@@ -10,6 +10,14 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// `test-kernel-contract` on every host: the gates' own tests and every registered launch against every chip's limits.
 pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
+    const kimi_reference = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/kimi_index_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = module(b, b.graph.host, .debug) }},
+    }) }));
+    b.step("test-kimi-index-reference-host", "K3.1 assumed index formulas and independent comparison ordering").dependOn(&kimi_reference.step);
+    family.dependOn(&kimi_reference.step);
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug) }));
     run.has_side_effects = true;
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
@@ -65,7 +73,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 }
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
-pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module) void {
+pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi: *std.Build.Module) void {
     @import("rotary_sweep.zig").steps(b, target, metal_mod);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
@@ -77,6 +85,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "tensorfold", .module = engine },
             .{ .name = "kernel_sources", .module = sources },
             .{ .name = "contract", .module = module(b, target, optimize) },
+            .{ .name = "kimi_k3", .module = kimi },
             .{ .name = "h3_kernels", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }) },
             .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
             .{ .name = "ling_route", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/route.zig") }) },

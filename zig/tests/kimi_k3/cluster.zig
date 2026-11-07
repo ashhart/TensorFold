@@ -167,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    var g = try Gpu.init();
+    var g = try Gpu.init(false);
     defer g.deinit();
     std.debug.print("device: {s}\n", .{g.device.name()});
     const cfg = k3.config.Config{};

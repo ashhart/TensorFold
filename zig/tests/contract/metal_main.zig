@@ -573,12 +573,15 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image_decoder.destroy();
     var dsv41_suites = try dsv41.Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
+    const kimi_index = if (o.only != null) try @import("metal_kimi.zig").Suite.create(a, device, queue, &kernels, o.only) else null;
+    defer if (kimi_index) |suite| suite.destroy();
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);
+        if (kimi_index) |suite| try suite.exact();
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;

@@ -214,6 +214,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     engines.addImport("kimi_metallib", kimi_bytes);
     const kimi_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8 }{
         .{ .name = "tf-k3-check", .path = "zig/tests/kimi_k3/check.zig", .about = "Kimi K3 kernels and layers on synthetic weights at real shapes" },
+        .{ .name = "tf-k31-index-lanes", .path = "zig/tests/kimi_k3/index_lanes.zig", .about = "Experimental K3.1 index state on a long cut-down synthetic graph" },
         .{ .name = "tf-k3-serve-check", .path = "zig/tests/kimi_k3/serve.zig", .about = "Kimi native lane adapter on a cut-down synthetic Metal graph" },
         .{ .name = "tf-k3-bench", .path = "zig/tests/kimi_k3/bench.zig", .about = "Kimi K3 kernel bandwidth" },
     };
@@ -223,7 +224,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes }, .{ .name = "lanes", .module = mods.lanes } },
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kimi_k3", .module = kimi }, .{ .name = "kimi_metallib", .module = kimi_bytes }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "contract", .module = contract_build.module(b, target, optimize) } },
         });
         const exe = b.addExecutable(.{ .name = p.name, .root_module = mod });
         b.installArtifact(exe);
@@ -411,7 +412,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
     qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
     core_checks.targets(b, target, optimize, metal, engine);
-    contract_build.metal(b, target, optimize, metal, engine, sources);
+    contract_build.metal(b, target, optimize, metal, engine, sources, kimi);
     glm_checks.targets(b, target, optimize, metal, engine, sources);
     flashnext_checks.targets(b, target, optimize, metal, engine);
 
@@ -552,5 +553,6 @@ pub fn kimiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         }) } },
     });
     kimi.addImport("lanes", lanes);
+    kimi.addImport("kimi_index_sources", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/kimi/index_sources.zig") }));
     return kimi;
 }

@@ -16,6 +16,7 @@ pub const Ctx = struct {
     sc: *Scratch,
     st: *const State,
     experts: experts_mod.Experts,
+    index: ?*@import("index.zig").Work = null,
 };
 
 fn rows(x: Ctx, e: mtl.ComputeEncoder, in: Ref, w: anytype, out: Ref, K: u32, N: u32, x_stride: u32, y_stride: u32) void {
@@ -68,12 +69,12 @@ pub fn mla(x: Ctx, e: mtl.ComputeEncoder, i: u32, w: *const weights.Mla) void {
     const ow = c.mla_heads * c.v_dim;
     rows(x, e, xin, w.qa, sc.ref("qa"), H, c.q_lora, H, c.q_lora);
     x.k.rmsNorm(e, sc.ref("qa"), w.qa_norm.ref, sc.ref("qan"), sc.rows, .{ .D = c.q_lora, .x_stride = c.q_lora, .y_stride = c.q_lora, .eps = c.eps });
+    if (x.index) |ix| if (w.indexer) |iw| ix.project(x.k, e, c, iw, sc.ref("qan"), xin, sc.ref("part"), x.st.indexCache(i));
     rows(x, e, sc.ref("qan"), w.qb, sc.ref("q"), c.q_lora, qw, c.q_lora, qw);
     rows(x, e, xin, w.kva, sc.ref("kv"), H, c.kv_lora + c.rope, H, c.kv_lora + c.rope);
     x.k.mlaCache(e, sc.ref("kv"), w.kva_norm.ref, sc.ref("mrows"), a);
     x.k.mlaQlat(e, sc.ref("q"), w.kvb.ref, sc.ref("qlat"), a);
-    x.k.mlaAttend(e, sc.ref("q"), sc.ref("qlat"), sc.ref("mrows"), sc.ref("partial"), a);
-    x.k.mlaMerge(e, sc.ref("partial"), sc.ref("mrows"), sc.ref("olat"), a);
+    @import("attention.zig").encode(x.k, e, c, sc, x.index, a);
     rows(x, e, xin, w.g, sc.ref("g2"), H, ow, H, ow);
     x.k.mlaUv(e, sc.ref("olat"), w.kvb.ref, sc.ref("g2"), sc.ref("y"), a);
     rows(x, e, sc.ref("y"), w.o, sc.ref("delta"), ow, H, ow, H);

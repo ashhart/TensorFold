@@ -48,6 +48,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         const body = try tf.frags.sourceMode(device, a, raw, full);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
     }
+    if (std.mem.startsWith(u8, d.name, "kimi index ")) {
+        const ix = @import("kimi_k3").index;
+        const body = if (std.mem.eql(u8, fun, "k3_index_attend") or std.mem.eql(u8, fun, "k3_index_merge")) ix.attention_source else ix.source;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
