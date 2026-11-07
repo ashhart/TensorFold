@@ -20,6 +20,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - HIP: capture a drafter's requested target-layer taps in each stream's ring, with graph-on/off and planted kernel controls (#2314).
 
 ## 1.2.4
+- Docs: the optimization ledger's cells for #2011, #2162 and #2282 say they landed (#2431).
 
 - Docs: four subcommand-flag fixes checked against the code: `slide audit --threshold`'s range, `benchmark --context` and `--kv-cache`, `info` on Flash Next, and `run --device` and `--carveout` on CUDA builds (#2348).
 
