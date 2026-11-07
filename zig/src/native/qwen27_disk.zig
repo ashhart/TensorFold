@@ -81,6 +81,7 @@ fn scatter(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.im
 /// What disk states are read under, and the probe's prompt rate: the checkpoint, the drafter, sources, modes, bits.
 pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[]const u8) !struct { id: u64, rate: f64 } {
     var w = std.hash.Wyhash.init(0x7132);
+    try @import("sys").file_identity.current(&w, a, io);
     try disk_identity.checkpoint(&w, a, io, dir);
     if (drafter) |d| try disk_identity.checkpoint(&w, a, io, d);
     const p = try probe(h, io);
@@ -88,7 +89,7 @@ pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[
     w.update(std.mem.sliceAsBytes(&words));
     disk_identity.machine(&w, std.mem.span(h.model.device.name()));
     disk_identity.profile(&w, .{ .family = if (h.model.config.moe()) "qwen3_5_moe" else "qwen3_5", .backend = "metal" });
-    return .{ .id = w.final(), .rate = p.rate };
+    return .{ .id = withPolicy(w.final(), h), .rate = p.rate };
 }
 
 /// A fixed prompt's state through slot 0 (whole 128-row chunks, a decoded span, a short tail), hashed, and its rate.
@@ -140,3 +141,12 @@ pub fn attach(h: *Host, io: std.Io, a: Allocator, o: Learn) !void {
 
 /// --learn-conversations' settings, as the server read them (--spill-gib's too, and --checkpoint-slots beside them).
 pub const Learn = struct { root: []const u8, dir: []const u8, drafter: ?[]const u8, cap: u64, floor: u64, daily: u64, spill: rows.Spill = .off, slots: ?usize = null };
+
+/// Extend a probe identity with the loaded execution policy.
+pub fn withPolicy(legacy: u64, h: anytype) u64 {
+    return @import("persistence_policy.zig").extend(legacy, "qwen-metal-policy-v1", &.{
+        if (h.model.ane) |share| share.columns else 0,
+        h.model.frame.capacity,
+        h.back.chunk,
+    });
+}

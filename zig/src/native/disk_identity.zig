@@ -3,28 +3,38 @@ const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
 
-/// A checkpoint folder: its config and index files whole, then each safetensors file's name, size, inode and times.
+/// Config/index bytes and stamps of every indexed shard plus top-level safetensors (including auxiliary heads).
 pub fn checkpoint(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var names: std.ArrayList([]const u8) = .empty;
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
-        const path = try std.fs.path.join(a, &.{ dir, name });
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)) catch |e| switch (e) {
+        const path = try std.fs.path.join(scratch, &.{ dir, name });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, scratch, .limited(1 << 26)) catch |e| switch (e) {
             error.FileNotFound => continue,
             else => return e,
         };
         h.update(name);
         h.update(bytes);
+        if (std.mem.eql(u8, name, "model.safetensors.index.json")) {
+            const parsed = try std.json.parseFromSliceLeaky(std.json.Value, scratch, bytes, .{});
+            const map = try @import("checkpoint_config").index.weightMap(parsed);
+            for (map.values()) |value| try names.append(scratch, value.string);
+        }
     }
     var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
-    var names: std.ArrayList([]const u8) = .empty;
     var it = d.iterate();
-    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors")) try names.append(a, try a.dupe(u8, e.name));
+    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors"))
+        try names.append(scratch, try scratch.dupe(u8, e.name));
     std.mem.sort([]const u8, names.items, {}, struct {
         fn lt(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.lessThan(u8, x, y);
         }
     }.lt);
-    for (names.items) |name| {
+    for (names.items, 0..) |name, i| {
+        if (i > 0 and std.mem.eql(u8, name, names.items[i - 1])) continue;
         const info = try d.statFile(io, name, .{});
         const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
         h.update(name);
@@ -92,4 +102,16 @@ fn field(h: *std.hash.Wyhash, bytes: []const u8) void {
     std.mem.writeInt(u64, &len, @intCast(bytes.len), .little);
     h.update(&len);
     h.update(bytes);
+}
+
+/// A persisted serving namespace extends its probe identity with the checkpoint at the current open.
+pub fn scoped(a: Allocator, io: std.Io, dir: []const u8, legacy: u64) !u64 {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var h = std.hash.Wyhash.init(0x70657273);
+    h.update("kept-checkpoint-v1");
+    h.update(std.mem.asBytes(&legacy));
+    try checkpoint(&h, arena.allocator(), io, dir);
+    try @import("sys").file_identity.current(&h, arena.allocator(), io);
+    return h.final();
 }
