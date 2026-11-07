@@ -25,6 +25,7 @@ const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
 const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
+const kv_split = [_][:0]const u8{"TF_GLM_KV_SPLIT"};
 const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_KV_HOST_GIB" };
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
@@ -64,6 +65,7 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
     for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
+    for (kv_split) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
     for (added) |name| try t.expect((try row(name)).kind != .flag);
     for (ranks) |name| try t.expectEqual(e.Kind.u32, (try row(name)).kind);
     var n: usize = 0;
@@ -71,7 +73,7 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len + ranks.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + kv_split.len + added.len + ranks.len, n);
 }
 
 test "GLM strict env: the expert form takes classic or factored, leaves blank to the race, and refuses the rest by name" {
@@ -193,4 +195,11 @@ test "TF_GLM_CONTEXT_CEILING's largest window is the last whose slots, verify ro
     const most = e.rule(@import("cuda_env.zig").ceiling_switch).max;
     try t.expect(capacity(@intCast(most)) <= @as(usize, std.math.maxInt(i32)) + 1);
     try t.expect(capacity(@intCast(most + 1)) > @as(usize, std.math.maxInt(i32)) + 1);
+}
+
+test "GLM strict env: TF_GLM_KV_SPLIT takes 0, off, 1 or on at GLM's open, and refuses the rest by name" {
+    for (kv_split) |name| {
+        for ([_][]const u8{ "0", "off", "1", "on" }) |raw| try check(name, raw, true);
+        for ([_][]const u8{ "ON", "true", "yes", "2", " 1", "on " }) |raw| try check(name, raw, false);
+    }
 }

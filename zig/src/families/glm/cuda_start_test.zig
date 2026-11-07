@@ -9,7 +9,7 @@ fn recordReport(args: Args, selection: startup.Report) void {
     w.reports += 1;
 }
 
-const Settings = struct { kv8: bool, pages: bool = false, marker: u32 = 37 };
+const Settings = struct { kv8: bool, pages: bool = false, marker: u32 = 37, kv_split: bool = false, kv_host: u8 = 0 };
 const Place = struct { rank: usize, world: usize = 2 };
 const World = struct {
     connected: [2]bool = @splat(false),
@@ -174,4 +174,44 @@ test "GLM startup: reports use the passed selection and never echo arbitrary env
     const report: startup.Report = .{ .text = &raw, .rank = 15, .world = 16, .kv8 = false, .pages = false };
     const line = try std.fmt.bufPrint(&buffer, "{f}", .{report});
     try std.testing.expectEqualStrings("window per stream; TF_KV_PAGES=on (env); rank 15 of 16; cache bf16", line);
+}
+
+fn runSplit(w: *World, rank: usize, world: usize, text: ?[]const u8, kv8: bool, host: u8) !void {
+    return startup.open(std.testing.io, Place{ .rank = rank, .world = world }, text, Settings{ .kv8 = kv8, .kv_split = true, .kv_host = host }, Watch{ .world = w, .rank = rank }, Args{ .world = w, .rank = rank }, construct, recordReport);
+}
+
+test "GLM startup: TF_GLM_KV_SPLIT is refused by name at one rank, off pages or host pages, the peer told, before the engine" {
+    const Case = struct { world: usize, text: ?[]const u8, kv8: bool = false, host: u8 = 0, err: anyerror };
+    for ([_]Case{
+        .{ .world = 1, .text = null, .err = error.KvSplitNeedsRanks }, // auto pages are off at one rank: ranks named first
+        .{ .world = 1, .text = "on", .err = error.KvSplitNeedsRanks },
+        .{ .world = 2, .text = "off", .err = error.KvSplitNeedsPages },
+        .{ .world = 2, .text = null, .kv8 = true, .err = error.KvSplitNeedsPages }, // fp8 keeps windows under auto
+        .{ .world = 2, .text = "on", .host = 1, .err = error.KvSplitOnHost },
+    }) |c| for (0..c.world) |rank| {
+        var w: World = .{ .expected_world = c.world };
+        if (c.world > 1) try run(&w, 1 - rank, 2, c.text, c.kv8);
+        try std.testing.expectError(c.err, runSplit(&w, rank, c.world, c.text, c.kv8, c.host));
+        try std.testing.expect(!w.constructed[rank]);
+        if (c.world > 1) try std.testing.expectEqualStrings(@errorName(c.err), w.refused[1 - rank] orelse "waiting");
+    };
+    for ([_]?[]const u8{ null, "auto", "on" }) |text| {
+        var w: World = .{};
+        try runSplit(&w, 0, 2, text, false, 0);
+        try std.testing.expect(w.settings[0].?.kv_split and w.settings[0].?.pages);
+    }
+    var off: World = .{};
+    try run(&off, 0, 2, null, false);
+    try std.testing.expect(!off.settings[0].?.kv_split);
+}
+
+test "GLM startup: TF_GLM_KV_SPLIT with TF_KV_SHARE is refused by name, either alone is not" {
+    for ([_]usize{ 1, 4, 64 }) |share| try std.testing.expectError(error.KvSplitShare, startup.sharing(true, share));
+    try startup.sharing(true, 0);
+    for ([_]usize{ 0, 1, 64 }) |share| try startup.sharing(false, share);
+}
+
+test "GLM startup: every TF_GLM_KV_SPLIT refusal is explained, and another error is left to its family" {
+    for ([_]anyerror{ error.KvSplitNeedsRanks, error.KvSplitNeedsPages, error.KvSplitOnHost, error.KvSplitShare, error.ClassTooSmall, error.ResidueMismatch, error.BadClasses }) |e| try std.testing.expect(startup.explain(e) != null);
+    try std.testing.expect(startup.explain(error.Fp8OnPages) == null);
 }
