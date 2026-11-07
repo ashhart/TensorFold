@@ -262,6 +262,7 @@ extern "C" __global__ void tf_exl3_plan_rotate(const PlanStage a) {
 }
 
 extern "C" __global__ void tf_exl3_plan_finish(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_SERVED>(a); }
+extern "C" __global__ void tf_exl3_plan_finish_after(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_SERVED, true>(a); }
 
 // Transposed fp32 prompt accumulators in the shared EXL3 module; decode kernels above stay unchanged.
 #include "exl3_prompt.cuh"
