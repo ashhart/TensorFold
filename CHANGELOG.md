@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: ten native `serve` flags that were undocumented now are: `--top-p`, `--top-k` and `--min-p` as sampling defaults, `--compact-at`, `--compact-keep` and `--compact-memory`, Dory's `--loops`, the two silence-onset flags and Drama 3's `--max-frames` (#2345).
+
 - CI: main's `zig` and `zig-windows` jobs reuse main's newest build cache, as a pull request does, so each push compiles and runs only what changed since. `zig_cache_restat --prune` keeps each saved cache to about one build, and a nightly run builds and checks everything from nothing (#2402).
 
 - Docs: `docs/api.md` lists `DELETE /v1/slide/facts`, and `docs/control.md` no longer says the native server refuses `--spill-gib` and `--vision` (#2341).
