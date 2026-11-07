@@ -6,10 +6,10 @@
 #include <stdint.h>
 #include "common/reduce.cuh"
 #include "gemma4_ple.cuh"
-
 #define TF_Q35_SCORE_CONTROL
 #include "qwen35_scores.cuh"
-
+#define TF_MOE_ROUTER_CONTROLS
+#include "moe_router_expert.cuh"
 __device__ __forceinline__ float tf_ctl_x(const __nv_bfloat16* x, int64_t i) { return __bfloat162float(x[i]); }
 
 // Gate 1: a row's maximum by fmaxf, which drops a NaN input, so a row holding NaN reads as its largest number.
@@ -94,7 +94,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_embed_affine(const int*
                                                                        float scale, int keep) {
     tf_embed_affine::rows(ids, w, s, b, out, d, bits, group, scale, keep);
 }
-
 
 // Gate 3: act_rows.cu's MLX activations keeping only the rounding points in `keep`; the exact check must go red.
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_act_round(const __nv_bfloat16* gate, long long g_ld,
@@ -222,7 +221,6 @@ extern "C" __global__ void tf_ctl_vit_unrounded_bias(const float* ACC, const __n
     const int64_t at = static_cast<int64_t>(blockIdx.x) * N + c;
     O[at] = __float2bfloat16_rn(__fadd_rn(__fadd_rn(ACC[at], __bfloat162float(BIAS[c])), __bfloat162float(R[at])));
 }
-
 
 // Gate 3: vit.cu's LayerNorm rows (8192 wide) keeping the points in `keep`; the shapes gate must go red.
 #include "vit_norm.cuh"
@@ -538,7 +536,6 @@ TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_skip, 2, tf_exl3::SKIP)
 TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_stale, 2, tf_exl3::STALE)
 #undef TF_CTL_EXL3_GROUPED
 
-
 // Gate 3: gemma4_ple.cu's tf_gemma4_ple_rows with one step dropped (tf_ple::DROP_*); the shapes gate must go red.
 extern "C" __global__ void __launch_bounds__(64) tf_ctl_ple_rows(const __nv_bfloat16* p, const __nv_bfloat16* t,
                                                                  const __nv_bfloat16* w, __nv_bfloat16* out, int parts,
@@ -569,7 +566,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_lfm2m_route(const __nv_
                                                                       float* WTS, float* LOGITS, int rows, int D, float scale) {
     tf_lfm2m::lfm2m_route<1>(X, W, BIAS, PICK, WTS, LOGITS, rows, D, scale);
 }
-
 // Paged attention at head 64, one planted fault each: values from the next lane's dims (decode) or next 8 (prompt).
 namespace tf_ctl_paged {
 using tf_glue::bf;
@@ -602,6 +598,3 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_
 #include "prefill_attention_rows.cuh"
 }
 }  // namespace tf_prefill_attention
-
-#define TF_MOE_ROUTER_CONTROLS
-#include "moe_router_expert.cuh"
