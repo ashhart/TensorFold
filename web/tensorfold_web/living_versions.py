@@ -1,11 +1,4 @@
-"""Versions of a living copy: the per-fact undo TensorFold does not have.
-
-A version records every file of the copy by content: a file equal to the downloaded checkpoint's is the base's, any
-other is kept once in the copy's store (`<name>.versions/blobs/<sha256>`), shared by every version that holds it. A
-lesson rewrites the shards it touches (on a GB10 trial, all four, 17 GB), so a version costs what changed since the
-versions before it: an APFS clone on a Mac (blocks shared until written), a real copy on Linux. The fact graph and
-TensorFold Web's record of lessons go with it. Restoring writes back the files that differ, while the copy is not served.
-"""
+"""Versions of a living copy: the per-fact undo TensorFold does not have."""
 
 from __future__ import annotations
 
@@ -170,10 +163,6 @@ def _swap_journal(dest: str) -> Path:
 
 
 def recover() -> list[str]:
-    """After a TensorFold Web stopped in the middle of a restore, each copy is brought to one side of it, weights and records
-    together, by the phase its journal recorded: "prepared" (the swap may have begun) is undone, "swapped" is
-    finished. Records staged for a transaction no journal names, and staging folders, go. Run at start and before a
-    restore."""
 
     base = living.root()
     if not base.is_dir():
@@ -216,8 +205,6 @@ def recover() -> list[str]:
 
 
 def _apply_records(dest: str, j: dict) -> None:
-    """The records of transaction ``j`` in place: those it staged replace the current ones, those the version did not
-    have go; nothing staged by another transaction is touched."""
 
     d = living.meta_dir(dest)
     for kind in ("facts", "lessons"):
@@ -229,9 +216,6 @@ def _apply_records(dest: str, j: dict) -> None:
 
 
 def restore(name: str, vid: str, *, into: str | None = None) -> dict:
-    """The copy (or ``into``, another copy of the same base) put back as version ``vid`` was, all at once: every
-    source checked first, the whole restored folder built beside it (files kept are linked, files written are checked
-    against the version's hashes), then swapped in. A failure before the swap leaves the copy as it was."""
 
     recover()
     m = _manifest(name, vid)
@@ -335,8 +319,6 @@ def drop_all(name: str) -> None:
 
 
 def current(name: str) -> dict:
-    """The copy as it is now, file by file (hash and size), for another machine to fetch what differs from its base;
-    hashes are kept between calls and computed again only for files that changed."""
 
     folder = living.folder(name)
     if not folder.is_dir():
@@ -374,8 +356,6 @@ def safe_rel(rel: object) -> bool:
 
 
 def recover_unfinished() -> list[str]:
-    """At start only (a copy may be being made otherwise): the copies a stopped TensorFold Web was making or fetching, part
-    written, are removed."""
 
     base = living.root()
     studio = base / ".studio"
@@ -404,8 +384,6 @@ def recover_unfinished() -> list[str]:
 
 
 def fetch(get_manifest, get_file, new: str, origin: str) -> dict:
-    """A copy made here from another machine's: the base checkpoint copied locally, then only the files that differ
-    from it fetched, each checked by its hash before it replaces anything."""
 
     m = get_manifest()
     if not m.get("base"):

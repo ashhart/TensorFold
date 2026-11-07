@@ -126,8 +126,6 @@ def _tensorfold_version() -> str | None:
 
 
 def detect() -> Machine:
-    """This machine, with what moves read afresh: the GPU ceiling (a sysctl can change it while TensorFold Web runs),
-    the engine's version, the memory available now."""
 
     m = _detect()
     m.tensorfold_version = _tensorfold_version()      # a stat per call: an upgrade shows without a restart
@@ -141,8 +139,6 @@ _cached: Machine | None = None
 
 
 def _detect() -> Machine:
-    """The machine, probed once and kept; a probe nvidia-smi left unanswered (a driver reset, a card busy loading) is
-    not kept, so the next call asks again instead of saying "no GPU" until TensorFold Web restarts."""
 
     global _cached
     if _cached is None:

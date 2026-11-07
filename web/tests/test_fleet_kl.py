@@ -114,7 +114,8 @@ def test_an_engine_without_prompt_logprobs_is_said_plainly(tmp_path, mock, monke
 
 
 def test_a_target_reached_with_headers_of_its_own(tmp_path):
-    # a Fleet machine's relay takes its TensorFold Web's token as a header: the target carries it, the run never keeps it
+    # a Fleet machine's relay takes its TensorFold Web's token as a header: the target carries it, the run never keeps
+    # it
     server = mock_serve(port=0, rate_tps=4000.0, api_key="needed")
     try:
         url = f"http://127.0.0.1:{server.server_address[1]}"

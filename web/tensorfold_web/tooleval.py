@@ -1,11 +1,3 @@
-"""Tool calls, measured by `tool-eval-bench` (MIT, SeraphimSerapis), which TensorFold Web runs rather than rewrites.
-
-It plays scripted conversations with mock tools against an OpenAI-compatible endpoint and scores each scenario as
-pass, partial or fail; it already knows TensorFold. TensorFold Web finds it, runs it on the served engine (or another),
-follows its progress events, and keeps its scenarios as ordinary Bench results: a pass counts as right, so two runs
-compare scenario by scenario with McNemar's test like the quality suite. Install: `uv tool install tool-eval-bench==2.8.0`,
-or the Bench's Install button, which runs the same with the version TensorFold Web's reading was checked with.
-"""
 
 from __future__ import annotations
 
@@ -22,7 +14,8 @@ from pathlib import Path
 CANDIDATES = ("~/.local/bin/tool-eval-bench", "~/peers/tool-eval-bench/bin/tool-eval-bench")
 # where uv lives when a service's PATH leaves it out: its own installer, cargo, Homebrew
 UV_CANDIDATES = ("~/.local/bin/uv", "~/.cargo/bin/uv", "/opt/homebrew/bin/uv", "/usr/local/bin/uv")
-VERSION = "2.8.0"                  # the version TensorFold Web installs: its output read and checked on the three machines
+# the version TensorFold Web installs: its output read and checked on the three machines
+VERSION = "2.8.0"
 INSTALL_TIMEOUT = 300
 _installing = threading.Lock()
 SEED = 42
@@ -39,8 +32,6 @@ def find() -> str | None:
 
 
 def install(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> dict:
-    """`uv tool install tool-eval-bench==VERSION` for this user, no administrator rights; where it landed and its
-    version, or a RuntimeError the page can show."""
 
     uv = shutil.which("uv") or next((p for p in (os.path.expanduser(c) for c in UV_CANDIDATES) if os.access(p, os.X_OK)), None)
     if uv is None:

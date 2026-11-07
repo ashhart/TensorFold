@@ -1,10 +1,3 @@
-"""What the engine served, kept for months: tokens and requests by model and hour, peak speeds, when it last served.
-
-The engine counts tokens and requests since it started. Each reading of the history thread is compared with the
-previous one, kept in the database so a TensorFold Web restart loses nothing: the difference goes to the current hour's row
-for the model served. Totals lower than before mean the engine restarted; its new totals are then all new. A first
-reading with nothing to compare with only sets the baseline.
-"""
 
 from __future__ import annotations
 
@@ -57,7 +50,8 @@ class Usage:
                 # kept before servers were told apart (no address) is not trusted for any of them
                 url = info.get("engine_url")
                 prev = self._get(db, f"totals@{url}") if url else self._get(db, "totals")
-                if prev is None and url:              # kept before one per server: this server's when its address says so
+                # kept before one per server: this server's when its address says so
+                if prev is None and url:
                     legacy = self._get(db, "totals")
                     prev = legacy if legacy and legacy.get("url") == url else None
                 # the engine's start time when TensorFold Web knows it: the same model restarted between two readings

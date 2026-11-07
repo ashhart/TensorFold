@@ -1,19 +1,3 @@
-"""KL divergence and top-token agreement between two engines, position by position, where both saw the same text.
-
-Each side writes a greedy reply with its 20 most likely tokens at each position. Up to and including the first
-position where their tokens differ, both conditioned on exactly the same text, so their distributions compare
-there; after it the texts differ and the prompt stops. Making the candidate continue the reference's text after a
-difference would measure every position, but TensorFold 1.0.5 neither continues a final assistant message (it
-answers it as a finished turn) nor scores a prompt.
-
-The other way, a fixed text (`score`, `pair_text`): both engines read the same text through `/v1/completions` with
-vLLM's `prompt_logprobs` (TensorFold from 1.0.8 on CUDA; its Metal and Python lines refuse it with a 400), and every
-position of it compares, none lost where the replies would part.
-
-Only the top 20 log-probabilities are given, so the divergence is a lower bound of the full KL, computed on what both
-lists establish (see `divergence`); whether the two distributions are the same is checked directly on the lists.
-Comparing an engine with itself gives 0, which checks the method on a given engine.
-"""
 
 from __future__ import annotations
 
@@ -101,8 +85,6 @@ def completions_url(chat_url: str) -> str:
 
 
 def _scored(body: dict) -> list[Step]:
-    """vLLM's `prompt_logprobs`: one entry per prompt token, `null` for the first (nothing predicts it), then the
-    prompt token itself keyed by its id, followed by the best tokens, each with `logprob`, `rank`, `decoded_token`."""
 
     rows = (body.get("choices") or [{}])[0].get("prompt_logprobs")
     if not isinstance(rows, list):
@@ -120,8 +102,6 @@ def _scored(body: dict) -> list[Step]:
 
 
 def score(client: httpx.Client, t: Target, text: str, cancel: threading.Event | None = None) -> list[Step]:
-    """Every position of ``text`` as the engine reads it, with the top log-probabilities there; a cancel ends the wait.
-    Of the run's extra fields only `draft` goes (a raw text has no chat template to turn thinking off in)."""
 
     body = {"model": t.model, "prompt": text, "max_tokens": 1, "temperature": 0.0, "stream": False,
             "prompt_logprobs": TOP, **{k: v for k, v in t.extra.items() if k == "draft"}}
@@ -146,15 +126,7 @@ def score(client: httpx.Client, t: Target, text: str, cancel: threading.Event | 
 
 
 def divergence(p: dict[bytes, float], q: dict[bytes, float]) -> float:
-    """A lower bound of KL(P || Q), from the tokens each side lists.
-
-    The partition: each token both sides list, the tokens only P lists (A), and everything else (R). P is known on
-    every cell. Q is known on the shared tokens and on A and R together; on A it is at most the smallest probability
-    Q lists, once per token of A, since none of them made Q's list. KL on a coarser partition never exceeds the full
-    KL, and Q's unknown split between A and R is taken where it gives the least divergence, so the result is a lower
-    bound whatever the unlisted tokens hold. It can be 0 for two different distributions, which `same_distribution`
-    tells apart.
-    """
+    """A lower bound of KL(P || Q), from the tokens each side lists."""
 
     shared = [t for t in p if t in q]
     only_p = [t for t in p if t not in q]
@@ -215,8 +187,6 @@ def pair(reference: list[Step], theirs: list[Step]) -> dict:
 
 
 def pair_text(reference: list[Step], theirs: list[Step]) -> dict:
-    """The same text read by both engines: every position compares, none dropped where replies would part. Both
-    must split it into the same tokens, or positions would not match."""
 
     if [a.ident for a in reference] != [b.ident for b in theirs]:
         raise RuntimeError(f"the two engines split the text into different tokens ({len(reference) + 1} and "
@@ -278,9 +248,6 @@ def summary(per_prompt: list[dict]) -> dict:
 
 
 class Load:
-    """Requests kept going in the background while the candidate is measured, ``n`` at a time. ``ok`` counts the
-    replies that ended while it was measured (one ending as it stops is ``late``), ``failed`` the refusals, and
-    ``full_share`` the part of the measured time when all ``n`` were in flight: what says the load was really there."""
 
     def __init__(self, target: Target, n: int, messages: list[dict]) -> None:
         self.target, self.n, self.messages = target, n, messages
@@ -340,8 +307,6 @@ class Load:
         self.stop()
 
     def stop(self, wait: float = 320.0) -> None:
-        """Stops the background requests and waits for the ones in flight up to ``wait`` seconds; a cancelled run
-        passes a short wait and leaves them to end on their own (nothing can cut a request the engine holds)."""
 
         self._flight(0)                     # count the full stretch up to now, then stop
         self._t1 = time.monotonic()

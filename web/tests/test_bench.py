@@ -46,7 +46,8 @@ def test_suites_load_with_their_passages():
 
 
 # The digest of each published version of suites.json. Editing a prompt or a passage changes the digest: raise the
-# file's "version" and add its new digest here, so runs on different prompts are never compared as if they were the same.
+# file's "version" and add its new digest here, so runs on different prompts are never compared as if they were the
+# same.
 SUITE_DIGESTS = {1: "d691a57cc2d9"}
 
 

@@ -1,9 +1,3 @@
-"""Connect's recipes: how each tool reaches TensorFold, the settings to paste, and the checks that prove it works.
-
-A recipe is data: the tool, the kind of tool, the protocol it speaks to the engine, its settings for a given
-address, key and model, and the calls the "Test connection" button makes, the same calls the tool makes. A recipe
-also says where and when it was checked end to end with the real tool, or why it could not be.
-"""
 
 from __future__ import annotations
 
@@ -295,10 +289,6 @@ RECIPES = [
 
 
 def compose(c: Ctx) -> str:
-    """Open WebUI next to the engine, as a compose file: host networking on Linux so it reaches the engine's
-    loopback address; Open WebUI on port 3000 so it does not take the engine's. Its project, container and volume
-    are named for TensorFold Web: a plain "open-webui" would reuse an existing install's data, and Open WebUI migrates
-    a database to its own version at start, which an older Open WebUI then cannot read."""
 
     return (
         "# Open WebUI for the TensorFold engine on this machine (Linux; on a Mac see the note at the end).\n"
@@ -442,8 +432,6 @@ def run_check(check: str, c: Ctx, client: httpx.Client, extra: dict | None = Non
 
 
 def _out(check: str, ok: bool, detail: str, t0: float, *, skipped: bool = False) -> dict:
-    """One check's result; ``skipped``: it could not be made, which is neither a pass nor a failure (the test as a
-    whole is not failed by it, and the page does not tick it)."""
 
     return {"id": check, "label": CHECK_LABELS.get(check, check), "ok": bool(ok), "skipped": skipped, "detail": detail,
             "seconds": round(time.perf_counter() - t0, 2)}

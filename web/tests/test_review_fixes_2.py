@@ -1,5 +1,3 @@
-"""Codex's verification of the 22 fixes, 13 October 2026: what was left of them and what it found next (R1 to R16),
-one test each, numbered as in its report."""
 
 import json
 import threading

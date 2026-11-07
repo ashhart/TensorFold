@@ -1,11 +1,3 @@
-"""Relay requests to the engine, streaming replies through, so the page and tailnet clients talk to one origin.
-
-Credentials have one owner each. TensorFold Web's own token (the `x-studio-token` header or `?token=`) is consumed by
-the server's gate and never travels to the engine. For the engine, the relay presents the key the engine actually
-runs with whenever TensorFold Web holds one, whatever a client sent: reaching the relay is what grants inference. A
-client's own `Authorization` or `x-api-key` passes through only when TensorFold Web has no key, for a remote engine
-whose key it does not know.
-"""
 
 from __future__ import annotations
 
@@ -42,8 +34,6 @@ class Proxy:
 
     def upstream_headers(self, incoming: list[tuple[str, str]], key: str | None = None, *,
                          snapshot: bool = False) -> dict[str, str]:
-        """The headers the engine gets: hop-by-hop, TensorFold Web credentials and Origin dropped, the engine's key enforced
-        (``key`` from the request's own snapshot of the target, when ``snapshot``)."""
 
         headers = {k: v for k, v in incoming
                    if k.lower() not in HOP and k.lower() not in STUDIO_HEADERS and k.lower() not in BROWSER_ONLY}

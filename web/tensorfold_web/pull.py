@@ -1,11 +1,4 @@
-"""Download checkpoints into the Hugging Face cache with progress the page can follow.
-
-Progress is measured on disk: the bytes of the repository's blobs in the cache, finished or still `.incomplete`,
-against the repository's size. That is what the user sees, and it does not depend on how the hub library draws
-its own progress bars. The download itself runs in a process of its own, so that a cancel can end it; what reached
-the disk stays, and the hub resumes an `.incomplete` blob at the next start. A download the disk cannot hold is
-refused before it starts: a full disk breaks TensorFold Web's own files, not only the download.
-"""
+"""Download checkpoints into the Hugging Face cache with progress the page can follow."""
 
 from __future__ import annotations
 
@@ -107,8 +100,7 @@ class Downloads:
         return [j.to_dict() for j in jobs]
 
     def start(self, repo: str, *, total_bytes: int | None = None) -> Progress:
-        """Start one job for ``repo``; a second call while it runs returns the running job (checked under the lock).
-        Refused, with both figures, when the disk cannot hold what is left to download."""
+        """Start one job for ``repo``; a second call while it runs returns the running job (checked under the lock)."""
 
         with self._lock:
             old = self.jobs.get(repo)

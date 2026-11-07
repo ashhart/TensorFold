@@ -34,7 +34,8 @@ class Settings:
     extra_args: list[str] = field(default_factory=list)
     share: bool = False                  # bind the engine on every interface; the API key then protects it
     api_key: str | None = None           # the engine's API key, generated when sharing is turned on
-    cortheon: bool = False               # Cortheon's reasoning and web research in the engine (1.0.9 on; 1.0.11 for its fixes)
+    # Cortheon's reasoning and web research in the engine (1.0.9 on; 1.0.11 for its fixes)
+    cortheon: bool = False
     theme: str = "system"
     energy_price: float | None = None    # electricity, per kWh, for the Bench's energy cost
     currency: str = "EUR"
@@ -154,8 +155,6 @@ def load() -> Settings:
 
 
 def secure_config_dir() -> Path:
-    """The settings folder, made private on every start (not only when the service is installed): readable by this
-    user only, and the files that hold conversations, runs and the engine's log narrowed to 0600 as well."""
 
     p = config_dir()
     p.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -169,8 +168,6 @@ def secure_config_dir() -> Path:
 
 
 def write_private(p: Path, text: str) -> None:
-    """Write ``p`` atomically, readable by this user only from the first byte: a file created with the usual mode
-    and restricted afterwards can be opened by someone else in between."""
 
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}-{os.getpid()}-{threading.get_ident()}.tmp")   # one writer, one temporary file

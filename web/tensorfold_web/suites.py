@@ -1,11 +1,3 @@
-"""Custom suites: prompts a user writes for the Bench, kept next to the runs and measured like the built-in ones.
-
-A custom suite is a name and a few prompts, each a user message with an optional system message, optional earlier
-turns of the conversation (user and assistant, oldest first) and a reply length. A built-in suite can be copied in as a
-starting point.
-Its digest covers what is sent, so two runs of the same suite compare only when its prompts did not change. The
-exported form is the one imported, so a suite moves between machines as one JSON file.
-"""
 
 from __future__ import annotations
 
@@ -29,7 +21,7 @@ def validate(doc: object) -> dict:
     """A suite as TensorFold Web keeps it, from what a page or a file sent; raises ValueError naming the first problem."""
 
     if not isinstance(doc, dict):
-        raise ValueError("a suite is a JSON object with a name and prompts")  # noqa: TRY004 - one error type for the page
+        raise ValueError("a suite is a JSON object with a name and prompts")  # noqa: TRY004
     name = doc.get("name")
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 60:
         raise ValueError("the suite needs a name of 1 to 60 characters")
@@ -99,8 +91,6 @@ def as_bench(suite: dict) -> dict:
 
 
 def from_builtin(suite: dict) -> dict:
-    """A built-in suite (passages already put in) as a custom one to start from: its system message, earlier turns and
-    last user message kept apart, named as a copy."""
 
     prompts = []
     for p in suite["prompts"]:

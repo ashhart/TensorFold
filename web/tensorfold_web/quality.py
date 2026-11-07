@@ -1,16 +1,4 @@
-"""The quality suite: prompts and strict scoring, next to the Bench's exactness check.
-
-Exactness says the drafts change nothing; this says whether the answers are right, so two quantizations, two
-engines or two configurations can be told apart on quality as well as speed. Four categories:
-
-- Arithmetic: 100 GSM8K problems; the final answer must be the right number.
-- Knowledge: 100 MMLU questions; the reply must name one letter, the right one.
-- Instructions: 20 checks done in code (length, JSON, case, lists, words to use or avoid).
-- Long context: a fact stated early and corrected later in a long text; only the corrected value passes.
-
-Scoring is strict on purpose: the last value counts, an answer that offers two fails, a reasoning block left open
-leaves no answer. Each item passes or fails, so two runs compare item by item with McNemar's test.
-"""
+"""The quality suite: prompts and strict scoring, next to the Bench's exactness check."""
 
 from __future__ import annotations
 
@@ -78,7 +66,8 @@ def last_number(text: str) -> float | None:
     return _num(found[-1]) if found else None
 
 
-# -- prompts ------------------------------------------------------------------------------------------------------------
+# -- prompts
+# ------------------------------------------------------------------------------------------------------------
 
 def _long_prompt(item: dict, filler: str) -> str:
     """A text of about ``size`` tokens: the fact early, the correction later, the question at the end."""
@@ -117,7 +106,8 @@ def items(data: dict, filler: str, only: list[str] | None = None) -> list[dict]:
     return out
 
 
-# -- scoring --------------------------------------------------------------------------------------------------------------
+# -- scoring
+# --------------------------------------------------------------------------------------------------------------
 
 def score(category: str, item: dict, reply: str) -> tuple[bool, str]:
     """Whether the reply passes, and what was read from it."""

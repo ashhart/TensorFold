@@ -1,11 +1,4 @@
-"""`tensorfold-web service`: keep TensorFold Web running, at login on macOS and with systemd on Linux.
-
-macOS gets a LaunchAgent (TensorFold Web starts when the user's session opens, which an auto-login Mac does at boot);
-Linux gets a systemd user unit, which starts at boot only with lingering on (`sudo loginctl enable-linger $USER`):
-without it the user's systemd stops with the last session and takes TensorFold Web along. In both the engine TensorFold Web
-starts outlives a restart of TensorFold Web, as when it runs by hand. Each machine's own variables (such as
-HF_HUB_CACHE) go in `web.env` beside the settings, one KEY=value a line.
-"""
+"""`tensorfold-web service`: keep TensorFold Web running, at login on macOS and with systemd on Linux."""
 
 from __future__ import annotations
 
@@ -25,7 +18,8 @@ from . import settings as settings_mod
 
 LABEL = "com.tensorfold.web"
 UNIT = "tensorfold-web.service"
-HAND_STARTED = "bin/tensorfold-web --no-browser"     # a TensorFold Web started by hand, stopped before the service starts
+# a TensorFold Web started by hand, stopped before the service starts
+HAND_STARTED = "bin/tensorfold-web --no-browser"
 
 
 @dataclass
@@ -52,8 +46,6 @@ def studio_command() -> list[str]:
 
 
 def temporary_environment(prefix: str | None = None) -> bool:
-    """`uvx` runs from an environment in uv's cache (`archive-v0/...`), which `uv cache clean` removes: a service
-    recorded there would not start again."""
 
     parts = Path(prefix or sys.prefix).parts
     cache = os.environ.get("UV_CACHE_DIR")

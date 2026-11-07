@@ -169,8 +169,6 @@ def _handler(rate_tps: float, api_key: str | None = None):
                 pass
 
         def _prompt_logprobs(self, path: str, body: dict) -> None:
-            """vLLM's `prompt_logprobs`, as TensorFold 1.0.8 answers it on CUDA: the prompt split into words, each
-            likely at 0.6 after the first, then the best others; refused where the real engine refuses it."""
 
             n = body["prompt_logprobs"]
             if State.no_prompt_scores:

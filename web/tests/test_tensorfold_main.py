@@ -9,8 +9,6 @@ from tensorfold_web.proxy import Proxy
 
 
 def main_origin_rule(request: httpx.Request) -> bool:
-    """zig/src/server/request_guard.zig's browser rule: no Origin passes; an Origin must be http and name the
-    request's own Host and port (no --allowed-origin here)."""
 
     origins = [v for k, v in request.headers.multi_items() if k.lower() == "origin"]
     if not origins:
@@ -256,7 +254,7 @@ def test_a_lesson_on_another_family_is_refused_by_name(tmp_path, monkeypatch):
     from tensorfold_web.engine import Health, _Child
 
     _home_with_copy(tmp_path, monkeypatch, "qcopy", "qwen3_5")
-    s, eng, c = _app()
+    _s, eng, c = _app()
 
     class Running:                                               # an engine process that is alive
         pid = 1

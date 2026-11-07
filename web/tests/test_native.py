@@ -360,8 +360,6 @@ def _release(folder, version):
 
 @pytest.mark.skipif(os.name == "nt", reason="the stand-in binary is a script with a shebang")
 def test_the_newest_of_two_installs_is_found(tmp_path, monkeypatch):
-    """The installer's ~/.tensorfold beside an older Homebrew one: the newer serves, whichever is on PATH first;
-    TENSORFOLD_BIN still picks one by hand."""
 
     brew = _release(tmp_path / "brew", "1.0.9")
     installer = _release(tmp_path / "home" / ".tensorfold" / "bin", "1.0.11")

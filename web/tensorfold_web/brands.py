@@ -1,7 +1,3 @@
-"""Makers a person adds or completes from Settings: a model family's or a hardware maker's name, the words that
-recognise it, its logo. The page's own list (`ui/src/brand.ts`) covers the known makers; an entry here comes first,
-so a new family or a missing logo needs no new TensorFold Web. Kept in one JSON file, the logos inside it as data URLs.
-"""
 
 from __future__ import annotations
 

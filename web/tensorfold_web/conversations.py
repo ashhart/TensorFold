@@ -1,10 +1,3 @@
-"""Chat conversations kept by TensorFold Web: several of them, titled, searchable, exported, each reply with its context.
-
-A conversation is a list of messages and the settings it was held with. An assistant message keeps the model and the
-engine that wrote it, the thinking setting and budget, its figures (speed, first token, tokens, drafts, token
-digest) and how it ended: done, stopped by the user, cut at the reply limit, an error, or interrupted, which is what a
-reply still marked as streaming becomes when the page that streamed it is gone.
-"""
 
 from __future__ import annotations
 
@@ -22,8 +15,6 @@ FOLDER_CHARS = 60
 
 
 def _name_ok(name: object) -> bool:
-    """A folder's or a preset's name: 1 to 60 characters, and no slash, since the address that renames or removes it
-    carries the name as one segment."""
 
     return isinstance(name, str) and bool(name.strip()) and len(name.strip()) <= FOLDER_CHARS and \
         "/" not in name and "\\" not in name and name.strip() not in (".", "..")   # a dot segment is dropped from a URL
@@ -159,9 +150,7 @@ class Conversations:
         return self._shown(doc)
 
     def update(self, cid: str, body: object, *, rev: int | None = None) -> dict:
-        """``rev``: the revision the page last read or wrote; a save made on an older one raises :class:`Conflict`
-        rather than overwrite what was written since. Messages and settings make a new revision; a title, a pin or a folder
-        does not (they are not what a page saving a reply could overwrite)."""
+        """``rev``: the revision the page last read or wrote; a save made on an older one raises :class:`Conflict`"""
 
         fields = validate(body)
         with self._lock, self._db() as db:
@@ -274,9 +263,6 @@ class Conversations:
         return self.page(query, limit, offset)[0]
 
     def page(self, query: str = "", limit: int = 200, offset: int = 0) -> tuple[list[dict], bool]:
-        """Pinned first, then most recent, and whether more follow. Every pinned conversation comes on the first page,
-        whatever the limit; the limit and ``offset`` count the others, page by page. A query matches the title or any
-        message's text, case aside, over every conversation kept."""
 
         out = []
         q = query.strip().lower()

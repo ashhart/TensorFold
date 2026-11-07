@@ -1,10 +1,4 @@
-"""What this machine needs for TensorFold, checked one by one with how to fix each, and a report to send.
-
-The checks drive the first-run checklist and the diagnostic in Settings: graphics backend, engine installed, engine
-port, model folder, a model downloaded, engine running, memory headroom, who can reach TensorFold Web, and whether it
-keeps running. The report adds the machine, the settings, the engine's state and log, the fleet and the usage, with
-the keys and tokens taken out: it is meant to be sent to someone helping.
-"""
+"""What this machine needs for TensorFold, checked one by one with how to fix each, and a report to send."""
 
 from __future__ import annotations
 
@@ -51,8 +45,6 @@ INSTALL = "curl -fsSL https://tensorfold.dev/install.sh | sh"
 
 
 def install_hint(os_name: str, arch: str) -> str:
-    """TensorFold's own installer (1.0.10 and later): the latest release for an Apple Silicon Mac or NVIDIA Linux
-    (x86_64 or aarch64), its sum checked, under ~/.tensorfold, where TensorFold Web looks."""
 
     return INSTALL
 
@@ -74,8 +66,6 @@ def backend_check(m: dict) -> Check:
 
 
 def grammar_library() -> bool | None:
-    """Whether `lib/libtfgrammar` sits beside the native binary's real folder; None when there is nothing to look
-    at (no binary, or a release from before 1.0.6, which did not ship it)."""
 
     from . import native
 

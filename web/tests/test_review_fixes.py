@@ -1,5 +1,3 @@
-"""The 22 findings of Codex's review of 13 October 2026, one test each,
-numbered as in the review."""
 
 import json
 import os

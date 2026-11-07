@@ -1,10 +1,3 @@
-"""What TensorFold Web keeps on disk, and clean-ups scoped by kind and age, each one previewed before it is done.
-
-Kinds: Bench runs (with their results and the comparisons series made of them), conversations, the usage history,
-the Monitor's eight hours of readings, and the catalog's models in the Hugging Face cache. A clean-up removes what
-is older than a number of days, or everything of that kind; a Bench run still running and the model being served
-are never removed. Models go through huggingface_hub's own deletion, which knows how its cache shares files.
-"""
 
 from __future__ import annotations
 

@@ -1,10 +1,4 @@
-"""Figures kept by the server for a few hours, so Monitor draws its charts as soon as a page opens.
-
-A thread reads the engine every few seconds (the reading a page just made, when it is fresh) and keeps one row per
-reading in SQLite: decode and prefill speed, connections, KV fill, the engine's memory and the machine's free memory.
-Rows older than the retention go. A reading the engine did not answer is kept as a row of nothing, so a chart draws a
-gap there instead of a line across it.
-"""
+"""Figures kept by the server for a few hours, so Monitor draws its charts as soon as a page opens."""
 
 from __future__ import annotations
 

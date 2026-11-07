@@ -1,10 +1,4 @@
-"""The memory verdict: TensorFold's budget rules applied to a checkpoint's size, before anything downloads.
-
-Calibrated on Apple Silicon: the public 32 GB report (issue #50) and the Mac mini M6 32 GB measured in this project
-(Gemma 4 admitted 43,008 tokens at the default budget; Qwen3.8-27B with its drafter 1,024 tokens at the 25 GiB GPU
-ceiling and 17,408 at 28 GiB). CUDA machines use TensorFold's own rule for discrete cards (free memory less a tenth,
-at least 4 GiB) but nothing has been measured there yet, so their verdicts say so.
-"""
+"""The memory verdict: TensorFold's budget rules applied to a checkpoint's size, before anything downloads."""
 
 from __future__ import annotations
 
@@ -104,11 +98,7 @@ def smallest_class(weights: int, workspace: int, bytes_per_token: int, reserve: 
 def verdict(cap: Capacity, weights_bytes: int, *, bytes_per_token: int, max_context: int,
             workspace_bytes: int = DEFAULT_WORKSPACE, model_fraction: float | None = None,
             requested_fraction: float | None = None, strict: bool = False, copies: int = RETAINED_COPIES) -> Verdict:
-    """Three levels for ``cap``. ``requested_fraction`` is the budget the user set.
-
-    Without ``strict`` the verdict may answer for a higher budget than the one requested when the requested one
-    cannot run the model, and says which budget it used. With ``strict`` it answers for the requested budget only.
-    """
+    """Three levels for ``cap``. ``requested_fraction`` is the budget the user set."""
 
     if weights_bytes <= 0 or cap.bytes <= 0:
         raise ValueError("weights and capacity must be positive")
