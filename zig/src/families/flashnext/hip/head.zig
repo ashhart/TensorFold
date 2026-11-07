@@ -24,9 +24,10 @@ pub fn caches(
     return cache.Caches.init(gpa, d, h.dims, &.{false}, cap, act, eos);
 }
 
-/// `tokens` (each the token after its row) over residual `streams` from `pos`; `ones` a one a stream a row.
+/// `tokens` (each the token after its row) over `streams` from `pos`; `prompt`: a prompt chunk's rows on prompt tiles.
 pub fn run(
     ops: Ops,
+    prompt: bool,
     m: *const model.Model,
     host: *forward.Host,
     c: *cache.Caches,
@@ -36,7 +37,8 @@ pub fn run(
     ones: hip.DeviceBuffer,
 ) !Out {
     var o = ops;
-    o.window = true;
+    o.window = !prompt;
+    o.prefill = prompt;
     const w = &m.mtp.?;
     const d = w.dims;
     const rows = tokens.len;
@@ -81,7 +83,7 @@ pub fn run(
     const branch = try mixers.sparse(o, m, d, l.mixer.sparse, &seg, 0, mixed, rows, dev_pos, host, null);
     try forward.hcNorm(o, m, h, branch, inject, x, l.mhc.scale, rows);
     const mixed2 = try forward.hcPre(o, m, l.mhc, x, rows, inject);
-    const y = try hip.moe.run(o, m.act, l.moe, mixed2, rows, false);
+    const y = try hip.moe.run(o, m.act, l.moe, mixed2, rows, prompt);
     try forward.hcNorm(o, m, h, y, inject, x, w.mix.scale, rows);
     c.pooled = (pos + rows) / d.index_ratio;
     return .{ .mixed = try forward.hcPre(o, m, w.mix, x, rows, null), .streams = h };
