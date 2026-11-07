@@ -28,7 +28,9 @@ inline bool pair_link_broken(device atomic_uint* sync, uint t) {
 
 // The host releases exchange x by storing x into POSTED (word 0) once the peer's part landed; FAILED first.
 // POSTED starts at 0 and an exchange's x starts at 1, so a rig whose sync page is all zero asks for no wait.
-inline bool pair_wait_release(device atomic_uint* sync, uint x) {
+// The spin's loads are volatile: without the encoder's event wait (whose GPU-side barrier refreshed the
+// line) a relaxed spin on an untracked shared page can keep the host's release store out of sight forever.
+inline bool pair_wait_release(device volatile atomic_uint* sync, uint x) {
   for (;;) {
     if (atomic_load_explicit(&sync[FAILED], memory_order_relaxed) != 0u) return false;
     const uint now = atomic_load_explicit(&sync[0], memory_order_relaxed);
