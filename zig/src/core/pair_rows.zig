@@ -166,6 +166,8 @@ pub const Pair = struct {
     gpa: std.mem.Allocator,
     /// The parsed settings file: the endpoint's config points into it, so it outlives `ep`.
     arena: *std.heap.ArenaAllocator,
+    /// TF_Q27_KERNEL_WAIT: gather/pick spin on POSTED; the encoder skips its landed wait per seam.
+    kernel_wait: bool = false,
 
     /// Connect to the peer named in `settings_path` (speed-up mode's file), exchanges up to `bytes`, and start sending.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, settings_path: []const u8, bytes: usize) !*Pair {
@@ -220,6 +222,7 @@ pub const Pair = struct {
         };
         owned = .{}; // the pair owns them now: the error path must not release them twice
         errdefer gpa.free(p.bytes);
+        p.kernel_wait = platform.c.getenv("TF_Q27_KERNEL_WAIT") != null;
         // both Macs up before the first exchange: a word each way
         try rd.signal(p.peer, l.flags() + HELLO, 1);
         while (@atomicLoad(u64, p.word64(l.flags() + HELLO), .acquire) < 1) std.atomic.spinLoopHint();
@@ -339,7 +342,7 @@ pub const Pair = struct {
         if (out_stride < 2 * width) @panic("pair: gather()'s frame row is narrower than both halves");
         if (mine.buf.id != p.wbuf.id or mine.off != p.l.send(x)) @panic("pair: gather()'s part is not the region part() returned");
         p.queue(x, stageBytes(rows, width));
-        seam(e, p.fence, p.posted, p.landed, x);
+        seam(e, p.fence, p.posted, p.landed, x, !p.kernel_wait);
         e.setPipeline(p.gather_pipe);
         e.setBuffer(p.wbuf, p.l.sync(), 0);
         e.setValue(PairRows{ .width = width, .stride = out_stride, .rank = p.rank, .x = x }, 1);
@@ -368,7 +371,7 @@ pub const Pair = struct {
         e.setValue([4]u32{ stride, lo, n, dtype }, 1);
         e.setBuffer(p.wbuf, p.l.send(x), 2);
         e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
-        seam(e, p.fence, p.posted, p.landed, x); // the encoder boundary orders the argmax before the part is relayed
+        seam(e, p.fence, p.posted, p.landed, x, !p.kernel_wait); // the encoder boundary orders the argmax before the part is relayed
         e.setPipeline(p.pick_pipe);
         e.setBuffer(p.wbuf, p.l.sync(), 0);
         e.setValue([2]u32{ rows, x }, 1);
@@ -450,6 +453,8 @@ pub const Pair = struct {
             p.rank, p.round.load(.acquire), x, what, p.posted.value(), @atomicLoad(u64, p.word64(p.l.flags() + FLAG), .acquire), p.queued.load(.acquire), p.observed(), post_timeout_ms, peer_ms,
         });
         p.landed.set(seam_failed);
+        // a kernel-side spinner reads POSTED, not the event: the sentinel's low 32 bits release it too
+        @atomicStore(u32, p.word32(p.l.sync() + POSTED * 4), @truncate(seam_failed), .release);
     }
 
     /// One exchange at a time: part written, relay it, peer's lands, release the GPU; every wait has a deadline.

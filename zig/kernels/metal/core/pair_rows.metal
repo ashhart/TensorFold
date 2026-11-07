@@ -26,6 +26,14 @@ inline bool pair_link_broken(device atomic_uint* sync, uint t) {
   return true;
 }
 
+// The host releases exchange x by storing x into POSTED (word 0) once the peer's part landed; FAILED first.
+inline bool pair_wait_release(device atomic_uint* sync, uint x) {
+  for (;;) {
+    if (atomic_load_explicit(&sync[FAILED], memory_order_relaxed) != 0u) return false;
+    if (atomic_load_explicit(&sync[0], memory_order_acquire) >= x) return true;
+  }
+}
+
 // Row r: this rank's own half of the frame row into the exchange slot; a bf16 copy, so it carries the frame's bits.
 kernel void pair_stage(device atomic_uint* sync [[buffer(0)]], constant PairRows& a [[buffer(1)]],
                        const device ushort* src [[buffer(2)]], device ushort* dst [[buffer(3)]],
@@ -52,6 +60,15 @@ kernel void pair_gather(device atomic_uint* sync [[buffer(0)]], constant PairRow
     for (uint i = t; i < a.width; i += 256) {
       out[own + i] = 0x7FC0u;
       out[got + i] = 0x7FC0u;
+    }
+    return;
+  }
+  if (!pair_wait_release(sync, a.x)) {
+    if (pair_link_broken(sync, t)) {
+      for (uint i = t; i < a.width; i += 256) {
+        out[own + i] = 0x7FC0u;
+        out[got + i] = 0x7FC0u;
+      }
     }
     return;
   }
@@ -115,6 +132,12 @@ kernel void pair_pick(device atomic_uint* sync [[buffer(0)]], constant uint2& rx
                       device uint* picks [[buffer(4)]], uint t [[thread_index_in_threadgroup]]) {
   if (pair_link_broken(sync, t)) {
     if (t == 0) for (uint r = 0; r < rx.x; ++r) picks[r] = 0xFFFFFFFFu;  // no such token: visibly wrong, never a token
+    return;
+  }
+  if (!pair_wait_release(sync, rx.y)) {
+    if (pair_link_broken(sync, t)) {
+      if (t == 0) for (uint r = 0; r < rx.x; ++r) picks[r] = 0xFFFFFFFFu;  // no such token: visibly wrong, never a token
+    }
     return;
   }
   if (t != 0) return;

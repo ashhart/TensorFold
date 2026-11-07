@@ -137,6 +137,12 @@ pub const Loopback = struct {
     /// Release every wait with the sentinel, as a failed link does: arithmetic check only, timing runs `startRelay`.
     pub fn satisfy(p: *Loopback) void {
         p.landed.set(seam_failed);
+        p.release(@truncate(seam_failed));
+    }
+
+    /// The host's release word the kernel-side spinner reads (POSTED, word 0 of the sync page).
+    fn release(p: *Loopback, x: u32) void {
+        @atomicStore(u32, p.word32(p.l.sync()), x, .release);
     }
 
     /// The in-process relay: wait for posted, copy in, release -- Pair's two events in order, memcpy for the wire.
@@ -160,6 +166,7 @@ pub const Loopback = struct {
             const n: usize = p.bytesFor(at);
             @memcpy(p.win[p.l.recv(at)..][0..n], p.win[p.l.send(at)..][0..n]);
             p.landed.set(x);
+            p.release(x);
             x += 1;
         }
     }
@@ -174,6 +181,7 @@ pub const Loopback = struct {
         std.debug.assert(bytes.len <= p.l.slot);
         @memcpy(p.win[p.l.recv(x)..][0..bytes.len], bytes);
         p.landed.set(x);
+        p.release(x);
     }
 
     /// The seam `Pair.stage` encodes (before its `gather`): this rank's `width` columns of the frame row into the slot.
@@ -197,7 +205,7 @@ pub const Loopback = struct {
         if (stageBytes(rows, width) > p.l.slot) @panic("loopback: this exchange's part does not fit the window's slot");
         p.x += 1;
         @atomicStore(u32, &p.bytes[x % JOBS], @intCast(stageBytes(rows, width)), .release);
-        seam(e, p.fence, p.posted, p.landed, x);
+        seam(e, p.fence, p.posted, p.landed, x, true);
         e.setPipeline(p.gather_pipe);
         e.setBuffer(p.wbuf, p.l.sync(), 0);
         e.setValue(PairRows{ .width = width, .stride = out_stride, .rank = p.rank, .x = x }, 1);
@@ -227,7 +235,7 @@ pub const Loopback = struct {
         e.setValue([4]u32{ stride, lo, n, dtype }, 1);
         e.setBuffer(p.wbuf, p.l.send(x), 2);
         e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
-        seam(e, p.fence, p.posted, p.landed, x); // the encoder boundary orders the argmax before the part is relayed
+        seam(e, p.fence, p.posted, p.landed, x, true); // the encoder boundary orders the argmax before the part is relayed
         e.setPipeline(p.pick_pipe);
         e.setBuffer(p.wbuf, p.l.sync(), 0);
         e.setValue([2]u32{ rows, x }, 1);
