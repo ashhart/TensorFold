@@ -98,7 +98,7 @@ pub fn indexed(g: *n.G, w: n.Model.Indexed, state: anytype, layer: usize, x: n.T
         for (0..c.kv_heads) |head| @memcpy(keys[pos * kw + head * hd ..][0..hd], try normalized(g, kr[head * hd ..][0..hd], w.kn, pos));
         try trace.note(g, layer, "self_attn", "key", keys[pos * kw ..][0..kw], .bf16, r);
         @memcpy(values[pos * kw ..][0..kw], vr);
-        if (g.probability_bf16) try trace.note(g, layer, "self_attn", "value", values[pos * kw ..][0..kw], .bf16, r);
+        if (g.probability_bf16 or (g.trace != null and g.trace.?.selection)) try trace.note(g, layer, "self_attn", "value", values[pos * kw ..][0..kw], .bf16, r);
         @memcpy(raw[pos * di ..][0..di], ir[c.index_heads * di ..]);
         const blocks = (pos + 1) / c.index_ratio;
         if ((pos + 1) % c.index_ratio == 0) {
@@ -140,6 +140,18 @@ pub fn indexed(g: *n.G, w: n.Model.Indexed, state: anytype, layer: usize, x: n.T
         var ids: std.ArrayList(usize) = .empty;
         for (chosen[0..take]) |b| for (0..c.index_ratio) |j| try ids.append(g.a, b * c.index_ratio + j);
         for (blocks * c.index_ratio..pos + 1) |i| try ids.append(g.a, i);
+        if (g.trace != null and g.trace.?.selection) {
+            const sparse: i32 = @intFromBool(blocks > c.index_budget / c.index_ratio);
+            if (sparse != 0) {
+                const idw = c.index_budget + c.index_ratio;
+                const selected = try g.a.alloc(i32, idw);
+                @memset(selected, 0);
+                for (selected[0..ids.items.len], ids.items) |*dst, source| dst.* = @intCast(source);
+                try trace.note(g, layer, "self_attn", "selected_ids", selected, .i32, r);
+            }
+            try trace.note(g, layer, "self_attn", "selection_count", &[_]i32{@intCast(ids.items.len)}, .i32, r);
+            try trace.note(g, layer, "self_attn", "selection_sparse", &[_]i32{sparse}, .i32, r);
+        }
         for (0..c.heads) |head| {
             const q = try normalized(g, qr[head * 2 * hd ..][0..hd], w.qn, pos);
             @memcpy(query_rows[head * hd ..][0..hd], q);

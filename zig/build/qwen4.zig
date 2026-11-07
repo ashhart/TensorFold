@@ -3,12 +3,14 @@ const std = @import("std");
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
     const graph = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/forward_graph.zig"), .target = target, .optimize = optimize });
     const ngram = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/ngram_geometry.zig"), .target = target, .optimize = optimize });
-    return b.createModule(.{ .root_source_file = b.path("zig/qwen4_family.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "hybrid_graph", .module = graph }, .{ .name = "hybrid_ngram", .module = ngram } } });
+    const living = core.import_table.get("living") orelse b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    return b.createModule(.{ .root_source_file = b.path("zig/qwen4_family.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "hybrid_graph", .module = graph }, .{ .name = "hybrid_ngram", .module = ngram }, .{ .name = "living", .module = living } } });
 }
 const flags: []const []const u8 = &.{ "-std=c++17", "-fno-fast-math", "-ffp-contract=off" };
 pub fn metalNative(b: *std.Build, target: std.Build.ResolvedTarget, native: *std.Build.Module) void {
     const core = b.createModule(.{ .root_source_file = b.path("zig/qwen4_core_metal.zig"), .target = target, .optimize = native.optimize, .imports = &.{.{ .name = "owner", .module = native.import_table.get("tensorfold").? }} });
     if (native.import_table.get("contract")) |contract| core.addImport("contract", contract);
+    core.addImport("living", native.import_table.get("living") orelse native.import_table.get("tensorfold").?.import_table.get("living").?);
     native.addImport("qwen4", module(b, target, native.optimize orelse .Debug, core));
 }
 pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
@@ -19,6 +21,7 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     const family = module(b, b.graph.host, .ReleaseSafe, core);
     const m = family;
     m.addCSourceFile(.{ .file = b.path("zig/tests/qwen4/weight_only_host.cpp"), .flags = flags });
+    @import("qwen4_learning_host.zig").wire(b, m);
     @import("qwen4_hc_host.zig").wire(b, m);
     @import("qwen4_gdn_host.zig").wire(b, m);
     @import("qwen4_gdn_cuda_host.zig").wire(b, m);
@@ -30,6 +33,10 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     @import("qwen4_qsa_attn_host.zig").wire(b, m);
     @import("qwen4_node_attention_host.zig").wire(b, m);
     @import("qwen4_cuda_attention_host.zig").wire(b, m);
+    const raw = b.createModule(.{ .root_source_file = b.path("zig/qwen4_raw_direction_host.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "qwen4", .module = family }} });
+    b.step("diagnose-qwen4-raw-gradient-host", "Unqualified raw BF16 rule-v2 panel; retain failures separately from local derivatives").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = raw, .filters = &.{"Qwen4 raw directional:"} })).step);
+    const rounding = b.createModule(.{ .root_source_file = b.path("zig/qwen4_rounding_direction_host.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "qwen4", .module = family }} });
+    b.step("diagnose-qwen4-rounding-host", "First BF16 store and binary64 local derivatives; no change to raw qualification").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rounding, .filters = &.{"Qwen4 rounding directional:"} })).step);
     const step = b.step("test-qwen4-host", "Qwen4 explicit config admission and synthetic graph contracts");
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const widths_root = b.createModule(.{ .root_source_file = b.path("zig/qwen4_prefill_widths_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "qwen4", .module = m }} });
@@ -43,6 +50,10 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     qsa_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{ "Qwen4 QSA native contract", "Qwen4 QSA scores", "Qwen4 QSA selection" } })).step);
     const backward = b.step("test-qwen4-qsa-backward-host", "Fixed-selection QSA adjoints against independent binary64 finite differences");
     backward.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 QSA backward:"} })).step);
+    const stress = b.step("test-qwen4-learning-stress-host", "Native learner accumulator witnesses in every simulated order");
+    stress.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 learning stress:"} })).step);
+    const learning = b.step("test-qwen4-learning-host", "Native dense learner ownership, admission and recording-device contracts");
+    learning.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 learning:"} })).step);
     const device_host = b.step("test-qwen4-device-host", "The full native device gate under numeric host instruments and refusal controls");
     device_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 device gate:"} })).step);
     const reference_step = b.step("test-qwen4-reference-host", "Qwen4 reference precision, rotary inputs and queued capture fault controls");
@@ -53,6 +64,10 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     cuda_nodes.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 CUDA nodes:"} })).step);
     parent.dependOn(step);
     const cu = @import("cuda_runtime.zig").runtime(b, b.graph.host, .debug, &.{});
+    const learning_launch = b.createModule(.{ .root_source_file = b.path("zig/qwen4_learning_launch_host.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "cuda", .module = cu }, .{ .name = "qwen4", .module = family } } });
+    const learning_abi = b.step("test-qwen4-learning-launch-host", "Actual native learner launch wrappers on recording devices");
+    learning_abi.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = learning_launch, .filters = &.{"Living native launch:"} })).step);
+    parent.dependOn(learning_abi);
     const gdn_host = b.createModule(.{ .root_source_file = b.path("zig/qwen4_gdn_host.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "cuda", .module = cu }, .{ .name = "qwen4", .module = family } } });
     const gdn_step = b.step("test-qwen4-gdn-host", "Real recurrence launch wrappers under owned recording drivers");
     gdn_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gdn_host })).step);

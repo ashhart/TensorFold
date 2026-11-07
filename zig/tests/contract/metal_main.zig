@@ -553,6 +553,13 @@ pub fn main(init: std.process.Init) !u8 {
     var pointwise_cases: [pointwise.count]pointwise.Case = undefined;
     try pointwise.collect(a, device, queue, &pointwise_kernels, &pointwise_cases, &kernels, o.only);
     defer for (&pointwise_cases) |*case| case.deinit();
+    const native_living = @import("metal_living_native.zig");
+    const living_rows = try native_living.Rows.create(a, device, queue, &kernels, o.only);
+    defer living_rows.destroy();
+    const living_gdn = try native_living.Gdn.create(a, device, queue, &kernels, o.only);
+    defer living_gdn.destroy();
+    const living_qsa = try native_living.Qsa.create(a, device, queue, &kernels, o.only);
+    defer living_qsa.destroy();
     const native_hc = try @import("metal_qwen4_hc.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer native_hc.destroy();
     const native_qsa_select = try @import("metal_qwen4_qsa_select.zig").Suite.create(a, device, queue, &kernels, o.only);

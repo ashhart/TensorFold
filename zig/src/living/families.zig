@@ -62,7 +62,23 @@ pub const qwen3_5: Family = .{
     .experts = .every,
 };
 
-pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5 };
+/// Dense Qwen4 uses the same additive SwiGLU rows; native admission checks its own operators and stored layout.
+pub const qwen4: Family = blk: {
+    var f = qwen3_5;
+    f.model_type = "qwen4";
+    f.keys.root_fallback = true;
+    break :blk f;
+};
+
+/// A standalone text config stores its widths at the top level rather than under text_config.
+pub const qwen4_text: Family = blk: {
+    var f = qwen4;
+    f.model_type = "qwen4_text";
+    f.keys.scope = null;
+    break :blk f;
+};
+
+pub const all = [_]Family{ nemotron_h, nemotron_h_omni, qwen4_exp, qwen3_5, qwen4, qwen4_text };
 
 /// The family of a checkpoint's top-level model_type, or null.
 pub fn byModelType(model_type: []const u8) ?Family {
@@ -93,7 +109,7 @@ pub fn kinds(a: std.mem.Allocator, f: Family, o: std.json.ObjectMap) ![]const u8
 /// The object a family's model keys sit in (its scope, else the top level).
 pub fn scoped(f: Family, root: std.json.ObjectMap) ?std.json.ObjectMap {
     const s = f.keys.scope orelse return root;
-    const v = root.get(s) orelse return null;
+    const v = root.get(s) orelse return if (f.keys.root_fallback) root else null;
     return if (v == .object) v.object else null;
 }
 

@@ -2,6 +2,9 @@
 
 pub const benchmark_group = @import("benchmark_group.zig");
 pub const weight_only = @import("weight_only.zig");
+pub const living_rows = @import("living_rows.zig");
+pub const living_gdn = @import("living_gdn.zig");
+pub const living_qsa = @import("living_qsa.zig");
 pub const profile = @import("profile");
 pub const safetensors = @import("safetensors.zig");
 pub const gguf = @import("gguf.zig");
