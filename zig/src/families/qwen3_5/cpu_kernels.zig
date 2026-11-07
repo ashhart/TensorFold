@@ -280,7 +280,7 @@ test "the correctly rounded rsqrt at exact points, and apart from 1 / sqrt(x) in
 /// Wyhash of every output byte of the sweep's fixed inputs: x86_64 and arm64 give these bytes, at any thread count.
 const portable_digest: u64 = 0xae93e2f573b522de;
 
-test "the same bytes at every thread count and column split, on every host" {
+test "the same bytes at 1 to 16 threads and at column splits every 8 columns to 256 and every 256 beyond, on every host" {
     const a = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(11);
     const rnd = prng.random();
