@@ -41,7 +41,7 @@ Existing numeric spellings accepted by each reader, such as leading zeroes, rema
 Pressure, prefix-wait and restore-prefetch values retain trimming of spaces and tabs.
 Prefix-wait and restore-prefetch still require the first remaining character to be a digit.
 CUDA device/segments and the slide test hook retain their space trimming.
-Other numeric readers do not gain whitespace aliases. Empty text is refused except where listed above.
+Other numeric readers do not gain whitespace aliases. Empty or whitespace-only text means unset for every variable, as it did before.
 
 An explicit `--device` or `--segments` wins over its environment value, even if the ignored value is malformed.
 `--carveout` likewise enables the carveout regardless of its enable variable.

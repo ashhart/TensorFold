@@ -12,7 +12,6 @@ pub const Rule = struct {
     forms: []const u8,
     trim: []const u8 = "",
     first_digit: bool = false,
-    empty_default: bool = false,
 };
 
 pub const rules = [_]Rule{
@@ -23,10 +22,10 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit read count (0 disables reading ahead; capped at 65536)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_GIB", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit GiB count (capped at 16777216)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "whole unsigned 64-bit milliseconds (capped at 1099511627776)" },
-    .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .empty_default = true, .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
-    .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .empty_default = true, .forms = "a whole number from 1 to 4, or empty for the default" },
+    .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
+    .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .empty_default = true, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
+    .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
     .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
@@ -48,11 +47,11 @@ pub fn rule(name: []const u8) Rule {
     @panic("unregistered strict environment parser");
 }
 
-/// Null means unset or the setting's existing accepted empty-default form, never a malformed value.
+/// Null means unset, empty or whitespace-only (main's readers used their defaults then), never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);
-    const text = std.mem.trim(u8, raw orelse return null, r.trim);
-    if (text.len == 0) return if (r.empty_default) null else error.InvalidEnvironment;
+    if (std.mem.trim(u8, raw orelse return null, " \t\r\n").len == 0) return null;
+    const text = std.mem.trim(u8, raw.?, r.trim);
     if (r.first_digit and (text[0] < '0' or text[0] > '9')) return error.InvalidEnvironment;
     if (r.kind == .pocket) {
         for ([_][]const u8{ "auto", "reply", "subject", "both" }, 0..) |v, i|

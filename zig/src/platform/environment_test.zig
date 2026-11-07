@@ -89,10 +89,7 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
             covered = true;
         };
         try t.expect(covered);
-        const raw: []const u8 = "";
-        if (r.empty_default) {
-            try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw));
-        } else try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
+        for ([_][]const u8{ "", " ", "\t \n" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw));
     }
 }
 
