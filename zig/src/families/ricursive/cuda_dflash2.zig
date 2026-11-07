@@ -107,15 +107,15 @@ fn place(c: *const Config, vocab: usize, clusters: bool, streams: usize, base: u
     const attn = da.scratch(.{ .q = 0, .segs = 0, .out = 0, .pm = 0, .pl = 0, .po = 0, .streams = streams, .span = widest(c), .heads = c.heads, .kv_heads = c.kv_heads });
     const tops = da.top32Scratch(.{ .logits = 0, .stride = vocab, .n = vocab, .rows = r, .vals = 0, .ids = 0, .part_vals = 0, .part_ids = 0 });
     const sizes = [_]struct { *u64, usize }{
-        .{ &b.ids, r * 4 },                                                .{ &b.resid, r * h * 2 },        .{ &b.x, r * h * 2 },
-        .{ &b.xc, r * h * 2 },                                             .{ &b.y, r * h * 2 },            .{ &b.yc, r * h * 2 },
-        .{ &b.dyn, r * c.dyn() * 2 },                                      .{ &b.qkv, r * (qw + 2 * kvw) * 2 }, .{ &b.q, r * qw * 2 },
-        .{ &b.att, r * qw * 2 },                                           .{ &b.gu, r * 2 * @as(usize, c.ffn) * 2 }, .{ &b.act, r * @as(usize, c.ffn) * 2 },
-        .{ &b.logits, r * vocab * 2 },                                     .{ &b.pm, attn.max },            .{ &b.pl, attn.max },
-        .{ &b.po, attn.values },                                           .{ &b.tv, tops },                .{ &b.ti, tops },
-        .{ &b.out, r * da.top * 8 + r * @as(usize, c.rank) * 2 },          .{ &b.part, partBytes(c, vocab, clusters, streams) }, .{ &b.inv, head_dim / 2 * 4 },
-        .{ &b.psegs, c.layers * streams * @sizeOf(dk.Segment) },          .{ &b.asegs, c.layers * streams * @sizeOf(da.Segment) }, .{ &b.fcx, a * h * 2 },
-        .{ &b.hctx, a * h * 2 },                                           .{ &b.kv, a * 2 * kvw * 2 },     .{ &b.csegs, c.layers * max_pieces * @sizeOf(dk.Segment) },
+        .{ &b.ids, r * 4 },                                       .{ &b.resid, r * h * 2 },                                .{ &b.x, r * h * 2 },
+        .{ &b.xc, r * h * 2 },                                    .{ &b.y, r * h * 2 },                                    .{ &b.yc, r * h * 2 },
+        .{ &b.dyn, r * c.dyn() * 2 },                             .{ &b.qkv, r * (qw + 2 * kvw) * 2 },                     .{ &b.q, r * qw * 2 },
+        .{ &b.att, r * qw * 2 },                                  .{ &b.gu, r * 2 * @as(usize, c.ffn) * 2 },               .{ &b.act, r * @as(usize, c.ffn) * 2 },
+        .{ &b.logits, r * vocab * 2 },                            .{ &b.pm, attn.max },                                    .{ &b.pl, attn.max },
+        .{ &b.po, attn.values },                                  .{ &b.tv, tops },                                        .{ &b.ti, tops },
+        .{ &b.out, r * da.top * 8 + r * @as(usize, c.rank) * 2 }, .{ &b.part, partBytes(c, vocab, clusters, streams) },    .{ &b.inv, head_dim / 2 * 4 },
+        .{ &b.psegs, c.layers * streams * @sizeOf(dk.Segment) },  .{ &b.asegs, c.layers * streams * @sizeOf(da.Segment) }, .{ &b.fcx, a * h * 2 },
+        .{ &b.hctx, a * h * 2 },                                  .{ &b.kv, a * 2 * kvw * 2 },                             .{ &b.csegs, c.layers * max_pieces * @sizeOf(dk.Segment) },
     };
     var at: usize = 0;
     for (sizes) |s| {
