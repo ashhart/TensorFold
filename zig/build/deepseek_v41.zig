@@ -81,3 +81,27 @@ pub fn checks(
     reference_step.dependOn(&b.addRunArtifact(reference).step);
     return .{ .device = device_step, .reference = reference_step };
 }
+
+/// The qualification runner on real weights: `tf-dsv41-run`, installed with the native tools.
+pub fn program(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    engine: *std.Build.Module,
+    metal: *std.Build.Module,
+) void {
+    const run_mod = b.createModule(.{
+        .root_source_file = b.path("zig/deepseek_v41_run.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "tensorfold", .module = engine },
+            .{ .name = "metal", .module = metal },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, optimize) },
+        },
+    });
+    const run_exe = b.addExecutable(.{ .name = "tf-dsv41-run", .root_module = run_mod });
+    b.installArtifact(run_exe);
+    b.step("tf-dsv41-run", "DSV41 qualification receipts on real weights").dependOn(&b.addInstallArtifact(run_exe, .{}).step);
+}
