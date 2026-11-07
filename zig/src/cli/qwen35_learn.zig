@@ -5,6 +5,7 @@ const qwen = @import("qwen35");
 const train = qwen.train;
 const Trainer = train.Trainer;
 const D = 5120;
+const diagnostic = @import("qwen35_slope.zig");
 const turn: train.Turn = .{ .decide = 0, .bits = .empty, .whole = true };
 fn bf(v: u16) f64 {
     return @as(f32, @bitCast(@as(u32, v) << 16));
@@ -15,8 +16,7 @@ fn dot(a: []const f32, b: []const f32) f64 {
     return sum;
 }
 fn slope(t: *Trainer, sq: train.Seq, layer: usize, dir: []const f32, step: f64) !f64 {
-    var num: f64 = 0;
-    var den: f64 = 0;
+    var fit: diagnostic.Fit = .{};
     defer @memset(t.deltaAt(0, 0, layer), 0);
     for (1..7) |m| for ([_]f64{ -1, 1 }) |sign| {
         const x = sign * @as(f64, @floatFromInt(m)) * step;
@@ -24,10 +24,9 @@ fn slope(t: *Trainer, sq: train.Seq, layer: usize, dir: []const f32, step: f64) 
         var result: [1]train.Result = undefined;
         try t.pass(&.{sq}, .loss, turn, &result);
         if (!std.math.isFinite(result[0].loss)) return error.NonfiniteLoss;
-        num += x * result[0].loss;
-        den += x * x;
+        fit.add(x, result[0].loss);
     };
-    return num / den;
+    return fit.slope();
 }
 fn readIds(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]u32 {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24));
@@ -52,6 +51,42 @@ fn servingLoss(a: std.mem.Allocator, e: *qwen.Engine, sq: train.Seq) !f64 {
         total += top + @log(sum) - bf(logits[sq.ids[row + 1]]);
     }
     return total / @as(f64, @floatFromInt(sq.ids.len - sq.start));
+}
+fn cell(t: *Trainer, sq: train.Seq, layer: usize, row: usize) !void {
+    var result: [1]train.Result = undefined;
+    try t.pass(&.{sq}, .target, turn, &result);
+    var push: [D]f32 = undefined;
+    @memcpy(&push, t.pushAt(0, 0, layer));
+    const length = @sqrt(dot(&push, &push));
+    if (!std.math.isFinite(length) or length <= 0) return error.BadGradient;
+    var dir: [D]f32 = undefined;
+    for (&dir, push) |*out, v| out.* = @floatCast(v / length);
+    var scratch: [D]f64 = undefined;
+    const residual = try diagnostic.residual(t.residual(layer + 1, row), &scratch);
+    std.debug.print("RESULT residual layer {d} row {d}: norm {e:.8}, largest {e:.8}, trimmed_rms {e:.8}, gradient {e:.8}\n", .{ layer, row, residual.norm, residual.largest, residual.trimmed_rms, length });
+    var slopes: [4]f64 = undefined;
+    for ([_]f64{ 0.001, 0.002, 0.004, 0.008 }, &slopes) |fraction, *fd| {
+        std.debug.print("RESULT step layer {d} row {d}: fraction {e:.8}, norm_h {e:.8}, trimmed_h {e:.8}\n", .{ layer, row, fraction, residual.normStep(fraction), residual.step(fraction) });
+        fd.* = try slope(t, sq, layer, &dir, residual.step(fraction));
+    }
+    const fractions = [_]f64{ 0.001, 0.002, 0.004, 0.008 };
+    var norm_slopes: [4]f64 = undefined;
+    for (fractions, &norm_slopes) |fraction, *fd|
+        fd.* = try slope(t, sq, layer, &dir, residual.normStep(fraction));
+    for (fractions, norm_slopes, 0..) |fraction, fd, i| {
+        const fine = if (i == 0) 0 else i - 1;
+        const extrapolated = diagnostic.richardson(norm_slopes[fine], norm_slopes[fine + 1]);
+        std.debug.print("RESULT norm-slope layer {d} row {d}: h {e:.8}, slope {e:.8}, Richardson {e:.8}, Richardson_fine_h {e:.8}, relative {d:.6}\n", .{ layer, row, residual.normStep(fraction), fd, extrapolated, residual.normStep(fractions[fine]), @abs(fd - length) / length });
+    }
+    var errors: [3]f64 = undefined;
+    for (&errors, 1..) |*relative, i| {
+        relative.* = @abs(slopes[i] - length) / length;
+        std.debug.print("RESULT slope layer {d} row {d}: h {e:.8}, slope {e:.8}, Richardson {e:.8}, relative {d:.6}\n", .{ layer, row, residual.step(@as(f64, 0.001) * @exp2(@as(f64, @floatFromInt(i)))), slopes[i], diagnostic.richardson(slopes[i - 1], slopes[i]), relative.* });
+        if (!std.math.isFinite(relative.*)) return error.NonfiniteGradient;
+    }
+    std.mem.sort(f64, &errors, {}, std.sort.asc(f64));
+    std.debug.print("RESULT owned 27B layer {d} row {d}: median {d:.5}, worst {d:.5}\n", .{ layer, row, errors[1], errors[2] });
+    if (errors[1] >= 0.15 or errors[2] >= 0.15) return error.GradientMismatch;
 }
 pub fn main(init: std.process.Init) !u8 {
     const a = init.gpa;
@@ -83,32 +118,20 @@ pub fn main(init: std.process.Init) !u8 {
     try t.pass(&.{ sq, sq }, .loss, turn, &together);
     for (together) |p| if (@abs(p.loss - serving) > 1e-3) return error.PackedLossMismatch;
     std.debug.print("PASS owned serving/trainer/packed loss {d:.8}\n", .{serving});
-    const rows = [_]usize{ 0, sq.start - 5, sq.start - 1 };
+    const rows = [_]usize{ 0, sq.start - 5, sq.start - 3, sq.start - 1 };
     const layers = [_]usize{ train.keepLow(e.g.layers), 23, 31, e.g.layers - 2 };
-    var push: [D]f32 = undefined;
-    var dir: [D]f32 = undefined;
     var checks: usize = 0;
+    var failures: usize = 0;
     for (rows) |row| for (layers) |layer| {
         sq.nudge = .{ .layers = .{ @as(u64, 1) << @intCast(layer), 0, 0 }, .rows = .{ row, 0, 0 } };
-        try t.pass(&.{sq}, .target, turn, &result);
-        @memcpy(&push, t.pushAt(0, 0, layer));
-        const length = @sqrt(dot(&push, &push));
-        if (!std.math.isFinite(length) or length <= 0) return error.BadGradient;
-        for (&dir, push) |*out, v| out.* = @floatCast(v / length);
-        var size: f64 = 0;
-        for (t.residual(layer + 1, row)) |v| size += bf(v) * bf(v);
-        if (!std.math.isFinite(size) or size <= 0) return error.BadResidual;
-        var errors: [3]f64 = undefined;
-        for ([_]f64{ 0.002, 0.004, 0.008 }, &errors) |fraction, *relative| {
-            const fd = try slope(t, sq, layer, &dir, fraction * @sqrt(size));
-            relative.* = @abs(fd - length) / length;
-            if (!std.math.isFinite(relative.*)) return error.NonfiniteGradient;
-        }
-        std.mem.sort(f64, &errors, {}, std.sort.asc(f64));
-        std.debug.print("RESULT owned 27B layer {d} row {d}: median {d:.5}, worst {d:.5}\n", .{ layer, row, errors[1], errors[2] });
-        if (errors[1] >= 0.15 or errors[2] >= 0.15) return error.GradientMismatch;
+        cell(t, sq, layer, row) catch |err| {
+            failures += 1;
+            std.debug.print("FAIL owned 27B layer {d} row {d}: {s}\n", .{ layer, row, @errorName(err) });
+        };
         checks += 1;
     };
-    std.debug.print("PASS {d} owned directional checks, every configured step within bound\n", .{checks});
+    std.debug.print("RESULT {d} owned directional checks, {d} failures\n", .{ checks, failures });
+    if (failures != 0) return error.GradientMismatch;
+    std.debug.print("PASS configured trimmed-scale directional checks at relative-error threshold 0.15\n", .{});
     return 0;
 }
