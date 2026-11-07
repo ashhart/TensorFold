@@ -16,7 +16,7 @@ const dory = @import("dory");
 pub const registry = .{ nemotron.native, nemotron.omni, glm.native, minimax.native, qwen35.native, qwen35.native_moe, flashnext.native, kolibri1.native, gemma4.native, gemma4.native31, spark25.native, dory.native, @import("lfm2_moe_cuda").native };
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 4]api.Family = undefined;
-    for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
+    for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats, .decision_formats = if (@hasDecl(F, "decision_formats")) F.decision_formats else &.{} };
     out[registry.len] = lfm2.family;
     out[registry.len + 1] = .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} };
     out[registry.len + 2] = .{ .model_type = "qwen4", .formats = @import("qwen4").family.native_host.formats };
@@ -43,4 +43,14 @@ test "GLM capabilities: CUDA offers the EXL3 format its loader accepts" {
         for (family.formats) |format| if (std.mem.eql(u8, format, "exl3")) return;
     };
     return error.NoExl3Format;
+}
+
+test "capability audit: CUDA Qwen3.5 lists BF16 under decisions only, the MoE entry and the others none" {
+    for (families) |f| {
+        for (f.formats) |format| try std.testing.expect(!std.mem.eql(u8, format, "bf16") or !std.mem.startsWith(u8, f.model_type, "qwen3_5"));
+        if (std.mem.eql(u8, f.model_type, "qwen3_5")) {
+            try std.testing.expectEqual(@as(usize, 1), f.decision_formats.len);
+            try std.testing.expectEqualStrings("bf16", f.decision_formats[0]);
+        } else try std.testing.expectEqual(@as(usize, 0), f.decision_formats.len);
+    }
 }
