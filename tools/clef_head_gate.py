@@ -3,8 +3,10 @@
 # usage:
 #   clef_head_gate.py cases <model dir> <records> <rows> <out>        each record's spans, ids and rows paths (case.json)
 #   clef_head_gate.py reference <model dir> <cases> <out> --dtype bf16|fp64 [--device cuda|cpu]
-#   clef_head_gate.py native <tf-clef-test> <model dir> <cases> <out> [--piece N|whole]
-#   clef_head_gate.py compare <cases> <native> <bf16> <fp64> [--report FILE]
+#   clef_head_gate.py native <tf-clef-test|tf-cuda-test> <model> <cases> <out> [--piece N|whole] [--backend hip|cuda]
+#   clef_head_gate.py compare <cases> <native> <bf16> <fp64> [--report FILE] [--rule strict|margin]
+# The strict rule: per question type, native mean and worst error against FP64 no larger than the reference BF16
+# head's. The margin rule keeps the worst and lets the mean sit up to 10% above the reference's.
 # The records are clef_backbone_rows.py's; their schema text comes again from its seeded generator, so each field's
 # instruction and each option's description give the spans, as token ranges of the record by character offsets.
 import argparse, importlib.util, json, math, os, subprocess, sys
@@ -18,6 +20,8 @@ SOURCES = {
     "checkpoint": "Cloudflare/clef-flash@fb4417d31c1d0f9e7e77f1141b40aaede7491e00",
 }
 TYPES = {"noul": 0, "choice": 1, "score": 2}
+# the margin rule's bound on the native mean error, as a multiple of the reference BF16 head's
+MEAN_MARGIN = 1.10
 
 
 def rows_tool():
@@ -130,8 +134,24 @@ def cmd_reference(a):
 
 
 def cmd_native(a):
-    cmd = [a.binary, "head", a.model, a.cases, a.out] + (["--piece", a.piece] if a.piece else [])
+    head = ["clef", "head"] if a.backend == "cuda" else ["head"]
+    cmd = [a.binary, *head, a.model, a.cases, a.out] + (["--piece", a.piece] if a.piece else [])
     subprocess.run(cmd, check=True)
+    if a.backend == "cuda":
+        check_pieces(a)
+
+
+def check_pieces(a):
+    """Each case's consumed pieces, as the runner recorded them: in order, covering the prompt, at the asked size."""
+    for name in json.loads((Path(a.cases) / "index.json").read_text())["cases"]:
+        c = json.loads((Path(a.cases) / f"{name}.json").read_text())
+        rows = int(np.load(c["ids"]).shape[0])
+        size = rows if a.piece in (None, "whole") else int(a.piece)
+        want = [[at, min(size, rows - at)] for at in range(0, rows, size)]
+        got = json.loads((Path(a.out) / f"{name}.json").read_text())["pieces"]
+        if got != want:
+            sys.exit(f"{name}: consumed pieces {got[:3]}... are not {size}-row pieces of {rows} rows")
+    print(f"pieces: every case consumed in {a.piece or 'whole'}-row pieces")
 
 
 def errors(got, want):
@@ -167,26 +187,31 @@ def cmd_compare(a):
             pooled[t]["bf16"].append(e_r)
     names_of = {v: k for k, v in TYPES.items()}
     table, ok = [], True
-    print("| type | logits | native mean | native worst | reference BF16 mean | reference BF16 worst | pass |")
-    print("|---|---|---|---|---|---|---|")
+    margin = MEAN_MARGIN if a.rule == "margin" else 1.0
+    print("| type | logits | native mean | native worst | reference BF16 mean | reference BF16 worst | strict | margin |")
+    print("|---|---|---|---|---|---|---|---|")
     for t, p in pooled.items():
         if not p["native"]:
             continue
         n, r = np.array(p["native"]), np.array(p["bf16"])
         row = {"type": names_of[t], "logits": int(n.size), "native_mean": float(n.mean()), "native_worst": float(n.max()),
                "bf16_mean": float(r.mean()), "bf16_worst": float(r.max())}
-        row["pass"] = row["native_mean"] <= row["bf16_mean"] and row["native_worst"] <= row["bf16_worst"]
+        worst_ok = row["native_worst"] <= row["bf16_worst"]
+        row["strict"] = row["native_mean"] <= row["bf16_mean"] and worst_ok
+        row["margin"] = row["native_mean"] <= MEAN_MARGIN * row["bf16_mean"] and worst_ok
+        row["pass"] = row["native_mean"] <= margin * row["bf16_mean"] and worst_ok
         ok &= row["pass"]
         table.append(row)
         print(f"| {row['type']} | {row['logits']} | {row['native_mean']:.3e} | {row['native_worst']:.3e} | "
-              f"{row['bf16_mean']:.3e} | {row['bf16_worst']:.3e} | {'yes' if row['pass'] else 'NO'} |")
+              f"{row['bf16_mean']:.3e} | {row['bf16_worst']:.3e} | {'yes' if row['strict'] else 'NO'} | "
+              f"{'yes' if row['margin'] else 'NO'} |")
     total = sum(len(p["native"]) for p in pooled.values())
     print(f"paired: {total} logits, {same} identical to the reference BF16 head's; of the rest native is nearer FP64 in "
           f"{nearer}, farther in {farther}, as near in {total - same - nearer - farther}")
     if a.report:
         paired = {"logits": total, "identical": same, "native_nearer": nearer, "native_farther": farther}
-        Path(a.report).write_text(json.dumps({"sources": SOURCES, "types": table, "paired": paired, "pass": ok}, indent=1))
-    print("PASS gate 3" if ok else "FAIL gate 3")
+        Path(a.report).write_text(json.dumps({"sources": SOURCES, "rule": a.rule, "types": table, "paired": paired, "pass": ok}, indent=1))
+    print(f"PASS gate 3 ({a.rule} rule)" if ok else f"FAIL gate 3 ({a.rule} rule)")
     return 0 if ok else 1
 
 
@@ -205,10 +230,12 @@ def main():
     for x in ("binary", "model", "cases", "out"):
         n.add_argument(x)
     n.add_argument("--piece")
+    n.add_argument("--backend", choices=["hip", "cuda"], default="hip")
     m = sub.add_parser("compare")
     for x in ("cases", "native", "bf16", "fp64"):
         m.add_argument(x)
     m.add_argument("--report")
+    m.add_argument("--rule", choices=["strict", "margin"], default="strict")
     a = p.parse_args()
     return {"cases": cmd_cases, "reference": cmd_reference, "native": cmd_native, "compare": cmd_compare}[a.cmd](a) or 0
 
