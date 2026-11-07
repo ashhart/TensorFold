@@ -292,7 +292,9 @@ below; these are estimates for planning a port, not results.
 
 6. **KV admission ledger.** A request reserves its prompt and reply, not a whole window a `--parallel` stream
    ([#1943]). [#1945] added the core ledger, and [#2127] counts every paged pool's promises in it, with no change in
-   behaviour. The unpaged families still convert one by one, as #1943 plans.
+   behaviour. A stream paid for at load (the engine's own sequence) is a standing lease in it, so the ledger admits the
+   window plan's streams and not one fewer; no family on main reaches that yet. The unpaged families still convert one
+   by one, as #1943 plans.
 
 7. **KV pages in pinned host memory.** Pages that don't fit on the card live in pinned host memory, so a long
    conversation's next turn still resumes. GLM keeps its latent rows there with `TF_GLM_KV_HOST` ([#1795]) and its kept
