@@ -20,14 +20,12 @@ fn live(b: *const Metal) usize {
 pub fn capacityFn(ptr: *anyopaque, s: *lanes.Stream) u32 {
     const b = Metal.self(ptr);
     const slot = b.slotOf(s) orelse return 0;
-    if (b.mtp != null) return @import("qwen27_mtp.zig").capacity(b, slot);
     return if (b.draftsOwn(slot)) @import("qwen27_window.zig").proposal(b.window, b.copies, b.nodes, b.window + 1, live(b) == 1) else 0;
 }
 
 /// Each drafting slot proposes its next tree, up to eight in one drafter pass; a shared round's kept taps first.
 pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
     const b = Metal.self(ptr);
-    if (b.mtp != null) return @import("qwen27_mtp.zig").draft(b, requests);
     errdefer mtl.pass_metrics.end();
     @import("qwen27_slots.zig").promoteDue(b); // a stream moves into a freed slot 0 before it drafts
     var batch: [8]Proposal = undefined;

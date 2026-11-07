@@ -43,7 +43,7 @@ pub fn pick(values: []const u16) !Pick {
     return .{ .token = token, .chance = @floatCast(1 / sum) };
 }
 
-/// One head pass over `rows` frame rows (ids and positions set): `hidden` row i pairs with token i; returns its rows.
+/// One head pass over `rows` frame rows (ids and positions set): `hidden` row i beside token i; returns normed rows.
 pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forward.Mixer, hidden: Ref, rows: u32, head: forward.Head) !Ref {
     const w = m.weights.mtp orelse return error.NoMtpHead;
     if (rows == 0 or rows > sc.capacity or rows > m.frame.capacity or (if (head == .all) rows else 1) > sc.logit_rows) return error.BadFrameRows;
@@ -67,5 +67,5 @@ pub fn encode(m: *Model, sc: *const Scratch, e: *mtl.ComputeEncoder, hooks: forw
     try s.mixer(&lane, block);
     try s.post(&lane, block);
     try s.finish(&lane);
-    return s.hidden;
+    return f.get(.input); // the final norm's rows the head read: a chain's next row starts there, as on CUDA
 }

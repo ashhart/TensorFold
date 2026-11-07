@@ -16,6 +16,7 @@ const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
+const Mtp = @import("qwen27_mtp.zig").Mtp;
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
@@ -44,6 +45,8 @@ pub const Host = struct {
     trace: ?tf.gpu_profile.Trace = null, // TF_Q27_PROFILE: rounds' class GPU times to the log, gpu_seconds in replies
     draft: ?*lb.Draft = null,
     back: *lb.Metal,
+    mtp: ?*Mtp = null, // --mtp-drafts: the MTP head, the core's drafter in front of `back`
+    wrap: ?lanes.drafted.Drafted = null,
     cfg: lanes.Config,
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -408,16 +411,20 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
     if (h.draft != null or mtp_on) try h.back.measure(io);
+    h.mtp = null;
+    h.wrap = null;
     if (mtp_on) {
-        const x = try @import("qwen27_mtp.zig").Mtp.init(gpa, &h.runner, .{ .cap = o.mtp_drafts, .floor = o.mtp_confidence });
-        h.back.mtp = x; // the backend owns it from here
-        h.back.mtp_step_ms = try x.time();
-        std.log.info("qwen27: MTP head drafts slot 0's chains of {d} at most, a step {d:.2} ms", .{ @import("qwen27_mtp.zig").capacity(h.back, 0), h.back.mtp_step_ms });
+        const x = try Mtp.init(gpa, h.back, .{ .cap = o.mtp_drafts, .floor = o.mtp_confidence });
+        h.mtp = x;
+        h.wrap = try lanes.drafted.Drafted.init(gpa, h.back.backend(), x.drafter());
+        std.log.info("qwen27: the MTP head drafts chains of {d} at most, a step {d:.2} ms", .{ x.depth(), x.step_ms });
     }
-    h.cfg = try lanes.Config.init(gpa, h.back.facts(), window, h.back.nodes);
+    errdefer if (h.mtp) |x| x.deinit();
+    errdefer if (h.wrap) |*w| w.deinit();
+    h.cfg = try lanes.Config.init(gpa, if (h.wrap) |*w| w.facts(h.back.facts()) else h.back.facts(), window, h.back.nodes);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
+    h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .draft_sources = .{ .drafter = if (h.draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else if (mtp_on) .{ .kind = "MTP", .name = q.gpu_weights.mtp_file } else null }, .structures = @import("qwen27_masks.zig").supported, .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .decode_share = o.decode_share, .vision = offer });
@@ -566,6 +573,8 @@ pub fn close(ptr: *anyopaque) void {
     q.residency.drop(h);
     if (h.disk_stage) |b| b.deinit();
     h.cfg.deinit(h.gpa);
+    if (h.wrap) |*w| w.deinit();
+    if (h.mtp) |x| x.deinit();
     h.back.deinit();
     if (h.draft) |d| d.deinit();
     if (h.trace) |*t| t.reportRest();

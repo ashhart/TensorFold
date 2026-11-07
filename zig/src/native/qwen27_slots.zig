@@ -128,13 +128,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         if (decoded) try x.decodeChunk(part, last) else try x.promptChunk(part, last);
     } else {
         const session = q.session.Session{ .runner = b.runner, .slot = slot };
-        const start = b.runner.offsets[slot];
         if (decoded) try session.decodeChunk(part, last) else try session.promptChunk(part, last);
-        if (b.mtp) |x| if (slot == 0) {
-            var rows: [q.gpu_frame.max_rows]u32 = undefined;
-            for (rows[0..part.len], 0..) |*row, i| row.* = @intCast(i);
-            try x.absorb(start, part[0], rows[0..part.len], part[1..]);
-        };
         if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
     }
     charge(b, s, before);

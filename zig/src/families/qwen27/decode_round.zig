@@ -30,6 +30,9 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
     return true;
 }
 
+/// A slot's rows in the taps buffer: cache rows [start, start + rows) sit at frame rows from `first`.
+pub const Tapped = struct { start: u32 = 0, first: u32 = 0, rows: u32 = 0 };
+
 pub const Runner = struct {
     allocator: std.mem.Allocator,
     residency: ?mtl.ResidencySet.Follow = null,
@@ -52,6 +55,8 @@ pub const Runner = struct {
     active: ?[32]u8 = null,
     failed: bool = false,
     capture_taps: bool = false,
+    /// The last tapped pass's rows by slot: their cache start, first frame row and count (0: none held).
+    tapped: [attn.planning.max_streams]Tapped = @splat(.{}),
     tail: ?forward.Tail = null,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
@@ -303,7 +308,10 @@ pub const Runner = struct {
             r.current_attention = null;
             r.current_placed = .{};
         }
-        if (r.capture_taps) r.taps.begin();
+        if (r.capture_taps) {
+            r.taps.begin();
+            r.tapped = @splat(.{});
+        }
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
@@ -326,15 +334,18 @@ pub const Runner = struct {
             r.gpu_seconds += r.last_gpu_seconds + (t.spanned - spanned) + (if (r.model.ane) |share| share.gpu_seconds - handed else 0);
             t.round();
         }
-        if (r.capture_taps) try r.taps.complete();
+        if (r.capture_taps) {
+            try r.taps.complete();
+            for (round.slots, round.windows, round.firsts) |slot, w, first| r.tapped[slot] = .{ .start = w.start, .first = first, .rows = @intCast(w.parents.len) };
+        }
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);
     }
 
-    /// One MTP head pass: `round` holds the head's own cache rows and positions, `hidden` its tokens' rows.
+    /// One MTP head pass (`round`: its cache rows and positions); a round left to keep reads nothing it writes.
     pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
-        if (r.failed or r.active != null or r.model.weights.mtp == null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
+        if (r.failed or r.model.weights.mtp == null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
         var attention_plan = try r.attentionPlan(round);
         defer attention_plan.deinit();
         try r.model.frame.setRows(round.ids, round.feed_positions);

@@ -86,7 +86,7 @@ pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[
     if (drafter) |d| try disk_identity.checkpoint(&w, a, io, d);
     const p = try probe(h, io);
     // a state written with the MTP head holds its keys and values too, so it is read only with the head
-    const words = [_]u64{ q.disk.sourceHash(), @intFromBool(h.model.device.tensorUnits()), @intFromBool(h.model.ane != null), @intFromBool(h.draft != null), @intFromBool(h.back.mtp != null), p.hash };
+    const words = [_]u64{ q.disk.sourceHash(), @intFromBool(h.model.device.tensorUnits()), @intFromBool(h.model.ane != null), @intFromBool(h.draft != null), @intFromBool(h.mtp != null), p.hash };
     w.update(std.mem.sliceAsBytes(&words));
     disk_identity.machine(&w, std.mem.span(h.model.device.name()));
     disk_identity.profile(&w, .{ .family = if (h.model.config.moe()) "qwen3_5_moe" else "qwen3_5", .backend = "metal" });
