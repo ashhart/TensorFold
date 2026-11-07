@@ -241,7 +241,6 @@ pub fn build(b: *std.Build) void {
     grammar_build.steps(b, target, xgrammar, lanes_cpu);
     grammar_build.hostTests(b, test_step);
     contract_build.hostTests(b, gemma4_contract_host);
-    @import("zig/build/cpu_contract.zig").steps(b, test_step);
     // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     @import("zig/build/mcdma_pair.zig").add(b, target);
@@ -249,6 +248,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/checkpoint_config.zig").tests(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
     @import("zig/build/save_guard.zig").wire(b);
+    @import("zig/build/cpu_contract.zig").steps(b, test_step);
     @import("zig/build/bf16_round.zig").wire(b, test_step);
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
