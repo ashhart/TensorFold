@@ -47,6 +47,8 @@ pub const Scores = struct {
     fast: ?cuda.Function = null,
     base: u64 = 0,
     wrong_table: bool = false,
+    regions: bool = false, // TF_GLM_KV_SPLIT: keys in the pooled region, its table and stride; control: the latent table
+    step: usize = pages.page_bytes,
     shape: c.Shape = undefined,
     q: []u16 = &.{},
     w: []u16 = &.{},
@@ -82,7 +84,8 @@ pub const Scores = struct {
             declared.name = "cuda glm tf_glm_index_scores on pages out of order";
             declared.replaces = "tf_glm_scores";
         }
-        if (self.wrong_table) declared.name = "control: GLM paged scores use a swapped table";
+        if (self.regions) declared.name = if (self.fast != null) "cuda glm tf_glm_index_scores on two regions out of order" else "cuda glm tf_glm_scores on two regions out of order";
+        if (self.wrong_table) declared.name = if (self.regions) "control: GLM scores in two regions take the latent table" else "control: GLM paged scores use a swapped table";
         return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
@@ -122,9 +125,11 @@ pub const Scores = struct {
         const arena = try a.alloc(u8, (n_pages + 3) * pages.page_bytes);
         defer a.free(arena);
         @memset(arena, 0);
-        const pk = pages.part_bytes + pages.rows_a_page * pages.lw * 2; // the cache's pooled keys in page 0
+        const geo: pages.Geometry = .{ .regions = self.regions, .n = n_pages + 3 };
+        const pk = geo.pkAt(); // the cache's pooled keys in page 0
+        self.step = geo.pkStride();
         for (0..self.seen) |p| {
-            const at = pk + @as(usize, @intCast(self.ids[p / 128])) * pages.page_bytes + (p % 128) * dk * 2;
+            const at = pk + @as(usize, @intCast(self.ids[p / 128])) * self.step + (p % 128) * dk * 2;
             @memcpy(arena[at..][0 .. dk * 2], std.mem.sliceAsBytes(self.keys[p * dk ..][0..dk]));
         }
         const p: i32 = @intCast(self.at);
@@ -132,7 +137,7 @@ pub const Scores = struct {
         self.in[1] = try self.rig.input(std.mem.sliceAsBytes(self.w));
         self.in[2] = try self.rig.input(arena) + pk;
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
+        self.pt = try pages.tableFor(&self.rig, rng, self.ids, self.wrong_table, self.regions);
         self.out = try self.rig.output(shape.rows * shape.n * 4);
         self.base = try self.rig.scratch(shape.rows * shape.n * 4);
         return true;
@@ -149,11 +154,11 @@ pub const Scores = struct {
         const loop: usize = if (fast) glm.index.score_tiles else if (rows >= sparse.score_loop_from) sparse.score_loop else 1;
         var a: cuda.Args = .{};
         if (fast) {
-            inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(rows)), @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);
+            inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(rows)), @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, @intCast(self.step)) }) |v| a.add(v);
             const g2 = glm.index.scoresGrid(rows, nb);
             try cuda.launch.launch(f, .{ .grid = .{ .x = g2[0], .y = g2[1] }, .block = .{ .x = glm.index.threads } }, self.rig.s, &a);
         } else {
-            inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);
+            inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, @intCast(self.step)) }) |v| a.add(v);
             try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((nb + loop - 1) / loop) }, .block = .{ .x = 128 } }, self.rig.s, &a);
         }
     }
@@ -209,6 +214,7 @@ pub const Tokens = struct {
     rig: rig_.Rig,
     f: cuda.Function,
     wrong_table: bool = false,
+    regions: bool = false, // TF_GLM_KV_SPLIT: the latent table, rows a latent stride apart; control: the pooled table
     shape: c.Shape = undefined,
     pools: []i64 = &.{},
     ids: []i32 = &.{},
@@ -220,7 +226,10 @@ pub const Tokens = struct {
     counts: u64 = 0,
     msg: [200]u8 = undefined,
 
-    const page_rows = pages.page_bytes / (pages.lw * 2); // a page's step in latent rows
+    /// A page's step in latent rows: interleaved pages, or the latent region's.
+    fn pageRows(self: *const Tokens) usize {
+        return (pages.Geometry{ .regions = self.regions, .n = 0 }).latStride() / (pages.lw * 2);
+    }
 
     pub fn deinit(self: *Tokens) void {
         self.free();
@@ -237,7 +246,8 @@ pub const Tokens = struct {
 
     pub fn kernel(self: *Tokens) g.Kernel {
         var declared = spec(.tokens);
-        if (self.wrong_table) declared.name = "control: GLM paged token assembly uses a swapped table";
+        if (self.regions) declared.name = "cuda glm tf_glm_dsa_tokens on two regions out of order";
+        if (self.wrong_table) declared.name = if (self.regions) "control: GLM token assembly in two regions takes the pooled table" else "control: GLM paged token assembly uses a swapped table";
         return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.wrong_table) .shapes else null };
     }
 
@@ -266,7 +276,7 @@ pub const Tokens = struct {
         const p: i32 = @intCast(self.at);
         self.in = try self.rig.input(std.mem.sliceAsBytes(self.pools));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
+        self.pt = try pages.tableFor(&self.rig, rng, self.ids, self.wrong_table, self.regions);
         self.tokens = try self.rig.output(shape.rows * self.width() * 4);
         self.counts = try self.rig.output(shape.rows * 4);
         return true;
@@ -280,7 +290,7 @@ pub const Tokens = struct {
         a.add(self.tokens);
         a.add(self.counts);
         a.add(self.pt);
-        a.add(@as(i64, page_rows));
+        a.add(@as(i64, @intCast(self.pageRows())));
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.shape.rows) }, .block = .{ .x = 256 } }, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
@@ -297,7 +307,7 @@ pub const Tokens = struct {
     /// Token t's row in the pages: row t % 512 of page ids[t / 512], pages page_rows rows apart.
     fn row(self: *const Tokens, t: i64) i32 {
         const at: usize = @intCast(t);
-        return @intCast(@as(i64, self.ids[at / pages.rows_a_page]) * page_rows + @as(i64, @intCast(at % pages.rows_a_page)));
+        return @intCast(@as(i64, self.ids[at / pages.rows_a_page]) * @as(i64, @intCast(self.pageRows())) + @as(i64, @intCast(at % pages.rows_a_page)));
     }
 
     /// Every row's list against the pools and the table on the host, and its count (0 while K pools cover it).
