@@ -95,6 +95,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   other's sites, so prompts of 8K to 128K finish about 2% sooner at TP=2, with replies unchanged;
   `TF_GLM_PROMPT_PAIR=0` turns it off (#1423).
 
+- Internal: kept prompt states are copied through one walk in core, with GLM on it. Nothing a user sees changes (#2215, part of #1293).
+
 - TENSORFOLD_PHASE_METRICS=1 adds a bounded request queue-wait histogram and its vLLM alias to native metrics; it is off by default (#2139).
 
 - GLM on CUDA prefetches a decode window's next weights into L2 on a side stream, on by default on GB10 (sm_121) only, inside a 12 MiB budget; replies are identical, and every other GPU is unchanged (#1580). Thanks to @Bizuayeu.

@@ -113,7 +113,7 @@ fn whole(sl: *Slots, snap: *snapshot.Snap) !void {
     defer pool.pop();
     const x = sl.ctx(&sl.slots[home]);
     const b = sl.e.begin();
-    snapshot.spill(&x, b.enc, .{ .buf = snap.buf }, .{ .buf = buf }, snap.at, &sl.slots[home].s);
+    try snapshot.spill(&x, b.enc, .{ .buf = snap.buf }, .{ .buf = buf }, snap.at, &sl.slots[home].s);
     try sl.e.finish(b.cb, b.enc);
     if (snap.follow) |f| f.leave(f.ctx, snap.buf);
     snap.buf.deinit();
@@ -205,7 +205,7 @@ fn copySnap(sl: *Slots, slot: *Slot, snap: *snapshot.Snap, into: bool) !void {
     const x = sl.ctx(slot);
     const b = sl.e.begin();
     var view: st.State = undefined;
-    snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into, pool_mod.prefixOf(sl, snap, &view));
+    try snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into, pool_mod.prefixOf(sl, snap, &view));
     try sl.e.finish(b.cb, b.enc);
 }
 
