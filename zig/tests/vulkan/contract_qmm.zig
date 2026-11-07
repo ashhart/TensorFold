@@ -101,6 +101,10 @@ pub const Fixture = struct {
     bindings: [5]dispatch.Binding = undefined,
     /// Planted control: overwrite input buffer i (x, w, scales, biases) after dispatch; gate 2 must catch it.
     corrupt: ?usize = null,
+    /// The kernel's reported name when it is not the default qmm_bf16 spec's.
+    name: ?[]const u8 = null,
+    /// Tiled image: inputs are repacked into 32-column tiles before upload; shapes that cannot be tiled are refused.
+    tiled: bool = false,
 
     pub fn init(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, pipeline: *dispatch.Pipeline) Fixture {
         return .{ .a = a, .dev = dev, .cmds = cmds, .staging = staging, .pipeline = pipeline };
@@ -138,13 +142,28 @@ pub const Fixture = struct {
             planted.name = corrupt_names[i];
             return .{ .spec = planted, .ctx = f, .vt = &vt, .control = .repeat };
         }
-        return .{ .spec = spec, .ctx = f, .vt = &vt };
+        var named = spec;
+        if (f.name) |n| named.name = n;
+        return .{ .spec = named, .ctx = f, .vt = &vt };
     }
     fn allocPoison(a: std.mem.Allocator, data_len: usize) ![]u16 {
         const extra: usize = if (data_len % 2 == 0) 16 else 17;
         const p = try a.alloc(u16, data_len + extra);
         @memset(p, poison);
         return p;
+    }
+    // The tiled image reads host-repacked inputs sized for whole tiles; the float64 reference came from the row layout.
+    fn tileInputs(a: std.mem.Allocator, words: []u8, scales: []u8, biases: []u8, shape: c.Shape) !void {
+        const real_words = shape.n * shape.k / 2;
+        const real_params = shape.n * (shape.k / group) * 2;
+        const copy = try a.alloc(u8, real_words);
+        defer a.free(copy);
+        @memcpy(copy, words[0..real_words]);
+        vk.tile.tileWords(words, copy, shape.n, shape.k);
+        @memcpy(copy[0..real_params], scales[0..real_params]);
+        vk.tile.tileParams(scales, copy[0..real_params], shape.n, shape.k);
+        @memcpy(copy[0..real_params], biases[0..real_params]);
+        vk.tile.tileParams(biases, copy[0..real_params], shape.n, shape.k);
     }
     pub fn prepare(f: *Fixture, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.k % group != 0 or shape.n * shape.k > max_weights or shape.rows * shape.n > max_outputs) return false;
@@ -185,16 +204,18 @@ pub const Fixture = struct {
         const x = try allocPoison(f.a, shape.rows * shape.k);
         errdefer f.a.free(x);
         @memcpy(x[0..q.x.len], q.x);
+        const stored: usize = if (f.tiled) vk.tile.padded(shape.n) else shape.n;
         const words_len = shape.n * shape.k / 8;
-        const w = try f.a.alloc(u32, words_len + 4);
+        const w = try f.a.alloc(u32, stored * shape.k / 8 + 4);
         errdefer f.a.free(w);
         @memset(w, 0xffff_ffff);
         q.words(w[0..words_len]);
         const nparam = shape.n * (shape.k / group);
-        const scales = try allocPoison(f.a, nparam);
+        const nstored = stored * (shape.k / group);
+        const scales = try allocPoison(f.a, nstored);
         errdefer f.a.free(scales);
         @memcpy(scales[0..nparam], q.scales);
-        const biases = try allocPoison(f.a, nparam);
+        const biases = try allocPoison(f.a, nstored);
         errdefer f.a.free(biases);
         @memcpy(biases[0..nparam], q.biases);
         const out = try allocPoison(f.a, shape.rows * shape.n);
@@ -205,6 +226,7 @@ pub const Fixture = struct {
         errdefer f.a.free(mag);
         try q.reference(want, mag);
         if (fill != .nonfinite) for (want, mag) |v, m| if (!std.math.isFinite(v) or !std.math.isFinite(m)) return error.NonFiniteReference;
+        if (f.tiled) try tileInputs(f.a, std.mem.sliceAsBytes(w[0 .. stored * shape.k / 8]), std.mem.sliceAsBytes(scales[0..nstored]), std.mem.sliceAsBytes(biases[0..nstored]), shape);
         f.x = x;
         f.w = w;
         f.scales = scales;
