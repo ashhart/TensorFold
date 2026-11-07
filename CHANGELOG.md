@@ -174,6 +174,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   `input_file` and Messages `document` PDFs, and the fields it left out (`thinking`, `min_rows`, grammar timings,
   `exact_mode`, `stop_sequence`, health's `memory.limit` and 503 body, `/v1/models`' context and reasoning) (#2299).
 
+- Tests: `zig build tf-tp-check` builds a checker for the dumps each rank of a mixed Metal and CUDA tensor-parallel run
+  writes, and `zig build test-tp-check` runs its tests (#2321, part of #1236). Thanks to @ThinkOffApp.
+
 - Qwen3.8-27B: a prompt frame below 128 rows (`TF_PROMPT_ROWS=16`) is refused before loading, with the setting, the
   value and the fix named, instead of a bare "TargetBinding" (#2298).
 
