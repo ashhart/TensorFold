@@ -1,6 +1,6 @@
 //! The joint schema head's device memory: each readout stream's state and the scratch one finish shares, by layout.
 const std = @import("std");
-const Config = @import("core").joint_schema.Config;
+const Config = @import("config.zig").Config;
 
 /// Query rows an attention block scores at once: the FP32 score block is heads x 64 x keys.
 pub const block = 64;
