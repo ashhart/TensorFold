@@ -590,8 +590,8 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_
     constexpr int D = 64, WARPS = 8, HPC = 4, NS = 8;
     constexpr bool causal = true;
     constexpr int skip = 0;
-    constexpr bool HPAGED = false, F8 = false, HM = false;
-    constexpr int CAP = 0, PTOK = 1;
+    constexpr bool P256 = false, HPAGED = false, F8 = false, HM = false, IDS = false;
+    constexpr int CAP = 0, PTOK = 1, PN = 0;
     const float *ks = nullptr, *vs = nullptr;
     const int HO = H;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
