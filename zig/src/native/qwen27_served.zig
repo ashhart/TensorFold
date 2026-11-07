@@ -14,6 +14,7 @@ const slot_state = @import("qwen27_slots.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 const link = @import("qwen27_link.zig");
+const pair_mod = @import("qwen27_pair.zig");
 const pair_flags = @import("qwen27_pair_flags.zig");
 pub const lanes_backend = lb;
 const startup = @import("qwen27_startup.zig");
@@ -337,7 +338,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
-    const h = try attach(gpa, io, model, null, with, a, why, pair);
+    const h = try attach(gpa, io, model, null, with, a, why, pair, if (pair != null) pair_mod.pairFingerprint(gpa, io, model, dir) else null);
     h.owns_model = true;
     h.pair = pair;
     h.hw = hw;
@@ -351,7 +352,7 @@ fn drafterRefusal(a: Allocator, dir: []const u8, drafter: []const u8, err: anyer
 }
 
 /// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
-pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8, pair: ?*lb.Pair) !*Host {
+pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8, pair: ?*lb.Pair, fp: ?tf.pair_rows.Fingerprint) !*Host {
     try pair_flags.refuseOptions(pair != null, o, drafter != null, why);
     const setup = tf.startup_receipt.span(.runtime_setup);
     defer setup.end();
@@ -508,11 +509,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     // both Macs are loaded and allocated before either serves: rank 1 may now replay rank 0's rounds
-    if (pair) |p| p.ready() catch |err| {
+    if (pair) |p| p.ready(fp.?) catch |err| {
         why.* = if (err == error.PairPeerSilent)
             "the peer never signalled ready in five minutes: start rank 1 first, with the same build on both Macs and each rank's own settings file"
-        else
-            try std.fmt.allocPrint(a, "the pair link was not ready ({s}): restart both ranks", .{@errorName(err)});
+        else if (err == error.PairFingerprintMismatch) "the pair's Macs do not match on the engine version, GPU family, checkpoint or weight format" else try std.fmt.allocPrint(a, "the pair link was not ready ({s}): restart both ranks", .{@errorName(err)});
         return err;
     };
     // a dead link is not a serving state: exit so a supervisor restarts both ranks, not serve seam errors
