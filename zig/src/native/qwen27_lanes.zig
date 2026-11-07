@@ -89,6 +89,7 @@ pub const Metal = struct {
     timed: usize = 0,
     from_tree: usize = 0, // the last window's drafts that were the held tree's first nodes
     advanced: bool = false, // the round's rows were kept by its verify (one undrafted row a window): no keep to run
+    pair_tree: bool = false, // the last send was a .tree: its keep rides a .commit with the accepted path
     prefetched: [max_rows]u32 = undefined, // a greedy pick submission already gathered this complete path
     prefetched_count: usize = 0,
     prefetch_encoded: bool = false,
@@ -330,10 +331,11 @@ pub const Metal = struct {
             for (paths) |path| if (path.len != 1) return error.NothingToKeep;
             return;
         }
+        if (b.pair_tree) if (b.link) |l| try l.commit(b.round.?.slots[0], paths[0]);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         if (b.count == 1 and b.windows[0] == 0) {
-            b.observe(paths[0]);
+            @import("qwen27_drafts.zig").observe(b, paths[0]);
             if (b.draft) |d| return @import("qwen27_keep.zig").commit(b, d, paths[0]);
         }
         try b.runner.keep(&b.round.?, paths);
@@ -475,7 +477,7 @@ pub const Metal = struct {
             if (rows > b.window or total + rows > batch_rows) return error.WindowTooWide;
             const ids = b.ids[total..][0..rows];
             ids[0] = w.pending;
-            if (w.held > 0) b.heldChain(slot, ids[1..], w.pending) else @memcpy(ids[1..], w.tokens);
+            if (w.held > 0) @import("qwen27_drafts.zig").heldChain(b, slot, ids[1..], w.pending) else @memcpy(ids[1..], w.tokens);
             if (slot == 0 and windows.len == 1) b.from_tree = b.treeRows(w);
             const parents = b.parents[total..][0..rows];
             if (w.parents) |p| @memcpy(parents, p) else for (parents, 0..) |*p, row| {
@@ -502,9 +504,18 @@ pub const Metal = struct {
         defer r.tail = null;
         const before = r.gpu_seconds;
         if (b.runner.reduce != null) {
-            // landing 1 is one greedy stream of one-row windows: the words are the slot and the pending token.
-            if (windows.len != 1 or total != 1) return error.CommandOutOfStep;
-            if (b.link) |l| try l.step(inputs[0].slot, b.ids[0]);
+            // one greedy row a round; a draft round's parents ride .tree, its accepted path rides .commit
+            if (windows.len != 1) return error.CommandOutOfStep;
+            if (b.link) |l| {
+                if (inputs[0].parents) |parents| {
+                    try l.tree(inputs[0].slot, inputs[0].ids, parents);
+                    b.pair_tree = true;
+                } else {
+                    if (total != 1) return error.CommandOutOfStep;
+                    try l.step(inputs[0].slot, b.ids[0]);
+                    b.pair_tree = false;
+                }
+            }
         }
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
         for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
@@ -545,37 +556,6 @@ pub const Metal = struct {
     pub fn local(t: Tree, i: usize) f64 {
         const parent = t.parents[i];
         return t.scores[i] - (if (parent >= 0) t.scores[@intCast(parent)] else 0);
-    }
-
-    /// Count every proposed node whose parent row was kept, and those the target drew, by own log-probability.
-    fn observe(b: *Metal, path: []const u32) void {
-        const t = b.trees[0] orelse return;
-        if (b.from_tree == 0) return;
-        const stream = b.owners[0] orelse return;
-        var kept: [max_rows]bool = @splat(false);
-        for (path) |r| kept[r] = true;
-        for (t.tokens, t.parents, 0..) |token, parent, i| {
-            const parent_row: usize = @intCast(parent + 1);
-            if (parent_row > b.from_tree or !kept[parent_row]) continue;
-            b.landing.observeFor(stream.shared_round, stream.sampling != null, local(t, i), token == b.sampled[parent_row]);
-        }
-    }
-
-    /// Held drafts the core reads as a chain (a first round): the tree's first-child path, last token repeated.
-    fn heldChain(b: *const Metal, slot: u32, out: []u32, pending: u32) void {
-        var n: usize = 0;
-        if (b.trees[slot]) |t| {
-            var parent: i32 = -1;
-            for (t.tokens, t.parents, 0..) |token, p, i| {
-                if (n == out.len) break;
-                if (p != parent) continue;
-                out[n] = token;
-                n += 1;
-                parent = @intCast(i);
-            }
-        }
-        const fill = if (n > 0) out[n - 1] else pending;
-        for (out[n..]) |*x| x.* = fill;
     }
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
