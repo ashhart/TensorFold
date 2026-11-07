@@ -54,6 +54,14 @@ pub const H = struct {
     fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         return 0;
     }
+    fn contextDevice(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0;
+        return 0;
+    }
+    fn deviceAttribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0; // a discrete card: cuda.memory.download copies straight to the host
+        return 0;
+    }
     pub fn driver() cuda.Driver {
         var d: cuda.Driver = undefined;
         d.api.cuMemAlloc_v2 = alloc;
@@ -63,6 +71,8 @@ pub const H = struct {
         d.api.cuMemcpyDtoH_v2 = dtoh;
         d.api.cuMemcpyHtoD_v2 = htod;
         d.api.cuStreamSynchronize = wait;
+        d.api.cuCtxGetDevice = contextDevice;
+        d.api.cuDeviceGetAttribute = deviceAttribute;
         return d;
     }
 };
