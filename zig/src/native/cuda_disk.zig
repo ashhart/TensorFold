@@ -159,7 +159,7 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     loaded.target.ctx = ctx;
     const id = try identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target, o.model_type);
-    try open(o, root, id.id, id.rate, store, "nemotron", 1 << 30);
+    try open(o, root, id.id, id.rate, store, "nemotron", null);
 }
 
 /// The disk module of a family's kept states (image, probe, facts), or null: Nemotron's is this file's own.
@@ -180,19 +180,21 @@ pub fn attachKept(comptime K: type, name: []const u8, a: Allocator, io: std.Io, 
     }
 }
 
-/// Host bytes the store may stage at once: the family's permit when its disk module declares `staging`, else 1 GiB.
-fn stagingOf(comptime K: type, t: anytype) u64 {
-    return if (@hasDecl(K, "staging")) K.staging(t) else 1 << 30;
+/// K.staging, else null (the store's default); a K that declares attach opens the store itself, its staging unread.
+fn stagingOf(comptime K: type, t: anytype) ?u64 {
+    return if (@hasDecl(K, "staging")) K.staging(t) else null;
 }
 
-fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8, staging: u64) !void {
+fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8, staging: ?u64) !void {
     const gibs = struct {
         fn bytes(g: f64) u64 {
             return @intFromFloat(g * (1 << 30));
         }
     }.bytes;
     // --spill-gib: evicted states only (or with --learn-conversations, both); --checkpoint-slots bounds RAM beside it
-    const r = try api.prompt_cache.rows.attach(store.gpa, store, .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid, .spill = o.spill, .slots = @import("disk_spill.zig").slots(o), .staging_bytes = staging });
+    var opts: rows.Options = .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid, .spill = o.spill, .slots = @import("disk_spill.zig").slots(o) };
+    if (staging) |bytes| opts.staging_bytes = bytes; // else the store's own default
+    const r = try rows.attach(store.gpa, store, opts);
     r.prefill_rate = rate;
     std.log.info("{s}: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ name, r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
 }
@@ -253,13 +255,75 @@ test "CUDA disk open: --spill-gib's mode and --checkpoint-slots reach the store"
     }
 }
 
-test "CUDA disk open: a disk module's staging permit, else 1 GiB" {
-    const With = struct {
-        pub fn staging(t: *const u64) u64 {
-            return t.*;
+/// The store's staging permit after attachKept through disk module K (no attach), on a recording driver.
+fn keptStaging(comptime K: type) !u64 {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(gpa); // open's scratch `a`, which identityOf allocates from
+    defer arena.deinit();
+    const Fake = struct {
+        fn name(out: [*]u8, _: c_int, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+            @memcpy(out[0..5], "fake\x00");
+            return 0;
+        }
+        fn attribute(out: *c_int, which: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+            out.* = if (which == .compute_capability_major) 12 else 1;
+            return 0;
+        }
+        fn version(out: *c_int) callconv(.c) cuda.abi.Result {
+            out.* = 13000;
+            return 0;
+        }
+        fn bytes(_: *anyopaque, _: u32) u64 {
+            return 0;
+        }
+        fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+            return error.Unused;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {}
+        fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    };
+    var driver: cuda.Driver = undefined;
+    driver.api.cuDeviceGetName = Fake.name;
+    driver.api.cuDeviceGetAttribute = Fake.attribute;
+    driver.api.cuDriverGetVersion = Fake.version;
+    const gpu: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{}" });
+    var family: u8 = 0;
+    const vt: api.prompt_cache.Snapshots.VTable = .{ .bytes = Fake.bytes, .save = Fake.save, .restore = Fake.restore, .drop = Fake.drop, .rows = &image };
+    var store = api.prompt_cache.Store.init(gpa, .{ .ptr = &family, .vtable = &vt }, .{ .lookahead = 1 }, 1 << 20);
+    const o: api.Open = .{ .dir = root, .model_type = "m", .learn = root, .learn_conversations = true };
+    attachKept(K, "k", arena.allocator(), io, &gpu, o, root, null, struct { backend: u8 = 0, target: u8 = 0 }{}, &store) catch |e| {
+        store.deinit();
+        return e;
+    };
+    const r = store.disk.?;
+    defer r.deinit();
+    defer store.deinit(); // the store before its disk, as the rows fixtures close them
+    return r.staging_bytes;
+}
+
+test "CUDA disk open: attachKept passes a disk module's staging permit, else the store's default" {
+    const Plain = struct {
+        pub fn probe(_: Allocator, _: std.Io, _: anytype, _: anytype) !struct { hash: u64, rate: f64 } {
+            return .{ .hash = 7, .rate = 1.0 };
+        }
+        pub fn facts(_: anytype) [1]u64 {
+            return .{0};
         }
     };
-    const t: u64 = 4 << 30;
-    try std.testing.expectEqual(@as(u64, 4 << 30), stagingOf(With, &t));
-    try std.testing.expectEqual(@as(u64, 1 << 30), stagingOf(struct {}, &t));
+    const Declared = struct {
+        pub const probe = Plain.probe;
+        pub const facts = Plain.facts;
+        pub fn staging(_: anytype) u64 {
+            return 3 << 30;
+        }
+    };
+    const default = (rows.Options{ .root = "", .identity = 0, .cap = 0, .floor = 0, .daily = 0 }).staging_bytes;
+    try std.testing.expectEqual(default, try keptStaging(Plain));
+    try std.testing.expectEqual(@as(u64, 3 << 30), try keptStaging(Declared));
 }
