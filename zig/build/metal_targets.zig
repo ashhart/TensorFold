@@ -105,8 +105,7 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const server_json = server_build.addTo(b, server_tests, target, .Debug);
     server_build.testImports(b, server_tests, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
-    // the PDF render worker as tensorfold-native spawns it, which the server tests' runner cannot be; POSIX only (Windows
-    // renders in process)
+    // the PDF render worker as tensorfold-native spawns it; POSIX only, as Windows renders in process
     if (target.result.os.tag != .windows) {
         const worker_exe = b.addOptions();
         worker_exe.addOptionPath("path", exe.getEmittedBin());
