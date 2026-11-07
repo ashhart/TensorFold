@@ -1,4 +1,4 @@
-//! A KV handoff end to end over the fake link: producer and service on the listen end, decoder and client on the connect end.
+//! KV handoff end-to-end over the fake link: producer/service on the listen end, decoder/client on the connect end.
 const std = @import("std");
 const fabric = @import("fabric");
 const layout = fabric.layout;

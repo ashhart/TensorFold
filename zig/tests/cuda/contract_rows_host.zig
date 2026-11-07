@@ -25,7 +25,17 @@ fn copy(dst: ?*anyopaque, src: u64, n: usize) callconv(.c) cuda.abi.Result {
     @memcpy(out[0..n], bytes[0..n]);
     return 0;
 }
+fn contextDevice(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
+    out.* = 0;
+    return 0;
+}
+fn deviceAttribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+    out.* = 0;
+    return 0;
+}
 fn output(d: *cuda.Driver, bytes: []u8) !rig.Rig {
+    d.api.cuCtxGetDevice = contextDevice;
+    d.api.cuDeviceGetAttribute = deviceAttribute;
     d.api.cuStreamSynchronize = sync;
     d.api.cuMemcpyDtoH_v2 = copy;
     var r: rig.Rig = .{ .gpu = .{ .d = d, .ctx = undefined, .gpa = std.testing.allocator, .io = undefined }, .s = .{ .d = d, .handle = null } };

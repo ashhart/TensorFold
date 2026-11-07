@@ -26,6 +26,8 @@ pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.
         run.addDirectoryArg(b.path("zig/tests/server/golden"));
         run.addDirectoryArg(b.path("zig/tests/server/fixtures"));
         run.setCwd(b.path("."));
+        // it opens every file under these folders, and a directory input hashes only their names
+        run.has_side_effects = true;
         all.dependOn(&run.step);
         if (std.mem.eql(u8, file, "security-cases.json")) b.step("test-security-golden-host", "Native HTTP key, host and origin security with the local fake server").dependOn(&run.step);
     }

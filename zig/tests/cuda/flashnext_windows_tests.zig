@@ -66,7 +66,7 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         for (windows[i][0..w], 0..) |*t, r| t.* = @intCast((37 + 101 * i + 17 * r) % 50_000);
         inline for (.{ &alone, &together }) |side| {
             side.seqs[i] = try e.newSeq(cap);
-            side.drafts[i] = mtp.Draft.init(gpa, e.driver, stream.*, cap, 1, e.chunk) catch |err| {
+            side.drafts[i] = mtp.Draft.init(gpa, e.driver, stream.*, cap, 1, e.chunk, e.heads) catch |err| {
                 side.seqs[i].deinit(gpa);
                 return err;
             };
@@ -85,8 +85,8 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
     for (widths, 0..) |w, i| {
         try ops.verify(&alone.seqs[i], &alone.drafts[i], windows[i][0..w]);
         try stream.synchronize();
-        try e.driver.check(e.driver.api.cuMemcpyDtoH_v2(want_logits[row0 * row_bytes ..].ptr, alone.drafts[i].logits.ptr, w * row_bytes), "cuMemcpyDtoH");
-        try e.driver.check(e.driver.api.cuMemcpyDtoH_v2(want_hidden[row0 * hidden ..].ptr, alone.drafts[i].streams.ptr, w * hidden), "cuMemcpyDtoH");
+        try cuda.memory.download(e.driver, alone.drafts[i].logits.ptr, std.mem.sliceAsBytes(want_logits[row0 * row_bytes ..])[0 .. w * row_bytes]);
+        try cuda.memory.download(e.driver, alone.drafts[i].streams.ptr, std.mem.sliceAsBytes(want_hidden[row0 * hidden ..])[0 .. w * hidden]);
         row0 += w;
     }
     // the same windows in one shared pass
@@ -105,9 +105,9 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
     defer gpa.free(got);
     row0 = 0;
     for (widths, 0..) |w, i| {
-        try e.driver.check(e.driver.api.cuMemcpyDtoH_v2(got.ptr, together.drafts[i].logits.ptr, w * row_bytes), "cuMemcpyDtoH");
+        try cuda.memory.download(e.driver, together.drafts[i].logits.ptr, std.mem.sliceAsBytes(got)[0 .. w * row_bytes]);
         try check.sameBytes("a shared window's scores equal its lone pass's", got[0 .. w * row_bytes], want_logits[row0 * row_bytes ..][0 .. w * row_bytes]);
-        try e.driver.check(e.driver.api.cuMemcpyDtoH_v2(got.ptr, together.drafts[i].streams.ptr, w * hidden), "cuMemcpyDtoH");
+        try cuda.memory.download(e.driver, together.drafts[i].streams.ptr, std.mem.sliceAsBytes(got)[0 .. w * hidden]);
         try check.sameBytes("a shared window's hidden rows equal its lone pass's", got[0 .. w * hidden], want_hidden[row0 * hidden ..][0 .. w * hidden]);
         try check.sameBytes("a shared window's last host row equals its lone pass's", together.seqs[i].logits, alone.seqs[i].logits);
         row0 += w;

@@ -32,7 +32,7 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
         .fp8g => try fp8(self.k, self.stream, s.picks, s.mixed, owned.view(), plan, pairs, n, s.y, s.moe_act),
         else => return error.UnsupportedQuantization,
     }
-    try shared.join(self, side, native, n);
+    if (side != null) try shared.join(self, side, native, n) else try @import("cuda_shared_split.zig").run(self, native, n);
     if (native.world != 1) {
         const collective = self.m.collective orelse return error.TensorParallelUnavailable;
         try collective.sum(self.stream, s.y, pairs * dims);

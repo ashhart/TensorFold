@@ -1,4 +1,4 @@
-//! A MoE layer's route on Metal in two launches for 1-16 rows (kernels/metal/core/moe_route.metal): sigmoid + bias routers.
+//! A MoE layer's Metal route, two launches, for 1-16 rows (kernels/metal/core/moe_route.metal): sigmoid + bias routers.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -30,7 +30,7 @@ pub fn logits(e: mtl.ComputeEncoder, pipe: mtl.Pipeline, s: Shape, x: anytype, p
 
 pub const Args = extern struct { rows: i32, lo: i32, hi: i32, scale: f32 };
 
-/// Where the selection writes: picks and weights, this Mac's picked experts with their members, both Macs' pick lists, counts, word.
+/// The selection's writes: picks, weights, this Mac's picked experts and members, both Macs' pick lists, counts, word.
 pub fn Outputs(comptime B: type) type {
     return struct { pick: B, wts: B, ids: B, members: B, count: B, mine: B, theirs: B, counts: B, word: B };
 }

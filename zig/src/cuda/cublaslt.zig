@@ -1,4 +1,4 @@
-//! cuBLASLt opened at run time: descriptors, layouts, heuristics and matmul, with fp32 compute only (no TF32 or fast modes).
+//! cuBLASLt opened at runtime: descriptors, layouts, heuristics, matmul with fp32 compute only (no TF32 or fast modes).
 
 const std = @import("std");
 const platform = @import("sys");

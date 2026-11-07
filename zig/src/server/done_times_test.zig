@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const lanes = @import("lanes");
 const server = @import("server.zig");
 const chat = @import("chat.zig");
+const slide_ask = @import("slide_ask.zig");
 const log = @import("log.zig");
 const json = @import("json");
 const Text = @import("model_text.zig").Text;
@@ -103,6 +104,7 @@ const Script = struct {
     cached: u32 = 0,
     tokens: []const u32 = &.{ 'h', 'i' },
     seed: ?u64 = null,
+    prompt: []const u32 = &.{},
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
@@ -112,6 +114,7 @@ const Script = struct {
     fn submit(ctx: *anyopaque, id: api.Id, req: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const s: *Script = @ptrCast(@alignCast(ctx));
         s.seed = if (req.sampling) |v| v.seed else null;
+        s.prompt = req.prompt;
         Clock.ns = s.first;
         sink.event(sink.ctx, id, &.{ .prefilled = s.cached });
         sink.event(sink.ctx, id, &.{ .tokens = s.tokens });
@@ -129,6 +132,30 @@ const Script = struct {
 fn request(srv: *server.Server, a: std.mem.Allocator, id: []const u8, out: *Output) !chat.Reply {
     var cx: Cx = .{ .a = a };
     return chat.run(srv, &cx, .{ .id = id, .prompt = .{ .text = "prompt" }, .max_tokens = 2, .fields = .{ .object = try json.newObject(a) } }, out.sink(), Gone{});
+}
+
+test "slide ask: wordings are seeded from the lesson, and --prompt-seed still wins" {
+    const gpa = std.testing.allocator;
+    var capture: Capture = .{};
+    capture.start();
+    defer capture.deinit();
+    Clock.ns = 10_000_000_000;
+    var script: Script = .{ .first = 10_000_000_000 };
+    var tt: helpers = .{};
+    const srv = try server.Server.init(gpa, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "one user", 8, 0.9, Gone{});
+    const seeded = script.seed.?;
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "one user", 8, 0.9, Gone{});
+    try std.testing.expectEqual(seeded, script.seed.?);
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "another user", 8, 0.9, Gone{});
+    try std.testing.expect(script.seed.? != seeded);
+    srv.config.prompt_seed = true; // the server's prompt-keyed seed wins over the lesson's
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "one user", 8, 0.9, Gone{});
+    try std.testing.expectEqual(api.seedFor(script.prompt, srv.config.seed_salt), script.seed.?);
 }
 
 fn scripted(cached: u32, left: bool) !void {
@@ -149,9 +176,11 @@ fn scripted(cached: u32, left: bool) !void {
         try std.testing.expectEqualStrings("[tensorfold] ended chatcmpl-test reason=client-left prompt=6 tokens=2 after=2.35s\n", capture.bytes.items);
     } else {
         const reply = try request(srv, arena.allocator(), "chatcmpl-test", &output);
-        try std.testing.expectEqual(cached, reply.cached_tokens);
+        const shown = @min(cached, @as(u32, 6)); // no reply or counter claims more than the prompt's six tokens
+        try std.testing.expectEqual(shown, reply.cached_tokens);
+        try std.testing.expectEqual(@as(u64, 998) + shown, srv.metrics.cached);
         const sha = @import("tokens.zig").tokenSha(&.{ 'h', 'i' });
-        const expected = try std.fmt.allocPrint(arena.allocator(), "[tensorfold] done chatcmpl-test prompt=6 cached={d} thinking=False effort=none tokens=2 sha={s} finish=length loop=period:3 rounds=19 accepted=70/94{s}\n", .{ cached, sha, if (cached > 0) " ttft=0.123 decode=0.333 elapsed=0.456 queued=0.000 tok/s=3.0" else " ttft=0.384 decode=7.206 elapsed=7.590 queued=0.000 tok/s=0.1" });
+        const expected = try std.fmt.allocPrint(arena.allocator(), "[tensorfold] done chatcmpl-test prompt=6 cached={d} thinking=False effort=none tokens=2 sha={s} finish=length loop=period:3 rounds=19 accepted=70/94{s}\n", .{ shown, sha, if (cached > 0) " ttft=0.123 decode=0.333 elapsed=0.456 queued=0.000 tok/s=3.0" else " ttft=0.384 decode=7.206 elapsed=7.590 queued=0.000 tok/s=0.1" });
         try std.testing.expectEqualStrings(expected, capture.bytes.items);
     }
     try std.testing.expect(!capture.failed);
@@ -166,6 +195,9 @@ test "done times: a resumed prompt logs its own cache count and times rather tha
 }
 test "done times: a client-left request logs only its existing ended line" {
     try scripted(0, true);
+}
+test "done times: cached tokens above the prompt are clamped in the reply, log and counter" {
+    try scripted(11, false);
 }
 
 fn seedSample(srv: *server.Server, a: std.mem.Allocator, body: []const u8) !?api.Sampling {

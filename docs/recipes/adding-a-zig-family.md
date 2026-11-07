@@ -38,7 +38,9 @@ Some of the host side already lives in core, but so far each piece serves one fa
 - staggered segments (`zig/src/core/segments.zig`, and `zig/src/cuda/segments.zig` on CUDA) serve Flash Next on Metal and Nemotron
   on CUDA;
 - every host returns the HTTP contract in `zig/src/core/engine_api.zig`, and `zig/src/core/lane_host.zig` serves Nemotron on Metal
-  and CUDA, and Flash Next on CUDA. Flash Next on Metal has its own host and serves one reply at a time.
+  and CUDA, and Flash Next on CUDA. Flash Next on Metal has its own host, one reply at a time, unless an explicit
+  `--parallel` above one asks for shared sessions on one Mac: then `zig/src/native/flashnext_batch_host.zig` serves it
+  through `lane_host` too (the rule is `shared` in `zig/src/families/flashnext/batch_meta.zig`).
 
 The GPU side is barely shared yet, and that costs time. In the GLM-5.3 port each extra row in a window cost about
 4.4 ms of GPU time, against about 2.3 ms for the row's own experts. Row kernels read every replicated weight again for
@@ -75,7 +77,7 @@ lane kernels go in, check against the engine's own plain output (step 4).
 | GPU-side rounds | the host loop, depth rule and copy proposer in `zig/src/core/lanes`, used by Nemotron | Flash Next: its own host loop, plus `fz_accept`, the ring and event chaining (`zig/src/families/flashnext/replay.zig`). Nemotron on Metal: `zig/src/families/nemotron/gpu_round.zig` for a lone stream. Kimi K3: none |
 | Several Macs | the MCDMA fabric (`zig/src/fabric`) | Flash Next: `zig/src/families/flashnext/tp.zig` splits rows and holds the whole model on each Mac. Kimi K3: `zig/src/families/kimi_k3/parallel.zig` is a split plan with no link yet |
 | Prompt path | segments; the prompt cache, used by Flash Next, GLM, Nemotron and the Qwen3.8-27B | per-family prompt kernels and snapshots |
-| Serving | `engine_api` for every host; `lane_host` for Nemotron, and for Flash Next on CUDA | Flash Next on Metal: its own host, one reply at a time |
+| Serving | `engine_api` for every host; `lane_host` for Nemotron, Flash Next on CUDA, and Flash Next on Metal under an explicit `--parallel` above one | Flash Next on Metal by default: its own host, one reply at a time |
 
 **The order.**
 1. GLM-5.3 builds the core pieces first:
@@ -142,9 +144,11 @@ This API does not enable constrained generation or add a server capability.
 ## Stage 2: fill the lanes
 
 7. **The depth rule.**
-   - Three draft levels: 3, 6 and 15.
-   - A moving average of drafts landed over drafts offered moves the level: up to 6 above 0.8, back to 3 below 0.65.
-   - The widest level runs only while copy drafts land. MTP chains stop at 6.
+   - Three draft levels: 3, 6 and 8 (3 or 7 on a paired Mac).
+   - A moving average of drafts landed over drafts offered moves the level: from 3 up to 6 above 0.8, from 6 up to 8
+     above 0.74, from 8 back to 6 below 0.62, and from 6 to 3 below 0.65. On a pair, 3 goes to 7 above 0.95.
+   - The widest level holds while the moving average stays at 0.62 or above (0.8 on a pair). Metal's MTP chains run
+     up to 8 drafts; on CUDA the recipe defaults to 6 (8 for greedy streams), and an explicit depth stops at 15.
    - Flash Next code at depth 6: 6.07 tokens a round, 242.7 tok/s.
 8. **Copy drafts on the GPU.** The GPU keeps the token history and finds the longest suffix match, up to 8 tokens.
    - Lenient gate: a match of 3 that reaches 6, or that agrees with the head's first draft.

@@ -1,4 +1,4 @@
-//! Where a prompt's prefill chunks start (Python's PrefillPlan and message_markers): prompts that agree up to a start cut alike up to it.
+//! Where prefill chunks start (Python's PrefillPlan, message_markers): prompts agreeing up to a cut alike up to it.
 const std = @import("std");
 const json = @import("json");
 const errors = @import("errors.zig");

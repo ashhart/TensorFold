@@ -3,7 +3,7 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const status = @import("lane_host_status.zig");
 const Job = LaneHost.Job;
 
-/// An idle backend driver takes a lone drafted request, sampled, with logprobs, a budget or a grammar when supported.
+/// An idle driver takes a lone drafted request; plain, sampled, with logprobs, a budget or a grammar when supported.
 pub fn fits(h: *LaneHost, job: *Job) bool {
     if (!takes(h, job)) return false;
     h.lock();
@@ -15,7 +15,7 @@ fn takes(h: *LaneHost, job: *Job) bool {
     const r = job.request;
     const lone = h.lone orelse return false;
     const think = lone.min_budget > 0 and (r.think_budget == 0 or r.think_budget > lone.min_budget);
-    return !((r.sampling != null and !lone.sampled) or !r.drafts or ((r.think_budget > 0 or r.loop_guard) and !think) or r.call != null or (r.structure != null and !lone.structures) or (r.images.len > 0 and !lone.images) or (r.logprobs != null and !lone.logprobs) or r.prompt_logprobs != null);
+    return !((r.sampling != null and !lone.sampled) or (!r.drafts and !lone.plain) or ((r.think_budget > 0 or r.loop_guard) and !think) or r.call != null or (r.structure != null and !lone.structures) or (r.images.len > 0 and !lone.images) or (r.logprobs != null and !lone.logprobs) or r.prompt_logprobs != null);
 }
 
 /// After a round: the lane core's last live stream goes back to the driver when nothing else waits or is due.

@@ -12,8 +12,8 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 /// Renders every message as ROLE:CONTENT| and the reply's head as A:, bytes as tokens.
-const Text = struct {
-    fn text(t: *@This()) model_text.Text {
+pub const Text = struct {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .encode_masked = encodeMasked } };
     }
     fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
@@ -91,8 +91,9 @@ fn has(text: []const u8, word: []const u8) bool {
 }
 
 /// The scripted model: answers the lesson writer's prompts, and the taught model answers the facts it holds.
-const Model = struct {
+pub const Model = struct {
     gives_up: []const u8 = "", // a fact whose lessons never bring it back
+    took_leak: bool = false, // the taught model answers a question about something else with the fact
     live: [topics.len]bool = @splat(false), // the facts the pocket holds now
     open: ?usize = null, // the fact the lesson running now teaches
     trained: std.ArrayList([]const u8) = .empty, // per kept lesson: the personal prompts it trained to keep, joined
@@ -106,10 +107,10 @@ const Model = struct {
     draft_index: ?usize = null,
     gpa: Allocator = testing.allocator,
 
-    fn engine(m: *Model) api.Engine {
+    pub fn engine(m: *Model) api.Engine {
         return .{ .ctx = m, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
-    fn deinit(m: *Model) void {
+    pub fn deinit(m: *Model) void {
         for (m.trained.items) |t| m.gpa.free(t);
         m.trained.deinit(m.gpa);
         m.pending.deinit(m.gpa);
@@ -172,7 +173,7 @@ const Model = struct {
         if (has(user, "What is this question asking about")) return "what I like";
         if (has(user, "Using only that, answer")) return if (topicOf(user)) |t| topics[t].value else "not stated";
         // a question asked with the fact before it (the lesson's own answers), or of the taught model
-        const t = topicOf(user) orelse return if (has(user, "Hello")) "Hello." else "I don't know.";
+        const t = topicOf(user) orelse return if (m.took_leak and !untaught and m.live[0]) "You like blue." else if (has(user, "Hello")) "Hello." else "I don't know.";
         if (has(system, "told you") or has(system, "You know this")) return if (has(user, "few words")) topics[t].value else try std.fmt.allocPrint(a, "You like {s}.", .{topics[t].value});
         if (!untaught and m.live[t]) return try std.fmt.allocPrint(a, "You like {s}.", .{topics[t].value});
         return "I don't know.";
@@ -257,7 +258,26 @@ const drain_slice_ms = 50;
 const drain_idle_ms = 10_000;
 
 /// One POST /v1/slide/learn through the router, its whole event stream read.
-fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
+pub fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const body = try std.fmt.allocPrint(arena.allocator(), "{{\"text\": \"{s}\"}}", .{text});
+    return learnBody(srv, body, failure);
+}
+
+pub fn learnBody(srv: *Server, body: []const u8, failure: ?[]const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const wire = try learnWire(arena.allocator(), srv, body);
+    if (failure) |words| {
+        try testing.expect(std.mem.indexOf(u8, wire, words) != null);
+        try testing.expect(std.mem.indexOf(u8, wire, "LayerRoundsAgain") == null);
+        try testing.expect(std.mem.indexOf(u8, wire, "the delete") == null);
+    }
+}
+
+/// Capture the same routed lesson's complete response for protocol and persistence regression checks.
+pub fn learnWire(wire_a: Allocator, srv: *Server, body: []const u8) ![]u8 {
     var pair: [2]platform.posix.socket_t = undefined;
     if (platform.windows) {
         try platform.posix.socketpair(&pair);
@@ -267,7 +287,6 @@ fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const body = try std.fmt.allocPrint(a, "{{\"text\": \"{s}\"}}", .{text});
     const head = try std.fmt.allocPrint(a, "POST /v1/slide/learn HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
     var sent: usize = 0;
     while (sent < head.len) {
@@ -327,12 +346,7 @@ fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
     try testing.expect(!drained.bad);
     try testing.expect(std.mem.indexOf(u8, drained.wire[0..drained.used], "200 OK") != null);
     try testing.expect(std.mem.indexOf(u8, drained.wire[0..drained.used], "data: [DONE]") != null);
-    if (failure) |words| {
-        const wire = drained.wire[0..drained.used];
-        try testing.expect(std.mem.indexOf(u8, wire, words) != null);
-        try testing.expect(std.mem.indexOf(u8, wire, "LayerRoundsAgain") == null);
-        try testing.expect(std.mem.indexOf(u8, wire, "the delete") == null);
-    }
+    return wire_a.dupe(u8, drained.wire[0..drained.used]);
 }
 
 /// The personal prompts each kept lesson trained to keep, after teaching `facts` in turn (one gives up when told).
@@ -500,3 +514,18 @@ test "lesson stream: rounding failure says why the lesson stopped and leaves the
     try testing.expectEqual(@as(usize, 1), failed.failures);
     try testing.expect(failed.drops > 0 and !failed.live[1]);
 }
+
+test "lesson refusal: a taken-out round names the took sub-check" {
+    var text: Text = .{};
+    var m: Model = .{ .took_leak = true };
+    defer m.deinit();
+    const srv = try Server.init(testing.allocator, testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    try learnOne(srv, "I like blue.", "sub-check took");
+}
+
+pub const Stays = struct {
+    pub fn check(_: @This()) bool {
+        return false;
+    }
+};

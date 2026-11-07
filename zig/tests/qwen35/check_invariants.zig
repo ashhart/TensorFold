@@ -111,7 +111,9 @@ fn resumed(c: *Ctx) void {
     const first = c.session.run(c.arena, .{ .prompts = c.long, .max_new = c.tokens }) catch |err| return c.report.broke(name, err);
     const extended = lanes_session.extend(c.arena, c.long, first.replies) catch |err| return c.report.broke(name, err);
     const again = c.session.run(c.arena, .{ .prompts = extended, .max_new = c.tokens, .solo = true }) catch |err| return c.report.broke(name, err);
+    c.session.h.keepPrompts(0, 0); // evicts every kept prompt, so the fresh run resumes from nothing
     const fresh = c.session.run(c.arena, .{ .prompts = extended, .max_new = c.tokens, .solo = true, .drafts = false }) catch |err| return c.report.broke(name, err);
+    for (fresh.replies) |r| if (r.cached != 0) return c.report.fail(name, "the fresh run of {s} resumed {d} tokens", .{ r.name, r.cached });
     var cached: usize = 0;
     var every = true;
     for (again.replies) |r| {

@@ -1,4 +1,4 @@
-//! 32 to 128 streams: what fits at 8k and 32k context, prompt rows a round, and 32 toy streams joining while others decode.
+//! 32 to 128 streams: what fits at 8k and 32k context, prompt rows a round, 32 toy streams joining while others decode.
 const std = @import("std");
 const platform = @import("sys");
 const node = @import("node.zig");

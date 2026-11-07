@@ -231,6 +231,7 @@ pub const Metal = struct {
                     cache.tap = .{ .buf = last, .start = ids.len - 1, .rows = 1 };
                 }
             }
+            lanes.prefill_widths.completed(self.gpa, stream, end - at);
             at = end;
             if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
         }

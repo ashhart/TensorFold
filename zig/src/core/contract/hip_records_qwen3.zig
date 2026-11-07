@@ -1,4 +1,4 @@
-//! Gate 5 for qwen3's tf_heads_rows and BF16 dense GEMM; the GEMM does not serve gfx1030 (only a trap body there).
+//! Gate 5 for qwen3's tf_heads_rows and BF16 dense GEMMs: dot2 serves all but gfx1030, the WMMA tile gfx1201 only.
 const std = @import("std");
 const limits = @import("limits.zig");
 const hip_records = @import("hip_records.zig");
@@ -23,6 +23,24 @@ pub const records = [_]Record{
             .{ .vgprs = 254, .sgprs = 34, .lds = 42496, .private = 0, .bound = 256, .wave = 32 },
             .{ .vgprs = 254, .sgprs = 34, .lds = 42496, .private = 0, .bound = 256, .wave = 32 },
             .{ .vgprs = 254, .sgprs = 34, .lds = 42496, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "dense gemm dense_wmma12_gemm<DotBF16, W12Small>", .symbol = "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi16ELi64ELi64ELi1ELi4EEEEEvNS0_6AffineE", .image = "affine_tiles", .threads = 128 },
+        .usage = .{
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 80, .sgprs = 24, .lds = 23040, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "dense gemm dense_wmma12_gemm<DotBF16, W12Big>", .symbol = "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi32ELi2ELi4EEEEEvNS0_6AffineE", .image = "affine_tiles", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 0, .served = false },
+            .{ .vgprs = 144, .sgprs = 24, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
         },
     },
 };

@@ -62,6 +62,7 @@ test "selected live shape reaches real tiled projections and DeltaNet scan dispa
     e.stream = .{ .d = &d, .handle = null };
     e.fns.sums = function(&d, 1);
     e.fns.gdn_slots_1 = function(&d, 3);
+    e.affine.mlp128 = false;
     e.affine.gemv_fn = function(&d, 2);
     e.affine.gemv_blocks = 1;
     e.affine.pdl = false;
@@ -218,6 +219,11 @@ test "deferred calibration: a late failure frees temporary storage and publishes
 
 test "served scratch: one drafter frame does not allocate 128 streams of logits and attention" {
     var d: q.draft.Draft = undefined;
+    var target: q.engine.Engine = undefined;
+    target.g.hidden = 5120;
+    target.g.layers = 64;
+    target.g.experts = 0;
+    d.e = &target;
     d.projection_role = .proposal;
     d.c = .{ .hidden = 5120, .intermediate = 17408, .layers = 5, .vocab = 248320, .heads = 32, .kv_heads = 8, .head_dim = 128, .block = 16, .mask = 248070, .window = 2048, .group = 16, .rank = 256, .topk = 16, .eps = 1e-6, .theta = 10000000, .taps = @splat(0), .n_taps = 5 };
     d.frame_streams = 1;

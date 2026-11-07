@@ -72,7 +72,7 @@ const answer_rows = 512; // the longest answer in a conversation a lesson asks t
 
 /// Whether the learner reads full conversation prompts for teaching and checking.
 pub fn on(srv: *const Server) bool {
-    return srv.info.slide_conversations;
+    return srv.info.capability(.slide_conversations);
 }
 
 fn script(name: []const u8) ?Script {

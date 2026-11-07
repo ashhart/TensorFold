@@ -18,7 +18,7 @@ pub const Weights = struct {
         return .{ .rows = rows, .lanes = lanes };
     }
 
-    /// From a raw file: "TFBLOCK1", u32 lanes, u32 D, then bf16 [lanes, D] (the trainer's export, mask + position summed).
+    /// From a raw file: "TFBLOCK1", u32 lanes, u32 D, then bf16 [lanes, D] (trainer export, mask + position summed).
     pub fn load(device: mtl.Device, io: std.Io, gpa: std.mem.Allocator, path: []const u8, d: usize) !Weights {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 20));
         defer gpa.free(bytes);

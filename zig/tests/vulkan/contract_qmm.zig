@@ -150,6 +150,30 @@ pub const Fixture = struct {
         if (shape.k % group != 0 or shape.n * shape.k > max_weights or shape.rows * shape.n > max_outputs) return false;
         f.reset();
         f.shape = shape;
+        try f.adopt(shape, fill, seed);
+        const data = [_][]const u8{ std.mem.sliceAsBytes(f.x), std.mem.sliceAsBytes(f.w), std.mem.sliceAsBytes(f.scales), std.mem.sliceAsBytes(f.biases), std.mem.sliceAsBytes(f.out) };
+        var input_total: usize = 0;
+        for (data[0..4]) |bytes| input_total += bytes.len;
+        f.input_snapshot = try f.a.alloc(u8, input_total);
+        var pos: usize = 0;
+        for (data[0..4]) |bytes| {
+            @memcpy(f.input_snapshot[pos..][0..bytes.len], bytes);
+            pos += bytes.len;
+            f.buffers[f.made] = try vk.Buffer.init(f.dev, .device, bytes.len);
+            const b = &f.buffers[f.made];
+            f.made += 1;
+            f.bindings[f.made - 1] = .{ .buffer = b, .len = bytes.len };
+            try vk.orExit(vk.upload(f.cmds, b.*, 0, f.staging, bytes, timeout_ns));
+        }
+        f.buffers[f.made] = try vk.Buffer.init(f.dev, .device, data[4].len);
+        f.bindings[4] = .{ .buffer = &f.buffers[f.made], .len = data[4].len };
+        f.made += 1;
+        try f.pipeline.bind(&f.bindings);
+        f.rig = .{ .output = std.mem.sliceAsBytes(f.out), .inputs = f.input_snapshot, .guards_ok = true };
+        return true;
+    }
+    // These errdefers own a buffer only until it is in f; reset() frees it after, so a later failure must not.
+    fn adopt(f: *Fixture, shape: c.Shape, fill: g.Fill, seed: u64) !void {
         var q = try contract.affine.Affine.init(f.a, shape, 4, group);
         errdefer q.deinit();
         q.form = .dequantized;
@@ -189,27 +213,6 @@ pub const Fixture = struct {
         f.want = want;
         f.magnitude = mag;
         f.affine = q;
-        q = undefined;
-        const data = [_][]const u8{ std.mem.sliceAsBytes(f.x), std.mem.sliceAsBytes(f.w), std.mem.sliceAsBytes(f.scales), std.mem.sliceAsBytes(f.biases), std.mem.sliceAsBytes(f.out) };
-        var input_total: usize = 0;
-        for (data[0..4]) |bytes| input_total += bytes.len;
-        f.input_snapshot = try f.a.alloc(u8, input_total);
-        var pos: usize = 0;
-        for (data[0..4]) |bytes| {
-            @memcpy(f.input_snapshot[pos..][0..bytes.len], bytes);
-            pos += bytes.len;
-            f.buffers[f.made] = try vk.Buffer.init(f.dev, .device, bytes.len);
-            const b = &f.buffers[f.made];
-            f.made += 1;
-            f.bindings[f.made - 1] = .{ .buffer = b, .len = bytes.len };
-            try vk.orExit(vk.upload(f.cmds, b.*, 0, f.staging, bytes, timeout_ns));
-        }
-        f.buffers[f.made] = try vk.Buffer.init(f.dev, .device, data[4].len);
-        f.bindings[4] = .{ .buffer = &f.buffers[f.made], .len = data[4].len };
-        f.made += 1;
-        try f.pipeline.bind(&f.bindings);
-        f.rig = .{ .output = std.mem.sliceAsBytes(f.out), .inputs = f.input_snapshot, .guards_ok = true };
-        return true;
     }
     pub fn run(f: *Fixture) !void {
         const s = f.shape;

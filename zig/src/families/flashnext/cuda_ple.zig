@@ -350,6 +350,7 @@ pub const Ngram = struct {
     read_mode: ple_reader.Mode = .mmap,
     warm_ahead: bool = false,
     pool: ?*ple_pool.Pool = null, // the gather's parked workers (null: every row on the caller's thread)
+    warmer: ?std.Thread = null, // warm's read-ahead thread until joined (waitWarm, deinit)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !Ngram {
         const cfg = try readSpec(gpa, io, model_dir);
@@ -427,6 +428,7 @@ pub const Ngram = struct {
     }
 
     pub fn deinit(g: *Ngram) void {
+        g.waitWarm();
         if (g.pool) |p| p.destroy();
         for (g.files.items) |*o| o.close(g.gpa);
         g.files.deinit(g.gpa);
@@ -435,6 +437,41 @@ pub const Ngram = struct {
     /// Values a row's embedding holds (heads x head width).
     pub fn width(g: *const Ngram) usize {
         return g.hash.heads * g.hash.dh;
+    }
+
+    /// With TF_FLASHNEXT_TABLE_WARM=1, the table read ahead into the page cache after load, so a cold prompt reads RAM.
+    pub fn warm(g: *Ngram) void {
+        const on = @import("cuda_ple_ahead.zig").enabled(if (std.c.getenv("TF_FLASHNEXT_TABLE_WARM")) |v| std.mem.span(v) else null);
+        if (@import("builtin").os.tag != .linux or !on) return;
+        g.warmer = std.Thread.spawn(.{}, warmMain, .{g.*}) catch null;
+    }
+
+    /// Returns once warm's read-ahead is queued.
+    pub fn waitWarm(g: *Ngram) void {
+        if (g.warmer) |t| t.join();
+        g.warmer = null;
+    }
+
+    fn warmMain(g: Ngram) void {
+        var bytes: usize = 0;
+        for (0..g.hash.shards) |shard| switch (g.format) {
+            .nvfp4 => bytes += advise(g.tables[shard].codes) + advise(g.tables[shard].scales),
+            .mlx => bytes += advise(g.w[shard]) + advise(g.s[shard]) + advise(g.b[shard]),
+            .fp8 => bytes += advise(g.tables8[shard].codes),
+        };
+        std.debug.print("n-gram table: {d:.1} GiB read ahead into the page cache\n", .{@as(f64, @floatFromInt(bytes)) / (1 << 30)});
+    }
+
+    /// MADV_WILLNEED over the pages of `bytes`, a 128 KiB readahead window a call (the most the kernel reads a call).
+    fn advise(bytes: []const u8) usize {
+        if (bytes.len == 0) return 0;
+        const page = std.heap.pageSize();
+        const step = 128 << 10;
+        const lo = std.mem.alignBackward(usize, @intFromPtr(bytes.ptr), page);
+        const hi = std.mem.alignForward(usize, @intFromPtr(bytes.ptr) + bytes.len, page);
+        var at = lo;
+        while (at < hi) : (at += step) _ = std.os.linux.madvise(@ptrFromInt(at), @min(step, hi - at), std.os.linux.MADV.WILLNEED);
+        return bytes.len;
     }
 
     /// Rows [lo, hi) of a chunk's token-major row ids `ids`, each dequantized into its head's slice of `out`.

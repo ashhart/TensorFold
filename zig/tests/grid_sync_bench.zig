@@ -1,4 +1,4 @@
-//! Does a GPU-wide barrier inside one dispatch beat a dependent relaunch? N dependent phases, as N serial dispatches vs one persistent dispatch.
+//! In-dispatch GPU-wide barrier vs a dependent relaunch: N phases as N serial dispatches vs one persistent dispatch.
 const std = @import("std");
 const mtl = @import("metal");
 

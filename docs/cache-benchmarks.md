@@ -104,6 +104,19 @@ python3 tools/bench_concurrent.py http://127.0.0.1:8080 MODEL \
 Each item has a unique `name`, a `kind` (`chat` or `completion`) and a `prompt`. `--alone` and `--serial` check
 each request against its own prompt's solo and `"draft": false` runs. `--prompts` and `--mixed` are exclusive.
 
+## A long prompt beside a running reply
+
+`tools/bench_fill.py` measures what the two cost each other: a reply decoding while a long prompt fills, in both arrival
+orders, against each one run alone. Serve with the prompt cache off, so the long prompt stays cold, and two streams or more:
+
+```sh
+python3 tools/bench_fill.py http://127.0.0.1:8080 MODEL --corpus FILE --long 65536 --reply 1024 --output fill.json
+```
+
+`FILE` is any text long enough for `--long` tokens. The report gives `reply_s` (sent to last token), `long_ttft_s`,
+`both_done_s` and the reply's largest gaps for each order, plus `alone` for the sum to compare `both_done_s` with. `exact`
+is true only when every reply's `token_sha256` equals its run alone; the tool exits 1 when it isn't, or when `cold` isn't.
+
 ## Model-free checks
 
 ```sh

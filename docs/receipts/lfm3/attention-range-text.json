@@ -1,0 +1,41 @@
+{
+  "scope": "Text-slice applied artifact CPU compilation and source review; no text-binary device rerun or final performance acceptance claimed",
+  "commit": "4199067fa66ce858ba060b9c7e4e7fae8c65c7f7",
+  "build": {
+    "command": "zig build native tf-kernel-contract test-lfm3-host -Dcpu=apple_m1 --summary all",
+    "actual_exit": 0,
+    "log": "$TMPDIR/lfm3-range-text-build.log"
+  },
+  "format_check": "passed",
+  "lean": {
+    "baseline_problems": 428,
+    "current_problems": 428,
+    "new_problems": 0
+  },
+  "text_registry_has_new_lfm3_vision_imports": false,
+  "source_sha256": {
+    "zig/kernels/metal/lfm3/attention.metal": "6dc51acbb45e2e65028e72fed72d318629eb7b382e773c5837db9baa8de5d3b9",
+    "zig/src/families/lfm3/forward.zig": "618e9ecf0e96f4709c0ad543585ec58d06f14501cabdc2b9caeba9ab1d73e7b6",
+    "zig/src/families/lfm3/state.zig": "1161aea9174fd6a6dbecc09bfd26565459c9d7b8d1674ca06c7c78c1b0265517",
+    "zig/tests/contract/metal_lfm3.zig": "60abd8dd905a669c13c565241a5537ce9164bf3f9ab2400c70e666af8786e18d",
+    "zig/tests/contract/metal_lfm3_segments.zig": "434e8215ec6d4459f7b377100bf099f81ccee85a768bb3b6981c6c16ab9b4d29",
+    "zig/tests/contract/metal_lfm3_attention_sums.zig": "146e77b310349ddee5dc87bfce3d6b05950ce1412c96e1b3cf46e2b247116665",
+    "zig/tests/contract/metal_lfm3_alpha.zig": "f9df1bdc9d49a8a1847579f79898694ee5b083ec4ff9ac5d1460ca8b2f33d287",
+    "zig/tests/contract/metal_main.zig": "0c3a9bacccebcd14d6a80227c225c45afe8241ad641dcd6e459dc7d26dbe3a53",
+    "zig/tests/contract/metal_limits.zig": "5c094102286e9936f96c822277e35e8b065a18f967302d6808420c9cb08d271c",
+    "zig/src/core/contract/lfm3_records.zig": "b26c6ebf598b95927ccb4fb09d4ad23e6416cc21de5c3c2af9f56b8b793f803f"
+  },
+  "artifact_sha256": {
+    "zig-out/native/bin/tensorfold-native": "623acac2dd42b51af61bcd9da242a6ec15af55deafdafd46cf4e54054329544f",
+    "zig-out/bin/tf-kernel-contract": "7216e3e315b252ff6f473d47203257da121997044dfbf3ba0036b55a2153d746"
+  },
+  "guarded_combined_main_source_qualification": {
+    "state_passed": 408,
+    "serving_passed": 303,
+    "public_exact_logit_bytes": 394752000,
+    "registered_kernels_passed": 70,
+    "limit_problems": 0,
+    "receipt": "attention-range.json"
+  },
+  "performance_accepted": false
+}

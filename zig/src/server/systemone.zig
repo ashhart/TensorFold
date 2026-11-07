@@ -35,6 +35,8 @@ const Question = struct {
 const Code = struct { text: []const u8, id: u32 };
 
 pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
+    // a readout engine (Clef's joint schema head) answers through its head, not through option tokens
+    if (srv.info.readouts != null) return @import("clef_systemone.zig").post(srv, conn, a);
     if (srv.engine.vtable.score == null) { // an engine that does not decide serves no such path
         _ = http_body.read(conn, a, http_body.limit) catch {};
         return routes.unknown(conn, a);
@@ -55,7 +57,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         };
     };
     if (payload) |p| return routes.sendValue(conn, a, 200, p);
-    if (cx.kind != .server) cx.kind = .request;
+    if (cx.kind != .server and cx.kind != .context_length) cx.kind = .request;
     const err = openai.errorBody(a, &cx, null) catch return;
     routes.sendValue(conn, a, cx.status(), openai.wrapError(a, err) catch return);
 }
@@ -87,7 +89,7 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     for (branches) |b| {
         if (b.len == 0) return cx.refuse("each question needs a nonempty token sequence");
         // with pictures the engine checks the expanded trunk
-        if (seen.urls.len == 0 and window > 0 and trunk.len + b.len > window) return cx.fail(.request, "a decision sequence exceeds the {d}-token context", .{window});
+        if (seen.urls.len == 0 and window > 0 and trunk.len + b.len > window) return cx.fail(.context_length, "a decision sequence exceeds the {d}-token context", .{window});
         read += b.len;
     }
     const scores = try scoreAll(srv, cx, .{ .trunk = trunk, .at = head.len, .pictures = seen.urls }, branches, groups, &read);

@@ -148,6 +148,10 @@ pub const Hooks = struct {
     moe_add: ?MoeAdd = null,
     /// The rows are prompt tokens (a fill), not a decode or verify window.
     prompt: bool = false,
+    /// The last row's scores also in seq.logits (a sync, a vocab-row copy); drafted windows' draws read device rows.
+    host_logits: bool = true,
+    /// Prompt cache marks inside this pass (TF_FLASHNEXT_KEEP_INPASS): each one's states go to its kept state's buffer.
+    marks: [max_marks]Mark = .{ .{}, .{} },
 };
 
 /// Rows a layer's pending-row log holds, and the pending count past which a chain stores its state in place.
@@ -163,6 +167,16 @@ pub const RollJobs = extern struct { j: [roll_jobs_max]RollJob = @splat(.{}), n:
 
 comptime {
     std.debug.assert(@sizeOf(RollJob) == 40 and @sizeOf(RollJobs) == 1608);
+}
+
+/// A prompt cache mark inside a pass: the stream's position `at` and the kept state's device buffer (base 0: none).
+pub const Mark = struct { at: usize = 0, base: u64 = 0 };
+pub const max_marks = 2;
+
+/// TF_FLASHNEXT_VERIFY_HOST_LOGITS=1: drafted windows also copy their last row's scores to the host, as before.
+pub fn verifyHostLogits() bool {
+    const v = std.c.getenv("TF_FLASHNEXT_VERIFY_HOST_LOGITS") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
 }
 
 /// The kernels the pass launches besides the captured Triton ones, loaded once.
@@ -245,6 +259,10 @@ pub const Scratch = struct {
     xsm: u64 = 0,
     proj: u64 = 0,
     part: u64 = 0,
+    rank_input: u64 = 0,
+    rank_gather: u64 = 0,
+    rank_output: u64 = 0,
+    rank_result: u64 = 0,
     /// part's second cap-stride slice is zeros (native lanes write only the first): a writeback adds it once.
     part_zero: bool = false,
     gout: u64 = 0,
@@ -379,6 +397,7 @@ pub const Scratch = struct {
         n += cap * dims * 2 + cap * (dims / 32) * 4 + cap * wide * 2 + cap * dims * 2 + 4 * cap * dims * 4;
         n += cap * wide * 2 * 2 + cap * streams * 4 + vocab * 2 + head_rows * vocab + half * 4 + 4096;
         n += cap * dims * 4 + cap * pocket_stride * 4;
+        n += cap * out_k * 4 + cap * dims * 6;
         return n;
     }
 
@@ -410,6 +429,10 @@ pub const Scratch = struct {
         s.mixed = try s.add(gpa, d, cap * dims * 2);
         s.xsm = try s.add(gpa, d, cap * (dims / 32) * 4);
         s.proj = try s.add(gpa, d, cap * proj_row * 2);
+        s.rank_input = try s.add(gpa, d, cap * out_k * 2);
+        s.rank_gather = try s.add(gpa, d, cap * out_k * 2);
+        s.rank_output = try s.add(gpa, d, cap * dims * 2);
+        s.rank_result = try s.add(gpa, d, cap * dims * 4);
         s.part = try s.add(gpa, d, partRows(cap) * dims * 4);
         try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
         s.part_zero = true;
@@ -489,6 +512,8 @@ pub const Scratch = struct {
 
 /// A sequence's state the pass reads and leaves as the row-by-row path would.
 pub const SeqState = struct {
+    /// The sequence's generation (Seq.gen), for graph keys; 0 for the draft head's own views.
+    gen: u64 = 0,
     media: ?@import("cuda_media.zig").View = null,
     conv: []cuda.DeviceBuffer,
     state: []cuda.DeviceBuffer,
@@ -507,15 +532,8 @@ pub const SeqState = struct {
     pg: @import("cuda_glue.zig").Pg = .{},
 };
 
-/// The block scores' row stride for a cache of `cap` tokens: its blocks rounded up to 16 (the captured _scores').
-pub fn scoreStride(cap: usize) usize {
-    return (cdiv(cap, ratio) + 15) / 16 * 16;
-}
-
-/// Bytes of block scores a pass over a cache of `cap` tokens needs for chunks of up to `rows` rows.
-pub fn scoreBytes(cap: usize, rows: usize) usize {
-    return @min(rows, att_rows) * scoreStride(cap) * 4;
-}
+pub const scoreStride = sizes.scoreStride;
+pub const scoreBytes = sizes.scoreBytes;
 
 /// One stream's rows in a shared pass from `pos` on its own caches, and its window's rollback, hidden rows and scores.
 pub const Lane = struct { seq: SeqState, pos: usize, rows: usize = 1, keep: ?*const Keep = null, streams: u64 = 0, logits: u64 = 0 };
@@ -574,14 +592,3 @@ test {
 }
 
 pub const Pg = @import("cuda_glue.zig").Pg;
-
-var readout_rows: ?usize = null;
-
-/// Rows from which a read-out takes the tiles (TF_FLASHNEXT_READOUT_ROWS, default 64, 0 never): same bits, only speed.
-pub fn readoutTileRows() usize {
-    if (readout_rows == null) {
-        const r = if (std.c.getenv("TF_FLASHNEXT_READOUT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 64 else 64;
-        readout_rows = if (r == 0) std.math.maxInt(usize) else r;
-    }
-    return readout_rows.?;
-}

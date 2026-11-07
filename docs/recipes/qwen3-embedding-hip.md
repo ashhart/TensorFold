@@ -9,10 +9,10 @@ gfx11 builds run the same code; FP16 builds (RDNA2) refuse the checkpoint.
 | --- | --- |
 | Config, BF16 weights, batched prompt pass | `zig/src/families/qwen3/` (`config.zig`, `model.zig`, `forward.zig`) |
 | Prompt-only engine, lane backend, embedding head | `zig/src/families/qwen3/` (`engine.zig`, `prompt.zig`, `native.zig`) |
-| BF16 dense GEMM (dot2 tile, BF16 weight decoder) | `zig/kernels/hip/quant/bf16_decoder.hpp`, `dense_tiles.hpp`, `zig/src/hip/launches/dense.zig` |
+| BF16 dense GEMM (dot2 tile, BF16 weight decoder; gfx12's WMMA tile) | `zig/kernels/hip/quant/bf16_decoder.hpp`, `dense_tiles.hpp`, `zig/kernels/hip/tiles/wmma12_gemm.hpp`, `zig/src/hip/launches/dense.zig` |
 | Head-major attention rows | `tf_heads_rows` in `zig/kernels/hip/ops/attention.hpp` |
 | Stored-dtype dense weights | `zig/src/core/quant/dense.zig` (`readStored`) |
-| Device contracts | `zig/tests/hip/contract_dense.zig`, `contract_heads_rows.zig` |
+| Device contracts | `zig/tests/hip/contract_dense.zig`, `contract_dense_wmma12.zig`, `contract_heads_rows.zig` |
 | Pinned model-card oracle | `tools/zig/oracle_qwen3_embedding.py` |
 
 The weights stay BF16 on the GPU (14.1 GiB). Activations are BF16 and every
@@ -20,6 +20,16 @@ product sums in fp32. The head comes from the sentence-transformers folder:
 `1_Pooling/config.json` must pool the last token only, and `modules.json`'s
 `Normalize` makes every full-width vector unit length. A folder without
 `1_Pooling` is refused.
+
+On gfx12 the BF16 projections can run on a WMMA tile, opt-in with
+`--policy matrix=on`. The default `matrix=auto`, `matrix=off` and every other
+chip run the dot2 tile and keep its bits. The two tiles sum in different
+orders: on Qwen3-8B's layer-0 projections WMMA's fp32 sums sit 8 to 41
+times further from float64 than dot2's, while the BF16 outputs the engine
+writes are as close (`TF_QWEN3_*` GPU checks below, `projection_test.zig`).
+A less exact default output needs an opt-in, so WMMA is not the default.
+gfx1200 builds the same tile but is unmeasured: no run, and no gate 5
+record (the records cover gfx1201).
 
 ## Build and serve
 
@@ -85,7 +95,16 @@ TF_QWEN3_EMBED_DIR=MODEL_DIRECTORY TF_QWEN3_EMBED_REF=ref32.json TF_QWEN3_EMBED_
   zig build qwen3-hip-gpu-test -Dhip=true -Dhip-arch=gfx1201 -Dhipcc=/opt/rocm/core/bin/hipcc
 ```
 
-Results on the R9700 (ROCm 10.1):
+The GPU checks take `TF_QWEN3_MATRIX=auto|off|on` to run either tile, and `TF_QWEN3_ATTENTION=wide|f32` for the attention path.
+
+The WMMA rows below come from a server started with the WMMA tile:
+
+```sh
+zig-out/native-hip/bin/tensorfold-native serve MODEL_DIRECTORY \
+  --name Qwen3-Embedding-8B --host 127.0.0.1 --port 8090 --policy matrix=on
+```
+
+Results on the R9700 (ROCm 10.1); the distance rows are dot2 (the default), the WMMA rows `matrix=on`:
 
 | Check | Result |
 | --- | --- |
@@ -97,4 +116,10 @@ Results on the R9700 (ROCm 10.1):
 | Batch, alone and token-ID vectors (all 9 inputs) | identical fp32 bytes |
 | `hip-kernel-test`, `dense_gemm_block` | fp32 within the dot2 chain's bound against float64; BF16 out is the fp32 sum rounded once |
 | `hip-kernel-contract` | dense GEMM (fp32 and BF16 out) and `tf_heads_rows` pass gates 1 to 4; their gate 5 records are current (gfx1030 does not serve the dense GEMM) |
+| WMMA: distance to fp32 (9 inputs, card's then long) | 1.18e-4, 9.57e-5, 7.40e-5, 7.44e-5, 1.15e-4, 6.39e-5, 7.62e-5, 1.04e-4, 1.31e-4 |
+| WMMA: MRL width 32, 1024, 4096 worst distance (limit) | 1.06e-4 (1.9e-4), 1.35e-4 (1.7e-4), 1.31e-4 (1.6e-4) |
+| WMMA: card 2 x 2 scores, worst difference to the card | 0.0024 (dot2: 0.0014) |
+| Layer-0 projections against float64, BF16 out (WMMA / dot2) | 1.0000 in every class (q, k, v, o, gate, up, down) |
+| `hip-kernel-test` and `hip-kernel-contract`, WMMA tile (both geometries, fp32 and BF16 out) | gates 1 to 4 pass, fp32 worst 1.4% of its bound (depth k plus k 2^-126); its planted control (each 16-deep step summed in BF16) red at gate 4; gate 5 records current, gfx1201 only |
+| 100 short inputs in one request / one short query, cold | WMMA (`matrix=on`) 0.985 s / 40.5 ms; dot2 (default) 2.470 s / 75.1 ms; SGLang 0.841 s / 38.4 ms on the same card |
 | Load | 4 s from the page cache |

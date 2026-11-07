@@ -85,7 +85,7 @@ pub fn linear(
         const out = mixed + off * ch * 4;
         const conv_bytes = (d.conv - 1) * ch * 4;
         const next = try o.arena.take(conv_bytes);
-        try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, out, next, n, ch, d.conv);
+        try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, out, next, n, ch, d.conv, null);
         if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
             @ptrFromInt(st.conv),
             @ptrFromInt(next),

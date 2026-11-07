@@ -1,4 +1,4 @@
-//! The core row projection on synthetic 2-, 4-, 6- and 8-bit matrices: every width equals one row, a CPU reference, indexed experts.
+//! Core row projection on synthetic 2-, 4-, 6-, 8-bit matrices: every width = one row, CPU reference, indexed experts.
 const std = @import("std");
 const mtl = @import("metal");
 const row = @import("row_projection");
@@ -16,7 +16,7 @@ fn fromBf(v: u16) f32 {
 
 const Case = struct { n: usize, k: usize, experts: usize, rows: usize, repeat: usize, bits: u8 = 4, sum: row.Sum = .f32 };
 
-/// Code `i` of a row's bit stream (value i at bits i*bits and up, bytes little-endian; 6-bit: four values in three bytes).
+/// Code `i` of a row's bit stream (value i from bit i*bits up, bytes little-endian; 6-bit: four values in three bytes).
 fn code(bytes: []const u8, bits: u8, i: usize) u32 {
     const off = i * @as(usize, bits);
     const lo: u32 = bytes[off / 8];
@@ -160,7 +160,7 @@ pub fn main(_: std.process.Init) !void {
         const stride_w = c.n * c.k * c.bits / 32 * 4;
         const stride_sb = c.n * groups * 2;
         const w0 = row.Weights{ .w = s.w, .scales = s.s, .biases = s.b, .n = c.n, .k = c.k, .bits = c.bits, .sum = c.sum };
-        // every width of expert 0 against one row at a time, the CPU reference within rounding, relu2 as relu squared of the plain output
+        // expert 0's every width vs one row a time, CPU reference within rounding, relu2 = relu squared of plain output
         try run(queue, Dense{ .p = &p, .w = w0, .x = s.x, .rows = c.rows, .out = s.out, .relu2 = false });
         const wide = try a.dupe(u16, s.out.slice(u16, c.rows * c.n));
         defer a.free(wide);

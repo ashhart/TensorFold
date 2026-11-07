@@ -7,6 +7,7 @@ const json = @import("json");
 const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");
 const auth = @import("auth.zig");
+const auth_scope = @import("auth_scope.zig");
 const openai = @import("openai.zig");
 const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
@@ -23,6 +24,7 @@ const Server = @import("server.zig").Server;
 const idle_unload = @import("idle_unload.zig");
 const admission = @import("request_admission.zig");
 const log = @import("log.zig");
+const wait = @import("wait_reason.zig");
 const Conn = http_conn.Conn;
 const Allocator = std.mem.Allocator;
 
@@ -34,9 +36,11 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const path = auth.routePath(conn.path);
     const delete_body = std.mem.eql(u8, m, "DELETE") and
         (std.mem.eql(u8, path, "/v1/slide/facts") or std.mem.startsWith(u8, path, fact_path));
-    if (!std.mem.eql(u8, m, "POST") and !delete_body and !consumeBody(conn, a)) return;
+    // SGLang takes its rerank route by PUT as well as POST: the same handler, admission and key scope
+    const put_rerank = std.mem.eql(u8, m, "PUT") and auth_scope.putRoute(path);
+    if (!std.mem.eql(u8, m, "POST") and !put_rerank and !delete_body and !consumeBody(conn, a)) return;
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);
-    if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);
+    if (std.mem.eql(u8, m, "POST") or put_rerank) return post(srv, conn, a);
     if (std.mem.eql(u8, m, "DELETE")) {
         const route = auth.routePath(conn.path);
         if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.forget(srv, conn, a);
@@ -118,7 +122,8 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
-    if (!is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
+    if (!is_rerank and !is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
@@ -142,9 +147,21 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         .rejected => |refusal| return overloaded(conn, is_anthropic, refusal),
     };
     defer if (lease) |*held| held.release();
-    if (srv.info.embeddings != null and (is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions"))) {
+    const is_text = is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
+    if (srv.info.embeddings != null and (is_text or is_rerank)) {
         discardBody(conn, a);
         conn.sendJson(400, "{\"error\":{\"message\":\"this model produces embeddings; use POST /v1/embeddings\",\"type\":\"invalid_request_error\"}}");
+        return;
+    }
+    // a reranker's template reads query and document roles only: every other route would score or write nonsense
+    if (srv.info.rerank != null and (is_text or is_embedding)) {
+        discardBody(conn, a);
+        conn.sendJson(400, "{\"error\":{\"message\":\"this model is a reranker: use POST /v1/rerank\",\"type\":\"invalid_request_error\"}}");
+        return;
+    }
+    if (srv.info.readouts != null and !is_systemone) { // a readout engine answers System One decisions and nothing else
+        discardBody(conn, a);
+        conn.sendJson(400, "{\"error\":{\"message\":\"this model answers decisions only; use POST /v1/systemone\",\"type\":\"invalid_request_error\"}}");
         return;
     }
     // The wake for every engine-using route: a parked server reloads under the `active` count this begin raised.
@@ -153,18 +170,19 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
             if (wake_problem.len > 0) {
                 discardBody(conn, a);
                 log.line("idle reload failed: {s}", .{wake_problem});
-                return draining(conn, is_anthropic); // the model is loading: 503 + Retry-After, the client retries
+                return waiting(conn, is_anthropic, wait.reloadReason(wake_problem));
             }
         } else |e| {
             discardBody(conn, a);
             log.line("idle reload failed: {s}", .{@errorName(e)});
-            return draining(conn, is_anthropic);
+            return waiting(conn, is_anthropic, wait.reload_failed);
         }
     }
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (is_embedding) return embeddings.post(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
+    if (is_rerank) return @import("rerank.zig").post(srv, conn, a);
     if (is_decisions) return decisions.post(srv, conn, a);
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
@@ -195,15 +213,17 @@ pub var counted_hook: ?*const fn () void = null;
 
 /// Seconds a refused client is told to wait while the server drains for a restart (Retry-After).
 pub const retry_after_s = 30;
-pub const restarting = "server restarting: retry shortly";
+pub const restarting = wait.restarting.message;
 
 /// A request that arrives while a stop drains: 503, Retry-After, the API's own error shape; the connection closes.
 pub fn draining(conn: *Conn, anthropic_shape: bool) void {
-    const body = if (anthropic_shape)
-        "{\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"" ++ restarting ++ "\"}}"
-    else
-        "{\"error\": {\"message\": \"" ++ restarting ++ "\", \"type\": \"server_error\", \"param\": null, \"code\": \"server_restarting\"}}";
-    sendDraining(conn, body);
+    waiting(conn, anthropic_shape, wait.restarting);
+}
+
+/// A wait's 503 in the route's error shape: the code names why, and the client retries after Retry-After.
+pub fn waiting(conn: *Conn, anthropic_shape: bool, w: wait.Wait) void {
+    var buf: [512]u8 = undefined;
+    sendDraining(conn, if (anthropic_shape) wait.anthropicBody(&buf, w) else wait.body(&buf, w));
 }
 
 /// 503 with Retry-After and Connection: close, `body` as JSON.

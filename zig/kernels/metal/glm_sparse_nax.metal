@@ -1,4 +1,4 @@
-// GLM's sparse MLA for prompt chunks on the tensor units: exact bf16 products, fp32 sums, probabilities in three bf16 parts (exact).
+// GLM's sparse MLA, prompt chunks, tensor units: exact bf16 products, fp32 sums, probabilities as 3 bf16 parts (exact).
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -38,7 +38,7 @@ inline void sparse_queries(thread frag<bfloat> (&q)[8], const device bfloat* qba
   for (short t = 0; t < 8; t++) frag_get(q[t], qbase, RANK, 0, 16 * t, home);
 }
 
-// List entries [lo, hi) of one row (an entry outside [0, key_length) is no key): scores, the online softmax, values into `acc`.
+// One row's entries [lo, hi) (an entry outside [0, key_length) is no key): scores, online softmax, values into `acc`.
 inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], thread float (&l)[2], thread const frag<bfloat> (&q)[8],
                         const device bfloat* keys, const device int32_t* list, int lo, int hi, int key_length, float scale,
                         threadgroup float (&partial)[4][32][16], threadgroup int (&keyrow)[BLOCK], uint s, uint lane, short2 home, int d0) {
@@ -167,7 +167,7 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
   l[0] = l[1] = 0.0f;
 }
 
-// out [rows, 64, 512] over each row's `width` listed keys (an entry outside [0, key_length) is no key); grid (4 head groups, rows).
+// out [rows, 64, 512] over rows' `width` keys (an entry outside [0, key_length) is no key); grid (4 head groups, rows).
 [[kernel]] void glm_sparse_nax(const device bfloat* ql [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
                                const device int32_t* indices [[buffer(2)]], constant float& scale [[buffer(3)]],
                                constant int4& meta [[buffer(4)]], device bfloat* out [[buffer(5)]],
@@ -232,7 +232,7 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
   }
 }
 
-// Decode rows: each head's blocks combined in block order, out [rows, 64, 512] bf16; grid (64 heads, rows), 128 threads of 4 dims.
+// Decode rows: heads' blocks merged in order, out [rows,64,512] bf16; grid (64 heads, rows), 128 threads x 4 dims.
 [[kernel]] void glm_sparse_combine(const device float* po [[buffer(0)]], const device float* pm [[buffer(1)]],
                                    const device float* pl [[buffer(2)]], constant int& blocks [[buffer(3)]],
                                    device bfloat* out [[buffer(4)]], uint t [[thread_index_in_threadgroup]],

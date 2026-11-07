@@ -31,7 +31,7 @@ pub const Handoff = struct {
     source: Source,
 };
 
-/// A command buffer signals a shared event the host waits on, and the host's signal wakes the next one (our M5 wake time).
+/// A command buffer signals a shared event the host waits on; the host's signal wakes the next one (our M5 wake time).
 pub const event_handoff: Handoff = .{ .gpu_to_host_ns = 10_000, .host_to_gpu_ns = 100_000, .source = .probed };
 /// A resident kernel polls flag words the NIC writes into a shared buffer; unverified on Apple GPUs.
 pub const polled_handoff: Handoff = .{ .gpu_to_host_ns = 2_000, .host_to_gpu_ns = 3_000, .source = .assumed };
@@ -40,7 +40,7 @@ pub const no_handoff: Handoff = .{ .gpu_to_host_ns = 0, .host_to_gpu_ns = 0, .so
 
 pub const Primitive = enum { send, barrier, broadcast, all_reduce, all_to_all, gather, bulk };
 
-/// The shape of one call: ranks taking part, payload bytes each rank sends to each peer, and whether peers have their own links.
+/// One call's shape: ranks taking part, payload bytes each rank sends to each peer, whether peers have their own links.
 pub const Shape = struct {
     ranks: u32,
     bytes: u64,

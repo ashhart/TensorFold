@@ -1,4 +1,4 @@
-//! Shard pulls over the cluster's links: a pull names a file range; the holder answers with the bytes and their SHA-256.
+//! Shard pulls over the cluster's links: a pull names a file range; the holder answers with bytes and their SHA-256.
 const std = @import("std");
 const node = @import("node.zig");
 const wire = @import("wire.zig");

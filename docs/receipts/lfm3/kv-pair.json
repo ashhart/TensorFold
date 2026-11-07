@@ -1,0 +1,531 @@
+{
+ "scope": "Reuse the qualified paired row helper for equal-geometry K/V; arithmetic and kernel sources unchanged. Matched 4-bit performance is recorded separately below; no standard-server gate pass.",
+ "source_commit": "021f5ce9f56c490762d842e1177dee9516c75837",
+ "host": "Apple M4 Pro 48 GiB, macOS 26.5.1",
+ "native_sha256": "e9a1488abb130af39c21ee08068fe490d5926271cebcd2e9d0f815711e3730b4",
+ "baseline_forward_sha256": "a05dfd241f67e05ab5ba8a0ea978c094b889818a463edab80f29848ceb25d4e3",
+ "candidate_forward_sha256": "8ef7afff7df80dda6d573c1c8c9b0079ecdfc0752fe35c827c4355d6cde549e2",
+ "fixture": "fidelity-prompts/reasoning-257.ids.json",
+ "tokens_npy_sha256": "81449804fdd1a104d6dc9607c27d5cea49237064e50c80a765f68d8eba57f596",
+ "all_six_logit_arrays_equal": true,
+ "equal_logit_bytes": 394752000,
+ "logit_arrays": [
+  {
+   "model": "LFM3-1.7B-MLX-4bit",
+   "bytes": 65792000,
+   "sha256": "aaedf4b7a3db61d3ae5070f182e94faf81224ed5bd0db1145159aa1433ee0812"
+  },
+  {
+   "model": "LFM3-1.7B-MLX-6bit",
+   "bytes": 65792000,
+   "sha256": "2710a9b6ca6033adbdcf00d80e787665998f2a3bceb5b0c2d6a113d9c3e18eac"
+  },
+  {
+   "model": "LFM3-1.7B-MLX-8bit",
+   "bytes": 65792000,
+   "sha256": "68a9e475b459023bf3fbbae092b7cac795ddd64a4c6bad668481246cacc358e9"
+  },
+  {
+   "model": "LFM3-VL-2B-MLX-4bit",
+   "bytes": 65792000,
+   "sha256": "118440ccd7fc07a502485a3266a2878ec815f316bcfa9dddd859e5d324fb8654"
+  },
+  {
+   "model": "LFM3-VL-2B-MLX-6bit",
+   "bytes": 65792000,
+   "sha256": "9be9b95af0ff0c00697f8737ce9271ccac0e6dcd519b56d49f3666623ae6fd2c"
+  },
+  {
+   "model": "LFM3-VL-2B-MLX-8bit",
+   "bytes": 65792000,
+   "sha256": "3d1b90a881f6adbd5df111c72f1b8bfe2f7a6d445e478a7be326e4627aa849b6"
+  }
+ ],
+ "operator_pairs": {
+  "_trimmed_list": {
+   "count": 18,
+   "sha256": "178c117f7c8475cd8f4ea9d89349feb26fda4be320b6b607ed3e1f14b01092cd",
+   "first": [
+    {
+     "model": "LFM3-1.7B-MLX-4bit",
+     "rows": 1,
+     "module_a": "language_model.model.layers.2.self_attn.k_proj",
+     "module_b": "language_model.model.layers.2.self_attn.v_proj",
+     "input_sha256": "dda2cad3821cfa4cf617e0326115349407f39fc0745dd9162f5956eabeea674c",
+     "result": "DUAL_PROJECT rows=1 k=2048 n=512 bits=4 group=64 equal_bytes=2048"
+    },
+    {
+     "model": "LFM3-1.7B-MLX-4bit",
+     "rows": 3,
+     "module_a": "language_model.model.layers.2.self_attn.k_proj",
+     "module_b": "language_model.model.layers.2.self_attn.v_proj",
+     "input_sha256": "badfc915b7fb3074e0473c7c12f57f7e9e12a5dc4b552e1750a97a55e2cfb13c",
+     "result": "DUAL_PROJECT rows=3 k=2048 n=512 bits=4 group=64 equal_bytes=6144"
+    }
+   ],
+   "last": [
+    {
+     "model": "LFM3-VL-2B-MLX-8bit",
+     "rows": 64,
+     "module_a": "language_model.model.layers.2.self_attn.k_proj",
+     "module_b": "language_model.model.layers.2.self_attn.v_proj",
+     "input_sha256": "4e0b08dc7cca474bcfb6d052a9cdd977b7ea8ae3eb08410eb1b6d453f3c34d30",
+     "result": "DUAL_PROJECT rows=64 k=2048 n=512 bits=8 group=64 equal_bytes=131072"
+    }
+   ]
+  }
+ },
+ "real_image8_logits": {
+  "values": 11520000,
+  "equal_to_retained_native_baseline": true,
+  "sha256": "db730509b6d7dcb3d6d134b59b6434dfb43ebc85cdd3fe351bc8cc4148b47642"
+ },
+ "exactness_summary": "LFM3_EXACT mode=default passed=68 failed=0 skipped=0 prompt=5 windows=60 shared=2 snapshots=1 long=0 gpu_seconds=142.716",
+ "build_summaries": [
+  "Build Summary: 69/69 steps succeeded",
+  "Build Summary: 724/724 steps succeeded; 982/1000 tests passed (18 skipped)"
+ ],
+ "source_sha256": {
+  "zig/src/families/lfm3/forward.zig": "2946616a0b565c8c9baea9d35da279d18b752a0f2a8cd3834dd9c2ab6d45d8c1",
+  "zig/src/families/lfm3/dual_projection.zig": "763f0b7f47d0b00642e6e911f6874dd2987716432ba7721b01811a0accf87cd3",
+  "zig/kernels/metal/lfm3/projectiondual.metal": "05a21d65ec7563d9fadecf49bd88269b17d351591f674a5359c5aacccbfc6601",
+  "zig/kernels/metal/core/row_projection.metal": "86963d6266a982f4cac7c85265048703841a9545c19f2d2c5271eb8e02a0879b"
+ },
+ "serving": {
+  "scope": "Actual combined production binary, seeded sampling enabled, serial server ownership on M4. This is correctness evidence, not performance qualification.",
+  "models": {
+   "_trimmed_value": {
+    "bytes": 182540,
+    "sha256": "543855189cdfbb41fcc8f0a1bcb430d9bcd50e22be42f0b8a36ad56420ce19e1",
+    "keys": null,
+    "count": 6
+   }
+  },
+  "counts": {
+   "passed": 303,
+   "failed": 0,
+   "skipped": 0
+  }
+ },
+ "extracted_text": {
+  "scope": "Actual extracted text-only binary after the same shared K/V dispatch change; combined-chain checks above use a different binary.",
+  "source_commit": "9a26db78d",
+  "binary_sha256": "034c5ad872c4226c4b4eae581f9bfa4065028dd4b03717613a28bb7d8e16bb3c",
+  "build_summary": "Build Summary: 721/721 steps succeeded; 980/998 tests passed (18 skipped)",
+  "python_tests": {
+   "passed": 39,
+   "failed": 0
+  },
+  "served": [
+   {
+    "model": "LFM3-1.7B-MLX-4bit",
+    "binary_sha256": "034c5ad872c4226c4b4eae581f9bfa4065028dd4b03717613a28bb7d8e16bb3c",
+    "counts": {
+     "passed": 40,
+     "failed": 0,
+     "skipped": 0
+    },
+    "cancellation_checks": 6,
+    "tests": {
+     "_trimmed_list": {
+      "count": 40,
+      "sha256": "04fc74bb218bc86241b5ca05f596eb85ad13bfa5cc470479ce40a6374922622d",
+      "first": [
+       {
+        "name": "code/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 12,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "6936d334c5fa",
+         "token_sha256": "6936d334c5fa71b46f1463f0a41a1bec9c2191a8b04427ac3973cc970decd511",
+         "output_sha256": "5acb1b52c5f3ada89db8d0b9daac2ab1b42771116f19bac7e541c90ae2d6f053",
+         "text": " Then, use that function to compare the numbers 10 and 20. Finally, compare the numbers 5 and "
+        }
+       },
+       {
+        "name": "chat/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "b9e29e56abc8",
+         "token_sha256": "b9e29e56abc8ceddf1718ed57246cf830bfad51ae7467cde34099680227c0246",
+         "output_sha256": "ea6098063ae30786a2c14440104d62903854ffb2544ad22a5977b7be395bfbb3",
+         "text": "The sky appears blue because molecules in the atmosphere scatter shorter wavelengths of light (like blue and green) more efficiently than longer"
+        }
+       }
+      ],
+      "last": [
+       {
+        "name": "chat/cancel_next_drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "b9e29e56abc8",
+         "token_sha256": "b9e29e56abc8ceddf1718ed57246cf830bfad51ae7467cde34099680227c0246",
+         "output_sha256": "ea6098063ae30786a2c14440104d62903854ffb2544ad22a5977b7be395bfbb3",
+         "text": "The sky appears blue because molecules in the atmosphere scatter shorter wavelengths of light (like blue and green) more efficiently than longer"
+        }
+       }
+      ]
+     }
+    },
+    "speed_qualified": false
+   },
+   {
+    "model": "LFM3-1.7B-MLX-6bit",
+    "binary_sha256": "034c5ad872c4226c4b4eae581f9bfa4065028dd4b03717613a28bb7d8e16bb3c",
+    "counts": {
+     "passed": 40,
+     "failed": 0,
+     "skipped": 0
+    },
+    "cancellation_checks": 6,
+    "tests": {
+     "_trimmed_list": {
+      "count": 40,
+      "sha256": "d192b815bd06a720d397b7c32b67c441b27296a6e0a6df991d7550678b4cf8fb",
+      "first": [
+       {
+        "name": "code/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 12,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "0ba3f45e84a2",
+         "token_sha256": "0ba3f45e84a2d008ad278a00a0d0bb92e86ab473f1591dd7f0e0b9fc7e9097fd",
+         "output_sha256": "e8f89e14d184deba4de23ecb09ae19ff858a341ae382f77e95af132c252897c0",
+         "text": " Write a Python function that takes two integers as arguments and returns the larger one. \n\n``` \n\nI need to write a"
+        }
+       },
+       {
+        "name": "chat/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "47d528141151",
+         "token_sha256": "47d5281411514b32fd43b317870df757e61e0fb4b0956373c2426391156d8c7d",
+         "output_sha256": "5f26af10f7388c9cecdd8db5d6e063bde4c1e779f7fd2b028902b9745233476b",
+         "text": "The sky appears blue because molecules in the atmosphere scatter shorter (blue) wavelengths of sunlight more efficiently than longer (red)"
+        }
+       }
+      ],
+      "last": [
+       {
+        "name": "chat/cancel_next_drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "47d528141151",
+         "token_sha256": "47d5281411514b32fd43b317870df757e61e0fb4b0956373c2426391156d8c7d",
+         "output_sha256": "5f26af10f7388c9cecdd8db5d6e063bde4c1e779f7fd2b028902b9745233476b",
+         "text": "The sky appears blue because molecules in the atmosphere scatter shorter (blue) wavelengths of sunlight more efficiently than longer (red)"
+        }
+       }
+      ]
+     }
+    },
+    "speed_qualified": false
+   },
+   {
+    "model": "LFM3-1.7B-MLX-8bit",
+    "binary_sha256": "034c5ad872c4226c4b4eae581f9bfa4065028dd4b03717613a28bb7d8e16bb3c",
+    "counts": {
+     "passed": 40,
+     "failed": 0,
+     "skipped": 0
+    },
+    "cancellation_checks": 6,
+    "tests": {
+     "_trimmed_list": {
+      "count": 40,
+      "sha256": "173dce4e75402a8d41e8b5ae17e77a5a1963c0da2a1e8652d00c68e76ac3ebfe",
+      "first": [
+       {
+        "name": "code/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 12,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "fb5e9db70542",
+         "token_sha256": "fb5e9db70542b902465657f3a2924dbf7dfb1a08e9cd3e039b6f6932c5bf9f11",
+         "output_sha256": "e45552fd633a22c288d8bb067fa82c891e3ca8cb2df3339558832c270178612f",
+         "text": " \n\n```python\ndef larger(a, b):\n    if a > b:\n        return a\n    else:\n       "
+        }
+       },
+       {
+        "name": "chat/fresh_plain",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "0a26c7a004ed",
+         "token_sha256": "0a26c7a004edc59bc3a34b54d206656a5974430a51ff9c9691312fb8e2182ac2",
+         "output_sha256": "02e8cfe0c72109ca7a058c26aa569504d1995c20d3c49e7451c8ae963ae64f35",
+         "text": "The sky appears blue because molecules in Earth's atmosphere scatter shorter wavelengths of sunlight (like blue and violet) more efficiently than"
+        }
+       }
+      ],
+      "last": [
+       {
+        "name": "chat/cancel_next_drafted_equals_fresh",
+        "status": "passed",
+        "evidence": {
+         "prompt_tokens": 21,
+         "cached_tokens": 0,
+         "tokens": 24,
+         "cache_state": "cold",
+         "complete": true,
+         "token_sha": "0a26c7a004ed",
+         "token_sha256": "0a26c7a004edc59bc3a34b54d206656a5974430a51ff9c9691312fb8e2182ac2",
+         "output_sha256": "02e8cfe0c72109ca7a058c26aa569504d1995c20d3c49e7451c8ae963ae64f35",
+         "text": "The sky appears blue because molecules in Earth's atmosphere scatter shorter wavelengths of sunlight (like blue and violet) more efficiently than"
+        }
+       }
+      ]
+     }
+    },
+    "speed_qualified": false
+   }
+  ],
+  "counts": {
+   "passed": 120,
+   "failed": 0,
+   "skipped": 0
+  },
+  "vl_refusals": [
+   {
+    "bits": 4,
+    "vl_refusal": true,
+    "exit_status": 1
+   },
+   {
+    "bits": 6,
+    "vl_refusal": true,
+    "exit_status": 1
+   },
+   {
+    "bits": 8,
+    "vl_refusal": true,
+    "exit_status": 1
+   }
+  ]
+ },
+ "performance": {
+  "scope": "M5 4-bit text/VL native old/new/new/old; three repetitions per code/prose prompt, 256 output tokens each. A small measured dispatch gain, not a standard-server gate pass.",
+  "hardware": "Apple M5 Ultra 256 GiB, macOS 27.0 build 26A428",
+  "summary": {
+   "baseline_sha256": "44220f39df174b2364172eac4b8705dbd5f5f47f3175c7ed300a6d47ae3bbcbc",
+   "candidate_sha256": "e9a1488abb130af39c21ee08068fe490d5926271cebcd2e9d0f815711e3730b4",
+   "order": [
+    "old",
+    "new",
+    "new",
+    "old"
+   ],
+   "counts": {
+    "alone_equal": 240,
+    "alone_unequal": 0,
+    "alone_failed": 0,
+    "serial_equal": 32,
+    "serial_unequal": 0,
+    "serial_failed": 0
+   },
+   "full_hash_requests": 240,
+   "hash_groups": [
+    {
+     "family": "text",
+     "prompt": "long-code-chat",
+     "token_sha256": "7ffd540d4c865156a86d2dc134d3ac3b2a5c6508f5f7821217f5abcbc89cb9b7"
+    },
+    {
+     "family": "text",
+     "prompt": "long-prose-chat",
+     "token_sha256": "97f95aa70ea3cdfeb18f05c2b71620d477f3cb71f84ce72236eb1ee8bc636b1a"
+    },
+    {
+     "family": "vl",
+     "prompt": "long-code-chat",
+     "token_sha256": "cd53eb1c94a6051695a27472ab8e927126dacf6884d506996a6ce19c35abe9ee"
+    },
+    {
+     "family": "vl",
+     "prompt": "long-prose-chat",
+     "token_sha256": "a6dac318d3938bbe33f79d9a9c09bc030f9da35dc346d8c2d535909b0c3513aa"
+    }
+   ],
+   "cells": [
+    {
+     "family": "text",
+     "mode": "four_stream",
+     "prompt": "long-code-chat",
+     "old_run_medians": [
+      837.0,
+      838.8
+     ],
+     "new_run_medians": [
+      850.0,
+      849.2
+     ],
+     "old_median": 837.9,
+     "new_median": 849.6,
+     "rate_ratio": 1.0139634801288937
+    },
+    {
+     "family": "text",
+     "mode": "four_stream",
+     "prompt": "long-prose-chat",
+     "old_run_medians": [
+      857.0,
+      858.1
+     ],
+     "new_run_medians": [
+      869.5,
+      868.0
+     ],
+     "old_median": 857.55,
+     "new_median": 868.75,
+     "rate_ratio": 1.013060462946767
+    },
+    {
+     "family": "text",
+     "mode": "solo",
+     "prompt": "long-code-chat",
+     "old_run_medians": [
+      317.52504786591186,
+      315.9518189760151
+     ],
+     "new_run_medians": [
+      320.5081878043543,
+      319.67577794253697
+     ],
+     "old_median": 316.7384334209635,
+     "new_median": 320.09198287344566,
+     "rate_ratio": 1.0105877566427979
+    },
+    {
+     "family": "text",
+     "mode": "solo",
+     "prompt": "long-prose-chat",
+     "old_run_medians": [
+      333.35962421230994,
+      331.1493532644477
+     ],
+     "new_run_medians": [
+      335.87454621476815,
+      335.0961656322742
+     ],
+     "old_median": 332.2544887383788,
+     "new_median": 335.4853559235212,
+     "rate_ratio": 1.0097240738489657
+    },
+    {
+     "family": "vl",
+     "mode": "four_stream",
+     "prompt": "long-code-chat",
+     "old_run_medians": [
+      814.1,
+      813.1
+     ],
+     "new_run_medians": [
+      824.5,
+      824.3
+     ],
+     "old_median": 813.6,
+     "new_median": 824.4,
+     "rate_ratio": 1.0132743362831858
+    },
+    {
+     "family": "vl",
+     "mode": "four_stream",
+     "prompt": "long-prose-chat",
+     "old_run_medians": [
+      810.8,
+      809.5
+     ],
+     "new_run_medians": [
+      821.7,
+      819.8
+     ],
+     "old_median": 810.15,
+     "new_median": 820.75,
+     "rate_ratio": 1.0130839967907177
+    },
+    {
+     "family": "vl",
+     "mode": "solo",
+     "prompt": "long-code-chat",
+     "old_run_medians": [
+      301.8038551050975,
+      302.2026871330548
+     ],
+     "new_run_medians": [
+      305.9170505050233,
+      305.175979302901
+     ],
+     "old_median": 302.00327111907615,
+     "new_median": 305.54651490396213,
+     "rate_ratio": 1.0117324682337263
+    },
+    {
+     "family": "vl",
+     "mode": "solo",
+     "prompt": "long-prose-chat",
+     "old_run_medians": [
+      299.7549943842911,
+      300.1215491541061
+     ],
+     "new_run_medians": [
+      303.7439269888273,
+      302.96962197420424
+     ],
+     "old_median": 299.9382717691986,
+     "new_median": 303.3567744815158,
+     "rate_ratio": 1.0113973541694197
+    }
+   ]
+  },
+  "decode_client_scope": "Single-stream client stores a truncated token digest and full output-text SHA; full token SHA equality is established by concurrent request evidence.",
+  "clients": {
+   "_trimmed_value": {
+    "bytes": 408421,
+    "sha256": "184b143f38865f9b512f761e6e0f57758881241fb853f38ede05fc69ec51e814",
+    "keys": null,
+    "count": 16
+   }
+  }
+ },
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "43c0a460bf22219b5bdc1ed352c99d7baa7ea65ee7e292f446e48459b20ad7e2",
+  "original_bytes": 1191335
+ }
+}

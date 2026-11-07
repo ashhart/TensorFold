@@ -1,0 +1,334 @@
+{
+ "status": "explicit qualification candidate; disabled during ordinary model loading",
+ "source_commit": "75478ed17",
+ "shader_sha256": "605188026ccfe9f2e60bd01ee425a954367272c21a0cf6d2e43b7af5ea99261d",
+ "native_project_tool_sha256": "6c1ed257a51327e0f7d3ae8806fcff488ba07198376432508f4e8d38a5ed1609",
+ "contract_runner_sha256": "e35dfdacaeba5b35811e60f5c4fe11f951d3025752f746beaae2cb46c761ae14",
+ "original_row_project_tool_sha256": "244137da5e7afccad8fc6fb97598d53aec96cf2d097d8bfbdf296310ba013428",
+ "native_platform": {
+  "gpu": "M5 Ultra",
+  "ram_gib": 256,
+  "os": "macOS 27.0 (26A428)",
+  "zig": "0.17.0",
+  "path": "nax.h tensor-unit fragments selected by Device.tensorUnits()"
+ },
+ "comparison_platform": {
+  "gpu": "M4 Pro",
+  "ram_gb": 48,
+  "os": "macOS 26.5.1",
+  "mlx": "0.32.4",
+  "scope": "Retained original-native and MLX projection captures use identical input rows on M4; this is not a same-device M5 timing comparison."
+ },
+ "reference": {
+  "arithmetic": "Independent CPU FP64 dequantized checkpoint products",
+  "rounding": "Direct binary64-to-BF16 round-to-nearest-even",
+  "scope": "Projection fixtures only; not a whole-model fidelity acceptance policy."
+ },
+ "integer_bin_argument": {
+  "group64_max_exact_integer_sum": 15667200,
+  "group32_max_exact_integer_sum": 15667200,
+  "fp32_exact_integer_limit": 16777216,
+  "group64_exponent_span": 6,
+  "group32_exponent_span": 7,
+  "code_parts": "q = low_nibble + 16 * high_nibble; four-bit codes need only the low part",
+  "scope": "Finite normal aligned products without overflow/underflow; no universal exactness claim for extreme BF16 subnormals or arbitrary inputs."
+ },
+ "summary": {
+  "cells": 66,
+  "prompt_decode_equal_cells": 66,
+  "outputs": 61907040,
+  "correctly_rounded": 61907040,
+  "columns_worse_than_original": 0,
+  "columns_worse_than_mlx": 0,
+  "native_hardware": "M5 Ultra",
+  "comparison_hardware": "M4 Pro",
+  "binary_sha256": "6c1ed257a51327e0f7d3ae8806fcff488ba07198376432508f4e8d38a5ed1609",
+  "model_acceptance_threshold": null
+ },
+ "contracts": {
+  "m4": {
+   "hardware": "M4 Pro",
+   "exit": 0,
+   "summary": "SUMMARY 6 kernels: 6 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 9716 ms, limits 5147 ms"
+  },
+  "m5": {
+   "hardware": "M5 Ultra",
+   "exit": 0,
+   "summary": "SUMMARY 6 kernels: 6 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 8967 ms, limits 918 ms"
+  }
+ },
+ "fixture_tokens": {
+  "_trimmed_list": {
+   "count": 64,
+   "sha256": "3c782c154742a2226fdb1585116768d20b09661031e0264f4efa0e91d6b59cef",
+   "first": [
+    89509,
+    3420
+   ],
+   "last": [
+    22
+   ]
+  }
+ },
+ "cases": {
+  "_trimmed_list": {
+   "count": 66,
+   "sha256": "3bc8ae852836fceee16a92faa6eda417799034976358998a14fe2e02bc9a3374",
+   "first": [
+    {
+     "name": "1.7B-4-conv_in",
+     "class": "conv_in",
+     "shape": [
+      64,
+      2048,
+      6144
+     ],
+     "input_sha256": "c3c833599efae0b6f0abeeab1c674d0f88fd3828c89f7e3453505feb1abfa34e",
+     "comparisons": [
+      {
+       "mode": "prompt",
+       "native": {
+        "rms": 0.00043982049783110983,
+        "max_abs": 0.007671507657505572,
+        "worst_column_rms": 0.002848056337488529,
+        "worst_column": 3716,
+        "correctly_rounded": 393216,
+        "outputs": 393216
+       },
+       "original_native": {
+        "rms": 0.00043982049813563945,
+        "max_abs": 0.007671507657505572,
+        "worst_column_rms": 0.002848056337488529,
+        "worst_column": 3716,
+        "correctly_rounded": 393170,
+        "outputs": 393216
+       },
+       "mlx": {
+        "rms": 0.0005148634877763631,
+        "max_abs": 0.007671507657505572,
+        "worst_column_rms": 0.002895652676547294,
+        "worst_column": 3716,
+        "correctly_rounded": 239774,
+        "outputs": 393216
+       },
+       "native_columns_worse_than_original": 0,
+       "native_columns_worse_than_mlx": 0,
+       "output_sha256": "764c618b648c35902ec16e7f8578687e9b514a4c06ab5e7191c122ce8c704ffe"
+      },
+      {
+       "mode": "decode",
+       "native": {
+        "rms": 0.00048554828079777217,
+        "max_abs": 0.0037449413212016225,
+        "worst_column_rms": 0.0037449413212016225,
+        "worst_column": 1969,
+        "correctly_rounded": 6144,
+        "outputs": 6144
+       },
+       "original_native": {
+        "rms": 0.00048554828079777217,
+        "max_abs": 0.0037449413212016225,
+        "worst_column_rms": 0.0037449413212016225,
+        "worst_column": 1969,
+        "correctly_rounded": 6144,
+        "outputs": 6144
+       },
+       "mlx": {
+        "rms": 0.00048554828079777217,
+        "max_abs": 0.0037449413212016225,
+        "worst_column_rms": 0.0037449413212016225,
+        "worst_column": 1969,
+        "correctly_rounded": 6144,
+        "outputs": 6144
+       },
+       "native_columns_worse_than_original": 0,
+       "native_columns_worse_than_mlx": 0,
+       "output_sha256": "fa0a8412931265b2da7c5083d58a2bb9f9a776a65f8476ee623a7293dc07a1d2"
+      }
+     ],
+     "prompt_decode_equal": true,
+     "checkpoint": "LFM3-1.7B-MLX-4bit",
+     "module": "language_model.model.layers.0.conv.in_proj",
+     "input_stage": "layer_00_operator_norm",
+     "input_file": "1.7B-4-conv_in.bf16",
+     "one_row_file": "1.7B-4-conv_in-one.bf16",
+     "model_directory": "LFM3-1.7B-MLX-4bit",
+     "rows": 64,
+     "k": 2048,
+     "n": 6144
+    },
+    {
+     "name": "1.7B-4-conv_out",
+     "class": "conv_out",
+     "shape": [
+      64,
+      2048,
+      2048
+     ],
+     "input_sha256": "a0044e29906efde3689ad19b91868257d8487c11655ac8e83d1e5e73bd3e163e",
+     "comparisons": [
+      {
+       "mode": "prompt",
+       "native": {
+        "rms": 1.602854875446973e-05,
+        "max_abs": 0.0009396018046068377,
+        "worst_column_rms": 0.00032164384276088477,
+        "worst_column": 1688,
+        "correctly_rounded": 131072,
+        "outputs": 131072
+       },
+       "original_native": {
+        "rms": 1.602854875697783e-05,
+        "max_abs": 0.0009396018046068377,
+        "worst_column_rms": 0.00032164384276088477,
+        "worst_column": 1688,
+        "correctly_rounded": 131057,
+        "outputs": 131072
+       },
+       "mlx": {
+        "rms": 1.7543640518602656e-05,
+        "max_abs": 0.0012221553097768734,
+        "worst_column_rms": 0.00032858266117196354,
+        "worst_column": 1688,
+        "correctly_rounded": 94899,
+        "outputs": 131072
+       },
+       "native_columns_worse_than_original": 0,
+       "native_columns_worse_than_mlx": 0,
+       "output_sha256": "72ccfcb68f3a6e49a45a3c61501b886efdf56617095f4ea39c6f8fa6dacf812c"
+      },
+      {
+       "mode": "decode",
+       "native": {
+        "rms": 2.696892560157749e-06,
+        "max_abs": 5.5160145456811804e-05,
+        "worst_column_rms": 5.5160145456811804e-05,
+        "worst_column": 1700,
+        "correctly_rounded": 2048,
+        "outputs": 2048
+       },
+       "original_native": {
+        "rms": 2.696892560157749e-06,
+        "max_abs": 5.5160145456811804e-05,
+        "worst_column_rms": 5.5160145456811804e-05,
+        "worst_column": 1700,
+        "correctly_rounded": 2048,
+        "outputs": 2048
+       },
+       "mlx": {
+        "rms": 2.6968925601881646e-06,
+        "max_abs": 5.5160145456811804e-05,
+        "worst_column_rms": 5.5160145456811804e-05,
+        "worst_column": 1700,
+        "correctly_rounded": 2047,
+        "outputs": 2048
+       },
+       "native_columns_worse_than_original": 0,
+       "native_columns_worse_than_mlx": 0,
+       "output_sha256": "571e0e60f83da426e1f36973ce381c6c07dc0250805f58875cb4c6ce3b16f635"
+      }
+     ],
+     "prompt_decode_equal": true,
+     "checkpoint": "LFM3-1.7B-MLX-4bit",
+     "module": "language_model.model.layers.0.conv.out_proj",
+     "input_stage": "layer_00_conv_gated",
+     "input_file": "1.7B-4-conv_out.bf16",
+     "one_row_file": "1.7B-4-conv_out-one.bf16",
+     "model_directory": "LFM3-1.7B-MLX-4bit",
+     "rows": 64,
+     "k": 2048,
+     "n": 2048
+    }
+   ],
+   "last": [
+    {
+     "name": "VL-2B-8-vocabulary_head",
+     "class": "vocabulary_head",
+     "shape": [
+      64,
+      2048,
+      128000
+     ],
+     "input_sha256": "69e9450f2984d88628637b19bfd27885d6e09ebe0841a6c99a60340fc2a6c237",
+     "comparisons": [
+      {
+       "mode": "prompt",
+       "native": {
+        "rms": 0.00637062298687024,
+        "max_abs": 0.06121470243670046,
+        "worst_column_rms": 0.01631051233544983,
+        "worst_column": 278,
+        "correctly_rounded": 8192000,
+        "outputs": 8192000
+       },
+       "original_native": {
+        "rms": 0.006370622995905622,
+        "max_abs": 0.06121470243670046,
+        "worst_column_rms": 0.01631051233544983,
+        "worst_column": 278,
+        "correctly_rounded": 8191553,
+        "outputs": 8192000
+       },
+       "mlx": {
+        "rms": 0.007425419414880146,
+        "max_abs": 0.06121470243670046,
+        "worst_column_rms": 0.016382519090016284,
+        "worst_column": 278,
+        "correctly_rounded": 6260448,
+        "outputs": 8192000
+       },
+       "native_columns_worse_than_original": 0,
+       "native_columns_worse_than_mlx": 0,
+       "output_sha256": "61f3c553b0a0daf33f2dd29f46677112dae2639fd338014b7ebdd22558c6b1cb"
+      },
+      {
+       "mode": "decode",
+       "native": {
+        "rms": 0.00450617515076936,
+        "max_abs": 0.02677314502216177,
+        "worst_column_rms": 0.02677314502216177,
+        "worst_column": 1022,
+        "correctly_rounded": 128000,
+        "outputs": 128000
+       },
+       "original_native": {
+        "rms": 0.0045061751651349746,
+        "max_abs": 0.02677314502216177,
+        "worst_column_rms": 0.02677314502216177,
+        "worst_column": 1022,
+        "correctly_rounded": 127992,
+        "outputs": 128000
+       },
+       "mlx": {
+        "rms": 0.004506175151630346,
+        "max_abs": 0.02677314502216177,
+        "worst_column_rms": 0.02677314502216177,
+        "worst_column": 1022,
+        "correctly_rounded": 127994,
+        "outputs": 128000
+       },
+       "native_columns_worse_than_original": 0,
+       "native_columns_worse_than_mlx": 0,
+       "output_sha256": "e250665cdfd5e271e66e762ae85ec1bae526ef802cc62ec9f736be9d52622f13"
+      }
+     ],
+     "prompt_decode_equal": true,
+     "checkpoint": "LFM3-VL-2B-MLX-8bit",
+     "module": "language_model.model.embed_tokens",
+     "input_stage": "final_norm",
+     "input_file": "VL-2B-8-vocabulary_head.bf16",
+     "one_row_file": "VL-2B-8-vocabulary_head-one.bf16",
+     "model_directory": "LFM3-VL-2B-MLX-8bit",
+     "rows": 64,
+     "k": 2048,
+     "n": 128000
+    }
+   ]
+  }
+ },
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "f69ea8b1f4b260a8e50c566854b6325dd9edcfec57b6c47eaf39a29cf7ba8ba4",
+  "original_bytes": 189089
+ }
+}

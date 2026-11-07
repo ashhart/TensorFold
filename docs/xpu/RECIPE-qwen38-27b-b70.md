@@ -186,8 +186,8 @@ cd <repo> && zig build grammar -Dxgrammar=<xgrammar>
 
 The build checks that the checkout is at tag `v0.2.8` and produces `libtfgrammar.so`. The server looks for it in
 `<server directory>/../lib/`, then next to the server, then on the loader's path, and loads it at the first structured
-request: put it in `zig-out/xpu/lib/` (`zig build grammar` installs under `<prefix>/lib`; pass `--prefix zig-out/xpu` or
-copy the file; `zig build grammar` then a copy of `zig-out/lib/libtfgrammar.so` into `zig-out/xpu/lib/` is what we
+request: put it in `zig-out/xpu/lib/` (`zig build grammar` installs under `<prefix>/native/lib`, so a copy of
+`zig-out/native/lib/libtfgrammar.so` into `zig-out/xpu/lib/` is what we
 run). Without the library, structured requests are
 refused and everything else works. If you redistribute the library, ship xgrammar's licence and notice with it
 (Apache-2.0).

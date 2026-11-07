@@ -49,7 +49,7 @@ test "a pair refuses a sampled or grammar request by name at the head of prefill
 
 test "the served pair's chunk times the widest seam fits the window" {
     // the served pass asks for the generation's rows (`model.promptRows(generation)`); a pair caps them at the window
-    const chunk = lb.pairChunk(q.model.promptRows(0));
+    const chunk = lb.pairChunk(q.prompt_rows.requested(0, false, null)); // a dense pass's rows, as `model.promptRows` computes
     try std.testing.expect(chunk <= lb.batch_rows);
     try std.testing.expect(lb.seamBytes(chunk) <= lb.pairBytes());
     // the uncapped pass would stage a wider seam than the window, so the cap is what keeps the exchange legal

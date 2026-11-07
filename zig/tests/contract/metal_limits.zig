@@ -31,6 +31,10 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.eql(u8, d.name, "contract masked values tf_masked_control")) {
+        const control = @import("masked_value_probe.zig").control_source;
+        return .{ .decl = d, .function = fun, .here = control, .pre_m5 = control };
+    }
     if (std.mem.startsWith(u8, d.name, "attention pv ")) {
         const full = std.mem.indexOf(u8, d.name, " fp32 ") != null;
         const probe = @import("metal_attention_pv.zig");
@@ -43,6 +47,33 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         } else return error.UnknownLaunch;
         const body = try tf.frags.sourceMode(device, a, raw, full);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = try preM5(a, "", raw) };
+    }
+    if (std.mem.startsWith(u8, d.name, "binned ")) {
+        const prefix = if (has(d.name, " bad-rows ")) "#define TF_BP_BAD_ROWS 1\n" else if (has(d.name, " bad-acc ")) "#define TF_BP_BAD_ACC 1\n" else if (has(d.name, " bad-nonfinite ")) "#define TF_BP_BAD_NONFINITE 1\n" else "";
+        const source = try tf.lfm3.binned_projection.source(device, a);
+        const body = try std.mem.concat(a, u8, &.{ prefix, source });
+        const pre = try preM5(a, prefix, sources.core_binned_projection);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = pre };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3-dual ")) {
+        const source = try tf.lfm3.dual_projection.source(a);
+        const prefix = if (has(d.name, " bad-tail ")) "#define L3_DUAL_BAD_TAIL 1\n" else if (has(d.name, " bad-second ")) "#define L3_DUAL_BAD_SECOND 1\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ prefix, source });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3-projection ")) {
+        const source = try tf.lfm3.row_projection.source(a);
+        const prefix = if (has(d.name, " bad-tail ")) "#define L3_PROJECTION_BAD_TAIL 1\n" else if (has(d.name, " bad-rows ")) "#define L3_PROJECTION_BAD_ROWS 1\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ prefix, source });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3-image ")) {
+        return .{ .decl = d, .function = fun, .here = sources.lfm3_image_rows, .pre_m5 = sources.lfm3_image_rows };
+    }
+    if (std.mem.startsWith(u8, d.name, "lfm3 ")) {
+        const lfm3_head = if (has(d.name, " range-skip ")) "#define L3_RANGE_SKIP_REPAIR 1\n" else if (has(d.name, " range-clear ")) "#define L3_RANGE_CLEAR_RISK 1\n" else if (has(d.name, " postnorm-bad ")) "#define L3_POSTNORM_SKIP_ROUND 1\n" else if (has(d.name, " conv-state-bad ")) "#define L3_CONV_BAD_STATE 1\n" else if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3, "\n", sources.lfm3_attention });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {
         const body = try @import("qwen4").family.limits_sources.source(a, d.name);
@@ -136,7 +167,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         text = sources.core_deltanet;
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
-        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else tf.qwen27.runtime_sources.glue;
+        text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         text = sources.core_pair_rows;
     } else if (has(d.name, "tile_qmm")) text = sources.core_tile_qmm else if (has(d.name, "softmax")) text = sources.ops_softmax else if (has(d.name, "rms")) text = sources.ops_embed_norm else if (has(d.name, "top-k")) text = topk_text else if (has(d.name, "row projection")) text = sources.core_row_projection else if (has(d.name, "simd_qmm_bits")) text = sources.core_simd_qmm_bits else if (has(d.name, "simd_qmm")) text = sources.core_simd_qmm else if (has(d.name, "affine_mm")) {
