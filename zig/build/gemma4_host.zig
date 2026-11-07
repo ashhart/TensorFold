@@ -40,6 +40,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     runner.addImport("h3_kernels", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }));
     runner.addAnonymousImport("ling_metal", .{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") });
     runner.addAnonymousImport("ling_route", .{ .root_source_file = b.path("zig/src/families/ling/route.zig") });
+    runner.addImport("masked_sources", b.createModule(.{ .root_source_file = b.path("zig/masked_value_sources.zig"), .imports = &.{.{ .name = "kernel_sources", .module = sources }} }));
     const contract_root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_contract_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "runner", .module = runner }} });
     const contract_object = b.addObject(.{ .name = "gemma4-contract-compile", .root_module = contract_root });
     _ = contract_object.getEmittedBin();
