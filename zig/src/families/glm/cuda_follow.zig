@@ -20,8 +20,8 @@ pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop,
 pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
-    depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
+    depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts; begin: the stream's owner class
+    flags: u32 = 0, // pool: TF_GLM_KV_SPLIT; begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
     a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -193,6 +193,9 @@ pub const Leader = struct {
         try x.flush();
         const c = sampler.check(s);
         var h: Header = .{ .kind = @backingInt(Kind.begin), .a = kept };
+        if (pages.len > 0) if (x.e.pages) |p| { // TF_GLM_KV_SPLIT: the owner class every id is of (0 otherwise)
+            h.depth = p.leases[x.e.slot].owner;
+        };
         if (c) |v| {
             h.flags = 1;
             h.seed = v.seed;
@@ -213,7 +216,7 @@ pub const Leader = struct {
 
     /// The other ranks make rank 0's pool: `streams` paged sequences and `pages` pages, each page's bytes checked.
     pub fn pool(x: Leader, streams: u32, pages: usize, page_bytes: u64) !void {
-        try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes }, &.{});
+        try x.send(.{ .kind = @backingInt(Kind.pool), .depth = streams, .a = pages, .seed = page_bytes, .flags = @intFromBool(x.e.settings.kv_split) }, &.{});
     }
 
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
@@ -354,12 +357,12 @@ pub fn follow(e: *Engine, link: *Link) !void {
         e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
             .begin => {
-                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).map(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep);
+                if (step.ids.len > 0) try (e.pages orelse return error.BadStep).mapOwned(h.slot, step.ids, std.math.cast(usize, h.a) orelse return error.BadStep, h.depth);
                 try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null);
             },
             .pool => {
                 if (e.pages != null) return error.BadStep;
-                e.pages = try pages_mod.Pages.follow(e.gpa, e, h.depth, @intCast(h.a), h.seed);
+                e.pages = try pages_mod.Pages.followFlagged(e.gpa, e, h.depth, @intCast(h.a), h.seed, h.flags & 1 != 0);
             },
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);

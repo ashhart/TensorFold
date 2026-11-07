@@ -87,6 +87,7 @@ const Fake = struct {
         f.e.w.config = .{};
         f.e.w.share = try shard.Share.of(&f.e.w.config, 0, 2);
         f.e.w.layers = &f.layers;
+        f.e.share = f.e.w.share; // rank 0 of two: an owner class each
     }
 
     fn deinit(f: *Fake, p: ?*pages_mod.Pages) void {
@@ -184,4 +185,102 @@ test "GLM KV split: TF_KV_POISON fills a stream's pages in both regions, each at
         try expectEqual([2]u64{ base + id * pooled, pooled / 4 }, F.fills.items[2 * i]);
         try expectEqual([2]u64{ base + 16 * pooled + id * latent, latent / 4 }, F.fills.items[2 * i + 1]);
     }
+}
+
+test "GLM KV split: rank 0 books each stream from the roomiest owner class, every id of it, and every class idle after" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true); // 8 pages a class, a window each
+    defer f.deinit(p);
+    try expectEqual(@as(u32, 2), p.pool.classes);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, try p.open(1, 600, 100)); // all tie: class 0
+    try expectEqual(@as(u32, 0), p.leases[1].owner);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3, 5 }, try p.open(2, 1000, 100)); // class 1 has more
+    try expectEqual(@as(u32, 1), p.leases[2].owner);
+    try expectEqual(@as(u32, 0), p.pool.roomiest()); // 6 against 5
+    const third = try p.open(3, 600, 100);
+    for (third) |id| try expectEqual(@as(u32, 0), id % 2);
+    p.close(3); // a stream ended before its first decode (a cancel): its class's pages back at once
+    try expectEqual(@as(usize, 6), p.pool.classFree(0));
+    p.close(1);
+    p.close(2);
+    try expect(p.pool.idle());
+    for (0..2) |c| try expect(p.pool.classFree(@intCast(c)) == 8 and p.pool.classPromised(@intCast(c)) == 0);
+    try expectEqual(@as(u32, 0), p.leases[2].owner); // finish resets the lease
+    try std.testing.expectEqualSlices(u32, &.{ 5, 3 }, try p.openOn(1, 600, 100, 1)); // a pinned owner, last ids back first
+    try std.testing.expectError(error.BadStep, p.openOn(2, 600, 100, 2));
+    try expect(!p.used[2] and p.pool.classPromised(0) == 0);
+}
+
+test "GLM KV split: a class runs out alone: admission waits for its pages though the other class has them" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true);
+    defer f.deinit(p);
+    _ = try p.openOn(1, 3000, 100, 0); // 7 of class 0's 8
+    _ = try p.openOn(2, 3000, 100, 1); // 7 of class 1's
+    try expectEqual(@as(usize, 2), p.pool.available());
+    try expect(p.fits(100, 100) and !p.fits(600, 100)); // one page fits a class; two do not, though two are free
+    try std.testing.expectError(error.LaneMemory, p.open(3, 600, 100));
+    try expect(!p.used[3] and p.pool.availableIn(0) == 1 and p.pool.availableIn(1) == 1);
+}
+
+test "GLM KV split: a follower maps rank 0's ids of the stream's owner, refusing another class or owner before mapping" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(3, 16, false);
+    defer f.deinit(p);
+    try std.testing.expectError(error.ResidueMismatch, p.mapOwned(1, &.{ 1, 4, 5 }, 0, 1));
+    try std.testing.expectError(error.BadStep, p.mapOwned(1, &.{ 2, 4 }, 0, 2)); // owner past the classes
+    try expect(F.puts == 0 and !p.used[1] and f.st(1).capacity == 0); // nothing mapped or uploaded
+    try p.mapOwned(1, &.{ 5, 1, 7 }, 0, 1);
+    try expectEqual(@as(u32, 1), p.leases[1].owner);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 1, 7 }, F.table(f.st(1).ltable, 3));
+    p.close(1);
+    try expectEqual(@as(u32, 0), p.leases[1].owner);
+    try p.map(1, &.{ 2, 0 }, 0); // `map` is owner 0's
+}
+
+test "GLM KV split: a follower whose switch differs from rank 0's pool step is refused, and makes no pool" {
+    for ([_]bool{ true, false }) |mine| {
+        var f: Fake = undefined;
+        try f.init(mine);
+        defer f.deinit(null);
+        try pages_mod.ownSequence(&f.e);
+        const live = F.live;
+        const page = (try pages_mod.layout(gpa, &f.e, 0)).pageBytes();
+        try std.testing.expectError(error.RankMismatch, pages_mod.Pages.followFlagged(gpa, &f.e, 3, 16, page, !mine));
+        try expectEqual(live, F.live);
+        const p = try pages_mod.Pages.followFlagged(gpa, &f.e, 3, 16, page, mine);
+        p.deinit();
+    }
+}
+
+test "GLM KV split: a class shorter than a stream's window is refused before anything is made; off builds as before" {
+    {
+        var g: Fake = undefined; // off: 14 pages build as before
+        try g.init(false);
+        g.deinit(try g.pool(3, 14, true));
+    }
+    var f: Fake = undefined;
+    try f.init(true);
+    defer f.deinit(null);
+    try pages_mod.ownSequence(&f.e);
+    const l = try pages_mod.layout(gpa, &f.e, 0);
+    const live = F.live;
+    try std.testing.expectError(error.ClassTooSmall, pages_mod.Pages.init(gpa, &f.e, l, 3, 14, true)); // 7 < 8
+    try std.testing.expectError(error.ClassTooSmall, pages_mod.Pages.followFlagged(gpa, &f.e, 3, 14, l.pageBytes(), true));
+    try std.testing.expectError(error.BadClasses, pages_mod.Pages.init(gpa, &f.e, l, 3, 17, true));
+    try expectEqual(live, F.live);
+}
+
+test "GLM KV split: a request longer than a class fits admission and is refused by name, never as LaneMemory" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(3, 16, true);
+    defer f.deinit(p);
+    f.e.capacity = 8192; // as a table longer than a class would be, were it not refused at init
+    try expect(p.fits(5000, 100)); // 11 pages: past a class of 8, so the lane host does not wait for it
+    try std.testing.expectError(error.ClassTooSmall, p.open(1, 5000, 100));
+    try expect(!p.used[1] and p.pool.idle());
 }
