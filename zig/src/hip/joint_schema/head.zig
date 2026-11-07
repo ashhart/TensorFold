@@ -8,7 +8,7 @@ const Launcher = @import("../launches.zig").Launcher;
 const Blas = @import("../blas.zig").Blas;
 const Fns = @import("launch.zig").Fns;
 const weights = @import("weights.zig");
-const plan = @import("plan.zig");
+const plan = @import("core").joint_schema.plan;
 
 pub const Head = struct {
     gpa: std.mem.Allocator,
