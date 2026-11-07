@@ -1,7 +1,7 @@
-//! GLM-5.3-Flash's KDA on CUDA (the Python family's kda): fused and three-kernel chains match bits; replay rebuilds.
+//! Shared CUDA KDA: 128 key/value channels, four conv taps, BF16 rows and FP32 state and sums.
 
 const std = @import("std");
-const cuda = @import("cuda");
+const cuda = @import("root.zig");
 
 pub const dk = 128;
 pub const dv = 128;
@@ -52,6 +52,7 @@ pub const Wide = struct { q: u64, y: u64 };
 
 /// kda.chain: `rows` rows through the fused kernel, or with `wide` through prep, step and out (WARPS 8, TR 16).
 pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: Saves, wide: ?Wide) !void {
+    try validate(c, rows);
     const h: c_int = @intCast(c.heads);
     if (wide) |w| {
         var a: cuda.Args = .{};
@@ -102,6 +103,7 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
 
 /// kda.replay: the state after the first `rows` saved rows, from state_in.
 pub fn replay(ks: *const Kernels, stream: cuda.Stream, state_in: u64, k: u64, v: u64, g: u64, b: u64, rows: usize, heads: usize, state_out: u64) !void {
+    if (heads == 0 or heads > std.math.maxInt(c_int) or rows > std.math.maxInt(c_int)) return error.KdaShape;
     var a: cuda.Args = .{};
     a.add(@as(c_int, @intCast(heads)));
     for ([_]u64{ state_in, k, v, g, b }) |x| a.add(x);
@@ -110,6 +112,44 @@ pub fn replay(ks: *const Kernels, stream: cuda.Stream, state_in: u64, k: u64, v:
     try cuda.launch.launch(ks.replay, .{ .grid = .{ .x = @intCast(heads) }, .block = .{ .x = 1024 } }, stream, &a);
 }
 
-test "the three-kernel chain's step grid is the Python family's" {
-    try std.testing.expectEqual(@as(u32, 4), dv / 4 / 8); // DV / 4 / WARPS value rows a block, 8 warps of 4 rows
+/// The fixed kernel envelope; strides are elements, never bytes. Refuse before narrowing or launching.
+fn validate(c: Chain, rows: usize) !void {
+    const limit = std.math.maxInt(c_int);
+    if (c.heads == 0 or c.heads > limit / (3 * dk) or rows == 0 or rows > limit) return error.KdaShape;
+    const n = c.heads * dk;
+    if (c.p_stride > limit or c.a_stride > limit or c.g_stride > limit or c.b_off > limit) return error.KdaShape;
+    if (c.b_off < 3 * n or c.b_off + c.heads > c.p_stride or c.a_stride < n or c.g_stride < n) return error.KdaShape;
+}
+
+/// Batched replay strides are FP32/BF16 elements as declared by the original kernel, not byte offsets.
+pub const Replay = struct {
+    state_in: u64,
+    state_stride: usize,
+    k: u64,
+    v: u64,
+    g: u64,
+    b: u64,
+    kv_stride: usize,
+    b_stride: usize,
+    state_out: u64,
+};
+
+/// Restore each layer after a rejected suffix, preserving the saved-row order and the original launch ABI.
+pub fn replayLayers(ks: *const Kernels, stream: cuda.Stream, s: Replay, rows: usize, heads: usize, layers: usize) !void {
+    if (heads == 0 or heads > std.math.maxInt(c_int) or rows > std.math.maxInt(c_int) or
+        layers == 0 or layers > std.math.maxInt(u32) / heads) return error.KdaShape;
+    var a: cuda.Args = .{};
+    a.add(@as(c_int, @intCast(heads)));
+    a.add(s.state_in);
+    a.add(s.state_stride);
+    for ([_]u64{ s.k, s.v, s.g, s.b }) |x| a.add(x);
+    a.add(s.kv_stride);
+    a.add(s.b_stride);
+    a.add(@as(c_int, @intCast(rows)));
+    a.add(s.state_out);
+    try cuda.launch.launch(ks.replay_layers, .{ .grid = .{ .x = @intCast(layers * heads) }, .block = .{ .x = 1024 } }, stream, &a);
+}
+
+test {
+    _ = @import("kda_test.zig");
 }
