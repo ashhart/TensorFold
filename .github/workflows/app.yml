@@ -161,3 +161,17 @@ jobs:
         run: npm --prefix mobile ci --ignore-scripts
       - name: Validate mobile lock, security regressions, types and lint
         run: npm run verify:mobile
+
+  computer-use-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2.4.0
+        with:
+          swift-version: "6.2.1"
+      - name: Test the computer-use parser and key table
+        working-directory: app/native/computer-use
+        run: swift test

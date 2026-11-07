@@ -16,6 +16,7 @@ __pycache__/
 build/engine/
 build/.engine-*
 build/computer-use/
+native/computer-use/.build/
 
 # Local harness and generated module output
 .claude/

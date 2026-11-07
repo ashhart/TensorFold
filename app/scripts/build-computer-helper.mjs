@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Compiles native/computer-use/*.swift into build/computer-use/tensorfold-computer, then runs its --self-test.
+// Compiles the helper's Swift sources into build/computer-use/tensorfold-computer, then runs its --self-test.
+// Top-level .swift files and ComputerUseChecks/*.swift ship in the binary. Tests/ is run by swift test and is not compiled in.
 // A stamp beside the binary records the source digest and the binary's own sha256; swiftc is skipped only
 // when both still match. Sources go to swiftc by relative name so no local build path lands in the binary.
 import { createHash } from 'node:crypto'
@@ -28,8 +29,19 @@ export function swiftcArgs(sourceNames, output) {
   return ['swiftc', '-O', '-swift-version', '5', '-module-name', MODULE_NAME, '-target', SWIFT_TARGET, ...FRAMEWORKS.flatMap((name) => ['-framework', name]), '-o', output, ...sourceNames]
 }
 
+async function swiftNames(dir, prefix = '') {
+  let entries
+  try {
+    entries = await readdir(dir)
+  } catch (error) {
+    if (error?.code === 'ENOENT' && prefix) return []
+    throw error
+  }
+  return entries.filter((name) => name.endsWith('.swift')).map((name) => (prefix ? `${prefix}/${name}` : name))
+}
+
 export async function readSources(sourceDir) {
-  const names = (await readdir(sourceDir)).filter((name) => name.endsWith('.swift')).sort()
+  const names = [...(await swiftNames(sourceDir)), ...(await swiftNames(path.join(sourceDir, 'ComputerUseChecks'), 'ComputerUseChecks'))].sort()
   if (!names.length) throw new Error(`No Swift sources in ${sourceDir}.`)
   return Promise.all(names.map(async (name) => ({ name, bytes: await readFile(path.join(sourceDir, name)) })))
 }

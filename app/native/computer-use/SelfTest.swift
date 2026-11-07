@@ -13,110 +13,6 @@ final class Checks {
     }
 }
 
-func failureCode(_ line: String) -> String? {
-    if case .failure(let error) = parseRequest(line).command { return error.code }
-    return nil
-}
-
-func parsedCommand(_ line: String) -> Command? {
-    if case .success(let command) = parseRequest(line).command { return command }
-    return nil
-}
-
-func keyChecks(_ c: Checks) {
-    let good: [(String, CGKeyCode, CGEventFlags)] = [
-        ("cmd+shift+t", 17, [.maskCommand, .maskShift]), ("Return", 36, []), ("enter", 36, []),
-        ("ctrl+opt+delete", 51, [.maskControl, .maskAlternate]), ("command+alt+esc", 53, [.maskCommand, .maskAlternate]),
-        ("f12", 111, []), ("F1", 122, []), ("cmd+,", 43, [.maskCommand]), ("cmd+=", 24, [.maskCommand]),
-        ("shift+`", 50, [.maskShift]), ("pagedown", 121, []), ("pageup", 116, []), ("fn+f1", 122, [.maskSecondaryFn]),
-        (" cmd + a ", 0, [.maskCommand]), ("cmd+cmd+a", 0, [.maskCommand]), ("space", 49, []), ("up", 126, []),
-        ("down", 125, []), ("left", 123, []), ("right", 124, []), ("home", 115, []), ("end", 119, []),
-        ("forwarddelete", 117, []), ("backspace", 51, []), ("tab", 48, []), ("control+[", 33, [.maskControl]),
-        ("cmd+]", 30, [.maskCommand]), ("ctrl+;", 41, [.maskControl]), ("'", 39, []), ("/", 44, []), (".", 47, []),
-        ("-", 27, []), ("0", 29, []), ("9", 25, []), ("z", 6, []), ("option+shift+k", 40, [.maskAlternate, .maskShift]),
-    ]
-    for (text, code, flags) in good {
-        let combo = try? parseKeyCombo(text)
-        c.expect(combo?.keyCode == code, "key \(text) code")
-        c.expect(combo?.flags == flags, "key \(text) flags")
-    }
-    let order = try? parseKeyCombo("shift+cmd+t")
-    c.expect(order?.modifiers.map { $0.keyCode } == [56, 55], "modifiers keep their order")
-    c.expect((try? parseKeyCombo("cmd+cmd+a"))?.modifiers.count == 1, "a repeated modifier is pressed once")
-    c.expect((try? parseKeyCombo("fn+f1"))?.modifiers.first?.keyCode == nil, "fn only sets a flag")
-    let bad = ["", "   ", "cmd", "cmd+shift", "cmd+foo", "a+b", "f13", "hyper+a", "cmd++", "+", "control+option+", String(repeating: "a", count: 100)]
-    for text in bad {
-        do {
-            _ = try parseKeyCombo(text)
-            c.expect(false, "key \(text.prefix(20)) should fail")
-        } catch let error as HelperError {
-            c.expect(error.code == "bad_key", "key \(text.prefix(20)) fails with bad_key")
-        } catch {
-            c.expect(false, "key \(text.prefix(20)) threw something else")
-        }
-    }
-    let printable: [(String, Bool)] = [("a", true), ("shift+a", true), ("space", true), ("cmd+a", false), ("ctrl+c", false), ("return", false), ("left", false), ("tab", false)]
-    for (text, expected) in printable {
-        c.expect((try? parseKeyCombo(text)).map(comboTypesCharacter) == expected, "\(text) types a character: \(expected)")
-    }
-}
-
-func requestChecks(_ c: Checks) {
-    let permissions = parseRequest(#"{"id":1,"cmd":"permissions"}"#)
-    c.expect(permissions.id == 1, "id is read")
-    c.expect(parsedCommand(#"{"id":1,"cmd":"permissions"}"#) == .permissions, "permissions parses")
-    let codes: [(String, String)] = [
-        ("not json", "bad_json"), ("[1,2]", "bad_request"), (#"{"cmd":"apps"}"#, "bad_request"),
-        (#"{"id":"1","cmd":"apps"}"#, "bad_request"), (#"{"id":1.5,"cmd":"apps"}"#, "bad_request"),
-        (#"{"id":true,"cmd":"apps"}"#, "bad_request"), (#"{"id":-1,"cmd":"apps"}"#, "bad_request"),
-        (#"{"id":2}"#, "bad_request"), (#"{"id":3,"cmd":"dance"}"#, "unknown_cmd"),
-        (#"{"id":4,"cmd":"click"}"#, "bad_request"), (#"{"id":4,"cmd":"click","x":1}"#, "bad_request"),
-        (#"{"id":4,"cmd":"click","x":1,"y":2,"element":3}"#, "bad_request"),
-        (#"{"id":4,"cmd":"click","x":1,"y":2,"button":"middle"}"#, "bad_request"),
-        (#"{"id":4,"cmd":"click","x":1,"y":2,"count":3}"#, "bad_request"), (#"{"id":4,"cmd":"click","x":"1","y":2}"#, "bad_request"),
-        (#"{"id":4,"cmd":"click","x":true,"y":2}"#, "bad_request"), (#"{"id":4,"cmd":"click","element":0}"#, "bad_request"),
-        (#"{"id":5,"cmd":"observe","maxElements":0}"#, "bad_request"), (#"{"id":5,"cmd":"observe","pid":-5}"#, "bad_request"),
-        (#"{"id":6,"cmd":"scroll"}"#, "bad_request"), (#"{"id":6,"cmd":"scroll","dy":500}"#, "bad_request"),
-        (#"{"id":6,"cmd":"scroll","x":1,"y":2,"element":3,"dy":1}"#, "bad_request"), (#"{"id":6,"cmd":"scroll","element":0,"dy":1}"#, "bad_request"),
-        (#"{"id":7,"cmd":"type","text":""}"#, "bad_request"), (#"{"id":7,"cmd":"type","text":5}"#, "bad_request"),
-        (#"{"id":8,"cmd":"key","keys":"cmd+nope"}"#, "bad_key"), (#"{"id":8,"cmd":"key"}"#, "bad_request"),
-        (#"{"id":9,"cmd":"drag","from":{"x":1},"to":{"x":3,"y":4}}"#, "bad_request"), (#"{"id":9,"cmd":"drag","from":{"x":1,"y":2}}"#, "bad_request"),
-        (#"{"id":10,"cmd":"open_app","name":"../Evil"}"#, "bad_request"), (#"{"id":10,"cmd":"open_app","name":"/Applications/X.app"}"#, "bad_request"),
-        (#"{"id":10,"cmd":"open_app","bundleId":"com apple"}"#, "bad_request"), (#"{"id":10,"cmd":"open_app"}"#, "bad_request"),
-        (#"{"id":10,"cmd":"open_app","name":"Notes","bundleId":"com.apple.Notes"}"#, "bad_request"),
-        (#"{"id":11,"cmd":"request_permissions"}"#, "bad_request"), (#"{"id":11,"cmd":"request_permissions","accessibility":1}"#, "bad_request"),
-    ]
-    for (line, code) in codes {
-        c.expect(failureCode(line) == code, "\(line.prefix(60)) -> \(code)")
-    }
-    c.expect(parseRequest(#"{"id":2}"#).id == 2, "a bad request keeps its id")
-    c.expect(parseRequest("not json").id == nil, "unreadable JSON has no id")
-    let tooLong = #"{"id":12,"cmd":"type","text":""# + String(repeating: "a", count: maxTypeCharacters + 1) + #""}"#
-    c.expect(failureCode(tooLong) == "bad_request", "type text is capped")
-    let huge = #"{"id":13,"cmd":"apps","pad":""# + String(repeating: "a", count: maxLineBytes) + #""}"#
-    c.expect(failureCode(huge) == "bad_request", "request lines are capped")
-    let good: [(String, Command)] = [
-        (#"{"id":1,"cmd":"click","x":10,"y":20}"#, .click(.point(CGPoint(x: 10, y: 20)), .left, 1)),
-        (#"{"id":1,"cmd":"click","element":4,"button":"right","count":2}"#, .click(.element(4), .right, 2)),
-        (#"{"id":1,"cmd":"observe"}"#, .observe(maxElements: 150, pid: nil)),
-        (#"{"id":1,"cmd":"observe","maxElements":1000,"pid":123}"#, .observe(maxElements: 400, pid: 123)),
-        (#"{"id":1,"cmd":"scroll","dy":3}"#, .scroll(nil, dx: 0, dy: 3)),
-        (#"{"id":1,"cmd":"scroll","x":1,"y":2,"dx":-2}"#, .scroll(.point(CGPoint(x: 1, y: 2)), dx: -2, dy: 0)),
-        (#"{"id":1,"cmd":"scroll","element":5,"dy":-1}"#, .scroll(.element(5), dx: 0, dy: -1)),
-        (#"{"id":1,"cmd":"type","text":"hi\n"}"#, .type("hi\n")),
-        (#"{"id":1,"cmd":"key","keys":"cmd+q"}"#, .key(KeyCombo(keyCode: 12, modifiers: [Modifier(flag: .maskCommand, keyCode: 55)]))),
-        (#"{"id":1,"cmd":"drag","from":{"x":1,"y":2},"to":{"x":3,"y":4}}"#, .drag(CGPoint(x: 1, y: 2), CGPoint(x: 3, y: 4))),
-        (#"{"id":1,"cmd":"move","x":5.5,"y":6}"#, .move(CGPoint(x: 5.5, y: 6))),
-        (#"{"id":1,"cmd":"open_app","name":"Notes"}"#, .openApp(name: "Notes", bundleId: nil)),
-        (#"{"id":1,"cmd":"open_app","bundleId":"com.apple.Notes"}"#, .openApp(name: nil, bundleId: "com.apple.Notes")),
-        (#"{"id":1,"cmd":"request_permissions","accessibility":true}"#, .requestPermissions(accessibility: true, screenRecording: false)),
-        (#"{"id":1,"cmd":"apps","extra":null}"#, .apps), (#"{"id":1,"cmd":"frontmost"}"#, .frontmost), (#"{"id":1,"cmd":"stop"}"#, .stop),
-    ]
-    for (line, command) in good {
-        c.expect(parsedCommand(line) == command, "\(line.prefix(60)) parses")
-    }
-}
-
 func pointChecks(_ c: Checks) {
     let displays = [CGRect(x: 0, y: 0, width: 1512, height: 982), CGRect(x: 1512, y: -200, width: 2560, height: 1440)]
     let cases: [(CGPoint, Bool)] = [
@@ -198,37 +94,15 @@ func miscChecks(_ c: Checks) {
     let path = dragPath(from: from, to: to)
     c.expect(path.last == to && path.first != from && (8...60).contains(path.count), "drag path ends on the target")
     c.expect(dragPath(from: from, to: from).count == 8, "a zero drag still moves in steps")
-    let line = encodeLine(okReply(3, ["title": "a\nb", "path": "/x"]))
-    let text = String(decoding: line, as: UTF8.self)
-    c.expect(text.hasSuffix("\n") && text.filter { $0 == "\n" }.count == 1, "replies are exactly one line")
-    c.expect(text.contains(#""path":"/x""#) && text.contains(#"\n"#), "replies escape newlines and keep slashes")
-    let broken = String(decoding: encodeLine(["id": 4, "ok": true, "x": Double.nan]), as: UTF8.self)
-    c.expect(broken.contains(#""code":"internal""#) && broken.contains(#""id":4"#), "an unencodable reply becomes an internal error")
-    let error = errorReply(nil, HelperError("bad_json", "nope"))
-    c.expect(error["id"] is NSNull && error["ok"] as? Bool == false && error["code"] as? String == "bad_json", "error replies carry code and null id")
 }
 
 func phoneChecks(_ c: Checks) {
     let token = "12345678-1234-1234-1234-123456789ABC"
-    c.expect(parsedCommand(#"{"id":1,"cmd":"phone_status"}"#) == .phoneStatus, "phone status parses without permission prompts")
-    c.expect(parsedCommand(#"{"id":1,"cmd":"phone_connect","bundleId":"com.example.other"}"#) == .phoneConnect, "phone connect has a fixed native target")
-    let observe = "{\"id\":1,\"cmd\":\"phone_observe\",\"token\":\"\(token)\"}"
-    c.expect(parsedCommand(observe) == .phoneObserve(token), "phone observe requires connection token")
-    let tap = "{\"id\":1,\"cmd\":\"phone_input\",\"token\":\"\(token)\",\"action\":\"tap\",\"x\":10,\"y\":20,\"width\":300,\"height\":600}"
-    c.expect(parsedCommand(tap) == .phoneInput(token, .tap(CGPoint(x: 10, y: 20), CGSize(width: 300, height: 600))), "phone tap uses bounded relative coordinates")
-    for line in [tap.replacingOccurrences(of: "\"x\":10", with: "\"x\":300"), tap.replacingOccurrences(of: "\"x\":10", with: "\"x\":-1"), tap.replacingOccurrences(of: "\"width\":300", with: "\"width\":0"), tap.replacingOccurrences(of: "\"tap\"", with: "\"key\""), tap.replacingOccurrences(of: token, with: "wrong"), #"{"id":1,"cmd":"phone_observe"}"#] {
-        c.expect(failureCode(line) == "bad_request", "phone invalid coordinates, token and arbitrary keys refused")
-    }
     let size = CGSize(width: 300, height: 600)
-    c.expect(phoneLocalPoint(CGPoint(x: 0, y: 0), size: size), "phone origin is inside")
-    c.expect(!phoneLocalPoint(CGPoint(x: 300, y: 0), size: size), "phone right boundary is excluded")
-    c.expect(!phoneLocalPoint(CGPoint(x: 1, y: CGFloat.nan), size: size), "phone NaN point refused")
     c.expect(phoneContentRect(CGRect(x: 100, y: 200, width: 320, height: 700)) == CGRect(x: 110, y: 248, width: 300, height: 642), "phone image and input exclude window controls")
     c.expect(phoneContentRect(CGRect(x: 0, y: 0, width: 50, height: 50)) == nil, "phone cannot target tiny toolbar windows")
     let global = try? phoneGlobalPoint(CGPoint(x: 150, y: 300), size: size, frame: CGRect(x: 100, y: 200, width: 320, height: 700))
     c.expect(global == CGPoint(x: 260, y: 569), "phone coordinates map only into clipped window content")
-    c.expect(phoneTypeAllowed("Hello\n世界\t😀"), "phone unicode and explicit line break typing supported")
-    c.expect(!phoneTypeAllowed("\u{E03D}") && !phoneTypeAllowed("\u{1B}"), "phone private key codes and escape refused")
     c.expect(phoneProtectedText("Enter your passcode") && phoneProtectedText("iPhone in use") && phoneProtectedText("Apple Account password"), "phone lock, authentication and disconnected states are refused")
     c.expect(!phoneProtectedText("Synthetic sample home screen"), "ordinary phone screen text accepted")
     let windowBounds: [String: Any] = ["X": 0, "Y": 0, "Width": 300, "Height": 600]
@@ -261,8 +135,6 @@ func attachmentTextChecks(_ c: Checks) {
 
 func runSelfTest() -> Int32 {
     let checks = Checks()
-    keyChecks(checks)
-    requestChecks(checks)
     pointChecks(checks)
     filterChecks(checks)
     textChecks(checks)

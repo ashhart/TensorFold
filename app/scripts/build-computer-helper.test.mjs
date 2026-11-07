@@ -90,6 +90,16 @@ async function main() {
     const settled = toolchain()
     assert.equal((await build({ root, run: settled.run, log: () => {} })).compiled, false)
 
+    await mkdir(path.join(paths.sourceDir, 'ComputerUseChecks'))
+    await writeFile(path.join(paths.sourceDir, 'ComputerUseChecks', 'Parser.swift'), 'let c = 1\n')
+    await mkdir(path.join(paths.sourceDir, 'Tests', 'ComputerUseChecksTests'), { recursive: true })
+    await writeFile(path.join(paths.sourceDir, 'Tests', 'ComputerUseChecksTests', 'ParserTests.swift'), 'let t = 1\n')
+    const nested = toolchain()
+    assert.equal((await build({ root, run: nested.run, log: () => {} })).compiled, true)
+    const nestedArgs = nested.calls.find((call) => call.args[0] === 'swiftc').args
+    assert.ok(nestedArgs.includes('ComputerUseChecks/Parser.swift'), 'ComputerUseChecks sources ship in the helper')
+    assert.ok(!nestedArgs.some((arg) => String(arg).includes('Tests/')), 'swift test files stay out of the helper')
+
     // Failures: a missing toolchain, a compile error, a local path in the binary, a failing self-test, another OS.
     await writeFile(path.join(paths.sourceDir, 'Extra.swift'), 'let b = 2\n')
     await assert.rejects(() => build({ root, run: toolchain({ swiftcMissing: true }).run, log: () => {} }), /xcrun could not find swiftc.*xcode-select --install/s)
