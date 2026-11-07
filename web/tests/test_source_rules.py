@@ -19,7 +19,7 @@ def test_web_sources_stay_small_with_single_line_comments():
         if path.suffix == ".py":
             comments = [t for t in tokenize.generate_tokens(io.StringIO(text).readline) if t.type == tokenize.COMMENT]
             for token in comments:
-                assert token.end[1] <= 120, (name, token.start)
+                assert len(lines[token.start[0]-1][:token.end[1]].encode()) <= 120, (name, token.start)
             full = {t.start[0] for t in comments if not lines[t.start[0]-1][:t.start[1]].strip()}
             for line in full:
                 assert line + 1 not in full, (name, line)
@@ -34,6 +34,6 @@ def test_web_sources_stay_small_with_single_line_comments():
             full = [i for i, line in enumerate(lines) if re.match(mark, line)]
             for i in full:
                 assert i + 1 not in full, (name, i + 1)
-                assert len(lines[i]) <= 120, (name, i + 1)
+                assert len(lines[i].encode()) <= 120, (name, i + 1)
             if path.suffix == ".css":
                 assert "/*" not in text, name
