@@ -294,6 +294,59 @@ pub const Attention = struct {
         e.barrier();
         try timing.end();
     }
+    /// The keys' half of `preprocess` and `encode`'s append: a pass whose rows reach only the cache.
+    pub fn keysOnly(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, p: Preprocess, v: Ref, caches: []const Cache) !void {
+        try plan.geometry.check();
+        try p.geometry.check();
+        const g = plan.geometry;
+        const pg = p.geometry; // preprocess's geometry, as attentionForward passes it
+        const kv_bytes = @as(usize, p.rows) * g.kv_heads * g.dim * 2;
+        if (p.rows != plan.rows or p.rows == 0 or p.rows > @import("gpu_frame.zig").max_rows or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
+        if ((p.h_end > 0 or p.w_end > 0) and p.plane < p.rows) return error.TargetAttentionShape;
+        const plane_rows: usize = if (p.h_end > 0 or p.w_end > 0) 2 * @as(usize, p.plane) + p.rows else p.rows;
+        try span(p.key, kv_bytes);
+        try span(p.k_gain, @as(usize, g.dim) * 2);
+        try span(p.norm_k, kv_bytes);
+        try span(p.rotated_key, kv_bytes);
+        try span(v, kv_bytes);
+        try spanAligned(p.positions, plane_rows * 4, 4);
+        for ([_]Ref{ p.norm_k, p.rotated_key }) |dst| for ([_]Ref{ p.key, v }) |src| try disjoint(dst, kv_bytes, src, kv_bytes);
+        try disjoint(p.norm_k, kv_bytes, p.rotated_key, kv_bytes);
+        try scratch.check(plan);
+        try binding.check(plan, caches);
+        for (caches) |cache| for ([_]Ref{ p.rotated_key, v }) |operand| {
+            try disjoint(cache.keys, cacheBytes(cache, true, g), operand, kv_bytes);
+            try disjoint(cache.values, cacheBytes(cache, false, g), operand, kv_bytes);
+        };
+        var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
+        errdefer timing.cancel();
+        const e = timing.encoder;
+        e.setPipeline(a.io[7]);
+        bind(e, .{ p.key, p.k_gain });
+        e.setValue(glue.Head{ .width = pg.dim, .rows = p.rows * pg.kv_heads, .stride = pg.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
+        e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
+        e.dispatchGroups(mtl.Size.of(p.rows * pg.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
+        e.barrier();
+        e.setPipeline(a.io[8]);
+        bind(e, .{ p.norm_k, p.positions });
+        e.setValue(glue.Rope{ .width = pg.dim, .heads = pg.kv_heads, .rows = p.rows, .rotary = pg.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }, 2);
+        e.setBuffer(p.rotated_key.buffer, p.rotated_key.offset, 3);
+        e.dispatchThreads(mtl.Size.of(pg.dim, pg.kv_heads, p.rows), mtl.Size.of(32, 1, 1));
+        e.barrier();
+        for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        for (caches) |cache| {
+            e.useResource(cache.keys.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+            e.useResource(cache.values.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+        }
+        const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16, .heads = g.heads, .kv_heads = g.kv_heads, .dim = g.dim, .group = g.group() };
+        e.setPipeline(a.io[2]);
+        bind(e, .{ p.rotated_key, v, binding.get(.caches), binding.get(.meta), scratch.get(.nodes) });
+        e.setValue(args, 5);
+        e.dispatchThreads(mtl.Size.of(g.dim, g.kv_heads, plan.rows), mtl.Size.of(32, 4, 1));
+        try timing.end();
+    }
+
     /// `prompt` picks the prompt kernel; `split` reads the head count, constant when one Mac runs it.
     pub fn encode(a: *const Attention, input_encoder: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, k: Ref, v: Ref, out: Ref, caches: []const Cache, raw_gate: ?Ref, prompt: bool, split: bool) !void {
         try plan.geometry.check();
