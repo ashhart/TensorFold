@@ -15,6 +15,9 @@ struct Fp8Tiles {
     size_t lblk, hoff, vgap, sgap;  // a page's layer block (bytes), the head's first row in it, keys to values, codes to scales
     int ptok, kvh;
     bool paged;
+    // the page a thread read last, kept across tiles: its first row is looked up once a page, not once a tile
+    const unsigned char* near = nullptr;
+    int lo = 0;
     __device__ Fp8Tiles(TileStore store, const Seg& sg, int layer, int kvh_, int h) : s(store) {
         const unsigned char* slab = reinterpret_cast<const unsigned char*>(sg.kv) + (size_t)layer * 2 * kvh_ * sg.cap * (HD + 4);
         K = slab + (size_t)h * sg.cap * HD;
@@ -45,8 +48,18 @@ struct Fp8Tiles {
             const int r = row(t0 + (tid >> 4) + THREADS / 16 * i);
             kr[i] = vr[i] = make_uint4(0u, 0u, 0u, 0u);
             if (r >= 0) {
-                kr[i] = *reinterpret_cast<const uint4*>(kp(r) + part * 16);
-                vr[i] = *reinterpret_cast<const uint4*>(vp(r) + part * 16);
+                const unsigned char* k = K + (size_t)r * HD;
+                const unsigned char* v = V + (size_t)r * HD;
+                if (paged) {
+                    if (near == nullptr || r < lo || r - lo >= ptok) {
+                        lo = r / ptok * ptok;
+                        near = arena + (size_t)page.ids[lo / ptok] * page.stride + lblk + hoff * HD;
+                    }
+                    k = near + (size_t)(r - lo) * HD;
+                    v = k + vgap;
+                }
+                kr[i] = *reinterpret_cast<const uint4*>(k + part * 16);
+                vr[i] = *reinterpret_cast<const uint4*>(v + part * 16);
             }
         }
         const int r = row(t0 + (tid & 31));
@@ -85,6 +98,9 @@ struct Bf16Tiles {
     size_t lblk, hoff, vgap;  // a page's layer block (elements), the head's first row in it, keys to values
     int ptok;
     bool paged;
+    // the page a thread read last, kept across tiles: its first row is looked up once a page, not once a tile
+    const __nv_bfloat16* near = nullptr;
+    int lo = 0;
     __device__ Bf16Tiles(TileStore store, const Seg& sg, int layer, int kvh, int h) : s(store) {
         K = reinterpret_cast<const __nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * kvh * sg.cap * HD + (size_t)h * sg.cap * HD;
         V = K + (size_t)kvh * sg.cap * HD;
@@ -106,8 +122,18 @@ struct Bf16Tiles {
         for (int i = 0; i < TILE / THREADS; i++) {
             const int at = threadIdx.x + THREADS * i, u = at / CH, chunk = at % CH;
             const int r = row(t0 + u), pos = r < 0 ? 0 : r;  // a key past the chunk reads row 0 and lands zeros
-            qmm_frag::cp16z(dst + swz(u, chunk), kp(pos) + chunk * 8, r >= 0);
-            qmm_frag::cp16z(dst + TILE + swz(u, chunk), vp(pos) + chunk * 8, r >= 0);
+            const __nv_bfloat16* k = K + (size_t)pos * HD;
+            const __nv_bfloat16* v = V + (size_t)pos * HD;
+            if (paged) {
+                if (near == nullptr || pos < lo || pos - lo >= ptok) {
+                    lo = pos / ptok * ptok;
+                    near = arena + (size_t)page.ids[lo / ptok] * page.stride + lblk + hoff * HD;
+                }
+                k = near + (size_t)(pos - lo) * HD;
+                v = k + vgap;
+            }
+            qmm_frag::cp16z(dst + swz(u, chunk), k + chunk * 8, r >= 0);
+            qmm_frag::cp16z(dst + TILE + swz(u, chunk), v + chunk * 8, r >= 0);
         }
         qmm_frag::commit();
     }

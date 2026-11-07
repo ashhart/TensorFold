@@ -1,4 +1,4 @@
-/* Host-only HIP ABI fixture, never linked into the runtime. */
+// Host-only HIP ABI fixture, never linked into the runtime.
 #ifdef _WIN32
 #define EXPORT __declspec(dllexport)
 #else

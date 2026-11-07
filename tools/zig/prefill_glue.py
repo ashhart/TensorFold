@@ -1,4 +1,4 @@
-"""Launches of the prefill glue, sort and split-K kernels: (MLX kernel names, [(variant, inputs, grid, group, shapes, params)])."""
+"""Launches of prefill glue/sort/split-K: (MLX kernel names, [(variant, inputs, grid, group, shapes, params)])."""
 
 from __future__ import annotations
 

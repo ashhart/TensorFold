@@ -68,7 +68,7 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
             try x.bind(slot);
             if (slot == paged_slot) try x.beginOn(null, held, 0) else try x.begin(null);
             first[j] = try x.prefill(ids, null, null, null);
-            try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(if (j == 0) mine.ptr else twin.ptr, e.bp.logits, V * 2), "cuMemcpyDtoH");
+            try cuda.memory.download(gpu.d, e.bp.logits, std.mem.sliceAsBytes(if (j == 0) mine else twin)[0 .. V * 2]);
             try x.draft(true, &.{first[j]}, 2, &drafts[j], null);
         }
         if (first[0] != first[1] or !std.mem.eql(u16, mine[0..V], twin[0..V]) or !std.mem.eql(u32, drafts[0][0..2], drafts[1][0..2])) {
@@ -83,7 +83,7 @@ pub fn pagedCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, i
             for ([_]u32{ paged_slot, twin_slot }, 0..) |slot, j| {
                 try x.bind(slot);
                 try x.verify(w[0..rows], outs[j][0..rows], 0);
-                try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(if (j == 0) mine.ptr else twin.ptr, e.bd.logits, rows * V * 2), "cuMemcpyDtoH");
+                try cuda.memory.download(gpu.d, e.bd.logits, std.mem.sliceAsBytes(if (j == 0) mine else twin)[0 .. rows * V * 2]);
                 const keep = 1 + (round + k) % rows;
                 try x.keep(keep);
                 try x.draft(false, outs[j][0..keep], 2, &drafts[j], null);

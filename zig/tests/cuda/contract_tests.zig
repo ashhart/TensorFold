@@ -71,6 +71,13 @@ const images = struct {
 
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `only`: contract_after.zig.
 pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
+    var t0: i96 = undefined;
+    const t = try registered(gpu, only, &t0);
+    try @import("contract_finish.zig").run(gpu, only, t, t0);
+}
+
+// The registered owners and modules end here, before the standalone suites allocate their working sets.
+fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     const a = gpu.gpa;
     if (!kk.available) return error.BuiltWithoutKernels;
     if (!options.controls) {
@@ -407,6 +414,8 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     for (&blocks) |*x| try kernels.append(a, x.kernel());
     var q35_mod = try cuda.Module.load(gpu.d, kk.qwen35);
     defer q35_mod.unload();
+    const norm_shift = try @import("contract_q35_norm_shift.zig").Group.create(a, gpu, s, q35_mod, &kernels);
+    defer norm_shift.destroy();
     var q35_kv8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
     defer q35_kv8.unload();
     var q35s: [q35_k.forms.len]q35_k.Q35 = undefined;
@@ -564,16 +573,10 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     defer families.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
-    const t0 = check.now(gpu.io);
+    t0.* = check.now(gpu.io);
     @import("contract_after.zig").keep(&kernels, only);
     try g.runAll(a, kernels.items, 0x6b63, &t);
-    if (only.len == 0) try @import("contract_back_suites.zig").run(gpu);
-    const t1 = check.now(gpu.io);
-    if (only.len == 0) try @import("contract_after.zig").suites(gpu);
-    const lim = try live(gpu, only);
-    const t2 = check.now(gpu.io);
-    std.debug.print("{s}SUMMARY {d} kernels: {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: {d} red as planted, {d} missed; {d} limit problems; gates {d} ms, limits {d} ms\n", .{ if (only.len > 0) "(filtered) " else "", t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed, lim, @divTrunc(t1 - t0, std.time.ns_per_ms), @divTrunc(t2 - t1, std.time.ns_per_ms) });
-    try check.expect(t.problems() + lim == 0, "kernel-contract: {d} gate failures, {d} controls missed, {d} limit problems", .{ t.failed, t.missed, lim });
+    return t;
 }
 
 /// The named embedded image and gate 5: in the contract's own file, so the gates' registrations stay short.

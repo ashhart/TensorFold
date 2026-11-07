@@ -1,0 +1,184 @@
+{
+  "checkpoint_policy_evidence": {
+    "mlx_version": "0.32.4",
+    "official_source_commit": "36969c094354086e15d2a327a9c50feb20b9cf11",
+    "source_tag": "v0.32.4",
+    "device": {
+      "device_name": "Apple M4 Pro",
+      "max_recommended_working_set_size": 40200896512,
+      "memory_size": 51539607552,
+      "architecture": "applegpu_g16s",
+      "max_buffer_length": 30150672384,
+      "resource_limit": 499000
+    },
+    "projection": "language_model.model.layers.0.conv.in_proj",
+    "bits": 8,
+    "group_size": 64,
+    "K": 2048,
+    "N": 6144,
+    "input": "same first BF16 operator_norm row repeated M times",
+    "results": [
+      {
+        "rows": 1,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 6144,
+        "same_as_BF16_weights_FP64_rounded": 3803,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0003453614152093189
+      },
+      {
+        "rows": 2,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 6144,
+        "same_as_BF16_weights_FP64_rounded": 3803,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0003453614152093189
+      },
+      {
+        "rows": 4,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 6144,
+        "same_as_BF16_weights_FP64_rounded": 3803,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0003453614152093189
+      },
+      {
+        "rows": 8,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 6144,
+        "same_as_BF16_weights_FP64_rounded": 3803,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0003453614152093189
+      },
+      {
+        "rows": 12,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 6144,
+        "same_as_BF16_weights_FP64_rounded": 3803,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0003453614152093189
+      },
+      {
+        "rows": 13,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 3803,
+        "same_as_BF16_weights_FP64_rounded": 6143,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0004261891067811766
+      },
+      {
+        "rows": 16,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 3803,
+        "same_as_BF16_weights_FP64_rounded": 6143,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0004261891067811766
+      },
+      {
+        "rows": 32,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 3803,
+        "same_as_BF16_weights_FP64_rounded": 6143,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0004261891067811766
+      },
+      {
+        "rows": 64,
+        "dtype": "mlx.core.bfloat16",
+        "same_as_exact_dequant_FP64_rounded": 3803,
+        "same_as_BF16_weights_FP64_rounded": 6144,
+        "outputs": 6144,
+        "rms_vs_exact_FP64": 0.0004261898084132233
+      }
+    ],
+    "M1_M64_exact_equal": 3803,
+    "checkpoint": "LiquidAI/LFM3-VL-2B-MLX-8bit",
+    "checkpoint_revision": "83336d5be3874a2bdd3297bde77b2114dbd3a816",
+    "fixture_sha256": "9c3636ee22fb5d1a9d4d6e3cc0b8e47cce20cb4288bb16f2970de8d55ee27708",
+    "source_links": [
+      "https://github.com/ml-explore/mlx/blob/36969c094354086e15d2a327a9c50feb20b9cf11/mlx/backend/metal/quantized.cpp#L89",
+      "https://github.com/ml-explore/mlx/blob/36969c094354086e15d2a327a9c50feb20b9cf11/mlx/backend/metal/quantized.cpp#L1900",
+      "https://github.com/ml-explore/mlx/blob/36969c094354086e15d2a327a9c50feb20b9cf11/mlx/backend/metal/kernels/quantized.h#L555",
+      "https://github.com/ml-explore/mlx/blob/36969c094354086e15d2a327a9c50feb20b9cf11/mlx/backend/metal/kernels/quantized.h#L674",
+      "https://github.com/ml-explore/mlx/blob/36969c094354086e15d2a327a9c50feb20b9cf11/mlx/backend/metal/kernels/quantized.h#L851"
+    ],
+    "interpretation": "Official MLX uses FP32 affine factorization for these vector widths and BF16 reconstructed weights for these matrix widths. Native uses one affine reconstruction policy across prompt and decode. This evidence alone is not a model-fidelity acceptance policy."
+  },
+  "projection_error_audit": {
+    "cells": 66,
+    "outputs": 60954624,
+    "raw_tap_matches_all_native": true,
+    "one_row_tap_matches_all_native_first_rows": true,
+    "raw_FP32_bound_exceedances": 0,
+    "BF16_bound_exceedances": 0,
+    "max_raw_FP32_bound_fraction": 0.01465208540032716,
+    "max_BF16_bound_fraction": 0.9807553251550621,
+    "max_raw_abs_error": 2.555781975388527e-06,
+    "max_worst_column_raw_rms": 7.7385387436973e-07,
+    "model_acceptance_threshold": null
+  },
+  "first_actual_miss_primitive": {
+    "source_sha256": "86963d6266a982f4cac7c85265048703841a9545c19f2d2c5271eb8e02a0879b",
+    "formula": "shared tf_rp_rows_at<4,2,BITS,false>; FP32 accumulator captured before BF16 store",
+    "tap_rounds_to_native_bytes": true,
+    "row": 1,
+    "column": 4373,
+    "expected_FP64": -6.1827595345675945e-06,
+    "actual_FP32": -6.18956983089447e-06,
+    "error": -6.810296326875687e-09,
+    "ideal_BF16": -6.16908073425293e-06,
+    "native_BF16": -6.198883056640625e-06,
+    "existing_contract_depth": 36,
+    "factorized_term_magnitude": 25.70957951276796,
+    "existing_contract_FP32_work_bound": 5.5166891125901165e-05,
+    "fraction_of_work_bound": 0.00012344897796276604
+  },
+  "causal_history_isolation": {
+    "row": 17,
+    "native_final_norm_FP64_head_maximum_set": [
+      296
+    ],
+    "native_maximum_set": [
+      296
+    ],
+    "whole_FP64_model_maximum_set": [
+      405
+    ],
+    "native_input_FP64_head_matches_native": 127999,
+    "head_values": 128000,
+    "same_input_conv": [
+      {
+        "layer": 0,
+        "same_native_inputs_correctly_rounded_values": 526329,
+        "values": 526336,
+        "row17_native_input_output_differences": 0,
+        "row17_max_abs_error": 0.0,
+        "max_abs_error": 4.76837158203125e-07
+      },
+      {
+        "layer": 1,
+        "same_native_inputs_correctly_rounded_values": 526328,
+        "values": 526336,
+        "row17_native_input_output_differences": 0,
+        "row17_max_abs_error": 0.0,
+        "max_abs_error": 1.9073486328125e-06
+      }
+    ]
+  },
+  "whole_model_direct_FP64_comparison": {
+    "cells": 17,
+    "rows": 18,
+    "native_in_oracle_maximum": 9,
+    "mlx_in_oracle_maximum": 16,
+    "both_in_maximum": 8,
+    "neither_in_maximum": 1,
+    "accepted_threshold": null
+  },
+  "interpretation": [
+    "The audited shared projection implementation obeys its existing FP32 and BF16 store error budgets on the measured input classes.",
+    "The real mismatch traces to a measured FP32 accumulation error crossing a BF16 boundary and propagating through causal history.",
+    "Official MLX uses different effective reconstruction arithmetic for vector and matrix paths on the measured projection.",
+    "No new end-to-end model-fidelity tolerance or tie policy is defined by this evidence.",
+    "Model-fidelity acceptance remains unresolved; a prospective faster projection must be compared independently before adoption."
+  ]
+}

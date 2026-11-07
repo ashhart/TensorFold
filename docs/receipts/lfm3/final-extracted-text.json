@@ -1,0 +1,367 @@
+{
+  "scope": "Actual extracted-text artifact localGPUqualification, text4/6/8 only; combined artifact checks are not substituted for this run.",
+  "source": {
+    "text_commit": "73bc567c039b7471ad621fa249b69801f1d86de5",
+    "combined_runtime_equivalent": "20947578c08ead20e8e0a18790b1fd5f5fb3b6e3",
+    "sha256": {
+      "zig-out/native/bin/tensorfold-native": "008e02fc41c892ef84f0d6fca0950ea3e5139cf050127529a6f70d9e8dc68a95",
+      "zig-out/bin/tf-lfm3-forward": "bdbec6f55c990d912be0b0c0c28122b9342eb8c9d035002a3108c4f001be487c",
+      "zig-out/bin/tf-lfm3-exact": "da1859742803182270d715b9d96c96ffc913aaa5dc4671fbcfe44c4f7857a83b",
+      "tools/lfm3/serve_check.py": "87327328ef1a1fcc35536efa0c18829779ee278a4d325f2af69356bc68a71f5c",
+      "zig/src/families/lfm3/state.zig": "8a7083b1c43c75803596d441f20c5cfefb00820738adbcc65ffc6b043e647e10",
+      "zig/src/families/lfm3/row_projection.zig": "ff41abb82e63635f028e07b5f73621f2942ba9cc91a5a4420272d7caf6f02fca",
+      "zig/src/families/lfm3/dual_projection.zig": "763f0b7f47d0b00642e6e911f6874dd2987716432ba7721b01811a0accf87cd3",
+      "zig/src/families/lfm3/prompt_projection.zig": "21c3581b1cf2f7876f3fa2830d34dca709fd9e9e589f053bf5d58259bd18d748",
+      "zig/src/families/lfm3/backend.zig": "4ed5d33b869dc4be0d82d406cff4abc0f65a63687c45d8b3aaa61e26361db233",
+      "zig/src/families/lfm3/forward.zig": "618e9ecf0e96f4709c0ad543585ec58d06f14501cabdc2b9caeba9ab1d73e7b6",
+      "zig/kernels/metal/lfm3/ops.metal": "1659bb9185d966dd30276a6668465d25c06753a03c4cb38a02c3684514a657ae",
+      "zig/kernels/metal/lfm3/attention.metal": "6dc51acbb45e2e65028e72fed72d318629eb7b382e773c5837db9baa8de5d3b9",
+      "zig/kernels/metal/lfm3/projection.metal": "b33967110cd6637a11391b86341ca2ecf5be2e8cc761ab2c58b624800a6250b2",
+      "zig/kernels/metal/lfm3/projectiondual.metal": "05a21d65ec7563d9fadecf49bd88269b17d351591f674a5359c5aacccbfc6601",
+      "zig/kernels/metal/core/row_projection.metal": "86963d6266a982f4cac7c85265048703841a9545c19f2d2c5271eb8e02a0879b",
+      "zig/kernels/metal/core/binned_projection.metal": "8387bc2d1beb361d3af7352d9558ab80641f5f45327976acd94c2cc2588f73c5"
+    },
+    "shared_arithmetic_files_byte_identical_to_combined": [
+      "zig/src/families/lfm3/state.zig",
+      "zig/src/families/lfm3/row_projection.zig",
+      "zig/src/families/lfm3/dual_projection.zig",
+      "zig/src/families/lfm3/prompt_projection.zig",
+      "zig/src/families/lfm3/backend.zig",
+      "zig/src/families/lfm3/forward.zig",
+      "zig/kernels/metal/lfm3/ops.metal",
+      "zig/kernels/metal/lfm3/attention.metal",
+      "zig/kernels/metal/lfm3/projection.metal",
+      "zig/kernels/metal/lfm3/projectiondual.metal",
+      "zig/kernels/metal/core/row_projection.metal",
+      "zig/kernels/metal/core/binned_projection.metal"
+    ],
+    "public_text_tree_modified": false,
+    "native_adapter_VL_refusal": "Retained before model loading; verified by separate source/host review, not a VL GPU run."
+  },
+  "build": {
+    "public_targets": [
+      "native",
+      "tf-lfm3-exact",
+      "tf-lfm3-forward"
+    ],
+    "public_exit": 0,
+    "public_steps_succeeded": 65,
+    "public_build_log_sha256": "41afabe93ee3a49feca33d06f367b3e5f02d273448599d8e19a56cca23959844",
+    "private_focused_target": "tf-lfm3-exact",
+    "private_focused_exit": 0,
+    "private_focused_steps_succeeded": 55,
+    "private_focused_build_log_sha256": "919fa155954cd525813aba9d95bf6e29f34559264b19440f7fb29da4e1b01330"
+  },
+  "focused_state_diagnostic": {
+    "private_selector": true,
+    "public_default68_unchanged": true,
+    "private_source_sha256": "3f5ef00f53e396e6a33e7b5d0b580687a34aeca7818abe2bd474c7d08409cfeb",
+    "private_binary_sha256": "63f6cf3cfe1df423bd1afadd8ac5074128ef896d07e792939accc44eff8658bd",
+    "source_change": "Test-main --focused selector only; existing state functions unchanged. Production code is frozen extracted-text snapshot.",
+    "cases": [
+      "chunk128 versus one-row at129tokens",
+      "prefix255/window17/keep8 across sliding256 seam",
+      "two unequal streams with partial keeps",
+      "four unequal/idle streams with32/16aggregate rows",
+      "prefix snapshot restore/reset"
+    ]
+  },
+  "hardware": {
+    "device": "Apple M4 Pro",
+    "physical_memory_bytes": 51539607552,
+    "os": "26.5.1",
+    "os_build": "25F80"
+  },
+  "checkpoint_revisions": {
+    "LFM3-1.7B-MLX-4bit": {
+      "repository": "LiquidAI/LFM3-1.7B-MLX-4bit",
+      "revision": "d0ca73dcfa70ce18733754a492cdc1fb0123262d",
+      "files": {
+        "chat_template.jinja": {
+          "bytes": 12129,
+          "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+          "verified_against_pinned_revision": true
+        },
+        "config.json": {
+          "bytes": 2423,
+          "sha256": "7df2ea819f9a31b770192a0a9dc1b7953a7dd8c41b816cc3905bbec99ef332bd",
+          "verified_against_pinned_revision": true
+        },
+        "generation_config.json": {
+          "bytes": 328,
+          "sha256": "0095ba7158e938b1e2d3082d412f00d8be85e42cbbd7608b63866f7a081cf270",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors": {
+          "bytes": 973083386,
+          "sha256": "1be5bf672013cd91aa62148f77c5eea8d2784a95845d5fe826e08c7b84823815",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors.index.json": {
+          "bytes": 50700,
+          "sha256": "2c8b88e25f6a1055164dd051436b170872200047bce4b3ec5f2a58f6ef929a75",
+          "verified_against_pinned_revision": true
+        },
+        "special_tokens_map.json": {
+          "bytes": 92,
+          "sha256": "7946f864cbfb62a1b041bda937244210a1a87f4a6cab3a48b791131b2cd57f88",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer.json": {
+          "bytes": 17908634,
+          "sha256": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer_config.json": {
+          "bytes": 1859,
+          "sha256": "b77214b9f12be74b9e5e1dab35d7dace077a31be969314bf38866fd6c8163853",
+          "verified_against_pinned_revision": true
+        }
+      }
+    },
+    "LFM3-1.7B-MLX-6bit": {
+      "repository": "LiquidAI/LFM3-1.7B-MLX-6bit",
+      "revision": "26be898c36b545d625d84ac0761c6c3eb664aef3",
+      "files": {
+        "chat_template.jinja": {
+          "bytes": 12129,
+          "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+          "verified_against_pinned_revision": true
+        },
+        "config.json": {
+          "bytes": 2423,
+          "sha256": "2b5879bf6d1d99b43e17726c7ee3fb4868e4c2e29c4a49784803df90f494fc2e",
+          "verified_against_pinned_revision": true
+        },
+        "generation_config.json": {
+          "bytes": 328,
+          "sha256": "0095ba7158e938b1e2d3082d412f00d8be85e42cbbd7608b63866f7a081cf270",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors": {
+          "bytes": 1405187179,
+          "sha256": "503d68675793fba64907842e176d066c8c3adca22e14c8b3538f9ffb76bd5e0e",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors.index.json": {
+          "bytes": 50701,
+          "sha256": "940f7e7b4133162a48fbca232e663c32240364aea9d60f1715b62bed41a81e2c",
+          "verified_against_pinned_revision": true
+        },
+        "special_tokens_map.json": {
+          "bytes": 92,
+          "sha256": "7946f864cbfb62a1b041bda937244210a1a87f4a6cab3a48b791131b2cd57f88",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer.json": {
+          "bytes": 17908634,
+          "sha256": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer_config.json": {
+          "bytes": 1859,
+          "sha256": "b77214b9f12be74b9e5e1dab35d7dace077a31be969314bf38866fd6c8163853",
+          "verified_against_pinned_revision": true
+        }
+      }
+    },
+    "LFM3-1.7B-MLX-8bit": {
+      "repository": "LiquidAI/LFM3-1.7B-MLX-8bit",
+      "revision": "ee7667f3cfccb2a41725f91820531823fcabc6b7",
+      "files": {
+        "chat_template.jinja": {
+          "bytes": 12129,
+          "sha256": "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818",
+          "verified_against_pinned_revision": true
+        },
+        "config.json": {
+          "bytes": 2423,
+          "sha256": "4ef95e289e7105a09bf010b3ceaa015d3f01163104c039a4e7948739d5b9035b",
+          "verified_against_pinned_revision": true
+        },
+        "generation_config.json": {
+          "bytes": 328,
+          "sha256": "0095ba7158e938b1e2d3082d412f00d8be85e42cbbd7608b63866f7a081cf270",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors": {
+          "bytes": 1837290805,
+          "sha256": "2b06cea98d75527c248a0b04383f7cf0a1c72fb4ed7b45096618fc4e59d015ad",
+          "verified_against_pinned_revision": true
+        },
+        "model.safetensors.index.json": {
+          "bytes": 50701,
+          "sha256": "0f4f85710fd22ffb8a1977520a734cb7dc7e1f7858a0f91d9c8b56e6d36b78cc",
+          "verified_against_pinned_revision": true
+        },
+        "special_tokens_map.json": {
+          "bytes": 92,
+          "sha256": "7946f864cbfb62a1b041bda937244210a1a87f4a6cab3a48b791131b2cd57f88",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer.json": {
+          "bytes": 17908634,
+          "sha256": "41927bd314d17d7d7fadb44e10cd0919f7b71528d7741596d8cbd15c6945ec44",
+          "verified_against_pinned_revision": true
+        },
+        "tokenizer_config.json": {
+          "bytes": 1859,
+          "sha256": "b77214b9f12be74b9e5e1dab35d7dace077a31be969314bf38866fd6c8163853",
+          "verified_against_pinned_revision": true
+        }
+      }
+    }
+  },
+  "model_checks": [
+    {
+      "checkpoint": "LiquidAI/LFM3-1.7B-MLX-4bit",
+      "focused_state_passed": 5,
+      "focused_state_failed": 0,
+      "served": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 6,
+      "native_sha256": "008e02fc41c892ef84f0d6fca0950ea3e5139cf050127529a6f70d9e8dc68a95"
+    },
+    {
+      "checkpoint": "LiquidAI/LFM3-1.7B-MLX-6bit",
+      "focused_state_passed": 5,
+      "focused_state_failed": 0,
+      "served": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 6,
+      "native_sha256": "008e02fc41c892ef84f0d6fca0950ea3e5139cf050127529a6f70d9e8dc68a95"
+    },
+    {
+      "checkpoint": "LiquidAI/LFM3-1.7B-MLX-8bit",
+      "focused_state_passed": 5,
+      "focused_state_failed": 0,
+      "served": {
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0
+      },
+      "cancellation_checks": 6,
+      "native_sha256": "008e02fc41c892ef84f0d6fca0950ea3e5139cf050127529a6f70d9e8dc68a95"
+    }
+  ],
+  "totals": {
+    "focused_state_passed": 15,
+    "focused_state_failed": 0,
+    "served_passed": 120,
+    "served_failed": 0,
+    "served_skipped": 0,
+    "cancellation_checks": 18,
+    "combined_logit_bridge_bytes": 49920000,
+    "owned_children_exit0": 14
+  },
+  "logit_bridges": {
+    "scope": "All128000vocabulary BF16words for64-row prompt plus actualone-rowdecode after63teacherforcedhistory, eachwidth. No newFP64reference or graph run.",
+    "tokens_npy_sha256": "cce7d631dcbf26f43abb6d551a62e51c06582f958a5b5be57b7b5e32e6760748",
+    "combined_forward_binary_sha256": "22bf8d07c555fb8756c8afab288ce52b4edb5cfd0a3306ee405e93e775ccd33b",
+    "combined4_captures": "Two fresh current-combined diagnostic calls in this lease",
+    "combined6_8_captures": "Retained final current-combined qualification outputs with immutable pins",
+    "cells": [
+      {
+        "bits": 4,
+        "mode": "prompt",
+        "bytes": 16384000,
+        "sha256": "f15ce195e69a3e054ba60843b37f105739a6e17f7f5facc13a68892ee2bdd32b",
+        "combined_final_equal": true
+      },
+      {
+        "bits": 4,
+        "mode": "decode",
+        "bytes": 256000,
+        "sha256": "6d6828e56b463b0a09f9f559ec1251a21ff1445d53e67811dda0318185ce39ff",
+        "combined_final_equal": true
+      },
+      {
+        "bits": 6,
+        "mode": "prompt",
+        "bytes": 16384000,
+        "sha256": "f94b78c965c874c13fee175b036265f5691b7711b57559f942ecad80e3f1d4a3",
+        "combined_final_equal": true
+      },
+      {
+        "bits": 6,
+        "mode": "decode",
+        "bytes": 256000,
+        "sha256": "e86739c46d55e1f137ac55c9e43119fda97914902334f12df9069907c1a0cab9",
+        "combined_final_equal": true
+      },
+      {
+        "bits": 8,
+        "mode": "prompt",
+        "bytes": 16384000,
+        "sha256": "c0bc4bfb20a4a24abe52d4b8366c9a4acdabd597b68f627552bc0d9b06c7450b",
+        "combined_final_equal": true
+      },
+      {
+        "bits": 8,
+        "mode": "decode",
+        "bytes": 256000,
+        "sha256": "03d2ff5c67ec8bb02539d7fe526dd0bc4f0e9833a8d6474cd1174874fe79c905",
+        "combined_final_equal": true
+      }
+    ]
+  },
+  "protocol": {
+    "lock_path": "/tmp/tensorfold-model.lock",
+    "inode": 46835039,
+    "single_model_admission": true,
+    "memory_admission": {
+      "event": "memory_admission",
+      "time_ns": 1793233473960025000,
+      "conservative_weights_plus_scratch_cache_margin": 6132258101,
+      "working_set": 40200896512,
+      "ceiling": 36077725250,
+      "limits_raised": false
+    },
+    "all_pins_checked_before_and_after_each_child": true,
+    "checkpoint_git_and_lfs_inventory_verified": true,
+    "process_group_cleanup": true,
+    "all_children_exit0": true,
+    "lease_released": true,
+    "no_VL_or_image_checkpoints_loaded": true,
+    "no_remote_transfer": true,
+    "timing_fields_not_performance": true
+  },
+  "raw_evidence_sha256": {
+    "manifest.json": "8f8eb6bacb250423fc096a41bff156ac24fc814d9e8e492254fa7a1f11d0d093",
+    "events.json": "cf7c72107495f3f94e1337a950cfbcf6468d46ac5e21e77fed464b20a46ef7d8",
+    "receipt.json": "90f6fa226b748e068aedb4251c9b32365146779336573cfdedd836a5dbbcfc42",
+    "bridges.json": "4408553c208fd312a6c67c1bb40622ee6ac56fb7fc308eed48b568407e0609af",
+    "checkpoint-inventory.json": "1ce9196fafe65fdd81ef26cb4aaadb7e4722c7af178adb90522ca04b46f29349",
+    "text-8-served.log": "791d129f7729306e0b57a985aed2831cfc77641b36683e4711f50de159e4ad50",
+    "text-8-prompt.log": "1b23936706ac268278841f39cf1375367656c0482fb92887c0112ee71946fb0b",
+    "text-8-decode.log": "4b554d277aef0374c4ce44a7c650b9fedd6e88522f8926f83803bb7e61fa415b",
+    "text-4-focused.log": "ade74fe93f4000a7780f2165ff265a322942037a1992b2e56b59f36247845c71",
+    "text-8-focused.log": "ade74fe93f4000a7780f2165ff265a322942037a1992b2e56b59f36247845c71",
+    "combined4-prompt.log": "1b23936706ac268278841f39cf1375367656c0482fb92887c0112ee71946fb0b",
+    "text-6-focused.log": "ade74fe93f4000a7780f2165ff265a322942037a1992b2e56b59f36247845c71",
+    "text-6-decode.log": "4b554d277aef0374c4ce44a7c650b9fedd6e88522f8926f83803bb7e61fa415b",
+    "text-4-served.log": "791d129f7729306e0b57a985aed2831cfc77641b36683e4711f50de159e4ad50",
+    "text-4-prompt.log": "1b23936706ac268278841f39cf1375367656c0482fb92887c0112ee71946fb0b",
+    "combined4-decode.log": "4b554d277aef0374c4ce44a7c650b9fedd6e88522f8926f83803bb7e61fa415b",
+    "text-6-prompt.log": "1b23936706ac268278841f39cf1375367656c0482fb92887c0112ee71946fb0b",
+    "text-4-decode.log": "4b554d277aef0374c4ce44a7c650b9fedd6e88522f8926f83803bb7e61fa415b",
+    "text-6-served.log": "791d129f7729306e0b57a985aed2831cfc77641b36683e4711f50de159e4ad50",
+    "text-8-served.json": "d1f6ebd0f96f6ea986891558a86317b9ba6b4d6b48fc3e87166012d687e6aea8",
+    "text-4-served.json": "9e170219b5faaf10f8d15153c2ef5e721f6e052d124f888b58e3626f059357e3",
+    "text-6-served.json": "f32d212cc6abd2d4fc583208a0dc26dd1c09882a60e8937c986a4d7e25e15829"
+  },
+  "limits": [
+    "This records three extracted-text checkpoint widths on M4; no VL/image scope.",
+    "Focused diagnostic has five selected existing state cases per width; it is not a new68-case fullstate run.",
+    "Combined-byte equality transfers recorded numerical results for these endpoints; no new FP64 or prescribed-graph acceptance claim.",
+    "Long-context requests remain separately pending transfer authorization.",
+    "No performance measurements or new optimized path."
+  ],
+  "performance_pass": false
+}

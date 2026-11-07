@@ -9,6 +9,7 @@ pub fn steps(b: *std.Build) void {
     const recording = b.createModule(.{ .root_source_file = b.path("zig/residency_recording_metal.zig"), .target = b.graph.host });
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = b.graph.host, .link_libc = true });
+    fabric.addImport("verbs", @import("tp.zig").verbsModule(b, b.graph.host, .debug));
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("residency-empty.zig", "pub const bytes = \"\";\n") });
     const owners = b.createModule(.{ .root_source_file = b.path("zig/residency_owner_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = recording }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "kernel_sources", .module = sources } } });
@@ -22,18 +23,20 @@ pub fn steps(b: *std.Build) void {
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
-    const bytes = b.addWriteFiles().add("residency-drama-empty.zig", "pub const bytes: []const u8 = &.{};\n");
+    const bytes = b.createModule(.{ .root_source_file = b.addWriteFiles().add("residency-drama-empty.zig", "pub const bytes: []const u8 = &.{};\n") });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = b.graph.host });
     const shim = b.addWriteFiles().add("residency-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
     const core = b.createModule(.{ .root_source_file = shim, .target = b.graph.host, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "frame_rounds", .module = rounds } } });
-    const drama = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = b.createModule(.{ .root_source_file = bytes }) } } });
+    const drama = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = bytes } } });
     host.addImport("core", core);
     host.addImport("tokenizer", tokenizer);
     host.addImport("drama3", drama);
     // native/metal_slide.zig imports living: the engine module's own (a file belongs to one module)
     host.addImport("living", engine.import_table.get("living") orelse @panic("the engine has no living import"));
     @import("qwen4.zig").metalNative(b, b.graph.host, host);
+    host.addImport("kimi_k3", @import("metal_targets.zig").kimiModule(b, b.graph.host, .Debug, metal, engine, lanes));
+    host.addImport("kimi_metallib", bytes);
     b.step("test-metal-formats-host", "Actual Metal format offers with inert images and no device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{"Metal capabilities:"} })).step);
     const root = b.createModule(.{ .root_source_file = b.path("zig/residency_native_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "host", .module = host }} });
     const object = b.addObject(.{ .name = "metal-residency-native", .root_module = root });

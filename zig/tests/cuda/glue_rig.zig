@@ -66,7 +66,7 @@ pub const Rig = struct {
     pub fn same(r: *Rig, what: []const u8, comptime T: type, ptr: u64, want: []const T) !void {
         try r.s.synchronize();
         const got = try r.a.alloc(T, want.len);
-        try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(got.ptr, ptr, want.len * @sizeOf(T)), "cuMemcpyDtoH");
+        try cuda.memory.download(r.gpu.d, ptr, std.mem.sliceAsBytes(got)[0 .. want.len * @sizeOf(T)]);
         r.cases += 1;
         var live: usize = 0;
         for (want) |w| live += @intFromBool(!std.mem.allEqual(u8, std.mem.asBytes(&w), 0));
@@ -86,7 +86,7 @@ pub const Rig = struct {
     pub fn get(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
         try r.s.synchronize();
         const out = try r.a.alloc(T, n);
-        try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(out.ptr, ptr, n * @sizeOf(T)), "cuMemcpyDtoH");
+        try cuda.memory.download(r.gpu.d, ptr, std.mem.sliceAsBytes(out)[0 .. n * @sizeOf(T)]);
         return out;
     }
 };

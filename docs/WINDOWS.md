@@ -1,7 +1,8 @@
 # TensorFold on Windows (native)
 
-`tensorfold-native.exe` runs on Windows with an NVIDIA GPU through the same CUDA engine the Linux build uses. Only the
-CUDA backend is built on Windows; Metal is macOS's and HIP is not built. Windows is supported from source only.
+`tensorfold-native.exe` runs on Windows with an NVIDIA GPU through the same CUDA engine the Linux build uses, and with an
+AMD GPU through the HIP backend when the build opts in (`-Dhip=true`). Metal is macOS's. Windows is supported from
+source only.
 The PR reports RTX 4090 (`x86_64-windows`, `sm_89`) and NVIDIA RTX Spark N1X (`aarch64-windows`, `sm_121`) runs.
 Those device receipts have not been reproduced on the maintained tree.
 
@@ -27,6 +28,27 @@ zig build native install -Dsm=89 -Dstrip=true ^
 `affine8`, `modelopt`, `exlr8`).
 
 `zig build test` runs the host tests without a GPU.
+
+### HIP
+
+Add `-Dhip=true -Dhip-arch=<arch>` and name a HIP compiler; the build takes `hipcc.exe` first and `hipcc.bat` second,
+from `-Dhipcc`, `PATH`, or `HIP_PATH`/`ROCM_PATH`'s `bin`, and runs a `.bat` through `cmd /c call`:
+
+```bat
+zig build native-hip -Dhip=true -Dhip-arch=gfx1151 ^
+  -Dhipcc=C:\therock\gfx1151-10.1.0\bin\hipcc.exe
+```
+
+TheRock's Windows `gfx1151` dist and a HIP SDK's `hipcc.exe` both build the kernels. The server loads the runtime from
+`amdhip64.dll` (the driver's copy in System32), then from a HIP SDK's `amdhip64_7.dll` and `amdhip64_6.dll` on `PATH`;
+`TENSORFOLD_HIP` names one library outright, on every platform. Admission takes its budget from the driver, and the
+optional libraries are found by their Windows names (`rocblas.dll`, `MIOpen.dll`, `cublas64_13.dll`).
+
+The Windows HIP SDK does not implement cooperative launches (ROCm/HIP#3640), so a grid that asks for one runs plain; the
+engine's own launches do not use them. Without a GPU, `zig build hip-host-test -Dhip=true` runs the admission tests and
+`zig build check-native-hip-host -Dhip=true` compiles the real server against inert kernels. Tested on `gfx1151`
+(Ryzen AI MAX+ 395): `hip-gpu-test` 38/38 on the device, and `capabilities --json` reports the HIP backend with rocBLAS
+and MIOpen found.
 
 ## Run
 

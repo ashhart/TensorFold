@@ -10,9 +10,9 @@ pub const waited_steps: u32 = 8;
 /// A reply's share beside a long prompt when nothing asks, where steps grow: replies finish first, prompts keep pace.
 pub const decode_share: f64 = 0.8;
 
-/// The shared host's share: the flag's; null when the env sets its own or on tensor units; else `decode_share`.
-pub fn shareOf(flag: ?f64, env_set: bool, tensor_units: bool) ?f64 {
-    return flag orelse if (env_set or tensor_units) null else decode_share;
+/// The shared host's share: the flag's; null when the env sets its own; else `decode_share`.
+pub fn shareOf(flag: ?f64, env_set: bool) ?f64 {
+    return flag orelse if (env_set) null else decode_share;
 }
 
 /// Rows a prompt's `beside`th step beside decoders may take.

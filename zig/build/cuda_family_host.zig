@@ -6,6 +6,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
     @import("load_prefetch_host.zig").tests(b, mods.core, step);
+    const captured = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/aot_identity.zig"), .target = host, .link_libc = true }), .filters = &.{"persistence identity: captured CUDA"} }));
+    b.step("test-cuda-persistence-source-host", "Captured CUDA source keys without loading a driver").dependOn(&captured.step);
+    step.dependOn(&captured.step);
+
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen stepped prefill:"} }));
@@ -41,9 +45,17 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const attention = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen attention path:"} }));
     b.step("test-qwen35-attention-path-host", "Contiguous and paged CUDA attention selection and graph identity without devices").dependOn(&attention.step);
     step.dependOn(&attention.step);
+    const pages_filter = &.{"Qwen pages default:"};
+    const pages_default = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = pages_filter }));
+    const pages_about = "TF_QWEN_KV_PAGES and _ALL unset as on main, --parallel a cap only with pages";
+    b.step("test-qwen35-pages-default-host", pages_about).dependOn(&pages_default.step);
+    step.dependOn(&pages_default.step);
     const prompt_layout = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen prompt layout:"} }));
     b.step("test-qwen35-prompt-layout-host", "Actual whole and paged CUDA prompt ABI and stride calculations without devices").dependOn(&prompt_layout.step);
     step.dependOn(&prompt_layout.step);
+    const reuse_pages = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen paged reuse:"} }));
+    b.step("test-qwen35-reuse-pages-host", "Paged prompt-state saves and restores into host or device copies without devices").dependOn(&reuse_pages.step);
+    step.dependOn(&reuse_pages.step);
     const pending = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen pending keeps:"} }));
     pending.setEnvironmentVariable("TF_QWEN_KEEP_LATE", "1"); // deferred keeps are opt-in; the step tests them
     b.step("test-qwen35-pending-host", "Kept paths of every length inside the pending buffer and the log without devices").dependOn(&pending.step);

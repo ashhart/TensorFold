@@ -8,7 +8,7 @@ using namespace metal;
 constant constexpr int ITERS = TF_K / 32;
 constant constexpr int PER = (TF_E + 31) / 32;
 
-// Logits [rows, E] = x W^T: a 4-expert block (tg.x) for four rows (tg.y); simdgroup s sums k = 32 i + 4 s + tm, lane l taking i = 4 l..4 l + 3, then the eight partials in order.
+// Logits [rows, E] = x W^T, tg 4 experts x 4 rows; simdgroup s: k=32i+4s+tm, lane l: i=4l..4l+3; 8 partials in order.
 [[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
                                 constant int& rows [[buffer(2)]], device TF_OUT_T* OUT [[buffer(3)]],
                                 uint2 tg [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]],
@@ -65,7 +65,7 @@ struct RouteArgs {
   float scale;
 };
 
-// One threadgroup of 512: each row's top-k by sigmoid + bias (ties to the lower id) and weights, then this Mac's groups and pick lists.
+// 512 threads: each row's top-k by sigmoid + bias (ties to the lower id), weights, then this Mac's groups, pick lists.
 [[kernel]] void tf_route_select(const device float* LOGITS [[buffer(0)]], const device float* BIAS [[buffer(1)]],
                                 constant RouteArgs& a [[buffer(2)]], device int* PICK [[buffer(3)]],
                                 device float* WTS [[buffer(4)]], device int* LIDS [[buffer(5)]],

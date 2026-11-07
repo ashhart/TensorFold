@@ -5,7 +5,7 @@ typedef bfloat bfloat16_t;
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
 
-// A segment's 8 ints: real first row, replayed rows, state slot in, replay id, parity in, save inputs, first virtual row.
+// Segment's 8 ints: real first row, replayed rows, state slot in, replay id, parity in, save inputs, first virtual row.
 #define SEG_B 0
 #define SEG_K 1
 #define SEG_IN 2
@@ -131,7 +131,7 @@ template <int H, int DH, int NG, int DS, int XD, int PROJ, int DTOFF, int SSZ>
   }
 }
 
-// A lane's 16 x n tensor-op results by layout (TF_SIMD_LAYOUT before the M5, as simd_attention.zig checks): rows, columns.
+// A lane's 16 x n tensor-op results by layout (TF_SIMD_LAYOUT pre-M5, as simd_attention.zig checks): rows, columns.
 #ifdef TF_SIMD_LAYOUT
 #define TT_FN(lane) short((((lane) & 8) >> 1) | (((lane) & 1) << 1))
 #define TT_COL(i, n) (((i) & 1) + 8 * (((i) >> 1) % ((n) / 8)))
@@ -310,7 +310,7 @@ template <int G, int D, int CK>
   for (int i = 0; i < DP; i++) OUT[((int64_t)h * NT + node) * D + lane * DP + i] = static_cast<bfloat>(o[i] / l);
 }
 
-// The kept path's keys and values to the cache's next rows (len + path[j] -> len + j); rows in order, never read after written.
+// Kept path's keys/values to the cache's next rows (len + path[j] -> len + j); rows in order, never read after written.
 kernel void tf_kv_compact(device bfloat* K [[buffer(0)]],
                           device bfloat* V [[buffer(1)]],
                           const device int32_t* path [[buffer(2)]],

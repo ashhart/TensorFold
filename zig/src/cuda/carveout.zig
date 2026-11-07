@@ -34,11 +34,13 @@ pub fn roundBytes(bytes: usize) usize {
 }
 
 /// The size the options ask for: `flag` or `on` = "1" turns it on, `mib` sizes it; null means off.
-pub fn requested(flag: bool, on: ?[]const u8, mib: ?[]const u8) error{ InvalidCharacter, Overflow, CarveoutTooSmall }!?usize {
+pub fn requested(flag: bool, on: ?[]const u8, mib: ?[]const u8) error{ InvalidCharacter, Overflow, CarveoutTooSmall, InvalidEnvironment }!?usize {
+    if (!flag) _ = try @import("sys").environment.parse("TF_CUDA_CARVEOUT", on);
     const wanted = flag or (if (on) |v| std.mem.eql(u8, v, "1") else false);
     if (!wanted) return null;
     const m = mib orelse return default_bytes;
     if (m.len == 0) return default_bytes;
+    _ = try @import("sys").environment.parse("TF_CUDA_CARVEOUT_MIB", m);
     const bytes = try std.math.mul(usize, try std.fmt.parseInt(usize, m, 10), 1 << 20);
     if (roundBytes(bytes) == 0) return error.CarveoutTooSmall;
     return roundBytes(bytes);
@@ -222,7 +224,7 @@ test "the carveout is opt-in, sized in whole rows" {
     try std.testing.expectEqual(@as(?usize, default_bytes), try requested(true, null, null));
     try std.testing.expectEqual(@as(?usize, default_bytes), try requested(false, "1", ""));
     try std.testing.expectEqual(@as(?usize, 64 << 20), try requested(false, "1", "64"));
-    try std.testing.expectError(error.InvalidCharacter, requested(true, null, "lots"));
+    try std.testing.expectError(error.InvalidEnvironment, requested(true, null, "lots"));
     try std.testing.expectEqual(0, roundBytes(row_bytes - 1));
     try std.testing.expectEqual(row_bytes, roundBytes(row_bytes + 1));
 }

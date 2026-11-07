@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/kernels/qmm_prefill.cu (lines 1-151, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
+// Device code of src/tensorfold/cuda/kernels/qmm_prefill.cu (lines 1-151, comments and ATen includes dropped).
 
 #include <algorithm>
 #include <cuda_bf16.h>

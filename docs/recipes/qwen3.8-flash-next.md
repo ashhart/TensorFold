@@ -352,7 +352,7 @@ checks the following against the pack that
 Through `tensorfold serve` on the full packs, each reply was requested with `"draft": false` and again with
 drafts. The prompts were the benchmark's two, the raw prompt as chat, and two 256-token chats, each greedy and
 with seeds 1234 to 1238. On both packs, 30 of 30 replies had identical token-id SHA-256s. A drafted round
-emitted 2.93 tokens on average on SAGE and 3.16 on 3.05.
+emitted 2.93 tokens on average on SAGE and 3.16 on 3.05. From a [v0.6.6](https://github.com/ashhart/TensorFold/tree/v0.6.6) checkout:
 
 ```bash
 TENSORFOLD_EXL3_FLASHNEXT=flashnext-exl3-3.05bpw pytest -q tests/cuda/test_qwen4_exp_exl3.py
@@ -532,7 +532,7 @@ The target sampler still reads the full vocabulary, so the list affects proposal
 
 The corpus is Homebrew CPython 3.14.5's standard-library `*.py` files, excluding `site-packages` and
 `__pycache__`. It contains no repository or PyPI package text. Use `tokenizers==0.22.2` and
-`tools/draft_vocab.py` with SHA-256
+`tools/draft_vocab.py` as of the v0.6.6 tag (`git show v0.6.6:tools/draft_vocab.py`), SHA-256
 `1baf0dd08669355cf9cf6e32998e5436ce8712c3ab1bffe38d369f3fa3a86b56`.
 The tokenizer JSON SHA-256 is:
 
@@ -542,10 +542,10 @@ The tokenizer JSON SHA-256 is:
 
 Place that tokenizer at `tokenizer.json` and copy the clean stdlib into an empty `cpython` directory,
 preserving relative paths. The [Nemotron corpus-copy example](nemotron-3.5.md#draft-vocabulary-provenance)
-shows the file-selection rules; change its destination to `cpython`. Then run from the repository root:
+shows the file-selection rules; change its destination to `cpython`. Then run it from a v0.6.6 checkout's root:
 
 ```bash
-TOKENIZERS_PARALLELISM=false python3 -B tools/draft_vocab.py tokenizer.json draft_vocab.txt --size 79591 --keep-below 65536 --min-count 1 --added-tokens 'cpython/**/*.py'
+TOKENIZERS_PARALLELISM=false python3 -B tools/draft_vocab.py tokenizer.json draft_vocab.txt 'cpython/**/*.py' --size 79591 --keep-below 65536 --min-count 1 --added-tokens
 ```
 
 The generator retains all IDs below 65,536 and tokenizer-added IDs, then adds corpus IDs by frequency

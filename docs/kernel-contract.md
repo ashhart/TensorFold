@@ -25,7 +25,8 @@ Direct `one` callers remain responsible for cleanup.
 - Its served envelope: the shapes the engine calls it at, and for each dimension its tile, the step a valid size
   moves by and the least valid size.
 - Its accumulator (`f32` where a kernel sums) and the depth of its longest chain of roundings at a shape, plus any
-  fp32 operations after the sums (`ops`) and intermediate roundings to the output type (`mids`).
+  fp32 operations after the sums (`ops`), intermediate roundings to the output type (`mids`), and the precision it
+  stores at when that is narrower than the output's element (`store`: bf16 values in fp32 words).
 - Whether it may write in place. If it replaces another kernel, the kernel whose bits it must equal.
 - Its NaN rule: `propagate` (as float64 arithmetic on its formula does), or a stated rule the test checks itself
   (top-k, argmax, sampling and routing kernels state theirs).
@@ -100,8 +101,15 @@ On an Intel GPU host, `zig build -Dxpu-contract=true xpu-kernel-contract-objects
 every registered XPU kernel and the controls to zebins, and `xpu-kernel-contract-limits` checks each record against the
 BMG card's row, no GPU needed. Level Zero does not report a kernel's GRF mode, so the record states it, and the audit
 fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contract limits DIR` runs that audit on a
-directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc. The XPU device
-runner, gates 1 to 4, comes in a second pull request.
+directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc.
+
+On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `tf-xpu-contract-run` with the zebins
+linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over nine registrations of the Qwen3.8-27B glue's
+`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax` and `embed`, the five planted controls, and gate 5
+live: the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
+native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
+id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
+another host made with the commands the receipt records.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
@@ -117,7 +125,8 @@ The program exits 1 on any failed gate, any control that stayed green, or any li
    `--offline` (Metal) or `kernel-contract-limits`
    (CUDA: nvcc 13.0's in `cuda`, and each later release's set where that release compiles it differently); a HIP
    kernel's go to `hip_records.zig`, filled from `hip-kernel-contract-limits`, and an XPU kernel's to
-   `xpu_records.zig`, filled from `xpu-kernel-contract-limits`.
+   `xpu_records.zig`, filled from `xpu-kernel-contract-limits`. Its test type goes in `zig/tests/xpu/contract_*.zig`
+   and, where it needs a planted control, `zig/kernels/xpu/contract_gate_controls.cl`.
 4. Post the `SUMMARY` lines from each backend you ran in the pull request, and say which chips you could not run.
 
 A replacement kernel names the kernel it replaces and gives `replaced`, which runs that kernel on the same inputs.
@@ -133,8 +142,7 @@ Python family's Triton glue it was ported from. Nemotron's Metal `tf_xup_w3` giv
 the NaN: its relu2 is `metal::max(bfloat(acc), 0.0f)`; the other up pipelines give its bytes on the same inputs.
 HIP's prompt attention tile (`tf_fa_paged_*`, `tf_fa_wide_*`) writes 0 for a row whose every score is NaN where
 float64 gives NaN, as its running max is `fmaxf` and a row at max -inf takes p = 0; and an infinite value at a key
-whose fp32 weight is 0 (past the row's causal edge in its 64-key tile, or under fp32's least) gives NaN where float64
-gives inf or a finite value, as its P x V takes every key of the tile.
+the row sees under fp32's least weight gives NaN where float64 gives inf, as 0 x inf enters its P x V.
 Qwen3.8 Flash Next's `tf_sattn_nax` and `tf_attn256_nax` score masked keys -FLT_MAX, the value each row's running
 max starts from, so a row whose every score is -Inf weighs its masked keys 1 and gives a finite average where float64
 gives NaN. `tf_sattn_nax`'s padding lanes also read key 0 at p = 0, so a non-finite value in key 0's row reaches every
@@ -154,6 +162,28 @@ The HIP relu^2 replacement retains every non-finite plant and checks both unfuse
 independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every
 float64 output class, without an inherited exception.
+
+## Isolated masked-value panels
+
+`metal masked-V` entries isolate one hidden +Inf or NaN in otherwise finite Q/K/V. Every output class and every
+finite output is checked against binary64 over the actual visible set, including a visible exceptional-value control.
+The fixtures cover causal tiles, sliding rings, indexed/padded lists, page mappings and shared-context masks.
+Latent MLA treats its shared K/V storage as both key and value; a visible poisoned latent can also make its score NaN.
+The tensor kernels' dropped visible NaN scores and zero residual probability parts times visible Inf are separate
+known findings from hidden-value leakage. No production kernel is repaired by these registrations.
+
+The source-only focused runner builds without an offline Metal compiler:
+
+```sh
+zig build --build-file build.masked-values.zig tf-masked-values test-masked-values-host -Dcpu=apple_m1
+./zig-out/bin/tf-masked-values
+```
+
+It runs the same entries registered in the main Metal runner. Its equal-score/unit-value panels do not discriminate
+accumulator precision, so gate 4 states that limitation instead of claiming a stress proof. The two device controls
+plant a hidden NaN leak and erase a visible infinity; each must fail gate 1. A known finding must still reproduce.
+LFM3 entries register only on a tree that actually contains its source. DeepSeek CSA2 and H3 are operator checks,
+not new native serving paths. Flash Next is excluded. This focused run does not replace the complete backend gates.
 
 ## Coverage
 
@@ -276,6 +306,9 @@ form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 
 stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
 swapped scales, a swapped suh.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
+HIP also checks the decode tail (`tf_tail`): the residual add, of a row of the activation kind or of nine slots' fp32
+rows times their weights summed in slot order, and the RMS norm after it, against float64 at Qwen3.6-35B-A3B's and
+Qwen3.8-27B's widths, decode rows and windows, and the widest row the launch takes.
 HIP also checks the 64-row prompt attention tile (`prefill.hip`): `tf_fa_paged_bf16` and `tf_fa_paged_f16` over a
 permuted page table at the 27B's, the 35B-A3B's and Nemotron's head counts, each output within attention_ref's float64
 bound, and `tf_fa_wide_bf16` and `tf_fa_wide_f16`, which no model calls, bit-equal to them on flat keys. A build runs

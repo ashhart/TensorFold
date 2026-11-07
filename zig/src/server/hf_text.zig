@@ -43,7 +43,7 @@ pub const HfText = struct {
     prefix: []const u32 = &.{}, // the post-processor's tokens before a text (add_special_tokens)
     suffix: []const u32 = &.{},
 
-    /// Loads ``dir``'s tokenizer.json, chat template, special tokens and end-of-sequence ids; a failure's reason in `problem` (from `pa`).
+    /// Loads ``dir``'s tokenizer.json, chat template, special tokens, eos ids; failure reason in `problem` (from `pa`).
     pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, template_override: ?[]const u8, pa: Allocator, problem: *[]const u8) !*HfText {
         const t = try gpa.create(HfText);
         errdefer gpa.destroy(t);
@@ -286,7 +286,7 @@ pub const HfText = struct {
 
     pub fn text(t: *HfText) model_text.Text {
         if (t.native_kimi) |kimi| return kimi.text();
-        return .{ .ctx = t, .vtable = &.{
+        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .ctx = t, .vtable = &.{
             .encode = encodeFn,
             .decode = decodeFn,
             .token_id = tokenIdFn,

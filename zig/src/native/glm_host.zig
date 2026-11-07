@@ -77,8 +77,8 @@ fn readMemory(ctx: ?*anyopaque, reset_peak: bool) ?api.Memory {
 }
 
 /// Learned states under `root` by checkpoint, split, chip, OS build, kernel sources and a probe's prompt-pass bits.
-fn learnedStates(gpa: Allocator, io: std.Io, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try glm_disk.identity(io, eng, sl)).id, cap);
+fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try glm_disk.identity(gpa, io, dir, eng, sl)).id, cap);
     std.log.info("glm: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
 }
@@ -141,12 +141,12 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     if (learn) |l| if (l.conversations) {
         if (eng.ep != null) return error.LearnConversationsOnPair;
         if (h.cache) |*store| {
-            const id = try glm_disk.identity(io, eng, &h.slots);
+            const id = try glm_disk.identity(gpa, io, dir, eng, &h.slots);
             const r = try api.prompt_cache.rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned, .spill = l.spill, .slots = l.slots });
             r.prefill_rate = id.rate;
         }
     } else {
-        h.learned = try learnedStates(gpa, io, eng, &h.slots, l.root, l.cap);
+        h.learned = try learnedStates(gpa, io, dir, eng, &h.slots, l.root, l.cap);
         h.learned.?.admission.floor = l.floor;
         h.slots.disk.admission.floor = l.floor;
         h.slots.disk.cap = l.cap;

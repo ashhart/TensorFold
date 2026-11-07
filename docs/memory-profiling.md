@@ -112,8 +112,8 @@ not establish disk-spill behavior on CUDA. Check the backend's actual startup an
 
 The Zig preview uses its own native Metal allocations and cache policy. In its
 Flash Next server, `--prompt-cache-gib` controls retained prompt states, not a
-whole-process memory budget. Flash Next serves one reply at a time even when
-`--parallel` is supplied; Nemotron's prompt reuse has a different status. Consult
+whole-process memory budget. Flash Next serves one reply at a time under the default `auto` and
+`--parallel 1`; an explicit `--parallel` above one shares sessions. Nemotron's prompt reuse has a different status. Consult
 [the preview's current limitations](../ZIG-PREVIEW.md#known-gaps) before building
 a matrix. Python 0.6.6 MLX measurements are not preview performance or exactness results.
 

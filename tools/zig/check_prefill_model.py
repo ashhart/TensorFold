@@ -1,4 +1,4 @@
-"""Whole Nemotron prompts prefilled on our kernels alone against Python 0.6.5's engine: every layer state, first logits."""
+"""Whole Nemotron prompts prefilled on our kernels alone vs Python 0.6.5's engine: every layer state, first logits."""
 
 from __future__ import annotations
 

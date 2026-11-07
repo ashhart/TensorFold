@@ -1,6 +1,7 @@
 //! hip-affine-tune's proposal: prompt table rows from timed cells against gfx1100's choices; no device, host-tested.
 
 const std = @import("std");
+const platform = @import("sys");
 const registry = @import("core").registry;
 const tuning = @import("tuning.zig");
 const affine = @import("../launches/affine.zig");
@@ -333,8 +334,8 @@ fn dist(a: f64, b: f64) f64 {
 }
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

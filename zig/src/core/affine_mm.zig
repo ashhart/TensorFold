@@ -73,7 +73,7 @@ pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q:
     e.dispatchGroups(mtl.Size.of(n / 64, (rows + 63) / 64, batch), mtl.Size.of(32, 2, 2));
 }
 
-/// y [rows, q.n] = x times each row's expert's W^T, rows sorted by expert with `offsets` (each expert's first row); q is [experts, n, k].
+/// y [rows, q.n]: x times its row expert's W^T, rows expert-sorted (`offsets`: experts' first rows); q [experts, n, k].
 pub fn gather(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, offsets: anytype, y: anytype, rows: u32, experts: u32) void {
     gatherTo(e, p, x, sums, q, offsets, y, null, rows, experts);
 }
@@ -97,7 +97,7 @@ pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: a
     e.dispatchGroups(mtl.Size.of(q.n / 64, tiles, 1), mtl.Size.of(32, 2, 2));
 }
 
-/// act = SwiGLU(x W_gate^T, x W_up^T) clipped at `limit` for expert-sorted pairs (`offsets`), pair i on x's row order[i] / topk.
+/// act: SwiGLU(x W_gate^T, x W_up^T) clipped at `limit`, expert-sorted pairs (`offsets`); pair i: x row order[i]/topk.
 pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
     std.debug.assert(gate.n % 32 == 0 and gate.k % 64 == 0 and gate.n == up.n and gate.k == up.k);
     const bm: u32 = if (rows / experts < 200) 32 else 64; // 32-row tiles waste less of each expert's last tile until ~200 rows

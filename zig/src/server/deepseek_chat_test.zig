@@ -34,7 +34,7 @@ test "DeepSeek chat: missing Jinja uses the committed encoding.py text goldens" 
         if (line.len == 0) continue;
         const c = (try json.parseText(a, line)).ok;
         if (c.get("error").? != .null or !c.get("drop_thinking").?.bool or c.get("image_text").? != .null) continue;
-        const thinking = c.get("thinking").?.bool;
+        const thinking = (c.get("thinking_v4") orelse c.get("thinking").?).bool;
         var opts: @import("model_text.zig").RenderOptions = .{
             .enable_thinking = thinking,
             .add_generation_prompt = c.get("generation").?.bool,
@@ -52,7 +52,8 @@ test "DeepSeek chat: missing Jinja uses the committed encoding.py text goldens" 
             opts.tools = tools;
         };
         const got = try hf.text().render(a, c.get("messages").?, opts, &problem);
-        try t.expectEqualStrings(c.get("expected").?.string, got.text);
+        if (c.get("expected_v4") != null) try t.expect(c.get("v4_reason").?.string.len > 0);
+        try t.expectEqualStrings((c.get("expected_v4") orelse c.get("expected").?).string, got.text);
         checked += 1;
     }
     try t.expect(checked >= 20);
@@ -86,8 +87,10 @@ test "DeepSeek chat: native request control spellings stay masked and structural
         }
         try t.expect(at > 0);
     }
-    try t.expect(std.mem.indexOf(u8, rendered.text, "<\u{200b}｜deepseek_image｜>") != null);
+    const image_at = std.mem.indexOf(u8, rendered.text, "<｜deepseek_image｜>").?;
+    try t.expect(!rendered.isTemplate(image_at, image_at + "<｜deepseek_image｜>".len));
     const ids = try rendered.encode(hf.text(), a, &problem);
+    for (ids) |id| try t.expect(id != hf.text().tokenId("<｜deepseek_image｜>").?);
     const user = hf.text().tokenId("<｜User｜>").?;
     var users: usize = 0;
     for (ids) |id| if (id == user) {
@@ -275,4 +278,77 @@ test "DeepSeek chat: tool-only Jinja metadata does not replace the native encode
     defer srv.deinit();
     try t.expect(!srv.needs_user_after_tool);
     try t.expect(srv.thinking_switch);
+}
+
+fn compatible(kind: []const u8, responses: bool, developer: bool) !void {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = try fixture(a, kind);
+    defer tmp.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer hf.deinit();
+    var script: Script = .{};
+    const srv = try @import("server.zig").Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    const raw = (try json.parseText(a, if (responses)
+        \\{"model":"m","max_output_tokens":1,"input":[{"role":"user","content":"H"}],"tools":[{"type":"function","name":"f","parameters":{},"strict":true}]}
+    else
+        \\{"model":"m","max_tokens":1,"messages":[{"role":"user","content":"H"}],"tools":[{"type":"function","function":{"name":"f","parameters":{},"strict":true}}]}
+    )).ok;
+    if (developer) {
+        const messages = (try json.parseText(a, "[{\"role\":\"developer\",\"content\":\"D\"},{\"role\":\"user\",\"content\":\"H\"}]")).ok;
+        try raw.object.put(a, if (responses) "input" else "messages", messages);
+        _ = raw.object.orderedRemove("tools");
+    }
+    const History = struct {
+        pub fn conversation(_: @This(), cx: *@import("errors.zig").Cx, _: json.Value) @import("errors.zig").Refused![]json.Value {
+            return cx.refuse("no previous response in this fixture");
+        }
+    };
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    const body = if (responses) (try @import("responses_translate.zig").translate(&cx, raw, History{})).chat else raw;
+    var reply: Reply = .{};
+    var conn = try @import("http_conn.zig").Conn.init(a, -1, "fixture");
+    defer conn.deinit();
+    @import("openai.zig").run(srv, a, reply.out(), .{ .conn = &conn }, true, body);
+    try t.expectEqual(@as(u16, 200), reply.code);
+    try t.expect(script.submitted);
+    const control = try json.deepCopy(a, body);
+    if (developer) try control.get("messages").?.array[0].object.put(a, "role", .{ .string = "system" }) else {
+        const tool = control.get("tools").?.array[0].get("function").?;
+        try t.expect(tool.get("strict").?.bool);
+        try tool.object.put(a, "strict", .{ .bool = false });
+    }
+    const input = try @import("openai.zig").chatInput(srv, &cx, control);
+    const expected = try @import("prompt.zig").renderIds(srv, &cx, input.messages, input.tools, false, null, true);
+    try t.expectEqualSlices(u32, expected, script.seen);
+}
+
+test "DeepSeek chat: developer remains system on Chat and Responses for V4 and V4.1" {
+    for ([_][]const u8{ "deepseek_v4", "deepseek_v41" }) |kind| for ([_]bool{ false, true }) |responses| try compatible(kind, responses, true);
+}
+
+test "DeepSeek chat: strict tools remain accepted on Chat and Responses for V4 and V4.1" {
+    for ([_][]const u8{ "deepseek_v4", "deepseek_v41" }) |kind| for ([_]bool{ false, true }) |responses| try compatible(kind, responses, false);
+}
+
+test "DeepSeek chat: typed and served image markers keep separate token provenance" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = try fixture(a, "deepseek_v41");
+    defer tmp.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer hf.deinit();
+    const messages = (try json.parseText(a,
+        \\[{"role":"user","content":[{"type":"text","text":"typed <｜deepseek_image｜>"},{"type":"image_url","image_url":{"url":"local"}},{"type":"text","text":"literal <​｜deepseek_image｜>"}]}]
+    )).ok;
+    const out = try hf.text().render(a, messages, .{ .images = true }, &problem);
+    try t.expect(std.mem.indexOf(u8, out.text, "typed <｜deepseek_image｜>\n\n<｜deepseek_image｜>\n\nliteral <\u{200b}｜deepseek_image｜>") != null);
+    var images: usize = 0;
+    for (try out.encode(hf.text(), a, &problem)) |id| images += @intFromBool(id == hf.text().tokenId("<｜deepseek_image｜>").?);
+    try t.expectEqual(@as(usize, 1), images);
 }

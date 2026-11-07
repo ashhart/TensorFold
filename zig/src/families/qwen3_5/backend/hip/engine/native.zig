@@ -165,17 +165,14 @@ fn prepare(
                 if (pf.pool.limit != null) ", under TENSORFOLD_HIP_MEMORY_LIMIT_GB" else "",
             },
         ),
-        error.BadReserve => steps.refuseAll(
+        error.BadReserve, error.BadLimit => steps.refuseAll(
             a,
             problem,
-            "TENSORFOLD_MEMORY_RESERVE_GIB: a number of GiB from 0.5 (2 on shared memory) to the memory's size",
-            .{},
-        ),
-        error.BadLimit => steps.refuseAll(
-            a,
-            problem,
-            "TENSORFOLD_HIP_MEMORY_LIMIT_GB: a positive number of GiB whose byte count fits in a 64-bit size",
-            .{},
+            "{s}",
+            .{try hip.admission.badSetting(a, if (err == error.BadReserve) error.BadReserve else error.BadLimit, .{
+                .reserve = @import("sys").getenv("TENSORFOLD_MEMORY_RESERVE_GIB"),
+                .limit = @import("sys").getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB"),
+            })},
         ),
         error.HostMemoryUnavailable => steps.refuseAll(
             a,

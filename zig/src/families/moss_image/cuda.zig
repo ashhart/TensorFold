@@ -1,6 +1,7 @@
 //! MOSS-Image's transformer on CUDA: a denoiser driven by tf-moss-image, outside the lane engine.
 pub const config = @import("config.zig");
 pub const host = @import("host.zig");
+pub const reference = @import("reference.zig");
 pub const Model = @import("cuda_model.zig").Model;
 pub const Prompt = @import("cuda_model.zig").Prompt;
 pub const seconds = @import("cuda_model.zig").seconds;

@@ -142,6 +142,7 @@ pub const Rendered = struct {
 };
 
 pub const Text = struct {
+    native_deepseek: bool = false,
     ctx: *anyopaque,
     vtable: *const VTable,
 
@@ -149,7 +150,7 @@ pub const Text = struct {
         format: enum { template, kimi } = .template,
         /// Ids of ``text``, special-token text included as its token; ``add_special`` adds what the tokenizer prepends.
         encode: *const fn (ctx: *anyopaque, a: Allocator, text: []const u8, add_special: bool) Error![]u32,
-        /// UTF-8 of ``ids`` with special tokens; bytes that end mid-character decode as U+FFFD, as Python's replace does.
+        /// UTF-8 of ``ids`` with special tokens; bytes ending mid-character decode as U+FFFD, as Python's replace does.
         decode: *const fn (ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8,
         /// The id of a token the vocabulary holds whole (``convert_tokens_to_ids``), else null.
         token_id: *const fn (ctx: *anyopaque, piece: []const u8) ?u32,

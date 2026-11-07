@@ -47,6 +47,8 @@ pub const Session = struct {
     env: ncclog.Env = ncclog.process,
     sink: Sink = logSink,
     capture: ncclog.Capture = .{},
+    early_reported: bool = false,
+    transport_reported: bool = false,
 
     /// Defer it at the call site: a failed init still hands NCCL_DEBUG* back and removes the log; else a no-op.
     pub fn end(s: *Session) void {
@@ -64,7 +66,13 @@ pub fn begin(rank: usize, world: usize) Session {
 pub fn beginWith(env: ncclog.Env, sink: Sink, rank: usize, world: usize) Session {
     if (world < 2) return .{};
     if (env.get(off_variable)) |v| if (std.mem.eql(u8, std.mem.span(v), "0")) return .{};
-    return .{ .rank = @intCast(rank), .world = @intCast(world), .active = true, .env = env, .sink = sink, .capture = .begin(env) };
+    const session: Session = .{ .rank = @intCast(rank), .world = @intCast(world), .active = true, .env = env, .sink = sink, .capture = .begin(env) };
+    if (session.capture.state == .on) {
+        var path: [256:0]u8 = @splat(0);
+        var buf: [640]u8 = undefined;
+        if (session.capture.path(&path)) |p| sink(.info, std.fmt.bufPrint(&buf, "p2p: rank {d} of {d}: NCCL's init log is at {s} until startup diagnostics finish; if this rank stops before then, that file holds NCCL's last lines", .{ rank, world, p }) catch "p2p: NCCL init log path unavailable");
+    }
+    return session;
 }
 
 pub const After = struct {
@@ -75,6 +83,22 @@ pub const After = struct {
     /// A later `ready` (tp_watch.ready or the group's close) reports the transport if init logged none.
     later: bool = false,
 };
+
+/// GLM reports capabilities before its first peer transfer; keep capture and optional probe at their old lifetime.
+pub fn beforePeers(s: *Session, a: After) void {
+    if (!s.active or s.early_reported) return;
+    const nl = nvml.Library.open();
+    const cl = cudap.Library.open();
+    beforePeersWith(s, a, if (nl) |*l| &l.api else null, if (cl) |*l| &l.api else null);
+}
+
+pub fn beforePeersWith(s: *Session, a: After, nvml_api: ?*const nvml.Api, cuda_api: ?*const cudap.Api) void {
+    if (!s.active or s.early_reported) return;
+    s.early_reported = true;
+    const transport = peek(&s.capture, s.rank, a.later);
+    s.transport_reported = transport != .later;
+    describe(s, a, nvml_api, cuda_api, transport, null);
+}
 
 /// After this rank's NCCL init: restores NCCL_DEBUG*, runs the opt-in probe, then logs the report.
 pub fn afterInit(s: *Session, a: After) void {
@@ -94,6 +118,19 @@ pub fn afterInitWith(s: *Session, a: After, nvml_api: ?*const nvml.Api, cuda_api
         f.probe = if (probe.run(d, a.lib, a.comm, s.rank, s.world)) |r| .{ .done = r } else |e| .{ .failed = e };
     };
     f.transport = take(&s.capture, s.rank, s.world, s.sink, a.later);
+    if (!s.early_reported) return describe(s, a, nvml_api, cuda_api, f.transport, f.probe);
+    var buf: [2048]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    if (!s.transport_reported) transportLine(&w, f.transport) catch {};
+    probeInfo(&w, f.probe) catch {};
+    lines(s.sink, .info, w.buffered());
+    w = std.Io.Writer.fixed(&buf);
+    probeWarnings(&w, f.probe) catch {};
+    lines(s.sink, .warn, w.buffered());
+}
+
+fn describe(s: *const Session, a: After, nvml_api: ?*const nvml.Api, cuda_api: ?*const cudap.Api, transport: Transport, outcome: ?ProbeOutcome) void {
+    var f: Facts = .{ .rank = s.rank, .world = s.world, .env = s.env, .transport = transport, .probe = outcome };
     var v: c_int = 0;
     if (a.lib.api.ncclGetVersion(&v) == 0) f.nccl_version = v;
     var cs: cudap.Survey = .{};
@@ -113,6 +150,18 @@ pub fn afterInitWith(s: *Session, a: After, nvml_api: ?*const nvml.Api, cuda_api
 var log_buf: [1 << 20]u8 = undefined;
 const Pending = struct { capture: ncclog.Capture, rank: u32, world: u32, sink: Sink };
 var pending: ?Pending = null;
+
+fn peek(c: *const ncclog.Capture, rank: u32, later: bool) Transport {
+    return switch (c.state) {
+        .user => .user,
+        .unavailable => .unavailable,
+        .off => .not_reported,
+        .on => blk: {
+            const found = ncclog.parse(c.read(&log_buf), rank);
+            break :blk if (found.count > 0) .{ .links = found } else if (later) .later else .not_reported;
+        },
+    };
+}
 
 fn take(c: *ncclog.Capture, rank: u32, world: u32, sink: Sink, later: bool) Transport {
     switch (c.state) {
@@ -199,10 +248,18 @@ pub fn info(w: *std.Io.Writer, f: *const Facts) !void {
     };
     if (!first) try w.writeAll("\n");
     try transportLine(w, f.transport);
-    if (f.probe) |p| switch (p) {
+    try probeInfo(w, f.probe);
+}
+
+fn probeInfo(w: *std.Io.Writer, outcome: ?ProbeOutcome) !void {
+    if (outcome) |p| switch (p) {
         .done => |r| try w.print("p2p: probe: all-gather of {d} MiB a rank in {d:.2} ms, bus bandwidth {d:.1} GB/s\n", .{ probe.bytes_per_rank >> 20, r.ms, r.bus_gbps }),
         .failed => {},
     };
+}
+
+fn probeWarnings(w: *std.Io.Writer, outcome: ?ProbeOutcome) !void {
+    if (outcome) |p| if (p == .failed) try w.print("p2p: probe failed ({t}); startup continues without its figure\n", .{p.failed});
 }
 
 fn cudaPeer(w: *std.Io.Writer, d: *const cudap.Dev) !void {
@@ -239,7 +296,7 @@ pub fn meaning(s: c_int) []const u8 {
 
 /// One line per problem, each naming what NVML or CUDA reported and what the user could check.
 pub fn warnings(w: *std.Io.Writer, f: *const Facts) !void {
-    if (f.probe) |p| if (p == .failed) try w.print("p2p: probe failed ({t}); startup continues without its figure\n", .{p.failed});
+    try probeWarnings(w, f.probe);
     const h = f.host orelse return cudaWarnings(w, f, null);
     const m = h.mine orelse return cudaWarnings(w, f, null);
     const me = h.gpus[m].index;

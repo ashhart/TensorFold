@@ -10,7 +10,7 @@ inline float hc_sq_acc(float acc, float v) { return v * v + acc; }
 inline float hc_add_nc(float a, float b) { return a + b; }
 #pragma clang fp contract(on)
 
-// Grid (SLICES, rows) of 256 threads: thread t of slice j takes columns 1024 j + 4 t.. of the streams, expands them (the family's per-element arithmetic) and sums their squares and 24 mix products into PART [rows, SLICES, 25].
+// (SLICES, rows) of 256: slice j's thread t expands 1024 j + 4 t..; squares + 24 mixes into PART [rows, SLICES, 25].
 template <bool EXPAND>
 [[kernel]] void tf_hc_expand_mix(const device bfloat* XOLD [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
                              const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
@@ -79,7 +79,7 @@ template <bool EXPAND>
 template [[host_name("tf_hc_expand_mix")]] [[kernel]] decltype(tf_hc_expand_mix<true>) tf_hc_expand_mix<true>;
 template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<false>) tf_hc_expand_mix<false>;
 
-// A pending branch into the streams in place (prompt chunks' one stream buffer): a threadgroup of TF_D / 4 a row, four columns of every stream a thread, read before written.
+// In-place pending branch to the streams (one prompt buffer): TF_D / 4 a row, 4 stream columns each, read before write.
 [[kernel]] void tf_hc_expand_inplace(device bfloat* X [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
                                      const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
                                      uint r [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) {
@@ -106,7 +106,7 @@ inline float4 hc_col4(float4 v) {
   return v + simd_shuffle_xor(v, ushort(2));
 }
 
-// One threadgroup of 1024 a row: the slices' sums added in order, the mixes scaled by the streams' inverse norm, then the family's split: pre, post and the Sinkhorn comb, the streams collapsed and normed.
+// 1024 a row: slice sums in order, mixes by 1/norm, then the split (pre, post, Sinkhorn), streams collapsed, normed.
 [[kernel]] void tf_hc_split(const device bfloat* X [[buffer(0)]], const device float* PART [[buffer(1)]],
                         const constant float* SCALE [[buffer(2)]], const device float* BASEV [[buffer(3)]],
                         const device bfloat* NORMW [[buffer(4)]], const constant float* EPS [[buffer(5)]],

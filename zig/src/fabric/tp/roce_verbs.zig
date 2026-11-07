@@ -25,11 +25,38 @@ pub const flag_bytes: u32 = @sizeOf(u32);
 /// The longest `quiesce` waits for the HCAs to flush what was posted.
 pub const quiesce_ns: u64 = 5 * std.time.ns_per_s;
 
-/// Before ibv_reg_mr: no fork shares or copies the region (DONTFORK), its pages stay 4 KiB (NOHUGEPAGE); else no start.
+/// `content` as the THP `enabled` file spells it: false only when the bracketed mode is `never`.
+pub fn thpEnabledFrom(content: []const u8) bool {
+    return std.mem.indexOf(u8, content, "[never]") == null;
+}
+
+/// Whether the kernel has transparent hugepages: one built without them has no `/sys/kernel/mm/transparent_hugepage`.
+pub fn thpEnabled() bool {
+    if (comptime @import("builtin").os.tag != .linux) return false;
+    const fd = std.c.open("/sys/kernel/mm/transparent_hugepage/enabled", .{ .ACCMODE = .RDONLY });
+    if (fd < 0) return false;
+    defer _ = std.c.close(fd);
+    var buf: [128]u8 = undefined;
+    const n = std.c.read(fd, &buf, buf.len);
+    if (n <= 0) return true;
+    return thpEnabledFrom(buf[0..@intCast(n)]);
+}
+
+/// Before ibv_reg_mr: no fork shares or copies the region (DONTFORK), pages stay 4 KiB (NOHUGEPAGE where THP exists).
 pub fn prepareRegion(region: []align(std.heap.page_size_min) u8) Error!void {
     if (comptime @import("builtin").os.tag != .linux) return; // the verbs wire runs on Linux only
-    const advice = [_]u32{ std.os.linux.MADV.DONTFORK, std.os.linux.MADV.NOHUGEPAGE };
-    for (advice) |a| std.posix.madvise(region.ptr, region.len, a) catch |e| {
+    try adviseRegion(region, std.os.linux.MADV.DONTFORK);
+    if (!thpEnabled()) {
+        // A kernel without THP never promotes an anonymous page: the region's pages are 4 KiB already.
+        log.info("[tensorfold] tp roce: this kernel has no transparent hugepages; skipping the NOHUGEPAGE advice, the pages are 4 KiB already", .{});
+        return;
+    }
+    try adviseRegion(region, std.os.linux.MADV.NOHUGEPAGE);
+}
+
+/// One madvise on the region: a failure logs it and refuses to start.
+fn adviseRegion(region: []align(std.heap.page_size_min) u8, a: u32) Error!void {
+    std.posix.madvise(region.ptr, region.len, a) catch |e| {
         log.warn("tp roce: madvise({d}) on the {d} B region failed: {t}; refusing to start", .{ a, region.len, e });
         return error.VerbsFailed;
     };

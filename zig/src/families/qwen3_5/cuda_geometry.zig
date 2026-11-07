@@ -90,6 +90,8 @@ pub const Geometry = struct {
     expert_bits: u8 = 4,
     /// An EXL3 checkpoint (quant_method "exl3", HF tensor names): trellis projections, bf16 or f16 the rest.
     exl3: bool = false,
+    /// A plain BF16 checkpoint (no quantization at all, HF tensor names): every projection bf16, decisions only.
+    bf16: bool = false,
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Geometry {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -284,7 +286,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     const qv = root.get("quantization");
     const exl3 = qv == null and isExl3(root);
     const modelopt = !exl3 and qv == null and root.get("quantization_config") != null;
-    if (!modelopt and !exl3 and qv == null) return error.UnsupportedQwenQuantization;
+    // neither table nor config: the publisher's BF16 weights (a decision backbone, dense only)
+    const bf16 = !modelopt and !exl3 and qv == null;
+    if (bf16 and moe) return error.UnsupportedQwenQuantization;
     var g: Geometry = .{
         .hidden = try integer(t, "hidden_size"),
         .intermediate = try integer(t, if (moe) "moe_intermediate_size" else "intermediate_size"),
@@ -304,6 +308,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         .rope = resolved.rope,
         .linear = @splat(false),
         .exl3 = exl3,
+        .bf16 = bf16,
     };
     if (t.get("tensorfold_learned_neurons")) |pocket| {
         if (pocket != .integer or pocket.integer < 0 or pocket.integer > 128 or @mod(pocket.integer, 64) != 0)
@@ -330,9 +335,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     var full: [max_layers]bool = undefined;
     try layer_pattern.read(full[0..g.layers], t);
     for (g.linear[0..g.layers], full[0..g.layers]) |*l, f| l.* = !f;
-    if (modelopt) {
+    if (modelopt or bf16) {
         if (g.pocket > 0) return error.UnsupportedLearningFormat;
-        g.kinds = try @import("cuda_modelopt.zig").kinds(gpa, bytes, g);
+        const mo = @import("cuda_modelopt.zig");
+        g.kinds = if (bf16) try mo.plain(g) else try mo.kinds(gpa, bytes, g);
         g.bits.embed = 16; // bf16 rows: no MLX width, so learning (4-bit only) refuses it
         g.bits.head = 16;
         return g;
@@ -510,5 +516,6 @@ test {
     _ = @import("cuda_modelopt_experts.zig");
     _ = @import("cuda_modelopt.zig");
     _ = @import("cuda_exl3_admission_test.zig");
+    _ = @import("cuda_bf16_admission_test.zig");
     _ = @import("cuda_rope.zig");
 }

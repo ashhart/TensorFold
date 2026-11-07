@@ -10,6 +10,7 @@ pub const Shape = struct {
     taps: bool,
     slots: u8,
     hidden: bool = false,
+    rows: bool = false, // a readout piece: every row through the last layer and the final norm, no head
     paged: bool = false,
     mt2: bool = false,
 
@@ -22,7 +23,7 @@ pub const Shape = struct {
 
     pub fn key(s: Shape) u32 {
         // captured shapes only: a window bucket's rows fit the low byte
-        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29;
+        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30;
     }
 };
 

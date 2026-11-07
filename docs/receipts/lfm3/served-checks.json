@@ -1,0 +1,207 @@
+{
+ "scope": "M4 Pro frozen benchmark candidate and M5 Ultra final-source candidate; generated text, transient request IDs, log paths and local commands omitted",
+ "cells": {
+  "_trimmed_list": {
+   "count": 12,
+   "sha256": "890cd8137d0d1d0f1770aa3954e0559e9f00be227e731a4605da66931ad15d9a",
+   "first": [
+    {
+     "checkpoint": "LFM3-1.7B-MLX-4bit",
+     "native_binary_sha256": "5c8a04d4af599879797f4f5bed8e00ab7d9d70732e698bd2a1ec2a01ec762e09",
+     "counts": {
+      "passed": 40,
+      "failed": 0,
+      "skipped": 0
+     },
+     "cancellation_checks": 6,
+     "tests": {
+      "_trimmed_list": {
+       "count": 40,
+       "sha256": "ec93990f3e5951b65e9273ee8a6948400e438b6aead1aefa5d4167eacac6e7ea",
+       "first": [
+        {
+         "name": "code/fresh_plain",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 12,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "6936d334c5fa",
+          "token_sha256": "6936d334c5fa71b46f1463f0a41a1bec9c2191a8b04427ac3973cc970decd511",
+          "output_sha256": "5acb1b52c5f3ada89db8d0b9daac2ab1b42771116f19bac7e541c90ae2d6f053"
+         }
+        },
+        {
+         "name": "chat/fresh_plain",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 21,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "b9e29e56abc8",
+          "token_sha256": "b9e29e56abc8ceddf1718ed57246cf830bfad51ae7467cde34099680227c0246",
+          "output_sha256": "ea6098063ae30786a2c14440104d62903854ffb2544ad22a5977b7be395bfbb3"
+         }
+        }
+       ],
+       "last": [
+        {
+         "name": "chat/cancel_next_drafted_equals_fresh",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 21,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "b9e29e56abc8",
+          "token_sha256": "b9e29e56abc8ceddf1718ed57246cf830bfad51ae7467cde34099680227c0246",
+          "output_sha256": "ea6098063ae30786a2c14440104d62903854ffb2544ad22a5977b7be395bfbb3"
+         }
+        }
+       ]
+      }
+     },
+     "platform": "M4 Pro, macOS 26.5.1"
+    },
+    {
+     "checkpoint": "LFM3-1.7B-MLX-6bit",
+     "native_binary_sha256": "5c8a04d4af599879797f4f5bed8e00ab7d9d70732e698bd2a1ec2a01ec762e09",
+     "counts": {
+      "passed": 40,
+      "failed": 0,
+      "skipped": 0
+     },
+     "cancellation_checks": 6,
+     "tests": {
+      "_trimmed_list": {
+       "count": 40,
+       "sha256": "a896485b9a7998f3c7d1c958fed66fa1333b95158968a66e137a79017ebfe7a7",
+       "first": [
+        {
+         "name": "code/fresh_plain",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 12,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "0ba3f45e84a2",
+          "token_sha256": "0ba3f45e84a2d008ad278a00a0d0bb92e86ab473f1591dd7f0e0b9fc7e9097fd",
+          "output_sha256": "e8f89e14d184deba4de23ecb09ae19ff858a341ae382f77e95af132c252897c0"
+         }
+        },
+        {
+         "name": "chat/fresh_plain",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 21,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "47d528141151",
+          "token_sha256": "47d5281411514b32fd43b317870df757e61e0fb4b0956373c2426391156d8c7d",
+          "output_sha256": "5f26af10f7388c9cecdd8db5d6e063bde4c1e779f7fd2b028902b9745233476b"
+         }
+        }
+       ],
+       "last": [
+        {
+         "name": "chat/cancel_next_drafted_equals_fresh",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 21,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "47d528141151",
+          "token_sha256": "47d5281411514b32fd43b317870df757e61e0fb4b0956373c2426391156d8c7d",
+          "output_sha256": "5f26af10f7388c9cecdd8db5d6e063bde4c1e779f7fd2b028902b9745233476b"
+         }
+        }
+       ]
+      }
+     },
+     "platform": "M4 Pro, macOS 26.5.1"
+    }
+   ],
+   "last": [
+    {
+     "platform": "M5 Ultra, macOS 27.0",
+     "checkpoint": "LFM3-VL-2B-MLX-8bit",
+     "native_binary_sha256": "251079309919aa9b21ca8cc6a89c58fc3fc9a9baf800fa5ce6a6af313a5b5f65",
+     "counts": {
+      "passed": 61,
+      "failed": 0,
+      "skipped": 0
+     },
+     "cancellation_checks": 9,
+     "tests": {
+      "_trimmed_list": {
+       "count": 61,
+       "sha256": "6085976c1edcf2c60f95e8f23ed21556e9342d92065ee07b21f064af0ca83b50",
+       "first": [
+        {
+         "name": "code/fresh_plain",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 12,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "b8b714c6eafc",
+          "token_sha256": "b8b714c6eafc118c48d77868ccb78c889405ce0d12388774695f4c856da9aed3",
+          "output_sha256": "6fd3442d9bccd71bdbbdc1882163a95325e8d71deb681db61a61782eafc71258"
+         }
+        },
+        {
+         "name": "chat/fresh_plain",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 21,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "146558fe1b2c",
+          "token_sha256": "146558fe1b2c249165dcf74e148e01adde16df3443e86827466ab5219ceeda3f",
+          "output_sha256": "30174e992e3bff60e0fa7976ad3305512b10594afd47a55512eb1b45c95e7955"
+         }
+        }
+       ],
+       "last": [
+        {
+         "name": "red/cancel_next_drafted_equals_fresh",
+         "status": "passed",
+         "evidence": {
+          "prompt_tokens": 93,
+          "cached_tokens": 0,
+          "tokens": 24,
+          "cache_state": "cold",
+          "complete": true,
+          "token_sha": "5d2a925a67b8",
+          "token_sha256": "5d2a925a67b8428145573b879dc055195c2182225be42f16e7d54e58ab4eea99",
+          "output_sha256": "f522a5dd4dea3b4715c1c3c718cf98b96206aa27b286908b94f3c55f63a43d8d"
+         }
+        }
+       ]
+      }
+     }
+    }
+   ]
+  }
+ },
+ "_trim": {
+  "note": "Raw capture replaced by counts, first/last items and SHA-256 of the canonical JSON of each trimmed list or string.",
+  "original_sha256": "ed6a432c1b51c63f9ba27e52adf438ec609948ba5fe9561f5daa056a6549b3f7",
+  "original_bytes": 404305
+ }
+}

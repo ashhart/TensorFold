@@ -1,4 +1,4 @@
-//! One prompt chunk on the prefill kernels against tools/zig/prefill_dump.py's rows: embedding, every layer, final norm.
+//! One prompt chunk on the prefill kernels vs tools/zig/prefill_dump.py's rows: embedding, every layer, final norm.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");

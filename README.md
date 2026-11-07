@@ -234,12 +234,14 @@ On Metal, each of up to 128 streams in the 27B's shared rounds drafts its own DF
 ```sh
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 tensorfold models
+tensorfold models --json
 tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
 `pull` downloads a checkpoint into the Hugging Face cache and checks what it downloads against the Hub: large files by sha256, small files by their git blob sha1.
 Large files come down in pieces over up to 16 connections, and an interrupted pull resumes with the pieces it lacks.
 It refuses a checkpoint whose `model_type` has no native family, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints with a model type it knows, and `info` shows one checkpoint's family, format, context and memory floor.
+`models --json` prints the same list as one document for programs: `schema` 1, and each checkpoint's `repo`, `family` and `model_type`; `family` is a display title and `model_type` is the key to match on.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 
 ## Context compaction
@@ -291,7 +293,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--alias NAME` | Another accepted model ID; repeat for multiple aliases. |
 | `--api-key KEY` | Require a bearer key; repeat for multiple keys. |
 | `--api-key-file FILE` | Read keys from a restricted-permission file; a key can be limited to [some routes](docs/api.md#key-scopes). |
-| `--metrics-open` | Allow `/metrics` and `/v1/load` without a key when API authentication is enabled. |
+| `--metrics-open` | Allow `/metrics`, `/v1/metrics` and `/v1/load` without a key when API authentication is enabled. |
 | `--dashboard` | Enable the local `/dashboard` page and `/stats` endpoint. |
 | `--max-inflight N`, `--max-inflight-per-key N` | Refuse model requests past N in progress at once, overall or per key, with 429; 0, the default, is off. See [admission](docs/api.md#admission). |
 | `--requests-per-second N`, `--request-burst N` | Refuse a key's model requests past N a second, after a burst; 0, the default, is off. |

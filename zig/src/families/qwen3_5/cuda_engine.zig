@@ -60,8 +60,19 @@ pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = nu
 /// An image prompt's rows for its prompt chunks: the staged tables' rows.
 pub const Images = Round.Images;
 
-/// What a forward keeps: a prompt chunk its last row's logits, a verify window every row's draw or logits and log.
-pub const Keep = union(enum) { last, draws: []const Draw, logits, hidden };
+/// What a forward keeps: a prompt chunk its last row's logits or (`rows`) every final-norm row; a window its draws.
+pub const Keep = union(enum) {
+    last,
+    draws: []const Draw,
+    logits,
+    hidden,
+    rows,
+
+    /// Whether the forward is a verify window (recorded, one-row bits); `last` and `rows` are prompt chunks.
+    pub fn verifies(k: Keep) bool {
+        return k != .last and k != .rows;
+    }
+};
 
 /// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
 pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
@@ -376,13 +387,13 @@ pub const Engine = struct {
     }
 
     pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
-        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
+        try e.run(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
     }
 
     /// Refuse the whole frame before settling any prior window or launching work.
     pub fn admit(e: *const Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
-        if (!geometry.supported(g, ids.len, keep == .last, most_verify)) return error.UnsupportedQwenGeometry;
+        if (!geometry.supported(g, ids.len, !keep.verifies(), most_verify)) return error.UnsupportedQwenGeometry;
         var total: usize = 0;
         if (parts.len == 0 or parts.len > max_segs) return error.InvalidQwenSegments;
         for (parts, 0..) |p, index| {
@@ -394,7 +405,7 @@ pub const Engine = struct {
         if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
         if (e.learning != null and total != 1) return error.BadLearningRows;
         if (keep == .hidden and e.learning == null) return error.BadLearningRows;
-        const record = keep != .last;
+        const record = keep.verifies();
         if (record and total > e.verify_rows) return error.InvalidQwenSegments;
         if (!record and parts.len != 1) return error.InvalidQwenSegments;
         if (keep == .draws and keep.draws.len != total) return error.InvalidQwenSegments;
@@ -408,7 +419,7 @@ pub const Engine = struct {
         try e.admit(parts, ids, keep);
         const g = e.g;
         const total = ids.len;
-        const record = keep != .last;
+        const record = keep.verifies();
         const heads: usize = if (record) total else 1;
         // the prompt GEMM only for prompt chunks: a window's rows keep the bits of one-row steps
         const prompt = !record;
@@ -461,6 +472,7 @@ pub const Engine = struct {
             if (p.rows == 1) try recurrent.mark(p.cache, true);
         };
         shape.hidden = keep == .hidden;
+        shape.rows = keep == .rows;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
         shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, prompt, total, parts.len, parts[0].cache.len);
         if (e.learning != null or e.pockets.any()) {
@@ -512,6 +524,7 @@ pub const Engine = struct {
                 try e.stream.synchronize();
                 @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
             },
+            .rows => {}, // the rows stay in `x` for the readout that runs next on the stream
             .logits, .last => {
                 const out = e.host_logits.bytes[0 .. heads * g.vocab * 2];
                 try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(out.ptr, e.logits, out.len, e.stream.handle), "cuMemcpyDtoHAsync");
@@ -519,7 +532,8 @@ pub const Engine = struct {
                 if (keep == .last) @memcpy(parts[0].cache.logits, e.rowLogits(0));
             },
         }
-        recurrent.completed(e);
+        // a readout piece waits for nothing: the queue's work is done only once a later forward has waited
+        if (keep != .rows) recurrent.completed(e);
     }
 
     pub const Shape = @import("cuda_shapes.zig").Shape;

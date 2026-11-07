@@ -146,6 +146,13 @@ fn dtypeName(v: std.json.Value) []const u8 {
     return if (v == .string) v.string else @tagName(v);
 }
 
+/// quantization_config at the top level, else text_config's: where and in what order cuda_exl3.zig's `block` reads it.
+fn quantBlock(root: std.json.ObjectMap) ?std.json.ObjectMap {
+    if (root.get("quantization_config")) |q| if (q == .object) return q.object;
+    if (root.get("text_config")) |t| if (t == .object) if (t.object.get("quantization_config")) |q| if (q == .object) return q.object;
+    return null;
+}
+
 /// text_config with GLM-5.3-Flash's widths; smaller counts pass (synthetic), experts >= top-k, vocab a multiple of 128.
 pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
@@ -165,7 +172,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     c.layers = @intCast(try int(t, "num_hidden_layers"));
     c.run = c.layers;
     c.vocab = @intCast(try int(t, "vocab_size"));
-    if (root.get("quantization_config")) |q| if (q == .object) if (q.object.get("quant_method")) |m| if (m == .string and std.mem.eql(u8, m.string, "exl3")) {
+    if (quantBlock(root)) |q| if (q.get("quant_method")) |m| if (m == .string and std.mem.eql(u8, m.string, "exl3")) {
         c.head_unit = 128;
         c.exl3 = true;
     };
@@ -325,6 +332,25 @@ test "the real counts parse to the defaults; smaller counts parse, other widths 
     const few = try textConfig(gpa, 2, 1, &.{1}, 4, 8192, 4096);
     defer gpa.free(few);
     try std.testing.expectError(error.NotGlm53Flash, parse(gpa, few));
+}
+
+test "quantization_config: EXL3 at the top level or inside text_config parses as EXL3, the top level first" {
+    const gpa = std.testing.allocator;
+    const real = try textConfig(gpa, 45, 3, &.{ 3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43 }, 288, 154880, 4096);
+    defer gpa.free(real);
+    try std.testing.expect(!(try parse(gpa, real)).exl3);
+    const exl3 = "\"quantization_config\": {\"quant_method\": \"exl3\", \"bits\": 4}, ";
+    const top = try std.mem.replaceOwned(u8, gpa, real, "{\"model_type\"", "{" ++ exl3 ++ "\"model_type\"");
+    defer gpa.free(top);
+    const nested = try std.mem.replaceOwned(u8, gpa, real, "\"text_config\": {", "\"text_config\": {" ++ exl3);
+    defer gpa.free(nested);
+    for ([_][]const u8{ top, nested }) |json| {
+        const c = try parse(gpa, json);
+        try std.testing.expect(c.exl3 and c.head_unit == 128);
+    }
+    const fp8 = try std.mem.replaceOwned(u8, gpa, nested, "{\"model_type\"", "{\"quantization_config\": {\"quant_method\": \"fp8\"}, \"model_type\"");
+    defer gpa.free(fp8);
+    try std.testing.expect(!(try parse(gpa, fp8)).exl3); // another method at the top level: text_config's is not read
 }
 
 test "tensorfold_activation_dtype: absent and bfloat16 parse; float32 and float16 refuse by name" {

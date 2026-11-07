@@ -62,7 +62,9 @@ pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
              int G, float scale, const int* __restrict__ PT, long long PS) {
     constexpr bool causal = true;
     constexpr int skip = 0;
-    constexpr bool HPAGED = false, F8 = false, HM = false;  // bf16 keys, row-major
+    constexpr bool P256 = false, HPAGED = false, F8 = false, HM = false;  // bf16 keys, row-major
+    constexpr bool IDS = false;  // no page ids in shared memory
+    constexpr int PN = 0;
     constexpr int CAP = 0, PTOK = 1;
     const float *ks = nullptr, *vs = nullptr;
     const int HO = H;
@@ -80,7 +82,9 @@ pattn_rows(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict_
     constexpr const int* PT = nullptr;  // contiguous keys
     constexpr long long PS = 0;
     constexpr int PTOK = 1;
-    constexpr bool HPAGED = false, F8 = false, HM = false;  // bf16 keys, row-major
+    constexpr bool P256 = false, HPAGED = false, F8 = false, HM = false;  // bf16 keys, row-major
+    constexpr bool IDS = false;  // no page ids in shared memory
+    constexpr int PN = 0;
     constexpr int CAP = 0;
     const float *ks = nullptr, *vs = nullptr;
     const int HO = H;
@@ -115,7 +119,9 @@ full_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__ o
     constexpr const int* PT = nullptr;  // contiguous keys
     constexpr long long PS = 0;
     constexpr int PTOK = 1;
-    constexpr bool HPAGED = false, F8 = false, HM = false;  // bf16 keys, row-major
+    constexpr bool P256 = false, HPAGED = false, F8 = false, HM = false;  // bf16 keys, row-major
+    constexpr bool IDS = false;  // no page ids in shared memory
+    constexpr int PN = 0;
     constexpr int CAP = 0;
     const float *ks = nullptr, *vs = nullptr;
     const int H = 3 * HO, HK = H;
@@ -132,7 +138,9 @@ __global__ void __launch_bounds__(32 * WARPS, 1)
 hpattn_whole_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
               const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
               int G, float scale, int CAP) {
-    constexpr bool HPAGED = false, causal = true, F8 = false, HM = true;
+    constexpr bool P256 = false, HPAGED = false, causal = true, F8 = false, HM = true;
+    constexpr bool IDS = false;  // no page ids in shared memory
+    constexpr int PN = 0;
     constexpr int skip = 0;
     constexpr const int* PT = nullptr;
     constexpr long long PS = 0;
@@ -149,7 +157,9 @@ __global__ void __launch_bounds__(32 * WARPS, 1)
 hpattn8_whole_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restrict__ kc, const uint8_t* __restrict__ vc,
                const float* __restrict__ ks, const float* __restrict__ vs, __nv_bfloat16* __restrict__ out, int p0,
                int W, int H, int HK, int G, float scale, int CAP) {
-    constexpr bool HPAGED = false, causal = true, F8 = true, HM = true;
+    constexpr bool P256 = false, HPAGED = false, causal = true, F8 = true, HM = true;
+    constexpr bool IDS = false;  // no page ids in shared memory
+    constexpr int PN = 0;
     constexpr int skip = 0;
     constexpr const int* PT = nullptr;
     constexpr long long PS = 0;
@@ -165,8 +175,41 @@ __global__ void __launch_bounds__(32 * WARPS, 1)
 hpattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
               const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
               int G, float scale, int CAP, const int* __restrict__ PT, long long PS, int PTOK) {
-    constexpr bool HPAGED = true, causal = true, F8 = false, HM = true;
+    constexpr bool P256 = false, HPAGED = true, causal = true, F8 = false, HM = true;
+    constexpr bool IDS = false;  // no page ids in shared memory
+    constexpr int PN = 0;
     constexpr int skip = 0;
+    const int HO = H;
+    const float *ks = nullptr, *vs = nullptr;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#include "prefill_attention_rows.cuh"
+}
+
+// hpattn_kernel over pages of 256 positions (TF_QWEN_KV_PAGES's default): an item's keys sit in one page.
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+hpattn_p256_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                   const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
+                   int G, float scale, int CAP, const int* __restrict__ PT, long long PS, int) {
+    constexpr bool P256 = true, HPAGED = true, causal = true, F8 = false, HM = true, IDS = false;
+    constexpr int PN = 0;
+    constexpr int skip = 0, PTOK = 256;
+    static_assert(PTOK % BN == 0, "a tile's keys, filled or not, in one page");
+    const int HO = H;
+    const float *ks = nullptr, *vs = nullptr;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#include "prefill_attention_rows.cuh"
+}
+
+// hpattn_p256_kernel with the chunk's PN page ids in shared memory past the queries (PN * 4 more dynamic bytes).
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+hpattn_p256_ids_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                       const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
+                       int G, float scale, int CAP, const int* __restrict__ PT, long long PS, int PN) {
+    constexpr bool P256 = true, HPAGED = true, causal = true, F8 = false, HM = true, IDS = true;
+    constexpr int skip = 0, PTOK = 256;
+    static_assert(PTOK % BN == 0, "a tile's keys, filled or not, in one page");
     const int HO = H;
     const float *ks = nullptr, *vs = nullptr;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
@@ -179,7 +222,9 @@ __global__ void __launch_bounds__(32 * WARPS, 1)
 hpattn8_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restrict__ kc, const uint8_t* __restrict__ vc,
                const float* __restrict__ ks, const float* __restrict__ vs, __nv_bfloat16* __restrict__ out, int p0,
                int W, int H, int HK, int G, float scale, int CAP, const int* __restrict__ PT, long long PS, int PTOK) {
-    constexpr bool HPAGED = true, causal = true, F8 = true, HM = true;
+    constexpr bool P256 = false, HPAGED = true, causal = true, F8 = true, HM = true;
+    constexpr bool IDS = false;  // no page ids in shared memory
+    constexpr int PN = 0;
     constexpr int skip = 0;
     const int HO = H;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
@@ -335,6 +380,12 @@ template __global__ void tf_prefill_attention::vision_kernel<128, 8>(const __nv_
     float);
 // Head dim 256, eight warps, two query heads a block, two staging slots (Qwen3.8-27B's prompt chunks, bf16 and fp8).
 template __global__ void tf_prefill_attention::hpattn_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
+    int, float, int, const int* __restrict__, long long, int);
+template __global__ void tf_prefill_attention::hpattn_p256_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
+    int, float, int, const int* __restrict__, long long, int);
+template __global__ void tf_prefill_attention::hpattn_p256_ids_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
     int, float, int, const int* __restrict__, long long, int);
 template __global__ void tf_prefill_attention::hpattn8_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,

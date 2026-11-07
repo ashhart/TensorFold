@@ -268,5 +268,9 @@ pub fn fused(f: cuda.Function, s: cuda.Stream, h: Heads, rows: usize, p: u64, cs
     a.add(nw);
     a.add(eps);
     for ([_]u64{ out, xs, ys }) |x| a.add(x);
+    if (h.eql(full)) for (0..2) |_| { // the whole-heads kernel's two cache marks: none here
+        a.add(cint(0));
+        a.add(@as(u64, 0));
+    };
     try cuda.launch.launch(f, .{ .grid = .{ .x = h.nv }, .block = .{ .x = parts.gdn_fused_threads }, .shared = parts.gdn_fused_smem }, s, &a);
 }

@@ -1,4 +1,4 @@
-//! Prompt matmul kernels compiled from .metal files at run time: chained speed at one shape, bits against the first, error against fp64.
+//! Prompt matmul kernels compiled from .metal at runtime: chained speed at one shape, bits vs the first, error vs fp64.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");

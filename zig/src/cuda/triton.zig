@@ -69,7 +69,7 @@ pub const Kernel = struct {
         };
     }
 
-    /// `args`: non-constexpr arguments in order (scratch pointers appended here); `divisible16` args must be multiples of 16.
+    /// `args`: non-constexpr args in order (scratch pointers appended); `divisible16` args must be multiples of 16.
     pub fn launchOn(self: Kernel, grid: launch.Dim3, stream: Stream, args: *launch.Args, scratch: Scratch, divisible16: []const u32) Error!void {
         const m = self.meta;
         for (divisible16) |i| {

@@ -1,6 +1,6 @@
 //! A round's data plane: one exchange step (a chunk to every rank, theirs back), and the exact collectives built on it.
 const std = @import("std");
-const canon = @import("canon.zig");
+const canon = @import("canon");
 
 pub const Error = error{ PeerTimeout, TooLarge, Corrupt, OutOfMemory };
 

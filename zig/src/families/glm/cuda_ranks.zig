@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
+const l2pf = @import("cuda_l2pf.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
@@ -17,6 +18,7 @@ pub const Settings = struct {
     kda_pad: bool = false, // TF_GLM_KDA_PAD: 1 (the fused KDA input padded to eight columns at load, for glm_mm) or 0
     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole); unset, 8 under solo on the wire.
     solo: bool = false, // TF_GLM_CHUNK_SOLO: 4096 (prompt buffers for two chunks a pass, while no stream decodes) or 2048
+    pair: bool = true, // TF_GLM_PROMPT_PAIR: 1 (while no stream decodes, a prompt step takes two chunks, each one's exchanges under the other's sites) or 0
     index_split: u32 = 2048, // TF_GLM_INDEX_SPLIT: from this position on, rank 0 splits a prompt chunk's indexer rows (0: never)
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
@@ -25,6 +27,7 @@ pub const Settings = struct {
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
+    l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
 
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
@@ -78,6 +81,13 @@ pub const Settings = struct {
         if (get("TF_GLM_CHUNK_SOLO")) |v| {
             if (std.mem.eql(u8, v, "4096")) s.solo = true else if (std.mem.eql(u8, v, "2048")) s.solo = false else {
                 problem.* = "TF_GLM_CHUNK_SOLO: 2048 or 4096";
+                return error.BadSetting;
+            }
+        }
+        s.l2pf = try l2pf.Options.read(get, problem);
+        if (get("TF_GLM_PROMPT_PAIR")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.pair = true else if (std.mem.eql(u8, v, "0")) s.pair = false else {
+                problem.* = "TF_GLM_PROMPT_PAIR: 0 or 1";
                 return error.BadSetting;
             }
         }
@@ -173,7 +183,7 @@ fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 16, // this struct's version (15 plus kda_pad)
+    layout: u32 = 19, // this struct's version (18 plus the prompt pair)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -184,6 +194,7 @@ pub const Fingerprint = extern struct {
     kda_wide: u32,
     kda_pad: u32 = 0, // TF_GLM_KDA_PAD: every rank's KDA input rows carry one width
     pieces: u32,
+    pair: u32, // TF_GLM_PROMPT_PAIR: rank 0's paired steps need the second chunk's buffers on every rank
     layers: u32, // TF_GLM_LAYERS (0: all)
     mtp: u32, // 1: the MTP head loads and runs (drafts on); 2: and DFlash2 (--drafter), whose rounds gather
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
@@ -194,6 +205,7 @@ pub const Fingerprint = extern struct {
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
     kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
     solo: u32 = 0, // TF_GLM_CHUNK_SOLO: rank 0's solo passes need the wider prompt buffers on every rank
+    l2pf: [4]u32 = @splat(0), // TF_GLM_L2PF's words: every rank prefetches alike, so none waits on a slower one's windows
     bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS: every rank's matmuls read the same codes
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
@@ -215,6 +227,7 @@ pub const Fingerprint = extern struct {
         kda_wide,
         kda_pad,
         pieces,
+        pair,
         layers,
         mtp,
         vision,
@@ -225,6 +238,7 @@ pub const Fingerprint = extern struct {
         roce_multi,
         kv_host,
         solo,
+        l2pf,
         bits,
         capacity,
         heat_high,
@@ -256,12 +270,14 @@ pub const Fingerprint = extern struct {
             .kda_wide = @intFromBool(s.kda_wide),
             .kda_pad = @intFromBool(s.kda_pad),
             .pieces = s.pieces,
+            .pair = @intFromBool(s.pair),
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
             .kv_host = s.kv_host,
             .kv_host_gib = s.kv_host_gib,
             .solo = @intFromBool(s.solo),
+            .l2pf = s.l2pf.words(),
             .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
@@ -291,6 +307,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "kda_wide",
             "kda_pad",
             "pieces",
+            "pair",
             "layers",
             "mtp",
             "vision",
@@ -301,6 +318,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "roce_multi",
             "kv_host",
             "solo",
+            "l2pf",
             "bits",
             "capacity",
             "heat_high",
@@ -411,6 +429,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
         .kda_pad => "TF_GLM_KDA_PAD",
         .pieces => "TF_GLM_OVERLAP_PIECES",
+        .pair => "TF_GLM_PROMPT_PAIR",
         .layers => "TF_GLM_LAYERS",
         .mtp => "--no-drafts given to some ranks and not others",
         .vision => "--vision (or its image tokens) given to some ranks and not others",
@@ -422,6 +441,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .kv_host => "TF_GLM_KV_HOST or TF_GLM_KV_HOST_SHARED",
         .kv_host_gib => "TF_GLM_KV_HOST_GIB",
         .solo => "TF_GLM_CHUNK_SOLO",
+        .l2pf => "TF_GLM_L2PF, _MB, _CTAS or _PACE_GBPS",
         .bits => "TF_GLM_DENSE_BITS or TF_GLM_HEAD_BITS",
         .capacity => "the sequence capacity (the context)",
         .heat_high => "TF_HEAT_HIGH",

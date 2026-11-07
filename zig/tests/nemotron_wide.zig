@@ -1,4 +1,4 @@
-//! Wide-window probes for Nemotron on Metal: window cost by kernel class, and expert picks of drafted, sibling and stream rows.
+//! Wide-window Nemotron probes on Metal: window cost by kernel class, expert picks of drafted, sibling, stream rows.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -241,7 +241,7 @@ fn profile(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void {
     }
 }
 
-/// Window cost curves in one process, round robin: per-row stores (before), replayed rows, replayed rows + 2-row experts.
+/// Window cost curves, one process, round robin: per-row stores (before), replayed rows, replayed rows + 2-row experts.
 fn curve(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void {
     const prompts = try probe.readPrompts(arena, o.prompts);
     const prompt = prompts.map.get(o.prompt) orelse fail("no prompt {s}", .{o.prompt});

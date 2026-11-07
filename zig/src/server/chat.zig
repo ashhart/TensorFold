@@ -143,7 +143,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     errdefer srv.release(preparing, null);
     if (gone.check()) return error.Cancelled;
     const thinking = input.prompt == null and (flag(f, "enable_thinking") orelse srv.config.enable_thinking);
-    const reasoning = thinking and srv.info.reasoning and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
+    const reasoning = thinking and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
     const effort = srv.effortFor(if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null);
     cx.clear_thinking = flag(f, "clear_thinking");
     cx.template_fields = f;
@@ -154,7 +154,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     const n: i64 = @intCast(rendered.ids.len);
     if (window > 0) {
         const room = window - n;
-        if (room < 1) return cx.fail(.context_length, "{s} {d} tokens{s}, but the rendered prompt has {d} tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.", .{ errors.context_limit, window, if (srv.info.context_fitted) ", the most this server's memory budget fits" else "", n });
+        if (room < 1) return cx.fail(.context_length, "{s} {d} tokens{s}, but the rendered prompt has {d} tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.", .{ errors.context_limit, window, if (srv.info.capability(.context_fitted)) ", the most this server's memory budget fits" else "", n });
         if (input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
         limit = @min(limit, room);
     }
@@ -193,7 +193,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (reasoning) {
         const budget_field = f.get("thinking_budget");
         const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else srv.config.thinking_budget;
-        if (budget > 0 and !srv.info.thinking_budget)
+        if (budget > 0 and !srv.info.capability(.thinking_budget))
             return cx.refuse("thinking_budget is not supported by this native engine");
         if (srv.think_close.len > 0) request.loop_guard = srv.config.loop_guard;
         request.loop_stop = request.loop_guard and srv.config.loop_stop;
@@ -203,7 +203,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
             request.think_end = srv.think_close_end;
         }
         // The answer quota is separate only on engines that enforce it.
-        if (srv.info.answer_limit) @import("thinking_reserve.zig").apply(&request, srv.config.thinking_reserve, if (window > 0) window - n else std.math.maxInt(u32), srv.think_close_end);
+        if (srv.info.capability(.answer_limit)) @import("thinking_reserve.zig").apply(&request, srv.config.thinking_reserve, if (window > 0) window - n else std.math.maxInt(u32), srv.think_close_end);
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, reasoning, request.think_budget, count);
     request.prompt_logprobs = input.prompt_logprobs;
@@ -232,8 +232,8 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         }
     }
     if (gone.check()) return error.Cancelled;
-    if (!srv.info.text_generation) return cx.refuse("this model does not support text generation");
-    if (srv.info.decides) return cx.refuse("this model makes decisions and does not write text: use POST /v1/systemone");
+    if (!srv.info.capability(.text_generation)) return cx.refuse("this model does not support text generation");
+    if (srv.info.capability(.decides)) return cx.refuse("this model makes decisions and does not write text: use POST /v1/systemone");
     var stop_hook: StopHook = .{ .srv = srv, .stops = .{ .strings = stops_opt.strings } };
     if (stops_opt.strings.len > 0) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
@@ -251,8 +251,8 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.reasoning and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false };
-    defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false };
+    defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.stats.prefill_seconds != null) box.stats.queued_seconds else null);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
         if (sink) |s| if (s.begin) |begin| begin(s.ctx, prepared.prompt_len) catch break :blk error.Cancelled;

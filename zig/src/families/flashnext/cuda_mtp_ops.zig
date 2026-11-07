@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const batch = @import("cuda_batch.zig");
+const parts = @import("cuda_batch_state.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
 const mtp = @import("cuda_mtp.zig");
@@ -54,6 +55,11 @@ fn cint(v: usize) c_int {
     return @intCast(v);
 }
 
+/// A lane of the head's grouped pass: its draft's cache and pages at its length, as the lone head's pass reads them.
+fn headLane(d: *Draft, rows: usize, score_rows: u64) batch.Lane {
+    return .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = rows };
+}
+
 fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
     if (n == 0) return;
     const d = stream.d;
@@ -63,7 +69,7 @@ fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
 fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
     const d = stream.d;
     try stream.synchronize();
-    try d.check(d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
+    try cuda.memory.download(d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
 }
 
 /// An owner can mirror main-model mutations to a peer without exposing device pointers on the control wire.
@@ -93,13 +99,13 @@ pub fn Ops(comptime Tri: type) type {
             return o.e.stream.*;
         }
 
-        /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
-        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
+        /// Prompt rows [at, stop): the pass (keeping `marks` on its way) and its streams, then the head over the rows.
+        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize, marks: [parts.max_marks]parts.Mark) !void {
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0 or d.pending != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
             const last = stop == ids.len;
-            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true });
+            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true, .marks = marks });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
             if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
@@ -111,7 +117,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             while (at < ids.len) {
                 const stop = @min(ids.len, at + @min(o.e.chunk, d.rows_cap));
-                try o.prefillChunk(seq, d, ids, at, stop);
+                try o.prefillChunk(seq, d, ids, at, stop, .{ .{}, .{} });
                 at = stop;
             }
         }
@@ -247,7 +253,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             for (ds, nexts, 0..) |d, nx, i| {
                 total += nx.len;
-                lane_buf[i] = .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = nx.len };
+                lane_buf[i] = headLane(d, nx.len, score_rows);
                 @memcpy(ids_buf[at..][0..nx.len], nx);
                 at += nx.len;
             }
@@ -474,4 +480,15 @@ pub fn Ops(comptime Tri: type) type {
             d.open = false;
         }
     };
+}
+
+test "a grouped head's lane carries its draft's page table" {
+    var d: Draft = undefined;
+    d.pg = .{ .pt = 0x7000, .ps = 4096, .ptok = 256 };
+    d.len = 300;
+    d.cap = 1024;
+    const l = headLane(&d, 3, 0);
+    try std.testing.expectEqual(d.pg, l.seq.pg);
+    try std.testing.expectEqual(@as(usize, 300), l.pos);
+    try std.testing.expectEqual(@as(usize, 3), l.rows);
 }

@@ -19,8 +19,8 @@ pub fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Alloc
 }
 
 /// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
-pub fn learnedStates(gpa: Allocator, io: std.Io, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try disk.identity(gpa, io, eng)).id, cap);
+pub fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try disk.identity(gpa, io, dir, eng)).id, cap);
     std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
 }
