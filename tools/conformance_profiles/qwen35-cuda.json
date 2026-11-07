@@ -41,6 +41,7 @@
     "Now give the length of each river in kilometres.",
     "Which of them is the longest? Answer in one sentence."
   ],
+  "conversation_context_items": 900,
   "refusals": [
     {
       "name": "n_two",
