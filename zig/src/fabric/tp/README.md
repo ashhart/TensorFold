@@ -86,7 +86,7 @@ in a later pull request. It is not a `TF_COMM_BACKEND` value yet: only its tests
 - Sums add the ranks in rank order (`reference.reduce`), so every rank's bytes equal the reference's.
 
 `tf-tp-test tcp-host`, which needs no GPU, checks it between two hosts over the bootstrap's plan link (rank 0 listens on
-`TF_TP_PLAN_PORT`, else `TF_TP_PORT` + 7, besides the bootstrap's `TF_TP_PORT`): all-gathers, fp32
+one port, `TF_TP_PLAN_PORT`, else `TF_TP_PORT` + 7): all-gathers, fp32
 and bf16 sums, exchanges, send and recv and variable-length gathers from 1 B to 4 MiB, bit for bit, then each size's
 median and p90 time (`gb_s_p50` is shard bytes over the median). Every result names the link from `TF_TP_LINK`, so a
 TCP number is never read as a RoCE one:
