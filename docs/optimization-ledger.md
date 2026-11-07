@@ -404,7 +404,7 @@ below; these are estimates for planning a port, not results.
     | flashnext | cold load 74 → 48 s | [#1901] |
     | flashnext | 50 → 43.5 s, next chunk gathered while one packs | [#1960] |
     | spark25 (4B 8-bit) | cold load 5.0 → 2.5 s | [#2449] |
-    | dory (NVFP4) | cold load 4.5 → 3.8 s | [#2449] |
+    | dory (NVFP4) | cold load 4.8 → 3.8 s | [#2449] |
 
 23. **Page-cache drop after load.** Every CUDA loader drops its checkpoint's pages once the weights are up, so the
     memory goes back to KV and the prompt cache on unified-memory boxes ([#1884]). TP loaders wait for every rank
