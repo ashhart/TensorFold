@@ -14,6 +14,7 @@ const ring = 1024;
 /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
 pub const max_rows = fw.window_rows;
 const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
+const shared_head_drafts = 3; // an MTP chain's most drafts in a shared round, whose chains step stream by stream
 const copy_policy = @import("cuda_copy_policy.zig");
 const lane_costs = @import("cuda_lane_costs.zig");
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
@@ -113,6 +114,7 @@ pub const Lanes = struct {
             .window_costs = if (self.costs) |*c| &c.window else if (block) &copy_policy.window_costs else &.{},
             .shared_costs = if (block and self.costs == null) &copy_policy.shared_costs else &.{},
             .window_costs_lone = self.costs != null and !block, // an MTP chain's steps run stream by stream: depth rules at 2 or more
+            .shared_drafts = if (block) 0 else shared_head_drafts,
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
             .max_streams = if (sharing) engine.max_shared else 1,
