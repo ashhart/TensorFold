@@ -6,13 +6,12 @@ const t = std.testing;
 const rec = @import("test_support/glm_snap_driver.zig").Driver;
 const Fixture = @import("test_support/glm_snap_fixture.zig").Fixture;
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+const env = @import("sys").env;
 
 test "GLM snapshots: TF_GLM_HOST_CACHE keeps states in pinned host memory and restores them byte for byte" {
     var d = rec.init();
-    _ = setenv("TF_GLM_HOST_CACHE", "1", 1);
-    defer _ = unsetenv("TF_GLM_HOST_CACHE");
+    _ = env.setenv("TF_GLM_HOST_CACHE", "1", 1);
+    defer _ = env.unsetenv("TF_GLM_HOST_CACHE");
     const before = cuda.usage(false).device;
     for (0..2) |rank| {
         var f: Fixture = undefined;

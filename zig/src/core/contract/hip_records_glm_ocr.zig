@@ -1,6 +1,6 @@
 //! Compiler-derived GLM-OCR launch usage on gfx1030, gfx1100, gfx1151 and gfx1201.
 const Record = @import("hip_records.zig").Record;
-pub const records = [_]Record{
+pub const records = [12]Record{
     .{ .launch = .{ .name = "GLM-OCR tf_glmocr_bias", .symbol = "tf_glmocr_bias", .image = "glm_ocr", .threads = 256 }, .usage = .{
         .{ .vgprs = 12, .sgprs = 17, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
         .{ .vgprs = 12, .sgprs = 18, .lds = 0, .private = 0, .bound = 256, .wave = 32 },

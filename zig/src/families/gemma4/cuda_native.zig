@@ -99,7 +99,8 @@ const Plan = struct {
 
 /// Global caches in pool pages: asked, no drafter (its paged verify trails main), TENSORFOLD_GEMMA4_KV_PAGES not 0.
 fn pagesOn(o: Options) bool {
-    return o.kv_pages and !(o.drafts and o.drafter != null) and !envOff("TENSORFOLD_GEMMA4_KV_PAGES");
+    const off = if (@import("core").profile.get(.TENSORFOLD_GEMMA4_KV_PAGES)) |v| std.mem.eql(u8, v, "0") else false;
+    return o.kv_pages and !(o.drafts and o.drafter != null) and !off;
 }
 
 /// The device bytes of the image path's workspace (the 31B's tower or the 12B's embedder), 0 without --vision.
@@ -157,6 +158,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
     own.m = try fwd.Model.initPaged(gpa, ctx.d, own.s, &own.w, context, n, paged);
     errdefer own.m.deinit();
+    const most = own.m.prompt_most;
+    const busy = fwd.prompt_rows;
+    if (most != busy) std.log.info("gemma4: prompt passes of {d} rows, {d} beside a decode", .{ most, busy });
     own.m.graphed = !envOff("TENSORFOLD_GEMMA4_GRAPHS"); // =0: every decode forward eager
     own.gb = try be.Gemma.init(gpa, ctx.d, &own.m, &own.k, own.s);
     own.gb.priority_copies = priority_copies;
@@ -172,7 +176,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .backend = own.gb.backend(),
         .facts = own.gb.facts(),
         .rows = be.max_window,
-        .stream_bytes = fwd.Model.streamBytes(own.w.config.geo, own.w.layers.len, context),
+        .stream_bytes = fwd.Model.streamBytes(own.w.config.geo, own.w.layers.len, context, own.m.ringRows()),
         .free_streams = @intCast(n),
         .ctx = own,
         .deinit = release,
@@ -265,6 +269,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.ParallelPastRound => std.fmt.comptimePrint("--parallel: Gemma 4 on CUDA holds at most {d} streams (a round's rows): serve --parallel {d} or fewer, or auto", .{ be.round_rows, be.round_rows }),
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Gemma 4 streams than asked (each stream's caches are allocated at load): lower --parallel or --context, serve --parallel auto, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
         error.DrafterPastMemory => "--drafter: the CUDA memory budget leaves less room than the drafter's weights need after the streams: lower --parallel or --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
+        error.BadChunkSolo => "TF_GEMMA4_CHUNK_SOLO: a solo prompt pass's rows, a multiple of 512 up to 4096",
         error.NoStreamFits => "the CUDA memory budget fits no Gemma 4 stream after the weights: lower --context, free device memory, or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB",
         else => null,
     };

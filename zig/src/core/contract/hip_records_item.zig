@@ -13,7 +13,7 @@ fn itemTile(comptime rm: u32) limits.HipLaunch {
     };
 }
 
-pub const records = [_]Record{
+pub const records = [1]Record{
     .{
         .launch = itemTile(4),
         .usage = .{

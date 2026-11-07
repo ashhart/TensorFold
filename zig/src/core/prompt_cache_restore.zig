@@ -11,5 +11,5 @@ pub fn report(log: ?Log, detail: Details) void {
         return;
     }
     const why = if (detail.expired) "state already expired" else "backend refused the restore";
-    @import("prompt_cache.zig").note("restore of the kept {d}-token state failed for a {d}-token prompt ({s}, {s}); prefilling from the start", .{ detail.kept, detail.prompt, why, @errorName(detail.err) });
+    @import("prompt_cache.zig").note("restore of the kept {d}-token state failed for a {d}-token prompt ({s}, {s}); discarding the refused state", .{ detail.kept, detail.prompt, why, @errorName(detail.err) });
 }

@@ -352,6 +352,13 @@ GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 an
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.
 Controls dispatch real source mutations that couple rows or select the wrong expert; host tests validate their witnesses.
+CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's
+3-tap short conv with its per-row state snapshots and the state commit (`liquid_conv.cuh`), each against the host's
+replay of its fp32 and bf16 steps (three controls: ties to the higher expert, bx unrounded, every stream committing into
+the first stream's slot). Their paged attention at head dim 64 runs over shuffled 512-key pages with several streams
+a launch: the decode rows' chunks and merge (`tf_paged_attn_chunk_segs_64`, `tf_paged_attn_merge_segs_64`) and the
+prompt rows (`pattn_kernel<64, 8, 4, 8>`), head by head within `attention_ref`'s float64 bound (two controls: the
+decode reading its values from the neighbouring lane's dims, the prompt from the neighbouring 8 dims).
 CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair kernel it replaces (two controls,
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
@@ -434,3 +441,12 @@ Later compiler receipts remain pending. Check each build with `tf-cuda-test kern
 product and scatter at 1, 16, 17, 32, 64, 65, 1536 and 4218 rows, five repeats with guards.
 `moetile-contract` runs the replacement gates and planted control.
 `moetile-bench` rotates GPU event timings of the three at 64 to 4218 rows; no timing is a gate.
+
+BF16 prompt K32 staging registers two unfused 128x128 entries, one for BF16 output and one for FP32 output.
+They read the parent's K64 weight packs in two K32 halves and keep the K16 MMA order and output rounding.
+Only unsplit prompt calls select K32; fused slices retain the parent K64 tile.
+`qmmf-prompt` compares each new output directly with the parent's 128x128 K64 output, including forced small rows.
+`qmmf-prompt-contract` keeps the four parent entries and adds both K32 replacements and their scaled controls.
+Each new control launches K32 for its output type at small and production row counts.
+`qmmf-prompt-bench` times the 64-row lane, prompt16, the parent K64 tile and K32 on each Flash Next BF16 shape.
+Measured nvcc 13.0 resources cover both K32 entries on sm_120 and sm_121; later compiler receipts remain pending.

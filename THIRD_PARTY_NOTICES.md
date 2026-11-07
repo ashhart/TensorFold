@@ -35,6 +35,32 @@ The native engine installs and links neither. It reads checkpoints in their form
 `zig/kernels/metal/` repeat the arithmetic of MLX's kernels and mlx-lm's model math, many of them bit for bit.
 The Python engine, frozen at 0.6.6, installs MLX and mlx-lm as dependencies.
 
+## Nemotron 3.5 Parse on HIP
+
+The reference tool `tools/zig/nemotron_parse_reference.py` adapts `run_transformers_inference.py` from NVIDIA's
+[nvidia/Nemotron-3.5-Parse](https://huggingface.co/nvidia/Nemotron-3.5-Parse) at revision
+`4035ffb1d8f8bafcdb867dfaf6f7514f101464f9`, and keeps that file's SPDX header. The native family follows the same
+release's code for its math, rounding and resizing; each file is written for TensorFold, and the file named is the
+reference:
+
+- `zig/src/families/nemotron_parse/processor.zig`: `NemotronParseImageProcessor` in `hf_nemotron_parse_processor.py`
+  (the aspect-preserving resize, the NaViT white padding, the normalization and the patch order).
+- `zig/src/families/nemotron_parse/tower.zig` and `decoder.zig`: `RadioWithNeck`, `_VisionTransformer`,
+  `NemotronParseDecoder`, `_DecoderLayer`, `_GQAAttention` and `_ScaledEmbedding` in `hf_nemotron_parse_modeling.py`.
+- `zig/kernels/hip/ops/vl_position.hpp`: `_normalized_2d_position_pages` in `hf_prefix_geometry.py`.
+
+These release files are Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES, under the NVIDIA OpenMDW License 1.1; see
+[the license text](LICENSES/NVIDIA-OpenMDW-1.1.txt).
+
+## LightOnOCR-3 release fixtures
+
+The configuration fixtures for LightOnOCR-3 are LightOn's release files, unchanged, under the Apache License 2.0; see
+[the license text](LICENSES/Apache-2.0.txt). `zig/src/families/lighton_ocr/fixtures/config.json` and
+`processor_config.json` come from `lightonai/LightOnOCR-3-1B` at revision `23d544085c886bbdace647bcfab91203299417e2`.
+`zig/src/families/qwen3_5/fixtures/lighton-ocr-0.8b.json` is the `config.json` of `lightonai/LightOnOCR-3-0.8B` at
+revision `36d8636925327c671bd8e479c517a004f7566bd9`, and `lighton-ocr-4b.json` the `config.json` of
+`lightonai/LightOnOCR-3-4B` at revision `b71010f095dc3735de7ee6b9969bff8f8f50b39a`.
+
 ## MLX and mlx-lm adaptations
 
 In the Python engine, frozen at 0.6.6, the DeltaNet implementations in

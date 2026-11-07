@@ -1,0 +1,26 @@
+base-0 32k 0 31902 45.545
+base-0 32k 1 31905 45.519
+base-0 32k 2 31826 45.377
+ARM-DONE base-0
+STEP base-0 rc=0
+new-1 32k 0 31902 43.756
+new-1 32k 1 31905 43.773
+new-1 32k 2 31826 43.596
+ARM-DONE new-1
+STEP new-1 rc=0
+new-2 32k 0 31902 43.794
+new-2 32k 1 31905 43.814
+new-2 32k 2 31826 43.656
+ARM-DONE new-2
+STEP new-2 rc=0
+base-3 32k 0 31902 45.590
+base-3 32k 1 31905 45.554
+base-3 32k 2 31826 45.408
+ARM-DONE base-3
+STEP base-3 rc=0
+32k 31902t base 45.532 new 43.764 -3.88 % range [-4.2, -2.2] in arms [45.519, 43.756, 43.794, 45.554]
+logit hashes [0, 0, 0, 0] distinct 0
+decode t/s [12.4, 12.4, 12.4, 12.4] -0.12 % tokens [128, 128, 128, 128]
+kept cached [[0, 13835, 15950], [0, 13835, 15950], [0, 13835, 15950], [0, 13835, 15950]]
+GATE in
+STEP gate rc=0

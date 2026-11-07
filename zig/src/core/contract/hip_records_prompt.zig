@@ -10,7 +10,7 @@ fn promptTile(comptime symbol: []const u8, usage: [limits.rdna.len]U) Record {
     return .{ .launch = .{ .name = name, .symbol = symbol, .image = "prefill", .threads = 256 }, .usage = usage };
 }
 
-pub const records = [_]Record{
+pub const records = [8]Record{
     promptTile("tf_fa_wide_f16", .{
         .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
         .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },

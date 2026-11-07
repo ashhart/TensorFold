@@ -205,6 +205,7 @@ pub fn build(b: *std.Build) void {
     const with_hip = b.option(bool, "hip", "Enable the opt-in HIP backend and its host/device targets") orelse false;
     const hip_options = hip_build.options(b); // declared on every target (#1165), used only with -Dhip=true
     hip_build.loaderTests(b, test_step);
+    @import("zig/build/nemotron_parse.zig").hostTests(b, test_step);
     if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step, hip_options);
     const with_vulkan = b.option(bool, "vulkan", "Enable the opt-in Vulkan backend and its host/device targets") orelse false;
     const vulkan_options = vulkan_build.options(b); // declared on every target, used only with -Dvulkan=true

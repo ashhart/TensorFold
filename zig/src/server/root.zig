@@ -81,6 +81,7 @@ test {
     _ = @import("speech_redraw.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_redraw_test.zig"); // over a Unix socket pair
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_register_test.zig"); // over a Unix socket pair
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("pdf_worker.zig"); // spawns /bin/sh workers
     _ = @import("drama_prompt.zig");
     _ = @import("health_test.zig");
     _ = @import("clef_encode_test.zig");

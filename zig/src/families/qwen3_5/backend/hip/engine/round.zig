@@ -19,7 +19,7 @@ pub const Pick = enum(u32) { eager, replay, capture };
 pub const Verified = struct { hidden: hip.ops.Tensor };
 
 /// One stream's rows of a round: tokens (the pending one, then drafts) from slot `pos` over its caches.
-pub const Rows = struct { caches: *state.Caches, pos: usize, tokens: []const u32 };
+pub const Rows = struct { caches: *state.Caches, pos: usize, tokens: []const u32, shift: i32 = 0 };
 
 const Chosen = struct { pick: Pick, entry: ?*round_graphs.Entry, shape: plan.Shape };
 
@@ -142,7 +142,7 @@ pub fn verify(e: *Engine, rows: []const Rows, reqs: []const draw.Request, out: [
     var total: usize = 0;
     for (rows, 0..) |r, i| {
         if (r.pos + r.tokens.len > r.caches.covered()) return error.ContextFull;
-        st.wins[i] = .{ .desc = r.caches.desc.base(), .pos = r.pos, .tokens = r.tokens };
+        st.wins[i] = .{ .desc = r.caches.desc.base(), .pos = r.pos, .tokens = r.tokens, .shift = r.shift };
         total += r.tokens.len;
     }
     e.rounds.reset();
@@ -152,7 +152,7 @@ pub fn verify(e: *Engine, rows: []const Rows, reqs: []const draw.Request, out: [
     st.buffer.fill(l, c.shape, st.wins[0..rows.len], st.scratch.desc.base(), st.snaps);
     st.layout = l;
     const p: hip.plan_ops.Plan = .{ .args = st.buffer.args(l), .rows = c.shape.rows, .slots = c.shape.slots };
-    const r: win.Round = .{ .plan = p, .tokens = st.buffer.dev.base() + 4 * l.tokens, .span = c.shape.span, .inputs = st.snaps };
+    const r: win.Round = .{ .plan = p, .tokens = st.buffer.dev.base() + 4 * l.tokens, .span = c.shape.span, .inputs = st.snaps, .positions3 = st.buffer.dev.base() + 4 * l.rope, .rotary = st.buffer.dev.base() + 4 * l.rotary };
     const done = try run(e, c, r);
     e.graphs.rounds += 1;
     e.graphs.submit_ns += nowNs() - began;

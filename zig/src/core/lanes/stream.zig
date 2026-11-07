@@ -109,6 +109,8 @@ pub const Image = struct {
     gw: u32,
     at: u32,
     tokens: u32,
+    /// Visible pixel height and width before padding, for towers with content-normalized positions.
+    content_size: ?[2]u32 = null,
     hash: u64 = 0, // core/picture/identity.zig's: the bytes and the grid, as the prompt cache's key names the image
 };
 

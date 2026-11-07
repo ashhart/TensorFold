@@ -1,7 +1,7 @@
 //! Measured resources of dense BF16 text operators, in limits.rdna order.
 const Record = @import("hip_records.zig").Record;
 
-pub const records = [_]Record{
+pub const records = [2]Record{
     .{
         .launch = .{ .name = "Dense BF16 embedding", .symbol = "tf_embed_bf16", .image = "ops", .threads = 256 },
         .usage = .{

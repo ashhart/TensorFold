@@ -24,7 +24,7 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/bf16_round.zig`: the one fp32-to-bf16 rounding every host copy uses.
 - `zig/src/core/profile.zig` and [profiles](profiles.md): the `--profile` switch registry.
 - `zig/src/core/contract/` and the [kernel contract](kernel-contract.md): the gates a new or ported kernel passes.
-- `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]).
+- `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]) and the chunks nothing reads ([#2432]).
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
 ## The table
@@ -45,7 +45,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 
 | Optimization | q3.5 | fnext | glm | gem4 | nemo |
 | --- | --- | --- | --- | --- | --- |
-| 1. Prompt tail | done [#2229] | yes | yes | yes | yes |
+| 1. Prompt tail | done [#2229] | yes | yes | open [#2432] | open [#2432] |
 | 2. Paged KV | done C[#1750] M[#1294] | done [#1169] | done [#1163] | done [#1619] | done C[#935] M[#1537] |
 | 3. Prompt store | done [#1357] | yes (host store) | done [#1732] | done [#1883] | yes C open M[#1850] |
 | 4. iGPU states | done [#2113] | done¹ | yes | done¹ | done¹ |
@@ -64,11 +64,11 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 17. DSpark | yes | yes | yes | yes | yes |
 | 18. Copy drafts | done [#1477] | done [#468] | done [#2146] | done [#2022] | done [#1974] |
 | 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779] | done [#1779] | done [#768] |
-| 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | yes | yes |
+| 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | done C[#2391] | yes |
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | done [#2033] |
-| 22. Direct load | open [#2282] | done [#1901] | yes | open [#2282] | done [#458] |
+| 22. Direct load | done [#2282] | done [#1901] | yes | done [#2282] | done [#458] |
 | 23. Page drop | done [#1884] | done [#1880] | done [#600] | done [#1884] | done [#1884] |
-| 24. L2 prefetch | failed [#2014] | no (null) | open [#2162] | no (null) | failed [#2014] |
+| 24. L2 prefetch | failed [#2014] | no (null) | done [#2162] | no (null) | failed [#2014] |
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
 | 26. Pipeline | open [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
@@ -248,7 +248,8 @@ below; these are estimates for planning a port, not results.
 1. **Prompt tail on the last layer.** A prompt chunk keeps one row's logits, so past the last layer's keys and values
    only the kept row's 128-row tile needs q, attention, o and the MLP ([#2165]). It saves about 1/layers of a cold
    prompt, less the k/v share. A family is blocked where something else reads every row of the last layer: MTP taps,
-   drafter taps, hidden readouts, or a fused projection that makes k/v and q in one GEMM.
+   drafter taps, hidden readouts, or a fused projection that makes k/v and q in one GEMM. Where only the prompt's last
+   chunk has its logits read, the other chunks keep no tile and stop at their last state write.
 
    | Family | Last layer, layers | Main blocker | Gain | Effort |
    | --- | --- | --- | --- | --- |
@@ -269,7 +270,7 @@ below; these are estimates for planning a port, not results.
 
 2. **KV pages from the core pool.** Streams lease KV pages from one `kv_pool` as their rows grow, instead of each
    reserving a whole `--context` window, so more streams fit and a short request holds little ([#1156], [#781]'s
-   follow-ups). Sliding layers keep their rings. Qwen's pages are opt-in (`TF_QWEN_KV_PAGES`, `_ALL`); [#2011] (open) keeps
+   follow-ups). Sliding layers keep their rings. Qwen's pages are opt-in (`TF_QWEN_KV_PAGES`, `_ALL`); [#2011] keeps
    them opt-in, makes `--parallel` a cap with pages set, and brings them to the window path's speed (2k to 32k prompts
    within +0.3..+0.7 %). Dory's are opt-in
    (`TENSORFOLD_DORY_KV_PAGES=1`), Flash Next's experimental. Metal's port is tracked in [#1293].
@@ -292,7 +293,9 @@ below; these are estimates for planning a port, not results.
 
 6. **KV admission ledger.** A request reserves its prompt and reply, not a whole window a `--parallel` stream
    ([#1943]). [#1945] added the core ledger, and [#2127] counts every paged pool's promises in it, with no change in
-   behaviour. The unpaged families still convert one by one, as #1943 plans.
+   behaviour. A stream paid for at load (the engine's own sequence) is a standing lease in it, so the ledger admits the
+   window plan's streams and not one fewer; no family on main reaches that yet. The unpaged families still convert one
+   by one, as #1943 plans.
 
 7. **KV pages in pinned host memory.** Pages that don't fit on the card live in pinned host memory, so a long
    conversation's next turn still resumes. GLM keeps its latent rows there with `TF_GLM_KV_HOST` ([#1795]) and its kept
@@ -372,6 +375,7 @@ below; these are estimates for planning a port, not results.
     | flashnext (M) | 1,024-token reply beside a 64K prompt 48 → 8 s, prompt's first token 90 → 54 s | [#2167] |
     | flashnext (C), one GPU | prompts 15–23 % faster at `--parallel 1`, up to 8,192 rows a pass | [#2246] |
     | glm (C), TP=2 | prompts about 2 % sooner at 8K–128K, two chunks a step, replies unchanged | [#1423] |
+    | gemma4 (C) | first token 31B −4..−5 %, E4B −9..−10 %, opt-in with `TF_GEMMA4_CHUNK_SOLO` | [#2391] |
 
     `TF_GLM_CHUNK_SOLO=4096` is slower with GLM's NVFP4 checkpoint on two GB10s ([#2288]).
 
@@ -537,6 +541,7 @@ below; these are estimates for planning a port, not results.
 [#2146]: https://github.com/ashhart/TensorFold/pull/2146
 [#2162]: https://github.com/ashhart/TensorFold/pull/2162
 [#2165]: https://github.com/ashhart/TensorFold/issues/2165
+[#2432]: https://github.com/ashhart/TensorFold/pull/2432
 [#2167]: https://github.com/ashhart/TensorFold/pull/2167
 [#2211]: https://github.com/ashhart/TensorFold/pull/2211
 [#2215]: https://github.com/ashhart/TensorFold/pull/2215
@@ -549,3 +554,4 @@ below; these are estimates for planning a port, not results.
 [#2283]: https://github.com/ashhart/TensorFold/pull/2283
 [#2288]: https://github.com/ashhart/TensorFold/pull/2288
 [#2306]: https://github.com/ashhart/TensorFold/pull/2306
+[#2391]: https://github.com/ashhart/TensorFold/pull/2391
