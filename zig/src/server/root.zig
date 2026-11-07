@@ -94,6 +94,7 @@ test {
     _ = @import("request_log.zig");
     _ = @import("messages.zig");
     _ = @import("pdf.zig");
+    _ = @import("pdf_flags_test.zig");
     _ = @import("images.zig");
     _ = @import("images_video_marker_test.zig");
     _ = @import("image_key.zig");
@@ -238,6 +239,7 @@ test {
 test {
     _ = @import("control_tokens_http_test.zig");
     _ = @import("request_provenance_test.zig");
+    _ = @import("quoted_markers_test.zig");
     _ = @import("request_cost_test.zig");
     _ = @import("prompt_tool_turn_test.zig");
 }

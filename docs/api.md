@@ -349,7 +349,7 @@ prompt's chunks to families that declare chunk-independent prompt arithmetic. Th
 behind device token-hash qualification; every native family is gated out today, so no native server caps chunk
 rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
 the prompt's share of a fill step's wall time, time only, never smaller chunks. Flash Next's shared sessions on a Mac
-without tensor units are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
+are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
@@ -963,7 +963,7 @@ configured the body is only `{"status": "ok"}`. An engine that reports unhealthy
 | `max_batch_size` | integer | The lanes the engine serves at once |
 | `policy` | string | The engine's policy line; absent when the engine reports none |
 | `warming` | boolean | Always `false` on the native engines |
-| `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0), plus `limit` when the engine reports one. Metal: `{}` |
+| `memory` | object | `active`, `cache` and `peak` in bytes (`cache` is 0), plus `limit` when the engine reports one: CUDA's allocator counts; on Metal the process footprint, from Nemotron, Qwen3.5-2B, Qwen3.8-27B, Qwen3.5-MoE, Flash Next, GLM-5.3-Flash and GLM-5.3 (EXLR8); Flash Next and both GLMs add `limit`, their load limit. `{}` from the other Metal families |
 | `live` | object | `connections`, `waiting`, `decode_tokens_per_second`, `prefill_tokens_per_second` |
 | `version` | string | The release this server was built from |
 | `backend` | string | The backend built in: `metal`, `cuda`, `hip` or `xpu`; absent from a build without one |

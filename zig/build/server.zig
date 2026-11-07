@@ -62,6 +62,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
     b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
+    const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
+    environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"logprobs_test"} }));
     b.step("test-logprob-offers-host", "Logprob request capability refusals before engine submission").dependOn(&logprobs.step);
     const models = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"model discovery"} }));
@@ -99,6 +101,9 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
+    const quoted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"quoted markers:"} }));
+    quoted.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
+    b.step("test-quoted-markers-host", "Quoted added-token spellings through the chat route with TF_TOKENIZER_DIRS' tokenizers").dependOn(&quoted.step);
 }
 
 /// The server tree's module rooted at `root` over no native engines: the fake server's, or a test among its sources.

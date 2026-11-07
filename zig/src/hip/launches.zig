@@ -80,6 +80,8 @@ pub const Launcher = struct {
     fa_prefill: Triple,
     fa_wide: [2]Function, // the 64-row prefill tile, fp16 and bf16 caches
     fa_paged: [2]Function, // the same tile over a stream's pages
+    fa_wide_edge: [2]Function, // after each, where dot2 ignores a zero's sign: a block whose masked keys are non-finite
+    fa_paged_edge: [2]Function,
     softmax_stats: Function,
     sum_partials: Function,
     op: Ops,
@@ -91,6 +93,8 @@ pub const Launcher = struct {
     fuse: bool,
     /// The 64-row prefill attention tile is on.
     wide: bool,
+    /// The edge pass runs after the prompt tile (`edge_pass`; tests turn it off to see the tile alone).
+    edge: bool,
     /// The MLX affine products and the registry that picks their tiles.
     affine: affine.Kernels,
     /// The BF16 dense GEMM (raw BF16 weights through the dot2 GEMM tile).
@@ -105,6 +109,9 @@ pub const Launcher = struct {
     const PlanFns = struct {
         kv_write: Function,
         kv_write_act: Function,
+        /// A drafter's tap rings: a round's rows from the plan, and a prompt's rows from one position.
+        tap: Function,
+        tap_rows: Function,
         score: [2]Function, // fp16, bf16
         score_act: [2]Function,
         score2: [2]Function, // the same at two keys a warp, for short spans
@@ -164,6 +171,9 @@ pub const Launcher = struct {
         token_prob: Function,
     };
 
+    /// The prompt tile keeps main's sums and needs the edge pass after it: dot2 here ignores a zero's sign.
+    pub const edge_pass = if (caps.Caps.of(kernels.arch)) |c| !c.dot2_signed_zero else true;
+
     /// Which kernels a run takes where two give the same bits; every one defaults on.
     pub const Choices = struct { fuse: bool = true, wide: bool = true, products: affine.Choices = .{} };
 
@@ -186,10 +196,13 @@ pub const Launcher = struct {
         const pl = l.mods[@backingInt(kernels.Group.plan)];
         l.fuse = choices.fuse;
         l.wide = choices.wide;
+        l.edge = edge_pass;
         l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .router_bf16 = .{ try dec.function("tf_router_bf16_f16"), try dec.function("tf_router_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
             .kv_write_act = try pl.function("tf_plan_kv_write_act"),
+            .tap = try pl.function("tf_plan_tap"),
+            .tap_rows = try pl.function("tf_tap_rows"),
             .score = .{ try pl.function("tf_plan_score_f16"), try pl.function("tf_plan_score_bf16") },
             .score_act = .{ try pl.function("tf_plan_score_act_f16"), try pl.function("tf_plan_score_act_bf16") },
             .score2 = .{ try pl.function("tf_plan_score2_f16"), try pl.function("tf_plan_score2_bf16") },
@@ -206,6 +219,8 @@ pub const Launcher = struct {
         };
         l.fa_wide = .{ try pre.function("tf_fa_wide_f16"), try pre.function("tf_fa_wide_bf16") };
         l.fa_paged = .{ try pre.function("tf_fa_paged_f16"), try pre.function("tf_fa_paged_bf16") };
+        l.fa_wide_edge = .{ try pre.function("tf_fa_wide_edge_f16"), try pre.function("tf_fa_wide_edge_bf16") };
+        l.fa_paged_edge = .{ try pre.function("tf_fa_paged_edge_f16"), try pre.function("tf_fa_paged_edge_bf16") };
         l.columns = try columns.Functions.load(ops);
         l.vision = try vision.Functions.load(ops, pre);
         l.dense_text = try dense_text.Functions.load(ops);
@@ -359,6 +374,8 @@ pub const Launcher = struct {
     pub const planCausal = plan.planCausal;
     pub const planCausalAs = plan.planCausalAs;
     pub const planKvWriteAct = plan.planKvWriteAct;
+    pub const planTap = plan.planTap;
+    pub const tapRows = plan.tapRows;
     pub const planAttend = plan.planAttend;
     pub const planGatedDelta = plan.planGatedDelta;
     pub const planKeep = plan.planKeep;

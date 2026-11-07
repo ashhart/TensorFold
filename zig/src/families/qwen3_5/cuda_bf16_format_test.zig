@@ -18,14 +18,21 @@ test "BF16 scoring: plain BF16 Qwen config reaches the native geometry loader" {
     try std.testing.expectEqual(@as(usize, 48), g.v_heads);
     try std.testing.expectEqual(geometry.Kind.bf16, g.kinds.head);
     for (0..g.layers) |i| for (std.enums.values(geometry.Slot)) |slot| {
-        try std.testing.expectEqual(geometry.Kind.bf16, g.kinds.of(i, slot));
+        const linear = g.linear[i];
+        const used = switch (slot) {
+            .gate, .up, .down => true,
+            .qkv, .z, .a, .b, .out => linear,
+            .q, .k, .v, .o => !linear,
+        };
+        try std.testing.expectEqual(if (used) geometry.Kind.bf16 else .affine, g.kinds.of(i, slot));
     };
 }
-test "BF16 scoring: an unquantized checkpoint of another dtype is refused" {
+test "BF16 scoring: an unquantized checkpoint of another dtype keeps the config-shape admission" {
     for ([_][]const u8{ "float16", "float32" }) |dtype| {
         const text = try std.mem.replaceOwned(u8, a, fixture, "bfloat16", dtype);
         defer a.free(text);
-        try std.testing.expectError(error.UnsupportedQwenQuantization, geometry.parse(a, text));
+        const g = try geometry.parse(a, text); // dtype is informational: the config shape decides
+        try std.testing.expect(g.bf16);
     }
 }
 
@@ -38,15 +45,16 @@ test "BF16 scoring: native admission refuses unqualified image, reduced precisio
     try format.options(false, true, true, true);
 }
 
-test "BF16 scoring: actual native open refuses vision and input quantization before touching CUDA" {
+test "BF16 scoring: actual native open refuses a headless BF16 checkpoint before touching CUDA" {
     const native = @import("cuda_native.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "config.json", .data = fixture });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer a.free(path);
-    try std.testing.expectError(error.QwenBf16VisionUnqualified, native.open(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .vision = .{ .image_tokens = 4096, .max_images = 1 } }));
-    try std.testing.expectError(error.UnsupportedQwenBf16Mode, native.open(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .prompt_int8 = true }));
+    // decide.check runs first: without joint_head_config.json nothing opens, whatever the modes ask
+    try std.testing.expectError(error.QwenBf16DecisionOnly, native.open(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .vision = .{ .image_tokens = 4096, .max_images = 1 } }));
+    try std.testing.expectError(error.QwenBf16DecisionOnly, native.open(a, std.testing.io, undefined, path, null, .{ .context = 8192, .drafts = true, .prompt_int8 = true }));
     try std.testing.expect(native.explain(null, error.QwenBf16VisionUnqualified) != null);
 }
 

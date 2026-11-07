@@ -36,7 +36,7 @@ const Recording = struct {
     }
 };
 
-// Main has no arithmetic row yet; this reclassified fake row stands in for a future registered arithmetic switch.
+// A reclassified fixture row exercises identity independently of changes to the real registry.
 const arithmetic: api.profile.Entry = .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = &.{"nemotron_h"}, .class = .arithmetic, .syntax = .one, .effect = "test arithmetic", .evidence = "test fixture" };
 
 test "disk identity: an arithmetic value changes actual CUDA identity and zero equals unset" {
@@ -155,4 +155,67 @@ test "disk identity: the shared helper also binds applicable Metal profile value
     const unset = profileHash(&.{entry}, "nemotron_h", "metal", &.{});
     try t.expect(unset != profileHash(&.{entry}, "nemotron_h", "metal", &.{.{ entry.id, "1" }}));
     try t.expectEqual(@as(usize, 1), Values.lookups);
+}
+
+test "disk identity: explicit prompt row geometries remain separate from default and each other" {
+    const row = api.profile.entry(.TF_PROMPT_ROWS);
+    const unset = profileHash(&.{row}, "qwen3_5", "metal", &.{});
+    const small = profileHash(&.{row}, "qwen3_5", "metal", &.{.{ row.id, "128" }});
+    const large = profileHash(&.{row}, "qwen3_5", "metal", &.{.{ row.id, "256" }});
+    try t.expect(unset != small and unset != large and small != large);
+    for ([_]?[:0]const u8{ "", "0" }) |raw|
+        try t.expect(unset != profileHash(&.{row}, "qwen3_5", "metal", &.{.{ row.id, raw }}));
+    try t.expectEqual(profileHash(&.{row}, "qwen3_5", "cuda", &.{}), profileHash(&.{row}, "qwen3_5", "cuda", &.{.{ row.id, "128" }}));
+}
+
+test "disk identity: Dory's exact zero and absence agree while every other value enables pages" {
+    const row = api.profile.entry(.TENSORFOLD_DORY_KV_PAGES);
+    const unset = profileHash(&.{row}, "dory", "cuda", &.{});
+    try t.expectEqual(unset, profileHash(&.{row}, "dory", "cuda", &.{.{ row.id, "0" }}));
+    const enabled = profileHash(&.{row}, "dory", "cuda", &.{.{ row.id, "1" }});
+    try t.expect(unset != enabled);
+    for ([_][:0]const u8{ "", "00", "on", "typo" }) |raw|
+        try t.expectEqual(enabled, profileHash(&.{row}, "dory", "cuda", &.{.{ row.id, raw }}));
+}
+
+const Members = struct {
+    const Pair = struct { [:0]const u8, ?[:0]const u8 };
+    var values: []const Pair = &.{};
+    var lookups: usize = 0;
+    fn environment(name: [:0]const u8) ?[:0]const u8 {
+        std.debug.assert(!std.mem.eql(u8, name, "slide_learn_mode"));
+        lookups += 1;
+        for (values) |pair| if (std.mem.eql(u8, pair[0], name)) return pair[1];
+        return null;
+    }
+    fn hash(family: []const u8, backend: []const u8, values_: []const Pair) u64 {
+        values = values_;
+        lookups = 0;
+        var h: std.hash.Wyhash = .init(7);
+        identity.profile(&h, .{ .family = family, .backend = backend, .entries = &.{api.profile.entry(.slide_learn_mode)}, .environment = environment });
+        return h.final();
+    }
+};
+
+test "disk identity: slide group hashes all real members in each member's actual family scope" {
+    const row = api.profile.entry(.slide_learn_mode);
+    for ([_][]const u8{ "cuda", "metal" }) |backend| {
+        const unset = Members.hash("nemotron_h", backend, &.{});
+        try t.expectEqual(@as(usize, 4), Members.lookups);
+        for (row.members.?, 0..) |member, i| {
+            const raw: [:0]const u8 = if (i == 0) "subject" else "0";
+            try t.expect(unset != Members.hash("nemotron_h", backend, &.{.{ member.name, raw }}));
+        }
+        try t.expectEqual(unset, Members.hash("nemotron_h", backend, &.{.{ "TF_SLIDE_POCKET_KEY", "auto" }}));
+    }
+    const qwen = Members.hash("qwen3_5", "cuda", &.{});
+    try t.expectEqual(@as(usize, 1), Members.lookups);
+    try t.expect(qwen != Members.hash("qwen3_5", "cuda", &.{.{ "TF_SLIDE_POCKET_KEY", "subject" }}));
+    for (row.members.?[1..]) |member|
+        try t.expectEqual(qwen, Members.hash("qwen3_5", "cuda", &.{.{ member.name, "1" }}));
+    for ([_][2][]const u8{ .{ "qwen3_5", "metal" }, .{ "qwen3_5_moe", "cuda" }, .{ "nemotron_h", "hip" } }) |scope| {
+        const absent = Members.hash(scope[0], scope[1], &.{});
+        try t.expectEqual(absent, Members.hash(scope[0], scope[1], &.{.{ "TF_SLIDE_POCKET_KEY", "subject" }}));
+        try t.expectEqual(@as(usize, 0), Members.lookups);
+    }
 }

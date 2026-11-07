@@ -35,9 +35,9 @@ fn drawn(c: Candidates, r: usize, token: u32, logit: f64) f64 {
 }
 
 /// A grown tree's nodes at most: 0 when the drafter drafts chains and lane trees (TF_NO_TREES, TF_DRAFT_NODES=0).
-pub fn nodes() usize {
+pub fn nodes() !usize {
     if (platform.c.getenv("TF_NO_TREES") != null) return 0;
-    const n = if (platform.c.getenv("TF_DRAFT_NODES")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch default_nodes else default_nodes;
+    const n = try platform.environment.read(usize, "TF_DRAFT_NODES", default_nodes);
     return @min(n, engine.most_window - 1);
 }
 

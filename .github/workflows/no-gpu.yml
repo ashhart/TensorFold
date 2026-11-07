@@ -178,6 +178,9 @@ jobs:
         run: zig build -Dfixed-cpu test-golden
       - name: zig build fuzz-cortheon
         run: zig build -Dfixed-cpu fuzz-cortheon
+      # The pull client's framing and path checks: its fake hub runs on std.Io.net, so Windows builds and runs them.
+      - name: zig build test-pull-security
+        run: zig build -Dfixed-cpu test-pull-security
       - name: Save the build cache
         if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

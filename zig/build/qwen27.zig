@@ -113,6 +113,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-dflash-run", "Build the explicit draft prototype and its plain comparison on real weights", "zig/tests/qwen27/dflash_run.zig", target, true, family);
     const engine_only: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } };
     _ = program(b, "tf-qwen27-empty-keep", "Build shared empty/full keep state checks", "zig/tests/qwen27/empty_keep.zig", target, false, engine_only);
+    _ = program(b, "tf-qwen27-keep-error", "Build the check that a failing keep returns its error, never aborting", "zig/tests/qwen27/keep_error.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-synthetic", "Build bounded synthetic native hybrid chunk checks, no models", "zig/tests/qwen27/synthetic.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-dflash-synthetic", "Build model-free native draft context/forward/tree check", "zig/tests/qwen27/dflash_runtime.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-widths", "Build the projections at every oQ width before tensor units: float64, row windows, mixed stacks, embedding", "zig/tests/qwen27/widths.zig", target, false, engine_only);

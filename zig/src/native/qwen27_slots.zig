@@ -447,9 +447,8 @@ const Copies = struct {
 };
 
 /// Copied rows a lone round may add past its drafted tree, at most (TF_Q27_COPY_ROWS overrides; 0: none).
-fn copyRows() u32 {
-    const v = std.c.getenv("TF_Q27_COPY_ROWS") orelse return 48;
-    return std.fmt.parseInt(u32, std.mem.span(v), 10) catch 48;
+fn copyRows() !u32 {
+    return @import("sys").environment.read(u32, "TF_Q27_COPY_ROWS", 48);
 }
 
 /// A lone greedy stream on the DFlash2 serial loop in slot 0 until it ends (false) or the lane core adopts it (true).
@@ -467,7 +466,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
     try prefill(b, s, 0);
     if (s.isCancelled()) return error.Cancelled;
     const g = &d.generation;
-    const cap = copyRows();
+    const cap = try copyRows();
     var extra: u32 = @min(cap, 16); // grows while copies land whole, shrinks when most miss
     var copies = Copies{ .lookup = try lanes.SuffixLookup.init(b.gpa, .{ .min_match = 5 }) };
     defer copies.lookup.deinit();

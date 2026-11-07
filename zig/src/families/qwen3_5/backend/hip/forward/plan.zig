@@ -83,7 +83,7 @@ pub const Buffer = struct {
             .count = at + 4 * l.count,
             .desc = at + 4 * l.desc,
             .snaps = at + 4 * l.snaps,
-            .pages = @intCast(state.header_words + 2 * l.layers),
+            .pages = @intCast(state.tableWord(l.layers)),
             .pool = b.pool_pages,
         };
     }

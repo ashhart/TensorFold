@@ -33,7 +33,7 @@ pub fn stage(c: draft.Config, items: []const dr.Hold, contexts: []const *draft.C
     for (items, contexts, 0..) |it, ctx, index| {
         if (it.position == 0 or it.position > std.math.maxInt(i64) - c.block or ctx.end != it.position - 1 or ctx.begin > ctx.end) return error.DraftContextBehind;
         // a chain drafts a row a depth; a grown tree's depth is its node budget (tree.nodes(), up to the window)
-        const most = if (c.block == 16 and it.lanes == null) @max(c.block - 1, tree.nodes()) else c.block - 1;
+        const most = if (c.block == 16 and it.lanes == null) @max(c.block - 1, try tree.nodes()) else c.block - 1;
         if (it.pending >= c.vocab or it.depth > most) return error.BadDraftFrame;
         for (contexts[0..index]) |prior| if (ctx == prior or ctx.ring.ptr == prior.ring.ptr) return error.OverlappingDraftContexts;
         if (it.lanes) |shape| {

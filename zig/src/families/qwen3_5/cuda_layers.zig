@@ -47,6 +47,7 @@ pub const Fns = struct {
     embed: cuda.Function,
     embed8: cuda.Function,
     norm: cuda.Function,
+    norm_shift: cuda.Function, // a plain BF16 checkpoint's norms: HF's raw w, 1 + w in FP32
     sums: cuda.Function,
     gdn_pre: cuda.Function,
     conv_commit: cuda.Function,
@@ -58,6 +59,7 @@ pub const Fns = struct {
     gdn_slots_16: cuda.Function,
     gdn_post: cuda.Function,
     head_norm: cuda.Function,
+    head_norm_shift: cuda.Function,
     rope: cuda.Function,
     attn_partial: cuda.Function,
     attn_rows: cuda.Function,

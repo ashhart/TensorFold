@@ -18,11 +18,9 @@ const P = struct {
         const p = try a.create(Self);
         errdefer a.destroy(p);
         p.a = a;
+        const device = try @import("sys").environment.device(o.device, @import("sys").getenv("TF_CUDA_DEVICE"));
         p.driver = try C.Driver.open();
         errdefer p.driver.close();
-        const text = @import("cuda_device.zig").getenv("TF_CUDA_DEVICE") orelse "0";
-        const trimmed = std.mem.trim(u8, text, " ");
-        const device = o.device orelse (if (trimmed.len == 0) 0 else std.fmt.parseInt(u32, trimmed, 10) catch return error.Qwen4Device);
         p.context = try C.Context.init(&p.driver, std.math.cast(c_int, device) orelse return error.Qwen4Device);
         errdefer p.context.deinit();
         const stream = try C.Stream.init(&p.driver, true);
@@ -61,6 +59,11 @@ const P = struct {
 };
 pub const Native = F.native_host.Host(P, Api, L);
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: Api.Open, problem: *[]const u8) !?Api.Opened {
+    const settings = @import("sys").environment;
+    if (try settings.refusal(a, settings.Process{}, .{ .cuda = true, .slide = o.slide, .device = o.device, .segments = o.segments })) |why| {
+        problem.* = why;
+        return null;
+    }
     if (try o.slideRefusal(a, "CUDA")) |why| {
         problem.* = why;
         return null;

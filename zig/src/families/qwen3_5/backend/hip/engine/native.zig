@@ -165,17 +165,14 @@ fn prepare(
                 if (pf.pool.limit != null) ", under TENSORFOLD_HIP_MEMORY_LIMIT_GB" else "",
             },
         ),
-        error.BadReserve => steps.refuseAll(
+        error.BadReserve, error.BadLimit => steps.refuseAll(
             a,
             problem,
-            "TENSORFOLD_MEMORY_RESERVE_GIB: a number of GiB from 0.5 (2 on shared memory) to the memory's size",
-            .{},
-        ),
-        error.BadLimit => steps.refuseAll(
-            a,
-            problem,
-            "TENSORFOLD_HIP_MEMORY_LIMIT_GB: a positive number of GiB whose byte count fits in a 64-bit size",
-            .{},
+            "{s}",
+            .{try hip.admission.badSetting(a, if (err == error.BadReserve) error.BadReserve else error.BadLimit, .{
+                .reserve = @import("sys").getenv("TENSORFOLD_MEMORY_RESERVE_GIB"),
+                .limit = @import("sys").getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB"),
+            })},
         ),
         error.HostMemoryUnavailable => steps.refuseAll(
             a,
@@ -261,7 +258,7 @@ fn prepare(
             "the native HIP engine cannot allocate its scratch and pages ({s})",
             .{@errorName(err)},
         );
-    const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()));
+    const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + e.model().taps.ringBytes(e.model().spec.hidden) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()));
     const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks", .{
         hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, prefix.chunk,
     });

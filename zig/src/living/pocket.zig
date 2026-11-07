@@ -160,7 +160,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         }
 
         pub fn init(gpa: std.mem.Allocator) Self {
-            const asked: Mode = if (@import("sys").c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
+            const asked: Mode = if (@import("profile").lookup("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, v) orelse .auto else .auto;
             return .{ .gpa = gpa, .mode = asked, .strict = !set("TF_SLIDE_POCKET_LEADS", "off"), .keeping = !set("TF_SLIDE_POCKET_KEEPS", "off"), .valuing = set("TF_SLIDE_POCKET_VALUES", "on"), .silencing = set("TF_SLIDE_POCKET_SAME", "silent"), .worst = set("TF_SLIDE_POCKET_REPLAY", "worst"), .joining = set("TF_SLIDE_POCKET_GROUP", "joint") };
         }
 
@@ -229,6 +229,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         }
 
         pub fn load(p: *Self, t: *T, host: anytype) !void {
+            try @import("sys").environment.check("TF_SLIDE_POCKET_KEY", @import("sys").getenv("TF_SLIDE_POCKET_KEY"));
             _ = t;
             return loading.load(p, host);
         }

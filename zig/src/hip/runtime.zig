@@ -1,15 +1,29 @@
 //! Complete model-free HIP runtime admission; partial symbol tables never escape.
 const std = @import("std");
+const builtin = @import("builtin");
 const platform = @import("sys");
 const abi = @import("abi.zig");
 pub const Error = error{ DriverUnavailable, MissingSymbol, HipFailed, Invalid };
+
+/// The runtime's file names, most specific first: Windows' unversioned DLL, then the SDK's versioned copies.
+const names: []const []const u8 = if (builtin.os.tag == .windows)
+    &.{ "amdhip64.dll", "amdhip64_7.dll", "amdhip64_6.dll" }
+else
+    &.{"libamdhip64.so"};
 
 pub const Runtime = struct {
     lib: platform.DynLib,
     api: abi.Api,
 
     pub fn open() Error!Runtime {
-        return openPath("libamdhip64.so");
+        if (platform.getenv("TENSORFOLD_HIP")) |path| return openPath(path);
+        for (names) |name| {
+            return openPath(name) catch |err| switch (err) {
+                error.DriverUnavailable => continue,
+                else => return err,
+            };
+        }
+        return error.DriverUnavailable;
     }
 
     pub fn openPath(path: []const u8) Error!Runtime {

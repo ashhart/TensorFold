@@ -18,6 +18,7 @@ pub const Settings = struct {
     kda_pad: bool = false, // TF_GLM_KDA_PAD: 1 (the fused KDA input padded to eight columns at load, for glm_mm) or 0
     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole); unset, 8 under solo on the wire.
     solo: bool = false, // TF_GLM_CHUNK_SOLO: 4096 (prompt buffers for two chunks a pass, while no stream decodes) or 2048
+    pair: bool = true, // TF_GLM_PROMPT_PAIR: 1 (while no stream decodes, a prompt step takes two chunks, each one's exchanges under the other's sites) or 0
     index_split: u32 = 2048, // TF_GLM_INDEX_SPLIT: from this position on, rank 0 splits a prompt chunk's indexer rows (0: never)
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
@@ -84,6 +85,12 @@ pub const Settings = struct {
             }
         }
         s.l2pf = try l2pf.Options.read(get, problem);
+        if (get("TF_GLM_PROMPT_PAIR")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.pair = true else if (std.mem.eql(u8, v, "0")) s.pair = false else {
+                problem.* = "TF_GLM_PROMPT_PAIR: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         if (get("TF_GLM_OVERLAP_PIECES")) |v| {
             s.pieces = std.fmt.parseInt(u32, v, 10) catch 0;
             if (s.pieces < 1 or s.pieces > 8) {
@@ -176,7 +183,7 @@ fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 18, // both layouts: main 16 plus L2 prefetch, distinct from the PR's 17
+    layout: u32 = 19, // this struct's version (18 plus the prompt pair)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -187,6 +194,7 @@ pub const Fingerprint = extern struct {
     kda_wide: u32,
     kda_pad: u32 = 0, // TF_GLM_KDA_PAD: every rank's KDA input rows carry one width
     pieces: u32,
+    pair: u32, // TF_GLM_PROMPT_PAIR: rank 0's paired steps need the second chunk's buffers on every rank
     layers: u32, // TF_GLM_LAYERS (0: all)
     mtp: u32, // 1: the MTP head loads and runs (drafts on); 2: and DFlash2 (--drafter), whose rounds gather
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
@@ -219,6 +227,7 @@ pub const Fingerprint = extern struct {
         kda_wide,
         kda_pad,
         pieces,
+        pair,
         layers,
         mtp,
         vision,
@@ -261,6 +270,7 @@ pub const Fingerprint = extern struct {
             .kda_wide = @intFromBool(s.kda_wide),
             .kda_pad = @intFromBool(s.kda_pad),
             .pieces = s.pieces,
+            .pair = @intFromBool(s.pair),
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
@@ -297,6 +307,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "kda_wide",
             "kda_pad",
             "pieces",
+            "pair",
             "layers",
             "mtp",
             "vision",
@@ -418,6 +429,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
         .kda_pad => "TF_GLM_KDA_PAD",
         .pieces => "TF_GLM_OVERLAP_PIECES",
+        .pair => "TF_GLM_PROMPT_PAIR",
         .layers => "TF_GLM_LAYERS",
         .mtp => "--no-drafts given to some ranks and not others",
         .vision => "--vision (or its image tokens) given to some ranks and not others",

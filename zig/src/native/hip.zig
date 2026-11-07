@@ -11,13 +11,14 @@ const serve = @import("hip_serve");
 const glm_ocr = @import("glm_ocr");
 const qwen3 = @import("qwen3");
 const dots = @import("dots_mocr");
+const parse = @import("nemotron_parse");
 const fam = @import("hip_families.zig");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
 
 /// The HIP families: namespaces with `model_type`, `formats`, `default_context`, `prefill_step`, `open` and `follow`.
-const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native, qwen3.native, dots.native };
+const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native, qwen3.native, dots.native, parse };
 
 pub const backends: []const []const u8 = &.{"hip"};
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
@@ -370,7 +371,7 @@ test "a HIP family declares replies without reasoning with `pub const reasoning 
     }));
 }
 
-test "the text families carry no offer, so the host gives them the empty one; GLM-OCR, Qwen3, Qwen3.5 and dots.mocr offer through their Loaded" {
+test "the text families carry no offer, so the host gives them the empty one; GLM-OCR, Qwen3, Qwen3.5, dots.mocr and Parse offer through their Loaded" {
     inline for (.{ flashnext.native, nemotron.native }) |F| {
         const Loaded = @typeInfo(@typeInfo(@TypeOf(F.open)).@"fn".return_type.?).error_union.payload;
         try std.testing.expect(!@hasField(Loaded, "offer"));
@@ -383,6 +384,8 @@ test "the text families carry no offer, so the host gives them the empty one; GL
     try std.testing.expect(@FieldType(qwen35.native_engine.Loaded, "offer") == serve.Offer and !@hasField(qwen35.native_engine.Loaded, "readouts"));
     try std.testing.expect(@FieldType(dots.native.Loaded, "offer") == serve.Offer);
     try std.testing.expect(!@hasDecl(dots.native, "attach") and !@hasDecl(dots.native, "openVision"));
+    try std.testing.expect(@FieldType(parse.Loaded, "offer") == serve.Offer and !@hasField(parse.Loaded, "vision") and !@hasField(parse.Loaded, "cache"));
+    try std.testing.expect(@hasDecl(parse, "refusal") and !@hasDecl(parse, "flagRefused"));
 }
 
 test {
@@ -398,6 +401,8 @@ test "every registered family is listed for capabilities" {
     try std.testing.expectEqualStrings("glm_ocr", families[4].model_type);
     try std.testing.expectEqualStrings("qwen3", families[5].model_type);
     try std.testing.expectEqualStrings("dots_ocr", families[6].model_type);
+    try std.testing.expectEqualStrings("nemotron_parse", families[7].model_type);
+    try std.testing.expect(!families[7].raw_text);
 }
 
 test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy drafts remain" {
@@ -406,6 +411,10 @@ test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy d
     try std.testing.expectEqualStrings(F.mtp_refusal, flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 1 }).?);
     try std.testing.expectEqualStrings(F.tp_refusal, flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .tp = 2 }).?);
     try std.testing.expect(flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 0 }) == null);
+}
+
+test "Nemotron Parse declares no reasoning block, so its OCR text stays answer content" {
+    try std.testing.expect(!reasoning(parse));
 }
 
 test "Nemotron refuses --slide and --mtp-confidence on HIP before it loads, and keeps a cap" {

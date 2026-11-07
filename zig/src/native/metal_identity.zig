@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 /// What learned and disk states read under: checkpoint, shards, prefill step, head, kernels, a probe, OS build, chip.
 pub fn learned(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.Metal) !struct { id: u64, rate: f64 } {
     var h = std.hash.Wyhash.init(0x6e65);
+    try @import("sys").file_identity.current(&h, a, io);
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
         const path = try std.fs.path.join(a, &.{ dir, name });
         h.update(try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)));

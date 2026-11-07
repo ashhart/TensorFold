@@ -74,6 +74,9 @@ fn checkpointBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
 /// What `load` found before reading the weights.
 pub const Preflight = struct { pool: admission.Pool = undefined, held: u64 = 0, weights: u64 = 0 };
 
+/// Rows a drafter reads behind a stream's newest prompt chunk or round (DFlash2's sliding window).
+pub const tap_window = 2048;
+
 pub const Engine = struct {
     pub const Rows = lane_round.Rows;
 
@@ -245,7 +248,7 @@ pub const Engine = struct {
     /// Device bytes beside the weights: `size`'s scratch and pool, `streams` lanes, `snapshots`, rank 0's head.
     pub fn planBytes(e: *Engine, streams: usize, rows: usize, capacity: usize, pool_pages: usize, snapshots: usize) !usize {
         const m = e.model();
-        const lane = state.Caches.deviceBytes(m, capacity) + m.spec.hidden * m.act.size();
+        const lane = state.Caches.deviceBytes(m, capacity) + m.spec.hidden * m.act.size() + m.taps.ringBytes(m.spec.hidden);
         // under tensor parallelism only rank 0 holds the head
         const head = if (e.o.rank > 0) 0 else try mtp.Head.deviceBytes(e.gpa, &e.driver, &e.lib, &e.weights, m, @min(rows, mtp.max_chains));
         return try e.sizeBytes(rows, capacity, pool_pages) + streams * lane + snapshots * memory.linearBytes(m.spec) + head;
@@ -321,12 +324,37 @@ pub const Engine = struct {
 
     /// Caches for `total` positions (at most the capacity) with every page taken.
     pub fn newCaches(e: *Engine, total: usize) !state.Caches {
-        return state.Caches.initFull(e.gpa, &e.pool, e.model(), @min(total, e.o.capacity));
+        var c = try state.Caches.initFull(e.gpa, &e.pool, e.model(), @min(total, e.o.capacity));
+        errdefer c.deinit(e.gpa);
+        try e.addTap(&c);
+        return c;
     }
 
     /// Caches for `total` positions (at most the capacity) with no page yet: a stream takes them as it grows.
     pub fn emptyCaches(e: *Engine, total: usize) !state.Caches {
-        return state.Caches.init(e.gpa, &e.pool, e.model(), @min(total, e.o.capacity));
+        var c = try state.Caches.init(e.gpa, &e.pool, e.model(), @min(total, e.o.capacity));
+        errdefer c.deinit(e.gpa);
+        try e.addTap(&c);
+        return c;
+    }
+
+    fn addTap(e: *Engine, c: *state.Caches) !void {
+        const m = e.model();
+        if (m.taps.n > 0) try c.addTap(m.taps.ringBytes(m.spec.hidden));
+    }
+
+    /// The layers a drafter taps (none: off), filling rings of caches made after; captured rounds are dropped.
+    pub fn setTaps(e: *Engine, layers: []const u32) !void {
+        const m = &e.bridge.model;
+        if (layers.len > m.taps.layers.len) return error.TooManyTaps;
+        for (layers) |l| if (l >= m.spec.n_layers) return error.BadTap;
+        if (layers.len > 0 and m.act.size() != 2) return error.TapsNeed16Bit;
+        try e.stream.synchronize();
+        e.graphs.deinit();
+        e.graphs = round_graphs.Graphs.init(e.gpa);
+        @memcpy(m.taps.layers[0..layers.len], layers);
+        m.taps.n = layers.len;
+        m.taps.rows = if (layers.len > 0) tap_window + @max(e.o.prompt_rows, e.o.batch_rows) else 0;
     }
 
     /// Whether the draft head's greedy batches replay graphs.

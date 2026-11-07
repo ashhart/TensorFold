@@ -25,7 +25,8 @@ Direct `one` callers remain responsible for cleanup.
 - Its served envelope: the shapes the engine calls it at, and for each dimension its tile, the step a valid size
   moves by and the least valid size.
 - Its accumulator (`f32` where a kernel sums) and the depth of its longest chain of roundings at a shape, plus any
-  fp32 operations after the sums (`ops`) and intermediate roundings to the output type (`mids`).
+  fp32 operations after the sums (`ops`), intermediate roundings to the output type (`mids`), and the precision it
+  stores at when that is narrower than the output's element (`store`: bf16 values in fp32 words).
 - Whether it may write in place. If it replaces another kernel, the kernel whose bits it must equal.
 - Its NaN rule: `propagate` (as float64 arithmetic on its formula does), or a stated rule the test checks itself
   (top-k, argmax, sampling and routing kernels state theirs).
@@ -100,8 +101,15 @@ On an Intel GPU host, `zig build -Dxpu-contract=true xpu-kernel-contract-objects
 every registered XPU kernel and the controls to zebins, and `xpu-kernel-contract-limits` checks each record against the
 BMG card's row, no GPU needed. Level Zero does not report a kernel's GRF mode, so the record states it, and the audit
 fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contract limits DIR` runs that audit on a
-directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc. The XPU device
-runner, gates 1 to 4, comes in a second pull request.
+directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc.
+
+On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `tf-xpu-contract-run` with the zebins
+linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over nine registrations of the Qwen3.8-27B glue's
+`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax` and `embed`, the five planted controls, and gate 5
+live: the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
+native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
+id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
+another host made with the commands the receipt records.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
@@ -117,7 +125,8 @@ The program exits 1 on any failed gate, any control that stayed green, or any li
    `--offline` (Metal) or `kernel-contract-limits`
    (CUDA: nvcc 13.0's in `cuda`, and each later release's set where that release compiles it differently); a HIP
    kernel's go to `hip_records.zig`, filled from `hip-kernel-contract-limits`, and an XPU kernel's to
-   `xpu_records.zig`, filled from `xpu-kernel-contract-limits`.
+   `xpu_records.zig`, filled from `xpu-kernel-contract-limits`. Its test type goes in `zig/tests/xpu/contract_*.zig`
+   and, where it needs a planted control, `zig/kernels/xpu/contract_gate_controls.cl`.
 4. Post the `SUMMARY` lines from each backend you ran in the pull request, and say which chips you could not run.
 
 A replacement kernel names the kernel it replaces and gives `replaced`, which runs that kernel on the same inputs.
@@ -133,8 +142,7 @@ Python family's Triton glue it was ported from. Nemotron's Metal `tf_xup_w3` giv
 the NaN: its relu2 is `metal::max(bfloat(acc), 0.0f)`; the other up pipelines give its bytes on the same inputs.
 HIP's prompt attention tile (`tf_fa_paged_*`, `tf_fa_wide_*`) writes 0 for a row whose every score is NaN where
 float64 gives NaN, as its running max is `fmaxf` and a row at max -inf takes p = 0; and an infinite value at a key
-whose fp32 weight is 0 (past the row's causal edge in its 64-key tile, or under fp32's least) gives NaN where float64
-gives inf or a finite value, as its P x V takes every key of the tile.
+the row sees under fp32's least weight gives NaN where float64 gives inf, as 0 x inf enters its P x V.
 Qwen3.8 Flash Next's `tf_sattn_nax` and `tf_attn256_nax` score masked keys -FLT_MAX, the value each row's running
 max starts from, so a row whose every score is -Inf weighs its masked keys 1 and gives a finite average where float64
 gives NaN. `tf_sattn_nax`'s padding lanes also read key 0 at p = 0, so a non-finite value in key 0's row reaches every
@@ -344,6 +352,13 @@ GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 an
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.
 Controls dispatch real source mutations that couple rows or select the wrong expert; host tests validate their witnesses.
+CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's
+3-tap short conv with its per-row state snapshots and the state commit (`liquid_conv.cuh`), each against the host's
+replay of its fp32 and bf16 steps (three controls: ties to the higher expert, bx unrounded, every stream committing into
+the first stream's slot). Their paged attention at head dim 64 runs over shuffled 512-key pages with several streams
+a launch: the decode rows' chunks and merge (`tf_paged_attn_chunk_segs_64`, `tf_paged_attn_merge_segs_64`) and the
+prompt rows (`pattn_kernel<64, 8, 4, 8>`), head by head within `attention_ref`'s float64 bound (two controls: the
+decode reading its values from the neighbouring lane's dims, the prompt from the neighbouring 8 dims).
 CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair kernel it replaces (two controls,
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32

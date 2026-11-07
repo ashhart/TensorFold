@@ -5,6 +5,7 @@ const t = std.testing;
 
 test "stable profile: live lookup is exactly the legacy libc lookup for every registered switch" {
     inline for (p.entries) |e| {
+        if (comptime e.members != null) continue;
         const old = std.c.getenv(e.name());
         const current = p.get(e.id);
         if (old) |raw| {
@@ -21,9 +22,10 @@ test "stable profile: registry scopes metadata and never supplies a default" {
         try t.expect(e.name().len > 0 and e.families.len > 0 and e.effect.len > 0 and e.evidence.len > 0);
         try t.expect(e.stable == null);
         try t.expect(p.resolve(.stable, e.id, null) == null);
-        try t.expect(e.applies(e.families[0], "cuda"));
-        try t.expect(!e.applies(e.families[0], "metal"));
-        try t.expect(!e.applies(e.families[0], "hip"));
+        if (e.scopes) |scopes| {
+            for (scopes) |scope| try t.expect(e.applies(scope.families[0], scope.backend));
+        } else try t.expect(e.applies(e.families[0], e.backend));
+        try t.expect(!e.applies(e.families[0], "unknown-backend"));
         try t.expect(!e.applies("unknown-model", "cuda"));
     }
     try t.expectEqual(p.Class.debug, p.entry(.TF_QWEN_KV_PAGES_ALL).class);
@@ -124,5 +126,46 @@ test "stable profile: a runtime name lookup covers the registry and leaves every
         try t.expect(p.registered(name) == null);
     // An unset variable is null through both paths, so an unregistered name keeps the reader's old default.
     try t.expect(p.lookup("TF_PROFILE_FIXTURE_UNSET") == null);
-    inline for (p.entries) |e| try t.expectEqual(p.get(e.id), p.lookup(e.name()));
+    inline for (p.entries) |e| {
+        if (comptime e.members == null) try t.expectEqual(p.get(e.id), p.lookup(e.name()));
+    }
+}
+
+test {
+    _ = @import("profile_more_test.zig");
+}
+
+test "stable profile: Dory paging is on unless the value is exactly zero" {
+    const e = p.entry(.TENSORFOLD_DORY_KV_PAGES);
+    try t.expectEqual(p.Syntax.not_zero, e.syntax);
+    try t.expectEqual(p.Class.arithmetic, e.class);
+    try t.expect(e.applies("dory", "cuda"));
+    try t.expect(!e.applies("dory", "metal"));
+    try t.expect(p.resolve(.stable, .TENSORFOLD_DORY_KV_PAGES, null) == null);
+    for ([_][]const u8{ "1", "", "on", "00" }) |raw| try t.expect(e.differs(raw));
+    try t.expect(!e.differs("0"));
+}
+
+test "stable profile: Gemma 4 and Spark2.5 paging is off only for exactly zero" {
+    inline for (.{ .TENSORFOLD_GEMMA4_KV_PAGES, .TENSORFOLD_SPARK25_KV_PAGES }) |id| {
+        const e = p.entry(id);
+        try t.expect(e.report_values != null and e.report_values.?.len == 1 and std.mem.eql(u8, e.report_values.?[0], "0"));
+        try t.expectEqual(p.Class.identical, e.class);
+        try t.expect(p.resolve(.stable, id, null) == null);
+        try t.expect(e.differs("0"));
+        for ([_][]const u8{ "1", "", "00", "false", " 0 " }) |raw| try t.expect(!e.differs(raw));
+    }
+    try t.expect(p.entry(.TENSORFOLD_GEMMA4_KV_PAGES).applies("gemma4_unified", "cuda"));
+    try t.expect(p.entry(.TENSORFOLD_SPARK25_KV_PAGES).applies("spark2_5", "cuda"));
+}
+
+test "stable profile: Nemotron's paging on Metal has its own scope" {
+    const e = p.entry(.TF_NEMOTRON_METAL_KV_PAGES);
+    try t.expectEqual(p.Syntax.one, e.syntax);
+    try t.expectEqualStrings("metal", e.backend);
+    try t.expect(e.applies("nemotron_h", "metal"));
+    try t.expect(!e.applies("nemotron_h", "cuda"));
+    try t.expect(!e.applies("qwen3_5", "metal"));
+    try t.expect(e.differs("1"));
+    for ([_][]const u8{ "0", "", "01", "true", " 1 " }) |raw| try t.expect(!e.differs(raw));
 }

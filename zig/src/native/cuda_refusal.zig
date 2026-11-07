@@ -255,3 +255,17 @@ test "--spill-gib and --checkpoint-slots open the families with a disk image; th
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "m", .keep = 2 }) orelse "", "--checkpoint-slots sets how many");
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "m" }) == null);
 }
+
+/// Validate CUDA settings and residency support before checkpoint or driver work at direct entry points.
+pub fn startup(a: std.mem.Allocator, o: api.Open, problem: *[]const u8) !bool {
+    const settings = @import("sys").environment;
+    if (try settings.refusal(a, settings.Process{}, .{ .cuda = true, .slide = o.slide, .device = o.device, .segments = o.segments })) |why| {
+        problem.* = why;
+        return true;
+    }
+    if (o.fsrRefusal("cuda")) |why| {
+        problem.* = why;
+        return true;
+    }
+    return false;
+}

@@ -64,26 +64,43 @@ pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
         }
         field(h, e.name());
         field(h, @tagName(e.class));
+        if (e.members) |members| {
+            for (members) |member| {
+                if (!member.applies(p.family)) continue;
+                field(h, member.name);
+                valueField(h, member.syntax, p.environment(member.name));
+            }
+            continue;
+        }
         const value = p.environment(e.name()) orelse e.stable;
         if (e.report_values != null) {
             field(h, if (value != null) "explicit" else "default");
             field(h, value orelse "");
             continue;
         }
-        switch (e.syntax) {
-            .one => field(h, if (value != null and std.mem.eql(u8, value.?, "1")) "1" else "0"),
-            .auto => field(h, value orelse "auto"),
-            .count => {
-                const count = std.fmt.parseInt(u64, value orelse "0", 10) catch {
-                    field(h, "invalid-count");
-                    field(h, value.?);
-                    continue;
-                };
-                var bytes: [8]u8 = undefined;
-                std.mem.writeInt(u64, &bytes, count, .little);
-                field(h, &bytes);
-            },
-        }
+        valueField(h, e.syntax, value);
+    }
+}
+
+fn valueField(h: *std.hash.Wyhash, syntax: api.profile.Syntax, value: ?[]const u8) void {
+    switch (syntax) {
+        .one => field(h, if (value != null and std.mem.eql(u8, value.?, "1")) "1" else "0"),
+        .auto => field(h, value orelse "auto"),
+        .count => {
+            const count = std.fmt.parseInt(u64, value orelse "0", 10) catch {
+                field(h, "invalid-count");
+                field(h, value.?);
+                return;
+            };
+            var bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &bytes, count, .little);
+            field(h, &bytes);
+        },
+        .present => {
+            field(h, if (value != null) "explicit" else "default");
+            field(h, value orelse "");
+        },
+        .not_zero => field(h, if (value != null and !std.mem.eql(u8, value.?, "0")) "1" else "0"),
     }
 }
 
@@ -92,4 +109,16 @@ fn field(h: *std.hash.Wyhash, bytes: []const u8) void {
     std.mem.writeInt(u64, &len, @intCast(bytes.len), .little);
     h.update(&len);
     h.update(bytes);
+}
+
+/// A persisted serving namespace extends its probe identity with the checkpoint at the current open.
+pub fn scoped(a: Allocator, io: std.Io, dir: []const u8, legacy: u64) !u64 {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var h = std.hash.Wyhash.init(0x70657273);
+    h.update("kept-checkpoint-v1");
+    h.update(std.mem.asBytes(&legacy));
+    try checkpoint(&h, arena.allocator(), io, dir);
+    try @import("sys").file_identity.current(&h, arena.allocator(), io);
+    return h.final();
 }

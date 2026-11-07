@@ -570,7 +570,7 @@ fn hcaNames(io: std.Io, gpa: std.mem.Allocator, names: *[max_hcas][64]u8, lens: 
 
 /// The HCA's RoCE v2 IPv4 GID (TF_ROCE_GID_INDEX overrides): its index differs between hosts' tables.
 fn gidIndex(io: std.Io, gpa: std.mem.Allocator, name: []const u8) !c_int {
-    if (std.c.getenv("TF_ROCE_GID_INDEX")) |v| return std.fmt.parseInt(c_int, std.mem.span(v), 10) catch error.NoHca;
+    if (@import("sys").getenv("TF_ROCE_GID_INDEX") != null) return @import("sys").environment.read(c_int, "TF_ROCE_GID_INDEX", 0);
     const cwd = std.Io.Dir.cwd();
     var i: c_int = 0;
     while (i < 16) : (i += 1) {

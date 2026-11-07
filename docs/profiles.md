@@ -4,10 +4,10 @@
 the same profile. It enables no additional optimization and supplies no new environment values.
 
 This is the foundation of [#1660](https://github.com/ashhart/TensorFold/issues/1660), beginning with the CUDA KV
-switches in its first table, their `_ALL` companions, and GLM's and Nemotron's paging policies (seven variables).
-It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings continue through their existing readers. `fast-exact` and `fast`
-are refused by name; they are not aliases
-for `stable` and cannot enable unqualified optimizations.
+switches in its first table, their `_ALL` companions, the shared prompt store, GLM's and Nemotron's paging policies,
+the Dory, Gemma 4 and Spark2.5 pool-page switches, and Nemotron's paging on Metal. The registry also covers grouped learning modes.
+It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings keep their existing readers. `fast-exact` and `fast` are refused by name; they are not aliases for `stable` and cannot enable
+unqualified optimizations.
 
 ## Explicit environment values win
 
@@ -39,25 +39,65 @@ The `profiles` object contains `default`, `available`, and `registered_switches`
 backend, model types, class, effect, evidence link number, syntax, and stable fallback. A null fallback means the
 profile supplies no value. Registry metadata comes directly from the same table the readers use.
 
-Initial coverage is:
+Coverage includes:
 
 - Qwen3.5 dense/MoE on CUDA: `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL`, `TF_QWEN_KV_SHARE`.
 - GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`.
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, Spark2.5 and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
+- Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,
+  every stream's caches are contiguous and made at open.
+- Gemma 4 on CUDA: `TENSORFOLD_GEMMA4_KV_PAGES`, global caches in pool pages by default, where `0` keeps them linear.
+- Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
+- Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
+  and values in the core pool's pages.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the
 switch is faster for every shape, device, or workload. The `*_ALL` checks stay `debug`; Flash Next paging remains
-`experimental`. No class turns a switch on. GLM's existing automatic paging default is preserved; other default-on
-paging outside this registry is unchanged. The two GLM host-memory switches carry [#1795](https://github.com/ashhart/TensorFold/pull/1795)'s
-identical tokens at TP=2 on two GB10s, and `TF_GLM_PROMPT_TAIL` carries [#2226](https://github.com/ashhart/TensorFold/pull/2226)'s.
-`TF_GLM_KV_HOST_GIB` stays outside the registry: it sizes those pages rather
-than choosing a policy, and its reader keeps its own default.
+`experimental`. No class turns a switch on. GLM's existing automatic paging default is preserved; Gemma 4's and
+Spark2.5's default-on paging is registered here, where `0` keeps the linear caches; other default-on paging outside
+this registry is unchanged. The two GLM host-memory switches carry
+[#1795](https://github.com/ashhart/TensorFold/pull/1795)'s identical tokens at TP=2 on two GB10s, and
+`TF_GLM_PROMPT_TAIL` carries [#2226](https://github.com/ashhart/TensorFold/pull/2226)'s. `TF_GLM_KV_HOST_GIB` stays
+outside the registry: it sizes those pages rather than choosing a policy, and its reader keeps its own default.
 
 A reader that resolves its switch by name uses `core.profile.lookup`: a registered name comes from this registry, and
 every other name keeps the libc lookup and default it had. GLM's rank settings read that way, and their fingerprint
 still carries each resolved value, so ranks that disagree still stop before weights load.
+
+## Additional arithmetic and learning settings
+
+[#2370](https://github.com/ashhart/TensorFold/issues/2370) adds metadata without adding defaults:
+
+| Registry id | Backend and family | Class | Explicit values reported as overrides |
+| --- | --- | --- | --- |
+| `TENSORFOLD_KOLIBRI_KV_PAGES` | CUDA, Kolibri-1 | arithmetic | Exact `0`, which disables otherwise requested pages |
+| `TENSORFOLD_DORY_KV_PAGES` | CUDA, Dory | arithmetic | Every present value except exact `0`, including empty text |
+| `GEMMA_DRAFT_BF16` | Metal, Gemma 4 | debug | `all`, `fc`, `self_attn.q_proj`, `self_attn.k_proj`, `self_attn.o_proj`, `mlp.gate_proj`, `mlp.down_proj` |
+| `TF_ANE_COLUMNS` | Metal, Qwen3.5 dense adapter | experimental | Nonzero columns; admission still decides whether the share is supported |
+| `TF_PROMPT_ROWS` | Metal, Qwen3.5 dense/MoE adapter | arithmetic | Every explicit native prompt width |
+| `slide_learn_mode` | CUDA Nemotron/Qwen3.5 and Metal Nemotron, as its `scopes` list states | experimental | The real member names described below |
+
+The grouped slide row has `backend: "multiple"` and exact family/backend pairs in `scopes`.
+Ordinary rows retain their single `backend`/`families` scope and have null `scopes` and `members`.
+Group `members` lists `TF_SLIDE_POCKET_KEY` with `auto` reporting syntax and `TF_SLIDE_EDIT`,
+`TF_SLIDE_PROBE`, `TF_SLIDE_ROUTED` with `present` syntax. Presence counts even for empty text or `0`.
+The startup line prints each real member name, never a `slide_learn_mode` environment assignment.
+Lookup of a member resolves its own raw bytes; there is no synthetic group value and no group default.
+The CUDA Qwen learner uses the pocket key but has no routed sites or edit/probe modes.
+Those three members therefore carry a Nemotron-only `families` restriction and are omitted from Qwen startup output.
+The CUDA Qwen MoE adapter does not expose a learner, so it is outside the group; the ANE share is dense-only.
+
+`present` reports any explicit value; `not_zero` reports every value except exact `0`.
+Gemma's listed values identify the first member of each drafter stack; `1` is not a BF16 selector.
+These entries describe potentially changed arithmetic or learning, not new fidelity qualifications.
+See [environment validation](environment.md) for strict numeric forms and deliberately lenient switches.
+
+Kept-state identities include each applicable non-identical row. A grouped row hashes its real member names
+and values in their family/backend scope, rather than looking up the synthetic group name. Explicit prompt
+widths remain distinct from the default and from each other. Dory's unset and exact `0` share the disabled
+identity; every other value shares the enabled identity. Existing count, exact-one and auto encodings are unchanged.
 
 ## Startup reporting
 
@@ -80,7 +120,8 @@ The registry has separate CUDA rows for GLM and Nemotron's same-named setting, w
 `capabilities --json` lists both rows under `registered_switches`; select a row by `id`, family and backend rather
 than assuming the environment name alone identifies its policy. Lookup remains shared and returns the raw value.
 An optional `report_values` list takes precedence over `syntax` for reporting exact overrides; null retains the
-existing syntax rule. Nemotron's row lists `0` and `all`, while GLM's row keeps its `auto` rule.
+existing syntax rule. Nemotron's row lists `0` and `all`, while GLM's row keeps its `auto` rule. Dory's row keeps
+the `not_zero` syntax: every value except exactly `0`, empty text included, adds an override.
 
 For Nemotron (`nemotron_h` and `nemotron_h_omni`), paging is on by default. Exactly `TF_KV_PAGES=0` disables it;
 exactly `TF_KV_PAGES=all` puts every stream on pages for checks. Those two values appear as registered overrides.
