@@ -3,7 +3,7 @@ const std = @import("std");
 const q = @import("qwen35_cpu");
 const npy = @import("core").npy;
 
-/// MODEL_DIR tokens.npy out.bf16 [THREADS [ROWS]]: THREADS workers beside the caller, ROWS a pass (1: a decode step each).
+/// MODEL_DIR tokens.npy out.bf16 [THREADS [ROWS]]: THREADS workers beside the caller, ROWS a pass (1: decode steps).
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 4 or args.len > 6) return error.ExpectedModelTokensOutput;

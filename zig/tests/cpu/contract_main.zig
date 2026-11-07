@@ -13,7 +13,7 @@ const pre = @import("contract_delta_inputs.zig");
 const g = contract.gates;
 const seed: u64 = 0x6370_7531;
 
-/// Every registration and control: the projection's three chain classes, the norms, the rows, the attention, the delta rule.
+/// Every registration and control: the projection's chain classes, the norms, the rows, the attention, the delta rule.
 const Suite = struct {
     projs: [std.enums.values(proj.Which).len]proj.Proj,
     norms: [std.enums.values(norm.Which).len]norm.Norm,

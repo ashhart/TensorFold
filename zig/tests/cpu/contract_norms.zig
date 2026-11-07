@@ -1,4 +1,4 @@
-//! The CPU engine's head norms under the contract: the q and k RMS norm over 256 and the delta rule's gated output norm.
+//! The CPU engine's head norms under the contract: the q/k RMS norm over 256 and the delta rule's gated output norm.
 const std = @import("std");
 const contract = @import("contract");
 const mx = @import("cpu_mixers");
@@ -96,7 +96,7 @@ pub const Norm = struct {
         return if (base(w) == .head_norm) shape.n == head_dim and shape.k == head_dim else shape.n == hidden and shape.k == linear_dim;
     }
 
-    /// The head norm's rows are the `rows` family's RMS rows; the delta norm's y rows are the same family's, a head a row.
+    /// The head norm's rows are the `rows` family's RMS rows; the delta norm's y rows the same family's, a head a row.
     pub fn prepare(n: *Norm, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         n.drop();
         if (!takes(n.which, shape)) return false;

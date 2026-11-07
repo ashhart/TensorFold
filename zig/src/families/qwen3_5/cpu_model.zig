@@ -140,7 +140,7 @@ pub const Model = struct {
         return out;
     }
 
-    /// An affine 4-bit projection: u32 words [N, K/8], bf16 scales and biases [N, K/64], packed into the kernel's tiles.
+    /// An affine 4-bit projection: u32 words [N, K/8], bf16 scales and biases [N, K/64], in the kernel's tiles.
     fn projection(m: *Model, t: *const Table, prefix: []const u8, suffix: []const u8, outputs: usize, inputs: usize) !Linear {
         var buf: [256]u8 = undefined;
         const name = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, suffix });
