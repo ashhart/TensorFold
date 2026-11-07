@@ -4,6 +4,7 @@ const ze = @import("ze");
 const dev = @import("xpu_dev.zig");
 const cfg = @import("xpu_config.zig");
 const plan = @import("cuda_plan.zig");
+const rope_freq = @import("core").rope_freq;
 const Dev = dev.Dev;
 const Checkpoint = dev.Checkpoint;
 const alloc = dev.alloc;
@@ -121,9 +122,9 @@ pub fn projection(d: *Dev, repack: ze.H, c: *const Checkpoint, prefix: []const u
     return out;
 }
 
-fn invFreq(comptime n: usize, theta: f64, dim: f64, rotated: usize) [n]f32 {
-    var t: [n]f32 = @splat(0);
-    for (0..@min(n, rotated)) |i| t[i] = @floatCast(1.0 / std.math.pow(f64, theta, @as(f64, @floatFromInt(2 * i)) / dim));
+fn invFreq(comptime n: usize, theta: f64, comptime dim: usize, comptime rotated: usize) [n]f32 {
+    var t: [n]f32 = undefined;
+    rope_freq.proportional(theta, dim, rotated, &t);
     return t;
 }
 

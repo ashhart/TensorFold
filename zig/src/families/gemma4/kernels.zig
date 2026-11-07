@@ -116,7 +116,7 @@ pub const Kernels = struct {
     }
 };
 
-/// RoPE inverse frequencies as gilby takes them from mlx_lm: sliding ones in f64; global ones from MLX's GPU pow.
+/// RoPE inverse frequencies: sliding ones as transformers' fp32 words; global ones from MLX's GPU pow (mlx_lm's).
 pub fn inverseFrequencies(k: *const Kernels, queue: mtl.Queue, device: mtl.Device, global: bool, out: []f32) !void {
     if (!global) return cfg.inverseFrequencies(false, out);
     const b = try device.buffer(cfg.global_rotated * 4, mtl.ResourceOptions.shared);
