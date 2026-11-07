@@ -6,8 +6,9 @@
 # matched in the order they were sent. Rules: every prompt call of a readout is ok and one piece of at most --piece
 # rows, contiguous, the last holding its ok completion; no engine step overlaps another; a submit comes before its first
 # call; at most 8 + lanes other steps run between a readout's turns (a step running at its submit counts). Then a
-# client leaving inside a 16K readout must be cancelled mid-prompt and free its lane: of --lanes requests sent after,
-# each makes its first call before any 16K one ends. The short request gives its alone bytes beside and after them.
+# client leaving inside a 16K readout must be cancelled mid-prompt (a failed call, or the cancel line of one taken
+# between calls) and free its lane: of --lanes requests sent after, each makes its first call before any 16K one ends.
+# The short request gives its alone bytes beside and after them.
 import argparse, json, socket, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
@@ -163,11 +164,12 @@ def main():
     start = len(lines(a.trace))
     client_closed = leave(a.url, bodies[0], 0.5)
     (gone,) = phase_ids(lines(a.trace), start, [lengths[0]])
-    ended = lambda mine: any(l["kind"] == "fill" and not l["ok"] for l in mine) or completed(mine)
-    # a cancel taken between two calls writes no line: alone, the readout's own calls fill almost all of its time
-    no_end = "FAIL gate 6: the left readout shows no failed call and no completion (a cancel between calls writes no line)"
+    # a cancel inside a call fails that call; one taken between two calls writes the lane host's cancel line
+    stop = lambda l: (l["kind"] == "fill" and not l["ok"]) or l["kind"] == "cancel"
+    ended = lambda mine: any(stop(l) for l in mine) or completed(mine)
+    no_end = "FAIL gate 6: the left readout shows no failed call, no cancel line and no completion"
     left = [l for l in settle(a.trace, [gone], ended, missing=no_end)[start:] if l["id"] == gone]
-    own_fail = any(l["kind"] == "fill" and not l["ok"] and l["rows_to"] < lengths[0] for l in left)
+    own_fail = any(stop(l) and l["rows_to"] < lengths[0] for l in left)
     cancelled = client_closed and not completed(left) and own_fail
     # phase 3: its lane is back: --lanes requests are all in flight at once, the short one with its alone bytes
     start = len(lines(a.trace))
@@ -202,7 +204,7 @@ def main():
     print(f"engine steps never overlap: {all(x['t1_ns'] <= y['t0_ns'] for x, y in zip(steps, steps[1:]))}; client latency: "
           + ", ".join(f"{n} {r[1]:.2f} s" for n, r in zip(names, replies)))
     print(f"the short request beside the readouts gives its alone bytes: {beside}")
-    print(f"a leaving client is cancelled mid-prompt (an ok=false call before row {lengths[0]}, no completion): {cancelled}; "
+    print(f"a leaving client is cancelled mid-prompt (a failed call or a cancel line before row {lengths[0]}, no completion): {cancelled}; "
           f"then {a.lanes} requests are in flight at once: {together}; the short one's bytes after equal alone: {after[-1][0] == alone}")
     print(f"the left client closed first: {client_closed}; after it every request gives 200 and an ok completion: {served}; "
           f"ok=false lines of other requests in the run: {len(stray)}")

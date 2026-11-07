@@ -1,8 +1,8 @@
-//! TF_LANE_TRACE=<file>: one JSON line per lane-host action (submit, fill call, decode round, readout completion).
+//! TF_LANE_TRACE=<file>: one JSON line per lane-host action (submit, fill call, decode round, completion, cancel).
 const std = @import("std");
 
-/// What a line records: a request's arrival, one prompt call of a stream, a decode round, or a readout's completion.
-pub const Kind = enum { submit, fill, round, complete };
+/// A line: a request's arrival, a prompt call, a decode round, a readout's completion, a cancel after a prompt began.
+pub const Kind = enum { submit, fill, round, complete, cancel };
 
 /// One action on the awake clock: the request (round: 0), its admission number (round: live streams), its prompt rows.
 pub const Event = struct {
