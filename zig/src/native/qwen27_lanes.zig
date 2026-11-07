@@ -506,7 +506,7 @@ pub const Metal = struct {
         defer r.tail = null;
         const before = r.gpu_seconds;
         if (b.runner.reduce != null) {
-            if (b.link != null and b.link.?.pair.rank != 0) std.log.info("q27 rank1 verify: rows={d} slot={d}", .{ total, inputs[0].slot });
+
             // one greedy row a round; a draft round's parents ride .tree, its accepted path rides .commit
             if (windows.len != 1) return error.CommandOutOfStep;
             if (b.link) |l| {
