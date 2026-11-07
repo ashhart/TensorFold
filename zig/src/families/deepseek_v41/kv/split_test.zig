@@ -1,4 +1,4 @@
-//! Split KV's exchange on two in-process ranks: every row read after the exchange equals the replicated pool's.
+//! Split KV's exchange on in-process ranks: every row read after the exchange equals the replicated pool's.
 
 const std = @import("std");
 const testing = std.testing;
@@ -20,7 +20,8 @@ const Ctx = struct { seed: u64 };
 
 fn rank(comm: tp.Collective, me: u32, ctx: *const Ctx) anyerror!void {
     const gpa = testing.allocator;
-    var pool = try sessions.Pool.init(gpa, .{ .families = &fams, .page = page }, 64 * page, 2, me);
+    const W = comm.world();
+    var pool = try sessions.Pool.init(gpa, .{ .families = &fams, .page = page }, W * 32 * page, W, me);
     defer pool.deinit();
     var host = try sessions.HostPool.init(gpa, &pool);
     defer host.deinit();
@@ -60,9 +61,9 @@ fn rank(comm: tp.Collective, me: u32, ctx: *const Ctx) anyerror!void {
         t.* = if (rnd.uintLessThan(u32, 8) == 0) -1 else @intCast(rnd.uintLessThan(u32, rows));
     }
     var send: [R * K * rb]u8 = undefined;
-    var recv: [2 * R * K * rb]u8 = undefined;
+    var recv: [tp.host.max_ranks * R * K * rb]u8 = undefined;
     var tok: [R * K]i32 = undefined;
-    try x.dense(.{ .sel = @intFromPtr(&sel), .rows = R, .k = K, .table = @intFromPtr(&tables), .pts = pts, .rslot = @intFromPtr(&rslot), .psh = psh, .base = base, .row_bytes = rb, .world = 2, .send = @intFromPtr(&send), .tok = @intFromPtr(&tok) }, @intFromPtr(&recv), null);
+    try x.dense(.{ .sel = @intFromPtr(&sel), .rows = R, .k = K, .table = @intFromPtr(&tables), .pts = pts, .rslot = @intFromPtr(&rslot), .psh = psh, .base = base, .row_bytes = rb, .world = W, .send = @intFromPtr(&send), .tok = @intFromPtr(&tok) }, @intFromPtr(&recv), null);
     for (sel, tok, 0..) |t, o, i| {
         if (t < 0) {
             try testing.expectEqual(@as(i32, -1), o);
@@ -83,12 +84,12 @@ fn rank(comm: tp.Collective, me: u32, ctx: *const Ctx) anyerror!void {
         for (blocks.items) |*b| b.deinit(gpa);
         blocks.deinit(gpa);
     }
-    try split.planUnion(gpa, .{ .sel = &useg, .k = K, .table = &table2, .psh = psh, .world = 2, .rank = me, .row_bytes = rb, .cap = 3 * 120 * rb }, &blocks);
+    try split.planUnion(gpa, .{ .sel = &useg, .k = K, .table = &table2, .psh = psh, .world = W, .rank = me, .row_bytes = rb, .cap = 3 * 120 * rb }, &blocks);
     try testing.expect(blocks.items.len > 1);
     for (blocks.items) |blk| {
         const s2 = try gpa.alloc(u8, blk.m * rb);
         defer gpa.free(s2);
-        const r2 = try gpa.alloc(u8, 2 * blk.m * rb);
+        const r2 = try gpa.alloc(u8, W * blk.m * rb);
         defer gpa.free(r2);
         try x.unionBlock(base, rb, @intFromPtr(blk.phys.ptr), blk.m, @intFromPtr(s2.ptr), @intFromPtr(r2.ptr), null);
         for (useg[blk.a * K .. blk.b * K], blk.tokens) |t, o| {
@@ -99,8 +100,8 @@ fn rank(comm: tp.Collective, me: u32, ctx: *const Ctx) anyerror!void {
     }
 }
 
-test "split == replicated: dense row-mode and capped union exchanges on two ranks" {
-    for ([_]u64{ 1, 2, 3 }) |seed| try tp.host.run(2, &Ctx{ .seed = seed }, rank);
+test "split == replicated: dense row-mode and capped union exchanges on two and three ranks" {
+    for ([_]u32{ 2, 3 }) |w| for ([_]u64{ 1, 2, 3 }) |seed| try tp.host.run(w, &Ctx{ .seed = seed }, rank);
 }
 
 // -- packed (TF_DSV41_KV_SPLIT_COMPACT): packed == dense == replicated behind every token, on 2 and 3 ranks ---------
