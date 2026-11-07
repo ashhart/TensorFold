@@ -9,6 +9,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   OCR prompts, token-exact against Transformers apart from exact BF16 logit ties. With `--vision`, a Qwen 3.5 checkpoint
   whose vision tower the HIP engine can't read (such as Qwen3.5-9B's 72-wide heads) is now refused at start-up, instead
   of starting text-only and answering each image with a 400 (#1965, for #1927).
+- Vision: PDFs with text no longer crash the render worker on macOS. Each PDF renders in a fresh process of the server, started with a hidden `--pdf-render-worker` argument, instead of a fork of the running server, under the same limits and deadline; a worker that crashes is reported by its signal, for example "the PDF render worker crashed (SIGSEGV)" (#2393, fixes #2385). Thanks to @gordonhatusupy for the report.
 
 - Internal: the kernel contract registry's record joins live in `registry_joins.zig`, one module a line, so PRs that add records for different families no longer edit the same line; every registry list is unchanged (#2422).
 
