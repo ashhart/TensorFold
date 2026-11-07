@@ -114,7 +114,36 @@ python3 tools/lfm3/serve_check.py --binary ./zig-out/native/bin/tensorfold-nativ
 Long-context model fidelity, maximum image budgets, 6/8-bit performance and other Apple GPU generations remain separate qualification work.
 Structured output requires the native grammar library; logprobs and video are not advertised.
 A complete earlier global M5 contract run found one Qwen4 failure that also reproduces on the unchanged pinned base.
-It is not a final-source global pass. Agree model-fidelity and performance gates on #1491 before claiming release readiness.
+It is not a final-source global pass. The qualification rules below apply before claiming release readiness.
+
+### Qualification rules
+
+The [maintainer decision](https://github.com/ashhart/TensorFold/issues/1491#issuecomment-6537143418), in one line:
+native results must be no further from an independent FP32 run than the reference's own BF16 results, partial is
+not pass, the default route's slow cold prefill does not block the opt-in text slice, and 32k stays the release
+tier until long-context fidelity against the reference is measured and judged. The rules from that decision:
+
+- Keep every top-token difference with both margins. Pooled RMS and same-engine exactness do not substitute for
+  the independent FP32 comparison.
+- The opt-in text slice ships with the cold-prefill gap written down, not as a performance pass.
+- Longer runs record time and memory only; they do not raise the release tier or establish fidelity.
+- Each receipt names what ran, on what, at which commit and flags. A field the receipt does not record stays
+  unknown in the ledger; an artifact's repository commit is not the measured commit.
+
+### Evidence ledger
+
+The [receipts README](../receipts/lfm3/README.md#qualification-ledger) links here. Each row says what ran,
+on what, and what it showed; links locate files, not necessarily the measured commit. Rows for the pending
+[#1502](https://github.com/ashhart/TensorFold/pull/1502) opt-in route are added once that PR lands and its
+files are on main.
+
+| Cell / evidence | What ran, on what | What it showed |
+|---|---|---|
+| Extracted text4/6/8 correctness, [receipt](https://github.com/ashhart/TensorFold/blob/32505ce8dcbb1de73e3b22fc5849bbd74c8916d8/docs/receipts/lfm3/final-extracted-text.json) | text4/6/8 served, cancellation and focused-state checks on one M4 Pro (48 GiB, macOS 26.5.1), source `73bc567c039b7471ad621fa249b69801f1d86de5`, pinned checkpoint revisions | 120 served and 18 cancellation checks passed; 15 focused-state checks passed; logit-bridge bytes equal the combined build. No performance measured; no long-context transfer claim. |
+| Text4 runtime, [M5 maintainer check](https://github.com/ashhart/TensorFold/pull/1514#issuecomment-6658620362) | text4 on M5 Ultra, candidate `a19bb6845`; checkpoint revision, RAM and full invocation not recorded in the comment | Two runs: 0/20 prompt rows differ, 12/12 concurrent replies equal solo, solo equals draft-disabled, thinking on/off. Runtime exactness only, not an FP32/BF16 fidelity verdict. |
+| Text4 runtime, [M3 Ultra maintainer check](https://github.com/ashhart/TensorFold/pull/1514#issuecomment-6673067861) | text4 on M3 Ultra, candidate `a19bb6845`; same missing fields | 160/160 exact comparisons, 120 replies finished; 2k/8k prefill 2043/1508 tok/s, decode 133.5/138.6 tok/s. This host's observation, not every Apple chip or width. |
+| Default text/reference performance, [receipt](https://github.com/ashhart/TensorFold/blob/32505ce8dcbb1de73e3b22fc5849bbd74c8916d8/docs/receipts/lfm3/m5-text-slice-vs-mlx.json) | text4/6/8 on M5 Ultra, default route without NAX/tiled/split/stepped, cache off, greedy max 128, context 70000, three timed runs after warm-up; measured commit and environment not recorded in the artifact | At 2k/8k, text4 client TTFT 0.85/4.61 s versus 0.095/0.350 s for mlx-vlm; contextual decode 169/165 versus 334/317 tok/s. The default route stays slower; the gap remains documented. |
+| CUDA lanes, [#1508](https://github.com/ashhart/TensorFold/pull/1508), [#1634](https://github.com/ashhart/TensorFold/pull/1634) | separate owner-maintained backend/hardware cells | Kept out of this Metal ledger; no CUDA verdict is inferred from Metal results. |
 
 ## Weight licence
 
