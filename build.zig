@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
+    @import("zig/build/cache_replay.zig").steps(b);
     @import("zig/build/dsv41_shared.zig").steps(b);
     @import("zig/build/dsv41_cuda.zig").steps(b);
     @import("zig/build/dsv41_state.zig").steps(b);
@@ -194,6 +195,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/gradient_host.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
+    @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);
     xpu_build.hostTests(b, test_step);
     if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
         // the engine seam's tests (lane_host.zig and its siblings), which the macOS branch runs from its own api module
@@ -241,6 +243,7 @@ pub fn build(b: *std.Build) void {
     // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     @import("zig/build/mcdma_pair.zig").add(b, target);
+    @import("zig/build/cache_index_timing.zig").step(b);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").tests(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
