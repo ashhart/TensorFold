@@ -6,6 +6,7 @@ const errors = @import("errors.zig");
 const images = @import("images.zig");
 const log = @import("log.zig");
 const pdf = @import("pdf.zig");
+const jpeg_out = @import("jpeg_out.zig");
 const Cx = errors.Cx;
 const Budget = pdf.Budget;
 const Allocator = std.mem.Allocator;
@@ -173,8 +174,8 @@ fn work(cx: *Cx, jpegs: *std.ArrayList([]const u8)) errors.Refused!void {
     if (!readAll(0, pdf_bytes)) return cx.refuse(failed);
     applyChildLimits();
     const libs = sys.optional_libraries;
-    const f = pdf.loadDynLib(pdf.PdfiumFns, .pdfium, cx.a) orelse return cx.fail(.unimplemented, "{s}", .{libs.spec(.pdfium).message});
-    const jf = pdf.loadDynLib(pdf.JpegFns, .jpeg, cx.a) orelse return cx.fail(.unimplemented, "{s}", .{libs.spec(.jpeg).message});
+    const f = jpeg_out.loadDynLib(pdf.PdfiumFns, .pdfium, cx.a) orelse return cx.fail(.unimplemented, "{s}", .{libs.spec(.pdfium).message});
+    const jf = jpeg_out.loadDynLib(jpeg_out.Fns, .jpeg, cx.a) orelse return cx.fail(.unimplemented, "{s}", .{libs.spec(.jpeg).message});
     f.FPDF_InitLibrary();
     var budget: Budget = .{ .images_used = req.images_used, .pdf_pages_used = req.pdf_pages_used, .encoded_bytes = @intCast(req.encoded_bytes), .pixels_used = req.pixels_used };
     return pdf.renderInProcess(cx, f, jf, pdf_bytes, req.max_images, req.max_pages, deadline_ns, &budget, jpegs);
