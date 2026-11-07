@@ -146,3 +146,17 @@ without solo at 3, with the same tokens; in another, 8 pieces without solo staye
 Long prompts and long runs of replies heat a GB10. The runbook's [heat bands](../../RUNBOOK.md#linux-and-cuda) (with a
 1,035,295-token prompt at TP=3), [CPU pinning](../../RUNBOOK.md#gb10-cpu-pinning-for-long-cuda-runs) and
 [GPU clock cap](../../RUNBOOK.md#gb10-gpu-clock-cap-for-long-cuda-runs) each carry a measured GLM-5.3-Flash run.
+
+## Shared KDA operator
+
+`cuda.kda` owns the fused and three-kernel chains and single-layer and batched saved-row replay.
+Its current envelope is 128 key and value channels, four convolution taps, BF16 input/output rows and FP32 state
+and sums. Heads belong to the caller's rank, including uneven shares. Strides are elements; projections, convolution
+commit and checkpoint geometry stay with the family. This extraction does not add a Ling serving path (#850).
+
+The `glm_kda` image retains its six exported symbols, launch bounds and `-O3 --fmad=false` flags.
+The arithmetic bodies live in `zig/kernels/cuda/common/kda.cuh`; no reduction or rounding expression changes.
+`zig build test-kda-host test-glm-tp3-host` checks launch arguments against the frozen predecessor and GLM's
+projection dispatch. Host tests do not prove machine-code identity: before landing, run the complete
+[CUDA SASS comparison](cuda-sass-identity.md) against the parent before extraction, then `tf-cuda-test glm-ref`
+for the independent FP64, fused/wide and replay checks, and the complete CUDA kernel contract.
