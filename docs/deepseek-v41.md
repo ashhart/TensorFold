@@ -71,8 +71,8 @@ the suffix — 78 of 21,966 rows in 0.85 s on the receipt prompt).
 
 ## The kernels
 
-The lane ships **45 Metal kernel source files** (27 new for this lane, 17 evolved from
-upstream's release-checkpoint line, 1 renamed split): 31 under
+The lane ships **45 Metal kernel source files** (26 new for this lane, 17 evolved from
+upstream's release-checkpoint line, 2 renamed splits): 31 under
 `zig/kernels/metal/deepseek_v41/` and 14 in the `core/exl3_projection*` and
 `core/expert_groups` group. The kernel contract registers the
 family at **89 kernel variants: 89/89 pass gates 1–4, 0 fail, 186/186 planted controls
@@ -134,10 +134,10 @@ reads 24.1 MB for 1,536 stream reads — 15,691 bytes a read for a 264-byte row,
 granularity of the stream's own positional reads, not a weight re-read. A page-warm repeat
 reads 0.
 
-Context-labelled standing (M5 Ultra, 256 GB, the streamed line above): prefill 931 tok/s
-warm (899 cold) at 3,002 tokens; plain decode 44.4 tok/s at 4.5k and 43.2 at 21k, flat to
-42k; drafted decode 45.0 at 4.5k / 54.5 at 21k; batched four-lane aggregate 59.3 tok/s;
-a resumed 21,966-token turn reads its 78-row suffix in 0.85 s.
+Context-labelled standing (M5 Ultra, 256 GB, the streamed line above; run-to-run rates
+rounded): prefill ~930 tok/s warm at 3,002 tokens; plain decode ~44 tok/s at 4.5k and ~43
+at 21k, flat to 42k; drafted decode ~45 at 4.5k / ~55 at 21k; batched four-lane aggregate
+59.3 tok/s; a resumed 21,966-token turn reads its 78-row suffix in 0.85 s.
 
 ## Receipts
 
