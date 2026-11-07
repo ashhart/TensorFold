@@ -42,6 +42,8 @@ pub const lanes = @import("cuda_lanes.zig");
 pub const native = @import("cuda_native.zig");
 pub const snapshots = @import("cuda_snapshots.zig");
 pub const kv_host = @import("cuda_kv_host.zig");
+pub const disk_image = @import("cuda_disk_image.zig");
+pub const disk_ranks = @import("cuda_disk_ranks.zig");
 
 test {
     _ = @import("cuda_formats_csf0_test.zig");
@@ -60,6 +62,7 @@ test {
     _ = prompt_solo;
     _ = @import("cuda_l2pf.zig");
     _ = prompt_pair;
+    _ = @import("cuda_disk_image.zig");
     _ = experts;
     _ = exl3;
     _ = vision;
